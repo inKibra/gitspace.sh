@@ -62,7 +62,9 @@ function printEventLine(event: WideEvent): void {
 function shouldSuppressRaw(definition: ReturnType<typeof getProcessDefinition>): boolean {
   if (!definition) return true;
   if (definition.events?.enabled === false) return true;
-  if (definition.events?.mode === "json") return false;
+  // json/all gates capture from the full stream, so raw output is kept (not
+  // suppressed) — the events are an additional structured projection.
+  if (definition.events?.mode === "json" || definition.events?.mode === "all") return false;
   return definition.events?.keepRawOutput === true ? false : true;
 }
 
@@ -141,6 +143,14 @@ async function run(): Promise<void> {
 
   const suppressRaw = shouldSuppressRaw(definition);
   const prefix = eventsConfig.prefix || "@event";
+  const mode = eventsConfig.mode || "prefix";
+  // Which lines are event candidates, per capture gate. The collector then parses
+  // each with graceful fidelity (JSON → structured, else → string log).
+  const isEventCandidate = (trimmed: string): boolean => {
+    if (mode === "all") return trimmed.length > 0;
+    if (mode === "json") return trimmed.startsWith("{");
+    return trimmed.startsWith(prefix);
+  };
 
   let stdoutBuffer = "";
   let stderrBuffer = "";
@@ -180,7 +190,7 @@ async function run(): Promise<void> {
 
     for (const line of parts) {
       const trimmed = line.trim();
-      if (trimmed.startsWith(prefix)) {
+      if (isEventCandidate(trimmed)) {
         eventLines.push(trimmed);
       } else {
         nonEventPayload += `${line}\n`;

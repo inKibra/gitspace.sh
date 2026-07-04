@@ -66,7 +66,15 @@ export const DEFAULT_NOTIFICATION_CONFIG: NotificationConfig = {
 /**
  * Wide event ingestion mode
  */
-export type EventsIngestionMode = 'prefix' | 'json';
+/**
+ * Wide event ingestion mode — the capture gate (which lines become events):
+ * - `prefix`: only lines starting with the marker (`@event`)
+ * - `json`: only lines that are JSON objects
+ * - `all`: every non-empty line (JSON parsed structurally, others as string logs)
+ * Each captured line is parsed with graceful fidelity (string / json /
+ * json+correlation) — missing fields are defaulted, never dropped.
+ */
+export type EventsIngestionMode = 'prefix' | 'json' | 'all';
 
 /**
  * Field mapping for wide events
@@ -127,7 +135,10 @@ export interface EventsConfig {
  */
 export const DEFAULT_EVENTS_CONFIG: EventsConfig = {
   enabled: true,
-  mode: 'prefix',
+  // Capture everything by default and extract structure per line (string / json
+  // / json+correlation). The `@event` prefix is still honored (a marked line
+  // with a JSON payload parses structurally), but is no longer required.
+  mode: 'all',
   prefix: '@event',
   fields: {
     name: 'event',

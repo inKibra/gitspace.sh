@@ -11,6 +11,30 @@ import { writeIndexFile } from './indexer.js';
 
 const LINE_BUFFER_LIMIT = 1_000_000; // 1MB safety cap
 
+function asEventString(value: unknown): string | undefined {
+  return typeof value === 'string' ? value : undefined;
+}
+
+/** Compact one-line representation of a JSON payload that had no message field. */
+function compactEventJson(obj: Record<string, unknown>): string {
+  try {
+    const s = JSON.stringify(obj);
+    return s.length > 200 ? `${s.slice(0, 200)}…` : s;
+  } catch {
+    return '';
+  }
+}
+
+/** Best-effort level from a plain-string log line (leading ERROR/WARN/…). */
+function inferEventLevel(message: string): string | undefined {
+  const match = /^\s*\[?\s*(error|err|fatal|warn|warning|debug|trace|info)\b/i.exec(message);
+  if (!match) return undefined;
+  const token = match[1].toLowerCase();
+  if (token === 'err') return 'error';
+  if (token === 'warning') return 'warn';
+  return token;
+}
+
 interface EventFileState {
   filePath: string;
   indexPath: string;
@@ -45,6 +69,7 @@ export class WideEventCollector {
   private snapshotCache = new Map<string, WideSnapshot>();
   private snapshotCacheBytes = 0;
   private snapshotsLoaded = false;
+  private eventSeq = 0;
 
   constructor(options: WideEventCollectorOptions) {
     this.config = options.config;
@@ -105,69 +130,98 @@ export class WideEventCollector {
     return live;
   }
 
+  /**
+   * Parse one line into a wide event with graceful fidelity. Nothing is dropped
+   * for missing fields — they default. The capture GATE (which lines get here)
+   * is decided by `mode`; this only decides how much structure a line carries:
+   *   - JSON object  → 'json' (or 'json+correlation' if the correlation field is set)
+   *   - plain string → 'string' (message = the line)
+   */
   private tryParseEvent(line: string): WideEvent | null {
     const { mode, prefix } = this.config;
-    let payload = line;
+    const trimmedLine = line.trim();
+    if (!trimmedLine) return null;
 
+    let payload = trimmedLine;
+    let allowString: boolean;
     if (mode === 'prefix') {
-      if (!payload.startsWith(prefix)) {
-        return null;
-      }
-      payload = payload.slice(prefix.length).trim();
+      if (!trimmedLine.startsWith(prefix)) return null;
+      payload = trimmedLine.slice(prefix.length).trim();
+      allowString = true; // a marked line with a non-JSON payload is a string event
+    } else if (mode === 'json') {
+      allowString = false; // json gate: only JSON lines become events
+    } else {
+      allowString = true; // 'all' gate: every line becomes an event
     }
 
     let parsed: Record<string, unknown> | null = null;
     try {
-      parsed = JSON.parse(payload) as Record<string, unknown>;
-    } catch {
-      return null;
-    }
-
-    if (!parsed || typeof parsed !== 'object') {
-      return null;
-    }
-
-    const fields = this.config.fields;
-    const eventName = parsed[fields.name];
-    const eventId = parsed[fields.id];
-    const level = parsed[fields.level];
-    const timestamp = parsed[fields.timestamp];
-    const message = parsed[fields.message];
-
-    if (
-      typeof eventName !== 'string' ||
-      typeof eventId !== 'string' ||
-      typeof level !== 'string' ||
-      typeof timestamp !== 'string' ||
-      typeof message !== 'string'
-    ) {
-      return null;
-    }
-
-    const timestampMs = Date.parse(timestamp);
-    const normalizedTimestampMs = Number.isNaN(timestampMs) ? Date.now() : timestampMs;
-
-    if (this.config.aggregateMode === 'stream' && this.config.correlationField) {
-      const rawCorrelation = parsed[this.config.correlationField];
-      if (typeof rawCorrelation === 'string') {
-        parsed[this.config.correlationField] = rawCorrelation.trim();
+      const value = JSON.parse(payload) as unknown;
+      if (value && typeof value === 'object' && !Array.isArray(value)) {
+        parsed = value as Record<string, unknown>;
       }
+    } catch {
+      /* not JSON */
     }
 
+    if (!parsed) {
+      if (!allowString) return null;
+      return this.buildEvent({ message: payload, fidelity: 'string', raw: { message: payload } });
+    }
+
+    const f = this.config.fields;
+    const correlationField = this.config.correlationField;
+    let correlationId = correlationField ? asEventString(parsed[correlationField])?.trim() : undefined;
+    if (correlationId && correlationField) {
+      parsed[correlationField] = correlationId; // normalize (trim) in raw for aggregation
+    }
+    if (correlationId === '') correlationId = undefined;
+
+    return this.buildEvent({
+      eventName: asEventString(parsed[f.name]),
+      eventId: asEventString(parsed[f.id]),
+      level: asEventString(parsed[f.level]),
+      timestamp: asEventString(parsed[f.timestamp]),
+      message: asEventString(parsed[f.message]) ?? compactEventJson(parsed),
+      correlationId,
+      fidelity: correlationId ? 'json+correlation' : 'json',
+      raw: parsed,
+    });
+  }
+
+  /** Assemble a WideEvent, defaulting every field the source line didn't provide. */
+  private buildEvent(p: {
+    eventName?: string;
+    eventId?: string;
+    level?: string;
+    timestamp?: string;
+    message: string;
+    correlationId?: string;
+    fidelity: WideEvent['fidelity'];
+    raw: Record<string, unknown>;
+  }): WideEvent {
+    const eventName = p.eventName ?? 'log';
+    const level = p.level ?? inferEventLevel(p.message) ?? 'info';
+    const parsedMs = p.timestamp ? Date.parse(p.timestamp) : NaN;
+    const timestampMs = Number.isNaN(parsedMs) ? Date.now() : parsedMs;
+    const timestamp = p.timestamp ?? new Date(timestampMs).toISOString();
+    const eventId = p.eventId ?? `${this.processName ?? 'log'}.${eventName}.${++this.eventSeq}.${timestampMs}`;
     return {
       eventId,
       eventName,
       level,
       timestamp,
-      timestampMs: normalizedTimestampMs,
-      message,
+      timestampMs,
+      message: p.message,
       sessionId: '',
       workspaceId: this.workspaceId,
       projectName: this.projectName,
       processName: this.processName,
       processInstance: this.processInstance,
-      raw: parsed,
+      raw: p.raw,
       kind: 'source',
+      correlationId: p.correlationId,
+      fidelity: p.fidelity,
     };
   }
 
