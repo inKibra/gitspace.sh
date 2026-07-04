@@ -194,17 +194,23 @@ export function AgentPaneHeader({
         />
       ) : null}
 
-      {/* fast mode (serviceTier=priority → speed:fast on Opus) */}
-      {onToggleFast && (
-        <button
-          type="button"
-          onClick={onToggleFast}
-          title={control?.serviceTier === 'priority' ? 'Fast mode on (priority) — click to turn off' : 'Fast mode off — click to prioritize'}
-          className={control?.serviceTier === 'priority' ? 'text-[var(--gs-warning)]' : 'text-[var(--gs-text-dim)] hover:text-[var(--gs-text)]'}
-        >
-          ⚡{control?.serviceTier === 'priority' ? ' fast' : ''}
-        </button>
-      )}
+      {/* fast mode — per-family service tier (priority). Only shown when the
+          current model's family supports it; label always states on/off. */}
+      {onToggleFast && control?.fastCapable && (() => {
+        const fastOn = control?.serviceTier === 'priority';
+        return (
+          <button
+            type="button"
+            onClick={onToggleFast}
+            title={fastOn ? 'Fast mode ON — click to turn off' : 'Fast mode OFF — click to turn on'}
+            className={fastOn
+              ? 'rounded-sm bg-[var(--gs-warning)] px-1.5 py-0.5 font-semibold text-[var(--gs-bg)]'
+              : 'rounded-sm border border-[var(--gs-border)] px-1.5 py-0.5 text-[var(--gs-text-dim)] hover:text-[var(--gs-text)]'}
+          >
+            ⚡ fast {fastOn ? 'on' : 'off'}
+          </button>
+        );
+      })()}
 
       {/* context + cost */}
       {ctx && ctx.tokens != null && ctx.contextWindow > 0 ? (

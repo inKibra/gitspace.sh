@@ -354,6 +354,7 @@ export class PiCoordinator {
       currentModel = `${liveModel.provider}/${liveModel.id}`;
     }
     let models: AgentControlInfo['models'] = [];
+    let rawModels: Array<{ provider: string; id: string; api?: string; contextWindow?: number }> = [];
     try {
       const [registry, auth] = await Promise.all([createPiModelRegistry(), createPiAuthStorage()]);
       const isAuthed = (provider: string): boolean => {
@@ -363,10 +364,10 @@ export class PiCoordinator {
           return false;
         }
       };
+      rawModels = registry.getAll();
       // Limit the switcher to providers the user is signed in to — an unauthed
       // model can't be selected. Always keep the current model so it stays shown.
-      models = registry
-        .getAll()
+      models = rawModels
         .filter((m) => isAuthed(m.provider) || `${m.provider}/${m.id}` === currentModel)
         .map((m) => ({ provider: m.provider, id: m.id, contextWindow: m.contextWindow ?? null }));
     } catch (err) {
@@ -378,13 +379,31 @@ export class PiCoordinator {
     const thinkingLevel = active?.configuredThinkingLevel?.() ?? active?.thinkingLevel ?? null;
     const context = active?.getContextUsage?.() ?? null;
     let approvalMode: string | null = null;
+    // Fast mode / service tier is PER MODEL FAMILY in 16.x (tier.openai /
+    // tier.anthropic / tier.google). Only models whose family exposes a
+    // serving-priority knob are "fast-capable"; others have no toggle. We read +
+    // write the family-specific setting key so the toggle reflects and realizes.
     let serviceTier: string | null = null;
+    let serviceTierKey: string | null = null;
+    let fastCapable = false;
     try {
       const settings = active?.settings ?? (await getPiSettings());
       const m = settings?.get('tools.approvalMode');
       if (typeof m === 'string') approvalMode = m;
-      const st = settings?.get('serviceTier');
-      if (typeof st === 'string') serviceTier = st;
+
+      const { serviceTierFamily } = (await import('@oh-my-pi/pi-ai')) as {
+        serviceTierFamily: (model: { provider: string; api?: string; id: string }) => string | undefined;
+      };
+      const modelObj = liveModel?.provider && liveModel?.id
+        ? liveModel
+        : rawModels.find((x) => `${x.provider}/${x.id}` === currentModel);
+      const family = modelObj ? serviceTierFamily(modelObj as { provider: string; api?: string; id: string }) : undefined;
+      fastCapable = !!family;
+      if (family) {
+        serviceTierKey = `tier.${family}`;
+        const st = settings?.get(serviceTierKey);
+        if (typeof st === 'string') serviceTier = st;
+      }
     } catch {
       /* settings unavailable */
     }
@@ -421,6 +440,8 @@ export class PiCoordinator {
       approvalMode,
       approvalModes: APPROVAL_MODES,
       serviceTier,
+      serviceTierKey,
+      fastCapable,
       context: context ?? null,
     };
   }

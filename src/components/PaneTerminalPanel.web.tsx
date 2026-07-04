@@ -248,10 +248,13 @@ export function PaneTerminalPanel({
   }, [backend, wsId, agentSessionId, refreshControl]);
   const handleToggleFast = useCallback(() => {
     const fn = backend?.setAgentSetting;
-    if (!fn) return;
+    // Fast mode is the per-family service-tier setting (tier.openai/anthropic/
+    // google); serviceTierKey is null when the current model can't do it.
+    const key = control?.serviceTierKey;
+    if (!fn || !key) return;
     const next = control?.serviceTier === 'priority' ? 'none' : 'priority';
-    void fn.call(backend, 'serviceTier', next).then(() => refreshControl()).catch(() => undefined);
-  }, [backend, control?.serviceTier, refreshControl]);
+    void fn.call(backend, key, next).then(() => refreshControl()).catch(() => undefined);
+  }, [backend, control?.serviceTier, control?.serviceTierKey, refreshControl]);
 
   // Conversation history / rewind
   const [historyOpen, setHistoryOpen] = useState(false);

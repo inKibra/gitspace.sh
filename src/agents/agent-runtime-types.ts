@@ -161,8 +161,16 @@ export interface AgentControlInfo {
   /** Current tool-approval mode ("always-ask" | "write" | "yolo"), or null. */
   approvalMode: string | null;
   approvalModes: string[];
-  /** Current service tier ("priority" == fast mode on Opus), or null. */
+  /** Current service tier for the active model's family ("priority" == fast
+   *  mode), or null. Read from the per-family setting `serviceTierKey`. */
   serviceTier: string | null;
+  /** The per-family service-tier setting key for the current model
+   *  (e.g. "tier.openai" / "tier.anthropic" / "tier.google"), or null when the
+   *  model has no serving-priority control. Used to toggle fast mode. */
+  serviceTierKey?: string | null;
+  /** Whether the current model supports fast/priority mode at all — the toggle
+   *  is only shown when true. */
+  fastCapable?: boolean;
   /** Live context-window usage (only for active sessions). */
   context: AgentContextUsage | null;
 }
