@@ -462,7 +462,11 @@ export async function getProjectSecret(
   projectName: string,
   key: string
 ): Promise<string | null> {
-  const blob = await loadUnifiedSecretsBlob();
+  // Always read fresh: secrets can be written by another process (e.g. bundle
+  // refresh from the tmux-lite server while scripts run in the machine daemon),
+  // and a stale process-local cache would report a just-saved secret as missing.
+  // The legacy project-blob / per-secret fallback below still runs unchanged.
+  const blob = await loadFreshUnifiedSecretsBlob();
   const current = blob.projects[projectName] || {};
 
   // Found in new format
@@ -529,7 +533,9 @@ export async function getProjectSecrets(
   projectName: string,
   keys: string[]
 ): Promise<Record<string, string>> {
-  const blob = await loadUnifiedSecretsBlob();
+  // Always read fresh (see getProjectSecret) so cross-process writes are visible
+  // without a manual cache clear.
+  const blob = await loadFreshUnifiedSecretsBlob();
   let secrets = blob.projects[projectName] || {};
   let changed = false;
 

@@ -66,6 +66,23 @@ describe('secrets cross-process cache refresh', () => {
     });
   });
 
+  it('reads a project secret written by another process without a manual cache clear (fresh reads)', async () => {
+    const secrets = await import(`../secrets.ts?fresh-read-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+
+    // Establish a blob + prime the process-local cache with API_TOKEN MISSING.
+    await secrets.setProjectSecret('demo', 'FIRST', 'one');
+    expect(await secrets.getProjectSecret('demo', 'API_TOKEN')).toBeNull();
+
+    // Another process writes the secret directly to the backing store.
+    const externalBlob = readUnifiedBlob(filePath);
+    externalBlob.projects.demo = { ...(externalBlob.projects.demo || {}), API_TOKEN: 'secret-value' };
+    writeUnifiedBlob(filePath, externalBlob);
+
+    // Reading again must observe the saved secret WITHOUT clearSecretsCache().
+    expect(await secrets.getProjectSecret('demo', 'API_TOKEN')).toBe('secret-value');
+    expect(await secrets.getProjectSecrets('demo', ['API_TOKEN'])).toEqual({ API_TOKEN: 'secret-value' });
+  });
+
   it('preserves externally written global secrets when setting another global secret from a stale module cache', async () => {
     const secrets = await import(`../secrets.ts?fresh-global-write-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 
