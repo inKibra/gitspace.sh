@@ -146,6 +146,16 @@ export interface AgentRoleInfo {
   current: boolean;
 }
 
+/** A role in the full catalog (for configuration): its assigned model, if any. */
+export interface AgentRoleCatalogItem {
+  role: string;
+  name: string;
+  description?: string;
+  /** The explicitly-assigned model selector ("provider/id"), or null when unset
+   *  (the role falls back to the default role). */
+  model: string | null;
+}
+
 /** Control-surface snapshot for an agent session (usage + model + thinking + approval). */
 export interface AgentControlInfo {
   usage: { input: number; output: number; cacheRead: number; cacheWrite: number; premiumRequests: number; cost: number } | null;
@@ -154,6 +164,8 @@ export interface AgentControlInfo {
   models: AgentModelOption[];
   /** Resolved model roles for the role cycle (empty when none configured). */
   roles: AgentRoleInfo[];
+  /** Full role catalog (all roles + their assignment) for the config UI. */
+  roleCatalog?: AgentRoleCatalogItem[];
   /** Current thinking/reasoning level (e.g. "auto", "high"), or null if unknown. */
   thinkingLevel: string | null;
   /** Selectable thinking levels. */

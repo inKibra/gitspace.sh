@@ -412,7 +412,7 @@ export class PiCoordinator {
     let roles: AgentControlInfo['roles'] = [];
     try {
       if (active?.getRoleModelCycle) {
-        const { MODEL_ROLE_IDS, MODEL_ROLES } = (await import('@oh-my-pi/pi-coding-agent/config/model-registry')) as unknown as {
+        const { MODEL_ROLE_IDS, MODEL_ROLES } = (await import('@oh-my-pi/pi-coding-agent/config/model-roles')) as unknown as {
           MODEL_ROLE_IDS: string[];
           MODEL_ROLES: Record<string, { name?: string }>;
         };
@@ -430,11 +430,33 @@ export class PiCoordinator {
       /* roles unavailable */
     }
 
+    // Full role CATALOG (every MODEL_ROLE + its explicitly-assigned model) for the
+    // config UI. Unlike `roles` (the cycle, only configured), this always lists
+    // all roles so each can be assigned. `model` is the raw configured selector
+    // (null → falls back to the default role).
+    let roleCatalog: AgentControlInfo['roleCatalog'] = [];
+    try {
+      const { MODEL_ROLE_IDS, MODEL_ROLES } = (await import('@oh-my-pi/pi-coding-agent/config/model-roles')) as unknown as {
+        MODEL_ROLE_IDS?: string[];
+        MODEL_ROLES?: Record<string, { name?: string; description?: string }>;
+      };
+      const settings = (active?.settings ?? (await getPiSettings())) as { getModelRole?: (r: string) => string | undefined } | null;
+      roleCatalog = (MODEL_ROLE_IDS ?? []).map((id) => ({
+        role: id,
+        name: MODEL_ROLES?.[id]?.name ?? id,
+        description: MODEL_ROLES?.[id]?.description,
+        model: (settings?.getModelRole ? settings.getModelRole(id) : undefined) ?? null,
+      }));
+    } catch {
+      /* role catalog unavailable */
+    }
+
     return {
       usage,
       currentModel,
       models,
       roles,
+      roleCatalog,
       thinkingLevel,
       thinkingLevels: THINKING_LEVELS,
       approvalMode,
@@ -450,7 +472,7 @@ export class PiCoordinator {
   async cycleRole(target: PiWorkspaceTarget, agentSessionId: string, direction: 'forward' | 'backward'): Promise<boolean> {
     const session = (await this.ensureActiveSession(target, agentSessionId)) as unknown as ControlSessionAccessors;
     if (!session.cycleRoleModels) return false;
-    const { MODEL_ROLE_IDS } = (await import('@oh-my-pi/pi-coding-agent/config/model-registry')) as unknown as { MODEL_ROLE_IDS: string[] };
+    const { MODEL_ROLE_IDS } = (await import('@oh-my-pi/pi-coding-agent/config/model-roles')) as unknown as { MODEL_ROLE_IDS: string[] };
     const result = await session.cycleRoleModels(MODEL_ROLE_IDS, direction);
     return !!result;
   }
@@ -459,7 +481,7 @@ export class PiCoordinator {
   async applyRole(target: PiWorkspaceTarget, agentSessionId: string, role: string): Promise<boolean> {
     const session = (await this.ensureActiveSession(target, agentSessionId)) as unknown as ControlSessionAccessors;
     if (!session.getRoleModelCycle || !session.applyRoleModel) return false;
-    const { MODEL_ROLE_IDS } = (await import('@oh-my-pi/pi-coding-agent/config/model-registry')) as unknown as { MODEL_ROLE_IDS: string[] };
+    const { MODEL_ROLE_IDS } = (await import('@oh-my-pi/pi-coding-agent/config/model-roles')) as unknown as { MODEL_ROLE_IDS: string[] };
     const cycle = session.getRoleModelCycle(MODEL_ROLE_IDS);
     const entry = cycle?.models.find((m) => m.role === role);
     if (!entry) return false;
@@ -550,10 +572,19 @@ export class PiCoordinator {
     });
   }
 
-  /** Write a single setting. */
+  /** Write a single setting. `modelRoles.<role>` is routed to the record helper
+   *  (setModelRole) so one role is updated without clobbering the others. */
   async setSetting(path: string, value: string | number | boolean): Promise<boolean> {
     const settings = await getPiSettings();
     if (!settings) return false;
+    if (path.startsWith('modelRoles.') && typeof value === 'string') {
+      const role = path.slice('modelRoles.'.length);
+      const withRole = settings as { setModelRole?: (r: string, m: string) => void };
+      if (typeof withRole.setModelRole === 'function') {
+        withRole.setModelRole(role, value);
+        return true;
+      }
+    }
     settings.set(path, value);
     return true;
   }

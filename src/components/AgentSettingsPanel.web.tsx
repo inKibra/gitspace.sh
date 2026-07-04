@@ -81,7 +81,7 @@ export function AgentSettingsPanel({
         </div>
 
         <div className="flex-1 overflow-y-auto px-4 py-3">
-          {tab === 'models' && <ModelsTab control={control} onSetModel={onSetModel} onApplyRole={onApplyRole} />}
+          {tab === 'models' && <ModelsTab control={control} onSetModel={onSetModel} onApplyRole={onApplyRole} onSet={set} />}
           {tab === 'agent' && <AgentTab control={control} tools={tools} loading={loading} onSet={set} />}
           {tab === 'settings' && <SettingsTab schema={schema} loading={loading} onSet={set} />}
           {tab === 'usage' && <UsageTab control={control} />}
@@ -100,27 +100,46 @@ function Grp({ children }: { children: React.ReactNode }): ReactElement {
   return <div className="mb-1 mt-3 text-[10px] uppercase tracking-wide text-[var(--gs-text-ghost)] first:mt-0">{children}</div>;
 }
 
-function ModelsTab({ control, onSetModel, onApplyRole }: { control?: AgentControlInfo; onSetModel: (p: string, id: string) => void; onApplyRole: (role: string) => void }): ReactElement {
+function ModelsTab({ control, onSetModel, onApplyRole, onSet }: { control?: AgentControlInfo; onSetModel: (p: string, id: string) => void; onApplyRole: (role: string) => void; onSet: (path: string, value: string | number | boolean) => void }): ReactElement {
   const models = control?.models ?? [];
   const current = control?.currentModel ?? null;
-  const roles = control?.roles ?? [];
+  const roles = control?.roleCatalog ?? [];
   return (
     <div>
       {roles.length > 0 && (
         <>
-          <Grp>Roles — click to apply</Grp>
-          {roles.map((r) => (
-            <button
-              key={r.role}
-              type="button"
-              onClick={() => onApplyRole(r.role)}
-              className={`flex w-full items-center gap-2 px-1 py-1 text-left hover:bg-[var(--gs-border)] ${r.current ? 'text-[var(--gs-accent)]' : 'text-[var(--gs-text)]'}`}
-            >
-              <span>{r.current ? '◉' : '○'}</span>
-              <span className="font-[family-name:var(--gs-font)]">{r.name}</span>
-              <span className="ml-auto truncate font-[family-name:var(--gs-font-mono)] text-[var(--gs-text-dim)]">{r.model ?? '—'}</span>
-            </button>
-          ))}
+          <Grp>Model roles — ◉ applies now · dropdown assigns the model</Grp>
+          {roles.map((r) => {
+            // Show the assigned model in the dropdown; keep it selectable even if
+            // its provider isn't in the authed list.
+            const inList = r.model ? models.some((m) => `${m.provider}/${m.id}` === r.model) : true;
+            const isCurrent = !!r.model && r.model === current;
+            return (
+              <div key={r.role} className="flex items-center gap-2 px-1 py-1">
+                <button
+                  type="button"
+                  onClick={() => onApplyRole(r.role)}
+                  title="Apply this role's model to the session now"
+                  className={isCurrent ? 'text-[var(--gs-accent)]' : 'text-[var(--gs-text-dim)] hover:text-[var(--gs-text)]'}
+                >
+                  {isCurrent ? '◉' : '○'}
+                </button>
+                <span className="w-16 shrink-0 truncate font-[family-name:var(--gs-font)]" title={r.description ?? r.name}>{r.name}</span>
+                <select
+                  value={r.model ?? ''}
+                  onChange={(e) => onSet(`modelRoles.${r.role}`, e.target.value)}
+                  className="ml-auto min-w-0 flex-1 truncate border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-1 py-0.5 font-[family-name:var(--gs-font-mono)] text-[var(--gs-text)]"
+                >
+                  <option value="">— default —</option>
+                  {r.model && !inList && <option value={r.model}>{r.model}</option>}
+                  {models.map((m) => {
+                    const ref = `${m.provider}/${m.id}`;
+                    return <option key={ref} value={ref}>{ref}</option>;
+                  })}
+                </select>
+              </div>
+            );
+          })}
         </>
       )}
       <Grp>Model — click to switch</Grp>
