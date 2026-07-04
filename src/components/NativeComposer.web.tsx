@@ -17,7 +17,22 @@ import React, {
   type CSSProperties,
 } from 'react';
 import { getSpaceCommandArgumentCompletions } from '../lib/tmux-lite/agents/extensions/space-command-autocomplete.js';
-import { hasMagicKeyword, segmentMagicKeywords } from '../blocks/agent/magic-keywords.js';
+import { findMagicKeywordRanges, hasMagicKeyword, segmentMagicKeywords } from '../blocks/agent/magic-keywords.js';
+
+/** A compact composer hint/affordance chip. */
+const composerChip = (tone: 'dim' | 'active'): CSSProperties => ({
+  fontSize: 11,
+  lineHeight: 1.4,
+  padding: '1px 8px',
+  borderRadius: 999,
+  border: `1px solid ${tone === 'active' ? 'var(--gs-accent)' : 'var(--gs-border)'}`,
+  background: tone === 'active' ? 'var(--gs-accent)' : 'transparent',
+  color: tone === 'active' ? 'var(--gs-bg)' : 'var(--gs-text-dim)',
+  fontWeight: tone === 'active' ? 600 : 400,
+  cursor: tone === 'active' ? 'default' : 'pointer',
+  WebkitTapHighlightColor: 'transparent',
+  whiteSpace: 'nowrap',
+});
 
 // Text-affecting styles shared by the textarea and its highlight mirror so the
 // keyword overlay lines up exactly with the typed text.
@@ -316,6 +331,8 @@ export function NativeComposer({
   }, []);
 
   const showKeywordOverlay = hasMagicKeyword(text);
+  // Distinct magic keywords present → shown as active "mode" chips in the hint row.
+  const activeKeywords = Array.from(new Set(findMagicKeywordRanges(text).map((r) => r.keyword)));
 
   // ── Submit helper — clears state after sending unless the submitter preserves the composer ───────────────────────────
   const submitAndClear = useCallback(
@@ -783,6 +800,16 @@ export function NativeComposer({
           ))}
         </div>
       )}
+
+      {/* ── Affordance hints + active magic-mode tags ─────────────────────── */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', paddingLeft: 4 }}>
+        <button type="button" onClick={() => fileInputRef.current?.click()} disabled={isDisabled} style={composerChip('dim')} title="Attach a file">＋ attach</button>
+        <button type="button" onMouseDown={(e) => { e.preventDefault(); textareaRef.current?.focus(); }} style={composerChip('dim')} title="Type / at the start of the message for slash commands">/ commands</button>
+        <button type="button" onMouseDown={(e) => { e.preventDefault(); textareaRef.current?.focus(); }} style={composerChip('dim')} title="Type @ to mention a file">@ mention</button>
+        {activeKeywords.map((kw) => (
+          <span key={kw} style={composerChip('active')} title={`"${kw}" triggers ${kw} mode`}>⚡ {kw}</span>
+        ))}
+      </div>
 
       {/* ── Input row — single visual bar with buttons inline ─────────────── */}
       <div style={{
