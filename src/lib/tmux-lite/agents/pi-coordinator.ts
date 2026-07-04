@@ -57,7 +57,11 @@ interface ControlSessionAccessors {
   cycleRoleModels?(roleOrder: readonly string[], direction?: 'forward' | 'backward'): Promise<unknown>;
   getUserMessagesForBranching?(): Array<{ entryId: string; text: string }>;
   navigateTree?(targetId: string, options?: { summarize?: boolean }): Promise<{ cancelled?: boolean }>;
-  sessionManager?: { branch?(branchFromId: string): void; getLeafId?(): string | null };
+  sessionManager?: {
+    branch?(branchFromId: string): void;
+    getLeafId?(): string | null;
+    getBranch?(fromId?: string): Array<{ id: string }>;
+  };
 }
 import { getTranscriptRange } from '../../../blocks/agent/transcript-source.js';
 import type { TranscriptPage, TranscriptSource } from '../../../blocks/agent/transcript-source.js';
@@ -312,6 +316,14 @@ export class PiCoordinator {
     agentSessionId: string,
     opts: { before?: string; limit: number },
   ): Promise<TranscriptPage> {
+    // Prefer the active session's in-memory manager so a live leaf move (a
+    // conversation rewind via SessionManager.branch) is reflected immediately.
+    // A fresh file open always resets the leaf to the last entry, which would
+    // ignore the rewind.
+    const active = this.activeSessions.get(agentSessionId) as ControlSessionAccessors | undefined;
+    if (active?.sessionManager) {
+      return getTranscriptRange(active.sessionManager as unknown as TranscriptSource, opts);
+    }
     const file = findPiSessionFile(target.workspacePath, agentSessionId, this.sessionsRoot);
     if (!file) return { blocks: [], oldestCursor: null, hasMore: false };
     const manager = await openPiSessionManager(file.path);
@@ -572,23 +584,32 @@ export class PiCoordinator {
   /** User-message checkpoints in the current branch (for conversation rewind). */
   async getHistory(target: PiWorkspaceTarget, agentSessionId: string): Promise<AgentHistoryEntry[]> {
     const session = (this.activeSessions.get(agentSessionId) ?? (await this.ensureActiveSession(target, agentSessionId))) as unknown as ControlSessionAccessors;
-    const msgs = session.getUserMessagesForBranching?.() ?? [];
-    return msgs.map((m, i) => ({ entryId: m.entryId, text: m.text, current: i === msgs.length - 1 }));
+    const all = session.getUserMessagesForBranching?.() ?? [];
+    // getUserMessagesForBranching returns user messages across the WHOLE tree
+    // (creation order), so restrict to the current branch (leaf → root) and mark
+    // the branch tip as current — otherwise "current" would always be the
+    // last-created turn regardless of where the leaf sits after a rewind.
+    const branchIds = new Set((session.sessionManager?.getBranch?.() ?? []).map((e) => e.id));
+    const inBranch = branchIds.size > 0 ? all.filter((m) => branchIds.has(m.entryId)) : all;
+    return inBranch.map((m, i) => ({ entryId: m.entryId, text: m.text, current: i === inBranch.length - 1 }));
   }
 
-  /** Rewind the conversation to a prior user-message entry (moves the leaf
-   *  pointer; the prior branch is preserved). */
+  /** Rewind the conversation to a prior user-message turn. navigateTree moves
+   *  the leaf to the message's parent (so complete prior turns remain and the
+   *  message returns to the editor) and rebuilds the agent context in-memory;
+   *  the transcript then re-reads from this same live manager. Falls back to a
+   *  raw leaf move if navigateTree is unavailable. */
   async navigateHistory(target: PiWorkspaceTarget, agentSessionId: string, entryId: string): Promise<boolean> {
     const session = (await this.ensureActiveSession(target, agentSessionId)) as unknown as ControlSessionAccessors;
-    // Prefer navigateTree (rebuilds session context); fall back to the raw
-    // SessionManager leaf move.
     if (session.navigateTree) {
-      await session.navigateTree(entryId, { summarize: false });
+      const result = await session.navigateTree(entryId, { summarize: false });
+      return !result?.cancelled;
     }
     if (session.sessionManager?.branch) {
       session.sessionManager.branch(entryId);
+      return session.sessionManager.getLeafId?.() === entryId;
     }
-    return session.sessionManager?.getLeafId?.() === entryId;
+    return false;
   }
 
   /** Switch the session's model. Spins up the session if needed. */

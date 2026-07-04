@@ -34,7 +34,18 @@ export function AgentTranscript({
   refreshNonce?: number;
 }): ReactElement {
   const t = useTranscript({ fetchRange, live, pageSize, refreshNonce });
-  const empty = t.committed.length === 0 && live.length === 0 && pending.length === 0;
+
+  // De-duplicate by block id across the three regions so a transient overlap
+  // (e.g. a just-committed turn briefly present in both committed and live)
+  // never renders the same key twice. Committed wins, then live, then pending.
+  const seen = new Set<string>();
+  const uniq = (blocks: readonly Block[]): Block[] =>
+    blocks.filter((b) => (seen.has(b.id) ? false : (seen.add(b.id), true)));
+  const committedBlocks = uniq(t.committed);
+  const liveBlocks = uniq(live);
+  const pendingBlocks = uniq(pending);
+
+  const empty = committedBlocks.length === 0 && liveBlocks.length === 0 && pendingBlocks.length === 0;
 
   return (
     <BlockHostProvider host={host}>
@@ -54,8 +65,8 @@ export function AgentTranscript({
             <div className="py-10 text-center text-[12px] text-[var(--gs-text-dim)]">No messages yet.</div>
           ) : (
             <>
-              <BlockList blocks={t.committed} />
-              <BlockList blocks={live} />
+              <BlockList blocks={committedBlocks} />
+              <BlockList blocks={liveBlocks} />
             </>
           )}
 
@@ -65,7 +76,7 @@ export function AgentTranscript({
             </div>
           )}
 
-          {pending.length > 0 && <BlockList blocks={pending} />}
+          {pendingBlocks.length > 0 && <BlockList blocks={pendingBlocks} />}
         </div>
 
         {t.mode === 'browse' && t.newBelowCount > 0 && (

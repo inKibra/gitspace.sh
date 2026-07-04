@@ -134,16 +134,36 @@ export function useTranscript(opts: {
     liveLenRef.current = live.length;
   }, [live]);
 
-  // When the live turn ends (live empties after being non-empty), fold the
-  // finished turn into committed history — no refetch, no flicker.
+  // When the live turn ends (live empties after being non-empty), reconcile the
+  // finished turn into committed. `fetchRange` reads the session's live in-memory
+  // manager (no lag), which already includes the just-finished turn, so we cannot
+  // simply append the live blocks — that double-counts. In follow mode we refetch
+  // the authoritative tail (single source of truth); in browse mode we append so
+  // the user's scroll position isn't disturbed (committed isn't refetched while
+  // browsing, so no double-count there).
   const prevLiveRef = useRef<readonly Block[]>([]);
   useEffect(() => {
     const prev = prevLiveRef.current;
-    if (prev.length > 0 && live.length === 0) {
-      setCommitted((c) => [...c, ...prev]);
-    }
     prevLiveRef.current = live;
-  }, [live]);
+    if (prev.length === 0 || live.length !== 0) return;
+    if (modeRef.current === 'browse') {
+      setCommitted((c) => [...c, ...prev]);
+      return;
+    }
+    let alive = true;
+    fetchRange(undefined, pageSize)
+      .then((page) => {
+        if (!alive) return;
+        setCommitted(page.blocks);
+        cursorRef.current = page.oldestCursor ?? undefined;
+        setHasMoreOlder(page.hasMore);
+        requestAnimationFrame(scrollToBottom);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [live, fetchRange, pageSize]);
 
   const onScroll = useCallback(() => {
     const el = containerRef.current;
