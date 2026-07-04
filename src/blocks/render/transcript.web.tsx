@@ -2,6 +2,21 @@ import { useState, type ReactElement } from 'react';
 import type { ErrorData, ImageData, MessageData, SubagentData, ThinkingData, ToolCallData } from '../types/transcript.js';
 import { defineRenderer, BlockView } from './registry.web.js';
 import { Markdown } from './markdown.web.js';
+import { segmentMagicKeywords } from '../agent/magic-keywords.js';
+
+/** Render text with magic keywords (workflowz / orchestrate / ultrathink) painted
+ *  in the accent color, matching the composer + the SDK's sent-bubble treatment. */
+function KeywordText({ text }: { text: string }): ReactElement {
+  return (
+    <>
+      {segmentMagicKeywords(text).map((seg, i) =>
+        seg.keyword
+          ? <span key={i} className="font-semibold text-[var(--gs-accent)]">{seg.text}</span>
+          : <span key={i}>{seg.text}</span>,
+      )}
+    </>
+  );
+}
 
 // ── message ───────────────────────────────────────────────────────────────
 defineRenderer<MessageData>('message', ({ data }): ReactElement => {
@@ -9,7 +24,7 @@ defineRenderer<MessageData>('message', ({ data }): ReactElement => {
     return (
       <div className="my-2 border-l-2 border-[var(--gs-border-active)] pl-3 py-1">
         <div className="mb-1 text-[10px] uppercase tracking-wide text-[var(--gs-text-dim)]">you</div>
-        <div className="text-[13px] leading-[1.6] text-[var(--gs-text)] whitespace-pre-wrap">{data.text}</div>
+        <div className="text-[13px] leading-[1.6] text-[var(--gs-text)] whitespace-pre-wrap"><KeywordText text={data.text} /></div>
       </div>
     );
   }

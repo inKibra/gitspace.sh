@@ -17,6 +17,20 @@ import React, {
   type CSSProperties,
 } from 'react';
 import { getSpaceCommandArgumentCompletions } from '../lib/tmux-lite/agents/extensions/space-command-autocomplete.js';
+import { hasMagicKeyword, segmentMagicKeywords } from '../blocks/agent/magic-keywords.js';
+
+// Text-affecting styles shared by the textarea and its highlight mirror so the
+// keyword overlay lines up exactly with the typed text.
+const COMPOSER_TEXT_STYLE: CSSProperties = {
+  fontSize: 15,
+  lineHeight: 1.5,
+  padding: '8px 12px',
+  fontFamily: 'inherit',
+  boxSizing: 'border-box',
+  whiteSpace: 'pre-wrap',
+  overflowWrap: 'break-word',
+  wordBreak: 'break-word',
+};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -250,6 +264,7 @@ export function NativeComposer({
   });
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const mirrorRef = useRef<HTMLDivElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const commandsCacheRef = useRef<CommandAutocompleteItem[] | null>(null);
@@ -290,7 +305,17 @@ export function NativeComposer({
     const natural = ta.scrollHeight;
     ta.style.height = `${Math.min(natural, MAX_TEXTAREA_HEIGHT)}px`;
     ta.style.overflowY = natural > MAX_TEXTAREA_HEIGHT ? 'auto' : 'hidden';
+    if (mirrorRef.current) mirrorRef.current.scrollTop = ta.scrollTop;
   }, [text]);
+
+  // Keep the keyword-highlight mirror scrolled in lockstep with the textarea.
+  const syncMirrorScroll = useCallback(() => {
+    const ta = textareaRef.current;
+    const mirror = mirrorRef.current;
+    if (ta && mirror) mirror.scrollTop = ta.scrollTop;
+  }, []);
+
+  const showKeywordOverlay = hasMagicKeyword(text);
 
   // ── Submit helper — clears state after sending unless the submitter preserves the composer ───────────────────────────
   const submitAndClear = useCallback(
@@ -785,6 +810,31 @@ export function NativeComposer({
 
         {/* Textarea wrapper with autocomplete dropdown */}
         <div style={{ flex: 1, position: 'relative', minWidth: 0 }}>
+          {/* Magic-keyword highlight mirror: renders the same text behind a
+              text-transparent textarea, painting keywords (workflowz / orchestrate
+              / ultrathink) in the accent color so they read as triggers. */}
+          {showKeywordOverlay && (
+            <div
+              ref={mirrorRef}
+              aria-hidden="true"
+              style={{
+                ...COMPOSER_TEXT_STYLE,
+                position: 'absolute',
+                inset: 0,
+                overflow: 'hidden',
+                pointerEvents: 'none',
+                color: isDisabled ? 'var(--gs-text-dim)' : 'var(--gs-text)',
+              }}
+            >
+              {segmentMagicKeywords(text).map((seg, i) =>
+                seg.keyword ? (
+                  <span key={i} style={{ color: 'var(--gs-accent)', fontWeight: 600 }}>{seg.text}</span>
+                ) : (
+                  <span key={i}>{seg.text}</span>
+                )
+              )}
+            </div>
+          )}
           {/* Autocomplete dropdown */}
           {autocomplete.mode && autocomplete.items.length > 0 && (
             <div
@@ -841,24 +891,26 @@ export function NativeComposer({
             onChange={handleTextChange}
             onKeyDown={handleKeyDown}
             onPaste={handlePaste}
+            onScroll={syncMirrorScroll}
             placeholder={placeholder}
             disabled={isDisabled}
             rows={1}
             style={{
+              ...COMPOSER_TEXT_STYLE,
+              position: 'relative',
+              zIndex: 1,
               width: '100%',
               background: 'transparent',
               border: 'none',
               color: isDisabled ? 'var(--gs-text-dim)' : 'var(--gs-text)',
-              fontSize: 15,
-              lineHeight: 1.5,
-              padding: '8px 12px',
+              // When a keyword is present, hide the textarea's own glyphs and let
+              // the highlight mirror show through; keep the caret visible.
+              WebkitTextFillColor: showKeywordOverlay ? 'transparent' : undefined,
               resize: 'none',
               outline: 'none',
               overflowY: 'hidden',
               minHeight: 38,
               maxHeight: MAX_TEXTAREA_HEIGHT,
-              boxSizing: 'border-box',
-              fontFamily: 'inherit',
               WebkitAppearance: 'none',
               caretColor: 'var(--gs-accent)',
             }}
