@@ -61,6 +61,7 @@ describe('executeSpaceCommand', () => {
         'GSSH_SESSION_MODE=workspace',
         'GSSH_SPACE_PROJECT=demo',
         'GSSH_SPACE_WORKSPACE=ws-1',
+        `GITSPACE_WORKSPACE_ROOT=${join(tempHomeDir, 'gitspace')}`,
         'bun',
         '/tmp/dev repo/src/index.ts',
         'space',
