@@ -124,13 +124,18 @@ export interface AgentHistoryEntry {
 }
 
 /** A message node in the conversation tree (flat list; `parentId` links to the
- *  nearest message ancestor). Powers the branch-explorer tree view. */
+ *  nearest user/assistant message ancestor — tool results and other entry types
+ *  are skipped). Powers the branch-explorer tree view. */
 export interface AgentTreeNode {
   id: string;
   parentId: string | null;
   role: 'user' | 'assistant' | 'other';
-  /** Short preview of the message text. */
+  /** Short preview of the message text (empty for tool-only turns). */
   preview: string;
+  /** Number of tool calls in the turn (labels text-less assistant turns). */
+  tools?: number;
+  /** Real creation order of the entry in the session (file order). */
+  seq?: number;
   /** This node is the current leaf (where the conversation sits now). */
   current: boolean;
   /** This node is on the current branch (leaf → root path). */

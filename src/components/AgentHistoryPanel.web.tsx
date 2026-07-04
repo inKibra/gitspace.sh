@@ -1,5 +1,5 @@
 /** @jsxImportSource react */
-import { useMemo, useState, type ReactElement } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
 import type { AgentHistoryEntry, AgentNavigateMode, AgentTreeNode } from '../agents/agent-runtime-types.js';
 
 /**
@@ -7,8 +7,10 @@ import type { AgentHistoryEntry, AgentNavigateMode, AgentTreeNode } from '../age
  *  - History: the user-message checkpoints on the current branch. Click one to
  *    re-do it — the message leaves the transcript and its text returns to the
  *    composer (edit + re-send). The prior path is preserved as a branch.
- *  - Tree: the full branch graph. Click any node to jump the conversation there
- *    (return to a fork), non-destructively.
+ *  - Tree ("spine + fork groups"): the current branch rendered flat; at every
+ *    fork an amber group lists ALL other branches (first message + length),
+ *    expandable in place. Click any node to jump the conversation there — the
+ *    spine re-roots around the new position.
  */
 export function AgentHistoryPanel({
   entries,
@@ -33,19 +35,6 @@ export function AgentHistoryPanel({
     return [...entries].reverse().filter((e) => !f || e.text.toLowerCase().includes(f));
   }, [entries, filter]);
 
-  // Build parent→children from the flat node list for the tree view.
-  const { roots, childrenOf } = useMemo(() => {
-    const byId = new Map(tree.map((n) => [n.id, n]));
-    const kids = new Map<string | null, AgentTreeNode[]>();
-    for (const n of tree) {
-      const p = n.parentId && byId.has(n.parentId) ? n.parentId : null;
-      const arr = kids.get(p) ?? [];
-      arr.push(n);
-      kids.set(p, arr);
-    }
-    return { roots: kids.get(null) ?? [], childrenOf: kids };
-  }, [tree]);
-
   const tab = (id: 'history' | 'tree', label: string) => (
     <button
       type="button"
@@ -60,14 +49,14 @@ export function AgentHistoryPanel({
     <div className="fixed inset-0 z-50 flex items-center justify-center" onClick={onClose}>
       <div className="absolute inset-0 bg-black/50" />
       <div
-        className="relative z-10 flex max-h-[72vh] w-[520px] flex-col border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] text-[12px] shadow-xl"
+        className="relative z-10 flex max-h-[78vh] w-[min(760px,94vw)] flex-col border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] text-[12px] shadow-xl"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center gap-3 border-b border-[var(--gs-border)] px-4 py-2 text-[13px]">
           {tab('history', '↩ History')}
           {tab('tree', '⑂ Tree')}
           <span className="text-[11px] text-[var(--gs-text-ghost)]">
-            {view === 'history' ? 'click a turn to re-do it' : 'click a node to jump there'}
+            {view === 'history' ? 'click a turn to re-do it' : 'flat = your branch · amber = other branches at their fork'}
           </span>
           <button type="button" onClick={onClose} className="ml-auto text-[var(--gs-text-dim)] hover:text-[var(--gs-text)]">✕</button>
         </div>
@@ -108,70 +97,145 @@ export function AgentHistoryPanel({
               )}
             </div>
           </>
+        ) : !treeAvailable ? (
+          <div className="px-4 py-4 text-center text-[var(--gs-text-dim)]">Tree view isn't available for this session.</div>
+        ) : loading && tree.length === 0 ? (
+          <div className="px-4 py-4 text-center text-[var(--gs-text-dim)]">Loading tree…</div>
         ) : (
-          <div className="overflow-y-auto py-1.5 font-[family-name:var(--gs-font-mono)]">
-            {!treeAvailable ? (
-              <div className="px-4 py-4 text-center text-[var(--gs-text-dim)]">Tree view isn't available for this session.</div>
-            ) : loading && tree.length === 0 ? (
-              <div className="px-4 py-4 text-center text-[var(--gs-text-dim)]">Loading tree…</div>
-            ) : roots.length === 0 ? (
-              <div className="px-4 py-4 text-center text-[var(--gs-text-dim)]">No messages yet.</div>
-            ) : (
-              roots.map((r) => <TreeRow key={r.id} node={r} depth={0} childrenOf={childrenOf} onNavigate={onNavigate} />)
-            )}
-          </div>
+          <SpineTree tree={tree} onNavigate={onNavigate} />
         )}
       </div>
     </div>
   );
 }
 
-function TreeRow({
-  node,
-  depth,
-  childrenOf,
-  onNavigate,
-}: {
-  node: AgentTreeNode;
-  depth: number;
-  childrenOf: Map<string | null, AgentTreeNode[]>;
-  onNavigate: (entryId: string, mode: AgentNavigateMode) => void;
-}): ReactElement {
-  const kids = childrenOf.get(node.id) ?? [];
-  const isFork = kids.length > 1;
-  return (
-    <>
-      <button
-        type="button"
-        disabled={node.current}
-        onClick={() => onNavigate(node.id, 'jump')}
-        style={{ paddingLeft: 10 + depth * 16 }}
-        className={`flex w-full items-center gap-2 py-1 pr-3 text-left ${
-          node.current
-            ? 'cursor-default bg-[color-mix(in_srgb,var(--gs-accent)_14%,transparent)] outline outline-1 outline-[color-mix(in_srgb,var(--gs-accent)_35%,transparent)]'
-            : 'hover:bg-[var(--gs-border)]'
-        } ${node.onPath || node.current ? '' : 'opacity-55'}`}
-        title={node.current ? 'Current position' : 'Jump the conversation to this node'}
-      >
-        <span className={node.current ? 'text-[var(--gs-accent)]' : 'text-[var(--gs-text-ghost)]'}>{node.onPath || node.current ? '●' : '○'}</span>
-        <span
-          className={`shrink-0 rounded-full border px-1.5 text-[10px] ${
-            node.role === 'user'
-              ? 'border-[#1e3a5f] text-[#93c5fd]'
-              : node.role === 'assistant'
-                ? 'border-[#1f4a2f] text-[var(--gs-accent)]'
-                : 'border-[var(--gs-border)] text-[var(--gs-text-dim)]'
+/** Node text: preview, or a ghost "⚙ N tool calls" label for text-less turns. */
+function nodeText(n: AgentTreeNode): ReactElement {
+  if (n.preview) return <>{n.preview}</>;
+  if (n.tools) return <span className="text-[var(--gs-text-ghost)]">⚙ {n.tools} tool call{n.tools > 1 ? 's' : ''} (no text)</span>;
+  return <span className="text-[var(--gs-text-ghost)]">(empty)</span>;
+}
+
+function SpineTree({ tree, onNavigate }: { tree: AgentTreeNode[]; onNavigate: (entryId: string, mode: AgentNavigateMode) => void }): ReactElement {
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  const { byId, childrenOf, roots } = useMemo(() => {
+    const byId = new Map(tree.map((n) => [n.id, n]));
+    const kids = new Map<string | null, AgentTreeNode[]>();
+    for (const n of tree) {
+      const p = n.parentId && byId.has(n.parentId) ? n.parentId : null;
+      (kids.get(p) ?? kids.set(p, []).get(p)!).push(n);
+    }
+    return { byId, childrenOf: kids, roots: kids.get(null) ?? [] };
+  }, [tree]);
+
+  // Center the current node when the tree opens / re-roots.
+  useEffect(() => {
+    scrollRef.current?.querySelector('[data-cur="1"]')?.scrollIntoView({ block: 'center' });
+  }, [tree]);
+
+  const kids = (id: string): AgentTreeNode[] => childrenOf.get(id) ?? [];
+  const chainLen = (startId: string): number => {
+    let c = 0;
+    let x: string | null = startId;
+    while (x) {
+      c++;
+      const ks = kids(x);
+      x = ks.length ? ks[0].id : null;
+    }
+    return c;
+  };
+  const toggle = (id: string): void =>
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
+  // Render a chain (a branch) flat; recurse into fork groups.
+  const renderChain = (startId: string, depth: number, out: ReactElement[]): void => {
+    let x: string | null = startId;
+    while (x) {
+      const n = byId.get(x);
+      if (!n) break;
+      const ks = kids(x);
+      const isFork = ks.length > 1;
+      out.push(
+        <button
+          key={n.id}
+          type="button"
+          disabled={n.current}
+          data-cur={n.current ? '1' : undefined}
+          onClick={() => onNavigate(n.id, 'jump')}
+          style={{ paddingLeft: 12 + depth * 16 }}
+          className={`flex w-full items-center gap-2 py-[3px] pr-3 text-left ${
+            n.current
+              ? 'cursor-default bg-[color-mix(in_srgb,var(--gs-accent)_14%,transparent)] outline outline-1 outline-[color-mix(in_srgb,var(--gs-accent)_35%,transparent)]'
+              : 'hover:bg-[var(--gs-border)]'
           }`}
+          title={n.current ? 'Current position' : 'Jump the conversation to this message'}
         >
-          {node.role === 'user' ? 'you' : node.role === 'assistant' ? 'gpt' : '·'}
-        </span>
-        <span className="truncate text-[var(--gs-text)]">{node.preview || '(empty)'}</span>
-        {node.current && <span className="ml-auto shrink-0 text-[10px] text-[var(--gs-accent)]">◀ current</span>}
-        {isFork && !node.current && <span className="ml-auto shrink-0 text-[10px] text-[var(--gs-warning,#f0b429)]">⑂ {kids.length}</span>}
-      </button>
-      {kids.map((k) => (
-        <TreeRow key={k.id} node={k} depth={depth + 1} childrenOf={childrenOf} onNavigate={onNavigate} />
-      ))}
-    </>
+          <span className="w-9 shrink-0 text-right text-[10px] text-[var(--gs-text-ghost)]">{n.seq !== undefined ? `#${n.seq}` : ''}</span>
+          <span className={`w-3 shrink-0 text-center ${n.current ? 'text-[var(--gs-accent)]' : 'text-[var(--gs-text-ghost)]'}`}>{n.onPath || n.current ? '●' : '○'}</span>
+          <span
+            className={`shrink-0 rounded-full border px-1.5 text-[10px] ${
+              n.role === 'user' ? 'border-[#1e3a5f] text-[#93c5fd]' : 'border-[#1f4a2f] text-[var(--gs-accent)]'
+            }`}
+          >
+            {n.role === 'user' ? 'you' : 'gpt'}
+          </span>
+          <span className={`min-w-0 flex-1 truncate ${n.onPath || n.current ? 'text-[var(--gs-text)]' : 'text-[var(--gs-text-dim)]'}`}>{nodeText(n)}</span>
+          {isFork && <span className="shrink-0 text-[10px] text-[#f0b429]">⑂ fork</span>}
+          {n.current && <span className="shrink-0 text-[10px] text-[var(--gs-accent)]">◀ current</span>}
+        </button>,
+      );
+      let main: AgentTreeNode | null = ks.length ? ks[0] : null;
+      if (isFork) {
+        const onp = ks.find((k) => k.onPath || k.current);
+        if (onp) main = onp;
+        const others = ks.filter((k) => k.id !== main!.id);
+        out.push(
+          <div key={`${n.id}:forks`} className="my-1 mr-3 rounded border border-[#2a2413] bg-[#12100a]" style={{ marginLeft: 46 + depth * 16 }}>
+            <div className="border-b border-[#221d10] px-2.5 py-1 text-[11px] text-[#f0b429]">
+              ⑂ {others.length} other branch{others.length > 1 ? 'es' : ''} from {n.seq !== undefined ? `#${n.seq}` : 'here'} — main path continues below
+            </div>
+            {others.map((o) => {
+              const open = expanded.has(o.id);
+              const inner: ReactElement[] = [];
+              if (open) renderChain(o.id, depth + 1, inner);
+              return (
+                <div key={o.id} className="border-t border-[#1c1810] first:border-t-0">
+                  <button type="button" onClick={() => toggle(o.id)} className="flex w-full items-center gap-2 px-2.5 py-1 text-left hover:bg-[#171410]">
+                    <span className="shrink-0 text-[var(--gs-text-dim)]">{open ? '▾' : '▸'}</span>
+                    <span className="w-9 shrink-0 text-right text-[10px] text-[var(--gs-text-ghost)]">{o.seq !== undefined ? `#${o.seq}` : ''}</span>
+                    <span
+                      className={`shrink-0 rounded-full border px-1.5 text-[10px] ${
+                        o.role === 'user' ? 'border-[#1e3a5f] text-[#93c5fd]' : 'border-[#1f4a2f] text-[var(--gs-accent)]'
+                      }`}
+                    >
+                      {o.role === 'user' ? 'you' : 'gpt'}
+                    </span>
+                    <span className="min-w-0 flex-1 truncate text-[var(--gs-text-dim)]">{nodeText(o)}</span>
+                    <span className="shrink-0 text-[10px] text-[var(--gs-text-ghost)]">· {chainLen(o.id)} msg{chainLen(o.id) > 1 ? 's' : ''} ↓</span>
+                  </button>
+                  {open && <div className="mb-1 ml-4 border-l-2 border-[#2a2413]">{inner}</div>}
+                </div>
+              );
+            })}
+          </div>,
+        );
+      }
+      x = main ? main.id : null;
+    }
+  };
+
+  const out: ReactElement[] = [];
+  for (const r of roots) renderChain(r.id, 0, out);
+  return (
+    <div ref={scrollRef} className="overflow-y-auto py-1.5 font-[family-name:var(--gs-font-mono)]">
+      {out.length === 0 ? <div className="px-4 py-4 text-center text-[var(--gs-text-dim)]">No messages yet.</div> : out}
+    </div>
   );
 }

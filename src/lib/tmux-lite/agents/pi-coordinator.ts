@@ -85,6 +85,7 @@ interface ControlSessionAccessors {
     getLeafId?(): string | null;
     getBranch?(fromId?: string): Array<{ id: string }>;
     getTree?(): SessionTreeNodeLike[];
+    getEntries?(): Array<{ id: string }>;
   };
 }
 import { getTranscriptRange } from '../../../blocks/agent/transcript-source.js';
@@ -717,8 +718,10 @@ export class PiCoordinator {
     return { ok: false };
   }
 
-  /** The conversation tree as a flat list of message nodes (non-message entries
-   *  are skipped, their children re-parented to the nearest message ancestor).
+  /** The conversation tree as a flat list of user/assistant message nodes
+   *  (tool results and non-message entries are skipped, their children
+   *  re-parented to the nearest kept ancestor). Includes real creation order
+   *  (`seq`) and per-turn tool-call counts so text-less turns can be labeled.
    *  Marks the current leaf and the current branch for the explorer view. */
   async getSessionTree(target: PiWorkspaceTarget, agentSessionId: string): Promise<AgentTreeNode[]> {
     const session = (this.activeSessions.get(agentSessionId) ?? (await this.ensureActiveSession(target, agentSessionId))) as unknown as ControlSessionAccessors;
@@ -726,26 +729,40 @@ export class PiCoordinator {
     if (!sm?.getTree) return [];
     const leafId = sm.getLeafId?.() ?? null;
     const branchIds = new Set((sm.getBranch?.() ?? []).map((e) => e.id));
+    const order = new Map((sm.getEntries?.() ?? []).map((e, i) => [e.id, i]));
     const out: AgentTreeNode[] = [];
     const walk = (node: SessionTreeNodeLike, msgParentId: string | null): void => {
       const entry = node.entry;
       let nextParent = msgParentId;
       if (entry?.type === 'message') {
         const msg = entry.message as { role?: string; content?: unknown } | undefined;
-        const role: AgentTreeNode['role'] = msg?.role === 'user' ? 'user' : msg?.role === 'assistant' ? 'assistant' : 'other';
-        out.push({
-          id: entry.id,
-          parentId: msgParentId,
-          role,
-          preview: previewMessageText(msg?.content).slice(0, 80),
-          current: entry.id === leafId,
-          onPath: branchIds.has(entry.id),
-        });
-        nextParent = entry.id;
+        if (msg?.role === 'user' || msg?.role === 'assistant') {
+          const tools = Array.isArray(msg.content)
+            ? (msg.content as Array<{ type?: string }>).filter((p) => p?.type === 'toolCall').length
+            : 0;
+          out.push({
+            id: entry.id,
+            parentId: msgParentId,
+            role: msg.role === 'user' ? 'user' : 'assistant',
+            preview: previewMessageText(msg.content).slice(0, 120),
+            tools,
+            seq: order.get(entry.id),
+            current: entry.id === leafId,
+            onPath: branchIds.has(entry.id),
+          });
+          nextParent = entry.id;
+        }
       }
       (node.children ?? []).forEach((c) => walk(c, nextParent));
     };
     (sm.getTree() ?? []).forEach((r: SessionTreeNodeLike) => walk(r, null));
+    // The leaf may be a skipped entry type (tool result, compaction, …) — mark
+    // the deepest emitted on-path node as current so the UI always has an anchor.
+    if (!out.some((n) => n.current)) {
+      const onPath = out.filter((n) => n.onPath);
+      const anchor = onPath.length ? onPath.reduce((a, b) => ((a.seq ?? 0) >= (b.seq ?? 0) ? a : b)) : null;
+      if (anchor) anchor.current = true;
+    }
     return out;
   }
 
