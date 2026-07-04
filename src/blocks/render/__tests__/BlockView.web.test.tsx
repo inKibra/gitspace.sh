@@ -49,6 +49,23 @@ describe('web BlockView', () => {
     expect(container.textContent).not.toContain('hidden body'); // output collapsed
   });
 
+  it('keeps input visible on a completed tool-call while output stays collapsed', () => {
+    const block = {
+      id: 't3',
+      type: 'tool-call',
+      data: {
+        tool: 'eval',
+        status: 'done',
+        target: 'print(6*7)',
+        input: [{ id: 'i3', type: 'markdown', data: { text: 'FULL INPUT CODE' } }],
+        result: [{ id: 'r3', type: 'markdown', data: { text: 'collapsed output' } }],
+      },
+    };
+    const { container } = render(<BlockView block={block} />);
+    expect(container.textContent).toContain('FULL INPUT CODE'); // input always visible
+    expect(container.textContent).not.toContain('collapsed output'); // output collapsed
+  });
+
   it('degrades an unknown block type to a loud fallback (markdown when text is present)', () => {
     const { container } = render(<BlockView block={{ id: 'x1', type: 'mystery', data: { text: 'fallback body' } }} />);
     expect(container.textContent).toContain('unsupported block');
