@@ -1,0 +1,28 @@
+diff --git a/src/session/agent-session.ts b/src/session/agent-session.ts
+index f271f21bfa2fed3ce70cd3d7ac1a5fa594a58dd7..bb890abc49a841a619c701574b1983efbd588d60 100644
+--- a/src/session/agent-session.ts
++++ b/src/session/agent-session.ts
+@@ -8206,6 +8206,23 @@ export class AgentSession {
+ 		};
+ 	}
+ 
++	/** Remove a queued user message by visible kind + index (GitSpace patch).
++	 *  Maps the display index (user-visible messages, matching getQueuedMessages)
++	 *  to the raw queue index and removes it via the agent. */
++	removeQueuedMessage(kind: "steering" | "followUp", index: number): string | undefined {
++		const queue = kind === "steering" ? this.agent.peekSteeringQueue() : this.agent.peekFollowUpQueue();
++		const userIndices: number[] = [];
++		queue.forEach((m, i) => {
++			if (isUserQueuedMessage(m)) userIndices.push(i);
++		});
++		const rawIndex = userIndices[index];
++		if (rawIndex === undefined) return undefined;
++		const removed = queue[rawIndex];
++		if (kind === "steering") this.agent.removeSteer(rawIndex);
++		else this.agent.removeFollowUp(rawIndex);
++		return removed ? queueChipText(removed) : undefined;
++	}
++
+ 	/**
+ 	 * Pop the last queued message (steering first, then follow-up).
+ 	 * Used by dequeue keybinding to restore messages to editor one at a time.
