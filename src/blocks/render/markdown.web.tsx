@@ -20,6 +20,9 @@ export const BLOCK_MD_OPTIONS: MarkdownRenderOptions = {
   blockquoteClassName: 'border-l-2 border-[var(--gs-border-active)] pl-3 text-[var(--gs-text-muted)] my-2',
   hrClassName: 'border-[var(--gs-border)] my-3',
   linkClassName: 'text-[var(--gs-info)] underline',
+  tableClassName: 'my-2 w-full border-collapse text-[12px] leading-[1.5] text-[var(--gs-text-secondary)] block overflow-x-auto',
+  tableHeadCellClassName: 'border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-2 py-1 text-left font-semibold text-[var(--gs-text)]',
+  tableCellClassName: 'border border-[var(--gs-border)] px-2 py-1 align-top',
 };
 
 const FENCE = /```([\w+#-]*)\n?([\s\S]*?)```/g;

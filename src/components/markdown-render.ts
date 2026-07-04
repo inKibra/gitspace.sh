@@ -11,6 +11,9 @@ export interface MarkdownRenderOptions {
   blockquoteClassName?: string;
   hrClassName?: string;
   linkClassName?: string;
+  tableClassName?: string;
+  tableHeadCellClassName?: string;
+  tableCellClassName?: string;
 }
 
 export function escapeMarkdownHtml(text: string): string {
@@ -34,6 +37,9 @@ export function renderMarkdownHtml(md: string, options: MarkdownRenderOptions = 
   const quote = options.blockquoteClassName ? ` class="${options.blockquoteClassName}"` : '';
   const hr = options.hrClassName ? ` class="${options.hrClassName}"` : '';
   const a = options.linkClassName ? ` class="${options.linkClassName}"` : '';
+  const tableCls = options.tableClassName ? ` class="${options.tableClassName}"` : '';
+  const thCls = options.tableHeadCellClassName ? ` class="${options.tableHeadCellClassName}"` : '';
+  const tdCls = options.tableCellClassName ? ` class="${options.tableCellClassName}"` : '';
 
   // 1. Lift fenced code out first so its contents aren't transformed as markdown.
   const fences: string[] = [];
@@ -60,6 +66,30 @@ export function renderMarkdownHtml(md: string, options: MarkdownRenderOptions = 
         return `<a${a} href="${href}"${external}>${label}</a>`;
       });
 
+  // ── GFM tables ────────────────────────────────────────────────────────────
+  const splitTableRow = (row: string): string[] => {
+    let s = row.trim();
+    if (s.startsWith('|')) s = s.slice(1);
+    if (s.endsWith('|')) s = s.slice(0, -1);
+    return s.split('|').map((c) => c.trim());
+  };
+  const isTableSeparator = (row: string): boolean => {
+    const cells = splitTableRow(row);
+    return cells.length > 0 && cells.every((c) => /^:?-+:?$/.test(c));
+  };
+  // A table starts when a pipe-bearing line is immediately followed by a
+  // separator row (|---|:--:|---:| with optional alignment colons).
+  const startsTable = (idx: number): boolean =>
+    (lines[idx]?.includes('|') ?? false) && idx + 1 < lines.length && isTableSeparator(lines[idx + 1]!);
+  const cellAlign = (spec: string): string => {
+    const l = spec.startsWith(':');
+    const r = spec.endsWith(':');
+    if (l && r) return ' style="text-align:center"';
+    if (r) return ' style="text-align:right"';
+    if (l) return ' style="text-align:left"';
+    return '';
+  };
+
   const lines = escaped.split('\n');
   const blocks: string[] = [];
   let i = 0;
@@ -76,6 +106,26 @@ export function renderMarkdownHtml(md: string, options: MarkdownRenderOptions = 
     if (/^##\s+/.test(line)) { blocks.push(`<h2${h2}>${inline(line.replace(/^##\s+/, ''))}</h2>`); i += 1; continue; }
     if (/^#\s+/.test(line)) { blocks.push(`<h1${h1}>${inline(line.replace(/^#\s+/, ''))}</h1>`); i += 1; continue; }
     if (/^(-{3,}|\*{3,}|_{3,})$/.test(trimmed)) { blocks.push(`<hr${hr}/>`); i += 1; continue; }
+
+    if (startsTable(i)) {
+      const header = splitTableRow(line);
+      const aligns = splitTableRow(lines[i + 1]!).map(cellAlign);
+      i += 2;
+      const bodyRows: string[][] = [];
+      while (
+        i < lines.length
+        && lines[i]!.trim() !== ''
+        && lines[i]!.includes('|')
+        && !new RegExp(`^${FENCE_MARKER}\\d+\\u0000$`).test(lines[i]!.trim())
+      ) {
+        bodyRows.push(splitTableRow(lines[i]!));
+        i += 1;
+      }
+      const thead = `<thead><tr>${header.map((c, j) => `<th${thCls}${aligns[j] ?? ''}>${inline(c)}</th>`).join('')}</tr></thead>`;
+      const tbody = `<tbody>${bodyRows.map((r) => `<tr>${header.map((_c, j) => `<td${tdCls}${aligns[j] ?? ''}>${inline(r[j] ?? '')}</td>`).join('')}</tr>`).join('')}</tbody>`;
+      blocks.push(`<table${tableCls}>${thead}${tbody}</table>`);
+      continue;
+    }
 
     if (/^&gt;\s?/.test(line)) {
       const quoted: string[] = [];
@@ -103,6 +153,7 @@ export function renderMarkdownHtml(md: string, options: MarkdownRenderOptions = 
       && lines[i]!.trim() !== ''
       && !/^(#{1,3}\s+|&gt;\s?|[-*]\s+|\d+\.\s+|-{3,}$|\*{3,}$|_{3,}$)/.test(lines[i]!)
       && !new RegExp(`^${FENCE_MARKER}\\d+\\u0000$`).test(lines[i]!.trim())
+      && !startsTable(i)
     ) {
       para.push(inline(lines[i]!));
       i += 1;
