@@ -1,5 +1,5 @@
 /** @jsxImportSource react */
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from '../lib/sonner.web.js';
 import { useGitSpace } from '../sdk/index.js';
 import { NativeAgentSurface } from './NativeAgentSurface.web.js';
@@ -10,9 +10,12 @@ interface NativeAgentSurfaceConnectedProps {
   workspaceId?: string | null;
   agentSessionId?: string | null;
   paneId?: string | null;
+  /** Text to drop into the composer (e.g. a re-done message). Applied whenever
+   *  `nonce` changes so the same text can be re-injected. */
+  externalDraft?: { text: string; nonce: number } | null;
 }
 
-export function NativeAgentSurfaceConnected({ backendKey, workspaceId, agentSessionId, paneId }: NativeAgentSurfaceConnectedProps = {}) {
+export function NativeAgentSurfaceConnected({ backendKey, workspaceId, agentSessionId, paneId, externalDraft }: NativeAgentSurfaceConnectedProps = {}) {
   const { engine, state: multiState } = useGitSpace();
   const resolvedBackendKey = backendKey ?? multiState.activeBackendKey;
 
@@ -38,6 +41,18 @@ export function NativeAgentSurfaceConnected({ backendKey, workspaceId, agentSess
     : null;
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [draftStorageVersion, setDraftStorageVersion] = useState(0);
+
+  // Inject an external draft (a re-done message) into the composer: write it to
+  // the draft store and bump the version so the composer reloads it. Keyed on
+  // nonce so re-doing the same text again re-applies.
+  const lastInjectedNonce = useRef(0);
+  useEffect(() => {
+    if (!externalDraft || externalDraft.nonce === lastInjectedNonce.current) return;
+    lastInjectedNonce.current = externalDraft.nonce;
+    if (!draftStorageKey) return;
+    try { localStorage.setItem(draftStorageKey, externalDraft.text); } catch { /* storage unavailable */ }
+    setDraftStorageVersion((v) => v + 1);
+  }, [externalDraft, draftStorageKey]);
 
   const handleSubmit = useCallback(async (text: string, rawImages: Array<{ dataUrl: string; name: string }>, rawFiles: Array<{ name: string; dataUrl: string }>, mode: 'send' | 'steer' | 'followUp') => {
     if (!resolvedBackendKey || !resolvedAgentSessionId || !resolvedWorkspaceId || isSubmitting) return;

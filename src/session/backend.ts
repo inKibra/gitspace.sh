@@ -22,7 +22,7 @@ import type { WideEventFilter } from '../types/events.js';
 import type { SessionLinearIssueSummary, WorkspaceSource } from '../types/lifecycle.js';
 import type { ConfirmStepResult, SpacesBundle } from '../types/bundle.js';
 import type { AgentStateUpdateDelta, WorkspaceAgentState } from '../lib/tmux-lite/agent-event-manager.js';
-import type { AgentControlInfo, AgentHistoryEntry, AgentSettingItem, AgentSettingSchemaItem, AgentToolInfo } from '../agents/agent-runtime-types.js';
+import type { AgentControlInfo, AgentHistoryEntry, AgentSettingItem, AgentSettingSchemaItem, AgentToolInfo, AgentTreeNode } from '../agents/agent-runtime-types.js';
 
 import type { ChainStackStatus, GoalChain, GoalRecord, GoalUpdateInput, WorkspacePhaseChangePreview } from '../types/goals.js';
 export type BackendKey = string;
@@ -289,8 +289,11 @@ export interface SessionBackend {
   applyAgentModelRole?(workspaceId: string, agentSessionId: string, role: string): Promise<boolean>;
   /** User-message checkpoints for conversation rewind. */
   getAgentHistory?(workspaceId: string, agentSessionId: string): Promise<AgentHistoryEntry[]>;
-  /** Rewind the conversation to a prior entry. */
-  navigateAgentHistory?(workspaceId: string, agentSessionId: string, entryId: string): Promise<boolean>;
+  /** The full conversation tree (message nodes) for the branch explorer. */
+  getAgentSessionTree?(workspaceId: string, agentSessionId: string): Promise<AgentTreeNode[]>;
+  /** Navigate the conversation tree: `redo` rewinds to the message's parent and
+   *  returns its text; `jump` makes the node the leaf (return to a fork). */
+  navigateAgentHistory?(workspaceId: string, agentSessionId: string, entryId: string, mode?: 'redo' | 'jump'): Promise<{ ok: boolean; editorText?: string }>;
 
   /** Fast, persisted workspace-scoped agent sessions (history/snapshot-backed). */
   getKnownAgentSessions?(workspaceId: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closedAt?: string; archivedAt?: string }>>;

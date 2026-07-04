@@ -58,7 +58,7 @@ import type {
   SessionBackend,
   TerminateSessionOptions,
 } from '../backend.js';
-import type { AgentControlInfo, AgentHistoryEntry, AgentSettingItem, AgentSettingSchemaItem, AgentToolInfo } from '../../agents/agent-runtime-types.js';
+import type { AgentControlInfo, AgentHistoryEntry, AgentSettingItem, AgentSettingSchemaItem, AgentToolInfo, AgentTreeNode } from '../../agents/agent-runtime-types.js';
 import type { BackendEvent } from '../events.js';
 import type { AgentStateUpdateDelta, WorkspaceAgentState } from '../../lib/tmux-lite/agent-event-manager.js';
 import type { AgentStateSnapshotPush, AgentStateUpdatePush } from '../../lib/remote-session/protocol.js';
@@ -3118,12 +3118,20 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     throw new Error('Unexpected history response');
   }
 
-  async navigateAgentHistory(workspaceId: string, agentSessionId: string, entryId: string): Promise<boolean> {
+  async navigateAgentHistory(workspaceId: string, agentSessionId: string, entryId: string, mode: 'redo' | 'jump' = 'redo'): Promise<{ ok: boolean; editorText?: string }> {
     await this.waitForInitialSnapshot();
-    const tmuxResponse = await this.sendRpcCommand({ type: 'navigate_agent_history', requestId: crypto.randomUUID(), target: this.getAgentWorkspaceTarget(workspaceId), agentSessionId, entryId });
-    if (tmuxResponse.type === 'agent-bool') return tmuxResponse.ok;
+    const tmuxResponse = await this.sendRpcCommand({ type: 'navigate_agent_history', requestId: crypto.randomUUID(), target: this.getAgentWorkspaceTarget(workspaceId), agentSessionId, entryId, mode });
+    if (tmuxResponse.type === 'agent-navigate') return { ok: tmuxResponse.ok, editorText: tmuxResponse.editorText };
     if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
     throw new Error('Unexpected navigate-history response');
+  }
+
+  async getAgentSessionTree(workspaceId: string, agentSessionId: string): Promise<AgentTreeNode[]> {
+    await this.waitForInitialSnapshot();
+    const tmuxResponse = await this.sendRpcCommand({ type: 'get_agent_session_tree', requestId: crypto.randomUUID(), target: this.getAgentWorkspaceTarget(workspaceId), agentSessionId });
+    if (tmuxResponse.type === 'agent-tree') return tmuxResponse.nodes;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected tree response');
   }
 
   // ============================================================================

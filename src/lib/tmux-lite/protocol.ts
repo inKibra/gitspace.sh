@@ -405,7 +405,8 @@ export type Command =
   | { type: 'agent-cycle-role'; target: AgentWorkspaceTargetPayload; agentSessionId: string; direction: 'forward' | 'backward' }
   | { type: 'agent-apply-role'; target: AgentWorkspaceTargetPayload; agentSessionId: string; role: string }
   | { type: 'agent-history'; target: AgentWorkspaceTargetPayload; agentSessionId: string }
-  | { type: 'agent-navigate-history'; target: AgentWorkspaceTargetPayload; agentSessionId: string; entryId: string }
+  | { type: 'agent-tree'; target: AgentWorkspaceTargetPayload; agentSessionId: string }
+  | { type: 'agent-navigate-history'; target: AgentWorkspaceTargetPayload; agentSessionId: string; entryId: string; mode?: 'redo' | 'jump' }
   | { type: 'workspace-editors-list'; target: AgentWorkspaceTargetPayload }
   | { type: 'workspace-editor-open'; target: AgentWorkspaceTargetPayload; editorId: import('../../utils/open-editor.js').WorkspaceEditorId }
   | { type: 'agent-file-suggestions'; target: AgentWorkspaceTargetPayload; prefix: string; limit?: number }
@@ -498,6 +499,8 @@ export type Response =
   | { type: 'agent-settings-schema'; schema: import('../../agents/agent-runtime-types.js').AgentSettingSchemaItem[] }
   | { type: 'agent-tools'; tools: import('../../agents/agent-runtime-types.js').AgentToolInfo[] }
   | { type: 'agent-history'; entries: import('../../agents/agent-runtime-types.js').AgentHistoryEntry[] }
+  | { type: 'agent-tree'; nodes: import('../../agents/agent-runtime-types.js').AgentTreeNode[] }
+  | { type: 'agent-navigate'; ok: boolean; editorText?: string }
   | { type: 'workspace-editors'; editors: import('../../utils/open-editor.js').WorkspaceEditorOption[] }
   | { type: 'agent-file-suggestions'; suggestions: Array<{ path: string; isDirectory: boolean }> }
   | {

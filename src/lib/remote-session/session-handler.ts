@@ -1740,6 +1740,19 @@ export class RemoteSessionHandler {
           target: msg.target,
           agentSessionId: msg.agentSessionId,
           entryId: msg.entryId,
+          mode: msg.mode,
+        }, sendResponse);
+        break;
+
+      case 'get_agent_session_tree':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, {
+          type: 'agent-tree',
+          target: msg.target,
+          agentSessionId: msg.agentSessionId,
         }, sendResponse);
         break;
 

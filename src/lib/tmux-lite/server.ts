@@ -81,6 +81,7 @@ import {
   cycleAgentRole,
   applyAgentModelRole,
   getAgentHistory,
+  getAgentSessionTree,
   navigateAgentHistory,
   startAgentOAuthLogin,
   respondAgentOAuthPrompt,
@@ -3640,11 +3641,22 @@ routerListener = Bun.listen({
           case 'agent-navigate-history':
             try {
               await getAgentControlReady();
-              const ok = await navigateAgentHistory(cmd.target, cmd.agentSessionId, cmd.entryId);
-              res = { type: 'agent-bool', ok };
+              const result = await navigateAgentHistory(cmd.target, cmd.agentSessionId, cmd.entryId, cmd.mode);
+              res = { type: 'agent-navigate', ok: result.ok, editorText: result.editorText };
             } catch (e) {
               const errMsg = e instanceof Error ? e.message : String(e);
               res = { type: 'error', message: `Failed to rewind: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-tree':
+            try {
+              await getAgentControlReady();
+              const nodes = await getAgentSessionTree(cmd.target, cmd.agentSessionId);
+              res = { type: 'agent-tree', nodes };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to read tree: ${errMsg}` };
             }
             break;
 

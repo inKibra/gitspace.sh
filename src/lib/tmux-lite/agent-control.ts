@@ -566,9 +566,15 @@ export async function getAgentHistory(target: AgentWorkspaceTarget, agentSession
   return defaultPiCoordinator.getHistory(target, agentSessionId);
 }
 
-/** Rewind the conversation to a prior entry. */
-export async function navigateAgentHistory(target: AgentWorkspaceTarget, agentSessionId: string, entryId: string): Promise<boolean> {
-  return defaultPiCoordinator.navigateHistory(target, agentSessionId, entryId);
+/** Navigate the conversation tree (redo = rewind to parent + editorText; jump =
+ *  make the node the leaf). */
+export async function navigateAgentHistory(target: AgentWorkspaceTarget, agentSessionId: string, entryId: string, mode: 'redo' | 'jump' = 'redo'): Promise<{ ok: boolean; editorText?: string }> {
+  return defaultPiCoordinator.navigateHistory(target, agentSessionId, entryId, mode);
+}
+
+/** The full conversation tree (message nodes) for the branch explorer. */
+export async function getAgentSessionTree(target: AgentWorkspaceTarget, agentSessionId: string): Promise<import('../../agents/agent-runtime-types.js').AgentTreeNode[]> {
+  return defaultPiCoordinator.getSessionTree(target, agentSessionId);
 }
 
 // ---------------------------------------------------------------------------

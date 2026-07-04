@@ -19,7 +19,30 @@ import {
   openPiSessionManager,
   persistInitialPiSessionModel,
 } from './pi-runtime.js';
-import type { AgentControlInfo, AgentHistoryEntry, AgentOAuthEvent, AgentSettingSchemaItem, AgentToolInfo } from '../../../agents/agent-runtime-types.js';
+import type { AgentControlInfo, AgentHistoryEntry, AgentOAuthEvent, AgentSettingSchemaItem, AgentToolInfo, AgentTreeNode } from '../../../agents/agent-runtime-types.js';
+
+/** Minimal shape of a SessionManager tree node (entry + children). */
+interface SessionTreeNodeLike {
+  entry?: { id: string; type?: string; message?: unknown } | null;
+  children?: SessionTreeNodeLike[];
+}
+
+/** Best-effort plain text from an AgentMessage content (string or content parts). */
+function previewMessageText(content: unknown): string {
+  if (typeof content === 'string') return content.trim();
+  if (Array.isArray(content)) {
+    const text = content
+      .map((p) => {
+        const part = p as { type?: string; text?: string } | undefined;
+        return part?.type === 'text' && typeof part.text === 'string' ? part.text : '';
+      })
+      .filter(Boolean)
+      .join(' ')
+      .trim();
+    return text;
+  }
+  return '';
+}
 
 const THINKING_LEVELS = ['auto', 'off', 'minimal', 'low', 'medium', 'high', 'xhigh'];
 const APPROVAL_MODES = ['always-ask', 'write', 'yolo'];
@@ -56,11 +79,12 @@ interface ControlSessionAccessors {
   applyRoleModel?(entry: unknown): Promise<void>;
   cycleRoleModels?(roleOrder: readonly string[], direction?: 'forward' | 'backward'): Promise<unknown>;
   getUserMessagesForBranching?(): Array<{ entryId: string; text: string }>;
-  navigateTree?(targetId: string, options?: { summarize?: boolean }): Promise<{ cancelled?: boolean }>;
+  navigateTree?(targetId: string, options?: { summarize?: boolean }): Promise<{ cancelled?: boolean; editorText?: string }>;
   sessionManager?: {
     branch?(branchFromId: string): void;
     getLeafId?(): string | null;
     getBranch?(fromId?: string): Array<{ id: string }>;
+    getTree?(): SessionTreeNodeLike[];
   };
 }
 import { getTranscriptRange } from '../../../blocks/agent/transcript-source.js';
@@ -661,22 +685,68 @@ export class PiCoordinator {
     return inBranch.map((m, i) => ({ entryId: m.entryId, text: m.text, current: i === inBranch.length - 1 }));
   }
 
-  /** Rewind the conversation to a prior user-message turn. navigateTree moves
-   *  the leaf to the message's parent (so complete prior turns remain and the
-   *  message returns to the editor) and rebuilds the agent context in-memory;
-   *  the transcript then re-reads from this same live manager. Falls back to a
-   *  raw leaf move if navigateTree is unavailable. */
-  async navigateHistory(target: PiWorkspaceTarget, agentSessionId: string, entryId: string): Promise<boolean> {
+  /** Navigate the conversation tree.
+   *  - `redo` (default): rewind to the message's parent via navigateTree — the
+   *    message leaves the branch and its text is returned as `editorText` so the
+   *    client can drop it back into the composer (edit + re-send). The prior path
+   *    is preserved as a branch (non-destructive).
+   *  - `jump`: make `entryId` itself the leaf (branch), i.e. return to an
+   *    arbitrary node/fork without dropping it. */
+  async navigateHistory(
+    target: PiWorkspaceTarget,
+    agentSessionId: string,
+    entryId: string,
+    mode: 'redo' | 'jump' = 'redo',
+  ): Promise<{ ok: boolean; editorText?: string }> {
     const session = (await this.ensureActiveSession(target, agentSessionId)) as unknown as ControlSessionAccessors;
+    if (mode === 'jump') {
+      if (session.sessionManager?.branch) {
+        session.sessionManager.branch(entryId);
+        return { ok: session.sessionManager.getLeafId?.() === entryId };
+      }
+      return { ok: false };
+    }
     if (session.navigateTree) {
       const result = await session.navigateTree(entryId, { summarize: false });
-      return !result?.cancelled;
+      return { ok: !result?.cancelled, editorText: result?.editorText };
     }
     if (session.sessionManager?.branch) {
       session.sessionManager.branch(entryId);
-      return session.sessionManager.getLeafId?.() === entryId;
+      return { ok: session.sessionManager.getLeafId?.() === entryId };
     }
-    return false;
+    return { ok: false };
+  }
+
+  /** The conversation tree as a flat list of message nodes (non-message entries
+   *  are skipped, their children re-parented to the nearest message ancestor).
+   *  Marks the current leaf and the current branch for the explorer view. */
+  async getSessionTree(target: PiWorkspaceTarget, agentSessionId: string): Promise<AgentTreeNode[]> {
+    const session = (this.activeSessions.get(agentSessionId) ?? (await this.ensureActiveSession(target, agentSessionId))) as unknown as ControlSessionAccessors;
+    const sm = session.sessionManager;
+    if (!sm?.getTree) return [];
+    const leafId = sm.getLeafId?.() ?? null;
+    const branchIds = new Set((sm.getBranch?.() ?? []).map((e) => e.id));
+    const out: AgentTreeNode[] = [];
+    const walk = (node: SessionTreeNodeLike, msgParentId: string | null): void => {
+      const entry = node.entry;
+      let nextParent = msgParentId;
+      if (entry?.type === 'message') {
+        const msg = entry.message as { role?: string; content?: unknown } | undefined;
+        const role: AgentTreeNode['role'] = msg?.role === 'user' ? 'user' : msg?.role === 'assistant' ? 'assistant' : 'other';
+        out.push({
+          id: entry.id,
+          parentId: msgParentId,
+          role,
+          preview: previewMessageText(msg?.content).slice(0, 80),
+          current: entry.id === leafId,
+          onPath: branchIds.has(entry.id),
+        });
+        nextParent = entry.id;
+      }
+      (node.children ?? []).forEach((c) => walk(c, nextParent));
+    };
+    (sm.getTree() ?? []).forEach((r: SessionTreeNodeLike) => walk(r, null));
+    return out;
   }
 
   /** Switch the session's model. Spins up the session if needed. */

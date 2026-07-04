@@ -88,7 +88,7 @@ import {
   type WorkspaceDeleteErrorCode,
 } from '../../types/errors.js';
 import type { TerminalSnapshot } from '../backend.js';
-import type { AgentControlInfo, AgentHistoryEntry, AgentSettingItem, AgentSettingSchemaItem, AgentToolInfo } from '../../agents/agent-runtime-types.js';
+import type { AgentControlInfo, AgentHistoryEntry, AgentSettingItem, AgentSettingSchemaItem, AgentToolInfo, AgentTreeNode } from '../../agents/agent-runtime-types.js';
 import type { AgentStateUpdateDelta, WorkspaceAgentState } from '../../lib/tmux-lite/agent-event-manager.js';
 import type { AgentWorkspaceTargetPayload } from '../../lib/tmux-lite/protocol.js';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
@@ -1780,10 +1780,18 @@ export class LocalSessionBackend implements SessionBackend {
     throw new Error('Unexpected history response');
   }
 
-  async navigateAgentHistory(workspaceId: string, agentSessionId: string, entryId: string): Promise<boolean> {
+  async getAgentSessionTree(workspaceId: string, agentSessionId: string): Promise<AgentTreeNode[]> {
     const target = await this.resolveAgentWorkspaceTarget(workspaceId);
-    const tmuxResponse = await this.sendTmuxCommand({ type: 'agent-navigate-history', target, agentSessionId, entryId });
-    if (tmuxResponse.type === 'agent-bool') return tmuxResponse.ok;
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'agent-tree', target, agentSessionId });
+    if (tmuxResponse.type === 'agent-tree') return tmuxResponse.nodes;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected tree response');
+  }
+
+  async navigateAgentHistory(workspaceId: string, agentSessionId: string, entryId: string, mode: 'redo' | 'jump' = 'redo'): Promise<{ ok: boolean; editorText?: string }> {
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'agent-navigate-history', target, agentSessionId, entryId, mode });
+    if (tmuxResponse.type === 'agent-navigate') return { ok: tmuxResponse.ok, editorText: tmuxResponse.editorText };
     if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
     throw new Error('Unexpected navigate-history response');
   }

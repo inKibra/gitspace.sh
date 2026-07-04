@@ -123,6 +123,32 @@ export interface AgentHistoryEntry {
   current: boolean;
 }
 
+/** A message node in the conversation tree (flat list; `parentId` links to the
+ *  nearest message ancestor). Powers the branch-explorer tree view. */
+export interface AgentTreeNode {
+  id: string;
+  parentId: string | null;
+  role: 'user' | 'assistant' | 'other';
+  /** Short preview of the message text. */
+  preview: string;
+  /** This node is the current leaf (where the conversation sits now). */
+  current: boolean;
+  /** This node is on the current branch (leaf → root path). */
+  onPath: boolean;
+}
+
+/** Result of a rewind/jump. `editorText` is the message text to drop back into
+ *  the composer (re-do), present only for a user-message rewind. */
+export interface AgentNavigateResult {
+  ok: boolean;
+  editorText?: string;
+}
+
+/** How a navigation targets a node: `redo` rewinds to the message's parent and
+ *  returns its text (edit + re-send); `jump` makes the node itself the leaf
+ *  (return to a fork, non-destructive). */
+export type AgentNavigateMode = 'redo' | 'jump';
+
 /** A tool available to the agent (for per-tool approval). */
 export interface AgentToolInfo {
   name: string;

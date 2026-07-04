@@ -690,6 +690,14 @@ export interface NavigateAgentHistoryRequest {
   target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
   agentSessionId: string;
   entryId: string;
+  mode?: 'redo' | 'jump';
+}
+
+export interface GetAgentSessionTreeRequest {
+  type: 'get_agent_session_tree';
+  requestId: string;
+  target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
+  agentSessionId: string;
 }
 
 export interface ListAgentCommandsRequest {
@@ -1110,6 +1118,7 @@ export type ClientToMachineMessage =
   | ApplyAgentRoleRequest
   | GetAgentHistoryRequest
   | NavigateAgentHistoryRequest
+  | GetAgentSessionTreeRequest
   | ListAgentCommandsRequest
   | ListWorkspaceEditorsRequest
   | OpenWorkspaceEditorRequest
@@ -1268,6 +1277,7 @@ export function isBrowseMessage(msg: RemoteSessionMessage): msg is ClientToMachi
     'apply_agent_role',
     'get_agent_history',
     'navigate_agent_history',
+    'get_agent_session_tree',
     'list_agent_commands',
     'list_workspace_editors',
     'open_workspace_editor',

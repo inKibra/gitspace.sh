@@ -11,7 +11,7 @@ import { AgentPaneHeader } from './AgentPaneHeader.web.js';
 import { AgentSettingsPanel } from './AgentSettingsPanel.web.js';
 import { AgentHistoryPanel } from './AgentHistoryPanel.web.js';
 import type { Block } from '../blocks/index.js';
-import type { AgentAuthProvider, AgentControlInfo, AgentHistoryEntry, AgentModelInfo, AgentOAuthEvent, AgentSettingSchemaItem, AgentToolInfo, SessionStatus } from '../agents/agent-runtime-types.js';
+import type { AgentAuthProvider, AgentControlInfo, AgentHistoryEntry, AgentModelInfo, AgentOAuthEvent, AgentSettingSchemaItem, AgentToolInfo, AgentTreeNode, SessionStatus } from '../agents/agent-runtime-types.js';
 import type { AttachedPaneState } from '../session/types.js';
 import type { BackendKey } from '../session/backend.js';
 import type { RemoteSessionPtyBackend } from '../session/useRemoteSessionClient.js';
@@ -256,27 +256,33 @@ export function PaneTerminalPanel({
     void fn.call(backend, key, next).then(() => refreshControl()).catch(() => undefined);
   }, [backend, control?.serviceTier, control?.serviceTierKey, refreshControl]);
 
-  // Conversation history / rewind
+  // Conversation history / rewind + branch tree
   const [historyOpen, setHistoryOpen] = useState(false);
   const [historyEntries, setHistoryEntries] = useState<AgentHistoryEntry[]>([]);
+  const [historyTree, setHistoryTree] = useState<AgentTreeNode[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [transcriptRefresh, setTranscriptRefresh] = useState(0);
+  // Text to drop back into the composer after a re-do (bumped nonce re-applies).
+  const [composerInjection, setComposerInjection] = useState<{ text: string; nonce: number } | null>(null);
+  const treeAvailable = !!backend?.getAgentSessionTree;
   const loadHistory = useCallback(() => {
-    const fn = backend?.getAgentHistory;
-    if (!fn || !wsId || !agentSessionId) return;
+    if (!wsId || !agentSessionId) return;
     setHistoryLoading(true);
-    void fn.call(backend, wsId, agentSessionId).then(setHistoryEntries).catch(() => undefined).finally(() => setHistoryLoading(false));
+    const hist = backend?.getAgentHistory?.call(backend, wsId, agentSessionId).then(setHistoryEntries).catch(() => undefined);
+    const tree = backend?.getAgentSessionTree?.call(backend, wsId, agentSessionId).then(setHistoryTree).catch(() => undefined);
+    void Promise.allSettled([hist, tree]).finally(() => setHistoryLoading(false));
   }, [backend, wsId, agentSessionId]);
   const openHistory = useCallback(() => { setHistoryOpen(true); loadHistory(); }, [loadHistory]);
-  const handleNavigateHistory = useCallback((entryId: string) => {
+  const handleNavigateHistory = useCallback((entryId: string, mode: 'redo' | 'jump') => {
     const fn = backend?.navigateAgentHistory;
     if (!fn || !wsId || !agentSessionId) return;
-    void fn.call(backend, wsId, agentSessionId, entryId).then((ok) => {
-      if (ok) {
+    void fn.call(backend, wsId, agentSessionId, entryId, mode).then((result) => {
+      if (result?.ok) {
         setHistoryOpen(false);
         setLiveBlocks(NO_LIVE);
         setTranscriptRefresh((n) => n + 1);
         refreshControl();
+        if (result.editorText) setComposerInjection((prev) => ({ text: result.editorText!, nonce: (prev?.nonce ?? 0) + 1 }));
       }
     }).catch(() => undefined);
   }, [backend, wsId, agentSessionId, refreshControl]);
@@ -379,6 +385,7 @@ export function PaneTerminalPanel({
             workspaceId={pane.workspaceId}
             agentSessionId={pane.agentSessionId}
             paneId={pane.paneId}
+            externalDraft={composerInjection}
           />
         </div>
       ) : null}
@@ -403,6 +410,8 @@ export function PaneTerminalPanel({
       {historyOpen && (
         <AgentHistoryPanel
           entries={historyEntries}
+          tree={historyTree}
+          treeAvailable={treeAvailable}
           loading={historyLoading}
           onNavigate={handleNavigateHistory}
           onClose={() => setHistoryOpen(false)}
