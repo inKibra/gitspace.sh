@@ -237,6 +237,9 @@ interface TerminalSessionBinding {
 
 export class PiCoordinator {
   private readonly liveTurns = new Map<string, LiveTurn>();
+  /** Sessions with a turn in flight (agent_start seen, agent_end not yet), so a
+   *  compaction that finishes mid-turn returns to busy rather than idle. */
+  private readonly activeTurns = new Set<string>();
   private readonly oauthPrompts = new Map<string, (value: string) => void>();
   private readonly inflightTerminalSessions = new Map<string, Promise<TmuxSession>>();
   private readonly inflightActiveSessions = new Map<string, Promise<OmpAgentSession>>();
@@ -352,8 +355,20 @@ export class PiCoordinator {
     }
     let models: AgentControlInfo['models'] = [];
     try {
-      const registry = await createPiModelRegistry();
-      models = registry.getAll().map((m) => ({ provider: m.provider, id: m.id, contextWindow: m.contextWindow ?? null }));
+      const [registry, auth] = await Promise.all([createPiModelRegistry(), createPiAuthStorage()]);
+      const isAuthed = (provider: string): boolean => {
+        try {
+          return auth.hasAuth(provider) || auth.has(provider);
+        } catch {
+          return false;
+        }
+      };
+      // Limit the switcher to providers the user is signed in to — an unauthed
+      // model can't be selected. Always keep the current model so it stays shown.
+      models = registry
+        .getAll()
+        .filter((m) => isAuthed(m.provider) || `${m.provider}/${m.id}` === currentModel)
+        .map((m) => ({ provider: m.provider, id: m.id, contextWindow: m.contextWindow ?? null }));
     } catch (err) {
       console.warn('[pi-coordinator] model list failed:', err);
     }
@@ -1092,6 +1107,7 @@ export class PiCoordinator {
             return;
 
           case 'agent_start':
+            this.activeTurns.add(sessionId);
             this.eventHandler(target, {
               type: 'status',
               sessionId,
@@ -1100,10 +1116,29 @@ export class PiCoordinator {
             return;
 
           case 'agent_end':
+            this.activeTurns.delete(sessionId);
             this.eventHandler(target, {
               type: 'status',
               sessionId,
               payload: { type: 'idle', event: piEvent },
+            });
+            return;
+
+          case 'auto_compaction_start':
+            this.eventHandler(target, {
+              type: 'status',
+              sessionId,
+              payload: { type: 'compacting', event: piEvent },
+            });
+            return;
+
+          case 'auto_compaction_end':
+            // Return to busy if a turn is still running (auto-compaction happens
+            // mid-turn); otherwise idle (a manual /compact while idle).
+            this.eventHandler(target, {
+              type: 'status',
+              sessionId,
+              payload: { type: this.activeTurns.has(sessionId) ? 'busy' : 'idle', event: piEvent },
             });
             return;
 

@@ -8,6 +8,7 @@
 export type SessionStatus =
   | { type: 'idle' }
   | { type: 'busy' }
+  | { type: 'compacting' }
   | { type: 'retry'; attempt: number; message: string; next: number };
 
 export interface Permission {

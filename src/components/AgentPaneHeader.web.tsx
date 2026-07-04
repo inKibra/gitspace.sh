@@ -82,10 +82,21 @@ export function AgentPaneHeader({
   error?: string | null;
 }): ReactElement {
   const [menu, setMenu] = useState<MenuId | null>(null);
-  const toggle = (id: MenuId) => setMenu((m) => (m === id ? null : id));
+  const [modelQuery, setModelQuery] = useState('');
+  const toggle = (id: MenuId) => {
+    setMenu((m) => (m === id ? null : id));
+    if (id === 'model') setModelQuery('');
+  };
   const kind = status?.type ?? 'idle';
-  const dot = kind === 'busy' ? 'bg-[var(--gs-success)] animate-pulse' : kind === 'retry' ? 'bg-[var(--gs-warning)]' : 'bg-[var(--gs-text-dim)]';
-  const label = kind === 'busy' ? 'working' : kind === 'retry' ? 'retrying' : 'idle';
+  // Compaction is active work — keep the dot green (pulsing) like a normal turn,
+  // and surface an explicit "compacting" label so it's clear what's happening.
+  const dot =
+    kind === 'busy' || kind === 'compacting'
+      ? 'bg-[var(--gs-success)] animate-pulse'
+      : kind === 'retry'
+        ? 'bg-[var(--gs-warning)]'
+        : 'bg-[var(--gs-text-dim)]';
+  const label = kind === 'compacting' ? 'compacting' : kind === 'busy' ? 'working' : kind === 'retry' ? 'retrying' : 'idle';
 
   const current = control?.currentModel ?? null; // "provider/id"
   const displayName = model?.name ?? (current ? current.slice(current.indexOf('/') + 1) : 'agent');
@@ -94,6 +105,8 @@ export function AgentPaneHeader({
   const ctx = control?.context;
   const models = control?.models ?? [];
   const canSwitch = models.length > 0 && !!onSetModel;
+  const mq = modelQuery.trim().toLowerCase();
+  const shownModels = mq ? models.filter((m) => `${m.provider}/${m.id}`.toLowerCase().includes(mq)) : models;
   const roles = control?.roles ?? [];
   const currentRole = roles.find((r) => r.current) ?? roles[0];
   const canCycleRole = roles.length > 1 && !!onCycleRole;
@@ -115,22 +128,36 @@ export function AgentPaneHeader({
         {menu === 'model' && canSwitch && (
           <>
             <div className="fixed inset-0 z-10" onClick={() => setMenu(null)} />
-            <div className="absolute left-0 top-full z-20 mt-1 max-h-72 w-72 overflow-y-auto border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] py-1 shadow-lg">
-              {models.map((m) => {
-                const ref = `${m.provider}/${m.id}`;
-                const active = ref === current;
-                return (
-                  <button
-                    key={ref}
-                    type="button"
-                    onClick={() => { onSetModel?.(m.provider, m.id); setMenu(null); }}
-                    className={`block w-full truncate px-3 py-1 text-left font-[family-name:var(--gs-font-mono)] hover:bg-[var(--gs-border)] ${active ? 'text-[var(--gs-accent)]' : 'text-[var(--gs-text)]'}`}
-                    title={ref}
-                  >
-                    {active ? '● ' : '  '}{ref}
-                  </button>
-                );
-              })}
+            <div className="absolute left-0 top-full z-20 mt-1 flex max-h-80 w-72 flex-col border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] shadow-lg">
+              <input
+                type="text"
+                autoFocus
+                value={modelQuery}
+                onChange={(e) => setModelQuery(e.target.value)}
+                placeholder="Search models…"
+                className="sticky top-0 border-b border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-3 py-1.5 text-[var(--gs-text)] outline-none placeholder:text-[var(--gs-text-ghost)]"
+              />
+              <div className="overflow-y-auto py-1">
+                {shownModels.length === 0 ? (
+                  <div className="px-3 py-2 text-[var(--gs-text-dim)]">No matching models</div>
+                ) : (
+                  shownModels.map((m) => {
+                    const ref = `${m.provider}/${m.id}`;
+                    const active = ref === current;
+                    return (
+                      <button
+                        key={ref}
+                        type="button"
+                        onClick={() => { onSetModel?.(m.provider, m.id); setMenu(null); }}
+                        className={`block w-full truncate px-3 py-1 text-left font-[family-name:var(--gs-font-mono)] hover:bg-[var(--gs-border)] ${active ? 'text-[var(--gs-accent)]' : 'text-[var(--gs-text)]'}`}
+                        title={ref}
+                      >
+                        {active ? '● ' : '  '}{ref}
+                      </button>
+                    );
+                  })
+                )}
+              </div>
             </div>
           </>
         )}

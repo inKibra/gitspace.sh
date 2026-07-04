@@ -97,6 +97,8 @@ export function ensureAgentControlInitialized(): Promise<void> {
             const payload = event.payload as { type?: string; [key: string]: unknown } | undefined;
             if (payload?.type === 'busy') {
               defaultAgentEventManager.setExternalStatus(target.workspaceId, event.sessionId, { type: 'busy' });
+            } else if (payload?.type === 'compacting') {
+              defaultAgentEventManager.setExternalStatus(target.workspaceId, event.sessionId, { type: 'compacting' });
             } else if (payload?.type === 'retry') {
               defaultAgentEventManager.setExternalStatus(target.workspaceId, event.sessionId, {
                 type: 'retry',
