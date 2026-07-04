@@ -212,6 +212,47 @@ and server-side preview. Leading candidate: **private-by-default E2E, with
 "publish" as an explicit act** that copies selected artifacts to a plaintext
 public space. Not yet decided.
 
+## Project creation & first-run experience
+
+Projects are born local; every attachment is a later, optional rung. This is
+what makes the artifacts design land cleanly: **`project create` is where the
+artifacts repo is born**, and the Plan-first flow is where its first contents
+(goal, rubric) come from.
+
+### Three ways into a project
+
+1. **From an existing repo** — today's `gssh project add` (GitHub clone via
+   `gh`). Unchanged.
+2. **From scratch — no repo required.** `gssh project create <name>`
+   (+ web "New project" modal):
+   - `git init` base repo + initial commit from a **bundle/template**
+     (`src/core/bundle.ts` — the existing bundle system is the template layer);
+   - `.artifacts.git` initialized alongside (artifacts phase 1 runs here);
+   - first workspace created + mounted, session opened;
+   - **GitHub is a deferred attachment** — "publish to GitHub" later
+     (`gh repo create --push`), same lazy-attach posture as the backend.
+3. **From an idea — agent-first.** A prompt ("a metronome app that…") creates a
+   from-scratch project and opens a **Plan-stage workspace** with the project
+   agent seeded with the idea. The goal chain + rubric it authors live in the
+   artifacts repo (exactly what the ProjectHome right rail renders: goal.md,
+   rubric.json, evidence, dashboards). Scaffolding happens through the agent —
+   the user onboards into a plan, not an empty repo.
+
+### The FTUE staircase (zero accounts → fully attached)
+
+```
+install gssh → open UI → "New project" (blank | template | idea)
+   → working locally, project agent live          [no GitHub, no gitspace.sh]
+→ publish to GitHub                                [when code wants a remote]
+→ gssh project provision                           [when artifacts want sync/share]
+→ host reserve / invites                           [when collaborating]
+```
+
+Every rung is optional and independent — possible only because the backend
+attaches rather than owns, and `.gitspace/artifacts.json` is written at
+whichever rung first needs it. A from-scratch project has no remote and no
+slug until publish/provision mints them.
+
 ## Lifecycle edges
 
 - **Rename**: `handle/slug` is backend identity; the local dir name is free —
