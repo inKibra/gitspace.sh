@@ -104,16 +104,26 @@ function ModelsTab({ control, onSetModel, onApplyRole, onSet }: { control?: Agen
   const models = control?.models ?? [];
   const current = control?.currentModel ?? null;
   const roles = control?.roleCatalog ?? [];
+  const thinkingLevels = control?.thinkingLevels ?? [];
+  // A role selector is `provider/id[:thinking]`. Split the trailing thinking
+  // suffix (only when it's a known level) and recombine on change.
+  const splitRole = (val: string | null): { base: string; think: string } => {
+    if (!val) return { base: '', think: '' };
+    const i = val.lastIndexOf(':');
+    if (i > 0 && thinkingLevels.includes(val.slice(i + 1))) return { base: val.slice(0, i), think: val.slice(i + 1) };
+    return { base: val, think: '' };
+  };
+  const combine = (base: string, think: string): string => (base && think ? `${base}:${think}` : base);
   return (
     <div>
       {roles.length > 0 && (
         <>
-          <Grp>Model roles — ◉ applies now · dropdown assigns the model</Grp>
+          <Grp>Model roles — ◉ applies now · model + thinking per role</Grp>
           {roles.map((r) => {
-            // Show the assigned model in the dropdown; keep it selectable even if
-            // its provider isn't in the authed list.
-            const inList = r.model ? models.some((m) => `${m.provider}/${m.id}` === r.model) : true;
-            const isCurrent = !!r.model && r.model === current;
+            const { base, think } = splitRole(r.model);
+            // Keep the assigned base selectable even if its provider isn't authed.
+            const inList = base ? models.some((m) => `${m.provider}/${m.id}` === base) : true;
+            const isCurrent = !!base && (r.model === current || base === current);
             return (
               <div key={r.role} className="flex items-center gap-2 px-1 py-1">
                 <button
@@ -124,18 +134,28 @@ function ModelsTab({ control, onSetModel, onApplyRole, onSet }: { control?: Agen
                 >
                   {isCurrent ? '◉' : '○'}
                 </button>
-                <span className="w-16 shrink-0 truncate font-[family-name:var(--gs-font)]" title={r.description ?? r.name}>{r.name}</span>
+                <span className="w-14 shrink-0 truncate font-[family-name:var(--gs-font)]" title={r.description ?? r.name}>{r.name}</span>
                 <select
-                  value={r.model ?? ''}
-                  onChange={(e) => onSet(`modelRoles.${r.role}`, e.target.value)}
-                  className="ml-auto min-w-0 flex-1 truncate border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-1 py-0.5 font-[family-name:var(--gs-font-mono)] text-[var(--gs-text)]"
+                  value={base}
+                  onChange={(e) => onSet(`modelRoles.${r.role}`, combine(e.target.value, think))}
+                  className="min-w-0 flex-1 truncate border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-1 py-0.5 font-[family-name:var(--gs-font-mono)] text-[var(--gs-text)]"
                 >
                   <option value="">— default —</option>
-                  {r.model && !inList && <option value={r.model}>{r.model}</option>}
+                  {base && !inList && <option value={base}>{base}</option>}
                   {models.map((m) => {
                     const ref = `${m.provider}/${m.id}`;
                     return <option key={ref} value={ref}>{ref}</option>;
                   })}
+                </select>
+                <select
+                  value={think}
+                  disabled={!base}
+                  title={base ? 'Thinking level for this role' : 'Pick a model first'}
+                  onChange={(e) => onSet(`modelRoles.${r.role}`, combine(base, e.target.value))}
+                  className="w-20 shrink-0 border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-1 py-0.5 text-[var(--gs-text)] disabled:opacity-40"
+                >
+                  <option value="">think</option>
+                  {thinkingLevels.map((l) => <option key={l} value={l}>{l}</option>)}
                 </select>
               </div>
             );
