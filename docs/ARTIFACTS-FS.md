@@ -159,6 +159,48 @@ authenticating.
   irrelevant locally; interesting later for instant-start cloud sandboxes.
 - Public beta ~May 2026; re-verify limits before building Tier 2.
 
+### Auth
+
+**Unmanaged (Tier 0/1) — gitspace is not in the loop.** Tier 0 has no auth
+(local bare repo). Tier 1 uses whatever the user's remote uses (SSH keys, PATs,
+their LFS endpoint); gitspace runs plain `git`, stores nothing.
+
+**Managed (Tier 2) — one chain of trust, one enforcement point:**
+
+```
+GitHub OAuth ──► gitspace.sh session ──► grant check (handle/slug)
+   ──► short-lived gitspace JWT (~15–60 min)
+      ──► artifacts.gitspace.sh worker enforces per request
+         ──► CF Artifacts (Workers binding) + R2 presigned URLs
+```
+
+- The remote URL is **`https://artifacts.gitspace.sh/<handle>/<slug>.git`** —
+  our worker proxies git smart HTTP to the CF repo via the Workers binding.
+  **CF repo-scoped tokens never leave the worker**; clients only hold
+  gitspace-minted short-lived JWTs. Revocation = delete the grant row
+  (enforced per request, instant). The proxy also preserves the
+  `artifacts.json` identity indirection (the CF repo behind a slug can move).
+- `gssh` installs a **git credential helper** scoped to `artifacts.gitspace.sh`
+  that exchanges the keychain session for fresh JWTs — rotation is invisible,
+  `git push` just works.
+- **LFS**: `…/<slug>/lfs` on the same worker, same JWT; the batch API returns
+  **time-limited R2 presigned PUT/GET URLs**, so blob bytes flow client↔R2
+  directly (the worker signs, never carries weight).
+- **Collaborator grants come in two kinds**, both minting the same JWT:
+  1. gitspace.sh account (GitHub OAuth) — the simple path;
+  2. **Ed25519 identity challenge-response** — the relay's existing machine-auth
+     mechanism; the grant table stores identity pubkeys (already exchanged by
+     the invite system), so a collaborator can access managed artifacts without
+     ever doing GitHub OAuth. `gssh invite` becomes the single onboarding
+     surface for machines *and* artifacts.
+- **Setup UX**: owner — `auth login` → `project provision` (record + CF repo +
+  R2 prefix + `artifacts.json` + credential helper). Machine #2 / collaborator —
+  clone code repo → `project add` reads `artifacts.json` → auth prompt (OAuth
+  or identity sig) → fetch + mount.
+- **No lock-in**: `git clone --mirror` + LFS fetch exports everything.
+- E2E encryption (below) layers on top unchanged — the worker authenticates and
+  signs URLs but only ever brokers ciphertext.
+
 ### Encryption posture (open decision)
 
 If "gitspace.sh can't read your artifacts" should match "the relay can't read
