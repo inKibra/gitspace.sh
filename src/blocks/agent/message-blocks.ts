@@ -19,18 +19,28 @@ import type {
 } from '@oh-my-pi/pi-ai';
 import type { Block } from '../index.js';
 
-const TARGET_KEYS = ['file_path', 'path', 'command', 'cmd', 'pattern', 'url', 'query', 'prompt'];
+const TARGET_KEYS = [
+  'file_path', 'path', 'command', 'cmd', 'pattern', 'url', 'query', 'prompt',
+  // eval → `code`; task (single) → `assignment` / `description` / `context`.
+  'code', 'assignment', 'description', 'context', 'message',
+];
 
 function clip(value: string, max = 80): string {
-  return value.length > max ? `${value.slice(0, max)}…` : value;
+  const firstLine = value.trim().split('\n')[0]?.trim() ?? '';
+  return firstLine.length > max ? `${firstLine.slice(0, max)}…` : firstLine;
 }
 
 /** A readable one-line target for a tool call, picked from its arguments. */
 function toolTarget(args: Record<string, unknown> | undefined): string | undefined {
   if (!args) return undefined;
+  // task.batch takes `tasks: [{ assignment, ... }]` — summarize the fan-out.
+  const tasks = args.tasks;
+  if (Array.isArray(tasks) && tasks.length > 0) {
+    return `${tasks.length} subtask${tasks.length === 1 ? '' : 's'}`;
+  }
   for (const key of TARGET_KEYS) {
     const value = args[key];
-    if (typeof value === 'string' && value.trim()) return clip(value.trim());
+    if (typeof value === 'string' && value.trim()) return clip(value);
   }
   return undefined;
 }

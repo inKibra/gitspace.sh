@@ -61,6 +61,27 @@ describe('messagesToBlocks', () => {
     expect((tool.data as { target: string }).target).toBe('a.ts');
   });
 
+  it('shows the eval code first line as the tool-call input', () => {
+    const blocks = messagesToBlocks([
+      assistant([{ type: 'toolCall', id: 'e1', name: 'eval', arguments: { code: 'const x = 2 + 2;\nreturn x;' } }]),
+    ]);
+    const tool = blocks.find((b) => b.type === 'tool-call')!;
+    expect((tool.data as { tool: string }).tool).toBe('eval');
+    expect((tool.data as { target?: string }).target).toBe('const x = 2 + 2;');
+  });
+
+  it('shows the task assignment (single) and subtask count (batch) as input', () => {
+    const single = messagesToBlocks([
+      assistant([{ type: 'toolCall', id: 't1', name: 'task', arguments: { agent: 'general', context: 'ctx', assignment: 'Audit the auth flow' } }]),
+    ]).find((b) => b.type === 'tool-call')!;
+    expect((single.data as { target?: string }).target).toBe('Audit the auth flow');
+
+    const batch = messagesToBlocks([
+      assistant([{ type: 'toolCall', id: 't2', name: 'task', arguments: { agent: 'general', context: 'ctx', tasks: [{ assignment: 'a' }, { assignment: 'b' }] } }]),
+    ]).find((b) => b.type === 'tool-call')!;
+    expect((batch.data as { target?: string }).target).toBe('2 subtasks');
+  });
+
   it('surfaces an assistant error as an error block', () => {
     const blocks = messagesToBlocks([assistant([{ type: 'text', text: 'partial' }], { errorMessage: 'stream aborted' })]);
     expect(blocks.some((b) => b.type === 'error')).toBe(true);
