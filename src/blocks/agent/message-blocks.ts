@@ -19,10 +19,25 @@ import type {
 } from '@oh-my-pi/pi-ai';
 import type { Block } from '../index.js';
 
+// Primary input keys across the 16.3.4 builtin tools, in priority order (most
+// descriptive first, bare operation enums last). Covers read/edit/write (path),
+// bash/ssh (command), grep/ast_grep (pattern/pat), eval (code), task (assignment),
+// checkpoint (goal), rewind (report), learn (memory), ssh (host), manage_skill
+// (name), edit hashline (input), inspect_image (question), and the op/action
+// enums (github/irc/todo/lsp/debug/browser).
 const TARGET_KEYS = [
-  'file_path', 'path', 'command', 'cmd', 'pattern', 'url', 'query', 'prompt',
-  // eval → `code`; task (single) → `assignment` / `description` / `context`.
+  'file_path', 'path', 'command', 'cmd', 'pattern', 'pat', 'url', 'query', 'prompt',
   'code', 'assignment', 'description', 'context', 'message',
+  'host', 'goal', 'report', 'memory', 'name', 'input', 'content', 'question',
+  'op', 'action',
+];
+
+// Array-shaped inputs → a concise "N things" summary (ask/task.batch/retain/ast_edit).
+const ARRAY_TARGET_KEYS: Array<[string, string]> = [
+  ['tasks', 'subtask'],
+  ['questions', 'question'],
+  ['items', 'item'],
+  ['paths', 'file'],
 ];
 
 function clip(value: string, max = 80): string {
@@ -33,10 +48,11 @@ function clip(value: string, max = 80): string {
 /** A readable one-line target for a tool call, picked from its arguments. */
 function toolTarget(args: Record<string, unknown> | undefined): string | undefined {
   if (!args) return undefined;
-  // task.batch takes `tasks: [{ assignment, ... }]` — summarize the fan-out.
-  const tasks = args.tasks;
-  if (Array.isArray(tasks) && tasks.length > 0) {
-    return `${tasks.length} subtask${tasks.length === 1 ? '' : 's'}`;
+  for (const [key, noun] of ARRAY_TARGET_KEYS) {
+    const value = args[key];
+    if (Array.isArray(value) && value.length > 0) {
+      return `${value.length} ${noun}${value.length === 1 ? '' : 's'}`;
+    }
   }
   for (const key of TARGET_KEYS) {
     const value = args[key];

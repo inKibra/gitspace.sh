@@ -82,6 +82,18 @@ describe('messagesToBlocks', () => {
     expect((batch.data as { target?: string }).target).toBe('2 subtasks');
   });
 
+  it('surfaces input for the newer builtin tools (ask/github/checkpoint/learn/manage_skill)', () => {
+    const target = (name: string, args: Record<string, unknown>): string | undefined =>
+      (messagesToBlocks([assistant([{ type: 'toolCall', id: `x-${name}`, name, arguments: args }])])
+        .find((b) => b.type === 'tool-call')!.data as { target?: string }).target;
+    expect(target('ask', { questions: [{ q: 'a' }] })).toBe('1 question');
+    expect(target('github', { op: 'pr_create' })).toBe('pr_create');
+    expect(target('checkpoint', { goal: 'trace the auth bug' })).toBe('trace the auth bug');
+    expect(target('learn', { memory: 'prefer clean cutover' })).toBe('prefer clean cutover');
+    expect(target('manage_skill', { action: 'create', name: 'deploy' })).toBe('deploy');
+    expect(target('write', { path: 'a.ts', content: 'x' })).toBe('a.ts'); // path wins over content
+  });
+
   it('surfaces an assistant error as an error block', () => {
     const blocks = messagesToBlocks([assistant([{ type: 'text', text: 'partial' }], { errorMessage: 'stream aborted' })]);
     expect(blocks.some((b) => b.type === 'error')).toBe(true);
