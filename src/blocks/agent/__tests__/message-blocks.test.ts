@@ -74,6 +74,45 @@ describe('messagesToBlocks', () => {
     expect(data.input?.[0]?.data.text).toBe(code); // full input preserved
   });
 
+  it('shows the write content as input (lang from the path)', () => {
+    const content = 'export const x = 1;\nexport const y = 2;';
+    const tool = messagesToBlocks([
+      assistant([{ type: 'toolCall', id: 'w1', name: 'write', arguments: { path: 'a.ts', content } }]),
+    ]).find((b) => b.type === 'tool-call')!;
+    const data = tool.data as { target?: string; input?: Array<{ type: string; data: { text: string; lang?: string } }> };
+    expect(data.target).toBe('a.ts');
+    expect(data.input?.[0]?.data.text).toBe(content);
+    expect(data.input?.[0]?.data.lang).toBe('typescript');
+  });
+
+  it('shows an edit as a synthesized old→new diff', () => {
+    const tool = messagesToBlocks([
+      assistant([{ type: 'toolCall', id: 'e1', name: 'edit', arguments: { path: 'a.ts', old_string: 'let a', new_string: 'const a' } }]),
+    ]).find((b) => b.type === 'tool-call')!;
+    const data = tool.data as { input?: Array<{ data: { text: string; lang?: string } }> };
+    expect(data.input?.[0]?.data.lang).toBe('diff');
+    expect(data.input?.[0]?.data.text).toBe('- let a\n+ const a');
+  });
+
+  it('shows a patch-mode edit as a diff', () => {
+    const patch = '@@ -1 +1 @@\n-old\n+new';
+    const tool = messagesToBlocks([
+      assistant([{ type: 'toolCall', id: 'e2', name: 'edit', arguments: { path: 'a.ts', patch } }]),
+    ]).find((b) => b.type === 'tool-call')!;
+    const data = tool.data as { input?: Array<{ data: { text: string; lang?: string } }> };
+    expect(data.input?.[0]?.data.text).toBe(patch);
+    expect(data.input?.[0]?.data.lang).toBe('diff');
+  });
+
+  it('generic fallback: surfaces a multi-line content arg for an unlisted tool', () => {
+    const memory = 'line one\nline two\nline three';
+    const tool = messagesToBlocks([
+      assistant([{ type: 'toolCall', id: 'g1', name: 'learn', arguments: { memory } }]),
+    ]).find((b) => b.type === 'tool-call')!;
+    const data = tool.data as { input?: Array<{ data: { text: string } }> };
+    expect(data.input?.[0]?.data.text).toBe(memory);
+  });
+
   it('shows the task assignment (single) and subtask count (batch) as input', () => {
     const single = messagesToBlocks([
       assistant([{ type: 'toolCall', id: 't1', name: 'task', arguments: { agent: 'general', context: 'ctx', assignment: 'Audit the auth flow' } }]),

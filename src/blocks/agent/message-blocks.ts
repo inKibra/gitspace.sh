@@ -114,11 +114,30 @@ function toolResultBlocks(result: ToolResultMessage, idBase: string, lang?: stri
   return blocks;
 }
 
+/** First non-empty string among the candidates, or undefined. */
+function firstNonEmptyString(...vals: unknown[]): string | undefined {
+  for (const v of vals) if (typeof v === 'string' && v.length > 0) return v;
+  return undefined;
+}
+
+/** The largest string arg worth showing in full — multi-line, or long enough
+ *  that the one-line target doesn't convey it. Skips short one-liners (already
+ *  the target). */
+function largestContentArg(args: Record<string, unknown>): string | undefined {
+  let best: string | undefined;
+  for (const value of Object.values(args)) {
+    if (typeof value !== 'string' || !value.trim()) continue;
+    if (!value.includes('\n') && value.length <= 120) continue;
+    if (best === undefined || value.length > best.length) best = value;
+  }
+  return best;
+}
+
 /**
  * Formatted, full input for a tool call — nested blocks shown when the call is
- * expanded (so the whole eval code / task assignment / bash command is visible,
- * not just the one-line target). Only produced for tools whose input is
- * substantial; simple tools rely on the one-line `target`.
+ * expanded (so the whole eval code / task assignment / bash command / written
+ * content / edit diff is visible, not just the one-line target). Simple tools
+ * rely on the one-line `target`.
  */
 function toolInputBlocks(call: ToolCall, idBase: string): Block[] {
   const args = call.arguments as Record<string, unknown> | undefined;
@@ -151,6 +170,33 @@ function toolInputBlocks(call: ToolCall, idBase: string): Block[] {
   if (name === 'bash' && typeof args.command === 'string' && args.command.trim()) {
     return [{ id, type: 'code', data: { text: args.command, lang: 'bash' } }];
   }
+
+  // write: the file content, highlighted by the target path's language.
+  if (name === 'write' && typeof args.content === 'string' && args.content.trim()) {
+    const lang = langFromPath(args.path ?? args.file_path ?? args.filePath);
+    return [{ id, type: 'code', data: lang ? { text: args.content, lang } : { text: args.content } }];
+  }
+
+  // edit: a unified patch / apply-patch input, or a synthesized old→new diff.
+  if (name === 'edit') {
+    const patch = firstNonEmptyString(args.patch, args.input, args.diff);
+    if (patch) return [{ id, type: 'code', data: { text: patch, lang: 'diff' } }];
+    const oldStr = firstNonEmptyString(args.old_string, args.oldText, args.search);
+    const newStr = firstNonEmptyString(args.new_string, args.newText, args.replace);
+    if (oldStr !== undefined || newStr !== undefined) {
+      const diff = [
+        ...(oldStr ?? '').split('\n').map((l) => `- ${l}`),
+        ...(newStr ?? '').split('\n').map((l) => `+ ${l}`),
+      ].join('\n');
+      return [{ id, type: 'code', data: { text: diff, lang: 'diff' } }];
+    }
+  }
+
+  // Generic fallback: surface the largest content-bearing string arg (multi-line
+  // or long) not already shown as the one-line target — covers write-like tools
+  // we don't special-case (ast_edit, memory_edit, learn, apply-patch variants, …).
+  const generic = largestContentArg(args);
+  if (generic) return [{ id, type: 'code', data: { text: generic } }];
 
   return [];
 }
