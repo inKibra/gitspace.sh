@@ -131,20 +131,48 @@ function listSessionFiles(sessionDir: string): string[] {
   }
 }
 
-function parseSessionHeader(content: string): SessionHeader | null {
-  const firstLineEnd = content.indexOf('\n');
-  const firstLine = (firstLineEnd === -1 ? content : content.slice(0, firstLineEnd)).trimEnd();
-  if (!firstLine) return null;
+// The `session` header is usually the first line, but newer omp session files
+// may prepend a fixed-width, in-place-updatable `title` record (so the title can
+// be rewritten without rewriting the whole file), which pushes the header down.
+// Scan the first few leading records for it.
+const MAX_HEADER_SCAN_LINES = 8;
 
-  try {
-    const header = JSON.parse(firstLine) as SessionHeader;
-    if (header.type !== 'session' || typeof header.id !== 'string') {
-      return null;
+function parseSessionHeader(content: string): SessionHeader | null {
+  let lineStart = 0;
+  for (let i = 0; i < MAX_HEADER_SCAN_LINES && lineStart < content.length; i++) {
+    const lineEnd = content.indexOf('\n', lineStart);
+    const line = (lineEnd === -1 ? content.slice(lineStart) : content.slice(lineStart, lineEnd)).trim();
+    if (line) {
+      try {
+        const header = JSON.parse(line) as SessionHeader;
+        if (header.type === 'session' && typeof header.id === 'string') {
+          return header;
+        }
+      } catch {
+        // not JSON or not the header record — keep scanning
+      }
     }
-    return header;
-  } catch {
-    return null;
+    if (lineEnd === -1) break;
+    lineStart = lineEnd + 1;
   }
+  return null;
+}
+
+/** Freshest title from a leading in-place-updatable `title` record, if present. */
+function parseLeadingTitle(content: string): string | undefined {
+  const end = content.indexOf('\n');
+  const line = (end === -1 ? content : content.slice(0, end)).trim();
+  if (!line) return undefined;
+  try {
+    const rec = JSON.parse(line) as { type?: string; title?: unknown };
+    if (rec.type === 'title' && typeof rec.title === 'string') {
+      const trimmed = rec.title.trim();
+      return trimmed.length > 0 ? trimmed : undefined;
+    }
+  } catch {
+    // not a title record
+  }
+  return undefined;
 }
 
 function parseSessionIdFromFile(filePath: string): string | null {
@@ -211,6 +239,12 @@ function parseSessionInfoFromFile(filePath: string): PiSessionFileInfo | null {
     stat = statSync(filePath);
   } catch {
     return null;
+  }
+
+  // A leading in-place-updatable `title` record is the freshest title; prefer it.
+  const leadingTitle = parseLeadingTitle(content);
+  if (leadingTitle) {
+    title = leadingTitle;
   }
 
   return {
