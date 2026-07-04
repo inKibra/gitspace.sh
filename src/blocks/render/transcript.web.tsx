@@ -63,30 +63,44 @@ const TOOL_STATUS: Record<ToolCallData['status'], string> = {
   done: 'text-[var(--gs-success)]',
   error: 'text-[var(--gs-danger)]',
 };
+function ToolSection({ label, blocks }: { label: string; blocks: readonly unknown[] }): ReactElement {
+  return (
+    <div className="p-2">
+      <div className="mb-1 text-[9px] uppercase tracking-wide text-[var(--gs-text-ghost)]">{label}</div>
+      {blocks.map((b, i) => (
+        <BlockView key={(b as { id?: string }).id ?? i} block={b as Parameters<typeof BlockView>[0]['block']} />
+      ))}
+    </div>
+  );
+}
+
 defineRenderer<ToolCallData>('tool-call', ({ data }): ReactElement => {
+  const input = data.input ?? [];
   const result = data.result ?? [];
-  const hasResult = result.length > 0;
-  const [open, setOpen] = useState(hasResult);
+  const expandable = input.length > 0 || result.length > 0;
+  // Collapse completed tool calls by default; keep the active (running) one open
+  // so its input + streaming output stay visible. A manual click overrides.
+  const [manualOpen, setManualOpen] = useState<boolean | null>(null);
+  const open = expandable && (manualOpen ?? data.status === 'running');
   return (
     <div className="my-2 border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)]">
       <button
         type="button"
-        onClick={() => hasResult && setOpen((o) => !o)}
+        onClick={() => expandable && setManualOpen(!open)}
         className="flex w-full items-center gap-2 px-2 py-1.5 text-left"
       >
-        {hasResult && <span className={open ? 'rotate-90 transition-transform' : 'transition-transform'}>▶</span>}
+        {expandable && <span className={open ? 'rotate-90 transition-transform' : 'transition-transform'}>▶</span>}
         <span className="text-[12px] text-[var(--gs-text)]">{data.tool}</span>
-        {data.target && <span className="text-[11px] text-[var(--gs-text-dim)] truncate">{data.target}</span>}
-        <span className="ml-auto flex items-center gap-2">
+        {data.target && <span className="min-w-0 flex-1 truncate text-[11px] text-[var(--gs-text-dim)]">{data.target}</span>}
+        <span className="ml-auto flex flex-shrink-0 items-center gap-2">
           {data.meta && <span className="text-[11px] text-[var(--gs-text-dim)]">{data.meta}</span>}
           <span className={`text-[11px] ${TOOL_STATUS[data.status]}`}>{data.status}</span>
         </span>
       </button>
-      {open && hasResult && (
-        <div className="border-t border-[var(--gs-border)] p-2">
-          {result.map((b, i) => (
-            <BlockView key={(b as { id?: string }).id ?? i} block={b} />
-          ))}
+      {open && (
+        <div className="border-t border-[var(--gs-border)] divide-y divide-[var(--gs-border)]">
+          {input.length > 0 && <ToolSection label="input" blocks={input} />}
+          {result.length > 0 && <ToolSection label="output" blocks={result} />}
         </div>
       )}
     </div>

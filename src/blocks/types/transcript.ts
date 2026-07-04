@@ -36,6 +36,9 @@ export const toolCallData = z.object({
   target: z.string().optional(),
   status: z.enum(['running', 'done', 'error']),
   meta: z.string().optional(),
+  /** Formatted full input (e.g. the eval code, task assignment, bash command) —
+   *  nested blocks shown above the result when the call is expanded. */
+  input: z.array(blockEnvelope).optional(),
   result: z.array(blockEnvelope).optional(),
 });
 export type ToolCallData = z.infer<typeof toolCallData>;

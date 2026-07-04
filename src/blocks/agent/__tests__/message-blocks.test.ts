@@ -61,13 +61,17 @@ describe('messagesToBlocks', () => {
     expect((tool.data as { target: string }).target).toBe('a.ts');
   });
 
-  it('shows the eval code first line as the tool-call input', () => {
+  it('shows the eval code: first line as target, full code as a formatted input block', () => {
+    const code = 'const x = 2 + 2;\nreturn x;';
     const blocks = messagesToBlocks([
-      assistant([{ type: 'toolCall', id: 'e1', name: 'eval', arguments: { code: 'const x = 2 + 2;\nreturn x;' } }]),
+      assistant([{ type: 'toolCall', id: 'e1', name: 'eval', arguments: { code } }]),
     ]);
     const tool = blocks.find((b) => b.type === 'tool-call')!;
-    expect((tool.data as { tool: string }).tool).toBe('eval');
-    expect((tool.data as { target?: string }).target).toBe('const x = 2 + 2;');
+    const data = tool.data as { tool: string; target?: string; input?: Array<{ type: string; data: { text: string } }> };
+    expect(data.tool).toBe('eval');
+    expect(data.target).toBe('const x = 2 + 2;'); // one-line collapsed summary
+    expect(data.input?.[0]?.type).toBe('code');
+    expect(data.input?.[0]?.data.text).toBe(code); // full input preserved
   });
 
   it('shows the task assignment (single) and subtask count (batch) as input', () => {

@@ -114,10 +114,52 @@ function toolResultBlocks(result: ToolResultMessage, idBase: string, lang?: stri
   return blocks;
 }
 
+/**
+ * Formatted, full input for a tool call — nested blocks shown when the call is
+ * expanded (so the whole eval code / task assignment / bash command is visible,
+ * not just the one-line target). Only produced for tools whose input is
+ * substantial; simple tools rely on the one-line `target`.
+ */
+function toolInputBlocks(call: ToolCall, idBase: string): Block[] {
+  const args = call.arguments as Record<string, unknown> | undefined;
+  if (!args) return [];
+  const id = `${idBase}:in`;
+  const name = call.name;
+
+  if (name === 'eval' && typeof args.code === 'string' && args.code.trim()) {
+    const lang = typeof args.language === 'string' ? args.language : undefined;
+    return [{ id, type: 'code', data: lang ? { text: args.code, lang } : { text: args.code } }];
+  }
+
+  if (name === 'task') {
+    const lines: string[] = [];
+    if (typeof args.context === 'string' && args.context.trim()) lines.push(args.context.trim());
+    if (typeof args.assignment === 'string' && args.assignment.trim()) lines.push(args.assignment.trim());
+    if (Array.isArray(args.tasks)) {
+      args.tasks.forEach((t, i) => {
+        const rec = (t ?? {}) as Record<string, unknown>;
+        const a = typeof rec.assignment === 'string' ? rec.assignment : '';
+        const d = typeof rec.description === 'string' && rec.description ? ` — ${rec.description}` : '';
+        const line = `${i + 1}. ${a}${d}`.trim();
+        if (line) lines.push(line);
+      });
+    }
+    const text = lines.join('\n\n').trim();
+    return text ? [{ id, type: 'code', data: { text } }] : [];
+  }
+
+  if (name === 'bash' && typeof args.command === 'string' && args.command.trim()) {
+    return [{ id, type: 'code', data: { text: args.command, lang: 'bash' } }];
+  }
+
+  return [];
+}
+
 function toolCallBlock(call: ToolCall, result: ToolResultMessage | undefined): Block {
   const id = `tool:${call.id}`;
   const args = call.arguments as Record<string, unknown> | undefined;
   const lang = langFromPath(args?.file_path ?? args?.path ?? args?.filePath ?? args?.notebook_path);
+  const input = toolInputBlocks(call, id);
   return {
     id,
     type: 'tool-call',
@@ -125,6 +167,7 @@ function toolCallBlock(call: ToolCall, result: ToolResultMessage | undefined): B
       tool: call.name,
       target: toolTarget(call.arguments),
       status: result ? (result.isError ? 'error' : 'done') : 'running',
+      input: input.length > 0 ? input : undefined,
       result: result ? toolResultBlocks(result, id, lang) : undefined,
     },
   };

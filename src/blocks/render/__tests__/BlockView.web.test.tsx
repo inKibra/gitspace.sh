@@ -25,15 +25,28 @@ describe('web BlockView', () => {
     expect(container.textContent).toContain('all done');
   });
 
-  it('composes: a tool-call renders its nested content blocks', () => {
+  it('composes: a running tool-call renders its nested content blocks (expanded)', () => {
+    // running → auto-expanded (completed calls collapse by default).
     const block = {
       id: 't1',
       type: 'tool-call',
-      data: { tool: 'bash', status: 'done', result: [{ id: 'c1', type: 'markdown', data: { text: 'composed body' } }] },
+      data: { tool: 'bash', status: 'running', result: [{ id: 'c1', type: 'markdown', data: { text: 'composed body' } }] },
     };
     const { container } = render(<BlockView block={block} />);
     expect(container.textContent).toContain('bash');
     expect(container.textContent).toContain('composed body');
+  });
+
+  it('collapses a completed tool-call by default (output hidden until expanded)', () => {
+    const block = {
+      id: 't2',
+      type: 'tool-call',
+      data: { tool: 'bash', status: 'done', target: 'ls', result: [{ id: 'c2', type: 'markdown', data: { text: 'hidden body' } }] },
+    };
+    const { container } = render(<BlockView block={block} />);
+    expect(container.textContent).toContain('bash');
+    expect(container.textContent).toContain('ls'); // header target still visible
+    expect(container.textContent).not.toContain('hidden body'); // output collapsed
   });
 
   it('degrades an unknown block type to a loud fallback (markdown when text is present)', () => {
