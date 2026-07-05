@@ -714,6 +714,15 @@ export interface ReadArtifactRequest {
   path: string;
 }
 
+export interface WriteArtifactRequest {
+  type: 'write_artifact';
+  requestId: string;
+  target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
+  path: string;
+  contentBase64: string;
+  message?: string;
+}
+
 export interface ProjectArtifactsListRequest {
   type: 'project_artifacts_list';
   requestId: string;
@@ -1168,6 +1177,7 @@ export type ClientToMachineMessage =
   | GetAgentSessionTreeRequest
   | ListArtifactsRequest
   | ReadArtifactRequest
+  | WriteArtifactRequest
   | ProjectArtifactsListRequest
   | ProjectArtifactsReadRequest
   | RepoTreeRequest
@@ -1334,6 +1344,7 @@ export function isBrowseMessage(msg: RemoteSessionMessage): msg is ClientToMachi
     'get_agent_session_tree',
     'list_artifacts',
     'read_artifact',
+    'write_artifact',
     'project_artifacts_list',
     'project_artifacts_read',
     'repo_tree',

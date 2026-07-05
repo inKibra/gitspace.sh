@@ -6,6 +6,7 @@ import type { GitStatusEntry } from '@pierre/trees';
 import type { SessionBackend } from '../session/backend.js';
 import type { ReviewChangedFile } from '../types/review.js';
 import { langForPath } from './ArtifactPanel.web.js';
+import { KIND_ICON, KIND_LABEL, KIND_ORDER, classifyArtifact, type ArtifactKind } from './artifact-kinds.js';
 import { Highlighted } from '../blocks/render/highlight.web.js';
 
 /**
@@ -74,6 +75,8 @@ export function RightRail({
   workspaceName,
   onOpenFile,
   onOpenArtifact,
+  onOpenDashboard,
+  onOpenNotes,
 }: {
   backend: SessionBackend | null;
   workspaceId: string;
@@ -83,6 +86,10 @@ export function RightRail({
   onOpenFile: (file: RepoFileOpen) => void;
   /** Open an artifact as a dock tab in the workspace multi-view. */
   onOpenArtifact: (path: string) => void;
+  /** Open a .dashboard.json artifact as a ▦ dock tab. */
+  onOpenDashboard: (path: string) => void;
+  /** Open the workspace notes surface. */
+  onOpenNotes?: () => void;
 }): ReactElement {
   const [closed, setClosed] = useState(() => {
     try { return window.localStorage.getItem(RAIL_CLOSED_KEY) === '1'; } catch { return false; }
@@ -124,7 +131,7 @@ export function RightRail({
       </div>
       {mode === 'repo'
         ? <RepoMode backend={backend} workspaceId={workspaceId} projectName={projectName} workspaceName={workspaceName} onOpenFile={onOpenFile} />
-        : <ArtifactsMode backend={backend} workspaceId={workspaceId} onOpenArtifact={onOpenArtifact} />}
+        : <ArtifactsMode backend={backend} workspaceId={workspaceId} projectName={projectName} workspaceName={workspaceName} onOpenArtifact={onOpenArtifact} onOpenDashboard={onOpenDashboard} onOpenNotes={onOpenNotes} />}
     </aside>
   );
 }
@@ -320,60 +327,136 @@ export function RepoFilePanel({ backend, workspaceId, projectName, workspaceName
 
 /* ── Artifacts mode ────────────────────────────────────────────────────────── */
 
-function ArtifactsMode({ backend, workspaceId, onOpenArtifact }: {
+function ArtifactsMode({ backend, workspaceId, projectName, workspaceName, onOpenArtifact, onOpenDashboard, onOpenNotes }: {
   backend: SessionBackend | null;
   workspaceId: string;
+  projectName: string;
+  workspaceName: string;
   onOpenArtifact: (path: string) => void;
+  onOpenDashboard: (path: string) => void;
+  onOpenNotes?: () => void;
 }): ReactElement {
   const [entries, setEntries] = useState<Array<{ path: string; size: number; pointer: boolean }>>([]);
+  const [notes, setNotes] = useState<Array<{ id: string; title: string }>>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [view, setView] = useState<'sel' | 'fav'>('sel');
+  const favKey = `gssh:artifact-favs:${projectName}`;
+  const [favs, setFavs] = useState<Set<string>>(() => {
+    try { return new Set(JSON.parse(window.localStorage.getItem(favKey) ?? '[]') as string[]); } catch { return new Set(); }
+  });
+  const toggleFav = (id: string): void => setFavs((prev) => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    try { window.localStorage.setItem(favKey, JSON.stringify([...next])); } catch { /* */ }
+    return next;
+  });
 
   useEffect(() => {
     let alive = true;
     const fn = backend?.listWorkspaceArtifacts;
     if (!fn) { setLoading(false); setError('Artifacts not available.'); return; }
-    fn.call(backend, workspaceId)
-      .then((list) => { if (alive) setEntries(list); })
-      .catch((e) => { if (alive) setError(e instanceof Error ? e.message : 'Failed to list artifacts'); })
-      .finally(() => { if (alive) setLoading(false); });
+    Promise.allSettled([
+      fn.call(backend, workspaceId).then((list) => { if (alive) setEntries(list); }),
+      backend?.listWorkspaceNotes?.(projectName, workspaceName).then((n) => {
+        if (alive) setNotes((n as Array<{ id: string; title?: string; name?: string }>).map((x) => ({ id: x.id, title: x.title ?? x.name ?? 'note' })));
+      }),
+    ]).then((results) => {
+      if (!alive) return;
+      const first = results[0];
+      if (first.status === 'rejected') setError(first.reason instanceof Error ? first.reason.message : 'Failed to list artifacts');
+      setLoading(false);
+    });
     return () => { alive = false; };
-  }, [backend, workspaceId]);
+  }, [backend, workspaceId, projectName, workspaceName]);
+
+  const openByKind = (path: string, kind: ArtifactKind): void => {
+    if (kind === 'dashboard') onOpenDashboard(path);
+    else onOpenArtifact(path);
+  };
 
   const groups = useMemo(() => {
-    const byDir = new Map<string, Array<{ path: string; size: number; pointer: boolean }>>();
+    const byKind = new Map<ArtifactKind, Array<{ path: string; kind: ArtifactKind }>>();
     for (const e of entries) {
-      const dir = e.path.includes('/') ? e.path.slice(0, e.path.indexOf('/')) : '·';
-      (byDir.get(dir) ?? byDir.set(dir, []).get(dir)!).push(e);
+      if (e.path === 'README.md') continue;
+      const kind = classifyArtifact(e.path);
+      (byKind.get(kind) ?? byKind.set(kind, []).get(kind)!).push({ path: e.path, kind });
     }
-    return [...byDir.entries()].sort(([a], [b]) => a.localeCompare(b));
+    return KIND_ORDER.map((k) => [k, byKind.get(k) ?? []] as const).filter(([, a]) => a.length > 0);
   }, [entries]);
 
+  const favList = useMemo(
+    () => entries.filter((e) => favs.has(e.path)).map((e) => ({ path: e.path, kind: classifyArtifact(e.path) })),
+    [entries, favs],
+  );
+
+  const row = (a: { path: string; kind: ArtifactKind }): ReactElement => {
+    const name = a.path.split('/').pop() ?? a.path;
+    return (
+      <div key={a.path} className="group flex w-full items-center gap-1.5 px-2 py-[2px] hover:bg-[var(--gs-bg-active)]">
+        <button type="button" onClick={() => openByKind(a.path, a.kind)} className="flex min-w-0 flex-1 items-center gap-1.5 text-left" title={a.path}>
+          <span className="w-4 flex-shrink-0 text-center text-[var(--gs-text-ghost)]">{KIND_ICON[a.kind]}</span>
+          <span className="min-w-0 flex-1 truncate text-[var(--gs-text)]">{name}</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => toggleFav(a.path)}
+          title="favorite"
+          className={`flex-shrink-0 px-0.5 ${favs.has(a.path) ? 'text-[#f0b429]' : 'text-[var(--gs-text-ghost)] opacity-0 group-hover:opacity-100'}`}
+        >
+          ★
+        </button>
+      </div>
+    );
+  };
+
   return (
-    <div className="min-h-0 flex-1 overflow-y-auto pb-2 font-[family-name:var(--gs-font-mono)] text-[11px]">
-      {loading ? (
-        <div className="px-3 py-3 text-center text-[var(--gs-text-dim)]">Loading…</div>
-      ) : error ? (
-        <div className="px-3 py-3 text-center text-[var(--gs-danger)]">{error}</div>
-      ) : entries.length === 0 ? (
-        <div className="px-3 py-4 text-center text-[var(--gs-text-dim)]">
-          No artifacts yet.
-          <div className="mt-1 text-[10px] text-[var(--gs-text-ghost)]">Goal evidence, demos and reports land here.</div>
-        </div>
-      ) : (
-        groups.map(([dir, files]) => (
-          <div key={dir}>
-            <div className="px-2 pb-0.5 pt-2 text-[10px] uppercase tracking-wider text-[var(--gs-text-ghost)]">{dir}/</div>
-            {files.map((e) => (
-              <button key={e.path} type="button" onClick={() => onOpenArtifact(e.path)}
-                className="flex w-full items-center gap-1.5 px-2 py-[2px] text-left hover:bg-[var(--gs-bg-active)]" title={e.path}>
-                <span className="min-w-0 flex-1 truncate text-[var(--gs-text)]">{e.path.includes('/') ? e.path.slice(e.path.indexOf('/') + 1) : e.path}</span>
-                {e.pointer && <span className="flex-shrink-0 rounded-full border border-[#2a2413] px-1 text-[9px] text-[#f0b429]">lfs</span>}
+    <div className="flex min-h-0 flex-1 flex-col font-[family-name:var(--gs-font-mono)] text-[11px]">
+      <div className="flex flex-shrink-0 items-center gap-1 px-2 pt-1.5 text-[11px]">
+        <button type="button" onClick={() => setView('sel')} className={`rounded px-2 py-0.5 ${view === 'sel' ? 'bg-[var(--gs-bg-active)] text-[var(--gs-text)]' : 'text-[var(--gs-text-dim)] hover:text-[var(--gs-text)]'}`}>Artifacts</button>
+        <button type="button" onClick={() => setView('fav')} className={`rounded px-2 py-0.5 ${view === 'fav' ? 'bg-[var(--gs-bg-active)] text-[var(--gs-text)]' : 'text-[var(--gs-text-dim)] hover:text-[var(--gs-text)]'}`}>
+          ★ Favorites {favs.size > 0 && <span className="text-[var(--gs-text-ghost)]">{favs.size}</span>}
+        </button>
+      </div>
+      <div className="min-h-0 flex-1 overflow-y-auto pb-2">
+        {loading ? (
+          <div className="px-3 py-3 text-center text-[var(--gs-text-dim)]">Loading…</div>
+        ) : error ? (
+          <div className="px-3 py-3 text-center text-[var(--gs-danger)]">{error}</div>
+        ) : view === 'fav' ? (
+          favList.length === 0
+            ? <div className="px-3 py-4 text-center text-[var(--gs-text-dim)]">No favorites yet — ★ an artifact to pin it.</div>
+            : favList.map(row)
+        ) : (
+          <>
+            {groups.length === 0 && (
+              <div className="px-3 py-4 text-center text-[var(--gs-text-dim)]">
+                No artifacts yet.
+                <div className="mt-1 text-[10px] text-[var(--gs-text-ghost)]">Goal evidence, demos and reports land here.</div>
+              </div>
+            )}
+            {groups.map(([kind, arts]) => (
+              <div key={kind}>
+                <div className="px-2 pb-0.5 pt-2 text-[10px] uppercase tracking-wider text-[var(--gs-text-ghost)]">{KIND_LABEL[kind]}</div>
+                {arts.map(row)}
+              </div>
+            ))}
+            <div className="px-2 pb-0.5 pt-2 text-[10px] uppercase tracking-wider text-[var(--gs-text-ghost)]">Notes</div>
+            {notes.map((n) => (
+              <button key={n.id} type="button" onClick={onOpenNotes} className="flex w-full items-center gap-1.5 px-2 py-[2px] text-left hover:bg-[var(--gs-bg-active)]">
+                <span className="w-4 flex-shrink-0 text-center text-[var(--gs-text-ghost)]">✎</span>
+                <span className="min-w-0 flex-1 truncate text-[var(--gs-text-dim)]">{n.title}</span>
               </button>
             ))}
-          </div>
-        ))
-      )}
+            {onOpenNotes && (
+              <button type="button" onClick={onOpenNotes} className="flex w-full items-center gap-1.5 px-2 py-[2px] text-left text-[var(--gs-text-dim)] hover:bg-[var(--gs-bg-active)]">
+                <span className="w-4 flex-shrink-0 text-center">＋</span>New note
+              </button>
+            )}
+          </>
+        )}
+      </div>
     </div>
   );
 }

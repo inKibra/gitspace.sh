@@ -1804,6 +1804,14 @@ export class LocalSessionBackend implements SessionBackend {
     throw new Error('Unexpected artifacts-read response');
   }
 
+  async writeWorkspaceArtifact(workspaceId: string, path: string, contentBase64: string, message?: string): Promise<string> {
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'artifacts-write', target, path, contentBase64, message });
+    if (tmuxResponse.type === 'artifacts-write') return tmuxResponse.commit;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected artifacts-write response');
+  }
+
   async listProjectArtifacts(projectName: string): Promise<Array<{ path: string; size: number; pointer: boolean }>> {
     const tmuxResponse = await this.sendTmuxCommand({ type: 'project-artifacts-list', projectName });
     if (tmuxResponse.type === 'artifacts-list') return tmuxResponse.entries;

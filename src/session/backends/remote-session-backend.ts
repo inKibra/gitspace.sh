@@ -3150,6 +3150,14 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     throw new Error('Unexpected artifacts-read response');
   }
 
+  async writeWorkspaceArtifact(workspaceId: string, path: string, contentBase64: string, message?: string): Promise<string> {
+    await this.waitForInitialSnapshot();
+    const tmuxResponse = await this.sendRpcCommand({ type: 'write_artifact', requestId: crypto.randomUUID(), target: this.getAgentWorkspaceTarget(workspaceId), path, contentBase64, message });
+    if (tmuxResponse.type === 'artifacts-write') return tmuxResponse.commit;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected artifacts-write response');
+  }
+
   async listProjectArtifacts(projectName: string): Promise<Array<{ path: string; size: number; pointer: boolean }>> {
     await this.waitForInitialSnapshot();
     const tmuxResponse = await this.sendRpcCommand({ type: 'project_artifacts_list', requestId: crypto.randomUUID(), projectName });

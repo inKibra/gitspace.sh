@@ -15,6 +15,8 @@ import type { SessionBackend } from '../session/backend.js';
 import type { KanbanGoalItem } from '../app/shared/board/types.js';
 import type { WorkspaceRuntimeEntry } from '../app/shared/workspace-runtime/types.js';
 import { ArtifactPanel } from '../components/ArtifactPanel.web.js';
+import { DashboardPanel } from '../components/DashboardPanel.web.js';
+import { KIND_ICON, KIND_LABEL, KIND_ORDER, classifyArtifact, type ArtifactKind } from '../components/artifact-kinds.js';
 
 interface ArtifactEntry {
   path: string;
@@ -76,18 +78,51 @@ export function ProjectHomePage({
     [workspaces],
   );
 
-  // Project artifacts (main branch via base mount).
+  // Artifact SOURCE: 'main' (the project's rolled-up branch) or a workspace's
+  // branch — the mock's chain·workspace combo.
+  const [artifactSource, setArtifactSource] = useState<string>('main');
+  const sourceOptions = useMemo(() => {
+    const wsOpts = workspaces.map((w) => {
+      const chain = goals.find((g) => g.workspaceName === w.workspace.name)?.chainTitle ?? 'workspaces';
+      return { value: w.workspace.selectionKey, label: w.workspace.name, chain, workspaceId: w.workspace.id };
+    });
+    return [{ value: 'main', label: 'main (rolled up)', chain: 'project', workspaceId: null as string | null }, ...wsOpts];
+  }, [workspaces, goals]);
   const loadArtifacts = useCallback(() => {
-    const fn = backend?.listProjectArtifacts;
-    if (!fn) {
-      setArtifactsError('Project artifacts unavailable on this backend.');
+    const src = sourceOptions.find((o) => o.value === artifactSource) ?? sourceOptions[0];
+    const req = src.workspaceId === null
+      ? backend?.listProjectArtifacts?.(projectName)
+      : backend?.listWorkspaceArtifacts?.(src.workspaceId);
+    if (!req) {
+      setArtifactsError('Artifacts unavailable on this backend.');
       return;
     }
-    fn.call(backend, projectName)
+    req
       .then((list) => { setArtifacts(list); setArtifactsError(null); })
       .catch((e) => setArtifactsError(e instanceof Error ? e.message : 'Failed to load artifacts'));
-  }, [backend, projectName]);
+  }, [backend, projectName, artifactSource, sourceOptions]);
   useEffect(() => { loadArtifacts(); }, [loadArtifacts]);
+  const readArtifactFromSource = useCallback((path: string) => {
+    const src = sourceOptions.find((o) => o.value === artifactSource) ?? sourceOptions[0];
+    if (src.workspaceId === null) {
+      return backend?.readProjectArtifact ? backend.readProjectArtifact(projectName, path) : Promise.reject(new Error('unavailable'));
+    }
+    return backend?.readWorkspaceArtifact ? backend.readWorkspaceArtifact(src.workspaceId, path) : Promise.reject(new Error('unavailable'));
+  }, [backend, projectName, artifactSource, sourceOptions]);
+  // Favorites (shared key with the workspace rail).
+  const favKey = `gssh:artifact-favs:${projectName}`;
+  const [favs, setFavs] = useState<Set<string>>(() => {
+    try { return new Set(JSON.parse(window.localStorage.getItem(favKey) ?? '[]') as string[]); } catch { return new Set(); }
+  });
+  const toggleFav = (id: string): void => setFavs((prev) => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    try { window.localStorage.setItem(favKey, JSON.stringify([...next])); } catch { /* */ }
+    return next;
+  });
+  const [railView, setRailView] = useState<'sel' | 'fav'>('sel');
+  const [dashboardPath, setDashboardPath] = useState<string | null>(null);
 
   // Reports & notes feed: project reports/ artifacts + notes across workspaces.
   useEffect(() => {
@@ -123,14 +158,17 @@ export function ProjectHomePage({
     return () => { alive = false; };
   }, [artifacts, backend, workspaces, projectName]);
 
-  const artifactGroups = useMemo(() => {
-    const byDir = new Map<string, ArtifactEntry[]>();
+  const kindGroups = useMemo(() => {
+    const byKind = new Map<ArtifactKind, ArtifactEntry[]>();
     for (const e of artifacts) {
-      const dir = e.path.includes('/') ? e.path.slice(0, e.path.indexOf('/')) : '·';
-      (byDir.get(dir) ?? byDir.set(dir, []).get(dir)!).push(e);
+      if (e.path === 'README.md') continue;
+      const k = classifyArtifact(e.path);
+      (byKind.get(k) ?? byKind.set(k, []).get(k)!).push(e);
     }
-    return [...byDir.entries()].sort(([a], [b]) => a.localeCompare(b));
+    return KIND_ORDER.map((k) => [k, byKind.get(k) ?? []] as const).filter(([, a]) => a.length > 0);
   }, [artifacts]);
+  const favEntries = useMemo(() => artifacts.filter((e) => favs.has(e.path)), [artifacts, favs]);
+  const dashboards = useMemo(() => artifacts.filter((e) => classifyArtifact(e.path) === 'dashboard'), [artifacts]);
 
   const navItem = (id: typeof section, label: string, count?: number): ReactElement => (
     <button
@@ -145,6 +183,26 @@ export function ProjectHomePage({
       {count !== undefined && <span className="text-[10px] text-[var(--gs-text-ghost)]">{count}</span>}
     </button>
   );
+
+  const railRow = (e: ArtifactEntry): ReactElement => {
+    const kind = classifyArtifact(e.path);
+    const name = e.path.split('/').pop() ?? e.path;
+    return (
+      <div key={e.path} className="group flex w-full items-center gap-1.5 rounded px-1.5 py-[3px] font-[family-name:var(--gs-font-mono)] text-[11px] hover:bg-[var(--gs-bg-active)]">
+        <button
+          type="button"
+          onClick={() => { if (kind === 'dashboard') { setViewerPath(null); setDashboardPath(e.path); } else { setDashboardPath(null); setViewerPath(e.path); } }}
+          className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
+          title={e.path}
+        >
+          <span className="w-4 flex-shrink-0 text-center text-[var(--gs-text-ghost)]">{KIND_ICON[kind]}</span>
+          <span className="min-w-0 flex-1 truncate text-[var(--gs-text)]">{name}</span>
+          {e.pointer && <span className="flex-shrink-0 rounded-full border border-[#2a2413] px-1 text-[9px] text-[#f0b429]">lfs</span>}
+        </button>
+        <button type="button" onClick={() => toggleFav(e.path)} title="favorite" className={`flex-shrink-0 px-0.5 ${favs.has(e.path) ? 'text-[#f0b429]' : 'text-[var(--gs-text-ghost)] opacity-0 group-hover:opacity-100'}`}>★</button>
+      </div>
+    );
+  };
 
   const showChains = section === 'overview' || section === 'chains';
   const showInProcess = section === 'overview' || section === 'in-process';
@@ -168,28 +226,50 @@ export function ProjectHomePage({
           {navItem('chains', 'Chains', chains.length)}
           {navItem('reports', 'Reports & notes', feed.length)}
           {navItem('artifacts', 'Artifacts', artifacts.length)}
+          <div className="px-2 pb-1 pt-3 text-[10px] uppercase tracking-wider text-[var(--gs-text-ghost)]">Dashboards</div>
+          {dashboards.length === 0 && <div className="px-2 text-[10px] text-[var(--gs-text-ghost)]">none in {artifactSource === 'main' ? 'main' : 'workspace'}</div>}
+          {dashboards.map((d) => (
+            <button
+              key={d.path}
+              type="button"
+              onClick={() => { setViewerPath(null); setDashboardPath(d.path); }}
+              className="flex w-full items-center gap-2 rounded px-2 py-1 text-left text-xs text-[var(--gs-text-muted)] hover:bg-[var(--gs-bg-active)]"
+            >
+              <span className="text-[var(--gs-accent)]">▦</span>
+              <span className="min-w-0 flex-1 truncate">{(d.path.split('/').pop() ?? d.path).replace('.dashboard.json', '')}</span>
+            </button>
+          ))}
         </div>
 
         {/* center */}
         <div className="min-w-0 flex-1 overflow-y-auto p-4">
-          {viewerPath !== null ? (
+          {viewerPath !== null || dashboardPath !== null ? (
             <div className="flex h-full min-h-0 flex-col">
               <button
                 type="button"
-                onClick={() => setViewerPath(null)}
+                onClick={() => { setViewerPath(null); setDashboardPath(null); }}
                 className="mb-2 self-start text-xs text-[var(--gs-text-dim)] hover:text-[var(--gs-text)]"
               >
                 ← back
               </button>
               <div className="min-h-0 flex-1 border border-[var(--gs-border)]">
-                <ArtifactPanel
-                  path={viewerPath}
-                  read={(p) => backend?.readProjectArtifact ? backend.readProjectArtifact(projectName, p) : Promise.reject(new Error('unavailable'))}
-                />
+                {dashboardPath !== null ? (
+                  <DashboardPanel dashboardPath={dashboardPath} scopeLabel={artifactSource === 'main' ? 'project · main' : 'workspace'} read={readArtifactFromSource} />
+                ) : (
+                  <ArtifactPanel path={viewerPath!} read={readArtifactFromSource} />
+                )}
               </div>
             </div>
           ) : section === 'artifacts' ? (
-            <ProjectArtifactsList groups={artifactGroups} error={artifactsError} onOpen={setViewerPath} full />
+            <div className="max-w-[620px]">
+              {kindGroups.map(([kind, files]) => (
+                <div key={kind}>
+                  <div className="px-1 pb-0.5 pt-2 text-[10px] uppercase tracking-wider text-[var(--gs-text-ghost)]">{KIND_LABEL[kind]}</div>
+                  {files.map((e) => railRow(e))}
+                </div>
+              ))}
+              {kindGroups.length === 0 && <div className="px-2 py-4 text-xs text-[var(--gs-text-dim)]">No artifacts in this source yet.</div>}
+            </div>
           ) : (
             <>
               {showChains && (
@@ -280,53 +360,47 @@ export function ProjectHomePage({
           )}
         </div>
 
-        {/* right: project artifacts rail */}
+        {/* right: project artifacts rail (mock: ProjectArtifactsRail) */}
         {section !== 'artifacts' && (
-          <div className="hidden w-[280px] flex-shrink-0 flex-col overflow-y-auto border-l border-[var(--gs-border-muted)] p-2 lg:flex">
-            <div className="px-1 pb-1 text-[10px] uppercase tracking-wider text-[var(--gs-text-ghost)]">Project artifacts · main</div>
-            <ProjectArtifactsList groups={artifactGroups} error={artifactsError} onOpen={setViewerPath} />
+          <div className="hidden w-[300px] flex-shrink-0 flex-col overflow-y-auto border-l border-[var(--gs-border-muted)] p-2 lg:flex">
+            <select
+              value={artifactSource}
+              onChange={(e) => { setArtifactSource(e.target.value); setViewerPath(null); setDashboardPath(null); }}
+              className="mb-1.5 w-full border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-1.5 py-1 font-[family-name:var(--gs-font-mono)] text-[11px] text-[var(--gs-text)]"
+            >
+              {[...new Set(sourceOptions.map((o) => o.chain))].map((chain) => (
+                <optgroup key={chain} label={`⛓ ${chain}`}>
+                  {sourceOptions.filter((o) => o.chain === chain).map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                </optgroup>
+              ))}
+            </select>
+            <div className="mb-1 flex items-center gap-1 text-[11px]">
+              <button type="button" onClick={() => setRailView('sel')} className={`rounded px-2 py-0.5 ${railView === 'sel' ? 'bg-[var(--gs-bg-active)] text-[var(--gs-text)]' : 'text-[var(--gs-text-dim)]'}`}>Artifacts</button>
+              <button type="button" onClick={() => setRailView('fav')} className={`rounded px-2 py-0.5 ${railView === 'fav' ? 'bg-[var(--gs-bg-active)] text-[var(--gs-text)]' : 'text-[var(--gs-text-dim)]'}`}>★ Favorites {favs.size > 0 ? favs.size : ''}</button>
+            </div>
+            {artifactsError ? (
+              <div className="px-2 py-3 text-center text-[11px] text-[var(--gs-danger)]">{artifactsError}</div>
+            ) : (railView === 'fav' ? (
+              favEntries.length === 0
+                ? <div className="px-2 py-4 text-center text-[11px] text-[var(--gs-text-dim)]">No favorites yet — ★ an artifact to pin it across the project.</div>
+                : favEntries.map((e) => railRow(e))
+            ) : kindGroups.length === 0 ? (
+              <div className="px-2 py-4 text-center text-[11px] text-[var(--gs-text-dim)]">
+                No artifacts in this source yet.
+                <div className="mt-1 text-[10px] text-[var(--gs-text-ghost)]">Roll up a workspace to promote artifacts to main.</div>
+              </div>
+            ) : (
+              kindGroups.map(([kind, files]) => (
+                <div key={kind}>
+                  <div className="px-1 pb-0.5 pt-2 text-[10px] uppercase tracking-wider text-[var(--gs-text-ghost)]">{KIND_LABEL[kind]}</div>
+                  {files.map((e) => railRow(e))}
+                </div>
+              ))
+            ))}
           </div>
         )}
       </div>
 
-    </div>
-  );
-}
-
-function ProjectArtifactsList({ groups, error, onOpen, full = false }: {
-  groups: Array<[string, ArtifactEntry[]]>;
-  error: string | null;
-  onOpen: (path: string) => void;
-  full?: boolean;
-}): ReactElement {
-  if (error) return <div className={`px-2 py-3 text-xs text-[var(--gs-danger)] ${full ? '' : 'text-center'}`}>{error}</div>;
-  if (groups.length === 0) {
-    return (
-      <div className="px-2 py-4 text-center text-xs text-[var(--gs-text-dim)]">
-        No project artifacts yet.
-        <div className="mt-1 text-[10px] text-[var(--gs-text-ghost)]">Roll up a workspace to promote its artifacts to main.</div>
-      </div>
-    );
-  }
-  return (
-    <div className={full ? 'max-w-[560px]' : ''}>
-      {groups.map(([dir, files]) => (
-        <div key={dir}>
-          <div className="px-1 pb-0.5 pt-2 text-[10px] uppercase tracking-wider text-[var(--gs-text-ghost)]">{dir}/</div>
-          {files.map((e) => (
-            <button
-              key={e.path}
-              type="button"
-              onClick={() => onOpen(e.path)}
-              className="flex w-full items-center gap-1.5 rounded px-1.5 py-[3px] text-left font-[family-name:var(--gs-font-mono)] text-[11px] hover:bg-[var(--gs-bg-active)]"
-              title={e.path}
-            >
-              <span className="min-w-0 flex-1 truncate text-[var(--gs-text)]">{e.path.includes('/') ? e.path.slice(e.path.indexOf('/') + 1) : e.path}</span>
-              {e.pointer && <span className="flex-shrink-0 rounded-full border border-[#2a2413] px-1 text-[9px] text-[#f0b429]">lfs</span>}
-            </button>
-          ))}
-        </div>
-      ))}
     </div>
   );
 }

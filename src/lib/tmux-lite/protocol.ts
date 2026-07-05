@@ -409,6 +409,7 @@ export type Command =
   | { type: 'agent-navigate-history'; target: AgentWorkspaceTargetPayload; agentSessionId: string; entryId: string; mode?: 'redo' | 'jump' }
   | { type: 'artifacts-list'; target: AgentWorkspaceTargetPayload }
   | { type: 'artifacts-read'; target: AgentWorkspaceTargetPayload; path: string }
+  | { type: 'artifacts-write'; target: AgentWorkspaceTargetPayload; path: string; contentBase64: string; message?: string }
   | { type: 'project-artifacts-list'; projectName: string }
   | { type: 'project-artifacts-read'; projectName: string; path: string }
   | { type: 'repo-tree'; target: AgentWorkspaceTargetPayload }
@@ -509,6 +510,7 @@ export type Response =
   | { type: 'agent-tree'; nodes: import('../../agents/agent-runtime-types.js').AgentTreeNode[] }
   | { type: 'artifacts-list'; entries: import('../../core/artifacts.js').ArtifactListEntry[] }
   | { type: 'artifacts-read'; base64: string; size: number; truncated: boolean }
+  | { type: 'artifacts-write'; commit: string }
   | { type: 'repo-tree'; entries: import('../../core/git.js').RepoFileEntry[] }
   | { type: 'repo-read'; base64: string | null; size: number; truncated: boolean }
   | { type: 'repo-commit'; commit: string | null }

@@ -297,6 +297,8 @@ export interface SessionBackend {
   listWorkspaceArtifacts?(workspaceId: string): Promise<Array<{ path: string; size: number; pointer: boolean }>>;
   /** Read one artifact (pointer-resolved) as base64, capped server-side. */
   readWorkspaceArtifact?(workspaceId: string, path: string): Promise<{ base64: string; size: number; truncated: boolean }>;
+  /** Write an artifact into the workspace mount (commit-on-write). */
+  writeWorkspaceArtifact?(workspaceId: string, path: string, contentBase64: string, message?: string): Promise<string>;
   /** List the PROJECT's artifacts (base clone's main mount). */
   listProjectArtifacts?(projectName: string): Promise<Array<{ path: string; size: number; pointer: boolean }>>;
   /** Read one project artifact (pointer-resolved) as base64. */

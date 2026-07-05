@@ -36,6 +36,7 @@ import { BoardPage } from "./pages/BoardPage.web.js";
 import { WorkspaceDetailPage } from "./pages/WorkspaceDetailPage.web.js";
 import { FlowWeb } from "./components/Flow.web.js";
 import { ArtifactPanel } from "./components/ArtifactPanel.web.js";
+import { DashboardPanel } from "./components/DashboardPanel.web.js";
 import { RightRail, RepoFilePanel, type RepoFileOpen } from "./components/RightRail.web.js";
 import { ProjectHomePage } from "./pages/ProjectHomePage.web.js";
 import { useInboxPage } from './app/react/index.js';
@@ -128,7 +129,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   const [eventsWorkspaceLabel, setEventsWorkspaceLabel] = useState<string>('');
   const [projectHomeName, setProjectHomeName] = useState<string | null>(null);
   /** Repo files + artifacts opened as dock tabs, keyed by workspace selectionKey. */
-  type DockExtraPane = ({ kind: 'file' } & RepoFileOpen) | { kind: 'artifact'; path: string };
+  type DockExtraPane = ({ kind: 'file' } & RepoFileOpen) | { kind: 'artifact'; path: string } | { kind: 'dashboard'; path: string };
   const [dockExtraPanes, setDockExtraPanes] = useState<Record<string, DockExtraPane[]>>({});
   const [pendingProcessEditWorkspaceId, setPendingProcessEditWorkspaceId] = useState<string | null>(null);
   const [modifiers, setModifiers] = useState<ModifierState>({
@@ -2862,6 +2863,29 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
               />
             ),
           });
+        } else if (extra.kind === 'dashboard') {
+          panels.push({
+            id: `dashboard:${extra.path}`,
+            title: `▦ ${name.replace('.dashboard.json', '')}`,
+            version: `dashboard|${extra.path}`,
+            onClose: closeExtra,
+            render: () => (
+              <DashboardPanel
+                dashboardPath={extra.path}
+                scopeLabel={workspace.name}
+                read={(p) => {
+                  const fn = paneBackend?.readWorkspaceArtifact;
+                  if (!fn) return Promise.reject(new Error('unavailable'));
+                  return fn.call(paneBackend, workspace.id, p);
+                }}
+                write={(p, contentBase64, message) => {
+                  const fn = paneBackend?.writeWorkspaceArtifact;
+                  if (!fn) return Promise.reject(new Error('unavailable'));
+                  return fn.call(paneBackend, workspace.id, p, contentBase64, message);
+                }}
+              />
+            ),
+          });
         } else {
           panels.push({
             id: `artifact:${extra.path}`,
@@ -2954,6 +2978,15 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
                         return { ...prev, [key]: [...cur, { kind: 'artifact', path }] };
                       });
                     }}
+                    onOpenDashboard={(path) => {
+                      const key = workspace.selectionKey ?? workspace.id;
+                      setDockExtraPanes((prev) => {
+                        const cur = prev[key] ?? [];
+                        if (cur.some((x) => x.kind === 'dashboard' && x.path === path)) return prev;
+                        return { ...prev, [key]: [...cur, { kind: 'dashboard', path }] };
+                      });
+                    }}
+                    onOpenNotes={() => { void openWorkspaceNotes(workspace, 'list'); }}
                   />
                 }
                 sessions={workspaceSessions}
