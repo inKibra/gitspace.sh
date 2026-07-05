@@ -430,6 +430,8 @@ export interface WorkspaceDetailPaneWebProps extends WorkspaceDetailPaneProps {
   children?: ReactNode;
   /** Layout-owned footer rendered below the sidebar/main split. */
   bottomContent?: ReactNode;
+  /** The right rail (repo/artifacts) — composed by the app shell. */
+  rightRail?: ReactNode;
 }
 
 export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
@@ -437,6 +439,7 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
     workspace,
     sessions,
     replays,
+    rightRail,
     agentSessions = [],
     agentSessionCount = 0,
     pendingPermissions = 0,
@@ -724,6 +727,9 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
             )}
           </div>
         </div>
+
+        {/* Right rail (repo / artifacts) — layout slot owned by the app shell */}
+        {rightRail && <div className="hidden sm:flex h-full flex-shrink-0">{rightRail}</div>}
       </div>
       {bottomContent}
 

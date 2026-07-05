@@ -36,6 +36,7 @@ import { BoardPage } from "./pages/BoardPage.web.js";
 import { WorkspaceDetailPage } from "./pages/WorkspaceDetailPage.web.js";
 import { FlowWeb } from "./components/Flow.web.js";
 import { ArtifactsBrowser } from "./components/ArtifactsBrowser.web.js";
+import { RightRail } from "./components/RightRail.web.js";
 import { useInboxPage } from './app/react/index.js';
 import { InboxWeb } from "./components/Inbox.web.js";
 import { useEvents, toWideEventItem, type WideEventItem } from "./components/Events.js";
@@ -2886,6 +2887,14 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
             >
               <WorkspaceDetailPage
                 workspace={workspace}
+                rightRail={
+                  <RightRail
+                    backend={multi.getBackend(workspaceBackendKey)}
+                    workspaceId={workspace.id}
+                    projectName={workspace.projectName}
+                    workspaceName={workspace.name}
+                  />
+                }
                 sessions={workspaceSessions}
                 replays={workspaceReplays}
                 agentSessions={runtime?.agentSessions ?? []}

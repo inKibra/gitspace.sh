@@ -3730,6 +3730,46 @@ routerListener = Bun.listen({
             }
             break;
 
+          case 'repo-tree':
+            try {
+              const { listRepoFiles } = await import('../../core/git.js');
+              res = { type: 'repo-tree', entries: await listRepoFiles(cmd.target.workspacePath) };
+            } catch (e) {
+              res = { type: 'error', message: `Failed to list repo files: ${e instanceof Error ? e.message : String(e)}` };
+            }
+            break;
+
+          case 'repo-read':
+            try {
+              const { readRepoFile } = await import('../../core/git.js');
+              const MAX_READ = 8 * 1024 * 1024;
+              const bytes = readRepoFile(cmd.target.workspacePath, cmd.path);
+              if (bytes === null) {
+                res = { type: 'repo-read', base64: null, size: 0, truncated: false };
+              } else {
+                const truncated = bytes.length > MAX_READ;
+                res = {
+                  type: 'repo-read',
+                  base64: (truncated ? bytes.subarray(0, MAX_READ) : bytes).toString('base64'),
+                  size: bytes.length,
+                  truncated,
+                };
+              }
+            } catch (e) {
+              res = { type: 'error', message: `Failed to read file: ${e instanceof Error ? e.message : String(e)}` };
+            }
+            break;
+
+          case 'repo-commit':
+            try {
+              const { commitAllChanges } = await import('../../core/git.js');
+              const commit = await commitAllChanges(cmd.target.workspacePath, cmd.message);
+              res = { type: 'repo-commit', commit };
+            } catch (e) {
+              res = { type: 'error', message: `Failed to commit: ${e instanceof Error ? e.message : String(e)}` };
+            }
+            break;
+
           case 'workspace-editor-open':
             try {
               const result = await openWorkspaceInEditor(cmd.editorId, cmd.target.workspacePath);

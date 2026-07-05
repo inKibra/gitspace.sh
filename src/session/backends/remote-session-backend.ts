@@ -3150,6 +3150,30 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     throw new Error('Unexpected artifacts-read response');
   }
 
+  async listRepoFiles(workspaceId: string): Promise<Array<{ path: string; status?: string }>> {
+    await this.waitForInitialSnapshot();
+    const tmuxResponse = await this.sendRpcCommand({ type: 'repo_tree', requestId: crypto.randomUUID(), target: this.getAgentWorkspaceTarget(workspaceId) });
+    if (tmuxResponse.type === 'repo-tree') return tmuxResponse.entries;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected repo-tree response');
+  }
+
+  async readRepoFile(workspaceId: string, path: string): Promise<{ base64: string | null; size: number; truncated: boolean }> {
+    await this.waitForInitialSnapshot();
+    const tmuxResponse = await this.sendRpcCommand({ type: 'repo_read', requestId: crypto.randomUUID(), target: this.getAgentWorkspaceTarget(workspaceId), path });
+    if (tmuxResponse.type === 'repo-read') return { base64: tmuxResponse.base64, size: tmuxResponse.size, truncated: tmuxResponse.truncated };
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected repo-read response');
+  }
+
+  async commitWorkspaceChanges(workspaceId: string, message: string): Promise<string | null> {
+    await this.waitForInitialSnapshot();
+    const tmuxResponse = await this.sendRpcCommand({ type: 'repo_commit', requestId: crypto.randomUUID(), target: this.getAgentWorkspaceTarget(workspaceId), message });
+    if (tmuxResponse.type === 'repo-commit') return tmuxResponse.commit;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected repo-commit response');
+  }
+
   // ============================================================================
   // Agent session preferences — stored locally on the client machine
   // Note: Preferences for remote machines are stored locally in the client,

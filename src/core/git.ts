@@ -4,7 +4,8 @@
 
 import { exec } from 'child_process';
 import { promisify } from 'util';
-import { existsSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
+import { join } from 'path';
 import { SpacesError } from '../types/errors.js';
 import { logger } from '../utils/logger.js';
 import { escapeShellArg } from '../utils/shell-escape.js';
@@ -844,4 +845,64 @@ export async function listWorktrees(repoPath: string): Promise<string[]> {
       2
     );
   }
+}
+
+/** A repo file entry for the RightRail tree: path + porcelain status letter
+ *  (M/A/D/R/?/…) when the file differs from HEAD/index. */
+export interface RepoFileEntry {
+  path: string;
+  status?: string;
+}
+
+/** List all files in a worktree (tracked + untracked, gitignore respected)
+ *  with working-tree status letters merged in. */
+export async function listRepoFiles(workspacePath: string): Promise<RepoFileEntry[]> {
+  const { stdout: tracked } = await execAsync('git ls-files -z', { cwd: workspacePath, maxBuffer: 32 * 1024 * 1024 });
+  const { stdout: untracked } = await execAsync('git ls-files -z --others --exclude-standard', {
+    cwd: workspacePath,
+    maxBuffer: 32 * 1024 * 1024,
+  });
+  const { stdout: statusOut } = await execAsync('git status --porcelain -z', {
+    cwd: workspacePath,
+    maxBuffer: 32 * 1024 * 1024,
+  });
+  const status = new Map<string, string>();
+  for (const rec of statusOut.split('\0')) {
+    if (rec.length < 4) continue;
+    const letters = rec.slice(0, 2).trim() || 'M';
+    // rename records are "XY new\0old" — the split already isolates the new path
+    status.set(rec.slice(3), letters[0] === 'R' ? 'R' : letters[0]);
+  }
+  const paths = new Set<string>();
+  for (const chunk of [tracked, untracked]) {
+    for (const p of chunk.split('\0')) {
+      if (p) paths.add(p);
+    }
+  }
+  return [...paths]
+    .sort((a, b) => a.localeCompare(b))
+    .map((path) => (status.has(path) ? { path, status: status.get(path) } : { path }));
+}
+
+/** Read a file inside a worktree (path-jailed). Returns null when missing. */
+export function readRepoFile(workspacePath: string, relPath: string): Buffer | null {
+  if (!relPath || relPath.startsWith('/') || relPath.split('/').some((s) => s === '' || s === '.' || s === '..')) {
+    throw new SpacesError(`Unsafe repo path: ${relPath}`, 'USER_ERROR', 1);
+  }
+  const abs = join(workspacePath, relPath);
+  if (!existsSync(abs)) return null;
+  return readFileSync(abs);
+}
+
+/** Stage everything and commit. Returns the commit sha (null when nothing to commit). */
+export async function commitAllChanges(workspacePath: string, message: string): Promise<string | null> {
+  if (!message.trim()) {
+    throw new SpacesError('Commit message is required', 'USER_ERROR', 1);
+  }
+  await execAsync('git add -A', { cwd: workspacePath });
+  const { stdout: staged } = await execAsync('git diff --cached --name-only', { cwd: workspacePath, maxBuffer: 8 * 1024 * 1024 });
+  if (!staged.trim()) return null;
+  await execAsync(`git commit -q -m ${escapeShellArg(message.trim())}`, { cwd: workspacePath });
+  const { stdout } = await execAsync('git rev-parse HEAD', { cwd: workspacePath });
+  return stdout.trim();
 }

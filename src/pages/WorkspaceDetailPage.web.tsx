@@ -16,12 +16,14 @@ export type WorkspaceDetailPageProps = WorkspaceDetailPaneProps & {
   children?: ReactNode;
   /** Layout-owned footer below the workspace detail pane. */
   bottomContent?: ReactNode;
+  /** The right rail (repo/artifacts) — composed by the app shell. */
+  rightRail?: ReactNode;
 };
 
-export function WorkspaceDetailPage({ children, bottomContent, ...props }: WorkspaceDetailPageProps) {
+export function WorkspaceDetailPage({ children, bottomContent, rightRail, ...props }: WorkspaceDetailPageProps) {
   return (
     <div className="h-screen w-screen flex flex-col bg-[var(--gs-bg)]">
-      <WorkspaceDetailPaneWeb {...props} bottomContent={bottomContent}>
+      <WorkspaceDetailPaneWeb {...props} bottomContent={bottomContent} rightRail={rightRail}>
         {children}
       </WorkspaceDetailPaneWeb>
     </div>

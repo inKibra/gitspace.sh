@@ -40,17 +40,20 @@ export function ArtifactsBrowser({
   backend,
   workspaceId,
   workspaceLabel,
+  initialSelected = null,
   onClose,
 }: {
   backend: SessionBackend | null;
   workspaceId: string;
   workspaceLabel?: string;
+  /** Preselect + preview this artifact path on open. */
+  initialSelected?: string | null;
   onClose: () => void;
 }): ReactElement {
   const [entries, setEntries] = useState<Entry[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [selected, setSelected] = useState<string | null>(null);
+  const [selected, setSelected] = useState<string | null>(initialSelected);
   const [preview, setPreview] = useState<{ path: string; base64: string; size: number; truncated: boolean } | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
 

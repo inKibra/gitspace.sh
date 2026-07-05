@@ -297,6 +297,12 @@ export interface SessionBackend {
   listWorkspaceArtifacts?(workspaceId: string): Promise<Array<{ path: string; size: number; pointer: boolean }>>;
   /** Read one artifact (pointer-resolved) as base64, capped server-side. */
   readWorkspaceArtifact?(workspaceId: string, path: string): Promise<{ base64: string; size: number; truncated: boolean }>;
+  /** Full workspace file listing (tracked + untracked, status letters). */
+  listRepoFiles?(workspaceId: string): Promise<Array<{ path: string; status?: string }>>;
+  /** Read a workspace file (path-jailed, capped). Null base64 = missing. */
+  readRepoFile?(workspaceId: string, path: string): Promise<{ base64: string | null; size: number; truncated: boolean }>;
+  /** Stage all + commit. Returns the sha, or null when nothing to commit. */
+  commitWorkspaceChanges?(workspaceId: string, message: string): Promise<string | null>;
   /** Navigate the conversation tree: `redo` rewinds to the message's parent and
    *  returns its text; `jump` makes the node the leaf (return to a fork). */
   navigateAgentHistory?(workspaceId: string, agentSessionId: string, entryId: string, mode?: 'redo' | 'jump'): Promise<{ ok: boolean; editorText?: string }>;

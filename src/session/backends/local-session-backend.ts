@@ -1804,6 +1804,30 @@ export class LocalSessionBackend implements SessionBackend {
     throw new Error('Unexpected artifacts-read response');
   }
 
+  async listRepoFiles(workspaceId: string): Promise<Array<{ path: string; status?: string }>> {
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'repo-tree', target });
+    if (tmuxResponse.type === 'repo-tree') return tmuxResponse.entries;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected repo-tree response');
+  }
+
+  async readRepoFile(workspaceId: string, path: string): Promise<{ base64: string | null; size: number; truncated: boolean }> {
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'repo-read', target, path });
+    if (tmuxResponse.type === 'repo-read') return { base64: tmuxResponse.base64, size: tmuxResponse.size, truncated: tmuxResponse.truncated };
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected repo-read response');
+  }
+
+  async commitWorkspaceChanges(workspaceId: string, message: string): Promise<string | null> {
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'repo-commit', target, message });
+    if (tmuxResponse.type === 'repo-commit') return tmuxResponse.commit;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected repo-commit response');
+  }
+
   async navigateAgentHistory(workspaceId: string, agentSessionId: string, entryId: string, mode: 'redo' | 'jump' = 'redo'): Promise<{ ok: boolean; editorText?: string }> {
     const target = await this.resolveAgentWorkspaceTarget(workspaceId);
     const tmuxResponse = await this.sendTmuxCommand({ type: 'agent-navigate-history', target, agentSessionId, entryId, mode });
