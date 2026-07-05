@@ -1,6 +1,8 @@
 /** @jsxImportSource react */
-import { useCallback, useEffect, useMemo, useState, type ReactElement } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
 import { PatchDiff } from '@pierre/diffs/react';
+import { useFileTree, FileTree } from '@pierre/trees/react';
+import type { GitStatusEntry } from '@pierre/trees';
 import type { SessionBackend } from '../session/backend.js';
 import type { ReviewChangedFile } from '../types/review.js';
 import { ArtifactsBrowser } from './ArtifactsBrowser.web.js';
@@ -15,33 +17,39 @@ import { ArtifactsBrowser } from './ArtifactsBrowser.web.js';
 const RAIL_CLOSED_KEY = 'gssh:workspace-right-rail-closed';
 const RAIL_MODE_KEY = 'gssh:workspace-right-rail-mode';
 
-interface TreeNode {
-  name: string;
-  path: string;
-  children?: Map<string, TreeNode>;
-  status?: string;
-}
-
-function buildTree(entries: Array<{ path: string; status?: string }>): TreeNode {
-  const root: TreeNode = { name: '', path: '', children: new Map() };
-  for (const e of entries) {
-    const parts = e.path.split('/');
-    let node = root;
-    let acc = '';
-    for (let i = 0; i < parts.length; i++) {
-      acc = acc ? `${acc}/${parts[i]}` : parts[i];
-      const leaf = i === parts.length - 1;
-      if (!node.children) node.children = new Map();
-      let child = node.children.get(parts[i]);
-      if (!child) {
-        child = { name: parts[i], path: acc, ...(leaf ? {} : { children: new Map() }) };
-        node.children.set(parts[i], child);
-      }
-      if (leaf) child.status = e.status;
-      node = child;
-    }
-  }
-  return root;
+/** The repo file tree, backed by @pierre/trees (the mock's stated backing). */
+function PierreRepoTree({ entries, changedSet, onOpenFile }: {
+  entries: Array<{ path: string; status?: string }>;
+  changedSet: Set<string>;
+  onOpenFile: (file: RepoFileOpen) => void;
+}): ReactElement {
+  const paths = useMemo(() => entries.map((e) => e.path), [entries]);
+  const fileSet = useMemo(() => new Set(paths), [paths]);
+  const gitStatus = useMemo<GitStatusEntry[]>(() => {
+    const map: Record<string, GitStatusEntry['status']> = { M: 'modified', A: 'added', D: 'deleted', R: 'renamed', '?': 'untracked' };
+    return entries
+      .filter((e) => e.status && map[e.status])
+      .map((e) => ({ path: e.path, status: map[e.status!] }));
+  }, [entries]);
+  const openRef = useRef(onOpenFile);
+  openRef.current = onOpenFile;
+  const changedRef = useRef(changedSet);
+  changedRef.current = changedSet;
+  const fileSetRef = useRef(fileSet);
+  fileSetRef.current = fileSet;
+  const { model } = useFileTree({
+    paths,
+    gitStatus,
+    density: 'compact',
+    onSelectionChange: (selected) => {
+      const path = selected.find((s) => fileSetRef.current.has(s));
+      if (path) openRef.current({ path, changed: changedRef.current.has(path) });
+    },
+  });
+  useEffect(() => {
+    model.resetPaths(paths);
+  }, [model, paths]);
+  return <FileTree model={model} className="gs-pierre-tree" />;
 }
 
 const STATUS_TONE: Record<string, string> = {
@@ -52,16 +60,25 @@ const STATUS_TONE: Record<string, string> = {
   '?': 'text-[var(--gs-text-ghost)]',
 };
 
+export interface RepoFileOpen {
+  path: string;
+  changed: boolean;
+  prevPath?: string;
+}
+
 export function RightRail({
   backend,
   workspaceId,
   projectName,
   workspaceName,
+  onOpenFile,
 }: {
   backend: SessionBackend | null;
   workspaceId: string;
   projectName: string;
   workspaceName: string;
+  /** Open a repo file as a dock tab in the workspace multi-view. */
+  onOpenFile: (file: RepoFileOpen) => void;
 }): ReactElement {
   const [closed, setClosed] = useState(() => {
     try { return window.localStorage.getItem(RAIL_CLOSED_KEY) === '1'; } catch { return false; }
@@ -102,7 +119,7 @@ export function RightRail({
         <button type="button" onClick={() => setClosed(true)} title="Collapse rail" className="ml-auto px-1 text-[var(--gs-text-ghost)] hover:text-[var(--gs-text)]">◨</button>
       </div>
       {mode === 'repo'
-        ? <RepoMode backend={backend} workspaceId={workspaceId} projectName={projectName} workspaceName={workspaceName} />
+        ? <RepoMode backend={backend} workspaceId={workspaceId} projectName={projectName} workspaceName={workspaceName} onOpenFile={onOpenFile} />
         : <ArtifactsMode backend={backend} workspaceId={workspaceId} workspaceName={workspaceName} />}
     </aside>
   );
@@ -110,22 +127,21 @@ export function RightRail({
 
 /* ── Repo mode ─────────────────────────────────────────────────────────────── */
 
-function RepoMode({ backend, workspaceId, projectName, workspaceName }: {
+function RepoMode({ backend, workspaceId, projectName, workspaceName, onOpenFile }: {
   backend: SessionBackend | null;
   workspaceId: string;
   projectName: string;
   workspaceName: string;
+  onOpenFile: (file: RepoFileOpen) => void;
 }): ReactElement {
   const [entries, setEntries] = useState<Array<{ path: string; status?: string }>>([]);
   const [changed, setChanged] = useState<ReviewChangedFile[]>([]);
   const [baseBranch, setBaseBranch] = useState<string>('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
   const [commitMsg, setCommitMsg] = useState('');
   const [committing, setCommitting] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
-  const [viewer, setViewer] = useState<{ path: string; changed: boolean; prevPath?: string } | null>(null);
 
   const refresh = useCallback(() => {
     if (!backend || !workspaceId) return;
@@ -151,44 +167,6 @@ function RepoMode({ backend, workspaceId, projectName, workspaceName }: {
   useEffect(() => { refresh(); }, [refresh]);
 
   const changedSet = useMemo(() => new Set(changed.map((f) => f.filePath)), [changed]);
-  const tree = useMemo(() => buildTree(entries), [entries]);
-
-  const toggleDir = (path: string): void =>
-    setCollapsed((prev) => {
-      const next = new Set(prev);
-      if (next.has(path)) next.delete(path);
-      else next.add(path);
-      return next;
-    });
-
-  const renderNode = (node: TreeNode, depth: number, out: ReactElement[]): void => {
-    const dirs = [...(node.children?.values() ?? [])].filter((n) => n.children).sort((a, b) => a.name.localeCompare(b.name));
-    const files = [...(node.children?.values() ?? [])].filter((n) => !n.children).sort((a, b) => a.name.localeCompare(b.name));
-    for (const d of dirs) {
-      const isCollapsed = collapsed.has(d.path);
-      out.push(
-        <button key={d.path} type="button" onClick={() => toggleDir(d.path)} style={{ paddingLeft: 8 + depth * 12 }}
-          className="flex w-full items-center gap-1.5 py-[2px] text-left text-[var(--gs-text-muted)] hover:bg-[var(--gs-bg-active)]">
-          <span className="text-[var(--gs-text-ghost)]">{isCollapsed ? '▸' : '▾'}</span>
-          <span className="truncate">{d.name}</span>
-        </button>,
-      );
-      if (!isCollapsed) renderNode(d, depth + 1, out);
-    }
-    for (const f of files) {
-      out.push(
-        <button key={f.path} type="button" onClick={() => setViewer({ path: f.path, changed: changedSet.has(f.path) })} style={{ paddingLeft: 8 + depth * 12 }}
-          className="flex w-full items-center gap-1.5 py-[2px] text-left hover:bg-[var(--gs-bg-active)]" title={f.path}>
-          <span className="text-[var(--gs-text-ghost)]">▤</span>
-          <span className={`min-w-0 flex-1 truncate ${f.status ? 'text-[var(--gs-text)]' : 'text-[var(--gs-text-muted)]'}`}>{f.name}</span>
-          {f.status && <span className={`flex-shrink-0 text-[10px] ${STATUS_TONE[f.status] ?? 'text-[var(--gs-text-dim)]'}`}>{f.status}</span>}
-        </button>,
-      );
-    }
-  };
-
-  const treeRows: ReactElement[] = [];
-  renderNode(tree, 0, treeRows);
 
   const commit = async (): Promise<void> => {
     if (!backend?.commitWorkspaceChanges || !commitMsg.trim() || committing) return;
@@ -221,7 +199,9 @@ function RepoMode({ backend, workspaceId, projectName, workspaceName }: {
             <div className="px-3 py-3 text-center text-[var(--gs-text-dim)]">Loading…</div>
           ) : error ? (
             <div className="px-3 py-3 text-center text-[var(--gs-danger)]">{error}</div>
-          ) : treeRows}
+          ) : (
+            <PierreRepoTree entries={entries} changedSet={changedSet} onOpenFile={onOpenFile} />
+          )}
         </div>
       </div>
       {/* Changes + commit */}
@@ -254,7 +234,7 @@ function RepoMode({ backend, workspaceId, projectName, workspaceName }: {
             changed.map((f) => {
               const letter = f.changeType === 'new' ? 'A' : f.changeType === 'deleted' ? 'D' : f.changeType === 'renamed' ? 'R' : 'M';
               return (
-                <button key={f.filePath} type="button" onClick={() => setViewer({ path: f.filePath, changed: true, prevPath: f.prevFilePath })}
+                <button key={f.filePath} type="button" onClick={() => onOpenFile({ path: f.filePath, changed: true, prevPath: f.prevFilePath })}
                   className="flex w-full items-center gap-1.5 px-2 py-[2px] text-left hover:bg-[var(--gs-bg-active)]" title={f.filePath}>
                   <span className={`w-3 flex-shrink-0 text-[10px] ${STATUS_TONE[letter] ?? 'text-[var(--gs-warning)]'}`}>{letter}</span>
                   <span className="min-w-0 flex-1 truncate text-[var(--gs-text)]">{f.filePath}</span>
@@ -264,25 +244,13 @@ function RepoMode({ backend, workspaceId, projectName, workspaceName }: {
           )}
         </div>
       </div>
-      {viewer && (
-        <FileViewer
-          backend={backend}
-          workspaceId={workspaceId}
-          projectName={projectName}
-          workspaceName={workspaceName}
-          path={viewer.path}
-          changed={viewer.changed}
-          prevPath={viewer.prevPath}
-          onClose={() => setViewer(null)}
-        />
-      )}
     </div>
   );
 }
 
-/* ── File viewer (Pierre diff for changed files, content otherwise) ────────── */
+/* ── Repo file panel (dock tab content): Pierre diff for changed files ─────── */
 
-function FileViewer({ backend, workspaceId, projectName, workspaceName, path, changed, prevPath, onClose }: {
+export function RepoFilePanel({ backend, workspaceId, projectName, workspaceName, path, changed, prevPath }: {
   backend: SessionBackend | null;
   workspaceId: string;
   projectName: string;
@@ -290,7 +258,6 @@ function FileViewer({ backend, workspaceId, projectName, workspaceName, path, ch
   path: string;
   changed: boolean;
   prevPath?: string;
-  onClose: () => void;
 }): ReactElement {
   const [patch, setPatch] = useState<string | null>(null);
   const [content, setContent] = useState<string | null>(null);
@@ -325,25 +292,21 @@ function FileViewer({ backend, workspaceId, projectName, workspaceName, path, ch
   }, [backend, workspaceId, projectName, workspaceName, path, changed, prevPath]);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center" onClick={onClose}>
-      <div className="absolute inset-0 bg-black/50" />
-      <div className="relative z-10 flex h-[80vh] w-[min(1100px,95vw)] flex-col border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] text-[12px] shadow-xl" onClick={(e) => e.stopPropagation()}>
-        <div className="flex items-center gap-2 border-b border-[var(--gs-border)] px-4 py-2.5 text-[13px]">
-          <span className="font-[family-name:var(--gs-font-mono)] text-[var(--gs-text)]">{path}</span>
-          {changed && <span className="rounded-full border border-[#4a3a1f] px-1.5 text-[10px] text-[var(--gs-warning)]">changed</span>}
-          <button type="button" onClick={onClose} className="ml-auto text-[var(--gs-text-dim)] hover:text-[var(--gs-text)]">✕</button>
-        </div>
-        <div className="min-h-0 flex-1 overflow-auto p-2">
-          {state === 'loading' ? (
-            <div className="flex h-full items-center justify-center text-[var(--gs-text-dim)]">Loading…</div>
-          ) : state === 'error' ? (
-            <div className="flex h-full items-center justify-center text-[var(--gs-danger)]">Failed to load {path}</div>
-          ) : patch ? (
-            <PatchDiff patch={patch} options={{ diffStyle: 'unified', theme: 'pierre-dark' }} />
-          ) : (
-            <pre className="whitespace-pre-wrap font-[family-name:var(--gs-font-mono)] text-[11px] text-[var(--gs-text)]">{content}</pre>
-          )}
-        </div>
+    <div className="flex h-full min-h-0 flex-col text-[12px]">
+      <div className="flex flex-shrink-0 items-center gap-2 border-b border-[var(--gs-border-muted)] px-3 py-1.5">
+        <span className="truncate font-[family-name:var(--gs-font-mono)] text-[12px] text-[var(--gs-text)]">{path}</span>
+        {changed && <span className="flex-shrink-0 rounded-full border border-[#4a3a1f] px-1.5 text-[10px] text-[var(--gs-warning)]">changed</span>}
+      </div>
+      <div className="min-h-0 flex-1 overflow-auto p-2">
+        {state === 'loading' ? (
+          <div className="flex h-full items-center justify-center text-[var(--gs-text-dim)]">Loading…</div>
+        ) : state === 'error' ? (
+          <div className="flex h-full items-center justify-center text-[var(--gs-danger)]">Failed to load {path}</div>
+        ) : patch ? (
+          <PatchDiff patch={patch} options={{ diffStyle: 'unified', theme: 'pierre-dark' }} />
+        ) : (
+          <pre className="whitespace-pre-wrap font-[family-name:var(--gs-font-mono)] text-[11px] text-[var(--gs-text)]">{content}</pre>
+        )}
       </div>
     </div>
   );

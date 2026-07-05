@@ -36,7 +36,7 @@ import { BoardPage } from "./pages/BoardPage.web.js";
 import { WorkspaceDetailPage } from "./pages/WorkspaceDetailPage.web.js";
 import { FlowWeb } from "./components/Flow.web.js";
 import { ArtifactsBrowser } from "./components/ArtifactsBrowser.web.js";
-import { RightRail } from "./components/RightRail.web.js";
+import { RightRail, RepoFilePanel, type RepoFileOpen } from "./components/RightRail.web.js";
 import { ProjectHomePage } from "./pages/ProjectHomePage.web.js";
 import { useInboxPage } from './app/react/index.js';
 import { InboxWeb } from "./components/Inbox.web.js";
@@ -128,6 +128,8 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   const [eventsWorkspaceLabel, setEventsWorkspaceLabel] = useState<string>('');
   const [artifactsBrowse, setArtifactsBrowse] = useState<{ workspaceId: string; backendKey: string; label: string } | null>(null);
   const [projectHomeName, setProjectHomeName] = useState<string | null>(null);
+  /** Repo files opened as dock tabs, keyed by workspace selectionKey. */
+  const [repoFilePanes, setRepoFilePanes] = useState<Record<string, RepoFileOpen[]>>({});
   const [pendingProcessEditWorkspaceId, setPendingProcessEditWorkspaceId] = useState<string | null>(null);
   const [modifiers, setModifiers] = useState<ModifierState>({
     ctrl: false,
@@ -2841,6 +2843,31 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
           ),
         });
       }
+      // Repo files opened from the RightRail as dock tabs.
+      const wsKey = workspace.selectionKey ?? workspace.id;
+      for (const f of repoFilePanes[wsKey] ?? []) {
+        const name = f.path.split('/').pop() ?? f.path;
+        panels.push({
+          id: `file:${f.path}`,
+          title: `${f.changed ? '± ' : '▤ '}${name}`,
+          version: `file|${f.path}|${f.changed}|${f.prevPath ?? ''}`,
+          onClose: () => setRepoFilePanes((prev) => ({
+            ...prev,
+            [wsKey]: (prev[wsKey] ?? []).filter((x) => x.path !== f.path),
+          })),
+          render: () => (
+            <RepoFilePanel
+              backend={paneBackend}
+              workspaceId={workspace.id}
+              projectName={workspace.projectName}
+              workspaceName={workspace.name}
+              path={f.path}
+              changed={f.changed}
+              prevPath={f.prevPath}
+            />
+          ),
+        });
+      }
       if (panels.length > 0) {
         cachedTerminalPanelsRef.current[workspace.selectionKey ?? workspace.id] = panels;
         terminalMemoryDebugGauge('app.cachedTerminalPanelCount', panels.length);
@@ -2895,6 +2922,16 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
                     workspaceId={workspace.id}
                     projectName={workspace.projectName}
                     workspaceName={workspace.name}
+                    onOpenFile={(file) => {
+                      const key = workspace.selectionKey ?? workspace.id;
+                      setRepoFilePanes((prev) => {
+                        const cur = prev[key] ?? [];
+                        const next = cur.some((x) => x.path === file.path)
+                          ? cur.map((x) => (x.path === file.path ? file : x))
+                          : [...cur, file];
+                        return { ...prev, [key]: next };
+                      });
+                    }}
                   />
                 }
                 sessions={workspaceSessions}
