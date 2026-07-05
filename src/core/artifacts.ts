@@ -297,6 +297,15 @@ export async function rollupArtifacts(
   }
 }
 
+/** Clean up stale worktree registrations after a workspace dir was deleted
+ *  out from under its mount (workspace removal deletes the whole tree). The
+ *  branch survives for a later roll-up. Best-effort no-op without a repo. */
+export async function pruneArtifactMounts(projectDir: string): Promise<void> {
+  const { repoDir } = artifactPaths(projectDir);
+  if (!existsSync(join(repoDir, 'HEAD'))) return;
+  await git(repoDir, 'worktree prune').catch(() => undefined);
+}
+
 /** Drop a workspace's artifacts branch (and its mount) without merging. */
 export async function abandonArtifacts(projectDir: string, branch: string): Promise<void> {
   const { repoDir } = artifactPaths(projectDir);

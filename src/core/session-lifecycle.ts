@@ -462,6 +462,15 @@ export async function createWorkspaceForSession(
 
   syncBundleWorkspaceState(projectName, workspacePath);
 
+  // Artifacts FS: branch-per-workspace mount at .gitspace/artifacts
+  // (docs/ARTIFACTS-FS.md). Best-effort — never fail workspace creation.
+  try {
+    const { ensureArtifactsMount } = await import('./artifacts.js');
+    await ensureArtifactsMount(getProjectDir(projectName), workspacePath, workspaceName);
+  } catch {
+    /* artifacts mount is additive; workspace remains usable without it */
+  }
+
   return {
     projectName,
     workspaceName,

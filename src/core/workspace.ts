@@ -224,6 +224,16 @@ export async function deleteWorkspaceCore(
     }
   }
 
+  // Artifacts FS: the workspace's artifacts mount died with the directory —
+  // prune the stale worktree registration. The artifacts BRANCH survives for a
+  // later roll-up (merge into main) or explicit abandon. Best-effort.
+  try {
+    const { pruneArtifactMounts } = await import('./artifacts.js');
+    await pruneArtifactMounts(getProjectDir(projectName));
+  } catch {
+    /* additive cleanup only */
+  }
+
   // Try to delete the local branch
   if (!options.keepBranch && info?.branch) {
     options.onProgress?.(`Deleting branch ${info.branch}...`);

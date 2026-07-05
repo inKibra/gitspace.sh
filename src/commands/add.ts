@@ -10,6 +10,7 @@ import {
   createProject,
   setCurrentProject,
   getProjectBaseDir,
+  getProjectDir,
   getProjectWorkspacesDir,
   getAllProjectNames,
   projectExists,
@@ -249,6 +250,17 @@ export async function addProject(options: {
     cleanupBundleDir(loadedBundle.bundleDir);
   }
 
+  // Artifacts FS: birth the project's artifacts repo and mount main at the
+  // base clone (docs/ARTIFACTS-FS.md). Best-effort — never fail project add.
+  try {
+    const { ensureArtifactsMount } = await import('../core/artifacts.js');
+    if (existsSync(baseDir)) {
+      await ensureArtifactsMount(getProjectDir(projectName), baseDir, 'main');
+    }
+  } catch (error) {
+    logger.warning(`Artifacts repo skipped: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
   logger.success(`Project '${projectName}' created`);
 
   // Set as current project
@@ -473,6 +485,15 @@ export async function addWorkspace(
   const bundleSync = syncBundleWorkspaceState(currentProject, workspacePath);
   if (bundleSync.parseError) {
     logger.warning(`Bundle parse error: ${bundleSync.parseError}`);
+  }
+
+  // Artifacts FS: branch-per-workspace mount at .gitspace/artifacts
+  // (docs/ARTIFACTS-FS.md). Best-effort — never fail workspace creation.
+  try {
+    const { ensureArtifactsMount } = await import('../core/artifacts.js');
+    await ensureArtifactsMount(getProjectDir(currentProject), workspacePath, workspaceName);
+  } catch (error) {
+    logger.warning(`Artifacts mount skipped: ${error instanceof Error ? error.message : String(error)}`);
   }
 
   // If workspace was created from a Linear issue, save issue details as markdown
