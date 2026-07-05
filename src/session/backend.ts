@@ -73,6 +73,8 @@ export interface CreateProjectParams {
   projectName?: string;
   baseBranch?: string;
   setCurrent?: boolean;
+  /** From-scratch project: git init locally, no repo required. */
+  scratch?: boolean;
 }
 
 export interface PreparedProjectResult {

@@ -874,6 +874,7 @@ export class RemoteSessionHandler {
             projectName: msg.projectName,
             baseBranch: msg.baseBranch,
             setCurrent: msg.setCurrent,
+            scratch: msg.scratch,
           },
           message: 'Creating project',
           refreshMachineSnapshot: true,

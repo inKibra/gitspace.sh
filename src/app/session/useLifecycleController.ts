@@ -435,9 +435,42 @@ export function useLifecycleController(
       });
     };
 
+    const openScratchPrompt = () => {
+      flow.showInput({
+        title: 'New Project Name',
+        label: 'Project name (created locally — publish to a remote later):',
+        placeholder: 'my-new-project',
+        validation: (value) => {
+          if (!value.trim()) return 'Project name is required';
+          const sanitized = sanitizeForFileSystem(value.trim());
+          if (!sanitized) return 'Project name must contain at least one letter or number';
+          return null;
+        },
+        onSubmit: async (value) => {
+          const projectName = value.trim();
+          flow.showLoading({ title: 'Creating Project', message: `Initializing ${projectName}...` });
+          try {
+            await createProject({ repository: '', projectName, scratch: true });
+            await completeProjectCreation(projectName, 'local');
+          } catch (error) {
+            flow.showMessage({
+              title: 'Create Project Failed',
+              message: toErrorMessage(error, 'Failed to create project'),
+              variant: 'error',
+            });
+          }
+        },
+      });
+    };
+
     flow.showSelect({
       title: 'Create Project From',
       options: [
+        {
+          label: 'Start from scratch',
+          description: 'New local repo — no GitHub required, publish later',
+          value: 'scratch' as const,
+        },
         {
           label: 'Git Remote URL',
           description: 'Enter a remote URL directly',
@@ -450,6 +483,10 @@ export function useLifecycleController(
         },
       ],
       onSelect: (source) => {
+        if (source === 'scratch') {
+          openScratchPrompt();
+          return;
+        }
         if (source === 'manual') {
           openManualRepoPrompt();
           return;
@@ -764,7 +801,7 @@ export function useLifecycleController(
       ...(openCreateGoalFlow
         ? [{ label: 'Goal', description: 'Add a planned goal to a workspace chain', value: 'goal' as const }]
         : []),
-      { label: 'Project', description: 'Clone a git repository', value: 'project' as const },
+      { label: 'Project', description: 'Clone a repo — or start from scratch', value: 'project' as const },
     ];
 
     flow.showSelect({

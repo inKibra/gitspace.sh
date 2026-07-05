@@ -239,10 +239,18 @@ export async function createWorktree(
     } else {
       // Branch doesn't exist, create new from base
       // Use --no-track to avoid setting upstream to baseBranch (user should push -u to set correct upstream)
+      // Prefer origin/<base>; fall back to the local base branch for repos with
+      // no remote (from-scratch projects created by `gssh project create`).
+      let startPoint = `origin/${baseBranch}`;
+      try {
+        await execAsync(`git rev-parse --verify --quiet ${escapeShellArg(startPoint)}`, { cwd: repoPath });
+      } catch {
+        startPoint = baseBranch;
+      }
       onProgress?.(`Creating new branch ${branchName}...`);
-      logger.debug(`Creating new branch from ${baseBranch}: ${branchName}`);
+      logger.debug(`Creating new branch from ${startPoint}: ${branchName}`);
       await execAsync(
-        `git worktree add -b ${escapeShellArg(branchName)} ${escapeShellArg(workspacePath)} ${escapeShellArg(`origin/${baseBranch}`)} --no-track`,
+        `git worktree add -b ${escapeShellArg(branchName)} ${escapeShellArg(workspacePath)} ${escapeShellArg(startPoint)} --no-track`,
         { cwd: repoPath }
       );
     }

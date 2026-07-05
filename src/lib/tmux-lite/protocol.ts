@@ -418,7 +418,7 @@ export type Command =
   | { type: 'github-repos'; org?: string }
   | { type: 'remote-branches'; projectName: string }
   | { type: 'linear-issues'; projectName: string }
-  | { type: 'project-create'; repository: string; projectName?: string; baseBranch?: string; setCurrent?: boolean }
+  | { type: 'project-create'; repository: string; projectName?: string; baseBranch?: string; setCurrent?: boolean; scratch?: boolean }
   | { type: 'project-prepare'; repository: string; projectName?: string; baseBranch?: string; setCurrent?: boolean }
   | { type: 'project-finalize'; projectName: string; repository: string; baseBranch: string; bundle?: import('../../types/bundle.js').SpacesBundle; inputValues?: Record<string, string>; secretValues?: Record<string, string>; confirmResults?: Record<string, import('../../types/bundle.js').ConfirmStepResult>; setCurrent?: boolean }
   | { type: 'project-cancel'; projectName: string }

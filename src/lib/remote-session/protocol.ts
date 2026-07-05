@@ -190,6 +190,7 @@ export interface CreateProjectRequest {
   projectName?: string;
   baseBranch?: string;
   setCurrent?: boolean;
+  scratch?: boolean;
 }
 
 export interface PrepareProjectCreationRequest {

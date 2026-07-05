@@ -31,6 +31,10 @@ export interface SessionCreateProjectParams {
   projectName?: string;
   baseBranch?: string;
   setCurrent?: boolean;
+  /** Create a from-scratch project: git init the base repo locally instead of
+   *  cloning (`repository` is ignored). GitHub is a later, optional attachment
+   *  (docs/ARTIFACTS-FS.md — project creation & FTUE). */
+  scratch?: boolean;
 }
 
 export interface SessionCreateProjectResult {
@@ -282,6 +286,7 @@ export async function listLinearIssuesForSession(
 export async function createProjectForSession(
   params: SessionCreateProjectParams
 ): Promise<SessionCreateProjectResult> {
+  if (params.scratch) return createScratchProjectForSession(params);
   const repository = validateRepository(params.repository);
   const projectName = sanitizeProjectName(params.projectName?.trim() || extractRepoName(repository));
 
@@ -304,11 +309,59 @@ export async function createProjectForSession(
     setCurrentProject(projectName);
   }
 
+  await mountProjectArtifacts(projectName, baseDir);
+
   return {
     projectName,
     repository,
     baseBranch,
   };
+}
+
+/** Artifacts FS: birth the project's artifacts repo + mount main at the base
+ *  clone (docs/ARTIFACTS-FS.md). Best-effort — never fail project creation. */
+async function mountProjectArtifacts(projectName: string, baseDir: string): Promise<void> {
+  try {
+    const { ensureArtifactsMount } = await import('./artifacts.js');
+    await ensureArtifactsMount(getProjectDir(projectName), baseDir, 'main');
+  } catch {
+    /* artifacts are additive */
+  }
+}
+
+/** From-scratch project: no repo required. `git init` the base, seed an
+ *  initial commit, and attach nothing — GitHub/publish is a later rung. */
+async function createScratchProjectForSession(
+  params: SessionCreateProjectParams
+): Promise<SessionCreateProjectResult> {
+  const rawName = params.projectName?.trim() || params.repository?.trim();
+  if (!rawName) {
+    throw new SpacesError('Project name is required for a from-scratch project.', 'USER_ERROR', 1);
+  }
+  const projectName = sanitizeProjectName(rawName);
+  if (projectExists(projectName)) {
+    throw new SpacesError(`Project "${projectName}" already exists.`, 'USER_ERROR', 1);
+  }
+  const baseBranch = params.baseBranch?.trim() || 'main';
+  const projectDir = getProjectDir(projectName);
+  const baseDir = getProjectBaseDir(projectName);
+  mkdirSync(baseDir, { recursive: true });
+  execFileSync('git', ['init', '-q', '--initial-branch', baseBranch, baseDir]);
+  writeFileSync(join(baseDir, 'README.md'), `# ${projectName}\n\nCreated with gitspace. Publish to a remote whenever you're ready.\n`);
+  execFileSync('git', ['-C', baseDir, 'add', 'README.md']);
+  execFileSync('git', [
+    '-C', baseDir,
+    '-c', 'user.name=gitspace', '-c', 'user.email=init@gitspace.sh', '-c', 'commit.gpgsign=false',
+    'commit', '-q', '-m', 'init project',
+  ]);
+
+  createProject(projectName, 'local', baseBranch);
+  if (params.setCurrent ?? true) {
+    setCurrentProject(projectName);
+  }
+  await mountProjectArtifacts(projectName, baseDir);
+
+  return { projectName, repository: 'local', baseBranch };
 }
 
 export async function prepareProjectForSession(
