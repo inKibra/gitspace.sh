@@ -136,24 +136,27 @@ export function useTranscript(opts: {
 
   // When the live turn ends (live empties after being non-empty), reconcile the
   // finished turn into committed. `fetchRange` reads the session's live in-memory
-  // manager (no lag), which already includes the just-finished turn, so we cannot
-  // simply append the live blocks — that double-counts. In follow mode we refetch
-  // the authoritative tail (single source of truth); in browse mode we append so
-  // the user's scroll position isn't disturbed (committed isn't refetched while
-  // browsing, so no double-count there).
+  // manager (no lag), which already includes the just-finished turn, so a follow
+  // refetch replaces committed with the authoritative tail. This MUST be a
+  // layout effect with a synchronous append: if the live suffix vanished for
+  // even one painted frame, the content shrink would clamp the user's scrollTop,
+  // fire a scroll event, flip browse → follow, and yank a scrolled-up reader to
+  // the bottom when a turn completes. Appending before paint keeps the height
+  // stable (the render-time dedup absorbs any transient overlap).
   const prevLiveRef = useRef<readonly Block[]>([]);
-  useEffect(() => {
+  useLayoutEffect(() => {
     const prev = prevLiveRef.current;
     prevLiveRef.current = live;
     if (prev.length === 0 || live.length !== 0) return;
-    if (modeRef.current === 'browse') {
-      setCommitted((c) => [...c, ...prev]);
-      return;
-    }
+    setCommitted((c) => [...c, ...prev]); // sync, pre-paint — no shrink frame
+    if (modeRef.current === 'browse') return;
     let alive = true;
     fetchRange(undefined, pageSize)
       .then((page) => {
         if (!alive) return;
+        // Only adopt the authoritative tail if the user is still following —
+        // they may have scrolled up during the fetch.
+        if (modeRef.current !== 'follow') return;
         setCommitted(page.blocks);
         cursorRef.current = page.oldestCursor ?? undefined;
         setHasMoreOlder(page.hasMore);
