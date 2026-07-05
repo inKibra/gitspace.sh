@@ -35,6 +35,7 @@ import {
 import { BoardPage } from "./pages/BoardPage.web.js";
 import { WorkspaceDetailPage } from "./pages/WorkspaceDetailPage.web.js";
 import { FlowWeb } from "./components/Flow.web.js";
+import { ArtifactsBrowser } from "./components/ArtifactsBrowser.web.js";
 import { useInboxPage } from './app/react/index.js';
 import { InboxWeb } from "./components/Inbox.web.js";
 import { useEvents, toWideEventItem, type WideEventItem } from "./components/Events.js";
@@ -123,6 +124,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   const [showEvents, setShowEvents] = useState(false);
   const [eventsWorkspacePath, setEventsWorkspacePath] = useState<string | null>(null);
   const [eventsWorkspaceLabel, setEventsWorkspaceLabel] = useState<string>('');
+  const [artifactsBrowse, setArtifactsBrowse] = useState<{ workspaceId: string; backendKey: string; label: string } | null>(null);
   const [pendingProcessEditWorkspaceId, setPendingProcessEditWorkspaceId] = useState<string | null>(null);
   const [modifiers, setModifiers] = useState<ModifierState>({
     ctrl: false,
@@ -2678,6 +2680,14 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
           </div>
         )}
         {notesModal}
+        {artifactsBrowse && (
+          <ArtifactsBrowser
+            backend={multi.getBackend(artifactsBrowse.backendKey)}
+            workspaceId={artifactsBrowse.workspaceId}
+            workspaceLabel={artifactsBrowse.label}
+            onClose={() => setArtifactsBrowse(null)}
+          />
+        )}
         {selectedGoal && (
           <GoalDetailPanel
             goal={selectedGoal}
@@ -2926,6 +2936,9 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
                   setEventsWorkspaceLabel(workspace.name);
                   setShowEvents(true);
                   void multi.requestEvents(getWorkspaceRef(workspaceId, workspaceBackendKey));
+                }}
+                onOpenArtifacts={(workspaceId) => {
+                  setArtifactsBrowse({ workspaceId, backendKey: workspaceBackendKey, label: workspace.name });
                 }}
                 onDeleteSession={handleDeleteSession}
                 onDeleteWorkspace={handleDeleteWorkspace}

@@ -39,6 +39,8 @@ export interface WorkspaceDetailPaneProps {
   onRequestStatusChange?: (workspaceId: string, projectName: string) => void | Promise<void>;
   onOpenNotes?: (workspaceId: string) => void;
   onOpenEvents: (workspaceId: string) => void;
+  /** Open the workspace artifacts browser (docs/ARTIFACTS-FS.md). */
+  onOpenArtifacts?: (workspaceId: string) => void;
   onOpenAgentSession?: (workspaceId: string, agentSessionId: string) => void | Promise<void>;
   onCreateAgentSession?: (workspaceId: string) => void | Promise<void>;
   onKillAgentSession?: (workspaceId: string, agentSessionId: string) => void | Promise<void>;

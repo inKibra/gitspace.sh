@@ -407,6 +407,8 @@ export type Command =
   | { type: 'agent-history'; target: AgentWorkspaceTargetPayload; agentSessionId: string }
   | { type: 'agent-tree'; target: AgentWorkspaceTargetPayload; agentSessionId: string }
   | { type: 'agent-navigate-history'; target: AgentWorkspaceTargetPayload; agentSessionId: string; entryId: string; mode?: 'redo' | 'jump' }
+  | { type: 'artifacts-list'; target: AgentWorkspaceTargetPayload }
+  | { type: 'artifacts-read'; target: AgentWorkspaceTargetPayload; path: string }
   | { type: 'workspace-editors-list'; target: AgentWorkspaceTargetPayload }
   | { type: 'workspace-editor-open'; target: AgentWorkspaceTargetPayload; editorId: import('../../utils/open-editor.js').WorkspaceEditorId }
   | { type: 'agent-file-suggestions'; target: AgentWorkspaceTargetPayload; prefix: string; limit?: number }
@@ -500,6 +502,8 @@ export type Response =
   | { type: 'agent-tools'; tools: import('../../agents/agent-runtime-types.js').AgentToolInfo[] }
   | { type: 'agent-history'; entries: import('../../agents/agent-runtime-types.js').AgentHistoryEntry[] }
   | { type: 'agent-tree'; nodes: import('../../agents/agent-runtime-types.js').AgentTreeNode[] }
+  | { type: 'artifacts-list'; entries: import('../../core/artifacts.js').ArtifactListEntry[] }
+  | { type: 'artifacts-read'; base64: string; size: number; truncated: boolean }
   | { type: 'agent-navigate'; ok: boolean; editorText?: string }
   | { type: 'workspace-editors'; editors: import('../../utils/open-editor.js').WorkspaceEditorOption[] }
   | { type: 'agent-file-suggestions'; suggestions: Array<{ path: string; isDirectory: boolean }> }

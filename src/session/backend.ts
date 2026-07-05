@@ -291,6 +291,10 @@ export interface SessionBackend {
   getAgentHistory?(workspaceId: string, agentSessionId: string): Promise<AgentHistoryEntry[]>;
   /** The full conversation tree (message nodes) for the branch explorer. */
   getAgentSessionTree?(workspaceId: string, agentSessionId: string): Promise<AgentTreeNode[]>;
+  /** List the workspace's artifacts mount (pointer-aware). */
+  listWorkspaceArtifacts?(workspaceId: string): Promise<Array<{ path: string; size: number; pointer: boolean }>>;
+  /** Read one artifact (pointer-resolved) as base64, capped server-side. */
+  readWorkspaceArtifact?(workspaceId: string, path: string): Promise<{ base64: string; size: number; truncated: boolean }>;
   /** Navigate the conversation tree: `redo` rewinds to the message's parent and
    *  returns its text; `jump` makes the node the leaf (return to a fork). */
   navigateAgentHistory?(workspaceId: string, agentSessionId: string, entryId: string, mode?: 'redo' | 'jump'): Promise<{ ok: boolean; editorText?: string }>;

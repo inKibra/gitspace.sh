@@ -18,7 +18,7 @@
 import { exec, execSync } from 'child_process';
 import { promisify } from 'util';
 import { createHash } from 'crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync, appendFileSync } from 'fs';
 import { dirname, join } from 'path';
 import { SpacesError } from '../types/errors.js';
 import { escapeShellArg } from '../utils/shell-escape.js';
@@ -253,6 +253,45 @@ export function captureArtifactsSync(
     gitS(`notes add -f -m ${escapeShellArg(JSON.stringify(opts.provenance))} ${commit}`);
   }
   return { commit, pointers };
+}
+
+export interface ArtifactListEntry {
+  /** Mount-relative posix path. */
+  path: string;
+  /** On-disk size; for pointers this is the REAL blob size. */
+  size: number;
+  /** Stored as an LFS pointer (blob lives in the blob store). */
+  pointer: boolean;
+}
+
+/** Recursively list a mount's files (pointer-aware, `.git` excluded). */
+export function listArtifactFiles(mountDir: string): ArtifactListEntry[] {
+  const out: ArtifactListEntry[] = [];
+  const walk = (rel: string): void => {
+    const abs = rel ? join(mountDir, rel) : mountDir;
+    for (const name of readdirSync(abs)) {
+      if (rel === '' && (name === '.git' || name.startsWith('.git'))) continue;
+      const childRel = rel ? `${rel}/${name}` : name;
+      const st = statSync(join(mountDir, childRel));
+      if (st.isDirectory()) {
+        walk(childRel);
+      } else {
+        let size = st.size;
+        let pointer = false;
+        if (st.size < 400) {
+          const ptr = parseLfsPointer(readFileSync(join(mountDir, childRel), 'utf8'));
+          if (ptr) {
+            pointer = true;
+            size = ptr.size;
+          }
+        }
+        out.push({ path: childRel, size, pointer });
+      }
+    }
+  };
+  if (!existsSync(mountDir)) return out;
+  walk('');
+  return out.sort((a, b) => a.path.localeCompare(b.path));
 }
 
 /** Read an artifact from a mount, transparently resolving LFS pointers. */

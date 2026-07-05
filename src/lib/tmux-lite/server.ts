@@ -3701,6 +3701,35 @@ routerListener = Bun.listen({
             }
             break;
 
+          case 'artifacts-list':
+            try {
+              const { artifactsMountDir, listArtifactFiles } = await import('../../core/artifacts.js');
+              res = { type: 'artifacts-list', entries: listArtifactFiles(artifactsMountDir(cmd.target.workspacePath)) };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to list artifacts: ${errMsg}` };
+            }
+            break;
+
+          case 'artifacts-read':
+            try {
+              const { artifactsMountDir, readArtifact } = await import('../../core/artifacts.js');
+              const { getProjectDir } = await import('../../core/config.js');
+              const MAX_READ = 25 * 1024 * 1024;
+              const bytes = readArtifact(getProjectDir(cmd.target.projectName), artifactsMountDir(cmd.target.workspacePath), cmd.path);
+              const truncated = bytes.length > MAX_READ;
+              res = {
+                type: 'artifacts-read',
+                base64: (truncated ? bytes.subarray(0, MAX_READ) : bytes).toString('base64'),
+                size: bytes.length,
+                truncated,
+              };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to read artifact: ${errMsg}` };
+            }
+            break;
+
           case 'workspace-editor-open':
             try {
               const result = await openWorkspaceInEditor(cmd.editorId, cmd.target.workspacePath);
