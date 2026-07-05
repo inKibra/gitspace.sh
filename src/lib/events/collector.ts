@@ -152,6 +152,9 @@ export class WideEventCollector {
       allowString = false; // json gate: only JSON lines become events
     } else {
       allowString = true; // 'all' gate: every line becomes an event
+      // Still honor an @event-style marker so prefixed JSON keeps full fidelity
+      // (otherwise "@event {…}" would fail the JSON parse and downgrade to string).
+      if (prefix && trimmedLine.startsWith(prefix)) payload = trimmedLine.slice(prefix.length).trim();
     }
 
     let parsed: Record<string, unknown> | null = null;

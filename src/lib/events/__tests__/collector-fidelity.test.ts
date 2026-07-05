@@ -76,6 +76,13 @@ describe('collector graceful ingestion', () => {
     expect(events[0]!.fidelity).toBe('json');
   });
 
+  it('all mode: an @event-prefixed JSON line keeps full fidelity (prefix stripped)', () => {
+    const [e] = collect('all', ['@event {"event":"job.done","requestId":"r-9","message":"ok"}']);
+    expect(e.fidelity).toBe('json+correlation');
+    expect(e.eventName).toBe('job.done');
+    expect(e.correlationId).toBe('r-9');
+  });
+
   it('prefix mode: a marked line with a non-JSON payload is a string event', () => {
     const [e] = collect('prefix', ['@event hello world']);
     expect(e.fidelity).toBe('string');
