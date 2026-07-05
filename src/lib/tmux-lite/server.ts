@@ -3730,6 +3730,36 @@ routerListener = Bun.listen({
             }
             break;
 
+          case 'project-artifacts-list':
+            try {
+              const { ensureArtifactsMount, listArtifactFiles } = await import('../../core/artifacts.js');
+              const { getProjectBaseDir, getProjectDir } = await import('../../core/config.js');
+              // Lazily mount main at the base clone for pre-artifacts projects.
+              const mount = await ensureArtifactsMount(getProjectDir(cmd.projectName), getProjectBaseDir(cmd.projectName), 'main');
+              res = { type: 'artifacts-list', entries: listArtifactFiles(mount) };
+            } catch (e) {
+              res = { type: 'error', message: `Failed to list project artifacts: ${e instanceof Error ? e.message : String(e)}` };
+            }
+            break;
+
+          case 'project-artifacts-read':
+            try {
+              const { artifactsMountDir, readArtifact } = await import('../../core/artifacts.js');
+              const { getProjectBaseDir, getProjectDir } = await import('../../core/config.js');
+              const MAX_READ = 25 * 1024 * 1024;
+              const bytes = readArtifact(getProjectDir(cmd.projectName), artifactsMountDir(getProjectBaseDir(cmd.projectName)), cmd.path);
+              const truncated = bytes.length > MAX_READ;
+              res = {
+                type: 'artifacts-read',
+                base64: (truncated ? bytes.subarray(0, MAX_READ) : bytes).toString('base64'),
+                size: bytes.length,
+                truncated,
+              };
+            } catch (e) {
+              res = { type: 'error', message: `Failed to read project artifact: ${e instanceof Error ? e.message : String(e)}` };
+            }
+            break;
+
           case 'repo-tree':
             try {
               const { listRepoFiles } = await import('../../core/git.js');

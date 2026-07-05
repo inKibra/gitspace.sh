@@ -714,6 +714,19 @@ export interface ReadArtifactRequest {
   path: string;
 }
 
+export interface ProjectArtifactsListRequest {
+  type: 'project_artifacts_list';
+  requestId: string;
+  projectName: string;
+}
+
+export interface ProjectArtifactsReadRequest {
+  type: 'project_artifacts_read';
+  requestId: string;
+  projectName: string;
+  path: string;
+}
+
 export interface RepoTreeRequest {
   type: 'repo_tree';
   requestId: string;
@@ -1155,6 +1168,8 @@ export type ClientToMachineMessage =
   | GetAgentSessionTreeRequest
   | ListArtifactsRequest
   | ReadArtifactRequest
+  | ProjectArtifactsListRequest
+  | ProjectArtifactsReadRequest
   | RepoTreeRequest
   | RepoReadRequest
   | RepoCommitRequest
@@ -1319,6 +1334,8 @@ export function isBrowseMessage(msg: RemoteSessionMessage): msg is ClientToMachi
     'get_agent_session_tree',
     'list_artifacts',
     'read_artifact',
+    'project_artifacts_list',
+    'project_artifacts_read',
     'repo_tree',
     'repo_read',
     'repo_commit',

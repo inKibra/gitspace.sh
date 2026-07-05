@@ -409,6 +409,8 @@ export type Command =
   | { type: 'agent-navigate-history'; target: AgentWorkspaceTargetPayload; agentSessionId: string; entryId: string; mode?: 'redo' | 'jump' }
   | { type: 'artifacts-list'; target: AgentWorkspaceTargetPayload }
   | { type: 'artifacts-read'; target: AgentWorkspaceTargetPayload; path: string }
+  | { type: 'project-artifacts-list'; projectName: string }
+  | { type: 'project-artifacts-read'; projectName: string; path: string }
   | { type: 'repo-tree'; target: AgentWorkspaceTargetPayload }
   | { type: 'repo-read'; target: AgentWorkspaceTargetPayload; path: string }
   | { type: 'repo-commit'; target: AgentWorkspaceTargetPayload; message: string }

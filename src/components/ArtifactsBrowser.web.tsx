@@ -41,6 +41,9 @@ export function ArtifactsBrowser({
   workspaceId,
   workspaceLabel,
   initialSelected = null,
+  scopeLabel,
+  listFn,
+  readFn,
   onClose,
 }: {
   backend: SessionBackend | null;
@@ -48,6 +51,11 @@ export function ArtifactsBrowser({
   workspaceLabel?: string;
   /** Preselect + preview this artifact path on open. */
   initialSelected?: string | null;
+  /** Override the header scope hint (defaults to the workspace-mount hint). */
+  scopeLabel?: string;
+  /** Custom source (e.g. project-level artifacts). Defaults to the workspace mount. */
+  listFn?: () => Promise<Entry[]>;
+  readFn?: (path: string) => Promise<{ base64: string; size: number; truncated: boolean }>;
   onClose: () => void;
 }): ReactElement {
   const [entries, setEntries] = useState<Entry[]>([]);
@@ -59,32 +67,32 @@ export function ArtifactsBrowser({
 
   useEffect(() => {
     let alive = true;
-    const fn = backend?.listWorkspaceArtifacts;
-    if (!fn) {
+    const list = listFn ?? (backend?.listWorkspaceArtifacts ? () => backend.listWorkspaceArtifacts!(workspaceId) : null);
+    if (!list) {
       setLoading(false);
       setError('Artifacts not available on this backend.');
       return;
     }
-    fn.call(backend, workspaceId)
-      .then((list) => { if (alive) setEntries(list); })
+    list()
+      .then((l) => { if (alive) setEntries(l); })
       .catch((e) => { if (alive) setError(e instanceof Error ? e.message : 'Failed to list artifacts'); })
       .finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
-  }, [backend, workspaceId]);
+  }, [backend, workspaceId, listFn]);
 
   useEffect(() => {
     if (!selected) return;
     let alive = true;
-    const fn = backend?.readWorkspaceArtifact;
-    if (!fn) return;
+    const read = readFn ?? (backend?.readWorkspaceArtifact ? (p: string) => backend.readWorkspaceArtifact!(workspaceId, p) : null);
+    if (!read) return;
     setPreviewLoading(true);
     setPreview(null);
-    fn.call(backend, workspaceId, selected)
+    read(selected)
       .then((r) => { if (alive) setPreview({ path: selected, ...r }); })
       .catch(() => { if (alive) setPreview(null); })
       .finally(() => { if (alive) setPreviewLoading(false); });
     return () => { alive = false; };
-  }, [backend, workspaceId, selected]);
+  }, [backend, workspaceId, selected, readFn]);
 
   // Group by top-level directory for a light tree feel.
   const groups = useMemo(() => {
@@ -106,7 +114,7 @@ export function ArtifactsBrowser({
         <div className="flex items-center gap-2 border-b border-[var(--gs-border)] px-4 py-2.5 text-[13px]">
           <span className="text-[var(--gs-accent)]">▤ Artifacts</span>
           <span className="text-[var(--gs-text-dim)]">{workspaceLabel ?? workspaceId}</span>
-          <span className="text-[10px] text-[var(--gs-text-ghost)]">.gitspace/artifacts · workspace branch of the project artifacts repo</span>
+          <span className="text-[10px] text-[var(--gs-text-ghost)]">{scopeLabel ?? '.gitspace/artifacts · workspace branch of the project artifacts repo'}</span>
           <button type="button" onClick={onClose} className="ml-auto text-[var(--gs-text-dim)] hover:text-[var(--gs-text)]">✕</button>
         </div>
         <div className="flex min-h-0 flex-1">

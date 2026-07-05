@@ -37,6 +37,7 @@ import { WorkspaceDetailPage } from "./pages/WorkspaceDetailPage.web.js";
 import { FlowWeb } from "./components/Flow.web.js";
 import { ArtifactsBrowser } from "./components/ArtifactsBrowser.web.js";
 import { RightRail } from "./components/RightRail.web.js";
+import { ProjectHomePage } from "./pages/ProjectHomePage.web.js";
 import { useInboxPage } from './app/react/index.js';
 import { InboxWeb } from "./components/Inbox.web.js";
 import { useEvents, toWideEventItem, type WideEventItem } from "./components/Events.js";
@@ -126,6 +127,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   const [eventsWorkspacePath, setEventsWorkspacePath] = useState<string | null>(null);
   const [eventsWorkspaceLabel, setEventsWorkspaceLabel] = useState<string>('');
   const [artifactsBrowse, setArtifactsBrowse] = useState<{ workspaceId: string; backendKey: string; label: string } | null>(null);
+  const [projectHomeName, setProjectHomeName] = useState<string | null>(null);
   const [pendingProcessEditWorkspaceId, setPendingProcessEditWorkspaceId] = useState<string | null>(null);
   const [modifiers, setModifiers] = useState<ModifierState>({
     ctrl: false,
@@ -2997,6 +2999,37 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
       );
     }
 
+    // ── Project home (full-screen project view) ────────────────────────────
+    if (projectHomeName) {
+      const phGoals = allGoalItems.filter((g) => g.projectName === projectHomeName);
+      const phWorkspaces = allWorkspaceEntries
+        .filter((w) => w.projectName === projectHomeName)
+        .map((w) => workspaceRuntime.runtimeByWorkspace[w.selectionKey] ?? workspaceRuntime.runtimeByWorkspace[w.id])
+        .filter((e): e is NonNullable<typeof e> => !!e);
+      const phBackendKey = phWorkspaces[0]?.workspace.backendKey ?? phGoals[0]?.backendKey ?? getTargetBackendKey();
+      return (
+        <>
+          <ProjectHomePage
+            projectName={projectHomeName}
+            goals={phGoals}
+            workspaces={phWorkspaces}
+            backend={phBackendKey ? multi.getBackend(phBackendKey) : null}
+            onBack={() => setProjectHomeName(null)}
+            onOpenWorkspace={(selectionKey) => {
+              setProjectHomeName(null);
+              handleBoardSelectWorkspace(selectionKey);
+            }}
+            onOpenGoal={(goal) => {
+              setProjectHomeName(null);
+              handleSelectPlannedGoal(goal);
+            }}
+          />
+          <FlowWeb flow={flow} />
+          <Toaster theme="dark" position="top-right" richColors />
+        </>
+      );
+    }
+
     // ── Board page (full-screen kanban, no workspace selected) ─────────────
     return (
       <>
@@ -3011,6 +3044,16 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
           onOpenInbox={() => { void inboxActions.requestInbox(); setShowInbox(true); }}
           onOpenHelp={handleOpenHelp}
           onOpenCreateMenu={handleOpenCreateMenu}
+          onOpenProjectHome={() => {
+            const names = allProjects.map((project) => project.name);
+            if (names.length === 0) return;
+            if (names.length === 1) { setProjectHomeName(names[0]); return; }
+            flow.showSelect({
+              title: 'Project home',
+              options: names.map((n) => ({ label: n, value: n })),
+              onSelect: (n) => { flow.close(); setProjectHomeName(n); },
+            });
+          }}
           onOpenCommandPalette={() => commandPalette.toggle()}
           onRefresh={() => { multi.listWorkspaces(); multi.listProjects(); }}
           onDisconnect={() => window.location.reload()}

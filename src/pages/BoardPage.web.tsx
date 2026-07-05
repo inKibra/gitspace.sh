@@ -24,6 +24,8 @@ export interface BoardPageProps {
   onOpenInbox: () => void;
   onOpenHelp: () => void;
   onOpenCreateMenu: () => void;
+  /** Open the project home view (docs mock: ProjectHome). */
+  onOpenProjectHome?: () => void;
   onOpenCommandPalette?: () => void;
   onRefresh: () => void;
   onDisconnect: () => void;
@@ -135,6 +137,7 @@ export function BoardPage({
   onOpenInbox,
   onOpenHelp,
   onOpenCreateMenu,
+  onOpenProjectHome,
   onOpenCommandPalette,
   onRefresh,
   onDisconnect,
@@ -186,6 +189,15 @@ export function BoardPage({
       {/* Header bar */}
       <div className="flex-shrink-0 flex items-center gap-2 px-3 py-2 border-b border-[var(--gs-border)] bg-[var(--gs-bg-elevated)]">
         <span className="text-sm font-medium text-[var(--gs-text)]">Project Board</span>
+        {onOpenProjectHome && (
+          <button
+            onClick={onOpenProjectHome}
+            className="px-1.5 py-0.5 text-xs rounded text-[var(--gs-text-dim)] hover:text-[var(--gs-text)] hover:bg-[var(--gs-bg-active)]"
+            title="Project home"
+          >
+            ⌂ home
+          </button>
+        )}
         <span className="hidden sm:inline text-xs text-[var(--gs-text-ghost)]">·</span>
         <span className="hidden sm:inline text-xs text-[var(--gs-text-ghost)]">
           {worktreeCount} worktree{worktreeCount !== 1 ? 's' : ''}
