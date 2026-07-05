@@ -15,7 +15,7 @@
  * testable against temp dirs; command/daemon layers resolve project names.
  */
 
-import { exec } from 'child_process';
+import { exec, execSync } from 'child_process';
 import { promisify } from 'util';
 import { createHash } from 'crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync } from 'fs';
@@ -186,28 +186,7 @@ export async function captureArtifacts(
   if (files.length === 0) throw new SpacesError('captureArtifacts: no files given', 'USER_ERROR', 1);
   const { blobsDir } = artifactPaths(projectDir);
   const threshold = opts.pointerThresholdBytes ?? DEFAULT_POINTER_THRESHOLD_BYTES;
-  const pointers: string[] = [];
-
-  for (const f of files) {
-    assertSafeRelPath(f.path);
-    const bytes = f.content !== undefined
-      ? (typeof f.content === 'string' ? Buffer.from(f.content) : f.content)
-      : readFileSync(f.sourceFile ?? raiseMissingSource(f.path));
-    const target = join(mountDir, f.path);
-    mkdirSync(dirname(target), { recursive: true });
-    if (bytes.length >= threshold) {
-      const oid = createHash('sha256').update(bytes).digest('hex');
-      const bp = blobPath(blobsDir, oid);
-      if (!existsSync(bp)) {
-        mkdirSync(dirname(bp), { recursive: true });
-        writeFileSync(bp, bytes);
-      }
-      writeFileSync(target, makeLfsPointer(oid, bytes.length));
-      pointers.push(f.path);
-    } else {
-      writeFileSync(target, bytes);
-    }
-  }
+  const pointers = files.filter((f) => writeCaptureFile(blobsDir, mountDir, f, threshold)).map((f) => f.path);
 
   const added = files.map((f) => escapeShellArg(f.path)).join(' ');
   await git(mountDir, `add -- ${added}`);
@@ -222,6 +201,58 @@ export async function captureArtifacts(
 
 function raiseMissingSource(path: string): never {
   throw new SpacesError(`captureArtifacts: file ${path} has neither content nor sourceFile`, 'USER_ERROR', 1);
+}
+
+/** Write one capture file into the mount (pointer-splitting large bytes).
+ *  Returns true when the file was stored as a pointer. */
+function writeCaptureFile(blobsDir: string, mountDir: string, f: CaptureFile, threshold: number): boolean {
+  assertSafeRelPath(f.path);
+  const bytes = f.content !== undefined
+    ? (typeof f.content === 'string' ? Buffer.from(f.content) : f.content)
+    : readFileSync(f.sourceFile ?? raiseMissingSource(f.path));
+  const target = join(mountDir, f.path);
+  mkdirSync(dirname(target), { recursive: true });
+  if (bytes.length >= threshold) {
+    const oid = createHash('sha256').update(bytes).digest('hex');
+    const bp = blobPath(blobsDir, oid);
+    if (!existsSync(bp)) {
+      mkdirSync(dirname(bp), { recursive: true });
+      writeFileSync(bp, bytes);
+    }
+    writeFileSync(target, makeLfsPointer(oid, bytes.length));
+    return true;
+  }
+  writeFileSync(target, bytes);
+  return false;
+}
+
+/** Synchronous twin of {@link captureArtifacts} for sync producer paths
+ *  (e.g. goal-validation evidence). Same semantics, execSync git. */
+export function captureArtifactsSync(
+  projectDir: string,
+  mountDir: string,
+  files: CaptureFile[],
+  opts: { message?: string; provenance?: CaptureProvenance; pointerThresholdBytes?: number } = {},
+): CaptureResult {
+  if (files.length === 0) throw new SpacesError('captureArtifacts: no files given', 'USER_ERROR', 1);
+  const { blobsDir } = artifactPaths(projectDir);
+  const threshold = opts.pointerThresholdBytes ?? DEFAULT_POINTER_THRESHOLD_BYTES;
+  const pointers = files.filter((f) => writeCaptureFile(blobsDir, mountDir, f, threshold)).map((f) => f.path);
+  const gitS = (args: string): string => {
+    try {
+      return execSync(`git -C ${escapeShellArg(mountDir)} ${GIT_ID} ${args}`, { encoding: 'utf8' }).trim();
+    } catch (e) {
+      throw new SpacesError(`git failed (${args.split(' ')[0]}): ${e instanceof Error ? e.message : e}`, 'SYSTEM_ERROR', 1);
+    }
+  };
+  gitS(`add -- ${files.map((f) => escapeShellArg(f.path)).join(' ')}`);
+  const message = opts.message ?? `capture: ${files.map((f) => f.path).join(', ')}`.slice(0, 200);
+  gitS(`commit -q -m ${escapeShellArg(message)}`);
+  const commit = gitS('rev-parse HEAD');
+  if (opts.provenance && Object.keys(opts.provenance).length > 0) {
+    gitS(`notes add -f -m ${escapeShellArg(JSON.stringify(opts.provenance))} ${commit}`);
+  }
+  return { commit, pointers };
 }
 
 /** Read an artifact from a mount, transparently resolving LFS pointers. */

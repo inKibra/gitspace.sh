@@ -10,7 +10,8 @@ import {
 } from 'fs';
 import { basename, dirname, extname, join } from 'path';
 import { spawnSync } from 'child_process';
-import { getProjectDir, getProjectWorkspacesDir } from './config.js';
+import { getProjectBaseDir, getProjectDir, getProjectWorkspacesDir } from './config.js';
+import { artifactsMountDir, captureArtifactsSync } from './artifacts.js';
 import { ensureWorkspaceStorageIgnored, getWorkspaceStorageDir } from './workspace-metadata.js';
 import { SpacesError } from '../types/errors.js';
 import { generateId } from '../utils/id.js';
@@ -206,6 +207,59 @@ function copyEvidenceFile(
   const targetPath = join(validationDir, relativePath);
   ensureParentDir(targetPath);
   copyFileSync(sourcePath, targetPath);
+  const mimeType = inferMimeType(sourcePath, kind);
+  const bytes = readFileSync(sourcePath);
+  const previewUrl = mimeType && (mimeType.startsWith('image/') || mimeType.startsWith('video/'))
+    ? `data:${mimeType};base64,${Buffer.from(bytes).toString('base64')}`
+    : undefined;
+  const body = !previewUrl && mimeType?.startsWith('text/') ? bytes.toString('utf-8') : undefined;
+  return {
+    artifactPath: relativePath,
+    mimeType,
+    sizeBytes: statSync(sourcePath).size,
+    displayName,
+    previewUrl,
+    body,
+  };
+}
+
+/**
+ * Store an evidence binary. Preferred home: the goal's artifacts mount
+ * (docs/ARTIFACTS-FS.md — workspace goals → the workspace's artifacts branch,
+ * planned goals → the base clone's main mount) as a committed capture with
+ * git-notes provenance. Falls back to the legacy validation-dir copy when no
+ * mount exists (pre-artifacts workspaces).
+ */
+function storeEvidenceFile(
+  projectName: string,
+  goal: GoalRecord,
+  validationDir: string,
+  evidenceId: string,
+  sourcePath: string,
+  kind: ArtifactKind,
+): Pick<Evidence, 'artifactPath' | 'mimeType' | 'sizeBytes' | 'displayName' | 'previewUrl' | 'body'> {
+  if (!existsSync(sourcePath)) {
+    throw new SpacesError(`Evidence file does not exist: ${sourcePath}`, 'USER_ERROR', 1);
+  }
+  const root = goal.workspaceName
+    ? join(getProjectWorkspacesDir(projectName), goal.workspaceName)
+    : getProjectBaseDir(projectName);
+  const mountDir = artifactsMountDir(root);
+  if (!existsSync(join(mountDir, '.git'))) {
+    return copyEvidenceFile(validationDir, evidenceId, sourcePath, kind);
+  }
+  const displayName = basename(sourcePath);
+  const safeName = sanitizeForFileSystem(displayName) || 'artifact';
+  const relativePath = `validation/${goal.id}/${evidenceId}-${safeName}`;
+  captureArtifactsSync(getProjectDir(projectName), mountDir, [{ path: relativePath, sourceFile: sourcePath }], {
+    message: `evidence: ${goal.id} ${displayName}`,
+    provenance: {
+      goal: goal.id,
+      workspace: goal.workspaceName ?? undefined,
+      tool: 'goal-validation',
+      evidence: evidenceId,
+    },
+  });
   const mimeType = inferMimeType(sourcePath, kind);
   const bytes = readFileSync(sourcePath);
   const previewUrl = mimeType && (mimeType.startsWith('image/') || mimeType.startsWith('video/'))
@@ -473,7 +527,7 @@ export function attachManualEvidence(
 
   const validationDir = ensureValidationDir(projectName, goal);
   const evidenceId = nextEvidenceId();
-  const copied = input.path ? copyEvidenceFile(validationDir, evidenceId, input.path, cur.kind) : {};
+  const copied = input.path ? storeEvidenceFile(projectName, goal, validationDir, evidenceId, input.path, cur.kind) : {};
   const evidence: Evidence = {
     id: evidenceId,
     name: input.name?.trim() || (input.path ? basename(input.path) : cur.title),
