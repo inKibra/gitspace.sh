@@ -1412,3 +1412,36 @@ html {
   --color-text-main: var(--gs-text);
   --color-blue: var(--gs-accent);
 }
+
+/* ── @pierre/trees themed to gitspace tokens (RightRail repo tree) ──────────
+   The trees stylesheet resolves --trees-*-override → --trees-theme-* → default;
+   custom properties inherit through the shadow boundary. */
+.gs-pierre-tree {
+  --trees-bg-override: transparent;
+  --trees-fg-override: var(--gs-text);
+  --trees-fg-muted-override: var(--gs-text-dim);
+  --trees-font-family-override: var(--gs-font-mono, var(--gs-font));
+  --trees-font-size-override: 11px;
+  --trees-border-radius-override: 2px;
+  --trees-accent-override: var(--gs-accent);
+  --trees-selected-bg-override: var(--gs-bg-active);
+  --trees-selected-fg-override: var(--gs-text);
+  --trees-selected-focused-border-color-override: var(--gs-accent);
+  --trees-theme-list-hover-bg: var(--gs-bg-active);
+  --trees-theme-sidebar-bg: transparent;
+  --trees-theme-sidebar-fg: var(--gs-text-muted);
+  --trees-theme-sidebar-border: var(--gs-border-muted);
+  --trees-indent-guide-bg-override: var(--gs-border-muted);
+  --trees-focus-ring-color-override: var(--gs-accent);
+  --trees-scrollbar-thumb-override: var(--gs-border);
+  --trees-input-bg-override: var(--gs-bg-elevated);
+  --trees-search-bg-override: var(--gs-bg-elevated);
+  --trees-search-fg-override: var(--gs-text);
+  --trees-git-modified-color-override: var(--gs-warning);
+  --trees-git-added-color-override: var(--gs-success);
+  --trees-git-deleted-color-override: var(--gs-danger);
+  --trees-git-renamed-color-override: var(--gs-info);
+  --trees-git-untracked-color-override: var(--gs-text-ghost);
+  --trees-git-ignored-color-override: var(--gs-text-ghost);
+  height: 100%;
+}

@@ -35,7 +35,7 @@ import {
 import { BoardPage } from "./pages/BoardPage.web.js";
 import { WorkspaceDetailPage } from "./pages/WorkspaceDetailPage.web.js";
 import { FlowWeb } from "./components/Flow.web.js";
-import { ArtifactsBrowser } from "./components/ArtifactsBrowser.web.js";
+import { ArtifactPanel } from "./components/ArtifactPanel.web.js";
 import { RightRail, RepoFilePanel, type RepoFileOpen } from "./components/RightRail.web.js";
 import { ProjectHomePage } from "./pages/ProjectHomePage.web.js";
 import { useInboxPage } from './app/react/index.js';
@@ -126,10 +126,10 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   const [showEvents, setShowEvents] = useState(false);
   const [eventsWorkspacePath, setEventsWorkspacePath] = useState<string | null>(null);
   const [eventsWorkspaceLabel, setEventsWorkspaceLabel] = useState<string>('');
-  const [artifactsBrowse, setArtifactsBrowse] = useState<{ workspaceId: string; backendKey: string; label: string } | null>(null);
   const [projectHomeName, setProjectHomeName] = useState<string | null>(null);
-  /** Repo files opened as dock tabs, keyed by workspace selectionKey. */
-  const [repoFilePanes, setRepoFilePanes] = useState<Record<string, RepoFileOpen[]>>({});
+  /** Repo files + artifacts opened as dock tabs, keyed by workspace selectionKey. */
+  type DockExtraPane = ({ kind: 'file' } & RepoFileOpen) | { kind: 'artifact'; path: string };
+  const [dockExtraPanes, setDockExtraPanes] = useState<Record<string, DockExtraPane[]>>({});
   const [pendingProcessEditWorkspaceId, setPendingProcessEditWorkspaceId] = useState<string | null>(null);
   const [modifiers, setModifiers] = useState<ModifierState>({
     ctrl: false,
@@ -2685,14 +2685,6 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
           </div>
         )}
         {notesModal}
-        {artifactsBrowse && (
-          <ArtifactsBrowser
-            backend={multi.getBackend(artifactsBrowse.backendKey)}
-            workspaceId={artifactsBrowse.workspaceId}
-            workspaceLabel={artifactsBrowse.label}
-            onClose={() => setArtifactsBrowse(null)}
-          />
-        )}
         {selectedGoal && (
           <GoalDetailPanel
             goal={selectedGoal}
@@ -2843,30 +2835,51 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
           ),
         });
       }
-      // Repo files opened from the RightRail as dock tabs.
+      // Repo files + artifacts opened from the RightRail as dock tabs
+      // (mock Shell pane kinds 'file' and 'artifact').
       const wsKey = workspace.selectionKey ?? workspace.id;
-      for (const f of repoFilePanes[wsKey] ?? []) {
-        const name = f.path.split('/').pop() ?? f.path;
-        panels.push({
-          id: `file:${f.path}`,
-          title: `${f.changed ? '± ' : '▤ '}${name}`,
-          version: `file|${f.path}|${f.changed}|${f.prevPath ?? ''}`,
-          onClose: () => setRepoFilePanes((prev) => ({
-            ...prev,
-            [wsKey]: (prev[wsKey] ?? []).filter((x) => x.path !== f.path),
-          })),
-          render: () => (
-            <RepoFilePanel
-              backend={paneBackend}
-              workspaceId={workspace.id}
-              projectName={workspace.projectName}
-              workspaceName={workspace.name}
-              path={f.path}
-              changed={f.changed}
-              prevPath={f.prevPath}
-            />
-          ),
-        });
+      for (const extra of dockExtraPanes[wsKey] ?? []) {
+        const name = extra.path.split('/').pop() ?? extra.path;
+        const closeExtra = () => setDockExtraPanes((prev) => ({
+          ...prev,
+          [wsKey]: (prev[wsKey] ?? []).filter((x) => !(x.kind === extra.kind && x.path === extra.path)),
+        }));
+        if (extra.kind === 'file') {
+          panels.push({
+            id: `file:${extra.path}`,
+            title: `${extra.changed ? '± ' : '▤ '}${name}`,
+            version: `file|${extra.path}|${extra.changed}|${extra.prevPath ?? ''}`,
+            onClose: closeExtra,
+            render: () => (
+              <RepoFilePanel
+                backend={paneBackend}
+                workspaceId={workspace.id}
+                projectName={workspace.projectName}
+                workspaceName={workspace.name}
+                path={extra.path}
+                changed={extra.changed}
+                prevPath={extra.prevPath}
+              />
+            ),
+          });
+        } else {
+          panels.push({
+            id: `artifact:${extra.path}`,
+            title: `◇ ${name}`,
+            version: `artifact|${extra.path}`,
+            onClose: closeExtra,
+            render: () => (
+              <ArtifactPanel
+                path={extra.path}
+                read={(p) => {
+                  const fn = paneBackend?.readWorkspaceArtifact;
+                  if (!fn) return Promise.reject(new Error('unavailable'));
+                  return fn.call(paneBackend, workspace.id, p);
+                }}
+              />
+            ),
+          });
+        }
       }
       if (panels.length > 0) {
         cachedTerminalPanelsRef.current[workspace.selectionKey ?? workspace.id] = panels;
@@ -2924,12 +2937,21 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
                     workspaceName={workspace.name}
                     onOpenFile={(file) => {
                       const key = workspace.selectionKey ?? workspace.id;
-                      setRepoFilePanes((prev) => {
+                      setDockExtraPanes((prev) => {
                         const cur = prev[key] ?? [];
-                        const next = cur.some((x) => x.path === file.path)
-                          ? cur.map((x) => (x.path === file.path ? file : x))
-                          : [...cur, file];
+                        const entry = { kind: 'file' as const, ...file };
+                        const next = cur.some((x) => x.kind === 'file' && x.path === file.path)
+                          ? cur.map((x) => (x.kind === 'file' && x.path === file.path ? entry : x))
+                          : [...cur, entry];
                         return { ...prev, [key]: next };
+                      });
+                    }}
+                    onOpenArtifact={(path) => {
+                      const key = workspace.selectionKey ?? workspace.id;
+                      setDockExtraPanes((prev) => {
+                        const cur = prev[key] ?? [];
+                        if (cur.some((x) => x.kind === 'artifact' && x.path === path)) return prev;
+                        return { ...prev, [key]: [...cur, { kind: 'artifact', path }] };
                       });
                     }}
                   />
@@ -2984,9 +3006,6 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
                   setEventsWorkspaceLabel(workspace.name);
                   setShowEvents(true);
                   void multi.requestEvents(getWorkspaceRef(workspaceId, workspaceBackendKey));
-                }}
-                onOpenArtifacts={(workspaceId) => {
-                  setArtifactsBrowse({ workspaceId, backendKey: workspaceBackendKey, label: workspace.name });
                 }}
                 onDeleteSession={handleDeleteSession}
                 onDeleteWorkspace={handleDeleteWorkspace}

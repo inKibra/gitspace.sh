@@ -48,6 +48,7 @@ export function IdentityGate({ onIdentityReady }: IdentityGateProps) {
     confirmPinValue,
     setConfirmPinValue,
     startLogin,
+    logout,
     handleUnlockPin,
     handleResetBrowserIdentity,
     handleLegacyMigratePin,
@@ -144,6 +145,7 @@ export function IdentityGate({ onIdentityReady }: IdentityGateProps) {
           <Section title="Checking cloud backup" body="Looking for a recoverable identity backup tied to your account." kicker="Cloud recovery">
             <div className="gs-loading-indicator">Checking for cloud backup…</div>
             <p className="gs-auth-note">This may take a moment.</p>
+            <button onClick={logout} className={SECONDARY}>Log out</button>
           </Section>
         )}
 
@@ -169,6 +171,7 @@ export function IdentityGate({ onIdentityReady }: IdentityGateProps) {
                 {loading ? 'Decrypting…' : 'Decrypt'}
               </button>
               <button onClick={handleGoToMnemonicEntry} className={SECONDARY}>Enter recovery phrase instead</button>
+              <button onClick={logout} className={SECONDARY}>Log out</button>
             </div>
           </Section>
         )}
@@ -182,7 +185,10 @@ export function IdentityGate({ onIdentityReady }: IdentityGateProps) {
             <p className="gs-auth-note">
               To enable backup from the CLI, run <span className="gs-inline-code">gssh user identity backup enable</span>.
             </p>
-            <button onClick={handleGoToMnemonicEntry} className={PRIMARY}>Enter recovery phrase</button>
+            <div className="gs-auth-actions">
+              <button onClick={handleGoToMnemonicEntry} className={PRIMARY}>Enter recovery phrase</button>
+              <button onClick={logout} className={SECONDARY}>Log out</button>
+            </div>
           </Section>
         )}
 

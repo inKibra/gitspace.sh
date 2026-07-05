@@ -14,7 +14,7 @@ import { useCallback, useEffect, useMemo, useState, type ReactElement } from 're
 import type { SessionBackend } from '../session/backend.js';
 import type { KanbanGoalItem } from '../app/shared/board/types.js';
 import type { WorkspaceRuntimeEntry } from '../app/shared/workspace-runtime/types.js';
-import { ArtifactsBrowser } from '../components/ArtifactsBrowser.web.js';
+import { ArtifactPanel } from '../components/ArtifactPanel.web.js';
 
 interface ArtifactEntry {
   path: string;
@@ -172,7 +172,23 @@ export function ProjectHomePage({
 
         {/* center */}
         <div className="min-w-0 flex-1 overflow-y-auto p-4">
-          {section === 'artifacts' ? (
+          {viewerPath !== null ? (
+            <div className="flex h-full min-h-0 flex-col">
+              <button
+                type="button"
+                onClick={() => setViewerPath(null)}
+                className="mb-2 self-start text-xs text-[var(--gs-text-dim)] hover:text-[var(--gs-text)]"
+              >
+                ← back
+              </button>
+              <div className="min-h-0 flex-1 border border-[var(--gs-border)]">
+                <ArtifactPanel
+                  path={viewerPath}
+                  read={(p) => backend?.readProjectArtifact ? backend.readProjectArtifact(projectName, p) : Promise.reject(new Error('unavailable'))}
+                />
+              </div>
+            </div>
+          ) : section === 'artifacts' ? (
             <ProjectArtifactsList groups={artifactGroups} error={artifactsError} onOpen={setViewerPath} full />
           ) : (
             <>
@@ -273,18 +289,6 @@ export function ProjectHomePage({
         )}
       </div>
 
-      {viewerPath !== null && backend && (
-        <ArtifactsBrowser
-          backend={backend}
-          workspaceId=""
-          workspaceLabel={projectName}
-          scopeLabel="project artifacts · main branch of the artifacts repo"
-          initialSelected={viewerPath}
-          listFn={() => backend.listProjectArtifacts?.(projectName) ?? Promise.resolve([])}
-          readFn={(p) => backend.readProjectArtifact ? backend.readProjectArtifact(projectName, p) : Promise.reject(new Error('unavailable'))}
-          onClose={() => setViewerPath(null)}
-        />
-      )}
     </div>
   );
 }

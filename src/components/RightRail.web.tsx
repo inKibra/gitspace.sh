@@ -5,7 +5,8 @@ import { useFileTree, FileTree } from '@pierre/trees/react';
 import type { GitStatusEntry } from '@pierre/trees';
 import type { SessionBackend } from '../session/backend.js';
 import type { ReviewChangedFile } from '../types/review.js';
-import { ArtifactsBrowser } from './ArtifactsBrowser.web.js';
+import { langForPath } from './ArtifactPanel.web.js';
+import { Highlighted } from '../blocks/render/highlight.web.js';
 
 /**
  * RightRail — the workspace view's persistent right column (mock: RightRail.tsx).
@@ -72,6 +73,7 @@ export function RightRail({
   projectName,
   workspaceName,
   onOpenFile,
+  onOpenArtifact,
 }: {
   backend: SessionBackend | null;
   workspaceId: string;
@@ -79,6 +81,8 @@ export function RightRail({
   workspaceName: string;
   /** Open a repo file as a dock tab in the workspace multi-view. */
   onOpenFile: (file: RepoFileOpen) => void;
+  /** Open an artifact as a dock tab in the workspace multi-view. */
+  onOpenArtifact: (path: string) => void;
 }): ReactElement {
   const [closed, setClosed] = useState(() => {
     try { return window.localStorage.getItem(RAIL_CLOSED_KEY) === '1'; } catch { return false; }
@@ -120,7 +124,7 @@ export function RightRail({
       </div>
       {mode === 'repo'
         ? <RepoMode backend={backend} workspaceId={workspaceId} projectName={projectName} workspaceName={workspaceName} onOpenFile={onOpenFile} />
-        : <ArtifactsMode backend={backend} workspaceId={workspaceId} workspaceName={workspaceName} />}
+        : <ArtifactsMode backend={backend} workspaceId={workspaceId} onOpenArtifact={onOpenArtifact} />}
     </aside>
   );
 }
@@ -304,6 +308,8 @@ export function RepoFilePanel({ backend, workspaceId, projectName, workspaceName
           <div className="flex h-full items-center justify-center text-[var(--gs-danger)]">Failed to load {path}</div>
         ) : patch ? (
           <PatchDiff patch={patch} options={{ diffStyle: 'unified', theme: 'pierre-dark' }} />
+        ) : langForPath(path) ? (
+          <Highlighted text={(content ?? '').slice(0, 300_000)} lang={langForPath(path)} name={path} />
         ) : (
           <pre className="whitespace-pre-wrap font-[family-name:var(--gs-font-mono)] text-[11px] text-[var(--gs-text)]">{content}</pre>
         )}
@@ -314,15 +320,14 @@ export function RepoFilePanel({ backend, workspaceId, projectName, workspaceName
 
 /* ── Artifacts mode ────────────────────────────────────────────────────────── */
 
-function ArtifactsMode({ backend, workspaceId, workspaceName }: {
+function ArtifactsMode({ backend, workspaceId, onOpenArtifact }: {
   backend: SessionBackend | null;
   workspaceId: string;
-  workspaceName: string;
+  onOpenArtifact: (path: string) => void;
 }): ReactElement {
   const [entries, setEntries] = useState<Array<{ path: string; size: number; pointer: boolean }>>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [open, setOpen] = useState<string | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -360,7 +365,7 @@ function ArtifactsMode({ backend, workspaceId, workspaceName }: {
           <div key={dir}>
             <div className="px-2 pb-0.5 pt-2 text-[10px] uppercase tracking-wider text-[var(--gs-text-ghost)]">{dir}/</div>
             {files.map((e) => (
-              <button key={e.path} type="button" onClick={() => setOpen(e.path)}
+              <button key={e.path} type="button" onClick={() => onOpenArtifact(e.path)}
                 className="flex w-full items-center gap-1.5 px-2 py-[2px] text-left hover:bg-[var(--gs-bg-active)]" title={e.path}>
                 <span className="min-w-0 flex-1 truncate text-[var(--gs-text)]">{e.path.includes('/') ? e.path.slice(e.path.indexOf('/') + 1) : e.path}</span>
                 {e.pointer && <span className="flex-shrink-0 rounded-full border border-[#2a2413] px-1 text-[9px] text-[#f0b429]">lfs</span>}
@@ -368,15 +373,6 @@ function ArtifactsMode({ backend, workspaceId, workspaceName }: {
             ))}
           </div>
         ))
-      )}
-      {open && (
-        <ArtifactsBrowser
-          backend={backend}
-          workspaceId={workspaceId}
-          workspaceLabel={workspaceName}
-          initialSelected={open}
-          onClose={() => setOpen(null)}
-        />
       )}
     </div>
   );

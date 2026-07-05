@@ -181,7 +181,6 @@ function SidebarContent(props: {
   onRequestStatusChange?: WorkspaceDetailPaneProps['onRequestStatusChange'];
   onOpenNotes?: WorkspaceDetailPaneProps['onOpenNotes'];
   onOpenEvents: WorkspaceDetailPaneProps['onOpenEvents'];
-  onOpenArtifacts?: (workspaceId: string) => void;
   agentSessionCount: number;
   pendingPermissions: number;
   pullRequest?: { url?: string };
@@ -192,7 +191,7 @@ function SidebarContent(props: {
     attachedSessionIds, attachedAgentSessionIds,
     onAttachSession, onStopAgentTurn, onCloseAgentSession, onArchiveAgentSession, onRestoreAgentSession,
     onCreateAgentSession, onStopProcess, onDeleteSession, onDeleteWorkspace, onOpenGitHubPullRequest, onOpenReview,
-    onRequestStatusChange, onOpenNotes, onOpenEvents, onOpenArtifacts, agentSessionCount, pendingPermissions, pullRequest, onDismiss,
+    onRequestStatusChange, onOpenNotes, onOpenEvents, agentSessionCount, pendingPermissions, pullRequest, onDismiss,
     goal, onOpenGoalDetail,
   } = props;
   const {
@@ -388,13 +387,6 @@ function SidebarContent(props: {
         </SidebarSection>
       )}
 
-      {/* ARTIFACTS */}
-      {onOpenArtifacts && (
-        <SidebarSection title="Artifacts">
-          <SidebarItem label="Browse artifacts" dotColor="text-[var(--gs-text-ghost)]" rightLabel="▤" onClick={() => act(() => onOpenArtifacts(workspace.id))} />
-        </SidebarSection>
-      )}
-
       {/* SYSTEM */}
       <SidebarSection title="System">
         <SidebarItem label="Event Logs" dotColor="text-[var(--gs-running)]" rightLabel="live" onClick={() => act(() => onOpenEvents(workspace.id))} />
@@ -455,7 +447,6 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
     onRequestStatusChange,
     onOpenNotes,
     onOpenEvents,
-    onOpenArtifacts,
     goal,
     onOpenGoalDetail,
     onOpenAgentSession,
@@ -681,7 +672,6 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
                 goal={goal}
                 onOpenGoalDetail={onOpenGoalDetail}
                 onOpenEvents={onOpenEvents}
-                onOpenArtifacts={onOpenArtifacts}
                 agentSessionCount={agentSessionCount}
                 pendingPermissions={pendingPermissions}
                 pullRequest={pullRequest}
@@ -781,8 +771,7 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
                   goal={goal}
                   onOpenGoalDetail={onOpenGoalDetail}
                   onOpenEvents={onOpenEvents}
-                  onOpenArtifacts={onOpenArtifacts}
-                  agentSessionCount={agentSessionCount}
+                    agentSessionCount={agentSessionCount}
                   pendingPermissions={pendingPermissions}
                   pullRequest={pullRequest}
                   onDismiss={() => setShowMobileSidebar(false)}
