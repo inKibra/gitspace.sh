@@ -187,6 +187,47 @@ describe('abandonArtifacts', () => {
   });
 });
 
+describe('remote + sync (Tier 1 BYO)', () => {
+  it('set/get remote, sync pushes branches and fast-forwards main', async () => {
+    const { setArtifactsRemote, getArtifactsRemote, syncArtifacts } = await import('../artifacts.js');
+    // local bare "remote"
+    const remoteDir = join(projectDir, 'byo-remote.git');
+    execSync(`git init -q --bare --initial-branch=main ${JSON.stringify(remoteDir)}`);
+    mkdirSync(wsDir('r1'), { recursive: true });
+    const mount = await ensureArtifactsMount(projectDir, wsDir('r1'), 'r1');
+    await captureArtifacts(projectDir, mount, [{ path: 'a.txt', content: 'a' }]);
+    expect(await getArtifactsRemote(projectDir)).toBeNull();
+    await setArtifactsRemote(projectDir, remoteDir);
+    expect(await getArtifactsRemote(projectDir)).toBe(remoteDir);
+    const r = await syncArtifacts(projectDir);
+    expect(r.pushed).toBe(true);
+    expect(g(remoteDir, 'branch --list r1')).not.toBe(''); // workspace branch pushed
+    expect(g(remoteDir, 'show main:README.md')).toContain('Artifacts');
+    // remote main moves ahead → sync fast-forwards local main
+    const tmp = join(projectDir, 'tmpclone');
+    execSync(`git clone -q ${JSON.stringify(remoteDir)} ${JSON.stringify(tmp)}`);
+    writeFileSync(join(tmp, 'upstream.txt'), 'up');
+    g(tmp, '-c user.name=t -c user.email=t@t add -A');
+    g(tmp, '-c user.name=t -c user.email=t@t commit -qm upstream');
+    g(tmp, 'push -q origin main');
+    const r2 = await syncArtifacts(projectDir);
+    expect(r2.fastForwarded).toBe(true);
+    const { repoDir } = artifactPaths(projectDir);
+    expect(g(repoDir, 'show main:upstream.txt')).toBe('up');
+  });
+
+  it('pointer config round-trips and stages in the code repo', async () => {
+    const { readArtifactsPointerConfig, writeArtifactsPointerConfig } = await import('../artifacts.js');
+    const code = join(projectDir, 'code');
+    mkdirSync(code, { recursive: true });
+    execSync(`git init -q ${JSON.stringify(code)}`);
+    expect(readArtifactsPointerConfig(code)).toBeNull();
+    await writeArtifactsPointerConfig(code, { remote: 'https://example.com/x.git' });
+    expect(readArtifactsPointerConfig(code)).toEqual({ remote: 'https://example.com/x.git' });
+    expect(g(code, 'diff --cached --name-only')).toBe('.gitspace/artifacts.json'); // staged
+  });
+});
+
 describe('LFS pointer format', () => {
   it('round-trips', () => {
     const oid = 'a'.repeat(64);

@@ -319,11 +319,25 @@ export async function createProjectForSession(
 }
 
 /** Artifacts FS: birth the project's artifacts repo + mount main at the base
- *  clone (docs/ARTIFACTS-FS.md). Best-effort — never fail project creation. */
+ *  clone; if the code repo carries a committed .gitspace/artifacts.json BYO
+ *  pointer, attach + fetch the remote (docs/ARTIFACTS-FS.md). Best-effort —
+ *  never fail project creation. */
 async function mountProjectArtifacts(projectName: string, baseDir: string): Promise<void> {
   try {
-    const { ensureArtifactsMount } = await import('./artifacts.js');
-    await ensureArtifactsMount(getProjectDir(projectName), baseDir, 'main');
+    const artifacts = await import('./artifacts.js');
+    const projectDir = getProjectDir(projectName);
+    // Attach a declared BYO remote BEFORE mounting so the fetched main is what
+    // gets checked out (fresh clones rediscover their artifacts automatically).
+    const pointer = artifacts.readArtifactsPointerConfig(baseDir);
+    if (pointer?.remote) {
+      await artifacts.setArtifactsRemote(projectDir, pointer.remote);
+      try {
+        await artifacts.syncArtifacts(projectDir);
+      } catch {
+        /* remote unreachable / auth needed — mount proceeds locally */
+      }
+    }
+    await artifacts.ensureArtifactsMount(projectDir, baseDir, 'main');
   } catch {
     /* artifacts are additive */
   }

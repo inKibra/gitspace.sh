@@ -30,6 +30,7 @@ import { registerRelayCommands } from './commands/relay.js';
 import { registerStatusCommand } from './commands/status.js';
 import { registerInviteCommands } from './commands/invite.js';
 import { registerWebCommand } from './commands/web.js';
+import { registerArtifactsCommands } from './commands/artifacts.js';
 /**
  * Create the CLI program with all commands registered.
  *
@@ -53,6 +54,7 @@ export function createProgram(version: string): Command {
   registerUserCommands(program);
   registerCloudCommands(program);
   registerRelayCommands(program);
+  registerArtifactsCommands(program);
   registerStatusCommand(program);
   registerWebCommand(program);
 

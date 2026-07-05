@@ -65,16 +65,24 @@ async function git(cwdOrRepo: string, args: string, opts: { id?: boolean } = {})
 export async function ensureArtifactsRepo(projectDir: string): Promise<string> {
   const { repoDir } = artifactPaths(projectDir);
   if (existsSync(join(repoDir, 'HEAD'))) return repoDir;
-  mkdirSync(repoDir, { recursive: true });
-  await git(repoDir, `init --bare --initial-branch=${MAIN_BRANCH} -q`);
-  // Root commit via plumbing (a bare repo has no working tree to commit from).
+  await initBareArtifactsRepo(repoDir);
+  await seedRootCommit(repoDir);
+  return repoDir;
+}
+
+/** Root commit via plumbing (a bare repo has no working tree to commit from). */
+async function seedRootCommit(repoDir: string): Promise<void> {
   const readme = 'Artifacts for this gitspace project. See docs/ARTIFACTS-FS.md.\n';
   const blob = await git(repoDir, `hash-object -w --stdin <<'GSEOF'\n${readme}GSEOF`);
   const tree = await git(repoDir, `mktree <<'GSEOF'\n100644 blob ${blob}\tREADME.md\nGSEOF`);
   const commit = await git(repoDir, `commit-tree ${tree} -m ${escapeShellArg('init artifacts')}`, { id: true });
   await git(repoDir, `update-ref refs/heads/${MAIN_BRANCH} ${commit}`);
   await git(repoDir, `symbolic-ref HEAD refs/heads/${MAIN_BRANCH}`);
-  return repoDir;
+}
+
+async function initBareArtifactsRepo(repoDir: string): Promise<void> {
+  mkdirSync(repoDir, { recursive: true });
+  await git(repoDir, `init --bare --initial-branch=${MAIN_BRANCH} -q`);
 }
 
 async function branchExists(repoDir: string, branch: string): Promise<boolean> {
@@ -374,6 +382,98 @@ export async function pruneArtifactMounts(projectDir: string): Promise<void> {
   const { repoDir } = artifactPaths(projectDir);
   if (!existsSync(join(repoDir, 'HEAD'))) return;
   await git(repoDir, 'worktree prune').catch(() => undefined);
+}
+
+// ── remotes / sync (Tier 1: BYO — docs/ARTIFACTS-FS.md) ────────────────────
+
+/** The committed pointer file in the CODE repo that lets any clone rediscover
+ *  its artifacts (the .gitmodules pattern). BYO form: explicit remote URL. */
+export interface ArtifactsPointerConfig {
+  /** gitspace.sh-managed identity ("handle/slug") — Tier 2, resolved later. */
+  project?: string;
+  /** BYO: explicit git remote URL for the artifacts repo. */
+  remote?: string;
+}
+
+const POINTER_CONFIG_RELATIVE = join('.gitspace', 'artifacts.json');
+
+export function readArtifactsPointerConfig(codeRepoDir: string): ArtifactsPointerConfig | null {
+  const p = join(codeRepoDir, POINTER_CONFIG_RELATIVE);
+  if (!existsSync(p)) return null;
+  try {
+    const parsed = JSON.parse(readFileSync(p, 'utf8')) as ArtifactsPointerConfig;
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Write + stage the pointer file in the code repo (committing is the user's
+ *  call — it lands in their history). */
+export async function writeArtifactsPointerConfig(codeRepoDir: string, config: ArtifactsPointerConfig): Promise<void> {
+  const p = join(codeRepoDir, POINTER_CONFIG_RELATIVE);
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, `${JSON.stringify(config, null, 2)}\n`);
+  await git(codeRepoDir, `add -- ${escapeShellArg(POINTER_CONFIG_RELATIVE)}`).catch(() => undefined);
+}
+
+export async function getArtifactsRemote(projectDir: string): Promise<string | null> {
+  const { repoDir } = artifactPaths(projectDir);
+  if (!existsSync(join(repoDir, 'HEAD'))) return null;
+  try {
+    return await git(repoDir, 'remote get-url origin');
+  } catch {
+    return null;
+  }
+}
+
+export async function setArtifactsRemote(projectDir: string, url: string): Promise<void> {
+  const { repoDir } = artifactPaths(projectDir);
+  // Fresh repo + remote: ADOPT the remote's main instead of seeding an
+  // unrelated local root commit (a second machine attaching via
+  // .gitspace/artifacts.json must fast-forward from the remote's history).
+  if (!existsSync(join(repoDir, 'HEAD'))) {
+    await initBareArtifactsRepo(repoDir);
+    await git(repoDir, `remote add origin ${escapeShellArg(url)}`);
+    try {
+      await git(repoDir, 'fetch origin --prune');
+      await git(repoDir, `update-ref refs/heads/${MAIN_BRANCH} refs/remotes/origin/${MAIN_BRANCH}`);
+      await git(repoDir, `symbolic-ref HEAD refs/heads/${MAIN_BRANCH}`);
+    } catch {
+      // Remote unreachable or empty — fall back to a local root commit so the
+      // repo is usable offline; a later sync will reconcile (empty remote
+      // accepts our push; unreachable stays local-first).
+      await seedRootCommit(repoDir);
+    }
+    return;
+  }
+  const existing = await getArtifactsRemote(projectDir);
+  if (existing === null) await git(repoDir, `remote add origin ${escapeShellArg(url)}`);
+  else await git(repoDir, `remote set-url origin ${escapeShellArg(url)}`);
+}
+
+/** Sync with the BYO remote: fetch, fast-forward main (through the live main
+ *  mount when one exists), push all branches. Conflict-free by construction —
+ *  non-ff main means someone must roll up/curate manually. */
+export async function syncArtifacts(projectDir: string): Promise<{ pushed: boolean; fastForwarded: boolean }> {
+  const { repoDir } = artifactPaths(projectDir);
+  const remote = await getArtifactsRemote(projectDir);
+  if (!remote) throw new SpacesError('No artifacts remote configured (gssh artifacts remote add <url>)', 'USER_ERROR', 1);
+  await git(repoDir, 'fetch origin --prune');
+  let fastForwarded = false;
+  const hasRemoteMain = await git(repoDir, `rev-parse --verify --quiet refs/remotes/origin/${MAIN_BRANCH}`).then(() => true).catch(() => false);
+  if (hasRemoteMain) {
+    const mainDir = await worktreeFor(repoDir, MAIN_BRANCH);
+    try {
+      if (mainDir) await git(mainDir, `merge --ff-only origin/${MAIN_BRANCH}`, { id: true });
+      else await git(repoDir, `fetch origin ${MAIN_BRANCH}:${MAIN_BRANCH}`);
+      fastForwarded = true;
+    } catch {
+      /* non-ff — leave for manual curation */
+    }
+  }
+  await git(repoDir, 'push origin --all');
+  return { pushed: true, fastForwarded };
 }
 
 /** Drop a workspace's artifacts branch (and its mount) without merging. */
