@@ -44,6 +44,8 @@ import { ReportPanel } from "./components/ReportPanel.web.js";
 import { WorkflowPanel } from "./components/WorkflowPanel.web.js";
 import { EventLogPane } from "./components/EventLogPane.web.js";
 import { CronsPanel } from "./components/CronsPanel.web.js";
+import { GlobalChromeBar, type ChromeWorkspaceChip } from "./components/GlobalChromeBar.web.js";
+import { GlobalTaskbar } from "./components/GlobalTaskbar.web.js";
 import { RightRail, RepoFilePanel, type RepoFileOpen } from "./components/RightRail.web.js";
 import { ProjectHomePage } from "./pages/ProjectHomePage.web.js";
 import { useInboxPage } from './app/react/index.js';
@@ -267,6 +269,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
       }),
     ];
   }, [machineWorkspaceTasks, workspaceRemovalTasks.tasks]);
+
   useEffect(() => {
     setSelectedWorkspaceTaskId((current) => {
       if (current && taskBarTasks.some((task) => task.id === current)) return current;
@@ -722,6 +725,33 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   // ─── Agent session data ────────────────────────────────────────────────────
   const agentSessionsByWorkspace = workspaceRuntime.agentSessionsByWorkspace;
   const allWorkspaceEntries = workspaceRuntime.workspaces;
+
+  /** Global chrome bar (mock topbar + ActivityStrip) — shared by board + shell. */
+  const CHIP_COLOR: Record<string, string> = { red: 'var(--gs-danger)', orange: 'var(--gs-warning)', blue: 'var(--gs-info)', dim: 'var(--gs-text-ghost)' };
+  const chromeChips: ChromeWorkspaceChip[] = workspaceRuntime.workspaces.map((w) => {
+    const st = workspaceRuntime.workspaceStatusById[w.selectionKey ?? w.id];
+    return {
+      key: w.selectionKey ?? w.id,
+      name: w.name,
+      phase: ((w as { phase?: string }).phase as import('./types/config.js').WorkspacePhase | undefined) ?? 'code',
+      statusColor: CHIP_COLOR[st?.primaryColor ?? 'dim'] ?? 'var(--gs-text-ghost)',
+    };
+  });
+  const renderChromeBar = (opts: { boardActive?: boolean; activeKey?: string | null; onBoard?: () => void }) => (
+    <GlobalChromeBar
+      projectName={allProjects.length === 1 ? allProjects[0]?.name : undefined}
+      workspaces={chromeChips}
+      activeKey={opts.activeKey}
+      boardActive={opts.boardActive}
+      onBoard={opts.onBoard ?? (() => {})}
+      onProject={allProjects.length > 0 ? () => setProjectHomeName(allProjects[0]!.name) : undefined}
+      onSelectWorkspace={(key) => handleBoardSelectWorkspace(key)}
+      inboxCount={backendInboxUnreadCount}
+      onOpenInbox={() => { void inboxActions.requestInbox(); setShowInbox(true); }}
+      onOpenPalette={() => commandPalette.toggle()}
+    />
+  );
+
 
   /** Workspaces whose default pane set (goal/workflow/guide) was already seeded. */
   const seededDockRef = useRef<Set<string>>(new Set());
@@ -3259,10 +3289,14 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
     // ── Workspace detail page cache (active page + hidden keep-alive pages) ─────
     if (currentDetailWorkspace && !showBoardWhileDetailMounted) {
       return (
-        <>
-          {renderDetailPages(currentDetailWorkspace.selectionKey ?? null)}
+        <div className="flex h-screen min-h-0 flex-col">
+          {renderChromeBar({ activeKey: currentDetailWorkspace.selectionKey ?? null, onBoard: () => { void handleBackToBoard(); } })}
+          <div className="min-h-0 flex-1">
+            {renderDetailPages(currentDetailWorkspace.selectionKey ?? null)}
+          </div>
+          <GlobalTaskbar tasks={taskBarTasks} onDismiss={(id) => workspaceRemovalTasks.dismissTask(id)} />
           {overlays}
-        </>
+        </div>
       );
     }
 
@@ -3299,8 +3333,11 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
 
     // ── Board page (full-screen kanban, no workspace selected) ─────────────
     return (
-      <>
+      <div className="flex h-screen min-h-0 flex-col">
+        {renderChromeBar({ boardActive: true })}
+        <div className="min-h-0 flex-1 overflow-hidden">
         <BoardPage
+          embedded
           groups={boardGroupsWithGoalStatus}
           selectedWorkspaceId={workspaceBoardState.selectedWorkspaceId}
           onSelectWorkspace={handleBoardSelectWorkspace}
@@ -3334,9 +3371,10 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
           loadingLabel="Loading worktrees..."
         />
         {renderDetailPages(null)}
-
+        </div>
+        <GlobalTaskbar tasks={taskBarTasks} onDismiss={(id) => workspaceRemovalTasks.dismissTask(id)} />
         {overlays}
-      </>
+      </div>
     );
   }
 

@@ -15,6 +15,8 @@ import type { WorkspacePhase } from '../types/config.js';
 import type { WorkspaceStatusSummary } from '../app/workspaces/workspace-status.js';
 
 export interface BoardPageProps {
+  /** Rendered under the GlobalChromeBar — suppress the legacy header row. */
+  embedded?: boolean;
   groups: WorkspaceBoardGroup[];
   selectedWorkspaceId: string | null;
   onSelectWorkspace: (workspaceKey: string | null) => void;
@@ -222,6 +224,7 @@ function OverflowMenu({ onOpenInbox, inboxUnreadCount, onOpenHelp, onOpenCommand
 }
 
 export function BoardPage({
+  embedded = false,
   groups,
   selectedWorkspaceId,
   onSelectWorkspace,
@@ -285,8 +288,9 @@ export function BoardPage({
   }, [groups, onPhaseChange, selectedWorkspaceId]);
 
   return (
-    <div className="h-screen w-screen flex flex-col bg-[var(--gs-bg)]">
-      {/* Header bar */}
+    <div className={`${embedded ? 'h-full w-full' : 'h-screen w-screen'} flex flex-col bg-[var(--gs-bg)]`}>
+      {/* Header bar (hidden when the GlobalChromeBar renders above — mock item 4) */}
+      {!embedded && (
       <div className="flex-shrink-0 flex items-center gap-2 px-3 py-2 border-b border-[var(--gs-border)] bg-[var(--gs-bg-elevated)]">
         <span className="text-sm font-medium text-[var(--gs-text)]">Project Board</span>
         {onOpenProjectHome && (
@@ -357,6 +361,7 @@ export function BoardPage({
           onDisconnect={onDisconnect}
         />
       </div>
+      )}
 
       {/* PROJECTS strip (mock ghome-projects) */}
       {!loading && (
