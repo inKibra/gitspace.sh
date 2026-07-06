@@ -1116,7 +1116,7 @@ export class LocalSessionBackend implements SessionBackend {
   async recordGoalHumanReview(projectName: string, goalId: string, requirementId: string, decision: HumanReviewDecision, note: string, createdBy?: string): Promise<import('../../types/goals.js').Review> {
     const goal = findGoalRecord(projectName, goalId);
     if (!goal) throw new Error(`Goal not found: ${goalId}`);
-    const result = recordHumanReview(goal, requirementId, decision, note, createdBy);
+    const result = recordHumanReview(goal, requirementId, decision, note, undefined, createdBy);
     writeGoalRecord(projectName, result.goal);
     await this.listWorkspaces();
     return result.review;

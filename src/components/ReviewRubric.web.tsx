@@ -136,8 +136,10 @@ function EvidenceRow({ requirement, evidence, onOpenEvidence }: {
 }
 
 function JudgementRow({ review }: { review: Review }): ReactElement {
-  const meta = judgeMeta(review.who);
+  // Prefer the recorded judgeType (scores/cites model); fall back to who-inference.
+  const meta = judgeMeta(review.judgeType ?? review.who);
   const verdict = reviewVerdict(review.tone);
+  const score = typeof review.score === 'number' ? Math.max(0, Math.min(100, review.score)) : undefined;
   return (
     <div className="flex items-start gap-2 border-t border-[var(--gs-border-muted)] py-2 first:border-t-0">
       <span className={`flex h-5 w-5 flex-shrink-0 items-center justify-center border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] text-[11px] ${meta.cls}`} title={meta.label}>
@@ -148,9 +150,24 @@ function JudgementRow({ review }: { review: Review }): ReactElement {
           <span className="text-[11.5px] font-medium text-[var(--gs-text)]">{review.createdBy || review.who}</span>
           <span className="text-[9.5px] uppercase tracking-wide text-[var(--gs-text-ghost)]">{meta.label}</span>
           <VerdictChip verdict={verdict} />
+          {score !== undefined && (
+            <span className="flex items-center gap-1" title={`score ${score}`}>
+              <span className="inline-block h-[4px] w-[42px] overflow-hidden rounded-full bg-[var(--gs-bg-active)]">
+                <span className={`block h-full ${scoreTone(score)}`} style={{ width: `${score}%` }} />
+              </span>
+              <span className="text-[10px] tabular-nums text-[var(--gs-text-dim)]">{score}</span>
+            </span>
+          )}
           <span className="ml-auto text-[10px] text-[var(--gs-text-ghost)] font-[family-name:var(--gs-font-mono)]">{review.createdAt}</span>
         </div>
         <div className="mt-1 text-[12px] leading-[1.5] text-[var(--gs-text-muted)]">{review.note}</div>
+        {(review.cites ?? []).length > 0 && (
+          <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5">
+            {review.cites!.map((c) => (
+              <span key={c} className="font-[family-name:var(--gs-font-mono)] text-[10px] text-[var(--gs-text-dim)]">↳ {c}</span>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );

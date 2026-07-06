@@ -185,6 +185,7 @@ function SidebarContent(props: {
   onOpenGoalDoc?: WorkspaceDetailPaneProps['onOpenGoalDoc'];
   onOpenChangeGuide?: WorkspaceDetailPaneProps['onOpenChangeGuide'];
   onOpenRubric?: WorkspaceDetailPaneProps['onOpenRubric'];
+  onOpenWorkflow?: WorkspaceDetailPaneProps['onOpenWorkflow'];
   dashboards?: WorkspaceDetailPaneProps['dashboards'];
   onOpenDashboard?: WorkspaceDetailPaneProps['onOpenDashboard'];
   chainGoals?: WorkspaceDetailPaneProps['chainGoals'];
@@ -201,7 +202,7 @@ function SidebarContent(props: {
     attachedSessionIds, attachedAgentSessionIds,
     onAttachSession, onStopAgentTurn, onCloseAgentSession, onArchiveAgentSession, onRestoreAgentSession,
     onCreateAgentSession, onStopProcess, onDeleteSession, onDeleteWorkspace, onOpenGitHubPullRequest, onOpenReview,
-    onRequestStatusChange, onOpenNotes, onOpenEvents, onOpenGoalDoc, onOpenChangeGuide, onOpenRubric,
+    onRequestStatusChange, onOpenNotes, onOpenEvents, onOpenGoalDoc, onOpenChangeGuide, onOpenRubric, onOpenWorkflow,
     dashboards, onOpenDashboard, chainGoals, chainTitle, currentChainGoalId, onSwitchChainWorkspace,
     agentSessionCount, pendingPermissions, pullRequest, onDismiss,
     goal, onOpenGoalDetail,
@@ -340,6 +341,9 @@ function SidebarContent(props: {
       <SidebarSection title="Surfaces">
         {onOpenGoalDoc && goal && (
           <SidebarItem label="◇ Goal doc" rightLabel={goalReady} onClick={() => act(() => onOpenGoalDoc(workspace.id))} />
+        )}
+        {onOpenWorkflow && (
+          <SidebarItem label="⟜ Workflow" rightLabel="live" onClick={() => act(() => onOpenWorkflow(workspace.id))} />
         )}
         {onOpenChangeGuide && (
           <SidebarItem label="⛓ Change Guide" onClick={() => act(() => onOpenChangeGuide(workspace.id))} />
@@ -721,6 +725,7 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
                 onOpenGoalDoc={props.onOpenGoalDoc}
                 onOpenChangeGuide={props.onOpenChangeGuide}
                 onOpenRubric={props.onOpenRubric}
+                onOpenWorkflow={props.onOpenWorkflow}
                 dashboards={props.dashboards}
                 onOpenDashboard={props.onOpenDashboard}
                 chainGoals={props.chainGoals}
@@ -830,6 +835,7 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
                   onOpenGoalDoc={props.onOpenGoalDoc}
                   onOpenChangeGuide={props.onOpenChangeGuide}
                   onOpenRubric={props.onOpenRubric}
+                  onOpenWorkflow={props.onOpenWorkflow}
                   dashboards={props.dashboards}
                   onOpenDashboard={props.onOpenDashboard}
                   chainGoals={props.chainGoals}

@@ -10,6 +10,8 @@ import './diff.web.js'; // @pierre/diffs — resolves in the web build only
 import './file-tree.web.js'; // @pierre/trees — resolves in the web build only
 import './mermaid.web.js'; // mermaid — resolves in the web build only
 import './mini-app.web.js';
+import './goal-blocks.web.js';
+import './workflow.web.js';
 
 export { BlockView, BlockList, defineRenderer, hasRenderer } from './registry.web.js';
 export { Markdown, BLOCK_MD_OPTIONS } from './markdown.web.js';

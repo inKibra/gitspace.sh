@@ -44,6 +44,7 @@ export interface WorkspaceDetailPaneProps {
   onSwitchStage?: (phase: import('../types/config.js').WorkspacePhase) => void;
   /** Surfaces group targets (mock Sidebar Surfaces). */
   onOpenRubric?: (workspaceId: string) => void;
+  onOpenWorkflow?: (workspaceId: string) => void;
   onOpenChangeGuide?: (workspaceId: string) => void;
   onOpenGoalDoc?: (workspaceId: string) => void;
   /** Dashboards group (from *.dashboard.json artifacts). */

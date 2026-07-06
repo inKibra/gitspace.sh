@@ -160,6 +160,28 @@ describe('goal validation core', () => {
     const passed = recordHumanReview(withEvidence.goal, v0.requirement.id, 'pass', 'looks good');
     expect(passed.requirement.status).toBe('accepted');
     expect(passed.review.tone).toBe('green');
+    expect(passed.review.judgeType).toBe('human');
+    expect(passed.review.score).toBeUndefined();
+  });
+
+  it('persists judgeType and score on human reviews with a score', () => {
+    const v0 = addRequirement(defaultValidation(), {
+      title: 'Note',
+      kind: 'note',
+      rubric: 'note.',
+      generation: { kind: 'manual' },
+      judgment: { kind: 'human' },
+    });
+    const goal = makeGoal({ id: 'api', title: 'API', phase: 'code', plannedWorkspaceName: 'api', validation: v0.validation });
+    const withEvidence = attachManualEvidence('demo', goal, v0.requirement.id, { body: 'ready', name: 'n' });
+    expect(() => recordHumanReview(withEvidence.goal, v0.requirement.id, 'pass', 'ok', 150)).toThrow(/between 0 and 100/);
+    const passed = recordHumanReview(withEvidence.goal, v0.requirement.id, 'pass', 'looks good', 85, 'alice');
+    expect(passed.review.judgeType).toBe('human');
+    expect(passed.review.score).toBe(85);
+    expect(passed.review.createdBy).toBe('alice');
+    const persisted = passed.goal.validation.requirements[v0.requirement.id].reviews.at(-1);
+    expect(persisted?.judgeType).toBe('human');
+    expect(persisted?.score).toBe(85);
   });
 
   it('reopens an accepted requirement', () => {
@@ -190,6 +212,8 @@ describe('goal validation core', () => {
     const judgment = runLlmJudgment(evidence.goal, v0.requirement.id);
     expect(judgment.review.tone).toBe('amber');
     expect(judgment.review.note).toMatch(/not yet implemented/);
+    expect(judgment.review.judgeType).toBe('llm');
+    expect(judgment.review.cites).toEqual([evidence.evidence.id]);
   });
 
   it('runs command generation and auto-accepts on exit-zero', () => {
@@ -208,6 +232,10 @@ describe('goal validation core', () => {
     expect(result.autoAccepted).toBe(true);
     expect(result.requirement.status).toBe('accepted');
     expect(result.requirement.evidence[0]?.source).toBe('command');
+    const review = result.requirement.reviews.at(-1);
+    expect(review?.judgeType).toBe('command');
+    expect(review?.score).toBe(100);
+    expect(review?.cites).toEqual([result.evidence.id]);
   });
 
   it('runs command judgment and records the review', () => {
@@ -226,6 +254,27 @@ describe('goal validation core', () => {
     const judgment = runJudgmentCommand('demo', withEvidence.goal, v0.requirement.id);
     expect(judgment.review.tone).toBe('green');
     expect(judgment.requirement.status).toBe('accepted');
+    expect(judgment.review.judgeType).toBe('command');
+    expect(judgment.review.score).toBe(100);
+    expect(judgment.review.cites).toEqual([withEvidence.evidence.id]);
+  });
+
+  it('records score 0 and judgeType command on failed command judgment', () => {
+    mkdirSync(join(root, 'demo', 'workspaces', 'api'), { recursive: true });
+    writeFileSync(join(root, 'demo', 'workspaces', 'api', '.gitignore'), '', 'utf-8');
+    const v0 = addRequirement(defaultValidation(), {
+      title: 'Tests',
+      kind: 'test-output',
+      rubric: 'Suite must pass.',
+      generation: { kind: 'manual' },
+      judgment: { kind: 'command', command: 'sh -c "exit 1"', expect: { kind: 'exit-zero' } },
+    });
+    const goal = makeGoal({ id: 'api', title: 'API', phase: 'code', workspaceName: 'api', validation: v0.validation });
+    writeGoalRecord('demo', goal);
+    const judgment = runJudgmentCommand('demo', goal, v0.requirement.id);
+    expect(judgment.review.tone).toBe('red');
+    expect(judgment.review.judgeType).toBe('command');
+    expect(judgment.review.score).toBe(0);
   });
 
   it('migrates a v1 goal record to v2', () => {
@@ -257,6 +306,38 @@ describe('goal validation core', () => {
     expect(migrated.validation.requirements['req-2'].kind).toBe('note');
     expect(migrated.validation.requirements['req-2'].generation.kind).toBe('manual');
     expect(migrated.validation.requirements['req-2'].judgment.kind).toBe('human');
+  });
+
+  it('backfills judgeType on v2 reviews from who when unambiguous', () => {
+    const v0 = addRequirement(defaultValidation(), {
+      title: 'Note',
+      kind: 'note',
+      rubric: 'note.',
+      generation: { kind: 'manual' },
+      judgment: { kind: 'human' },
+    });
+    const reqId = v0.requirement.id;
+    const now = new Date(0).toISOString();
+    const validation = {
+      ...v0.validation,
+      requirements: {
+        [reqId]: {
+          ...v0.validation.requirements[reqId],
+          reviews: [
+            { id: 'rv-old-1', tone: 'green', who: 'human', note: 'lgtm', createdAt: now },
+            { id: 'rv-old-2', tone: 'green', who: 'command', note: 'exit 0', createdAt: now },
+            { id: 'rv-old-3', tone: 'amber', who: 'claude-3.5-sonnet', note: 'unclear', createdAt: now },
+          ],
+        },
+      },
+    };
+    const goal = makeGoal({ id: 'api', title: 'API', phase: 'code', plannedWorkspaceName: 'api', validation: validation as GoalRecord['validation'] });
+    const migrated = migrateGoalRecord(goal);
+    const reviews = migrated.validation.requirements[reqId].reviews;
+    expect(reviews[0].judgeType).toBe('human');
+    expect(reviews[1].judgeType).toBe('command');
+    expect(reviews[2].judgeType).toBeUndefined();
+    expect(reviews[2].note).toBe('unclear');
   });
 
   it('moves planned validation artifacts dir to workspace on bind', () => {

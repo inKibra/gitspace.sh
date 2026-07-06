@@ -41,6 +41,7 @@ import { ChangeGuidePane } from "./components/ChangeGuide.web.js";
 import { ReviewRubric } from "./components/ReviewRubric.web.js";
 import { EvidencePanel } from "./components/EvidencePanel.web.js";
 import { ReportPanel } from "./components/ReportPanel.web.js";
+import { WorkflowPanel } from "./components/WorkflowPanel.web.js";
 import { RightRail, RepoFilePanel, type RepoFileOpen } from "./components/RightRail.web.js";
 import { ProjectHomePage } from "./pages/ProjectHomePage.web.js";
 import { useInboxPage } from './app/react/index.js';
@@ -133,7 +134,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   const [eventsWorkspaceLabel, setEventsWorkspaceLabel] = useState<string>('');
   const [projectHomeName, setProjectHomeName] = useState<string | null>(null);
   /** Repo files + artifacts opened as dock tabs, keyed by workspace selectionKey. */
-  type DockExtraPane = ({ kind: 'file' } & RepoFileOpen) | { kind: 'artifact'; path: string } | { kind: 'dashboard'; path: string } | { kind: 'note'; noteId: string | null; title: string; nonce?: number } | { kind: 'goal' } | { kind: 'guide' } | { kind: 'rubric' } | { kind: 'evidence'; requirementId: string; evidenceId: string } | { kind: 'report'; path: string };
+  type DockExtraPane = ({ kind: 'file' } & RepoFileOpen) | { kind: 'artifact'; path: string } | { kind: 'dashboard'; path: string } | { kind: 'note'; noteId: string | null; title: string; nonce?: number } | { kind: 'goal' } | { kind: 'guide' } | { kind: 'rubric' } | { kind: 'evidence'; requirementId: string; evidenceId: string } | { kind: 'report'; path: string } | { kind: 'workflow' };
   const [dockExtraPanes, setDockExtraPanes] = useState<Record<string, DockExtraPane[]>>({});
   const openSingletonPane = useCallback((wsKey: string, pane: DockExtraPane) => {
     setDockExtraPanes((prev) => {
@@ -2841,11 +2842,23 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
           panels.push({
             id: 'goal',
             title: '◇ Goal',
-            version: `goal|${workspaceGoalForPanels?.id ?? ''}|${chainGoalsForPane.length}`,
+            version: `goal|${workspaceGoalForPanels?.id ?? ''}|${chainGoalsForPane.length}|${workspaceGoalForPanels?.updatedAt ?? ''}|${(workspaceGoalForPanels?.doc?.exemplarBlockIds ?? []).length}`,
             onClose: closeExtra,
             render: () => (
               chainGoalsForPane.length > 0 && workspaceGoalForPanels
-                ? <GoalDocDockPane goals={chainGoalsForPane} initialGoalId={workspaceGoalForPanels.id} />
+                ? <GoalDocDockPane
+                    goals={chainGoalsForPane}
+                    initialGoalId={workspaceGoalForPanels.id}
+                    onOpenWorkflow={() => openSingletonPane(wsKey, { kind: 'workflow' })}
+                    onToggleExemplar={async (goalId, blockId) => {
+                      const be = paneBackendKey ? multi.getBackend(paneBackendKey) : null;
+                      const g = allGoalItems.find((x) => x.id === goalId);
+                      if (!be?.updateGoal || !g?.doc) return;
+                      const cur = new Set(g.doc.exemplarBlockIds ?? []);
+                      if (cur.has(blockId)) cur.delete(blockId); else cur.add(blockId);
+                      await be.updateGoal(g.projectName, getPersistedGoalId(g), { doc: { ...g.doc, exemplarBlockIds: [...cur], updatedAt: new Date().toISOString() } });
+                    }}
+                  />
                 : <div className="flex h-full items-center justify-center text-[12px] text-[var(--gs-text-dim)]">No goal bound to this workspace.</div>
             ),
           });
@@ -2890,6 +2903,20 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
                   await be?.runGoalJudgment?.(workspace.projectName, workspaceGoalForPanels!.id, requirementId);
                 }}
                 onOpenEvidence={(requirementId, evidenceId) => openSingletonPane(wsKey, { kind: 'evidence', requirementId, evidenceId })}
+              />
+            ),
+          });
+        } else if (extra.kind === 'workflow') {
+          panels.push({
+            id: 'workflow',
+            title: '⟜ Workflow',
+            version: `workflow|${workspace.id}`,
+            onClose: closeExtra,
+            render: () => (
+              <WorkflowPanel
+                backend={paneBackend}
+                workspaceId={workspace.id}
+                onOpenArtifact={(path) => openSingletonPane(wsKey, { kind: 'artifact', path })}
               />
             ),
           });
@@ -3065,6 +3092,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
                 onOpenGoalDoc={() => openSingletonPane(workspace.selectionKey ?? workspace.id, { kind: 'goal' })}
                 onOpenChangeGuide={() => openSingletonPane(workspace.selectionKey ?? workspace.id, { kind: 'guide' })}
                 onOpenRubric={() => openSingletonPane(workspace.selectionKey ?? workspace.id, { kind: 'rubric' })}
+                onOpenWorkflow={() => openSingletonPane(workspace.selectionKey ?? workspace.id, { kind: 'workflow' })}
                 dashboards={wsDashboards[workspace.selectionKey ?? workspace.id] ?? []}
                 onOpenDashboard={(path) => openSingletonPane(workspace.selectionKey ?? workspace.id, { kind: 'dashboard', path })}
                 chainGoals={workspaceGoal?.chainId ? allGoalItems.filter((g) => g.chainId === workspaceGoal.chainId) : undefined}
@@ -3379,9 +3407,14 @@ function ReportPaneLoader({ path, read, onOpenAttachment }: { path: string; read
   return <ReportPanel report={report} onOpenAttachment={onOpenAttachment} />;
 }
 
-function GoalDocDockPane({ goals, initialGoalId }: { goals: import("./app/shared/board/types.js").KanbanGoalItem[]; initialGoalId: string }) {
+function GoalDocDockPane({ goals, initialGoalId, onToggleExemplar, onOpenWorkflow }: {
+  goals: import("./app/shared/board/types.js").KanbanGoalItem[];
+  initialGoalId: string;
+  onToggleExemplar?: (goalId: string, blockId: string) => void;
+  onOpenWorkflow?: () => void;
+}) {
   const [goalId, setGoalId] = useState(initialGoalId);
-  return <GoalDocPanel goals={goals} currentGoalId={goalId} onSelectGoal={setGoalId} />;
+  return <GoalDocPanel goals={goals} currentGoalId={goalId} onSelectGoal={setGoalId} onToggleExemplar={onToggleExemplar} onOpenWorkflow={onOpenWorkflow} />;
 }
 
 export default function App() {

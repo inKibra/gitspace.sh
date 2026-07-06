@@ -1,6 +1,7 @@
 /** @jsxImportSource react */
 import { useMemo, type ReactElement } from 'react';
 import { renderMarkdownHtml } from './markdown-render.js';
+import { BlockView } from '../blocks/render/registry.web.js';
 import type { GoalDoc, GoalValidation, Requirement } from '../types/goals.js';
 import type { WorkspacePhase } from '../types/config.js';
 
@@ -70,10 +71,14 @@ function RequirementRow({ requirement }: { requirement: Requirement }): ReactEle
   );
 }
 
-export function GoalDocPanel({ goals, currentGoalId, onSelectGoal }: {
+export function GoalDocPanel({ goals, currentGoalId, onSelectGoal, onToggleExemplar, onOpenWorkflow }: {
   goals: GoalLike[];
   currentGoalId: string;
   onSelectGoal: (goalId: string) => void;
+  /** Persist exemplar starring on the goal doc (mock exstar). */
+  onToggleExemplar?: (goalId: string, blockId: string) => void;
+  /** Open the ⟜ Workflow pane (mock wf-tie). */
+  onOpenWorkflow?: () => void;
 }): ReactElement {
   const chain = useMemo(
     () => [...goals].sort((a, b) => a.chainPosition - b.chainPosition),
@@ -92,6 +97,8 @@ export function GoalDocPanel({ goals, currentGoalId, onSelectGoal }: {
 
   const ready = readyCounts(goal.validation);
   const bodyMarkdown = goal.doc?.bodyMarkdown?.trim() ?? '';
+  const docBlocks = goal.doc?.blocks ?? [];
+  const exemplars = new Set(goal.doc?.exemplarBlockIds ?? []);
   const requirements = goal.validation
     ? goal.validation.reqOrder
         .map((id) => goal.validation!.requirements[id])
@@ -166,7 +173,25 @@ export function GoalDocPanel({ goals, currentGoalId, onSelectGoal }: {
 
       {/* Doc body */}
       <div className="min-h-0 flex-1 overflow-auto px-5 py-4">
-        {bodyMarkdown ? (
+        {docBlocks.length > 0 ? (
+          <div className="flex max-w-[880px] flex-col gap-3">
+            {docBlocks.map((b) => (
+              <div key={b.id} className={`relative ${exemplars.has(b.id) ? 'border-l-2 border-l-[var(--gs-warning)] pl-2' : ''}`}>
+                {onToggleExemplar && (
+                  <button
+                    type="button"
+                    title="Mark as exemplar"
+                    onClick={() => onToggleExemplar(goal.id, b.id)}
+                    className={`absolute right-1 top-1 z-10 px-1 text-[12px] ${exemplars.has(b.id) ? 'text-[var(--gs-warning)]' : 'text-[var(--gs-text-ghost)] hover:text-[var(--gs-text-muted)]'}`}
+                  >
+                    ★
+                  </button>
+                )}
+                <BlockView block={b} />
+              </div>
+            ))}
+          </div>
+        ) : bodyMarkdown ? (
           <div
             className="gs-block-md max-w-[880px] text-[12.5px] leading-relaxed text-[var(--gs-text)]"
             dangerouslySetInnerHTML={{ __html: renderMarkdownHtml(bodyMarkdown) }}
@@ -189,18 +214,24 @@ export function GoalDocPanel({ goals, currentGoalId, onSelectGoal }: {
         )}
       </div>
 
-      {/* Workflow tie-in footer */}
-      <div className="flex flex-none items-center gap-2.5 border-t border-[var(--gs-border)] border-l-2 border-l-[var(--gs-accent)] bg-[var(--gs-bg-elevated)] px-3.5 py-2.5">
+      {/* Workflow tie-in footer (mock wf-tie — opens the ⟜ Workflow pane) */}
+      <button
+        type="button"
+        onClick={onOpenWorkflow}
+        disabled={!onOpenWorkflow}
+        className="flex w-full flex-none items-center gap-2.5 border-t border-[var(--gs-border)] border-l-2 border-l-[var(--gs-accent)] bg-[var(--gs-bg-elevated)] px-3.5 py-2.5 text-left enabled:cursor-pointer enabled:hover:bg-[var(--gs-bg-hover)]"
+      >
         <span className="flex-none text-[18px] text-[var(--gs-accent)]">⟜</span>
-        <div className="min-w-0">
+        <div className="min-w-0 flex-1">
           <div className="truncate text-[12.5px] font-medium text-[var(--gs-text)]">
             This goal drives the review-gated workflow
           </div>
           <div className="mt-px truncate text-[11px] text-[var(--gs-text-muted)]">
-            implement → evidence → review-gate → adjudicate
+            implement → evidence → review-gate → adjudicate{exemplars.size > 0 ? ` · ★ ${exemplars.size} exemplar` : ''}
           </div>
         </div>
-      </div>
+        {onOpenWorkflow && <span className="flex-none text-[11px] text-[var(--gs-accent)]">open Workflow ↗</span>}
+      </button>
     </div>
   );
 }

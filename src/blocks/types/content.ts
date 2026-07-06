@@ -164,6 +164,152 @@ defineBlock({
   schema: mermaidData,
 });
 
+// ── goal-doc blocks (intent / boundaries / anti-shortcut / plan / evidence-shape)
+// The planning vocabulary of a goal doc: the user's north star, protected
+// surfaces, shortcut prevention, a cited implementation plan, and the shape of
+// the decisive final evidence. Field names mirror the agent-surfaces mock.
+
+export const intentData = z.object({
+  quote: z.string(),
+  source: z.string().optional(),
+  why: z.string().optional(),
+});
+export type IntentData = z.infer<typeof intentData>;
+defineBlock({
+  type: 'intent',
+  tier: 'content',
+  description: "The user's intent verbatim — the north star quote a goal doc is anchored to, with source and why it matters.",
+  schema: intentData,
+});
+
+export const boundaryItem = z.object({
+  surface: z.string(),
+  rule: z.string(),
+});
+export const boundariesData = z.object({
+  items: z.array(boundaryItem),
+});
+export type BoundariesData = z.infer<typeof boundariesData>;
+defineBlock({
+  type: 'boundaries',
+  tier: 'content',
+  description: 'Protected boundaries — locked surfaces that must not change without explicit approval, each with its rule.',
+  schema: boundariesData,
+});
+
+export const shortcutItem = z.object({
+  shortcut: z.string(),
+  why: z.string(),
+});
+export const antiShortcutData = z.object({
+  items: z.array(shortcutItem),
+});
+export type AntiShortcutData = z.infer<typeof antiShortcutData>;
+defineBlock({
+  type: 'anti-shortcut',
+  tier: 'content',
+  description: 'Shortcut prevention — proof that looks complete but is not, and why each shortcut fails the contract.',
+  schema: antiShortcutData,
+});
+
+export const planStepItem = z.object({
+  title: z.string(),
+  detail: z.string(),
+  refs: z.array(z.string()).optional(), // file:line strings the step cites
+});
+export const planData = z.object({
+  steps: z.array(planStepItem),
+});
+export type PlanData = z.infer<typeof planData>;
+defineBlock({
+  type: 'plan',
+  tier: 'content',
+  description: 'A numbered implementation plan; each step cites the code it touches via file:line refs.',
+  schema: planData,
+});
+
+export const evidenceShapeItem = z.object({
+  requirement: z.string(),
+  kind: z.enum(['command', 'test', 'screenshot', 'video', 'note']),
+  captured: z.string(),
+});
+export const evidenceShapeData = z.object({
+  items: z.array(evidenceShapeItem),
+});
+export type EvidenceShapeData = z.infer<typeof evidenceShapeData>;
+defineBlock({
+  type: 'evidence-shape',
+  tier: 'content',
+  description: 'The shape of the final evidence — what decisive proof the goal wants at the end, per requirement.',
+  schema: evidenceShapeData,
+});
+
+// ── workflow (recipe traversal: typed dataflow of phases, agents, gates) ────
+// Mirrors the mock's WorkflowSpecData: phases with source/artifact-typed I/O,
+// gated loops, per-phase created artifacts, and agent/gate/tool node rows.
+export const wfIo = z.enum(['source', 'artifact']);
+export type WfIo = z.infer<typeof wfIo>;
+export const wfRef = z.object({
+  name: z.string(),
+  io: wfIo,
+});
+export type WfRef = z.infer<typeof wfRef>;
+export const wfArtifactType = z.enum(['goal-slice', 'phased-goal', 'rubric', 'note', 'evidence', 'arbitrary']);
+export type WfArtifactType = z.infer<typeof wfArtifactType>;
+export const wfCreatedArtifact = z.object({
+  name: z.string(),
+  type: wfArtifactType,
+  from: z.string().optional(),
+  passedTo: z.string().optional(),
+});
+export type WfCreatedArtifact = z.infer<typeof wfCreatedArtifact>;
+export const wfGateType = z.enum(['human', 'orchestration', 'command']);
+export type WfGateType = z.infer<typeof wfGateType>;
+export const wfNode = z.object({
+  id: z.string(),
+  role: z.string(),
+  kind: z.enum(['agent', 'gate', 'tool']),
+  model: z.string().optional(),
+  status: z.enum(['done', 'running', 'pending']).optional(),
+  gateType: wfGateType.optional(),
+  reads: z.array(wfRef).optional(),
+  writes: z.array(wfRef).optional(),
+  out: z.string().optional(),
+  fanout: z.object({ over: z.string(), instances: z.array(z.string()) }).optional(),
+});
+export type WfNode = z.infer<typeof wfNode>;
+export const wfPhaseArtifact = z.object({
+  name: z.string(),
+  kind: z.string(),
+  io: wfIo,
+  required: z.boolean().optional(),
+  status: z.enum(['created', 'pending']).optional(),
+});
+export type WfPhaseArtifact = z.infer<typeof wfPhaseArtifact>;
+export const wfPhase = z.object({
+  name: z.string(),
+  inputs: z.array(wfRef),
+  gate: z.object({ type: wfGateType, label: z.string() }).optional(),
+  loop: z.string().optional(),
+  created: z.array(wfCreatedArtifact).optional(),
+  nodes: z.array(wfNode),
+  outputs: z.array(wfPhaseArtifact),
+});
+export type WfPhase = z.infer<typeof wfPhase>;
+export const workflowSpecData = z.object({
+  recipe: z.string(),
+  recipePath: z.string().optional(),
+  rollup: z.array(z.string()).optional(),
+  phases: z.array(wfPhase),
+});
+export type WorkflowSpecData = z.infer<typeof workflowSpecData>;
+defineBlock({
+  type: 'workflow',
+  tier: 'structural',
+  description: 'A workflow recipe traversal: phases with source/artifact-typed dataflow, agent/gate/tool nodes, gated loops, and per-phase created artifacts.',
+  schema: workflowSpecData,
+});
+
 // ── mini-app (sandboxed gitspace mini-app) ──────────────────────────────────
 export const miniAppData = z.object({
   name: z.string(),

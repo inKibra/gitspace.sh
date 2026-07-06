@@ -276,6 +276,15 @@ function storeEvidenceFile(
   };
 }
 
+/** Parse an optional `score: N` line (0-100) out of judgment text. */
+function parseScoreLine(text: string): number | undefined {
+  const match = /^\s*score:\s*(\d{1,3})\s*$/im.exec(text);
+  if (!match) return undefined;
+  const score = Number(match[1]);
+  if (!Number.isFinite(score) || score < 0 || score > 100) return undefined;
+  return score;
+}
+
 function truncate(value: string): string {
   const MAX = 32_000;
   if (value.length <= MAX) return value;
@@ -612,6 +621,9 @@ export function runGenerationCommand(
         who: 'command',
         note: describeExpectSatisfied(r.judgment.expect),
         createdAt: nowIso(),
+        judgeType: 'command',
+        score: 100,
+        cites: [evidence.id],
       });
     }
     return { ...r, evidence: [...r.evidence, evidence], status, reviews };
@@ -668,7 +680,16 @@ export function runJudgmentCommand(
   const passed = commandPasses(cur.judgment, exitCode, stdout, stderr);
   const note = passed ? describeExpectSatisfied(expect) : describeExpectFailed(expect, exitCode);
   const tone: ReviewTone = passed ? 'green' : 'red';
-  const review: Review = { id: nextReviewId(), tone, who: 'command', note, createdAt: nowIso() };
+  const review: Review = {
+    id: nextReviewId(),
+    tone,
+    who: 'command',
+    note,
+    createdAt: nowIso(),
+    judgeType: 'command',
+    score: passed ? 100 : 0,
+    cites: cur.evidence.map((e) => e.id),
+  };
   const { validation: nextValidation, requirement } = withRequirement(goal.validation, requirementId, (r) => ({
     ...r,
     reviews: [...r.reviews, review],
@@ -700,12 +721,17 @@ export function runLlmJudgment(
   }
   // LLM runner not yet implemented. Record an honest "unavailable" review
   // rather than fabricating a pass.
+  const judgmentText = 'LLM judgment runner is not yet implemented. Apply the rubric manually or wire an LLM backend.';
   const review: Review = {
     id: nextReviewId(),
     tone: 'amber',
     who: cur.judgment.modelHint || 'llm',
-    note: 'LLM judgment runner is not yet implemented. Apply the rubric manually or wire an LLM backend.',
+    note: judgmentText,
     createdAt: nowIso(),
+    judgeType: 'llm',
+    // When a real runner lands, its output may carry a "score: N" line.
+    score: parseScoreLine(judgmentText),
+    cites: cur.evidence.map((e) => e.id),
   };
   const { validation: nextValidation, requirement } = withRequirement(goal.validation, requirementId, (r) => ({
     ...r,
@@ -734,6 +760,7 @@ export function recordHumanReview(
   requirementId: string,
   decision: HumanReviewDecision,
   note: string,
+  score?: number,
   createdBy?: string,
 ): { goal: GoalRecord; requirement: Requirement; review: Review } {
   const cur = goal.validation.requirements[requirementId];
@@ -745,6 +772,9 @@ export function recordHumanReview(
   if ((decision === 'fail' || decision === 'changes') && !trimmed) {
     throw new SpacesError('A note is required to fail or request changes.', 'USER_ERROR', 1);
   }
+  if (score !== undefined && (!Number.isFinite(score) || score < 0 || score > 100)) {
+    throw new SpacesError('Score must be a number between 0 and 100.', 'USER_ERROR', 1);
+  }
   const tone: ReviewTone = decision === 'pass' ? 'green' : decision === 'changes' ? 'amber' : 'red';
   const review: Review = {
     id: nextReviewId(),
@@ -753,6 +783,8 @@ export function recordHumanReview(
     note: trimmed || 'Accepted.',
     createdAt: nowIso(),
     createdBy,
+    judgeType: 'human',
+    score,
   };
   const { validation: nextValidation, requirement } = withRequirement(goal.validation, requirementId, (r) => {
     let status: RequirementStatus;
@@ -843,10 +875,40 @@ function isNewValidationShape(value: unknown): value is GoalValidation {
   return Array.isArray(v.reqOrder) && typeof v.requirements === 'object' && v.requirements !== null && Array.isArray(v.events);
 }
 
+/**
+ * Backfill Review.judgeType from the legacy `who` field when unambiguous
+ * ('human'/'llm'/'command'). Existing reviews are otherwise left untouched.
+ */
+function backfillReviewJudgeTypes(validation: GoalValidation): GoalValidation {
+  let changed = false;
+  const requirements: Record<string, Requirement> = {};
+  for (const [id, req] of Object.entries(validation.requirements)) {
+    let reqChanged = false;
+    const reviews = req.reviews.map((review) => {
+      if (review.judgeType) return review;
+      if (review.who === 'human' || review.who === 'llm' || review.who === 'command') {
+        reqChanged = true;
+        const judgeType: Review['judgeType'] = review.who;
+        return { ...review, judgeType };
+      }
+      return review;
+    });
+    if (reqChanged) {
+      changed = true;
+      requirements[id] = { ...req, reviews };
+    } else {
+      requirements[id] = req;
+    }
+  }
+  return changed ? { ...validation, requirements } : validation;
+}
+
 export function migrateGoalRecord(raw: unknown): GoalRecord {
   const candidate = raw as LegacyGoalRecord;
   if (candidate && (candidate.version === 2) && isNewValidationShape(candidate.validation)) {
-    return candidate as unknown as GoalRecord;
+    const record = candidate as unknown as GoalRecord;
+    const validation = backfillReviewJudgeTypes(record.validation);
+    return validation === record.validation ? record : { ...record, validation };
   }
   const legacy = (candidate.validation ?? {}) as LegacyValidation;
   const reqOrder: string[] = [];
