@@ -176,6 +176,8 @@ export type ReviewOperation =
       threadId: string;
       commentId: string;
     }
+  | { op: 'get_review_guide_state'; projectName: string; workspaceName: string }
+  | { op: 'set_review_guide_state'; projectName: string; workspaceName: string; state: { readSections: string[]; approval?: { by: string; at: string; headSha: string }; requestedChangesAt?: string } }
   | { op: 'get_changed_files'; projectName: string; workspaceName: string; base?: string }
   | { op: 'get_diff'; projectName: string; workspaceName: string }
   | {
@@ -233,6 +235,7 @@ export interface ReviewChangedFile {
 /** Results returned from machine to client */
 export type ReviewResult =
   | { op: 'threads'; threads: ReviewThread[] }
+  | { op: 'review_guide_state'; state: { readSections: string[]; approval?: { by: string; at: string; headSha: string }; requestedChangesAt?: string } }
   | { op: 'thread_created'; thread: ReviewThread }
   | { op: 'thread_updated'; thread: ReviewThread }
   | { op: 'comment_added'; thread: ReviewThread }

@@ -187,6 +187,26 @@ export async function executeLocalReviewOperation(
       };
     }
 
+    case 'get_review_guide_state': {
+      const workspace = await resolveWorkspaceByName(
+        operation.projectName,
+        operation.workspaceName,
+        scan
+      );
+      const { readReviewGuideState } = await import('./review.js');
+      return { op: 'review_guide_state', state: readReviewGuideState(workspace.path, workspace.id) };
+    }
+
+    case 'set_review_guide_state': {
+      const workspace = await resolveWorkspaceByName(
+        operation.projectName,
+        operation.workspaceName,
+        scan
+      );
+      const { writeReviewGuideState } = await import('./review.js');
+      return { op: 'review_guide_state', state: writeReviewGuideState(workspace.path, workspace.id, operation.state) };
+    }
+
     case 'get_changed_files': {
       const workspace = await resolveWorkspaceByName(
         operation.projectName,

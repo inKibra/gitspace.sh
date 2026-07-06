@@ -2933,8 +2933,49 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
                 backend={paneBackend}
                 projectName={workspace.projectName}
                 workspaceName={workspace.name}
+                workspaceId={workspace.id}
                 onOpenFile={(path) => openSingletonPane(wsKey, { kind: 'file', path, changed: true })}
                 onOpenRubric={() => openSingletonPane(wsKey, { kind: 'rubric' })}
+                onApprove={() => {
+                  workspaceBoardState.setPhase(wsKey, 'ship');
+                  toast.success('Approved — workspace advanced to ship.');
+                }}
+                onRequestChanges={async (prompt) => {
+                  // The review loop (docs/REVIEW-GUIDE.md): findings → workspace
+                  // agent, stage back to code; diffs refresh as the agent commits.
+                  const be = paneBackendKey ? multi.getBackend(paneBackendKey) : null;
+                  const st = paneBackendKey ? multiMachineState.byBackend[paneBackendKey] : null;
+                  const agentId = Object.entries(st?.snapshot?.agentSessionsById ?? {})
+                    .find(([, sess]) => (sess as { workspaceId?: string; state?: string }).workspaceId === workspace.id
+                      && (sess as { state?: string }).state !== 'closed')?.[0];
+                  if (!be?.promptAgentSession || !agentId) {
+                    toast.error('No active agent session to route the findings to.');
+                    return;
+                  }
+                  await be.promptAgentSession(workspace.id, agentId, prompt, undefined, { streamingBehavior: 'followUp' });
+                  workspaceBoardState.setPhase(wsKey, 'code');
+                  toast.success('Changes requested — findings routed to the agent, stage back to code.');
+                }}
+                onGenerateGuide={async () => {
+                  const be = paneBackendKey ? multi.getBackend(paneBackendKey) : null;
+                  if (!be?.createAgentSession || !be.promptAgentSession) {
+                    toast.error('Agent sessions unavailable on this backend.');
+                    return;
+                  }
+                  try {
+                    const sessions = await be.createAgentSession(workspace.id, 'review guide narrator');
+                    const created = sessions.find((x) => x.title === 'review guide narrator') ?? sessions[sessions.length - 1];
+                    if (!created) { toast.error('Failed to create the narrator session.'); return; }
+                    await be.promptAgentSession(
+                      workspace.id,
+                      created.id,
+                      'Use the review-guide-narrator skill to generate the review guide for this workspace. Base ref: main. Follow the skill exactly: analyze, narrate stale clusters in order, submit, fix validation errors until the submit succeeds.',
+                    );
+                    toast.success('Narrator session started — the guide will appear when it submits.');
+                  } catch (err) {
+                    toast.error(err instanceof Error ? err.message : 'Failed to start the narrator.');
+                  }
+                }}
                 humanGatePending={workspaceGoalForPanels?.validation
                   ? Object.values(workspaceGoalForPanels.validation.requirements ?? {}).filter((r) =>
                       r.required !== false

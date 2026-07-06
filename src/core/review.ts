@@ -77,6 +77,39 @@ function getNotesPath(workspacePath: string, workspaceName: string): string {
 }
 
 // ============================================================================
+// Review guide state (docs/REVIEW-GUIDE.md): reviewer read-progress keyed by
+// stable cluster/section ids + the approval record. Stored beside review.json.
+// ============================================================================
+
+export interface ReviewGuideState {
+  /** Section (cluster) ids the reviewer marked read/complete. */
+  readSections: string[];
+  approval?: { by: string; at: string; headSha: string };
+  requestedChangesAt?: string;
+}
+
+function getGuideStatePath(workspacePath: string, workspaceName: string): string {
+  return getNotesPath(workspacePath, workspaceName).replace(/review\.json$/, 'review-guide-state.json');
+}
+
+export function readReviewGuideState(workspacePath: string, workspaceName: string): ReviewGuideState {
+  const path = getGuideStatePath(workspacePath, workspaceName);
+  if (!existsSync(path)) return { readSections: [] };
+  try {
+    return JSON.parse(readFileSync(path, 'utf-8')) as ReviewGuideState;
+  } catch {
+    return { readSections: [] };
+  }
+}
+
+export function writeReviewGuideState(workspacePath: string, workspaceName: string, state: ReviewGuideState): ReviewGuideState {
+  const path = getGuideStatePath(workspacePath, workspaceName);
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, JSON.stringify(state, null, 2), 'utf-8');
+  return state;
+}
+
+// ============================================================================
 // Session Read / Write
 // ============================================================================
 

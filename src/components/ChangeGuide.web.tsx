@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactElement } from 'react';
 import { PatchDiff } from '@pierre/diffs/react';
 import type { SessionBackend } from '../session/backend.js';
+import { renderMarkdownHtml } from './markdown-render.js';
 import type { ReviewChangedFile } from '../types/review.js';
 
 /**
@@ -41,6 +42,14 @@ export interface WalkStep {
   files: WalkStepFile[];
   /** Optional reviewer comment thread closing the section (mock: ReviewStage .thread). */
   comment?: WalkStepComment;
+  /** Guide-mode: stable section id (read-state persists under it). */
+  sectionId?: string;
+  /** Guide-mode: markdown explanation (rendered over `why` plain text). */
+  explanationMd?: string;
+  /** Guide-mode: narrator questions for the reviewer. */
+  asks?: string[];
+  /** Guide-mode: attention callouts. */
+  callouts?: Array<{ tone: 'risk' | 'mechanical' | 'decision'; text: string }>;
 }
 
 const ROOT_GROUP = '(root)';
@@ -182,14 +191,20 @@ function FileDiffBlock({ backend, projectName, workspaceName, file, onOpenFile }
 
 /* ── The pane ──────────────────────────────────────────────────────────────── */
 
-export function ChangeGuidePane({ backend, projectName, workspaceName, onOpenFile, onApprove, onOpenRubric, humanGatePending = 0 }: {
+export function ChangeGuidePane({ backend, projectName, workspaceName, workspaceId, onOpenFile, onApprove, onOpenRubric, onRequestChanges, onGenerateGuide, humanGatePending = 0 }: {
   backend: SessionBackend | null;
   projectName: string;
   workspaceName: string;
+  /** Enables guide-mode (review/guide.json) + persisted read-state. */
+  workspaceId?: string;
   onOpenFile?: (path: string) => void;
   onApprove?: () => void;
   /** Opens the Review rubric pane (mock: foot '☰ Review rubric' → open('rubric')). */
   onOpenRubric?: () => void;
+  /** The review loop: compose findings → workspace agent, stage back to code. */
+  onRequestChanges?: (prompt: string) => void;
+  /** Spawn a narrator session (review-guide-narrator skill). */
+  onGenerateGuide?: () => void;
   /** Required human-gated requirements still awaiting a verdict — Approve is
    *  blocked until 0 (mock: review-gated approval owned by the human). */
   humanGatePending?: number;
@@ -199,6 +214,10 @@ export function ChangeGuidePane({ backend, projectName, workspaceName, onOpenFil
   const [active, setActive] = useState(0);
   const [done, setDone] = useState<Set<number>>(new Set());
   const [reloadTick, setReloadTick] = useState(0);
+  const [guideMode, setGuideMode] = useState(false);
+  const [specEvolution, setSpecEvolution] = useState<string | null>(null);
+  const [threadsOpen, setThreadsOpen] = useState(0);
+  const [unresolvedSummaries, setUnresolvedSummaries] = useState<string[]>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const secRefs = useRef<Array<HTMLElement | null>>([]);
 
@@ -208,18 +227,76 @@ export function ChangeGuidePane({ backend, projectName, workspaceName, onOpenFil
     setDone(new Set());
     setActive(0);
     if (!backend?.sendReviewRequest) { setLoadState('error'); return; }
-    void backend
-      .sendReviewRequest({ op: 'get_changed_files', projectName, workspaceName })
+
+    const loadHeuristic = async (): Promise<void> => {
+      const r = await backend.sendReviewRequest!({ op: 'get_changed_files', projectName, workspaceName });
+      if (!alive || r.op !== 'changed_files') { if (alive) setLoadState('error'); return; }
+      secRefs.current = [];
+      setGuideMode(false);
+      setSteps(buildWalkSteps(r.files));
+      setLoadState('ready');
+    };
+
+    void (async () => {
+      // Guide-mode: narrated review/guide.json from the artifacts branch.
+      try {
+        if (workspaceId && backend.readWorkspaceArtifact) {
+          const raw = await backend.readWorkspaceArtifact(workspaceId, 'review/guide.json');
+          const guide = JSON.parse(new TextDecoder('utf-8').decode(Uint8Array.from(atob(raw.base64), (c) => c.charCodeAt(0)))) as {
+            sections: Array<{ clusterId: string; title: string; kind: string; explanation: string; exhibits: Array<{ file: string; slow?: boolean }>; asks?: string[]; callouts?: Array<{ tone: 'risk' | 'mechanical' | 'decision'; text: string }> }>;
+            specEvolution?: string;
+          };
+          if (!alive) return;
+          secRefs.current = [];
+          setGuideMode(true);
+          setSpecEvolution(guide.specEvolution ?? null);
+          setSteps(guide.sections.map((section, i) => ({
+            n: i + 1,
+            kind: section.kind,
+            title: section.title,
+            what: '',
+            why: section.explanation,
+            explanationMd: section.explanation,
+            files: section.exhibits.map((e) => ({ path: e.file, changeType: 'modified' as const })),
+            sectionId: section.clusterId,
+            asks: section.asks,
+            callouts: section.callouts,
+          })));
+          setLoadState('ready');
+          // persisted read-state keyed by section id
+          const st = await backend.sendReviewRequest!({ op: 'get_review_guide_state', projectName, workspaceName });
+          if (alive && st.op === 'review_guide_state') {
+            const read = new Set(st.state.readSections);
+            setDone(new Set(guide.sections.map((sec, i) => (read.has(sec.clusterId) ? i : -1)).filter((i) => i >= 0)));
+          }
+          return;
+        }
+      } catch { /* no guide yet — heuristic below */ }
+      await loadHeuristic().catch(() => { if (alive) setLoadState('error'); });
+    })();
+
+    // Open threads gate Approve (settled: threads block).
+    void backend.sendReviewRequest({ op: 'get_threads', projectName, workspaceName })
       .then((r) => {
-        if (!alive) return;
-        if (r.op !== 'changed_files') { setLoadState('error'); return; }
-        secRefs.current = [];
-        setSteps(buildWalkSteps(r.files));
-        setLoadState('ready');
+        if (!alive || r.op !== 'threads') return;
+        const open = r.threads.filter((t) => !t.resolved);
+        setThreadsOpen(open.length);
+        setUnresolvedSummaries(open.map((t) => {
+          const target = t.target.kind === 'workspace' ? 'workspace' : (t.target as { file?: string }).file ?? 'file';
+          const first = t.comments[0]?.body?.split('\n')[0] ?? '';
+          return `- [${target}] ${first}`.slice(0, 200);
+        }));
       })
-      .catch(() => { if (alive) setLoadState('error'); });
+      .catch(() => undefined);
     return () => { alive = false; };
-  }, [backend, projectName, workspaceName, reloadTick]);
+  }, [backend, projectName, workspaceName, workspaceId, reloadTick]);
+
+  /** Persist read-state in guide-mode (fire-and-forget; heuristic mode stays in-memory). */
+  const persistRead = useCallback((nextDone: Set<number>, allSteps: WalkStep[]) => {
+    if (!guideMode || !backend?.sendReviewRequest) return;
+    const readSections = allSteps.filter((_, i) => nextDone.has(i)).map((st) => st.sectionId!).filter(Boolean);
+    void backend.sendReviewRequest({ op: 'set_review_guide_state', projectName, workspaceName, state: { readSections } }).catch(() => undefined);
+  }, [guideMode, backend, projectName, workspaceName]);
 
   /* Scroll-spy: IntersectionObserver on sections drives the active timeline step.
      Active = last section whose top sits above a line 72px into the scroll viewport;
@@ -249,9 +326,10 @@ export function ChangeGuidePane({ backend, projectName, workspaceName, onOpenFil
       const next = new Set(d);
       if (next.has(i)) next.delete(i);
       else next.add(i);
+      persistRead(next, steps);
       return next;
     });
-  }, []);
+  }, [persistRead, steps]);
 
   const total = steps.length;
   const completed = done.size;
@@ -332,14 +410,36 @@ export function ChangeGuidePane({ backend, projectName, workspaceName, onOpenFil
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto border-t border-[var(--gs-border)] p-3.5">
+          {guideMode && specEvolution && active === 0 && (
+            <div className="mb-3 border border-[var(--gs-border)] border-l-2 border-l-[var(--gs-purple,#bc8cff)] bg-[var(--gs-bg-elevated)] px-2.5 py-2">
+              <div className="text-[10px] uppercase tracking-[0.12em] text-[#bc8cff]">how the spec evolved</div>
+              <div className="gs-block-md mt-1 text-[11.5px] leading-[1.55] text-[var(--gs-text-muted)]" dangerouslySetInnerHTML={{ __html: renderMarkdownHtml(specEvolution) }} />
+            </div>
+          )}
           {activeStep && (
             <>
               <div className="text-[10.5px] uppercase tracking-[0.12em] text-[var(--gs-text-dim)]">{activeStep.kind}</div>
-              <p className="mt-2 text-[12.5px] leading-[1.55] text-[var(--gs-text)]">{activeStep.what}</p>
-              <p className="mt-2 text-[11.5px] leading-[1.55] text-[var(--gs-text-muted)]">
-                <span className="mr-1.5 uppercase text-[10px] tracking-[0.1em] text-[var(--gs-accent)]">why</span>
-                {activeStep.why}
-              </p>
+              {activeStep.explanationMd ? (
+                <div className="gs-block-md mt-2 text-[12.5px] leading-[1.55] text-[var(--gs-text)]" dangerouslySetInnerHTML={{ __html: renderMarkdownHtml(activeStep.explanationMd) }} />
+              ) : (
+                <>
+                  <p className="mt-2 text-[12.5px] leading-[1.55] text-[var(--gs-text)]">{activeStep.what}</p>
+                  <p className="mt-2 text-[11.5px] leading-[1.55] text-[var(--gs-text-muted)]">
+                    <span className="mr-1.5 uppercase text-[10px] tracking-[0.1em] text-[var(--gs-accent)]">why</span>
+                    {activeStep.why}
+                  </p>
+                </>
+              )}
+              {(activeStep.callouts ?? []).map((c, ci) => (
+                <div key={ci} className={`mt-2 border-l-2 px-2 py-1 text-[11px] ${c.tone === 'risk' ? 'border-[var(--gs-danger)] text-[var(--gs-danger)]' : c.tone === 'decision' ? 'border-[var(--gs-info)] text-[var(--gs-text-muted)]' : 'border-[var(--gs-border-active)] text-[var(--gs-text-dim)]'}`}>
+                  <span className="mr-1 uppercase text-[9.5px] tracking-[0.1em]">{c.tone}</span>{c.text}
+                </div>
+              ))}
+              {(activeStep.asks ?? []).map((a, ai) => (
+                <div key={ai} className="mt-2 border border-[rgba(188,140,255,.3)] px-2 py-1 text-[11px] text-[#bc8cff]">
+                  <span className="mr-1">?</span>{a}
+                </div>
+              ))}
             </>
           )}
         </div>
@@ -353,18 +453,52 @@ export function ChangeGuidePane({ backend, projectName, workspaceName, onOpenFil
           >
             ☰ Review rubric
           </button>
+          {!guideMode && onGenerateGuide && (
+            <button
+              type="button"
+              onClick={onGenerateGuide}
+              title="Spawn a narrator session that writes review/guide.json for this diff"
+              className="border border-[var(--gs-border)] px-2 py-[3px] text-[11px] text-[var(--gs-text-muted)] transition-colors duration-[120ms] hover:bg-[var(--gs-bg-active)] hover:text-[var(--gs-text)] active:scale-[.96]"
+            >
+              ✦ Generate guide
+            </button>
+          )}
+          {onRequestChanges && (threadsOpen > 0 || humanGatePending > 0) && (
+            <button
+              type="button"
+              onClick={() => {
+                const prompt = [
+                  'Review requested changes — please address, then re-run the guide.',
+                  unresolvedSummaries.length ? `\nOpen review threads:\n${unresolvedSummaries.join('\n')}` : '',
+                  humanGatePending > 0 ? `\n${humanGatePending} required human-gated requirement(s) still lack a passing verdict — check the rubric.` : '',
+                ].filter(Boolean).join('\n');
+                onRequestChanges(prompt);
+              }}
+              className="border border-[#4a3a1f] px-2 py-[3px] text-[11px] text-[var(--gs-warning)] transition-colors duration-[120ms] hover:bg-[rgba(255,204,0,.08)] active:scale-[.96]"
+            >
+              ↺ Request changes
+            </button>
+          )}
           <button
             type="button"
-            disabled={!allDone || humanGatePending > 0}
-            onClick={() => { if (allDone && humanGatePending === 0) onApprove?.(); }}
+            disabled={!allDone || humanGatePending > 0 || threadsOpen > 0}
+            onClick={() => {
+              if (!allDone || humanGatePending > 0 || threadsOpen > 0) return;
+              // Record the approval durably, then let the shell advance the stage.
+              void backend?.sendReviewRequest?.({
+                op: 'set_review_guide_state', projectName, workspaceName,
+                state: { readSections: steps.filter((_, i) => done.has(i)).map((st) => st.sectionId ?? String(st.n)), approval: { by: 'human', at: new Date().toISOString(), headSha: '' } },
+              }).catch(() => undefined);
+              onApprove?.();
+            }}
             title={humanGatePending > 0 ? `${humanGatePending} human gate${humanGatePending === 1 ? '' : 's'} pending in the rubric` : undefined}
             className={`ml-auto whitespace-nowrap border border-[var(--gs-accent)] bg-[var(--gs-accent)] px-2 py-[3px] text-[11px] font-medium tabular-nums text-[var(--gs-text-on-accent)] transition-colors duration-[120ms] ${
-              allDone && humanGatePending === 0
+              allDone && humanGatePending === 0 && threadsOpen === 0
                 ? 'hover:bg-[var(--gs-accent-hover)] active:scale-[.96]'
                 : 'cursor-not-allowed opacity-40'
             }`}
           >
-            {allDone && humanGatePending === 0 ? 'Approve' : `Approve · ${completed}/${total}`}
+            {allDone && humanGatePending === 0 && threadsOpen === 0 ? 'Approve' : `Approve · ${completed}/${total}${threadsOpen > 0 ? ` · ${threadsOpen} open thread${threadsOpen === 1 ? '' : 's'}` : ''}`}
           </button>
         </div>
       </div>
