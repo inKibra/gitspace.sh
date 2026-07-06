@@ -32,6 +32,55 @@ interface FeedItem {
   path?: string;
 }
 
+function WorkspaceCombo({ value, options, onChange }: {
+  value: string;
+  options: Array<{ value: string; label: string; chain: string }>;
+  onChange: (value: string) => void;
+}): ReactElement {
+  const [open, setOpen] = useState(false);
+  const [q, setQ] = useState('');
+  const cur = options.find((o) => o.value === value);
+  const ql = q.toLowerCase();
+  const filtered = options.filter((o) => `${o.chain} ${o.label}`.toLowerCase().includes(ql));
+  const chains = [...new Set(filtered.map((o) => o.chain))];
+  return (
+    <div className="relative border-b border-[var(--gs-border)] px-2.5 py-2">
+      <div className="relative flex items-center">
+        <span className="pointer-events-none absolute left-2 text-[11px] text-[var(--gs-text-ghost)]">⛓</span>
+        <input
+          value={open ? q : (cur ? `${cur.chain} · ${cur.label}` : '')}
+          placeholder="find chain / workspace…"
+          onFocus={() => { setOpen(true); setQ(''); }}
+          onChange={(e) => setQ(e.target.value)}
+          onBlur={() => setTimeout(() => setOpen(false), 130)}
+          className="w-full border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] py-1 pl-7 pr-6 font-[family-name:var(--gs-font-mono)] text-[11px] text-[var(--gs-text)] outline-none placeholder:text-[var(--gs-text-ghost)] focus:border-[var(--gs-border-active)]"
+        />
+        <span className="pointer-events-none absolute right-2 text-[10px] text-[var(--gs-text-dim)]">▾</span>
+      </div>
+      {open && (
+        <div className="absolute inset-x-2.5 top-[38px] z-30 max-h-[240px] overflow-auto border border-[var(--gs-border-active)] bg-[var(--gs-bg-overlay)] shadow-[0_8px_24px_rgba(0,0,0,.6)]">
+          {chains.map((chain) => (
+            <div key={chain}>
+              <div className="px-[9px] pb-[3px] pt-[7px] text-[10px] uppercase tracking-[.1em] text-[var(--gs-text-dim)]">{chain}</div>
+              {filtered.filter((o) => o.chain === chain).map((o) => (
+                <button
+                  key={o.value}
+                  type="button"
+                  onMouseDown={() => { onChange(o.value); setOpen(false); }}
+                  className={`block w-full px-[9px] py-1.5 text-left font-[family-name:var(--gs-font-mono)] text-[11px] ${o.value === value ? 'bg-[var(--gs-bg-active)] text-[var(--gs-text)]' : 'text-[var(--gs-text-muted)] hover:bg-[var(--gs-bg-hover)]'}`}
+                >
+                  {o.label}
+                </button>
+              ))}
+            </div>
+          ))}
+          {filtered.length === 0 && <div className="px-[9px] py-2 text-[11px] text-[var(--gs-text-dim)]">no matches</div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
 const PHASE_TONE: Record<string, string> = {
   plan: 'bg-[#1e3a5f]',
   code: 'bg-[#4a3a1f]',
@@ -184,22 +233,30 @@ export function ProjectHomePage({
     </button>
   );
 
-  const railRow = (e: ArtifactEntry): ReactElement => {
+  const railRow = (e: ArtifactEntry, sub?: string): ReactElement => {
     const kind = classifyArtifact(e.path);
     const name = e.path.split('/').pop() ?? e.path;
     return (
-      <div key={e.path} className="group flex w-full items-center gap-1.5 rounded px-1.5 py-[3px] font-[family-name:var(--gs-font-mono)] text-[11px] hover:bg-[var(--gs-bg-active)]">
+      <div
+        key={`${sub ?? ''}:${e.path}`}
+        onClick={() => { if (kind === 'dashboard') { setViewerPath(null); setDashboardPath(e.path); } else { setDashboardPath(null); setViewerPath(e.path); } }}
+        title={e.path}
+        className="flex w-full cursor-pointer items-center gap-2 px-3 py-1 text-[11.5px] text-[var(--gs-text-muted)] hover:bg-[var(--gs-bg-hover)] hover:text-[var(--gs-text)]"
+      >
+        <span className="w-4 flex-shrink-0 text-center text-[var(--gs-text-ghost)]">{KIND_ICON[kind]}</span>
+        <span className="min-w-0 flex-1 truncate">
+          {name}
+          {sub && <span className="text-[10px] text-[var(--gs-text-dim)]"> · {sub}</span>}
+        </span>
+        {e.pointer && <span className="flex-shrink-0 rounded-full border border-[#2a2413] px-1 text-[9px] text-[var(--gs-warning)]">lfs</span>}
         <button
           type="button"
-          onClick={() => { if (kind === 'dashboard') { setViewerPath(null); setDashboardPath(e.path); } else { setDashboardPath(null); setViewerPath(e.path); } }}
-          className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
-          title={e.path}
+          onClick={(ev) => { ev.stopPropagation(); toggleFav(e.path); }}
+          title="favorite"
+          className={`flex-shrink-0 px-0.5 text-[12px] ${favs.has(e.path) ? 'text-[var(--gs-warning)]' : 'text-[var(--gs-text-ghost)] hover:text-[var(--gs-text-muted)]'}`}
         >
-          <span className="w-4 flex-shrink-0 text-center text-[var(--gs-text-ghost)]">{KIND_ICON[kind]}</span>
-          <span className="min-w-0 flex-1 truncate text-[var(--gs-text)]">{name}</span>
-          {e.pointer && <span className="flex-shrink-0 rounded-full border border-[#2a2413] px-1 text-[9px] text-[#f0b429]">lfs</span>}
+          ★
         </button>
-        <button type="button" onClick={() => toggleFav(e.path)} title="favorite" className={`flex-shrink-0 px-0.5 ${favs.has(e.path) ? 'text-[#f0b429]' : 'text-[var(--gs-text-ghost)] opacity-0 group-hover:opacity-100'}`}>★</button>
       </div>
     );
   };
@@ -363,20 +420,14 @@ export function ProjectHomePage({
         {/* right: project artifacts rail (mock: ProjectArtifactsRail) */}
         {section !== 'artifacts' && (
           <div className="hidden w-[300px] flex-shrink-0 flex-col overflow-y-auto border-l border-[var(--gs-border-muted)] p-2 lg:flex">
-            <select
+            <WorkspaceCombo
               value={artifactSource}
-              onChange={(e) => { setArtifactSource(e.target.value); setViewerPath(null); setDashboardPath(null); }}
-              className="mb-1.5 w-full border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-1.5 py-1 font-[family-name:var(--gs-font-mono)] text-[11px] text-[var(--gs-text)]"
-            >
-              {[...new Set(sourceOptions.map((o) => o.chain))].map((chain) => (
-                <optgroup key={chain} label={`⛓ ${chain}`}>
-                  {sourceOptions.filter((o) => o.chain === chain).map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-                </optgroup>
-              ))}
-            </select>
-            <div className="mb-1 flex items-center gap-1 text-[11px]">
-              <button type="button" onClick={() => setRailView('sel')} className={`rounded px-2 py-0.5 ${railView === 'sel' ? 'bg-[var(--gs-bg-active)] text-[var(--gs-text)]' : 'text-[var(--gs-text-dim)]'}`}>Artifacts</button>
-              <button type="button" onClick={() => setRailView('fav')} className={`rounded px-2 py-0.5 ${railView === 'fav' ? 'bg-[var(--gs-bg-active)] text-[var(--gs-text)]' : 'text-[var(--gs-text-dim)]'}`}>★ Favorites {favs.size > 0 ? favs.size : ''}</button>
+              options={sourceOptions.map((o) => ({ value: o.value, label: o.label, chain: o.chain }))}
+              onChange={(v) => { setArtifactSource(v); setViewerPath(null); setDashboardPath(null); }}
+            />
+            <div className="flex border-b border-[var(--gs-border)]">
+              <button type="button" onClick={() => setRailView('sel')} className={`flex-1 py-[7px] text-[11px] ${railView === 'sel' ? 'bg-[var(--gs-bg-elevated)] text-[var(--gs-text)] shadow-[inset_0_-2px_0_var(--gs-accent)]' : 'text-[var(--gs-text-muted)]'}`}>Artifacts</button>
+              <button type="button" onClick={() => setRailView('fav')} className={`flex-1 py-[7px] text-[11px] ${railView === 'fav' ? 'bg-[var(--gs-bg-elevated)] text-[var(--gs-text)] shadow-[inset_0_-2px_0_var(--gs-accent)]' : 'text-[var(--gs-text-muted)]'}`}>★ Favorites <span className="text-[var(--gs-text-ghost)]">{favs.size > 0 ? favs.size : ''}</span></button>
             </div>
             {artifactsError ? (
               <div className="px-2 py-3 text-center text-[11px] text-[var(--gs-danger)]">{artifactsError}</div>
