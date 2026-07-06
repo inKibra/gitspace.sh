@@ -1,7 +1,7 @@
 /** @jsxImportSource react */
 
 import { useCallback, useEffect, useRef, type ReactNode } from 'react';
-import { DockviewReact, type DockviewReadyEvent, type IDockviewPanelHeaderProps, type IDockviewPanelProps } from 'dockview-react';
+import { DockviewReact, type DockviewReadyEvent, type IDockviewHeaderActionsProps, type IDockviewPanelHeaderProps, type IDockviewPanelProps } from 'dockview-react';
 import { terminalMemoryDebugDecrement, terminalMemoryDebugGauge, terminalMemoryDebugIncrement } from '../utils/terminal-memory-debug.js';
 
 export interface DockviewTerminalPanel {
@@ -10,12 +10,15 @@ export interface DockviewTerminalPanel {
   version?: string;
   render: () => ReactNode;
   onClose?: () => void;
+  /** Pulsing green dot on the tab while the pane's agent/process runs (mock wdot). */
+  running?: boolean;
 }
 
 type PanelParams = {
   version?: string;
   render: () => ReactNode;
   onClose?: () => void;
+  running?: boolean;
 };
 
 function DockPanel(props: IDockviewPanelProps<PanelParams>) {
@@ -32,6 +35,7 @@ function DockTab(props: IDockviewPanelHeaderProps<PanelParams>) {
   };
   return (
     <div className="flex items-center gap-2 min-w-0 max-w-full px-1">
+      {props.params.running && <span className="h-[7px] w-[7px] flex-none animate-pulse rounded-full bg-[var(--gs-accent)]" />}
       <span className="truncate">{title}</span>
       {onClose ? (
         <button
@@ -50,6 +54,24 @@ function DockTab(props: IDockviewPanelHeaderProps<PanelParams>) {
           ×
         </button>
       ) : null}
+    </div>
+  );
+}
+
+function DockHeaderActions(props: IDockviewHeaderActionsProps) {
+  return (
+    <div className="flex h-full items-center pr-1">
+      <button
+        type="button"
+        onClick={() => {
+          const active = props.group.activePanel;
+          if (active && props.group.panels.length > 1) active.api.moveTo({ position: 'right' });
+        }}
+        title="Split the active tab into a right pane"
+        className="px-1.5 text-[10.5px] text-[var(--gs-text-ghost)] hover:text-[var(--gs-text)]"
+      >
+        ⇆ Split
+      </button>
     </div>
   );
 }
@@ -119,7 +141,7 @@ export function DockviewWorkspaceShell({
     }
 
     for (const panel of panels) {
-      const params: PanelParams = { version: panel.version, render: panel.render, onClose: panel.onClose };
+      const params: PanelParams = { version: panel.version, render: panel.render, onClose: panel.onClose, running: panel.running };
       const existingPanel = api.getPanel(panel.id);
       if (existingPanel) {
         const previous = panelVersionsRef.current.get(panel.id);
@@ -255,6 +277,7 @@ export function DockviewWorkspaceShell({
         className="dockview-theme-dark"
         components={{ panel: DockPanel }}
         tabComponents={{ 'terminal-tab': DockTab }}
+        rightHeaderActionsComponent={DockHeaderActions}
         onReady={onReady}
       />
     </div>

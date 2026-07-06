@@ -2752,12 +2752,14 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
           inputMode,
           String(keyboardVisible),
           String(showInlineFloatingControls),
+          String((agentSession as { state?: string } | null | undefined)?.state === 'running'),
         ].join('|');
         terminalMemoryDebugIncrement('app.terminalPanelDescriptor.created');
         return {
           id: pane.paneId,
           title,
           version: panelVersion,
+          running: (agentSession as { state?: string } | null | undefined)?.state === 'running',
           onClose: () => paneBackend?.detachPane?.(pane.paneId).catch(() => undefined),
           render: () => (
             <PaneTerminalPanel
