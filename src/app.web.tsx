@@ -40,6 +40,7 @@ import { GoalDocPanel } from "./components/GoalDocPanel.web.js";
 import { ChangeGuidePane } from "./components/ChangeGuide.web.js";
 import { ReviewRubric } from "./components/ReviewRubric.web.js";
 import { EvidencePanel } from "./components/EvidencePanel.web.js";
+import { ReportPanel } from "./components/ReportPanel.web.js";
 import { RightRail, RepoFilePanel, type RepoFileOpen } from "./components/RightRail.web.js";
 import { ProjectHomePage } from "./pages/ProjectHomePage.web.js";
 import { useInboxPage } from './app/react/index.js';
@@ -132,7 +133,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   const [eventsWorkspaceLabel, setEventsWorkspaceLabel] = useState<string>('');
   const [projectHomeName, setProjectHomeName] = useState<string | null>(null);
   /** Repo files + artifacts opened as dock tabs, keyed by workspace selectionKey. */
-  type DockExtraPane = ({ kind: 'file' } & RepoFileOpen) | { kind: 'artifact'; path: string } | { kind: 'dashboard'; path: string } | { kind: 'note'; noteId: string | null; title: string; nonce?: number } | { kind: 'goal' } | { kind: 'guide' } | { kind: 'rubric' } | { kind: 'evidence'; requirementId: string; evidenceId: string };
+  type DockExtraPane = ({ kind: 'file' } & RepoFileOpen) | { kind: 'artifact'; path: string } | { kind: 'dashboard'; path: string } | { kind: 'note'; noteId: string | null; title: string; nonce?: number } | { kind: 'goal' } | { kind: 'guide' } | { kind: 'rubric' } | { kind: 'evidence'; requirementId: string; evidenceId: string } | { kind: 'report'; path: string };
   const [dockExtraPanes, setDockExtraPanes] = useState<Record<string, DockExtraPane[]>>({});
   const openSingletonPane = useCallback((wsKey: string, pane: DockExtraPane) => {
     setDockExtraPanes((prev) => {
@@ -2864,6 +2865,24 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
               />
             ),
           });
+        } else if (extra.kind === 'report') {
+          panels.push({
+            id: `report:${extra.path}`,
+            title: '⚑ Report',
+            version: `report|${extra.path}`,
+            onClose: closeExtra,
+            render: () => (
+              <ReportPaneLoader
+                path={extra.path}
+                read={(p2) => {
+                  const fn = paneBackend?.readWorkspaceArtifact;
+                  if (!fn) return Promise.reject(new Error('unavailable'));
+                  return fn.call(paneBackend, workspace.id, p2);
+                }}
+                onOpenAttachment={(ref) => openSingletonPane(wsKey, { kind: 'artifact', path: ref })}
+              />
+            ),
+          });
         } else if (extra.kind === 'evidence') {
           const req = workspaceGoalForPanels?.validation?.requirements?.[extra.requirementId];
           const ev = req?.evidence?.find((e) => e.id === extra.evidenceId);
@@ -2977,6 +2996,17 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
                         return { ...prev, [key]: [...cur, { kind: 'dashboard', path }] };
                       });
                     }}
+                    phase={((workspace as { phase?: string }).phase as import('./types/config.js').WorkspacePhase | undefined) ?? 'code'}
+                    onOpenEvents={() => {
+                      setEventsWorkspacePath(workspace.path);
+                      setEventsWorkspaceLabel(workspace.name);
+                      setShowEvents(true);
+                      void multi.requestEvents(getWorkspaceRef(workspace.id, workspaceBackendKey));
+                    }}
+                    goalEvidence={workspaceGoal?.validation ? Object.values(workspaceGoal.validation.requirements ?? {}).flatMap((r) => (r.evidence ?? []).map((e) => ({ requirementId: r.id, evidenceId: e.id, name: e.name, requirementTitle: r.title }))) : []}
+                    onOpenEvidence={(requirementId, evidenceId) => openSingletonPane(workspace.selectionKey ?? workspace.id, { kind: 'evidence', requirementId, evidenceId })}
+                    onOpenReport={(path) => openSingletonPane(workspace.selectionKey ?? workspace.id, { kind: 'report', path })}
+                    onOpenGoalPane={() => openSingletonPane(workspace.selectionKey ?? workspace.id, { kind: 'goal' })}
                     onOpenNote={(noteId, title) => {
                       const key = workspace.selectionKey ?? workspace.id;
                       setDockExtraPanes((prev) => {
@@ -3307,6 +3337,19 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
 }
 
 // ─── Outer shell ────────────────────────────────────────────────────────────
+
+function ReportPaneLoader({ path, read, onOpenAttachment }: { path: string; read: (p: string) => Promise<{ base64: string }>; onOpenAttachment?: (ref: string) => void }) {
+  const [report, setReport] = useState<unknown>(undefined);
+  const [err, setErr] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    read(path).then((r) => { if (alive) setReport(JSON.parse(atob(r.base64))); }).catch(() => { if (alive) setErr(true); });
+    return () => { alive = false; };
+  }, [path, read]);
+  if (err) return <div className="flex h-full items-center justify-center text-[12px] text-[var(--gs-danger)]">Failed to load report.</div>;
+  if (report === undefined) return <div className="flex h-full items-center justify-center text-[12px] text-[var(--gs-text-dim)]">Loading…</div>;
+  return <ReportPanel report={report} onOpenAttachment={onOpenAttachment} />;
+}
 
 function GoalDocDockPane({ goals, initialGoalId }: { goals: import("./app/shared/board/types.js").KanbanGoalItem[]; initialGoalId: string }) {
   const [goalId, setGoalId] = useState(initialGoalId);

@@ -78,6 +78,12 @@ export function RightRail({
   onOpenArtifact,
   onOpenDashboard,
   onOpenNote,
+  phase,
+  onOpenEvents,
+  goalEvidence,
+  onOpenEvidence,
+  onOpenReport,
+  onOpenGoalPane,
 }: {
   backend: SessionBackend | null;
   workspaceId: string;
@@ -91,6 +97,14 @@ export function RightRail({
   onOpenDashboard: (path: string) => void;
   /** Open a note (or a new-note composer when id is null) as a ✎ dock tab. */
   onOpenNote?: (noteId: string | null, title: string) => void;
+  /** Workspace kanban phase — review stage switches the repo header to Diffs. */
+  phase?: import('../types/config.js').WorkspacePhase;
+  onOpenEvents?: () => void;
+  /** Evidence rows from the bound goal (open as ▸ ev: tabs). */
+  goalEvidence?: Array<{ requirementId: string; evidenceId: string; name: string; requirementTitle: string }>;
+  onOpenEvidence?: (requirementId: string, evidenceId: string) => void;
+  onOpenReport?: (path: string) => void;
+  onOpenGoalPane?: () => void;
 }): ReactElement {
   const [closed, setClosed] = useState(() => {
     try { return window.localStorage.getItem(RAIL_CLOSED_KEY) === '1'; } catch { return false; }
@@ -131,24 +145,26 @@ export function RightRail({
         <button type="button" onClick={() => setClosed(true)} title="Collapse rail" className="ml-auto px-1 text-[var(--gs-text-ghost)] hover:text-[var(--gs-text)]">◨</button>
       </div>
       {mode === 'repo'
-        ? <RepoMode backend={backend} workspaceId={workspaceId} projectName={projectName} workspaceName={workspaceName} onOpenFile={onOpenFile} />
-        : <ArtifactsMode backend={backend} workspaceId={workspaceId} projectName={projectName} workspaceName={workspaceName} onOpenArtifact={onOpenArtifact} onOpenDashboard={onOpenDashboard} onOpenNote={onOpenNote} />}
+        ? <RepoMode backend={backend} workspaceId={workspaceId} projectName={projectName} workspaceName={workspaceName} onOpenFile={onOpenFile} reviewing={phase === 'review'} />
+        : <ArtifactsMode backend={backend} workspaceId={workspaceId} projectName={projectName} workspaceName={workspaceName} onOpenArtifact={onOpenArtifact} onOpenDashboard={onOpenDashboard} onOpenNote={onOpenNote} onOpenEvents={onOpenEvents} goalEvidence={goalEvidence} onOpenEvidence={onOpenEvidence} onOpenReport={onOpenReport} onOpenGoalPane={onOpenGoalPane} />}
     </aside>
   );
 }
 
 /* ── Repo mode ─────────────────────────────────────────────────────────────── */
 
-function RepoMode({ backend, workspaceId, projectName, workspaceName, onOpenFile }: {
+function RepoMode({ backend, workspaceId, projectName, workspaceName, onOpenFile, reviewing = false }: {
   backend: SessionBackend | null;
   workspaceId: string;
   projectName: string;
   workspaceName: string;
   onOpenFile: (file: RepoFileOpen) => void;
+  reviewing?: boolean;
 }): ReactElement {
   const [entries, setEntries] = useState<Array<{ path: string; status?: string }>>([]);
   const [changed, setChanged] = useState<ReviewChangedFile[]>([]);
   const [baseBranch, setBaseBranch] = useState<string>('');
+  const [baseOverride, setBaseOverride] = useState<string>('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [commitMsg, setCommitMsg] = useState('');
@@ -160,7 +176,7 @@ function RepoMode({ backend, workspaceId, projectName, workspaceName, onOpenFile
     setLoading(true);
     setError(null);
     const tree = backend.listRepoFiles?.(workspaceId).then(setEntries);
-    const changes = backend.sendReviewRequest?.({ op: 'get_changed_files', projectName, workspaceName })
+    const changes = backend.sendReviewRequest?.({ op: 'get_changed_files', projectName, workspaceName, base: baseOverride || undefined })
       .then((r) => {
         if (r && 'op' in r && r.op === 'changed_files') {
           setChanged((r as { files: ReviewChangedFile[] }).files ?? []);
@@ -174,7 +190,7 @@ function RepoMode({ backend, workspaceId, projectName, workspaceName, onOpenFile
       })
       .finally(() => setLoading(false));
     function entriesEmpty(): boolean { return true; }
-  }, [backend, workspaceId, projectName, workspaceName]);
+  }, [backend, workspaceId, projectName, workspaceName, baseOverride]);
 
   useEffect(() => { refresh(); }, [refresh]);
 
@@ -201,9 +217,18 @@ function RepoMode({ backend, workspaceId, projectName, workspaceName, onOpenFile
       {/* Files */}
       <div className="flex min-h-0 flex-1 flex-col">
         <div className="flex items-center gap-2 px-2 py-1 text-[10px] uppercase tracking-wider text-[var(--gs-text-ghost)]">
-          Files
-          <span className="ml-auto normal-case tracking-normal">
-            diff vs <span className="text-[var(--gs-text-dim)]">{baseBranch || '…'}</span>
+          {reviewing ? 'Diffs' : 'Files'}
+          {reviewing && <span className="rounded-full border border-[#4a3a1f] px-1.5 normal-case text-[var(--gs-warning)]">review</span>}
+          <span className="normal-case tracking-normal text-[var(--gs-text-ghost)]">backed by <span className="text-[var(--gs-text-dim)]">@pierre/trees</span></span>
+          <span className="ml-auto flex items-center gap-1 normal-case tracking-normal">
+            diff vs
+            <select
+              value={baseOverride || baseBranch}
+              onChange={(e) => setBaseOverride(e.target.value === baseBranch ? '' : e.target.value)}
+              className="border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-1 py-0.5 text-[10px] text-[var(--gs-text-dim)]"
+            >
+              {[...new Set([baseBranch || 'main', 'main', 'develop'])].map((b) => <option key={b} value={b}>{b}</option>)}
+            </select>
           </span>
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto pb-1 font-[family-name:var(--gs-font-mono)] text-[11px]">
@@ -250,6 +275,9 @@ function RepoMode({ backend, workspaceId, projectName, workspaceName, onOpenFile
                   className="flex w-full items-center gap-1.5 px-2 py-[2px] text-left hover:bg-[var(--gs-bg-active)]" title={f.filePath}>
                   <span className={`w-3 flex-shrink-0 text-[10px] ${STATUS_TONE[letter] ?? 'text-[var(--gs-warning)]'}`}>{letter}</span>
                   <span className="min-w-0 flex-1 truncate text-[var(--gs-text)]">{f.filePath}</span>
+                  {(f.additions !== undefined || f.deletions !== undefined) && (
+                    <span className="flex-shrink-0 text-[10px] tabular-nums text-[var(--gs-text-dim)]">+{f.additions ?? 0} −{f.deletions ?? 0}</span>
+                  )}
                 </button>
               );
             })
@@ -328,7 +356,32 @@ export function RepoFilePanel({ backend, workspaceId, projectName, workspaceName
 
 /* ── Artifacts mode ────────────────────────────────────────────────────────── */
 
-function ArtifactsMode({ backend, workspaceId, projectName, workspaceName, onOpenArtifact, onOpenDashboard, onOpenNote }: {
+function rowMeta(path: string): string {
+  const ext = path.includes('.') ? path.slice(path.lastIndexOf('.') + 1).toLowerCase() : '';
+  if (ext === 'md') return 'doc';
+  if (['png', 'jpg', 'jpeg', 'gif', 'webp'].includes(ext)) return 'img';
+  if (['webm', 'mp4', 'mov'].includes(ext)) return 'video';
+  if (ext === 'json') return 'json';
+  return ext || '';
+}
+
+interface ReportRow {
+  path: string;
+  kind: string;
+  surface: string;
+  note: string;
+  rating?: number;
+}
+
+const REPORT_TONE: Record<string, string> = {
+  praise: 'border-[rgba(91,155,255,.4)] text-[var(--gs-info)]',
+  'good-pattern': 'border-[rgba(0,255,102,.4)] text-[var(--gs-success)]',
+  frustration: 'border-[rgba(255,80,80,.4)] text-[var(--gs-danger)]',
+  'workflow-quirk': 'border-[rgba(255,204,0,.4)] text-[var(--gs-warning)]',
+  'gitspace-quirk': 'border-[rgba(188,140,255,.4)] text-[#bc8cff]',
+};
+
+function ArtifactsMode({ backend, workspaceId, projectName, workspaceName, onOpenArtifact, onOpenDashboard, onOpenNote, onOpenEvents, goalEvidence, onOpenEvidence, onOpenReport, onOpenGoalPane }: {
   backend: SessionBackend | null;
   workspaceId: string;
   projectName: string;
@@ -336,12 +389,19 @@ function ArtifactsMode({ backend, workspaceId, projectName, workspaceName, onOpe
   onOpenArtifact: (path: string) => void;
   onOpenDashboard: (path: string) => void;
   onOpenNote?: (noteId: string | null, title: string) => void;
+  onOpenEvents?: () => void;
+  goalEvidence?: Array<{ requirementId: string; evidenceId: string; name: string; requirementTitle: string }>;
+  onOpenEvidence?: (requirementId: string, evidenceId: string) => void;
+  onOpenReport?: (path: string) => void;
+  onOpenGoalPane?: () => void;
 }): ReactElement {
   const [entries, setEntries] = useState<Array<{ path: string; size: number; pointer: boolean }>>([]);
   const [notes, setNotes] = useState<Array<{ id: string; title: string }>>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [view, setView] = useState<'sel' | 'fav'>('sel');
+  const [query, setQuery] = useState('');
+  const [reports, setReports] = useState<ReportRow[]>([]);
   const favKey = `gssh:artifact-favs:${projectName}`;
   const [favs, setFavs] = useState<Set<string>>(() => {
     try { return new Set(JSON.parse(window.localStorage.getItem(favKey) ?? '[]') as string[]); } catch { return new Set(); }
@@ -359,7 +419,19 @@ function ArtifactsMode({ backend, workspaceId, projectName, workspaceName, onOpe
     const fn = backend?.listWorkspaceArtifacts;
     if (!fn) { setLoading(false); setError('Artifacts not available.'); return; }
     Promise.allSettled([
-      fn.call(backend, workspaceId).then((list) => { if (alive) setEntries(list); }),
+      fn.call(backend, workspaceId).then(async (list) => {
+        if (alive) setEntries(list);
+        // Parse report artifacts (reports/*.report.json) for the Reports group.
+        const reportPaths = list.filter((e) => e.path.endsWith('.report.json'));
+        const parsed = await Promise.all(reportPaths.map(async (e) => {
+          try {
+            const raw = await backend!.readWorkspaceArtifact!(workspaceId, e.path);
+            const doc = JSON.parse(atob(raw.base64)) as { kind?: string; surface?: string; note?: string; rating?: number };
+            return { path: e.path, kind: doc.kind ?? 'praise', surface: doc.surface ?? e.path, note: doc.note ?? '', rating: doc.rating } as ReportRow;
+          } catch { return null; }
+        }));
+        if (alive) setReports(parsed.filter((r): r is ReportRow => r !== null));
+      }),
       backend?.listWorkspaceNotes?.(projectName, workspaceName).then((n) => {
         if (alive) setNotes((n as Array<{ id: string; body?: string }>).map((x) => ({ id: x.id, title: deriveNoteLabel(x.body ?? '') })));
       }),
@@ -377,15 +449,18 @@ function ArtifactsMode({ backend, workspaceId, projectName, workspaceName, onOpe
     else onOpenArtifact(path);
   };
 
+  const ql = query.trim().toLowerCase();
+  const matches = (text: string): boolean => !ql || text.toLowerCase().includes(ql);
   const groups = useMemo(() => {
     const byKind = new Map<ArtifactKind, Array<{ path: string; kind: ArtifactKind }>>();
     for (const e of entries) {
-      if (e.path === 'README.md') continue;
+      if (e.path === 'README.md' || e.path.endsWith('.report.json')) continue;
       const kind = classifyArtifact(e.path);
+      if (!matches(`${kind} ${e.path}`)) continue;
       (byKind.get(kind) ?? byKind.set(kind, []).get(kind)!).push({ path: e.path, kind });
     }
     return KIND_ORDER.map((k) => [k, byKind.get(k) ?? []] as const).filter(([, a]) => a.length > 0);
-  }, [entries]);
+  }, [entries, ql]);
 
   const favList = useMemo(
     () => entries.filter((e) => favs.has(e.path)).map((e) => ({ path: e.path, kind: classifyArtifact(e.path) })),
@@ -400,6 +475,7 @@ function ArtifactsMode({ backend, workspaceId, projectName, workspaceName, onOpe
           <span className="w-4 flex-shrink-0 text-center text-[var(--gs-text-ghost)]">{KIND_ICON[a.kind]}</span>
           <span className="min-w-0 flex-1 truncate text-[var(--gs-text)]">{name}</span>
         </button>
+        <span className="ml-auto flex-shrink-0 text-[10.5px] text-[var(--gs-text-dim)]">{rowMeta(a.path)}</span>
         <button
           type="button"
           onClick={() => toggleFav(a.path)}
@@ -420,6 +496,14 @@ function ArtifactsMode({ backend, workspaceId, projectName, workspaceName, onOpe
           ★ Favorites {favs.size > 0 && <span className="text-[var(--gs-text-ghost)]">{favs.size}</span>}
         </button>
       </div>
+      <div className="px-2 pb-1 pt-1.5">
+        <input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="search project artifacts…"
+          className="w-full border border-[var(--gs-border)] bg-black px-[9px] py-[5px] text-[11px] text-[var(--gs-text)] outline-none placeholder:text-[var(--gs-text-ghost)] focus:border-[var(--gs-accent)]"
+        />
+      </div>
       <div className="min-h-0 flex-1 overflow-y-auto pb-2">
         {loading ? (
           <div className="px-3 py-3 text-center text-[var(--gs-text-dim)]">Loading…</div>
@@ -431,6 +515,32 @@ function ArtifactsMode({ backend, workspaceId, projectName, workspaceName, onOpe
             : favList.map(row)
         ) : (
           <>
+            {/* synthetic pane rows (mock artifactTree Events/Goal rows) */}
+            {onOpenGoalPane && matches('goal doc') && (
+              <button type="button" onClick={onOpenGoalPane} className="flex w-full items-center gap-1.5 px-2 py-[2px] text-left hover:bg-[var(--gs-bg-active)]">
+                <span className="w-4 flex-shrink-0 text-center text-[var(--gs-text-ghost)]">◇</span>
+                <span className="min-w-0 flex-1 truncate text-[var(--gs-text)]">goal.md</span>
+                <span className="ml-auto flex-shrink-0 text-[10.5px] text-[var(--gs-text-dim)]">doc</span>
+              </button>
+            )}
+            {onOpenEvents && matches('event log') && (
+              <button type="button" onClick={onOpenEvents} className="flex w-full items-center gap-1.5 px-2 py-[2px] text-left hover:bg-[var(--gs-bg-active)]">
+                <span className="w-4 flex-shrink-0 text-center text-[var(--gs-text-ghost)]">⚑</span>
+                <span className="min-w-0 flex-1 truncate text-[var(--gs-text)]">event log</span>
+                <span className="ml-auto flex-shrink-0 text-[10.5px] text-[var(--gs-text-dim)]">live</span>
+              </button>
+            )}
+            {(goalEvidence ?? []).filter((e) => matches(`evidence ${e.name} ${e.requirementTitle}`)).length > 0 && (
+              <div className="px-2 pb-0.5 pt-2 text-[10px] uppercase tracking-wider text-[var(--gs-text-ghost)]">Evidence</div>
+            )}
+            {(goalEvidence ?? []).filter((e) => matches(`evidence ${e.name} ${e.requirementTitle}`)).map((e) => (
+              <button key={e.evidenceId} type="button" onClick={() => onOpenEvidence?.(e.requirementId, e.evidenceId)} title={e.requirementTitle}
+                className="flex w-full items-center gap-1.5 px-2 py-[2px] text-left hover:bg-[var(--gs-bg-active)]">
+                <span className="w-4 flex-shrink-0 text-center text-[var(--gs-text-ghost)]">▸</span>
+                <span className="min-w-0 flex-1 truncate text-[var(--gs-text)]">{e.name}</span>
+                <span className="ml-auto flex-shrink-0 truncate text-[10.5px] text-[var(--gs-text-dim)]">{e.requirementTitle.slice(0, 18)}</span>
+              </button>
+            ))}
             {groups.length === 0 && (
               <div className="px-3 py-4 text-center text-[var(--gs-text-dim)]">
                 No artifacts yet.
@@ -455,6 +565,27 @@ function ArtifactsMode({ backend, workspaceId, projectName, workspaceName, onOpe
                 <span className="w-4 flex-shrink-0 text-center">＋</span>New note
               </button>
             )}
+            {reports.filter((r) => matches(`${r.kind} ${r.surface} ${r.note}`)).length > 0 && (
+              <div className="px-2 pb-0.5 pt-2 text-[10px] uppercase tracking-wider text-[var(--gs-text-ghost)]">Reports · good + bad</div>
+            )}
+            {reports.filter((r) => matches(`${r.kind} ${r.surface} ${r.note}`)).map((r) => (
+              <button key={r.path} type="button" onClick={() => onOpenReport?.(r.path)} title={r.note}
+                className="flex w-full items-center gap-1.5 px-2 py-[2px] text-left hover:bg-[var(--gs-bg-active)]">
+                <span className={`flex-shrink-0 rounded-full border px-1 text-[9px] uppercase ${REPORT_TONE[r.kind] ?? 'border-[var(--gs-border)] text-[var(--gs-text-dim)]'}`}>{r.kind}</span>
+                <span className="min-w-0 flex-1 truncate text-[var(--gs-text)]">{r.surface}</span>
+              </button>
+            ))}
+            {reports.filter((r) => r.rating !== undefined && matches(`${r.surface}`)).length > 0 && (
+              <div className="px-2 pb-0.5 pt-2 text-[10px] uppercase tracking-wider text-[var(--gs-text-ghost)]">Rated precedents · seed from these</div>
+            )}
+            {reports.filter((r) => r.rating !== undefined && matches(`${r.surface}`)).map((r) => (
+              <button key={`prec:${r.path}`} type="button" onClick={onOpenGoalPane} title={r.surface}
+                className="flex w-full items-center gap-1.5 px-2 py-[2px] text-left hover:bg-[var(--gs-bg-active)]">
+                <span className="w-4 flex-shrink-0 text-center text-[var(--gs-text-ghost)]">⛓</span>
+                <span className="min-w-0 flex-1 truncate text-[var(--gs-text)]">{r.surface}</span>
+                <span className="ml-auto flex-shrink-0 text-[10px] tracking-[1px] text-[var(--gs-warning)]">{'★'.repeat(Math.min(5, r.rating ?? 0))}{'☆'.repeat(Math.max(0, 5 - (r.rating ?? 0)))}</span>
+              </button>
+            ))}
           </>
         )}
       </div>

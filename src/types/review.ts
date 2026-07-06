@@ -176,7 +176,7 @@ export type ReviewOperation =
       threadId: string;
       commentId: string;
     }
-  | { op: 'get_changed_files'; projectName: string; workspaceName: string }
+  | { op: 'get_changed_files'; projectName: string; workspaceName: string; base?: string }
   | { op: 'get_diff'; projectName: string; workspaceName: string }
   | {
       op: 'get_file_diff';
@@ -184,6 +184,7 @@ export type ReviewOperation =
       workspaceName: string;
       filePath: string;
       prevFilePath?: string;
+      base?: string;
     }
   | {
       op: 'get_file_versions';
@@ -224,6 +225,9 @@ export interface ReviewChangedFile {
   /** Optional old path for renames/copies (source path) */
   prevFilePath?: string;
   changeType: 'new' | 'deleted' | 'renamed' | 'copied' | 'modified';
+  /** Line counts vs the diff base (from --numstat; absent for binary). */
+  additions?: number;
+  deletions?: number;
 }
 
 /** Results returned from machine to client */

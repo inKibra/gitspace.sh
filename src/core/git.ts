@@ -484,8 +484,31 @@ export async function getWorkspaceChangedFiles(
       { cwd: workspacePath, maxBuffer: 10 * 1024 * 1024 }
     );
 
+    // Line counts per file (absent for binary files, '-' in numstat).
+    const counts = new Map<string, { additions: number; deletions: number }>();
+    try {
+      const { stdout: numstat } = await execAsync(
+        `git diff --numstat -z --find-renames -M ${escapeShellArg(baseRef)}...HEAD`,
+        { cwd: workspacePath, maxBuffer: 10 * 1024 * 1024 }
+      );
+      // -z numstat records: "adds\tdels\tpath\0" or for renames "adds\tdels\0old\0new\0"
+      const parts = numstat.split('\0');
+      for (let i = 0; i < parts.length; i++) {
+        const rec = parts[i];
+        if (!rec) continue;
+        const m = rec.match(/^(\d+|-)\t(\d+|-)\t?(.*)$/);
+        if (!m) continue;
+        let path = m[3];
+        if (!path) { path = parts[i + 2] ?? parts[i + 1] ?? ''; i += 2; }
+        if (path && m[1] !== '-') counts.set(path, { additions: Number(m[1]), deletions: Number(m[2]) });
+      }
+    } catch { /* counts are decorative */ }
+
     return {
-      files: parseChangedFilesFromNameStatusZ(stdout),
+      files: parseChangedFilesFromNameStatusZ(stdout).map((f) => {
+        const c = counts.get(f.filePath);
+        return c ? { ...f, additions: c.additions, deletions: c.deletions } : f;
+      }),
       baseBranch,
       headBranch,
     };

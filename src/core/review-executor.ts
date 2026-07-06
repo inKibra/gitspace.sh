@@ -193,7 +193,7 @@ export async function executeLocalReviewOperation(
         operation.workspaceName,
         scan
       );
-      const changed = await getWorkspaceChangedFiles(workspace.path, workspace.baseBranch);
+      const changed = await getWorkspaceChangedFiles(workspace.path, operation.base ?? workspace.baseBranch);
       return {
         op: 'changed_files',
         files: changed.files,
@@ -210,7 +210,7 @@ export async function executeLocalReviewOperation(
       );
       const result = await getWorkspaceFileDiff(
         workspace.path,
-        workspace.baseBranch,
+        operation.base ?? workspace.baseBranch,
         operation.filePath,
         operation.prevFilePath
       );
