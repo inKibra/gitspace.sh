@@ -1,4 +1,5 @@
 import { parseCommandArgs } from '@oh-my-pi/pi-coding-agent/utils/command-args';
+import { recordEditBreadcrumb, flushEditBreadcrumbs } from './edit-breadcrumbs.js';
 
 import type { OmpAgentSession, OmpCreateSessionResult } from './omp-types.js';
 import { HostUIBridgeState, type HostUIBridgeEmitter, type HostUIDialogResponse } from './host-ui-bridge.js';
@@ -1254,14 +1255,19 @@ export class PiCoordinator {
             });
             return;
 
-          case 'agent_end':
+          case 'agent_end': {
             this.activeTurns.delete(sessionId);
+            // Turn boundary: flush buffered edit breadcrumbs to blame/edits.jsonl.
+            void import('../../../core/config.js')
+              .then(({ getProjectDir }) => flushEditBreadcrumbs(target.workspacePath, getProjectDir(target.projectName)))
+              .catch(() => undefined);
             this.eventHandler(target, {
               type: 'status',
               sessionId,
               payload: { type: 'idle', event: piEvent },
             });
             return;
+          }
 
           case 'auto_compaction_start':
             this.eventHandler(target, {
@@ -1334,6 +1340,13 @@ export class PiCoordinator {
           case 'tool_execution_end':
           case 'tool_result': {
             const toolName = piEvent.toolName ?? piEvent.tool_name;
+            // Review-guide grounding tier 1: breadcrumb every mutating tool call.
+            recordEditBreadcrumb(
+              target.workspacePath,
+              sessionId,
+              typeof toolName === 'string' ? toolName : undefined,
+              piEvent.input,
+            );
             // Always extract todo phases from tool_execution_end regardless of tool
             const phases = (session as any).getTodoPhases?.();
             if (Array.isArray(phases)) {

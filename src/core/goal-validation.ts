@@ -1,3 +1,4 @@
+import { createHash } from 'crypto';
 import {
   copyFileSync,
   existsSync,
@@ -624,6 +625,7 @@ export function runGenerationCommand(
         judgeType: 'command',
         score: 100,
         cites: [evidence.id],
+        rubricHash: hashRubric(r.rubric),
       });
     }
     return { ...r, evidence: [...r.evidence, evidence], status, reviews };
@@ -689,6 +691,7 @@ export function runJudgmentCommand(
     judgeType: 'command',
     score: passed ? 100 : 0,
     cites: cur.evidence.map((e) => e.id),
+    rubricHash: hashRubric(cur.rubric),
   };
   const { validation: nextValidation, requirement } = withRequirement(goal.validation, requirementId, (r) => ({
     ...r,
@@ -731,6 +734,7 @@ export function runLlmJudgment(
     judgeType: 'llm',
     // When a real runner lands, its output may carry a "score: N" line.
     score: parseScoreLine(judgmentText),
+    rubricHash: hashRubric(cur.rubric),
     cites: cur.evidence.map((e) => e.id),
   };
   const { validation: nextValidation, requirement } = withRequirement(goal.validation, requirementId, (r) => ({
@@ -754,6 +758,23 @@ export function runLlmJudgment(
 }
 
 export type HumanReviewDecision = 'pass' | 'changes' | 'fail';
+
+/** Canon pin: hash of a requirement's rubric text (docs/REVIEW-GUIDE.md). */
+export function hashRubric(rubric: string): string {
+  return `sha256:${createHash('sha256').update(rubric.trim()).digest('hex').slice(0, 16)}`;
+}
+
+/**
+ * A requirement's acceptance is stale when the rubric changed after the
+ * accepting judgment was recorded (accepted-at-hash ≠ current hash).
+ * Unpinned legacy acceptances are never reported stale.
+ */
+export function isAcceptanceStale(requirement: import('../types/goals.js').Requirement): boolean {
+  if (requirement.status !== 'accepted') return false;
+  const accepting = [...(requirement.reviews ?? [])].reverse().find((r) => r.tone === 'green' && r.rubricHash);
+  if (!accepting?.rubricHash) return false;
+  return accepting.rubricHash !== hashRubric(requirement.rubric);
+}
 
 export function recordHumanReview(
   goal: GoalRecord,
@@ -785,6 +806,7 @@ export function recordHumanReview(
     createdBy,
     judgeType: 'human',
     score,
+    rubricHash: hashRubric(cur.rubric),
   };
   const { validation: nextValidation, requirement } = withRequirement(goal.validation, requirementId, (r) => {
     let status: RequirementStatus;

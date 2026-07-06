@@ -9,6 +9,7 @@ import {
 } from 'fs';
 import { dirname, join } from 'path';
 import { getProjectDir, getProjectWorkspacesDir } from './config.js';
+import { captureArtifactsSync } from './artifacts.js';
 import { defaultValidation, migrateGoalRecord, moveGoalValidationToWorkspace } from './goal-validation.js';
 import { computeReadiness } from '../app/shared/goal-validation/readiness.js';
 import { ensureWorkspaceStorageIgnored, getWorkspaceStatus, getWorkspaceStorageDir, setWorkspaceStatus } from './workspace-metadata.js';
@@ -253,9 +254,55 @@ export function getGoalRecord(projectName: string, goalId: string): GoalRecord |
 
 export function writeGoalRecord(projectName: string, goal: GoalRecord): GoalRecord {
   if (goal.workspaceName) {
-    return writeWorkspaceGoal(projectName, goal.workspaceName, goal);
+    const written = writeWorkspaceGoal(projectName, goal.workspaceName, goal);
+    mirrorGoalCanonToArtifacts(projectName, goal.workspaceName, written);
+    return written;
   }
   return writePlannedGoal(projectName, goal);
+}
+
+/**
+ * Canon write-through (docs/REVIEW-GUIDE.md): mirror the goal doc + rubric to
+ * the workspace's artifacts branch so canon history is append-only via git.
+ * Journal snapshots and judgments pin hashes into this history. Never blocks
+ * a goal write — degrades silently without a mount.
+ */
+function mirrorGoalCanonToArtifacts(projectName: string, workspaceName: string, goal: GoalRecord): void {
+  try {
+    const workspaceDir = join(getProjectWorkspacesDir(projectName), workspaceName);
+    const mountDir = join(workspaceDir, '.gitspace', 'artifacts');
+    if (!existsSync(join(mountDir, '.git'))) return;
+    const rubricCanon = {
+      goalId: goal.id,
+      requirements: (goal.validation?.reqOrder ?? Object.keys(goal.validation?.requirements ?? {}))
+        .map((id) => goal.validation?.requirements?.[id])
+        .filter((r): r is NonNullable<typeof r> => Boolean(r))
+        .map((r) => ({ id: r.id, title: r.title, kind: r.kind, required: r.required, rubric: r.rubric, judgment: r.judgment })),
+    };
+    const goalMd = [
+      `# ${goal.title}`,
+      '',
+      goal.doc?.bodyMarkdown ?? '',
+      goal.doc?.blocks?.length ? `\n<!-- blocks:${JSON.stringify(goal.doc.blocks)} -->` : '',
+    ].join('\n');
+    const files = [
+      { path: 'goal.md', content: goalMd },
+      { path: 'rubric.json', content: `${JSON.stringify(rubricCanon, null, 2)}\n` },
+    ];
+    // Skip the commit when canon is unchanged (captureArtifactsSync would
+    // no-op on identical content, but avoid the git round-trip entirely).
+    const unchanged = files.every((f) => {
+      const target = join(mountDir, f.path);
+      return existsSync(target) && readFileSync(target, 'utf-8') === f.content;
+    });
+    if (unchanged) return;
+    captureArtifactsSync(getProjectDir(projectName), mountDir, files, {
+      message: `canon: goal ${goal.id}`,
+      provenance: { tool: 'goal-canon' },
+    });
+  } catch {
+    /* canon mirroring must never break goal persistence */
+  }
 }
 
 export function updateGoalRecord(projectName: string, goalId: string, updates: GoalUpdateInput): GoalRecord {

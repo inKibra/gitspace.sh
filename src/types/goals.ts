@@ -62,6 +62,9 @@ export interface Review {
   score?: number;
   /** Evidence ids this review examined or produced. */
   cites?: string[];
+  /** Hash of the requirement's rubric at judgment time (canon pin,
+   *  docs/REVIEW-GUIDE.md). Acceptance is stale when it no longer matches. */
+  rubricHash?: string;
 }
 
 export interface Requirement {

@@ -6,6 +6,10 @@ import {
   addRequirement,
   attachManualEvidence,
   defaultValidation,
+  recordHumanReview,
+  addRequirement,
+  isAcceptanceStale,
+  hashRubric,
   getGoalValidationDir,
   getPlannedGoalValidationDir,
   getWorkspaceGoalValidationDir,
@@ -357,5 +361,30 @@ describe('goal validation core', () => {
     moveGoalValidationToWorkspace('demo', 'planned', 'api');
     expect(existsSync(getPlannedGoalValidationDir('demo', 'planned'))).toBe(false);
     expect(existsSync(getWorkspaceGoalValidationDir('demo', 'api'))).toBe(true);
+  });
+});
+
+describe('canon pins (docs/REVIEW-GUIDE.md)', () => {
+  it('human review pins the rubric hash at judgment time', () => {
+    let v = defaultValidation();
+    const add = addRequirement(v, { title: 'R', kind: 'note', rubric: 'must do X', generation: { kind: 'manual' }, judgment: { kind: 'human' } });
+    v = add.validation;
+    const goal = makeGoal({ id: 'g1', title: 'g', phase: 'review', validation: v });
+    const { review, requirement } = recordHumanReview(goal, add.requirement.id, 'pass', 'looks right');
+    expect(review.rubricHash).toBe(hashRubric('must do X'));
+    expect(isAcceptanceStale(requirement)).toBe(false);
+  });
+
+  it('acceptance goes stale when the rubric changes after the accepting judgment', () => {
+    let v = defaultValidation();
+    const add = addRequirement(v, { title: 'R', kind: 'note', rubric: 'must do X', generation: { kind: 'manual' }, judgment: { kind: 'human' } });
+    v = add.validation;
+    const goal = makeGoal({ id: 'g2', title: 'g', phase: 'review', validation: v });
+    const { requirement } = recordHumanReview(goal, add.requirement.id, 'pass', 'ok');
+    const edited = { ...requirement, rubric: 'must do X and also Y' };
+    expect(isAcceptanceStale(edited)).toBe(true);
+    // legacy acceptances without a pin are never reported stale
+    const legacy = { ...edited, reviews: edited.reviews.map((r) => ({ ...r, rubricHash: undefined })) };
+    expect(isAcceptanceStale(legacy)).toBe(false);
   });
 });

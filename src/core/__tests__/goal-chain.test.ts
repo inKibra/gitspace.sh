@@ -15,6 +15,7 @@ import {
   readWorkspaceGoal,
   setWorkspaceStatusForGoalChain,
   upsertGoalChain,
+  writeGoalRecord,
   writePlannedGoal,
 } from '../goal-chain.js';
 import { getWorkspaceStatus, setWorkspaceStatus } from '../workspace-metadata.js';
@@ -275,5 +276,62 @@ describe('goal-chain storage', () => {
     applyWorkspaceGoalPhaseChange('demo', 'base', 'plan', { cascade: true });
     expect(getWorkspaceStatus('demo', 'base')).toBe('plan');
     expect(getWorkspaceStatus('demo', 'child')).toBe('plan');
+  });
+});
+
+describe('canon write-through (docs/REVIEW-GUIDE.md)', () => {
+  let root: string;
+  let previousRoot: string | undefined;
+
+  beforeEach(() => {
+    root = join(tmpdir(), `canon-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    previousRoot = process.env.GITSPACE_WORKSPACE_ROOT;
+    process.env.GITSPACE_WORKSPACE_ROOT = root;
+    mkdirSync(join(root, 'demo'), { recursive: true });
+    writeFileSync(join(root, 'demo', '.config.json'), JSON.stringify({ name: 'demo', repository: 'x/y' }));
+  });
+
+  afterEach(() => {
+    if (previousRoot === undefined) delete process.env.GITSPACE_WORKSPACE_ROOT;
+    else process.env.GITSPACE_WORKSPACE_ROOT = previousRoot;
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('mirrors goal.md + rubric.json to the artifacts mount on goal writes', async () => {
+    const { ensureArtifactsRepo, ensureArtifactsMount } = await import('../artifacts.js');
+    const { writeGoalRecord } = await import('../goal-chain.js');
+    const projectDir = join(root, 'demo');
+    const workspaceDir = join(projectDir, 'workspaces', 'ws1');
+    mkdirSync(workspaceDir, { recursive: true });
+    execFileSync('git', ['init', '-q', workspaceDir]);
+    await ensureArtifactsRepo(projectDir);
+    const mount = await ensureArtifactsMount(projectDir, workspaceDir, 'ws1');
+
+    let v = defaultValidation();
+    const add = addRequirement(v, { title: 'R', kind: 'note', rubric: 'must do X', generation: { kind: 'manual' }, judgment: { kind: 'human' } });
+    const goal = makeGoal({ id: 'g1', title: 'Canon goal', phase: 'code', workspaceName: 'ws1', validation: add.validation });
+    writeGoalRecord('demo', goal);
+
+    expect(readFileSync(join(mount, 'goal.md'), 'utf-8')).toContain('# Canon goal');
+    const rubric = JSON.parse(readFileSync(join(mount, 'rubric.json'), 'utf-8'));
+    expect(rubric.requirements[0]).toMatchObject({ title: 'R', rubric: 'must do X' });
+
+    // second identical write does not add a canon commit; a rubric edit does
+    const log1 = execFileSync('git', ['-C', mount, 'log', '--oneline'], { encoding: 'utf8' }).trim().split('\n').length;
+    writeGoalRecord('demo', goal);
+    const log2 = execFileSync('git', ['-C', mount, 'log', '--oneline'], { encoding: 'utf8' }).trim().split('\n').length;
+    expect(log2).toBe(log1);
+    const edited = { ...goal, validation: { ...add.validation, requirements: { ...add.validation.requirements, [add.requirement.id]: { ...add.requirement, rubric: 'must do X and Y' } } } };
+    writeGoalRecord('demo', edited);
+    const log3 = execFileSync('git', ['-C', mount, 'log', '--oneline'], { encoding: 'utf8' }).trim().split('\n').length;
+    expect(log3).toBe(log2 + 1);
+  });
+
+  it('degrades silently without an artifacts mount', () => {
+    const projectDir = join(root, 'demo');
+    mkdirSync(join(projectDir, 'workspaces', 'ws2'), { recursive: true });
+    const goal = makeGoal({ id: 'g2', title: 'No mount', phase: 'code', workspaceName: 'ws2' });
+    expect(() => writeGoalRecord('demo', goal)).not.toThrow();
+    expect(existsSync(join(projectDir, 'workspaces', 'ws2', '.gitspace', 'artifacts', 'goal.md'))).toBe(false);
   });
 });
