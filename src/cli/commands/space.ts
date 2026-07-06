@@ -96,10 +96,54 @@ export function registerSpaceCommands(parent: Command): void {
   registerSpaceHostingCommands(cmd);
   registerSpaceEventsCommands(cmd);
   registerSpaceBundleCommands(cmd);
+  registerSpaceJournalCommands(cmd);
   configureSpaceHelpRecursively(cmd);
 }
 
 
+
+function registerSpaceJournalCommands(space: Command): void {
+  const journal = space
+    .command('journal')
+    .description('Phase-boundary journal: narrative from the agent, state snapshots from the system');
+
+  journal
+    .command('phase-start')
+    .description('Open a phase: record intent + snapshot goal/workflow/review state')
+    .requiredOption('--phase <name>', 'Workflow phase name')
+    .requiredOption('--intent <text>', 'What this phase intends to do and why')
+    .option('--workflow-ref <ref>', 'Workflow spec reference, e.g. parity.workflow.json#phases[1]')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      const ctx = requireSessionContext();
+      const { journalPhaseStart } = await import('../../commands/space-journal.js');
+      await journalPhaseStart(ctx, { phase: options.phase, intent: options.intent, workflowRef: options.workflowRef, json: options.json });
+    }));
+
+  journal
+    .command('phase-end')
+    .description('Close the open phase: record outcome, compute delta, auto-commit the repo')
+    .requiredOption('--outcome <text>', 'What actually happened')
+    .option('--decision <text...>', 'Notable decision (repeatable)')
+    .option('--surprise <text...>', 'Something unexpected (repeatable)')
+    .option('--no-commit', 'Skip the phase-boundary auto-commit')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      const ctx = requireSessionContext();
+      const { journalPhaseEnd } = await import('../../commands/space-journal.js');
+      await journalPhaseEnd(ctx, { outcome: options.outcome, decision: options.decision, surprise: options.surprise, noCommit: options.commit === false, json: options.json });
+    }));
+
+  journal
+    .command('status')
+    .description('Show the open phase, if any')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      const ctx = requireSessionContext();
+      const { journalStatus } = await import('../../commands/space-journal.js');
+      journalStatus(ctx, options);
+    }));
+}
 
 function registerSpaceGoalCommands(space: Command): void {
   const goal = space
