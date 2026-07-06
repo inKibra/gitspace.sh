@@ -40,6 +40,8 @@ export interface GuideSection {
   cites?: { journalPhases?: string[]; turns?: string[] };
   /** Cluster content fingerprint the prose was written against (staleness). */
   contentHash?: string;
+  /** Full member file list of the cluster (stamped server-side at submit). */
+  files?: string[];
 }
 
 export interface ReviewGuide {
@@ -218,7 +220,7 @@ export async function submitGuideSections(
   const missing: string[] = [];
   for (const cluster of worksheet.clusters) {
     const submitted = submittedById.get(cluster.id);
-    if (submitted) { sections.push({ ...submitted, kind: cluster.type, contentHash: cluster.contentHash }); continue; }
+    if (submitted) { sections.push({ ...submitted, kind: cluster.type, contentHash: cluster.contentHash, files: cluster.files }); continue; }
     const carried = cachedById.get(cluster.id);
     if (carried && !cluster.stale) { sections.push(carried); continue; }
     missing.push(cluster.id);

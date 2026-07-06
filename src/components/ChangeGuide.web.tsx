@@ -50,6 +50,8 @@ export interface WalkStep {
   asks?: string[];
   /** Guide-mode: attention callouts. */
   callouts?: Array<{ tone: 'risk' | 'mechanical' | 'decision'; text: string }>;
+  /** Guide-mode: full member file list (exhibits are the subset with diffs shown). */
+  allFiles?: string[];
 }
 
 const ROOT_GROUP = '(root)';
@@ -259,6 +261,7 @@ export function ChangeGuidePane({ backend, projectName, workspaceName, workspace
   const [specEvolution, setSpecEvolution] = useState<string | null>(null);
   const [threadsOpen, setThreadsOpen] = useState(0);
   const [unresolvedSummaries, setUnresolvedSummaries] = useState<string[]>([]);
+  const [fileStats, setFileStats] = useState<Map<string, { additions?: number; deletions?: number; changeType: string }>>(new Map());
   const scrollRef = useRef<HTMLDivElement>(null);
   const secRefs = useRef<Array<HTMLElement | null>>([]);
 
@@ -284,7 +287,7 @@ export function ChangeGuidePane({ backend, projectName, workspaceName, workspace
         if (workspaceId && backend.readWorkspaceArtifact) {
           const raw = await backend.readWorkspaceArtifact(workspaceId, 'review/guide.json');
           const guide = JSON.parse(new TextDecoder('utf-8').decode(Uint8Array.from(atob(raw.base64), (c) => c.charCodeAt(0)))) as {
-            sections: Array<{ clusterId: string; title: string; kind: string; explanation: string; exhibits: Array<{ file: string; slow?: boolean }>; asks?: string[]; callouts?: Array<{ tone: 'risk' | 'mechanical' | 'decision'; text: string }> }>;
+            sections: Array<{ clusterId: string; title: string; kind: string; explanation: string; exhibits: Array<{ file: string; slow?: boolean }>; asks?: string[]; callouts?: Array<{ tone: 'risk' | 'mechanical' | 'decision'; text: string }>; files?: string[] }>;
             specEvolution?: string;
           };
           if (!alive) return;
@@ -302,6 +305,7 @@ export function ChangeGuidePane({ backend, projectName, workspaceName, workspace
             sectionId: section.clusterId,
             asks: section.asks,
             callouts: section.callouts,
+            allFiles: section.files,
           })));
           setLoadState('ready');
           // persisted read-state keyed by section id
@@ -315,6 +319,14 @@ export function ChangeGuidePane({ backend, projectName, workspaceName, workspace
       } catch { /* no guide yet — heuristic below */ }
       await loadHeuristic().catch(() => { if (alive) setLoadState('error'); });
     })();
+
+    // Per-file +/- stats for the section manifests.
+    void backend.sendReviewRequest({ op: 'get_changed_files', projectName, workspaceName })
+      .then((r) => {
+        if (!alive || r.op !== 'changed_files') return;
+        setFileStats(new Map(r.files.map((f) => [f.filePath, { additions: f.additions, deletions: f.deletions, changeType: f.changeType }])));
+      })
+      .catch(() => undefined);
 
     // Open threads gate Approve (settled: threads block).
     void backend.sendReviewRequest({ op: 'get_threads', projectName, workspaceName })
@@ -461,7 +473,9 @@ export function ChangeGuidePane({ backend, projectName, workspaceName, workspace
             <>
               <div className="text-[10.5px] uppercase tracking-[0.12em] text-[var(--gs-text-dim)]">{activeStep.kind}</div>
               {activeStep.explanationMd ? (
-                <div className="gs-block-md mt-2 text-[12.5px] leading-[1.55] text-[var(--gs-text)]" dangerouslySetInnerHTML={{ __html: renderMarkdownHtml(activeStep.explanationMd) }} />
+                <div className="mt-2 text-[11px] text-[var(--gs-text-dim)]">
+                  {(activeStep.allFiles ?? activeStep.files).length} file{(activeStep.allFiles ?? activeStep.files).length === 1 ? '' : 's'} · narrative and diffs on the right.
+                </div>
               ) : (
                 <>
                   <p className="mt-2 text-[12.5px] leading-[1.55] text-[var(--gs-text)]">{activeStep.what}</p>
@@ -471,12 +485,12 @@ export function ChangeGuidePane({ backend, projectName, workspaceName, workspace
                   </p>
                 </>
               )}
-              {(activeStep.callouts ?? []).map((c, ci) => (
+              {!activeStep.explanationMd && (activeStep.callouts ?? []).map((c, ci) => (
                 <div key={ci} className={`mt-2 border-l-2 px-2 py-1 text-[11px] ${c.tone === 'risk' ? 'border-[var(--gs-danger)] text-[var(--gs-danger)]' : c.tone === 'decision' ? 'border-[var(--gs-info)] text-[var(--gs-text-muted)]' : 'border-[var(--gs-border-active)] text-[var(--gs-text-dim)]'}`}>
                   <span className="mr-1 uppercase text-[9.5px] tracking-[0.1em]">{c.tone}</span>{c.text}
                 </div>
               ))}
-              {(activeStep.asks ?? []).map((a, ai) => (
+              {!activeStep.explanationMd && (activeStep.asks ?? []).map((a, ai) => (
                 <div key={ai} className="mt-2 border border-[rgba(188,140,255,.3)] px-2 py-1 text-[11px] text-[#bc8cff]">
                   <span className="mr-1">?</span>{a}
                 </div>
@@ -577,6 +591,50 @@ export function ChangeGuidePane({ backend, projectName, workspaceName, workspace
                 </button>
               </div>
               <div className="flex flex-col gap-2.5 p-[11px]">
+                {/* Guide prose lives IN the story flow (moved up from the left panel). */}
+                {s.explanationMd && (
+                  <div className="gs-block-md text-[12.5px] leading-[1.55] text-[var(--gs-text)]" dangerouslySetInnerHTML={{ __html: renderMarkdownHtml(s.explanationMd) }} />
+                )}
+                {(s.callouts ?? []).map((c, ci) => (
+                  <div key={ci} className={`border-l-2 px-2 py-1 text-[11px] ${c.tone === 'risk' ? 'border-[var(--gs-danger)] text-[var(--gs-danger)]' : c.tone === 'decision' ? 'border-[var(--gs-info)] text-[var(--gs-text-muted)]' : 'border-[var(--gs-border-active)] text-[var(--gs-text-dim)]'}`}>
+                    <span className="mr-1 uppercase text-[9.5px] tracking-[0.1em]">{c.tone}</span>{c.text}
+                  </div>
+                ))}
+                {(s.asks ?? []).map((a, ai) => (
+                  <div key={ai} className="border border-[rgba(188,140,255,.3)] px-2 py-1 text-[11px] text-[#bc8cff]">
+                    <span className="mr-1">?</span>{a}
+                  </div>
+                ))}
+                {/* Full file manifest with line stats; exhibits render diffs below. */}
+                {(s.allFiles ?? []).length > 0 && (
+                  <div className="border border-[var(--gs-border)]">
+                    <div className="border-b border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-2.5 py-[4px] text-[10px] uppercase tracking-[0.08em] text-[var(--gs-text-dim)]">
+                      {s.allFiles!.length} file{s.allFiles!.length === 1 ? '' : 's'} in this step
+                    </div>
+                    <div className="max-h-[220px] overflow-y-auto py-0.5">
+                      {s.allFiles!.map((path) => {
+                        const st = fileStats.get(path);
+                        return (
+                          <button
+                            key={path}
+                            type="button"
+                            onClick={() => onOpenFile?.(path)}
+                            className="flex w-full items-baseline gap-2 px-2.5 py-[2px] text-left font-[family-name:var(--gs-font)] text-[10.5px] text-[var(--gs-text-muted)] hover:bg-[var(--gs-bg-hover)] hover:text-[var(--gs-text)]"
+                          >
+                            <span className="min-w-0 flex-1 truncate">{path}</span>
+                            {st?.changeType && st.changeType !== 'modified' && (
+                              <span className="flex-shrink-0 lowercase text-[9.5px] text-[var(--gs-text-dim)]">{st.changeType}</span>
+                            )}
+                            <span className="flex-shrink-0 tabular-nums">
+                              {st?.additions !== undefined && <span className="text-[var(--gs-success)]">+{st.additions}</span>}
+                              {st?.deletions !== undefined && <span className="ml-1 text-[var(--gs-danger)]">−{st.deletions}</span>}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
                 {s.files.map((f) => (
                   <FileDiffBlock
                     key={f.path}
