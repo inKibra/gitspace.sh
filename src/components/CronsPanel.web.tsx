@@ -330,7 +330,14 @@ function NewTriggerForm({ onSave, onClose }: { onSave: (t: Trigger) => Promise<v
       </div>
       <input className={`${field} mt-2`} placeholder="one-line intent (what it does)" value={does} onChange={(e) => setDoes(e.target.value)} />
       <textarea className={`${field} mt-2 h-20 resize-none font-[family-name:var(--gs-font)]`} placeholder="agent prompt — what a run should do; write outputs as data artifacts" value={prompt} onChange={(e) => setPrompt(e.target.value)} />
-      <input className={`${field} mt-2`} placeholder="may write (comma-separated artifact paths/prefixes)" value={writes} onChange={(e) => setWrites(e.target.value)} />
+      <div className="mt-2">
+        <div className="mb-1 flex items-baseline gap-2">
+          <span className="text-[10px] uppercase tracking-[0.08em] text-[var(--gs-text-dim)]">capability scope — may write</span>
+          <span className="text-[10px] text-[var(--gs-text-ghost)]">artifact paths this trigger's runs are allowed to modify · comma-separated globs</span>
+        </div>
+        <input className={field} placeholder="data/**, reports/*.report.json" value={writes} onChange={(e) => setWrites(e.target.value)} />
+        <div className="mt-1 text-[10px] text-[var(--gs-text-ghost)]">Runs are prompted with this contract; freshness chips + write enforcement key off it.</div>
+      </div>
       <div className="mt-2 flex justify-end gap-2">
         <XsButton onClick={onClose}>Cancel</XsButton>
         <button

@@ -42,7 +42,6 @@ import { ReviewRubric } from "./components/ReviewRubric.web.js";
 import { EvidencePanel } from "./components/EvidencePanel.web.js";
 import { ReportPanel } from "./components/ReportPanel.web.js";
 import { WorkflowPanel } from "./components/WorkflowPanel.web.js";
-import { EventLogPane } from "./components/EventLogPane.web.js";
 import { CronsPanel } from "./components/CronsPanel.web.js";
 import { decodeBase64Utf8, encodeBase64Utf8 } from "./components/artifact-kinds.js";
 import { GlobalChromeBar, type ChromeWorkspaceChip } from "./components/GlobalChromeBar.web.js";
@@ -141,12 +140,22 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   /** Repo files + artifacts opened as dock tabs, keyed by workspace selectionKey. */
   type DockExtraPane = ({ kind: 'file' } & RepoFileOpen) | { kind: 'artifact'; path: string } | { kind: 'dashboard'; path: string } | { kind: 'note'; noteId: string | null; title: string; nonce?: number } | { kind: 'goal' } | { kind: 'guide' } | { kind: 'rubric' } | { kind: 'evidence'; requirementId: string; evidenceId: string } | { kind: 'report'; path: string } | { kind: 'workflow' } | { kind: 'crons' } | { kind: 'eventlog' };
   const [dockExtraPanes, setDockExtraPanes] = useState<Record<string, DockExtraPane[]>>({});
+  const [dockFocusRequests, setDockFocusRequests] = useState<Record<string, { id: string; nonce: number }>>({});
   const openSingletonPane = useCallback((wsKey: string, pane: DockExtraPane) => {
     setDockExtraPanes((prev) => {
       const cur = prev[wsKey] ?? [];
       if (cur.some((x) => x.kind === pane.kind && (pane.kind !== 'evidence' || (x.kind === 'evidence' && x.evidenceId === (pane as { evidenceId: string }).evidenceId)))) return prev;
       return { ...prev, [wsKey]: [...cur, pane] };
     });
+    // Focus whether newly added or already open (repeat clicks surface the pane).
+    const panelId = pane.kind === 'file' ? `file:${pane.path}`
+      : pane.kind === 'artifact' ? `artifact:${pane.path}`
+      : pane.kind === 'dashboard' ? `dashboard:${pane.path}`
+      : pane.kind === 'report' ? `report:${pane.path}`
+      : pane.kind === 'note' ? `note:${pane.noteId ?? `new-${pane.nonce ?? 0}`}`
+      : pane.kind === 'evidence' ? `evidence:${pane.evidenceId}`
+      : pane.kind;
+    setDockFocusRequests((prev) => ({ ...prev, [wsKey]: { id: panelId, nonce: (prev[wsKey]?.nonce ?? 0) + 1 } }));
   }, []);
   const [pendingProcessEditWorkspaceId, setPendingProcessEditWorkspaceId] = useState<string | null>(null);
   const [modifiers, setModifiers] = useState<ModifierState>({
@@ -3036,16 +3045,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
             title: '⚑ Event logs',
             version: `eventlog|${eventsItems.length}`,
             onClose: closeExtra,
-            render: () => (
-              <EventLogPane
-                events={eventsItems}
-                onOpenBrowser={() => {
-                  setEventsWorkspacePath(workspace.path);
-                  setEventsWorkspaceLabel(workspace.name);
-                  setShowEvents(true);
-                }}
-              />
-            ),
+            render: () => <EventsWeb {...eventsProps} workspaceLabel={workspace.name} embedded />,
           });
         } else if (extra.kind === 'crons') {
           panels.push({
@@ -3214,7 +3214,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
                     onOpenEvents={() => {
                       setEventsWorkspacePath(workspace.path);
                       setEventsWorkspaceLabel(workspace.name);
-                      setShowEvents(true);
+                      openSingletonPane(workspace.selectionKey ?? workspace.id, { kind: 'eventlog' });
                       void multi.requestEvents(getWorkspaceRef(workspace.id, workspaceBackendKey));
                     }}
                     goalEvidence={workspaceGoal?.validation ? Object.values(workspaceGoal.validation.requirements ?? {}).flatMap((r) => (r.evidence ?? []).map((e) => ({ requirementId: r.id, evidenceId: e.id, name: e.name, requirementTitle: r.title }))) : []}
@@ -3320,7 +3320,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
                 onOpenEvents={(workspaceId) => {
                   setEventsWorkspacePath(workspace.path);
                   setEventsWorkspaceLabel(workspace.name);
-                  setShowEvents(true);
+                  openSingletonPane(workspace.selectionKey ?? workspace.id, { kind: 'eventlog' });
                   void multi.requestEvents(getWorkspaceRef(workspaceId, workspaceBackendKey));
                 }}
                 onDeleteSession={handleDeleteSession}
@@ -3349,6 +3349,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
                       dockviewLayoutsRef.current[selectionKey] = layout;
                     }}
                     isActive={isActive}
+                    focusRequest={dockFocusRequests[selectionKey] ?? null}
                   />
                 ) : (
                   <div className="flex-1 flex items-center justify-center text-sm text-[var(--gs-text-muted)]">

@@ -105,6 +105,7 @@ import { buildMachineSnapshot } from './machine/build.js';
 import type { MachineSnapshot } from './machine/protocol.js';
 import { subscribeWorkspacePmUpdates } from './machine/pm-links.js';
 import { scanWorkspaces } from '../remote-session/workspace-scanner.js';
+import { startTriggerScheduler } from './trigger-scheduler.js';
 import { matchesWorkspaceId, toCanonicalWorkspaceId } from '../../utils/workspace-id.js';
 import { getProcessSpecs, startProcessInstance, stopProcessInstance } from '../processes/manager.js';
 import { signalSubprocessTree } from './process-tree.js';
@@ -598,6 +599,34 @@ void getAgentControlReady().catch((error) => {
   const message = error instanceof Error ? error.message : String(error);
   console.error(`[server] failed to initialize agent control: ${message}`);
 });
+
+// Trigger scheduler (triggers M2): this machine fires cron triggers for the
+// workspaces it hosts. Runs are ordinary agent sessions, visible in the UI.
+startTriggerScheduler(
+  async () => (await scanWorkspaces()).map((w) => ({ id: w.id, name: w.name, path: w.path, projectName: w.projectName })),
+  {
+    log: (message) => console.error(`[triggers] ${message}`),
+    runAgent: async (workspace, title, prompt) => {
+      try {
+        await getAgentControlReady();
+        const target = { workspaceId: workspace.id, workspaceName: workspace.name, workspacePath: workspace.path, projectName: workspace.projectName };
+        const sessions = await createAgentSession(target, title);
+        const created = sessions.find((x) => x.title === title) ?? sessions[sessions.length - 1];
+        if (!created) return null;
+        for (let attempt = 0; attempt < 4; attempt++) {
+          if (attempt > 0) await new Promise((r) => setTimeout(r, 2000 * attempt));
+          try {
+            await promptAgentSession(target, created.id, prompt);
+            return created.id;
+          } catch { /* discovery race — retry */ }
+        }
+        return null;
+      } catch {
+        return null;
+      }
+    },
+  },
+);
 
 ensureWorkspacePmSubscribed();
 

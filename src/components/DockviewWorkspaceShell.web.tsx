@@ -77,6 +77,8 @@ function DockHeaderActions(props: IDockviewHeaderActionsProps) {
 }
 
 export interface DockviewWorkspaceShellProps {
+  /** Focus/activate a panel by id (nonce forces re-fire for repeat clicks). */
+  focusRequest?: { id: string; nonce: number } | null;
   backendKey: string;
   workspaceId: string;
   panels: DockviewTerminalPanel[];
@@ -94,6 +96,7 @@ export function DockviewWorkspaceShell({
   onLayoutChange,
   isActive = true,
   onApiChange,
+  focusRequest,
 }: DockviewWorkspaceShellProps) {
   const apiRef = useRef<DockviewReadyEvent['api'] | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -168,6 +171,22 @@ export function DockviewWorkspaceShell({
       });
     }
   }, [panels]);
+
+  // Focus an already-open panel on repeat open-requests (clicking a sidebar/
+  // rail row whose pane exists should surface it, not silently no-op).
+  useEffect(() => {
+    if (!focusRequest) return;
+    const focus = (): boolean => {
+      const panel = apiRef.current?.getPanel(focusRequest.id);
+      if (!panel) return false;
+      panel.api.setActive();
+      return true;
+    };
+    if (focus()) return;
+    // Panel may be added later in this same commit — retry next tick.
+    const t = setTimeout(focus, 50);
+    return () => clearTimeout(t);
+  }, [focusRequest]);
 
   const restoreLayout = useCallback((layout: unknown | undefined) => {
     const api = apiRef.current;
