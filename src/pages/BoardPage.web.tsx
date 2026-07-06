@@ -27,7 +27,7 @@ export interface BoardPageProps {
   onOpenHelp: () => void;
   onOpenCreateMenu: () => void;
   /** Open the project home view (docs mock: ProjectHome). */
-  onOpenProjectHome?: () => void;
+  onOpenProjectHome?: (projectName?: string) => void;
   onOpenCommandPalette?: () => void;
   onRefresh: () => void;
   onDisconnect: () => void;
@@ -91,7 +91,7 @@ function deriveProjects(
 /** PROJECTS strip above the kanban (mock Board.tsx ghome-projects section). */
 function ProjectsStrip({ projects, onOpenProjectHome, onNewProject }: {
   projects: ProjectStripEntry[];
-  onOpenProjectHome?: () => void;
+  onOpenProjectHome?: (projectName?: string) => void;
   onNewProject: () => void;
 }) {
   const [filter, setFilter] = useState('');
@@ -124,7 +124,7 @@ function ProjectsStrip({ projects, onOpenProjectHome, onNewProject }: {
           <button
             key={project.name}
             type="button"
-            onClick={onOpenProjectHome}
+            onClick={() => onOpenProjectHome?.(project.name)}
             disabled={!onOpenProjectHome}
             title={onOpenProjectHome ? `Open ${project.name} project home` : 'Project home unavailable'}
             className="border border-[var(--gs-border)] bg-[var(--gs-bg-surface)] px-[13px] py-[11px] text-left transition-colors hover:border-[var(--gs-border-active)] hover:bg-[var(--gs-bg-hover)] disabled:cursor-not-allowed"
@@ -295,7 +295,7 @@ export function BoardPage({
         <span className="text-sm font-medium text-[var(--gs-text)]">Project Board</span>
         {onOpenProjectHome && (
           <button
-            onClick={onOpenProjectHome}
+            onClick={() => onOpenProjectHome?.()}
             className="px-1.5 py-0.5 text-xs rounded text-[var(--gs-text-dim)] hover:text-[var(--gs-text)] hover:bg-[var(--gs-bg-active)]"
             title="Project home"
           >

@@ -763,9 +763,11 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
     setDockExtraPanes((prev) => {
       const cur = prev[key] ?? [];
       const missing: DockExtraPane[] = [];
-      if (!cur.some((x) => x.kind === 'goal')) missing.push({ kind: 'goal' });
-      if (!cur.some((x) => x.kind === 'workflow')) missing.push({ kind: 'workflow' });
+      // Order matters: dockview activates the last-added panel — end on goal so
+      // the mock's default active content tab (◇ Goal) wins.
       if (!cur.some((x) => x.kind === 'guide')) missing.push({ kind: 'guide' });
+      if (!cur.some((x) => x.kind === 'workflow')) missing.push({ kind: 'workflow' });
+      if (!cur.some((x) => x.kind === 'goal')) missing.push({ kind: 'goal' });
       return missing.length ? { ...prev, [key]: [...cur, ...missing] } : prev;
     });
   }, [workspaceBoardState.selectedWorkspaceId]);
@@ -3099,7 +3101,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
           return (
             <div
               key={selectionKey}
-              className={isActive ? 'fixed inset-0 z-20' : 'fixed left-[-200vw] top-0 w-screen h-screen invisible pointer-events-none overflow-hidden'}
+              className={isActive ? 'h-full w-full min-h-0 overflow-hidden' : 'fixed left-[-200vw] top-0 w-screen h-screen invisible pointer-events-none overflow-hidden'}
               aria-hidden={isActive ? undefined : true}
             >
               <WorkspaceDetailPage
@@ -3350,7 +3352,10 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
           onOpenInbox={() => { void inboxActions.requestInbox(); setShowInbox(true); }}
           onOpenHelp={handleOpenHelp}
           onOpenCreateMenu={handleOpenCreateMenu}
-          onOpenProjectHome={() => {
+          onOpenProjectHome={(projectName) => {
+            // Project cards enter their own home directly (mock); the ⌂ header
+            // affordance (no name) falls back to the selector.
+            if (projectName) { setProjectHomeName(projectName); return; }
             const names = allProjects.map((project) => project.name);
             if (names.length === 0) return;
             if (names.length === 1) { setProjectHomeName(names[0]); return; }
