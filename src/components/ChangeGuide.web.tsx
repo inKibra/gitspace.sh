@@ -131,22 +131,31 @@ function FileDiffBlock({ backend, projectName, workspaceName, file, onOpenFile }
 }): ReactElement {
   const [patch, setPatch] = useState<string | null>(null);
   const [state, setState] = useState<'loading' | 'ready' | 'empty' | 'error'>('loading');
-  // Fetch only when the block nears the viewport — a guide renders every
-  // section's exhibits stacked, and eagerly fetching ~20 diffs (some 100KB+)
-  // on pane open stalls the shell.
-  const [visible, setVisible] = useState(false);
+  // Windowed rendering (guide diffs accumulate thousands of DOM nodes):
+  // fetch once when first near the viewport, but keep PatchDiff MOUNTED only
+  // while near — far-away blocks swap to a measured-height spacer so scroll
+  // position holds and the DOM stays bounded.
+  const [visible, setVisible] = useState(false); // ever been near → fetch
+  const [nearView, setNearView] = useState(false); // currently near → mount
   const [renderHuge, setRenderHuge] = useState(false);
   const hostRef = useRef<HTMLDivElement>(null);
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const heightRef = useRef<number | null>(null);
 
   useEffect(() => {
     const host = hostRef.current;
-    if (!host || visible) return;
+    if (!host) return;
     const io = new IntersectionObserver((entries) => {
-      if (entries.some((e) => e.isIntersecting)) { setVisible(true); io.disconnect(); }
-    }, { rootMargin: '600px 0px' });
+      const near = entries.some((e) => e.isIntersecting);
+      if (near) setVisible(true);
+      setNearView((prev) => {
+        if (prev && !near && bodyRef.current) heightRef.current = bodyRef.current.offsetHeight;
+        return near;
+      });
+    }, { rootMargin: '1200px 0px' });
     io.observe(host);
     return () => io.disconnect();
-  }, [visible]);
+  }, []);
 
   useEffect(() => {
     if (!visible) return;
@@ -186,6 +195,7 @@ function FileDiffBlock({ backend, projectName, workspaceName, file, onOpenFile }
         </span>
       </button>
       <div
+        ref={bodyRef}
         className="overflow-x-auto"
         style={{
           '--diffs-dark-bg': '#000000',
@@ -196,7 +206,9 @@ function FileDiffBlock({ backend, projectName, workspaceName, file, onOpenFile }
           '--diffs-font-family': 'var(--gs-font)',
         } as CSSProperties}
       >
-        {!visible || state === 'loading' ? (
+        {visible && !nearView && state === 'ready' ? (
+          <div style={{ height: heightRef.current ?? 120 }} aria-hidden="true" />
+        ) : !visible || state === 'loading' ? (
           <div className="px-2 py-2 text-[11px] text-[var(--gs-text-dim)]">Loading diff…</div>
         ) : state === 'error' ? (
           <div className="px-2 py-2 text-[11px] text-[var(--gs-danger)]">Failed to load diff for {file.path}</div>
