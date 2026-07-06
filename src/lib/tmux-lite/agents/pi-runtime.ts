@@ -16,6 +16,26 @@ import { getManagedSessionBootstrap } from './managed-defaults.js';
 const importSdk = () => import('@oh-my-pi/pi-coding-agent/sdk');
 const importSessionManagerModule = () => import('@oh-my-pi/pi-coding-agent/session/session-manager');
 const importModelRegistryModule = () => import('@oh-my-pi/pi-coding-agent/config/model-registry');
+const importAgentRegistryModule = () => import('@oh-my-pi/pi-coding-agent/registry/agent-registry');
+
+/**
+ * Per-WORKSPACE agent registries for IRC routing. OMP's IrcBus defaults to a
+ * process-global AgentRegistry — correct when one process hosts one agent
+ * tree, but our daemon hosts every workspace's sessions in-process, which
+ * made agents in different workspaces addressable IRC peers (workflow spawns
+ * in workspace A were messaging agents in workspace B). Scoping the registry
+ * by workspace cwd confines IRC (send/list/wait) to same-workspace agents;
+ * subagents inherit their parent session's registry.
+ */
+const workspaceAgentRegistries = new Map<string, unknown>();
+async function agentRegistryForWorkspace(cwd: string): Promise<unknown> {
+  const existing = workspaceAgentRegistries.get(cwd);
+  if (existing) return existing;
+  const { AgentRegistry } = (await importAgentRegistryModule()) as unknown as { AgentRegistry: new () => unknown };
+  const registry = new AgentRegistry();
+  workspaceAgentRegistries.set(cwd, registry);
+  return registry;
+}
 const importPiAi = () => import('@oh-my-pi/pi-ai');
 /**
  * Pi agent directory, scoped under the configured workspace root.
@@ -258,6 +278,8 @@ export async function openPiSession(cwd: string, sessionFilePath: string) {
     additionalExtensionPaths: getManagedPiExtensionPaths(),
     skills: managedBootstrap.skills,
     hasUI: true,
+    // IRC scoping: one registry per workspace, not the process-global one.
+    agentRegistry: (await agentRegistryForWorkspace(cwd)) as never,
   });
   const { session, setToolUIContext } = result as unknown as OmpCreateSessionResult;
   if (!session?.sessionId) {

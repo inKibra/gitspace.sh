@@ -3185,6 +3185,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
                     workspaceName={workspace.name}
                     onOpenFile={(file) => {
                       const key = workspace.selectionKey ?? workspace.id;
+                      // Update-in-place keeps changed/prevPath fresh, then focus.
                       setDockExtraPanes((prev) => {
                         const cur = prev[key] ?? [];
                         const entry = { kind: 'file' as const, ...file };
@@ -3193,23 +3194,10 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
                           : [...cur, entry];
                         return { ...prev, [key]: next };
                       });
+                      setDockFocusRequests((prev) => ({ ...prev, [key]: { id: `file:${file.path}`, nonce: (prev[key]?.nonce ?? 0) + 1 } }));
                     }}
-                    onOpenArtifact={(path) => {
-                      const key = workspace.selectionKey ?? workspace.id;
-                      setDockExtraPanes((prev) => {
-                        const cur = prev[key] ?? [];
-                        if (cur.some((x) => x.kind === 'artifact' && x.path === path)) return prev;
-                        return { ...prev, [key]: [...cur, { kind: 'artifact', path }] };
-                      });
-                    }}
-                    onOpenDashboard={(path) => {
-                      const key = workspace.selectionKey ?? workspace.id;
-                      setDockExtraPanes((prev) => {
-                        const cur = prev[key] ?? [];
-                        if (cur.some((x) => x.kind === 'dashboard' && x.path === path)) return prev;
-                        return { ...prev, [key]: [...cur, { kind: 'dashboard', path }] };
-                      });
-                    }}
+                    onOpenArtifact={(path) => openSingletonPane(workspace.selectionKey ?? workspace.id, { kind: 'artifact', path })}
+                    onOpenDashboard={(path) => openSingletonPane(workspace.selectionKey ?? workspace.id, { kind: 'dashboard', path })}
                     phase={((workspace as { phase?: string }).phase as import('./types/config.js').WorkspacePhase | undefined) ?? 'code'}
                     onOpenEvents={() => {
                       setEventsWorkspacePath(workspace.path);
@@ -3231,11 +3219,13 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
                     } : undefined}
                     onOpenNote={(noteId, title) => {
                       const key = workspace.selectionKey ?? workspace.id;
+                      const nonce = Date.now();
                       setDockExtraPanes((prev) => {
                         const cur = prev[key] ?? [];
                         if (noteId !== null && cur.some((x) => x.kind === 'note' && x.noteId === noteId)) return prev;
-                        return { ...prev, [key]: [...cur, { kind: 'note', noteId, title, nonce: Date.now() }] };
+                        return { ...prev, [key]: [...cur, { kind: 'note', noteId, title, nonce }] };
                       });
+                      setDockFocusRequests((prev) => ({ ...prev, [key]: { id: `note:${noteId ?? `new-${nonce}`}`, nonce: (prev[key]?.nonce ?? 0) + 1 } }));
                     }}
                   />
                 }
