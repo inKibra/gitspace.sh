@@ -38,6 +38,8 @@ export interface GuideSection {
   satisfies?: string[];
   /** Grounding refs: journal phases and/or session turn ids the prose cites. */
   cites?: { journalPhases?: string[]; turns?: string[] };
+  /** Cluster content fingerprint the prose was written against (staleness). */
+  contentHash?: string;
 }
 
 export interface ReviewGuide {
@@ -139,7 +141,7 @@ export async function buildGuideWorksheet(projectName: string, workspaceName: st
   }
   const analysis: ReviewAnalysis = analyzeReviewDiff(workspaceDir, baseRef!);
   const cached = readReviewGuide(projectName, workspaceName);
-  const cachedIds = new Set((cached?.sections ?? []).map((s) => s.clusterId));
+  const cachedByCluster = new Map((cached?.sections ?? []).map((s) => [s.clusterId, s]));
   const journal = readJournal(mount);
 
   const clusters = analysis.clusters.map((cluster) => {
@@ -149,7 +151,7 @@ export async function buildGuideWorksheet(projectName: string, workspaceName: st
       .map((j) => ({ phase: j.phase, intent: j.intent, outcome: j.outcome, decisions: j.decisions, canonChanged: j.delta?.canonChanged }));
     return {
       ...cluster,
-      stale: !cachedIds.has(cluster.id),
+      stale: cachedByCluster.get(cluster.id)?.contentHash !== cluster.contentHash,
       grounding: { journal: entries, sessions: breadcrumbSessions(mount, cluster.files) },
     };
   });
@@ -216,7 +218,7 @@ export async function submitGuideSections(
   const missing: string[] = [];
   for (const cluster of worksheet.clusters) {
     const submitted = submittedById.get(cluster.id);
-    if (submitted) { sections.push({ ...submitted, kind: cluster.type }); continue; }
+    if (submitted) { sections.push({ ...submitted, kind: cluster.type, contentHash: cluster.contentHash }); continue; }
     const carried = cachedById.get(cluster.id);
     if (carried && !cluster.stale) { sections.push(carried); continue; }
     missing.push(cluster.id);
