@@ -1,3 +1,4 @@
+import { decodeBase64Utf8 } from './artifact-kinds.js';
 /** @jsxImportSource react */
 import { useEffect, useMemo, useState, type ReactElement } from 'react';
 import type { SessionBackend } from '../session/backend.js';
@@ -31,7 +32,7 @@ export function WorkflowPanel({ backend, workspaceId, onOpenArtifact, onOpenGoal
         const entries = await list.call(backend, workspaceId);
         const paths = entries.filter((e) => e.path.endsWith('.workflow.json')).map((e) => e.path);
         const loaded = await Promise.all(paths.map(async (path) => {
-          try { return { path, data: JSON.parse(atob((await read.call(backend, workspaceId, path)).base64)) as unknown }; }
+          try { return { path, data: JSON.parse(decodeBase64Utf8((await read.call(backend, workspaceId, path)).base64)) as unknown }; }
           catch { return null; }
         }));
         if (!alive) return;

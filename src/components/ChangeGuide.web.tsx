@@ -163,7 +163,7 @@ function FileDiffBlock({ backend, projectName, workspaceName, file, onOpenFile }
           '--diffs-fg-number-override': 'var(--gs-text-ghost)',
           '--diffs-font-size': '11.5px',
           '--diffs-line-height': '18px',
-          '--diffs-font-family': 'var(--gs-font-mono)',
+          '--diffs-font-family': 'var(--gs-font)',
         } as CSSProperties}
       >
         {state === 'loading' ? (
@@ -173,7 +173,7 @@ function FileDiffBlock({ backend, projectName, workspaceName, file, onOpenFile }
         ) : state === 'empty' ? (
           <div className="px-2 py-2 text-[11px] text-[var(--gs-text-dim)]">No textual diff (binary or unchanged content).</div>
         ) : patch ? (
-          <PatchDiff patch={patch} options={{ diffStyle: 'unified', theme: 'pierre-dark' }} />
+          <PatchDiff patch={patch} options={{ diffStyle: 'unified', theme: 'pierre-dark', disableFileHeader: true }} />
         ) : null}
       </div>
     </div>

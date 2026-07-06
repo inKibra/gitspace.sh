@@ -44,6 +44,7 @@ import { ReportPanel } from "./components/ReportPanel.web.js";
 import { WorkflowPanel } from "./components/WorkflowPanel.web.js";
 import { EventLogPane } from "./components/EventLogPane.web.js";
 import { CronsPanel } from "./components/CronsPanel.web.js";
+import { decodeBase64Utf8, encodeBase64Utf8 } from "./components/artifact-kinds.js";
 import { GlobalChromeBar, type ChromeWorkspaceChip } from "./components/GlobalChromeBar.web.js";
 import { GlobalTaskbar } from "./components/GlobalTaskbar.web.js";
 import { RightRail, RepoFilePanel, type RepoFileOpen } from "./components/RightRail.web.js";
@@ -789,7 +790,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
           let panels = 0;
           try {
             const raw = await be.readWorkspaceArtifact!(entry.id, d.path);
-            const doc = JSON.parse(atob(raw.base64)) as { name?: string; panels?: unknown[] };
+            const doc = JSON.parse(decodeBase64Utf8(raw.base64)) as { name?: string; panels?: unknown[] };
             if (doc.name) name = doc.name;
             panels = Array.isArray(doc.panels) ? doc.panels.length : 0;
           } catch { /* count stays 0 */ }
@@ -2989,7 +2990,6 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
             render: () => (
               <EventLogPane
                 events={eventsItems}
-                workspaceLabel={workspace.name}
                 onOpenBrowser={() => {
                   setEventsWorkspacePath(workspace.path);
                   setEventsWorkspaceLabel(workspace.name);
@@ -3198,7 +3198,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
                       if (!slug) return;
                       const be = multi.getBackend(backendKeyFromSelectionKey(workspace.selectionKey ?? workspace.id));
                       const doc = { name: slug, panels: [] };
-                      void be?.writeWorkspaceArtifact?.(workspace.id, `${slug}.dashboard.json`, btoa(JSON.stringify(doc, null, 2)), `dashboard: create ${slug}`)
+                      void be?.writeWorkspaceArtifact?.(workspace.id, `${slug}.dashboard.json`, encodeBase64Utf8(JSON.stringify(doc, null, 2)), `dashboard: create ${slug}`)
                         .then(() => {
                           openSingletonPane(workspace.selectionKey ?? workspace.id, { kind: 'dashboard', path: `${slug}.dashboard.json` });
                           toast.success(`Dashboard ${slug} created.`);
@@ -3521,7 +3521,7 @@ function ReportPaneLoader({ path, read, onOpenAttachment }: { path: string; read
   const [err, setErr] = useState(false);
   useEffect(() => {
     let alive = true;
-    read(path).then((r) => { if (alive) setReport(JSON.parse(atob(r.base64))); }).catch(() => { if (alive) setErr(true); });
+    read(path).then((r) => { if (alive) setReport(JSON.parse(decodeBase64Utf8(r.base64))); }).catch(() => { if (alive) setErr(true); });
     return () => { alive = false; };
   }, [path, read]);
   if (err) return <div className="flex h-full items-center justify-center text-[12px] text-[var(--gs-danger)]">Failed to load report.</div>;

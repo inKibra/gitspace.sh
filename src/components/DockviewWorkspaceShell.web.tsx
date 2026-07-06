@@ -34,7 +34,7 @@ function DockTab(props: IDockviewPanelHeaderProps<PanelParams>) {
     event.stopPropagation();
   };
   return (
-    <div className="flex items-center gap-2 min-w-0 max-w-full px-1">
+    <div className="gs-ui flex items-center gap-2 min-w-0 max-w-full px-1">
       {props.params.running && <span className="h-[7px] w-[7px] flex-none animate-pulse rounded-full bg-[var(--gs-accent)]" />}
       <span className="truncate">{title}</span>
       {onClose ? (

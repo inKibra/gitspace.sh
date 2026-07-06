@@ -29,24 +29,23 @@ function timeLabel(item: WideEventItem): string {
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 }
 
-export function EventLogPane({ events, workspaceLabel, onOpenBrowser }: {
+export function EventLogPane({ events, onOpenBrowser }: {
   events: WideEventItem[];
-  workspaceLabel?: string;
   /** Open the full observability browser (filters/timeline/inspector). */
   onOpenBrowser?: () => void;
 }): ReactElement {
   return (
-    <div className="flex h-full min-h-0 flex-col text-[12px]">
-      <div className="flex flex-shrink-0 items-center gap-2 border-b border-[var(--gs-border-muted)] px-3.5 py-1.5">
-        <span className="text-[var(--gs-accent)]">⚑</span>
-        <span className="text-[13px] font-medium text-[var(--gs-text)]">Event logs</span>
-        <span className="text-[11px] text-[var(--gs-text-dim)]">live{workspaceLabel ? ` · ${workspaceLabel}` : ''}</span>
-        {onOpenBrowser && (
-          <button type="button" onClick={onOpenBrowser} className="ml-auto border border-[var(--gs-border)] px-2 py-0.5 text-[11px] text-[var(--gs-text-muted)] hover:border-[var(--gs-border-active)] hover:text-[var(--gs-text)]">
-            open browser ↗
-          </button>
-        )}
-      </div>
+    <div className="gs-ui relative flex h-full min-h-0 flex-col text-[12px]">
+      {onOpenBrowser && (
+        <button
+          type="button"
+          onClick={onOpenBrowser}
+          title="Open the full events browser (filters · timeline · inspector)"
+          className="absolute right-2 top-1.5 z-10 px-1.5 text-[10.5px] text-[var(--gs-text-ghost)] hover:text-[var(--gs-text)]"
+        >
+          browser ↗
+        </button>
+      )}
       <div className="min-h-0 flex-1 overflow-y-auto py-2.5">
         {events.length === 0 ? (
           <div className="flex h-full items-center justify-center text-[var(--gs-text-muted)]">No events yet</div>

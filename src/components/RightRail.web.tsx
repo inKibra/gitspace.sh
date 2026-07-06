@@ -6,7 +6,7 @@ import type { GitStatusEntry } from '@pierre/trees';
 import type { SessionBackend } from '../session/backend.js';
 import type { ReviewChangedFile } from '../types/review.js';
 import { langForPath } from './ArtifactPanel.web.js';
-import { KIND_ICON, KIND_LABEL, KIND_ORDER, classifyArtifact, type ArtifactKind } from './artifact-kinds.js';
+import { KIND_ICON, KIND_LABEL, KIND_ORDER, classifyArtifact, type ArtifactKind, decodeBase64Utf8 } from './artifact-kinds.js';
 import { Highlighted } from '../blocks/render/highlight.web.js';
 import { deriveNoteLabel } from './note-label.js';
 
@@ -346,7 +346,7 @@ export function RepoFilePanel({ backend, workspaceId, projectName, workspaceName
         const read = await backend?.readRepoFile?.(workspaceId, path);
         if (!alive) return;
         if (!read || read.base64 === null) { setState('error'); return; }
-        setContent(atob(read.base64));
+        setContent(decodeBase64Utf8(read.base64));
         setState('ready');
       } catch {
         if (alive) setState('error');
@@ -367,7 +367,7 @@ export function RepoFilePanel({ backend, workspaceId, projectName, workspaceName
         ) : state === 'error' ? (
           <div className="flex h-full items-center justify-center text-[var(--gs-danger)]">Failed to load {path}</div>
         ) : patch ? (
-          <PatchDiff patch={patch} options={{ diffStyle: 'unified', theme: 'pierre-dark' }} />
+          <PatchDiff patch={patch} options={{ diffStyle: 'unified', theme: 'pierre-dark', disableFileHeader: true }} />
         ) : langForPath(path) ? (
           <Highlighted text={(content ?? '').slice(0, 300_000)} lang={langForPath(path)} name={path} />
         ) : (
@@ -454,7 +454,7 @@ function ArtifactsMode({ backend, workspaceId, projectName, workspaceName, onOpe
         const parsed = await Promise.all(reportPaths.map(async (e) => {
           try {
             const raw = await backend!.readWorkspaceArtifact!(workspaceId, e.path);
-            const doc = JSON.parse(atob(raw.base64)) as { kind?: string; surface?: string; note?: string; rating?: number };
+            const doc = JSON.parse(decodeBase64Utf8(raw.base64)) as { kind?: string; surface?: string; note?: string; rating?: number };
             return { path: e.path, kind: doc.kind ?? 'praise', surface: doc.surface ?? e.path, note: doc.note ?? '', rating: doc.rating } as ReportRow;
           } catch { return null; }
         }));

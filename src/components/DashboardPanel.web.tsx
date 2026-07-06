@@ -1,3 +1,4 @@
+import { decodeBase64Utf8, encodeBase64Utf8 } from './artifact-kinds.js';
 /** @jsxImportSource react */
 import { useCallback, useEffect, useRef, useState, type ReactElement, type ReactNode } from 'react';
 import type { ArtifactRead } from './ArtifactPanel.web.js';
@@ -154,15 +155,15 @@ export function DashboardPanel({ dashboardPath, scopeLabel, read, write, listApp
     void (async () => {
       try {
         const raw = await read(dashboardPath);
-        const parsed = parseDashboard(atob(raw.base64));
+        const parsed = parseDashboard(decodeBase64Utf8(raw.base64));
         if (!alive) return;
         setDoc(parsed);
         const appHtml: Record<string, string | null> = {};
         const dataVals: Record<string, unknown> = {};
         await Promise.all(parsed.panels.map(async (p) => {
-          try { appHtml[p.app] = atob((await read(p.app)).base64); } catch { appHtml[p.app] = null; }
+          try { appHtml[p.app] = decodeBase64Utf8((await read(p.app)).base64); } catch { appHtml[p.app] = null; }
           if (p.data) {
-            try { dataVals[p.data] = JSON.parse(atob((await read(p.data)).base64)); } catch { dataVals[p.data] = null; }
+            try { dataVals[p.data] = JSON.parse(decodeBase64Utf8((await read(p.data)).base64)); } catch { dataVals[p.data] = null; }
           }
         }));
         if (!alive) return;
@@ -185,7 +186,7 @@ export function DashboardPanel({ dashboardPath, scopeLabel, read, write, listApp
     if (!write) return;
     const timer = setTimeout(() => {
       dirtyRef.current = false;
-      void write(dashboardPath, btoa(JSON.stringify(doc, null, 2)), `dashboard: update ${dashboardPath}`)
+      void write(dashboardPath, encodeBase64Utf8(JSON.stringify(doc, null, 2)), `dashboard: update ${dashboardPath}`)
         .catch(() => { dirtyRef.current = true; });
     }, 600);
     return () => clearTimeout(timer);
@@ -224,7 +225,7 @@ export function DashboardPanel({ dashboardPath, scopeLabel, read, write, listApp
       const read = readRef.current;
       void (async () => {
         try {
-          const html = atob((await read(appPath)).base64);
+          const html = decodeBase64Utf8((await read(appPath)).base64);
           setApps((prev) => ({ ...prev, [appPath]: html }));
         } catch {
           setApps((prev) => ({ ...prev, [appPath]: null }));

@@ -304,7 +304,7 @@ function TriggerCard({ t, live }: { t: Trigger; live: boolean }): ReactElement {
 
 export function CronsPanel({ triggers = [], live = false }: CronsPanelProps): ReactElement {
   return (
-    <div className="flex h-full min-h-0 flex-col bg-[var(--gs-bg)]">
+    <div className="gs-ui flex h-full min-h-0 flex-col bg-[var(--gs-bg)]">
       {/* bar */}
       <div className="flex flex-none items-center gap-[11px] border-b border-[var(--gs-border)] bg-[#050505] px-4 py-[11px]">
         <span className="text-[10px] uppercase tracking-[0.12em] text-[var(--gs-text-dim)]">Crons &amp; triggers</span>

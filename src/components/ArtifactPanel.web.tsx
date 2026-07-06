@@ -1,3 +1,4 @@
+import { decodeBase64Utf8 } from './artifact-kinds.js';
 /** @jsxImportSource react */
 import { useEffect, useState, type ReactElement } from 'react';
 import { renderMarkdownHtml } from './markdown-render.js';
@@ -60,7 +61,7 @@ export function ArtifactPreviewContent({ path, data }: { path: string; data: Art
     return <video src={`data:${mime};base64,${data.base64}`} controls className="max-h-full max-w-full border border-[var(--gs-border)]" />;
   }
   let text: string | null = null;
-  try { text = atob(data.base64); } catch { /* binary */ }
+  try { text = decodeBase64Utf8(data.base64); } catch { /* binary */ }
   if (text === null) return <div className="text-[var(--gs-text-dim)]">Binary artifact — no inline preview.</div>;
   if (mime === 'text/markdown') {
     return <div className="gs-block-md max-w-[860px]" dangerouslySetInnerHTML={{ __html: renderMarkdownHtml(text) }} />;

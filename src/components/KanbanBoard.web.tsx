@@ -305,14 +305,11 @@ function ChainHandle({ goal, related }: { goal: KanbanGoalItem; related?: boolea
     <span
       data-chain-anchor="true"
       title={`Goal chain position ${goal.chainPosition} of ${goal.chainLength}`}
-      className={`relative ml-auto inline-flex h-5 min-w-8 flex-shrink-0 items-center justify-center ${R_CHIP} border px-1 text-[12px] leading-none transition-opacity duration-150 ${chainHoverClass(related)}`}
+      className={`ml-auto inline-flex h-5 flex-shrink-0 items-center gap-1 border px-1.5 text-[11px] leading-none transition-opacity duration-150 ${chainHoverClass(related)}`}
       style={{ color: palette.fg, borderColor: palette.border, backgroundColor: palette.bg }}
     >
       ⛓
-      <span
-        className="absolute -right-2 -top-1 grid h-[17px] min-w-[28px] place-items-center rounded-full border bg-[var(--gs-bg-elevated)] px-[4px] text-[10px] font-semibold leading-none text-[var(--gs-text)]"
-        style={{ borderColor: palette.border }}
-      >
+      <span className="text-[10px] font-semibold tabular-nums leading-none">
         {goal.chainPosition}/{goal.chainLength}
       </span>
     </span>
@@ -998,7 +995,7 @@ export function KanbanBoardWeb({
           ))}
         </div>
       )}
-      <div className={`hidden sm:flex flex-1 gap-6 overflow-x-auto ${fullHeight ? 'h-full' : ''}`}>
+      <div className={`hidden sm:flex flex-1 gap-4 overflow-x-auto ${fullHeight ? 'h-full' : ''}`}>
         {groups.map((group) => {
           const plannedGoals = plannedGoalsForPhase(group.phase);
           const creating = creatingForPhase(group.phase);
@@ -1007,7 +1004,7 @@ export function KanbanBoardWeb({
           return (
           <div
             key={group.phase}
-            className={`flex min-w-[180px] flex-1 flex-col bg-[var(--gs-bg)] ${fullHeight ? 'h-full min-h-0' : ''}`}
+            className={`flex min-w-[180px] flex-1 flex-col border-r border-[var(--gs-border-muted)] bg-[var(--gs-bg)] pr-3 last:border-r-0 last:pr-0 ${fullHeight ? 'h-full min-h-0' : ''}`}
           >
 	            <div className="border-b border-[var(--gs-border)] px-3 py-2.5">
 	              <div className="flex items-baseline justify-between">

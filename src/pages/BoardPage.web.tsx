@@ -398,7 +398,7 @@ export function BoardPage({
       )}
 
       {/* Kanban board — fills remaining height */}
-      <div className="flex-1 min-h-0 p-3 overflow-auto">
+      <div className="flex-1 min-h-0 px-3 pb-3 pt-1 overflow-auto">
         {loading ? (
           <div className="flex items-center justify-center h-full">
             <div className="text-sm text-[var(--gs-text-muted)]">{loadingLabel}</div>

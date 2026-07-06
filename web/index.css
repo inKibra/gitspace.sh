@@ -884,7 +884,10 @@ body {
   min-height: 100dvh;
   background-color: var(--gs-bg);
   color: var(--gs-text);
-  font-family: var(--gs-font);
+  /* Mock parity (LOCKED): UI chrome is sans (--gs-ui); mono is opt-in via
+     .font-mono/code/pre/kbd and explicit font classes. Do not revert. */
+  font-family: var(--gs-ui);
+  letter-spacing: -0.003em;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   overscroll-behavior: none;

@@ -29,3 +29,15 @@ export function classifyArtifact(path: string): ArtifactKind {
   if (path.startsWith('notes/')) return 'note';
   return 'other';
 }
+
+/** UTF-8-safe base64 decode (bare atob() yields Latin-1 and mangles —, ✦, etc). */
+export function decodeBase64Utf8(base64: string): string {
+  return new TextDecoder('utf-8').decode(Uint8Array.from(atob(base64), (c) => c.charCodeAt(0)));
+}
+
+/** UTF-8-safe base64 encode (bare btoa() throws on non-Latin-1 input). */
+export function encodeBase64Utf8(text: string): string {
+  let binary = '';
+  for (const byte of new TextEncoder().encode(text)) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
