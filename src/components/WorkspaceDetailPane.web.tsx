@@ -272,7 +272,16 @@ function SidebarContent(props: {
         </>}
       >
         {activeAgentSessions.length === 0 ? (
-          <div className="text-xs text-[var(--gs-text-ghost)] px-[13px]">No agents</div>
+          closedAgentRows.length > 0 && !showSessionHistory ? (
+            <SidebarItem
+              icon="⟲"
+              label="Recent sessions"
+              rightLabel={String(closedAgentRows.length)}
+              onClick={() => setShowSessionHistory(true)}
+            />
+          ) : closedAgentRows.length === 0 ? (
+            <div className="text-xs text-[var(--gs-text-ghost)] px-[13px]">No agents</div>
+          ) : null
         ) : (
           agentRows.filter((row) => row.bucket === 'active').map((row) => {
             const agentState = row.state;
