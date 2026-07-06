@@ -722,6 +722,23 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   const agentSessionsByWorkspace = workspaceRuntime.agentSessionsByWorkspace;
   const allWorkspaceEntries = workspaceRuntime.workspaces;
 
+  /** Workspaces whose default pane set (goal/workflow/guide) was already seeded. */
+  const seededDockRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const key = workspaceBoardState.selectedWorkspaceId;
+    if (!key || seededDockRef.current.has(key)) return;
+    seededDockRef.current.add(key);
+    setDockExtraPanes((prev) => {
+      const cur = prev[key] ?? [];
+      const missing: DockExtraPane[] = [];
+      if (!cur.some((x) => x.kind === 'goal')) missing.push({ kind: 'goal' });
+      if (!cur.some((x) => x.kind === 'workflow')) missing.push({ kind: 'workflow' });
+      if (!cur.some((x) => x.kind === 'guide')) missing.push({ kind: 'guide' });
+      return missing.length ? { ...prev, [key]: [...cur, ...missing] } : prev;
+    });
+  }, [workspaceBoardState.selectedWorkspaceId]);
+
+
   /** *.dashboard.json artifacts for the selected workspace (sidebar Dashboards group). */
   const [wsDashboards, setWsDashboards] = useState<Record<string, Array<{ path: string; name: string; panels: number }>>>({});
   useEffect(() => {
