@@ -3214,7 +3214,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
                     onOpenEvents={() => {
                       setEventsWorkspacePath(workspace.path);
                       setEventsWorkspaceLabel(workspace.name);
-                      openSingletonPane(workspace.selectionKey ?? workspace.id, { kind: 'eventlog' });
+                      setShowEvents(true);
                       void multi.requestEvents(getWorkspaceRef(workspace.id, workspaceBackendKey));
                     }}
                     goalEvidence={workspaceGoal?.validation ? Object.values(workspaceGoal.validation.requirements ?? {}).flatMap((r) => (r.evidence ?? []).map((e) => ({ requirementId: r.id, evidenceId: e.id, name: e.name, requirementTitle: r.title }))) : []}
@@ -3320,7 +3320,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
                 onOpenEvents={(workspaceId) => {
                   setEventsWorkspacePath(workspace.path);
                   setEventsWorkspaceLabel(workspace.name);
-                  openSingletonPane(workspace.selectionKey ?? workspace.id, { kind: 'eventlog' });
+                  setShowEvents(true);
                   void multi.requestEvents(getWorkspaceRef(workspaceId, workspaceBackendKey));
                 }}
                 onDeleteSession={handleDeleteSession}
