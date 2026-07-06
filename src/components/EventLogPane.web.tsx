@@ -41,9 +41,9 @@ export function EventLogPane({ events, onOpenBrowser }: {
           type="button"
           onClick={onOpenBrowser}
           title="Open the full events browser (filters · timeline · inspector)"
-          className="absolute right-2 top-1.5 z-10 px-1.5 text-[10.5px] text-[var(--gs-text-ghost)] hover:text-[var(--gs-text)]"
+          className="absolute right-2 top-1.5 z-10 border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-2 py-[2px] text-[10.5px] text-[var(--gs-text-muted)] hover:border-[var(--gs-border-active)] hover:text-[var(--gs-text)]"
         >
-          browser ↗
+          ⧉ events browser
         </button>
       )}
       <div className="min-h-0 flex-1 overflow-y-auto py-2.5">

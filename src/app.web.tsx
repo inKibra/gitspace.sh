@@ -3053,7 +3053,26 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
             title: '◷ Crons & triggers',
             version: 'crons',
             onClose: closeExtra,
-            render: () => <CronsPanel triggers={[]} live={((workspace as { phase?: string }).phase ?? 'code') === 'ship'} />,
+            render: () => (
+              <CronsPaneConnected
+                backend={paneBackend}
+                workspaceId={workspace.id}
+                live={((workspace as { phase?: string }).phase ?? 'code') === 'ship'}
+                onRunAgent={async (title, prompt) => {
+                  const be = paneBackendKey ? multi.getBackend(paneBackendKey) : null;
+                  if (!be?.createAgentSession || !be.promptAgentSession) { toast.error('Agent sessions unavailable.'); return null; }
+                  const sessions = await be.createAgentSession(workspace.id, title);
+                  const created = sessions.find((x) => x.title === title) ?? sessions[sessions.length - 1];
+                  if (!created) return null;
+                  for (let attempt = 0; attempt < 4; attempt++) {
+                    if (attempt > 0) await new Promise((r) => setTimeout(r, 2000 * attempt));
+                    try { await be.promptAgentSession(workspace.id, created.id, prompt); return created.id; } catch { /* retry */ }
+                  }
+                  toast.error('Run session created but the prompt failed — open it and prompt manually.');
+                  return created.id;
+                }}
+              />
+            ),
           });
         } else if (extra.kind === 'report') {
           panels.push({
@@ -3577,6 +3596,61 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
 }
 
 // ─── Outer shell ────────────────────────────────────────────────────────────
+
+function CronsPaneConnected({ backend, workspaceId, live, onRunAgent }: {
+  backend: import('./session/backend.js').SessionBackend | null;
+  workspaceId: string;
+  live: boolean;
+  /** Spawn+prompt an agent session for a run; resolves to the session id. */
+  onRunAgent: (title: string, prompt: string) => Promise<string | null>;
+}) {
+  const [triggers, setTriggers] = useState<import('./components/CronsPanel.web.js').Trigger[]>([]);
+  const [tick, setTick] = useState(0);
+
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      const list = backend?.listWorkspaceArtifacts;
+      const read = backend?.readWorkspaceArtifact;
+      if (!list || !read) return;
+      try {
+        const arts = await list.call(backend, workspaceId);
+        const paths = arts.map((a) => a.path).filter((x) => x.startsWith('triggers/') && x.endsWith('.trigger.json'));
+        const loaded = await Promise.all(paths.map(async (path) => {
+          try { return JSON.parse(decodeBase64Utf8((await read.call(backend, workspaceId, path)).base64)) as import('./components/CronsPanel.web.js').Trigger; }
+          catch { return null; }
+        }));
+        if (alive) setTriggers(loaded.filter((x): x is import('./components/CronsPanel.web.js').Trigger => x !== null));
+      } catch { /* mount missing */ }
+    })();
+    return () => { alive = false; };
+  }, [backend, workspaceId, tick]);
+
+  const persist = useCallback(async (t: import('./components/CronsPanel.web.js').Trigger) => {
+    const write = backend?.writeWorkspaceArtifact;
+    if (!write) { toast.error('Trigger persistence unavailable.'); return; }
+    const id = (t.id ?? t.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')) || 'trigger';
+    await write.call(backend, workspaceId, `triggers/${id}.trigger.json`, encodeBase64Utf8(JSON.stringify({ ...t, id }, null, 2) + '\n'), `trigger: save ${t.name}`);
+    setTick((n) => n + 1);
+  }, [backend, workspaceId]);
+
+  return (
+    <CronsPanel
+      triggers={triggers}
+      live={live}
+      onSave={async (t) => { await persist(t); toast.success(`Trigger ${t.name} saved.`); }}
+      onRunNow={async (t) => {
+        const prompt = t.runs?.prompt ?? t.does ?? t.note;
+        if (!prompt) { toast.error('Trigger has no prompt to run.'); return; }
+        const sessionId = await onRunAgent(`trigger: ${t.name}`,
+          `${prompt}\n\nTrigger contract: you may only write these artifact paths: ${t.writes.join(', ') || '(none declared)'} (plus evidence via goal commands). Follow the space-artifacts skill.`);
+        if (!sessionId) return;
+        await persist({ ...t, status: 'pending', last: 'just now', history: [...t.history, 'pending' as const].slice(-5) });
+        toast.success(`Trigger ${t.name} running — see the agent session.`);
+      }}
+    />
+  );
+}
 
 function ReportPaneLoader({ path, read, onOpenAttachment }: { path: string; read: (p: string) => Promise<{ base64: string }>; onOpenAttachment?: (ref: string) => void }) {
   const [report, setReport] = useState<unknown>(undefined);
