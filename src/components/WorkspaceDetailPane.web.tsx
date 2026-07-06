@@ -14,6 +14,7 @@ import type { WorkspaceDetailPaneProps } from './WorkspaceDetailPane.js';
 import { getWorkspaceStripColor } from '../app/shared/workspace-detail/strip.js';
 import { useWorkspaceDetailModel } from '../app/shared/workspace-detail/useWorkspaceDetailModel.js';
 import { useTheme, THEMES } from '../lib/theme.web.js';
+import { SidebarStageHeader, ModeCapsStrip, ChainStack, chainNodesFromGoals } from './WorkspaceSidebarChrome.web.js';
 
 /* ─── Sidebar helpers ─────────────────────────────────────────────────────── */
 
@@ -181,6 +182,15 @@ function SidebarContent(props: {
   onRequestStatusChange?: WorkspaceDetailPaneProps['onRequestStatusChange'];
   onOpenNotes?: WorkspaceDetailPaneProps['onOpenNotes'];
   onOpenEvents: WorkspaceDetailPaneProps['onOpenEvents'];
+  onOpenGoalDoc?: WorkspaceDetailPaneProps['onOpenGoalDoc'];
+  onOpenChangeGuide?: WorkspaceDetailPaneProps['onOpenChangeGuide'];
+  onOpenRubric?: WorkspaceDetailPaneProps['onOpenRubric'];
+  dashboards?: WorkspaceDetailPaneProps['dashboards'];
+  onOpenDashboard?: WorkspaceDetailPaneProps['onOpenDashboard'];
+  chainGoals?: WorkspaceDetailPaneProps['chainGoals'];
+  chainTitle?: string;
+  currentChainGoalId?: string;
+  onSwitchChainWorkspace?: WorkspaceDetailPaneProps['onSwitchChainWorkspace'];
   agentSessionCount: number;
   pendingPermissions: number;
   pullRequest?: { url?: string };
@@ -191,7 +201,9 @@ function SidebarContent(props: {
     attachedSessionIds, attachedAgentSessionIds,
     onAttachSession, onStopAgentTurn, onCloseAgentSession, onArchiveAgentSession, onRestoreAgentSession,
     onCreateAgentSession, onStopProcess, onDeleteSession, onDeleteWorkspace, onOpenGitHubPullRequest, onOpenReview,
-    onRequestStatusChange, onOpenNotes, onOpenEvents, agentSessionCount, pendingPermissions, pullRequest, onDismiss,
+    onRequestStatusChange, onOpenNotes, onOpenEvents, onOpenGoalDoc, onOpenChangeGuide, onOpenRubric,
+    dashboards, onOpenDashboard, chainGoals, chainTitle, currentChainGoalId, onSwitchChainWorkspace,
+    agentSessionCount, pendingPermissions, pullRequest, onDismiss,
     goal, onOpenGoalDetail,
   } = props;
   const {
@@ -209,12 +221,17 @@ function SidebarContent(props: {
   /** Wrap sidebar actions: dismiss bottom sheet on mobile after action */
   const act = (fn: () => void) => { fn(); onDismiss?.(); };
 
+  const goalReqs = goal?.validation ? Object.values(goal.validation.requirements ?? {}) : [];
+  const goalReady = goalReqs.length > 0
+    ? `${goalReqs.filter((r) => (r as { status?: string }).status === 'accepted').length}/${goalReqs.length}`
+    : '—';
+
   return (
     <>
       <div>
       {/* AI AGENTS */}
       <SidebarSection
-        title="AI Agents"
+        title="Agent"
         extra={<>
           {agentSessionCount > 0 && <span className="text-[10px] text-[var(--gs-text-ghost)]">{agentSessionCount}</span>}
           {pendingPermissions > 0 && <span className="text-[10px] text-[var(--gs-warning-bright)]">⚡{pendingPermissions}</span>}
@@ -319,6 +336,30 @@ function SidebarContent(props: {
         <SidebarItem label="+ New session" onClick={() => act(() => void detailActions.createSession())} />
       </SidebarSection>
 
+      {/* SURFACES (mock Sidebar Surfaces group) */}
+      <SidebarSection title="Surfaces">
+        {onOpenGoalDoc && goal && (
+          <SidebarItem label="◇ Goal doc" rightLabel={goalReady} onClick={() => act(() => onOpenGoalDoc(workspace.id))} />
+        )}
+        {onOpenChangeGuide && (
+          <SidebarItem label="⛓ Change Guide" onClick={() => act(() => onOpenChangeGuide(workspace.id))} />
+        )}
+        {onOpenRubric && (
+          <SidebarItem label="☰ Review rubric" onClick={() => act(() => onOpenRubric(workspace.id))} />
+        )}
+        <SidebarItem label="⚑ Event logs" rightLabel="live" onClick={() => act(() => onOpenEvents(workspace.id))} />
+      </SidebarSection>
+
+      {/* DASHBOARDS (mock Sidebar Dashboards group — *.dashboard.json artifacts) */}
+      {onOpenDashboard && (
+        <SidebarSection title="Dashboards">
+          {(dashboards ?? []).length === 0 && <div className="text-xs text-[var(--gs-text-ghost)] px-1.5">No dashboards</div>}
+          {(dashboards ?? []).map((d) => (
+            <SidebarItem key={d.path} label={`▦ ${d.name}`} rightLabel={String(d.panels)} onClick={() => act(() => onOpenDashboard(d.path))} />
+          ))}
+        </SidebarSection>
+      )}
+
       {/* SERVICES */}
       {serviceRows.length > 0 && (
         <SidebarSection title="Services">
@@ -357,6 +398,16 @@ function SidebarContent(props: {
         </SidebarSection>
       )}
 
+      {/* CHAIN (mock chainstack) */}
+      {chainGoals && chainGoals.length > 1 && chainTitle && (
+        <ChainStack
+          title={chainTitle}
+          nodes={chainNodesFromGoals(chainGoals, workspace.name)}
+          currentGoalId={currentChainGoalId}
+          onSwitchWorkspace={onSwitchChainWorkspace ? (key) => act(() => onSwitchChainWorkspace(key)) : undefined}
+        />
+      )}
+
       {/* REPLAYS */}
       {workspaceReplays.length > 0 && (
         <SidebarSection title="Replays">
@@ -387,13 +438,11 @@ function SidebarContent(props: {
         </SidebarSection>
       )}
 
-      {/* SYSTEM */}
-      <SidebarSection title="System">
-        <SidebarItem label="Event Logs" dotColor="text-[var(--gs-running)]" rightLabel="live" onClick={() => act(() => onOpenEvents(workspace.id))} />
-      </SidebarSection>
+
       </div>
 
       <div className="mt-auto pt-3 border-t border-[var(--gs-border-muted)] space-y-0.5">
+        <div className="px-1.5 pb-1 text-[10.5px] uppercase tracking-[.12em] text-[var(--gs-text-dim)]">Workspace</div>
         {pendingPermissions > 0 && (
           <div className="px-1.5 text-[11px] text-[var(--gs-warning-bright)]">⚡ {pendingPermissions} pending permission{pendingPermissions !== 1 ? 's' : ''}</div>
         )}
@@ -634,20 +683,17 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
         {!sidebarClosed ? (
           <>
             <div
-              className="hidden sm:flex flex-shrink-0 bg-[var(--gs-sidebar-bg)] overflow-y-auto px-2 py-3 flex-col"
+              className="hidden sm:flex flex-shrink-0 bg-[var(--gs-sidebar-bg)] overflow-hidden flex-col"
               style={{ width: sidebarWidth }}
             >
-              <div className="mb-2 flex items-center justify-between gap-2">
-                <span className="text-[10px] uppercase tracking-wider text-[var(--gs-text-ghost)] font-medium">Workspace Panel</span>
-                <button
-                  type="button"
-                  onClick={() => setDesktopSidebarClosed(true)}
-                  className="rounded px-1.5 py-0.5 text-xs text-[var(--gs-text-dim)] hover:bg-[var(--gs-bg-active)] hover:text-[var(--gs-text)]"
-                  title="Close workspace panel"
-                >
-                  ×
-                </button>
-              </div>
+              <SidebarStageHeader
+                name={workspace.name}
+                phase={props.phase ?? 'code'}
+                onSwitchStage={props.onSwitchStage}
+                onClose={() => setDesktopSidebarClosed(true)}
+              />
+              <ModeCapsStrip phase={props.phase ?? 'code'} />
+              <div className="flex-1 overflow-y-auto px-2 py-3 flex flex-col">
               <SidebarContent
                 detailModel={detailModel}
                 workspace={workspace}
@@ -672,10 +718,20 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
                 goal={goal}
                 onOpenGoalDetail={onOpenGoalDetail}
                 onOpenEvents={onOpenEvents}
+                onOpenGoalDoc={props.onOpenGoalDoc}
+                onOpenChangeGuide={props.onOpenChangeGuide}
+                onOpenRubric={props.onOpenRubric}
+                dashboards={props.dashboards}
+                onOpenDashboard={props.onOpenDashboard}
+                chainGoals={props.chainGoals}
+                chainTitle={props.chainTitle}
+                currentChainGoalId={props.currentChainGoalId}
+                onSwitchChainWorkspace={props.onSwitchChainWorkspace}
                 agentSessionCount={agentSessionCount}
                 pendingPermissions={pendingPermissions}
                 pullRequest={pullRequest}
               />
+              </div>
             </div>
             <div
               className="hidden sm:block w-1.5 flex-shrink-0 cursor-col-resize border-l border-r border-[var(--gs-border-muted)] bg-[var(--gs-bg)] hover:bg-[var(--gs-bg-active)]"
@@ -771,6 +827,15 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
                   goal={goal}
                   onOpenGoalDetail={onOpenGoalDetail}
                   onOpenEvents={onOpenEvents}
+                  onOpenGoalDoc={props.onOpenGoalDoc}
+                  onOpenChangeGuide={props.onOpenChangeGuide}
+                  onOpenRubric={props.onOpenRubric}
+                  dashboards={props.dashboards}
+                  onOpenDashboard={props.onOpenDashboard}
+                  chainGoals={props.chainGoals}
+                  chainTitle={props.chainTitle}
+                  currentChainGoalId={props.currentChainGoalId}
+                  onSwitchChainWorkspace={props.onSwitchChainWorkspace}
                     agentSessionCount={agentSessionCount}
                   pendingPermissions={pendingPermissions}
                   pullRequest={pullRequest}

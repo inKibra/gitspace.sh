@@ -38,6 +38,10 @@ import { FlowWeb } from "./components/Flow.web.js";
 import { ArtifactPanel } from "./components/ArtifactPanel.web.js";
 import { DashboardPanel } from "./components/DashboardPanel.web.js";
 import { NotePanel } from "./components/NotePanel.web.js";
+import { GoalDocPanel } from "./components/GoalDocPanel.web.js";
+import { ChangeGuidePane } from "./components/ChangeGuide.web.js";
+import { ReviewRubric } from "./components/ReviewRubric.web.js";
+import { EvidencePanel } from "./components/EvidencePanel.web.js";
 import { RightRail, RepoFilePanel, type RepoFileOpen } from "./components/RightRail.web.js";
 import { ProjectHomePage } from "./pages/ProjectHomePage.web.js";
 import { useInboxPage } from './app/react/index.js';
@@ -130,8 +134,15 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   const [eventsWorkspaceLabel, setEventsWorkspaceLabel] = useState<string>('');
   const [projectHomeName, setProjectHomeName] = useState<string | null>(null);
   /** Repo files + artifacts opened as dock tabs, keyed by workspace selectionKey. */
-  type DockExtraPane = ({ kind: 'file' } & RepoFileOpen) | { kind: 'artifact'; path: string } | { kind: 'dashboard'; path: string } | { kind: 'note'; noteId: string | null; title: string; nonce?: number };
+  type DockExtraPane = ({ kind: 'file' } & RepoFileOpen) | { kind: 'artifact'; path: string } | { kind: 'dashboard'; path: string } | { kind: 'note'; noteId: string | null; title: string; nonce?: number } | { kind: 'goal' } | { kind: 'guide' } | { kind: 'rubric' } | { kind: 'evidence'; requirementId: string; evidenceId: string };
   const [dockExtraPanes, setDockExtraPanes] = useState<Record<string, DockExtraPane[]>>({});
+  const openSingletonPane = useCallback((wsKey: string, pane: DockExtraPane) => {
+    setDockExtraPanes((prev) => {
+      const cur = prev[wsKey] ?? [];
+      if (cur.some((x) => x.kind === pane.kind && (pane.kind !== 'evidence' || (x.kind === 'evidence' && x.evidenceId === (pane as { evidenceId: string }).evidenceId)))) return prev;
+      return { ...prev, [wsKey]: [...cur, pane] };
+    });
+  }, []);
   const [pendingProcessEditWorkspaceId, setPendingProcessEditWorkspaceId] = useState<string | null>(null);
   const [modifiers, setModifiers] = useState<ModifierState>({
     ctrl: false,
@@ -720,6 +731,38 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   // ─── Agent session data ────────────────────────────────────────────────────
   const agentSessionsByWorkspace = workspaceRuntime.agentSessionsByWorkspace;
   const allWorkspaceEntries = workspaceRuntime.workspaces;
+
+  /** *.dashboard.json artifacts for the selected workspace (sidebar Dashboards group). */
+  const [wsDashboards, setWsDashboards] = useState<Record<string, Array<{ path: string; name: string; panels: number }>>>({});
+  useEffect(() => {
+    const key = workspaceBoardState.selectedWorkspaceId;
+    if (!key) return;
+    const entry = workspaceRuntime.workspaces.find((w) => w.selectionKey === key || w.id === key);
+    if (!entry) return;
+    const be = multi.getBackend(entry.backendKey);
+    if (!be?.listWorkspaceArtifacts) return;
+    let alive = true;
+    void (async () => {
+      try {
+        const arts = await be.listWorkspaceArtifacts!(entry.id);
+        const dashes = arts.filter((a) => a.path.endsWith('.dashboard.json'));
+        const detailed = await Promise.all(dashes.map(async (d) => {
+          let name = (d.path.split('/').pop() ?? d.path).replace('.dashboard.json', '');
+          let panels = 0;
+          try {
+            const raw = await be.readWorkspaceArtifact!(entry.id, d.path);
+            const doc = JSON.parse(atob(raw.base64)) as { name?: string; panels?: unknown[] };
+            if (doc.name) name = doc.name;
+            panels = Array.isArray(doc.panels) ? doc.panels.length : 0;
+          } catch { /* count stays 0 */ }
+          return { path: d.path, name, panels };
+        }));
+        if (alive) setWsDashboards((prev) => ({ ...prev, [key]: detailed }));
+      } catch { /* additive */ }
+    })();
+    return () => { alive = false; };
+  }, [workspaceBoardState.selectedWorkspaceId, workspaceRuntime.workspaces, multi]);
+
   const workspaceStatusById = workspaceRuntime.stripStatusById;
 
   const workspaceBySelectionKey = useMemo(() => {
@@ -2726,7 +2769,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
     })();
 
     const paneBackendKey = attachedBackendKey ?? activeBackendKey ?? selectedBackendKey ?? null;
-    const paneBackend = paneBackendKey ? (multi.getBackend(paneBackendKey) as RemoteSessionPtyBackend | null) : null;
+    const paneBackend = paneBackendKey ? (paneBackendKey ? multi.getBackend(paneBackendKey) : null as RemoteSessionPtyBackend | null) : null;
     const snapshotCurrentDetailLayout = () => {
       const selectionKey = currentDetailWorkspace?.selectionKey;
       if (!selectionKey) return;
@@ -2840,11 +2883,17 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
       // Repo files + artifacts opened from the RightRail as dock tabs
       // (mock Shell pane kinds 'file' and 'artifact').
       const wsKey = workspace.selectionKey ?? workspace.id;
+      const workspaceGoalForPanels = allGoalItems.find((g) => g.workspaceName === workspace.name && g.projectName === workspace.projectName) ?? null;
+      const dockPaneKey = (x: DockExtraPane): string =>
+        x.kind === 'note' ? `note:${x.noteId ?? ''}:${x.nonce ?? ''}`
+        : x.kind === 'evidence' ? `ev:${x.evidenceId}`
+        : 'path' in x ? `${x.kind}:${x.path}`
+        : x.kind;
       for (const extra of dockExtraPanes[wsKey] ?? []) {
-        const name = extra.kind === 'note' ? extra.title : (extra.path.split('/').pop() ?? extra.path);
+        const name = extra.kind === 'note' ? extra.title : ('path' in extra ? (extra.path.split('/').pop() ?? extra.path) : extra.kind);
         const closeExtra = () => setDockExtraPanes((prev) => ({
           ...prev,
-          [wsKey]: (prev[wsKey] ?? []).filter((x) => !(x.kind === extra.kind && (x.kind === 'note' || extra.kind === 'note' ? (x.kind === 'note' && extra.kind === 'note' && x.noteId === extra.noteId && x.nonce === extra.nonce) : x.path === extra.path))),
+          [wsKey]: (prev[wsKey] ?? []).filter((x) => dockPaneKey(x) !== dockPaneKey(extra)),
         }));
         if (extra.kind === 'file') {
           panels.push({
@@ -2903,6 +2952,71 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
                 workspaceName={workspace.name}
                 noteId={extra.noteId}
               />
+            ),
+          });
+        } else if (extra.kind === 'goal') {
+          const chainGoalsForPane = workspaceGoalForPanels?.chainId
+            ? allGoalItems.filter((g) => g.chainId === workspaceGoalForPanels.chainId)
+            : (workspaceGoalForPanels ? [workspaceGoalForPanels] : []);
+          panels.push({
+            id: 'goal',
+            title: '◇ Goal',
+            version: `goal|${workspaceGoalForPanels?.id ?? ''}|${chainGoalsForPane.length}`,
+            onClose: closeExtra,
+            render: () => (
+              chainGoalsForPane.length > 0 && workspaceGoalForPanels
+                ? <GoalDocDockPane goals={chainGoalsForPane} initialGoalId={workspaceGoalForPanels.id} />
+                : <div className="flex h-full items-center justify-center text-[12px] text-[var(--gs-text-dim)]">No goal bound to this workspace.</div>
+            ),
+          });
+        } else if (extra.kind === 'guide') {
+          panels.push({
+            id: 'guide',
+            title: '⛓ Change Guide',
+            version: `guide|${workspace.id}`,
+            onClose: closeExtra,
+            render: () => (
+              <ChangeGuidePane
+                backend={paneBackend}
+                projectName={workspace.projectName}
+                workspaceName={workspace.name}
+                onOpenFile={(path) => openSingletonPane(wsKey, { kind: 'file', path, changed: true })}
+              />
+            ),
+          });
+        } else if (extra.kind === 'rubric') {
+          panels.push({
+            id: 'rubric',
+            title: '☰ Review rubric',
+            version: `rubric|${workspaceGoalForPanels?.id ?? ''}|${workspaceGoalForPanels?.updatedAt ?? ''}`,
+            onClose: closeExtra,
+            render: () => (
+              <ReviewRubric
+                goal={workspaceGoalForPanels?.validation ? { id: workspaceGoalForPanels.id, title: workspaceGoalForPanels.title, validation: workspaceGoalForPanels.validation } : null}
+                onRecordHuman={async (requirementId, decision, note) => {
+                  const be = paneBackendKey ? multi.getBackend(paneBackendKey) : null;
+                  const mapped = decision === 'pass' ? 'pass' : decision === 'partial' ? 'changes' : 'fail';
+                  await be?.recordGoalHumanReview?.(workspace.projectName, workspaceGoalForPanels!.id, requirementId, mapped, note);
+                }}
+                onRunJudgment={async (requirementId) => {
+                  const be = paneBackendKey ? multi.getBackend(paneBackendKey) : null;
+                  await be?.runGoalJudgment?.(workspace.projectName, workspaceGoalForPanels!.id, requirementId);
+                }}
+                onOpenEvidence={(requirementId, evidenceId) => openSingletonPane(wsKey, { kind: 'evidence', requirementId, evidenceId })}
+              />
+            ),
+          });
+        } else if (extra.kind === 'evidence') {
+          const req = workspaceGoalForPanels?.validation?.requirements?.[extra.requirementId];
+          const ev = req?.evidence?.find((e) => e.id === extra.evidenceId);
+          panels.push({
+            id: `evidence:${extra.evidenceId}`,
+            title: `▸ ${(ev?.name ?? 'evidence').slice(0, 20)}`,
+            version: `evidence|${extra.evidenceId}`,
+            onClose: closeExtra,
+            render: () => (
+              ev ? <EvidencePanel evidence={ev} requirementTitle={req?.title} />
+                 : <div className="flex h-full items-center justify-center text-[12px] text-[var(--gs-text-dim)]">Evidence not found.</div>
             ),
           });
         } else {
@@ -3030,6 +3144,17 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
                 runtime={runtime}
                 goal={workspaceGoal}
                 onOpenGoalDetail={handleSelectPlannedGoal}
+                phase={((workspace as { phase?: string }).phase as import('./types/config.js').WorkspacePhase | undefined) ?? 'code'}
+                onSwitchStage={(phase) => workspaceBoardState.setPhase(workspace.selectionKey ?? workspace.id, phase)}
+                onOpenGoalDoc={() => openSingletonPane(workspace.selectionKey ?? workspace.id, { kind: 'goal' })}
+                onOpenChangeGuide={() => openSingletonPane(workspace.selectionKey ?? workspace.id, { kind: 'guide' })}
+                onOpenRubric={() => openSingletonPane(workspace.selectionKey ?? workspace.id, { kind: 'rubric' })}
+                dashboards={wsDashboards[workspace.selectionKey ?? workspace.id] ?? []}
+                onOpenDashboard={(path) => openSingletonPane(workspace.selectionKey ?? workspace.id, { kind: 'dashboard', path })}
+                chainGoals={workspaceGoal?.chainId ? allGoalItems.filter((g) => g.chainId === workspaceGoal.chainId) : undefined}
+                chainTitle={workspaceGoal?.chainTitle}
+                currentChainGoalId={workspaceGoal?.id}
+                onSwitchChainWorkspace={handleSelectWorkspaceFromDetail}
                 onSelectWorkspace={handleSelectWorkspaceFromDetail}
                 onOpenAgentSession={handleOpenAgentSession}
                 onCreateAgentSession={handleCreateAgentSession}
@@ -3323,6 +3448,11 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
 }
 
 // ─── Outer shell ────────────────────────────────────────────────────────────
+
+function GoalDocDockPane({ goals, initialGoalId }: { goals: import("./app/shared/board/types.js").KanbanGoalItem[]; initialGoalId: string }) {
+  const [goalId, setGoalId] = useState(initialGoalId);
+  return <GoalDocPanel goals={goals} currentGoalId={goalId} onSelectGoal={setGoalId} />;
+}
 
 export default function App() {
   const [resolvedIdentity, setResolvedIdentity] = useState<Identity | null>(null);

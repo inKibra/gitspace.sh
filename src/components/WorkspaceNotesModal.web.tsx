@@ -20,12 +20,7 @@ export interface WorkspaceNotesModalProps {
 }
 
 
-function deriveNoteLabel(body: string): string {
-  const lines = body.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  const heading = lines.find((line) => line.startsWith('#'));
-  const raw = heading ? heading.replace(/^#+\s*/, '') : (lines[0] ?? 'Untitled note');
-  return raw.length > 56 ? `${raw.slice(0, 56)}…` : raw;
-}
+import { deriveNoteLabel } from './note-label.js';
 
 function toPreview(body: string): string {
   return body.replace(/^#+\s*/gm, '').replace(/\s+/g, ' ').trim();

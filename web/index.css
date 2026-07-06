@@ -59,6 +59,10 @@
 
   /* Accent */
   --gs-accent: #00ff66;
+  --gs-stage-plan: #5b9bff;
+  --gs-stage-code: #00ff66;
+  --gs-stage-review: #ffcc00;
+  --gs-stage-ship: #bc8cff;
   --gs-accent-hover: #00cc52;
   --gs-accent-subtle: rgba(0, 255, 102, 0.04);
   --gs-accent-glow: 0 0 8px rgba(0, 255, 102, 0.25);
@@ -172,6 +176,10 @@
   --gs-text-on-accent: #000000;
 
   --gs-accent: #e8c840;
+  --gs-stage-plan: #5b9bff;
+  --gs-stage-code: #00ff66;
+  --gs-stage-review: #ffcc00;
+  --gs-stage-ship: #bc8cff;
   --gs-accent-hover: #c8a830;
   --gs-accent-subtle: rgba(232, 200, 64, 0.03);
   --gs-accent-glow: 0 0 8px rgba(232, 200, 64, 0.2);
@@ -272,6 +280,10 @@
   --gs-text-on-accent: #000000;
 
   --gs-accent: #ffffff;
+  --gs-stage-plan: #5b9bff;
+  --gs-stage-code: #00ff66;
+  --gs-stage-review: #ffcc00;
+  --gs-stage-ship: #bc8cff;
   --gs-accent-hover: #cccccc;
   --gs-accent-subtle: rgba(255, 255, 255, 0.03);
   --gs-accent-glow: none;
@@ -372,6 +384,10 @@
   --gs-text-on-accent: #000000;
 
   --gs-accent: #ffffff;
+  --gs-stage-plan: #5b9bff;
+  --gs-stage-code: #00ff66;
+  --gs-stage-review: #ffcc00;
+  --gs-stage-ship: #bc8cff;
   --gs-accent-hover: #cccccc;
   --gs-accent-subtle: rgba(255, 255, 255, 0.02);
   --gs-accent-glow: none;
@@ -472,6 +488,10 @@
   --gs-text-on-accent: #000000;
 
   --gs-accent: #f050a0;
+  --gs-stage-plan: #5b9bff;
+  --gs-stage-code: #00ff66;
+  --gs-stage-review: #ffcc00;
+  --gs-stage-ship: #bc8cff;
   --gs-accent-hover: #d04888;
   --gs-accent-subtle: rgba(240, 80, 160, 0.04);
   --gs-accent-glow: 0 0 8px rgba(240, 80, 160, 0.2);
@@ -572,6 +592,10 @@
   --gs-text-on-accent: #000000;
 
   --gs-accent: #d8c060;
+  --gs-stage-plan: #5b9bff;
+  --gs-stage-code: #00ff66;
+  --gs-stage-review: #ffcc00;
+  --gs-stage-ship: #bc8cff;
   --gs-accent-hover: #b8a048;
   --gs-accent-subtle: rgba(216, 192, 96, 0.03);
   --gs-accent-glow: 0 0 6px rgba(232, 200, 64, 0.15);
@@ -672,6 +696,10 @@
   --gs-text-on-accent: #ffffff;
 
   --gs-accent: #00aa44;
+  --gs-stage-plan: #5b9bff;
+  --gs-stage-code: #00ff66;
+  --gs-stage-review: #ffcc00;
+  --gs-stage-ship: #bc8cff;
   --gs-accent-hover: #008836;
   --gs-accent-subtle: rgba(0, 170, 68, 0.04);
   --gs-accent-glow: 0 0 6px rgba(0, 170, 68, 0.15);
@@ -774,6 +802,10 @@
 
   /* "accent" is black (inversion-based selection) */
   --gs-accent: #1a1816;
+  --gs-stage-plan: #5b9bff;
+  --gs-stage-code: #00ff66;
+  --gs-stage-review: #ffcc00;
+  --gs-stage-ship: #bc8cff;
   --gs-accent-hover: #333028;
   --gs-accent-subtle: rgba(26, 24, 22, 0.04);
   --gs-accent-glow: none;

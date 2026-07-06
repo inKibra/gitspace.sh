@@ -39,6 +39,21 @@ export interface WorkspaceDetailPaneProps {
   onRequestStatusChange?: (workspaceId: string, projectName: string) => void | Promise<void>;
   onOpenNotes?: (workspaceId: string) => void;
   onOpenEvents: (workspaceId: string) => void;
+  /** Kanban phase (stage) + switcher for the sidebar header (mock .sb-wh). */
+  phase?: import('../types/config.js').WorkspacePhase;
+  onSwitchStage?: (phase: import('../types/config.js').WorkspacePhase) => void;
+  /** Surfaces group targets (mock Sidebar Surfaces). */
+  onOpenRubric?: (workspaceId: string) => void;
+  onOpenChangeGuide?: (workspaceId: string) => void;
+  onOpenGoalDoc?: (workspaceId: string) => void;
+  /** Dashboards group (from *.dashboard.json artifacts). */
+  dashboards?: Array<{ path: string; name: string; panels: number }>;
+  onOpenDashboard?: (path: string) => void;
+  /** Chain stack (mock chainstack) — the workspace's goal chain. */
+  chainGoals?: KanbanGoalItem[];
+  chainTitle?: string;
+  currentChainGoalId?: string;
+  onSwitchChainWorkspace?: (selectionKey: string) => void;
   onOpenAgentSession?: (workspaceId: string, agentSessionId: string) => void | Promise<void>;
   onCreateAgentSession?: (workspaceId: string) => void | Promise<void>;
   onKillAgentSession?: (workspaceId: string, agentSessionId: string) => void | Promise<void>;
