@@ -97,6 +97,7 @@ export function registerSpaceCommands(parent: Command): void {
   registerSpaceEventsCommands(cmd);
   registerSpaceBundleCommands(cmd);
   registerSpaceJournalCommands(cmd);
+  registerSpaceGuideCommands(cmd);
   configureSpaceHelpRecursively(cmd);
 }
 
@@ -142,6 +143,44 @@ function registerSpaceJournalCommands(space: Command): void {
       const ctx = requireSessionContext();
       const { journalStatus } = await import('../../commands/space-journal.js');
       journalStatus(ctx, options);
+    }));
+}
+
+function registerSpaceGuideCommands(space: Command): void {
+  const guide = space
+    .command('guide')
+    .description('Review guide: analyzer worksheet + validated narrator submission');
+
+  guide
+    .command('analyze')
+    .description('Build the narrator worksheet (clusters, grounding, staleness) and commit it')
+    .option('--base <ref>', 'Base ref to diff against', 'main')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      const ctx = requireSessionContext();
+      const { guideAnalyze } = await import('../../commands/space-guide.js');
+      await guideAnalyze(ctx, options);
+    }));
+
+  guide
+    .command('submit')
+    .description('Validate and commit narrated sections (merges cached sections for unchanged clusters)')
+    .requiredOption('--file <path>', 'JSON file: { headSha, sections[], specEvolution? }')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      const ctx = requireSessionContext();
+      const { guideSubmit } = await import('../../commands/space-guide.js');
+      await guideSubmit(ctx, options);
+    }));
+
+  guide
+    .command('show')
+    .description('Show the committed guide')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      const ctx = requireSessionContext();
+      const { guideShow } = await import('../../commands/space-guide.js');
+      guideShow(ctx, options);
     }));
 }
 
