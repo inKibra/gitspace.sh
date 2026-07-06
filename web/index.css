@@ -1537,3 +1537,10 @@ html {
 [data-sonner-toast][data-type='info'], [data-sonner-toast][data-type='default'] { border-left-color: var(--gs-info) !important; }
 [data-sonner-toast][data-type='warning'] { border-left-color: var(--gs-warning) !important; }
 [data-sonner-toast] [data-description] { color: var(--gs-text-dim) !important; }
+
+/* Mock parity: active dock tab gets the accent inset underline (mock .tab.active). */
+.dockview-theme-dark .dv-tab.dv-active-tab,
+.dockview-theme-abyss .dv-tab.dv-active-tab {
+  background: var(--gs-bg);
+  box-shadow: inset 0 -2px 0 var(--gs-accent);
+}

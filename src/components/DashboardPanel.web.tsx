@@ -34,6 +34,8 @@ export interface DashboardDoc {
   panels: DashboardPanelDef[];
 }
 
+
+
 function parseDashboard(text: string): DashboardDoc {
   const parsed = JSON.parse(text) as DashboardDoc;
   return { name: parsed.name, panels: Array.isArray(parsed.panels) ? parsed.panels : [] };

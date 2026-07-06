@@ -662,9 +662,9 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
 
   return (
     <div className="h-full flex flex-col bg-[var(--gs-bg)] overflow-hidden">
-      {/* ── Workspace pill strip ── */}
+      {/* ── Workspace pill strip (mobile only — GlobalChromeBar supersedes on desktop) ── */}
       {visibleStripWorkspaces.length > 0 && (
-        <div className="flex-shrink-0 flex items-center gap-0 overflow-x-auto border-b border-[var(--gs-border-muted)] bg-[var(--gs-bg)] px-1 py-0.5 scrollbar-none">
+        <div className="sm:hidden flex-shrink-0 flex items-center gap-0 overflow-x-auto border-b border-[var(--gs-border-muted)] bg-[var(--gs-bg)] px-1 py-0.5 scrollbar-none">
           {stripDisplayItems.map((di, idx) => {
             if (di.type === 'project-label') {
               return (
@@ -712,8 +712,8 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
         </div>
       )}
 
-      {/* ── Header ── */}
-      <div className="flex-shrink-0 flex items-center gap-2 px-3 py-2 border-b border-[var(--gs-border)] bg-[var(--gs-bg-elevated)]">
+      {/* ── Header (mobile only — GlobalChromeBar supersedes on desktop) ── */}
+      <div className="sm:hidden flex-shrink-0 flex items-center gap-2 px-3 py-2 border-b border-[var(--gs-border)] bg-[var(--gs-bg-elevated)]">
         <button
           type="button"
           onClick={onClose}

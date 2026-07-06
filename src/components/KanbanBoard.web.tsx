@@ -305,8 +305,10 @@ function ChainHandle({ goal, related }: { goal: KanbanGoalItem; related?: boolea
     <span
       data-chain-anchor="true"
       title={`Goal chain position ${goal.chainPosition} of ${goal.chainLength}`}
-      className={`ml-auto inline-flex h-5 flex-shrink-0 items-center gap-1 border px-1.5 text-[11px] leading-none transition-opacity duration-150 ${chainHoverClass(related)}`}
-      style={{ color: palette.fg, borderColor: palette.border, backgroundColor: palette.bg }}
+      className={`ml-auto inline-flex h-5 flex-shrink-0 items-center gap-1 border px-1.5 text-[11px] leading-none transition-colors duration-150 ${chainHoverClass(related)}`}
+      style={related
+        ? { color: palette.fg, borderColor: palette.border, backgroundColor: palette.bg }
+        : { color: 'var(--gs-text-dim)', borderColor: 'var(--gs-border)', backgroundColor: 'transparent' }}
     >
       ⛓
       <span className="text-[10px] font-semibold tabular-nums leading-none">
@@ -458,6 +460,11 @@ function PlannedGoalCard({ goal, onSelectGoal, onChainFocus, onOpenOrder, relate
           ? <div className="flex flex-wrap items-center gap-1 mt-1.5"><PmChip label={chip.label} tone={chip.tone} /></div>
           : null;
       })()}
+      {/* footer — machine chip (mock plan cards carry the card footer too) */}
+      <div className="mt-2 flex items-center gap-1.5 border-t border-[var(--gs-border-muted)] pt-1.5 text-[10.5px] text-[var(--gs-text-dim)]">
+        <span className="h-[6px] w-[6px] rounded-full bg-[var(--gs-success)]" />
+        local
+      </div>
     </div>
   );
 }
@@ -976,8 +983,8 @@ export function KanbanBoardWeb({
       </div>
 
       {/* ── Desktop: side-by-side columns ── */}
-      {chainSummaries.length > 0 && (
-        <div className="hidden sm:flex items-center gap-2 border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-3 py-2 text-xs text-[var(--gs-text-muted)] opacity-0 transition-opacity hover:opacity-100 focus-within:opacity-100" onMouseLeave={() => setActiveChainId(null)} onBlur={() => setActiveChainId(null)}>
+      {chainSummaries.length > 0 && activeChainId !== null && (
+        <div className="hidden sm:flex items-center gap-2 border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-3 py-2 text-xs text-[var(--gs-text-muted)]" onMouseLeave={() => setActiveChainId(null)} onBlur={() => setActiveChainId(null)}>
           <span className="font-semibold uppercase tracking-[0.14em] text-[var(--gs-text-dim)]">Goal Chains</span>
           {chainSummaries.map((chain) => (
             <button

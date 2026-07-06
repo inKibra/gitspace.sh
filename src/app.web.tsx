@@ -3304,8 +3304,9 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
       );
     }
 
-    // ── Project home (full-screen project view) ────────────────────────────
+    // ── Project home (full-screen project view, under the global chrome) ────
     if (projectHomeName) {
+      /* wrapped below */
       const phGoals = allGoalItems.filter((g) => g.projectName === projectHomeName);
       const phWorkspaces = allWorkspaceEntries
         .filter((w) => w.projectName === projectHomeName)
@@ -3313,7 +3314,9 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
         .filter((e): e is NonNullable<typeof e> => !!e);
       const phBackendKey = phWorkspaces[0]?.workspace.backendKey ?? phGoals[0]?.backendKey ?? getTargetBackendKey();
       return (
-        <>
+        <div className="flex h-screen min-h-0 flex-col">
+          {renderChromeBar({ onBoard: () => setProjectHomeName(null) })}
+          <div className="min-h-0 flex-1 overflow-hidden">
           <ProjectHomePage
             projectName={projectHomeName}
             goals={phGoals}
@@ -3329,9 +3332,11 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
               handleSelectPlannedGoal(goal);
             }}
           />
+          </div>
+          <GlobalTaskbar tasks={taskBarTasks} onDismiss={(id) => workspaceRemovalTasks.dismissTask(id)} />
           <FlowWeb flow={flow} />
           <Toaster theme="dark" position="bottom-right" richColors />
-        </>
+        </div>
       );
     }
 

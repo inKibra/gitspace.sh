@@ -68,7 +68,7 @@ function DockHeaderActions(props: IDockviewHeaderActionsProps) {
           if (active && props.group.panels.length > 1) active.api.moveTo({ position: 'right' });
         }}
         title="Split the active tab into a right pane"
-        className="px-1.5 text-[10.5px] text-[var(--gs-text-ghost)] hover:text-[var(--gs-text)]"
+        className="border border-[var(--gs-border)] px-1.5 py-px text-[10.5px] text-[var(--gs-text-muted)] hover:border-[var(--gs-border-active)] hover:text-[var(--gs-text)]"
       >
         ⇆ Split
       </button>
