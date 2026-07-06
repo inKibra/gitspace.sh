@@ -3095,6 +3095,11 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
             render: () => (
               <ArtifactPanel
                 path={extra.path}
+                listArtifacts={async () => {
+                  const fn = paneBackend?.listWorkspaceArtifacts;
+                  if (!fn) return [];
+                  return (await fn.call(paneBackend, workspace.id)).map((a) => a.path);
+                }}
                 read={(p) => {
                   const fn = paneBackend?.readWorkspaceArtifact;
                   if (!fn) return Promise.reject(new Error('unavailable'));

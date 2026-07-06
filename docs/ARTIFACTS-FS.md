@@ -277,3 +277,29 @@ slug until publish/provision mints them.
 5. **BYO remote**: `artifacts remote add`, sync commands, `.gitspace/artifacts.json`.
 6. **Managed (post CF public beta)**: provision worker, credential helper, LFS
    endpoint on R2, quotas; encryption decision lands here.
+
+## Mini-apps and data artifacts
+
+Mini-apps are self-contained, sandboxed HTML artifacts; data artifacts are
+plain JSON. The contract between them is one postMessage:
+
+- **App**: `<name>.gssh.html` — a complete HTML document (inline CSS/JS, no
+  external requests; rendered in an `<iframe sandbox="allow-scripts">`). It
+  listens for `message` events shaped `{ type: 'gssh:data', data }` and
+  re-renders from `data`. Apps must tolerate `data == null` (opened standalone
+  with no feed) and repeated messages (data re-picked or refreshed).
+- **Data**: `<name>.data.json` or anything under `data/` — arbitrary JSON.
+  The SHAPE IS APP-DEFINED; there is no global schema. Example pair:
+  `apps/ops-board.gssh.html` expects `{ title, series: [{ label, value }] }`
+  from `data/build.data.json`.
+- **Binding** happens in two places:
+  1. **Dashboards** (`<name>.dashboard.json`): each panel def pins
+     `{ app, data, size }` — the canvas reads both artifacts and posts the
+     payload on iframe load. Panel edits persist via the artifacts write RPC.
+  2. **Standalone open**: opening a `.gssh.html` artifact runs it live with a
+     Run|Source toggle and a data picker listing the workspace's data
+     artifacts (auto-selected when exactly one exists).
+- **Refresh model (planned, plan item 25)**: triggers (cron/event/manual)
+  write data artifacts; freshness chips (`⟳ last run`) surface on data rows
+  and dashboard panels. Apps never fetch — data always arrives as an artifact
+  commit, so every chart state is reproducible from git history.

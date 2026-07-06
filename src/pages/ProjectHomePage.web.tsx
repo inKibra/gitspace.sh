@@ -565,7 +565,7 @@ export function ProjectHomePage({
           )}
           {isArtTab(active) && (
             <div className="h-full min-h-0">
-              <ArtifactPanel path={active.slice(4)} read={readArtifactFromSource} />
+              <ArtifactPanel path={active.slice(4)} read={readArtifactFromSource} listArtifacts={async () => artifacts.map((e) => e.path)} />
             </div>
           )}
         </div>
