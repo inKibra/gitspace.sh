@@ -338,3 +338,20 @@ Six header issues in one pass. (note-03) Lines 76-78: Write|Preview must be a jo
 **Files:** src/pages/ProjectHomePage.web.tsx
 
 (ph-rail-cron-chip) railRow (lines 236-262): add a compact last-run cron chip ('⟳ 2h ago', LastRunChip) between name and star for data/dashboard artifacts when trigger info exists on the backend. (ph-rail-artifact-name-font) Line 56: the combo's collapsed value classes reference --gs-font-mono but the screenshot shows sans-ish rendering — verify --gs-font-mono is defined in this page's stylesheet scope (compare mock styles.css --gs-font); a missing CSS var makes font-[family-name:...] silently fall back. Fix the var name if it differs.
+
+---
+
+## Loop status (2026-07-05, after round 2)
+
+All 56 items implemented. Re-audit round verdicts: rubric close-match; board /
+review / crons / events / dashboard / projecthome minor-gaps (all named gaps
+fixed in the follow-up commit); shell-agent / goal / workflow / note "broken"
+verdicts were capture artifacts (wrong active tab / no seeded session), fixed
+by the seed-order + capture changes.
+
+Known remaining (blocked on data/backends, not rendering):
+- Chains grouped under epic kickers — needs an epic field on the chain model.
+- Trigger registry backend (item 25) — CronsPanel is prop-ready.
+- WorkspaceNote.title field — panel uses derived titles until then.
+- PH in-process gate-tally fallback — export getGateTally and wire.
+- Mini-app freshness chips — need panels to carry source/updated.
