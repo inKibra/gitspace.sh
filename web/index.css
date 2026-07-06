@@ -1484,3 +1484,30 @@ html {
 /* Mock parity: sans UI chrome (mock body font). */
 .gs-ui { font-family: var(--gs-ui); letter-spacing: -0.003em; }
 .font-mono, code, pre, kbd, samp { font-family: var(--gs-font); }
+
+/* ── Goal doc pane (.gs-goal-doc — GoalDocPanel.web.tsx body) ──────────────
+   Mock parity: the goal doc hosts the prominent `.md-doc` markdown variant
+   (mock styles.css:1002-1013) and the kicker-style callout (styles.css:71-74).
+   Scoped overrides on top of the shared block renderers; unlayered so they win
+   over Tailwind utility classes. */
+.gs-goal-doc .gs-block-md h2 { font-size: 14px; font-weight: 600; color: var(--gs-text); margin: 20px 0 8px; padding-bottom: 6px; border-bottom: 1px solid var(--gs-border); }
+.gs-goal-doc .gs-block-md h2:first-child { margin-top: 0; }
+.gs-goal-doc .gs-block-md h3 { font-size: 12.5px; font-weight: 600; color: var(--gs-text); margin: 14px 0 5px; }
+.gs-goal-doc .gs-block-md p { font-size: 13px; line-height: 1.7; color: var(--gs-text-muted); margin: 0 0 11px; }
+.gs-goal-doc .gs-block-md ul, .gs-goal-doc .gs-block-md ol { font-size: 13px; line-height: 1.7; color: var(--gs-text-muted); margin: 0 0 11px; }
+.gs-goal-doc .gs-block-md li { margin: 4px 0; }
+.gs-goal-doc .gs-block-md li::marker { color: var(--gs-accent); }
+.gs-goal-doc .gs-block-md :not(pre) > code { font-size: 12px; background: #000; border: 1px solid var(--gs-border); color: var(--gs-accent); padding: 0 4px; }
+.gs-goal-doc .gs-block-md strong { color: var(--gs-text); }
+
+/* Callout inside the goal doc → mock .callout: full 1px border + 2px tone
+   left border on plain bg, with a 10px uppercase kicker title (the
+   'GAMEABILITY CONTRACT' look). Selector hooks the callout renderer's
+   utility classes (content.web.tsx) — border-l-2 + bg-elevated is unique to
+   the callout root among block renderers. */
+.gs-goal-doc div.border-l-2.bg-\[var\(--gs-bg-elevated\)\] { border-width: 1px 1px 1px 2px; border-style: solid; border-color: var(--gs-border); background: var(--gs-bg); padding: 10px 13px; }
+.gs-goal-doc div.border-l-2.bg-\[var\(--gs-bg-elevated\)\].border-\[var\(--gs-info\)\] { border-left-color: var(--gs-info); }
+.gs-goal-doc div.border-l-2.bg-\[var\(--gs-bg-elevated\)\].border-\[var\(--gs-warning\)\] { border-left-color: var(--gs-warning); }
+.gs-goal-doc div.border-l-2.bg-\[var\(--gs-bg-elevated\)\].border-\[var\(--gs-success\)\] { border-left-color: var(--gs-success); }
+.gs-goal-doc div.border-l-2.bg-\[var\(--gs-bg-elevated\)\].border-\[var\(--gs-danger\)\] { border-left-color: var(--gs-danger); }
+.gs-goal-doc div.border-l-2.bg-\[var\(--gs-bg-elevated\)\] > div.font-semibold { font-size: 10px; font-weight: 400; text-transform: uppercase; letter-spacing: 0.1em; color: var(--gs-text-dim); margin-bottom: 4px; }

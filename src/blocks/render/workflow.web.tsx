@@ -1,13 +1,13 @@
 /** @jsxImportSource react */
-import { Fragment, type ReactElement } from 'react';
-import type { WfGateType, WfNode, WfPhase, WfRef, WorkflowSpecData } from '../types/content.js';
+import { Fragment, useState, type ReactElement } from 'react';
+import type { WfArtifactType, WfCreatedArtifact, WfGateType, WfNode, WfPhase, WfRef, WorkflowSpecData } from '../types/content.js';
 import { defineRenderer } from './registry.web.js';
 import { useBlockHost } from './host.web.js';
 
 // Workflow block: a recipe traversal rendered as phase sections with
 // source/artifact-typed dataflow (◇ artifact vs ▤ source), gate banners toned
-// by gate type, gated-loop lines, per-phase created artifacts, node rows
-// (✦ agent / ◆ gate), and required outputs. Mirrors the agent-surfaces mock.
+// by gate type, gated-loop lines, per-phase created artifacts, node rows,
+// and required outputs. Mirrors the agent-surfaces mock.
 
 const MONO = 'font-[family-name:var(--gs-font)]';
 
@@ -40,6 +40,20 @@ const GATE_TONE: Record<WfGateType, string> = {
   command: 'text-[var(--gs-info)] border-[var(--gs-info)]',
 };
 
+// '+ create artifact' menu options (mock WF_ART_TYPES)
+const WF_ART_TYPES: { type: WfArtifactType; label: string }[] = [
+  { type: 'goal-slice', label: 'goal-doc line-range' },
+  { type: 'phased-goal', label: 'phased goal-doc' },
+  { type: 'rubric', label: 'reviewer rubric' },
+  { type: 'arbitrary', label: 'arbitrary artifact' },
+];
+
+// Mock routes created-artifact chips by type: rubric → rubric pane,
+// goal-slice/phased-goal → goal pane, else the named artifact viewer.
+function cartTarget(a: WfCreatedArtifact): string {
+  return a.type === 'rubric' ? 'rubric' : a.type === 'goal-slice' || a.type === 'phased-goal' ? 'goal' : `artifact:${a.name}`;
+}
+
 function NodeCard({ n }: { n: WfNode }): ReactElement {
   const gate = n.kind === 'gate';
   return (
@@ -53,7 +67,6 @@ function NodeCard({ n }: { n: WfNode }): ReactElement {
       <div className={`flex items-center gap-1.5 px-2 py-1.5 text-[11px] ${gate ? '' : 'border-b border-[var(--gs-border)]'}`}>
         <StatusDot status={n.status} />
         <span className="text-[var(--gs-text)] font-medium">
-          <span className={`mr-1 ${gate ? 'text-[var(--gs-text-dim)]' : 'text-[var(--gs-accent)]'}`}>{gate ? '◆' : '✦'}</span>
           {gate ? `gate · ${n.gateType ?? 'human'}` : n.role}
         </span>
         {n.model && <span className={`ml-auto text-[10px] text-[var(--gs-text-dim)] ${MONO}`}>{n.model}</span>}
@@ -84,7 +97,14 @@ function NodeCard({ n }: { n: WfNode }): ReactElement {
   );
 }
 
-function PhaseSection({ p, index }: { p: WfPhase; index: number }): ReactElement {
+function PhaseSection({ p, index, created, menuOpen, onToggleMenu, onAdd }: {
+  p: WfPhase;
+  index: number;
+  created: WfCreatedArtifact[];
+  menuOpen: boolean;
+  onToggleMenu: () => void;
+  onAdd: (type: WfArtifactType) => void;
+}): ReactElement {
   const host = useBlockHost();
   return (
     <div className="border border-[var(--gs-border)]">
@@ -121,25 +141,46 @@ function PhaseSection({ p, index }: { p: WfPhase; index: number }): ReactElement
           {p.gate && <span className="ml-auto text-[10px]">exit owned by <b className="font-medium text-[var(--gs-warning)]">{p.gate.label}</b></span>}
         </div>
       )}
-      {/* created artifacts */}
-      {p.created && p.created.length > 0 && (
-        <div className="flex items-center gap-2 flex-wrap px-3 py-2 border-t border-[var(--gs-border-muted)] bg-[rgba(188,140,255,0.03)]">
-          <span className="flex-none text-[10px] uppercase tracking-[0.08em] text-[var(--gs-purple)]">artifacts</span>
-          {p.created.map((a, i) => (
-            <button
-              key={i}
-              type="button"
-              onClick={() => host.dispatch({ kind: 'open', target: `artifact:${a.name}` })}
-              className="inline-flex items-center gap-2 border border-[var(--gs-border)] border-l-2 border-l-[var(--gs-purple)] hover:border-[var(--gs-purple)] bg-[#0a0a0a] px-2 py-0.5 text-[11px] cursor-pointer"
-            >
-              <span className="text-[10.5px] uppercase tracking-[0.04em] text-[var(--gs-purple)]">{a.type}</span>
-              <span className="text-[var(--gs-text)]">{a.name}</span>
-              {a.from && <span className={`${MONO} text-[10.5px] text-[var(--gs-text-dim)]`}>{a.from}</span>}
-              {a.passedTo && <span className="text-[10px] text-[var(--gs-info)]">→ {a.passedTo}</span>}
-            </button>
-          ))}
-        </div>
-      )}
+      {/* created artifacts — always visible, ends with '+ create artifact' */}
+      <div className="flex items-center gap-[7px] flex-wrap px-[11px] py-2 border-t border-[var(--gs-border-muted)] bg-[rgba(188,140,255,0.03)]">
+        <span className="flex-none text-[10px] uppercase tracking-[0.08em] text-[var(--gs-purple)]">artifacts</span>
+        {created.map((a, i) => (
+          <button
+            key={i}
+            type="button"
+            onClick={() => host.dispatch({ kind: 'open', target: cartTarget(a) })}
+            className="inline-flex items-center gap-[7px] border border-[var(--gs-border)] border-l-2 border-l-[var(--gs-purple)] hover:border-[var(--gs-purple)] bg-[#0a0a0a] px-2 py-[3px] text-[11px] cursor-pointer transition-colors"
+          >
+            <span className="text-[10.5px] uppercase tracking-[0.04em] text-[var(--gs-purple)]">{a.type}</span>
+            <span className="text-[var(--gs-text)]">{a.name}</span>
+            {a.from && <span className={`${MONO} text-[10.5px] text-[var(--gs-text-dim)]`}>{a.from}</span>}
+            {a.passedTo && <span className="text-[10px] text-[var(--gs-info)]">→ {a.passedTo}</span>}
+          </button>
+        ))}
+        <span className="relative ml-1">
+          <button
+            type="button"
+            onClick={onToggleMenu}
+            className="border border-dashed border-[var(--gs-border-active)] bg-transparent px-2 py-px text-[10px] text-[var(--gs-text-dim)] hover:text-[var(--gs-text-muted)] hover:border-[var(--gs-text-muted)] cursor-pointer"
+          >
+            + create artifact
+          </button>
+          {menuOpen && (
+            <div className="absolute left-0 top-full z-20 mt-[3px] min-w-[172px] border border-[var(--gs-border-active)] bg-[var(--gs-bg-overlay)]">
+              {WF_ART_TYPES.map((t) => (
+                <button
+                  key={t.type}
+                  type="button"
+                  onClick={() => onAdd(t.type)}
+                  className="block w-full cursor-pointer bg-transparent px-2.5 py-1.5 text-left text-[11px] text-[var(--gs-text-muted)] hover:bg-[var(--gs-bg-hover)] hover:text-[var(--gs-text)]"
+                >
+                  {t.label}
+                </button>
+              ))}
+            </div>
+          )}
+        </span>
+      </div>
       {/* outputs */}
       <div className="flex items-center gap-1.5 flex-wrap px-3 py-1.5 border-t border-[var(--gs-border-muted)]">
         <span className="flex-none w-[22px] text-[10px] uppercase tracking-[0.08em] text-[var(--gs-text-dim)]">out</span>
@@ -153,7 +194,6 @@ function PhaseSection({ p, index }: { p: WfPhase; index: number }): ReactElement
             <span className={`text-[10px] ${a.io === 'artifact' ? 'text-[var(--gs-purple)]' : 'text-[var(--gs-info)]'}`}>{a.io === 'artifact' ? '◇' : '▤'}</span>
             {a.name}
             <span className="text-[10.5px] uppercase text-[var(--gs-text-dim)]">{a.kind}</span>
-            {a.status === 'created' && <span className="text-[10px] text-[var(--gs-success)]">✓</span>}
           </span>
         ))}
       </div>
@@ -161,32 +201,49 @@ function PhaseSection({ p, index }: { p: WfPhase; index: number }): ReactElement
   );
 }
 
-defineRenderer<WorkflowSpecData>('workflow', ({ data }): ReactElement => (
-  <div className="my-2 flex flex-col">
-    {/* head: recipe + traversal path + io key + rollup chips */}
-    <div className="flex items-center gap-2 flex-wrap px-3 py-2 mb-3 border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] text-[11px] tracking-[0.03em] text-[var(--gs-text-muted)]">
-      <StatusDot status="running" />
-      <span className="text-[var(--gs-text)] font-medium">{data.recipe}</span>
-      {data.recipePath && <span className={`text-[10.5px] text-[var(--gs-text-dim)]`}>traversal of <span className={`text-[var(--gs-accent)] ${MONO}`}>{data.recipePath}</span></span>}
-      <span className="grow" />
-      <span className="inline-flex gap-1.5 mr-2">
-        <RefChip r={{ name: 'artifact', io: 'artifact' }} />
-        <RefChip r={{ name: 'source', io: 'source' }} />
-      </span>
-      {data.rollup?.map((r, i) => (
-        <span key={i} className="border border-[var(--gs-border)] px-1.5 py-0.5 text-[10px] text-[var(--gs-text-dim)]">{r}</span>
+function Workflow({ data }: { data: WorkflowSpecData }): ReactElement {
+  const [created, setCreated] = useState<WfCreatedArtifact[][]>(() => data.phases.map((p) => p.created ?? []));
+  const [menu, setMenu] = useState<number | null>(null);
+  const add = (pi: number, type: WfArtifactType): void => {
+    setCreated((c) => c.map((arr, i) => (i === pi ? [...arr, { name: `new ${type}`, type, passedTo: '(assign agent)' }] : arr)));
+    setMenu(null);
+  };
+  return (
+    <div className="flex flex-col">
+      {/* head: recipe + traversal path + io key + rollup chips */}
+      <div className="flex items-center gap-2 flex-wrap px-3 py-2 mb-3 border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] text-[11px] tracking-[0.03em] text-[var(--gs-text-muted)]">
+        <StatusDot status="running" />
+        <span className="text-[var(--gs-text)] font-medium">{data.recipe}</span>
+        {data.recipePath && <span className={`text-[10.5px] text-[var(--gs-text-dim)]`}>traversal of <span className={`text-[var(--gs-accent)] ${MONO}`}>{data.recipePath}</span></span>}
+        <span className="grow" />
+        <span className="inline-flex gap-1.5 mr-2">
+          <RefChip r={{ name: 'artifact', io: 'artifact' }} />
+          <RefChip r={{ name: 'source', io: 'source' }} />
+        </span>
+        {data.rollup?.map((r, i) => (
+          <span key={i} className="inline-flex items-center gap-[5px] whitespace-nowrap border border-[var(--gs-border)] px-[7px] py-[2px] text-[10.5px] uppercase tracking-[0.05em] leading-[1.4] bg-[var(--gs-chip-dim-bg)] text-[var(--gs-chip-dim-text)]">{r}</span>
+        ))}
+      </div>
+      {data.phases.map((p, pi) => (
+        <Fragment key={pi}>
+          <PhaseSection
+            p={p}
+            index={pi}
+            created={created[pi] ?? []}
+            menuOpen={menu === pi}
+            onToggleMenu={() => setMenu(menu === pi ? null : pi)}
+            onAdd={(type) => add(pi, type)}
+          />
+          {pi < data.phases.length - 1 && (
+            <div className={`flex items-center gap-2 px-3 py-2 text-[10.5px] text-[var(--gs-text-dim)] ${MONO}`}>
+              <span className="text-[var(--gs-accent)]">▼</span>
+              dataflow · {p.outputs.filter((o) => o.required).map((o) => o.name).join(', ')}
+            </div>
+          )}
+        </Fragment>
       ))}
     </div>
-    {data.phases.map((p, pi) => (
-      <Fragment key={pi}>
-        <PhaseSection p={p} index={pi} />
-        {pi < data.phases.length - 1 && (
-          <div className={`flex items-center gap-2 px-3 py-2 text-[10.5px] text-[var(--gs-text-dim)] ${MONO}`}>
-            <span className="text-[var(--gs-accent)]">▼</span>
-            dataflow · {p.outputs.filter((o) => o.required).map((o) => o.name).join(', ')}
-          </div>
-        )}
-      </Fragment>
-    ))}
-  </div>
-));
+  );
+}
+
+defineRenderer<WorkflowSpecData>('workflow', Workflow);

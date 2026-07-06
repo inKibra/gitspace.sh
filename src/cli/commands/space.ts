@@ -309,13 +309,14 @@ function registerSpaceGoalCommands(space: Command): void {
     .option('--body <text>', 'Review note')
     .option('--file <path>', 'Read note from file')
     .option('--stdin', 'Read note from stdin')
+    .option('--score <n>', 'Judgement score 0-100')
     .option('--created-by <name>', 'Reviewer identity label')
     .option('--goal <goal>', 'Goal id, workspace name, planned workspace name, or title')
     .option('--json', 'Output structured JSON')
     .action(withErrorHandler(async (options) => {
       const ctx = requireSessionContext();
       const { recordSpaceGoalHumanReview } = await import('../../commands/space-goals.js');
-      recordSpaceGoalHumanReview(ctx, options);
+      recordSpaceGoalHumanReview(ctx, { ...options, score: options.score !== undefined ? Number(options.score) : undefined });
     }));
 }
 

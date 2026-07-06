@@ -7,9 +7,9 @@ import type { WorkspacePhase } from '../types/config.js';
 
 /**
  * GoalDocPanel — the '◇ Goal' workspace dock pane (mock: GoalDoc.tsx).
- * Header (title + phase chip + ready count), chain strip of ⛓ nodes with
- * prev/next nav, doc body (markdown or a requirements/rubric summary), and a
- * dim workflow tie-in footer strip.
+ * Header (title + subtitle + Preview/Edit), chain strip of ⛓ nodes with
+ * '‹ up'/'down ›' nav, scrollable doc body (blocks or fallbacks) ending with
+ * the wf-tie card that opens the ⟜ Workflow pane.
  */
 
 /** Local slice of the board's KanbanGoalItem — only what this pane reads. */
@@ -44,27 +44,17 @@ function reqStatusDot(status: Requirement['status']): string {
   return 'bg-[var(--gs-danger)]';
 }
 
-function readyCounts(validation: GoalValidation | undefined): { accepted: number; total: number } | null {
-  if (!validation) return null;
-  const reqs = validation.reqOrder
-    .map((id) => validation.requirements[id])
-    .filter((r): r is Requirement => Boolean(r));
-  if (reqs.length === 0) return null;
-  return {
-    accepted: reqs.filter((r) => r.status === 'accepted').length,
-    total: reqs.length,
-  };
-}
-
+/** Requirements fallback row — styled to the evidence-shape block vocabulary
+ *  (rows inside one bordered container, sans text, dim meta). */
 function RequirementRow({ requirement }: { requirement: Requirement }): ReactElement {
   return (
-    <div className="flex items-center gap-2 border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-2.5 py-2">
+    <div className="flex items-center gap-2 border-b border-[var(--gs-border-muted)] px-3 py-2 last:border-b-0">
       <span className={`h-1.5 w-1.5 flex-none rounded-full ${reqStatusDot(requirement.status)}`} />
       <span className="min-w-0 flex-1 truncate text-[12px] text-[var(--gs-text)]">{requirement.title}</span>
-      <span className="flex-none border border-[var(--gs-border)] px-1.5 py-px text-[10px] text-[var(--gs-text-muted)] font-[family-name:var(--gs-font-mono)]">
+      <span className="flex-none border border-[var(--gs-border)] px-1.5 py-0.5 text-[10px] text-[var(--gs-text-muted)]">
         {requirement.kind}
       </span>
-      <span className="flex-none text-[10.5px] text-[var(--gs-text-dim)] font-[family-name:var(--gs-font-mono)] [font-variant-numeric:tabular-nums]">
+      <span className="flex-none text-[10.5px] text-[var(--gs-text-dim)] [font-variant-numeric:tabular-nums]">
         {requirement.evidence.length} evidence
       </span>
     </div>
@@ -95,7 +85,6 @@ export function GoalDocPanel({ goals, currentGoalId, onSelectGoal, onToggleExemp
     );
   }
 
-  const ready = readyCounts(goal.validation);
   const bodyMarkdown = goal.doc?.bodyMarkdown?.trim() ?? '';
   const docBlocks = goal.doc?.blocks ?? [];
   const exemplars = new Set(goal.doc?.exemplarBlockIds ?? []);
@@ -107,24 +96,28 @@ export function GoalDocPanel({ goals, currentGoalId, onSelectGoal, onToggleExemp
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-[var(--gs-bg)]">
-      {/* Header */}
+      {/* Header (mock gdoc-head: title · subtitle · Preview/Edit) */}
       <div className="flex flex-none items-center gap-2.5 border-b border-[var(--gs-border)] px-4 py-2.5">
         <span className="min-w-0 truncate text-[13px] font-medium text-[var(--gs-text)]">
           Goal · {goal.title}
         </span>
-        <span className="flex-none border border-[var(--gs-border)] px-1.5 py-px text-[10px] uppercase tracking-wide text-[var(--gs-text-muted)] font-[family-name:var(--gs-font-mono)]">
-          {goal.phase}
+        <span className="min-w-0 flex-none truncate text-[11px] text-[var(--gs-text-muted)]">
+          composed from a small block vocabulary{exemplars.size > 0 ? ` · ★ ${exemplars.size} exemplar` : ''}
         </span>
-        {ready ? (
-          <span className="flex-none text-[11px] text-[var(--gs-text-dim)] font-[family-name:var(--gs-font-mono)] [font-variant-numeric:tabular-nums]">
-            {ready.accepted}/{ready.total} ready
-          </span>
-        ) : null}
-        {goal.workspaceName ? (
-          <span className="ml-auto flex-none truncate text-[10.5px] text-[var(--gs-text-ghost)] font-[family-name:var(--gs-font-mono)]">
-            {goal.workspaceName}
-          </span>
-        ) : null}
+        <span className="ml-auto flex flex-none items-center gap-1.5">
+          <button
+            type="button"
+            className="border border-[var(--gs-border)] bg-transparent px-2 py-0.5 text-[11px] text-[var(--gs-text-muted)] transition-colors hover:bg-[var(--gs-bg-active)] hover:text-[var(--gs-text)]"
+          >
+            Preview
+          </button>
+          <button
+            type="button"
+            className="border border-[var(--gs-border)] bg-transparent px-2 py-0.5 text-[11px] text-[var(--gs-text-muted)] transition-colors hover:bg-[var(--gs-bg-active)] hover:text-[var(--gs-text)]"
+          >
+            Edit
+          </button>
+        </span>
       </div>
 
       {/* Chain strip */}
@@ -135,7 +128,7 @@ export function GoalDocPanel({ goals, currentGoalId, onSelectGoal, onToggleExemp
           onClick={() => { const prev = chain[curIndex - 1]; if (prev) onSelectGoal(prev.id); }}
           className="flex-none border border-[var(--gs-border)] bg-transparent px-2.5 text-[11px] text-[var(--gs-text-muted)] transition-colors hover:enabled:border-[var(--gs-border-active)] hover:enabled:text-[var(--gs-text)] disabled:cursor-default disabled:opacity-35"
         >
-          ‹
+          ‹ up
         </button>
         <div className="mx-1.5 flex min-w-0 flex-1 gap-px overflow-x-auto">
           {chain.map((g, i) => {
@@ -167,22 +160,22 @@ export function GoalDocPanel({ goals, currentGoalId, onSelectGoal, onToggleExemp
           onClick={() => { const next = chain[curIndex + 1]; if (next) onSelectGoal(next.id); }}
           className="flex-none border border-[var(--gs-border)] bg-transparent px-2.5 text-[11px] text-[var(--gs-text-muted)] transition-colors hover:enabled:border-[var(--gs-border-active)] hover:enabled:text-[var(--gs-text)] disabled:cursor-default disabled:opacity-35"
         >
-          ›
+          down ›
         </button>
       </div>
 
-      {/* Doc body */}
-      <div className="min-h-0 flex-1 overflow-auto px-5 py-4">
+      {/* Doc body (mock gdoc-body: 18px/20px padding, wf-tie card in-flow at end) */}
+      <div className="gs-goal-doc min-h-0 flex-1 overflow-auto px-5 pt-[18px] pb-[18px]">
         {docBlocks.length > 0 ? (
-          <div className="flex max-w-[880px] flex-col gap-3">
+          <div className="flex max-w-[880px] flex-col gap-4">
             {docBlocks.map((b) => (
-              <div key={b.id} className={`relative ${exemplars.has(b.id) ? 'border-l-2 border-l-[var(--gs-warning)] pl-2' : ''}`}>
+              <div key={b.id} className={`relative ${exemplars.has(b.id) ? 'shadow-[inset_2px_0_0_var(--gs-warning)] pl-[11px]' : ''}`}>
                 {onToggleExemplar && (
                   <button
                     type="button"
                     title="Mark as exemplar"
                     onClick={() => onToggleExemplar(goal.id, b.id)}
-                    className={`absolute right-1 top-1 z-10 px-1 text-[12px] ${exemplars.has(b.id) ? 'text-[var(--gs-warning)]' : 'text-[var(--gs-text-ghost)] hover:text-[var(--gs-text-muted)]'}`}
+                    className={`absolute right-0 top-0 z-10 px-[5px] py-[2px] text-[13px] ${exemplars.has(b.id) ? 'text-[var(--gs-warning)]' : 'text-[var(--gs-text-ghost)] hover:text-[var(--gs-text-muted)]'}`}
                   >
                     ★
                   </button>
@@ -193,45 +186,43 @@ export function GoalDocPanel({ goals, currentGoalId, onSelectGoal, onToggleExemp
           </div>
         ) : bodyMarkdown ? (
           <div
-            className="gs-block-md max-w-[880px] text-[12.5px] leading-relaxed text-[var(--gs-text)]"
+            className="gs-block-md max-w-[880px] text-[13px] text-[var(--gs-text-muted)]"
             dangerouslySetInnerHTML={{ __html: renderMarkdownHtml(bodyMarkdown) }}
           />
         ) : requirements.length > 0 ? (
-          <div className="max-w-[880px]">
-            <div className="mb-2 text-[10.5px] uppercase tracking-wide text-[var(--gs-text-dim)] font-[family-name:var(--gs-font-mono)]">
-              Requirements · rubric
+          <div className="max-w-[880px] border border-[var(--gs-border)]">
+            <div className="border-b border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-3 py-1.5 text-[10px] uppercase tracking-[0.06em] text-[var(--gs-text-muted)]">
+              requirements · rubric
             </div>
-            <div className="flex flex-col gap-1.5">
-              {requirements.map((r) => (
-                <RequirementRow key={r.id} requirement={r} />
-              ))}
-            </div>
+            {requirements.map((r) => (
+              <RequirementRow key={r.id} requirement={r} />
+            ))}
           </div>
         ) : (
-          <div className="max-w-[880px] text-[11.5px] text-[var(--gs-text-dim)]">
+          <div className="max-w-[880px] text-[12.5px] leading-[1.6] text-[var(--gs-text-dim)]">
             No goal doc yet — author the spec: intent, objective, rubric.
           </div>
         )}
-      </div>
 
-      {/* Workflow tie-in footer (mock wf-tie — opens the ⟜ Workflow pane) */}
-      <button
-        type="button"
-        onClick={onOpenWorkflow}
-        disabled={!onOpenWorkflow}
-        className="flex w-full flex-none items-center gap-2.5 border-t border-[var(--gs-border)] border-l-2 border-l-[var(--gs-accent)] bg-[var(--gs-bg-elevated)] px-3.5 py-2.5 text-left enabled:cursor-pointer enabled:hover:bg-[var(--gs-bg-hover)]"
-      >
-        <span className="flex-none text-[18px] text-[var(--gs-accent)]">⟜</span>
-        <div className="min-w-0 flex-1">
-          <div className="truncate text-[12.5px] font-medium text-[var(--gs-text)]">
-            This goal drives the review-gated workflow
+        {/* Workflow tie-in card (mock wf-tie — opens the ⟜ Workflow pane) */}
+        <button
+          type="button"
+          onClick={onOpenWorkflow}
+          disabled={!onOpenWorkflow}
+          className="mt-1.5 flex w-full max-w-[880px] items-center gap-[11px] border border-[var(--gs-border)] border-l-2 border-l-[var(--gs-accent)] bg-[var(--gs-bg-elevated)] px-3.5 py-3 text-left transition-colors enabled:cursor-pointer enabled:hover:bg-[var(--gs-bg-hover)]"
+        >
+          <span className="flex-none text-[18px] text-[var(--gs-accent)]">⟜</span>
+          <div className="min-w-0 flex-1">
+            <div className="truncate text-[12.5px] font-medium text-[var(--gs-text)]">
+              This goal drives the review-gated workflow
+            </div>
+            <div className="mt-0.5 truncate text-[11px] text-[var(--gs-text-muted)]">
+              4 phases · implement → evidence → review-gate → adjudicate
+            </div>
           </div>
-          <div className="mt-px truncate text-[11px] text-[var(--gs-text-muted)]">
-            implement → evidence → review-gate → adjudicate{exemplars.size > 0 ? ` · ★ ${exemplars.size} exemplar` : ''}
-          </div>
-        </div>
-        {onOpenWorkflow && <span className="flex-none text-[11px] text-[var(--gs-accent)]">open Workflow ↗</span>}
-      </button>
+          {onOpenWorkflow && <span className="ml-auto flex-none text-[11px] text-[var(--gs-accent)]">open Workflow ↗</span>}
+        </button>
+      </div>
     </div>
   );
 }

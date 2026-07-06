@@ -5,11 +5,11 @@ import { renderMarkdownHtml } from './markdown-render.js';
 
 /**
  * ReviewRubric — the '☰ Review rubric' dock pane (mock: ReviewRubric.tsx).
- * Two columns: LEFT index of criteria (verdict dot, gate chip, score/evidence
- * count, scroll-spy synced), RIGHT scrolling detail per criterion (rubric
- * contract, evidence rows, judgements, and a 'your judgement' form for
- * human-gated criteria still awaiting a verdict). Read/judge surface only —
- * authoring stays in GoalDetailPanel.
+ * Two columns: LEFT rail = capped criterion index (scroll-spy synced) + the
+ * active criterion's detail (badges, contract, score, judgement form) +
+ * footer; RIGHT = lean per-criterion sections (verdict + title header, then
+ * evidence cards with artifact previews and judgement rows). Read/judge
+ * surface only — authoring stays in GoalDetailPanel.
  */
 
 type Verdict = 'pass' | 'fail' | 'partial' | 'pending';
@@ -33,9 +33,9 @@ const VERDICT_DOT: Record<Verdict, string> = {
 };
 
 const GATE_META: Record<Gate, { icon: string; label: string; cls: string }> = {
-  human: { icon: '◆', label: 'human', cls: 'border-[var(--gs-purple)] text-[var(--gs-purple)]' },
-  llm: { icon: '✦', label: 'llm', cls: 'border-[var(--gs-info)] text-[var(--gs-info)]' },
-  command: { icon: '❯', label: 'command', cls: 'border-[var(--gs-success)] text-[var(--gs-success)]' },
+  human: { icon: '◆', label: 'human', cls: 'border-[rgba(188,140,255,0.3)] text-[var(--gs-purple)]' },
+  llm: { icon: '✦', label: 'llm', cls: 'border-[rgba(91,155,255,0.25)] text-[var(--gs-info)]' },
+  command: { icon: '❯', label: 'command', cls: 'border-[rgba(0,255,102,0.25)] text-[var(--gs-success)]' },
 };
 
 /** Judge type inferred from Review.who (core writes 'human' | 'command' | modelHint/llm). */
@@ -78,10 +78,17 @@ function scoreTone(value: number): string {
   return value >= 80 ? 'bg-[var(--gs-success)]' : value >= 50 ? 'bg-[var(--gs-warning)]' : 'bg-[var(--gs-danger)]';
 }
 
+/** Compact HH:MM locale time; falls back to the raw string when unparseable. */
+function compactTime(at: string): string {
+  const d = new Date(at);
+  if (Number.isNaN(d.getTime())) return at;
+  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
 function ScoreBar({ value, small }: { value: number; small?: boolean }): ReactElement {
   return (
     <span className="inline-flex items-center gap-1.5">
-      <span className={`inline-block overflow-hidden rounded-[2px] bg-[var(--gs-bg-active)] ${small ? 'h-[4px] w-[42px]' : 'h-[5px] w-[60px]'}`}>
+      <span className={`inline-block overflow-hidden bg-[var(--gs-bg-active)] ${small ? 'h-[4px] w-[42px]' : 'h-[5px] w-[60px]'}`}>
         <span className={`block h-full ${scoreTone(value)}`} style={{ width: `${value}%` }} />
       </span>
       <span className="text-[10px] tabular-nums text-[var(--gs-text-dim)] font-[family-name:var(--gs-font-mono)]">{value}</span>
@@ -91,7 +98,7 @@ function ScoreBar({ value, small }: { value: number; small?: boolean }): ReactEl
 
 function VerdictChip({ verdict }: { verdict: Verdict }): ReactElement {
   return (
-    <span className={`inline-flex items-center rounded-[var(--gs-chip-radius)] px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${VERDICT_CHIP[verdict]}`}>
+    <span className={`inline-flex items-center rounded-[var(--gs-chip-radius)] border border-[var(--gs-border)] px-[7px] py-[2px] text-[10.5px] font-normal uppercase tracking-wide ${VERDICT_CHIP[verdict]}`}>
       {VERDICT_LABEL[verdict]}
     </span>
   );
@@ -106,7 +113,65 @@ function GateChip({ gate }: { gate: Gate }): ReactElement {
   );
 }
 
-function EvidenceRow({ requirement, evidence, onOpenEvidence }: {
+/** ArtifactPreview-equivalent: render the evidence payload inline (mock ArtifactPreview.tsx). */
+function EvidencePreview({ evidence }: { evidence: Evidence }): ReactElement {
+  const mime = evidence.mimeType ?? '';
+  if (evidence.command || evidence.stdout !== undefined) {
+    const text = [evidence.command ? `$ ${evidence.command}` : null, evidence.stdout?.trimEnd() || null]
+      .filter(Boolean)
+      .join('\n');
+    return (
+      <pre className="m-0 max-h-[260px] overflow-auto whitespace-pre-wrap border border-[var(--gs-border)] bg-black px-2.5 py-2 text-[11px] leading-[1.6] text-[var(--gs-text)] font-[family-name:var(--gs-font-mono)]">
+        {text || '(no output captured)'}
+      </pre>
+    );
+  }
+  if (mime.startsWith('image/') && evidence.previewUrl) {
+    return (
+      <div>
+        <img className="block max-w-full border border-[var(--gs-border)]" src={evidence.previewUrl} alt={evidence.displayName || evidence.name} />
+        {typeof evidence.sizeBytes === 'number' && (
+          <div className="mt-[5px] text-[10px] text-[var(--gs-text-ghost)] font-[family-name:var(--gs-font-mono)]">{(evidence.sizeBytes / 1024).toFixed(1)} KB</div>
+        )}
+      </div>
+    );
+  }
+  if (mime.startsWith('video/')) {
+    return (
+      <div className="flex items-center gap-2.5 border border-[var(--gs-border)] bg-black px-3 py-3.5">
+        <span className="text-[16px] text-[var(--gs-purple)]">▶</span>
+        <span className="text-[11px] text-[var(--gs-text-ghost)] font-[family-name:var(--gs-font-mono)]">{evidence.artifactPath || evidence.originalPath || evidence.name}</span>
+      </div>
+    );
+  }
+  if (evidence.url) {
+    return (
+      <a
+        className="text-[11px] text-[var(--gs-info)] font-[family-name:var(--gs-font-mono)] hover:underline"
+        href={evidence.url}
+        target="_blank"
+        rel="noreferrer"
+      >
+        {evidence.url}
+      </a>
+    );
+  }
+  if (evidence.body !== undefined && evidence.body !== '') {
+    return (
+      <pre className="m-0 max-h-[260px] overflow-auto whitespace-pre-wrap border border-[var(--gs-border)] bg-black px-2.5 py-2 text-[11px] leading-[1.6] text-[var(--gs-text)] font-[family-name:var(--gs-font-mono)]">
+        {evidence.body}
+      </pre>
+    );
+  }
+  return (
+    <div className="text-[11px] text-[var(--gs-info)] font-[family-name:var(--gs-font-mono)]">
+      <span className="text-[var(--gs-text-ghost)]">file</span> {evidence.artifactPath || evidence.originalPath || evidence.name}
+    </div>
+  );
+}
+
+/** Evidence card (mock .rc-ev): header row with kind/name/meta/ref/source + inline artifact preview body. */
+function EvidenceCard({ requirement, evidence, onOpenEvidence }: {
   requirement: Requirement;
   evidence: Evidence;
   onOpenEvidence?: (requirementId: string, evidenceId: string) => void;
@@ -114,24 +179,25 @@ function EvidenceRow({ requirement, evidence, onOpenEvidence }: {
   const kind = evidenceKind(evidence, requirement.kind);
   const captured = evidence.source === 'command';
   const clickable = Boolean(onOpenEvidence);
+  const Head = clickable ? 'button' : 'div';
   return (
-    <button
-      type="button"
-      disabled={!clickable}
-      onClick={() => onOpenEvidence?.(requirement.id, evidence.id)}
-      title={clickable ? `Open evidence ${evidence.name}` : evidence.name}
-      className={`flex w-full items-center gap-2 border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-2 py-1.5 text-left transition-[border-color,background-color] duration-150 ${clickable ? 'hover:border-[var(--gs-border-active)] hover:bg-[var(--gs-bg-active)]' : 'cursor-default'}`}
-    >
-      <span className={`inline-flex flex-shrink-0 items-center rounded-[var(--gs-chip-radius)] px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide ${kind.cls}`}>{kind.label}</span>
-      <span className="min-w-0 flex-1 truncate text-[11px] text-[var(--gs-text)] font-[family-name:var(--gs-font-mono)]">
-        {evidence.displayName || evidence.name}
-        {evidence.meta && <span className="text-[var(--gs-text-muted)]"> — {evidence.meta}</span>}
-      </span>
-      <span className={`inline-flex flex-shrink-0 items-center rounded-[var(--gs-chip-radius)] px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide ${captured ? 'bg-[var(--gs-chip-green-bg)] text-[var(--gs-chip-green-text)]' : 'bg-[var(--gs-chip-amber-bg)] text-[var(--gs-chip-amber-text)]'}`}>
-        {captured ? 'captured' : 'asserted'}
-      </span>
-      {clickable && <span className="flex-shrink-0 text-[10px] text-[var(--gs-text-ghost)]">↗</span>}
-    </button>
+    <div className="border border-[var(--gs-border)] bg-[var(--gs-bg)]">
+      <Head
+        {...(clickable ? { type: 'button' as const, onClick: () => onOpenEvidence?.(requirement.id, evidence.id), title: `Open evidence ${evidence.name}` } : {})}
+        className={`flex w-full items-center gap-[7px] border-b border-[var(--gs-border-muted)] bg-[#060606] px-[9px] py-1.5 text-left ${clickable ? 'cursor-pointer transition-[background-color] duration-150 hover:bg-[var(--gs-bg-elevated)]' : ''}`}
+      >
+        <span className={`inline-flex flex-shrink-0 items-center rounded-[var(--gs-chip-radius)] px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide ${kind.cls}`}>{kind.label}</span>
+        <span className="min-w-0 truncate text-[11px] text-[var(--gs-text)] font-[family-name:var(--gs-font-mono)]">{evidence.displayName || evidence.name}</span>
+        {evidence.meta && <span className="min-w-0 truncate text-[10.5px] text-[var(--gs-text-muted)]">— {evidence.meta}</span>}
+        <span className="ml-auto flex-shrink-0 text-[10.5px] text-[var(--gs-text-ghost)] font-[family-name:var(--gs-font-mono)]" title="artifact ref">{evidence.id}</span>
+        <span className={`inline-flex flex-shrink-0 items-center rounded-[var(--gs-chip-radius)] px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide ${captured ? 'bg-[var(--gs-chip-green-bg)] text-[var(--gs-chip-green-text)]' : 'bg-[var(--gs-chip-amber-bg)] text-[var(--gs-chip-amber-text)]'}`}>
+          {captured ? 'captured' : 'asserted'}
+        </span>
+      </Head>
+      <div className="px-[11px] py-[9px]">
+        <EvidencePreview evidence={evidence} />
+      </div>
+    </div>
   );
 }
 
@@ -142,7 +208,7 @@ function JudgementRow({ review }: { review: Review }): ReactElement {
   const score = typeof review.score === 'number' ? Math.max(0, Math.min(100, review.score)) : undefined;
   return (
     <div className="flex items-start gap-2 border-t border-[var(--gs-border-muted)] py-2 first:border-t-0">
-      <span className={`flex h-5 w-5 flex-shrink-0 items-center justify-center border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] text-[11px] ${meta.cls}`} title={meta.label}>
+      <span className={`flex h-5 w-5 flex-shrink-0 items-center justify-center border border-[var(--gs-border)] text-[11px] ${meta.cls}`} title={meta.label}>
         {meta.icon}
       </span>
       <div className="min-w-0 flex-1">
@@ -152,13 +218,13 @@ function JudgementRow({ review }: { review: Review }): ReactElement {
           <VerdictChip verdict={verdict} />
           {score !== undefined && (
             <span className="flex items-center gap-1" title={`score ${score}`}>
-              <span className="inline-block h-[4px] w-[42px] overflow-hidden rounded-full bg-[var(--gs-bg-active)]">
+              <span className="inline-block h-[4px] w-[42px] overflow-hidden bg-[var(--gs-bg-active)]">
                 <span className={`block h-full ${scoreTone(score)}`} style={{ width: `${score}%` }} />
               </span>
               <span className="text-[10px] tabular-nums text-[var(--gs-text-dim)]">{score}</span>
             </span>
           )}
-          <span className="ml-auto text-[10px] text-[var(--gs-text-ghost)] font-[family-name:var(--gs-font-mono)]">{review.createdAt}</span>
+          <span className="ml-auto text-[10px] text-[var(--gs-text-ghost)] font-[family-name:var(--gs-font-mono)]" title={review.createdAt}>{compactTime(review.createdAt)}</span>
         </div>
         <div className="mt-1 text-[12px] leading-[1.5] text-[var(--gs-text-muted)]">{review.note}</div>
         {(review.cites ?? []).length > 0 && (
@@ -173,13 +239,14 @@ function JudgementRow({ review }: { review: Review }): ReactElement {
   );
 }
 
-/** Human judgement form — pass/partial/fail + required note, submits via onRecordHuman. */
+/** Human judgement form — pass/partial/fail + score slider + required note, submits via onRecordHuman. */
 function MakeJudgement({ requirementId, onRecordHuman, onDone }: {
   requirementId: string;
-  onRecordHuman: (requirementId: string, decision: Decision, note: string) => Promise<void>;
+  onRecordHuman: (requirementId: string, decision: Decision, note: string, score?: number) => Promise<void>;
   onDone: () => void;
 }): ReactElement {
   const [decision, setDecision] = useState<Decision | null>(null);
+  const [score, setScore] = useState(70);
   const [note, setNote] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -195,7 +262,7 @@ function MakeJudgement({ requirementId, onRecordHuman, onDone }: {
     setBusy(true);
     setError(null);
     try {
-      await onRecordHuman(requirementId, decision, note.trim());
+      await onRecordHuman(requirementId, decision, note.trim(), score);
       onDone();
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to record judgement');
@@ -205,11 +272,11 @@ function MakeJudgement({ requirementId, onRecordHuman, onDone }: {
   };
 
   return (
-    <div className="border border-[var(--gs-border)] border-t-2 border-t-[var(--gs-purple)] bg-[var(--gs-bg-elevated)] p-3">
+    <div className="border-t border-t-[rgba(188,140,255,0.18)] bg-[rgba(188,140,255,0.04)] px-[13px] py-[11px]">
       <div className="text-[11px] font-medium text-[var(--gs-purple)]">
         ◆ your judgement <span className="font-normal text-[var(--gs-text-ghost)]">— this criterion is human-gated</span>
       </div>
-      <div className="mt-2 flex items-center gap-1.5">
+      <div className="mt-2 flex flex-wrap items-center gap-[7px]">
         {(['pass', 'partial', 'fail'] as Decision[]).map((d) => (
           <button
             key={d}
@@ -222,13 +289,25 @@ function MakeJudgement({ requirementId, onRecordHuman, onDone }: {
             {d}
           </button>
         ))}
+        <label className="ml-auto flex items-center gap-[7px] text-[10.5px] uppercase tracking-wide text-[var(--gs-text-dim)]">
+          score
+          <input
+            type="range"
+            min={0}
+            max={100}
+            value={score}
+            onChange={(e) => setScore(Number(e.target.value))}
+            className="w-[110px] accent-[var(--gs-purple)]"
+          />
+          <span className="tabular-nums text-[var(--gs-text-muted)] font-[family-name:var(--gs-font-mono)]">{score}</span>
+        </label>
       </div>
       <textarea
         value={note}
         onChange={(e) => setNote(e.target.value)}
-        placeholder="Why — cite what the evidence does or doesn't prove…"
+        placeholder="Why — cite what the evidence on the right does or doesn't prove…"
         rows={3}
-        className="mt-2 w-full resize-y rounded-[var(--gs-input-radius)] border border-[var(--gs-border)] bg-[var(--gs-bg)] px-2 py-1.5 text-[12px] leading-[1.5] text-[var(--gs-text)] placeholder:text-[var(--gs-text-ghost)] focus:border-[var(--gs-border-active)] focus:outline-none"
+        className="mt-2 min-h-[52px] w-full resize-y border border-[var(--gs-border)] bg-black px-2.5 py-2 text-[12px] leading-[1.5] text-[var(--gs-text)] placeholder:text-[var(--gs-text-ghost)] focus:border-[var(--gs-border-active)] focus:outline-none"
       />
       {error && <div className="mt-1 text-[11px] text-[var(--gs-danger)]">{error}</div>}
       <div className="mt-2 flex justify-end">
@@ -247,7 +326,7 @@ function MakeJudgement({ requirementId, onRecordHuman, onDone }: {
 
 export function ReviewRubric({ goal, onRecordHuman, onRunJudgment, onOpenEvidence }: {
   goal: { id: string; title: string; validation: GoalValidation } | null;
-  onRecordHuman: (requirementId: string, decision: Decision, note: string) => Promise<void>;
+  onRecordHuman: (requirementId: string, decision: Decision, note: string, score?: number) => Promise<void>;
   onRunJudgment?: (requirementId: string) => Promise<void>;
   onOpenEvidence?: (requirementId: string, evidenceId: string) => void;
 }): ReactElement {
@@ -274,8 +353,6 @@ export function ReviewRubric({ goal, onRecordHuman, onRunJudgment, onOpenEvidenc
         };
       });
   }, [goal, recorded]);
-
-  const passCount = crits.filter((c) => c.verdict === 'pass').length;
 
   // Scroll-spy: the criterion the right column is showing lights up on the left.
   useEffect(() => {
@@ -315,7 +392,7 @@ export function ReviewRubric({ goal, onRecordHuman, onRunJudgment, onOpenEvidenc
 
   if (!goal || crits.length === 0) {
     return (
-      <div className="flex h-full min-h-0 flex-col items-center justify-center gap-1 bg-[var(--gs-bg)] p-6 text-center">
+      <div className="gs-ui flex h-full min-h-0 flex-col items-center justify-center gap-1 bg-[var(--gs-bg)] p-6 text-center">
         <div className="text-[13px] text-[var(--gs-text-dim)]">☰ No review rubric yet</div>
         <div className="max-w-[360px] text-[11px] leading-[1.5] text-[var(--gs-text-ghost)]">
           The rubric appears once this workspace's goal carries validation requirements. Author criteria from the goal detail panel.
@@ -324,130 +401,142 @@ export function ReviewRubric({ goal, onRecordHuman, onRunJudgment, onOpenEvidenc
     );
   }
 
+  const act = crits[Math.min(active, crits.length - 1)];
+
   return (
-    <div className="flex h-full min-h-0 flex-col bg-[var(--gs-bg)]">
-      <div className="grid min-h-0 flex-1 grid-cols-[minmax(240px,340px)_1fr]">
-        {/* left: criterion index (scroll-spy synced) */}
-        <div className="flex min-h-0 flex-col border-r border-[var(--gs-border-muted)] bg-[var(--gs-bg-canvas,var(--gs-bg))]">
-          <div className="border-b border-[var(--gs-border-muted)] px-3.5 py-3 text-[12px] font-medium text-[var(--gs-text)]">
+    <div className="gs-ui flex h-full min-h-0 flex-col bg-[var(--gs-bg)]">
+      <div className="grid min-h-0 flex-1 grid-cols-[380px_1fr]">
+        {/* left rail: index (capped) + active-criterion detail + footer */}
+        <div className="flex min-h-0 flex-col overflow-hidden border-r border-[var(--gs-border)] bg-[#050505]">
+          <div className="flex-none border-b border-[var(--gs-border)] px-3.5 py-3 text-[12px] font-medium text-[var(--gs-text)]">
             Review rubric <span className="text-[var(--gs-text-ghost)]">· the contract</span>
           </div>
-          <div className="min-h-0 flex-1 overflow-y-auto py-1">
+          <div className="max-h-[34%] flex-none overflow-y-auto border-b border-[var(--gs-border)] py-1.5">
             {crits.map((c, i) => (
               <button
                 key={c.r.id}
                 type="button"
                 onClick={() => go(i)}
-                className={`flex w-full items-center gap-2 px-3.5 py-2 text-left transition-[background-color,color] duration-150 ${
+                className={`flex w-full items-start gap-[9px] px-3.5 py-[7px] text-left transition-[background-color,color] duration-150 ${
                   active === i ? 'bg-[var(--gs-bg-active)]' : 'hover:bg-[var(--gs-bg-elevated)]'
                 }`}
               >
-                <span className={`h-2 w-2 flex-shrink-0 rounded-full ${VERDICT_DOT[c.verdict]}`} />
-                <span className={`min-w-0 flex-1 truncate text-[12px] ${active === i ? 'text-[var(--gs-text)]' : 'text-[var(--gs-text-dim)]'}`}>{c.r.title}</span>
-                <span className={`flex-shrink-0 text-[11px] ${GATE_META[c.gate].cls.split(' ')[1]}`} title={`${GATE_META[c.gate].label} gate`}>
-                  {GATE_META[c.gate].icon}
+                <span className={`mt-1 h-2 w-2 flex-shrink-0 rounded-full ${VERDICT_DOT[c.verdict]}`} />
+                <span className={`min-w-0 flex-1 text-[12px] leading-[1.35] ${active === i ? 'font-medium text-[var(--gs-text)]' : 'text-[var(--gs-text-muted)]'}`}>
+                  {c.r.title}
                 </span>
-                <span className="flex-shrink-0 text-[10px] tabular-nums text-[var(--gs-text-ghost)] font-[family-name:var(--gs-font-mono)]">
-                  {typeof c.score === 'number' ? c.score : `${c.r.evidence.length} ev`}
-                </span>
+                {typeof c.score === 'number' && (
+                  <span className="mt-0.5 flex-shrink-0 text-[10px] tabular-nums text-[var(--gs-text-dim)] font-[family-name:var(--gs-font-mono)]">{c.score}</span>
+                )}
               </button>
             ))}
           </div>
-          <div className="border-t border-[var(--gs-border-muted)] px-3.5 py-2.5 text-[10px] text-[var(--gs-text-ghost)] font-[family-name:var(--gs-font-mono)]">
-            {crits.length} criteria · {passCount}/{crits.length} pass · gated exit owned by human approval
+
+          {/* active criterion detail — stays put while the right column scrolls */}
+          <div className="min-h-0 flex-1 overflow-y-auto p-3.5">
+            {act && (
+              <>
+                <div className="mb-[9px] flex flex-wrap items-center gap-[7px]">
+                  <VerdictChip verdict={act.verdict} />
+                  {act.r.required && (
+                    <span className="border border-[var(--gs-border)] px-[5px] py-px text-[10.5px] uppercase tracking-[0.08em] text-[var(--gs-text-dim)]">required</span>
+                  )}
+                  <GateChip gate={act.gate} />
+                </div>
+                <div className="mb-2 text-[14px] font-medium leading-[1.4] text-[var(--gs-text)]">{act.r.title}</div>
+                <div
+                  className="gs-block-md mb-2.5 text-[12px] leading-[1.55] text-[var(--gs-text-muted)]"
+                  dangerouslySetInnerHTML={{ __html: renderMarkdownHtml(act.r.rubric) }}
+                />
+                <div className="mb-3 flex items-center gap-2.5 text-[10.5px] text-[var(--gs-text-dim)]">
+                  {typeof act.score === 'number' && <ScoreBar value={act.score} />}
+                  <span>
+                    {act.r.reviews.length} {act.r.reviews.length === 1 ? 'judge' : 'judges'} · {act.r.evidence.length} evidence
+                  </span>
+                  {onRunJudgment && act.gate !== 'human' && act.r.status !== 'accepted' && (
+                    <button
+                      type="button"
+                      disabled={runningId !== null}
+                      onClick={() => void runJudgment(act.r.id)}
+                      className={`ml-auto border px-2 py-1 text-[10px] uppercase tracking-wide transition-[border-color,color,scale] duration-150 active:scale-[0.96] disabled:pointer-events-none disabled:opacity-40 ${GATE_META[act.gate].cls} hover:bg-[var(--gs-bg-active)]`}
+                    >
+                      {runningId === act.r.id ? 'running…' : `${GATE_META[act.gate].icon} run judgment`}
+                    </button>
+                  )}
+                </div>
+                {act.awaiting ? (
+                  <MakeJudgement
+                    requirementId={act.r.id}
+                    onRecordHuman={onRecordHuman}
+                    onDone={() => setRecorded((m) => ({ ...m, [act.r.id]: true }))}
+                  />
+                ) : (
+                  <div className="border border-dashed border-[var(--gs-border)] px-2.5 py-2 text-[11px] text-[var(--gs-text-dim)]">
+                    {act.gate === 'human'
+                      ? <span className="text-[var(--gs-purple)]">◆ your verdict recorded</span>
+                      : `${GATE_META[act.gate].icon} ${act.gate}-gated — no human verdict required`}
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+
+          <div className="flex-none border-t border-[var(--gs-border)] px-3.5 py-[9px] text-[10px] text-[var(--gs-text-ghost)] font-[family-name:var(--gs-font-mono)]">
+            {crits.length} criteria · gated exit owned by human approval
           </div>
         </div>
 
-        {/* right: per-criterion detail sections */}
+        {/* right: lean per-criterion sections — evidence cards + judgement rows */}
         <div ref={scrollRef} className="min-h-0 overflow-y-auto px-[18px] py-4">
           {crits.map((c, i) => (
             <section
               key={c.r.id}
               ref={(el) => { secRefs.current[i] = el; }}
-              className={`mb-[18px] scroll-mt-1.5 border bg-[var(--gs-bg-elevated)] ${active === i ? 'border-[var(--gs-border-active)]' : 'border-[var(--gs-border)]'}`}
+              className={`mb-4 scroll-mt-2 border bg-[var(--gs-bg-elevated)] transition-[border-color] duration-150 ${active === i ? 'border-[var(--gs-border-active)]' : 'border-[var(--gs-border)]'}`}
             >
-              <div className="sticky top-0 z-10 flex flex-wrap items-center gap-2 border-b border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-3 py-2">
+              <div className="sticky top-0 z-10 flex flex-wrap items-center gap-[9px] border-b border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-3 py-2.5">
                 <VerdictChip verdict={c.verdict} />
                 <span className="text-[13px] font-medium text-[var(--gs-text)]">{c.r.title}</span>
-                {c.r.required && (
-                  <span className="rounded-[var(--gs-chip-radius)] border border-[var(--gs-border)] px-1.5 py-0.5 text-[9px] uppercase tracking-wide text-[var(--gs-text-ghost)]">required</span>
-                )}
-                <GateChip gate={c.gate} />
                 {c.awaiting && (
-                  <span className="ml-auto rounded-[var(--gs-chip-radius)] border border-[var(--gs-purple)] px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-[var(--gs-purple)]">
+                  <span className="ml-auto border border-[rgba(188,140,255,0.3)] px-1.5 py-px text-[12px] tracking-[0.04em] text-[var(--gs-purple)]">
                     awaiting your verdict
                   </span>
                 )}
               </div>
 
-              <div className="flex flex-col gap-3 p-3">
-                {/* rubric contract */}
-                <div
-                  className="gs-block-md text-[12px] leading-[1.55] text-[var(--gs-text-muted)]"
-                  dangerouslySetInnerHTML={{ __html: renderMarkdownHtml(c.r.rubric) }}
-                />
-                <div className="flex items-center gap-3">
-                  {typeof c.score === 'number' && <ScoreBar value={c.score} />}
-                  <span className="text-[10.5px] text-[var(--gs-text-ghost)]">
-                    {c.r.reviews.length} {c.r.reviews.length === 1 ? 'judge' : 'judges'} · {c.r.evidence.length} evidence
-                  </span>
-                  {onRunJudgment && c.gate !== 'human' && c.r.status !== 'accepted' && (
-                    <button
-                      type="button"
-                      disabled={runningId !== null}
-                      onClick={() => void runJudgment(c.r.id)}
-                      className={`ml-auto border px-2 py-1 text-[10.5px] uppercase tracking-wide transition-[border-color,color,scale] duration-150 active:scale-[0.96] disabled:pointer-events-none disabled:opacity-40 ${GATE_META[c.gate].cls} hover:bg-[var(--gs-bg-active)]`}
-                    >
-                      {runningId === c.r.id ? 'running…' : `${GATE_META[c.gate].icon} run judgment`}
-                    </button>
-                  )}
-                </div>
-
+              <div className="p-3">
                 {/* evidence */}
-                <div>
-                  <div className="mb-1.5 text-[10px] uppercase tracking-[0.12em] text-[var(--gs-text-ghost)]">
-                    evidence <span className="normal-case tracking-normal">· {c.r.evidence.length}</span>
-                  </div>
-                  {c.r.evidence.length === 0 ? (
-                    <div className="border border-dashed border-[var(--gs-border)] px-2 py-2 text-[11px] text-[var(--gs-text-ghost)]">no evidence collected yet</div>
-                  ) : (
-                    <div className="flex flex-col gap-1.5">
-                      {c.r.evidence.map((ev) => (
-                        <EvidenceRow key={ev.id} requirement={c.r} evidence={ev} onOpenEvidence={onOpenEvidence} />
-                      ))}
-                    </div>
-                  )}
+                <div className="mb-2 text-[10px] uppercase tracking-[0.12em] text-[var(--gs-text-ghost)]">
+                  evidence <span className="normal-case tracking-normal">· {c.r.evidence.length}</span>
                 </div>
+                {c.r.evidence.length === 0 ? (
+                  <div className="text-[11.5px] italic text-[var(--gs-text-dim)]">no evidence collected yet</div>
+                ) : (
+                  <div className="flex flex-col gap-[7px]">
+                    {c.r.evidence.map((ev) => (
+                      <EvidenceCard key={ev.id} requirement={c.r} evidence={ev} onOpenEvidence={onOpenEvidence} />
+                    ))}
+                  </div>
+                )}
 
                 {/* judgements */}
-                <div>
-                  <div className="mb-0.5 text-[10px] uppercase tracking-[0.12em] text-[var(--gs-text-ghost)]">
-                    judgements <span className="normal-case tracking-normal">· {c.r.reviews.length} {c.r.reviews.length === 1 ? 'judge' : 'judges'}</span>
-                  </div>
-                  {c.r.reviews.length === 0 ? (
-                    <div className="border border-dashed border-[var(--gs-border)] px-2 py-2 text-[11px] text-[var(--gs-text-ghost)]">no judgements recorded yet</div>
-                  ) : (
-                    <div>{c.r.reviews.map((rv) => <JudgementRow key={rv.id} review={rv} />)}</div>
-                  )}
+                <div className="mb-0.5 mt-3.5 text-[10px] uppercase tracking-[0.12em] text-[var(--gs-text-ghost)]">
+                  judgements <span className="normal-case tracking-normal">· {c.r.reviews.length} {c.r.reviews.length === 1 ? 'judge' : 'judges'}</span>
                 </div>
-
-                {/* human gate */}
-                {c.awaiting ? (
-                  <MakeJudgement
-                    requirementId={c.r.id}
-                    onRecordHuman={onRecordHuman}
-                    onDone={() => setRecorded((m) => ({ ...m, [c.r.id]: true }))}
-                  />
-                ) : c.gate === 'human' ? (
-                  <div className="border border-dashed border-[var(--gs-border)] px-2.5 py-2 text-[11px] text-[var(--gs-purple)]">◆ your verdict recorded</div>
-                ) : (
-                  <div className="border border-dashed border-[var(--gs-border)] px-2.5 py-2 text-[11px] text-[var(--gs-text-ghost)]">
-                    {GATE_META[c.gate].icon} {c.gate}-gated — no human verdict required
-                  </div>
+                {c.r.reviews.length > 0 && (
+                  <div>{c.r.reviews.map((rv) => <JudgementRow key={rv.id} review={rv} />)}</div>
                 )}
               </div>
             </section>
           ))}
+
+          {/* right-column footer callout (mock .callout.rc-foot) */}
+          <div className="mt-4 border border-[var(--gs-border)] border-l-2 border-l-[var(--gs-info)] bg-[var(--gs-bg)] px-[13px] py-2.5 text-[12.5px] leading-[1.55] text-[var(--gs-text-muted)]">
+            <div className="mb-1 text-[10px] uppercase tracking-[0.1em] text-[var(--gs-text-dim)]">top-level + per-phase</div>
+            This is the workspace's top-level review rubric. Each workflow phase can carry its own <b className="text-[var(--gs-text)]">mini rubric</b> (e.g.{' '}
+            <code className="bg-[var(--gs-bg-active)] px-[5px] py-px text-[11px] text-[var(--gs-text)] font-[family-name:var(--gs-font-mono)]">type-review rubric</code>) passed to that
+            phase's reviewer — see the Workflow phase artifacts.
+          </div>
         </div>
       </div>
     </div>

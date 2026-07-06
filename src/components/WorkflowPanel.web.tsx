@@ -5,15 +5,17 @@ import { BlockView } from '../blocks/render/registry.web.js';
 import { BlockHostProvider, type BlockAction, type BlockHost } from '../blocks/render/host.web.js';
 
 /**
- * ⟜ Workflow dock pane (mock Shell 'workflow' pane): "phased dataflow · gated
+ * Workflow dock pane (mock Shell 'workflow' pane): "phased dataflow · gated
  * loops · gates · artifacts per phase". The spec is artifact-driven — agents
  * commit `*.workflow.json` (WorkflowSpecData) to the workspace artifacts
  * branch and this pane renders it through the 'workflow' block renderer.
  */
-export function WorkflowPanel({ backend, workspaceId, onOpenArtifact }: {
+export function WorkflowPanel({ backend, workspaceId, onOpenArtifact, onOpenGoal, onOpenRubric }: {
   backend: SessionBackend | null;
   workspaceId: string;
   onOpenArtifact?: (path: string) => void;
+  onOpenGoal?: () => void;
+  onOpenRubric?: () => void;
 }): ReactElement {
   const [specs, setSpecs] = useState<Array<{ path: string; data: unknown }>>([]);
   const [selected, setSelected] = useState(0);
@@ -45,34 +47,32 @@ export function WorkflowPanel({ backend, workspaceId, onOpenArtifact }: {
   const host = useMemo<BlockHost>(() => ({
     resolve: () => {},
     dispatch: (action: BlockAction) => {
-      if (action.kind === 'open' && onOpenArtifact) {
-        onOpenArtifact(action.target.replace(/^artifact:/, ''));
-      }
+      if (action.kind !== 'open') return;
+      // Created-artifact chips route by type (mock): rubric → rubric pane,
+      // goal-slice/phased-goal → goal pane, else the artifact viewer.
+      if (action.target === 'rubric') { onOpenRubric?.(); return; }
+      if (action.target === 'goal') { onOpenGoal?.(); return; }
+      onOpenArtifact?.(action.target.replace(/^artifact:/, ''));
     },
     readOnly: true,
-  }), [onOpenArtifact]);
+  }), [onOpenArtifact, onOpenGoal, onOpenRubric]);
 
   const cur = specs[selected];
-  const spec = cur?.data as { recipe?: string; recipePath?: string } | undefined;
 
   return (
     <div className="flex h-full min-h-0 flex-col text-[12px]">
-      <div className="flex flex-shrink-0 items-center gap-2 border-b border-[var(--gs-border-muted)] px-3 py-1.5">
-        <span className="text-[var(--gs-accent)]">⟜</span>
-        <span className="truncate font-[family-name:var(--gs-font-mono)] text-[12px] text-[var(--gs-text)]">{spec?.recipe ?? 'Workflow'}</span>
-        <span className="text-[10px] text-[var(--gs-text-ghost)]">phased dataflow · gated loops · gates · artifacts per phase</span>
-        {specs.length > 1 && (
-          <select
-            value={selected}
-            onChange={(e) => setSelected(Number(e.target.value))}
-            className="ml-auto border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-1 py-0.5 text-[10px] text-[var(--gs-text-dim)]"
-          >
-            {specs.map((sp, i) => <option key={sp.path} value={i}>{sp.path.split('/').pop()}</option>)}
-          </select>
-        )}
-        {spec?.recipePath && <span className="ml-auto font-[family-name:var(--gs-font-mono)] text-[10px] text-[var(--gs-text-dim)]">{spec.recipePath}</span>}
+      {/* panel-head (mock PaneBox): uppercase title · sub · Save workflow */}
+      <div className="flex h-8 flex-none items-center gap-2 border-b border-[var(--gs-border)] bg-[#070707] px-3">
+        <span className="text-[11px] uppercase tracking-[0.1em] text-[var(--gs-text-muted)]">Workflow</span>
+        <span className="truncate text-[11px] text-[var(--gs-text-muted)]">phased dataflow · gated loops · gates · artifacts per phase</span>
+        <button
+          type="button"
+          className="ml-auto inline-flex cursor-pointer items-center justify-center gap-[5px] border border-[var(--gs-border)] bg-transparent px-2 py-[3px] text-[11px] text-[var(--gs-text-muted)] transition-colors hover:bg-[var(--gs-bg-active)] hover:text-[var(--gs-text)]"
+        >
+          Save workflow
+        </button>
       </div>
-      <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+      <div className="min-h-0 flex-1 overflow-y-auto p-[13px]">
         {state === 'loading' ? (
           <div className="flex h-full items-center justify-center text-[var(--gs-text-dim)]">Loading…</div>
         ) : state === 'error' ? (
@@ -86,7 +86,25 @@ export function WorkflowPanel({ backend, workspaceId, onOpenArtifact }: {
             </span>
           </div>
         ) : (
-          <div className="max-w-[920px]">
+          <div>
+            {specs.length > 1 && (
+              <div className="mb-2 flex flex-wrap items-center gap-1.5">
+                {specs.map((sp, i) => (
+                  <button
+                    key={sp.path}
+                    type="button"
+                    onClick={() => setSelected(i)}
+                    className={`inline-flex cursor-pointer items-center gap-[5px] whitespace-nowrap border px-[7px] py-[2px] text-[10.5px] uppercase leading-[1.4] tracking-[0.05em] ${
+                      i === selected
+                        ? 'border-[var(--gs-border-active)] bg-[var(--gs-bg-active)] text-[var(--gs-text)]'
+                        : 'border-[var(--gs-border)] bg-[var(--gs-chip-dim-bg)] text-[var(--gs-chip-dim-text)] hover:text-[var(--gs-text-muted)]'
+                    }`}
+                  >
+                    {sp.path.split('/').pop()}
+                  </button>
+                ))}
+              </div>
+            )}
             <BlockHostProvider host={host}>
               <BlockView block={{ id: cur.path, type: 'workflow', data: cur.data }} />
             </BlockHostProvider>

@@ -40,8 +40,47 @@ function getChainPalette(chainId: string) {
   return CHAIN_PALETTE[Math.abs(hash) % CHAIN_PALETTE.length] ?? CHAIN_PALETTE[0];
 }
 
-function chainHoverClass(related?: boolean): string {
-  return related ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 group-focus-within:opacity-100';
+function chainHoverClass(_related?: boolean): string {
+  // Chain badge stays visible at rest (mock parity); related/dim treatment
+  // is handled by card-level opacity instead of hiding the badge.
+  return 'opacity-100';
+}
+
+/** Column header blurbs — mirrors agent-surfaces-app mock STAGE_BLURB. */
+const PHASE_BLURBS: Record<string, string> = {
+  plan: 'Author the spec — goal, rubric, review-gated workflow. Not editing the repo.',
+  code: 'Run the implementation workflow and guide it.',
+  review: 'Code review — commit staging and the narrative arc of the change.',
+  ship: 'Post-merge ops — monitor, deploy, crons, roll-up.',
+};
+
+/** Status-colored card edge/dot — mirrors mock WS_STATUS_COLOR. */
+function statusEdgeColor(primaryColor: string | undefined): string {
+  switch (primaryColor) {
+    case 'green': return 'var(--gs-accent)';
+    case 'orange': return 'var(--gs-warning-bright)';
+    case 'red': return 'var(--gs-danger-hover)';
+    case 'blue': return 'var(--gs-info)';
+    default: return 'var(--gs-text-ghost)';
+  }
+}
+
+/** Accepted/total gates from goal validation requirements. */
+function getGateTally(validation?: {
+  requirements?: Record<string, { status: string }>;
+  readiness?: { totals?: { accepted: number; total: number } };
+}): { passed: number; total: number } | null {
+  if (!validation) return null;
+  const totals = validation.readiness?.totals;
+  if (totals && totals.total > 0) {
+    return { passed: totals.accepted, total: totals.total };
+  }
+  const requirements = Object.values(validation.requirements ?? {});
+  if (requirements.length === 0) return null;
+  return {
+    passed: requirements.filter((requirement) => requirement.status === 'accepted').length,
+    total: requirements.length,
+  };
 }
 
 
@@ -340,6 +379,8 @@ export interface KanbanBoardWebProps {
   onSelectPlannedGoal?: (goal: KanbanGoalItem) => void;
   onSaveChainOrder?: (goals: KanbanGoalItem[]) => void | Promise<void>;
   boardMessage?: string | null;
+  /** Board lens: workspace kanban (default) or chain stack lanes. */
+  view?: 'workspaces' | 'stacks';
 }
 
 	function PendingWorkspaceCard({
@@ -373,10 +414,12 @@ export interface KanbanBoardWebProps {
 
 
 
-function PlannedGoalCard({ goal, onSelectGoal, onChainFocus, onOpenOrder, related }: { goal: KanbanGoalItem; onSelectGoal?: (goal: KanbanGoalItem) => void; onChainFocus?: (chainId: string | null) => void; onOpenOrder?: (chainId: string) => void; related?: boolean }) {
+function PlannedGoalCard({ goal, onSelectGoal, onChainFocus, onOpenOrder, related, index = 0 }: { goal: KanbanGoalItem; onSelectGoal?: (goal: KanbanGoalItem) => void; onChainFocus?: (chainId: string | null) => void; onOpenOrder?: (chainId: string) => void; related?: boolean; index?: number }) {
   const handleClick = () => {
     onSelectGoal?.(goal);
   };
+  // Blocked state is encoded via the status dot + left-border tone (no chip).
+  const edgeColor = goal.blockedReason ? 'var(--gs-warning)' : 'var(--gs-text-dim)';
 
   return (
     <div
@@ -394,22 +437,30 @@ function PlannedGoalCard({ goal, onSelectGoal, onChainFocus, onOpenOrder, relate
           handleClick();
         }
       }}
-      className={`group relative w-full px-3 py-2.5 border-l-2 bg-[var(--gs-bg-surface)] text-left transition-[background-color,opacity] duration-150 hover:bg-[var(--gs-bg-hover)] ${related === false ? 'opacity-40' : related === true ? 'ring-1' : ''}`}
-      style={{ borderLeftColor: related ? getChainPalette(goal.chainId).fg : 'transparent', ...(related ? { ['--tw-ring-color' as string]: getChainPalette(goal.chainId).fg } : {}) }}
+      className={`group relative w-full px-3 py-2.5 border border-[var(--gs-border)] border-l-2 bg-[var(--gs-bg-surface)] text-left transition-[background-color,border-color,opacity] duration-150 hover:bg-[var(--gs-bg-hover)] hover:border-[var(--gs-border-active)] ${related === false ? 'opacity-40' : related === true ? 'ring-1' : ''}`}
+      style={{
+        borderLeftColor: related ? getChainPalette(goal.chainId).fg : edgeColor,
+        animation: 'gs-card-in .3s cubic-bezier(0.2,0,0,1) both',
+        animationDelay: `${index * 45}ms`,
+        ...(related ? { ['--tw-ring-color' as string]: getChainPalette(goal.chainId).fg } : {}),
+      }}
       title={goal.blockedReason ?? `Create workspace for planned goal in ${goal.chainTitle}`}
     >
       <div className="flex items-center gap-2">
-        <span className="flex-shrink-0 text-[10px] text-[var(--gs-info)]">○</span>
+        <span className="h-2 w-2 flex-shrink-0 rounded-full" style={{ background: edgeColor }} title={goal.blockedReason ? 'blocked' : 'planned'} />
         <span className="font-mono font-medium text-[12px] truncate">{goal.plannedWorkspaceName ?? goal.title}</span>
         <ChainHandle goal={goal} related={related} />
         <RearrangeHandle onOpenOrder={() => onOpenOrder?.(goal.chainId)} />
       </div>
-      <div className="mt-0.5 pl-[18px] text-[10px] text-[var(--gs-text-dim)] truncate">
+      <div className="mt-1 text-[12px] text-[var(--gs-text-muted)] truncate">
         {goal.title}
       </div>
-      <div className="flex flex-wrap items-center gap-1 mt-1.5 pl-[18px]">
-        {getGoalStatusChip(goal)?.label !== 'not created' && getGoalStatusChip(goal) && <PmChip label={getGoalStatusChip(goal)!.label} tone={getGoalStatusChip(goal)!.tone} />}
-      </div>
+      {(() => {
+        const chip = getGoalStatusChip(goal);
+        return chip && chip.label !== 'not created' && chip.label !== 'blocked'
+          ? <div className="flex flex-wrap items-center gap-1 mt-1.5"><PmChip label={chip.label} tone={chip.tone} /></div>
+          : null;
+      })()}
     </div>
   );
 }
@@ -423,6 +474,7 @@ function WorkspaceCard({
   onChainFocus,
   related,
   onOpenOrder,
+  index = 0,
 }: {
   entry: KanbanWorkspaceItem;
   isSelected: boolean;
@@ -432,6 +484,7 @@ function WorkspaceCard({
   onChainFocus?: (chainId: string | null) => void;
   related?: boolean;
   onOpenOrder?: (chainId: string) => void;
+  index?: number;
 }) {
   const name = getWorkspaceDisplayName(entry);
   const prChip = getPullRequestChip(entry);
@@ -439,16 +492,13 @@ function WorkspaceCard({
   const goal = entry.goal;
   const isDeleting = deletionTask?.status === 'running' || deletionTask?.status === 'queued';
   const goalChip = getGoalStatusChip(goal);
+  const gates = getGateTally(goal?.validation);
+  const machineLabel = entry.isRemote && entry.machineLabel ? entry.machineLabel : 'local';
 
-  // Dot color: use the same primaryColor from WorkspaceStatusSummary
+  // Edge/dot color: use the same primaryColor from WorkspaceStatusSummary
   // that the workspace detail strip bar uses
   const primaryColor = status?.primaryColor ?? 'dim';
-  const dotColor =
-    primaryColor === 'orange' ? 'text-[var(--gs-warning-bright)]'
-    : primaryColor === 'red' ? 'text-[var(--gs-danger-hover)]'
-    : primaryColor === 'blue' ? 'text-[var(--gs-info)]'
-    : primaryColor === 'green' ? 'text-[var(--gs-accent)]'
-    : 'text-[var(--gs-text-ghost)]';
+  const edgeColor = statusEdgeColor(primaryColor);
 
   // Build readable info chips from status counts
   const agentTotal = status ? status.agents.green + status.agents.blue + status.agents.orange + status.agents.red : 0;
@@ -473,13 +523,18 @@ function WorkspaceCard({
       aria-pressed={isSelected}
       aria-disabled={isDeleting}
       className={
-        'group relative w-full px-3 py-2.5 border-l-2 transition-colors text-left ' +
+        'group relative w-full px-3 py-2.5 border border-[var(--gs-border)] border-l-2 transition-colors text-left ' +
         (related === false ? 'opacity-40 ' : related === true ? 'ring-1 ring-[var(--gs-info)] ' : '') +
         (isDeleting ? 'cursor-not-allowed opacity-55 grayscale ' : 'cursor-pointer ') +
         (isSelected
-          ? 'border-l-[var(--gs-selected-border)] bg-[var(--gs-bg-selected)]'
-          : 'border-l-transparent hover:bg-[var(--gs-bg-hover)]')
+          ? 'border-[var(--gs-border-active)] bg-[var(--gs-bg-selected)]'
+          : 'bg-[var(--gs-bg-surface)] hover:bg-[var(--gs-bg-hover)] hover:border-[var(--gs-border-active)]')
       }
+      style={{
+        borderLeftColor: edgeColor,
+        animation: 'gs-card-in .3s cubic-bezier(0.2,0,0,1) both',
+        animationDelay: `${index * 45}ms`,
+      }}
     >
       {isDeleting && (
         <div className="absolute bottom-0 left-0 right-0 h-[2px] overflow-hidden bg-[var(--gs-border)]">
@@ -491,8 +546,8 @@ function WorkspaceCard({
       )}
       {/* Name + dot */}
       <div className="flex items-center gap-2">
-        <span className={`flex-shrink-0 text-[10px] ${dotColor}`}>●</span>
-        <span className="font-medium text-[12px] truncate">{name}</span>
+        <span className="h-2 w-2 flex-shrink-0 rounded-full" style={{ background: edgeColor }} />
+        <span className="font-mono font-medium text-[12px] truncate">{name}</span>
         {goal && <ChainHandle goal={goal} related={related} />}
         {goal && <RearrangeHandle onOpenOrder={() => onOpenOrder?.(goal.chainId)} />}
         {isDeleting && <span className="ml-auto text-[9px] uppercase tracking-wide text-[var(--gs-warning)]">deleting</span>}
@@ -504,9 +559,9 @@ function WorkspaceCard({
         </div>
       )}
 
-      {/* Branch */}
-      {entry.branch && (
-        <div className="text-[10px] text-[var(--gs-text-dim)] mt-0.5 pl-[18px] truncate">({entry.branch})</div>
+      {/* Human summary: goal title, falling back to branch */}
+      {(goal?.title || entry.branch) && (
+        <div className="mt-1 text-[12px] text-[var(--gs-text-muted)] truncate">{goal?.title ?? entry.branch}</div>
       )}
 
       {/* Status row: agents, terminals, services — readable text */}
@@ -550,10 +605,9 @@ function WorkspaceCard({
       )}
 
       {/* Goal / PR / Linear chips */}
-      {(goal || prChip || linear?.syncState === 'ready' || linear?.syncState === 'unconfigured' || linear?.syncState === 'identifier_missing') && (
+      {((goalChip && goalChip.label !== 'blocked') || prChip || linear?.syncState === 'ready' || linear?.syncState === 'unconfigured') && (
         <div className="flex flex-wrap items-center gap-1 mt-1 pl-[18px]">
-          {goal && <PmChip label={`chain ${goal.chainPosition}/${goal.chainLength}`} tone="blue" className={`transition ${chainHoverClass(related)}`} />}
-          {goalChip && <PmChip label={goalChip.label} tone={goalChip.tone} />}
+          {goalChip && goalChip.label !== 'blocked' && <PmChip label={goalChip.label} tone={goalChip.tone} />}
           {prChip && <PmChip label={prChip.label} tone={prChip.tone} />}
           {linear?.syncState === 'ready' && linear.identifier && (
             <PmChip
@@ -564,11 +618,24 @@ function WorkspaceCard({
           {linear?.syncState === 'unconfigured' && (
             <PmChip label="Linear setup" tone="dim" />
           )}
-          {linear?.syncState === 'identifier_missing' && (
-            <PmChip label="No issue key" tone="dim" />
-          )}
         </div>
       )}
+
+      {/* Footer: machine chip + gates tally */}
+      <div className="mt-1.5 flex items-center gap-2">
+        <span className="inline-flex items-center gap-1 text-[10.5px] text-[var(--gs-text-dim)]">
+          <span className="h-1.5 w-1.5 rounded-full bg-[var(--gs-success)]" />
+          {machineLabel}
+        </span>
+        {gates && (
+          <span
+            className="ml-auto text-[11px] tabular-nums"
+            style={{ color: gates.passed === gates.total ? 'var(--gs-success)' : 'var(--gs-warning)' }}
+          >
+            {gates.passed}/{gates.total} gates
+          </span>
+        )}
+      </div>
     </div>
   );
 }

@@ -11,11 +11,10 @@ import type { KanbanGoalItem } from '../app/shared/board/types.js';
  *  - ChainStack: the goal chain rail with shipped/active/planned nodes
  */
 
-export function SidebarStageHeader({ name, phase, onSwitchStage, onClose }: {
+export function SidebarStageHeader({ name, phase, onSwitchStage }: {
   name: string;
   phase: WorkspacePhase;
   onSwitchStage?: (phase: WorkspacePhase) => void;
-  onClose?: () => void;
 }): ReactElement {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -60,20 +59,25 @@ export function SidebarStageHeader({ name, phase, onSwitchStage, onClose }: {
           </div>
         )}
       </div>
-      {onClose && (
-        <button type="button" onClick={onClose} title="Close workspace panel" className="flex-shrink-0 px-1 text-xs text-[var(--gs-text-dim)] hover:text-[var(--gs-text)]">×</button>
-      )}
     </div>
   );
 }
 
+/** Mock .modecap chip. */
+function ModeCap({ label }: { label: string }): ReactElement {
+  return <span className="whitespace-nowrap border border-[var(--gs-border)] px-1.5 py-px text-[10.5px] text-[var(--gs-text-muted)]">{label}</span>;
+}
+
 export function ModeCapsStrip({ phase }: { phase: WorkspacePhase }): ReactElement {
+  const [firstCap, ...restCaps] = STAGE_CAPS[phase].unlocks;
   return (
     <div className="gs-ui flex flex-shrink-0 flex-wrap items-center gap-[5px] border-b border-[var(--gs-border)] bg-[#070707] px-[13px] py-[7px]">
-      <span className="text-[10px] uppercase tracking-[.1em] text-[var(--gs-text-dim)]">{phase} mode</span>
-      {STAGE_CAPS[phase].unlocks.map((u) => (
-        <span key={u} className="border border-[var(--gs-border)] px-1.5 py-px text-[10.5px] text-[var(--gs-text-muted)]">{u}</span>
-      ))}
+      {/* Mock keeps the first mode chip inline on the "{stage} MODE" header row. */}
+      <span className="flex items-center gap-[8px] whitespace-nowrap">
+        <span className="text-[10px] uppercase tracking-[.1em] text-[var(--gs-text-dim)]">{phase} mode</span>
+        {firstCap && <ModeCap label={firstCap} />}
+      </span>
+      {restCaps.map((u) => <ModeCap key={u} label={u} />)}
     </div>
   );
 }

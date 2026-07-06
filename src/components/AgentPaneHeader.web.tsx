@@ -8,47 +8,38 @@ function fmtTokens(n: number): string {
   return String(n);
 }
 
-type MenuId = 'model' | 'thinking' | 'approval';
+type MenuId = 'model' | 'settings';
 
-/** A compact dropdown of string options for the header (thinking / approval). */
-function PickerMenu({
+/** A titled option-picker section inside the ⚙ settings popover. */
+function SettingsPickerSection({
   label,
   value,
   options,
-  open,
-  onToggle,
   onPick,
 }: {
   label: string;
   value: string | null;
   options: string[];
-  open: boolean;
-  onToggle: () => void;
   onPick: (v: string) => void;
 }): ReactElement {
   return (
-    <span className="relative">
-      <button type="button" onClick={onToggle} className="text-[var(--gs-text-dim)] hover:text-[var(--gs-accent)]">
-        {label}:{' '}<span className="text-[var(--gs-text)]">{value ?? '—'}</span> ▾
-      </button>
-      {open && (
-        <>
-          <div className="fixed inset-0 z-10" onClick={onToggle} />
-          <div className="absolute left-0 top-full z-20 mt-1 w-40 border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] py-1 shadow-lg">
-            {options.map((o) => (
-              <button
-                key={o}
-                type="button"
-                onClick={() => onPick(o)}
-                className={`block w-full px-3 py-1 text-left font-[family-name:var(--gs-font-mono)] hover:bg-[var(--gs-border)] ${o === value ? 'text-[var(--gs-accent)]' : 'text-[var(--gs-text)]'}`}
-              >
-                {o === value ? '● ' : '  '}{o}
-              </button>
-            ))}
-          </div>
-        </>
-      )}
-    </span>
+    <div className="px-3 py-1.5">
+      <div className="mb-1 text-[10px] uppercase tracking-wide text-[var(--gs-text-dim)]">{label}</div>
+      <div className="flex flex-wrap gap-1">
+        {options.map((o) => (
+          <button
+            key={o}
+            type="button"
+            onClick={() => onPick(o)}
+            className={`border px-1.5 py-0.5 font-mono text-[10px] ${o === value
+              ? 'border-[var(--gs-accent)] text-[var(--gs-accent)]'
+              : 'border-[var(--gs-border)] text-[var(--gs-text-muted)] hover:text-[var(--gs-text)]'}`}
+          >
+            {o}
+          </button>
+        ))}
+      </div>
+    </div>
   );
 }
 

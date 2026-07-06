@@ -18,20 +18,36 @@ function KeywordText({ text }: { text: string }): ReactElement {
   );
 }
 
+/** Bordered uppercase status chip (mock .chip): tone via --gs-chip-* vars. */
+const CHIP_BASE = 'border border-[var(--gs-border)] px-1.5 py-px text-[10px] uppercase tracking-[0.05em] leading-[1.4] whitespace-nowrap';
+
 // ── message ───────────────────────────────────────────────────────────────
 defineRenderer<MessageData>('message', ({ data }): ReactElement => {
   if (data.role === 'user') {
+    // Attachment names are an optional extension on the message payload —
+    // render chips only when a producer actually supplies them.
+    const rawAtts = (data as { attachments?: unknown }).attachments;
+    const atts = Array.isArray(rawAtts) ? rawAtts.filter((a): a is string => typeof a === 'string') : [];
     return (
-      <div className="my-2 border-l-2 border-[var(--gs-border-active)] pl-3 py-1">
-        <div className="mb-1 text-[10px] uppercase tracking-wide text-[var(--gs-text-dim)]">you</div>
-        <div className="text-[13px] leading-[1.6] text-[var(--gs-text)] whitespace-pre-wrap"><KeywordText text={data.text} /></div>
+      <div className="my-2 flex items-baseline">
+        <span className="mr-2 flex-none text-[11px] lowercase text-[var(--gs-success)]">you</span>
+        <div className="min-w-0 flex-1 text-[13px] leading-[1.6] text-[var(--gs-text)] whitespace-pre-wrap">
+          <KeywordText text={data.text} />
+          {atts.length > 0 && (
+            <span className="ml-2 inline-flex flex-wrap gap-1.5 align-middle">
+              {atts.map((a) => (
+                <span key={a} className={`${CHIP_BASE} bg-[var(--gs-chip-dim-bg)] font-mono text-[var(--gs-text-dim)]`}>▯ {a}</span>
+              ))}
+            </span>
+          )}
+        </div>
       </div>
     );
   }
   return (
-    <div className="my-2">
-      <div className="mb-1 text-[10px] uppercase tracking-wide text-[var(--gs-accent)]">agent</div>
-      <Markdown text={data.text} />
+    <div className="my-2 flex items-baseline">
+      <span className="mr-2 flex-none text-[11px] lowercase text-[var(--gs-accent)]">agent</span>
+      <div className="min-w-0 flex-1"><Markdown text={data.text} /></div>
     </div>
   );
 });
@@ -58,15 +74,16 @@ defineRenderer<ThinkingData>('thinking', ({ data }): ReactElement => {
 });
 
 // ── tool-call (composes nested blocks in its result) ────────────────────────
-const TOOL_STATUS: Record<ToolCallData['status'], string> = {
-  running: 'text-[var(--gs-warning)]',
-  done: 'text-[var(--gs-success)]',
-  error: 'text-[var(--gs-danger)]',
+const TOOL_STATUS_CHIP: Record<ToolCallData['status'], string> = {
+  running: 'bg-[var(--gs-chip-amber-bg)] text-[var(--gs-chip-amber-text)]',
+  done: 'bg-[var(--gs-chip-green-bg)] text-[var(--gs-chip-green-text)]',
+  error: 'bg-[var(--gs-chip-red-bg)] text-[var(--gs-chip-red-text)]',
 };
-function ToolSection({ label, blocks }: { label: string; blocks: readonly unknown[] }): ReactElement {
+// Input/output sections render their blocks directly (no visible section
+// headers) — the border-t alone separates them from the header row.
+function ToolSection({ blocks }: { blocks: readonly unknown[] }): ReactElement {
   return (
     <div className="border-t border-[var(--gs-border)] p-2">
-      <div className="mb-1 text-[9px] uppercase tracking-wide text-[var(--gs-text-ghost)]">{label}</div>
       {blocks.map((b, i) => (
         <BlockView key={(b as { id?: string }).id ?? i} block={b as Parameters<typeof BlockView>[0]['block']} />
       ))}
@@ -94,15 +111,16 @@ defineRenderer<ToolCallData>('tool-call', ({ data }): ReactElement => {
         {hasOutput
           ? <span className={showOutput ? 'rotate-90 transition-transform' : 'transition-transform'}>▶</span>
           : <span className="inline-block w-[1ch]" />}
-        <span className="text-[12px] text-[var(--gs-text)]">{data.tool}</span>
-        {data.target && <span className="min-w-0 flex-1 truncate text-[11px] text-[var(--gs-text-dim)]">{data.target}</span>}
+        <span className="font-mono text-[12px] text-[var(--gs-accent)]">{data.tool}</span>
+        {data.target && <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-[var(--gs-text-dim)]">{data.target}</span>}
         <span className="ml-auto flex flex-shrink-0 items-center gap-2">
-          {data.meta && <span className="text-[11px] text-[var(--gs-text-dim)]">{data.meta}</span>}
-          <span className={`text-[11px] ${TOOL_STATUS[data.status]}`}>{data.status}</span>
+          {data.status === 'running' && <span className="h-[7px] w-[7px] flex-none rounded-full bg-[var(--gs-success)] animate-pulse" />}
+          {data.meta && <span className="font-mono text-[11px] text-[var(--gs-text-dim)]">{data.meta}</span>}
+          <span className={`${CHIP_BASE} ${TOOL_STATUS_CHIP[data.status]}`}>{data.status}</span>
         </span>
       </button>
-      {input.length > 0 && <ToolSection label="input" blocks={input} />}
-      {showOutput && <ToolSection label="output" blocks={result} />}
+      {input.length > 0 && <ToolSection blocks={input} />}
+      {showOutput && <ToolSection blocks={result} />}
     </div>
   );
 });
@@ -116,23 +134,30 @@ defineRenderer<ImageData>('image', ({ data }): ReactElement => (
 ));
 
 // ── subagent ──────────────────────────────────────────────────────────────
-const SUB_STATUS: Record<SubagentData['status'], string> = {
-  running: 'text-[var(--gs-warning)]',
-  done: 'text-[var(--gs-success)]',
-  blocked: 'text-[var(--gs-danger)]',
-  queued: 'text-[var(--gs-text-dim)]',
+const SUB_STATUS_CHIP: Record<SubagentData['status'], string> = {
+  running: 'bg-[var(--gs-chip-amber-bg)] text-[var(--gs-chip-amber-text)]',
+  done: 'bg-[var(--gs-chip-green-bg)] text-[var(--gs-chip-green-text)]',
+  blocked: 'bg-[var(--gs-chip-red-bg)] text-[var(--gs-chip-red-text)]',
+  queued: 'bg-[var(--gs-chip-dim-bg)] text-[var(--gs-chip-dim-text)]',
+};
+const SUB_STATUS_DOT: Record<SubagentData['status'], string> = {
+  running: 'bg-[var(--gs-success)] animate-pulse',
+  done: 'bg-[var(--gs-success)]',
+  blocked: 'bg-[var(--gs-danger)]',
+  queued: 'bg-[var(--gs-text-dim)]',
 };
 defineRenderer<SubagentData>('subagent', ({ data }): ReactElement => (
-  <div className="my-2 border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)]">
+  <div className="my-2 border border-[var(--gs-border)] border-l-2 border-l-[var(--gs-purple)] bg-[var(--gs-bg-elevated)]">
     <div className="flex items-center gap-2 px-2 py-1.5 border-b border-[var(--gs-border)]">
-      <span className="text-[12px] text-[var(--gs-text)]">✦ {data.label}</span>
-      {data.model && <span className="text-[11px] text-[var(--gs-text-dim)]">{data.model}</span>}
-      <span className={`ml-auto text-[11px] ${SUB_STATUS[data.status]}`}>{data.status}</span>
+      <span className={`h-[7px] w-[7px] flex-none rounded-full ${SUB_STATUS_DOT[data.status]}`} />
+      <span className="font-mono text-[12px] text-[var(--gs-text)]">✦ {data.label}</span>
+      {data.model && <span className="font-mono text-[11px] text-[var(--gs-text-dim)]">{data.model}</span>}
+      <span className={`ml-auto ${CHIP_BASE} ${SUB_STATUS_CHIP[data.status]}`}>{data.status}</span>
     </div>
     {data.lines.length > 0 && (
       <div className="px-2 py-1.5">
         {data.lines.map((l, i) => (
-          <div key={i} className="text-[11px] text-[var(--gs-text-muted)] leading-[1.55]">→ {l}</div>
+          <div key={i} className="text-[11px] text-[var(--gs-text-dim)] leading-[1.55]">→ {l}</div>
         ))}
       </div>
     )}

@@ -2,15 +2,16 @@
 /**
  * ProjectHomePage — the project-level home (mock: ProjectHome.tsx).
  *
- * Sidebar: Overview / In process / Chains / Reports & notes / Artifacts.
- * Center:  CHAINS (goal chains grouped, per-goal phase dots) → IN PROCESS
- *          (workspaces with live agent state) → REPORTS & NOTES (workspace
- *          notes + project reports/ artifacts).
+ * Sidebar: AGENT (stubs) / PROJECT (Overview, In process, Reports & notes,
+ *          Chains, Crons & triggers) / DASHBOARDS / CONFIG (stub).
+ * Center:  multi-tab shell (34px tabstrip) — Overview tab (three .ph-card
+ *          sections) plus closable tabs for process/chains/reports feeds,
+ *          dashboards and artifact viewers.
  * Right:   project artifacts rail (the artifacts repo's main branch, mounted
- *          at the base clone — docs/ARTIFACTS-FS.md).
+ *          at the base clone — docs/ARTIFACTS-FS.md) + Recently shipped queue.
  */
 
-import { useCallback, useEffect, useMemo, useState, type ReactElement } from 'react';
+import { useCallback, useEffect, useMemo, useState, type MouseEvent as ReactMouseEvent, type ReactElement } from 'react';
 import type { SessionBackend } from '../session/backend.js';
 import type { KanbanGoalItem } from '../app/shared/board/types.js';
 import type { WorkspaceRuntimeEntry } from '../app/shared/workspace-runtime/types.js';
@@ -25,12 +26,23 @@ interface ArtifactEntry {
 }
 
 interface FeedItem {
-  kind: 'note' | 'report';
-  title: string;
-  detail: string;
+  kind: 'note' | 'todo' | 'report';
+  /** mono surface line (workspace name or report file) */
+  surface: string;
+  /** note body paragraph */
+  body?: string;
   /** report path for click-through */
   path?: string;
 }
+
+const FEED_CHIP: Record<FeedItem['kind'], { cls: string; label: string }> = {
+  report: { cls: 'bg-[var(--gs-chip-green-bg)] text-[var(--gs-chip-green-text)]', label: 'report' },
+  note: { cls: 'bg-[var(--gs-chip-blue-bg)] text-[var(--gs-chip-blue-text)]', label: 'note' },
+  todo: { cls: 'bg-[var(--gs-chip-amber-bg)] text-[var(--gs-chip-amber-text)]', label: 'todo' },
+};
+
+const XS_BTN = 'border border-[var(--gs-border)] bg-transparent px-1.5 py-0.5 text-[10px] text-[var(--gs-text-muted)] transition-colors enabled:hover:bg-[var(--gs-bg-active)] enabled:hover:text-[var(--gs-text)] disabled:cursor-default';
+const CHIP = 'inline-flex items-center gap-[5px] self-start whitespace-nowrap border border-[var(--gs-border)] px-[7px] py-[2px] text-[10.5px] uppercase leading-[1.4] tracking-[.05em]';
 
 function WorkspaceCombo({ value, options, onChange }: {
   value: string;
@@ -53,7 +65,7 @@ function WorkspaceCombo({ value, options, onChange }: {
           onFocus={() => { setOpen(true); setQ(''); }}
           onChange={(e) => setQ(e.target.value)}
           onBlur={() => setTimeout(() => setOpen(false), 130)}
-          className="w-full border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] py-1 pl-7 pr-6 font-[family-name:var(--gs-font-mono)] text-[11px] text-[var(--gs-text)] outline-none placeholder:text-[var(--gs-text-ghost)] focus:border-[var(--gs-border-active)]"
+          className="w-full border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] py-1 pl-7 pr-6 font-[family-name:var(--gs-font)] text-[11px] text-[var(--gs-text)] outline-none placeholder:text-[var(--gs-text-ghost)] focus:border-[var(--gs-border-active)]"
         />
         <span className="pointer-events-none absolute right-2 text-[10px] text-[var(--gs-text-dim)]">▾</span>
       </div>
@@ -67,7 +79,7 @@ function WorkspaceCombo({ value, options, onChange }: {
                   key={o.value}
                   type="button"
                   onMouseDown={() => { onChange(o.value); setOpen(false); }}
-                  className={`block w-full px-[9px] py-1.5 text-left font-[family-name:var(--gs-font-mono)] text-[11px] ${o.value === value ? 'bg-[var(--gs-bg-active)] text-[var(--gs-text)]' : 'text-[var(--gs-text-muted)] hover:bg-[var(--gs-bg-hover)]'}`}
+                  className={`block w-full px-[9px] py-1.5 text-left font-[family-name:var(--gs-font)] text-[11px] ${o.value === value ? 'bg-[var(--gs-bg-active)] text-[var(--gs-text)]' : 'text-[var(--gs-text-muted)] hover:bg-[var(--gs-bg-hover)]'}`}
                 >
                   {o.label}
                 </button>
@@ -81,12 +93,40 @@ function WorkspaceCombo({ value, options, onChange }: {
   );
 }
 
-const PHASE_TONE: Record<string, string> = {
-  plan: 'bg-[#1e3a5f]',
-  code: 'bg-[#4a3a1f]',
-  review: 'bg-[#3a2a4a]',
-  ship: 'bg-[#1f4a2f]',
+/** small star rater for the roll-up rate step (mock: Stars) */
+function Stars({ value, onChange }: { value: number; onChange: (n: number) => void }): ReactElement {
+  return (
+    <span className="inline-flex gap-0.5">
+      {[1, 2, 3, 4, 5].map((n) => (
+        <button
+          key={n}
+          type="button"
+          onClick={() => onChange(n)}
+          className={`px-px text-[16px] leading-none transition-colors active:scale-90 ${n <= value ? 'text-[var(--gs-warning)]' : 'text-[var(--gs-text-ghost)] hover:text-[var(--gs-warning)]'}`}
+        >
+          ★
+        </button>
+      ))}
+    </span>
+  );
+}
+
+/** per-goal status dot on chain rows (mock: .cs-dot) */
+function goalDotClass(g: KanbanGoalItem): string {
+  const base = 'h-2 w-2 flex-none rounded-full border-2';
+  if (g.status === 'planned') return `${base} border-[var(--gs-border-active)] bg-[var(--gs-bg)]`;
+  if (g.phase === 'ship') return `${base} border-[var(--gs-success)] bg-[var(--gs-success)]`;
+  return `${base} border-[var(--gs-accent)] bg-[var(--gs-accent)] shadow-[0_0_8px_var(--gs-accent)]`;
+}
+
+const FIXED_TAB_LABEL: Record<string, string> = {
+  overview: 'Overview',
+  process: 'In process',
+  chains: 'Chains',
+  reports: 'Reports & notes',
 };
+const isDashTab = (t: string): boolean => t.startsWith('dash:');
+const isArtTab = (t: string): boolean => t.startsWith('art:');
 
 export function ProjectHomePage({
   projectName,
@@ -96,6 +136,8 @@ export function ProjectHomePage({
   onBack,
   onOpenWorkspace,
   onOpenGoal,
+  shippedWorkspaces,
+  onRollup,
 }: {
   projectName: string;
   goals: KanbanGoalItem[];
@@ -104,12 +146,29 @@ export function ProjectHomePage({
   onBack: () => void;
   onOpenWorkspace: (workspaceId: string) => void;
   onOpenGoal: (goal: KanbanGoalItem) => void;
+  /** shipped workspaces queued for roll-up (integrator wires from backend rollup) */
+  shippedWorkspaces?: Array<{ name: string; chain: string }>;
+  onRollup?: (workspaceName: string) => Promise<void>;
 }): ReactElement {
   const [artifacts, setArtifacts] = useState<ArtifactEntry[]>([]);
   const [artifactsError, setArtifactsError] = useState<string | null>(null);
   const [feed, setFeed] = useState<FeedItem[]>([]);
-  const [viewerPath, setViewerPath] = useState<string | null>(null);
-  const [section, setSection] = useState<'overview' | 'in-process' | 'chains' | 'reports' | 'artifacts'>('overview');
+
+  // Center multi-tab shell (mock: tabs/active/open/closeTab).
+  const [tabs, setTabs] = useState<string[]>(['overview']);
+  const [active, setActive] = useState<string>('overview');
+  const openTab = useCallback((t: string): void => {
+    setTabs((s) => (s.includes(t) ? s : [...s, t]));
+    setActive(t);
+  }, []);
+  const closeTab = (t: string, e: ReactMouseEvent): void => {
+    e.stopPropagation();
+    setTabs((s) => {
+      const next = s.filter((x) => x !== t);
+      setActive((a) => (a === t ? (next[next.length - 1] ?? 'overview') : a));
+      return next;
+    });
+  };
 
   // Chains grouped from the board's goal items.
   const chains = useMemo(() => {
@@ -171,7 +230,29 @@ export function ProjectHomePage({
     return next;
   });
   const [railView, setRailView] = useState<'sel' | 'fav'>('sel');
-  const [dashboardPath, setDashboardPath] = useState<string | null>(null);
+
+  // Recently shipped roll-up flow (mock: rolled/rating/stars).
+  const shipped = shippedWorkspaces ?? [];
+  const [rolled, setRolled] = useState<Record<string, boolean>>({});
+  const [ratingWs, setRatingWs] = useState<string | null>(null);
+  const [stars, setStars] = useState<Record<string, number>>({});
+  const [rollBusy, setRollBusy] = useState<string | null>(null);
+  const doRollUp = async (name: string): Promise<void> => {
+    if (rollBusy !== null) return;
+    if (!onRollup) {
+      setRolled((r) => ({ ...r, [name]: true }));
+      setRatingWs(null);
+      return;
+    }
+    setRollBusy(name);
+    try {
+      await onRollup(name);
+      setRolled((r) => ({ ...r, [name]: true }));
+      setRatingWs(null);
+      loadArtifacts();
+    } catch { /* keep row for retry */ }
+    setRollBusy(null);
+  };
 
   // Reports & notes feed: project reports/ artifacts + notes across workspaces.
   useEffect(() => {
@@ -180,7 +261,7 @@ export function ProjectHomePage({
       const items: FeedItem[] = [];
       for (const a of artifacts) {
         if (a.path.startsWith('reports/')) {
-          items.push({ kind: 'report', title: a.path.slice('reports/'.length), detail: 'project artifact', path: a.path });
+          items.push({ kind: 'report', surface: a.path.slice('reports/'.length), body: 'project artifact', path: a.path });
         }
       }
       if (backend?.listWorkspaceNotes) {
@@ -193,11 +274,10 @@ export function ProjectHomePage({
         for (const r of results) {
           if (r.status !== 'fulfilled') continue;
           for (const n of r.value.notes) {
-            const rec = n as { title?: string; name?: string; content?: string };
             items.push({
-              kind: 'note',
-              title: rec.title ?? rec.name ?? 'note',
-              detail: `note · ${r.value.ws}`,
+              kind: n.kind === 'todo' ? 'todo' : 'note',
+              surface: r.value.ws,
+              body: n.body,
             });
           }
         }
@@ -219,18 +299,37 @@ export function ProjectHomePage({
   const favEntries = useMemo(() => artifacts.filter((e) => favs.has(e.path)), [artifacts, favs]);
   const dashboards = useMemo(() => artifacts.filter((e) => classifyArtifact(e.path) === 'dashboard'), [artifacts]);
 
-  const navItem = (id: typeof section, label: string, count?: number): ReactElement => (
-    <button
-      key={id}
-      type="button"
-      onClick={() => setSection(id)}
-      className={`flex w-full items-center gap-2 rounded px-2 py-1 text-left text-xs ${
-        section === id ? 'bg-[var(--gs-bg-active)] text-[var(--gs-text)]' : 'text-[var(--gs-text-muted)] hover:bg-[var(--gs-bg-active)]'
-      }`}
-    >
-      <span className="flex-1">{label}</span>
-      {count !== undefined && <span className="text-[10px] text-[var(--gs-text-ghost)]">{count}</span>}
-    </button>
+  const dashName = (path: string): string => (path.split('/').pop() ?? path).replace('.dashboard.json', '');
+  const tabLabel = (t: string): string => {
+    if (isDashTab(t)) return dashName(t.slice(5));
+    if (isArtTab(t)) return `◇ ${t.slice(4).split('/').pop() ?? t.slice(4)}`;
+    return FIXED_TAB_LABEL[t] ?? t;
+  };
+
+  // Sidebar rows (mock: .litem — icon column, inset accent bar when active).
+  const navRow = (opts: { key: string; icon: string; label: string; rt?: string; tab?: string; onClick?: () => void; disabled?: boolean; title?: string }): ReactElement => {
+    const on = opts.tab !== undefined && active === opts.tab;
+    return (
+      <button
+        key={opts.key}
+        type="button"
+        disabled={opts.disabled}
+        title={opts.title}
+        onClick={opts.onClick ?? (opts.tab !== undefined ? () => openTab(opts.tab!) : undefined)}
+        className={`flex w-full items-center gap-[9px] px-[13px] py-[5px] text-left text-[12px] transition-colors ${
+          on
+            ? 'bg-[var(--gs-bg-active)] text-[var(--gs-text)] shadow-[inset_2px_0_0_var(--gs-accent)]'
+            : `text-[var(--gs-text-muted)] ${opts.disabled ? 'cursor-default' : 'hover:bg-[var(--gs-bg-hover)] hover:text-[var(--gs-text)]'}`
+        }`}
+      >
+        <span className={`w-[14px] flex-none text-center ${on ? 'text-[var(--gs-accent)]' : 'text-[var(--gs-text-dim)]'}`}>{opts.icon}</span>
+        <span className="min-w-0 flex-1 truncate">{opts.label}</span>
+        {opts.rt !== undefined && <span className="text-[10.5px] tabular-nums text-[var(--gs-text-dim)]">{opts.rt}</span>}
+      </button>
+    );
+  };
+  const sbGroup = (label: string): ReactElement => (
+    <div className="px-[13px] pb-[5px] pt-[11px] text-[10.5px] uppercase tracking-[.12em] text-[var(--gs-text-dim)]">{label}</div>
   );
 
   const railRow = (e: ArtifactEntry, sub?: string): ReactElement => {
@@ -239,7 +338,7 @@ export function ProjectHomePage({
     return (
       <div
         key={`${sub ?? ''}:${e.path}`}
-        onClick={() => { if (kind === 'dashboard') { setViewerPath(null); setDashboardPath(e.path); } else { setDashboardPath(null); setViewerPath(e.path); } }}
+        onClick={() => openTab(kind === 'dashboard' ? `dash:${e.path}` : `art:${e.path}`)}
         title={e.path}
         className="flex w-full cursor-pointer items-center gap-2 px-3 py-1 text-[11.5px] text-[var(--gs-text-muted)] hover:bg-[var(--gs-bg-hover)] hover:text-[var(--gs-text)]"
       >
@@ -261,199 +360,310 @@ export function ProjectHomePage({
     );
   };
 
-  const showChains = section === 'overview' || section === 'chains';
-  const showInProcess = section === 'overview' || section === 'in-process';
-  const showReports = section === 'overview' || section === 'reports';
+  // Overview card shell (mock: .ph-card / .ph-card-h).
+  const card = (title: string, sub: string | null, right: ReactElement, body: ReactElement): ReactElement => (
+    <div className="border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)]">
+      <div className="flex items-center gap-[9px] border-b border-[var(--gs-border)] bg-[#070707] px-3 py-2">
+        <span className="text-[11px] uppercase tracking-[.1em] text-[var(--gs-text-muted)]">{title}</span>
+        {sub && <span className="text-[11px] text-[var(--gs-text-dim)]">{sub}</span>}
+        <span className="ml-auto">{right}</span>
+      </div>
+      {body}
+    </div>
+  );
+
+  // Chains: grouped slim rows with status-dot strips (mock: .ph-chain).
+  const chainsBody = (
+    <div className="px-3.5 py-3">
+      {chains.length === 0 ? (
+        <div className="text-xs text-[var(--gs-text-dim)]">No goal chains yet — plan one from the board.</div>
+      ) : (
+        chains.map((c) => {
+          const curGoal = c.goals.find((g) => g.workspaceName);
+          const ws = curGoal ? workspaces.find((w) => w.workspace.name === curGoal.workspaceName) : undefined;
+          return (
+            <div
+              key={c.chainId}
+              onClick={() => {
+                if (ws) onOpenWorkspace(ws.workspace.selectionKey);
+                else if (c.goals[0]) onOpenGoal(c.goals[0]);
+              }}
+              className="mb-[5px] flex cursor-pointer items-center gap-2.5 border border-[var(--gs-border-muted)] px-[9px] py-[7px] transition-colors last:mb-0 hover:border-[var(--gs-border-active)] hover:bg-[var(--gs-bg-hover)]"
+            >
+              <span className="text-[12.5px] text-[var(--gs-text)]">{c.title}</span>
+              <span className="ml-1.5 inline-flex gap-1">
+                {c.goals.map((g) => (
+                  <span key={g.id} title={`${g.title} · ${g.status === 'planned' ? 'planned' : g.phase}`} className={goalDotClass(g)} />
+                ))}
+              </span>
+              <span className="ml-auto text-[10.5px] text-[var(--gs-text-dim)]">{c.goals.length} goal{c.goals.length === 1 ? '' : 's'}</span>
+            </div>
+          );
+        })
+      )}
+    </div>
+  );
+
+  // In process: borderless hover rows (mock: .ph-proc).
+  const inProcessBody = (
+    <div className="px-3.5 py-3">
+      {inProcess.length === 0 ? (
+        <div className="text-xs text-[var(--gs-text-dim)]">Nothing in flight.</div>
+      ) : (
+        inProcess.map((w) => (
+          <div
+            key={w.workspace.selectionKey}
+            onClick={() => onOpenWorkspace(w.workspace.selectionKey)}
+            className="flex cursor-pointer items-center gap-[9px] px-[9px] py-1.5 hover:bg-[var(--gs-bg-hover)]"
+          >
+            {w.agentSessionCount > 0 && <span className="h-[7px] w-[7px] flex-none animate-pulse rounded-full bg-[var(--gs-accent)]" />}
+            <span className="font-[family-name:var(--gs-font)] text-[12px] text-[var(--gs-text)]">{w.workspace.name}</span>
+            {w.workspace.phase && <span className={`${CHIP} bg-[var(--gs-chip-dim-bg)] text-[var(--gs-text-dim)]`}>{w.workspace.phase}</span>}
+            <span className="ml-auto text-[10.5px] text-[var(--gs-text-dim)]">
+              {w.agentSessionCount > 0 ? 'agent running' : w.pendingPermissionCount > 0 ? `⚡ ${w.pendingPermissionCount} pending` : ''}
+            </span>
+          </div>
+        ))
+      )}
+    </div>
+  );
+
+  // Reports & notes: kind chip + two-line body + actions row (mock: ReportRow).
+  const feedBody = (
+    <div className="flex flex-col">
+      {feed.length === 0 ? (
+        <div className="px-3.5 py-3 text-xs text-[var(--gs-text-dim)]">No reports or notes yet — roll-ups and workspace notes land here.</div>
+      ) : (
+        feed.map((f, i) => {
+          const chip = FEED_CHIP[f.kind];
+          return (
+            <div key={`${f.kind}:${f.surface}:${i}`} className="flex gap-2.5 border-b border-[var(--gs-border-muted)] px-3.5 py-[9px] last:border-b-0">
+              <span className={`${CHIP} ${chip.cls}`}>{chip.label}</span>
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2">
+                  {f.path ? (
+                    <button
+                      type="button"
+                      onClick={() => openTab(`art:${f.path}`)}
+                      className="font-[family-name:var(--gs-font)] text-[11.5px] text-[var(--gs-text)] hover:underline"
+                    >
+                      {f.surface}
+                    </button>
+                  ) : (
+                    <span className="font-[family-name:var(--gs-font)] text-[11.5px] text-[var(--gs-text)]">{f.surface}</span>
+                  )}
+                </div>
+                {f.body && <div className="mt-[3px] text-[12px] leading-[1.45] text-[var(--gs-text-muted)]">{f.body}</div>}
+                <div className="mt-1.5 flex gap-[7px]">
+                  <button type="button" disabled title="planning from notes ships next" className={XS_BTN}>＋ Plan from this</button>
+                </div>
+              </div>
+            </div>
+          );
+        })
+      )}
+    </div>
+  );
 
   return (
-    <div className="flex h-screen w-screen flex-col bg-[var(--gs-bg)] text-[13px]">
-      {/* header */}
-      <div className="flex flex-shrink-0 items-center gap-3 border-b border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-3 py-2">
-        <button type="button" onClick={onBack} className="text-xs text-[var(--gs-text-dim)] hover:text-[var(--gs-text)]">← Board</button>
-        <span className="font-[family-name:var(--gs-font-mono)] text-sm font-medium text-[var(--gs-text)]">{projectName}</span>
-        <span className="text-xs text-[var(--gs-text-ghost)]">project home · {chains.length} chain{chains.length === 1 ? '' : 's'} · {workspaces.length} workspace{workspaces.length === 1 ? '' : 's'}</span>
-      </div>
+    <div className="flex h-screen w-screen bg-[var(--gs-bg)] text-[13px]">
+      {/* sidebar (mock: .ph-sb) */}
+      <aside className="flex w-[220px] flex-none flex-col border-r border-[var(--gs-border)] bg-[#050505]">
+        <div className="flex flex-none flex-col gap-[7px] border-b border-[var(--gs-border)] px-[13px] py-[11px]">
+          <span className="font-[family-name:var(--gs-font)] text-[13px] text-[var(--gs-text)]">{projectName}</span>
+          <button
+            type="button"
+            onClick={onBack}
+            className="self-start border border-[var(--gs-border)] px-2 py-[3px] text-[11px] text-[var(--gs-text-muted)] hover:border-[var(--gs-border-active)] hover:text-[var(--gs-text)]"
+          >
+            ⊞ All projects
+          </button>
+        </div>
+        <div className="min-h-0 flex-1 overflow-y-auto pb-2">
+          {sbGroup('Agent')}
+          {navRow({ key: 'agent', icon: '✦', label: 'Project agent', rt: 'live', disabled: true, title: 'project agent ships next' })}
+          {navRow({ key: 'new-thread', icon: '＋', label: 'New thread', disabled: true, title: 'project agent ships next' })}
 
-      <div className="flex min-h-0 flex-1">
-        {/* sidebar */}
-        <div className="flex w-[190px] flex-shrink-0 flex-col gap-0.5 border-r border-[var(--gs-border-muted)] p-2">
-          <div className="px-2 pb-1 text-[10px] uppercase tracking-wider text-[var(--gs-text-ghost)]">Project</div>
-          {navItem('overview', 'Overview')}
-          {navItem('in-process', 'In process', inProcess.length)}
-          {navItem('chains', 'Chains', chains.length)}
-          {navItem('reports', 'Reports & notes', feed.length)}
-          {navItem('artifacts', 'Artifacts', artifacts.length)}
-          <div className="px-2 pb-1 pt-3 text-[10px] uppercase tracking-wider text-[var(--gs-text-ghost)]">Dashboards</div>
-          {dashboards.length === 0 && <div className="px-2 text-[10px] text-[var(--gs-text-ghost)]">none in {artifactSource === 'main' ? 'main' : 'workspace'}</div>}
-          {dashboards.map((d) => (
-            <button
-              key={d.path}
-              type="button"
-              onClick={() => { setViewerPath(null); setDashboardPath(d.path); }}
-              className="flex w-full items-center gap-2 rounded px-2 py-1 text-left text-xs text-[var(--gs-text-muted)] hover:bg-[var(--gs-bg-active)]"
+          {sbGroup('Project')}
+          {navRow({ key: 'overview', icon: '◎', label: 'Overview', tab: 'overview' })}
+          {navRow({ key: 'process', icon: '◷', label: 'In process', rt: String(inProcess.length), tab: 'process' })}
+          {navRow({ key: 'reports', icon: '⚑', label: 'Reports & notes', rt: String(feed.length), tab: 'reports' })}
+          {navRow({ key: 'chains', icon: '⛓', label: 'Chains', rt: String(chains.length), tab: 'chains' })}
+          {navRow({ key: 'crons', icon: '◷', label: 'Crons & triggers', disabled: true, title: 'trigger backend ships next' })}
+
+          {sbGroup('Dashboards')}
+          {dashboards.length === 0 && (
+            <div className="px-[13px] text-[10px] text-[var(--gs-text-ghost)]">none in {artifactSource === 'main' ? 'main' : 'workspace'}</div>
+          )}
+          {dashboards.map((d) => navRow({ key: `dash:${d.path}`, icon: '▦', label: dashName(d.path), tab: `dash:${d.path}` }))}
+          {navRow({ key: 'new-dash', icon: '＋', label: 'New dashboard', disabled: true, title: 'dashboard creation ships next' })}
+
+          {sbGroup('Config')}
+          {navRow({ key: 'config', icon: '⚙', label: 'Bundle config', disabled: true, title: 'bundle config editor ships next' })}
+        </div>
+      </aside>
+
+      {/* center: multi-tab shell (mock: .ph-center + .tabstrip) */}
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+        <div className="flex h-[34px] flex-none items-stretch overflow-x-auto border-b border-[var(--gs-border)] bg-[#050505]">
+          {tabs.map((t) => (
+            <div
+              key={t}
+              onClick={() => setActive(t)}
+              className={`flex cursor-pointer items-center gap-1.5 whitespace-nowrap border-r border-[var(--gs-border)] px-[13px] text-[11.5px] transition-colors ${
+                active === t ? 'bg-[var(--gs-bg)] text-[var(--gs-text)] shadow-[inset_0_-2px_0_var(--gs-accent)]' : 'text-[var(--gs-text-muted)] hover:text-[var(--gs-text)]'
+              }`}
             >
-              <span className="text-[var(--gs-accent)]">▦</span>
-              <span className="min-w-0 flex-1 truncate">{(d.path.split('/').pop() ?? d.path).replace('.dashboard.json', '')}</span>
-            </button>
+              {isDashTab(t) && <span className={`mr-px ${active === t ? 'text-[var(--gs-success)]' : 'text-[var(--gs-text-dim)]'}`}>▦</span>}
+              <span>{tabLabel(t)}</span>
+              {t !== 'overview' && (
+                <span
+                  onClick={(e) => closeTab(t, e)}
+                  className="p-0.5 text-[10px] leading-none text-[var(--gs-text-ghost)] hover:text-[var(--gs-danger)]"
+                >
+                  ✕
+                </span>
+              )}
+            </div>
           ))}
         </div>
 
-        {/* center */}
-        <div className="min-w-0 flex-1 overflow-y-auto p-4">
-          {viewerPath !== null || dashboardPath !== null ? (
-            <div className="flex h-full min-h-0 flex-col">
-              <button
-                type="button"
-                onClick={() => { setViewerPath(null); setDashboardPath(null); }}
-                className="mb-2 self-start text-xs text-[var(--gs-text-dim)] hover:text-[var(--gs-text)]"
-              >
-                ← back
-              </button>
-              <div className="min-h-0 flex-1 border border-[var(--gs-border)]">
-                {dashboardPath !== null ? (
-                  <DashboardPanel dashboardPath={dashboardPath} scopeLabel={artifactSource === 'main' ? 'project · main' : 'workspace'} read={readArtifactFromSource} />
-                ) : (
-                  <ArtifactPanel path={viewerPath!} read={readArtifactFromSource} />
-                )}
-              </div>
+        <div className="min-h-0 flex-1 overflow-hidden">
+          {active === 'overview' && (
+            <div className="flex h-full flex-col gap-3.5 overflow-y-auto px-[18px] py-4">
+              {card(
+                'Chains',
+                'grouped · tag into epics',
+                <button type="button" disabled title="plan a chain from the board" className={XS_BTN}>＋ New</button>,
+                chainsBody,
+              )}
+              {card(
+                'In process',
+                null,
+                <button type="button" onClick={() => openTab('process')} className={XS_BTN}>open ↗</button>,
+                inProcessBody,
+              )}
+              {card(
+                'Reports & notes',
+                'reflect → plan',
+                <button type="button" onClick={() => openTab('reports')} className={XS_BTN}>open feed ↗</button>,
+                feedBody,
+              )}
             </div>
-          ) : section === 'artifacts' ? (
-            <div className="max-w-[620px]">
-              {kindGroups.map(([kind, files]) => (
-                <div key={kind}>
-                  <div className="px-1 pb-0.5 pt-2 text-[10px] uppercase tracking-wider text-[var(--gs-text-ghost)]">{KIND_LABEL[kind]}</div>
-                  {files.map((e) => railRow(e))}
-                </div>
-              ))}
-              {kindGroups.length === 0 && <div className="px-2 py-4 text-xs text-[var(--gs-text-dim)]">No artifacts in this source yet.</div>}
+          )}
+          {active === 'process' && <div className="h-full overflow-y-auto">{inProcessBody}</div>}
+          {active === 'chains' && <div className="h-full overflow-y-auto">{chainsBody}</div>}
+          {active === 'reports' && <div className="h-full overflow-y-auto">{feedBody}</div>}
+          {isDashTab(active) && (
+            <div className="h-full min-h-0">
+              <DashboardPanel
+                dashboardPath={active.slice(5)}
+                scopeLabel={artifactSource === 'main' ? 'project · main' : 'workspace'}
+                read={readArtifactFromSource}
+              />
             </div>
-          ) : (
-            <>
-              {showChains && (
-                <section className="mb-5">
-                  <div className="mb-2 text-[10px] uppercase tracking-wider text-[var(--gs-text-ghost)]">Chains</div>
-                  {chains.length === 0 ? (
-                    <div className="text-xs text-[var(--gs-text-dim)]">No goal chains yet — plan one from the board.</div>
-                  ) : (
-                    <div className="flex flex-col gap-2">
-                      {chains.map((c) => (
-                        <div key={c.chainId} className="border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-3 py-2">
-                          <div className="mb-1.5 flex items-center gap-2">
-                            <span className="text-[var(--gs-text)]">⛓ {c.title}</span>
-                            <span className="text-[10px] text-[var(--gs-text-ghost)]">{c.goals.length} goal{c.goals.length === 1 ? '' : 's'}</span>
-                          </div>
-                          <div className="flex flex-wrap gap-1.5">
-                            {c.goals.map((g) => (
-                              <button
-                                key={g.id}
-                                type="button"
-                                onClick={() => onOpenGoal(g)}
-                                title={`${g.title} · ${g.phase}${g.status === 'planned' ? ' · planned' : ''}`}
-                                className={`flex items-center gap-1.5 rounded-full border border-[var(--gs-border)] px-2 py-0.5 text-[11px] ${g.status === 'planned' ? 'text-[var(--gs-text-dim)]' : 'text-[var(--gs-text)]'} hover:border-[var(--gs-text-dim)]`}
-                              >
-                                <span className={`h-1.5 w-1.5 rounded-full ${PHASE_TONE[g.phase] ?? 'bg-[var(--gs-border)]'}`} />
-                                <span className="max-w-[220px] truncate">{g.title}</span>
-                              </button>
-                            ))}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </section>
-              )}
-
-              {showInProcess && (
-                <section className="mb-5">
-                  <div className="mb-2 text-[10px] uppercase tracking-wider text-[var(--gs-text-ghost)]">In process</div>
-                  {inProcess.length === 0 ? (
-                    <div className="text-xs text-[var(--gs-text-dim)]">Nothing in flight.</div>
-                  ) : (
-                    <div className="flex flex-col gap-1">
-                      {inProcess.map((w) => (
-                        <button
-                          key={w.workspace.selectionKey}
-                          type="button"
-                          onClick={() => onOpenWorkspace(w.workspace.selectionKey)}
-                          className="flex items-center gap-2 border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-3 py-1.5 text-left hover:border-[var(--gs-text-dim)]"
-                        >
-                          <span className={`h-2 w-2 flex-shrink-0 rounded-full ${w.stripStatus.primaryColor === 'red' ? 'bg-[var(--gs-danger)]' : w.stripStatus.primaryColor === 'orange' ? 'bg-[var(--gs-warning)]' : w.stripStatus.primaryColor === 'blue' ? 'bg-[var(--gs-info)]' : 'bg-[var(--gs-border)]'}`} />
-                          <span className="min-w-0 flex-1 truncate font-[family-name:var(--gs-font-mono)] text-[12px] text-[var(--gs-text)]">{w.workspace.name}</span>
-                          {w.workspace.phase && <span className="rounded-full border border-[var(--gs-border)] px-1.5 text-[10px] uppercase text-[var(--gs-text-dim)]">{w.workspace.phase}</span>}
-                          {w.agentSessionCount > 0 && <span className="text-[10px] text-[var(--gs-accent)]">✦ {w.agentSessionCount} agent{w.agentSessionCount === 1 ? '' : 's'}</span>}
-                          {w.pendingPermissionCount > 0 && <span className="text-[10px] text-[var(--gs-warning)]">⚡ {w.pendingPermissionCount}</span>}
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </section>
-              )}
-
-              {showReports && (
-                <section className="mb-5">
-                  <div className="mb-2 text-[10px] uppercase tracking-wider text-[var(--gs-text-ghost)]">Reports & notes</div>
-                  {feed.length === 0 ? (
-                    <div className="text-xs text-[var(--gs-text-dim)]">No reports or notes yet — roll-ups and workspace notes land here.</div>
-                  ) : (
-                    <div className="flex flex-col gap-1">
-                      {feed.map((f, i) => (
-                        <button
-                          key={`${f.kind}:${f.title}:${i}`}
-                          type="button"
-                          disabled={!f.path}
-                          onClick={() => f.path && setViewerPath(f.path)}
-                          className={`flex items-center gap-2 border border-[var(--gs-border-muted)] px-3 py-1.5 text-left ${f.path ? 'hover:border-[var(--gs-text-dim)]' : 'cursor-default'}`}
-                        >
-                          <span className={`rounded-full border px-1.5 text-[9px] uppercase ${f.kind === 'report' ? 'border-[#1f4a2f] text-[var(--gs-accent)]' : 'border-[var(--gs-border)] text-[var(--gs-text-dim)]'}`}>{f.kind}</span>
-                          <span className="min-w-0 flex-1 truncate text-[12px] text-[var(--gs-text)]">{f.title}</span>
-                          <span className="text-[10px] text-[var(--gs-text-ghost)]">{f.detail}</span>
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </section>
-              )}
-            </>
+          )}
+          {isArtTab(active) && (
+            <div className="h-full min-h-0">
+              <ArtifactPanel path={active.slice(4)} read={readArtifactFromSource} />
+            </div>
           )}
         </div>
-
-        {/* right: project artifacts rail (mock: ProjectArtifactsRail) */}
-        {section !== 'artifacts' && (
-          <div className="gs-ui hidden w-[300px] flex-shrink-0 flex-col overflow-hidden border-l border-[var(--gs-border-muted)] lg:flex">
-            <WorkspaceCombo
-              value={artifactSource}
-              options={sourceOptions.map((o) => ({ value: o.value, label: o.label, chain: o.chain }))}
-              onChange={(v) => { setArtifactSource(v); setViewerPath(null); setDashboardPath(null); }}
-            />
-            <div className="flex border-b border-[var(--gs-border)]">
-              <button type="button" onClick={() => setRailView('sel')} className={`flex-1 py-[7px] text-[11px] ${railView === 'sel' ? 'bg-[var(--gs-bg-elevated)] text-[var(--gs-text)] shadow-[inset_0_-2px_0_var(--gs-accent)]' : 'text-[var(--gs-text-muted)]'}`}>Artifacts</button>
-              <button type="button" onClick={() => setRailView('fav')} className={`flex-1 py-[7px] text-[11px] ${railView === 'fav' ? 'bg-[var(--gs-bg-elevated)] text-[var(--gs-text)] shadow-[inset_0_-2px_0_var(--gs-accent)]' : 'text-[var(--gs-text-muted)]'}`}>★ Favorites <span className="text-[var(--gs-text-ghost)]">{favs.size > 0 ? favs.size : ''}</span></button>
-            </div>
-            <div className="min-h-0 flex-1 overflow-y-auto py-1.5">
-            {artifactsError ? (
-              <div className="px-3 py-3 text-[11px] text-[var(--gs-danger)]">{artifactsError}</div>
-            ) : (railView === 'fav' ? (
-              favEntries.length === 0
-                ? <div className="px-3 py-[18px] text-[12px] text-[var(--gs-text-dim)]">No favorites yet — ★ an artifact to pin it across the project.</div>
-                : favEntries.map((e) => railRow(e))
-            ) : kindGroups.length === 0 ? (
-              <div className="px-3 py-[18px] text-[12px] text-[var(--gs-text-dim)]">
-                No artifacts in this source yet.
-                <div className="mt-1 text-[10px] text-[var(--gs-text-ghost)]">Roll up a workspace to promote artifacts to main.</div>
-              </div>
-            ) : (
-              kindGroups.map(([kind, files]) => (
-                <div key={kind}>
-                  <div className="px-3 pb-[3px] pt-[9px] text-[10px] uppercase tracking-[.12em] text-[var(--gs-text-dim)]">{KIND_LABEL[kind]}</div>
-                  {files.map((e) => railRow(e))}
-                </div>
-              ))
-            ))}
-            </div>
-          </div>
-        )}
       </div>
 
+      {/* right: project artifacts rail (mock: ProjectArtifactsRail) + shipped queue */}
+      <div className="gs-ui hidden w-[300px] flex-shrink-0 flex-col overflow-hidden border-l border-[var(--gs-border-muted)] lg:flex">
+        <div className="flex min-h-0 flex-1 flex-col">
+          <WorkspaceCombo
+            value={artifactSource}
+            options={sourceOptions.map((o) => ({ value: o.value, label: o.label, chain: o.chain }))}
+            onChange={(v) => setArtifactSource(v)}
+          />
+          <div className="flex border-b border-[var(--gs-border)]">
+            <button type="button" onClick={() => setRailView('sel')} className={`flex-1 py-[7px] text-[11px] ${railView === 'sel' ? 'bg-[var(--gs-bg-elevated)] text-[var(--gs-text)] shadow-[inset_0_-2px_0_var(--gs-accent)]' : 'text-[var(--gs-text-muted)]'}`}>Artifacts</button>
+            <button type="button" onClick={() => setRailView('fav')} className={`flex-1 py-[7px] text-[11px] ${railView === 'fav' ? 'bg-[var(--gs-bg-elevated)] text-[var(--gs-text)] shadow-[inset_0_-2px_0_var(--gs-accent)]' : 'text-[var(--gs-text-muted)]'}`}>★ Favorites <span className="text-[var(--gs-text-ghost)]">{favs.size > 0 ? favs.size : ''}</span></button>
+          </div>
+          <div className="min-h-0 flex-1 overflow-y-auto py-1.5">
+          {artifactsError ? (
+            <div className="px-3 py-3 text-[11px] text-[var(--gs-danger)]">{artifactsError}</div>
+          ) : (railView === 'fav' ? (
+            favEntries.length === 0
+              ? <div className="px-3 py-[18px] text-[12px] text-[var(--gs-text-dim)]">No favorites yet — ★ an artifact to pin it across the project.</div>
+              : favEntries.map((e) => railRow(e))
+          ) : kindGroups.length === 0 ? (
+            <div className="px-3 py-[18px] text-[12px] text-[var(--gs-text-dim)]">
+              No artifacts in this source yet.
+              <div className="mt-1 text-[10px] text-[var(--gs-text-ghost)]">Roll up a workspace to promote artifacts to main.</div>
+            </div>
+          ) : (
+            kindGroups.map(([kind, files]) => (
+              <div key={kind}>
+                <div className="px-3 pb-[3px] pt-[9px] text-[10.5px] uppercase tracking-[.12em] text-[var(--gs-text-dim)]">{KIND_LABEL[kind]}</div>
+                {files.map((e) => railRow(e))}
+              </div>
+            ))
+          ))}
+          </div>
+        </div>
+
+        {/* Recently shipped queue with roll-up flow (mock: rsection.changes) */}
+        <div className="flex max-h-[46%] min-h-0 flex-none flex-col border-t border-[var(--gs-border)]">
+          <div className="flex h-[30px] flex-none items-center gap-[7px] border-b border-[var(--gs-border-muted)] px-3 text-[10px] uppercase tracking-[.1em] text-[var(--gs-text-muted)]">
+            <span>▾</span> Recently shipped
+            <span className="ml-auto normal-case tracking-normal text-[var(--gs-text-dim)]">
+              <span className="text-[var(--gs-text-ghost)]">deletion check → </span>roll up
+            </span>
+          </div>
+          <div className="min-h-0 flex-1 overflow-y-auto py-1.5">
+            {shipped.length === 0 ? (
+              <div className="px-3 py-2.5 text-[11px] text-[var(--gs-text-dim)]">Nothing shipped yet — shipped workspaces queue here for roll-up.</div>
+            ) : (
+              shipped.map((s) => {
+                const done = rolled[s.name] === true;
+                const rated = ratingWs === s.name;
+                return (
+                  <div
+                    key={s.name}
+                    className={`flex flex-col gap-[7px] border-b border-[var(--gs-border-muted)] px-3 py-[7px] last:border-b-0 ${rated ? 'bg-[rgba(188,140,255,0.04)]' : ''}`}
+                  >
+                    <div className="flex items-center gap-[9px]">
+                      <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                        <span className="font-[family-name:var(--gs-font)] text-[11.5px] text-[var(--gs-text)]">{s.name}</span>
+                        <span className="text-[10px] text-[var(--gs-text-dim)]">{s.chain} · shipped</span>
+                      </div>
+                      {done
+                        ? <span className={`${CHIP} bg-[var(--gs-chip-green-bg)] text-[var(--gs-chip-green-text)]`}>rolled up</span>
+                        : !rated && <button type="button" onClick={() => setRatingWs(s.name)} className={XS_BTN}>Check & roll up</button>}
+                    </div>
+                    {rated && !done && (
+                      <div className="border border-[rgba(188,140,255,0.2)] bg-[var(--gs-bg)] px-2.5 py-2">
+                        <div className="mb-[7px] text-[10.5px] text-[var(--gs-purple)]">
+                          Rate the artifacts you're rolling up <span className="text-[var(--gs-text-dim)]">— feeds rated precedents</span>
+                        </div>
+                        <div className="flex items-center gap-2 py-0.5">
+                          <span className="min-w-0 flex-1 truncate text-[11px] text-[var(--gs-text-muted)]">artifacts · {s.name}</span>
+                          <Stars value={stars[s.name] ?? 0} onChange={(v) => setStars((m) => ({ ...m, [s.name]: v }))} />
+                        </div>
+                        <div className="mt-2 flex justify-end gap-1.5">
+                          <button type="button" onClick={() => setRatingWs(null)} className={XS_BTN}>Cancel</button>
+                          <button
+                            type="button"
+                            disabled={rollBusy === s.name}
+                            onClick={() => { void doRollUp(s.name); }}
+                            className="border border-[var(--gs-accent)] bg-[var(--gs-accent)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--gs-text-on-accent)] hover:bg-[var(--gs-accent-hover)] disabled:opacity-40"
+                          >
+                            {rollBusy === s.name ? 'Rolling up…' : 'Roll up →'}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })
+            )}
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

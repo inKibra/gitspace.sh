@@ -43,6 +43,7 @@ import { EvidencePanel } from "./components/EvidencePanel.web.js";
 import { ReportPanel } from "./components/ReportPanel.web.js";
 import { WorkflowPanel } from "./components/WorkflowPanel.web.js";
 import { EventLogPane } from "./components/EventLogPane.web.js";
+import { CronsPanel } from "./components/CronsPanel.web.js";
 import { RightRail, RepoFilePanel, type RepoFileOpen } from "./components/RightRail.web.js";
 import { ProjectHomePage } from "./pages/ProjectHomePage.web.js";
 import { useInboxPage } from './app/react/index.js';
@@ -2812,6 +2813,12 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
             onClose: closeExtra,
             render: () => (
               <DashboardPanel
+                listApps={async () => {
+                  const fn = paneBackend?.listWorkspaceArtifacts;
+                  if (!fn) return [];
+                  const arts = await fn.call(paneBackend, workspace.id);
+                  return arts.map((a) => a.path).filter((x) => x.endsWith('.gssh.html'));
+                }}
                 dashboardPath={extra.path}
                 scopeLabel={workspace.name}
                 read={(p) => {
@@ -2892,6 +2899,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
                 projectName={workspace.projectName}
                 workspaceName={workspace.name}
                 onOpenFile={(path) => openSingletonPane(wsKey, { kind: 'file', path, changed: true })}
+                onOpenRubric={() => openSingletonPane(wsKey, { kind: 'rubric' })}
                 humanGatePending={workspaceGoalForPanels?.validation
                   ? Object.values(workspaceGoalForPanels.validation.requirements ?? {}).filter((r) =>
                       r.required !== false
@@ -2911,10 +2919,10 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
             render: () => (
               <ReviewRubric
                 goal={workspaceGoalForPanels?.validation ? { id: workspaceGoalForPanels.id, title: workspaceGoalForPanels.title, validation: workspaceGoalForPanels.validation } : null}
-                onRecordHuman={async (requirementId, decision, note) => {
+                onRecordHuman={async (requirementId, decision, note, score) => {
                   const be = paneBackendKey ? multi.getBackend(paneBackendKey) : null;
                   const mapped = decision === 'pass' ? 'pass' : decision === 'partial' ? 'changes' : 'fail';
-                  await be?.recordGoalHumanReview?.(workspace.projectName, workspaceGoalForPanels!.id, requirementId, mapped, note);
+                  await be?.recordGoalHumanReview?.(workspace.projectName, workspaceGoalForPanels!.id, requirementId, mapped, note, score);
                 }}
                 onRunJudgment={async (requirementId) => {
                   const be = paneBackendKey ? multi.getBackend(paneBackendKey) : null;
@@ -2935,6 +2943,8 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
                 backend={paneBackend}
                 workspaceId={workspace.id}
                 onOpenArtifact={(path) => openSingletonPane(wsKey, { kind: 'artifact', path })}
+                onOpenRubric={() => openSingletonPane(wsKey, { kind: 'rubric' })}
+                onOpenGoal={() => openSingletonPane(wsKey, { kind: 'goal' })}
               />
             ),
           });
@@ -2962,22 +2972,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
             title: '◷ Crons & triggers',
             version: 'crons',
             onClose: closeExtra,
-            render: () => (
-              <div className="flex h-full min-h-0 flex-col text-[12px]">
-                <div className="flex flex-shrink-0 items-center gap-2 border-b border-[var(--gs-border-muted)] px-3 py-1.5">
-                  <span className="text-[var(--gs-accent)]">◷</span>
-                  <span className="text-[var(--gs-text)]">Crons & triggers</span>
-                  <span className="text-[10px] text-[var(--gs-text-ghost)]">ship stage · scheduled + event-driven agents</span>
-                </div>
-                <div className="flex flex-1 flex-col items-center justify-center gap-1 text-center">
-                  <span className="text-[var(--gs-text-dim)]">No triggers yet.</span>
-                  <span className="max-w-[420px] text-[11px] text-[var(--gs-text-ghost)]">
-                    The trigger registry (cron / event / manual runs that write data artifacts) ships next — runs will
-                    surface here and as ⟳ last-run chips on data artifacts.
-                  </span>
-                </div>
-              </div>
-            ),
+            render: () => <CronsPanel triggers={[]} live={((workspace as { phase?: string }).phase ?? 'code') === 'ship'} />,
           });
         } else if (extra.kind === 'report') {
           panels.push({

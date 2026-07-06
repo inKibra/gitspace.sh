@@ -1269,9 +1269,10 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     return { requirement: goal.validation.requirements[requirementId], review: parsed.review };
   }
 
-  async recordGoalHumanReview(projectName: string, goalId: string, requirementId: string, decision: HumanReviewDecision, note: string, createdBy?: string): Promise<import('../../types/goals.js').Review> {
+  async recordGoalHumanReview(projectName: string, goalId: string, requirementId: string, decision: HumanReviewDecision, note: string, score?: number, createdBy?: string): Promise<import('../../types/goals.js').Review> {
     const workspaceId = this.getWorkspaceIdForGoal(projectName, goalId);
     const parts = ['goal', 'review', 'record', '--goal', goalId, '--requirement', requirementId, '--decision', decision, '--body', note, '--json'];
+    if (score !== undefined) parts.push('--score', String(score));
     if (createdBy) parts.push('--created-by', createdBy);
     const output = await this.runSpaceCommand(workspaceId, parts.map((part) => /\s/.test(part) ? JSON.stringify(part) : part).join(' '));
     const parsed = JSON.parse(this.unwrapSpaceCommandOutput(output)) as { goalId: string; requirementId: string; review: import('../../types/goals.js').Review };

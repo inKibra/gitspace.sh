@@ -517,6 +517,7 @@ export function recordSpaceGoalHumanReview(ctx: SpaceCommandContext, options: {
   body?: string;
   file?: string;
   stdin?: boolean;
+  score?: number;
   createdBy?: string;
   json?: boolean;
 }): void {
@@ -527,7 +528,7 @@ export function recordSpaceGoalHumanReview(ctx: SpaceCommandContext, options: {
   const goal = resolveGoalForOption(ctx, options.goal);
   const requirement = resolveRequirement(goal, options.requirement);
   const note = readOptionalBody(options) ?? '';
-  const result = recordHumanReview(goal, requirement.id, options.decision as HumanReviewDecision, note, undefined, options.createdBy);
+  const result = recordHumanReview(goal, requirement.id, options.decision as HumanReviewDecision, note, options.score, options.createdBy);
   writeGoalRecord(ctx.project, result.goal);
   if (options.json) {
     printJson({ goalId: goal.id, requirementId: requirement.id, review: result.review });

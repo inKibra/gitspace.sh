@@ -148,7 +148,7 @@ export interface SessionBackend {
   attachGoalEvidence?(projectName: string, goalId: string, requirementId: string, input: import('../core/goal-validation.js').AttachEvidenceInput): Promise<import('../types/goals.js').Evidence>;
   runGoalGeneration?(projectName: string, goalId: string, requirementId: string): Promise<{ requirement: import('../types/goals.js').Requirement; evidence: import('../types/goals.js').Evidence; autoAccepted: boolean }>;
   runGoalJudgment?(projectName: string, goalId: string, requirementId: string): Promise<{ requirement: import('../types/goals.js').Requirement; review: import('../types/goals.js').Review }>;
-  recordGoalHumanReview?(projectName: string, goalId: string, requirementId: string, decision: import('../core/goal-validation.js').HumanReviewDecision, note: string, createdBy?: string): Promise<import('../types/goals.js').Review>;
+  recordGoalHumanReview?(projectName: string, goalId: string, requirementId: string, decision: import('../core/goal-validation.js').HumanReviewDecision, note: string, score?: number, createdBy?: string): Promise<import('../types/goals.js').Review>;
   listSessions(workspaceId?: string): Promise<void>;
   listReplays?(workspaceId?: string, includeDismissed?: boolean): Promise<void>;
   createProject(params: CreateProjectParams): Promise<void>;
