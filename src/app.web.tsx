@@ -2966,11 +2966,17 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
                     const sessions = await be.createAgentSession(workspace.id, 'review guide narrator');
                     const created = sessions.find((x) => x.title === 'review guide narrator') ?? sessions[sessions.length - 1];
                     if (!created) { toast.error('Failed to create the narrator session.'); return; }
-                    await be.promptAgentSession(
-                      workspace.id,
-                      created.id,
-                      'Use the review-guide-narrator skill to generate the review guide for this workspace. Follow the skill exactly: analyze, narrate stale clusters in order, submit, fix validation errors until the submit succeeds.',
-                    );
+                    // Fresh sessions need discovery before they accept prompts — retry briefly.
+                    const kickoff = 'Use the review-guide-narrator skill to generate the review guide for this workspace. Follow the skill exactly: analyze, narrate stale clusters in order, submit, fix validation errors until the submit succeeds.';
+                    let sent = false;
+                    for (let attempt = 0; attempt < 4 && !sent; attempt++) {
+                      if (attempt > 0) await new Promise((r) => setTimeout(r, 2000 * attempt));
+                      try {
+                        await be.promptAgentSession(workspace.id, created.id, kickoff);
+                        sent = true;
+                      } catch { /* retry */ }
+                    }
+                    if (!sent) { toast.error('Narrator session created but the kickoff prompt failed — open it and prompt manually.'); return; }
                     toast.success('Narrator session started — the guide will appear when it submits.');
                   } catch (err) {
                     toast.error(err instanceof Error ? err.message : 'Failed to start the narrator.');
