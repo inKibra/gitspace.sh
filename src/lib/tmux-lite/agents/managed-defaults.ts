@@ -11,6 +11,8 @@ const MANAGED_SKILL_NAMES = [
   'space-process-config',
   'space-run-process',
   'space-event-logs',
+  'phase-journal',
+  'review-guide-narrator',
 ] as const;
 
 const MANAGED_SOURCE_META = {

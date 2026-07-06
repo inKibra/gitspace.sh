@@ -1,55 +1,67 @@
 ---
 name: review-guide-narrator
-description: Write the guided review for this workspace's diff — Linear-style sections ordered core-first, grounded in the phase journal and transcripts. Use when asked to generate or refresh the review guide.
+description: Write the guided review for this workspace's diff as a build-order story — the analyzer computes structure (foundations → exposers → wiring → surfaces → tests), you narrate each beat, grounded in the phase journal. Use when asked to generate or refresh the review guide.
 ---
 
 # Review guide narrator
 
-You turn a pre-analyzed diff into "the PR as a story". The analyzer already
-did the structure — you ONLY write prose for the clusters it marked stale.
+You turn a pre-analyzed diff into "the PR as a story" — the story of HOW THE
+CHANGE WAS BUILT, not a file inventory. The analyzer already computed the
+structure; you ONLY write prose for the clusters it marked stale.
 
 ## Process
 
-1. `gssh space guide analyze` — builds and commits the worksheet (base = the project's configured base branch).
-2. Read `.gitspace/artifacts/review/analysis.json`. For each cluster where
-   `stale: true`, in `order`:
-   - Read its diffs: `git diff <baseRef>...HEAD -- <files>` (baseRef from the worksheet; only this cluster's files).
-   - Read its `grounding.journal` quotes — the intent/outcome written WHEN the
-     work happened. Quote or paraphrase them; do not invent motives. If
-     grounding is empty, say what the change does and mark uncertain motives
-     as such.
-   - Write the section (shape below).
-3. Write `sections.json`: `{ "headSha": <worksheet headSha>, "sections": [...],
-   "specEvolution": "..." }` and run `gssh space guide submit --file sections.json`.
-   Fix validation errors and resubmit — coverage of every stale cluster is enforced.
+1. `gssh space guide analyze` — builds and commits the worksheet
+   (base = the project's configured base branch).
+2. Read `.gitspace/artifacts/review/analysis.json`. Clusters arrive in READER
+   ORDER; big components are pre-split into build-order beats via
+   `signals.beat = { component, seq, of }` — beat 1 is the foundation layer
+   (files no other changed file depends on), later beats consume earlier ones.
+3. For each cluster where `stale: true`, in `order`:
+   - Read its diffs: `git diff <baseRef>...HEAD -- <files>` (baseRef from the
+     worksheet; only this cluster's files; summarize per-file for huge beats).
+   - Read `grounding.journal` — intent/outcome written WHEN the work happened.
+     Quote or paraphrase; never invent motives. Empty grounding → describe
+     what the change does and mark motive-claims as uncertain.
+4. Write `sections.json`: `{ "headSha": <worksheet headSha>, "sections": [...],
+   "specEvolution": "..." }`, then `gssh space guide submit --file sections.json`.
+   Fix validation errors and resubmit — coverage of every stale cluster is
+   enforced server-side.
 
-## Section shape
+## Storytelling rules (the part that makes it a guide, not a list)
 
-- `clusterId`: from the worksheet. `title`: 3-7 words, what this chapter IS.
-- `explanation` (markdown): what the change is, THEN its consequences. Two
-  short paragraphs max. Ground claims in journal quotes; cite phases in
+- **Beats are construction steps.** Title beat-tagged sections as steps in the
+  build: "Step {seq} — {what this layer IS}" (e.g. "Step 1 — Foundations:
+  types and validators", "Step 3 — Thread it through the transports").
+  The explanation says what this step ADDS on top of the previous steps and
+  what the next steps will do with it — forward references welcome.
+- **The final-assembly beat** (often one hub file, alone in its step) gets the
+  slowest-read framing: everything converges there; name the load-bearing
+  structures a reviewer should check.
+- **Explanation** (markdown, ≤2 short paragraphs): what the change is, then
+  its consequences. Ground claims in journal quotes; cite phases in
   `cites.journalPhases`.
-- `exhibits`: the files worth reading, `slow: true` only where judgment is
-  required. For sweep clusters: ONE representative exhibit + a `mechanical`
-  callout ("same edit × N files").
-- `callouts`: `risk` for regions the journal shows struggle or surprises;
-  `decision` for choices a reviewer could reasonably question; `mechanical`
-  for skimmable bulk.
-- `asks`: real questions for the reviewer (uncertainty in the journal/
-  transcript, choices you'd want a second opinion on). Never pad.
-- `satisfies`: requirement ids ONLY when the cluster's journal delta shows
-  them advancing — do not decorate.
+- **Exhibits**: files worth reading, `slow: true` only where judgment is
+  required. Sweep clusters: ONE representative + a `mechanical` callout
+  ("same edit × N files"). Test beats: exhibit the tests guarding the
+  riskiest earlier beats.
+- **Callouts**: `risk` where the journal shows struggle/surprises or a hub
+  absorbs many passes; `decision` for choices a reviewer could question;
+  `mechanical` for skimmable bulk (chore/docs beats).
+- **Asks**: real questions only (uncertainty in the journal, choices needing
+  a second opinion). Never pad.
+- **`satisfies`**: requirement ids ONLY where the beat's journal delta shows
+  them advancing — never decorate.
 
 ## specEvolution
 
-If the worksheet's `canonTimeline` is non-empty, open with 2-4 sentences on
-how the definition of done changed (which phases edited goal/rubric/workflow
-and why, per journal decisions). This chapter comes first — reviewers judge
-the spec before the code.
+If `canonTimeline` is non-empty, open with 2-4 sentences on how the
+definition of done changed (which phases edited goal/rubric/workflow, and why
+per journal decisions). Reviewers judge the spec before the code.
 
-## Rules
+## Hard rules
 
-- Reader order, not chronology. The analyzer's `order` is authoritative.
-- Never narrate a non-stale cluster; the cached prose carries over.
-- Exhibits must stay inside the cluster's files (validation enforces this).
+- Reader order is authoritative; never reorder sections.
+- Never narrate a non-stale cluster (cached prose carries over server-side).
+- Exhibits must stay inside the cluster's files (validation rejects strays).
 - Short. A section a reviewer can't read in a minute is a failed section.
