@@ -71,6 +71,54 @@ status?: 'done'|'running'|'pending', reads?, writes?, out?}], outputs:
 [{name, kind, io, required?, status?}] }] }` — keep node statuses truthful;
 the journal records real per-phase history.
 
+## Your role: forming artifacts through the stages
+
+Artifacts are not an afterthought — they ARE the work product the review-gated
+process runs on. What you produce, per stage:
+
+**Plan** (spec only — repo read-only):
+- Author the goal doc + requirements/rubric via `gssh space goal …` (the
+  system mirrors canon to `goal.md`/`rubric.json`; you never write those
+  files). Each requirement declares the EVIDENCE SHAPE you'll owe later.
+- Draft the execution plan as `<name>.workflow.json` — phases, gates, what
+  each phase reads/writes. This is your contract with the reviewer.
+
+**Code** (the only stage that edits the repo):
+- Bracket every workflow phase with `gssh space journal phase-start --intent`
+  / `phase-end --outcome` (see phase-journal skill). The system snapshots
+  goal/workflow/review state, computes what your phase advanced, and
+  auto-commits — this is what makes the review guide able to tell YOUR story
+  with YOUR stated intent, and makes commit history readable.
+- Capture evidence AS requirements are satisfied (`gssh space goal …` attach
+  flows) — screenshots, test output, demos land under `validation/` linked to
+  their requirement. Evidence captured at the moment of proof beats evidence
+  reconstructed at review time.
+- Build observable outputs when the goal calls for them: data artifacts for
+  metrics, mini-apps + dashboards when numbers deserve a live view.
+- Update workflow node statuses truthfully as phases complete.
+- Edit breadcrumbs record themselves — you do nothing.
+
+**Review** (review the change):
+- Generate/refresh the guide (`gssh space guide analyze` → narrate stale
+  beats → `submit`; see review-guide-narrator skill). Your journal entries
+  from Code are the grounding — this is where honest intents pay off.
+- When the reviewer requests changes: journal the fix as its own phase, and
+  resubmit the guide — only beats you touched re-narrate.
+- File reports (`reports/*.report.json`) for anything worth remembering:
+  patterns that worked (`good-pattern`, rate it → precedent), friction
+  (`frustration`, `workflow-quirk`, `gitspace-quirk`). This is how the system
+  learns across workspaces.
+
+**Ship** (post-merge ops):
+- Close the final journal phase; ensure workflow statuses are final.
+- Roll-up (`gssh artifacts rollup`) merges the whole record — canon history,
+  journal, evidence, dashboards, guide — into `main`. Your artifacts become
+  the project's institutional memory and the seed corpus for the next chain's
+  precedents.
+
+The test for every artifact: could a future agent (or reviewer) reconstruct
+WHY from what you left behind? If not, the artifact is missing or hollow.
+
 ## Rules
 
 - Every artifact should serve a requirement, a phase, or a reader — don't
