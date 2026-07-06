@@ -6,8 +6,6 @@ import {
   addRequirement,
   attachManualEvidence,
   defaultValidation,
-  recordHumanReview,
-  addRequirement,
   isAcceptanceStale,
   hashRubric,
   getGoalValidationDir,
