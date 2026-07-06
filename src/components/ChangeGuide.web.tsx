@@ -152,12 +152,15 @@ function FileDiffBlock({ backend, projectName, workspaceName, file, onOpenFile }
 
 /* ── The pane ──────────────────────────────────────────────────────────────── */
 
-export function ChangeGuidePane({ backend, projectName, workspaceName, onOpenFile, onApprove }: {
+export function ChangeGuidePane({ backend, projectName, workspaceName, onOpenFile, onApprove, humanGatePending = 0 }: {
   backend: SessionBackend | null;
   projectName: string;
   workspaceName: string;
   onOpenFile?: (path: string) => void;
   onApprove?: () => void;
+  /** Required human-gated requirements still awaiting a verdict — Approve is
+   *  blocked until 0 (mock: review-gated approval owned by the human). */
+  humanGatePending?: number;
 }): ReactElement {
   const [steps, setSteps] = useState<WalkStep[]>([]);
   const [baseBranch, setBaseBranch] = useState<string | null>(null);
@@ -314,19 +317,24 @@ export function ChangeGuidePane({ backend, projectName, workspaceName, onOpenFil
           )}
         </div>
 
-        {/* Foot bar — progress-gated approval */}
-        <div className="flex flex-shrink-0 items-center justify-end gap-2 border-t border-[var(--gs-border)] px-3.5 py-2.5">
+        {/* Foot bar — progress + human-gate owned approval */}
+        <div className="flex flex-shrink-0 items-center gap-2 border-t border-[var(--gs-border)] px-3.5 py-2.5">
+          {humanGatePending > 0 && (
+            <span className="rounded-full border border-[rgba(188,140,255,.4)] px-1.5 text-[10px] text-[#bc8cff]" title="Required human-gated requirements awaiting a verdict in the rubric">
+              ◆ {humanGatePending} human gate{humanGatePending === 1 ? '' : 's'} pending
+            </span>
+          )}
           <button
             type="button"
-            disabled={!allDone}
-            onClick={() => { if (allDone) onApprove?.(); }}
-            className={`px-2.5 py-1 text-[11px] tabular-nums transition-colors duration-[120ms] ${
-              allDone
+            disabled={!allDone || humanGatePending > 0}
+            onClick={() => { if (allDone && humanGatePending === 0) onApprove?.(); }}
+            className={`ml-auto px-2.5 py-1 text-[11px] tabular-nums transition-colors duration-[120ms] ${
+              allDone && humanGatePending === 0
                 ? 'border border-[var(--gs-success)] bg-[var(--gs-chip-green-bg)] text-[var(--gs-success)] hover:bg-[rgba(0,255,102,0.14)]'
                 : 'cursor-not-allowed border border-[var(--gs-border)] text-[var(--gs-text-dim)]'
             }`}
           >
-            {allDone ? 'Approve' : `Approve · ${completed}/${total}`}
+            {allDone && humanGatePending === 0 ? 'Approve' : `Approve · ${completed}/${total}`}
           </button>
         </div>
       </div>

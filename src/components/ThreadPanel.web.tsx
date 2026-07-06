@@ -28,6 +28,8 @@ export interface ThreadPanelProps {
   onDeleteComment: (threadId: string, commentId: string) => Promise<void>;
   onUpdateDecision: (threadId: string, decision: HunkDecision) => Promise<void>;
   onOpenThreadTarget?: (threadId: string) => void;
+  /** Route a finding to the workspace's agent ('✦ Send to agent → fix'). */
+  onSendToAgent?: (thread: ReviewThread) => Promise<void> | void;
   onClose?: () => void;
 }
 
@@ -236,6 +238,7 @@ export function ThreadPanel({
   selectedThreadId,
   hoveredThreadId,
   onResolveThread,
+  onSendToAgent,
   onAddReply,
   onUpdateComment,
   onDeleteComment,
@@ -759,6 +762,23 @@ export function ThreadPanel({
                     >
                       {thread.resolved ? 'Re-open' : 'Resolve'}
                     </button>
+                    {onSendToAgent && !thread.resolved && (
+                      <button
+                        onClick={() => { void Promise.resolve(onSendToAgent(thread)).catch(() => {}); }}
+                        title="Route this finding to the workspace agent"
+                        style={{
+                          fontSize: '11px',
+                          padding: '2px 8px',
+                          background: 'none',
+                          color: 'var(--gs-accent)',
+                          border: '1px solid rgba(0,255,102,.35)',
+                          borderRadius: '4px',
+                          cursor: 'pointer',
+                        }}
+                      >
+                        ✦ Send to agent → fix
+                      </button>
+                    )}
                   </div>
                 )}
               </div>

@@ -47,6 +47,8 @@ export interface Evidence {
 
 export type ReviewTone = 'green' | 'amber' | 'red';
 
+export type ReviewJudgeType = 'human' | 'llm' | 'command';
+
 export interface Review {
   id: string;
   tone: ReviewTone;
@@ -54,6 +56,12 @@ export interface Review {
   note: string;
   createdAt: string;
   createdBy?: string;
+  /** Which judge produced this review. Optional for back-compat. */
+  judgeType?: ReviewJudgeType;
+  /** 0-100 confidence/quality score, when the judge produces one. */
+  score?: number;
+  /** Evidence ids this review examined or produced. */
+  cites?: string[];
 }
 
 export interface Requirement {
@@ -110,6 +118,12 @@ export interface GoalDoc {
   bodyMarkdown: string;
   updatedAt: string;
   updatedBy?: string;
+  /** Block-composed doc (mock GoalDoc vocabulary: intent/boundaries/anti-shortcut/
+   *  plan/evidence-shape/mini-app). Rendered through the block pipeline when
+   *  present; bodyMarkdown remains the fallback. */
+  blocks?: Array<{ id: string; type: string; data: unknown }>;
+  /** Block ids the user starred as exemplars. */
+  exemplarBlockIds?: string[];
 }
 
 export interface SourceRef {

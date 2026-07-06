@@ -2381,6 +2381,27 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
             workspaceName={reviewWorkspace.workspaceId}
             workspaceLabel={reviewWorkspace.workspaceLabel}
             sendReviewRequest={reviewSendRequest}
+            onSendToAgent={async (thread) => {
+              // Route the finding into the workspace's active agent session.
+              const backendKey = reviewWorkspace.backendKey;
+              const be = backendKey ? multi.getBackend(backendKey) : null;
+              const st = backendKey ? multiMachineState.byBackend[backendKey] : null;
+              const wsId = `${reviewWorkspace.projectName}:${reviewWorkspace.workspaceId}`;
+              const agentId = Object.entries(st?.snapshot?.agentSessionsById ?? {})
+                .find(([, sess]) => (sess as { workspaceId?: string; state?: string }).workspaceId === wsId
+                  && (sess as { state?: string }).state !== 'closed')?.[0];
+              if (!be?.promptAgentSession || !agentId) {
+                toast.error('No active agent session to route this finding to.');
+                return;
+              }
+              const target = thread.target;
+              const loc = target.kind === 'workspace' ? 'workspace-wide'
+                : target.kind === 'file' ? target.file
+                : `${(target as { file: string }).file}`;
+              const body = thread.comments.map((c) => c.body).join('\n\n');
+              await be.promptAgentSession(wsId, agentId, `Review finding (${loc}) — please fix:\n\n${body}`, undefined, { streamingBehavior: 'followUp' });
+              toast.success('Finding routed to the agent.');
+            }}
             onBack={() => { setView('terminal'); setReviewWorkspace(null); }}
           />
           <Toaster theme="dark" position="top-right" richColors />
@@ -2840,6 +2861,13 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
                 projectName={workspace.projectName}
                 workspaceName={workspace.name}
                 onOpenFile={(path) => openSingletonPane(wsKey, { kind: 'file', path, changed: true })}
+                humanGatePending={workspaceGoalForPanels?.validation
+                  ? Object.values(workspaceGoalForPanels.validation.requirements ?? {}).filter((r) =>
+                      r.required !== false
+                      && r.judgment?.kind === 'human'
+                      && r.status !== 'accepted'
+                      && !(r.reviews ?? []).some((rv) => (rv as { who?: string }).who === 'human')).length
+                  : 0}
               />
             ),
           });
