@@ -131,8 +131,25 @@ function FileDiffBlock({ backend, projectName, workspaceName, file, onOpenFile }
 }): ReactElement {
   const [patch, setPatch] = useState<string | null>(null);
   const [state, setState] = useState<'loading' | 'ready' | 'empty' | 'error'>('loading');
+  // Fetch only when the block nears the viewport — a guide renders every
+  // section's exhibits stacked, and eagerly fetching ~20 diffs (some 100KB+)
+  // on pane open stalls the shell.
+  const [visible, setVisible] = useState(false);
+  const [renderHuge, setRenderHuge] = useState(false);
+  const hostRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
+    const host = hostRef.current;
+    if (!host || visible) return;
+    const io = new IntersectionObserver((entries) => {
+      if (entries.some((e) => e.isIntersecting)) { setVisible(true); io.disconnect(); }
+    }, { rootMargin: '600px 0px' });
+    io.observe(host);
+    return () => io.disconnect();
+  }, [visible]);
+
+  useEffect(() => {
+    if (!visible) return;
     let alive = true;
     setState('loading');
     setPatch(null);
@@ -147,10 +164,14 @@ function FileDiffBlock({ backend, projectName, workspaceName, file, onOpenFile }
       })
       .catch(() => { if (alive) setState('error'); });
     return () => { alive = false; };
-  }, [backend, projectName, workspaceName, file.path, file.prevPath]);
+  }, [visible, backend, projectName, workspaceName, file.path, file.prevPath]);
+
+  /** Above this, PatchDiff+shiki blocks the main thread — gate behind a click. */
+  const HUGE_PATCH_BYTES = 60_000;
+  const isHuge = patch !== null && patch.length > HUGE_PATCH_BYTES;
 
   return (
-    <div className="border border-[var(--gs-border)]">
+    <div ref={hostRef} className="border border-[var(--gs-border)]">
       <button
         type="button"
         onClick={() => onOpenFile?.(file.path)}
@@ -175,12 +196,20 @@ function FileDiffBlock({ backend, projectName, workspaceName, file, onOpenFile }
           '--diffs-font-family': 'var(--gs-font)',
         } as CSSProperties}
       >
-        {state === 'loading' ? (
+        {!visible || state === 'loading' ? (
           <div className="px-2 py-2 text-[11px] text-[var(--gs-text-dim)]">Loading diff…</div>
         ) : state === 'error' ? (
           <div className="px-2 py-2 text-[11px] text-[var(--gs-danger)]">Failed to load diff for {file.path}</div>
         ) : state === 'empty' ? (
           <div className="px-2 py-2 text-[11px] text-[var(--gs-text-dim)]">No textual diff (binary or unchanged content).</div>
+        ) : patch && isHuge && !renderHuge ? (
+          <div className="flex items-center gap-2 px-2 py-2 text-[11px] text-[var(--gs-text-dim)]">
+            Large diff ({Math.round(patch.length / 1024)}KB) — heavy to render inline.
+            <button type="button" onClick={() => setRenderHuge(true)} className="border border-[var(--gs-border)] px-1.5 py-px text-[10.5px] text-[var(--gs-text-muted)] hover:text-[var(--gs-text)]">render anyway</button>
+            {onOpenFile && (
+              <button type="button" onClick={() => onOpenFile(file.path)} className="border border-[var(--gs-border)] px-1.5 py-px text-[10.5px] text-[var(--gs-text-muted)] hover:text-[var(--gs-text)]">open as tab</button>
+            )}
+          </div>
         ) : patch ? (
           <PatchDiff patch={patch} options={{ diffStyle: 'unified', theme: 'pierre-dark', disableFileHeader: true }} />
         ) : null}
