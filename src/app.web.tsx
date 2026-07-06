@@ -2424,7 +2424,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
             }}
             onBack={() => { setView('terminal'); setReviewWorkspace(null); }}
           />
-          <Toaster theme="dark" position="top-right" richColors />
+          <Toaster theme="dark" position="bottom-right" richColors />
         </>
       );
     }
@@ -2447,7 +2447,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
             </button>
           </div>
         </div>
-        <Toaster theme="dark" position="top-right" richColors />
+        <Toaster theme="dark" position="bottom-right" richColors />
       </>
     );
   }
@@ -2473,7 +2473,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
             </div>
           </div>
           <FlowWeb flow={flow} />
-          <Toaster theme="dark" position="top-right" richColors />
+          <Toaster theme="dark" position="bottom-right" richColors />
         </>
       );
     }
@@ -2494,7 +2494,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
           onCleanup={() => cancelReplayRequests(replayBackendKey)}
         />
         <FlowWeb flow={flow} />
-        <Toaster theme="dark" position="top-right" richColors />
+        <Toaster theme="dark" position="bottom-right" richColors />
       </>
     );
   }
@@ -2534,7 +2534,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
           }}
         />
         {!isRunning && <FlowWeb flow={flow} />}
-        <Toaster theme="dark" position="top-right" richColors />
+        <Toaster theme="dark" position="bottom-right" richColors />
       </>
     );
   }
@@ -2551,7 +2551,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
         <>
           <InboxWeb {...inboxProps} />
           <FlowWeb flow={flow} />
-          <Toaster theme="dark" position="top-right" richColors />
+          <Toaster theme="dark" position="bottom-right" richColors />
         </>
       );
     }
@@ -2561,7 +2561,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
         <>
           <EventsWeb {...eventsProps} workspaceLabel={eventsWorkspaceLabel} />
           <FlowWeb flow={flow} />
-          <Toaster theme="dark" position="top-right" richColors />
+          <Toaster theme="dark" position="bottom-right" richColors />
         </>
       );
     }
@@ -2571,7 +2571,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
     const overlays = (
       <>
         <FlowWeb flow={flow} />
-        <Toaster theme="dark" position="top-right" richColors />
+        <Toaster theme="dark" position="bottom-right" richColors />
 
         {commandPalette.isOpen && (
           <div
@@ -3292,7 +3292,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
             }}
           />
           <FlowWeb flow={flow} />
-          <Toaster theme="dark" position="top-right" richColors />
+          <Toaster theme="dark" position="bottom-right" richColors />
         </>
       );
     }
@@ -3430,7 +3430,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
           onModifiersChange={setModifiers}
           showFloatingControls={showFloatingControls}
         />
-        <Toaster theme="dark" position="top-right" richColors />
+        <Toaster theme="dark" position="bottom-right" richColors />
       </>
     );
   }
@@ -3469,7 +3469,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
           )}
         </div>
       </div>
-      <Toaster theme="dark" position="top-right" richColors />
+      <Toaster theme="dark" position="bottom-right" richColors />
     </>
   );
 }
