@@ -13,7 +13,7 @@ function printJson(value: unknown): void {
 }
 
 export async function guideAnalyze(ctx: SpaceCommandContext, options: { base?: string; json?: boolean }): Promise<void> {
-  const worksheet = await buildGuideWorksheet(ctx.project, ctx.workspace, options.base ?? 'main');
+  const worksheet = await buildGuideWorksheet(ctx.project, ctx.workspace, options.base);
   if (options.json) { printJson(worksheet); return; }
   const stale = worksheet.clusters.filter((c) => c.stale);
   logger.success(`Worksheet @ ${worksheet.headSha.slice(0, 7)}: ${worksheet.clusters.length} clusters — ${stale.length} to narrate, ${worksheet.cachedSections} cached.`);

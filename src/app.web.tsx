@@ -2969,7 +2969,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
                     await be.promptAgentSession(
                       workspace.id,
                       created.id,
-                      'Use the review-guide-narrator skill to generate the review guide for this workspace. Base ref: main. Follow the skill exactly: analyze, narrate stale clusters in order, submit, fix validation errors until the submit succeeds.',
+                      'Use the review-guide-narrator skill to generate the review guide for this workspace. Follow the skill exactly: analyze, narrate stale clusters in order, submit, fix validation errors until the submit succeeds.',
                     );
                     toast.success('Narrator session started — the guide will appear when it submits.');
                   } catch (err) {

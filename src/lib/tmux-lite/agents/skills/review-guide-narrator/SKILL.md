@@ -10,10 +10,10 @@ did the structure — you ONLY write prose for the clusters it marked stale.
 
 ## Process
 
-1. `gssh space guide analyze --base <base>` — builds and commits the worksheet.
+1. `gssh space guide analyze` — builds and commits the worksheet (base = the project's configured base branch).
 2. Read `.gitspace/artifacts/review/analysis.json`. For each cluster where
    `stale: true`, in `order`:
-   - Read its diffs: `git diff <base>...HEAD -- <files>` (only this cluster's files).
+   - Read its diffs: `git diff <baseRef>...HEAD -- <files>` (baseRef from the worksheet; only this cluster's files).
    - Read its `grounding.journal` quotes — the intent/outcome written WHEN the
      work happened. Quote or paraphrase them; do not invent motives. If
      grounding is empty, say what the change does and mark uncertain motives

@@ -10,7 +10,7 @@
 
 import { existsSync, readFileSync, readdirSync } from 'fs';
 import { join } from 'path';
-import { getProjectDir, getProjectWorkspacesDir } from './config.js';
+import { getProjectDir, getProjectWorkspacesDir, readProjectConfig } from './config.js';
 import { analyzeReviewDiff, type ReviewAnalysis, type ReviewCluster } from './review-analysis.js';
 import { captureArtifacts } from './artifacts.js';
 import { SpacesError } from '../types/errors.js';
@@ -124,13 +124,20 @@ function breadcrumbSessions(mount: string, files: string[]): string[] {
  * cached guide. Committed to the artifacts branch so the narrator session
  * (and later audits) read a pinned input, not a moving target.
  */
-export async function buildGuideWorksheet(projectName: string, workspaceName: string, baseRef: string): Promise<GuideWorksheet> {
+export async function buildGuideWorksheet(projectName: string, workspaceName: string, baseRef?: string): Promise<GuideWorksheet> {
   const workspaceDir = join(getProjectWorkspacesDir(projectName), workspaceName);
+  if (!baseRef) {
+    try {
+      baseRef = readProjectConfig(projectName).baseBranch ?? 'main';
+    } catch {
+      baseRef = 'main';
+    }
+  }
   const mount = mountDirFor(projectName, workspaceName);
   if (!existsSync(join(mount, '.git'))) {
     throw new SpacesError('Review guide requires the artifacts mount (.gitspace/artifacts).', 'USER_ERROR', 1);
   }
-  const analysis: ReviewAnalysis = analyzeReviewDiff(workspaceDir, baseRef);
+  const analysis: ReviewAnalysis = analyzeReviewDiff(workspaceDir, baseRef!);
   const cached = readReviewGuide(projectName, workspaceName);
   const cachedIds = new Set((cached?.sections ?? []).map((s) => s.clusterId));
   const journal = readJournal(mount);
@@ -149,7 +156,7 @@ export async function buildGuideWorksheet(projectName: string, workspaceName: st
 
   const worksheet: GuideWorksheet = {
     headSha: analysis.headSha,
-    baseRef,
+    baseRef: baseRef!,
     clusters,
     cachedSections: clusters.filter((c) => !c.stale).length,
     canonTimeline: journal

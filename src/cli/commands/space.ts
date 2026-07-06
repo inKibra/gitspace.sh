@@ -154,7 +154,7 @@ function registerSpaceGuideCommands(space: Command): void {
   guide
     .command('analyze')
     .description('Build the narrator worksheet (clusters, grounding, staleness) and commit it')
-    .option('--base <ref>', 'Base ref to diff against', 'main')
+    .option('--base <ref>', 'Base ref to diff against (default: project base branch)')
     .option('--json', 'Output structured JSON')
     .action(withErrorHandler(async (options) => {
       const ctx = requireSessionContext();
