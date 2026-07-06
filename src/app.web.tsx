@@ -42,6 +42,7 @@ import { ReviewRubric } from "./components/ReviewRubric.web.js";
 import { EvidencePanel } from "./components/EvidencePanel.web.js";
 import { ReportPanel } from "./components/ReportPanel.web.js";
 import { WorkflowPanel } from "./components/WorkflowPanel.web.js";
+import { EventLogPane } from "./components/EventLogPane.web.js";
 import { RightRail, RepoFilePanel, type RepoFileOpen } from "./components/RightRail.web.js";
 import { ProjectHomePage } from "./pages/ProjectHomePage.web.js";
 import { useInboxPage } from './app/react/index.js';
@@ -134,7 +135,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   const [eventsWorkspaceLabel, setEventsWorkspaceLabel] = useState<string>('');
   const [projectHomeName, setProjectHomeName] = useState<string | null>(null);
   /** Repo files + artifacts opened as dock tabs, keyed by workspace selectionKey. */
-  type DockExtraPane = ({ kind: 'file' } & RepoFileOpen) | { kind: 'artifact'; path: string } | { kind: 'dashboard'; path: string } | { kind: 'note'; noteId: string | null; title: string; nonce?: number } | { kind: 'goal' } | { kind: 'guide' } | { kind: 'rubric' } | { kind: 'evidence'; requirementId: string; evidenceId: string } | { kind: 'report'; path: string } | { kind: 'workflow' } | { kind: 'crons' };
+  type DockExtraPane = ({ kind: 'file' } & RepoFileOpen) | { kind: 'artifact'; path: string } | { kind: 'dashboard'; path: string } | { kind: 'note'; noteId: string | null; title: string; nonce?: number } | { kind: 'goal' } | { kind: 'guide' } | { kind: 'rubric' } | { kind: 'evidence'; requirementId: string; evidenceId: string } | { kind: 'report'; path: string } | { kind: 'workflow' } | { kind: 'crons' } | { kind: 'eventlog' };
   const [dockExtraPanes, setDockExtraPanes] = useState<Record<string, DockExtraPane[]>>({});
   const openSingletonPane = useCallback((wsKey: string, pane: DockExtraPane) => {
     setDockExtraPanes((prev) => {
@@ -2920,6 +2921,24 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
               />
             ),
           });
+        } else if (extra.kind === 'eventlog') {
+          panels.push({
+            id: 'eventlog',
+            title: '⚑ Event logs',
+            version: `eventlog|${eventsItems.length}`,
+            onClose: closeExtra,
+            render: () => (
+              <EventLogPane
+                events={eventsItems}
+                workspaceLabel={workspace.name}
+                onOpenBrowser={() => {
+                  setEventsWorkspacePath(workspace.path);
+                  setEventsWorkspaceLabel(workspace.name);
+                  setShowEvents(true);
+                }}
+              />
+            ),
+          });
         } else if (extra.kind === 'crons') {
           panels.push({
             id: 'crons',
@@ -3078,7 +3097,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
                     onOpenEvents={() => {
                       setEventsWorkspacePath(workspace.path);
                       setEventsWorkspaceLabel(workspace.name);
-                      setShowEvents(true);
+                      openSingletonPane(workspace.selectionKey ?? workspace.id, { kind: 'eventlog' });
                       void multi.requestEvents(getWorkspaceRef(workspace.id, workspaceBackendKey));
                     }}
                     goalEvidence={workspaceGoal?.validation ? Object.values(workspaceGoal.validation.requirements ?? {}).flatMap((r) => (r.evidence ?? []).map((e) => ({ requirementId: r.id, evidenceId: e.id, name: e.name, requirementTitle: r.title }))) : []}
@@ -3184,7 +3203,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
                 onOpenEvents={(workspaceId) => {
                   setEventsWorkspacePath(workspace.path);
                   setEventsWorkspaceLabel(workspace.name);
-                  setShowEvents(true);
+                  openSingletonPane(workspace.selectionKey ?? workspace.id, { kind: 'eventlog' });
                   void multi.requestEvents(getWorkspaceRef(workspaceId, workspaceBackendKey));
                 }}
                 onDeleteSession={handleDeleteSession}
