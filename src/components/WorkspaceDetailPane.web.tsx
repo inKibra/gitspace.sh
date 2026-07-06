@@ -239,12 +239,16 @@ function SidebarContent(props: {
 
   /** Wrap sidebar actions: dismiss bottom sheet on mobile after action */
   const act = (fn: () => void) => { fn(); onDismiss?.(); };
-  const [showClosedAgents, setShowClosedAgents] = useState(false);
+  /** Closed/archived session history hides behind the section kebab (mock has no closed-sessions row). */
+  const [showSessionHistory, setShowSessionHistory] = useState(false);
 
   const goalReqs = goal?.validation ? Object.values(goal.validation.requirements ?? {}) : [];
   const goalReady = goalReqs.length > 0
     ? `${goalReqs.filter((r) => (r as { status?: string }).status === 'accepted').length}/${goalReqs.length}`
     : '—';
+
+  const closedAgentRows = agentRows.filter((row) => row.bucket === 'closed');
+  const hasSessionHistory = closedAgentRows.length > 0 || archivedAgentSessions.length > 0;
 
   return (
     <>
@@ -255,6 +259,16 @@ function SidebarContent(props: {
         extra={<>
           {agentSessionCount > 0 && <span className="text-[10px] text-[var(--gs-text-ghost)]">{agentSessionCount}</span>}
           {pendingPermissions > 0 && <span className="text-[10px] text-[var(--gs-warning-bright)]">⚡{pendingPermissions}</span>}
+          {hasSessionHistory && (
+            <button
+              type="button"
+              onClick={() => setShowSessionHistory((v) => !v)}
+              title={showSessionHistory ? 'Hide closed & archived sessions' : 'Show closed & archived sessions'}
+              className={`ml-auto px-1 text-[11px] leading-none ${showSessionHistory ? 'text-[var(--gs-text)]' : 'text-[var(--gs-text-ghost)] hover:text-[var(--gs-text-muted)]'}`}
+            >
+              ⋯
+            </button>
+          )}
         </>}
       >
         {activeAgentSessions.length === 0 ? (
@@ -290,23 +304,20 @@ function SidebarContent(props: {
             );
           })
         )}
-        {agentRows.some((row) => row.bucket === 'closed') && (
-          <SidebarItem
-            icon="▾"
-            label={`Closed sessions (${agentRows.filter((row) => row.bucket === 'closed').length})`}
-            rightLabel={showClosedAgents ? 'hide' : 'show'}
-            onClick={() => setShowClosedAgents((v) => !v)}
-          />
+        {showSessionHistory && closedAgentRows.length > 0 && (
+          <>
+            <div className="px-[13px] pt-1 pb-0.5 text-[10px] uppercase tracking-[.1em] text-[var(--gs-text-ghost)]">Closed · {closedAgentRows.length}</div>
+            {closedAgentRows.map((row) => (
+              <div key={`closed:${row.id}`} className="flex items-center gap-1">
+                <SidebarItem dotColor="text-[var(--gs-text-ghost)]" label={row.title} rightLabel="closed" onClick={() => act(() => void detailActions.openAgentSession(row.id))} />
+                {onArchiveAgentSession && (
+                  <button type="button" onClick={() => void detailActions.archiveAgentSession(row.id)} className="text-[10px] text-[var(--gs-text-ghost)] hover:text-[var(--gs-text-muted)] flex-shrink-0 px-1">arc</button>
+                )}
+              </div>
+            ))}
+          </>
         )}
-        {showClosedAgents && agentRows.filter((row) => row.bucket === 'closed').map((row) => (
-          <div key={`closed:${row.id}`} className="flex items-center gap-1">
-            <SidebarItem dotColor="text-[var(--gs-text-ghost)]" label={row.title} rightLabel="closed" onClick={() => act(() => void detailActions.openAgentSession(row.id))} />
-            {onArchiveAgentSession && (
-              <button type="button" onClick={() => void detailActions.archiveAgentSession(row.id)} className="text-[10px] text-[var(--gs-text-ghost)] hover:text-[var(--gs-text-muted)] flex-shrink-0 px-1">arc</button>
-            )}
-          </div>
-        ))}
-        {archivedAgentSessions.length > 0 && (
+        {showSessionHistory && archivedAgentSessions.length > 0 && (
           <>
             <SidebarItem label={`Archived agent sessions (${archivedAgentSessions.length})`} rightLabel={showArchivedAgents ? 'hide' : 'show'} onClick={toggleArchivedAgents} />
             {showArchivedAgents && agentRows.filter((row) => row.bucket === 'archived').map((row) => (
@@ -733,7 +744,6 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
                 name={workspace.name}
                 phase={props.phase ?? 'code'}
                 onSwitchStage={props.onSwitchStage}
-                onClose={() => setDesktopSidebarClosed(true)}
               />
               <ModeCapsStrip phase={props.phase ?? 'code'} />
               <div className="flex-1 overflow-y-auto pb-3 flex flex-col">

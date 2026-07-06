@@ -1472,11 +1472,17 @@ html {
   --trees-input-bg-override: var(--gs-bg-elevated);
   --trees-search-bg-override: var(--gs-bg-elevated);
   --trees-search-fg-override: var(--gs-text);
+  /* Mock .tnode indents 14px per depth — the compact default (8px × density)
+     muddies nesting at 12px mono. */
+  --trees-level-gap-override: 14px;
+  /* Mock .gd status-letter column: 14px, right-aligned per-file M/A/D/U. */
+  --trees-git-lane-width-override: 14px;
   --trees-git-modified-color-override: var(--gs-warning);
   --trees-git-added-color-override: var(--gs-success);
   --trees-git-deleted-color-override: var(--gs-danger);
   --trees-git-renamed-color-override: var(--gs-info);
-  --trees-git-untracked-color-override: var(--gs-text-ghost);
+  /* Mock tones untracked (U) green like added (.gd.u/.gd.a → --gs-success). */
+  --trees-git-untracked-color-override: var(--gs-success);
   --trees-git-ignored-color-override: var(--gs-text-ghost);
   height: 100%;
 }

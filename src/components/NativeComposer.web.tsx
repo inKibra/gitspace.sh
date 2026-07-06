@@ -20,16 +20,16 @@ import { getSpaceCommandArgumentCompletions } from '../lib/tmux-lite/agents/exte
 import { findMagicKeywordRanges, hasMagicKeyword, segmentMagicKeywords } from '../blocks/agent/magic-keywords.js';
 
 /** A compact composer hint/affordance chip. */
-const composerChip = (tone: 'dim' | 'active'): CSSProperties => ({
+const composerChip = (tone: 'dim' | 'active' | 'violet'): CSSProperties => ({
   fontSize: 11,
   lineHeight: 1.4,
   padding: '1px 8px',
   borderRadius: 999,
-  border: `1px solid ${tone === 'active' ? 'var(--gs-accent)' : 'var(--gs-border)'}`,
-  background: tone === 'active' ? 'var(--gs-accent)' : 'transparent',
-  color: tone === 'active' ? 'var(--gs-bg)' : 'var(--gs-text-dim)',
+  border: `1px solid ${tone === 'active' ? 'var(--gs-accent)' : tone === 'violet' ? 'rgba(188,140,255,0.35)' : 'var(--gs-border)'}`,
+  background: tone === 'active' ? 'var(--gs-accent)' : tone === 'violet' ? 'rgba(188,140,255,0.08)' : 'transparent',
+  color: tone === 'active' ? 'var(--gs-bg)' : tone === 'violet' ? 'var(--gs-purple)' : 'var(--gs-text-dim)',
   fontWeight: tone === 'active' ? 600 : 400,
-  cursor: tone === 'active' ? 'default' : 'pointer',
+  cursor: tone === 'active' || tone === 'violet' ? 'default' : 'pointer',
   WebkitTapHighlightColor: 'transparent',
   whiteSpace: 'nowrap',
 });
@@ -64,6 +64,15 @@ export interface NativeComposerWebProps {
   draftStorageVersion?: number;
   onRequestCommands?: () => Promise<Array<{ name: string; description: string; kind: string }>>;
   onRequestFileSuggestions?: (prefix: string) => Promise<Array<{ path: string; isDirectory: boolean }>>;
+  /** Name of the workflow attached to this session, if any — renders the violet
+   *  workflow chip in the affordance row. Omitted → no chip. */
+  workflowLabel?: string | null;
+  /** Number of queued follow-up messages waiting on the current turn. When > 0
+   *  the hint line below the textarea becomes a queue-status row. */
+  queuedFollowUpCount?: number;
+  /** What the queued messages are waiting on (e.g. a subagent name); defaults
+   *  to "agent" in the status row. */
+  queuedWaitingOn?: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -269,6 +278,9 @@ export function NativeComposer({
   draftStorageVersion = 0,
   onRequestCommands,
   onRequestFileSuggestions,
+  workflowLabel = null,
+  queuedFollowUpCount = 0,
+  queuedWaitingOn = null,
 }: NativeComposerWebProps): React.ReactElement {
   const [text, setText] = useState('');
   const [busySubmitMode, setBusySubmitMode] = useState<Extract<NativeComposerSubmitMode, 'steer' | 'followUp'>>('steer');
@@ -806,6 +818,9 @@ export function NativeComposer({
         <button type="button" onClick={() => fileInputRef.current?.click()} disabled={isDisabled} style={composerChip('dim')} title="Attach a file">＋ attach</button>
         <button type="button" onMouseDown={(e) => { e.preventDefault(); textareaRef.current?.focus(); }} style={composerChip('dim')} title="Type / at the start of the message for slash commands">/ commands</button>
         <button type="button" onMouseDown={(e) => { e.preventDefault(); textareaRef.current?.focus(); }} style={composerChip('dim')} title="Type @ to mention a file">@ mention</button>
+        {workflowLabel && (
+          <span style={composerChip('violet')} title={`Workflow attached — ${workflowLabel}`}>workflow</span>
+        )}
         {activeKeywords.map((kw) => (
           <span key={kw} style={composerChip('active')} title={`"${kw}" triggers ${kw} mode`}>⚡ {kw}</span>
         ))}
@@ -1005,11 +1020,18 @@ export function NativeComposer({
         </div>
       </div>
 
-      <div style={{ padding: '3px 10px 0 10px', color: 'var(--gs-text-dim)', fontSize: 11 }}>
-        {isBusy
-          ? 'Enter steers current turn · Ctrl/Cmd+Enter queues follow-up · use the mode button to switch Send'
-          : 'Enter sends · Shift+Enter adds a newline'}
-      </div>
+      {queuedFollowUpCount > 0 ? (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 7, padding: '3px 10px 0 10px', color: 'var(--gs-text-muted)', fontSize: 11 }}>
+          <span style={{ width: 7, height: 7, borderRadius: '50%', background: 'var(--gs-text-dim)', flexShrink: 0 }} />
+          {queuedFollowUpCount} message{queuedFollowUpCount === 1 ? '' : 's'} queued — sends when {queuedWaitingOn ?? 'agent'} returns
+        </div>
+      ) : (
+        <div style={{ padding: '3px 10px 0 10px', color: 'var(--gs-text-dim)', fontSize: 11 }}>
+          {isBusy
+            ? 'Enter steers current turn · Ctrl/Cmd+Enter queues follow-up · use the mode button to switch Send'
+            : 'Enter sends · Shift+Enter adds a newline'}
+        </div>
+      )}
 
       {/* Hidden file inputs */}
       <input

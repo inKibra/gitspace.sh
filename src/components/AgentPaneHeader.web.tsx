@@ -154,73 +154,117 @@ export function AgentPaneHeader({
         )}
       </span>
 
-      {/* role cycle (the cmd-P role selector) */}
-      {canCycleRole && (
-        <button type="button" onClick={onCycleRole} title="Cycle model role" className="text-[var(--gs-text-dim)] hover:text-[var(--gs-accent)]">
-          ⟳ <span className="text-[var(--gs-text)]">{currentRole?.name ?? 'role'}</span>
-        </button>
-      )}
-
-      {/* thinking level */}
-      {control?.thinkingLevels?.length && onSetThinkingLevel ? (
-        <PickerMenu
-          label="think"
-          value={control.thinkingLevel}
-          options={control.thinkingLevels}
-          open={menu === 'thinking'}
-          onToggle={() => toggle('thinking')}
-          onPick={(v) => { onSetThinkingLevel(v); setMenu(null); }}
-        />
-      ) : null}
-
-      {/* approval mode */}
-      {control?.approvalModes?.length && onSetApprovalMode ? (
-        <PickerMenu
-          label="approve"
-          value={control.approvalMode}
-          options={control.approvalModes}
-          open={menu === 'approval'}
-          onToggle={() => toggle('approval')}
-          onPick={(v) => { onSetApprovalMode(v); setMenu(null); }}
-        />
-      ) : null}
-
-      {/* fast mode — per-family service tier (priority). Only shown when the
-          current model's family supports it; label always states on/off. */}
-      {onToggleFast && control?.fastCapable && (() => {
-        const fastOn = control?.serviceTier === 'priority';
+      {/* context — slim progress bar + tokens (mock .chat-ctx) */}
+      {ctx && ctx.tokens != null && ctx.contextWindow > 0 ? (() => {
+        const pct = Math.min(100, Math.max(0, Math.round((ctx.tokens! / ctx.contextWindow) * 100)));
         return (
-          <button
-            type="button"
-            onClick={onToggleFast}
-            title={fastOn ? 'Fast mode ON — click to turn off' : 'Fast mode OFF — click to turn on'}
-            className={fastOn
-              ? 'rounded-sm bg-[var(--gs-warning)] px-1.5 py-0.5 font-semibold text-[var(--gs-bg)]'
-              : 'rounded-sm border border-[var(--gs-border)] px-1.5 py-0.5 text-[var(--gs-text-dim)] hover:text-[var(--gs-text)]'}
-          >
-            ⚡ fast {fastOn ? 'on' : 'off'}
-          </button>
+          <span className="flex items-center gap-1.5" title={`context window · ${pct}%`}>
+            <span className="text-[10px] text-[var(--gs-text-dim)]">ctx</span>
+            <span className="h-[5px] w-16 flex-none overflow-hidden bg-[var(--gs-bg-active)]">
+              <span className="block h-full bg-[var(--gs-info)]" style={{ width: `${pct}%` }} />
+            </span>
+            <span className="font-mono text-[10px] text-[var(--gs-text-dim)]">{fmtTokens(ctx.tokens!)} / {fmtTokens(ctx.contextWindow)}</span>
+          </span>
+        );
+      })() : currentOpt?.contextWindow ? (
+        <span className="text-[var(--gs-text-dim)]">· {fmtTokens(currentOpt.contextWindow)} ctx</span>
+      ) : null}
+
+      {/* session usage — total tokens · cost (mock .chat-usage) */}
+      {(() => {
+        if (!usage) return null;
+        const total = usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+        if (total <= 0 && usage.cost <= 0) return null;
+        return (
+          <span className="font-mono text-[10px] text-[var(--gs-text-dim)]" title="session tokens · cost">
+            session {fmtTokens(total)} · ${usage.cost.toFixed(2)}
+          </span>
         );
       })()}
 
-      {/* context + cost */}
-      {ctx && ctx.tokens != null && ctx.contextWindow > 0 ? (
-        <span className="text-[var(--gs-text-dim)]">· {fmtTokens(ctx.tokens)}/{fmtTokens(ctx.contextWindow)} ({Math.round((ctx.tokens / ctx.contextWindow) * 100)}%)</span>
-      ) : currentOpt?.contextWindow ? (
-        <span className="text-[var(--gs-text-dim)]">· {fmtTokens(currentOpt.contextWindow)} ctx</span>
-      ) : null}
-      {usage && usage.cost > 0 ? <span className="text-[var(--gs-text-dim)]">· ${usage.cost.toFixed(2)}</span> : null}
-
       {error && <span className="max-w-[35%] truncate text-[var(--gs-danger)]" title={error}>⚠ {error}</span>}
       <span className="ml-auto flex items-center gap-2">
-        {onOpenHistory && (
-          <button type="button" onClick={onOpenHistory} title="History — rewind the conversation" className="text-[var(--gs-text-dim)] hover:text-[var(--gs-accent)]">⟲</button>
+        <span className={`inline-block h-2 w-2 rounded-full ${dot}`} title={label} />
+        {(onOpenAuth || onOpenHistory || canCycleRole || onSetThinkingLevel || onSetApprovalMode || onToggleFast) && (
+          <span className="relative">
+            <button
+              type="button"
+              onClick={() => toggle('settings')}
+              title="Agent controls & settings"
+              className="flex h-6 w-6 items-center justify-center border border-[var(--gs-border)] text-[12px] text-[var(--gs-text-dim)] hover:border-[var(--gs-border-active)] hover:text-[var(--gs-text)]"
+            >
+              ⚙
+            </button>
+            {menu === 'settings' && (
+              <>
+                <div className="fixed inset-0 z-10" onClick={() => setMenu(null)} />
+                <div className="absolute right-0 top-full z-20 mt-1 w-60 border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] py-1 shadow-lg">
+                  {canCycleRole && (
+                    <button
+                      type="button"
+                      onClick={onCycleRole}
+                      title="Cycle model role"
+                      className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[var(--gs-text-dim)] hover:bg-[var(--gs-border)]"
+                    >
+                      ⟳ role <span className="font-mono text-[var(--gs-text)]">{currentRole?.name ?? 'role'}</span>
+                    </button>
+                  )}
+                  {control?.thinkingLevels?.length && onSetThinkingLevel ? (
+                    <SettingsPickerSection
+                      label="think"
+                      value={control.thinkingLevel}
+                      options={control.thinkingLevels}
+                      onPick={(v) => { onSetThinkingLevel(v); setMenu(null); }}
+                    />
+                  ) : null}
+                  {control?.approvalModes?.length && onSetApprovalMode ? (
+                    <SettingsPickerSection
+                      label="approve"
+                      value={control.approvalMode}
+                      options={control.approvalModes}
+                      onPick={(v) => { onSetApprovalMode(v); setMenu(null); }}
+                    />
+                  ) : null}
+                  {onToggleFast && control?.fastCapable && (() => {
+                    const fastOn = control?.serviceTier === 'priority';
+                    return (
+                      <button
+                        type="button"
+                        onClick={onToggleFast}
+                        title={fastOn ? 'Fast mode ON — click to turn off' : 'Fast mode OFF — click to turn on'}
+                        className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[var(--gs-text-dim)] hover:bg-[var(--gs-border)]"
+                      >
+                        ⚡ fast mode
+                        <span className={fastOn ? 'font-semibold text-[var(--gs-warning)]' : 'text-[var(--gs-text-muted)]'}>{fastOn ? 'on' : 'off'}</span>
+                      </button>
+                    );
+                  })()}
+                  {(canCycleRole || control?.thinkingLevels?.length || control?.approvalModes?.length || (onToggleFast && control?.fastCapable)) && (onOpenHistory || onOpenAuth) ? (
+                    <div className="my-1 border-t border-[var(--gs-border)]" />
+                  ) : null}
+                  {onOpenHistory && (
+                    <button
+                      type="button"
+                      onClick={() => { setMenu(null); onOpenHistory(); }}
+                      className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[var(--gs-text-dim)] hover:bg-[var(--gs-border)] hover:text-[var(--gs-text)]"
+                    >
+                      ⟲ History — rewind…
+                    </button>
+                  )}
+                  {onOpenAuth && (
+                    <button
+                      type="button"
+                      onClick={() => { setMenu(null); onOpenAuth(); }}
+                      className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[var(--gs-text-dim)] hover:bg-[var(--gs-border)] hover:text-[var(--gs-text)]"
+                    >
+                      ⚙ Agent settings…
+                    </button>
+                  )}
+                </div>
+              </>
+            )}
+          </span>
         )}
-        {onOpenAuth && (
-          <button type="button" onClick={onOpenAuth} title="Agent settings" className="text-[var(--gs-text-dim)] hover:text-[var(--gs-accent)]">⚙</button>
-        )}
-        <span className={`inline-block h-2 w-2 rounded-full ${dot}`} />
-        <span className="text-[var(--gs-text-muted)]">{label}</span>
       </span>
     </div>
   );

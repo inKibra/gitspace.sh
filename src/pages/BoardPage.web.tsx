@@ -6,7 +6,7 @@
  * header bar + full-height kanban board with all phases visible.
  */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useTheme, THEMES } from '../lib/theme.web.js';
 import { KanbanBoardWeb } from '../components/KanbanBoard.web.js';
 import type { KanbanGoalItem, WorkspaceBoardGroup } from '../app/shared/board/types.js';
@@ -46,6 +46,100 @@ function isTypingTarget(target: EventTarget | null): boolean {
     || target instanceof HTMLTextAreaElement
     || target instanceof HTMLSelectElement
     || (target instanceof HTMLElement && target.isContentEditable);
+}
+
+interface ProjectStripEntry {
+  name: string;
+  chains: number;
+  workspaces: number;
+  active: number;
+}
+
+/** Derive the PROJECTS strip entries from board groups (mock ghome-projects). */
+function deriveProjects(
+  groups: WorkspaceBoardGroup[],
+  workspaceStatusById: Record<string, WorkspaceStatusSummary>,
+): ProjectStripEntry[] {
+  const byName = new Map<string, { chainIds: Set<string>; workspaces: number; active: number }>();
+  const ensure = (name: string) => {
+    let entry = byName.get(name);
+    if (!entry) {
+      entry = { chainIds: new Set<string>(), workspaces: 0, active: 0 };
+      byName.set(name, entry);
+    }
+    return entry;
+  };
+  for (const group of groups) {
+    for (const workspace of group.workspaces) {
+      const entry = ensure(workspace.projectName);
+      entry.workspaces += 1;
+      if (workspace.goal) entry.chainIds.add(workspace.goal.chainId);
+      const status = workspaceStatusById[workspace.selectionKey];
+      if (status && (status.agents.green > 0 || status.agents.orange > 0)) entry.active += 1;
+    }
+    for (const goal of group.plannedGoals ?? []) {
+      ensure(goal.projectName).chainIds.add(goal.chainId);
+    }
+  }
+  return Array.from(byName.entries())
+    .map(([name, entry]) => ({ name, chains: entry.chainIds.size, workspaces: entry.workspaces, active: entry.active }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/** PROJECTS strip above the kanban (mock Board.tsx ghome-projects section). */
+function ProjectsStrip({ projects, onOpenProjectHome, onNewProject }: {
+  projects: ProjectStripEntry[];
+  onOpenProjectHome?: () => void;
+  onNewProject: () => void;
+}) {
+  const [filter, setFilter] = useState('');
+  const visible = projects.filter((project) => project.name.toLowerCase().includes(filter.toLowerCase()));
+  return (
+    <div className="flex-shrink-0 border-b border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-4 py-3">
+      <div className="mb-2.5 flex items-center gap-3">
+        <span className="text-[10px] uppercase tracking-[0.12em] text-[var(--gs-text-dim)]">Projects</span>
+        <input
+          value={filter}
+          onChange={(event) => setFilter(event.target.value)}
+          placeholder="filter projects…"
+          className="w-[200px] border border-[var(--gs-border)] bg-[var(--gs-bg)] px-2 py-1 text-[12px] text-[var(--gs-text)] outline-none placeholder:text-[var(--gs-text-ghost)] focus:border-[var(--gs-border-active)]"
+        />
+        <button
+          type="button"
+          onClick={onNewProject}
+          className="ml-auto rounded bg-[var(--gs-accent)] px-2 py-1 text-xs text-[var(--gs-text-on-accent)] hover:bg-[var(--gs-accent-hover)]"
+        >
+          ＋ New project
+        </button>
+      </div>
+      <div className="grid grid-cols-[repeat(auto-fill,minmax(220px,1fr))] gap-2.5">
+        {visible.length === 0 && (
+          <div className="py-2 text-[11.5px] italic text-[var(--gs-text-ghost)]">
+            {projects.length === 0 ? 'No projects yet' : 'No projects match the filter'}
+          </div>
+        )}
+        {visible.map((project) => (
+          <button
+            key={project.name}
+            type="button"
+            onClick={onOpenProjectHome}
+            disabled={!onOpenProjectHome}
+            title={onOpenProjectHome ? `Open ${project.name} project home` : 'Project home unavailable'}
+            className="border border-[var(--gs-border)] bg-[var(--gs-bg-surface)] px-[13px] py-[11px] text-left transition-colors hover:border-[var(--gs-border-active)] hover:bg-[var(--gs-bg-hover)] disabled:cursor-not-allowed"
+          >
+            <div className="flex items-center gap-2">
+              <span className="font-mono text-[13px] text-[var(--gs-text)]">{project.name}</span>
+              {project.active > 0 && <span className="h-[7px] w-[7px] animate-pulse rounded-full bg-[var(--gs-accent)]" />}
+            </div>
+            <div className="mt-[5px] text-[11px] text-[var(--gs-text-dim)]">
+              {project.chains} chains · {project.workspaces} workspaces{project.active > 0 ? ` · ${project.active} active` : ''}
+            </div>
+            <div className="mt-2 text-[10.5px] text-[var(--gs-info)]">enter project home →</div>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 /** Compact theme switcher — dropdown on hover. Shows icon-only on mobile. */
@@ -151,6 +245,12 @@ export function BoardPage({
 	  loading = false,
 	  loadingLabel = 'Loading worktrees...',
 }: BoardPageProps) {
+  const [boardView, setBoardView] = useState<'workspaces' | 'stacks'>('workspaces');
+  const projects = useMemo(
+    () => deriveProjects(groups, workspaceStatusById),
+    [groups, workspaceStatusById],
+  );
+
   useEffect(() => {
     if (!onPhaseChange) {
       return;
@@ -258,6 +358,40 @@ export function BoardPage({
         />
       </div>
 
+      {/* PROJECTS strip (mock ghome-projects) */}
+      {!loading && (
+        <ProjectsStrip
+          projects={projects}
+          onOpenProjectHome={onOpenProjectHome}
+          onNewProject={onOpenCreateMenu}
+        />
+      )}
+
+      {/* Kicker + Workspaces/Stacks segmented toggle (mock ghome-kanban-h) */}
+      {!loading && (
+        <div className="flex flex-shrink-0 items-center px-4 pb-1 pt-2.5">
+          <span className="text-[10px] uppercase tracking-[0.12em] text-[var(--gs-text-dim)]">
+            {boardView === 'workspaces' ? 'All workspaces · across projects' : 'Goal stacks · alignment across the chain'}
+          </span>
+          <span className="ml-2.5 inline-flex border border-[var(--gs-border)]">
+            <button
+              type="button"
+              onClick={() => setBoardView('workspaces')}
+              className={`px-[11px] py-[3px] text-[11px] ${boardView === 'workspaces' ? 'bg-[var(--gs-bg-active)] text-[var(--gs-text)] shadow-[inset_0_-2px_0_var(--gs-accent)]' : 'text-[var(--gs-text-dim)] hover:text-[var(--gs-text)]'}`}
+            >
+              Workspaces
+            </button>
+            <button
+              type="button"
+              onClick={() => setBoardView('stacks')}
+              className={`px-[11px] py-[3px] text-[11px] ${boardView === 'stacks' ? 'bg-[var(--gs-bg-active)] text-[var(--gs-text)] shadow-[inset_0_-2px_0_var(--gs-accent)]' : 'text-[var(--gs-text-dim)] hover:text-[var(--gs-text)]'}`}
+            >
+              Stacks
+            </button>
+          </span>
+        </div>
+      )}
+
       {/* Kanban board — fills remaining height */}
       <div className="flex-1 min-h-0 p-3 overflow-auto">
         {loading ? (
@@ -277,6 +411,7 @@ export function BoardPage({
             onSelectPlannedGoal={onSelectPlannedGoal}
             onSaveChainOrder={onSaveChainOrder}
             boardMessage={boardMessage}
+            view={boardView}
           />
         )}
       </div>

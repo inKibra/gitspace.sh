@@ -391,7 +391,7 @@ export interface KanbanBoardWebProps {
 	  progressLabel?: string;
 	}) {
 	  return (
-	    <div className="relative w-full px-3 py-2.5 border-l-2 border-l-transparent bg-[var(--gs-bg-surface)] opacity-70 cursor-not-allowed text-left">
+	    <div className="relative w-full px-3 py-2.5 border border-[var(--gs-border)] border-l-2 border-l-[var(--gs-info)] bg-[var(--gs-bg-surface)] opacity-70 cursor-not-allowed text-left">
 	      <div className="absolute bottom-0 left-0 right-0 h-[2px] overflow-hidden bg-[var(--gs-border)]">
 	        <div
 	          className="h-full w-1/2 bg-[var(--gs-info)]"
@@ -437,7 +437,7 @@ function PlannedGoalCard({ goal, onSelectGoal, onChainFocus, onOpenOrder, relate
           handleClick();
         }
       }}
-      className={`group relative w-full px-3 py-2.5 border border-[var(--gs-border)] border-l-2 bg-[var(--gs-bg-surface)] text-left transition-[background-color,border-color,opacity] duration-150 hover:bg-[var(--gs-bg-hover)] hover:border-[var(--gs-border-active)] ${related === false ? 'opacity-40' : related === true ? 'ring-1' : ''}`}
+      className={`gs-card-anim group relative w-full px-3 py-2.5 border border-[var(--gs-border)] border-l-2 bg-[var(--gs-bg-surface)] text-left transition-[background-color,border-color,opacity] duration-150 hover:bg-[var(--gs-bg-hover)] hover:border-[var(--gs-border-active)] ${related === false ? 'opacity-40' : related === true ? 'ring-1' : ''}`}
       style={{
         borderLeftColor: related ? getChainPalette(goal.chainId).fg : edgeColor,
         animation: 'gs-card-in .3s cubic-bezier(0.2,0,0,1) both',
@@ -523,7 +523,7 @@ function WorkspaceCard({
       aria-pressed={isSelected}
       aria-disabled={isDeleting}
       className={
-        'group relative w-full px-3 py-2.5 border border-[var(--gs-border)] border-l-2 transition-colors text-left ' +
+        'gs-card-anim group relative w-full px-3 py-2.5 border border-[var(--gs-border)] border-l-2 transition-colors text-left ' +
         (related === false ? 'opacity-40 ' : related === true ? 'ring-1 ring-[var(--gs-info)] ' : '') +
         (isDeleting ? 'cursor-not-allowed opacity-55 grayscale ' : 'cursor-pointer ') +
         (isSelected
@@ -640,6 +640,118 @@ function WorkspaceCard({
   );
 }
 
+const ALIGN_CHIP_TONE: Record<string, 'green' | 'amber' | 'red' | 'dim'> = {
+  aligned: 'green',
+  'needs-rebase': 'amber',
+  'dirty-worktree': 'amber',
+  'missing-branch': 'red',
+  'missing-workspace': 'dim',
+  unknown: 'dim',
+};
+
+const ALIGN_CONNECTOR_CLASS: Record<string, string> = {
+  'needs-rebase': 'text-[var(--gs-warning)]',
+  'dirty-worktree': 'text-[var(--gs-warning)]',
+  'missing-branch': 'text-[var(--gs-danger)]',
+};
+
+/** Stacks lens: chains as horizontal lanes of goal nodes (mock Board.tsx Stacks). */
+function StacksLanes({
+  chains,
+  workspaceByGoalId,
+  selectedWorkspaceId,
+  onSelectWorkspace,
+  onSelectPlannedGoal,
+  onCreatePlannedGoalWorkspace,
+}: {
+  chains: Array<{ chainId: string; title: string; count: number; goals: KanbanGoalItem[] }>;
+  workspaceByGoalId: Map<string, KanbanWorkspaceItem>;
+  selectedWorkspaceId: string | null;
+  onSelectWorkspace: (workspaceKey: string | null) => void;
+  onSelectPlannedGoal?: (goal: KanbanGoalItem) => void;
+  onCreatePlannedGoalWorkspace?: (goal: KanbanGoalItem) => void;
+}) {
+  const alignFor = (goal: KanbanGoalItem): string =>
+    goal.stackStatus ?? (goal.status === 'planned' ? 'missing-workspace' : 'aligned');
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col gap-[18px] overflow-auto px-4 py-3.5">
+      {chains.length === 0 && (
+        <div className="py-10 text-center text-xs italic text-[var(--gs-text-ghost)]">No goal chains yet</div>
+      )}
+      {chains.map((chain) => (
+        <div key={chain.chainId}>
+          <div className="mb-2 flex items-baseline gap-[9px]">
+            <span className="text-[13px] font-medium text-[var(--gs-text)]">⛓ {chain.title}</span>
+            <span className="text-[11px] text-[var(--gs-text-dim)]">
+              {chain.goals[0]?.projectName ?? ''} · {chain.count} goal{chain.count !== 1 ? 's' : ''}
+            </span>
+          </div>
+          <div className="flex items-stretch overflow-x-auto">
+            {chain.goals.map((goal, index) => {
+              const workspace = workspaceByGoalId.get(goal.id);
+              const here = Boolean(workspace && workspace.selectionKey === selectedWorkspaceId);
+              const status = goal.status === 'planned' ? 'planned' : goal.phase === 'ship' ? 'shipped' : 'active';
+              const dotColor = status === 'shipped' ? 'var(--gs-success)' : status === 'active' ? 'var(--gs-accent)' : 'var(--gs-text-dim)';
+              const align = alignFor(goal);
+              const next = chain.goals[index + 1];
+              return (
+                <div key={goal.selectionKey} className="flex items-center">
+                  <div
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => workspace ? onSelectWorkspace(workspace.selectionKey) : onSelectPlannedGoal?.(goal)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault();
+                        if (workspace) onSelectWorkspace(workspace.selectionKey);
+                        else onSelectPlannedGoal?.(goal);
+                      }
+                    }}
+                    className={`w-[230px] flex-none cursor-pointer border bg-[var(--gs-bg-surface)] px-[11px] py-[9px] text-left transition-colors hover:bg-[var(--gs-bg-hover)] ${here ? 'border-[var(--gs-accent)] shadow-[inset_0_0_0_1px_var(--gs-accent)]' : 'border-[var(--gs-border)]'}`}
+                  >
+                    <div className="flex items-center gap-[7px]">
+                      <span className="h-2 w-2 flex-none rounded-full" style={{ background: dotColor }} />
+                      <span className="min-w-0 flex-1 truncate text-[12px] text-[var(--gs-text)]">{goal.title}</span>
+                      {here && (
+                        <span className="border border-[var(--gs-accent)] px-1 text-[10.5px] uppercase tracking-[0.06em] text-[var(--gs-accent)] opacity-90">here</span>
+                      )}
+                    </div>
+                    <div className="mt-1.5 flex items-center gap-[7px] text-[10px]">
+                      <span className="uppercase tracking-[0.05em] text-[var(--gs-text-dim)]">{goal.status === 'planned' ? 'planned' : goal.phase}</span>
+                      <PmChip label={align} tone={ALIGN_CHIP_TONE[align] ?? 'dim'} />
+                    </div>
+                    {!workspace && goal.status === 'planned' && onCreatePlannedGoalWorkspace && (
+                      <button
+                        type="button"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onCreatePlannedGoalWorkspace(goal);
+                        }}
+                        className={btnGhost('mt-2')}
+                      >
+                        ＋ Create workspace
+                      </button>
+                    )}
+                  </div>
+                  {next && (
+                    <span
+                      className={`flex w-[34px] flex-none items-center justify-center ${ALIGN_CONNECTOR_CLASS[alignFor(next)] ?? 'text-[var(--gs-text-dim)]'}`}
+                      title={alignFor(next)}
+                    >
+                      →
+                    </span>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export function KanbanBoardWeb({
   groups,
   selectedWorkspaceId,
@@ -648,9 +760,11 @@ export function KanbanBoardWeb({
 	  deletingWorkspaceIds = {},
 	  creatingWorkspaceIds = {},
 	  onSelectPlannedGoal,
+	  onCreatePlannedGoalWorkspace,
 	  onSaveChainOrder,
 	  boardMessage = null,
 	  fullHeight = false,
+	  view = 'workspaces',
 }: KanbanBoardWebProps) {
   const [mobilePhaseIndex, setMobilePhaseIndex] = useState(0);
   const safeIndex = Math.min(mobilePhaseIndex, groups.length - 1);
@@ -695,6 +809,15 @@ export function KanbanBoardWeb({
       palette: getChainPalette(chainId),
     }),
   ), [allGoalItems]);
+  const workspaceByGoalId = useMemo(() => {
+    const map = new Map<string, KanbanWorkspaceItem>();
+    for (const group of groups) {
+      for (const workspace of group.workspaces) {
+        if (workspace.goal) map.set(workspace.goal.id, workspace);
+      }
+    }
+    return map;
+  }, [groups]);
   const activeChainGoals = useMemo(
     () => activeChainId ? allGoalItems.filter((goal) => goal.chainId === activeChainId).sort((a, b) => a.chainPosition - b.chainPosition) : [],
     [activeChainId, allGoalItems],
@@ -778,7 +901,20 @@ export function KanbanBoardWeb({
   };
   return (
     <>
-      <style>{`@keyframes gs-delete-card-progress { 0% { transform: translateX(-105%); } 100% { transform: translateX(205%); } } @keyframes gs-chain-dot-flow { from { stroke-dashoffset: 0; } to { stroke-dashoffset: -24; } }`}</style>
+      <style>{`@keyframes gs-delete-card-progress { 0% { transform: translateX(-105%); } 100% { transform: translateX(205%); } } @keyframes gs-chain-dot-flow { from { stroke-dashoffset: 0; } to { stroke-dashoffset: -24; } } @keyframes gs-card-in { from { opacity: 0; transform: translateY(8px); filter: blur(4px); } to { opacity: 1; transform: translateY(0); filter: blur(0); } } @media (prefers-reduced-motion: reduce) { .gs-card-anim { animation: none !important; } }`}</style>
+      {view === 'stacks' && (
+        <div className={`flex flex-col ${fullHeight ? 'h-full' : 'flex-1'}`}>
+          <StacksLanes
+            chains={chainSummaries}
+            workspaceByGoalId={workspaceByGoalId}
+            selectedWorkspaceId={selectedWorkspaceId}
+            onSelectWorkspace={onSelectWorkspace}
+            onSelectPlannedGoal={onSelectPlannedGoal}
+            onCreatePlannedGoalWorkspace={onCreatePlannedGoalWorkspace}
+          />
+        </div>
+      )}
+      {view === 'workspaces' && (<>
       {/* ── Mobile: tab bar + single phase ── */}
       <div className={`flex flex-col sm:hidden ${fullHeight ? 'h-full' : 'flex-1'}`}>
         {/* Phase tab bar */}
@@ -808,7 +944,7 @@ export function KanbanBoardWeb({
         {/* Cards for active phase */}
         <div className="flex-1 overflow-y-auto">
 	          {mobileGroup && (mobileGroup.workspaces.length > 0 || creatingForPhase(mobileGroup.phase).length > 0 || plannedGoalsForPhase(mobileGroup.phase).length > 0) ? (
-	            <div className="flex flex-col">
+	            <div className="flex flex-col gap-2 p-2.5">
 	              {creatingForPhase(mobileGroup.phase).map((task) => (
 	                <PendingWorkspaceCard
 	                  key={`creating-${task.workspaceName}`}
@@ -816,13 +952,14 @@ export function KanbanBoardWeb({
 	                  progressLabel={task.progressLabel}
 	                />
 	              ))}
-	              {plannedGoalsForPhase(mobileGroup.phase).map((goal) => (
-	                <PlannedGoalCard key={goal.selectionKey} goal={goal} onSelectGoal={onSelectPlannedGoal} onChainFocus={setActiveChainId} onOpenOrder={openOrderEditor} related={activeChainId ? goal.chainId === activeChainId : undefined} />
+	              {plannedGoalsForPhase(mobileGroup.phase).map((goal, index) => (
+	                <PlannedGoalCard key={goal.selectionKey} goal={goal} index={index} onSelectGoal={onSelectPlannedGoal} onChainFocus={setActiveChainId} onOpenOrder={openOrderEditor} related={activeChainId ? goal.chainId === activeChainId : undefined} />
 	              ))}
-	              {sortWorkspacesForLane(mobileGroup.workspaces).map((w) => (
+	              {sortWorkspacesForLane(mobileGroup.workspaces).map((w, index) => (
 	                <WorkspaceCard
 	                  key={w.selectionKey}
 	                  entry={w}
+	                  index={plannedGoalsForPhase(mobileGroup.phase).length + index}
 	                  isSelected={w.selectionKey === selectedWorkspaceId}
 	                  onSelect={() => onSelectWorkspace(w.selectionKey === selectedWorkspaceId ? null : w.selectionKey)}
 	                  status={workspaceStatusById[w.selectionKey]}
@@ -861,31 +998,47 @@ export function KanbanBoardWeb({
           ))}
         </div>
       )}
-      <div className={`hidden sm:flex flex-1 gap-px overflow-x-auto bg-[var(--gs-gap)] ${fullHeight ? 'h-full' : ''}`}>
-        {groups.map((group) => (
+      <div className={`hidden sm:flex flex-1 gap-6 overflow-x-auto ${fullHeight ? 'h-full' : ''}`}>
+        {groups.map((group) => {
+          const plannedGoals = plannedGoalsForPhase(group.phase);
+          const creating = creatingForPhase(group.phase);
+          const count = group.workspaces.length + creating.length + plannedGoals.length;
+          const label = PHASE_LABELS[group.phase] ?? group.phase;
+          return (
           <div
             key={group.phase}
-            className={`flex min-w-[180px] flex-1 flex-col bg-[var(--gs-bg)] ${fullHeight ? 'h-full overflow-y-auto' : ''}`}
+            className={`flex min-w-[180px] flex-1 flex-col bg-[var(--gs-bg)] ${fullHeight ? 'h-full min-h-0' : ''}`}
           >
-	            <div className="flex justify-between items-baseline px-3 py-2.5 text-[10px] tracking-[2px] uppercase text-[var(--gs-text-dim)]">
-	              <span>{PHASE_LABELS[group.phase] ?? group.phase}</span>
-	              <span className="text-[var(--gs-text-ghost)]">{group.workspaces.length + creatingForPhase(group.phase).length + plannedGoalsForPhase(group.phase).length}</span>
+	            <div className="border-b border-[var(--gs-border)] px-3 py-2.5">
+	              <div className="flex items-baseline justify-between">
+	                <span className="text-[13px] font-semibold text-[var(--gs-text)]">{label}</span>
+	                <span className="text-[11px] tabular-nums text-[var(--gs-text-dim)]">{count}</span>
+	              </div>
+	              {PHASE_BLURBS[group.phase] && (
+	                <div className="mt-1 text-[11px] text-[var(--gs-text-muted)]">{PHASE_BLURBS[group.phase]}</div>
+	              )}
 	            </div>
-	            <div className="flex flex-col gap-0">
-	              {creatingForPhase(group.phase).map((task) => (
+	            <div className={`flex flex-col gap-2 p-2.5 ${fullHeight ? 'flex-1 overflow-y-auto' : ''}`}>
+	              {count === 0 && (
+	                <div className="px-2 py-4 text-center text-[11.5px] italic text-[var(--gs-text-dim)]">
+	                  No workspaces in {String(label).toLowerCase()}
+	                </div>
+	              )}
+	              {creating.map((task) => (
 	                <PendingWorkspaceCard
 	                  key={`creating-${task.workspaceName}`}
 	                  workspaceName={task.workspaceName}
 	                  progressLabel={task.progressLabel}
 	                />
 	              ))}
-	              {plannedGoalsForPhase(group.phase).map((goal) => (
-	                <PlannedGoalCard key={goal.selectionKey} goal={goal} onSelectGoal={onSelectPlannedGoal} onChainFocus={setActiveChainId} onOpenOrder={openOrderEditor} related={activeChainId ? goal.chainId === activeChainId : undefined} />
+	              {plannedGoals.map((goal, index) => (
+	                <PlannedGoalCard key={goal.selectionKey} goal={goal} index={creating.length + index} onSelectGoal={onSelectPlannedGoal} onChainFocus={setActiveChainId} onOpenOrder={openOrderEditor} related={activeChainId ? goal.chainId === activeChainId : undefined} />
 	              ))}
-	              {sortWorkspacesForLane(group.workspaces).map((w) => (
+	              {sortWorkspacesForLane(group.workspaces).map((w, index) => (
 	                <WorkspaceCard
 	                  key={w.selectionKey}
 	                  entry={w}
+	                  index={creating.length + plannedGoals.length + index}
 	                  isSelected={w.selectionKey === selectedWorkspaceId}
 	                  onSelect={() => onSelectWorkspace(w.selectionKey === selectedWorkspaceId ? null : w.selectionKey)}
 	                  status={workspaceStatusById[w.selectionKey]}
@@ -897,8 +1050,10 @@ export function KanbanBoardWeb({
 	              ))}
 	            </div>
           </div>
-        ))}
+          );
+        })}
       </div>
+      </>)}
       {chainConnectors.length > 0 && (
         <svg className="fixed inset-0 z-20 h-screen w-screen pointer-events-none opacity-90" aria-hidden="true">
           {chainConnectors.map((connector, index) => {

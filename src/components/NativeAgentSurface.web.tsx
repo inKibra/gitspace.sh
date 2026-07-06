@@ -63,6 +63,8 @@ export interface NativeAgentSurfaceProps {
   onRequestCommands?: () => Promise<Array<{ name: string; description: string; kind: string }>>;
   /** Fetch file suggestions for @ autocomplete. */
   onRequestFileSuggestions?: (prefix: string) => Promise<Array<{ path: string; isDirectory: boolean }>>;
+  /** Name of the workflow attached to this session, if any (violet composer chip). */
+  workflowLabel?: string | null;
 }
 
 export function NativeAgentSurface({
@@ -81,6 +83,7 @@ export function NativeAgentSurface({
   onEditQueuedMessage,
   onRequestCommands,
   onRequestFileSuggestions,
+  workflowLabel,
 }: NativeAgentSurfaceProps) {
   // Dialog overlay stays as a portal (always on top)
   const dialogOverlay = pendingDialog ? createPortal(
@@ -158,6 +161,8 @@ export function NativeAgentSurface({
         draftStorageVersion={draftStorageVersion}
         onRequestCommands={onRequestCommands}
         onRequestFileSuggestions={onRequestFileSuggestions}
+        workflowLabel={workflowLabel}
+        queuedFollowUpCount={queuedMessages?.followUp.length ?? 0}
       />
     </>
   );

@@ -34,6 +34,15 @@ function PierreRepoTree({ entries, changedSet, onOpenFile }: {
       .filter((e) => e.status && map[e.status])
       .map((e) => ({ path: e.path, status: map[e.status!] }));
   }, [entries]);
+  /** Mock parity: dirs that contain working-tree changes start expanded. */
+  const expandedDirs = useMemo(() => {
+    const dirs = new Set<string>();
+    for (const e of gitStatus) {
+      const segments = e.path.split('/');
+      for (let i = 1; i < segments.length; i += 1) dirs.add(segments.slice(0, i).join('/'));
+    }
+    return [...dirs];
+  }, [gitStatus]);
   const openRef = useRef(onOpenFile);
   openRef.current = onOpenFile;
   const changedRef = useRef(changedSet);
@@ -43,6 +52,7 @@ function PierreRepoTree({ entries, changedSet, onOpenFile }: {
   const { model } = useFileTree({
     paths,
     gitStatus,
+    initialExpandedPaths: expandedDirs,
     density: 'compact',
     onSelectionChange: (selected) => {
       const path = selected.find((s) => fileSetRef.current.has(s));
@@ -50,8 +60,13 @@ function PierreRepoTree({ entries, changedSet, onOpenFile }: {
     },
   });
   useEffect(() => {
-    model.resetPaths(paths);
-  }, [model, paths]);
+    model.resetPaths(paths, { initialExpandedPaths: expandedDirs });
+  }, [model, paths, expandedDirs]);
+  /** useFileTree only reads options at construction — push git status (the
+   *  right-aligned M/A/D/U letters) whenever the async repo listing lands. */
+  useEffect(() => {
+    model.setGitStatus(gitStatus);
+  }, [model, gitStatus]);
   return <FileTree model={model} className="gs-pierre-tree" />;
 }
 
