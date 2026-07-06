@@ -134,7 +134,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   const [eventsWorkspaceLabel, setEventsWorkspaceLabel] = useState<string>('');
   const [projectHomeName, setProjectHomeName] = useState<string | null>(null);
   /** Repo files + artifacts opened as dock tabs, keyed by workspace selectionKey. */
-  type DockExtraPane = ({ kind: 'file' } & RepoFileOpen) | { kind: 'artifact'; path: string } | { kind: 'dashboard'; path: string } | { kind: 'note'; noteId: string | null; title: string; nonce?: number } | { kind: 'goal' } | { kind: 'guide' } | { kind: 'rubric' } | { kind: 'evidence'; requirementId: string; evidenceId: string } | { kind: 'report'; path: string } | { kind: 'workflow' };
+  type DockExtraPane = ({ kind: 'file' } & RepoFileOpen) | { kind: 'artifact'; path: string } | { kind: 'dashboard'; path: string } | { kind: 'note'; noteId: string | null; title: string; nonce?: number } | { kind: 'goal' } | { kind: 'guide' } | { kind: 'rubric' } | { kind: 'evidence'; requirementId: string; evidenceId: string } | { kind: 'report'; path: string } | { kind: 'workflow' } | { kind: 'crons' };
   const [dockExtraPanes, setDockExtraPanes] = useState<Record<string, DockExtraPane[]>>({});
   const openSingletonPane = useCallback((wsKey: string, pane: DockExtraPane) => {
     setDockExtraPanes((prev) => {
@@ -2920,6 +2920,29 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
               />
             ),
           });
+        } else if (extra.kind === 'crons') {
+          panels.push({
+            id: 'crons',
+            title: '◷ Crons & triggers',
+            version: 'crons',
+            onClose: closeExtra,
+            render: () => (
+              <div className="flex h-full min-h-0 flex-col text-[12px]">
+                <div className="flex flex-shrink-0 items-center gap-2 border-b border-[var(--gs-border-muted)] px-3 py-1.5">
+                  <span className="text-[var(--gs-accent)]">◷</span>
+                  <span className="text-[var(--gs-text)]">Crons & triggers</span>
+                  <span className="text-[10px] text-[var(--gs-text-ghost)]">ship stage · scheduled + event-driven agents</span>
+                </div>
+                <div className="flex flex-1 flex-col items-center justify-center gap-1 text-center">
+                  <span className="text-[var(--gs-text-dim)]">No triggers yet.</span>
+                  <span className="max-w-[420px] text-[11px] text-[var(--gs-text-ghost)]">
+                    The trigger registry (cron / event / manual runs that write data artifacts) ships next — runs will
+                    surface here and as ⟳ last-run chips on data artifacts.
+                  </span>
+                </div>
+              </div>
+            ),
+          });
         } else if (extra.kind === 'report') {
           panels.push({
             id: `report:${extra.path}`,
@@ -3062,6 +3085,14 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
                     onOpenEvidence={(requirementId, evidenceId) => openSingletonPane(workspace.selectionKey ?? workspace.id, { kind: 'evidence', requirementId, evidenceId })}
                     onOpenReport={(path) => openSingletonPane(workspace.selectionKey ?? workspace.id, { kind: 'report', path })}
                     onOpenGoalPane={() => openSingletonPane(workspace.selectionKey ?? workspace.id, { kind: 'goal' })}
+                    onOpenRubricPane={() => openSingletonPane(workspace.selectionKey ?? workspace.id, { kind: 'rubric' })}
+                    onOpenWorkflowPane={() => openSingletonPane(workspace.selectionKey ?? workspace.id, { kind: 'workflow' })}
+                    goalSummary={workspaceGoal ? {
+                      chainTitle: workspaceGoal.chainTitle,
+                      chainLength: workspaceGoal.chainLength,
+                      chainPosition: workspaceGoal.chainPosition,
+                      reqCount: workspaceGoal.validation ? Object.keys(workspaceGoal.validation.requirements ?? {}).length : 0,
+                    } : undefined}
                     onOpenNote={(noteId, title) => {
                       const key = workspace.selectionKey ?? workspace.id;
                       setDockExtraPanes((prev) => {
@@ -3093,6 +3124,26 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
                 onOpenChangeGuide={() => openSingletonPane(workspace.selectionKey ?? workspace.id, { kind: 'guide' })}
                 onOpenRubric={() => openSingletonPane(workspace.selectionKey ?? workspace.id, { kind: 'rubric' })}
                 onOpenWorkflow={() => openSingletonPane(workspace.selectionKey ?? workspace.id, { kind: 'workflow' })}
+                onOpenCrons={() => openSingletonPane(workspace.selectionKey ?? workspace.id, { kind: 'crons' })}
+                onCreateDashboard={() => {
+                  flow.showInput({
+                    title: 'New dashboard',
+                    message: 'Dashboard name (becomes <name>.dashboard.json on the artifacts branch)',
+                    placeholder: 'ops',
+                    onSubmit: (name) => {
+                      const slug = name.trim().toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '');
+                      if (!slug) return;
+                      const be = multi.getBackend(backendKeyFromSelectionKey(workspace.selectionKey ?? workspace.id));
+                      const doc = { name: slug, panels: [] };
+                      void be?.writeWorkspaceArtifact?.(workspace.id, `${slug}.dashboard.json`, btoa(JSON.stringify(doc, null, 2)), `dashboard: create ${slug}`)
+                        .then(() => {
+                          openSingletonPane(workspace.selectionKey ?? workspace.id, { kind: 'dashboard', path: `${slug}.dashboard.json` });
+                          toast.success(`Dashboard ${slug} created.`);
+                        })
+                        .catch((err) => toast.error(err instanceof Error ? err.message : 'Failed to create dashboard.'));
+                    },
+                  });
+                }}
                 dashboards={wsDashboards[workspace.selectionKey ?? workspace.id] ?? []}
                 onOpenDashboard={(path) => openSingletonPane(workspace.selectionKey ?? workspace.id, { kind: 'dashboard', path })}
                 chainGoals={workspaceGoal?.chainId ? allGoalItems.filter((g) => g.chainId === workspaceGoal.chainId) : undefined}

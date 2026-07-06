@@ -45,6 +45,8 @@ export interface WorkspaceDetailPaneProps {
   /** Surfaces group targets (mock Sidebar Surfaces). */
   onOpenRubric?: (workspaceId: string) => void;
   onOpenWorkflow?: (workspaceId: string) => void;
+  onOpenCrons?: (workspaceId: string) => void;
+  onCreateDashboard?: () => void;
   onOpenChangeGuide?: (workspaceId: string) => void;
   onOpenGoalDoc?: (workspaceId: string) => void;
   /** Dashboards group (from *.dashboard.json artifacts). */

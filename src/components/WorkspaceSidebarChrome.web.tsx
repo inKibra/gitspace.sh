@@ -29,7 +29,7 @@ export function SidebarStageHeader({ name, phase, onSwitchStage, onClose }: {
   }, [open]);
   const color = stageColorVar(phase);
   return (
-    <div className="flex h-[42px] flex-shrink-0 items-center gap-2 border-b border-[var(--gs-border)] px-[13px]">
+    <div className="gs-ui flex h-[42px] flex-shrink-0 items-center gap-2 border-b border-[var(--gs-border)] px-[13px]">
       <span className="min-w-0 flex-1 truncate font-[family-name:var(--gs-font-mono)] text-[12.5px] text-[var(--gs-text)]">{name}</span>
       <div ref={rootRef} className="relative flex-shrink-0">
         <button
@@ -69,7 +69,7 @@ export function SidebarStageHeader({ name, phase, onSwitchStage, onClose }: {
 
 export function ModeCapsStrip({ phase }: { phase: WorkspacePhase }): ReactElement {
   return (
-    <div className="flex flex-shrink-0 flex-wrap items-center gap-[5px] border-b border-[var(--gs-border)] bg-[#070707] px-[13px] py-[7px]">
+    <div className="gs-ui flex flex-shrink-0 flex-wrap items-center gap-[5px] border-b border-[var(--gs-border)] bg-[#070707] px-[13px] py-[7px]">
       <span className="text-[10px] uppercase tracking-[.1em] text-[var(--gs-text-dim)]">{phase} mode</span>
       {STAGE_CAPS[phase].unlocks.map((u) => (
         <span key={u} className="border border-[var(--gs-border)] px-1.5 py-px text-[10.5px] text-[var(--gs-text-muted)]">{u}</span>

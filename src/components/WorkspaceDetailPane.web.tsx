@@ -43,55 +43,71 @@ function readStoredSidebarClosed(): boolean {
   }
 }
 
+/** Mock .sb-grp — 10.5px uppercase tracked group header, full-bleed rows. */
 function SidebarSection({ title, extra, children }: { title: string; extra?: ReactNode; children: ReactNode }) {
   return (
-    <div className="mb-3">
-      <div className="flex items-center gap-2 mb-1">
-        <span className="text-[10px] uppercase tracking-wider text-[var(--gs-text-ghost)] font-medium">{title}</span>
+    <div>
+      <div className="flex items-center gap-2 px-[13px] pt-[11px] pb-[5px]">
+        <span className="text-[10.5px] uppercase tracking-[.12em] text-[var(--gs-text-dim)]">{title}</span>
         {extra}
       </div>
-      <div className="space-y-0.5">{children}</div>
+      <div>{children}</div>
     </div>
   );
 }
 
+/** Mock .litem — glyph column + label + right tag, inset accent bar when active. */
 function SidebarItem({
+  icon,
+  iconClass,
   dotColor,
   label,
   subtitle,
   rightLabel,
+  busy = false,
+  danger = false,
   onClick,
   active = false,
   highlight = false,
 }: {
+  /** Fixed-width glyph column (mock .ic). */
+  icon?: string;
+  /** Tone override for the glyph (e.g. service status dots). */
+  iconClass?: string;
   dotColor?: string;
   label: string;
   subtitle?: string;
   rightLabel?: string;
+  /** Pulsing accent dot at the row's right edge (mock .dotpulse). */
+  busy?: boolean;
+  danger?: boolean;
   onClick?: () => void;
   active?: boolean;
   highlight?: boolean;
 }) {
   const Tag = onClick ? 'button' : 'div';
+  const glyph = icon ?? (dotColor ? '●' : undefined);
+  const glyphCls = iconClass ?? dotColor ?? (active ? 'text-[var(--gs-accent)]' : 'text-[var(--gs-text-dim)]');
   return (
     <Tag
       type={onClick ? 'button' : undefined}
       onClick={onClick}
       className={
-        'w-full flex items-center gap-1.5 px-1.5 py-1 rounded text-xs text-left truncate transition-colors ' +
+        'w-full flex items-center gap-[9px] px-[13px] py-[5px] text-[12px] text-left transition-colors duration-100 ' +
         (highlight
-          ? 'bg-[var(--gs-highlight-bg)] text-[var(--gs-text)] ring-1 ring-[var(--gs-info)]/30'
+          ? 'bg-[var(--gs-highlight-bg)] text-[var(--gs-text)] shadow-[inset_2px_0_0_var(--gs-info)]'
           : active
-            ? 'bg-[var(--gs-bg-active)] text-[var(--gs-text)]'
-            : 'text-[var(--gs-text-muted)] hover:bg-[var(--gs-bg-active)] hover:text-[var(--gs-text)]')
+            ? 'bg-[var(--gs-bg-active)] text-[var(--gs-text)] shadow-[inset_2px_0_0_var(--gs-accent)]'
+            : `text-[var(--gs-text-muted)] hover:bg-[var(--gs-bg-hover)] ${danger ? 'hover:text-[var(--gs-danger)]' : 'hover:text-[var(--gs-text)]'}`)
       }
     >
-      {dotColor && <span className={dotColor} style={{ fontSize: '8px' }}>●</span>}
+      {glyph && <span className={`w-[14px] flex-shrink-0 text-center text-[11px] ${active && !iconClass && !dotColor ? 'text-[var(--gs-accent)]' : glyphCls}`}>{glyph}</span>}
       <span className="truncate flex-1 min-w-0">
         <span className="block truncate">{label}</span>
         {subtitle && <span className="block truncate text-[10px] text-[var(--gs-text-dim)]">{subtitle}</span>}
       </span>
-      {rightLabel && <span className="text-[10px] text-[var(--gs-text-ghost)] flex-shrink-0">{rightLabel}</span>}
+      {busy && <span className="h-[7px] w-[7px] flex-shrink-0 animate-pulse rounded-full bg-[var(--gs-accent)]" />}
+      {rightLabel && <span className="ml-auto text-[10.5px] tabular-nums text-[var(--gs-text-dim)] flex-shrink-0">{rightLabel}</span>}
     </Tag>
   );
 }
@@ -186,6 +202,8 @@ function SidebarContent(props: {
   onOpenChangeGuide?: WorkspaceDetailPaneProps['onOpenChangeGuide'];
   onOpenRubric?: WorkspaceDetailPaneProps['onOpenRubric'];
   onOpenWorkflow?: WorkspaceDetailPaneProps['onOpenWorkflow'];
+  onOpenCrons?: WorkspaceDetailPaneProps['onOpenCrons'];
+  onCreateDashboard?: WorkspaceDetailPaneProps['onCreateDashboard'];
   dashboards?: WorkspaceDetailPaneProps['dashboards'];
   onOpenDashboard?: WorkspaceDetailPaneProps['onOpenDashboard'];
   chainGoals?: WorkspaceDetailPaneProps['chainGoals'];
@@ -202,7 +220,7 @@ function SidebarContent(props: {
     attachedSessionIds, attachedAgentSessionIds,
     onAttachSession, onStopAgentTurn, onCloseAgentSession, onArchiveAgentSession, onRestoreAgentSession,
     onCreateAgentSession, onStopProcess, onDeleteSession, onDeleteWorkspace, onOpenGitHubPullRequest, onOpenReview,
-    onRequestStatusChange, onOpenNotes, onOpenEvents, onOpenGoalDoc, onOpenChangeGuide, onOpenRubric, onOpenWorkflow,
+    onRequestStatusChange, onOpenNotes, onOpenEvents, onOpenGoalDoc, onOpenChangeGuide, onOpenRubric, onOpenWorkflow, onOpenCrons, onCreateDashboard,
     dashboards, onOpenDashboard, chainGoals, chainTitle, currentChainGoalId, onSwitchChainWorkspace,
     agentSessionCount, pendingPermissions, pullRequest, onDismiss,
     goal, onOpenGoalDetail,
@@ -221,6 +239,7 @@ function SidebarContent(props: {
 
   /** Wrap sidebar actions: dismiss bottom sheet on mobile after action */
   const act = (fn: () => void) => { fn(); onDismiss?.(); };
+  const [showClosedAgents, setShowClosedAgents] = useState(false);
 
   const goalReqs = goal?.validation ? Object.values(goal.validation.requirements ?? {}) : [];
   const goalReady = goalReqs.length > 0
@@ -239,7 +258,7 @@ function SidebarContent(props: {
         </>}
       >
         {activeAgentSessions.length === 0 ? (
-          <div className="text-xs text-[var(--gs-text-ghost)] px-1.5">No agents</div>
+          <div className="text-xs text-[var(--gs-text-ghost)] px-[13px]">No agents</div>
         ) : (
           agentRows.filter((row) => row.bucket === 'active').map((row) => {
             const agentState = row.state;
@@ -252,10 +271,12 @@ function SidebarContent(props: {
             return (
               <div key={row.id} className="flex items-center gap-1">
                 <SidebarItem
-                  dotColor={dotColor}
+                  icon="▸"
+                  iconClass={dotColor}
                   label={row.title}
                   subtitle={row.modelLabel}
                   rightLabel={row.lastActiveLabel ?? undefined}
+                  busy={agentState === 'running'}
                   active={attachedAgentSessionIds.includes(row.id) || row.id === attachedAgentSessionId}
                   onClick={() => act(() => void detailActions.openAgentSession(row.id))}
                 />
@@ -269,7 +290,15 @@ function SidebarContent(props: {
             );
           })
         )}
-        {agentRows.filter((row) => row.bucket === 'closed').map((row) => (
+        {agentRows.some((row) => row.bucket === 'closed') && (
+          <SidebarItem
+            icon="▾"
+            label={`Closed sessions (${agentRows.filter((row) => row.bucket === 'closed').length})`}
+            rightLabel={showClosedAgents ? 'hide' : 'show'}
+            onClick={() => setShowClosedAgents((v) => !v)}
+          />
+        )}
+        {showClosedAgents && agentRows.filter((row) => row.bucket === 'closed').map((row) => (
           <div key={`closed:${row.id}`} className="flex items-center gap-1">
             <SidebarItem dotColor="text-[var(--gs-text-ghost)]" label={row.title} rightLabel="closed" onClick={() => act(() => void detailActions.openAgentSession(row.id))} />
             {onArchiveAgentSession && (
@@ -291,7 +320,7 @@ function SidebarContent(props: {
           </>
         )}
         {onCreateAgentSession && (
-          <SidebarItem label="+ New agent session" onClick={() => act(() => void detailActions.createAgentSession())} />
+          <SidebarItem icon="＋" label="New thread" onClick={() => act(() => void detailActions.createAgentSession())} />
         )}
       </SidebarSection>
 
@@ -313,7 +342,7 @@ function SidebarContent(props: {
       {/* TERMINALS */}
       <SidebarSection title="Terminals">
         {shellSessions.length === 0 ? (
-          <div className="text-xs text-[var(--gs-text-ghost)] px-1.5">No sessions</div>
+          <div className="text-xs text-[var(--gs-text-ghost)] px-[13px]">No sessions</div>
         ) : (
           sessionRows.map((row) => {
             const s = workspaceSessions.find((session) => session.id === row.id)!;
@@ -322,7 +351,9 @@ function SidebarContent(props: {
             return (
               <div key={row.id} className="flex items-center gap-1">
                 <SidebarItem
-                  dotColor={isOpen ? 'text-[var(--gs-success)]' : row.attached ? 'text-[var(--gs-warning-bright)]' : 'text-[var(--gs-running)]'}
+                  icon="⌗"
+                  iconClass={isOpen ? 'text-[var(--gs-success)]' : row.attached ? 'text-[var(--gs-warning-bright)]' : 'text-[var(--gs-text-dim)]'}
+                  busy={row.attached && !isOpen}
                   label={row.label} subtitle={row.subtitle} rightLabel={row.alertLabel ?? row.statusLabel}
                   highlight={isOpen} active={row.attached && !isOpen}
                   onClick={() => act(() => void detailActions.attachSession(row.id))}
@@ -334,33 +365,39 @@ function SidebarContent(props: {
             );
           })
         )}
-        <SidebarItem label="+ New session" onClick={() => act(() => void detailActions.createSession())} />
+        <SidebarItem icon="＋" label="New terminal" onClick={() => act(() => void detailActions.createSession())} />
       </SidebarSection>
 
       {/* SURFACES (mock Sidebar Surfaces group) */}
       <SidebarSection title="Surfaces">
         {onOpenGoalDoc && goal && (
-          <SidebarItem label="◇ Goal doc" rightLabel={goalReady} onClick={() => act(() => onOpenGoalDoc(workspace.id))} />
+          <SidebarItem icon="◇" label="Goal doc" rightLabel={goalReady} onClick={() => act(() => onOpenGoalDoc(workspace.id))} />
         )}
         {onOpenWorkflow && (
-          <SidebarItem label="⟜ Workflow" rightLabel="live" onClick={() => act(() => onOpenWorkflow(workspace.id))} />
+          <SidebarItem icon="⟜" label="Workflow" rightLabel="live" onClick={() => act(() => onOpenWorkflow(workspace.id))} />
         )}
         {onOpenChangeGuide && (
-          <SidebarItem label="⛓ Change Guide" onClick={() => act(() => onOpenChangeGuide(workspace.id))} />
+          <SidebarItem icon="⛓" label="Change Guide" onClick={() => act(() => onOpenChangeGuide(workspace.id))} />
         )}
         {onOpenRubric && (
-          <SidebarItem label="☰ Review rubric" onClick={() => act(() => onOpenRubric(workspace.id))} />
+          <SidebarItem icon="☰" label="Review rubric" onClick={() => act(() => onOpenRubric(workspace.id))} />
         )}
-        <SidebarItem label="⚑ Event logs" rightLabel="live" onClick={() => act(() => onOpenEvents(workspace.id))} />
+        {onOpenCrons && (
+          <SidebarItem icon="◷" label="Crons & triggers" rightLabel="ship" onClick={() => act(() => onOpenCrons(workspace.id))} />
+        )}
+        <SidebarItem icon="⚑" label="Event logs" rightLabel="live" onClick={() => act(() => onOpenEvents(workspace.id))} />
       </SidebarSection>
 
       {/* DASHBOARDS (mock Sidebar Dashboards group — *.dashboard.json artifacts) */}
       {onOpenDashboard && (
         <SidebarSection title="Dashboards">
-          {(dashboards ?? []).length === 0 && <div className="text-xs text-[var(--gs-text-ghost)] px-1.5">No dashboards</div>}
+          {(dashboards ?? []).length === 0 && <div className="text-xs text-[var(--gs-text-ghost)] px-[13px]">No dashboards</div>}
           {(dashboards ?? []).map((d) => (
-            <SidebarItem key={d.path} label={`▦ ${d.name}`} rightLabel={String(d.panels)} onClick={() => act(() => onOpenDashboard(d.path))} />
+            <SidebarItem key={d.path} icon="▦" label={d.name} rightLabel={String(d.panels)} onClick={() => act(() => onOpenDashboard(d.path))} />
           ))}
+          {onCreateDashboard && (
+            <SidebarItem icon="＋" label="New dashboard" onClick={() => act(onCreateDashboard)} />
+          )}
         </SidebarSection>
       )}
 
@@ -374,9 +411,10 @@ function SidebarContent(props: {
               <div key={service.key}>
                 <div className="flex items-center gap-1">
                   <SidebarItem
-                    dotColor={isOpen ? 'text-[var(--gs-success)]' : service.state === 'running' ? 'text-[var(--gs-running)]' : 'text-[var(--gs-text-ghost)]'}
-                    label={service.label} subtitle={service.subtitle ?? localUrl}
-                    rightLabel={service.state === 'disabled' ? undefined : (service.alertLabel ?? service.state)}
+                    icon="●"
+                    iconClass={isOpen || service.state === 'running' ? 'text-[var(--gs-success)]' : service.state === 'failed' ? 'text-[var(--gs-danger)]' : 'text-[var(--gs-text-dim)]'}
+                    label={service.instance > 1 ? service.label : service.processName}
+                    rightLabel={localUrl?.includes(':') ? `:${localUrl.split(':').pop()}` : (service.state === 'disabled' ? undefined : (service.alertLabel ?? undefined))}
                     highlight={isOpen}
                     onClick={service.state === 'disabled' ? undefined : () => act(() => void detailActions.activateService(service.processName, service.instance, service.state))}
                   />
@@ -428,7 +466,7 @@ function SidebarContent(props: {
       {(notesSummary?.total ?? 0) > 0 && (
         <SidebarSection title="Notes" extra={<span className="text-[10px] text-[var(--gs-text-ghost)]">{notesSummary?.total ?? 0} note{(notesSummary?.total ?? 0) === 1 ? '' : 's'}</span>}>
           {visibleRecentNoteRows.map((note) => (
-            <SidebarItem key={note.id} dotColor="text-[var(--gs-text-ghost)]" label={note.label} rightLabel="note" />
+            <SidebarItem key={note.id} icon="✎" label={note.label} rightLabel="note" />
           ))}
         </SidebarSection>
       )}
@@ -445,8 +483,8 @@ function SidebarContent(props: {
 
       </div>
 
-      <div className="mt-auto pt-3 border-t border-[var(--gs-border-muted)] space-y-0.5">
-        <div className="px-1.5 pb-1 text-[10.5px] uppercase tracking-[.12em] text-[var(--gs-text-dim)]">Workspace</div>
+      <div className="mt-auto pt-2 border-t border-[var(--gs-border-muted)]">
+        <div className="px-[13px] pt-[5px] pb-[5px] text-[10.5px] uppercase tracking-[.12em] text-[var(--gs-text-dim)]">Workspace</div>
         {pendingPermissions > 0 && (
           <div className="px-1.5 text-[11px] text-[var(--gs-warning-bright)]">⚡ {pendingPermissions} pending permission{pendingPermissions !== 1 ? 's' : ''}</div>
         )}
@@ -455,14 +493,15 @@ function SidebarContent(props: {
           if (action.id === 'open-review' && !onOpenReview) return null;
           if (action.id === 'change-status' && !onRequestStatusChange) return null;
           const onClick = () => void detailActions.footerAction(action.id);
-          return <SidebarItem key={action.id} label={action.label} rightLabel={action.rightLabel} onClick={onClick} />;
+          const FOOT_ICON: Record<string, string> = { 'change-status': '◷', 'bundle-config': '⚙', 'open-review': '⛓', 'open-github-pr': '↗', 'auto-commit': '✓', 'edit-process-config': '⚙' };
+          return <SidebarItem key={action.id} icon={FOOT_ICON[action.id] ?? '·'} label={action.label} rightLabel={action.rightLabel} onClick={onClick} />;
         })}
         {goal && onOpenGoalDetail && (
-          <SidebarItem label="Goal" rightLabel={`⛓ ${goal.chainPosition}/${goal.chainLength}`} onClick={() => act(() => onOpenGoalDetail(goal))} />
+          <SidebarItem icon="◇" label="Goal" rightLabel={`⛓ ${goal.chainPosition}/${goal.chainLength}`} onClick={() => act(() => onOpenGoalDetail(goal))} />
         )}
-        <SidebarItem label="Notes" rightLabel={notesSummary?.total ? `${notesSummary.total}` : 'open'} onClick={() => act(() => onOpenNotes?.(workspace.id))} />
+        <SidebarItem icon="✎" label="Notes" rightLabel={notesSummary?.total ? `${notesSummary.total}` : 'open'} onClick={() => act(() => onOpenNotes?.(workspace.id))} />
         {onDeleteWorkspace && (
-          <SidebarItem label="Delete Workspace" rightLabel="danger" onClick={() => onDeleteWorkspace(workspace)} />
+          <SidebarItem icon="⌫" danger label="Delete Workspace" rightLabel="danger" onClick={() => onDeleteWorkspace(workspace)} />
         )}
       </div>
     </>
@@ -687,7 +726,7 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
         {!sidebarClosed ? (
           <>
             <div
-              className="hidden sm:flex flex-shrink-0 bg-[var(--gs-sidebar-bg)] overflow-hidden flex-col"
+              className="gs-ui hidden sm:flex flex-shrink-0 bg-[var(--gs-sidebar-bg)] overflow-hidden flex-col"
               style={{ width: sidebarWidth }}
             >
               <SidebarStageHeader
@@ -697,7 +736,7 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
                 onClose={() => setDesktopSidebarClosed(true)}
               />
               <ModeCapsStrip phase={props.phase ?? 'code'} />
-              <div className="flex-1 overflow-y-auto px-2 py-3 flex flex-col">
+              <div className="flex-1 overflow-y-auto pb-3 flex flex-col">
               <SidebarContent
                 detailModel={detailModel}
                 workspace={workspace}
@@ -726,6 +765,8 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
                 onOpenChangeGuide={props.onOpenChangeGuide}
                 onOpenRubric={props.onOpenRubric}
                 onOpenWorkflow={props.onOpenWorkflow}
+                onOpenCrons={props.onOpenCrons}
+                onCreateDashboard={props.onCreateDashboard}
                 dashboards={props.dashboards}
                 onOpenDashboard={props.onOpenDashboard}
                 chainGoals={props.chainGoals}
@@ -836,6 +877,8 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
                   onOpenChangeGuide={props.onOpenChangeGuide}
                   onOpenRubric={props.onOpenRubric}
                   onOpenWorkflow={props.onOpenWorkflow}
+                  onOpenCrons={props.onOpenCrons}
+                  onCreateDashboard={props.onCreateDashboard}
                   dashboards={props.dashboards}
                   onOpenDashboard={props.onOpenDashboard}
                   chainGoals={props.chainGoals}

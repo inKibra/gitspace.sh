@@ -84,6 +84,9 @@ export function RightRail({
   onOpenEvidence,
   onOpenReport,
   onOpenGoalPane,
+  onOpenRubricPane,
+  onOpenWorkflowPane,
+  goalSummary,
 }: {
   backend: SessionBackend | null;
   workspaceId: string;
@@ -105,6 +108,10 @@ export function RightRail({
   onOpenEvidence?: (requirementId: string, evidenceId: string) => void;
   onOpenReport?: (path: string) => void;
   onOpenGoalPane?: () => void;
+  onOpenRubricPane?: () => void;
+  onOpenWorkflowPane?: () => void;
+  /** Bound-goal summary for the rail's Goal group (mock: chain · N goals / N requirements). */
+  goalSummary?: { chainTitle: string; chainLength: number; chainPosition: number; reqCount: number };
 }): ReactElement {
   const [closed, setClosed] = useState(() => {
     try { return window.localStorage.getItem(RAIL_CLOSED_KEY) === '1'; } catch { return false; }
@@ -130,23 +137,23 @@ export function RightRail({
   }
 
   return (
-    <aside className="flex h-full w-[320px] flex-shrink-0 flex-col border-l border-[var(--gs-border-muted)] bg-[var(--gs-bg)]">
-      <div className="flex items-center gap-1 border-b border-[var(--gs-border-muted)] px-2 py-1.5 text-[11px]">
+    <aside className="gs-ui flex h-full w-[320px] flex-shrink-0 flex-col border-l border-[var(--gs-border-muted)] bg-[var(--gs-bg)]">
+      <div className="relative flex flex-shrink-0 border-b border-[var(--gs-border)]">
         {(['repo', 'artifacts'] as const).map((m) => (
           <button
             key={m}
             type="button"
             onClick={() => setMode(m)}
-            className={`rounded px-2 py-0.5 capitalize ${mode === m ? 'bg-[var(--gs-bg-active)] text-[var(--gs-accent)]' : 'text-[var(--gs-text-dim)] hover:text-[var(--gs-text)]'}`}
+            className={`flex-1 py-[7px] text-[11px] uppercase tracking-[.08em] ${mode === m ? 'bg-[var(--gs-bg-elevated)] text-[var(--gs-text)] shadow-[inset_0_-2px_0_var(--gs-accent)]' : 'text-[var(--gs-text-muted)] hover:text-[var(--gs-text)]'}`}
           >
             {m}
           </button>
         ))}
-        <button type="button" onClick={() => setClosed(true)} title="Collapse rail" className="ml-auto px-1 text-[var(--gs-text-ghost)] hover:text-[var(--gs-text)]">◨</button>
+        <button type="button" onClick={() => setClosed(true)} title="Collapse rail" className="absolute right-1 top-1/2 -translate-y-1/2 px-1 text-[11px] text-[var(--gs-text-ghost)] hover:text-[var(--gs-text)]">◨</button>
       </div>
       {mode === 'repo'
         ? <RepoMode backend={backend} workspaceId={workspaceId} projectName={projectName} workspaceName={workspaceName} onOpenFile={onOpenFile} reviewing={phase === 'review'} />
-        : <ArtifactsMode backend={backend} workspaceId={workspaceId} projectName={projectName} workspaceName={workspaceName} onOpenArtifact={onOpenArtifact} onOpenDashboard={onOpenDashboard} onOpenNote={onOpenNote} onOpenEvents={onOpenEvents} goalEvidence={goalEvidence} onOpenEvidence={onOpenEvidence} onOpenReport={onOpenReport} onOpenGoalPane={onOpenGoalPane} />}
+        : <ArtifactsMode backend={backend} workspaceId={workspaceId} projectName={projectName} workspaceName={workspaceName} onOpenArtifact={onOpenArtifact} onOpenDashboard={onOpenDashboard} onOpenNote={onOpenNote} onOpenEvents={onOpenEvents} goalEvidence={goalEvidence} onOpenEvidence={onOpenEvidence} onOpenReport={onOpenReport} onOpenGoalPane={onOpenGoalPane} onOpenRubricPane={onOpenRubricPane} onOpenWorkflowPane={onOpenWorkflowPane} goalSummary={goalSummary} />}
     </aside>
   );
 }
@@ -216,22 +223,23 @@ function RepoMode({ backend, workspaceId, projectName, workspaceName, onOpenFile
     <div className="flex min-h-0 flex-1 flex-col text-[12px]">
       {/* Files */}
       <div className="flex min-h-0 flex-1 flex-col">
-        <div className="flex items-center gap-2 px-2 py-1 text-[10px] uppercase tracking-wider text-[var(--gs-text-ghost)]">
+        <div className="flex h-[30px] flex-shrink-0 items-center gap-[7px] border-b border-[var(--gs-border-muted)] px-3 text-[10px] uppercase tracking-[.1em] text-[var(--gs-text-muted)]">
+          <span>▾</span>
           {reviewing ? 'Diffs' : 'Files'}
-          {reviewing && <span className="rounded-full border border-[#4a3a1f] px-1.5 normal-case text-[var(--gs-warning)]">review</span>}
-          <span className="normal-case tracking-normal text-[var(--gs-text-ghost)]">backed by <span className="text-[var(--gs-text-dim)]">@pierre/trees</span></span>
-          <span className="ml-auto flex items-center gap-1 normal-case tracking-normal">
-            diff vs
-            <select
-              value={baseOverride || baseBranch}
-              onChange={(e) => setBaseOverride(e.target.value === baseBranch ? '' : e.target.value)}
-              className="border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-1 py-0.5 text-[10px] text-[var(--gs-text-dim)]"
-            >
-              {[...new Set([baseBranch || 'main', 'main', 'develop'])].map((b) => <option key={b} value={b}>{b}</option>)}
-            </select>
-          </span>
+          {reviewing && <span className="rounded-full border border-[#4a3a1f] px-1.5 normal-case tracking-normal text-[var(--gs-warning)]">review</span>}
+          <span className="ml-auto normal-case tracking-normal text-[var(--gs-text-ghost)]">backed by <span className="text-[var(--gs-text-dim)]">@pierre/trees</span></span>
         </div>
-        <div className="min-h-0 flex-1 overflow-y-auto pb-1 font-[family-name:var(--gs-font-mono)] text-[11px]">
+        <div className="flex flex-shrink-0 items-center gap-2 border-b border-[var(--gs-border-muted)] px-3 py-1.5 text-[11px]">
+          <span className="text-[var(--gs-text-dim)]">diff vs</span>
+          <select
+            value={baseOverride || baseBranch}
+            onChange={(e) => setBaseOverride(e.target.value === baseBranch ? '' : e.target.value)}
+            className="border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-1.5 py-0.5 text-[11px] text-[var(--gs-text)]"
+          >
+            {[...new Set([baseBranch || 'main', 'main', 'develop'])].map((b) => <option key={b} value={b}>{b}</option>)}
+          </select>
+        </div>
+        <div className="min-h-0 flex-1 overflow-y-auto pb-1 text-[11.5px]">
           {loading && entries.length === 0 ? (
             <div className="px-3 py-3 text-center text-[var(--gs-text-dim)]">Loading…</div>
           ) : error ? (
@@ -243,10 +251,11 @@ function RepoMode({ backend, workspaceId, projectName, workspaceName, onOpenFile
       </div>
       {/* Changes + commit */}
       <div className="flex max-h-[45%] min-h-[120px] flex-col border-t border-[var(--gs-border-muted)]">
-        <div className="px-2 py-1 text-[10px] uppercase tracking-wider text-[var(--gs-text-ghost)]">
-          Changes <span className="text-[var(--gs-text-dim)]">{changed.length}</span>
+        <div className="flex h-[30px] flex-shrink-0 items-center gap-[7px] px-3 text-[10px] uppercase tracking-[.1em] text-[var(--gs-text-muted)]">
+          <span>▾</span>
+          Changes <span className="ml-auto tabular-nums text-[var(--gs-text-dim)]">{changed.length}</span>
         </div>
-        <div className="flex gap-1 px-2 pb-1">
+        <div className="flex gap-1 px-3 pb-1.5">
           <input
             value={commitMsg}
             onChange={(e) => setCommitMsg(e.target.value)}
@@ -264,7 +273,7 @@ function RepoMode({ backend, workspaceId, projectName, workspaceName, onOpenFile
           </button>
         </div>
         {notice && <div className="px-2 pb-1 text-[10px] text-[var(--gs-text-dim)]">{notice}</div>}
-        <div className="min-h-0 flex-1 overflow-y-auto pb-1 font-[family-name:var(--gs-font-mono)] text-[11px]">
+        <div className="min-h-0 flex-1 overflow-y-auto pb-1 text-[11.5px]">
           {changed.length === 0 ? (
             <div className="px-3 py-2 text-center text-[var(--gs-text-ghost)]">No changes vs {baseBranch || 'base'}.</div>
           ) : (
@@ -272,7 +281,7 @@ function RepoMode({ backend, workspaceId, projectName, workspaceName, onOpenFile
               const letter = f.changeType === 'new' ? 'A' : f.changeType === 'deleted' ? 'D' : f.changeType === 'renamed' ? 'R' : 'M';
               return (
                 <button key={f.filePath} type="button" onClick={() => onOpenFile({ path: f.filePath, changed: true, prevPath: f.prevFilePath })}
-                  className="flex w-full items-center gap-1.5 px-2 py-[2px] text-left hover:bg-[var(--gs-bg-active)]" title={f.filePath}>
+                  className="flex w-full items-center gap-1.5 px-3 py-[2px] text-left hover:bg-[var(--gs-bg-active)]" title={f.filePath}>
                   <span className={`w-3 flex-shrink-0 text-[10px] ${STATUS_TONE[letter] ?? 'text-[var(--gs-warning)]'}`}>{letter}</span>
                   <span className="min-w-0 flex-1 truncate text-[var(--gs-text)]">{f.filePath}</span>
                   {(f.additions !== undefined || f.deletions !== undefined) && (
@@ -381,7 +390,7 @@ const REPORT_TONE: Record<string, string> = {
   'gitspace-quirk': 'border-[rgba(188,140,255,.4)] text-[#bc8cff]',
 };
 
-function ArtifactsMode({ backend, workspaceId, projectName, workspaceName, onOpenArtifact, onOpenDashboard, onOpenNote, onOpenEvents, goalEvidence, onOpenEvidence, onOpenReport, onOpenGoalPane }: {
+function ArtifactsMode({ backend, workspaceId, projectName, workspaceName, onOpenArtifact, onOpenDashboard, onOpenNote, onOpenEvents, goalEvidence, onOpenEvidence, onOpenReport, onOpenGoalPane, onOpenRubricPane, onOpenWorkflowPane, goalSummary }: {
   backend: SessionBackend | null;
   workspaceId: string;
   projectName: string;
@@ -394,6 +403,10 @@ function ArtifactsMode({ backend, workspaceId, projectName, workspaceName, onOpe
   onOpenEvidence?: (requirementId: string, evidenceId: string) => void;
   onOpenReport?: (path: string) => void;
   onOpenGoalPane?: () => void;
+  onOpenRubricPane?: () => void;
+  onOpenWorkflowPane?: () => void;
+  /** Bound-goal summary for the rail's Goal group (mock: chain · N goals / N requirements). */
+  goalSummary?: { chainTitle: string; chainLength: number; chainPosition: number; reqCount: number };
 }): ReactElement {
   const [entries, setEntries] = useState<Array<{ path: string; size: number; pointer: boolean }>>([]);
   const [notes, setNotes] = useState<Array<{ id: string; title: string }>>([]);
@@ -446,6 +459,7 @@ function ArtifactsMode({ backend, workspaceId, projectName, workspaceName, onOpe
 
   const openByKind = (path: string, kind: ArtifactKind): void => {
     if (kind === 'dashboard') onOpenDashboard(path);
+    else if (kind === 'workflow' && onOpenWorkflowPane) onOpenWorkflowPane();
     else onOpenArtifact(path);
   };
 
@@ -489,7 +503,7 @@ function ArtifactsMode({ backend, workspaceId, projectName, workspaceName, onOpe
   };
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col font-[family-name:var(--gs-font-mono)] text-[11px]">
+    <div className="flex min-h-0 flex-1 flex-col text-[11.5px]">
       <div className="flex flex-shrink-0 items-center gap-1 px-2 pt-1.5 text-[11px]">
         <button type="button" onClick={() => setView('sel')} className={`rounded px-2 py-0.5 ${view === 'sel' ? 'bg-[var(--gs-bg-active)] text-[var(--gs-text)]' : 'text-[var(--gs-text-dim)] hover:text-[var(--gs-text)]'}`}>Artifacts</button>
         <button type="button" onClick={() => setView('fav')} className={`rounded px-2 py-0.5 ${view === 'fav' ? 'bg-[var(--gs-bg-active)] text-[var(--gs-text)]' : 'text-[var(--gs-text-dim)] hover:text-[var(--gs-text)]'}`}>
@@ -515,72 +529,93 @@ function ArtifactsMode({ backend, workspaceId, projectName, workspaceName, onOpe
             : favList.map(row)
         ) : (
           <>
-            {/* synthetic pane rows (mock artifactTree Events/Goal rows) */}
+            {/* GOAL group (mock artifactTree Goal rows) */}
             {onOpenGoalPane && matches('goal doc') && (
-              <button type="button" onClick={onOpenGoalPane} className="flex w-full items-center gap-1.5 px-2 py-[2px] text-left hover:bg-[var(--gs-bg-active)]">
-                <span className="w-4 flex-shrink-0 text-center text-[var(--gs-text-ghost)]">◇</span>
-                <span className="min-w-0 flex-1 truncate text-[var(--gs-text)]">goal.md</span>
-                <span className="ml-auto flex-shrink-0 text-[10.5px] text-[var(--gs-text-dim)]">doc</span>
-              </button>
+              <>
+                <div className="px-3 pb-1 pt-2.5 text-[10px] uppercase tracking-[.12em] text-[var(--gs-text-dim)]">Goal</div>
+                <button type="button" onClick={onOpenGoalPane} className="flex w-full items-center gap-1.5 px-3 py-[2px] text-left hover:bg-[var(--gs-bg-active)]">
+                  <span className="w-4 flex-shrink-0 text-center text-[var(--gs-text-ghost)]">◇</span>
+                  <span className="min-w-0 flex-1 truncate text-[var(--gs-text)]">goal.md</span>
+                  <span className="ml-auto flex-shrink-0 text-[10.5px] text-[var(--gs-text-dim)]">doc</span>
+                </button>
+                {goalSummary && goalSummary.chainLength > 1 && (
+                  <button type="button" onClick={onOpenGoalPane} className="flex w-full items-center gap-1.5 px-3 py-[2px] text-left hover:bg-[var(--gs-bg-active)]">
+                    <span className="w-4 flex-shrink-0 text-center text-[var(--gs-text-ghost)]">⛓</span>
+                    <span className="min-w-0 flex-1 truncate text-[var(--gs-text)]">chain · {goalSummary.chainLength} goals</span>
+                    <span className="ml-auto flex-shrink-0 text-[10.5px] tabular-nums text-[var(--gs-text-dim)]">{goalSummary.chainPosition} of {goalSummary.chainLength}</span>
+                  </button>
+                )}
+                {goalSummary && goalSummary.reqCount > 0 && onOpenRubricPane && (
+                  <button type="button" onClick={onOpenRubricPane} className="flex w-full items-center gap-1.5 px-3 py-[2px] text-left hover:bg-[var(--gs-bg-active)]">
+                    <span className="w-4 flex-shrink-0 text-center text-[var(--gs-text-ghost)]">☰</span>
+                    <span className="min-w-0 flex-1 truncate text-[var(--gs-text)]">{goalSummary.reqCount} requirements</span>
+                    <span className="ml-auto flex-shrink-0 text-[10.5px] text-[var(--gs-text-dim)]">rubric</span>
+                  </button>
+                )}
+              </>
             )}
             {onOpenEvents && matches('event log') && (
-              <button type="button" onClick={onOpenEvents} className="flex w-full items-center gap-1.5 px-2 py-[2px] text-left hover:bg-[var(--gs-bg-active)]">
+              <>
+              <div className="px-3 pb-1 pt-2.5 text-[10px] uppercase tracking-[.12em] text-[var(--gs-text-dim)]">Events</div>
+              <button type="button" onClick={onOpenEvents} className="flex w-full items-center gap-1.5 px-3 py-[2px] text-left hover:bg-[var(--gs-bg-active)]">
                 <span className="w-4 flex-shrink-0 text-center text-[var(--gs-text-ghost)]">⚑</span>
                 <span className="min-w-0 flex-1 truncate text-[var(--gs-text)]">event log</span>
                 <span className="ml-auto flex-shrink-0 text-[10.5px] text-[var(--gs-text-dim)]">live</span>
               </button>
+              </>
             )}
             {(goalEvidence ?? []).filter((e) => matches(`evidence ${e.name} ${e.requirementTitle}`)).length > 0 && (
-              <div className="px-2 pb-0.5 pt-2 text-[10px] uppercase tracking-wider text-[var(--gs-text-ghost)]">Evidence</div>
+              <div className="px-3 pb-1 pt-2.5 text-[10px] uppercase tracking-[.12em] text-[var(--gs-text-dim)]">Evidence</div>
             )}
             {(goalEvidence ?? []).filter((e) => matches(`evidence ${e.name} ${e.requirementTitle}`)).map((e) => (
               <button key={e.evidenceId} type="button" onClick={() => onOpenEvidence?.(e.requirementId, e.evidenceId)} title={e.requirementTitle}
-                className="flex w-full items-center gap-1.5 px-2 py-[2px] text-left hover:bg-[var(--gs-bg-active)]">
+                className="flex w-full items-center gap-1.5 px-3 py-[2px] text-left hover:bg-[var(--gs-bg-active)]">
                 <span className="w-4 flex-shrink-0 text-center text-[var(--gs-text-ghost)]">▸</span>
                 <span className="min-w-0 flex-1 truncate text-[var(--gs-text)]">{e.name}</span>
                 <span className="ml-auto flex-shrink-0 truncate text-[10.5px] text-[var(--gs-text-dim)]">{e.requirementTitle.slice(0, 18)}</span>
               </button>
             ))}
+            {(groups.find(([k]) => k === 'evidence')?.[1] ?? []).map(row)}
             {groups.length === 0 && (
               <div className="px-3 py-4 text-center text-[var(--gs-text-dim)]">
                 No artifacts yet.
                 <div className="mt-1 text-[10px] text-[var(--gs-text-ghost)]">Goal evidence, demos and reports land here.</div>
               </div>
             )}
-            {groups.map(([kind, arts]) => (
+            {groups.filter(([kind]) => kind !== 'evidence').map(([kind, arts]) => (
               <div key={kind}>
-                <div className="px-2 pb-0.5 pt-2 text-[10px] uppercase tracking-wider text-[var(--gs-text-ghost)]">{KIND_LABEL[kind]}</div>
+                <div className="px-3 pb-1 pt-2.5 text-[10px] uppercase tracking-[.12em] text-[var(--gs-text-dim)]">{KIND_LABEL[kind]}</div>
                 {arts.map(row)}
               </div>
             ))}
-            <div className="px-2 pb-0.5 pt-2 text-[10px] uppercase tracking-wider text-[var(--gs-text-ghost)]">Notes</div>
+            <div className="px-3 pb-1 pt-2.5 text-[10px] uppercase tracking-[.12em] text-[var(--gs-text-dim)]">Notes</div>
             {notes.map((n) => (
-              <button key={n.id} type="button" onClick={() => onOpenNote?.(n.id, n.title)} className="flex w-full items-center gap-1.5 px-2 py-[2px] text-left hover:bg-[var(--gs-bg-active)]">
+              <button key={n.id} type="button" onClick={() => onOpenNote?.(n.id, n.title)} className="flex w-full items-center gap-1.5 px-3 py-[2px] text-left hover:bg-[var(--gs-bg-active)]">
                 <span className="w-4 flex-shrink-0 text-center text-[var(--gs-text-ghost)]">✎</span>
                 <span className="min-w-0 flex-1 truncate text-[var(--gs-text-dim)]">{n.title}</span>
               </button>
             ))}
             {onOpenNote && (
-              <button type="button" onClick={() => onOpenNote(null, 'New note')} className="flex w-full items-center gap-1.5 px-2 py-[2px] text-left text-[var(--gs-text-dim)] hover:bg-[var(--gs-bg-active)]">
+              <button type="button" onClick={() => onOpenNote(null, 'New note')} className="flex w-full items-center gap-1.5 px-3 py-[2px] text-left text-[var(--gs-text-dim)] hover:bg-[var(--gs-bg-active)]">
                 <span className="w-4 flex-shrink-0 text-center">＋</span>New note
               </button>
             )}
             {reports.filter((r) => matches(`${r.kind} ${r.surface} ${r.note}`)).length > 0 && (
-              <div className="px-2 pb-0.5 pt-2 text-[10px] uppercase tracking-wider text-[var(--gs-text-ghost)]">Reports · good + bad</div>
+              <div className="px-3 pb-1 pt-2.5 text-[10px] uppercase tracking-[.12em] text-[var(--gs-text-dim)]">Reports · good + bad</div>
             )}
             {reports.filter((r) => matches(`${r.kind} ${r.surface} ${r.note}`)).map((r) => (
               <button key={r.path} type="button" onClick={() => onOpenReport?.(r.path)} title={r.note}
-                className="flex w-full items-center gap-1.5 px-2 py-[2px] text-left hover:bg-[var(--gs-bg-active)]">
+                className="flex w-full items-center gap-1.5 px-3 py-[2px] text-left hover:bg-[var(--gs-bg-active)]">
                 <span className={`flex-shrink-0 rounded-full border px-1 text-[9px] uppercase ${REPORT_TONE[r.kind] ?? 'border-[var(--gs-border)] text-[var(--gs-text-dim)]'}`}>{r.kind}</span>
                 <span className="min-w-0 flex-1 truncate text-[var(--gs-text)]">{r.surface}</span>
               </button>
             ))}
             {reports.filter((r) => r.rating !== undefined && matches(`${r.surface}`)).length > 0 && (
-              <div className="px-2 pb-0.5 pt-2 text-[10px] uppercase tracking-wider text-[var(--gs-text-ghost)]">Rated precedents · seed from these</div>
+              <div className="px-3 pb-1 pt-2.5 text-[10px] uppercase tracking-[.12em] text-[var(--gs-text-dim)]">Rated precedents · seed from these</div>
             )}
             {reports.filter((r) => r.rating !== undefined && matches(`${r.surface}`)).map((r) => (
               <button key={`prec:${r.path}`} type="button" onClick={onOpenGoalPane} title={r.surface}
-                className="flex w-full items-center gap-1.5 px-2 py-[2px] text-left hover:bg-[var(--gs-bg-active)]">
+                className="flex w-full items-center gap-1.5 px-3 py-[2px] text-left hover:bg-[var(--gs-bg-active)]">
                 <span className="w-4 flex-shrink-0 text-center text-[var(--gs-text-ghost)]">⛓</span>
                 <span className="min-w-0 flex-1 truncate text-[var(--gs-text)]">{r.surface}</span>
                 <span className="ml-auto flex-shrink-0 text-[10px] tracking-[1px] text-[var(--gs-warning)]">{'★'.repeat(Math.min(5, r.rating ?? 0))}{'☆'.repeat(Math.max(0, 5 - (r.rating ?? 0)))}</span>

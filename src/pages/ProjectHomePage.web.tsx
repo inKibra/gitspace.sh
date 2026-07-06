@@ -419,7 +419,7 @@ export function ProjectHomePage({
 
         {/* right: project artifacts rail (mock: ProjectArtifactsRail) */}
         {section !== 'artifacts' && (
-          <div className="hidden w-[300px] flex-shrink-0 flex-col overflow-y-auto border-l border-[var(--gs-border-muted)] p-2 lg:flex">
+          <div className="gs-ui hidden w-[300px] flex-shrink-0 flex-col overflow-hidden border-l border-[var(--gs-border-muted)] lg:flex">
             <WorkspaceCombo
               value={artifactSource}
               options={sourceOptions.map((o) => ({ value: o.value, label: o.label, chain: o.chain }))}
@@ -429,25 +429,27 @@ export function ProjectHomePage({
               <button type="button" onClick={() => setRailView('sel')} className={`flex-1 py-[7px] text-[11px] ${railView === 'sel' ? 'bg-[var(--gs-bg-elevated)] text-[var(--gs-text)] shadow-[inset_0_-2px_0_var(--gs-accent)]' : 'text-[var(--gs-text-muted)]'}`}>Artifacts</button>
               <button type="button" onClick={() => setRailView('fav')} className={`flex-1 py-[7px] text-[11px] ${railView === 'fav' ? 'bg-[var(--gs-bg-elevated)] text-[var(--gs-text)] shadow-[inset_0_-2px_0_var(--gs-accent)]' : 'text-[var(--gs-text-muted)]'}`}>★ Favorites <span className="text-[var(--gs-text-ghost)]">{favs.size > 0 ? favs.size : ''}</span></button>
             </div>
+            <div className="min-h-0 flex-1 overflow-y-auto py-1.5">
             {artifactsError ? (
-              <div className="px-2 py-3 text-center text-[11px] text-[var(--gs-danger)]">{artifactsError}</div>
+              <div className="px-3 py-3 text-[11px] text-[var(--gs-danger)]">{artifactsError}</div>
             ) : (railView === 'fav' ? (
               favEntries.length === 0
-                ? <div className="px-2 py-4 text-center text-[11px] text-[var(--gs-text-dim)]">No favorites yet — ★ an artifact to pin it across the project.</div>
+                ? <div className="px-3 py-[18px] text-[12px] text-[var(--gs-text-dim)]">No favorites yet — ★ an artifact to pin it across the project.</div>
                 : favEntries.map((e) => railRow(e))
             ) : kindGroups.length === 0 ? (
-              <div className="px-2 py-4 text-center text-[11px] text-[var(--gs-text-dim)]">
+              <div className="px-3 py-[18px] text-[12px] text-[var(--gs-text-dim)]">
                 No artifacts in this source yet.
                 <div className="mt-1 text-[10px] text-[var(--gs-text-ghost)]">Roll up a workspace to promote artifacts to main.</div>
               </div>
             ) : (
               kindGroups.map(([kind, files]) => (
                 <div key={kind}>
-                  <div className="px-1 pb-0.5 pt-2 text-[10px] uppercase tracking-wider text-[var(--gs-text-ghost)]">{KIND_LABEL[kind]}</div>
+                  <div className="px-3 pb-[3px] pt-[9px] text-[10px] uppercase tracking-[.12em] text-[var(--gs-text-dim)]">{KIND_LABEL[kind]}</div>
                   {files.map((e) => railRow(e))}
                 </div>
               ))
             ))}
+            </div>
           </div>
         )}
       </div>
