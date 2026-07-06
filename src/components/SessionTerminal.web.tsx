@@ -381,7 +381,8 @@ export const SessionTerminal = forwardRef<SessionTerminalHandle, Props>(function
         const term = new GhosttyTerminal({
           scrollback: WEB_TERMINAL_SCROLLBACK,
           fontSize: 14,
-          fontFamily: "'JetBrains Mono', 'SF Mono', Monaco, monospace",
+          // Follow the theme's mono (Geist Mono / Space Mono / …) instead of a hardcoded face.
+          fontFamily: `${v('--gs-font') || "'JetBrains Mono'"}, monospace`,
           theme: {
             background: v('--gs-terminal-bg'),
             foreground: v('--gs-terminal-fg'),

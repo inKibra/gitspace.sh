@@ -15,6 +15,9 @@
 
 /* ── Fonts ────────────────────────────────────────────────────────────────── */
 
+@font-face { font-family: 'Geist Sans'; src: url('https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/Geist-Regular.woff2') format('woff2'); font-weight: 400; font-display: swap; }
+@font-face { font-family: 'Geist Sans'; src: url('https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/Geist-Medium.woff2') format('woff2'); font-weight: 500; font-display: swap; }
+@font-face { font-family: 'Geist Sans'; src: url('https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/Geist-SemiBold.woff2') format('woff2'); font-weight: 600; font-display: swap; }
 @font-face { font-family: 'Geist Mono'; src: url('https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-mono/GeistMono-Regular.woff2') format('woff2'); font-weight: 400; font-display: swap; }
 @font-face { font-family: 'Geist Mono'; src: url('https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-mono/GeistMono-Medium.woff2') format('woff2'); font-weight: 500; font-display: swap; }
 
@@ -887,7 +890,11 @@ body {
   /* Mock parity (LOCKED): UI chrome is sans (--gs-ui); mono is opt-in via
      .font-mono/code/pre/kbd and explicit font classes. Do not revert. */
   font-family: var(--gs-ui);
+  font-size: 13px;
+  line-height: 1.5;
   letter-spacing: -0.003em;
+  text-rendering: optimizeLegibility;
+  font-feature-settings: "cv01", "ss03";
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   overscroll-behavior: none;
@@ -1425,7 +1432,7 @@ html {
 
 :root {
   /* Mock parity: UI chrome font (sidebar, rails, buttons) — mono stays for identifiers/code. */
-  --gs-ui: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --gs-ui: 'Geist Sans', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
 
   --color-bg: var(--gs-bg);
   --color-bg-elevated: var(--gs-bg-elevated);
