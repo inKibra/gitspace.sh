@@ -1483,4 +1483,4 @@ html {
 
 /* Mock parity: sans UI chrome (mock body font). */
 .gs-ui { font-family: var(--gs-ui); letter-spacing: -0.003em; }
-.gs-ui .font-mono, .gs-ui code { font-family: var(--gs-font); }
+.font-mono, code, pre, kbd, samp { font-family: var(--gs-font); }

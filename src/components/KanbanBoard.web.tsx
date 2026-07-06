@@ -359,7 +359,7 @@ export interface KanbanBoardWebProps {
 	      </div>
 	      <div className="flex items-center gap-2">
 	        <span className="flex-shrink-0 text-[10px] text-[var(--gs-text-ghost)]">●</span>
-	        <span className="font-medium text-[12px] truncate text-[var(--gs-text-dim)]">{workspaceName}</span>
+	        <span className="font-mono font-medium text-[12px] truncate text-[var(--gs-text-dim)]">{workspaceName}</span>
 	        <span className="ml-auto text-[9px] uppercase tracking-wide text-[var(--gs-info)]">creating</span>
 	      </div>
 	      {progressLabel && (
@@ -400,7 +400,7 @@ function PlannedGoalCard({ goal, onSelectGoal, onChainFocus, onOpenOrder, relate
     >
       <div className="flex items-center gap-2">
         <span className="flex-shrink-0 text-[10px] text-[var(--gs-info)]">○</span>
-        <span className="font-medium text-[12px] truncate">{goal.plannedWorkspaceName ?? goal.title}</span>
+        <span className="font-mono font-medium text-[12px] truncate">{goal.plannedWorkspaceName ?? goal.title}</span>
         <ChainHandle goal={goal} related={related} />
         <RearrangeHandle onOpenOrder={() => onOpenOrder?.(goal.chainId)} />
       </div>
@@ -883,7 +883,7 @@ export function KanbanBoardWeb({
                   }}
                   className="min-w-0 rounded-[var(--gs-btn-radius)] px-1 py-0.5 text-left transition-[background-color] duration-150 hover:bg-[var(--gs-bg-hover)]"
                 >
-                  <div className="truncate text-[var(--gs-text)]">{goal.workspaceName ?? goal.plannedWorkspaceName ?? goal.title}</div>
+                  <div className="truncate font-mono text-[var(--gs-text)]">{goal.workspaceName ?? goal.plannedWorkspaceName ?? goal.title}</div>
                   <div className="truncate text-[10px] uppercase tracking-wide text-[var(--gs-text-dim)]">{displayGoalPhase(goal)} · {goal.status}</div>
                 </button>
                 <div className="flex gap-1">

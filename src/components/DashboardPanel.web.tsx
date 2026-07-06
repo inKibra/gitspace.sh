@@ -88,7 +88,13 @@ export function DashboardPanel({ dashboardPath, scopeLabel, read, write }: {
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
 
+  // `read` is usually an inline closure — hold it in a ref so a new identity
+  // per parent render can't restart the load effect into a permanent spinner.
+  const readRef = useRef(read);
+  readRef.current = read;
+
   useEffect(() => {
+    const read = readRef.current;
     let alive = true;
     setState('loading');
     void (async () => {
@@ -114,7 +120,7 @@ export function DashboardPanel({ dashboardPath, scopeLabel, read, write }: {
       }
     })();
     return () => { alive = false; };
-  }, [dashboardPath, read]);
+  }, [dashboardPath]);
 
   const mutate = useCallback((fn: (panels: DashboardPanelDef[]) => DashboardPanelDef[]): void => {
     setDoc((d) => (d ? { ...d, panels: fn(d.panels) } : d));
