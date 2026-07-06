@@ -76,7 +76,7 @@ export function RightRail({
   onOpenFile,
   onOpenArtifact,
   onOpenDashboard,
-  onOpenNotes,
+  onOpenNote,
 }: {
   backend: SessionBackend | null;
   workspaceId: string;
@@ -88,8 +88,8 @@ export function RightRail({
   onOpenArtifact: (path: string) => void;
   /** Open a .dashboard.json artifact as a ▦ dock tab. */
   onOpenDashboard: (path: string) => void;
-  /** Open the workspace notes surface. */
-  onOpenNotes?: () => void;
+  /** Open a note (or a new-note composer when id is null) as a ✎ dock tab. */
+  onOpenNote?: (noteId: string | null, title: string) => void;
 }): ReactElement {
   const [closed, setClosed] = useState(() => {
     try { return window.localStorage.getItem(RAIL_CLOSED_KEY) === '1'; } catch { return false; }
@@ -131,7 +131,7 @@ export function RightRail({
       </div>
       {mode === 'repo'
         ? <RepoMode backend={backend} workspaceId={workspaceId} projectName={projectName} workspaceName={workspaceName} onOpenFile={onOpenFile} />
-        : <ArtifactsMode backend={backend} workspaceId={workspaceId} projectName={projectName} workspaceName={workspaceName} onOpenArtifact={onOpenArtifact} onOpenDashboard={onOpenDashboard} onOpenNotes={onOpenNotes} />}
+        : <ArtifactsMode backend={backend} workspaceId={workspaceId} projectName={projectName} workspaceName={workspaceName} onOpenArtifact={onOpenArtifact} onOpenDashboard={onOpenDashboard} onOpenNote={onOpenNote} />}
     </aside>
   );
 }
@@ -327,14 +327,14 @@ export function RepoFilePanel({ backend, workspaceId, projectName, workspaceName
 
 /* ── Artifacts mode ────────────────────────────────────────────────────────── */
 
-function ArtifactsMode({ backend, workspaceId, projectName, workspaceName, onOpenArtifact, onOpenDashboard, onOpenNotes }: {
+function ArtifactsMode({ backend, workspaceId, projectName, workspaceName, onOpenArtifact, onOpenDashboard, onOpenNote }: {
   backend: SessionBackend | null;
   workspaceId: string;
   projectName: string;
   workspaceName: string;
   onOpenArtifact: (path: string) => void;
   onOpenDashboard: (path: string) => void;
-  onOpenNotes?: () => void;
+  onOpenNote?: (noteId: string | null, title: string) => void;
 }): ReactElement {
   const [entries, setEntries] = useState<Array<{ path: string; size: number; pointer: boolean }>>([]);
   const [notes, setNotes] = useState<Array<{ id: string; title: string }>>([]);
@@ -444,13 +444,13 @@ function ArtifactsMode({ backend, workspaceId, projectName, workspaceName, onOpe
             ))}
             <div className="px-2 pb-0.5 pt-2 text-[10px] uppercase tracking-wider text-[var(--gs-text-ghost)]">Notes</div>
             {notes.map((n) => (
-              <button key={n.id} type="button" onClick={onOpenNotes} className="flex w-full items-center gap-1.5 px-2 py-[2px] text-left hover:bg-[var(--gs-bg-active)]">
+              <button key={n.id} type="button" onClick={() => onOpenNote?.(n.id, n.title)} className="flex w-full items-center gap-1.5 px-2 py-[2px] text-left hover:bg-[var(--gs-bg-active)]">
                 <span className="w-4 flex-shrink-0 text-center text-[var(--gs-text-ghost)]">✎</span>
                 <span className="min-w-0 flex-1 truncate text-[var(--gs-text-dim)]">{n.title}</span>
               </button>
             ))}
-            {onOpenNotes && (
-              <button type="button" onClick={onOpenNotes} className="flex w-full items-center gap-1.5 px-2 py-[2px] text-left text-[var(--gs-text-dim)] hover:bg-[var(--gs-bg-active)]">
+            {onOpenNote && (
+              <button type="button" onClick={() => onOpenNote(null, 'New note')} className="flex w-full items-center gap-1.5 px-2 py-[2px] text-left text-[var(--gs-text-dim)] hover:bg-[var(--gs-bg-active)]">
                 <span className="w-4 flex-shrink-0 text-center">＋</span>New note
               </button>
             )}

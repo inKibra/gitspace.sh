@@ -37,6 +37,7 @@ import { WorkspaceDetailPage } from "./pages/WorkspaceDetailPage.web.js";
 import { FlowWeb } from "./components/Flow.web.js";
 import { ArtifactPanel } from "./components/ArtifactPanel.web.js";
 import { DashboardPanel } from "./components/DashboardPanel.web.js";
+import { NotePanel } from "./components/NotePanel.web.js";
 import { RightRail, RepoFilePanel, type RepoFileOpen } from "./components/RightRail.web.js";
 import { ProjectHomePage } from "./pages/ProjectHomePage.web.js";
 import { useInboxPage } from './app/react/index.js';
@@ -129,7 +130,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   const [eventsWorkspaceLabel, setEventsWorkspaceLabel] = useState<string>('');
   const [projectHomeName, setProjectHomeName] = useState<string | null>(null);
   /** Repo files + artifacts opened as dock tabs, keyed by workspace selectionKey. */
-  type DockExtraPane = ({ kind: 'file' } & RepoFileOpen) | { kind: 'artifact'; path: string } | { kind: 'dashboard'; path: string };
+  type DockExtraPane = ({ kind: 'file' } & RepoFileOpen) | { kind: 'artifact'; path: string } | { kind: 'dashboard'; path: string } | { kind: 'note'; noteId: string | null; title: string; nonce?: number };
   const [dockExtraPanes, setDockExtraPanes] = useState<Record<string, DockExtraPane[]>>({});
   const [pendingProcessEditWorkspaceId, setPendingProcessEditWorkspaceId] = useState<string | null>(null);
   const [modifiers, setModifiers] = useState<ModifierState>({
@@ -2840,10 +2841,10 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
       // (mock Shell pane kinds 'file' and 'artifact').
       const wsKey = workspace.selectionKey ?? workspace.id;
       for (const extra of dockExtraPanes[wsKey] ?? []) {
-        const name = extra.path.split('/').pop() ?? extra.path;
+        const name = extra.kind === 'note' ? extra.title : (extra.path.split('/').pop() ?? extra.path);
         const closeExtra = () => setDockExtraPanes((prev) => ({
           ...prev,
-          [wsKey]: (prev[wsKey] ?? []).filter((x) => !(x.kind === extra.kind && x.path === extra.path)),
+          [wsKey]: (prev[wsKey] ?? []).filter((x) => !(x.kind === extra.kind && (x.kind === 'note' || extra.kind === 'note' ? (x.kind === 'note' && extra.kind === 'note' && x.noteId === extra.noteId && x.nonce === extra.nonce) : x.path === extra.path))),
         }));
         if (extra.kind === 'file') {
           panels.push({
@@ -2883,6 +2884,24 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
                   if (!fn) return Promise.reject(new Error('unavailable'));
                   return fn.call(paneBackend, workspace.id, p, contentBase64, message);
                 }}
+              />
+            ),
+          });
+        } else if (extra.kind === 'note') {
+          panels.push({
+            id: `note:${extra.noteId ?? `new-${extra.nonce ?? 0}`}`,
+            title: `✎ ${extra.title.slice(0, 18)}`,
+            version: `note|${extra.noteId ?? extra.nonce ?? ''}`,
+            onClose: () => setDockExtraPanes((prev) => ({
+              ...prev,
+              [wsKey]: (prev[wsKey] ?? []).filter((x) => !(x.kind === 'note' && x.noteId === extra.noteId && x.nonce === extra.nonce)),
+            })),
+            render: () => (
+              <NotePanel
+                backend={paneBackend}
+                projectName={workspace.projectName}
+                workspaceName={workspace.name}
+                noteId={extra.noteId}
               />
             ),
           });
@@ -2986,7 +3005,14 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
                         return { ...prev, [key]: [...cur, { kind: 'dashboard', path }] };
                       });
                     }}
-                    onOpenNotes={() => { void openWorkspaceNotes(workspace, 'list'); }}
+                    onOpenNote={(noteId, title) => {
+                      const key = workspace.selectionKey ?? workspace.id;
+                      setDockExtraPanes((prev) => {
+                        const cur = prev[key] ?? [];
+                        if (noteId !== null && cur.some((x) => x.kind === 'note' && x.noteId === noteId)) return prev;
+                        return { ...prev, [key]: [...cur, { kind: 'note', noteId, title, nonce: Date.now() }] };
+                      });
+                    }}
                   />
                 }
                 sessions={workspaceSessions}
