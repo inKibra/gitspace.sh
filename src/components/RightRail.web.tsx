@@ -8,6 +8,7 @@ import type { ReviewChangedFile } from '../types/review.js';
 import { langForPath } from './ArtifactPanel.web.js';
 import { KIND_ICON, KIND_LABEL, KIND_ORDER, classifyArtifact, type ArtifactKind } from './artifact-kinds.js';
 import { Highlighted } from '../blocks/render/highlight.web.js';
+import { deriveNoteLabel } from './note-label.js';
 
 /**
  * RightRail — the workspace view's persistent right column (mock: RightRail.tsx).
@@ -360,7 +361,7 @@ function ArtifactsMode({ backend, workspaceId, projectName, workspaceName, onOpe
     Promise.allSettled([
       fn.call(backend, workspaceId).then((list) => { if (alive) setEntries(list); }),
       backend?.listWorkspaceNotes?.(projectName, workspaceName).then((n) => {
-        if (alive) setNotes((n as Array<{ id: string; title?: string; name?: string }>).map((x) => ({ id: x.id, title: x.title ?? x.name ?? 'note' })));
+        if (alive) setNotes((n as Array<{ id: string; body?: string }>).map((x) => ({ id: x.id, title: deriveNoteLabel(x.body ?? '') })));
       }),
     ]).then((results) => {
       if (!alive) return;

@@ -9,13 +9,15 @@ import { renderMarkdownHtml } from './markdown-render.js';
  * sidebar Notes list"). Write | Preview modes; markdown body persisted through
  * the workspace-notes backend. `noteId === null` composes a new note.
  */
-export function NotePanel({ backend, projectName, workspaceName, noteId, onCreated }: {
+export function NotePanel({ backend, projectName, workspaceName, noteId, onCreated, onDeleted }: {
   backend: SessionBackend | null;
   projectName: string;
   workspaceName: string;
   noteId: string | null;
   /** New-note flow: called with the created note id so the tab can re-key. */
   onCreated?: (note: WorkspaceNote) => void;
+  /** Called after a successful delete so the tab can close. */
+  onDeleted?: () => void;
 }): ReactElement {
   const [body, setBody] = useState<string>('# New note\n\nWrite agent-readable markdown…');
   const [mode, setMode] = useState<'write' | 'preview'>(noteId ? 'preview' : 'write');
@@ -23,6 +25,14 @@ export function NotePanel({ backend, projectName, workspaceName, noteId, onCreat
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [currentId, setCurrentId] = useState<string | null>(noteId);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+
+  const remove = async (): Promise<void> => {
+    if (!currentId) return;
+    if (!confirmDelete) { setConfirmDelete(true); return; }
+    await backend?.removeWorkspaceNote?.(projectName, workspaceName, currentId);
+    onDeleted?.();
+  };
 
   useEffect(() => {
     if (!noteId) return;
@@ -66,6 +76,11 @@ export function NotePanel({ backend, projectName, workspaceName, noteId, onCreat
         <span className="ml-auto flex items-center gap-1 text-[11px]">
           <button type="button" onClick={() => setMode('write')} className={`rounded px-2 py-0.5 ${mode === 'write' ? 'bg-[var(--gs-bg-active)] text-[var(--gs-text)]' : 'text-[var(--gs-text-dim)]'}`}>Write</button>
           <button type="button" onClick={() => setMode('preview')} className={`rounded px-2 py-0.5 ${mode === 'preview' ? 'bg-[var(--gs-bg-active)] text-[var(--gs-text)]' : 'text-[var(--gs-text-dim)]'}`}>Preview</button>
+          {currentId && (
+            <button type="button" onClick={() => void remove()} className={`px-2 py-0.5 ${confirmDelete ? 'border border-[var(--gs-danger)] text-[var(--gs-danger)]' : 'text-[var(--gs-text-ghost)] hover:text-[var(--gs-danger)]'}`}>
+              {confirmDelete ? 'Confirm delete' : 'Delete'}
+            </button>
+          )}
           {dirty && (
             <button type="button" onClick={() => void save()} disabled={saving} className="ml-1 border border-[#1f4a2f] px-2 py-0.5 text-[var(--gs-accent)] disabled:opacity-40">
               {saving ? 'Saving…' : 'Save'}
