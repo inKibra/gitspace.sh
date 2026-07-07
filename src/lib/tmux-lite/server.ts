@@ -715,6 +715,28 @@ startTriggerScheduler(
   },
 );
 
+
+/** Resolve an artifact:// URI to on-disk dirs, lazily mounting. The '@base'
+ *  workspace segment is the project base clone's main mount — this one
+ *  segment replaces the whole former project-artifacts-* RPC family. */
+async function resolveArtifactUriDirs(uri: string): Promise<{ projectDir: string; workspaceDir: string; mountDir: string; relPath: string }> {
+  const { parseArtifactUri } = await import('../../core/artifact-cap.js');
+  const { artifactsMountDir, ensureArtifactsMount } = await import('../../core/artifacts.js');
+  const { getProjectBaseDir, getProjectDir } = await import('../../core/config.js');
+  const { existsSync } = await import('fs');
+  const { join } = await import('path');
+  const parsed = parseArtifactUri(uri);
+  const projectDir = getProjectDir(parsed.project);
+  const workspaceDir = parsed.workspace === '@base' ? getProjectBaseDir(parsed.project) : join(projectDir, 'workspaces', parsed.workspace);
+  const mountDir = artifactsMountDir(workspaceDir);
+  if (!existsSync(join(mountDir, '.git'))) {
+    try {
+      await ensureArtifactsMount(projectDir, workspaceDir, parsed.workspace === '@base' ? 'main' : parsed.workspace);
+    } catch { /* unmountable — lists read empty; writes fail loudly below */ }
+  }
+  return { projectDir, workspaceDir, mountDir, relPath: parsed.relPath };
+}
+
 /** Fire `onIdle` once when an agent session completes a run (busy → idle).
  *  Used to close the trigger run lifecycle — before this, nothing ever
  *  recorded `ok` and every cron re-fired on pending-lock expiry instead of
@@ -3858,24 +3880,47 @@ routerListener = Bun.listen({
             }
             break;
 
-          case 'artifacts-list':
+
+          case 'artifact-list':
             try {
-              const { artifactsMountDir, listArtifactFiles, ensureArtifactsMount } = await import('../../core/artifacts.js');
-              const { getProjectDir } = await import('../../core/config.js');
-              // Lazy mount for workspaces predating the artifacts FS (mirrors
-              // the project-level case) — setup is fully automatic.
-              const mountDir = artifactsMountDir(cmd.target.workspacePath);
-              const { existsSync } = await import('fs');
-              const { join } = await import('path');
-              if (!existsSync(join(mountDir, '.git'))) {
-                try {
-                  await ensureArtifactsMount(getProjectDir(cmd.target.projectName), cmd.target.workspacePath, cmd.target.workspaceName);
-                } catch { /* unmountable (no git workspace) — list stays empty */ }
-              }
-              res = { type: 'artifacts-list', entries: listArtifactFiles(mountDir) };
+              const { listArtifactFiles } = await import('../../core/artifacts.js');
+              const { mountDir } = await resolveArtifactUriDirs(cmd.uriPrefix);
+              res = { type: 'artifact-list', entries: listArtifactFiles(mountDir) };
             } catch (e) {
-              const errMsg = e instanceof Error ? e.message : String(e);
-              res = { type: 'error', message: `Failed to list artifacts: ${errMsg}` };
+              res = { type: 'error', message: `Failed to list artifacts: ${e instanceof Error ? e.message : String(e)}` };
+            }
+            break;
+
+          case 'artifact-read':
+            try {
+              const { readArtifactResolving } = await import('../../core/artifacts.js');
+              const { projectDir, mountDir, relPath } = await resolveArtifactUriDirs(cmd.uri);
+              const MAX_READ = 25 * 1024 * 1024;
+              const bytes = await readArtifactResolving(projectDir, mountDir, relPath);
+              const truncated = bytes.length > MAX_READ;
+              res = { type: 'artifact-read', base64: (truncated ? bytes.subarray(0, MAX_READ) : bytes).toString('base64'), size: bytes.length, truncated };
+            } catch (e) {
+              res = { type: 'error', message: `Failed to read artifact: ${e instanceof Error ? e.message : String(e)}` };
+            }
+            break;
+
+          case 'artifact-write':
+            try {
+              const { captureArtifacts } = await import('../../core/artifacts.js');
+              const { parseArtifactCapUnverified } = await import('../../core/artifact-cap.js');
+              const { projectDir, mountDir, relPath } = await resolveArtifactUriDirs(cmd.uri);
+              if (!relPath) { res = { type: 'error', message: 'artifact-write needs a file path in the URI' }; break; }
+              // Provenance from the capability subject when the caller holds
+              // one (display-grade today — cryptographic verification + scope
+              // ENFORCEMENT land in Phase 3 with daemon key wiring).
+              const capSub = cmd.cap ? parseArtifactCapUnverified(cmd.cap)?.sub : undefined;
+              const provenance = capSub
+                ? { tool: capSub.kind, ...(capSub.kind === 'session' ? { session: capSub.id } : {}), ...(capSub.kind === 'trigger' ? { trigger: capSub.id } : {}) }
+                : { tool: 'web-ui' };
+              const result = await captureArtifacts(projectDir, mountDir, [{ path: relPath, content: Buffer.from(cmd.contentBase64, 'base64') }], { message: cmd.message, provenance });
+              res = { type: 'artifact-write', commit: result.commit };
+            } catch (e) {
+              res = { type: 'error', message: `Failed to write artifact: ${e instanceof Error ? e.message : String(e)}` };
             }
             break;
 
@@ -3938,69 +3983,9 @@ routerListener = Bun.listen({
             }
             break;
 
-          case 'artifacts-read':
-            try {
-              const { artifactsMountDir, readArtifactResolving } = await import('../../core/artifacts.js');
-              const { getProjectDir } = await import('../../core/config.js');
-              const MAX_READ = 25 * 1024 * 1024;
-              const bytes = await readArtifactResolving(getProjectDir(cmd.target.projectName), artifactsMountDir(cmd.target.workspacePath), cmd.path);
-              const truncated = bytes.length > MAX_READ;
-              res = {
-                type: 'artifacts-read',
-                base64: (truncated ? bytes.subarray(0, MAX_READ) : bytes).toString('base64'),
-                size: bytes.length,
-                truncated,
-              };
-            } catch (e) {
-              const errMsg = e instanceof Error ? e.message : String(e);
-              res = { type: 'error', message: `Failed to read artifact: ${errMsg}` };
-            }
-            break;
 
-          case 'artifacts-write':
-            try {
-              const { artifactsMountDir, captureArtifacts } = await import('../../core/artifacts.js');
-              const { getProjectDir } = await import('../../core/config.js');
-              const result = await captureArtifacts(
-                getProjectDir(cmd.target.projectName),
-                artifactsMountDir(cmd.target.workspacePath),
-                [{ path: cmd.path, content: Buffer.from(cmd.contentBase64, 'base64') }],
-                { message: cmd.message, provenance: { tool: 'web-ui' } },
-              );
-              res = { type: 'artifacts-write', commit: result.commit };
-            } catch (e) {
-              res = { type: 'error', message: `Failed to write artifact: ${e instanceof Error ? e.message : String(e)}` };
-            }
-            break;
 
-          case 'project-artifacts-list':
-            try {
-              const { ensureArtifactsMount, listArtifactFiles } = await import('../../core/artifacts.js');
-              const { getProjectBaseDir, getProjectDir } = await import('../../core/config.js');
-              // Lazily mount main at the base clone for pre-artifacts projects.
-              const mount = await ensureArtifactsMount(getProjectDir(cmd.projectName), getProjectBaseDir(cmd.projectName), 'main');
-              res = { type: 'artifacts-list', entries: listArtifactFiles(mount) };
-            } catch (e) {
-              res = { type: 'error', message: `Failed to list project artifacts: ${e instanceof Error ? e.message : String(e)}` };
-            }
-            break;
 
-          case 'project-artifacts-write':
-            try {
-              const { artifactsMountDir, captureArtifacts, ensureArtifactsMount } = await import('../../core/artifacts.js');
-              const { getProjectBaseDir, getProjectDir } = await import('../../core/config.js');
-              await ensureArtifactsMount(getProjectDir(cmd.projectName), getProjectBaseDir(cmd.projectName), 'main');
-              const result = await captureArtifacts(
-                getProjectDir(cmd.projectName),
-                artifactsMountDir(getProjectBaseDir(cmd.projectName)),
-                [{ path: cmd.path, content: Buffer.from(cmd.contentBase64, 'base64') }],
-                { message: cmd.message, provenance: { tool: 'web-ui' } },
-              );
-              res = { type: 'artifacts-write', commit: result.commit };
-            } catch (e) {
-              res = { type: 'error', message: `Failed to write project artifact: ${e instanceof Error ? e.message : String(e)}` };
-            }
-            break;
 
           case 'project-artifacts-status':
             try {
@@ -4077,23 +4062,6 @@ routerListener = Bun.listen({
             }
             break;
 
-          case 'project-artifacts-read':
-            try {
-              const { artifactsMountDir, readArtifactResolving } = await import('../../core/artifacts.js');
-              const { getProjectBaseDir, getProjectDir } = await import('../../core/config.js');
-              const MAX_READ = 25 * 1024 * 1024;
-              const bytes = await readArtifactResolving(getProjectDir(cmd.projectName), artifactsMountDir(getProjectBaseDir(cmd.projectName)), cmd.path);
-              const truncated = bytes.length > MAX_READ;
-              res = {
-                type: 'artifacts-read',
-                base64: (truncated ? bytes.subarray(0, MAX_READ) : bytes).toString('base64'),
-                size: bytes.length,
-                truncated,
-              };
-            } catch (e) {
-              res = { type: 'error', message: `Failed to read project artifact: ${e instanceof Error ? e.message : String(e)}` };
-            }
-            break;
 
           case 'repo-tree':
             try {

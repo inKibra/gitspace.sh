@@ -701,48 +701,25 @@ export interface GetAgentSessionTreeRequest {
   agentSessionId: string;
 }
 
-export interface ListArtifactsRequest {
-  type: 'list_artifacts';
+export interface ArtifactListRequest {
+  type: 'artifact_list';
   requestId: string;
-  target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
+  uriPrefix: string;
 }
 
-export interface ReadArtifactRequest {
-  type: 'read_artifact';
+export interface ArtifactReadRequest {
+  type: 'artifact_read';
   requestId: string;
-  target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
-  path: string;
+  uri: string;
 }
 
-export interface WriteArtifactRequest {
-  type: 'write_artifact';
+export interface ArtifactWriteRequest {
+  type: 'artifact_write';
   requestId: string;
-  target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
-  path: string;
+  uri: string;
   contentBase64: string;
   message?: string;
-}
-
-export interface ProjectArtifactsListRequest {
-  type: 'project_artifacts_list';
-  requestId: string;
-  projectName: string;
-}
-
-export interface ProjectArtifactsReadRequest {
-  type: 'project_artifacts_read';
-  requestId: string;
-  projectName: string;
-  path: string;
-}
-
-interface ProjectArtifactsWriteRequest {
-  type: 'project_artifacts_write';
-  requestId: string;
-  projectName: string;
-  path: string;
-  contentBase64: string;
-  message?: string;
+  cap?: string;
 }
 
 interface ProjectArtifactsStatusRequest {
@@ -1223,12 +1200,9 @@ export type ClientToMachineMessage =
   | GetAgentHistoryRequest
   | NavigateAgentHistoryRequest
   | GetAgentSessionTreeRequest
-  | ListArtifactsRequest
-  | ReadArtifactRequest
-  | WriteArtifactRequest
-  | ProjectArtifactsListRequest
-  | ProjectArtifactsReadRequest
-  | ProjectArtifactsWriteRequest
+  | ArtifactListRequest
+  | ArtifactReadRequest
+  | ArtifactWriteRequest
   | ProjectArtifactsStatusRequest
   | ProjectArtifactsRemoteSetRequest
   | ProjectArtifactsSyncRequest
@@ -1397,12 +1371,9 @@ export function isBrowseMessage(msg: RemoteSessionMessage): msg is ClientToMachi
     'get_agent_history',
     'navigate_agent_history',
     'get_agent_session_tree',
-    'list_artifacts',
-    'read_artifact',
-    'write_artifact',
-    'project_artifacts_list',
-    'project_artifacts_read',
-    'project_artifacts_write',
+    'artifact_list',
+    'artifact_read',
+    'artifact_write',
     'project_artifacts_status',
     'project_artifacts_remote_set',
     'project_artifacts_sync',

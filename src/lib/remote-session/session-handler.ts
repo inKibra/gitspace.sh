@@ -1757,78 +1757,34 @@ export class RemoteSessionHandler {
         }, sendResponse);
         break;
 
-      case 'list_artifacts':
+
+
+
+
+
+
+      case 'artifact_list':
         if (!canManage(session.accessType)) {
           await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
           return;
         }
-        await this.handleTypedCommand(session, msg.requestId, {
-          type: 'artifacts-list',
-          target: msg.target,
-        }, sendResponse);
+        await this.handleTypedCommand(session, msg.requestId, { type: 'artifact-list', uriPrefix: msg.uriPrefix }, sendResponse);
         break;
 
-      case 'read_artifact':
+      case 'artifact_read':
         if (!canManage(session.accessType)) {
           await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
           return;
         }
-        await this.handleTypedCommand(session, msg.requestId, {
-          type: 'artifacts-read',
-          target: msg.target,
-          path: msg.path,
-        }, sendResponse);
+        await this.handleTypedCommand(session, msg.requestId, { type: 'artifact-read', uri: msg.uri }, sendResponse);
         break;
 
-      case 'write_artifact':
+      case 'artifact_write':
         if (!canManage(session.accessType)) {
           await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
           return;
         }
-        await this.handleTypedCommand(session, msg.requestId, {
-          type: 'artifacts-write',
-          target: msg.target,
-          path: msg.path,
-          contentBase64: msg.contentBase64,
-          message: msg.message,
-        }, sendResponse);
-        break;
-
-      case 'project_artifacts_list':
-        if (!canManage(session.accessType)) {
-          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
-          return;
-        }
-        await this.handleTypedCommand(session, msg.requestId, {
-          type: 'project-artifacts-list',
-          projectName: msg.projectName,
-        }, sendResponse);
-        break;
-
-      case 'project_artifacts_read':
-        if (!canManage(session.accessType)) {
-          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
-          return;
-        }
-        await this.handleTypedCommand(session, msg.requestId, {
-          type: 'project-artifacts-read',
-          projectName: msg.projectName,
-          path: msg.path,
-        }, sendResponse);
-        break;
-
-      case 'project_artifacts_write':
-        if (!canManage(session.accessType)) {
-          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
-          return;
-        }
-        await this.handleTypedCommand(session, msg.requestId, {
-          type: 'project-artifacts-write',
-          projectName: msg.projectName,
-          path: msg.path,
-          contentBase64: msg.contentBase64,
-          message: msg.message,
-        }, sendResponse);
+        await this.handleTypedCommand(session, msg.requestId, { type: 'artifact-write', uri: msg.uri, contentBase64: msg.contentBase64, message: msg.message, cap: msg.cap }, sendResponse);
         break;
 
       case 'project_artifacts_status':

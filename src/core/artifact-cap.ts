@@ -10,9 +10,11 @@
  * daemon owns key material), so this module stays unit-testable offline.
  */
 
-import { createHash } from 'crypto';
 import { sign as ed25519Sign, verify as ed25519Verify } from '../lib/tmux-lite/crypto/identity.js';
 import { SpacesError } from '../types/errors.js';
+
+// BROWSER-SAFE by construction: this module is imported by the remote session
+// backend, which runs in the web app — no node builtins (crypto/Buffer) here.
 
 // ── artifact:// URIs ────────────────────────────────────────────────────────
 
@@ -126,15 +128,28 @@ function canonicalCapBytes(cap: ArtifactCap): Uint8Array {
   return new TextEncoder().encode(`${CAP_DOMAIN}\n${JSON.stringify(sorted(cap))}`);
 }
 
-function b64url(bytes: Uint8Array): string {
-  return Buffer.from(bytes).toString('base64url');
+function bytesToB64url(bytes: Uint8Array): string {
+  let bin = '';
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function b64urlToBytes(s: string): Uint8Array {
+  const b64 = s.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - (s.length % 4)) % 4);
+  return Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+}
+
+function randomHex(byteCount: number): string {
+  const buf = new Uint8Array(byteCount);
+  globalThis.crypto.getRandomValues(buf);
+  return [...buf].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
 export function mintArtifactCap(cap: Omit<ArtifactCap, 'v' | 'tokenId'>, signingKey: Uint8Array): string {
-  const record: ArtifactCap = { v: 1, tokenId: createHash('sha256').update(`${Date.now()}:${Math.random()}`).digest('hex').slice(0, 32), ...cap };
-  const sig = b64url(ed25519Sign(canonicalCapBytes(record), signingKey));
+  const record: ArtifactCap = { v: 1, tokenId: randomHex(16), ...cap };
+  const sig = bytesToB64url(ed25519Sign(canonicalCapBytes(record), signingKey));
   const signed: SignedArtifactCap = { ...record, sig };
-  return `${CAP_PREFIX}${Buffer.from(JSON.stringify(signed)).toString('base64url')}`;
+  return `${CAP_PREFIX}${bytesToB64url(new TextEncoder().encode(JSON.stringify(signed)))}`;
 }
 
 export interface CapVerifyOptions {
@@ -148,7 +163,7 @@ export function verifyArtifactCap(token: string, opts: CapVerifyOptions): Signed
   if (!token.startsWith(CAP_PREFIX)) throw new SpacesError('Not an artifact capability token', 'USER_ERROR', 1);
   let parsed: SignedArtifactCap;
   try {
-    parsed = JSON.parse(Buffer.from(token.slice(CAP_PREFIX.length), 'base64url').toString('utf8')) as SignedArtifactCap;
+    parsed = JSON.parse(new TextDecoder().decode(b64urlToBytes(token.slice(CAP_PREFIX.length)))) as SignedArtifactCap;
   } catch {
     throw new SpacesError('Malformed artifact capability token', 'USER_ERROR', 1);
   }
@@ -156,7 +171,7 @@ export function verifyArtifactCap(token: string, opts: CapVerifyOptions): Signed
   if (record.v !== 1 || !sig) throw new SpacesError('Unsupported artifact capability version', 'USER_ERROR', 1);
   let ok = false;
   try {
-    ok = ed25519Verify(canonicalCapBytes(record), Buffer.from(sig, 'base64url'), opts.publicKey);
+    ok = ed25519Verify(canonicalCapBytes(record), b64urlToBytes(sig), opts.publicKey);
   } catch {
     ok = false; // wrong-length sig/key throws in the primitive — treat as invalid
   }
@@ -170,7 +185,7 @@ export function verifyArtifactCap(token: string, opts: CapVerifyOptions): Signed
 export function parseArtifactCapUnverified(token: string): SignedArtifactCap | null {
   if (!token.startsWith(CAP_PREFIX)) return null;
   try {
-    return JSON.parse(Buffer.from(token.slice(CAP_PREFIX.length), 'base64url').toString('utf8')) as SignedArtifactCap;
+    return JSON.parse(new TextDecoder().decode(b64urlToBytes(token.slice(CAP_PREFIX.length)))) as SignedArtifactCap;
   } catch {
     return null;
   }

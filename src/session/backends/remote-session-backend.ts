@@ -78,6 +78,7 @@ import { createEmptyMachineSnapshot } from '../../machine/state/client.js';
 import type { MachineAgentSessionRecord } from '../../lib/tmux-lite/machine/types.js';
 import { writeTraceLog } from '../../utils/trace-log.js';
 import { terminalMemoryDebugIncrement } from '../../utils/terminal-memory-debug.js';
+import { formatArtifactUri } from '../../core/artifact-cap.js';
 
 type PendingOperationCompletion = {
   resolve: (operation: RemoteOperationRecord) => void;
@@ -3140,52 +3141,58 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     throw new Error('Unexpected tree response');
   }
 
+  /** artifact:// URI for a workspace target (project methods use '@base'). */
+  private artifactUriFor(workspaceId: string, relPath = ''): string {
+    const target = this.getAgentWorkspaceTarget(workspaceId);
+    return formatArtifactUri(target.projectName, target.workspaceName, relPath);
+  }
+
   async listWorkspaceArtifacts(workspaceId: string): Promise<Array<{ path: string; size: number; pointer: boolean }>> {
     await this.waitForInitialSnapshot();
-    const tmuxResponse = await this.sendRpcCommand({ type: 'list_artifacts', requestId: crypto.randomUUID(), target: this.getAgentWorkspaceTarget(workspaceId) });
-    if (tmuxResponse.type === 'artifacts-list') return tmuxResponse.entries;
+    const tmuxResponse = await this.sendRpcCommand({ type: 'artifact_list', requestId: crypto.randomUUID(), uriPrefix: this.artifactUriFor(workspaceId) });
+    if (tmuxResponse.type === 'artifact-list') return tmuxResponse.entries;
     if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
-    throw new Error('Unexpected artifacts-list response');
+    throw new Error('Unexpected artifact-list response');
   }
 
   async readWorkspaceArtifact(workspaceId: string, path: string): Promise<{ base64: string; size: number; truncated: boolean }> {
     await this.waitForInitialSnapshot();
-    const tmuxResponse = await this.sendRpcCommand({ type: 'read_artifact', requestId: crypto.randomUUID(), target: this.getAgentWorkspaceTarget(workspaceId), path });
-    if (tmuxResponse.type === 'artifacts-read') return { base64: tmuxResponse.base64, size: tmuxResponse.size, truncated: tmuxResponse.truncated };
+    const tmuxResponse = await this.sendRpcCommand({ type: 'artifact_read', requestId: crypto.randomUUID(), uri: this.artifactUriFor(workspaceId, path) });
+    if (tmuxResponse.type === 'artifact-read') return { base64: tmuxResponse.base64, size: tmuxResponse.size, truncated: tmuxResponse.truncated };
     if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
-    throw new Error('Unexpected artifacts-read response');
+    throw new Error('Unexpected artifact-read response');
   }
 
   async writeWorkspaceArtifact(workspaceId: string, path: string, contentBase64: string, message?: string): Promise<string> {
     await this.waitForInitialSnapshot();
-    const tmuxResponse = await this.sendRpcCommand({ type: 'write_artifact', requestId: crypto.randomUUID(), target: this.getAgentWorkspaceTarget(workspaceId), path, contentBase64, message });
-    if (tmuxResponse.type === 'artifacts-write') return tmuxResponse.commit;
+    const tmuxResponse = await this.sendRpcCommand({ type: 'artifact_write', requestId: crypto.randomUUID(), uri: this.artifactUriFor(workspaceId, path), contentBase64, message });
+    if (tmuxResponse.type === 'artifact-write') return tmuxResponse.commit;
     if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
-    throw new Error('Unexpected artifacts-write response');
+    throw new Error('Unexpected artifact-write response');
   }
 
   async listProjectArtifacts(projectName: string): Promise<Array<{ path: string; size: number; pointer: boolean }>> {
     await this.waitForInitialSnapshot();
-    const tmuxResponse = await this.sendRpcCommand({ type: 'project_artifacts_list', requestId: crypto.randomUUID(), projectName });
-    if (tmuxResponse.type === 'artifacts-list') return tmuxResponse.entries;
+    const tmuxResponse = await this.sendRpcCommand({ type: 'artifact_list', requestId: crypto.randomUUID(), uriPrefix: formatArtifactUri(projectName, '@base') });
+    if (tmuxResponse.type === 'artifact-list') return tmuxResponse.entries;
     if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
-    throw new Error('Unexpected project-artifacts-list response');
+    throw new Error('Unexpected artifact-list response');
   }
 
   async readProjectArtifact(projectName: string, path: string): Promise<{ base64: string; size: number; truncated: boolean }> {
     await this.waitForInitialSnapshot();
-    const tmuxResponse = await this.sendRpcCommand({ type: 'project_artifacts_read', requestId: crypto.randomUUID(), projectName, path });
-    if (tmuxResponse.type === 'artifacts-read') return { base64: tmuxResponse.base64, size: tmuxResponse.size, truncated: tmuxResponse.truncated };
+    const tmuxResponse = await this.sendRpcCommand({ type: 'artifact_read', requestId: crypto.randomUUID(), uri: formatArtifactUri(projectName, '@base', path) });
+    if (tmuxResponse.type === 'artifact-read') return { base64: tmuxResponse.base64, size: tmuxResponse.size, truncated: tmuxResponse.truncated };
     if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
-    throw new Error('Unexpected project-artifacts-read response');
+    throw new Error('Unexpected artifact-read response');
   }
 
   async writeProjectArtifact(projectName: string, path: string, contentBase64: string, message?: string): Promise<string> {
     await this.waitForInitialSnapshot();
-    const tmuxResponse = await this.sendRpcCommand({ type: 'project_artifacts_write', requestId: crypto.randomUUID(), projectName, path, contentBase64, message });
-    if (tmuxResponse.type === 'artifacts-write') return tmuxResponse.commit;
+    const tmuxResponse = await this.sendRpcCommand({ type: 'artifact_write', requestId: crypto.randomUUID(), uri: formatArtifactUri(projectName, '@base', path), contentBase64, message });
+    if (tmuxResponse.type === 'artifact-write') return tmuxResponse.commit;
     if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
-    throw new Error('Unexpected project-artifacts-write response');
+    throw new Error('Unexpected artifact-write response');
   }
 
   async getProjectArtifactsStatus(projectName: string): Promise<{ repoPath: string; remote: string | null; branches: string[]; pointerCommitted?: boolean }> {

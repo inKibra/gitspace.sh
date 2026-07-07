@@ -407,12 +407,9 @@ export type Command =
   | { type: 'agent-history'; target: AgentWorkspaceTargetPayload; agentSessionId: string }
   | { type: 'agent-tree'; target: AgentWorkspaceTargetPayload; agentSessionId: string }
   | { type: 'agent-navigate-history'; target: AgentWorkspaceTargetPayload; agentSessionId: string; entryId: string; mode?: 'redo' | 'jump' }
-  | { type: 'artifacts-list'; target: AgentWorkspaceTargetPayload }
-  | { type: 'artifacts-read'; target: AgentWorkspaceTargetPayload; path: string }
-  | { type: 'artifacts-write'; target: AgentWorkspaceTargetPayload; path: string; contentBase64: string; message?: string }
-  | { type: 'project-artifacts-list'; projectName: string }
-  | { type: 'project-artifacts-read'; projectName: string; path: string }
-  | { type: 'project-artifacts-write'; projectName: string; path: string; contentBase64: string; message?: string }
+  | { type: 'artifact-list'; uriPrefix: string }
+  | { type: 'artifact-read'; uri: string }
+  | { type: 'artifact-write'; uri: string; contentBase64: string; message?: string; cap?: string }
   | { type: 'project-artifacts-status'; projectName: string }
   | { type: 'project-artifacts-remote-set'; projectName: string; url: string }
   | { type: 'project-artifacts-sync'; projectName: string }
@@ -515,9 +512,9 @@ export type Response =
   | { type: 'agent-tools'; tools: import('../../agents/agent-runtime-types.js').AgentToolInfo[] }
   | { type: 'agent-history'; entries: import('../../agents/agent-runtime-types.js').AgentHistoryEntry[] }
   | { type: 'agent-tree'; nodes: import('../../agents/agent-runtime-types.js').AgentTreeNode[] }
-  | { type: 'artifacts-list'; entries: import('../../core/artifacts.js').ArtifactListEntry[] }
-  | { type: 'artifacts-read'; base64: string; size: number; truncated: boolean }
-  | { type: 'artifacts-write'; commit: string }
+  | { type: 'artifact-list'; entries: import('../../core/artifacts.js').ArtifactListEntry[] }
+  | { type: 'artifact-read'; base64: string; size: number; truncated: boolean }
+  | { type: 'artifact-write'; commit: string }
   | { type: 'project-artifacts-status'; repoPath: string; remote: string | null; branches: string[]; pointerCommitted?: boolean }
   | { type: 'project-artifacts-sync'; pushed: boolean; fastForwarded: boolean }
   | { type: 'project-artifacts-provision'; slug: string; url: string; created: boolean; blobsUploaded: number; collaboratorsCopied: number }

@@ -96,6 +96,7 @@ import { join } from 'node:path';
 import { ReviewRequestError } from '../../types/errors.js';
 import { throwServiceStartError } from './service-start-error.js';
 import { executeSpaceCommand } from '../../lib/tmux-lite/agents/extensions/space-command.js';
+import { formatArtifactUri } from '../../core/artifact-cap.js';
 
 
 export interface LocalSessionBackendDependencies {
@@ -1794,49 +1795,52 @@ export class LocalSessionBackend implements SessionBackend {
     throw new Error('Unexpected tree response');
   }
 
-  async listWorkspaceArtifacts(workspaceId: string): Promise<Array<{ path: string; size: number; pointer: boolean }>> {
+  /** artifact:// URI for a workspace target (project methods use '@base'). */
+  private async artifactUriFor(workspaceId: string, relPath = ''): Promise<string> {
     const target = await this.resolveAgentWorkspaceTarget(workspaceId);
-    const tmuxResponse = await this.sendTmuxCommand({ type: 'artifacts-list', target });
-    if (tmuxResponse.type === 'artifacts-list') return tmuxResponse.entries;
+    return formatArtifactUri(target.projectName, target.workspaceName, relPath);
+  }
+
+  async listWorkspaceArtifacts(workspaceId: string): Promise<Array<{ path: string; size: number; pointer: boolean }>> {
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'artifact-list', uriPrefix: await this.artifactUriFor(workspaceId) });
+    if (tmuxResponse.type === 'artifact-list') return tmuxResponse.entries;
     if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
-    throw new Error('Unexpected artifacts-list response');
+    throw new Error('Unexpected artifact-list response');
   }
 
   async readWorkspaceArtifact(workspaceId: string, path: string): Promise<{ base64: string; size: number; truncated: boolean }> {
-    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
-    const tmuxResponse = await this.sendTmuxCommand({ type: 'artifacts-read', target, path });
-    if (tmuxResponse.type === 'artifacts-read') return { base64: tmuxResponse.base64, size: tmuxResponse.size, truncated: tmuxResponse.truncated };
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'artifact-read', uri: await this.artifactUriFor(workspaceId, path) });
+    if (tmuxResponse.type === 'artifact-read') return { base64: tmuxResponse.base64, size: tmuxResponse.size, truncated: tmuxResponse.truncated };
     if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
-    throw new Error('Unexpected artifacts-read response');
+    throw new Error('Unexpected artifact-read response');
   }
 
   async writeWorkspaceArtifact(workspaceId: string, path: string, contentBase64: string, message?: string): Promise<string> {
-    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
-    const tmuxResponse = await this.sendTmuxCommand({ type: 'artifacts-write', target, path, contentBase64, message });
-    if (tmuxResponse.type === 'artifacts-write') return tmuxResponse.commit;
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'artifact-write', uri: await this.artifactUriFor(workspaceId, path), contentBase64, message });
+    if (tmuxResponse.type === 'artifact-write') return tmuxResponse.commit;
     if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
-    throw new Error('Unexpected artifacts-write response');
+    throw new Error('Unexpected artifact-write response');
   }
 
   async listProjectArtifacts(projectName: string): Promise<Array<{ path: string; size: number; pointer: boolean }>> {
-    const tmuxResponse = await this.sendTmuxCommand({ type: 'project-artifacts-list', projectName });
-    if (tmuxResponse.type === 'artifacts-list') return tmuxResponse.entries;
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'artifact-list', uriPrefix: formatArtifactUri(projectName, '@base') });
+    if (tmuxResponse.type === 'artifact-list') return tmuxResponse.entries;
     if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
-    throw new Error('Unexpected project-artifacts-list response');
+    throw new Error('Unexpected artifact-list response');
   }
 
   async readProjectArtifact(projectName: string, path: string): Promise<{ base64: string; size: number; truncated: boolean }> {
-    const tmuxResponse = await this.sendTmuxCommand({ type: 'project-artifacts-read', projectName, path });
-    if (tmuxResponse.type === 'artifacts-read') return { base64: tmuxResponse.base64, size: tmuxResponse.size, truncated: tmuxResponse.truncated };
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'artifact-read', uri: formatArtifactUri(projectName, '@base', path) });
+    if (tmuxResponse.type === 'artifact-read') return { base64: tmuxResponse.base64, size: tmuxResponse.size, truncated: tmuxResponse.truncated };
     if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
-    throw new Error('Unexpected project-artifacts-read response');
+    throw new Error('Unexpected artifact-read response');
   }
 
   async writeProjectArtifact(projectName: string, path: string, contentBase64: string, message?: string): Promise<string> {
-    const tmuxResponse = await this.sendTmuxCommand({ type: 'project-artifacts-write', projectName, path, contentBase64, message });
-    if (tmuxResponse.type === 'artifacts-write') return tmuxResponse.commit;
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'artifact-write', uri: formatArtifactUri(projectName, '@base', path), contentBase64, message });
+    if (tmuxResponse.type === 'artifact-write') return tmuxResponse.commit;
     if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
-    throw new Error('Unexpected project-artifacts-write response');
+    throw new Error('Unexpected artifact-write response');
   }
 
   async getProjectArtifactsStatus(projectName: string): Promise<{ repoPath: string; remote: string | null; branches: string[]; pointerCommitted?: boolean }> {
