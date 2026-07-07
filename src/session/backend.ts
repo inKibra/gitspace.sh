@@ -313,6 +313,8 @@ export interface SessionBackend {
   syncProjectArtifacts?(projectName: string): Promise<{ pushed: boolean; fastForwarded: boolean }>;
   /** One-click GitHub provisioning: create <owner>/<repo>-artifacts, wire remote+pointer, push, mirror collaborators, upload blobs. */
   provisionProjectArtifacts?(projectName: string): Promise<{ slug: string; url: string; created: boolean; blobsUploaded: number; collaboratorsCopied: number }>;
+  /** gitspace.sh-managed setup: provision on CF Artifacts, wire tokened remote, commit {project} pointer, initial sync. */
+  setupManagedProjectArtifacts?(projectName: string): Promise<{ project: string; gitUrl: string; synced: boolean }>;
   /** Full workspace file listing (tracked + untracked, status letters). */
   listRepoFiles?(workspaceId: string): Promise<Array<{ path: string; status?: string }>>;
   /** Read a workspace file (path-jailed, capped). Null base64 = missing. */

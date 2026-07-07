@@ -112,13 +112,14 @@ function WorkspaceCombo({ value, options, onChange }: {
   );
 }
 
-/** CONFIG → Artifacts repo: where it lives, remote connect, sync (lock-in card). */
+/** CONFIG → Artifacts repo: wizard — sharing is OPTIONAL; local always works. */
 function ArtifactsRepoTab({ projectName, backend }: { projectName: string; backend: SessionBackend | null }): ReactElement {
   const [status, setStatus] = useState<{ repoPath: string; remote: string | null; branches: string[] } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [choice, setChoice] = useState<'managed' | 'github' | 'byo' | null>(null);
   const [url, setUrl] = useState('');
-  const [busy, setBusy] = useState<'connect' | 'sync' | null>(null);
-  const [lastSync, setLastSync] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
 
   const refresh = useCallback(() => {
     const fn = backend?.getProjectArtifactsStatus;
@@ -129,102 +130,107 @@ function ArtifactsRepoTab({ projectName, backend }: { projectName: string; backe
   }, [backend, projectName]);
   useEffect(() => { refresh(); }, [refresh]);
 
-  const row = 'flex items-baseline gap-3 py-1.5 text-[12px]';
-  const key = 'w-[120px] flex-none text-[10.5px] uppercase tracking-[0.08em] text-[var(--gs-text-dim)]';
+  const kicker = 'text-[10px] uppercase tracking-[0.09em] text-[var(--gs-text-dim)]';
+  const mono = 'font-[family-name:var(--gs-font)]';
+
+  const enable = async (run: () => Promise<string>) => {
+    setBusy(true); setNote(null);
+    try { setNote(await run()); } catch (e) { setNote(e instanceof Error ? e.message : 'failed'); }
+    finally { setBusy(false); refresh(); }
+  };
+
+  const OPTIONS: Array<{ key: 'managed' | 'github' | 'byo'; icon: string; title: string; badge?: string; desc: string; available: boolean }> = [
+    { key: 'managed', icon: '✦', title: 'gitspace.sh managed', badge: 'recommended · beta', desc: 'Zero setup — one repo per project on gitspace.sh infrastructure. Access follows your gitspace identity; teammates need nothing but this project.', available: Boolean(backend?.setupManagedProjectArtifacts) },
+    { key: 'github', icon: '⚡', title: 'GitHub private repo', desc: 'One click via your existing gh login: creates <owner>/<repo>-artifacts, mirrors your code-repo collaborators, large files ride as release assets.', available: Boolean(backend?.provisionProjectArtifacts) },
+    { key: 'byo', icon: '⛓', title: 'Bring your own remote', desc: 'Any git URL you control (GitLab, self-hosted, a bare repo on a server). Access is whatever the host enforces.', available: Boolean(backend?.setProjectArtifactsRemote) },
+  ];
+
+  const PLAN: Record<'managed' | 'github' | 'byo', string[]> = {
+    managed: ['Provision a managed repo for this project (handle/project)', 'Wire the artifacts repo to it with short-lived scoped tokens', 'Commit the pointer to the code repo — teammates + your other machines adopt automatically', 'Push all branches now, then auto-sync every 5 minutes'],
+    github: ['Create a private <owner>/<repo>-artifacts on your GitHub', 'Mirror the code repo\u2019s collaborators onto it', 'Commit the pointer to the code repo — teammates adopt automatically', 'Push all branches + upload large-file blobs, then auto-sync every 5 minutes'],
+    byo: ['Set your URL as the artifacts remote', 'Commit the pointer to the code repo — teammates adopt automatically (their git auth must reach the host)', 'Push all branches now, then auto-sync every 5 minutes'],
+  };
+
   return (
     <div className="h-full overflow-y-auto p-5">
       <div className="max-w-[720px]">
-        <div className="text-[15px] font-semibold text-[var(--gs-text)]">Artifacts repo</div>
+        <div className="text-[15px] font-semibold text-[var(--gs-text)]">Artifacts sharing</div>
         <p className="mt-1 text-[12px] leading-[1.55] text-[var(--gs-text-muted)]">
-          Every workspace's artifacts (journals, evidence, dashboards, review guides, triggers) live on branches of one
-          project-local git repo, mounted at <code className="font-[family-name:var(--gs-font)] text-[11px]">.gitspace/artifacts</code>.
-          Connecting a remote makes it sync across machines and collaborators — the pointer is committed to the code repo, so
-          teammates inherit it automatically; access is plain git auth on the remote host.
+          Everything already works locally — journals, evidence, dashboards and review guides are versioned in a
+          project-local repo{status ? <> at <code className={`${mono} text-[11px]`}>{status.repoPath}</code></> : null}.
+          Sharing is an <span className="text-[var(--gs-text)]">optional step for teams</span>: connect a remote once and
+          every teammate and machine syncs automatically.
         </p>
-        {error ? (
-          <div className="mt-4 text-[12px] text-[var(--gs-danger)]">{error}</div>
-        ) : !status ? (
-          <div className="mt-4 text-[12px] text-[var(--gs-text-dim)]">Loading…</div>
-        ) : (
-          <div className="mt-4 border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-4 py-3">
-            <div className={row}><span className={key}>local repo</span><span className="min-w-0 flex-1 truncate font-[family-name:var(--gs-font)] text-[11.5px] text-[var(--gs-text)]">{status.repoPath}</span></div>
-            <div className={row}><span className={key}>branches</span><span className="font-[family-name:var(--gs-font)] text-[11.5px] text-[var(--gs-text-muted)]">{status.branches.join(' · ') || '(none yet)'}</span></div>
-            <div className={row}>
-              <span className={key}>remote</span>
-              {status.remote ? (
-                <span className="flex min-w-0 flex-1 items-baseline gap-2">
-                  <span className="min-w-0 flex-1 truncate font-[family-name:var(--gs-font)] text-[11.5px] text-[var(--gs-success)]">{status.remote}</span>
-                  <button
-                    type="button"
-                    disabled={busy !== null}
-                    onClick={async () => {
-                      setBusy('sync');
-                      try {
-                        const r = await backend!.syncProjectArtifacts!(projectName);
-                        setLastSync(`synced — ${r.pushed ? 'pushed' : 'nothing to push'}${r.fastForwarded ? ', main fast-forwarded' : ''}`);
-                      } catch (e) { setLastSync(e instanceof Error ? e.message : 'sync failed'); }
-                      finally { setBusy(null); refresh(); }
-                    }}
-                    className={XS_BTN}
-                  >
-                    {busy === 'sync' ? 'Syncing…' : '⟳ Sync now'}
-                  </button>
-                </span>
-              ) : (
-                <span className="text-[12px] text-[var(--gs-warning)]">local only — nothing is synced anywhere</span>
-              )}
+
+        {error && <div className="mt-4 text-[12px] text-[var(--gs-danger)]">{error}</div>}
+
+        {status?.remote ? (
+          <div className="mt-4 border border-[#1f4a2f] bg-[var(--gs-bg-elevated)] px-4 py-3">
+            <div className="flex items-baseline gap-2">
+              <span className="text-[var(--gs-accent)]">✓</span>
+              <span className={kicker}>sharing enabled</span>
+              <span className={`min-w-0 flex-1 truncate ${mono} text-[11.5px] text-[var(--gs-success)]`}>{status.remote}</span>
+              <button type="button" disabled={busy} onClick={() => void enable(async () => { const r = await backend!.syncProjectArtifacts!(projectName); return `synced — ${r.pushed ? 'pushed' : 'up to date'}`; })} className={XS_BTN}>{busy ? 'Syncing…' : '⟳ Sync now'}</button>
             </div>
-            {lastSync && <div className="pt-1 text-[11px] text-[var(--gs-text-dim)]">{lastSync}</div>}
-            {!status.remote && backend?.provisionProjectArtifacts && (
-              <div className="mt-3 border-t border-[var(--gs-border-muted)] pt-3">
-                <div className="mb-1.5 text-[10.5px] uppercase tracking-[0.08em] text-[var(--gs-text-dim)]">one-click — github (uses your gh auth)</div>
+            <div className={`mt-2 ${mono} text-[11px] text-[var(--gs-text-dim)]`}>branches: {status.branches.join(' · ') || '(none yet)'}</div>
+            <div className="mt-2 border-t border-[var(--gs-border-muted)] pt-2 text-[11px] leading-[1.5] text-[var(--gs-text-muted)]">
+              Teammates do nothing: the committed pointer in the code repo wires them up on their first workspace. Auto-sync runs every 5 minutes on every machine.
+            </div>
+            {note && <div className="pt-1.5 text-[11px] text-[var(--gs-text-dim)]">{note}</div>}
+          </div>
+        ) : (
+          <>
+            <div className={`mt-5 ${kicker}`}>1 · choose how to share</div>
+            <div className="mt-2 flex flex-col gap-2">
+              {OPTIONS.map((o) => (
+                <button
+                  key={o.key}
+                  type="button"
+                  disabled={!o.available}
+                  onClick={() => setChoice(o.key)}
+                  className={`border px-3.5 py-2.5 text-left transition-colors disabled:opacity-40 ${choice === o.key ? 'border-[var(--gs-accent)] bg-[var(--gs-bg-elevated)]' : 'border-[var(--gs-border)] hover:border-[var(--gs-border-active)]'}`}
+                >
+                  <div className="flex items-baseline gap-2">
+                    <span className="text-[var(--gs-accent)]">{o.icon}</span>
+                    <span className="text-[12.5px] font-semibold text-[var(--gs-text)]">{o.title}</span>
+                    {o.badge && <span className="border border-[#1f4a2f] px-1.5 py-px text-[9.5px] uppercase tracking-[0.06em] text-[var(--gs-accent)]">{o.badge}</span>}
+                    {!o.available && <span className="text-[10px] text-[var(--gs-text-ghost)]">unavailable on this backend</span>}
+                  </div>
+                  <div className="mt-1 text-[11.5px] leading-[1.5] text-[var(--gs-text-muted)]">{o.desc}</div>
+                </button>
+              ))}
+            </div>
+
+            {choice && (
+              <>
+                {choice === 'byo' && (
+                  <div className="mt-3">
+                    <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="git@github.com:you/proj-artifacts.git" className={`w-full border border-[var(--gs-border)] bg-black px-2 py-1.5 ${mono} text-[11.5px] text-[var(--gs-text)] outline-none focus:border-[var(--gs-accent)]`} />
+                  </div>
+                )}
+                <div className={`mt-4 ${kicker}`}>2 · what will happen</div>
+                <ul className="mt-1.5 flex flex-col gap-1">
+                  {PLAN[choice].map((step, i) => (
+                    <li key={i} className="flex gap-2 text-[11.5px] leading-[1.5] text-[var(--gs-text-muted)]"><span className={`${mono} text-[var(--gs-text-dim)]`}>{i + 1}.</span>{step}</li>
+                  ))}
+                </ul>
+                <div className={`mt-4 ${kicker}`}>3 · enable</div>
                 <button
                   type="button"
-                  disabled={busy !== null}
-                  onClick={async () => {
-                    setBusy('connect');
-                    try {
-                      const r = await backend.provisionProjectArtifacts!(projectName);
-                      setLastSync(`${r.created ? 'created' : 'reusing'} ${r.slug} — pushed, ${r.blobsUploaded} blobs uploaded, ${r.collaboratorsCopied} collaborators mirrored`);
-                    } catch (e) { setLastSync(e instanceof Error ? e.message : 'provisioning failed'); }
-                    finally { setBusy(null); refresh(); }
-                  }}
-                  className="border border-[#1f4a2f] px-3 py-1 text-[11.5px] text-[var(--gs-accent)] disabled:opacity-40"
+                  disabled={busy || (choice === 'byo' && !url.trim())}
+                  onClick={() => void enable(async () => {
+                    if (choice === 'managed') { const r = await backend!.setupManagedProjectArtifacts!(projectName); return `managed sharing on — ${r.project}${r.synced ? ', synced' : ' (first sync pending)'}`; }
+                    if (choice === 'github') { const r = await backend!.provisionProjectArtifacts!(projectName); return `${r.created ? 'created' : 'reusing'} ${r.slug} — pushed, ${r.blobsUploaded} blobs, ${r.collaboratorsCopied} collaborators`; }
+                    const r = await backend!.setProjectArtifactsRemote!(projectName, url.trim()); return `connected — ${r.pushed ? 'branches pushed' : 'adopted remote'}`;
+                  })}
+                  className="mt-1.5 border border-[#1f4a2f] px-4 py-1.5 text-[12px] text-[var(--gs-accent)] disabled:opacity-40"
                 >
-                  {busy === 'connect' ? 'Provisioning…' : '⚡ Provision private repo on GitHub'}
+                  {busy ? 'Enabling…' : '⚡ Enable sharing'}
                 </button>
-                <div className="mt-1 text-[10.5px] text-[var(--gs-text-ghost)]">Creates a private &lt;owner&gt;/&lt;repo&gt;-artifacts repo, pushes all branches, mirrors code-repo collaborators, uploads large-file blobs as release assets.</div>
-                <div className="mb-1.5 mt-3 text-[10.5px] uppercase tracking-[0.08em] text-[var(--gs-text-dim)]">or connect a remote (bring your own git repo)</div>
-                <div className="flex gap-2">
-                  <input
-                    value={url}
-                    onChange={(e) => setUrl(e.target.value)}
-                    placeholder="git@github.com:you/proj-artifacts.git"
-                    className="min-w-0 flex-1 border border-[var(--gs-border)] bg-black px-2 py-1 font-[family-name:var(--gs-font)] text-[11.5px] text-[var(--gs-text)] outline-none focus:border-[var(--gs-accent)]"
-                  />
-                  <button
-                    type="button"
-                    disabled={!url.trim() || busy !== null || !backend?.setProjectArtifactsRemote}
-                    onClick={async () => {
-                      setBusy('connect');
-                      try {
-                        const r = await backend!.setProjectArtifactsRemote!(projectName, url.trim());
-                        setLastSync(`connected — ${r.pushed ? 'branches pushed' : 'adopted remote main'}`);
-                        setUrl('');
-                      } catch (e) { setLastSync(e instanceof Error ? e.message : 'connect failed'); }
-                      finally { setBusy(null); refresh(); }
-                    }}
-                    className="border border-[#1f4a2f] px-3 py-1 text-[11.5px] text-[var(--gs-accent)] disabled:opacity-40"
-                  >
-                    {busy === 'connect' ? 'Connecting…' : 'Connect & sync'}
-                  </button>
-                </div>
-                <div className="mt-1.5 text-[10.5px] text-[var(--gs-text-ghost)]">
-                  Create an empty private repo anywhere git lives, paste its URL. The pointer commits to the code repo; teammates and your other machines pick it up automatically. Managed gitspace.sh remotes (no repo needed) ship later.
-                </div>
-              </div>
+                {note && <div className="mt-2 text-[11.5px] text-[var(--gs-text-muted)]">{note}</div>}
+              </>
             )}
-          </div>
+          </>
         )}
       </div>
     </div>

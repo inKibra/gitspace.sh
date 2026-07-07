@@ -3204,6 +3204,14 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     throw new Error('Unexpected project-artifacts-remote-set response');
   }
 
+  async setupManagedProjectArtifacts(projectName: string): Promise<{ project: string; gitUrl: string; synced: boolean }> {
+    await this.waitForInitialSnapshot();
+    const r = await this.sendRpcCommand({ type: 'project_artifacts_managed_setup', requestId: crypto.randomUUID(), projectName });
+    if (r.type === 'project-artifacts-managed-setup') return { project: r.project, gitUrl: r.gitUrl, synced: r.synced };
+    if (r.type === 'error') throw new Error(r.message);
+    throw new Error('Unexpected managed-setup response');
+  }
+
   async provisionProjectArtifacts(projectName: string): Promise<{ slug: string; url: string; created: boolean; blobsUploaded: number; collaboratorsCopied: number }> {
     await this.waitForInitialSnapshot();
     const r = await this.sendRpcCommand({ type: 'project_artifacts_provision', requestId: crypto.randomUUID(), projectName });
