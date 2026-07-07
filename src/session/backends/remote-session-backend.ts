@@ -3211,6 +3211,14 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     throw new Error('Unexpected project-artifacts-remote-set response');
   }
 
+  async rollupProjectArtifacts(projectName: string, workspace: string, opts: { removeBranch?: boolean } = {}): Promise<{ mergeCommit: string }> {
+    await this.waitForInitialSnapshot();
+    const r = await this.sendRpcCommand({ type: 'project_artifacts_rollup', requestId: crypto.randomUUID(), projectName, workspace, removeBranch: opts.removeBranch });
+    if (r.type === 'project-artifacts-rollup') return { mergeCommit: r.mergeCommit };
+    if (r.type === 'error') throw new Error(r.message);
+    throw new Error('Unexpected rollup response');
+  }
+
   async mintArtifactShare(uri: string, opts: { ttlMs?: number; maxUses?: number } = {}): Promise<{ url: string; tokenId: string; expiresAt: number }> {
     await this.waitForInitialSnapshot();
     const r = await this.sendRpcCommand({ type: 'artifact_share_mint', requestId: crypto.randomUUID(), uri, ttlMs: opts.ttlMs, maxUses: opts.maxUses });

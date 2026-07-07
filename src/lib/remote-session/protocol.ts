@@ -701,6 +701,14 @@ export interface GetAgentSessionTreeRequest {
   agentSessionId: string;
 }
 
+export interface ProjectArtifactsRollupRequest {
+  type: 'project_artifacts_rollup';
+  requestId: string;
+  projectName: string;
+  workspace: string;
+  removeBranch?: boolean;
+}
+
 export interface ArtifactShareMintRequest {
   type: 'artifact_share_mint';
   requestId: string;
@@ -1219,6 +1227,7 @@ export type ClientToMachineMessage =
   | GetAgentHistoryRequest
   | NavigateAgentHistoryRequest
   | GetAgentSessionTreeRequest
+  | ProjectArtifactsRollupRequest
   | ArtifactShareMintRequest
   | ArtifactShareRevokeRequest
   | ArtifactShareListRequest
@@ -1393,6 +1402,7 @@ export function isBrowseMessage(msg: RemoteSessionMessage): msg is ClientToMachi
     'get_agent_history',
     'navigate_agent_history',
     'get_agent_session_tree',
+    'project_artifacts_rollup',
     'artifact_share_mint',
     'artifact_share_revoke',
     'artifact_share_list',

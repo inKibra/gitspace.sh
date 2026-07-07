@@ -4024,6 +4024,19 @@ routerListener = Bun.listen({
             }
             break;
 
+          case 'project-artifacts-rollup':
+            try {
+              const { rollupArtifacts } = await import('../../core/artifacts.js');
+              const { getProjectDir } = await import('../../core/config.js');
+              // The publish gate inside rollupArtifacts refuses raw large
+              // blobs; its error names the repair command.
+              const r = await rollupArtifacts(getProjectDir(cmd.projectName), cmd.workspace, { removeBranch: cmd.removeBranch });
+              res = { type: 'project-artifacts-rollup', mergeCommit: r.mergeCommit };
+            } catch (e) {
+              res = { type: 'error', message: `Roll-up failed: ${e instanceof Error ? e.message : String(e)}` };
+            }
+            break;
+
           case 'artifact-share-mint':
             try {
               const { mintShareLink } = await import('./artifact-share.js');

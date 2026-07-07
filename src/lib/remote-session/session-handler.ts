@@ -1754,6 +1754,14 @@ export class RemoteSessionHandler {
 
 
 
+      case 'project_artifacts_rollup':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, { type: 'project-artifacts-rollup', projectName: msg.projectName, workspace: msg.workspace, removeBranch: msg.removeBranch }, sendResponse);
+        break;
+
       case 'artifact_share_mint':
         if (!canManage(session.accessType)) {
           await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });

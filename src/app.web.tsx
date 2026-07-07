@@ -3377,6 +3377,17 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
               setProjectHomeName(null);
               handleSelectPlannedGoal(goal);
             }}
+            shippedWorkspaces={phWorkspaces
+              .filter((w) => ((w.workspace as { phase?: string }).phase ?? 'code') === 'ship')
+              .map((w) => ({
+                name: w.workspace.name,
+                chain: phGoals.find((g) => g.workspaceName === w.workspace.name)?.chainTitle ?? 'workspaces',
+              }))}
+            onRollup={async (workspaceName) => {
+              const be = phBackendKey ? multi.getBackend(phBackendKey) : null;
+              if (!be?.rollupProjectArtifacts) throw new Error('Roll-up unavailable on this connection.');
+              await be.rollupProjectArtifacts(projectHomeName, workspaceName);
+            }}
           />
           </div>
           <GlobalTaskbar tasks={taskBarTasks} onDismiss={(id) => workspaceRemovalTasks.dismissTask(id)} />

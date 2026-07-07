@@ -26,7 +26,7 @@ import type { KanbanGoalItem } from '../app/shared/board/types.js';
 import type { WorkspaceRuntimeEntry } from '../app/shared/workspace-runtime/types.js';
 import { ArtifactPanel } from '../components/ArtifactPanel.web.js';
 import { DashboardPanel } from '../components/DashboardPanel.web.js';
-import { KIND_ICON, KIND_LABEL, KIND_ORDER, classifyArtifact, type ArtifactKind, decodeBase64Utf8 } from '../components/artifact-kinds.js';
+import { KIND_ICON, KIND_LABEL, KIND_ORDER, classifyArtifact, type ArtifactKind, decodeBase64Utf8, encodeBase64Utf8 } from '../components/artifact-kinds.js';
 
 function ProjectReportTab({ path, read }: { path: string; read: (p: string) => Promise<{ base64: string }> }): ReactElement {
   const [report, setReport] = useState<unknown>(undefined);
@@ -493,8 +493,22 @@ export function ProjectHomePage({
       await onRollup(name);
       setRolled((r) => ({ ...r, [name]: true }));
       setRatingWs(null);
+      // Persist the rating as a rated precedent (previously dropped on the
+      // floor — the queue's whole promise is 'rate → feeds precedents').
+      const rating = stars[name];
+      if (rating && backend?.writeProjectArtifact) {
+        const report = {
+          kind: 'good-pattern',
+          surface: name,
+          note: `Roll-up rating for shipped workspace \`${name}\`.`,
+          rating,
+        };
+        await backend.writeProjectArtifact(projectName, `reports/rollup-${name}.report.json`, encodeBase64Utf8(JSON.stringify(report, null, 2) + '\n'), `rollup: rate ${name} ${rating}/5`).catch(() => undefined);
+      }
       loadArtifacts();
-    } catch { /* keep row for retry */ }
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Roll-up failed');
+    }
     setRollBusy(null);
   };
 

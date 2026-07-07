@@ -1857,6 +1857,13 @@ export class LocalSessionBackend implements SessionBackend {
     throw new Error('Unexpected project-artifacts-remote-set response');
   }
 
+  async rollupProjectArtifacts(projectName: string, workspace: string, opts: { removeBranch?: boolean } = {}): Promise<{ mergeCommit: string }> {
+    const r = await this.sendTmuxCommand({ type: 'project-artifacts-rollup', projectName, workspace, removeBranch: opts.removeBranch });
+    if (r.type === 'project-artifacts-rollup') return { mergeCommit: r.mergeCommit };
+    if (r.type === 'error') throw new Error(r.message);
+    throw new Error('Unexpected rollup response');
+  }
+
   async mintArtifactShare(uri: string, opts: { ttlMs?: number; maxUses?: number } = {}): Promise<{ url: string; tokenId: string; expiresAt: number }> {
     const r = await this.sendTmuxCommand({ type: 'artifact-share-mint', uri, ttlMs: opts.ttlMs, maxUses: opts.maxUses });
     if (r.type === 'artifact-share-mint') return { url: r.url, tokenId: r.tokenId, expiresAt: r.expiresAt };

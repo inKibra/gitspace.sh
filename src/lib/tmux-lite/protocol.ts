@@ -444,6 +444,7 @@ export type Command =
   | { type: 'serve-activate'; config: ServeActivatePayload }
   | { type: 'serve-deactivate' }
   | { type: 'serve-status' }
+  | { type: 'project-artifacts-rollup'; projectName: string; workspace: string; removeBranch?: boolean }
   | { type: 'artifact-share-mint'; uri: string; ttlMs?: number; maxUses?: number }
   | { type: 'artifact-share-revoke'; tokenId: string }
   | { type: 'artifact-share-list' }
@@ -552,6 +553,7 @@ export type Response =
   | { type: 'project-artifacts-sync'; pushed: boolean; fastForwarded: boolean }
   | { type: 'project-artifacts-provision'; slug: string; url: string; created: boolean; blobsUploaded: number; collaboratorsCopied: number }
   | { type: 'serve-status'; status: { active: boolean; relayUrl?: string; relayStatus?: string; clients?: number; machineId?: string; startedAt?: number } }
+  | { type: 'project-artifacts-rollup'; mergeCommit: string }
   | { type: 'artifact-share-mint'; url: string; tokenId: string; expiresAt: number }
   | { type: 'artifact-share-revoke'; revoked: boolean }
   | { type: 'artifact-share-list'; shares: import('./artifact-share.js').ShareLedgerEntry[] }
