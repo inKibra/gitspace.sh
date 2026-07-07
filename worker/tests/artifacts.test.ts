@@ -55,21 +55,22 @@ describe('artifacts provisioning', () => {
     const created = JSON.parse(bodyText) as ProvisionResponse;
 
     expect(created.project).toBe('brad/demo');
-    expect(created.gitUrl).toBe('https://artifacts.gitspace.sh/brad/demo.git');
-    expect(created.token).toStartWith('cfa_write_');
+    expect(created.gitUrl).toBe('https://artifacts-upstream.example.com/brad--demo.git');
+    expect(created.token).toStartWith('art_v1_');
     expect(created.expiresAt).toBeGreaterThan(before);
     expect(created.expiresAt).toBeLessThanOrEqual(Date.now() + 3600 * 1000);
 
     // The long-lived upstream credential must never appear in responses.
+    // (The git REMOTE is intentionally exposed — CF's model is direct data
+    // plane: any git client + a short-lived repo-scoped art_v1 token.)
     expect(bodyText).not.toContain(harness.upstream.cfArtifactsApiToken);
-    // Nor the upstream git URL (clients only see the worker-proxied URL).
-    expect(bodyText).not.toContain('artifacts-upstream.example.com');
 
     const repos = harness.upstream.listArtifactRepos();
     expect(repos).toHaveLength(1);
     expect(repos[0]?.name).toBe('brad--demo');
+    // Verified API mints tokens by repo NAME at the namespace level.
     expect(harness.upstream.getLastArtifactTokenRequest()).toMatchObject({
-      repoId: repos[0]?.id,
+      repoId: 'brad--demo',
       access: 'write',
       ttlSeconds: 3600,
     });
@@ -116,8 +117,8 @@ describe('artifacts token refresh', () => {
     expect(refresh.status).toBe(200);
     const refreshed = await refresh.json() as ProvisionResponse;
     expect(refreshed.project).toBe('brad/demo');
-    expect(refreshed.gitUrl).toBe('https://artifacts.gitspace.sh/brad/demo.git');
-    expect(refreshed.token).toStartWith('cfa_write_');
+    expect(refreshed.gitUrl).toBe('https://artifacts-upstream.example.com/brad--demo.git');
+    expect(refreshed.token).toStartWith('art_v1_');
     expect(refreshed.token).not.toBe(initial.token);
     expect(refreshed.expiresAt).toBeLessThanOrEqual(Date.now() + 3600 * 1000);
   });
@@ -320,7 +321,7 @@ describe('artifacts authorization', () => {
     });
     expect(granted.status).toBe(200);
     const minted = await granted.json() as ProvisionResponse;
-    expect(minted.token).toStartWith('cfa_write_');
+    expect(minted.token).toStartWith('art_v1_');
 
     const content = 'collaborator blob';
     const oid = sha256Hex(content);

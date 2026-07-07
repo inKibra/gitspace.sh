@@ -37,16 +37,16 @@ export interface UpstreamArtifactsHost {
 }
 
 /**
- * Real implementation against the CF Artifacts REST API.
- *
- * UNVERIFIED-AT-DEPLOY: the REST shapes below (paths, request bodies, and
- * response envelopes) are best-effort reconstructions of the CF Artifacts
- * beta API and MUST be verified against the real Cloudflare docs before
- * this code path is enabled in production (the product went to public beta
- * ~May 2026; see docs/ARTIFACTS-FS.md "Cloudflare Artifacts facts").
- * Assumed shapes:
- *   POST {base}/repos                  { name }                     -> { success, result: { id, git_url } }
- *   POST {base}/repos/{id}/tokens      { access, ttl_seconds }      -> { success, result: { token, expires_at } }
+ * Real implementation against the CF Artifacts REST API — shapes VERIFIED
+ * against the live docs (2026-07):
+ *   base = https://api.cloudflare.com/client/v4/accounts/{ACCOUNT_ID}/artifacts/namespaces/{NAMESPACE}
+ *   POST {base}/repos   { name }                        -> { success, result: { id, name, remote, token } }
+ *   POST {base}/tokens  { repo, scope: read|write, ttl } -> { success, result: { id, plaintext, scope, expires_at } }
+ *   token format: art_v1_<40hex>?expires=<unix_seconds>; git auth =
+ *   http.extraHeader "Authorization: Bearer <token>" (or basic x:<secret>).
+ * Sources: developers.cloudflare.com/artifacts/api/rest-api/,
+ * /artifacts/get-started/rest-api/, /artifacts/api/git-protocol/.
+ * CF_ARTIFACTS_API_URL should be the full namespace base above.
  */
 export class CfArtifactsHost implements UpstreamArtifactsHost {
   private readonly baseUrl: string;
@@ -83,16 +83,18 @@ export class CfArtifactsHost implements UpstreamArtifactsHost {
 
     const data = (await response.json()) as {
       success: boolean;
-      result?: { id?: string; git_url?: string };
+      result?: { id?: string; name?: string; remote?: string; token?: string };
     };
 
     if (!data.success || !data.result?.id) {
       throw new Error('Upstream repo creation returned an unexpected shape');
     }
 
+    // `remote` is the standard smart-HTTP URL:
+    // https://<ACCOUNT_ID>.artifacts.cloudflare.net/git/<namespace>/<repo>.git
     return {
-      repoId: data.result.id,
-      gitUrl: data.result.git_url ?? '',
+      repoId: data.result.name ?? name,
+      gitUrl: data.result.remote ?? '',
     };
   }
 
@@ -101,14 +103,13 @@ export class CfArtifactsHost implements UpstreamArtifactsHost {
     access: UpstreamTokenAccess,
     ttlSeconds: number,
   ): Promise<UpstreamScopedToken> {
-    const response = await fetch(
-      `${this.baseUrl}/repos/${encodeURIComponent(repoId)}/tokens`,
-      {
-        method: 'POST',
-        headers: this.headers(),
-        body: JSON.stringify({ access, ttl_seconds: ttlSeconds }),
-      },
-    );
+    // Tokens are namespace-level, keyed by repo NAME; ttl in seconds
+    // (min 60, max 31_536_000). scope: 'read' | 'write'.
+    const response = await fetch(`${this.baseUrl}/tokens`, {
+      method: 'POST',
+      headers: this.headers(),
+      body: JSON.stringify({ repo: repoId, scope: access, ttl: ttlSeconds }),
+    });
 
     if (!response.ok) {
       throw new Error(`Upstream token mint failed (${response.status})`);
@@ -116,20 +117,22 @@ export class CfArtifactsHost implements UpstreamArtifactsHost {
 
     const data = (await response.json()) as {
       success: boolean;
-      result?: { token?: string; expires_at?: number };
+      result?: { plaintext?: string; expires_at?: number | string };
     };
 
-    if (!data.success || !data.result?.token) {
+    if (!data.success || !data.result?.plaintext) {
       throw new Error('Upstream token mint returned an unexpected shape');
     }
 
-    // UNVERIFIED-AT-DEPLOY: expires_at unit. Normalize seconds vs ms epochs.
-    const rawExpiry = data.result.expires_at;
-    const expiresAt = typeof rawExpiry === 'number'
-      ? (rawExpiry < 1_000_000_000_000 ? rawExpiry * 1000 : rawExpiry)
-      : Date.now() + ttlSeconds * 1000;
+    // plaintext = art_v1_<40hex>?expires=<unix_seconds> — the ?expires suffix
+    // is authoritative; fall back to expires_at, then ttl.
+    const token = data.result.plaintext;
+    const suffix = token.match(/\?expires=(\d+)/);
+    const raw = data.result.expires_at;
+    const fromField = typeof raw === 'string' ? Date.parse(raw) : typeof raw === 'number' ? (raw < 1_000_000_000_000 ? raw * 1000 : raw) : NaN;
+    const expiresAt = suffix ? Number(suffix[1]) * 1000 : Number.isFinite(fromField) ? fromField : Date.now() + ttlSeconds * 1000;
 
-    return { token: data.result.token, expiresAt };
+    return { token, expiresAt };
   }
 }
 

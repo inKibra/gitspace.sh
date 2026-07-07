@@ -149,25 +149,29 @@ export function startMockUpstream(): MockUpstream {
               };
               artifactRepos.set(repo.id, repo);
             }
-            return Response.json({ success: true, result: { id: repo.id, git_url: repo.gitUrl } });
+            const expires = Math.floor(Date.now() / 1000) + 86_400;
+            return Response.json({ success: true, result: { id: repo.id, name: repo.name, remote: repo.gitUrl, token: `art_v1_${'0'.repeat(40)}?expires=${expires}` } });
           });
         }
 
-        const tokenMatch = path.match(/^\/artifacts-host\/repos\/([^/]+)\/tokens$/);
-        if (tokenMatch && request.method === 'POST') {
-          const repoId = decodeURIComponent(tokenMatch[1] ?? '');
-          if (!artifactRepos.has(repoId)) {
-            return new Response('Not found', { status: 404 });
-          }
+        if (path === '/artifacts-host/tokens' && request.method === 'POST') {
           return readJsonObject(request).then((body) => {
-            const access = body.access === 'read' ? 'read' : 'write';
-            const ttlSeconds = typeof body.ttl_seconds === 'number' ? body.ttl_seconds : 3600;
-            lastArtifactTokenRequest = { repoId, access, ttlSeconds };
+            const repoName = stringField(body.repo, '');
+            const repo = Array.from(artifactRepos.values()).find((entry) => entry.name === repoName);
+            if (!repo) {
+              return new Response('Not found', { status: 404 });
+            }
+            const access = body.scope === 'read' ? 'read' : 'write';
+            const ttlSeconds = typeof body.ttl === 'number' ? body.ttl : 86_400;
+            lastArtifactTokenRequest = { repoId: repoName, access, ttlSeconds };
+            const expires = Math.floor((Date.now() + ttlSeconds * 1000) / 1000);
             return Response.json({
               success: true,
               result: {
-                token: `cfa_${access}_${crypto.randomUUID().replace(/-/g, '')}`,
-                expires_at: Date.now() + ttlSeconds * 1000,
+                id: `tok_${crypto.randomUUID()}`,
+                plaintext: `art_v1_${crypto.randomUUID().replace(/-/g, '').padEnd(40, '0').slice(0, 40)}?expires=${expires}`,
+                scope: access,
+                expires_at: expires,
               },
             });
           });

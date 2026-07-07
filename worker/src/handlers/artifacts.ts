@@ -215,7 +215,7 @@ app.post('/provision', async (c) => {
   const minted = await mintProjectToken(c.env, project);
   return c.json({
     project: `${ref.handle}/${ref.slug}`,
-    gitUrl: buildGitUrl(c.env, ref.handle, ref.slug),
+    gitUrl: project.upstream_git_url || buildGitUrl(c.env, ref.handle, ref.slug),
     token: minted.token,
     expiresAt: minted.expiresAt,
   });
@@ -244,7 +244,7 @@ app.get('/token', async (c) => {
   const minted = await mintProjectToken(c.env, project);
   return c.json({
     project: `${ref.handle}/${ref.slug}`,
-    gitUrl: buildGitUrl(c.env, ref.handle, ref.slug),
+    gitUrl: project.upstream_git_url || buildGitUrl(c.env, ref.handle, ref.slug),
     token: minted.token,
     expiresAt: minted.expiresAt,
   });
