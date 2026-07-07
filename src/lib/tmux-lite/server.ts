@@ -687,8 +687,39 @@ startTriggerScheduler(
         return null;
       }
     },
+    watchSessionIdle: watchAgentSessionIdle,
   },
 );
+
+/** Fire `onIdle` once when an agent session completes a run (busy → idle).
+ *  Used to close the trigger run lifecycle — before this, nothing ever
+ *  recorded `ok` and every cron re-fired on pending-lock expiry instead of
+ *  its cadence. Auto-unsubscribes; a session that never goes busy within the
+ *  grace window is treated as complete on its first idle after that. */
+function watchAgentSessionIdle(
+  workspace: { id: string },
+  sessionId: string,
+  onIdle: () => void,
+): void {
+  let sawBusy = false;
+  const startedAt = Date.now();
+  const unsubscribe = subscribeAgentControl((delta) => {
+    if (delta.type !== 'agent_session_status' || delta.sessionId !== sessionId || delta.workspaceId !== workspace.id) return;
+    if (delta.status.type === 'busy' || delta.status.type === 'retry' || delta.status.type === 'compacting') {
+      sawBusy = true;
+      return;
+    }
+    if (delta.status.type !== 'idle') return;
+    // Idle before ever going busy = the prompt hasn't landed yet; give it a
+    // grace window instead of declaring instant success.
+    if (!sawBusy && Date.now() - startedAt < 30_000) return;
+    unsubscribe();
+    onIdle();
+  });
+  // Safety: never leak the subscription past a reasonable run ceiling.
+  const t = setTimeout(() => unsubscribe(), 6 * 60 * 60_000);
+  (t as { unref?: () => void }).unref?.();
+}
 
 ensureWorkspacePmSubscribed();
 
@@ -3821,6 +3852,65 @@ routerListener = Bun.listen({
             } catch (e) {
               const errMsg = e instanceof Error ? e.message : String(e);
               res = { type: 'error', message: `Failed to list artifacts: ${errMsg}` };
+            }
+            break;
+
+          case 'trigger-save':
+            try {
+              const { saveTrigger } = await import('../../core/triggers.js');
+              const { ensureArtifactsMount, artifactsMountDir } = await import('../../core/artifacts.js');
+              const { getProjectDir } = await import('../../core/config.js');
+              const { existsSync: ex } = await import('fs');
+              const { join: j } = await import('path');
+              const projectDir = getProjectDir(cmd.target.projectName);
+              if (!ex(j(artifactsMountDir(cmd.target.workspacePath), '.git'))) {
+                await ensureArtifactsMount(projectDir, cmd.target.workspacePath, cmd.target.workspaceName === '@base' ? 'main' : cmd.target.workspaceName);
+              }
+              const record = await saveTrigger(projectDir, cmd.target.workspacePath, cmd.trigger);
+              res = { type: 'trigger-save', trigger: record };
+            } catch (e) {
+              res = { type: 'error', message: `Failed to save trigger: ${e instanceof Error ? e.message : String(e)}` };
+            }
+            break;
+
+          case 'trigger-run-now':
+            try {
+              await getAgentControlReady();
+              const { listTriggers, recordTriggerRun } = await import('../../core/triggers.js');
+              const { buildTriggerPrompt } = await import('./trigger-scheduler.js');
+              const { getProjectDir } = await import('../../core/config.js');
+              const projectDir = getProjectDir(cmd.target.projectName);
+              const trigger = listTriggers(cmd.target.workspacePath).find((t) => t.id === cmd.triggerId);
+              if (!trigger) { res = { type: 'error', message: `Unknown trigger: ${cmd.triggerId}` }; break; }
+              const prompt = buildTriggerPrompt(trigger);
+              if (!prompt) { res = { type: 'error', message: `Trigger ${trigger.name} has no prompt to run.` }; break; }
+              // Same lifecycle as scheduled fires: pending → spawn → ok on idle.
+              await recordTriggerRun(projectDir, cmd.target.workspacePath, trigger.id, { status: 'pending', note: 'manual run' });
+              const before = new Set((await getKnownAgentSessions(cmd.target)).map((s) => s.id));
+              const sessions = await createAgentSession(cmd.target, `trigger: ${trigger.name}`);
+              const created = sessions.find((s) => !before.has(s.id)) ?? sessions[sessions.length - 1];
+              if (!created) {
+                await recordTriggerRun(projectDir, cmd.target.workspacePath, trigger.id, { status: 'fail', note: 'agent session failed to start' });
+                res = { type: 'error', message: 'Agent session failed to start.' };
+                break;
+              }
+              let prompted = false;
+              for (let attempt = 0; attempt < 4 && !prompted; attempt++) {
+                if (attempt > 0) await new Promise((r) => setTimeout(r, 2000 * attempt));
+                try { await promptAgentSession(cmd.target, created.id, prompt); prompted = true; } catch { /* discovery race */ }
+              }
+              if (!prompted) {
+                await recordTriggerRun(projectDir, cmd.target.workspacePath, trigger.id, { status: 'fail', note: 'prompt delivery failed', sessionId: created.id });
+                res = { type: 'error', message: 'Run session created but the prompt failed — open it and prompt manually.' };
+                break;
+              }
+              watchAgentSessionIdle({ id: cmd.target.workspaceId }, created.id, () => {
+                void recordTriggerRun(projectDir, cmd.target.workspacePath, trigger.id, { status: 'ok', sessionId: created.id })
+                  .catch(() => undefined);
+              });
+              res = { type: 'trigger-run-now', sessionId: created.id };
+            } catch (e) {
+              res = { type: 'error', message: `Failed to run trigger: ${e instanceof Error ? e.message : String(e)}` };
             }
             break;
 

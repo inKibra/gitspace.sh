@@ -1855,6 +1855,22 @@ export class RemoteSessionHandler {
         await this.handleTypedCommand(session, msg.requestId, { type: 'project-artifacts-provision', projectName: msg.projectName }, sendResponse);
         break;
 
+      case 'trigger_save':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, { type: 'trigger-save', target: msg.target, trigger: msg.trigger }, sendResponse);
+        break;
+
+      case 'trigger_run_now':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, { type: 'trigger-run-now', target: msg.target, triggerId: msg.triggerId }, sendResponse);
+        break;
+
       case 'project_artifacts_sync':
         if (!canManage(session.accessType)) {
           await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });

@@ -15,6 +15,7 @@ import { useCallback, useEffect, useMemo, useState, type ReactElement } from 're
 import type { DockviewApi } from 'dockview-react';
 import type { BackendKey, SessionBackend } from '../session/backend.js';
 import { NotePanel } from '../components/NotePanel.web.js';
+import { CronsPaneConnected } from '../components/CronsPaneConnected.web.js';
 import { PaneTerminalPanel } from '../components/PaneTerminalPanel.web.js';
 import { DockviewWorkspaceShell, type DockviewTerminalPanel } from '../components/DockviewWorkspaceShell.web.js';
 import type { RemoteSessionPtyBackend } from '../session/useRemoteSessionClient.js';
@@ -313,6 +314,7 @@ const FIXED_TAB_LABEL: Record<string, string> = {
   process: 'In process',
   chains: 'Chains',
   reports: 'Reports & notes',
+  crons: '◷ Crons & triggers',
   'artifacts-repo': 'Artifacts repo',
 };
 const isDashTab = (t: string): boolean => t.startsWith('dash:');
@@ -748,6 +750,9 @@ export function ProjectHomePage({
       ) };
     }
     if (t === 'artifacts-repo') return { ...common, version: 'artifacts-repo', render: () => <ArtifactsRepoTab projectName={projectName} backend={backend} /> };
+    // Project-scope triggers live on the base clone's main mount and fire as
+    // '<project>:@base' agent runs — same registry, same scheduler.
+    if (t === 'crons') return { ...common, version: 'crons', render: () => <CronsPaneConnected backend={backend} workspaceId={baseWorkspaceId} /> };
     if (t.startsWith('agent:')) {
       return { ...common, version: `agent|${t}`, render: () => (
         <ProjectAgentPane backend={backend} backendKey={backendKey ?? null} workspaceId={baseWorkspaceId} agentSessionId={t.slice(6)} paneId={t} />
@@ -801,7 +806,7 @@ export function ProjectHomePage({
           {navRow({ key: 'process', icon: '◷', label: 'In process', rt: String(inProcess.length), tab: 'process' })}
           {navRow({ key: 'reports', icon: '⚑', label: 'Reports & notes', rt: String(feed.length), tab: 'reports' })}
           {navRow({ key: 'chains', icon: '⛓', label: 'Chains', rt: String(chains.length), tab: 'chains' })}
-          {navRow({ key: 'crons', icon: '◷', label: 'Crons & triggers', disabled: true, title: 'trigger backend ships next' })}
+          {navRow({ key: 'crons', icon: '◷', label: 'Crons & triggers', tab: 'crons' })}
 
           {sbGroup('Dashboards')}
           {dashboards.length === 0 && (

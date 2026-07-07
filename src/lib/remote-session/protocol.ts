@@ -770,6 +770,20 @@ interface ProjectArtifactsProvisionRequest {
   projectName: string;
 }
 
+interface TriggerSaveRequest {
+  type: 'trigger_save';
+  requestId: string;
+  target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
+  trigger: import('../../core/triggers.js').TriggerRecord;
+}
+
+interface TriggerRunNowRequest {
+  type: 'trigger_run_now';
+  requestId: string;
+  target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
+  triggerId: string;
+}
+
 export interface RepoTreeRequest {
   type: 'repo_tree';
   requestId: string;
@@ -1219,6 +1233,8 @@ export type ClientToMachineMessage =
   | ProjectArtifactsRemoteSetRequest
   | ProjectArtifactsSyncRequest
   | ProjectArtifactsProvisionRequest
+  | TriggerSaveRequest
+  | TriggerRunNowRequest
   | RepoTreeRequest
   | RepoReadRequest
   | RepoCommitRequest
@@ -1391,6 +1407,8 @@ export function isBrowseMessage(msg: RemoteSessionMessage): msg is ClientToMachi
     'project_artifacts_remote_set',
     'project_artifacts_sync',
     'project_artifacts_provision',
+    'trigger_save',
+    'trigger_run_now',
     'repo_tree',
     'repo_read',
     'repo_commit',

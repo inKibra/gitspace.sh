@@ -11,6 +11,7 @@
 import { existsSync, readFileSync, readdirSync } from 'fs';
 import { join } from 'path';
 import { captureArtifacts } from './artifacts.js';
+import { validateTriggerWhen } from './trigger-grammar.js';
 import { SpacesError } from '../types/errors.js';
 
 export interface TriggerRecord {
@@ -67,6 +68,10 @@ export async function saveTrigger(
   if (!existsSync(join(mount, '.git'))) {
     throw new SpacesError('Triggers require the artifacts mount (.gitspace/artifacts).', 'USER_ERROR', 1);
   }
+  // An unfireable schedule must be impossible to save (it would sit "armed"
+  // forever with zero feedback).
+  const whenError = validateTriggerWhen(trigger.kind, trigger.when);
+  if (whenError) throw new SpacesError(`Trigger schedule invalid: ${whenError}`, 'USER_ERROR', 1);
   const id = trigger.id ?? triggerSlug(trigger.name);
   const record: TriggerRecord = {
     status: 'idle',

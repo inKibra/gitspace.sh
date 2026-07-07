@@ -10,7 +10,10 @@
  */
 
 import { listTriggers, recordTriggerRun, type TriggerRecord } from '../../core/triggers.js';
+import { parseCronWhen } from '../../core/trigger-grammar.js';
 import { getProjectDir } from '../../core/config.js';
+
+export { parseCronWhen };
 
 export interface SchedulerWorkspace {
   id: string;
@@ -23,17 +26,6 @@ export interface DueTrigger {
   workspace: SchedulerWorkspace;
   trigger: TriggerRecord;
   prompt: string;
-}
-
-/** `every 5m` / `every 2h` / `every 1d` → milliseconds; anything else → null. */
-export function parseCronWhen(when: string): number | null {
-  const m = when.trim().toLowerCase().match(/^every\s+(\d+)\s*(m|min|minutes?|h|hours?|d|days?)$/);
-  if (!m) return null;
-  const n = Number(m[1]);
-  if (!Number.isFinite(n) || n <= 0) return null;
-  const unit = m[2]![0];
-  const ms = unit === 'm' ? 60_000 : unit === 'h' ? 3_600_000 : 86_400_000;
-  return n * ms;
 }
 
 /** A pending run younger than this blocks re-fire (don't stack runs). */
@@ -82,6 +74,9 @@ export function collectDueTriggers(workspaces: SchedulerWorkspace[], now: Date):
 export interface TriggerFireDeps {
   /** Spawn + kick an agent session; resolves to the session id (or null on failure). */
   runAgent: (workspace: SchedulerWorkspace, title: string, prompt: string) => Promise<string | null>;
+  /** Call `onIdle` once when the session finishes its run (busy → idle).
+   *  Without it, runs stay `pending` until the lock lapses. */
+  watchSessionIdle?: (workspace: SchedulerWorkspace, sessionId: string, onIdle: () => void) => void;
   log?: (message: string) => void;
 }
 
@@ -101,6 +96,13 @@ export async function tickTriggerScheduler(
       deps.log?.(`trigger ${trigger.name} fired in ${workspace.id}${sessionId ? ` (session ${sessionId})` : ' (session failed)'}`);
       if (!sessionId) {
         await recordTriggerRun(getProjectDir(workspace.projectName), workspace.path, trigger.id, { status: 'fail', note: 'agent session failed to start' }, now);
+      } else {
+        // Close the loop: the run is `ok` when its session goes idle again.
+        // (Crash before idle → the pending lock recovers on schedule.)
+        deps.watchSessionIdle?.(workspace, sessionId, () => {
+          void recordTriggerRun(getProjectDir(workspace.projectName), workspace.path, trigger.id, { status: 'ok', sessionId }, new Date())
+            .catch((e) => deps.log?.(`trigger ${trigger.name} ok-record failed: ${e instanceof Error ? e.message : e}`));
+        });
       }
       fired += 1;
     } catch (error) {

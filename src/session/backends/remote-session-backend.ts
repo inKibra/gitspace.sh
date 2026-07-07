@@ -3204,6 +3204,22 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     throw new Error('Unexpected project-artifacts-remote-set response');
   }
 
+  async saveWorkspaceTrigger(workspaceId: string, trigger: import('../../core/triggers.js').TriggerRecord): Promise<import('../../core/triggers.js').TriggerRecord> {
+    await this.waitForInitialSnapshot();
+    const r = await this.sendRpcCommand({ type: 'trigger_save', requestId: crypto.randomUUID(), target: this.getAgentWorkspaceTarget(workspaceId), trigger });
+    if (r.type === 'trigger-save') return r.trigger;
+    if (r.type === 'error') throw new Error(r.message);
+    throw new Error('Unexpected trigger-save response');
+  }
+
+  async runWorkspaceTriggerNow(workspaceId: string, triggerId: string): Promise<{ sessionId: string }> {
+    await this.waitForInitialSnapshot();
+    const r = await this.sendRpcCommand({ type: 'trigger_run_now', requestId: crypto.randomUUID(), target: this.getAgentWorkspaceTarget(workspaceId), triggerId });
+    if (r.type === 'trigger-run-now') return { sessionId: r.sessionId };
+    if (r.type === 'error') throw new Error(r.message);
+    throw new Error('Unexpected trigger-run-now response');
+  }
+
   async provisionProjectArtifacts(projectName: string): Promise<{ slug: string; url: string; created: boolean; blobsUploaded: number; collaboratorsCopied: number }> {
     await this.waitForInitialSnapshot();
     const r = await this.sendRpcCommand({ type: 'project_artifacts_provision', requestId: crypto.randomUUID(), projectName });

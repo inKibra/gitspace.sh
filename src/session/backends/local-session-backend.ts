@@ -1853,6 +1853,22 @@ export class LocalSessionBackend implements SessionBackend {
     throw new Error('Unexpected project-artifacts-remote-set response');
   }
 
+  async saveWorkspaceTrigger(workspaceId: string, trigger: import('../../core/triggers.js').TriggerRecord): Promise<import('../../core/triggers.js').TriggerRecord> {
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    const r = await this.sendTmuxCommand({ type: 'trigger-save', target, trigger });
+    if (r.type === 'trigger-save') return r.trigger;
+    if (r.type === 'error') throw new Error(r.message);
+    throw new Error('Unexpected trigger-save response');
+  }
+
+  async runWorkspaceTriggerNow(workspaceId: string, triggerId: string): Promise<{ sessionId: string }> {
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    const r = await this.sendTmuxCommand({ type: 'trigger-run-now', target, triggerId });
+    if (r.type === 'trigger-run-now') return { sessionId: r.sessionId };
+    if (r.type === 'error') throw new Error(r.message);
+    throw new Error('Unexpected trigger-run-now response');
+  }
+
   async provisionProjectArtifacts(projectName: string): Promise<{ slug: string; url: string; created: boolean; blobsUploaded: number; collaboratorsCopied: number }> {
     const r = await this.sendTmuxCommand({ type: 'project-artifacts-provision', projectName });
     if (r.type === 'project-artifacts-provision') return { slug: r.slug, url: r.url, created: r.created, blobsUploaded: r.blobsUploaded, collaboratorsCopied: r.collaboratorsCopied };

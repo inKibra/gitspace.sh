@@ -86,6 +86,45 @@ describe('tick against a real registry', () => {
     expect(again).toBe(0);
   });
 
+  it('records ok (with the session id) when the run session goes idle', async () => {
+    await saveTrigger(projectDir, workspaceDir, {
+      name: 'closes loop', kind: 'cron', when: 'every 1h',
+      writes: [], runs: { type: 'skill', ref: 'agent-prompt', prompt: 'do it' },
+    });
+    const ws = { id: 'demo:ws1', name: 'ws1', path: workspaceDir, projectName: 'demo' };
+    let complete: (() => void) | null = null;
+    await tickTriggerScheduler([ws], {
+      runAgent: async () => 'sess-ok',
+      watchSessionIdle: (_w, _sid, onIdle) => { complete = onIdle; },
+    }, new Date('2026-07-07T12:00:00Z'));
+
+    expect(listTriggers(workspaceDir)[0]!.status).toBe('pending');
+    expect(complete).not.toBeNull();
+    complete!();
+    // ok-record is async fire-and-forget — give it a beat
+    await new Promise((r) => setTimeout(r, 400));
+    const after = listTriggers(workspaceDir)[0]!;
+    expect(after.status).toBe('ok');
+    const last = after.runLog![after.runLog!.length - 1]!;
+    expect(last.status).toBe('ok');
+    expect(last.sessionId).toBe('sess-ok');
+    // and the NEXT tick within the interval does not re-fire (cadence restored)
+    const again = await tickTriggerScheduler([ws], { runAgent: async () => 'sess-2' }, new Date('2026-07-07T12:30:00Z'));
+    expect(again).toBe(0);
+  });
+
+  it('saveTrigger rejects an unfireable cron schedule', async () => {
+    await expect(saveTrigger(projectDir, workspaceDir, {
+      name: 'bad clock', kind: 'cron', when: 'Mon 09:00',
+      writes: [], runs: { type: 'skill', ref: 'agent-prompt', prompt: 'x' },
+    })).rejects.toThrow('never fire');
+    // event/manual kinds carry free-form condition labels — no schedule check
+    await saveTrigger(projectDir, workspaceDir, {
+      name: 'on push', kind: 'event', when: 'on push',
+      writes: [], runs: { type: 'skill', ref: 'agent-prompt', prompt: 'x' },
+    });
+  });
+
   it('records fail when the agent session cannot start', async () => {
     await saveTrigger(projectDir, workspaceDir, {
       name: 'broken', kind: 'cron', when: 'every 5m', writes: [], runs: { type: 'skill', ref: 'agent-prompt', prompt: 'x' },
