@@ -429,6 +429,45 @@ export async function connectMachineRelay(
               }
               break;
 
+            case 'share_read': {
+              // Public share link fetch (docs/ARTIFACT-PROTOCOL.md Q3): verify
+              // with OUR key, enforce the ledger, stream resolved bytes back
+              // in ≤700KB frames (relay protocol caps messages at 1MB).
+              const requestId = String((msg as { requestId?: unknown }).requestId ?? '');
+              const token = String((msg as { token?: unknown }).token ?? '');
+              void (async () => {
+                try {
+                  const { consumeShareRead } = await import('../lib/tmux-lite/artifact-share.js');
+                  const result = await consumeShareRead(token);
+                  const CHUNK = 512 * 1024;
+                  let seq = 0;
+                  for (let off = 0; off < result.bytes.length || seq === 0; off += CHUNK) {
+                    const slice = result.bytes.subarray(off, Math.min(off + CHUNK, result.bytes.length));
+                    const done = off + CHUNK >= result.bytes.length;
+                    signAndSend(ws, {
+                      type: 'share_read_chunk',
+                      requestId,
+                      seq,
+                      dataBase64: slice.length > 0 ? Buffer.from(slice).toString('base64') : undefined,
+                      ...(seq === 0 ? { contentType: result.contentType, disposition: result.disposition, fileName: result.fileName } : {}),
+                      ...(done ? { done: true } : {}),
+                    });
+                    seq += 1;
+                    if (done) break;
+                  }
+                } catch (error) {
+                  signAndSend(ws, {
+                    type: 'share_read_chunk',
+                    requestId,
+                    seq: 0,
+                    error: error instanceof Error ? error.message.slice(0, 200) : 'share read failed',
+                    done: true,
+                  });
+                }
+              })();
+              break;
+            }
+
             case 'pong':
               break;
 

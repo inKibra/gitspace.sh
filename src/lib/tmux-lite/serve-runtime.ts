@@ -213,3 +213,10 @@ export async function deactivateServeRuntime(): Promise<ServeRuntimeStatus> {
 export function getServeRuntimeStatus(): ServeRuntimeStatus {
   return active ? { ...active.status } : { active: false };
 }
+
+/** The activated machine identity/config — share-link minting signs with the
+ *  REGISTERED machine key so the relay can verify against its registry.
+ *  Null when serve is inactive (no public surface = no links, by design). */
+export function getActiveServeContext(): { identity: Identity; machineId: string; relayUrl: string } | null {
+  return active ? { identity: active.config.identity, machineId: active.config.machineId, relayUrl: active.config.relayUrl } : null;
+}

@@ -444,6 +444,9 @@ export type Command =
   | { type: 'serve-activate'; config: ServeActivatePayload }
   | { type: 'serve-deactivate' }
   | { type: 'serve-status' }
+  | { type: 'artifact-share-mint'; uri: string; ttlMs?: number; maxUses?: number }
+  | { type: 'artifact-share-revoke'; tokenId: string }
+  | { type: 'artifact-share-list' }
   | { type: 'trigger-save'; target: AgentWorkspaceTargetPayload; trigger: import('../../core/triggers.js').TriggerRecord }
   | { type: 'trigger-run-now'; target: AgentWorkspaceTargetPayload; triggerId: string }
   | { type: 'repo-tree'; target: AgentWorkspaceTargetPayload }
@@ -549,6 +552,9 @@ export type Response =
   | { type: 'project-artifacts-sync'; pushed: boolean; fastForwarded: boolean }
   | { type: 'project-artifacts-provision'; slug: string; url: string; created: boolean; blobsUploaded: number; collaboratorsCopied: number }
   | { type: 'serve-status'; status: { active: boolean; relayUrl?: string; relayStatus?: string; clients?: number; machineId?: string; startedAt?: number } }
+  | { type: 'artifact-share-mint'; url: string; tokenId: string; expiresAt: number }
+  | { type: 'artifact-share-revoke'; revoked: boolean }
+  | { type: 'artifact-share-list'; shares: import('./artifact-share.js').ShareLedgerEntry[] }
   | { type: 'trigger-save'; trigger: import('../../core/triggers.js').TriggerRecord }
   | { type: 'trigger-run-now'; sessionId: string }
   | { type: 'repo-tree'; entries: import('../../core/git.js').RepoFileEntry[] }

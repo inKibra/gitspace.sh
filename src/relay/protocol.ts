@@ -473,7 +473,33 @@ export type RelayToClientMessage =
   | ErrorMessage;
 
 /** All protocol messages */
+
+/** Relay→machine: fetch the bytes behind a share link (artifact-share.ts).
+ *  Deliberately NOT E2E — share links exist to serve unauthenticated
+ *  browsers; the relay is trusted with exactly the shared bytes, per link. */
+export interface ShareReadMessage {
+  type: 'share_read';
+  requestId: string;
+  token: string;
+}
+
+/** Machine→relay: one chunk of a share read (final chunk sets done; errors
+ *  set error and done). First chunk carries the response metadata. */
+export interface ShareReadChunkMessage {
+  type: 'share_read_chunk';
+  requestId: string;
+  seq: number;
+  dataBase64?: string;
+  done?: boolean;
+  error?: string;
+  contentType?: string;
+  disposition?: string;
+  fileName?: string;
+}
+
 export type ProtocolMessage =
+  | ShareReadMessage
+  | ShareReadChunkMessage
   | MachineToRelayMessage
   | ClientToRelayMessage
   | RelayToMachineMessage
@@ -645,6 +671,34 @@ function validateMessageFields(msg: Record<string, unknown>): ProtocolMessage | 
         registerPermit: msg.registerPermit,
         enrollmentToken: msg.enrollmentToken,
         deviceCertificate: msg.deviceCertificate,
+      };
+    }
+
+    case 'share_read': {
+      if (!isValidIdentifier(msg.requestId)) return null;
+      if (typeof msg.token !== 'string' || msg.token.length === 0 || msg.token.length > 8192) return null;
+      return { type: 'share_read', requestId: msg.requestId, token: msg.token };
+    }
+
+    case 'share_read_chunk': {
+      if (!isValidIdentifier(msg.requestId)) return null;
+      if (typeof msg.seq !== 'number' || !Number.isFinite(msg.seq) || msg.seq < 0) return null;
+      if (msg.dataBase64 !== undefined && !isValidBase64(msg.dataBase64)) return null;
+      if (msg.done !== undefined && typeof msg.done !== 'boolean') return null;
+      if (msg.error !== undefined && (typeof msg.error !== 'string' || msg.error.length > 512)) return null;
+      if (msg.contentType !== undefined && (typeof msg.contentType !== 'string' || msg.contentType.length > 128)) return null;
+      if (msg.disposition !== undefined && msg.disposition !== 'inline' && msg.disposition !== 'attachment') return null;
+      if (msg.fileName !== undefined && (typeof msg.fileName !== 'string' || msg.fileName.length > 256)) return null;
+      return {
+        type: 'share_read_chunk',
+        requestId: msg.requestId,
+        seq: msg.seq,
+        dataBase64: msg.dataBase64,
+        done: msg.done,
+        error: msg.error,
+        contentType: msg.contentType,
+        disposition: msg.disposition as 'inline' | 'attachment' | undefined,
+        fileName: msg.fileName,
       };
     }
 

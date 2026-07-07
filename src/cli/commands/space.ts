@@ -102,9 +102,63 @@ export function registerSpaceCommands(parent: Command): void {
   configureSpaceHelpRecursively(cmd);
 }
 
-/** Artifact-protocol verbs (docs/ARTIFACT-PROTOCOL.md). share lands Phase 5. */
+/** '7d' / '24h' / '30m' → ms. */
+function parseTtl(ttl: string): number {
+  const m = ttl.trim().match(/^(\d+)\s*(m|h|d)$/);
+  if (!m) throw new Error(`Invalid --ttl '${ttl}' — use e.g. 30m, 24h, 7d`);
+  const n = Number(m[1]);
+  return n * (m[2] === 'm' ? 60_000 : m[2] === 'h' ? 3_600_000 : 86_400_000);
+}
+
+/** Artifact-protocol verbs (docs/ARTIFACT-PROTOCOL.md). */
 function registerSpaceArtifactsCommands(space: Command): void {
   const artifacts = space.command('artifacts').description('Workspace artifacts (mount at .gitspace/artifacts)');
+
+  artifacts
+    .command('share <relPath>')
+    .description('Mint a signed public link for one artifact, served through your relay (requires serve active)')
+    .option('--ttl <duration>', 'Link lifetime (30m / 24h / 7d)', '7d')
+    .option('--max-uses <n>', 'Optional use cap')
+    .action(withErrorHandler(async (relPath: string, options: { ttl: string; maxUses?: string }) => {
+      const ctx = requireSessionContext();
+      const { send } = await import('../../lib/tmux-lite/cli.js');
+      const { formatArtifactUri } = await import('../../core/artifact-cap.js');
+      const r = await send({
+        type: 'artifact-share-mint',
+        uri: formatArtifactUri(ctx.project, ctx.workspace, relPath),
+        ttlMs: parseTtl(options.ttl),
+        maxUses: options.maxUses ? Number(options.maxUses) : undefined,
+      });
+      if (r.type === 'error') { logger.error(r.message); process.exit(1); }
+      if (r.type !== 'artifact-share-mint') { logger.error('Unexpected response'); process.exit(1); }
+      logger.success('Share link (anyone with the URL can read this one file):');
+      logger.log(r.url);
+      logger.info(`Expires ${new Date(r.expiresAt).toLocaleString()} · revoke: gssh space artifacts share-revoke ${r.tokenId}`);
+    }));
+
+  artifacts
+    .command('share-list')
+    .description('List minted share links (this machine)')
+    .action(withErrorHandler(async () => {
+      const { send } = await import('../../lib/tmux-lite/cli.js');
+      const r = await send({ type: 'artifact-share-list' });
+      if (r.type !== 'artifact-share-list') { logger.error(r.type === 'error' ? r.message : 'Unexpected response'); process.exit(1); }
+      if (r.shares.length === 0) { logger.info('No share links minted.'); return; }
+      for (const sh of r.shares) {
+        const state = sh.revokedAt ? 'revoked' : Date.now() > sh.expiresAt ? 'expired' : 'active';
+        logger.log(`${sh.tokenId}  ${state.padEnd(7)}  uses ${sh.useCount}${sh.maxUses ? `/${sh.maxUses}` : ''}  ${sh.uri}`);
+      }
+    }));
+
+  artifacts
+    .command('share-revoke <tokenId>')
+    .description('Revoke a share link (takes effect on the next request)')
+    .action(withErrorHandler(async (tokenId: string) => {
+      const { send } = await import('../../lib/tmux-lite/cli.js');
+      const r = await send({ type: 'artifact-share-revoke', tokenId });
+      if (r.type !== 'artifact-share-revoke') { logger.error(r.type === 'error' ? r.message : 'Unexpected response'); process.exit(1); }
+      logger.success(r.revoked ? 'Revoked.' : 'Not found or already revoked.');
+    }));
 
   artifacts
     .command('commit <paths...>')

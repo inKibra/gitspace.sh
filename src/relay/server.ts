@@ -561,6 +561,19 @@ function setupClientConnection(
 /**
  * Create the relay server
  */
+
+// In-flight share reads (GET /artifact-share/<token> → machine WS round
+// trip). Keyed by requestId; bound to the machineId that must answer.
+// Module scope: the HTTP handler and the machine-message switch live in
+// different closures. One relay instance per process.
+const pendingShareReads = new Map<string, {
+  machineId: string;
+  chunks: Buffer[];
+  meta: { contentType?: string; disposition?: string; fileName?: string };
+  resolve: (r: { body: Buffer; contentType: string; disposition: string; fileName: string } | null) => void;
+  timer: ReturnType<typeof setTimeout>;
+}>();
+
 export function createRelayServer(config: RelayServerConfig): Server<WebSocketData> {
   const { port, bind = "0.0.0.0", hostname, identity } = config;
   const disableRateLimit = config.disableRateLimit === true;
@@ -747,6 +760,56 @@ export function createRelayServer(config: RelayServerConfig): Server<WebSocketDa
           return new Response("Not found", { status: 404 });
         }
       }
+      // Public share links (docs/ARTIFACT-PROTOCOL.md Q3): verify the token
+      // against the REGISTERED machine key, then stream the bytes from that
+      // machine over its WS — the relay never reads disk. All failures are
+      // 404 (no oracle).
+      if (url.pathname.startsWith('/artifact-share/')) {
+        const notFound = () => new Response('Not found', { status: 404, headers: { 'Cache-Control': 'no-store' } });
+        try {
+          const token = decodeURIComponent(url.pathname.slice('/artifact-share/'.length));
+          const { parseArtifactCapUnverified, verifyArtifactCap } = await import('../core/artifact-cap.js');
+          const unverified = parseArtifactCapUnverified(token);
+          if (!unverified || unverified.sub.kind !== 'link') return notFound();
+          const machine = getMachine(unverified.machineId);
+          if (!machine) return notFound();
+          try {
+            verifyArtifactCap(token, { publicKey: Uint8Array.from(Buffer.from(machine.signingKey, 'base64')) });
+          } catch {
+            return notFound();
+          }
+          if (!machine.ws) return new Response('Machine offline', { status: 503, headers: { 'Cache-Control': 'no-store' } });
+
+          const requestId = generateConnectionId();
+          const result = await new Promise<{ body: Buffer; contentType: string; disposition: string; fileName: string } | null>((resolve) => {
+            const timer = setTimeout(() => {
+              pendingShareReads.delete(requestId);
+              resolve(null);
+            }, 30_000);
+            pendingShareReads.set(requestId, {
+              machineId: unverified.machineId,
+              chunks: [],
+              meta: {},
+              resolve,
+              timer,
+            });
+            machine.ws!.send(serializeMessage({ type: 'share_read', requestId, token }));
+          });
+          if (!result) return notFound();
+          return new Response(new Uint8Array(result.body), {
+            status: 200,
+            headers: {
+              'Content-Type': result.contentType,
+              'Content-Disposition': `${result.disposition}; filename="${result.fileName.replace(/[^\w.\-]/g, '_')}"`,
+              'X-Content-Type-Options': 'nosniff',
+              'Cache-Control': 'no-store',
+            },
+          });
+        } catch {
+          return notFound();
+        }
+      }
+
       // WebSocket upgrade
       // - Machines and clients connect freely
       // - Machine authentication happens via challenge-response during registration
@@ -940,6 +1003,35 @@ async function handleProtocolMessage(
 
   switch (msg.type) {
     // ========== Machine Messages ==========
+
+    case 'share_read_chunk': {
+      if (role !== 'machine') return;
+      const chunkMsg = msg as import('./protocol.js').ShareReadChunkMessage;
+      const pending = pendingShareReads.get(chunkMsg.requestId);
+      // Bind to the machine that was asked — no cross-machine spoofing.
+      if (!pending || pending.machineId !== ws.data.machineId) return;
+      if (chunkMsg.error) {
+        clearTimeout(pending.timer);
+        pendingShareReads.delete(chunkMsg.requestId);
+        pending.resolve(null);
+        return;
+      }
+      if (chunkMsg.contentType) pending.meta.contentType = chunkMsg.contentType;
+      if (chunkMsg.disposition) pending.meta.disposition = chunkMsg.disposition;
+      if (chunkMsg.fileName) pending.meta.fileName = chunkMsg.fileName;
+      if (chunkMsg.dataBase64) pending.chunks.push(Buffer.from(chunkMsg.dataBase64, 'base64'));
+      if (chunkMsg.done) {
+        clearTimeout(pending.timer);
+        pendingShareReads.delete(chunkMsg.requestId);
+        pending.resolve({
+          body: Buffer.concat(pending.chunks),
+          contentType: pending.meta.contentType ?? 'application/octet-stream',
+          disposition: pending.meta.disposition ?? 'attachment',
+          fileName: pending.meta.fileName ?? 'artifact',
+        });
+      }
+      return;
+    }
 
     case 'unlock_request': {
       if (role !== 'machine') {

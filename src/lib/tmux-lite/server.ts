@@ -4024,6 +4024,37 @@ routerListener = Bun.listen({
             }
             break;
 
+          case 'artifact-share-mint':
+            try {
+              const { mintShareLink } = await import('./artifact-share.js');
+              const { readHostConfig } = await import('../../commands/host.js');
+              const hostConfig = readHostConfig();
+              const hostedDomain = hostConfig?.subdomain ? `${hostConfig.subdomain}.gitspace.sh` : null;
+              const r = mintShareLink({ uri: cmd.uri, ttlMs: cmd.ttlMs, maxUses: cmd.maxUses, hostedDomain });
+              res = { type: 'artifact-share-mint', url: r.url, tokenId: r.tokenId, expiresAt: r.expiresAt };
+            } catch (e) {
+              res = { type: 'error', message: `Failed to mint share link: ${e instanceof Error ? e.message : String(e)}` };
+            }
+            break;
+
+          case 'artifact-share-revoke':
+            try {
+              const { revokeShareLink } = await import('./artifact-share.js');
+              res = { type: 'artifact-share-revoke', revoked: revokeShareLink(cmd.tokenId) };
+            } catch (e) {
+              res = { type: 'error', message: `Failed to revoke share link: ${e instanceof Error ? e.message : String(e)}` };
+            }
+            break;
+
+          case 'artifact-share-list':
+            try {
+              const { listShareLinks } = await import('./artifact-share.js');
+              res = { type: 'artifact-share-list', shares: listShareLinks() };
+            } catch (e) {
+              res = { type: 'error', message: `Failed to list share links: ${e instanceof Error ? e.message : String(e)}` };
+            }
+            break;
+
           case 'trigger-save':
             try {
               const { saveTrigger } = await import('../../core/triggers.js');
