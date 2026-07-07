@@ -13,6 +13,7 @@ import { appendFileSync, existsSync, writeFileSync, readdirSync } from 'fs';
 import { join } from 'path';
 import os from 'os';
 import { spawn } from 'bun';
+import { getSessionDir } from '../lib/tmux-lite/protocol.js';
 import { logger } from '../utils/logger.js';
 import { promptConfirm, selectOne } from '../utils/prompts.js';
 import {
@@ -726,603 +727,247 @@ export async function serveStart(options: {
   takeover?: boolean;
   yes?: boolean;
 } = {}): Promise<void> {
+  // Daemon-unification P2 (docs/DAEMON-UNIFICATION.md): serve start is a thin
+  // ACTIVATOR now — unlock the identity, resolve relay trust interactively,
+  // then hand the pinned config to the tmux-lite machine daemon over its
+  // same-user unix socket. The daemon hosts the relay client + E2E session
+  // manager in-process (serve-runtime.ts); there is no second daemon.
   const devicePasswordContext = createDeviceIdentityPasswordContext({ passwordStdin: options.passwordStdin });
+  const skipOwnerBindingCheck = process.env.GITSPACE_SKIP_OWNER_BINDING_CHECK === '1';
+  const usingUnlockMode = Boolean(options.unlockToken);
+  const enrollmentToken = options.enrollmentToken;
 
-  // Check if already running
-  if (isServeRunning()) {
-    const pid = getServePid();
-    logger.info(`serve daemon already running${pid ? ` (pid ${pid})` : ''}`);
-    return;
+  const { ensureServer, isServerRunning, send } = await import('../lib/tmux-lite/cli.js');
+
+  if (await isServerRunning()) {
+    const st = await send({ type: 'serve-status' });
+    if (st.type === 'serve-status' && st.status.active) {
+      logger.info(`serve already active (relay ${st.status.relayUrl ?? 'unknown'}) — run 'gssh machine serve stop' to deactivate.`);
+      return;
+    }
   }
 
-  const usingUnlockMode = Boolean(options.unlockToken);
-  const skipOwnerBindingCheck = process.env.GITSPACE_SKIP_OWNER_BINDING_CHECK === '1';
+  const hostConfig = readHostConfig();
+  const relayUrl = await resolveRelayUrlForServe(options.relay, hostConfig);
 
-  let password: string | null = null;
+  // Identity: unlock-token flow (cloud workspaces) or local keypair unlock.
   let identity: Identity | null = null;
-  let signingPrivateKey: Uint8Array | null = null;
-  let publicIdentity: PublicIdentity | null = null;
   let registerPermit: string | undefined;
-  let enrollmentToken = options.enrollmentToken;
-
-  // If not foreground mode, fork to background
-  if (!options.foreground) {
-    if (usingUnlockMode) {
-      if (!options.relay) {
-        throw new SpacesError('Unlock mode requires --relay', 'USER_ERROR', 1);
-      }
-      if (!options.workspaceId) {
-        throw new SpacesError('Unlock mode requires --workspace-id', 'USER_ERROR', 1);
-      }
-      if (!options.enrollmentToken) {
-        throw new SpacesError('Unlock mode requires --enrollment-token', 'USER_ERROR', 1);
-      }
-    } else {
-      password = await ensureDeviceIdentityPassword({ yes: options.yes }, devicePasswordContext);
-      if (!password) {
-        logger.info('Cancelled');
-        return;
-      }
-
-      // Validate password before daemonizing
-      const loadedIdentity = await loadKeypair(password);
-      if (!loadedIdentity) {
-        throw new SpacesError(
-          'Failed to unlock identity. Check your password.',
-          'USER_ERROR',
-          1
-        );
-      }
-
+  if (usingUnlockMode) {
+    if (!options.workspaceId) throw new SpacesError('Unlock mode requires --workspace-id', 'USER_ERROR', 1);
+    if (!enrollmentToken) throw new SpacesError('Unlock mode requires --enrollment-token', 'USER_ERROR', 1);
+    const unlocked = await fetchIdentityViaUnlockToken(relayUrl, options.relayPubkey, options.workspaceId, options.unlockToken ?? '');
+    identity = unlocked.identity;
+    registerPermit = unlocked.registerPermit;
+  } else {
+    const password = await ensureDeviceIdentityPassword({ yes: options.yes }, devicePasswordContext);
+    if (!password) {
+      logger.info('Cancelled');
+      return;
     }
-
-    if (!options.relay) {
-      const daemonHostConfig = readHostConfig();
-      options.relay = await resolveRelayUrlForServe(undefined, daemonHostConfig);
+    identity = await loadKeypair(password);
+    if (!identity) {
+      throw new SpacesError('Failed to unlock identity. Check your password.', 'USER_ERROR', 1);
     }
+  }
 
-    if (!usingUnlockMode) {
-      const userRootAuth = await resolveUserRootAuthorizationConfig({
-        yes: options.yes,
-        devicePasswordContext,
-      });
-      const relayIdentity = await fetchRelayIdentity(options.relay);
-      const trustResult = await verifyRelayTrust(
-        options.relay,
-        relayIdentity.publicKey,
-        relayIdentity.fingerprint,
-        relayIdentity.label,
-        options.relayPubkey,
-        Boolean(options.yes),
-        Boolean(options.takeover),
-      );
-      if (!trustResult.trusted) {
-        throw new SpacesError(trustResult.reason, 'USER_ERROR', 1);
-      }
+  const publicIdentity = getPublicIdentityFromPrivate(identity);
+  const machineIdentity = readMachineIdentity();
+  const machineId = machineIdentity?.machineId ?? identity.id;
 
-      options.relayPubkey ??= relayIdentity.publicKey;
-
-      await ensureServeOwnerBindingForStartup(userRootAuth.ownerUserRootId, {
+  // Relay trust happens HERE, interactively; the daemon only ever compares
+  // against the pubkey we pin into the activation config.
+  const relayIdentity = await fetchRelayIdentity(relayUrl);
+  let relayPubkey = options.relayPubkey ?? relayIdentity.publicKey;
+  let ownerUserRootId: string | undefined;
+  let deviceCertificate: string | undefined;
+  if (usingUnlockMode) {
+    ownerUserRootId = resolveOwnerUserRootIdFromEnrollmentToken(enrollmentToken!);
+  } else {
+    const trustResult = await verifyRelayTrust(
+      relayUrl,
+      relayIdentity.publicKey,
+      relayIdentity.fingerprint,
+      relayIdentity.label,
+      options.relayPubkey,
+      Boolean(options.yes),
+      Boolean(options.takeover),
+    );
+    if (!trustResult.trusted) {
+      throw new SpacesError(trustResult.reason, 'USER_ERROR', 1);
+    }
+    relayPubkey = relayIdentity.publicKey;
+    const userRootAuth = await resolveUserRootAuthorizationConfig({ yes: options.yes, devicePasswordContext });
+    ownerUserRootId = userRootAuth.ownerUserRootId;
+    if (!skipOwnerBindingCheck) {
+      await ensureServeOwnerBindingForStartup(ownerUserRootId, {
         takeover: options.takeover,
         yes: options.yes,
         currentRelay: relayIdentity,
       });
     }
-
-    logger.log('Starting serve daemon...');
-
-    // Build args for background process
-    // Detect if we're running as a compiled binary vs dev mode
-    const isCompiled = !process.execPath.endsWith('bun');
-
-    const serveArgs = ['machine', 'serve', 'start', '--foreground'];
-    if (options.relay) serveArgs.push('--relay', options.relay);
-    if (options.relayPubkey) serveArgs.push('--relay-pubkey', options.relayPubkey);
-    if (options.bootstrapToken) serveArgs.push('--bootstrap-token', options.bootstrapToken);
-    if (options.enrollmentToken) serveArgs.push('--enrollment-token', options.enrollmentToken);
-    if (options.unlockToken) serveArgs.push('--unlock-token', options.unlockToken);
-    if (options.workspaceId) serveArgs.push('--workspace-id', options.workspaceId);
-    if (options.ignoreKeychainAndSkipSecrets) {
-      serveArgs.push('--ignore-keychain-and-skip-secrets');
-    }
-    if (options.yes) {
-      serveArgs.push('--yes');
-    }
-    if (options.takeover) {
-      serveArgs.push('--takeover');
-    }
-    if (!usingUnlockMode) {
-      serveArgs.push('--password-stdin');
-    }
-
-    // Build command: compiled binary runs directly, dev mode uses bun
-    const cmd = isCompiled
-      ? [process.execPath, ...serveArgs]
-      : ['bun', process.argv[1], ...serveArgs];
-
-    // Write output to log file for debugging
-    const logFile = getServeLogFile();
-    ensureServeDaemonDir();
-
-    // Truncate log file at start
-    await Bun.write(logFile, `[${new Date().toISOString()}] Starting serve daemon...\n`);
-
-    const child = spawn({
-      cmd,
-      stdin: 'pipe',
-      stdout: Bun.file(logFile),
-      stderr: Bun.file(logFile),
-      env: {
-        ...process.env,
-        GITSPACE_SKIP_OWNER_BINDING_CHECK: '1',
-      },
-    });
-
-    // Send password via stdin (non-unlock mode)
-    if (!usingUnlockMode) {
-      if (!password) {
-        throw new SpacesError('Failed to pass identity password to serve daemon startup.', 'SYSTEM_ERROR', 2);
-      }
-
-      child.stdin.write(password);
-      child.stdin.end();
-    } else {
-      child.stdin.end();
-    }
-
-    // Wait a bit for process to start
-    await Bun.sleep(1000);
-
-    // Check if it started
-    if (isServeRunning()) {
-      const pid = getServePid();
-      logger.success(`serve daemon started${pid ? ` (pid ${pid})` : ''}`);
-      // Force exit since inquirer prompts may keep event loop alive
-      process.exit(0);
-    } else {
-      // Read log file for error message
-      const logContent = await Bun.file(logFile).text();
-      logger.error('Daemon log:');
-      logger.log(logContent);
-      throw new SpacesError('Failed to start serve daemon. Check log above for details.', 'SYSTEM_ERROR', 2);
-    }
-  }
-
-  // Foreground mode identity resolution
-  if (usingUnlockMode) {
-    if (!options.relay) {
-      cleanupServeFiles();
-      throw new SpacesError('Unlock mode requires --relay', 'USER_ERROR', 1);
-    }
-    if (!options.workspaceId) {
-      cleanupServeFiles();
-      throw new SpacesError('Unlock mode requires --workspace-id', 'USER_ERROR', 1);
-    }
-    if (!options.enrollmentToken) {
-      cleanupServeFiles();
-      throw new SpacesError('Unlock mode requires --enrollment-token', 'USER_ERROR', 1);
-    }
-
-    const unlocked = await fetchIdentityViaUnlockToken(
-      options.relay,
-      options.relayPubkey,
-      options.workspaceId,
-      options.unlockToken ?? ''
-    );
-    identity = unlocked.identity;
-    registerPermit = unlocked.registerPermit;
-  } else {
-    password = await ensureDeviceIdentityPassword({ yes: options.yes }, devicePasswordContext);
-    if (!password) {
-      logger.info('Cancelled');
-      cleanupServeFiles();
-      return;
-    }
-
-    identity = await loadKeypair(password);
-    if (!identity) {
-      cleanupServeFiles();
-      throw new SpacesError(
-        'Failed to unlock identity. Check your password.',
-        'USER_ERROR',
-        1
-      );
-    }
-  }
-
-  if (!identity) {
-    cleanupServeFiles();
-    throw new SpacesError('Failed to initialize identity for serve daemon', 'SYSTEM_ERROR', 2);
-  }
-
-  signingPrivateKey = identity.signing.secretKey.slice(0, 32);
-  publicIdentity = getPublicIdentityFromPrivate(identity);
-
-  // Foreground/daemon mode - write PID and start status server
-  writeServePid(process.pid);
-  startStatusServer();
-
-  // Guard: clean up the PID file if the process crashes unexpectedly after it
-  // has been written.  Without these handlers an orphaned PID file would cause
-  // the parent (and subsequent `gssh machine serve start` invocations) to
-  // believe the daemon is still running.
-  const cleanupOnCrash = (reason: unknown) => {
-    logger.error(`[serve] fatal: ${reason instanceof Error ? reason.message : String(reason)}`);
-    stopStatusServer();
-    cleanupServeFiles();
-    process.exit(1);
-  };
-  process.once('uncaughtException', cleanupOnCrash);
-  process.once('unhandledRejection', cleanupOnCrash);
-
-  try {
-    await initializeSecretRuntime({
-      ignoreKeychainAndSkipSecrets: options.ignoreKeychainAndSkipSecrets,
-    });
-  } catch (error) {
-    stopStatusServer();
-    cleanupServeFiles();
-    throw error;
-  }
-
-  let ownerUserRootId: string;
-  let deviceCertificate: string | undefined;
-  if (usingUnlockMode) {
+    // Device certificate: proves this machine belongs to the user root so the
+    // relay can auto-authorize without enrollment tokens. Best-effort.
     try {
-      ownerUserRootId = resolveOwnerUserRootIdFromEnrollmentToken(enrollmentToken);
-    } catch (error) {
-      stopStatusServer();
-      cleanupServeFiles();
-      throw error;
-    }
-  } else {
-    try {
-      const userRootAuth = await resolveUserRootAuthorizationConfig({
-        yes: options.yes,
-        devicePasswordContext,
-      });
-      ownerUserRootId = userRootAuth.ownerUserRootId;
-      await ensureServeOwnerBindingForStartup(ownerUserRootId, {
-        takeover: options.takeover,
-        yes: options.yes,
-      });
-    } catch (error) {
-      stopStatusServer();
-      cleanupServeFiles();
-      throw error;
-    }
-
-    // Create a device certificate: proves this machine belongs to the user root.
-    // The relay can verify this cert to auto-authorize the machine without
-    // needing enrollment tokens or preAuthorizedMachines.
-    try {
-      deviceCertificate = await createLocalDeviceCertificate(identity!);
+      deviceCertificate = await createLocalDeviceCertificate(identity);
       logger.info(`[serve] Device certificate created for owner ${ownerUserRootId}`);
     } catch (error) {
-      // Device cert is not strictly required — the machine may still be
-      // authorized via vault_machines, enrollmentToken, or preAuthorizedMachines.
-      // Log a warning but don't fail startup.
-      logger.warning(
-        `[serve] Could not create device certificate: ${error instanceof Error ? error.message : String(error)}`
-      );
+      logger.warning(`[serve] Could not create device certificate: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
-  if (!signingPrivateKey || !publicIdentity) {
-    stopStatusServer();
-    cleanupServeFiles();
-    throw new SpacesError('Failed to initialize identity for serve daemon', 'SYSTEM_ERROR', 2);
-  }
-
-  // Get config
-  const machineIdentity = readMachineIdentity();
-  const machineId = machineIdentity?.machineId ?? identity.id;
-
-  // Check for gitspace.sh hosting (used for hosted relay selection only)
-  const hostConfig = readHostConfig();
-  let sessionManager: ClientSessionManager | null = null;
-
-  let effectiveRelayUrl: string;
-  try {
-    effectiveRelayUrl = await resolveRelayUrlForServe(options.relay, hostConfig);
-  } catch (error) {
-    await cleanupServeStartupFailure(sessionManager);
-    throw error;
-  }
-
-  if (!usingUnlockMode) {
-    try {
-      const relayIdentity = await fetchRelayIdentity(effectiveRelayUrl);
-      const trustResult = await verifyRelayTrust(
-        effectiveRelayUrl,
-        relayIdentity.publicKey,
-        relayIdentity.fingerprint,
-        relayIdentity.label,
-        options.relayPubkey,
-        Boolean(options.yes),
-        Boolean(options.takeover),
-      );
-      if (!trustResult.trusted) {
-        throw new SpacesError(trustResult.reason, 'USER_ERROR', 1);
-      }
-
-      options.relayPubkey ??= relayIdentity.publicKey;
-      if (!skipOwnerBindingCheck) {
-        await ensureServeOwnerBindingForStartup(ownerUserRootId, {
-          takeover: options.takeover,
-          yes: options.yes,
-          currentRelay: relayIdentity,
-        });
-      }
-    } catch (error) {
-      await cleanupServeStartupFailure(sessionManager);
-      throw error;
-    }
-  }
-
-  // Initialize daemon state
-  setDaemonState({
-    version: PACKAGE_VERSION,
-    startTime: Date.now(),
-    relay: {
-      url: effectiveRelayUrl,
-      status: 'connecting',
-    },
-    clients: 0,
-  });
-
-  // Create session manager
-  sessionManager = new ClientSessionManager({
-    relay: effectiveRelayUrl,
-    identity,
-    ownerUserRootId,
-  });
-
-  // Initialize session manager (starts tmux-lite server)
-  try {
-    await sessionManager.initialize();
-  } catch (error) {
-    await cleanupServeStartupFailure(sessionManager);
-    throw error;
-  }
-
-  const applyAgentDelta = (delta: import('../lib/tmux-lite/agent-event-manager.js').AgentStateUpdateDelta): void => {
-    currentAgentSnapshot = applyAgentDeltaToAgentState(currentAgentSnapshot, delta);
-  };
-
-  let currentAgentSnapshot: Record<string, import('../lib/tmux-lite/agent-event-manager.js').WorkspaceAgentState> = {};
-  let stopAgentWatch: (() => void) | null = null;
-  try {
-    currentAgentSnapshot = Object.fromEntries((await getAgentState()).map((workspace) => [workspace.workspaceId, workspace]));
-    stopAgentWatch = await watchAgentState({
-      onSnapshot: (workspaces) => {
-        currentAgentSnapshot = Object.fromEntries(workspaces.map((workspace) => [workspace.workspaceId, workspace]));
-      },
-      onUpdate: (delta) => {
-        applyAgentDelta(delta);
-        void sessionManager.broadcastAgentStateUpdate(delta);
-      },
-      onDialogRequest: (request) => {
-        void sessionManager.broadcastRawMessage({ type: 'agent_dialog_request', request });
-      },
-      onUIEvent: (event) => {
-        void sessionManager.broadcastRawMessage({ type: 'agent_ui_event', event });
-      },
-      onError: (error) => {
-        logger.error(`[serve] tmux-lite agent watch failed: ${error.message}`);
-      },
-    });
-  } catch (error) {
-    await cleanupServeStartupFailure(sessionManager);
-    throw error;
-  }
-
-  // Event handler - update daemon state
-  const eventHandler: ServeEventHandler = (event) => {
-    switch (event.type) {
-      case 'relay_connected':
-        updateDaemonState({ relay: { url: effectiveRelayUrl, status: 'connected' } });
-        break;
-      case 'relay_disconnected':
-        updateDaemonState({ relay: { url: effectiveRelayUrl, status: 'disconnected' } });
-        break;
-      case 'relay_reconnecting':
-        updateDaemonState({ relay: { url: effectiveRelayUrl, status: 'reconnecting' } });
-        break;
-      case 'client_authenticated': {
-        updateDaemonState({ clients: sessionManager.establishedSessionCount });
-        if (Object.keys(currentAgentSnapshot).length > 0) {
-          void sessionManager.sendAgentStateSnapshot(event.connectionId, currentAgentSnapshot);
-        }
-        break;
-      }
-      case 'client_disconnected':
-        updateDaemonState({ clients: sessionManager.establishedSessionCount });
-        break;
-    }
-  };
-
-  sessionManager.onEvent(eventHandler);
-
-  // Connect to relay
-  try {
-    const trustedRelayIdentity = await connectToRelay(
-      effectiveRelayUrl,
+  // Ensure the machine daemon exists, then activate the serve runtime in it.
+  await ensureServer();
+  const b64 = (v: Uint8Array): string => Buffer.from(v).toString('base64');
+  const res = await send({
+    type: 'serve-activate',
+    config: {
+      relayUrl,
+      relayPubkey,
       machineId,
+      ownerUserRootId,
+      identity: {
+        id: identity.id,
+        label: identity.label,
+        createdAt: identity.createdAt,
+        signingPublicKey: b64(identity.signing.publicKey),
+        signingSecretKey: b64(identity.signing.secretKey),
+        keyExchangePublicKey: b64(identity.keyExchange.publicKey),
+        keyExchangeSecretKey: b64(identity.keyExchange.privateKey),
+      },
       publicIdentity,
-      sessionManager,
-      eventHandler,
-      signingPrivateKey,
-      options.relayPubkey,
-      options.bootstrapToken,
+      bootstrapToken: options.bootstrapToken,
       registerPermit,
       enrollmentToken,
       deviceCertificate,
-      options.yes,
-      options.takeover,
-    );
-
-    if (trustedRelayIdentity) {
-      const relayIdentityId = computeIdentityId(trustedRelayIdentity.relayPublicKey);
-      bindControlRelayIdentity({
-        relayIdentityId,
-        relaySigningPublicKey: trustedRelayIdentity.relayPublicKey,
-        relayFingerprint: trustedRelayIdentity.relayFingerprint,
-      });
-    }
-
-    updateDaemonState({ relay: { url: effectiveRelayUrl, status: 'connected' } });
-  } catch (error) {
-    const originalError = error;
-    try {
-      await cleanupServeStartupFailure(sessionManager);
-    } catch (cleanupError) {
-      logger.error(
-        `[serve] Cleanup after relay connection failure also failed: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
-      );
-    }
-
-    if (originalError instanceof SpacesError) {
-      throw originalError;
-    }
-    throw new SpacesError(
-      `Failed to connect to relay: ${originalError instanceof Error ? originalError.message : String(originalError)}`,
-      'SYSTEM_ERROR',
-      2
-    );
+    },
+  });
+  const daemonLog = join(getSessionDir(), 'tmux-lite-daemon.log');
+  if (res.type === 'error') {
+    throw new SpacesError(`serve activation failed: ${res.message} (daemon log: ${daemonLog})`, 'SYSTEM_ERROR', 2);
+  }
+  if (res.type !== 'serve-status') {
+    throw new SpacesError('Unexpected serve-activate response', 'SYSTEM_ERROR', 2);
   }
 
-  // Save relay + machine identity config for reconnect/bootstrap flows
-  try {
-    writeRelayConfig({
-      relayUrl: effectiveRelayUrl,
-      cloudRelayUrl: resolveCloudRelayUrlForConfig(effectiveRelayUrl, hostConfig),
-      machineId,
-      savedAt: Date.now(),
-    });
-    persistMachineIdentityFromServe({
-      existingIdentity: machineIdentity,
-      machineId,
-      relayUrl: effectiveRelayUrl,
-      publicIdentity,
-    });
-  } catch (error) {
-    await cleanupServeStartupFailure(sessionManager);
-    throw new SpacesError(
-      `Failed to persist machine relay identity: ${error instanceof Error ? error.message : String(error)}`,
-      'SYSTEM_ERROR',
-      2,
-    );
-  }
-
-  // Set up shutdown handlers with daemon cleanup
-  setupShutdownHandlers(sessionManager, true, () => {
-    stopAgentWatch?.();
+  // Persist relay + machine identity for reconnect/bootstrap flows.
+  bindControlRelayIdentity({
+    relayIdentityId: computeIdentityId(relayPubkey),
+    relaySigningPublicKey: relayPubkey,
+    relayFingerprint: relayIdentity.fingerprint,
+  });
+  writeRelayConfig({
+    relayUrl,
+    cloudRelayUrl: resolveCloudRelayUrlForConfig(relayUrl, hostConfig),
+    machineId,
+    savedAt: Date.now(),
+  });
+  persistMachineIdentityFromServe({
+    existingIdentity: machineIdentity,
+    machineId,
+    relayUrl,
+    publicIdentity,
   });
 
-  // Keep process alive
-  await new Promise(() => {});
+  logger.success(`serve active in the machine daemon — relay ${relayUrl} (${res.status.relayStatus ?? 'connected'})`);
+  logger.info(`Daemon log: ${daemonLog}`);
+
+  if (options.foreground) {
+    logger.info('Following the daemon log (Ctrl+C stops following; serve stays active)...');
+    await followDaemonLog(daemonLog);
+  }
+
+  // Force exit: inquirer prompts (password/trust) keep the event loop alive.
+  process.exit(0);
 }
 
-/**
- * Stop serve daemon
- */
+/** Tail the daemon log until interrupted (serve --foreground). */
+async function followDaemonLog(path: string): Promise<void> {
+  const { openSync, readSync, fstatSync } = await import('node:fs');
+  let offset = 0;
+  try { offset = fstatSync(openSync(path, 'r')).size; } catch { /* not created yet */ }
+  for (;;) {
+    await Bun.sleep(500);
+    try {
+      const fd = openSync(path, 'r');
+      const size = fstatSync(fd).size;
+      if (size < offset) offset = 0; // rotated/truncated
+      if (size > offset) {
+        const buf = Buffer.alloc(size - offset);
+        readSync(fd, buf, 0, buf.length, offset);
+        offset = size;
+        process.stdout.write(buf);
+      }
+    } catch { /* file missing — keep waiting */ }
+  }
+}
+
 export async function serveStop(): Promise<void> {
-  if (!isServeRunning()) {
-    logger.info('serve daemon not running');
+  const { isServerRunning, send } = await import('../lib/tmux-lite/cli.js');
+  let deactivated = false;
+  if (await isServerRunning()) {
+    const res = await send({ type: 'serve-deactivate' });
+    deactivated = res.type === 'serve-status';
+  }
+
+  // Legacy: a pre-unification standalone serve daemon may still be running.
+  if (isServeRunning()) {
+    const pid = getServePid();
+    if (pid) {
+      try {
+        process.kill(pid, 'SIGTERM');
+        await Bun.sleep(800);
+        if (isServeRunning()) process.kill(pid, 'SIGKILL');
+      } catch { /* already gone */ }
+    }
+    cleanupServeFiles();
+    logger.success('legacy serve daemon stopped');
     return;
   }
 
-  logger.log('Stopping serve daemon...');
-
-  // Try graceful shutdown via socket first
-  const success = await sendShutdownCommand();
-
-  if (success) {
-    // Wait for process to exit
-    await Bun.sleep(1000);
-
-    if (!isServeRunning()) {
-      logger.success('serve daemon stopped');
-      return;
-    }
-  }
-
-  // Fallback: send SIGTERM directly
-  const pid = getServePid();
-  if (pid) {
-    try {
-      process.kill(pid, 'SIGTERM');
-      await Bun.sleep(1000);
-
-      if (!isServeRunning()) {
-        logger.success('serve daemon stopped');
-        return;
-      }
-
-      // Force kill
-      process.kill(pid, 'SIGKILL');
-      cleanupServeFiles();
-      logger.success('serve daemon stopped (forced)');
-    } catch {
-      cleanupServeFiles();
-      logger.success('serve daemon stopped');
-    }
-  }
+  logger.success(deactivated
+    ? 'serve deactivated (the machine daemon keeps running for local use)'
+    : 'serve was not active');
 }
 
-/**
- * Show serve daemon status
- */
 export async function serveStatus(): Promise<void> {
-  // Build status output
   const box = (lines: string[]) => {
     const width = 44;
-    const top = '┌─ serve daemon ' + '─'.repeat(width - 16) + '┐';
+    const top = '┌─ serve (machine daemon) ' + '─'.repeat(width - 26) + '┐';
     const bottom = '└' + '─'.repeat(width) + '┘';
     const padded = lines.map((l) => {
-      const visible = l.replace(/\x1b\[[0-9;]*m/g, ''); // Strip ANSI for length calc
+      const visible = l.replace(/\x1b\[[0-9;]*m/g, '');
       const padding = width - visible.length;
       return '│ ' + l + ' '.repeat(Math.max(0, padding - 1)) + '│';
     });
     return [top, ...padded, bottom].join('\n');
   };
 
-  if (!isServeRunning()) {
-    const lines = [
-      'Status:   \x1b[90m○ not running\x1b[0m',
+  const { isServerRunning, send } = await import('../lib/tmux-lite/cli.js');
+  if (!(await isServerRunning())) {
+    logger.log(box([
+      'Status:   \x1b[90m○ daemon not running\x1b[0m',
       '',
       'Run: \x1b[36mgssh machine serve start\x1b[0m',
-    ];
-    logger.log(box(lines));
+    ]));
     return;
   }
-
-  // Query daemon for status
-  const status = await queryServeStatus();
-
-  if (status) {
-    const statusIcon = status.relay.status === 'connected' ? '\x1b[32m●\x1b[0m' : '\x1b[33m●\x1b[0m';
-    const relayStatus = status.relay.status === 'connected' ? 'connected' : status.relay.status;
-
-    const lines = [
-      `Status:   ${statusIcon} running (pid ${status.pid})`,
-      `Version:  ${status.version}`,
-      `Relay:    ${status.relay.url}`,
-      `          ${relayStatus}`,
-      `Clients:  ${status.clients} active`,
-      `Uptime:   ${formatUptime(status.uptime)}`,
-    ];
-
-
-    logger.log(box(lines));
-  } else {
-    // Fallback if status query fails
-    const pid = getServePid();
-    const lines = [
-      `Status:   \x1b[32m●\x1b[0m running${pid ? ` (pid ${pid})` : ''}`,
-      `Version:  ${PACKAGE_VERSION}`,
-    ];
-    logger.log(box(lines));
+  const res = await send({ type: 'serve-status' });
+  if (res.type !== 'serve-status' || !res.status.active) {
+    logger.log(box([
+      'Status:   \x1b[90m○ inactive (daemon running, local-only)\x1b[0m',
+      '',
+      'Run: \x1b[36mgssh machine serve start\x1b[0m',
+    ]));
+    return;
   }
+  const st = res.status;
+  const statusIcon = st.relayStatus === 'connected' ? '\x1b[32m●\x1b[0m' : '\x1b[33m●\x1b[0m';
+  logger.log(box([
+    `Status:   ${statusIcon} active (in the machine daemon)`,
+    `Relay:    ${st.relayUrl ?? 'unknown'}`,
+    `          ${st.relayStatus ?? 'unknown'}`,
+    `Clients:  ${st.clients ?? 0} active`,
+    `Uptime:   ${st.startedAt ? formatUptime(Math.floor((Date.now() - st.startedAt) / 1000)) : 'unknown'}`,
+  ]));
 }

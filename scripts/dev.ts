@@ -21,7 +21,6 @@ import { clearSandboxBootstrapMetadata, createSandboxSecretsStore, validateSandb
 import { createRootInviteToken } from '../src/lib/tmux-lite/crypto/root-invites.js';
 import { mnemonicToUserIdentity } from '../src/lib/tmux-lite/crypto/user-identity.js';
 
-import { queryServeStatus } from '../src/serve/daemon.js';
 
 const ROOT = join(import.meta.dir, '..');
 const ENTRY = join(ROOT, 'src/index.ts');
@@ -95,27 +94,7 @@ async function waitForPort(port: number, timeoutMs = 15000): Promise<void> {
   throw new Error(`Timed out waiting for port ${port}`);
 }
 
-async function waitForServeReady(expectedRelayUrl: string, serveDaemonDir: string, timeoutMs = 15000): Promise<void> {
-  const previousServeDir = process.env.GITSPACE_SERVE_DAEMON_DIR;
-  process.env.GITSPACE_SERVE_DAEMON_DIR = serveDaemonDir;
-  try {
-    const start = Date.now();
-    while (Date.now() - start < timeoutMs) {
-      const status = await queryServeStatus();
-      if (status?.relay.url === expectedRelayUrl && status.relay.status === 'connected') {
-        return;
-      }
-      await Bun.sleep(200);
-    }
-  } finally {
-    if (previousServeDir === undefined) {
-      delete process.env.GITSPACE_SERVE_DAEMON_DIR;
-    } else {
-      process.env.GITSPACE_SERVE_DAEMON_DIR = previousServeDir;
-    }
-  }
-  throw new Error(`Timed out waiting for serve to connect to ${expectedRelayUrl}`);
-}
+
 
 // ─── Sandbox ─────────────────────────────────────────────────────────────────
 
@@ -420,33 +399,36 @@ async function main(): Promise<void> {
   }
   log('dev', 'Relay ready');
 
-  // Phase 2: Start serve with the dev password piped via stdin
-  log('dev', 'Starting serve...');
-  const serveProc = spawnChild('serve',
-    [
-      'bun', ENTRY, 'machine', 'serve', 'start',
-      '--takeover',
-      '--yes',
-      '--foreground',
-      '--relay', relayUrl,
-      '--enrollment-token', enrollmentToken,
-      '--password-stdin',
-    ],
-    { ...sandboxEnv, GITSPACE_CONTROL_DIR: controlDir, TMUX_LITE_SANDBOX: sandboxName, GITSPACE_SERVE_DAEMON_DIR: serveDaemonDir },
-    undefined,
-    { stdin: 'pipe' },
-  );
+  // Phase 2: serve is an ACTIVATOR now (daemon unification P2): it unlocks
+  // the identity, activates the serve runtime inside the tmux-lite daemon,
+  // and EXITS 0. Deliberately not spawnChild-tracked — a clean exit is the
+  // success signal here, not a stack failure.
+  log('dev', 'Activating serve in the machine daemon...');
+  const serveProc = spawn([
+    'bun', ENTRY, 'machine', 'serve', 'start',
+    '--takeover',
+    '--yes',
+    '--relay', relayUrl,
+    '--enrollment-token', enrollmentToken,
+    '--password-stdin',
+  ], {
+    cwd: ROOT,
+    env: { ...process.env, ...sandboxEnv, GITSPACE_CONTROL_DIR: controlDir, TMUX_LITE_SANDBOX: sandboxName, GITSPACE_SERVE_DAEMON_DIR: serveDaemonDir },
+    stdout: 'pipe',
+    stderr: 'pipe',
+    stdin: 'pipe',
+  });
+  pipeOutput(serveProc, 'serve');
   serveProc.stdin.write(DEV_PASSWORD + '\n');
   serveProc.stdin.end();
 
-  try {
-    await waitForServeReady(relayUrl, serveDaemonDir);
-  } catch (error) {
-    log('dev', `Serve failed to connect: ${error instanceof Error ? error.message : String(error)}`);
+  const serveExit = await serveProc.exited;
+  if (serveExit !== 0) {
+    log('dev', `Serve activation failed (exit ${serveExit})`);
     await shutdown(1);
     return;
   }
-  log('dev', 'Serve started');
+  log('dev', 'Serve active (hosted in the machine daemon)');
 
   // Phase 3: Start Vite dev server with enrollment token
   const enrollToken = process.env.DEV_ENROLL_TOKEN ?? crypto.randomUUID();

@@ -11,10 +11,6 @@ import {
   isServerRunning as isTmuxRunning,
   getStatus as getTmuxStatus,
 } from '../lib/tmux-lite/cli.js';
-import {
-  isServeRunning,
-  queryServeStatus,
-} from '../serve/daemon.js';
 
 /** Package version for display */
 const PACKAGE_VERSION = '1.0.0';
@@ -75,34 +71,32 @@ export async function showStatus(): Promise<void> {
     console.log(padLine(chalk.dim(tmuxDetailLine)));
   }
 
-  // Check serve status
+  // Serve runtime status — hosted INSIDE the machine daemon (unification P2).
   let serveLine = '';
   let serveDetailLine = '';
-  if (isServeRunning()) {
-    try {
-      const status = await queryServeStatus();
-      if (status) {
-        const relayIcon = status.relay.status === 'connected' ? chalk.green('●') :
-                         status.relay.status === 'connecting' || status.relay.status === 'reconnecting' ? chalk.yellow('◐') :
+  try {
+    const { isServerRunning, send } = await import('../lib/tmux-lite/cli.js');
+    if (await isServerRunning()) {
+      const res = await send({ type: 'serve-status' });
+      if (res.type === 'serve-status' && res.status.active) {
+        const st = res.status;
+        const relayIcon = st.relayStatus === 'connected' ? chalk.green('●') :
+                         st.relayStatus === 'connecting' || st.relayStatus === 'reconnecting' ? chalk.yellow('◐') :
                          chalk.red('○');
-        const relayText = status.relay.status === 'connected' ? 'connected' :
-                         status.relay.status === 'connecting' ? 'connecting' :
-                         status.relay.status === 'reconnecting' ? 'reconnecting' :
-                         'disconnected';
-        const clientText = status.clients === 1 ? 'client' : 'clients';
-        serveLine = `${chalk.green('●')} serve        ${relayIcon} ${relayText}    ${status.clients} ${clientText}`;
-
-        if (status.uptime) {
-          serveDetailLine = `              uptime: ${formatUptime(status.uptime)}`;
+        const clients = st.clients ?? 0;
+        const clientText = clients === 1 ? 'client' : 'clients';
+        serveLine = `${chalk.green('●')} serve        ${relayIcon} ${st.relayStatus ?? 'unknown'}    ${clients} ${clientText}`;
+        if (st.startedAt) {
+          serveDetailLine = `              uptime: ${formatUptime(Math.floor((Date.now() - st.startedAt) / 1000))}`;
         }
       } else {
-        serveLine = `${chalk.green('●')} serve        ${chalk.white('running')}`;
+        serveLine = `${chalk.gray('○')} serve        ${chalk.gray('inactive (daemon local-only)')}`;
       }
-    } catch {
-      serveLine = `${chalk.green('●')} serve        ${chalk.white('running')}`;
+    } else {
+      serveLine = `${chalk.gray('○')} serve        ${chalk.gray('daemon not running')}`;
     }
-  } else {
-    serveLine = `${chalk.gray('○')} serve        ${chalk.gray('not running')}`;
+  } catch {
+    serveLine = `${chalk.gray('○')} serve        ${chalk.gray('unavailable')}`;
   }
   console.log(padLine(serveLine));
   if (serveDetailLine) {
