@@ -22,8 +22,10 @@ type PanelParams = {
 };
 
 function DockPanel(props: IDockviewPanelProps<PanelParams>) {
+  // A restored layout can mount a panel one tick before syncPanels installs
+  // its live params (functions don't survive toJSON) — render nothing then.
   const { render } = props.params;
-  return <div className="h-full min-h-0 bg-[var(--gs-bg)] overflow-hidden flex flex-col">{render()}</div>;
+  return <div className="h-full min-h-0 bg-[var(--gs-bg)] overflow-hidden flex flex-col">{render ? render() : null}</div>;
 }
 
 function DockTab(props: IDockviewPanelHeaderProps<PanelParams>) {

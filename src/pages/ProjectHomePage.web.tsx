@@ -11,10 +11,12 @@
  *          at the base clone — docs/ARTIFACTS-FS.md) + Recently shipped queue.
  */
 
-import { useCallback, useEffect, useMemo, useState, type MouseEvent as ReactMouseEvent, type ReactElement } from 'react';
+import { useCallback, useEffect, useMemo, useState, type ReactElement } from 'react';
+import type { DockviewApi } from 'dockview-react';
 import type { BackendKey, SessionBackend } from '../session/backend.js';
 import { NotePanel } from '../components/NotePanel.web.js';
 import { PaneTerminalPanel } from '../components/PaneTerminalPanel.web.js';
+import { DockviewWorkspaceShell, type DockviewTerminalPanel } from '../components/DockviewWorkspaceShell.web.js';
 import type { RemoteSessionPtyBackend } from '../session/useRemoteSessionClient.js';
 import { ReportPanel } from '../components/ReportPanel.web.js';
 import type { KanbanGoalItem } from '../app/shared/board/types.js';
@@ -360,21 +362,46 @@ export function ProjectHomePage({
   const [artifactsError, setArtifactsError] = useState<string | null>(null);
   const [feed, setFeed] = useState<FeedItem[]>([]);
 
-  // Center multi-tab shell (mock: tabs/active/open/closeTab).
-  const [tabs, setTabs] = useState<string[]>(['overview']);
+  // Center dock — the same DockviewWorkspaceShell as workspace panes, so
+  // project tabs (agent threads, reports, dashboards) get splits, drag, and
+  // focus-on-reopen. `tabs` is the open-panel list; dockview owns activation.
+  const tabsStorageKey = `gssh:ph-tabs:${projectName}`;
+  const layoutStorageKey = `gssh:ph-layout:${projectName}`;
+  const [tabs, setTabs] = useState<string[]>(() => {
+    try {
+      const saved = JSON.parse(window.localStorage.getItem(tabsStorageKey) ?? '[]') as string[];
+      return saved.includes('overview') ? saved : ['overview', ...saved];
+    } catch { return ['overview']; }
+  });
+  useEffect(() => {
+    try { window.localStorage.setItem(tabsStorageKey, JSON.stringify(tabs)); } catch { /* storage unavailable */ }
+  }, [tabs, tabsStorageKey]);
+  const initialDockLayout = useMemo<unknown>(() => {
+    try {
+      const raw = window.localStorage.getItem(layoutStorageKey);
+      return raw ? JSON.parse(raw) : undefined;
+    } catch { return undefined; }
+  }, [layoutStorageKey]);
+  const handleDockLayoutChange = useCallback((layout: unknown) => {
+    try { window.localStorage.setItem(layoutStorageKey, JSON.stringify(layout)); } catch { /* storage unavailable */ }
+  }, [layoutStorageKey]);
+  const [focusRequest, setFocusRequest] = useState<{ id: string; nonce: number } | null>(null);
+  const [dockApi, setDockApi] = useState<DockviewApi | null>(null);
   const [active, setActive] = useState<string>('overview');
+  useEffect(() => {
+    if (!dockApi) return;
+    setActive(dockApi.activePanel?.id ?? 'overview');
+    const sub = dockApi.onDidActivePanelChange((panel) => setActive(panel?.id ?? 'overview'));
+    return () => sub.dispose();
+  }, [dockApi]);
   const openTab = useCallback((t: string): void => {
     setTabs((s) => (s.includes(t) ? s : [...s, t]));
-    setActive(t);
+    // Focus whether new or already open (new panels also self-activate).
+    setFocusRequest((prev) => ({ id: t, nonce: (prev?.nonce ?? 0) + 1 }));
   }, []);
-  const closeTab = (t: string, e: ReactMouseEvent): void => {
-    e.stopPropagation();
-    setTabs((s) => {
-      const next = s.filter((x) => x !== t);
-      setActive((a) => (a === t ? (next[next.length - 1] ?? 'overview') : a));
-      return next;
-    });
-  };
+  const closePane = useCallback((t: string): void => {
+    setTabs((s) => s.filter((x) => x !== t));
+  }, []);
 
   // Chains grouped from the board's goal items.
   const chains = useMemo(() => {
@@ -676,6 +703,70 @@ export function ProjectHomePage({
     </div>
   );
 
+  // Overview tab body (mock: .ph-card stack).
+  const overviewBody = (
+    <div className="flex h-full flex-col gap-3.5 overflow-y-auto px-[18px] py-4">
+      {card(
+        'Chains',
+        'grouped · tag into epics',
+        <button type="button" disabled title="plan a chain from the board" className={XS_BTN}>＋ New</button>,
+        chainsBody,
+      )}
+      {card(
+        'In process',
+        null,
+        <button type="button" onClick={() => openTab('process')} className={XS_BTN}>open ↗</button>,
+        inProcessBody,
+      )}
+      {card(
+        'Reports & notes',
+        'reflect → plan',
+        <button type="button" onClick={() => openTab('reports')} className={XS_BTN}>open feed ↗</button>,
+        feedBody,
+      )}
+    </div>
+  );
+
+  // Dock panels. Render closures snapshot this render's data; `version`
+  // fingerprints what each closure captures so the shell re-renders the panel
+  // when (and only when) that data changes.
+  const goalsFp = goals.map((g) => `${g.id}:${g.status}:${g.phase ?? ''}:${g.workspaceName ?? ''}`).join(',');
+  const procFp = inProcess.map((w) => `${w.workspace.selectionKey}:${w.agentSessionCount}:${w.pendingPermissionCount}:${w.workspace.phase ?? ''}`).join(',');
+  const feedFp = feed.map((f) => `${f.kind}:${f.surface}:${f.path ?? f.noteId ?? ''}:${f.body?.length ?? 0}`).join(',');
+  const artifactsFp = artifacts.map((e) => e.path).join(',');
+  const dockPanels: DockviewTerminalPanel[] = tabs.map((t) => {
+    const common = { id: t, title: tabLabel(t), onClose: t === 'overview' ? undefined : () => closePane(t) };
+    if (t === 'overview') return { ...common, version: `overview|${goalsFp}|${procFp}|${feedFp}`, render: () => overviewBody };
+    if (t === 'process') return { ...common, version: `process|${procFp}`, render: () => <div className="h-full overflow-y-auto">{inProcessBody}</div> };
+    if (t === 'chains') return { ...common, version: `chains|${goalsFp}`, render: () => <div className="h-full overflow-y-auto">{chainsBody}</div> };
+    if (t === 'reports') return { ...common, version: `reports|${feedFp}`, render: () => <div className="h-full overflow-y-auto">{feedBody}</div> };
+    if (isDashTab(t)) {
+      return { ...common, version: `dash|${t}|${artifactSource}`, render: () => (
+        <DashboardPanel dashboardPath={t.slice(5)} scopeLabel={artifactSource === 'main' ? 'project · main' : 'workspace'} read={readArtifactFromSource} />
+      ) };
+    }
+    if (isArtTab(t)) {
+      return { ...common, version: `art|${t}|${artifactSource}|${artifactsFp}`, render: () => (
+        <ArtifactPanel path={t.slice(4)} read={readArtifactFromSource} listArtifacts={async () => artifacts.map((e) => e.path)} />
+      ) };
+    }
+    if (t === 'artifacts-repo') return { ...common, version: 'artifacts-repo', render: () => <ArtifactsRepoTab projectName={projectName} backend={backend} /> };
+    if (t.startsWith('agent:')) {
+      return { ...common, version: `agent|${t}`, render: () => (
+        <ProjectAgentPane backend={backend} backendKey={backendKey ?? null} workspaceId={baseWorkspaceId} agentSessionId={t.slice(6)} paneId={t} />
+      ) };
+    }
+    if (t.startsWith('report:')) {
+      return { ...common, version: `report|${t}|${artifactSource}`, render: () => <ProjectReportTab path={t.slice(7)} read={readArtifactFromSource} /> };
+    }
+    if (t.startsWith('note:')) {
+      const [, ws, ...idParts] = t.split(':');
+      return { ...common, version: `note|${t}`, render: () => <NotePanel backend={backend} projectName={projectName} workspaceName={ws!} noteId={idParts.join(':')} /> };
+    }
+    // Stale persisted id from an older scheme — closable, never crashes.
+    return { ...common, version: 'unknown', render: () => <div className="p-4 text-xs text-[var(--gs-text-dim)]">Unknown tab: {t}</div> };
+  });
+
   return (
     <div className="flex h-screen w-screen bg-[var(--gs-bg)] text-[13px]">
       {/* sidebar (mock: .ph-sb) */}
@@ -751,91 +842,18 @@ export function ProjectHomePage({
         </div>
       </aside>
 
-      {/* center: multi-tab shell (mock: .ph-center + .tabstrip) */}
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <div className="flex h-[34px] flex-none items-stretch overflow-x-auto border-b border-[var(--gs-border)] bg-[#050505]">
-          {tabs.map((t) => (
-            <div
-              key={t}
-              onClick={() => setActive(t)}
-              className={`flex cursor-pointer items-center gap-1.5 whitespace-nowrap border-r border-[var(--gs-border)] px-[13px] text-[11.5px] transition-colors ${
-                active === t ? 'bg-[var(--gs-bg)] text-[var(--gs-text)] shadow-[inset_0_-2px_0_var(--gs-accent)]' : 'text-[var(--gs-text-muted)] hover:text-[var(--gs-text)]'
-              }`}
-            >
-              {isDashTab(t) && <span className={`mr-px ${active === t ? 'text-[var(--gs-success)]' : 'text-[var(--gs-text-dim)]'}`}>▦</span>}
-              <span>{tabLabel(t)}</span>
-              {t !== 'overview' && (
-                <span
-                  onClick={(e) => closeTab(t, e)}
-                  className="p-0.5 text-[10px] leading-none text-[var(--gs-text-ghost)] hover:text-[var(--gs-danger)]"
-                >
-                  ✕
-                </span>
-              )}
-            </div>
-          ))}
-        </div>
-
-        <div className="min-h-0 flex-1 overflow-hidden">
-          {active === 'overview' && (
-            <div className="flex h-full flex-col gap-3.5 overflow-y-auto px-[18px] py-4">
-              {card(
-                'Chains',
-                'grouped · tag into epics',
-                <button type="button" disabled title="plan a chain from the board" className={XS_BTN}>＋ New</button>,
-                chainsBody,
-              )}
-              {card(
-                'In process',
-                null,
-                <button type="button" onClick={() => openTab('process')} className={XS_BTN}>open ↗</button>,
-                inProcessBody,
-              )}
-              {card(
-                'Reports & notes',
-                'reflect → plan',
-                <button type="button" onClick={() => openTab('reports')} className={XS_BTN}>open feed ↗</button>,
-                feedBody,
-              )}
-            </div>
-          )}
-          {active === 'process' && <div className="h-full overflow-y-auto">{inProcessBody}</div>}
-          {active === 'chains' && <div className="h-full overflow-y-auto">{chainsBody}</div>}
-          {active === 'reports' && <div className="h-full overflow-y-auto">{feedBody}</div>}
-          {isDashTab(active) && (
-            <div className="h-full min-h-0">
-              <DashboardPanel
-                dashboardPath={active.slice(5)}
-                scopeLabel={artifactSource === 'main' ? 'project · main' : 'workspace'}
-                read={readArtifactFromSource}
-              />
-            </div>
-          )}
-          {isArtTab(active) && (
-            <div className="h-full min-h-0">
-              <ArtifactPanel path={active.slice(4)} read={readArtifactFromSource} listArtifacts={async () => artifacts.map((e) => e.path)} />
-            </div>
-          )}
-          {active === 'artifacts-repo' && <ArtifactsRepoTab projectName={projectName} backend={backend} />}
-          {active.startsWith('agent:') && (
-            <div className="h-full min-h-0">
-              <ProjectAgentPane backend={backend} backendKey={backendKey ?? null} workspaceId={baseWorkspaceId} agentSessionId={active.slice(6)} paneId={active} />
-            </div>
-          )}
-          {active.startsWith('report:') && (
-            <div className="h-full min-h-0">
-              <ProjectReportTab path={active.slice(7)} read={readArtifactFromSource} />
-            </div>
-          )}
-          {active.startsWith('note:') && (() => {
-            const [, ws, ...idParts] = active.split(':');
-            return (
-              <div className="h-full min-h-0">
-                <NotePanel backend={backend} projectName={projectName} workspaceName={ws!} noteId={idParts.join(':')} />
-              </div>
-            );
-          })()}
-        </div>
+      {/* center: dock shell — same shell as workspace panes (splits, drag,
+          focus-on-reopen, persisted layout) */}
+      <div className="min-h-0 min-w-0 flex-1">
+        <DockviewWorkspaceShell
+          backendKey={backendKey ?? 'local'}
+          workspaceId={baseWorkspaceId}
+          panels={dockPanels}
+          focusRequest={focusRequest}
+          initialLayout={initialDockLayout}
+          onLayoutChange={handleDockLayoutChange}
+          onApiChange={setDockApi}
+        />
       </div>
 
       {/* right: project artifacts rail (mock: ProjectArtifactsRail) + shipped queue */}
