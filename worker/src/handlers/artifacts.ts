@@ -24,7 +24,10 @@ const app = new Hono<{ Bindings: Env; Variables: AuthContext }>();
 const SLUG_REGEX = /^[a-z0-9][a-z0-9-]{0,62}$/;
 const HANDLE_REGEX = /^[a-z0-9][a-z0-9-]{1,18}[a-z0-9]$/;
 const OID_REGEX = /^[a-f0-9]{64}$/;
-const MAX_BLOB_BYTES = 512 * 1024 * 1024; // 512 MB per blob
+// Workers reject request bodies over 100MB on standard plans BEFORE the
+// worker runs — cap inline uploads at 95MB. Larger blobs need the presigned
+// R2 URL flow (worker mints short-lived S3 PUT URLs; bucket stays private).
+const MAX_BLOB_BYTES = 95 * 1024 * 1024; // 512 MB per blob
 const TOKEN_TTL_SECONDS = 3600; // hard cap: scoped tokens live at most 1h
 
 interface ArtifactProjectRecord {
