@@ -113,6 +113,56 @@ describe('tick against a real registry', () => {
     expect(again).toBe(0);
   });
 
+  it('reverts out-of-scope writes at completion and marks the run failed; clean runs stay ok', async () => {
+    const { completeTriggerRun } = await import('../../../core/triggers.js');
+    await saveTrigger(projectDir, workspaceDir, {
+      name: 'scoped', kind: 'cron', when: 'every 1h',
+      writes: ['data/**'], runs: { type: 'skill', ref: 'agent-prompt', prompt: 'refresh data' },
+    });
+    const ws = { id: 'demo:ws1', name: 'ws1', path: workspaceDir, projectName: 'demo' };
+    const mount = join(workspaceDir, '.gitspace', 'artifacts');
+    const g = (args: string): string => execFileSync('bash', ['-c', `git -C ${JSON.stringify(mount)} -c user.name=t -c user.email=t@t -c commit.gpgsign=false ${args}`], { encoding: 'utf8' }).trim();
+
+    let complete: (() => void) | null = null;
+    await tickTriggerScheduler([ws], {
+      runAgent: async () => 'sess-scoped',
+      watchSessionIdle: (_w, _sid, onIdle) => { complete = onIdle; },
+    }, new Date('2026-07-07T12:00:00Z'));
+
+    // Simulate the run's agent: one in-scope write, one out-of-scope write.
+    mkdirSync(join(mount, 'data'), { recursive: true });
+    writeFileSync(join(mount, 'data', 'metrics.json'), '{"ok":true}');
+    writeFileSync(join(mount, 'README.md'), 'HIJACKED');
+    g('add -A');
+    g('commit -q -m "run writes"');
+
+    complete!();
+    await new Promise((r) => setTimeout(r, 800));
+
+    const after = listTriggers(workspaceDir).find((t) => t.id === 'scoped')!;
+    expect(after.status).toBe('failed');
+    expect(after.runLog![after.runLog!.length - 1]!.note).toContain('README.md');
+    // out-of-scope file restored; in-scope write kept
+    expect(g('show HEAD:README.md')).not.toContain('HIJACKED');
+    expect(g('show HEAD:data/metrics.json')).toContain('ok');
+
+    // clean run: only in-scope writes → ok. (Completion stamps REAL time, so
+    // the second due-check must be relative to real now, not the fake clock.)
+    let complete2: (() => void) | null = null;
+    await tickTriggerScheduler([ws], {
+      runAgent: async () => 'sess-clean',
+      watchSessionIdle: (_w, _sid, onIdle) => { complete2 = onIdle; },
+    }, new Date(Date.now() + 2 * 3_600_000));
+    writeFileSync(join(mount, 'data', 'metrics.json'), '{"ok":2}');
+    g('add -A');
+    g('commit -q -m "clean run"');
+    complete2!();
+    await new Promise((r) => setTimeout(r, 800));
+    const after2 = listTriggers(workspaceDir).find((t) => t.id === 'scoped')!;
+    expect(after2.status).toBe('ok');
+    expect(g('show HEAD:data/metrics.json')).toContain('2');
+  });
+
   it('saveTrigger rejects an unfireable cron schedule', async () => {
     await expect(saveTrigger(projectDir, workspaceDir, {
       name: 'bad clock', kind: 'cron', when: 'Mon 09:00',

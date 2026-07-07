@@ -9,7 +9,7 @@
  * trigger's instruction + capability scope, and records the run.
  */
 
-import { listTriggers, recordTriggerRun, type TriggerRecord } from '../../core/triggers.js';
+import { completeTriggerRun, listTriggers, mountHead, recordTriggerRun, type TriggerRecord, type TriggerRunEnforcement } from '../../core/triggers.js';
 import { parseCronWhen } from '../../core/trigger-grammar.js';
 import { getProjectDir } from '../../core/config.js';
 
@@ -43,14 +43,22 @@ export function isTriggerDue(trigger: TriggerRecord, now: Date): boolean {
   return now.getTime() - lastAt >= interval;
 }
 
-export function buildTriggerPrompt(trigger: TriggerRecord): string | null {
+export function buildTriggerPrompt(trigger: TriggerRecord, opts: { capToken?: string } = {}): string | null {
   const instruction = trigger.runs?.prompt ?? trigger.does ?? trigger.note;
   if (!instruction) return null;
-  return [
+  const scope = trigger.writes.filter(Boolean);
+  const lines = [
     instruction,
     '',
-    `Trigger contract: you may only write these artifact paths: ${trigger.writes.join(', ') || '(none declared)'} (plus evidence via goal commands). Follow the space-artifacts skill. This is an unattended run of trigger "${trigger.name}" (${trigger.when}).`,
-  ].join('\n');
+    scope.length > 0
+      ? `Enforced write scope: ${scope.join(', ')} (plus evidence via goal commands). Out-of-scope artifact changes are automatically reverted when the run completes and the run is marked failed.`
+      : 'This trigger declared no write scope — write only what the instruction requires.',
+    `This is an unattended run of trigger "${trigger.name}" (${trigger.when}). Follow the space-artifacts skill.`,
+  ];
+  if (opts.capToken) {
+    lines.push(`Capability token for sanctioned writes (pass verbatim): gssh space artifacts commit --cap ${opts.capToken} -m "<message>" <files...>`);
+  }
+  return lines.join('\n');
 }
 
 /** Pure scan: which triggers should fire right now across hosted workspaces. */
@@ -77,6 +85,10 @@ export interface TriggerFireDeps {
   /** Call `onIdle` once when the session finishes its run (busy → idle).
    *  Without it, runs stay `pending` until the lock lapses. */
   watchSessionIdle?: (workspace: SchedulerWorkspace, sessionId: string, onIdle: () => void) => void;
+  /** Mint a write capability for a run (server wires the machine cap key). */
+  mintCap?: (workspace: SchedulerWorkspace, trigger: TriggerRecord) => string | null;
+  /** Surface post-run scope violations (server wires the inbox). */
+  notifyViolations?: (workspace: SchedulerWorkspace, trigger: TriggerRecord, enforcement: TriggerRunEnforcement) => void;
   log?: (message: string) => void;
 }
 
@@ -90,18 +102,28 @@ export async function tickTriggerScheduler(
   let fired = 0;
   for (const { workspace, trigger, prompt } of due) {
     try {
-      // Record pending FIRST so a crash mid-fire can't rapid-fire on restart.
-      await recordTriggerRun(getProjectDir(workspace.projectName), workspace.path, trigger.id, { status: 'pending', note: 'scheduled fire' }, now);
-      const sessionId = await deps.runAgent(workspace, `trigger: ${trigger.name}`, prompt);
+      const projectDir = getProjectDir(workspace.projectName);
+      // Record pending FIRST (with the run-window start) so a crash mid-fire
+      // can't rapid-fire on restart and the post-run diff has its baseline.
+      await recordTriggerRun(projectDir, workspace.path, trigger.id, { status: 'pending', note: 'scheduled fire', startCommit: mountHead(workspace.path) ?? undefined }, now);
+      const capToken = deps.mintCap?.(workspace, trigger) ?? undefined;
+      const finalPrompt = capToken ? buildTriggerPrompt(trigger, { capToken }) ?? prompt : prompt;
+      const sessionId = await deps.runAgent(workspace, `trigger: ${trigger.name}`, finalPrompt);
       deps.log?.(`trigger ${trigger.name} fired in ${workspace.id}${sessionId ? ` (session ${sessionId})` : ' (session failed)'}`);
       if (!sessionId) {
-        await recordTriggerRun(getProjectDir(workspace.projectName), workspace.path, trigger.id, { status: 'fail', note: 'agent session failed to start' }, now);
+        await recordTriggerRun(projectDir, workspace.path, trigger.id, { status: 'fail', note: 'agent session failed to start' }, now);
       } else {
-        // Close the loop: the run is `ok` when its session goes idle again.
-        // (Crash before idle → the pending lock recovers on schedule.)
+        // Close the loop: enforce the write scope over the run window, then
+        // record ok/fail. (Crash before idle → pending lock recovers.)
         deps.watchSessionIdle?.(workspace, sessionId, () => {
-          void recordTriggerRun(getProjectDir(workspace.projectName), workspace.path, trigger.id, { status: 'ok', sessionId }, new Date())
-            .catch((e) => deps.log?.(`trigger ${trigger.name} ok-record failed: ${e instanceof Error ? e.message : e}`));
+          void completeTriggerRun(projectDir, workspace.path, trigger.id, { sessionId })
+            .then((outcome) => {
+              if (outcome.enforcement.violations.length > 0) {
+                deps.log?.(`trigger ${trigger.name}: reverted out-of-scope writes ${outcome.enforcement.violations.join(', ')}`);
+                deps.notifyViolations?.(workspace, trigger, outcome.enforcement);
+              }
+            })
+            .catch((e) => deps.log?.(`trigger ${trigger.name} completion failed: ${e instanceof Error ? e.message : e}`));
         });
       }
       fired += 1;

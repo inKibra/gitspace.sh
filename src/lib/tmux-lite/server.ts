@@ -106,6 +106,8 @@ import type { MachineSnapshot } from './machine/protocol.js';
 import { subscribeWorkspacePmUpdates } from './machine/pm-links.js';
 import { scanWorkspaces } from '../remote-session/workspace-scanner.js';
 import { startTriggerScheduler } from './trigger-scheduler.js';
+import { formatArtifactUri, mintArtifactCap, verifyArtifactCap, capAllows, parseArtifactUri } from '../../core/artifact-cap.js';
+import { getOrCreateArtifactCapKeypair } from '../../core/artifact-cap-key.js';
 import { matchesWorkspaceId, toCanonicalWorkspaceId } from '../../utils/workspace-id.js';
 import { getProcessSpecs, startProcessInstance, stopProcessInstance } from '../processes/manager.js';
 import { signalSubprocessTree } from './process-tree.js';
@@ -712,6 +714,30 @@ startTriggerScheduler(
       }
     },
     watchSessionIdle: watchAgentSessionIdle,
+    mintCap: (workspace, trigger) => {
+      try {
+        const scope = trigger.writes.filter(Boolean);
+        if (scope.length === 0) return null;
+        return mintArtifactCap({
+          sub: { kind: 'trigger', id: trigger.id },
+          verbs: ['write'],
+          scope: scope.map((g) => formatArtifactUri(workspace.projectName, workspace.name, g)),
+          machineId: 'local',
+          expiresAt: Date.now() + 6 * 60 * 60_000,
+        }, getOrCreateArtifactCapKeypair().secretKey);
+      } catch (e) {
+        console.error(`[triggers] cap mint failed: ${e instanceof Error ? e.message : e}`);
+        return null;
+      }
+    },
+    notifyViolations: (workspace, trigger, enforcement) => {
+      addInboxItem(createInboxNotification(
+        `trigger:${workspace.projectName}:${trigger.id}`,
+        `trigger · ${trigger.name}`,
+        'osc',
+        `Run wrote outside its scope — reverted: ${enforcement.violations.join(', ')}. The run is marked failed; widen the trigger's 'writes' globs if these paths are intended.`,
+      ));
+    },
   },
 );
 
@@ -3907,17 +3933,27 @@ routerListener = Bun.listen({
           case 'artifact-write':
             try {
               const { captureArtifacts } = await import('../../core/artifacts.js');
-              const { parseArtifactCapUnverified } = await import('../../core/artifact-cap.js');
               const { projectDir, mountDir, relPath } = await resolveArtifactUriDirs(cmd.uri);
               if (!relPath) { res = { type: 'error', message: 'artifact-write needs a file path in the URI' }; break; }
-              // Provenance from the capability subject when the caller holds
-              // one (display-grade today — cryptographic verification + scope
-              // ENFORCEMENT land in Phase 3 with daemon key wiring).
-              const capSub = cmd.cap ? parseArtifactCapUnverified(cmd.cap)?.sub : undefined;
+              // A presented capability is VERIFIED (fail closed) and its scope
+              // enforced; provenance comes from the verified subject. Cap-less
+              // writes (the UI) keep web-ui provenance and no extra scope.
+              let capSub: { kind: string; id?: string } | undefined;
+              let allowedWrites: string[] | undefined;
+              if (cmd.cap) {
+                const verified = verifyArtifactCap(cmd.cap, { publicKey: getOrCreateArtifactCapKeypair().publicKey });
+                const parsedUri = parseArtifactUri(cmd.uri);
+                if (!capAllows(verified, 'write', parsedUri)) {
+                  res = { type: 'error', message: `Capability does not permit writing ${cmd.uri}` };
+                  break;
+                }
+                capSub = verified.sub;
+                allowedWrites = verified.scope.map((u) => { try { return parseArtifactUri(u).relPath || '**'; } catch { return '(invalid)'; } });
+              }
               const provenance = capSub
                 ? { tool: capSub.kind, ...(capSub.kind === 'session' ? { session: capSub.id } : {}), ...(capSub.kind === 'trigger' ? { trigger: capSub.id } : {}) }
                 : { tool: 'web-ui' };
-              const result = await captureArtifacts(projectDir, mountDir, [{ path: relPath, content: Buffer.from(cmd.contentBase64, 'base64') }], { message: cmd.message, provenance });
+              const result = await captureArtifacts(projectDir, mountDir, [{ path: relPath, content: Buffer.from(cmd.contentBase64, 'base64') }], { message: cmd.message, provenance, allowedWrites });
               res = { type: 'artifact-write', commit: result.commit };
             } catch (e) {
               res = { type: 'error', message: `Failed to write artifact: ${e instanceof Error ? e.message : String(e)}` };
@@ -3951,10 +3987,24 @@ routerListener = Bun.listen({
               const projectDir = getProjectDir(cmd.target.projectName);
               const trigger = listTriggers(cmd.target.workspacePath).find((t) => t.id === cmd.triggerId);
               if (!trigger) { res = { type: 'error', message: `Unknown trigger: ${cmd.triggerId}` }; break; }
-              const prompt = buildTriggerPrompt(trigger);
+              let capToken: string | undefined;
+              try {
+                const scope = trigger.writes.filter(Boolean);
+                if (scope.length > 0) {
+                  capToken = mintArtifactCap({
+                    sub: { kind: 'trigger', id: trigger.id },
+                    verbs: ['write'],
+                    scope: scope.map((g) => formatArtifactUri(cmd.target.projectName, cmd.target.workspaceName, g)),
+                    machineId: 'local',
+                    expiresAt: Date.now() + 6 * 60 * 60_000,
+                  }, getOrCreateArtifactCapKeypair().secretKey);
+                }
+              } catch { /* cap optional */ }
+              const prompt = buildTriggerPrompt(trigger, { capToken });
               if (!prompt) { res = { type: 'error', message: `Trigger ${trigger.name} has no prompt to run.` }; break; }
-              // Same lifecycle as scheduled fires: pending → spawn → ok on idle.
-              await recordTriggerRun(projectDir, cmd.target.workspacePath, trigger.id, { status: 'pending', note: 'manual run' });
+              // Same lifecycle as scheduled fires: pending → spawn → enforce+ok on idle.
+              const { mountHead } = await import('../../core/triggers.js');
+              await recordTriggerRun(projectDir, cmd.target.workspacePath, trigger.id, { status: 'pending', note: 'manual run', startCommit: mountHead(cmd.target.workspacePath) ?? undefined });
               const before = new Set((await getKnownAgentSessions(cmd.target)).map((s) => s.id));
               const sessions = await createAgentSession(cmd.target, `trigger: ${trigger.name}`);
               const created = sessions.find((s) => !before.has(s.id)) ?? sessions[sessions.length - 1];
@@ -3974,8 +4024,18 @@ routerListener = Bun.listen({
                 break;
               }
               watchAgentSessionIdle({ id: cmd.target.workspaceId }, created.id, () => {
-                void recordTriggerRun(projectDir, cmd.target.workspacePath, trigger.id, { status: 'ok', sessionId: created.id })
-                  .catch(() => undefined);
+                void (async () => {
+                  const { completeTriggerRun } = await import('../../core/triggers.js');
+                  const outcome = await completeTriggerRun(projectDir, cmd.target.workspacePath, trigger.id, { sessionId: created.id });
+                  if (outcome.enforcement.violations.length > 0) {
+                    addInboxItem(createInboxNotification(
+                      `trigger:${cmd.target.projectName}:${trigger.id}`,
+                      `trigger · ${trigger.name}`,
+                      'osc',
+                      `Run wrote outside its scope — reverted: ${outcome.enforcement.violations.join(', ')}. The run is marked failed.`,
+                    ));
+                  }
+                })().catch(() => undefined);
               });
               res = { type: 'trigger-run-now', sessionId: created.id };
             } catch (e) {

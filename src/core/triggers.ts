@@ -8,9 +8,11 @@
  * fires them unattended is M2.
  */
 
+import { execSync } from 'child_process';
 import { existsSync, readFileSync, readdirSync } from 'fs';
 import { join } from 'path';
 import { captureArtifacts } from './artifacts.js';
+import { pathInScope } from './artifact-cap.js';
 import { validateTriggerWhen } from './trigger-grammar.js';
 import { SpacesError } from '../types/errors.js';
 
@@ -32,7 +34,7 @@ export interface TriggerRecord {
   reads?: string[];
   feeds?: string[];
   /** ISO timestamps of recent runs, newest last (source for `last`). */
-  runLog?: Array<{ at: string; status: 'ok' | 'fail' | 'pending'; note?: string; sessionId?: string }>;
+  runLog?: Array<{ at: string; status: 'ok' | 'fail' | 'pending'; note?: string; sessionId?: string; startCommit?: string }>;
 }
 
 const TRIGGER_DIR = 'triggers';
@@ -90,7 +92,7 @@ export async function recordTriggerRun(
   projectDir: string,
   workspaceDir: string,
   triggerId: string,
-  run: { status: 'ok' | 'fail' | 'pending'; note?: string; sessionId?: string },
+  run: { status: 'ok' | 'fail' | 'pending'; note?: string; sessionId?: string; startCommit?: string },
   now: Date = new Date(),
 ): Promise<TriggerRecord> {
   const mount = mountDirFor(workspaceDir);
@@ -109,4 +111,131 @@ export async function recordTriggerRun(
     { path: `${TRIGGER_DIR}/${triggerId}.trigger.json`, content: JSON.stringify(next, null, 2) + '\n' },
   ], { message: `trigger: run ${record.name} (${run.status})`, provenance: { tool: 'triggers' } });
   return next;
+}
+
+// ── run-window write enforcement (docs/ARTIFACT-PROTOCOL.md Phase 3) ────────
+
+function gitInMount(workspaceDir: string, args: string[], env?: Record<string, string>): string {
+  return execSync(
+    `git -C ${JSON.stringify(mountDirFor(workspaceDir))} -c user.name=gitspace -c user.email=artifacts@gitspace.sh -c commit.gpgsign=false ${args.join(' ')}`,
+    { encoding: 'utf8', env: env ? { ...process.env, ...env } : undefined },
+  ).trim();
+}
+
+/** HEAD of the workspace's artifacts mount (recorded as a run's startCommit). */
+export function mountHead(workspaceDir: string): string | null {
+  try {
+    return gitInMount(workspaceDir, ['rev-parse', 'HEAD']);
+  } catch {
+    return null;
+  }
+}
+
+export interface TriggerRunEnforcement {
+  violations: string[];
+  revertCommit?: string;
+  skippedForeignCommits: number;
+}
+
+/**
+ * The hard enforcement ring for trigger `writes`: after a run completes, diff
+ * the commits landed on the branch during the run window (startCommit..HEAD)
+ * and revert out-of-scope file changes with a forward-fix commit (safe — the
+ * publish gate guarantees nothing in the window left the machine).
+ *
+ * Attribution: commits whose provenance note names a DIFFERENT session or
+ * trigger are skipped (protects concurrent capture-attributed writes);
+ * everything else in the window is attributed to the run — artifacts
+ * branches are single-writer by design. An empty `writes` list means the
+ * trigger declared no scope: nothing is enforced.
+ */
+export async function enforceTriggerWritesPostRun(
+  _projectDir: string,
+  workspaceDir: string,
+  trigger: TriggerRecord,
+  run: { sessionId?: string; startCommit?: string },
+): Promise<TriggerRunEnforcement> {
+  const writes = (trigger.writes ?? []).filter(Boolean);
+  if (writes.length === 0 || !run.startCommit) return { violations: [], skippedForeignCommits: 0 };
+
+  let commits: string[] = [];
+  try {
+    commits = gitInMount(workspaceDir, ['rev-list', '--reverse', `${run.startCommit}..HEAD`]).split('\n').map((c) => c.trim()).filter(Boolean);
+  } catch {
+    return { violations: [], skippedForeignCommits: 0 };
+  }
+  if (commits.length === 0) return { violations: [], skippedForeignCommits: 0 };
+
+  const violations = new Set<string>();
+  let skippedForeignCommits = 0;
+  for (const commit of commits) {
+    let note: { session?: string; trigger?: string } | null = null;
+    try {
+      note = JSON.parse(gitInMount(workspaceDir, ['notes', 'show', commit])) as { session?: string; trigger?: string };
+    } catch { /* no note — attributable to the run window */ }
+    if (note && ((note.session && run.sessionId && note.session !== run.sessionId) || (note.trigger && note.trigger !== trigger.id))) {
+      skippedForeignCommits += 1;
+      continue;
+    }
+    let changed: string[] = [];
+    try {
+      changed = gitInMount(workspaceDir, ['diff-tree', '--no-commit-id', '--name-only', '-r', commit]).split('\n').map((f) => f.trim()).filter(Boolean);
+    } catch { continue; }
+    for (const file of changed) {
+      if (file === '.gitattributes' || file.startsWith(`${TRIGGER_DIR}/`)) continue; // run bookkeeping is always in scope
+      if (!pathInScope(file, writes)) violations.add(file);
+    }
+  }
+  if (violations.size === 0) return { violations: [], skippedForeignCommits };
+
+  // Forward-fix: restore each out-of-scope path to its startCommit state
+  // (delete paths that did not exist there).
+  const paths = [...violations].sort();
+  for (const file of paths) {
+    const existedAtStart = (() => {
+      try { gitInMount(workspaceDir, ['cat-file', '-e', `${run.startCommit}:${JSON.stringify(file).slice(1, -1)}`]); return true; } catch { return false; }
+    })();
+    if (existedAtStart) gitInMount(workspaceDir, ['checkout', run.startCommit!, '--', JSON.stringify(file)]);
+    else {
+      try { gitInMount(workspaceDir, ['rm', '-f', '-q', '--', JSON.stringify(file)]); } catch { /* already gone */ }
+    }
+  }
+  gitInMount(workspaceDir, ['add', '-A']);
+  const message = `revert: trigger ${trigger.id} wrote outside its scope (${paths.join(', ')})`;
+  gitInMount(workspaceDir, ['commit', '-q', '-m', JSON.stringify(message)], { GSSH_ARTIFACTS_CAPTURE: '1' });
+  const revertCommit = gitInMount(workspaceDir, ['rev-parse', 'HEAD']);
+  try {
+    gitInMount(workspaceDir, ['notes', 'add', '-f', '-m', JSON.stringify(JSON.stringify({ tool: 'trigger-enforcement', trigger: trigger.id })).slice(1, -1), revertCommit]);
+  } catch { /* note best-effort */ }
+  return { violations: paths, revertCommit, skippedForeignCommits };
+}
+
+/**
+ * Close a run: enforce the write scope over the run window, then record
+ * ok (clean) or fail (violations reverted). The one completion path shared
+ * by the scheduler and run-now.
+ */
+export async function completeTriggerRun(
+  projectDir: string,
+  workspaceDir: string,
+  triggerId: string,
+  opts: { sessionId?: string } = {},
+): Promise<{ status: 'ok' | 'fail'; enforcement: TriggerRunEnforcement }> {
+  const trigger = listTriggers(workspaceDir).find((t) => t.id === triggerId);
+  if (!trigger) throw new SpacesError(`Unknown trigger: ${triggerId}`, 'USER_ERROR', 1);
+  const pendingEntry = [...(trigger.runLog ?? [])].reverse().find((r) => r.status === 'pending');
+  const enforcement = await enforceTriggerWritesPostRun(projectDir, workspaceDir, trigger, {
+    sessionId: opts.sessionId,
+    startCommit: pendingEntry?.startCommit,
+  });
+  if (enforcement.violations.length > 0) {
+    await recordTriggerRun(projectDir, workspaceDir, triggerId, {
+      status: 'fail',
+      sessionId: opts.sessionId,
+      note: `out-of-scope writes reverted: ${enforcement.violations.join(', ')}`,
+    });
+    return { status: 'fail', enforcement };
+  }
+  await recordTriggerRun(projectDir, workspaceDir, triggerId, { status: 'ok', sessionId: opts.sessionId });
+  return { status: 'ok', enforcement };
 }

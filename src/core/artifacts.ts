@@ -21,6 +21,7 @@ import { createHash } from 'crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync, appendFileSync } from 'fs';
 import { dirname, join } from 'path';
 import { SpacesError } from '../types/errors.js';
+import { pathInScope } from './artifact-cap.js';
 import { escapeShellArg } from '../utils/shell-escape.js';
 
 const execAsync = promisify(exec);
@@ -292,6 +293,21 @@ export interface CaptureResult {
   pointers: string[];
 }
 
+
+/** Enforce a write-scope (capability globs) over a capture's file set —
+ *  the mechanical enforcement ring for callers that carry a scope. */
+function assertWritesInScope(files: CaptureFile[], allowedWrites: string[] | undefined): void {
+  if (!allowedWrites) return;
+  const outside = files.map((f) => f.path).filter((p) => !pathInScope(p, allowedWrites));
+  if (outside.length > 0) {
+    throw new SpacesError(
+      `Write scope violation: ${outside.join(', ')} outside allowed globs (${allowedWrites.join(', ') || 'none'})`,
+      'USER_ERROR',
+      1,
+    );
+  }
+}
+
 function assertSafeRelPath(rel: string): void {
   if (!rel || rel.startsWith('/') || rel.split('/').some((s) => s === '' || s === '.' || s === '..')) {
     throw new SpacesError(`Unsafe artifact path: ${rel}`, 'USER_ERROR', 1);
@@ -306,9 +322,10 @@ export async function captureArtifacts(
   projectDir: string,
   mountDir: string,
   files: CaptureFile[],
-  opts: { message?: string; provenance?: CaptureProvenance; pointerThresholdBytes?: number } = {},
+  opts: { message?: string; provenance?: CaptureProvenance; pointerThresholdBytes?: number; allowedWrites?: string[] } = {},
 ): Promise<CaptureResult> {
   if (files.length === 0) throw new SpacesError('captureArtifacts: no files given', 'USER_ERROR', 1);
+  assertWritesInScope(files, opts.allowedWrites);
   const { blobsDir } = artifactPaths(projectDir);
   const threshold = opts.pointerThresholdBytes ?? DEFAULT_POINTER_THRESHOLD_BYTES;
   const pointers = files.filter((f) => writeCaptureFile(blobsDir, mountDir, f, threshold)).map((f) => f.path);
@@ -383,9 +400,10 @@ export function captureArtifactsSync(
   projectDir: string,
   mountDir: string,
   files: CaptureFile[],
-  opts: { message?: string; provenance?: CaptureProvenance; pointerThresholdBytes?: number } = {},
+  opts: { message?: string; provenance?: CaptureProvenance; pointerThresholdBytes?: number; allowedWrites?: string[] } = {},
 ): CaptureResult {
   if (files.length === 0) throw new SpacesError('captureArtifacts: no files given', 'USER_ERROR', 1);
+  assertWritesInScope(files, opts.allowedWrites);
   const { blobsDir } = artifactPaths(projectDir);
   const threshold = opts.pointerThresholdBytes ?? DEFAULT_POINTER_THRESHOLD_BYTES;
   const pointers = files.filter((f) => writeCaptureFile(blobsDir, mountDir, f, threshold)).map((f) => f.path);

@@ -102,10 +102,69 @@ export function registerSpaceCommands(parent: Command): void {
   configureSpaceHelpRecursively(cmd);
 }
 
-/** Artifact-protocol verbs (docs/ARTIFACT-PROTOCOL.md). Phase 1 ships repair;
- *  commit/promote/share land with later phases. */
+/** Artifact-protocol verbs (docs/ARTIFACT-PROTOCOL.md). share lands Phase 5. */
 function registerSpaceArtifactsCommands(space: Command): void {
   const artifacts = space.command('artifacts').description('Workspace artifacts (mount at .gitspace/artifacts)');
+
+  artifacts
+    .command('commit <paths...>')
+    .description('Capture files already written in the artifacts mount: pointer split + provenance in one commit')
+    .requiredOption('-m, --message <message>', 'Commit message')
+    .option('--cap <token>', 'Capability token (from a trigger run prompt) — verified, and the write scope is enforced')
+    .action(withErrorHandler(async (paths: string[], options: { message: string; cap?: string }) => {
+      const ctx = requireSessionContext();
+      const { getProjectDir } = await import('../../core/config.js');
+      const { captureArtifacts, artifactsMountDir } = await import('../../core/artifacts.js');
+      const { join } = await import('path');
+      const projectDir = getProjectDir(ctx.project);
+      const mount = artifactsMountDir(join(projectDir, 'workspaces', ctx.workspace));
+
+      let allowedWrites: string[] | undefined;
+      let provenance: Record<string, string | undefined> = { tool: 'cli' };
+      if (options.cap) {
+        const { verifyArtifactCap, capAllows, parseArtifactUri, formatArtifactUri } = await import('../../core/artifact-cap.js');
+        const { getOrCreateArtifactCapKeypair } = await import('../../core/artifact-cap-key.js');
+        const cap = verifyArtifactCap(options.cap, { publicKey: getOrCreateArtifactCapKeypair().publicKey });
+        for (const p of paths) {
+          if (!capAllows(cap, 'write', parseArtifactUri(formatArtifactUri(ctx.project, ctx.workspace, p)))) {
+            const { SpacesError } = await import('../../types/errors.js');
+            throw new SpacesError(`Capability does not permit writing ${p} (scope: ${cap.scope.join(', ')})`, 'USER_ERROR', 1);
+          }
+        }
+        allowedWrites = cap.scope.map((u) => { try { return parseArtifactUri(u).relPath || '**'; } catch { return '(invalid)'; } });
+        provenance = { tool: cap.sub.kind, ...(cap.sub.kind === 'trigger' ? { trigger: cap.sub.id } : {}), ...(cap.sub.kind === 'session' ? { session: cap.sub.id } : {}) };
+      }
+      const result = await captureArtifacts(projectDir, mount, paths.map((p) => ({ path: p, sourceFile: join(mount, p) })), {
+        message: options.message,
+        provenance,
+        allowedWrites,
+      });
+      logger.success(`Captured ${paths.length} file(s) → ${result.commit.slice(0, 8)}${result.pointers.length ? ` (${result.pointers.length} as LFS pointers)` : ''}`);
+    }));
+
+  artifacts
+    .command('promote <source> <destRelPath>')
+    .description('Promote a working file (e.g. session scratch) into the versioned artifacts tree — the TYPING act')
+    .option('-m, --message <message>', 'Commit message')
+    .action(withErrorHandler(async (source: string, destRelPath: string, options: { message?: string }) => {
+      const ctx = requireSessionContext();
+      const { getProjectDir } = await import('../../core/config.js');
+      const { captureArtifacts, artifactsMountDir } = await import('../../core/artifacts.js');
+      const { join, resolve } = await import('path');
+      const { existsSync } = await import('fs');
+      const projectDir = getProjectDir(ctx.project);
+      const mount = artifactsMountDir(join(projectDir, 'workspaces', ctx.workspace));
+      const src = resolve(source);
+      if (!existsSync(src)) {
+        const { SpacesError } = await import('../../types/errors.js');
+        throw new SpacesError(`Source not found: ${source}`, 'USER_ERROR', 1);
+      }
+      const result = await captureArtifacts(projectDir, mount, [{ path: destRelPath, sourceFile: src }], {
+        message: options.message ?? `promote: ${destRelPath}`,
+        provenance: { tool: 'promote' },
+      });
+      logger.success(`Promoted → ${destRelPath} (${result.commit.slice(0, 8)}). It now types as a curated artifact (feeds, rails, precedents).`);
+    }));
 
   artifacts
     .command('repair')

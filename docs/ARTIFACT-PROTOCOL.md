@@ -236,14 +236,16 @@ gssh-share:<base64url(canonical sorted-key JSON)>
 
 ## Trigger `writes` enforcement tie-in
 
-`TriggerRecord.writes` (`triggers.ts:25`) is currently prompt-only, injected in exactly two strings (`app.web.tsx:3639`, `trigger-scheduler.ts:54-63`). It becomes a real capability with **no schema change**:
+`TriggerRecord.writes` (`triggers.ts`) became a real capability with **no schema change** — implemented (Phase 3) with one adjustment forced by ground truth:
 
-1. **Mint + inject**: `trigger-scheduler.ts` (and the UI run-now path) mints a write-cap `{sub:{kind:'trigger', id}, verbs:['write'], scope: record.writes}` and exports it as `GSSH_ARTIFACT_CAP` into the trigger session's environment, alongside `GSSH_TRIGGER_ID`.
-2. **Hard enforcement where identity flows**: `artifact-write` RPC and `gssh space artifacts commit` verify the cap's globs daemon-side — mechanical, unbypassable on that channel.
-3. **Advisory enforcement on raw git**: the pre-commit hook rejects staged paths outside the cap's globs when `GSSH_ARTIFACT_CAP` is present.
-4. **Detect-and-revert backstop**: `recordTriggerRun` diffs commits landed on the branch during the run window, attributed via the post-commit provenance notes (not pure time-window, to avoid reverting a concurrent legitimate hand-commit), and reverts out-of-scope commits with a forward-fix commit (safe pre-push), flagging the run failed and raising an inbox notification.
+**SDK gap (discovered at implementation)**: `createAgentSession` exposes no per-session ambient environment, and the bash tool's `env` is per-invocation (model-supplied) — so the designed `GSSH_ARTIFACT_CAP`/`GSSH_TRIGGER_ID` env injection is NOT possible today. Upstream ask filed conceptually; until then the cap rides the RUN PROMPT and the hard ring moved down a level:
 
-Honest grading, stated in the docs and prompts: size/pointer discipline is hard-enforced at the push gate for everyone; path scopes are hard-enforced on the identity-carrying RPC/CLI channel and detect-and-revert for raw git, because git carries no caller identity and env vars are strippable. The two prompt strings are reworded from "contract" to "enforced scope."
+1. **Mint + deliver**: the scheduler and run-now RPC mint a write-cap `{sub:{kind:'trigger', id}, verbs:['write'], scope}` signed with a dedicated machine-local keypair (`artifact-cap-key.ts`, 0600 under the identity dir — share links in Phase 5 bind to the REGISTERED machine key instead) and include the token in the run prompt with usage instructions.
+2. **Mechanical enforcement where the token flows**: `artifact-write` RPC and `gssh space artifacts commit --cap` verify the signature (fail closed) and enforce the scope globs; verified subjects drive provenance.
+3. **Hard backstop for raw git** (the ring that catches everything): each run records `startCommit` at pending; on completion `completeTriggerRun` diffs the run window, skips commits whose provenance note names a DIFFERENT session/trigger (protects concurrent attributed writes; single-writer branches otherwise), reverts out-of-scope changes with a forward-fix commit (safe pre-push), records the run **failed** with the reverted paths, and raises an inbox notification.
+4. The pre-commit hook's cap check (advisory ring) is DEFERRED until per-session env exists — without env there is nothing session-scoped for the hook to read.
+
+Honest grading, stated in the docs and prompts: size/pointer discipline is hard-enforced at the push gate for everyone; path scopes are hard-enforced on the token-carrying RPC/CLI channel and detect-and-reverted for raw git. Prompts say "enforced write scope … automatically reverted", which is now literally true.
 
 ---
 
