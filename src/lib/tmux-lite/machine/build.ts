@@ -287,7 +287,10 @@ export function buildMachineSnapshot(params: {
   const agentSessionIdsByWorkspaceId: Record<string, string[]> = {};
 
   for (const [workspaceId, workspace] of Object.entries(agentStateByWorkspaceId)) {
-    const workspaceRecord = workspacesById[workspaceId];
+    // Project agents live on the '<project>:@base' pseudo-workspace (no
+    // scanner record) — pass their sessions through so transcripts render.
+    const workspaceRecord = workspacesById[workspaceId]
+      ?? (workspaceId.endsWith(':@base') ? { projectId: workspaceId.slice(0, -':@base'.length) } as (typeof workspacesById)[string] : undefined);
     if (!workspaceRecord) continue;
     const archivedSessions = getArchivedSessions(workspaceId);
     const archivedSessionIds = new Set(archivedSessions.map((session) => session.sessionId));
