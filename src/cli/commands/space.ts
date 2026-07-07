@@ -98,7 +98,34 @@ export function registerSpaceCommands(parent: Command): void {
   registerSpaceBundleCommands(cmd);
   registerSpaceJournalCommands(cmd);
   registerSpaceGuideCommands(cmd);
+  registerSpaceArtifactsCommands(cmd);
   configureSpaceHelpRecursively(cmd);
+}
+
+/** Artifact-protocol verbs (docs/ARTIFACT-PROTOCOL.md). Phase 1 ships repair;
+ *  commit/promote/share land with later phases. */
+function registerSpaceArtifactsCommands(space: Command): void {
+  const artifacts = space.command('artifacts').description('Workspace artifacts (mount at .gitspace/artifacts)');
+
+  artifacts
+    .command('repair')
+    .description('Convert raw large files in never-pushed commits to LFS pointers (fixes publish-gate refusals)')
+    .action(withErrorHandler(async () => {
+      const ctx = requireSessionContext();
+      const { getProjectDir } = await import('../../core/config.js');
+      const { repairArtifacts, artifactsMountDir, ensureArtifactsRepo } = await import('../../core/artifacts.js');
+      const { join } = await import('path');
+      const projectDir = getProjectDir(ctx.project);
+      await ensureArtifactsRepo(projectDir); // repair relies on the pre-commit converter being current
+      const mount = artifactsMountDir(join(projectDir, 'workspaces', ctx.workspace));
+      const r = await repairArtifacts(projectDir, mount);
+      if (r.repaired === 0) {
+        logger.info('Nothing to repair — no raw large files in unpushed commits.');
+        return;
+      }
+      logger.success(`Repaired: squashed ${r.repaired} commit(s) into ${r.commit?.slice(0, 8)} with pointer conversion.`);
+      logger.info('Sync will push this branch on its next 5-minute tick.');
+    }));
 }
 
 

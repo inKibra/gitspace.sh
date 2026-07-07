@@ -605,6 +605,9 @@ void getAgentControlReady().catch((error) => {
 // branches make this conflict-free; failures are quiet (offline is normal).
 {
   let syncing = false;
+  // De-dup gate-refusal inbox items per (project, branch, offender set) —
+  // the tick repeats every 5 minutes but the user needs telling once.
+  const notifiedGateRefusals = new Set<string>();
   const t = setInterval(() => {
     if (syncing) return;
     syncing = true;
@@ -620,6 +623,21 @@ void getAgentControlReady().catch((error) => {
             if (!(await getArtifactsRemote(projectDir))) continue;
             const r = await syncGithubArtifacts(projectDir);
             if (r.pushed || r.blobsUploaded) console.error(`[artifacts] synced ${projectName}${r.blobsUploaded ? ` (+${r.blobsUploaded} blobs)` : ''}`);
+            // Publish-gate refusals must be LOUD: a silently stalled
+            // single-writer branch is the top agent-confusion risk.
+            for (const refusal of r.refused ?? []) {
+              const key = `${projectName}:${refusal.branch}:${refusal.offenders.map((o) => o.path).sort().join(',')}`;
+              if (notifiedGateRefusals.has(key)) continue;
+              notifiedGateRefusals.add(key);
+              const files = refusal.offenders.map((o) => `${o.path} (${(o.size / (1024 * 1024)).toFixed(1)} MB)`).join(', ');
+              console.error(`[artifacts] push REFUSED for ${projectName}/${refusal.branch}: raw large files ${files}`);
+              addInboxItem(createInboxNotification(
+                `artifacts:${projectName}:${refusal.branch}`,
+                `artifacts · ${projectName}`,
+                'osc',
+                `Push of artifacts branch '${refusal.branch}' refused: ${files} committed raw (not as LFS pointers). Run \`gssh space artifacts repair\` in that workspace — sync resumes automatically.`,
+              ));
+            }
           } catch { /* offline / auth — retry next tick */ }
         }
       } catch { /* scan failed */ }

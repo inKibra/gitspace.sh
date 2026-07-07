@@ -50,10 +50,12 @@ export function artifactsMountDir(workspaceOrBaseDir: string): string {
   return join(workspaceOrBaseDir, MOUNT_RELATIVE);
 }
 
-async function git(cwdOrRepo: string, args: string, opts: { id?: boolean } = {}): Promise<string> {
+async function git(cwdOrRepo: string, args: string, opts: { id?: boolean; env?: Record<string, string> } = {}): Promise<string> {
   const cmd = `git -C ${escapeShellArg(cwdOrRepo)} ${opts.id ? `${GIT_ID} ` : ''}${args}`;
   try {
-    const { stdout } = await execAsync(cmd);
+    const { stdout } = opts.env
+      ? await execAsync(cmd, { env: { ...process.env, ...opts.env }, encoding: 'utf8' })
+      : await execAsync(cmd);
     return stdout.trim();
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -61,12 +63,18 @@ async function git(cwdOrRepo: string, args: string, opts: { id?: boolean } = {})
   }
 }
 
-/** Lazily create the project's bare artifacts repo with a root commit on main. */
+/** Lazily create the project's bare artifacts repo with a root commit on main.
+ *  Also (re)installs the managed hooks on EVERY call — existing projects
+ *  self-migrate on the next mount touch, and hooks never travel with clones. */
 export async function ensureArtifactsRepo(projectDir: string): Promise<string> {
   const { repoDir } = artifactPaths(projectDir);
-  if (existsSync(join(repoDir, 'HEAD'))) return repoDir;
+  if (existsSync(join(repoDir, 'HEAD'))) {
+    installArtifactHooks(projectDir);
+    return repoDir;
+  }
   await initBareArtifactsRepo(repoDir);
   await seedRootCommit(repoDir);
+  installArtifactHooks(projectDir);
   return repoDir;
 }
 
@@ -83,6 +91,111 @@ async function seedRootCommit(repoDir: string): Promise<void> {
 async function initBareArtifactsRepo(repoDir: string): Promise<void> {
   mkdirSync(repoDir, { recursive: true });
   await git(repoDir, `init --bare --initial-branch=${MAIN_BRANCH} -q`);
+}
+
+// ── managed hooks (docs/ARTIFACT-PROTOCOL.md Q1) ────────────────────────────
+//
+// Installed ONCE in the bare repo's hooks/ — verified to fire for commits in
+// every current and future worktree mount (hook resolution goes through the
+// git common dir). MUST be bash: dash broke on this script and failed OPEN
+// (exit 0 with raw bytes committed). Hooks are ergonomics + safety net;
+// `--no-verify` bypasses them, so the hard boundary is the push/rollup gate.
+
+const HOOK_VERSION = 1;
+
+/** pre-commit: auto-convert staged blobs ≥ threshold into blob-store bytes +
+ *  a git-LFS pointer + a .gitattributes line — identical to capture output.
+ *  Aborts the commit (non-zero) if the blob-store write cannot be verified. */
+function preCommitHookScript(blobsDir: string): string {
+  return `#!/bin/bash
+# gssh-hook-v${HOOK_VERSION} pre-commit — gitspace artifacts pointer discipline.
+# Managed by gssh (ensureArtifactsRepo); local edits are overwritten.
+set -uo pipefail
+BLOBS_DIR=${escapeShellArg(blobsDir)}
+THRESHOLD=${DEFAULT_POINTER_THRESHOLD_BYTES}
+[ "\${GSSH_ARTIFACTS_CAPTURE:-}" = "1" ] && exit 0
+
+while IFS= read -r -d '' p; do
+  sha=$(git rev-parse -q --verify ":$p" 2>/dev/null) || continue
+  size=$(git cat-file -s "$sha" 2>/dev/null) || continue
+  [ "$size" -lt "$THRESHOLD" ] && continue
+
+  oid=$(git cat-file blob "$sha" | sha256sum | awk '{print $1}')
+  shard="$BLOBS_DIR/\${oid:0:2}"
+  mkdir -p "$shard" || { echo "gssh pre-commit: cannot create blob store at $BLOBS_DIR — aborting commit" >&2; exit 1; }
+  blob="$shard/$oid"
+  if [ ! -f "$blob" ]; then
+    tmp="$blob.part.$$"
+    if ! git cat-file blob "$sha" > "$tmp"; then rm -f "$tmp"; echo "gssh pre-commit: blob store write failed for $p — aborting commit" >&2; exit 1; fi
+    actual=$(wc -c < "$tmp" | tr -d ' ')
+    if [ "$actual" != "$size" ]; then rm -f "$tmp"; echo "gssh pre-commit: blob store verification failed for $p ($actual != $size bytes) — aborting commit" >&2; exit 1; fi
+    mv "$tmp" "$blob" || { rm -f "$tmp"; echo "gssh pre-commit: blob store move failed for $p — aborting commit" >&2; exit 1; }
+  fi
+  [ -s "$blob" ] || { echo "gssh pre-commit: blob missing after write for $p — aborting commit" >&2; exit 1; }
+
+  pointer=$(printf 'version https://git-lfs.github.com/spec/v1\\noid sha256:%s\\nsize %s' "$oid" "$size")
+  psha=$(printf '%s\\n' "$pointer" | git hash-object -w --stdin) || { echo "gssh pre-commit: hash-object failed for $p" >&2; exit 1; }
+  git update-index --cacheinfo "100644,$psha,$p" || { echo "gssh pre-commit: update-index failed for $p — aborting commit" >&2; exit 1; }
+  printf '%s\\n' "$pointer" > "$p"
+
+  case "$p" in
+    *" "*) pat="\\"$p\\"" ;;
+    *) pat="$p" ;;
+  esac
+  line="$pat filter=lfs diff=lfs merge=lfs -text"
+  touch .gitattributes
+  grep -qxF -- "$line" .gitattributes || { printf '%s\\n' "$line" >> .gitattributes; git add .gitattributes; }
+  echo "gssh: $p ($size bytes) committed as LFS pointer \${oid:0:12}" >&2
+done < <(git diff --cached --name-only --diff-filter=ACMR -z)
+
+exit 0
+`;
+}
+
+/** post-commit: provenance note for hand commits (capture attaches richer
+ *  notes itself and sets GSSH_ARTIFACTS_CAPTURE=1 to skip this). */
+function postCommitHookScript(): string {
+  return `#!/bin/bash
+# gssh-hook-v${HOOK_VERSION} post-commit — provenance note for hand commits.
+# Managed by gssh (ensureArtifactsRepo); local edits are overwritten.
+[ "\${GSSH_ARTIFACTS_CAPTURE:-}" = "1" ] && exit 0
+note='{"tool":"hand-commit"'
+if [ -n "\${GSSH_SESSION_ID:-}" ]; then note="$note,\\"session\\":\\"\${GSSH_SESSION_ID}\\""; fi
+if [ -n "\${GSSH_TRIGGER_ID:-}" ]; then note="$note,\\"trigger\\":\\"\${GSSH_TRIGGER_ID}\\""; fi
+note="$note}"
+git -c user.name=gitspace -c user.email=artifacts@gitspace.sh -c commit.gpgsign=false notes add -f -m "$note" HEAD >/dev/null 2>&1
+exit 0
+`;
+}
+
+/** Idempotent, versioned hook install — write-if-changed by full content
+ *  (covers version bumps AND a moved project dir re-baking BLOBS_DIR). */
+export function installArtifactHooks(projectDir: string): void {
+  const { repoDir, blobsDir } = artifactPaths(projectDir);
+  const hooksDir = join(repoDir, 'hooks');
+  const wanted: Array<[string, string]> = [
+    ['pre-commit', preCommitHookScript(blobsDir)],
+    ['post-commit', postCommitHookScript()],
+  ];
+  for (const [name, content] of wanted) {
+    const path = join(hooksDir, name);
+    const current = existsSync(path) ? readFileSync(path, 'utf8') : null;
+    if (current === content) continue;
+    mkdirSync(hooksDir, { recursive: true });
+    writeFileSync(path, content, { mode: 0o755 });
+  }
+}
+
+/** Hook health for status surfaces — a regressed hook FAILS OPEN, so drift
+ *  must be visible. */
+export function artifactHooksStatus(projectDir: string): 'ok' | 'stale' | 'missing' {
+  const { repoDir, blobsDir } = artifactPaths(projectDir);
+  const pre = join(repoDir, 'hooks', 'pre-commit');
+  const post = join(repoDir, 'hooks', 'post-commit');
+  if (!existsSync(pre) || !existsSync(post)) return 'missing';
+  const preOk = readFileSync(pre, 'utf8') === preCommitHookScript(blobsDir);
+  const postOk = readFileSync(post, 'utf8') === postCommitHookScript();
+  return preOk && postOk ? 'ok' : 'stale';
 }
 
 async function branchExists(repoDir: string, branch: string): Promise<boolean> {
@@ -204,7 +317,9 @@ export async function captureArtifacts(
   const added = files.map((f) => escapeShellArg(f.path)).concat(attributesTouched ? [escapeShellArg('.gitattributes')] : []).join(' ');
   await git(mountDir, `add -- ${added}`);
   const message = opts.message ?? `capture: ${files.map((f) => f.path).join(', ')}`.slice(0, 200);
-  await git(mountDir, `commit -q -m ${escapeShellArg(message)}`, { id: true });
+  // Capture is authoritative for pointer split + provenance; the managed
+  // hooks stand down when this marker is set.
+  await git(mountDir, `commit -q -m ${escapeShellArg(message)}`, { id: true, env: { GSSH_ARTIFACTS_CAPTURE: '1' } });
   const commit = await git(mountDir, 'rev-parse HEAD');
   if (opts.provenance && Object.keys(opts.provenance).length > 0) {
     await git(mountDir, `notes add -f -m ${escapeShellArg(JSON.stringify(opts.provenance))} ${commit}`, { id: true });
@@ -275,16 +390,16 @@ export function captureArtifactsSync(
   const threshold = opts.pointerThresholdBytes ?? DEFAULT_POINTER_THRESHOLD_BYTES;
   const pointers = files.filter((f) => writeCaptureFile(blobsDir, mountDir, f, threshold)).map((f) => f.path);
   const attributesTouched = ensureLfsAttributes(mountDir, pointers);
-  const gitS = (args: string): string => {
+  const gitS = (args: string, env?: Record<string, string>): string => {
     try {
-      return execSync(`git -C ${escapeShellArg(mountDir)} ${GIT_ID} ${args}`, { encoding: 'utf8' }).trim();
+      return execSync(`git -C ${escapeShellArg(mountDir)} ${GIT_ID} ${args}`, { encoding: 'utf8', env: env ? { ...process.env, ...env } : undefined }).trim();
     } catch (e) {
       throw new SpacesError(`git failed (${args.split(' ')[0]}): ${e instanceof Error ? e.message : e}`, 'SYSTEM_ERROR', 1);
     }
   };
   gitS(`add -- ${files.map((f) => escapeShellArg(f.path)).concat(attributesTouched ? [escapeShellArg('.gitattributes')] : []).join(' ')}`);
   const message = opts.message ?? `capture: ${files.map((f) => f.path).join(', ')}`.slice(0, 200);
-  gitS(`commit -q -m ${escapeShellArg(message)}`);
+  gitS(`commit -q -m ${escapeShellArg(message)}`, { GSSH_ARTIFACTS_CAPTURE: '1' });
   const commit = gitS('rev-parse HEAD');
   if (opts.provenance && Object.keys(opts.provenance).length > 0) {
     gitS(`notes add -f -m ${escapeShellArg(JSON.stringify(opts.provenance))} ${commit}`);
@@ -402,6 +517,41 @@ async function defaultGithubBlobFetcher(projectDir: string): Promise<ArtifactBlo
   }
 }
 
+// ── publish gate (docs/ARTIFACT-PROTOCOL.md Q1) ─────────────────────────────
+//
+// `--no-verify` escapes the hooks, so the bypass-proof boundary is here: no
+// raw (non-pointer) blob ≥ threshold ever leaves the machine (sync) or
+// reaches main (rollup). Gated bytes provably never left, which is what makes
+// `repairArtifacts` safe.
+
+export interface RawBlobOffender {
+  path: string;
+  size: number;
+}
+
+/** Scan a rev-list range for raw blobs ≥ the pointer threshold. Pointers are
+ *  ~130 bytes, so size alone separates raw bytes from discipline-conformant
+ *  content. `rangeArgs` is trusted caller-built rev-list syntax. */
+export async function scanRawBlobOffenders(repoDir: string, rangeArgs: string): Promise<RawBlobOffender[]> {
+  const cmd = `git -C ${escapeShellArg(repoDir)} rev-list --objects ${rangeArgs} | git -C ${escapeShellArg(repoDir)} cat-file --batch-check='%(objecttype) %(objectsize) %(rest)'`;
+  let stdout = '';
+  try {
+    stdout = (await execAsync(cmd, { maxBuffer: 64 * 1024 * 1024 })).stdout;
+  } catch (e) {
+    throw new SpacesError(`artifacts gate scan failed: ${e instanceof Error ? e.message : e}`, 'SYSTEM_ERROR', 1);
+  }
+  const seen = new Map<string, number>();
+  for (const line of stdout.split('\n')) {
+    const m = line.match(/^blob (\d+) (.+)$/);
+    if (!m) continue;
+    const size = Number(m[1]);
+    if (size < DEFAULT_POINTER_THRESHOLD_BYTES) continue;
+    const path = m[2]!;
+    seen.set(path, Math.max(seen.get(path) ?? 0, size));
+  }
+  return [...seen.entries()].map(([path, size]) => ({ path, size }));
+}
+
 // ── roll-up / abandon ───────────────────────────────────────────────────────
 
 /** Where (if anywhere) a branch is currently checked out as a worktree. */
@@ -430,6 +580,18 @@ export async function rollupArtifacts(
   const { repoDir } = artifactPaths(projectDir);
   if (branch === MAIN_BRANCH) throw new SpacesError('Cannot roll up main into itself', 'USER_ERROR', 1);
   if (!(await branchExists(repoDir, branch))) throw new SpacesError(`No artifacts branch: ${branch}`, 'USER_ERROR', 1);
+
+  // Gate: a --no-verify raw blob committed between sync ticks must not reach
+  // main through a rollup merge either.
+  const offenders = await scanRawBlobOffenders(repoDir, `${escapeShellArg(branch)} --not ${MAIN_BRANCH}`);
+  if (offenders.length > 0) {
+    const list = offenders.map((o) => `${o.path} (${(o.size / (1024 * 1024)).toFixed(1)} MB)`).join(', ');
+    throw new SpacesError(
+      `Roll-up of ${branch} refused: raw large files not stored as LFS pointers — ${list}. Run \`gssh space artifacts repair\` in that workspace (or \`gssh artifacts repair --workspace ${branch}\`), then roll up again.`,
+      'USER_ERROR',
+      1,
+    );
+  }
 
   let mainDir = await worktreeFor(repoDir, MAIN_BRANCH);
   let temp: string | null = null;
@@ -541,13 +703,15 @@ export async function setArtifactsRemote(projectDir: string, url: string): Promi
 export interface ArtifactsSyncResult {
   pushed: boolean;
   fastForwarded: boolean;
+  /** Branches the publish gate refused (raw ≥2MB blobs — repair, then re-sync). */
+  refused?: Array<{ branch: string; offenders: RawBlobOffender[] }>;
 }
 
 /** Git sync: fetch, fast-forward main (through the live main mount when one
- *  exists), push all branches. Conflict-free by construction — non-ff main
- *  means someone must roll up/curate manually. Blob transport is the GitHub
- *  tier's job (LFS batch API in artifacts-github.ts); BYO remotes move
- *  branches only. */
+ *  exists), gate every branch against raw large blobs, push the clean ones.
+ *  Conflict-free by construction — non-ff main means someone must roll
+ *  up/curate manually. Blob transport is the GitHub tier's job (LFS batch API
+ *  in artifacts-github.ts); BYO remotes move branches only. */
 export async function syncArtifacts(projectDir: string): Promise<ArtifactsSyncResult> {
   const { repoDir } = artifactPaths(projectDir);
   const remote = await getArtifactsRemote(projectDir);
@@ -565,8 +729,85 @@ export async function syncArtifacts(projectDir: string): Promise<ArtifactsSyncRe
       /* non-ff — leave for manual curation */
     }
   }
-  await git(repoDir, 'push origin --all');
-  return { pushed: true, fastForwarded };
+
+  // Publish gate: refuse any branch whose unpushed commits carry a raw
+  // (non-pointer) blob ≥ threshold; push the clean branches regardless so one
+  // bad branch never blocks the rest of the project.
+  const branches = (await git(repoDir, `for-each-ref --format='%(refname:short)' refs/heads`)).split('\n').map((b) => b.trim()).filter(Boolean);
+  const refused: NonNullable<ArtifactsSyncResult['refused']> = [];
+  const clean: string[] = [];
+  for (const branch of branches) {
+    const offenders = await scanRawBlobOffenders(repoDir, `${escapeShellArg(branch)} --not --remotes=origin`);
+    if (offenders.length > 0) refused.push({ branch, offenders });
+    else clean.push(branch);
+  }
+  if (refused.length === 0) {
+    await git(repoDir, 'push origin --all');
+    return { pushed: true, fastForwarded };
+  }
+  if (clean.length > 0) {
+    await git(repoDir, `push origin ${clean.map((b) => escapeShellArg(b)).join(' ')}`);
+  }
+  return { pushed: clean.length > 0, fastForwarded, refused };
+}
+
+export interface RepairResult {
+  /** Commits squashed into the repaired commit (0 = nothing to repair). */
+  repaired: number;
+  commit?: string;
+}
+
+/**
+ * Repair a mount whose branch the publish gate refused: soft-reset to just
+ * before the first offending commit and re-commit — the managed pre-commit
+ * hook performs the pointer conversion. Safe ONLY because the gate guarantees
+ * the offending bytes never left this machine; this is the one sanctioned
+ * history modification (general daemon-side rewrite stays off the table).
+ */
+export async function repairArtifacts(projectDir: string, mountDir: string): Promise<RepairResult> {
+  const { repoDir } = artifactPaths(projectDir);
+  const branch = await git(mountDir, 'branch --show-current');
+  if (!branch) throw new SpacesError('repair: mount is not on a branch', 'USER_ERROR', 1);
+  const dirty = (await git(mountDir, 'status --porcelain')).split('\n').filter((l) => l.trim() && !l.startsWith('??'));
+  if (dirty.length > 0) {
+    throw new SpacesError('repair: mount has uncommitted changes — commit or stash them first', 'USER_ERROR', 1);
+  }
+
+  // Unpushed range: prefer the remote-tracking branch; otherwise a workspace
+  // branch's local-only commits are everything past main.
+  const hasRemoteBranch = await git(repoDir, `rev-parse --verify --quiet refs/remotes/origin/${escapeShellArg(branch)}`).then(() => true).catch(() => false);
+  const range = hasRemoteBranch
+    ? `HEAD --not refs/remotes/origin/${escapeShellArg(branch)}`
+    : branch !== MAIN_BRANCH
+      ? `HEAD --not ${MAIN_BRANCH}`
+      : 'HEAD';
+
+  const commits = (await git(mountDir, `rev-list --reverse ${range}`)).split('\n').map((c) => c.trim()).filter(Boolean);
+  let firstBad: string | null = null;
+  for (const c of commits) {
+    // Objects introduced by c alone. c^ always exists here (every artifacts
+    // repo has a seeded root commit below any workspace/main work).
+    const introduced = await scanRawBlobOffenders(repoDir, `${c} --not ${c}^`).catch(() => [] as RawBlobOffender[]);
+    if (introduced.length > 0) { firstBad = c; break; }
+  }
+  if (!firstBad) return { repaired: 0 };
+
+  const base = await git(mountDir, `rev-parse ${firstBad}^`);
+  const squashedCount = commits.length - commits.indexOf(firstBad);
+  const messages = (await git(mountDir, `log --reverse --format=%s ${base}..HEAD`)).split('\n').filter(Boolean);
+  await git(mountDir, `reset --soft ${base}`);
+  const message = `repair: convert large files to LFS pointers\n\nSquashed ${squashedCount} commit(s):\n${messages.map((m) => `- ${m}`).join('\n')}`;
+  // NO capture marker: the pre-commit hook must run — it is the converter.
+  await git(mountDir, `commit -q -m ${escapeShellArg(message)}`, { id: true });
+  const commit = await git(mountDir, 'rev-parse HEAD');
+
+  // Verify the rewritten range itself is clean — if the hook is missing or
+  // regressed, the repair commit would still carry raw bytes.
+  const remaining = await scanRawBlobOffenders(repoDir, `${commit} --not ${base}`);
+  if (remaining.length > 0) {
+    throw new SpacesError(`repair: conversion incomplete — ${remaining.map((o) => o.path).join(', ')} still raw (is the pre-commit hook installed? gssh artifacts status)`, 'SYSTEM_ERROR', 1);
+  }
+  return { repaired: squashedCount, commit };
 }
 
 /** Drop a workspace's artifacts branch (and its mount) without merging. */

@@ -17,7 +17,7 @@ import { promisify } from 'util';
 import { createHash } from 'crypto';
 import { existsSync, readdirSync, readFileSync, statSync, mkdirSync, renameSync, writeFileSync } from 'fs';
 import { join, dirname } from 'path';
-import { artifactPaths, artifactBlobPath, getArtifactsRemote, setArtifactsRemote, syncArtifacts, writeArtifactsPointerConfig, ensureArtifactsRepo, ensureLfsAttributes, listArtifactFiles, artifactsMountDir, type ArtifactBlobFetcher } from './artifacts.js';
+import { artifactPaths, artifactBlobPath, captureArtifacts, getArtifactsRemote, setArtifactsRemote, syncArtifacts, writeArtifactsPointerConfig, ensureArtifactsRepo, ensureLfsAttributes, listArtifactFiles, artifactsMountDir, type ArtifactBlobFetcher, type ArtifactsSyncResult } from './artifacts.js';
 import { readProjectConfig } from './config.js';
 import { SpacesError } from '../types/errors.js';
 
@@ -80,7 +80,7 @@ export async function provisionGithubArtifacts(
   await gh(['auth', 'setup-git'], { allowFail: true });
   await setArtifactsRemote(projectDir, url);
   try { await writeArtifactsPointerConfig(baseDir, { remote: url }); } catch { /* base missing */ }
-  await backfillLfsAttributes(baseDir);
+  await backfillLfsAttributes(projectDir, baseDir);
   const sync = await syncArtifacts(projectDir);
 
   // 3. Mirror the code repo's collaborators (best-effort, day-one access).
@@ -103,17 +103,18 @@ export async function provisionGithubArtifacts(
 
 /** Repos provisioned before capture-time attribute writing may hold pointer
  *  files with no .gitattributes coverage — GitHub LFS ignores those. Backfill
- *  through the base clone's main mount (best-effort; workspace branches get
- *  their lines from ongoing captures). */
-async function backfillLfsAttributes(baseDir: string): Promise<void> {
+ *  through the base clone's main mount via captureArtifacts (the only commit
+ *  constructor — provenance + hook standdown come for free). Best-effort;
+ *  workspace branches get their lines from ongoing captures. */
+async function backfillLfsAttributes(projectDir: string, baseDir: string): Promise<void> {
   try {
     const mount = artifactsMountDir(baseDir);
     if (!existsSync(join(mount, '.git'))) return;
     const pointers = listArtifactFiles(mount).filter((e) => e.pointer).map((e) => e.path);
     if (!ensureLfsAttributes(mount, pointers)) return;
-    const { execFile: ef } = await import('child_process');
-    const runGit = promisify(ef);
-    await runGit('git', ['-C', mount, '-c', 'user.name=gitspace', '-c', 'user.email=artifacts@gitspace.sh', '-c', 'commit.gpgsign=false', 'commit', '-q', '-am', 'lfs: backfill .gitattributes for existing pointers']);
+    await captureArtifacts(projectDir, mount, [
+      { path: '.gitattributes', sourceFile: join(mount, '.gitattributes') },
+    ], { message: 'lfs: backfill .gitattributes for existing pointers', provenance: { tool: 'lfs-backfill' } });
   } catch { /* best-effort */ }
 }
 
@@ -251,9 +252,9 @@ export function slugFromRemote(remote: string | null): string | null {
 }
 
 /** Full sync for a provisioned project: branches via git, blobs via LFS. */
-export async function syncGithubArtifacts(projectDir: string, deps: GithubLfsDeps = {}): Promise<{ pushed: boolean; blobsUploaded: number }> {
+export async function syncGithubArtifacts(projectDir: string, deps: GithubLfsDeps = {}): Promise<{ pushed: boolean; blobsUploaded: number; refused?: ArtifactsSyncResult['refused'] }> {
   const sync = await syncArtifacts(projectDir);
   const slug = slugFromRemote(await getArtifactsRemote(projectDir));
   const blobsUploaded = slug ? await uploadMissingBlobs(projectDir, slug, deps) : 0;
-  return { pushed: sync.pushed, blobsUploaded };
+  return { pushed: sync.pushed, blobsUploaded, refused: sync.refused };
 }

@@ -75,8 +75,34 @@ export function registerArtifactsCommands(program: Command): void {
         }
       }
       logger.info(`Blobs:          ${blobCount} local (${(blobBytes / (1024 * 1024)).toFixed(1)} MB)`);
+      const { artifactHooksStatus } = await import('../../core/artifacts.js');
+      const hooks = artifactHooksStatus(projectDir);
+      logger.info(`Hooks:          ${hooks}${hooks === 'ok' ? '' : ' — run any gssh workspace command to reinstall (pointer discipline is degraded until then)'}`);
       const branches = execFileSync('git', ['-C', repoDir, 'branch', '--format=%(refname:short) %(objectname:short) %(subject)'], { encoding: 'utf8' }).trim();
       logger.info(`Branches:\n${branches.split('\n').map((l) => `  ${l}`).join('\n')}`);
+    }));
+
+  cmd
+    .command('repair')
+    .description('Convert raw large files in never-pushed commits to LFS pointers (fixes publish-gate refusals)')
+    .option('--project <name>', 'Project (defaults to current)')
+    .option('--workspace <name>', "Workspace whose artifacts branch to repair (default: the project base's main mount)")
+    .action(withErrorHandler(async (options: { project?: string; workspace?: string }) => {
+      const { projectName, projectDir } = await resolveProject(options.project);
+      const { repairArtifacts, artifactsMountDir, ensureArtifactsRepo } = await import('../../core/artifacts.js');
+      const { getProjectBaseDir } = await import('../../core/config.js');
+      const { join } = await import('path');
+      const { logger } = await import('../../utils/logger.js');
+      await ensureArtifactsRepo(projectDir); // hooks must be current — repair relies on the pre-commit converter
+      const dir = options.workspace ? join(projectDir, 'workspaces', options.workspace) : getProjectBaseDir(projectName);
+      const mount = artifactsMountDir(dir);
+      const r = await repairArtifacts(projectDir, mount);
+      if (r.repaired === 0) {
+        logger.info('Nothing to repair — no raw large files in unpushed commits.');
+        return;
+      }
+      logger.success(`Repaired: squashed ${r.repaired} commit(s) into ${r.commit?.slice(0, 8)} with pointer conversion.`);
+      logger.info('Next sync will push the branch (auto-sync runs every 5 minutes, or: gssh artifacts sync).');
     }));
 
   const remote = cmd.command('remote').description('Manage the artifacts remote (BYO git URL)');
@@ -106,13 +132,20 @@ export function registerArtifactsCommands(program: Command): void {
       const { logger } = await import('../../utils/logger.js');
       const { getArtifactsRemote } = await import('../../core/artifacts.js');
       const { slugFromRemote, syncGithubArtifacts } = await import('../../core/artifacts-github.js');
+      const printRefusals = (refused?: Array<{ branch: string; offenders: Array<{ path: string; size: number }> }>): void => {
+        for (const r of refused ?? []) {
+          logger.warning(`Push REFUSED for branch '${r.branch}': ${r.offenders.map((o) => `${o.path} (${(o.size / (1024 * 1024)).toFixed(1)} MB)`).join(', ')} committed raw — run: gssh artifacts repair --workspace ${r.branch}`);
+        }
+      };
       if (slugFromRemote(await getArtifactsRemote(projectDir))) {
         const r = await syncGithubArtifacts(projectDir);
         logger.success(`Synced (branches pushed: ${r.pushed}, blobs uploaded to GitHub LFS: ${r.blobsUploaded}).`);
+        printRefusals(r.refused);
         return;
       }
       const result = await syncArtifacts(projectDir);
-      logger.success(`Synced (main ${result.fastForwarded ? 'fast-forwarded' : 'unchanged/none'}, all branches pushed).`);
+      logger.success(`Synced (main ${result.fastForwarded ? 'fast-forwarded' : 'unchanged/none'}, branches pushed).`);
+      printRefusals(result.refused);
     }));
 
   cmd
