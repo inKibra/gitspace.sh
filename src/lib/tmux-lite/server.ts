@@ -3977,6 +3977,53 @@ routerListener = Bun.listen({
             }
             break;
 
+          case 'serve-activate':
+            try {
+              const { activateServeRuntime } = await import('./serve-runtime.js');
+              const c = cmd.config;
+              const b64 = (v: string): Uint8Array => Uint8Array.from(Buffer.from(v, 'base64'));
+              const status = await activateServeRuntime({
+                relayUrl: c.relayUrl,
+                relayPubkey: c.relayPubkey,
+                machineId: c.machineId,
+                ownerUserRootId: c.ownerUserRootId,
+                identity: {
+                  id: c.identity.id,
+                  label: c.identity.label,
+                  createdAt: c.identity.createdAt,
+                  signing: { publicKey: b64(c.identity.signingPublicKey), secretKey: b64(c.identity.signingSecretKey) },
+                  keyExchange: { publicKey: b64(c.identity.keyExchangePublicKey), privateKey: b64(c.identity.keyExchangeSecretKey) },
+                },
+                publicIdentity: c.publicIdentity,
+                bootstrapToken: c.bootstrapToken,
+                registerPermit: c.registerPermit,
+                enrollmentToken: c.enrollmentToken,
+                deviceCertificate: c.deviceCertificate,
+              });
+              res = { type: 'serve-status', status };
+            } catch (e) {
+              res = { type: 'error', message: `serve activation failed: ${e instanceof Error ? e.message : String(e)}` };
+            }
+            break;
+
+          case 'serve-deactivate':
+            try {
+              const { deactivateServeRuntime } = await import('./serve-runtime.js');
+              res = { type: 'serve-status', status: await deactivateServeRuntime() };
+            } catch (e) {
+              res = { type: 'error', message: `serve deactivation failed: ${e instanceof Error ? e.message : String(e)}` };
+            }
+            break;
+
+          case 'serve-status':
+            try {
+              const { getServeRuntimeStatus } = await import('./serve-runtime.js');
+              res = { type: 'serve-status', status: getServeRuntimeStatus() };
+            } catch (e) {
+              res = { type: 'error', message: `serve status failed: ${e instanceof Error ? e.message : String(e)}` };
+            }
+            break;
+
           case 'trigger-save':
             try {
               const { saveTrigger } = await import('../../core/triggers.js');

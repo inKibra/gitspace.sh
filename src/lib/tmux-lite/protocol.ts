@@ -230,6 +230,33 @@ export type SessionKind = 'shell' | 'agent';
 
 export type { ReplayInfo, ReplayStatus, TerminalSnapshot } from './replay/types.js';
 
+
+/** Daemon-unification P1 (docs/DAEMON-UNIFICATION.md): the activator passes
+ *  the DECRYPTED identity over the same-user 0600 unix socket — the same
+ *  trust domain as the encrypted keyfile + keychain password. Keys are
+ *  base64; the server reconstructs Uint8Arrays. */
+export interface ServeActivatePayload {
+  relayUrl: string;
+  /** Pinned by the activator's interactive trust check. */
+  relayPubkey: string;
+  machineId: string;
+  ownerUserRootId?: string;
+  identity: {
+    id: string;
+    label?: string;
+    createdAt: number;
+    signingPublicKey: string;
+    signingSecretKey: string;
+    keyExchangePublicKey: string;
+    keyExchangeSecretKey: string;
+  };
+  publicIdentity: { id: string; signingPublicKey: string; keyExchangePublicKey: string; label?: string };
+  bootstrapToken?: string;
+  registerPermit?: string;
+  enrollmentToken?: string;
+  deviceCertificate?: string;
+}
+
 export interface AgentWorkspaceTargetPayload {
   workspaceId: string;
   workspaceName: string;
@@ -414,6 +441,9 @@ export type Command =
   | { type: 'project-artifacts-remote-set'; projectName: string; url: string }
   | { type: 'project-artifacts-sync'; projectName: string }
   | { type: 'project-artifacts-provision'; projectName: string }
+  | { type: 'serve-activate'; config: ServeActivatePayload }
+  | { type: 'serve-deactivate' }
+  | { type: 'serve-status' }
   | { type: 'trigger-save'; target: AgentWorkspaceTargetPayload; trigger: import('../../core/triggers.js').TriggerRecord }
   | { type: 'trigger-run-now'; target: AgentWorkspaceTargetPayload; triggerId: string }
   | { type: 'repo-tree'; target: AgentWorkspaceTargetPayload }
@@ -518,6 +548,7 @@ export type Response =
   | { type: 'project-artifacts-status'; repoPath: string; remote: string | null; branches: string[]; pointerCommitted?: boolean }
   | { type: 'project-artifacts-sync'; pushed: boolean; fastForwarded: boolean }
   | { type: 'project-artifacts-provision'; slug: string; url: string; created: boolean; blobsUploaded: number; collaboratorsCopied: number }
+  | { type: 'serve-status'; status: { active: boolean; relayUrl?: string; relayStatus?: string; clients?: number; machineId?: string; startedAt?: number } }
   | { type: 'trigger-save'; trigger: import('../../core/triggers.js').TriggerRecord }
   | { type: 'trigger-run-now'; sessionId: string }
   | { type: 'repo-tree'; entries: import('../../core/git.js').RepoFileEntry[] }

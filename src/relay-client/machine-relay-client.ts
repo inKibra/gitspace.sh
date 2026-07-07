@@ -223,6 +223,9 @@ export async function connectMachineRelay(
   registerPermit?: string,
   enrollmentToken?: string,
   deviceCertificate?: string,
+  /** Daemon-unification P1: receive a stop handle so an in-process host can
+   *  deactivate (close the socket, stop pings, suppress reconnection). */
+  lifecycle?: { onStop: (stop: () => void) => void },
 ): Promise<void> {
   const url = new URL(relayUrl);
   url.searchParams.set('role', 'machine');
@@ -235,6 +238,13 @@ export async function connectMachineRelay(
     const pingIntervalMs = 15_000;
     let resolved = false;
     let pingTimer: ReturnType<typeof setInterval> | null = null;
+    let stopped = false;
+    let currentWs: WebSocket | null = null;
+    lifecycle?.onStop(() => {
+      stopped = true;
+      stopPing();
+      try { currentWs?.close(); } catch { /* already closed */ }
+    });
 
     const signingPublicKey = signingPrivateKey
       ? new Uint8Array(Buffer.from(publicIdentity.signingPublicKey, 'base64'))
@@ -267,8 +277,10 @@ export async function connectMachineRelay(
     };
 
     const connect = () => {
+      if (stopped) return;
       console.log(`[serve] Connecting to relay: ${url.toString()}`);
       const ws = new WebSocket(url.toString());
+      currentWs = ws;
       ws.binaryType = 'arraybuffer';
 
       ws.onopen = () => {
@@ -284,6 +296,7 @@ export async function connectMachineRelay(
           reason: event.reason || 'Connection closed',
         });
 
+        if (stopped) return;
         if (reconnectAttempts < maxReconnectAttempts) {
           reconnectAttempts += 1;
           const delay = Math.min(
