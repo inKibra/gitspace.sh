@@ -3732,8 +3732,19 @@ routerListener = Bun.listen({
 
           case 'artifacts-list':
             try {
-              const { artifactsMountDir, listArtifactFiles } = await import('../../core/artifacts.js');
-              res = { type: 'artifacts-list', entries: listArtifactFiles(artifactsMountDir(cmd.target.workspacePath)) };
+              const { artifactsMountDir, listArtifactFiles, ensureArtifactsMount } = await import('../../core/artifacts.js');
+              const { getProjectDir } = await import('../../core/config.js');
+              // Lazy mount for workspaces predating the artifacts FS (mirrors
+              // the project-level case) — setup is fully automatic.
+              const mountDir = artifactsMountDir(cmd.target.workspacePath);
+              const { existsSync } = await import('fs');
+              const { join } = await import('path');
+              if (!existsSync(join(mountDir, '.git'))) {
+                try {
+                  await ensureArtifactsMount(getProjectDir(cmd.target.projectName), cmd.target.workspacePath, cmd.target.workspaceName);
+                } catch { /* unmountable (no git workspace) — list stays empty */ }
+              }
+              res = { type: 'artifacts-list', entries: listArtifactFiles(mountDir) };
             } catch (e) {
               const errMsg = e instanceof Error ? e.message : String(e);
               res = { type: 'error', message: `Failed to list artifacts: ${errMsg}` };
