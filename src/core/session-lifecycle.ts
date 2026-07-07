@@ -333,8 +333,11 @@ async function mountProjectArtifacts(projectName: string, baseDir: string): Prom
       await artifacts.setArtifactsRemote(projectDir, pointer.remote);
       try {
         await artifacts.syncArtifacts(projectDir);
-      } catch {
-        /* remote unreachable / auth needed — mount proceeds locally */
+        console.error(`[artifacts] adopted shared remote for ${projectName}: ${pointer.remote}`);
+      } catch (e) {
+        // Mount proceeds locally, but say so — a teammate who can't reach the
+        // remote must not silently believe they're sharing.
+        console.error(`[artifacts] ${projectName}: remote ${pointer.remote} configured but first sync FAILED (${e instanceof Error ? e.message.split('\n')[0] : e}) — check access (gh auth login), then \`gssh artifacts sync\``);
       }
     }
     await artifacts.ensureArtifactsMount(projectDir, baseDir, 'main');

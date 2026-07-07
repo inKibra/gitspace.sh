@@ -518,7 +518,7 @@ export type Response =
   | { type: 'artifacts-list'; entries: import('../../core/artifacts.js').ArtifactListEntry[] }
   | { type: 'artifacts-read'; base64: string; size: number; truncated: boolean }
   | { type: 'artifacts-write'; commit: string }
-  | { type: 'project-artifacts-status'; repoPath: string; remote: string | null; branches: string[] }
+  | { type: 'project-artifacts-status'; repoPath: string; remote: string | null; branches: string[]; pointerCommitted?: boolean }
   | { type: 'project-artifacts-sync'; pushed: boolean; fastForwarded: boolean }
   | { type: 'project-artifacts-provision'; slug: string; url: string; created: boolean; blobsUploaded: number; collaboratorsCopied: number }
   | { type: 'trigger-save'; trigger: import('../../core/triggers.js').TriggerRecord }

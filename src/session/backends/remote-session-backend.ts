@@ -3188,10 +3188,10 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     throw new Error('Unexpected project-artifacts-write response');
   }
 
-  async getProjectArtifactsStatus(projectName: string): Promise<{ repoPath: string; remote: string | null; branches: string[] }> {
+  async getProjectArtifactsStatus(projectName: string): Promise<{ repoPath: string; remote: string | null; branches: string[]; pointerCommitted?: boolean }> {
     await this.waitForInitialSnapshot();
     const r = await this.sendRpcCommand({ type: 'project_artifacts_status', requestId: crypto.randomUUID(), projectName });
-    if (r.type === 'project-artifacts-status') return { repoPath: r.repoPath, remote: r.remote, branches: r.branches };
+    if (r.type === 'project-artifacts-status') return { repoPath: r.repoPath, remote: r.remote, branches: r.branches, pointerCommitted: r.pointerCommitted };
     if (r.type === 'error') throw new Error(r.message);
     throw new Error('Unexpected project-artifacts-status response');
   }

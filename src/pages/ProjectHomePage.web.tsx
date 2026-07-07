@@ -118,7 +118,7 @@ function WorkspaceCombo({ value, options, onChange }: {
 
 /** CONFIG → Artifacts repo: wizard — sharing is OPTIONAL; local always works. */
 function ArtifactsRepoTab({ projectName, backend }: { projectName: string; backend: SessionBackend | null }): ReactElement {
-  const [status, setStatus] = useState<{ repoPath: string; remote: string | null; branches: string[] } | null>(null);
+  const [status, setStatus] = useState<{ repoPath: string; remote: string | null; branches: string[]; pointerCommitted?: boolean } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [choice, setChoice] = useState<'github' | 'byo' | null>(null);
   const [url, setUrl] = useState('');
@@ -150,8 +150,8 @@ function ArtifactsRepoTab({ projectName, backend }: { projectName: string; backe
   ];
 
   const PLAN: Record<'github' | 'byo', string[]> = {
-    github: ['Create a private <owner>/<repo>-artifacts on your GitHub', 'Mirror the code repo\u2019s collaborators onto it', 'Commit the pointer to the code repo — teammates adopt automatically', 'Push all branches + upload large files to GitHub LFS, then auto-sync every 5 minutes'],
-    byo: ['Set your URL as the artifacts remote', 'Commit the pointer to the code repo — teammates adopt automatically (their git auth must reach the host)', 'Push all branches now, then auto-sync every 5 minutes'],
+    github: ['Create a private <owner>/<repo>-artifacts on your GitHub', 'Mirror the code repo\u2019s collaborators onto it (they need their own gh login)', 'Stage .gitspace/artifacts.json in the code repo — commit & push it and teammates adopt automatically', 'Push all branches + upload large files to GitHub LFS, then auto-sync every 5 minutes'],
+    byo: ['Set your URL as the artifacts remote', 'Stage .gitspace/artifacts.json in the code repo — commit & push it and teammates adopt (their git auth must reach the host)', 'Push all branches now, then auto-sync every 5 minutes'],
   };
 
   return (
@@ -177,9 +177,19 @@ function ArtifactsRepoTab({ projectName, backend }: { projectName: string; backe
               <button type="button" onClick={() => setEditing((v) => !v)} className={XS_BTN}>{editing ? 'Close' : '✎ Change'}</button>
             </div>
             <div className={`mt-2 ${mono} text-[11px] text-[var(--gs-text-dim)]`}>branches: {status.branches.join(' · ') || '(none yet)'}</div>
-            <div className="mt-2 border-t border-[var(--gs-border-muted)] pt-2 text-[11px] leading-[1.5] text-[var(--gs-text-muted)]">
-              Teammates do nothing: the committed pointer in the code repo wires them up on their first workspace. Auto-sync runs every 5 minutes on every machine.
-            </div>
+            {status.pointerCommitted === false ? (
+              <div className="mt-2 border border-[#3a3013] bg-[rgba(255,190,70,0.06)] px-2.5 py-2 text-[11px] leading-[1.5] text-[var(--gs-warning)]">
+                Final step for teammates: <code className={mono}>.gitspace/artifacts.json</code> is staged in the
+                project&apos;s base clone but not committed. Commit &amp; push it — teammates and your other machines
+                adopt sharing from that commit.
+              </div>
+            ) : (
+              <div className="mt-2 border-t border-[var(--gs-border-muted)] pt-2 text-[11px] leading-[1.5] text-[var(--gs-text-muted)]">
+                Teammates adopt automatically when they add this project (the committed pointer in the code repo wires
+                them up). GitHub tier: they need their own <code className={mono}>gh auth login</code>. Auto-sync runs
+                every 5 minutes on every machine with the project.
+              </div>
+            )}
             {note && <div className="pt-1.5 text-[11px] text-[var(--gs-text-dim)]">{note}</div>}
           </div>
         ) : null}

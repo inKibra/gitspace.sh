@@ -608,6 +608,10 @@ void getAgentControlReady().catch((error) => {
   // De-dup gate-refusal inbox items per (project, branch, offender set) —
   // the tick repeats every 5 minutes but the user needs telling once.
   const notifiedGateRefusals = new Set<string>();
+  // Sync failures were fully silent (offline is normal, so one failure stays
+  // quiet) — but PERSISTENT failure means auth/access is broken and the user
+  // believes they're sharing when they aren't. Notify once after 3 in a row.
+  const syncFailStreak = new Map<string, { count: number; notified: boolean }>();
   const t = setInterval(() => {
     if (syncing) return;
     syncing = true;
@@ -621,7 +625,27 @@ void getAgentControlReady().catch((error) => {
           try {
             const projectDir = getProjectDir(projectName);
             if (!(await getArtifactsRemote(projectDir))) continue;
-            const r = await syncGithubArtifacts(projectDir);
+            let r;
+            try {
+              r = await syncGithubArtifacts(projectDir);
+              syncFailStreak.delete(projectName);
+            } catch (e) {
+              const streak = syncFailStreak.get(projectName) ?? { count: 0, notified: false };
+              streak.count += 1;
+              if (streak.count >= 3 && !streak.notified) {
+                streak.notified = true;
+                const msg = e instanceof Error ? e.message.split('\n')[0] : String(e);
+                console.error(`[artifacts] sync for ${projectName} failing persistently: ${msg}`);
+                addInboxItem(createInboxNotification(
+                  `artifacts:${projectName}:sync`,
+                  `artifacts · ${projectName}`,
+                  'osc',
+                  `Artifacts sync has failed ${streak.count} times in a row (${msg}). Sharing is stalled — check access (GitHub: gh auth login), then run \`gssh artifacts sync\`.`,
+                ));
+              }
+              syncFailStreak.set(projectName, streak);
+              continue;
+            }
             if (r.pushed || r.blobsUploaded) console.error(`[artifacts] synced ${projectName}${r.blobsUploaded ? ` (+${r.blobsUploaded} blobs)` : ''}`);
             // Publish-gate refusals must be LOUD: a silently stalled
             // single-writer branch is the top agent-confusion risk.
@@ -3992,7 +4016,20 @@ routerListener = Bun.listen({
                 branches = execFileSync('git', ['-C', repoDir, 'branch', '--format=%(refname:short)'], { encoding: 'utf8' })
                   .split('\n').map((x) => x.trim()).filter(Boolean);
               } catch { /* fresh repo */ }
-              res = { type: 'project-artifacts-status', repoPath: repoDir, remote, branches };
+              // Teammates adopt via the COMMITTED pointer; a staged-but-
+              // uncommitted .gitspace/artifacts.json means sharing is not yet
+              // reaching anyone else — the wizard surfaces the remaining step.
+              let pointerCommitted: boolean | undefined;
+              if (remote) {
+                try {
+                  const { getProjectBaseDir } = await import('../../core/config.js');
+                  const base = getProjectBaseDir(cmd.projectName);
+                  const dirty = execFileSync('git', ['-C', base, 'status', '--porcelain', '--', '.gitspace/artifacts.json'], { encoding: 'utf8' }).trim();
+                  const tracked = execFileSync('git', ['-C', base, 'ls-files', '--', '.gitspace/artifacts.json'], { encoding: 'utf8' }).trim();
+                  pointerCommitted = dirty === '' && tracked !== '';
+                } catch { /* base missing / not a git repo */ }
+              }
+              res = { type: 'project-artifacts-status', repoPath: repoDir, remote, branches, pointerCommitted };
             } catch (e) {
               res = { type: 'error', message: `Failed to read artifacts status: ${e instanceof Error ? e.message : String(e)}` };
             }

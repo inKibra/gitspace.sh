@@ -306,7 +306,7 @@ export interface SessionBackend {
   /** Write+commit an artifact on the project's MAIN branch (base mount). */
   writeProjectArtifact?(projectName: string, path: string, contentBase64: string, message?: string): Promise<string>;
   /** Artifacts repo status: local bare-repo path, remote url, branches. */
-  getProjectArtifactsStatus?(projectName: string): Promise<{ repoPath: string; remote: string | null; branches: string[] }>;
+  getProjectArtifactsStatus?(projectName: string): Promise<{ repoPath: string; remote: string | null; branches: string[]; pointerCommitted?: boolean }>;
   /** Connect a BYO remote (writes the committed pointer) and sync. */
   setProjectArtifactsRemote?(projectName: string, url: string): Promise<{ pushed: boolean; fastForwarded: boolean }>;
   /** Fetch + ff main + push --all against the configured remote. */

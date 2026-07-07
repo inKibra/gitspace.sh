@@ -252,10 +252,27 @@ export async function addProject(options: {
 
   // Artifacts FS: birth the project's artifacts repo and mount main at the
   // base clone (docs/ARTIFACTS-FS.md). Best-effort — never fail project add.
+  // A committed .gitspace/artifacts.json pointer is ADOPTED here — this is
+  // the teammate path: clone a repo that shares artifacts, get wired up.
+  // (Previously only the web/session project-create path adopted; CLI
+  // teammates silently got a local-only repo.)
   try {
-    const { ensureArtifactsMount } = await import('../core/artifacts.js');
+    const artifacts = await import('../core/artifacts.js');
     if (existsSync(baseDir)) {
-      await ensureArtifactsMount(getProjectDir(projectName), baseDir, 'main');
+      const pointer = artifacts.readArtifactsPointerConfig(baseDir);
+      if (pointer?.remote) {
+        await artifacts.setArtifactsRemote(getProjectDir(projectName), pointer.remote);
+        try {
+          await artifacts.syncArtifacts(getProjectDir(projectName));
+          logger.success(`Artifacts sharing adopted from the repo: ${pointer.remote}`);
+        } catch (error) {
+          logger.warning(`Artifacts remote configured (${pointer.remote}) but the first sync failed: ${error instanceof Error ? error.message.split('\n')[0] : error}`);
+          logger.info('Check access (GitHub: `gh auth login`), then run: gssh artifacts sync');
+        }
+      } else {
+        logger.info('Artifacts: local repo only (no sharing pointer in the code repo).');
+      }
+      await artifacts.ensureArtifactsMount(getProjectDir(projectName), baseDir, 'main');
     }
   } catch (error) {
     logger.warning(`Artifacts repo skipped: ${error instanceof Error ? error.message : String(error)}`);

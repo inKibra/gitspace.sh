@@ -1839,9 +1839,9 @@ export class LocalSessionBackend implements SessionBackend {
     throw new Error('Unexpected project-artifacts-write response');
   }
 
-  async getProjectArtifactsStatus(projectName: string): Promise<{ repoPath: string; remote: string | null; branches: string[] }> {
+  async getProjectArtifactsStatus(projectName: string): Promise<{ repoPath: string; remote: string | null; branches: string[]; pointerCommitted?: boolean }> {
     const r = await this.sendTmuxCommand({ type: 'project-artifacts-status', projectName });
-    if (r.type === 'project-artifacts-status') return { repoPath: r.repoPath, remote: r.remote, branches: r.branches };
+    if (r.type === 'project-artifacts-status') return { repoPath: r.repoPath, remote: r.remote, branches: r.branches, pointerCommitted: r.pointerCommitted };
     if (r.type === 'error') throw new Error(r.message);
     throw new Error('Unexpected project-artifacts-status response');
   }
