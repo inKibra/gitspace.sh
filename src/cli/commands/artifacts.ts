@@ -39,11 +39,12 @@ export function registerArtifactsCommands(program: Command): void {
 
   cmd
     .command('status')
-    .description('Show the artifacts repo, its branches, and remote')
+    .description('Show the artifacts repo, its tier (managed/BYO/local), branches, and blob sync state')
     .option('--project <name>', 'Project (defaults to current)')
     .action(withErrorHandler(async (options: { project?: string }) => {
       const { projectName, projectDir } = await resolveProject(options.project);
-      const { artifactPaths, getArtifactsRemote } = await import('../../core/artifacts.js');
+      const { artifactPaths, getArtifactsRemote, getManagedArtifactsProject } = await import('../../core/artifacts.js');
+      const { listLocalBlobs, checkRemoteBlobs } = await import('../../core/artifacts-managed.js');
       const { logger } = await import('../../utils/logger.js');
       const { existsSync } = await import('fs');
       const { join } = await import('path');
@@ -53,12 +54,57 @@ export function registerArtifactsCommands(program: Command): void {
         logger.info(`No artifacts repo yet for '${projectName}' (created on first workspace/capture).`);
         return;
       }
-      logger.info(`Artifacts repo: ${repoDir}`);
-      logger.info(`Blob store:     ${blobsDir}${existsSync(blobsDir) ? '' : ' (empty)'}`);
       const remote = await getArtifactsRemote(projectDir);
+      const managedProject = await getManagedArtifactsProject(projectDir);
+      const tier = managedProject
+        ? `managed (${managedProject})`
+        : remote ? 'BYO remote' : 'local only';
+      logger.info(`Artifacts repo: ${repoDir}`);
+      logger.info(`Tier:           ${tier}`);
       logger.info(`Remote:         ${remote ?? '(none — local only)'}`);
+      logger.info(`Blob store:     ${blobsDir}${existsSync(blobsDir) ? '' : ' (empty)'}`);
+      const blobs = listLocalBlobs(blobsDir);
+      const blobBytes = blobs.reduce((sum, b) => sum + b.size, 0);
+      logger.info(`Blobs:          ${blobs.length} local (${(blobBytes / (1024 * 1024)).toFixed(1)} MB)`);
+      if (managedProject && blobs.length > 0) {
+        try {
+          const check = await checkRemoteBlobs(projectDir, managedProject);
+          logger.info(`Blob sync:      ${check.present}/${check.total} present remotely, ${check.missing} pending upload`);
+        } catch (e) {
+          logger.dim(`Blob sync:      remote check unavailable (${e instanceof Error ? e.message.split('\n')[0] : e})`);
+        }
+      }
       const branches = execFileSync('git', ['-C', repoDir, 'branch', '--format=%(refname:short) %(objectname:short) %(subject)'], { encoding: 'utf8' }).trim();
       logger.info(`Branches:\n${branches.split('\n').map((l) => `  ${l}`).join('\n')}`);
+    }));
+
+  const managed = cmd.command('managed').description('gitspace.sh-managed artifacts (Tier 2: worker + R2 blob store)');
+  managed
+    .command('setup')
+    .description('Provision (or attach to) managed artifacts on gitspace.sh and wire this project to it')
+    .option('--project <name>', 'Project (defaults to current)')
+    .option('--attach <handle/slug>', 'Attach to an existing managed artifacts project instead of deriving handle/slug')
+    .action(withErrorHandler(async (options: { project?: string; attach?: string }) => {
+      const { projectName, projectDir } = await resolveProject(options.project);
+      const { getProjectBaseDir } = await import('../../core/config.js');
+      const { setupManagedArtifacts, deriveManagedProjectRef, parseManagedProjectRef } = await import('../../core/artifacts-managed.js');
+      const { logger } = await import('../../utils/logger.js');
+      let ref: string;
+      if (options.attach) {
+        parseManagedProjectRef(options.attach);
+        ref = options.attach;
+      } else {
+        ref = await deriveManagedProjectRef(projectName);
+      }
+      const result = await setupManagedArtifacts({
+        projectDir,
+        baseDir: getProjectBaseDir(projectName),
+        project: ref,
+      });
+      logger.success(`Managed artifacts ready: ${result.project}`);
+      logger.info(`Remote: ${result.gitUrl}`);
+      logger.info(result.synced ? 'Initial sync complete (branches + blobs).' : 'Initial sync deferred — run: gssh artifacts sync');
+      logger.info('.gitspace/artifacts.json written + staged in the base repo — commit it so other machines adopt automatically.');
     }));
 
   const remote = cmd.command('remote').description('Manage the artifacts remote (BYO git URL)');
@@ -88,6 +134,10 @@ export function registerArtifactsCommands(program: Command): void {
       const { logger } = await import('../../utils/logger.js');
       const result = await syncArtifacts(projectDir);
       logger.success(`Synced (main ${result.fastForwarded ? 'fast-forwarded' : 'unchanged/none'}, all branches pushed).`);
+      if (result.blobs) {
+        const { uploaded, alreadyPresent, failed, total } = result.blobs;
+        logger.info(`Blobs: ${uploaded} uploaded, ${alreadyPresent} already present (${total} total)${failed ? `, ${failed} FAILED` : ''}`);
+      }
     }));
 
   cmd

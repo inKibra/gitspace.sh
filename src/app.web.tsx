@@ -3384,6 +3384,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
             goals={phGoals}
             workspaces={phWorkspaces}
             backend={phBackendKey ? multi.getBackend(phBackendKey) : null}
+            backendKey={phBackendKey}
             onBack={() => setProjectHomeName(null)}
             onOpenWorkspace={(selectionKey) => {
               setProjectHomeName(null);
