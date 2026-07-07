@@ -15,6 +15,8 @@ import type { WorkspacePhase } from '../types/config.js';
 import type { WorkspaceStatusSummary } from '../app/workspaces/workspace-status.js';
 
 export interface BoardPageProps {
+  /** Catalog projects (from the machine snapshot) — shown even with zero workspaces. */
+  catalogProjects?: Array<{ name: string }>;
   /** Rendered under the GlobalChromeBar — suppress the legacy header row. */
   embedded?: boolean;
   groups: WorkspaceBoardGroup[];
@@ -61,6 +63,7 @@ interface ProjectStripEntry {
 function deriveProjects(
   groups: WorkspaceBoardGroup[],
   workspaceStatusById: Record<string, WorkspaceStatusSummary>,
+  catalogNames: string[] = [],
 ): ProjectStripEntry[] {
   const byName = new Map<string, { chainIds: Set<string>; workspaces: number; active: number }>();
   const ensure = (name: string) => {
@@ -71,6 +74,8 @@ function deriveProjects(
     }
     return entry;
   };
+  // Catalog projects appear even with zero workspaces/goals (fresh projects).
+  for (const name of catalogNames) ensure(name);
   for (const group of groups) {
     for (const workspace of group.workspaces) {
       const entry = ensure(workspace.projectName);
@@ -225,6 +230,7 @@ function OverflowMenu({ onOpenInbox, inboxUnreadCount, onOpenHelp, onOpenCommand
 
 export function BoardPage({
   embedded = false,
+  catalogProjects = [],
   groups,
   selectedWorkspaceId,
   onSelectWorkspace,
@@ -250,7 +256,7 @@ export function BoardPage({
 }: BoardPageProps) {
   const [boardView, setBoardView] = useState<'workspaces' | 'stacks'>('workspaces');
   const projects = useMemo(
-    () => deriveProjects(groups, workspaceStatusById),
+    () => deriveProjects(groups, workspaceStatusById, catalogProjects.map((p) => p.name)),
     [groups, workspaceStatusById],
   );
 

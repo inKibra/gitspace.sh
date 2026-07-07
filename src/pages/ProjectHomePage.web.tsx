@@ -120,6 +120,7 @@ function ArtifactsRepoTab({ projectName, backend }: { projectName: string; backe
   const [url, setUrl] = useState('');
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
+  const [editing, setEditing] = useState(false);
 
   const refresh = useCallback(() => {
     const fn = backend?.getProjectArtifactsStatus;
@@ -171,6 +172,7 @@ function ArtifactsRepoTab({ projectName, backend }: { projectName: string; backe
               <span className={kicker}>sharing enabled</span>
               <span className={`min-w-0 flex-1 truncate ${mono} text-[11.5px] text-[var(--gs-success)]`}>{status.remote}</span>
               <button type="button" disabled={busy} onClick={() => void enable(async () => { const r = await backend!.syncProjectArtifacts!(projectName); return `synced — ${r.pushed ? 'pushed' : 'up to date'}`; })} className={XS_BTN}>{busy ? 'Syncing…' : '⟳ Sync now'}</button>
+              <button type="button" onClick={() => setEditing((v) => !v)} className={XS_BTN}>{editing ? 'Close' : '✎ Change'}</button>
             </div>
             <div className={`mt-2 ${mono} text-[11px] text-[var(--gs-text-dim)]`}>branches: {status.branches.join(' · ') || '(none yet)'}</div>
             <div className="mt-2 border-t border-[var(--gs-border-muted)] pt-2 text-[11px] leading-[1.5] text-[var(--gs-text-muted)]">
@@ -178,8 +180,10 @@ function ArtifactsRepoTab({ projectName, backend }: { projectName: string; backe
             </div>
             {note && <div className="pt-1.5 text-[11px] text-[var(--gs-text-dim)]">{note}</div>}
           </div>
-        ) : (
+        ) : null}
+        {(!status?.remote || editing) && (
           <>
+            {editing && <div className="mt-4 text-[11.5px] text-[var(--gs-warning)]">Choosing a new path replaces the current remote (history stays local; the pointer commit updates for teammates).</div>}
             <div className={`mt-5 ${kicker}`}>1 · choose how to share</div>
             <div className="mt-2 flex flex-col gap-2">
               {OPTIONS.map((o) => (

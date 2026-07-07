@@ -3410,6 +3410,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
         <div className="min-h-0 flex-1 overflow-hidden">
         <BoardPage
           embedded
+          catalogProjects={allProjects}
           groups={boardGroupsWithGoalStatus}
           selectedWorkspaceId={workspaceBoardState.selectedWorkspaceId}
           onSelectWorkspace={handleBoardSelectWorkspace}
