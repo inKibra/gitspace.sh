@@ -619,10 +619,27 @@ void getAgentControlReady().catch((error) => {
     syncing = true;
     void (async () => {
       try {
-        const { getArtifactsRemote } = await import('../../core/artifacts.js');
+        const { getArtifactsRemote, gcSessionScratch, artifactsMountDir } = await import('../../core/artifacts.js');
         const { syncGithubArtifacts } = await import('../../core/artifacts-github.js');
-        const { getProjectDir } = await import('../../core/config.js');
-        const projects = [...new Set((await scanWorkspaces()).map((w) => w.projectName))];
+        const { getProjectDir, getProjectBaseDir } = await import('../../core/config.js');
+        const scanned = await scanWorkspaces();
+        const projects = [...new Set(scanned.map((w) => w.projectName))];
+        // Session-scratch GC (local:// roots): the SDK has none; drop scratch
+        // for sessions that are gone AND idle past retention.
+        try {
+          const liveIds = new Set<string>();
+          for (const ws of Object.values(getAgentControlSnapshot())) {
+            for (const sess of ws.sessions ?? []) liveIds.add(sess.id);
+          }
+          const dirs = [
+            ...scanned.map((w) => w.path),
+            ...projects.map((name) => { try { return getProjectBaseDir(name); } catch { return null; } }).filter((d): d is string => !!d),
+          ];
+          for (const dir of dirs) {
+            const removed = gcSessionScratch(artifactsMountDir(dir), liveIds);
+            if (removed > 0) console.error(`[artifacts] gc: removed ${removed} stale session scratch dir(s) under ${dir}`);
+          }
+        } catch { /* gc is best-effort */ }
         for (const projectName of projects) {
           try {
             const projectDir = getProjectDir(projectName);

@@ -138,6 +138,9 @@ export interface OmpModule {
     additionalExtensionPaths?: string[];
     skills?: Skill[];
     hasUI?: boolean;
+    /** Root local:// session scratch at <artifacts mount>/.sessions/<sid>
+     *  (docs/ARTIFACT-PROTOCOL.md Q2). SDK appends '/local'. */
+    localProtocolOptions?: { getArtifactsDir?: () => string | null; getSessionId?: () => string | null };
   }): Promise<OmpCreateSessionResult>;
 }
 

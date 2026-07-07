@@ -13,6 +13,7 @@ import {
   createPiSessionManager,
   getManagedPiExtensionPaths,
   persistInitialPiSessionModel,
+  makeLocalProtocolOptions,
 } from './pi-runtime.js';
 import { getManagedSessionBootstrap } from './managed-defaults.js';
 // Dynamic import: oh-my-pi has module-level side effects (postmortem signal
@@ -123,6 +124,7 @@ export class PiBackend implements AgentBackend {
     const { createAgentSession, discoverSkills } = await importSdk();
     const { agentDir, sessionManager } = await createPiSessionManager(cwd);
     const managedBootstrap = await getManagedSessionBootstrap(cwd, agentDir, discoverSkills);
+    const localProtocol = makeLocalProtocolOptions(cwd);
     const result = await createAgentSession({
       agentDir,
       sessionManager,
@@ -130,8 +132,10 @@ export class PiBackend implements AgentBackend {
       additionalExtensionPaths: getManagedPiExtensionPaths(),
       skills: managedBootstrap.skills,
       hasUI: true,
+      localProtocolOptions: localProtocol.options,
     });
     const { session } = result;
+    localProtocol.bind(session.sessionId);
     if (input.title) {
       await sessionManager.setSessionName(input.title);
     }

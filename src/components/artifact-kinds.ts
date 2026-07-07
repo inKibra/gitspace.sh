@@ -17,6 +17,10 @@ export const KIND_ORDER: ArtifactKind[] = ['goal', 'rubric', 'workflow', 'eviden
 
 /** Classify a mount-relative artifact path (conventions per docs/ARTIFACTS-FS.md). */
 export function classifyArtifact(path: string): ArtifactKind {
+  // Session scratch has an address but NO TYPE until promoted — without this
+  // guard, extension-keyed kinds (*.dashboard.json, *.gssh.html, *.data.json)
+  // would leak scratch into curated surfaces (docs/ARTIFACT-PROTOCOL.md Q2).
+  if (path === '.sessions' || path.startsWith('.sessions/')) return 'other';
   const base = path.split('/').pop() ?? path;
   if (base === 'goal.md' || path.startsWith('goal/')) return 'goal';
   if (base === 'rubric.json' || base.endsWith('.rubric.json')) return 'rubric';

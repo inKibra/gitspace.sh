@@ -232,6 +232,35 @@ describe('remote + sync (Tier 1 BYO)', () => {
   });
 });
 
+describe('session scratch (.sessions/)', () => {
+  it('is git-excluded, invisible to listings, typeless, and GC-able', async () => {
+    const base = join(projectDir, 'base');
+    mkdirSync(base, { recursive: true });
+    const mount = await ensureArtifactsMount(projectDir, base, 'main');
+
+    // scratch that would leak into extension-keyed kinds without the guards
+    const sessDir = join(mount, '.sessions', 'sess-1', 'local');
+    mkdirSync(sessDir, { recursive: true });
+    writeFileSync(join(sessDir, 'PLAN.md'), '# plan');
+    writeFileSync(join(sessDir, 'sneaky.dashboard.json'), '{}');
+
+    // git-excluded: status stays clean (bare repo info/exclude covers worktrees)
+    expect(g(mount, 'status --porcelain')).toBe('');
+    // invisible to the curated walk
+    const listed = (await import('../artifacts.js')).listArtifactFiles(mount).map((e) => e.path);
+    expect(listed.some((p) => p.includes('.sessions'))).toBe(false);
+    // typeless to classification (guards extension-keyed kinds)
+    const { classifyArtifact } = await import('../../components/artifact-kinds.js');
+    expect(classifyArtifact('.sessions/sess-1/local/sneaky.dashboard.json')).toBe('other');
+
+    // GC: live ids survive; dead-and-old dirs go
+    const { gcSessionScratch } = await import('../artifacts.js');
+    expect(gcSessionScratch(mount, new Set(['sess-1']))).toBe(0); // live
+    expect(gcSessionScratch(mount, new Set(), 0)).toBe(1);        // dead + past retention
+    expect(existsSync(join(mount, '.sessions', 'sess-1'))).toBe(false);
+  });
+});
+
 describe('LFS pointer format', () => {
   it('round-trips', () => {
     const oid = 'a'.repeat(64);

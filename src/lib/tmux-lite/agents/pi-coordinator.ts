@@ -19,6 +19,7 @@ import {
   openPiSession,
   openPiSessionManager,
   persistInitialPiSessionModel,
+  makeLocalProtocolOptions,
 } from './pi-runtime.js';
 import type { AgentControlInfo, AgentHistoryEntry, AgentOAuthEvent, AgentSettingSchemaItem, AgentToolInfo, AgentTreeNode } from '../../../agents/agent-runtime-types.js';
 
@@ -786,6 +787,7 @@ export class PiCoordinator {
     const { createAgentSession: createPiAgentSessionSdk, discoverSkills } = await importSdk();
     const { agentDir, sessionManager } = await createPiSessionManager(target.workspacePath);
     const managedBootstrap = await getManagedSessionBootstrap(target.workspacePath, agentDir, discoverSkills);
+    const localProtocol = makeLocalProtocolOptions(target.workspacePath);
     const result = await createPiAgentSessionSdk({
       agentDir,
       sessionManager,
@@ -793,11 +795,13 @@ export class PiCoordinator {
       additionalExtensionPaths: getManagedPiExtensionPaths(),
       skills: managedBootstrap.skills,
       hasUI: true,
+      localProtocolOptions: localProtocol.options,
     });
     const { session, setToolUIContext } = result as unknown as OmpCreateSessionResult;
     if (!session?.sessionId || typeof setToolUIContext !== 'function') {
       throw new Error('Unexpected createAgentSession result shape — SDK version may be incompatible');
     }
+    localProtocol.bind(session.sessionId);
     if (title) {
       await sessionManager.setSessionName(title);
     }

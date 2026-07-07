@@ -18,7 +18,7 @@
 import { exec, execSync } from 'child_process';
 import { promisify } from 'util';
 import { createHash } from 'crypto';
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync, appendFileSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync, appendFileSync } from 'fs';
 import { dirname, join } from 'path';
 import { SpacesError } from '../types/errors.js';
 import { pathInScope } from './artifact-cap.js';
@@ -71,12 +71,30 @@ export async function ensureArtifactsRepo(projectDir: string): Promise<string> {
   const { repoDir } = artifactPaths(projectDir);
   if (existsSync(join(repoDir, 'HEAD'))) {
     installArtifactHooks(projectDir);
+    ensureSessionsExcluded(repoDir);
     return repoDir;
   }
   await initBareArtifactsRepo(repoDir);
   await seedRootCommit(repoDir);
   installArtifactHooks(projectDir);
+  ensureSessionsExcluded(repoDir);
   return repoDir;
+}
+
+/** Session scratch (local:// roots at <mount>/.sessions/<sid>) is addressable
+ *  but UNVERSIONED: the bare repo's shared info/exclude covers every worktree,
+ *  so scratch never enters branch history, rollups, git status, or the
+ *  pre-commit hook (docs/ARTIFACT-PROTOCOL.md Q2). */
+function ensureSessionsExcluded(repoDir: string): void {
+  try {
+    const excludePath = join(repoDir, 'info', 'exclude');
+    const line = '.sessions/';
+    const current = existsSync(excludePath) ? readFileSync(excludePath, 'utf8') : '';
+    if (!current.split('\n').includes(line)) {
+      mkdirSync(dirname(excludePath), { recursive: true });
+      appendFileSync(excludePath, `${current.endsWith('\n') || current === '' ? '' : '\n'}${line}\n`);
+    }
+  } catch { /* best-effort */ }
 }
 
 /** Root commit via plumbing (a bare repo has no working tree to commit from). */
@@ -441,6 +459,10 @@ export function listArtifactFiles(mountDir: string): ArtifactListEntry[] {
     const abs = rel ? join(mountDir, rel) : mountDir;
     for (const name of readdirSync(abs)) {
       if (rel === '' && (name === '.git' || name.startsWith('.git'))) continue;
+      // Session scratch is addressable-by-URI but has NO TYPE and never
+      // appears in curated listings (the git exclude does not help a
+      // filesystem walk — this skip is load-bearing).
+      if (rel === '' && name === '.sessions') continue;
       const childRel = rel ? `${rel}/${name}` : name;
       const st = statSync(join(mountDir, childRel));
       if (st.isDirectory()) {
@@ -462,6 +484,25 @@ export function listArtifactFiles(mountDir: string): ArtifactListEntry[] {
   if (!existsSync(mountDir)) return out;
   walk('');
   return out.sort((a, b) => a.path.localeCompare(b.path));
+}
+
+
+/** Delete session-scratch dirs for sessions that are no longer live and have
+ *  been idle past the retention window. The SDK has no session-dir GC. */
+export function gcSessionScratch(mountDir: string, liveSessionIds: Set<string>, maxAgeMs = 14 * 24 * 3_600_000): number {
+  const root = join(mountDir, '.sessions');
+  if (!existsSync(root)) return 0;
+  let removed = 0;
+  for (const sid of readdirSync(root)) {
+    if (liveSessionIds.has(sid)) continue;
+    const dir = join(root, sid);
+    try {
+      if (Date.now() - statSync(dir).mtimeMs < maxAgeMs) continue;
+      rmSync(dir, { recursive: true, force: true });
+      removed += 1;
+    } catch { /* concurrent removal */ }
+  }
+  return removed;
 }
 
 /** Read an artifact from a mount, transparently resolving LFS pointers. */

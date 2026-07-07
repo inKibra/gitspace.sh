@@ -239,6 +239,29 @@ export async function getPiSettings(): Promise<{ get(path: string): unknown; set
   return mod.settings ?? null;
 }
 
+
+/**
+ * local:// unification (docs/ARTIFACT-PROTOCOL.md Q2): root each session's
+ * local scratch at <artifacts mount>/.sessions/<sessionId> — addressable and
+ * shareable, but git-ignored (bare repo info/exclude) so it never enters
+ * branch history, rollups, or the pre-commit hook. The session id is only
+ * known AFTER createAgentSession returns, so callers bind it immediately
+ * after; the SDK resolves these lazily per tool call.
+ */
+export function makeLocalProtocolOptions(cwd: string): {
+  options: { getArtifactsDir: () => string | null; getSessionId: () => string | null };
+  bind: (sessionId: string) => void;
+} {
+  let sessionId: string | null = null;
+  return {
+    options: {
+      getArtifactsDir: () => (sessionId ? join(cwd, '.gitspace', 'artifacts', '.sessions', sessionId) : null),
+      getSessionId: () => sessionId,
+    },
+    bind: (id: string) => { sessionId = id; },
+  };
+}
+
 /**
  * Re-open an existing Pi session file in-process so GitSpace can subscribe to live SDK events
  * again after a tmux-lite restart.
@@ -268,6 +291,7 @@ export async function openPiSession(cwd: string, sessionFilePath: string) {
 
   const managedBootstrap = await getManagedSessionBootstrap(cwd, env.PI_CODING_AGENT_DIR, discoverSkills);
 
+  const localProtocol = makeLocalProtocolOptions(cwd);
   const result = await createAgentSession({
     agentDir: env.PI_CODING_AGENT_DIR,
     sessionManager,
@@ -278,6 +302,7 @@ export async function openPiSession(cwd: string, sessionFilePath: string) {
     additionalExtensionPaths: getManagedPiExtensionPaths(),
     skills: managedBootstrap.skills,
     hasUI: true,
+    localProtocolOptions: localProtocol.options,
     // IRC scoping: one registry per workspace, not the process-global one.
     agentRegistry: (await agentRegistryForWorkspace(cwd)) as never,
   });
@@ -285,6 +310,7 @@ export async function openPiSession(cwd: string, sessionFilePath: string) {
   if (!session?.sessionId) {
     throw new Error('Unexpected createAgentSession result shape — SDK version may be incompatible');
   }
+  localProtocol.bind(session.sessionId);
   if (restoredModel && !session.model) {
     await session.setModel(restoredModel);
   }
