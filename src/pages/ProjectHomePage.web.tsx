@@ -29,7 +29,7 @@ function ProjectReportTab({ path, read }: { path: string; read: (p: string) => P
     read(path).then((r) => { if (alive) setReport(JSON.parse(decodeBase64Utf8(r.base64))); }).catch(() => { if (alive) setErr(true); });
     return () => { alive = false; };
   }, [path, read]);
-  if (err) return <div className="p-4 text-[12px] text-[var(--gs-danger)]">Failed to load {path}</div>;
+  if (err) return <div className="p-4 text-[12px] text-[var(--gs-text-dim)]">Not a structured report — open it from the rail to view as a document.</div>;
   if (report === undefined) return <div className="p-4 text-[12px] text-[var(--gs-text-dim)]">Loading…</div>;
   return <ReportPanel report={report} />;
 }
@@ -111,6 +111,108 @@ function WorkspaceCombo({ value, options, onChange }: {
   );
 }
 
+/** CONFIG → Artifacts repo: where it lives, remote connect, sync (lock-in card). */
+function ArtifactsRepoTab({ projectName, backend }: { projectName: string; backend: SessionBackend | null }): ReactElement {
+  const [status, setStatus] = useState<{ repoPath: string; remote: string | null; branches: string[] } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [url, setUrl] = useState('');
+  const [busy, setBusy] = useState<'connect' | 'sync' | null>(null);
+  const [lastSync, setLastSync] = useState<string | null>(null);
+
+  const refresh = useCallback(() => {
+    const fn = backend?.getProjectArtifactsStatus;
+    if (!fn) { setError('Artifacts status unavailable on this backend.'); return; }
+    fn.call(backend, projectName)
+      .then((st) => { setStatus(st); setError(null); })
+      .catch((e) => setError(e instanceof Error ? e.message : 'status unavailable'));
+  }, [backend, projectName]);
+  useEffect(() => { refresh(); }, [refresh]);
+
+  const row = 'flex items-baseline gap-3 py-1.5 text-[12px]';
+  const key = 'w-[120px] flex-none text-[10.5px] uppercase tracking-[0.08em] text-[var(--gs-text-dim)]';
+  return (
+    <div className="h-full overflow-y-auto p-5">
+      <div className="max-w-[720px]">
+        <div className="text-[15px] font-semibold text-[var(--gs-text)]">Artifacts repo</div>
+        <p className="mt-1 text-[12px] leading-[1.55] text-[var(--gs-text-muted)]">
+          Every workspace's artifacts (journals, evidence, dashboards, review guides, triggers) live on branches of one
+          project-local git repo, mounted at <code className="font-[family-name:var(--gs-font)] text-[11px]">.gitspace/artifacts</code>.
+          Connecting a remote makes it sync across machines and collaborators — the pointer is committed to the code repo, so
+          teammates inherit it automatically; access is plain git auth on the remote host.
+        </p>
+        {error ? (
+          <div className="mt-4 text-[12px] text-[var(--gs-danger)]">{error}</div>
+        ) : !status ? (
+          <div className="mt-4 text-[12px] text-[var(--gs-text-dim)]">Loading…</div>
+        ) : (
+          <div className="mt-4 border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-4 py-3">
+            <div className={row}><span className={key}>local repo</span><span className="min-w-0 flex-1 truncate font-[family-name:var(--gs-font)] text-[11.5px] text-[var(--gs-text)]">{status.repoPath}</span></div>
+            <div className={row}><span className={key}>branches</span><span className="font-[family-name:var(--gs-font)] text-[11.5px] text-[var(--gs-text-muted)]">{status.branches.join(' · ') || '(none yet)'}</span></div>
+            <div className={row}>
+              <span className={key}>remote</span>
+              {status.remote ? (
+                <span className="flex min-w-0 flex-1 items-baseline gap-2">
+                  <span className="min-w-0 flex-1 truncate font-[family-name:var(--gs-font)] text-[11.5px] text-[var(--gs-success)]">{status.remote}</span>
+                  <button
+                    type="button"
+                    disabled={busy !== null}
+                    onClick={async () => {
+                      setBusy('sync');
+                      try {
+                        const r = await backend!.syncProjectArtifacts!(projectName);
+                        setLastSync(`synced — ${r.pushed ? 'pushed' : 'nothing to push'}${r.fastForwarded ? ', main fast-forwarded' : ''}`);
+                      } catch (e) { setLastSync(e instanceof Error ? e.message : 'sync failed'); }
+                      finally { setBusy(null); refresh(); }
+                    }}
+                    className={XS_BTN}
+                  >
+                    {busy === 'sync' ? 'Syncing…' : '⟳ Sync now'}
+                  </button>
+                </span>
+              ) : (
+                <span className="text-[12px] text-[var(--gs-warning)]">local only — nothing is synced anywhere</span>
+              )}
+            </div>
+            {lastSync && <div className="pt-1 text-[11px] text-[var(--gs-text-dim)]">{lastSync}</div>}
+            {!status.remote && (
+              <div className="mt-3 border-t border-[var(--gs-border-muted)] pt-3">
+                <div className="mb-1.5 text-[10.5px] uppercase tracking-[0.08em] text-[var(--gs-text-dim)]">connect a remote (bring your own git repo)</div>
+                <div className="flex gap-2">
+                  <input
+                    value={url}
+                    onChange={(e) => setUrl(e.target.value)}
+                    placeholder="git@github.com:you/proj-artifacts.git"
+                    className="min-w-0 flex-1 border border-[var(--gs-border)] bg-black px-2 py-1 font-[family-name:var(--gs-font)] text-[11.5px] text-[var(--gs-text)] outline-none focus:border-[var(--gs-accent)]"
+                  />
+                  <button
+                    type="button"
+                    disabled={!url.trim() || busy !== null || !backend?.setProjectArtifactsRemote}
+                    onClick={async () => {
+                      setBusy('connect');
+                      try {
+                        const r = await backend!.setProjectArtifactsRemote!(projectName, url.trim());
+                        setLastSync(`connected — ${r.pushed ? 'branches pushed' : 'adopted remote main'}`);
+                        setUrl('');
+                      } catch (e) { setLastSync(e instanceof Error ? e.message : 'connect failed'); }
+                      finally { setBusy(null); refresh(); }
+                    }}
+                    className="border border-[#1f4a2f] px-3 py-1 text-[11.5px] text-[var(--gs-accent)] disabled:opacity-40"
+                  >
+                    {busy === 'connect' ? 'Connecting…' : 'Connect & sync'}
+                  </button>
+                </div>
+                <div className="mt-1.5 text-[10.5px] text-[var(--gs-text-ghost)]">
+                  Create an empty private repo anywhere git lives, paste its URL. The pointer commits to the code repo; teammates and your other machines pick it up automatically. Managed gitspace.sh remotes (no repo needed) ship later.
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 /** small star rater for the roll-up rate step (mock: Stars) */
 function Stars({ value, onChange }: { value: number; onChange: (n: number) => void }): ReactElement {
   return (
@@ -142,6 +244,7 @@ const FIXED_TAB_LABEL: Record<string, string> = {
   process: 'In process',
   chains: 'Chains',
   reports: 'Reports & notes',
+  'artifacts-repo': 'Artifacts repo',
 };
 const isDashTab = (t: string): boolean => t.startsWith('dash:');
 const isArtTab = (t: string): boolean => t.startsWith('art:');
@@ -467,7 +570,7 @@ export function ProjectHomePage({
                   {f.path || f.noteId ? (
                     <button
                       type="button"
-                      onClick={() => openTab(f.path ? `report:${f.path}` : `note:${f.noteWorkspace}:${f.noteId}`)}
+                      onClick={() => openTab(f.path ? (f.path.endsWith('.report.json') ? `report:${f.path}` : `art:${f.path}`) : `note:${f.noteWorkspace}:${f.noteId}`)}
                       className="font-[family-name:var(--gs-font)] text-[11.5px] text-[var(--gs-text)] hover:underline"
                     >
                       {f.surface}
@@ -545,6 +648,7 @@ export function ProjectHomePage({
           )}
 
           {sbGroup('Config')}
+          {navRow({ key: 'artifacts-repo', icon: '◈', label: 'Artifacts repo', tab: 'artifacts-repo' })}
           {navRow({ key: 'config', icon: '⚙', label: 'Bundle config', disabled: true, title: 'bundle config editor ships next' })}
         </div>
       </aside>
@@ -614,6 +718,7 @@ export function ProjectHomePage({
               <ArtifactPanel path={active.slice(4)} read={readArtifactFromSource} listArtifacts={async () => artifacts.map((e) => e.path)} />
             </div>
           )}
+          {active === 'artifacts-repo' && <ArtifactsRepoTab projectName={projectName} backend={backend} />}
           {active.startsWith('report:') && (
             <div className="h-full min-h-0">
               <ProjectReportTab path={active.slice(7)} read={readArtifactFromSource} />

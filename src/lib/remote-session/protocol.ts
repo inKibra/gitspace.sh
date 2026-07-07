@@ -745,6 +745,25 @@ interface ProjectArtifactsWriteRequest {
   message?: string;
 }
 
+interface ProjectArtifactsStatusRequest {
+  type: 'project_artifacts_status';
+  requestId: string;
+  projectName: string;
+}
+
+interface ProjectArtifactsRemoteSetRequest {
+  type: 'project_artifacts_remote_set';
+  requestId: string;
+  projectName: string;
+  url: string;
+}
+
+interface ProjectArtifactsSyncRequest {
+  type: 'project_artifacts_sync';
+  requestId: string;
+  projectName: string;
+}
+
 export interface RepoTreeRequest {
   type: 'repo_tree';
   requestId: string;
@@ -1190,6 +1209,9 @@ export type ClientToMachineMessage =
   | ProjectArtifactsListRequest
   | ProjectArtifactsReadRequest
   | ProjectArtifactsWriteRequest
+  | ProjectArtifactsStatusRequest
+  | ProjectArtifactsRemoteSetRequest
+  | ProjectArtifactsSyncRequest
   | RepoTreeRequest
   | RepoReadRequest
   | RepoCommitRequest
@@ -1358,6 +1380,9 @@ export function isBrowseMessage(msg: RemoteSessionMessage): msg is ClientToMachi
     'project_artifacts_list',
     'project_artifacts_read',
     'project_artifacts_write',
+    'project_artifacts_status',
+    'project_artifacts_remote_set',
+    'project_artifacts_sync',
     'repo_tree',
     'repo_read',
     'repo_commit',

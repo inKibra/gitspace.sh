@@ -3183,6 +3183,30 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     throw new Error('Unexpected project-artifacts-write response');
   }
 
+  async getProjectArtifactsStatus(projectName: string): Promise<{ repoPath: string; remote: string | null; branches: string[] }> {
+    await this.waitForInitialSnapshot();
+    const r = await this.sendRpcCommand({ type: 'project_artifacts_status', requestId: crypto.randomUUID(), projectName });
+    if (r.type === 'project-artifacts-status') return { repoPath: r.repoPath, remote: r.remote, branches: r.branches };
+    if (r.type === 'error') throw new Error(r.message);
+    throw new Error('Unexpected project-artifacts-status response');
+  }
+
+  async setProjectArtifactsRemote(projectName: string, url: string): Promise<{ pushed: boolean; fastForwarded: boolean }> {
+    await this.waitForInitialSnapshot();
+    const r = await this.sendRpcCommand({ type: 'project_artifacts_remote_set', requestId: crypto.randomUUID(), projectName, url });
+    if (r.type === 'project-artifacts-sync') return { pushed: r.pushed, fastForwarded: r.fastForwarded };
+    if (r.type === 'error') throw new Error(r.message);
+    throw new Error('Unexpected project-artifacts-remote-set response');
+  }
+
+  async syncProjectArtifacts(projectName: string): Promise<{ pushed: boolean; fastForwarded: boolean }> {
+    await this.waitForInitialSnapshot();
+    const r = await this.sendRpcCommand({ type: 'project_artifacts_sync', requestId: crypto.randomUUID(), projectName });
+    if (r.type === 'project-artifacts-sync') return { pushed: r.pushed, fastForwarded: r.fastForwarded };
+    if (r.type === 'error') throw new Error(r.message);
+    throw new Error('Unexpected project-artifacts-sync response');
+  }
+
   async listRepoFiles(workspaceId: string): Promise<Array<{ path: string; status?: string }>> {
     await this.waitForInitialSnapshot();
     const tmuxResponse = await this.sendRpcCommand({ type: 'repo_tree', requestId: crypto.randomUUID(), target: this.getAgentWorkspaceTarget(workspaceId) });

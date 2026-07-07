@@ -305,6 +305,12 @@ export interface SessionBackend {
   readProjectArtifact?(projectName: string, path: string): Promise<{ base64: string; size: number; truncated: boolean }>;
   /** Write+commit an artifact on the project's MAIN branch (base mount). */
   writeProjectArtifact?(projectName: string, path: string, contentBase64: string, message?: string): Promise<string>;
+  /** Artifacts repo status: local bare-repo path, remote url, branches. */
+  getProjectArtifactsStatus?(projectName: string): Promise<{ repoPath: string; remote: string | null; branches: string[] }>;
+  /** Connect a BYO remote (writes the committed pointer) and sync. */
+  setProjectArtifactsRemote?(projectName: string, url: string): Promise<{ pushed: boolean; fastForwarded: boolean }>;
+  /** Fetch + ff main + push --all against the configured remote. */
+  syncProjectArtifacts?(projectName: string): Promise<{ pushed: boolean; fastForwarded: boolean }>;
   /** Full workspace file listing (tracked + untracked, status letters). */
   listRepoFiles?(workspaceId: string): Promise<Array<{ path: string; status?: string }>>;
   /** Read a workspace file (path-jailed, capped). Null base64 = missing. */

@@ -1831,6 +1831,30 @@ export class RemoteSessionHandler {
         }, sendResponse);
         break;
 
+      case 'project_artifacts_status':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, { type: 'project-artifacts-status', projectName: msg.projectName }, sendResponse);
+        break;
+
+      case 'project_artifacts_remote_set':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, { type: 'project-artifacts-remote-set', projectName: msg.projectName, url: msg.url }, sendResponse);
+        break;
+
+      case 'project_artifacts_sync':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, { type: 'project-artifacts-sync', projectName: msg.projectName }, sendResponse);
+        break;
+
       case 'repo_tree':
         if (!canManage(session.accessType)) {
           await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });

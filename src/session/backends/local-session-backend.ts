@@ -1833,6 +1833,27 @@ export class LocalSessionBackend implements SessionBackend {
     throw new Error('Unexpected project-artifacts-write response');
   }
 
+  async getProjectArtifactsStatus(projectName: string): Promise<{ repoPath: string; remote: string | null; branches: string[] }> {
+    const r = await this.sendTmuxCommand({ type: 'project-artifacts-status', projectName });
+    if (r.type === 'project-artifacts-status') return { repoPath: r.repoPath, remote: r.remote, branches: r.branches };
+    if (r.type === 'error') throw new Error(r.message);
+    throw new Error('Unexpected project-artifacts-status response');
+  }
+
+  async setProjectArtifactsRemote(projectName: string, url: string): Promise<{ pushed: boolean; fastForwarded: boolean }> {
+    const r = await this.sendTmuxCommand({ type: 'project-artifacts-remote-set', projectName, url });
+    if (r.type === 'project-artifacts-sync') return { pushed: r.pushed, fastForwarded: r.fastForwarded };
+    if (r.type === 'error') throw new Error(r.message);
+    throw new Error('Unexpected project-artifacts-remote-set response');
+  }
+
+  async syncProjectArtifacts(projectName: string): Promise<{ pushed: boolean; fastForwarded: boolean }> {
+    const r = await this.sendTmuxCommand({ type: 'project-artifacts-sync', projectName });
+    if (r.type === 'project-artifacts-sync') return { pushed: r.pushed, fastForwarded: r.fastForwarded };
+    if (r.type === 'error') throw new Error(r.message);
+    throw new Error('Unexpected project-artifacts-sync response');
+  }
+
   async listRepoFiles(workspaceId: string): Promise<Array<{ path: string; status?: string }>> {
     const target = await this.resolveAgentWorkspaceTarget(workspaceId);
     const tmuxResponse = await this.sendTmuxCommand({ type: 'repo-tree', target });

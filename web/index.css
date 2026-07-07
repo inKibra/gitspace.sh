@@ -1551,3 +1551,32 @@ html {
   background: var(--gs-bg);
   box-shadow: inset 0 -2px 0 var(--gs-accent);
 }
+
+/* ── .gs-block-md: the app-wide markdown document theme ─────────────────────
+   Professional doc typography over --gs-* tokens; used by notes, goal docs,
+   guides, artifact previews, report bodies. */
+.gs-block-md { font-family: var(--gs-ui); font-size: 13px; line-height: 1.65; color: var(--gs-text); }
+.gs-block-md > :first-child { margin-top: 0; }
+.gs-block-md h1 { font-size: 19px; font-weight: 600; letter-spacing: -0.012em; margin: 26px 0 10px; padding-bottom: 8px; border-bottom: 1px solid var(--gs-border); }
+.gs-block-md h2 { font-size: 15.5px; font-weight: 600; letter-spacing: -0.008em; margin: 22px 0 8px; padding-bottom: 6px; border-bottom: 1px solid var(--gs-border-muted); }
+.gs-block-md h3 { font-size: 13.5px; font-weight: 600; margin: 16px 0 6px; }
+.gs-block-md h4, .gs-block-md h5, .gs-block-md h6 { font-size: 12.5px; font-weight: 600; color: var(--gs-text-muted); margin: 12px 0 4px; text-transform: uppercase; letter-spacing: 0.04em; }
+.gs-block-md p { margin: 0 0 10px; color: var(--gs-text-muted); }
+.gs-block-md strong { color: var(--gs-text); font-weight: 600; }
+.gs-block-md a { color: var(--gs-info); text-decoration: none; border-bottom: 1px solid rgba(91, 155, 255, 0.3); }
+.gs-block-md a:hover { border-bottom-color: var(--gs-info); }
+.gs-block-md ul, .gs-block-md ol { margin: 0 0 10px; padding-left: 22px; color: var(--gs-text-muted); }
+.gs-block-md li { margin: 3px 0; }
+.gs-block-md li::marker { color: var(--gs-accent); }
+.gs-block-md ol > li::marker { color: var(--gs-text-dim); font-variant-numeric: tabular-nums; }
+.gs-block-md blockquote { margin: 0 0 10px; padding: 6px 12px; border-left: 2px solid var(--gs-border-active); color: var(--gs-text-dim); background: var(--gs-bg-elevated); }
+.gs-block-md blockquote p:last-child { margin-bottom: 0; }
+.gs-block-md hr { border: 0; border-top: 1px solid var(--gs-border); margin: 18px 0; }
+.gs-block-md code { font-family: var(--gs-font); font-size: 11.5px; background: #000; border: 1px solid var(--gs-border-muted); border-radius: 3px; padding: 1px 5px; color: var(--gs-accent); }
+.gs-block-md pre { margin: 0 0 12px; padding: 10px 12px; background: #000; border: 1px solid var(--gs-border); overflow-x: auto; }
+.gs-block-md pre code { background: none; border: 0; padding: 0; color: var(--gs-text); font-size: 12px; line-height: 1.6; }
+.gs-block-md table { border-collapse: collapse; margin: 0 0 12px; width: 100%; font-size: 12px; }
+.gs-block-md th { text-align: left; font-weight: 600; color: var(--gs-text); background: var(--gs-bg-elevated); border: 1px solid var(--gs-border); padding: 5px 10px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; }
+.gs-block-md td { border: 1px solid var(--gs-border-muted); padding: 5px 10px; color: var(--gs-text-muted); vertical-align: top; }
+.gs-block-md tr:hover td { background: var(--gs-bg-hover); }
+.gs-block-md img { max-width: 100%; border: 1px solid var(--gs-border); }

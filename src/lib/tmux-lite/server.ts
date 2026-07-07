@@ -3815,6 +3815,52 @@ routerListener = Bun.listen({
             }
             break;
 
+          case 'project-artifacts-status':
+            try {
+              const { artifactPaths, getArtifactsRemote, ensureArtifactsRepo } = await import('../../core/artifacts.js');
+              const { getProjectDir } = await import('../../core/config.js');
+              const { execFileSync } = await import('child_process');
+              const projectDir = getProjectDir(cmd.projectName);
+              await ensureArtifactsRepo(projectDir);
+              const { repoDir } = artifactPaths(projectDir);
+              const remote = await getArtifactsRemote(projectDir);
+              let branches: string[] = [];
+              try {
+                branches = execFileSync('git', ['-C', repoDir, 'branch', '--format=%(refname:short)'], { encoding: 'utf8' })
+                  .split('\n').map((x) => x.trim()).filter(Boolean);
+              } catch { /* fresh repo */ }
+              res = { type: 'project-artifacts-status', repoPath: repoDir, remote, branches };
+            } catch (e) {
+              res = { type: 'error', message: `Failed to read artifacts status: ${e instanceof Error ? e.message : String(e)}` };
+            }
+            break;
+
+          case 'project-artifacts-remote-set':
+            try {
+              const { setArtifactsRemote, syncArtifacts, writeArtifactsPointerConfig } = await import('../../core/artifacts.js');
+              const { getProjectBaseDir, getProjectDir } = await import('../../core/config.js');
+              const projectDir = getProjectDir(cmd.projectName);
+              await setArtifactsRemote(projectDir, cmd.url);
+              // Commit the pointer into the CODE repo so collaborators inherit it.
+              try { await writeArtifactsPointerConfig(getProjectBaseDir(cmd.projectName), { remote: cmd.url }); } catch { /* base missing */ }
+              const sync = await syncArtifacts(projectDir);
+              res = { type: 'project-artifacts-sync', pushed: sync.pushed, fastForwarded: sync.fastForwarded };
+            } catch (e) {
+              res = { type: 'error', message: `Failed to connect artifacts remote: ${e instanceof Error ? e.message : String(e)}` };
+            }
+            break;
+
+          case 'project-artifacts-sync':
+            try {
+              const { syncArtifacts } = await import('../../core/artifacts.js');
+              const { getProjectDir } = await import('../../core/config.js');
+              const sync = await syncArtifacts(getProjectDir(cmd.projectName));
+              res = { type: 'project-artifacts-sync', pushed: sync.pushed, fastForwarded: sync.fastForwarded };
+            } catch (e) {
+              res = { type: 'error', message: `Failed to sync artifacts: ${e instanceof Error ? e.message : String(e)}` };
+            }
+            break;
+
           case 'project-artifacts-read':
             try {
               const { artifactsMountDir, readArtifact } = await import('../../core/artifacts.js');
