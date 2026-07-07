@@ -1826,6 +1826,13 @@ export class LocalSessionBackend implements SessionBackend {
     throw new Error('Unexpected project-artifacts-read response');
   }
 
+  async writeProjectArtifact(projectName: string, path: string, contentBase64: string, message?: string): Promise<string> {
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'project-artifacts-write', projectName, path, contentBase64, message });
+    if (tmuxResponse.type === 'artifacts-write') return tmuxResponse.commit;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected project-artifacts-write response');
+  }
+
   async listRepoFiles(workspaceId: string): Promise<Array<{ path: string; status?: string }>> {
     const target = await this.resolveAgentWorkspaceTarget(workspaceId);
     const tmuxResponse = await this.sendTmuxCommand({ type: 'repo-tree', target });

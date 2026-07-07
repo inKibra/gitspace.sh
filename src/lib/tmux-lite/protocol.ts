@@ -412,6 +412,7 @@ export type Command =
   | { type: 'artifacts-write'; target: AgentWorkspaceTargetPayload; path: string; contentBase64: string; message?: string }
   | { type: 'project-artifacts-list'; projectName: string }
   | { type: 'project-artifacts-read'; projectName: string; path: string }
+  | { type: 'project-artifacts-write'; projectName: string; path: string; contentBase64: string; message?: string }
   | { type: 'repo-tree'; target: AgentWorkspaceTargetPayload }
   | { type: 'repo-read'; target: AgentWorkspaceTargetPayload; path: string }
   | { type: 'repo-commit'; target: AgentWorkspaceTargetPayload; message: string }

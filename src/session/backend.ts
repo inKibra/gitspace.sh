@@ -303,6 +303,8 @@ export interface SessionBackend {
   listProjectArtifacts?(projectName: string): Promise<Array<{ path: string; size: number; pointer: boolean }>>;
   /** Read one project artifact (pointer-resolved) as base64. */
   readProjectArtifact?(projectName: string, path: string): Promise<{ base64: string; size: number; truncated: boolean }>;
+  /** Write+commit an artifact on the project's MAIN branch (base mount). */
+  writeProjectArtifact?(projectName: string, path: string, contentBase64: string, message?: string): Promise<string>;
   /** Full workspace file listing (tracked + untracked, status letters). */
   listRepoFiles?(workspaceId: string): Promise<Array<{ path: string; status?: string }>>;
   /** Read a workspace file (path-jailed, capped). Null base64 = missing. */

@@ -169,6 +169,7 @@ export function ProjectHomePage({
   onRollup?: (workspaceName: string) => Promise<void>;
 }): ReactElement {
   const [artifacts, setArtifacts] = useState<ArtifactEntry[]>([]);
+  const [newDashName, setNewDashName] = useState<string | null>(null);
   const [artifactsError, setArtifactsError] = useState<string | null>(null);
   const [feed, setFeed] = useState<FeedItem[]>([]);
 
@@ -360,7 +361,7 @@ export function ProjectHomePage({
     return (
       <div
         key={`${sub ?? ''}:${e.path}`}
-        onClick={() => openTab(kind === 'dashboard' ? `dash:${e.path}` : `art:${e.path}`)}
+        onClick={() => openTab(kind === 'dashboard' ? `dash:${e.path}` : kind === 'report' && e.path.endsWith('.report.json') ? `report:${e.path}` : `art:${e.path}`)}
         title={e.path}
         className="flex w-full cursor-pointer items-center gap-2 px-3 py-1 text-[11.5px] text-[var(--gs-text-muted)] hover:bg-[var(--gs-bg-hover)] hover:text-[var(--gs-text)]"
       >
@@ -518,7 +519,30 @@ export function ProjectHomePage({
             <div className="px-[13px] text-[10px] text-[var(--gs-text-ghost)]">none in {artifactSource === 'main' ? 'main' : 'workspace'}</div>
           )}
           {dashboards.map((d) => navRow({ key: `dash:${d.path}`, icon: '▦', label: dashName(d.path), tab: `dash:${d.path}` }))}
-          {navRow({ key: 'new-dash', icon: '＋', label: 'New dashboard', disabled: true, title: 'dashboard creation ships next' })}
+          {newDashName === null ? (
+            navRow({ key: 'new-dash', icon: '＋', label: 'New dashboard', onClick: backend?.writeProjectArtifact ? () => setNewDashName('') : undefined, disabled: !backend?.writeProjectArtifact, title: backend?.writeProjectArtifact ? undefined : 'project artifact writes unavailable' })
+          ) : (
+            <div className="flex items-center gap-1 px-[13px] py-[3px]">
+              <input
+                autoFocus
+                value={newDashName}
+                onChange={(e) => setNewDashName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Escape') setNewDashName(null);
+                  if (e.key === 'Enter') {
+                    const slug = newDashName.trim().toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '');
+                    if (!slug) return;
+                    const doc = JSON.stringify({ name: slug, panels: [] }, null, 2) + '\n';
+                    void backend!.writeProjectArtifact!(projectName, `${slug}.dashboard.json`, btoa(doc), `dashboard: create ${slug}`)
+                      .then(() => { setNewDashName(null); loadArtifacts(); openTab(`dash:${slug}.dashboard.json`); })
+                      .catch(() => setNewDashName(null));
+                  }
+                }}
+                placeholder="dashboard name ⏎"
+                className="w-full border border-[var(--gs-border-active)] bg-black px-1.5 py-0.5 text-[11px] text-[var(--gs-text)] outline-none"
+              />
+            </div>
+          )}
 
           {sbGroup('Config')}
           {navRow({ key: 'config', icon: '⚙', label: 'Bundle config', disabled: true, title: 'bundle config editor ships next' })}

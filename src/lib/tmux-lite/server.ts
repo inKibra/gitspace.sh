@@ -3798,6 +3798,23 @@ routerListener = Bun.listen({
             }
             break;
 
+          case 'project-artifacts-write':
+            try {
+              const { artifactsMountDir, captureArtifacts, ensureArtifactsMount } = await import('../../core/artifacts.js');
+              const { getProjectBaseDir, getProjectDir } = await import('../../core/config.js');
+              await ensureArtifactsMount(getProjectDir(cmd.projectName), getProjectBaseDir(cmd.projectName), 'main');
+              const result = await captureArtifacts(
+                getProjectDir(cmd.projectName),
+                artifactsMountDir(getProjectBaseDir(cmd.projectName)),
+                [{ path: cmd.path, content: Buffer.from(cmd.contentBase64, 'base64') }],
+                { message: cmd.message, provenance: { tool: 'web-ui' } },
+              );
+              res = { type: 'artifacts-write', commit: result.commit };
+            } catch (e) {
+              res = { type: 'error', message: `Failed to write project artifact: ${e instanceof Error ? e.message : String(e)}` };
+            }
+            break;
+
           case 'project-artifacts-read':
             try {
               const { artifactsMountDir, readArtifact } = await import('../../core/artifacts.js');

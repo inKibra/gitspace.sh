@@ -736,6 +736,15 @@ export interface ProjectArtifactsReadRequest {
   path: string;
 }
 
+interface ProjectArtifactsWriteRequest {
+  type: 'project_artifacts_write';
+  requestId: string;
+  projectName: string;
+  path: string;
+  contentBase64: string;
+  message?: string;
+}
+
 export interface RepoTreeRequest {
   type: 'repo_tree';
   requestId: string;
@@ -1180,6 +1189,7 @@ export type ClientToMachineMessage =
   | WriteArtifactRequest
   | ProjectArtifactsListRequest
   | ProjectArtifactsReadRequest
+  | ProjectArtifactsWriteRequest
   | RepoTreeRequest
   | RepoReadRequest
   | RepoCommitRequest
@@ -1347,6 +1357,7 @@ export function isBrowseMessage(msg: RemoteSessionMessage): msg is ClientToMachi
     'write_artifact',
     'project_artifacts_list',
     'project_artifacts_read',
+    'project_artifacts_write',
     'repo_tree',
     'repo_read',
     'repo_commit',

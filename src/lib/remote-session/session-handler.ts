@@ -1817,6 +1817,20 @@ export class RemoteSessionHandler {
         }, sendResponse);
         break;
 
+      case 'project_artifacts_write':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, {
+          type: 'project-artifacts-write',
+          projectName: msg.projectName,
+          path: msg.path,
+          contentBase64: msg.contentBase64,
+          message: msg.message,
+        }, sendResponse);
+        break;
+
       case 'repo_tree':
         if (!canManage(session.accessType)) {
           await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
