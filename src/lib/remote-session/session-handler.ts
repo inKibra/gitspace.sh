@@ -407,14 +407,22 @@ export class RemoteSessionHandler {
     return Buffer.concat([Buffer.from(existing, 'base64'), Buffer.from(chunk, 'base64')]).toString('base64');
   }
 
+  /** Commands whose server handlers bind the CALLING SOCKET (transcript
+   *  ownership) — they must keep riding the unix socket even in-process,
+   *  or the daemon answers 'Unknown command' (the exact 'invalid command'
+   *  users see when opening an agent pane). */
+  private static readonly SOCKET_COUPLED_COMMANDS = new Set(['agent-attach', 'agent-dialog-response']);
+
   private async sendBoundedTmuxCommand(command: TmuxCommand): Promise<TmuxResponse> {
     let timeout: ReturnType<typeof setTimeout> | null = null;
     try {
       // Daemon-unification P3: the session-handler runs INSIDE the daemon —
       // dispatch directly when the server has registered (always, in the
-      // unified topology). The socket path remains as the fallback for any
-      // exotic embedding. The timeout guard applies to both.
-      const invoke = hasInProcessDispatcher() ? dispatchInProcess(command) : sendTmuxCommand(command);
+      // unified topology). Socket-coupled commands keep the socket path so
+      // their ownership binding lands on cli's persistent connection, same
+      // as pre-P3. The timeout guard applies to both.
+      const useDispatch = hasInProcessDispatcher() && !RemoteSessionHandler.SOCKET_COUPLED_COMMANDS.has(command.type);
+      const invoke = useDispatch ? dispatchInProcess(command) : sendTmuxCommand(command);
       return await Promise.race([
         invoke,
         new Promise<TmuxResponse>((resolve) => {

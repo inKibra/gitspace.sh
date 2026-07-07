@@ -15,6 +15,7 @@ import { useCallback, useEffect, useMemo, useState, type ReactElement } from 're
 import type { DockviewApi } from 'dockview-react';
 import type { BackendKey, SessionBackend } from '../session/backend.js';
 import { NotePanel } from '../components/NotePanel.web.js';
+import { MarkdownPreview } from '../components/MarkdownPreview.web.js';
 import { CronsPaneConnected } from '../components/CronsPaneConnected.web.js';
 import { formatArtifactUri } from '../core/artifact-cap.js';
 import { toast } from '../lib/sonner.web.js';
@@ -739,7 +740,7 @@ export function ProjectHomePage({
                     <span className="font-[family-name:var(--gs-font)] text-[11.5px] text-[var(--gs-text)]">{f.surface}</span>
                   )}
                 </div>
-                {f.body && <div className="mt-[3px] text-[12px] leading-[1.45] text-[var(--gs-text-muted)]">{f.body}</div>}
+                {f.body && <div className="mt-[3px]"><MarkdownPreview markdown={f.body} maxLines={3} /></div>}
                 <div className="mt-1.5 flex gap-[7px]">
                   <button type="button" disabled title="planning from notes ships next" className={XS_BTN}>＋ Plan from this</button>
                 </div>

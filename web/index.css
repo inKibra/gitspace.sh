@@ -1580,3 +1580,17 @@ html {
 .gs-block-md td { border: 1px solid var(--gs-border-muted); padding: 5px 10px; color: var(--gs-text-muted); vertical-align: top; }
 .gs-block-md tr:hover td { background: var(--gs-bg-hover); }
 .gs-block-md img { max-width: 100%; border: 1px solid var(--gs-border); }
+
+/* Markdown previews (MarkdownPreview.web): document theme at row scale. */
+.gs-md-preview { font-size: 12px; line-height: 1.45; color: var(--gs-text-muted); }
+.gs-md-preview h1, .gs-md-preview h2, .gs-md-preview h3, .gs-md-preview h4 {
+  font-size: 12.5px; margin: 0 0 2px; padding: 0; border: 0; color: var(--gs-text);
+}
+.gs-md-preview p { margin: 0 0 3px; }
+.gs-md-preview ul, .gs-md-preview ol { margin: 0 0 3px; padding-left: 16px; }
+.gs-md-preview pre { margin: 2px 0; padding: 3px 6px; font-size: 11px; }
+.gs-md-preview blockquote { margin: 2px 0; padding: 0 0 0 8px; }
+.gs-md-preview table { margin: 2px 0; font-size: 11px; }
+.gs-md-preview hr { margin: 3px 0; }
+.gs-md-preview code { background: #111; border: 1px solid var(--gs-border); padding: 0 3px; border-radius: 2px; font-size: 11px; }
+.gs-md-preview strong { color: var(--gs-text); }
