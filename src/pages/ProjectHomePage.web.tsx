@@ -12,9 +12,10 @@
  */
 
 import { useCallback, useEffect, useMemo, useState, type MouseEvent as ReactMouseEvent, type ReactElement } from 'react';
-import type { SessionBackend } from '../session/backend.js';
+import type { BackendKey, SessionBackend } from '../session/backend.js';
 import { NotePanel } from '../components/NotePanel.web.js';
-import { NativeAgentSurfaceConnected } from '../components/NativeAgentSurfaceConnected.web.js';
+import { PaneTerminalPanel } from '../components/PaneTerminalPanel.web.js';
+import type { RemoteSessionPtyBackend } from '../session/useRemoteSessionClient.js';
 import { ReportPanel } from '../components/ReportPanel.web.js';
 import type { KanbanGoalItem } from '../app/shared/board/types.js';
 import type { WorkspaceRuntimeEntry } from '../app/shared/workspace-runtime/types.js';
@@ -242,6 +243,47 @@ function ArtifactsRepoTab({ projectName, backend }: { projectName: string; backe
 }
 
 /** small star rater for the roll-up rate step (mock: Stars) */
+/**
+ * Project-agent tab: the full agent pane (header + transcript + composer)
+ * against the `<project>:@base` pseudo-workspace. PaneTerminalPanel's agent
+ * branch only touches SessionBackend methods, so the pty-backend cast is safe.
+ */
+function ProjectAgentPane({ backend, backendKey, workspaceId, agentSessionId, paneId }: {
+  backend: SessionBackend | null;
+  backendKey: BackendKey | null;
+  workspaceId: string;
+  agentSessionId: string;
+  paneId: string;
+}): ReactElement {
+  const [modifiers, setModifiers] = useState({ ctrl: false, shift: false, alt: false });
+  const pane = useMemo(() => ({
+    paneId,
+    streamId: 0,
+    sessionId: '',
+    sessionName: null,
+    meta: null,
+    workspaceId,
+    agentSessionId,
+    viewOnly: false,
+  }), [paneId, workspaceId, agentSessionId]);
+  return (
+    <PaneTerminalPanel
+      pane={pane}
+      backend={backend as RemoteSessionPtyBackend | null}
+      backendKey={backendKey}
+      showMobileControls={false}
+      inputMode={false}
+      keyboardVisible={false}
+      onToggleInputMode={() => {}}
+      inputButtonClassName=""
+      terminalContainerClassName=""
+      modifiers={modifiers}
+      onModifiersChange={setModifiers}
+      showFloatingControls={false}
+    />
+  );
+}
+
 function Stars({ value, onChange }: { value: number; onChange: (n: number) => void }): ReactElement {
   return (
     <span className="inline-flex gap-0.5">
@@ -309,7 +351,9 @@ export function ProjectHomePage({
   useEffect(() => {
     let alive = true;
     backend?.listAgentSessions?.(baseWorkspaceId)
-      .then((list) => { if (alive) setAgentThreads(list.filter((x) => !x.closedAt && !x.archivedAt).map((x) => ({ id: x.id, title: x.title }))); })
+      // closedAt just means "not open in a UI right now" — after a daemon
+      // restart every known session starts closed. Only archived threads hide.
+      .then((list) => { if (alive) setAgentThreads(list.filter((x) => !x.archivedAt).map((x) => ({ id: x.id, title: x.title }))); })
       .catch(() => { /* no threads yet / backend down */ });
     return () => { alive = false; };
   }, [backend, baseWorkspaceId, threadsTick]);
@@ -775,7 +819,7 @@ export function ProjectHomePage({
           {active === 'artifacts-repo' && <ArtifactsRepoTab projectName={projectName} backend={backend} />}
           {active.startsWith('agent:') && (
             <div className="h-full min-h-0">
-              <NativeAgentSurfaceConnected backendKey={backendKey ?? undefined} workspaceId={baseWorkspaceId} agentSessionId={active.slice(6)} paneId={active} />
+              <ProjectAgentPane backend={backend} backendKey={backendKey ?? null} workspaceId={baseWorkspaceId} agentSessionId={active.slice(6)} paneId={active} />
             </div>
           )}
           {active.startsWith('report:') && (

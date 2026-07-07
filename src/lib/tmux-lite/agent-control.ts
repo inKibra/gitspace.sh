@@ -7,7 +7,9 @@ import {
   type AgentStateUpdateDelta,
   type WorkspaceAgentState,
 } from './agent-event-manager.js';
+import { existsSync } from 'fs';
 import { getArchivedSessions } from '../../agents/agent-db.js';
+import { getProjectBaseDir } from '../../core/config.js';
 import { scanWorkspaces } from '../remote-session/workspace-scanner.js';
 import type { WorkspaceInfo } from '../remote-session/protocol.js';
 import type { AgentPromptImage } from './protocol.js';
@@ -186,13 +188,26 @@ function buildTargetFromWorkspaceId(workspaceId: string): PiWorkspaceTarget | nu
   const match = scanWorkspacesCache.find(
     (w) => toCanonicalWorkspaceId(w) === workspaceId,
   );
-  if (!match) return null;
-  return {
-    workspaceId,
-    workspaceName: match.name,
-    workspacePath: match.path,
-    projectName: match.projectName,
-  };
+  if (match) {
+    return {
+      workspaceId,
+      workspaceName: match.name,
+      workspacePath: match.path,
+      projectName: match.projectName,
+    };
+  }
+  // `<project>:@base` pseudo-workspaces (project agents) never appear in the
+  // scan — synthesize the target from the project's base checkout.
+  if (workspaceId.endsWith(':@base')) {
+    const projectName = workspaceId.slice(0, -':@base'.length);
+    try {
+      const baseDir = getProjectBaseDir(projectName);
+      if (existsSync(baseDir)) {
+        return { workspaceId, workspaceName: '@base', workspacePath: baseDir, projectName };
+      }
+    } catch { /* project gone */ }
+  }
+  return null;
 }
 
 export function subscribeAgentControl(handler: (delta: AgentStateUpdateDelta) => void): () => void {
@@ -223,6 +238,16 @@ export function releasePiTerminalSessionOwnership(terminalSessionId: string): vo
 export async function getKnownAgentSessions(target: AgentWorkspaceTarget): Promise<AgentSessionSummary[]> {
   await ensureAgentControlInitialized();
   defaultAgentEventManager.registerWorkspace(target.workspaceId, target.workspacePath);
+
+  // Workspaces that init-time seeding never saw (registered lazily — e.g.
+  // `<project>:@base` pseudo-workspaces after a daemon restart) have an empty
+  // snapshot even when Pi session files exist on disk. Seed them on first ask.
+  if ((defaultAgentEventManager.getSnapshot()[target.workspaceId]?.sessions ?? []).length === 0 && target.workspacePath) {
+    try {
+      const sessions = await defaultPiCoordinator.refreshAgentSessions(target);
+      if (sessions.length > 0) defaultAgentEventManager.syncKnownSessions(target.workspaceId, sessions);
+    } catch { /* no Pi sessions yet */ }
+  }
 
   const snapshot = defaultAgentEventManager.getSnapshot();
   const snapshotSessions: AgentSessionSummary[] = (snapshot[target.workspaceId]?.sessions ?? []).map((s) => ({
