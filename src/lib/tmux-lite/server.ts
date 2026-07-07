@@ -106,6 +106,7 @@ import type { MachineSnapshot } from './machine/protocol.js';
 import { subscribeWorkspacePmUpdates } from './machine/pm-links.js';
 import { scanWorkspaces } from '../remote-session/workspace-scanner.js';
 import { startTriggerScheduler } from './trigger-scheduler.js';
+import { setCommandDispatcher } from './command-dispatch.js';
 import { formatArtifactUri, mintArtifactCap, verifyArtifactCap, capAllows, parseArtifactUri } from '../../core/artifact-cap.js';
 import { getOrCreateArtifactCapKeypair } from '../../core/artifact-cap-key.js';
 import { matchesWorkspaceId, toCanonicalWorkspaceId } from '../../utils/workspace-id.js';
@@ -2753,59 +2754,27 @@ function createVirtualSession(
 }
 
 // Router server
-routerListener = Bun.listen({
-  unix: ROUTER_SOCKET,
-  socket: {
-    open(socket) {
-      const socketState = getRouterSocketState(socket);
-      socketState.writer = createBufferedSocketWriter(socket as any);
-    },
-    close(socket) {
-      clearRouterSocketState(socket);
-    },
-
-    async data(socket, data) {
-      const socketState = getRouterSocketState(socket);
-      const combined = Buffer.concat([socketState.buffer, Buffer.from(data)]);
-      let decoded;
-
-      try {
-        decoded = decodeRouterMessages(combined);
-      } catch (err) {
-        const message = err instanceof Error ? err.message : "Invalid request";
-        if (socketState.writer) socketState.writer.write(encodeRouterMessage({ type: "error", message }));
-        else socket.write(encodeRouterMessage({ type: "error", message }));
-        socketState.buffer = Buffer.alloc(0);
-        return;
-      }
-
-      socketState.buffer = decoded.remaining;
-
-      for (const message of decoded.messages) {
-        const cmd = message as Command;
-        // Project agents: '<project>:@base' pseudo-workspace targets resolve to
-        // the project BASE clone (main artifacts mount) — normalize here so
-        // every agent-* handler sees a real path.
-        if ('target' in cmd && cmd.target && typeof cmd.target === 'object' && 'workspaceName' in cmd.target && (cmd.target as { workspaceName?: string }).workspaceName === '@base') {
-          try {
-            const { getProjectBaseDir } = await import('../../core/config.js');
-            const t = cmd.target as { workspaceId: string; workspaceName: string; workspacePath: string; projectName: string };
-            t.workspacePath = getProjectBaseDir(t.projectName);
-            t.workspaceId = `${t.projectName}:@base`;
-          } catch { /* leave as-is; handler will error */ }
-        }
-        const commandTraceStartMs = Date.now();
-        writeTraceLog('tmux-command-start', {
-          commandType: cmd.type,
-          requestId: 'requestId' in cmd ? cmd.requestId : undefined,
-        });
-        let res: Response;
-        const writeResponse = (response: Response) => {
-          if (socketState.writer) socketState.writer.write(encodeRouterMessage(response));
-          else socket.write(encodeRouterMessage(response));
-        };
-
-        switch (cmd.type) {
+/** Request/response command dispatch — the single implementation behind BOTH
+ *  transports: the unix socket handler AND (daemon-unification P3) the
+ *  in-process remote session-handler, which previously round-tripped every
+ *  typed command through the socket to itself. Connection-coupled commands
+ *  (attach/watch/delete streams, kill-server) stay in the socket handler
+ *  and are unreachable here (dispatch returns their error via default).
+ */
+export async function dispatchCommand(cmd: Command): Promise<Response | null> {
+  // Project agents: '<project>:@base' pseudo-workspace targets resolve to
+  // the project BASE clone (main artifacts mount) — normalize here so
+  // every handler on either transport sees a real path.
+  if ('target' in cmd && cmd.target && typeof cmd.target === 'object' && 'workspaceName' in cmd.target && (cmd.target as { workspaceName?: string }).workspaceName === '@base') {
+    try {
+      const { getProjectBaseDir } = await import('../../core/config.js');
+      const t = cmd.target as { workspaceId: string; workspaceName: string; workspacePath: string; projectName: string };
+      t.workspacePath = getProjectBaseDir(t.projectName);
+      t.workspaceId = `${t.projectName}:@base`;
+    } catch { /* leave as-is; handler will error */ }
+  }
+  let res: Response | null = null;
+  switch (cmd.type) {
           case "list":
             res = {
               type: "sessions",
@@ -2943,111 +2912,6 @@ routerListener = Bun.listen({
             }
             break;
 
-          case 'attach-prepare':
-            try {
-              let targetSession: Session;
-              let workspaceId: string | undefined;
-              if (cmd.sessionId) {
-                const s = sessions.get(cmd.sessionId);
-                if (!s) {
-                  res = { type: 'error', message: `Session ${cmd.sessionId} not found` };
-                  break;
-                }
-                targetSession = getSessionInfo(s);
-              } else if (cmd.workspaceId) {
-                let currentPhase: 'pre' | 'setup' | 'select' = 'pre';
-                const prepared = await attachWorkspaceSession({
-                  scanWorkspaces,
-                  listSessions: async () => Array.from(sessions.values()).map((session) => ({ name: session.info.name })),
-                  createSession: async (name, cwd, options) => createSession(name, cwd, options),
-                  prepareWorkspaceForSession: async (args) => prepareWorkspaceForSession(args),
-                }, {
-                  workspaceId: cmd.workspaceId,
-                  sessionName: cmd.sessionName,
-                  command: cmd.command,
-                  args: cmd.args,
-                  env: cmd.env,
-                  scriptPolicy: cmd.scriptPolicy,
-                  onAbortController: (controller) => {
-                    if (controller) {
-                      pendingAttachControllers.set(cmd.requestId, controller);
-                    } else {
-                      pendingAttachControllers.delete(cmd.requestId);
-                    }
-                  },
-                  onOutput: (data, phase) => {
-                    currentPhase = phase;
-                    writeResponse({ type: 'attach-script-output', requestId: cmd.requestId, phase, data: Buffer.from(data).toString('base64') });
-                  },
-                  onPhaseStart: (phase) => {
-                    currentPhase = phase;
-                    const banner = Buffer.from(`\r\n==> ${phase} scripts...\r\n`);
-                    writeResponse({ type: 'attach-script-output', requestId: cmd.requestId, phase, data: banner.toString('base64') });
-                  },
-                });
-                if (!cmd.command) {
-                  writeResponse({ type: 'attach-script-output', requestId: cmd.requestId, phase: currentPhase, data: '', done: true });
-                }
-                targetSession = prepared.session;
-                workspaceId = prepared.workspace.id;
-              } else {
-                res = { type: 'error', message: 'attach-prepare requires sessionId or workspaceId' };
-                break;
-              }
-              void broadcastMachineSnapshotReplacement().catch(() => {});
-              writeResponse({ type: 'attach-prepared', requestId: cmd.requestId, session: targetSession, workspaceId, viewOnly: cmd.viewOnly });
-              continue;
-            } catch (e) {
-              pendingAttachControllers.delete(cmd.requestId);
-              const typedError = e instanceof Error ? e as Error & { code?: string } : undefined;
-              const message = `Failed to prepare attach: ${typedError?.message ?? String(e)}`;
-              res = typedError?.code
-                ? { type: 'error', message, code: typedError.code }
-                : { type: 'error', message };
-            }
-            break;
-
-          case 'attach-cancel': {
-            const controller = pendingAttachControllers.get(cmd.requestId);
-            if (controller) {
-              controller.abort();
-              pendingAttachControllers.delete(cmd.requestId);
-            }
-            res = { type: 'ok' };
-            break;
-          }
-
-          case "attach": {
-            const s = sessions.get(cmd.id);
-            if (!s) {
-              res = { type: "error", message: `Session ${cmd.id} not found` };
-            } else if (s.info.attached && !cmd.force) {
-              res = { type: "already-attached", session: getSessionInfo(s) };
-            } else {
-              res = { type: "session", session: getSessionInfo(s) };
-            }
-            break;
-          }
-
-          case "terminate": {
-            const s = sessions.get(cmd.id);
-            if (!s) {
-              res = { type: "error", message: `Session ${cmd.id} not found` };
-            } else {
-              const mode = resolveTerminationMode(cmd.mode);
-              const graceMs = resolveTerminationGraceMs(cmd.graceMs);
-              if (!mode) {
-                res = { type: "error", message: "Invalid terminate mode" };
-              } else if (graceMs === null) {
-                res = { type: "error", message: "Invalid terminate graceMs" };
-              } else {
-                await terminateSessionData(s, mode, graceMs);
-                res = { type: "ok" };
-              }
-            }
-            break;
-          }
-
           case 'agent-state':
             try {
               await getAgentControlReady();
@@ -3055,18 +2919,6 @@ routerListener = Bun.listen({
             } catch (e) {
               const errMsg = e instanceof Error ? e.message : String(e);
               res = { type: 'error', message: `Failed to load agent state: ${errMsg}` };
-            }
-            break;
-
-          case 'agent-watch':
-            try {
-              await getAgentControlReady();
-              socketState.watchesAgentState = true;
-              agentStateWatchers.add(socket);
-              res = { type: 'agent-watch-started' };
-            } catch (e) {
-              const errMsg = e instanceof Error ? e.message : String(e);
-              res = { type: 'error', message: `Failed to start agent watch: ${errMsg}` };
             }
             break;
 
@@ -3079,56 +2931,6 @@ routerListener = Bun.listen({
               res = { type: 'error', message: `Failed to load machine snapshot: ${errMsg}` };
             }
             break;
-
-          case 'machine-watch':
-            try {
-              const snapshot = await buildCurrentMachineSnapshot();
-              socketState.watchesMachineState = true;
-              machineStateWatchers.add(socket);
-              writeResponse({ type: 'machine-snapshot', snapshot });
-              res = { type: 'machine-watch-started' };
-            } catch (e) {
-              const errMsg = e instanceof Error ? e.message : String(e);
-              res = { type: 'error', message: `Failed to start machine watch: ${errMsg}` };
-            }
-            break;
-
-
-          case 'agent-prompt': {
-            const traceStartMs = Date.now();
-            writeTraceLog('tmux-agent-prompt-start', {
-              agentSessionId: cmd.agentSessionId,
-              workspaceId: cmd.target.workspaceId,
-              textLength: cmd.text.length,
-              imageCount: cmd.images?.length ?? 0,
-            });
-            try {
-              await getAgentControlReady();
-              writeTraceLog('tmux-agent-prompt-control-ready', {
-                agentSessionId: cmd.agentSessionId,
-                workspaceId: cmd.target.workspaceId,
-                durationMs: Date.now() - traceStartMs,
-              });
-              // ok here means the turn was accepted. Turn progress and completion are surfaced via existing agent events, not via this response.
-              await promptAgentSession(cmd.target, cmd.agentSessionId, cmd.text, cmd.images, { streamingBehavior: cmd.streamingBehavior });
-              writeTraceLog('tmux-agent-prompt-accepted', {
-                agentSessionId: cmd.agentSessionId,
-                workspaceId: cmd.target.workspaceId,
-                durationMs: Date.now() - traceStartMs,
-              });
-              res = { type: 'ok' };
-            } catch (e) {
-              const errMsg = e instanceof Error ? e.message : String(e);
-              res = { type: 'error', message: `Failed to prompt agent session: ${errMsg}` };
-              writeTraceLog('tmux-agent-prompt-error', {
-                agentSessionId: cmd.agentSessionId,
-                workspaceId: cmd.target.workspaceId,
-                durationMs: Date.now() - traceStartMs,
-                error: errMsg,
-              });
-            }
-            break;
-          }
 
           case 'agent-queue-remove':
             try {
@@ -3327,35 +3129,6 @@ routerListener = Bun.listen({
               res = { type: 'project-deleted', projectName: cmd.projectName };
             } catch (e) {
               res = { type: 'error', message: e instanceof Error ? e.message : String(e) };
-            }
-            break;
-
-          case 'workspace-delete':
-            try {
-              const normalizedWorkspaceId = cmd.workspaceId.startsWith(`${cmd.projectName}:`)
-                ? cmd.workspaceId.slice(cmd.projectName.length + 1)
-                : cmd.workspaceId;
-              const canonicalWorkspaceId = `${cmd.projectName}:${normalizedWorkspaceId}`;
-              const result = await deleteWorkspaceCore(cmd.projectName, normalizedWorkspaceId, {
-                nonInteractive: true,
-                removeScriptPolicy: cmd.scriptPolicy === 'skip' ? 'skip' : 'enforce',
-                onScriptOutput: (data) => {
-                  writeResponse({ type: 'workspace-delete-output', requestId: cmd.requestId, data: data.toString('base64') });
-                },
-              });
-              if (!result.success) {
-                const message = result.error ?? `Failed to delete workspace ${normalizedWorkspaceId}`;
-                writeResponse({ type: 'workspace-delete-output', requestId: cmd.requestId, data: '', done: true, error: message });
-                res = { type: 'error', message, code: result.errorCode };
-                break;
-              }
-              writeResponse({ type: 'workspace-delete-output', requestId: cmd.requestId, data: '', done: true });
-              void broadcastMachineSnapshotReplacement().catch(() => {});
-              res = { type: 'workspace-deleted', requestId: cmd.requestId, workspaceId: canonicalWorkspaceId };
-            } catch (e) {
-              const errMsg = e instanceof Error ? e.message : String(e);
-              writeResponse({ type: 'workspace-delete-output', requestId: cmd.requestId, data: '', done: true, error: errMsg });
-              res = { type: 'error', message: errMsg };
             }
             break;
 
@@ -3643,19 +3416,6 @@ routerListener = Bun.listen({
             }
             break;
 
-          case 'agent-attach':
-            try {
-              await getAgentControlReady();
-              const session = await ensureAgentTerminalSession(cmd.target, cmd.agentSessionId, { cols: cmd.cols, rows: cmd.rows });
-              agentSessionWatchOwners.set(cmd.agentSessionId, socket);
-              res = { type: 'session', session };
-              void broadcastMachineSnapshotReplacement().catch(() => {});
-            } catch (e) {
-              const errMsg = e instanceof Error ? e.message : String(e);
-              res = { type: 'error', message: `Failed to attach agent session: ${errMsg}` };
-            }
-            break;
-
           case 'agent-permission':
             try {
               await getAgentControlReady();
@@ -3879,26 +3639,6 @@ routerListener = Bun.listen({
             } catch (e) {
               const errMsg = e instanceof Error ? e.message : String(e);
               res = { type: 'error', message: `Failed to read tree: ${errMsg}` };
-            }
-            break;
-
-          case 'agent-dialog-response':
-            try {
-              const owner = agentDialogOwners.get(cmd.dialogId);
-              if (!owner || owner !== socket) {
-                res = { type: 'agent-bool', ok: false };
-                break;
-              }
-              const resolved = resolveAgentDialogResponse({
-                type: cmd.dialogType,
-                id: cmd.dialogId,
-                value: cmd.value as any,
-              });
-              agentDialogOwners.delete(cmd.dialogId);
-              res = { type: 'agent-bool', ok: resolved };
-            } catch (e) {
-              const errMsg = e instanceof Error ? e.message : String(e);
-              res = { type: 'error', message: `Failed to resolve dialog: ${errMsg}` };
             }
             break;
 
@@ -4293,18 +4033,6 @@ routerListener = Bun.listen({
             }
             break;
 
-          case "kill-server":
-            console.log("Shutting down...");
-            res = { type: "ok" };
-            if (socketState.writer) socketState.writer.write(encodeRouterMessage(res));
-            else socket.write(encodeRouterMessage(res));
-            // Clean up socket file after sending response, before exit
-            setTimeout(() => {
-              shutdownServer();
-              process.exit(0);
-            }, 100);
-            return;
-
           case "inbox":
             res = { type: "inbox", items: [...inbox] };
             break;
@@ -4369,8 +4097,315 @@ routerListener = Bun.listen({
             break;
           }
 
+          case "terminate": {
+            const s = sessions.get(cmd.id);
+            if (!s) {
+              res = { type: "error", message: `Session ${cmd.id} not found` };
+            } else {
+              const mode = resolveTerminationMode(cmd.mode);
+              const graceMs = resolveTerminationGraceMs(cmd.graceMs);
+              if (!mode) {
+                res = { type: "error", message: "Invalid terminate mode" };
+              } else if (graceMs === null) {
+                res = { type: "error", message: "Invalid terminate graceMs" };
+              } else {
+                await terminateSessionData(s, mode, graceMs);
+                res = { type: "ok" };
+              }
+            }
+            break;
+          }
+
+          case 'agent-prompt': {
+            const traceStartMs = Date.now();
+            writeTraceLog('tmux-agent-prompt-start', {
+              agentSessionId: cmd.agentSessionId,
+              workspaceId: cmd.target.workspaceId,
+              textLength: cmd.text.length,
+              imageCount: cmd.images?.length ?? 0,
+            });
+            try {
+              await getAgentControlReady();
+              writeTraceLog('tmux-agent-prompt-control-ready', {
+                agentSessionId: cmd.agentSessionId,
+                workspaceId: cmd.target.workspaceId,
+                durationMs: Date.now() - traceStartMs,
+              });
+              // ok here means the turn was accepted. Turn progress and completion are surfaced via existing agent events, not via this response.
+              await promptAgentSession(cmd.target, cmd.agentSessionId, cmd.text, cmd.images, { streamingBehavior: cmd.streamingBehavior });
+              writeTraceLog('tmux-agent-prompt-accepted', {
+                agentSessionId: cmd.agentSessionId,
+                workspaceId: cmd.target.workspaceId,
+                durationMs: Date.now() - traceStartMs,
+              });
+              res = { type: 'ok' };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to prompt agent session: ${errMsg}` };
+              writeTraceLog('tmux-agent-prompt-error', {
+                agentSessionId: cmd.agentSessionId,
+                workspaceId: cmd.target.workspaceId,
+                durationMs: Date.now() - traceStartMs,
+                error: errMsg,
+              });
+            }
+            break;
+          }
+
           default:
             res = { type: "error", message: "Unknown command" };
+  }
+  return res;
+}
+
+// Daemon-unification P3: the in-process session-handler dispatches typed
+// commands directly — no socket round trip to ourselves.
+setCommandDispatcher(dispatchCommand);
+console.error('[dispatch] in-process command dispatcher registered');
+
+routerListener = Bun.listen({
+  unix: ROUTER_SOCKET,
+  socket: {
+    open(socket) {
+      const socketState = getRouterSocketState(socket);
+      socketState.writer = createBufferedSocketWriter(socket as any);
+    },
+    close(socket) {
+      clearRouterSocketState(socket);
+    },
+
+    async data(socket, data) {
+      const socketState = getRouterSocketState(socket);
+      const combined = Buffer.concat([socketState.buffer, Buffer.from(data)]);
+      let decoded;
+
+      try {
+        decoded = decodeRouterMessages(combined);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Invalid request";
+        if (socketState.writer) socketState.writer.write(encodeRouterMessage({ type: "error", message }));
+        else socket.write(encodeRouterMessage({ type: "error", message }));
+        socketState.buffer = Buffer.alloc(0);
+        return;
+      }
+
+      socketState.buffer = decoded.remaining;
+
+      for (const message of decoded.messages) {
+        const cmd = message as Command;
+        // Loop-resident commands (agent-attach, agent-dialog-response) also
+        // carry '@base' targets — normalize here too (idempotent with the
+        // dispatchCommand normalization for everything routed through it).
+        if ('target' in cmd && cmd.target && typeof cmd.target === 'object' && 'workspaceName' in cmd.target && (cmd.target as { workspaceName?: string }).workspaceName === '@base') {
+          try {
+            const { getProjectBaseDir } = await import('../../core/config.js');
+            const t = cmd.target as { workspaceId: string; workspaceName: string; workspacePath: string; projectName: string };
+            t.workspacePath = getProjectBaseDir(t.projectName);
+            t.workspaceId = `${t.projectName}:@base`;
+          } catch { /* leave as-is; handler will error */ }
+        }
+        const commandTraceStartMs = Date.now();
+        writeTraceLog('tmux-command-start', {
+          commandType: cmd.type,
+          requestId: 'requestId' in cmd ? cmd.requestId : undefined,
+        });
+        let res: Response;
+        const writeResponse = (response: Response) => {
+          if (socketState.writer) socketState.writer.write(encodeRouterMessage(response));
+          else socket.write(encodeRouterMessage(response));
+        };
+
+        switch (cmd.type) {
+          case 'attach-prepare':
+            try {
+              let targetSession: Session;
+              let workspaceId: string | undefined;
+              if (cmd.sessionId) {
+                const s = sessions.get(cmd.sessionId);
+                if (!s) {
+                  res = { type: 'error', message: `Session ${cmd.sessionId} not found` };
+                  break;
+                }
+                targetSession = getSessionInfo(s);
+              } else if (cmd.workspaceId) {
+                let currentPhase: 'pre' | 'setup' | 'select' = 'pre';
+                const prepared = await attachWorkspaceSession({
+                  scanWorkspaces,
+                  listSessions: async () => Array.from(sessions.values()).map((session) => ({ name: session.info.name })),
+                  createSession: async (name, cwd, options) => createSession(name, cwd, options),
+                  prepareWorkspaceForSession: async (args) => prepareWorkspaceForSession(args),
+                }, {
+                  workspaceId: cmd.workspaceId,
+                  sessionName: cmd.sessionName,
+                  command: cmd.command,
+                  args: cmd.args,
+                  env: cmd.env,
+                  scriptPolicy: cmd.scriptPolicy,
+                  onAbortController: (controller) => {
+                    if (controller) {
+                      pendingAttachControllers.set(cmd.requestId, controller);
+                    } else {
+                      pendingAttachControllers.delete(cmd.requestId);
+                    }
+                  },
+                  onOutput: (data, phase) => {
+                    currentPhase = phase;
+                    writeResponse({ type: 'attach-script-output', requestId: cmd.requestId, phase, data: Buffer.from(data).toString('base64') });
+                  },
+                  onPhaseStart: (phase) => {
+                    currentPhase = phase;
+                    const banner = Buffer.from(`\r\n==> ${phase} scripts...\r\n`);
+                    writeResponse({ type: 'attach-script-output', requestId: cmd.requestId, phase, data: banner.toString('base64') });
+                  },
+                });
+                if (!cmd.command) {
+                  writeResponse({ type: 'attach-script-output', requestId: cmd.requestId, phase: currentPhase, data: '', done: true });
+                }
+                targetSession = prepared.session;
+                workspaceId = prepared.workspace.id;
+              } else {
+                res = { type: 'error', message: 'attach-prepare requires sessionId or workspaceId' };
+                break;
+              }
+              void broadcastMachineSnapshotReplacement().catch(() => {});
+              writeResponse({ type: 'attach-prepared', requestId: cmd.requestId, session: targetSession, workspaceId, viewOnly: cmd.viewOnly });
+              continue;
+            } catch (e) {
+              pendingAttachControllers.delete(cmd.requestId);
+              const typedError = e instanceof Error ? e as Error & { code?: string } : undefined;
+              const message = `Failed to prepare attach: ${typedError?.message ?? String(e)}`;
+              res = typedError?.code
+                ? { type: 'error', message, code: typedError.code }
+                : { type: 'error', message };
+            }
+            break;
+
+          case 'attach-cancel': {
+            const controller = pendingAttachControllers.get(cmd.requestId);
+            if (controller) {
+              controller.abort();
+              pendingAttachControllers.delete(cmd.requestId);
+            }
+            res = { type: 'ok' };
+            break;
+          }
+
+          case "attach": {
+            const s = sessions.get(cmd.id);
+            if (!s) {
+              res = { type: "error", message: `Session ${cmd.id} not found` };
+            } else if (s.info.attached && !cmd.force) {
+              res = { type: "already-attached", session: getSessionInfo(s) };
+            } else {
+              res = { type: "session", session: getSessionInfo(s) };
+            }
+            break;
+          }
+
+          case 'agent-watch':
+            try {
+              await getAgentControlReady();
+              socketState.watchesAgentState = true;
+              agentStateWatchers.add(socket);
+              res = { type: 'agent-watch-started' };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to start agent watch: ${errMsg}` };
+            }
+            break;
+
+          case 'machine-watch':
+            try {
+              const snapshot = await buildCurrentMachineSnapshot();
+              socketState.watchesMachineState = true;
+              machineStateWatchers.add(socket);
+              writeResponse({ type: 'machine-snapshot', snapshot });
+              res = { type: 'machine-watch-started' };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to start machine watch: ${errMsg}` };
+            }
+            break;
+
+
+          case 'workspace-delete':
+            try {
+              const normalizedWorkspaceId = cmd.workspaceId.startsWith(`${cmd.projectName}:`)
+                ? cmd.workspaceId.slice(cmd.projectName.length + 1)
+                : cmd.workspaceId;
+              const canonicalWorkspaceId = `${cmd.projectName}:${normalizedWorkspaceId}`;
+              const result = await deleteWorkspaceCore(cmd.projectName, normalizedWorkspaceId, {
+                nonInteractive: true,
+                removeScriptPolicy: cmd.scriptPolicy === 'skip' ? 'skip' : 'enforce',
+                onScriptOutput: (data) => {
+                  writeResponse({ type: 'workspace-delete-output', requestId: cmd.requestId, data: data.toString('base64') });
+                },
+              });
+              if (!result.success) {
+                const message = result.error ?? `Failed to delete workspace ${normalizedWorkspaceId}`;
+                writeResponse({ type: 'workspace-delete-output', requestId: cmd.requestId, data: '', done: true, error: message });
+                res = { type: 'error', message, code: result.errorCode };
+                break;
+              }
+              writeResponse({ type: 'workspace-delete-output', requestId: cmd.requestId, data: '', done: true });
+              void broadcastMachineSnapshotReplacement().catch(() => {});
+              res = { type: 'workspace-deleted', requestId: cmd.requestId, workspaceId: canonicalWorkspaceId };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              writeResponse({ type: 'workspace-delete-output', requestId: cmd.requestId, data: '', done: true, error: errMsg });
+              res = { type: 'error', message: errMsg };
+            }
+            break;
+
+          case 'agent-attach':
+            try {
+              await getAgentControlReady();
+              const session = await ensureAgentTerminalSession(cmd.target, cmd.agentSessionId, { cols: cmd.cols, rows: cmd.rows });
+              agentSessionWatchOwners.set(cmd.agentSessionId, socket);
+              res = { type: 'session', session };
+              void broadcastMachineSnapshotReplacement().catch(() => {});
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to attach agent session: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-dialog-response':
+            try {
+              const owner = agentDialogOwners.get(cmd.dialogId);
+              if (!owner || owner !== socket) {
+                res = { type: 'agent-bool', ok: false };
+                break;
+              }
+              const resolved = resolveAgentDialogResponse({
+                type: cmd.dialogType,
+                id: cmd.dialogId,
+                value: cmd.value as any,
+              });
+              agentDialogOwners.delete(cmd.dialogId);
+              res = { type: 'agent-bool', ok: resolved };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to resolve dialog: ${errMsg}` };
+            }
+            break;
+
+          case "kill-server":
+            console.log("Shutting down...");
+            res = { type: "ok" };
+            if (socketState.writer) socketState.writer.write(encodeRouterMessage(res));
+            else socket.write(encodeRouterMessage(res));
+            // Clean up socket file after sending response, before exit
+            setTimeout(() => {
+              shutdownServer();
+              process.exit(0);
+            }, 100);
+            return;
+
+          default: {
+            const dispatched = await dispatchCommand(cmd);
+            res = dispatched ?? { type: 'error', message: `Unknown command: ${(cmd as { type?: string }).type}` };
+          }
         }
 
         sendRouterResponse(socket, res);

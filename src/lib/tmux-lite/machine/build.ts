@@ -331,10 +331,15 @@ export function buildMachineSnapshot(params: {
       };
       agentSessionsById[record.id] = record;
       agentSessionIdsByWorkspaceId[workspaceId] = [...(agentSessionIdsByWorkspaceId[workspaceId] ?? []), record.id];
-      workspacesById[workspaceId] = {
-        ...workspacesById[workspaceId],
-        agentSessionIds: [...workspacesById[workspaceId].agentSessionIds, record.id],
-      };
+      // '@base' pseudo-workspaces have no scanner record in the map — their
+      // sessions still land in agentSessionsById (transcripts/lists), but
+      // only real workspace records carry agentSessionIds.
+      if (workspacesById[workspaceId]) {
+        workspacesById[workspaceId] = {
+          ...workspacesById[workspaceId],
+          agentSessionIds: [...workspacesById[workspaceId].agentSessionIds, record.id],
+        };
+      }
     }
 
       for (const archived of archivedSessions) {
@@ -353,10 +358,12 @@ export function buildMachineSnapshot(params: {
         };
       agentSessionsById[record.id] = record;
       agentSessionIdsByWorkspaceId[workspaceId] = [...(agentSessionIdsByWorkspaceId[workspaceId] ?? []), record.id];
-      workspacesById[workspaceId] = {
-        ...workspacesById[workspaceId],
-        agentSessionIds: [...workspacesById[workspaceId].agentSessionIds, record.id],
-      };
+      if (workspacesById[workspaceId]) {
+        workspacesById[workspaceId] = {
+          ...workspacesById[workspaceId],
+          agentSessionIds: [...workspacesById[workspaceId].agentSessionIds, record.id],
+        };
+      }
     }
   }
 

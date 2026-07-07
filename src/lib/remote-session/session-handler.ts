@@ -34,6 +34,7 @@ import {
   watchMachineEvents,
   type Session,
 } from "../tmux-lite/cli";
+import { dispatchInProcess, hasInProcessDispatcher } from '../tmux-lite/command-dispatch.js';
 import { addWorkspaceNote, listWorkspaceNotes, removeWorkspaceNote, updateWorkspaceNote } from '../../core/workspace-metadata.js';
 
 // Import project loading / workspace operations
@@ -409,8 +410,13 @@ export class RemoteSessionHandler {
   private async sendBoundedTmuxCommand(command: TmuxCommand): Promise<TmuxResponse> {
     let timeout: ReturnType<typeof setTimeout> | null = null;
     try {
+      // Daemon-unification P3: the session-handler runs INSIDE the daemon —
+      // dispatch directly when the server has registered (always, in the
+      // unified topology). The socket path remains as the fallback for any
+      // exotic embedding. The timeout guard applies to both.
+      const invoke = hasInProcessDispatcher() ? dispatchInProcess(command) : sendTmuxCommand(command);
       return await Promise.race([
-        sendTmuxCommand(command),
+        invoke,
         new Promise<TmuxResponse>((resolve) => {
           timeout = setTimeout(() => {
             resolve({ type: 'error', message: `Timed out waiting for command response (${command.type})` });
