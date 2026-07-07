@@ -162,6 +162,29 @@ Result: `local://PLAN.md` lives at `<mount>/.sessions/<sid>/local/PLAN.md`, cano
 
 **ArtifactManager overflow**: not touched. `adoptArtifactManager` is not called; overflow stays transcript-adjacent per `ARTIFACTS-FS.md:57-61`. Bridge = explicit promote only.
 
+**Typed discovery — scratch has an address but no type.** The artifact taxonomy
+(`classifyArtifact`, `src/components/artifact-kinds.ts:19-31`) is a claim the
+CURATED tree makes; `.sessions/` never participates. Two guards make this true
+(both land in Phase 4, non-optional):
+
+- `listArtifactFiles` (`src/core/artifacts.ts:279-306`) skips `.sessions/` in
+  the default walk — otherwise every session's scratch floods the artifact
+  rails the day the cutover lands (the walk is filesystem-based; the git
+  exclude does not help it).
+- `classifyArtifact` short-circuits `.sessions/` paths to a non-curated kind —
+  directory-keyed kinds (`reports/`, `notes/`, `evidence/`) are safe by
+  construction, but extension-keyed kinds match ANYWHERE: without the guard a
+  scratch `ops.dashboard.json` appears in the ph DASHBOARDS sidebar, a scratch
+  `.data.json` appears in the dashboard panel's data picker, and scratch
+  `.gssh.html` files list as apps.
+
+Promotion is therefore the TYPING act, not just the durability act: an agent
+drafts `local://draft.report.json`, iterates, shares it mid-flight via a read
+cap — and only `promote` to `reports/draft.report.json` makes it a report to
+feeds, rails, and rated precedents. Deliberate scoped surfacing (e.g. the ph
+agent-thread pane listing its own session's working docs) is a welcome future
+feature; accidental global leakage is not.
+
 ### Honest limits
 
 - The process-global `LocalProtocolHandler.setOverride` is last-writer-wins in the one-process multi-session daemon. All tool traffic is correct via per-tool-call context threading (the documented fix for upstream #1608); only context-less paths (TUI hyperlink resolution) can resolve against the wrong session's mount. Low impact; noted for follow-up.
@@ -244,9 +267,9 @@ Size: ~450 lines TS.
 Verification: run a trigger with `writes: ['reports/**']`; confirm the CLI refuses an out-of-scope path, the hook rejects an out-of-scope raw commit, and a `--no-verify` out-of-scope commit is reverted + flagged by `recordTriggerRun`.
 
 **Phase 4 — OMP `local://` cutover.**
-Files: `src/lib/tmux-lite/agents/omp-types.ts` (one-line `localProtocolOptions` type addition), `pi-runtime.ts` / `pi-backend.ts` / `pi-coordinator.ts` (option at all three call sites, reopen path included so resumed sessions keep the same root), `src/core/artifacts.ts` (`.sessions/` → `<bare>/info/exclude` in `ensureArtifactsRepo`; retention-window GC of dead session dirs).
-Size: ~80 lines TS.
-Verification: open a session, write `local://PLAN.md`, confirm the file at `<mount>/.sessions/<sid>/local/PLAN.md`, `git status` clean in the mount, plan mode writable while tree read-only; reopen the session and confirm the same root; subagent sees the parent's local files.
+Files: `src/lib/tmux-lite/agents/omp-types.ts` (one-line `localProtocolOptions` type addition), `pi-runtime.ts` / `pi-backend.ts` / `pi-coordinator.ts` (option at all three call sites, reopen path included so resumed sessions keep the same root), `src/core/artifacts.ts` (`.sessions/` → `<bare>/info/exclude` in `ensureArtifactsRepo`; retention-window GC of dead session dirs; `listArtifactFiles` skips `.sessions/`), `src/components/artifact-kinds.ts` (`classifyArtifact` short-circuits `.sessions/` paths — see "Typed discovery" above; without both guards, scratch floods the rails and extension-keyed kinds leak into curated surfaces).
+Size: ~100 lines TS.
+Verification: open a session, write `local://PLAN.md`, confirm the file at `<mount>/.sessions/<sid>/local/PLAN.md`, `git status` clean in the mount, plan mode writable while tree read-only; reopen the session and confirm the same root; subagent sees the parent's local files; write a scratch `x.dashboard.json` via `local://` and confirm it does NOT appear in the ph DASHBOARDS sidebar or the artifacts rail.
 
 **Phase 5 — Share links.**
 Files: `src/core/artifact-share.ts` (new: mint/verify/ledger, ~250 lines), `src/relay/server.ts` (`GET /artifact-share/` verify + pipe-delegate + stream, ~120 lines), `src/lib/tmux-lite/server.ts` (`artifact-share-read` pipe handler with chunked streaming, ~200 lines), CLI share verbs (~80 lines), UI Share button.
