@@ -1,6 +1,6 @@
 ---
 name: space-artifacts
-description: The workspace artifacts filesystem — what lives at .gitspace/artifacts, every artifact kind and its contract (dashboards, mini-apps, data, reports, workflow specs, evidence, notes, journal), and how to produce each one correctly. Use whenever you create, read, or reason about artifacts.
+description: The workspace artifacts filesystem — what lives at .gitspace/artifacts, every artifact kind and its contract (dashboards, mini-apps, data, reports, workflow specs, evidence, notes, journal, triggers), session scratch + promote, share links, and how to produce each one correctly. Use whenever you create, read, or reason about artifacts.
 ---
 
 # Workspace artifacts
@@ -9,9 +9,23 @@ description: The workspace artifacts filesystem — what lives at .gitspace/arti
 branch** (one branch per workspace, off `main`; roll-up merges it to `main`
 when the workspace ships). Everything in it is versioned, travels with the
 branch, and surfaces in the product UI by **path convention**. Write files
-there and commit in that directory (`git -C .gitspace/artifacts add -A &&
-git -C .gitspace/artifacts commit -m "..."`) — never commit artifacts into
-the code repo.
+there and commit in that directory — never commit artifacts into the code
+repo. Two equally valid ways to commit:
+
+- `gssh space artifacts commit <paths...> -m "…"` — preferred: records
+  provenance (who/which session produced it) in git-notes.
+- Plain `git -C .gitspace/artifacts add -A && git -C .gitspace/artifacts
+  commit -m "…"` — also fine; a managed hook stamps basic provenance.
+
+## Project agents (@base)
+
+If your working directory is the project's **base clone** (not a workspace
+worktree), you are the PROJECT agent and your `.gitspace/artifacts` mount is
+the **`main` branch — the project's rolled-up institutional memory**, not a
+scratch branch. Treat writes as project-global: curate reports and
+dashboards that summarize across workspaces, tend rated precedents, maintain
+project-level triggers. Goal/journal/phase machinery is workspace-scoped and
+mostly does not apply to you.
 
 ## The kinds (path convention → UI surface)
 
@@ -19,17 +33,50 @@ the code repo.
 |---|---|---|
 | `goal.md`, `rubric.json` | goal canon | **SYSTEM-MIRRORED — never write by hand.** Updated automatically from the goal record; journal/judgments pin hashes into their history. |
 | `<name>.dashboard.json` | dashboard | ▦ dock tab + sidebar Dashboards + project home |
-| `apps/<name>.gssh.html` | mini-app | runs sandboxed (standalone or in dashboards) |
-| `<name>.data.json` or `data/…` | data | feeds apps; ⟳ trigger chips later |
-| `reports/<name>.report.json` | report | '⚑ Report' pane + 'Reports · good + bad' rail group; `rating` adds it to Rated precedents |
+| `<name>.gssh.html` (conventionally under `apps/`) | mini-app | runs sandboxed (standalone or in dashboards); recognized by extension anywhere |
+| `<name>.data.json` or `data/…` | data | feeds apps; ⟳ trigger freshness chips |
+| `reports/<name>.report.json` | report | '⚑ Report' pane + Reports rail group; `rating` adds it to the 'Rated precedents' group |
 | `<name>.workflow.json` | workflow spec | ⟜ Workflow pane (phased dataflow) |
+| `triggers/<slug>.trigger.json` | trigger | ◷ Crons & triggers pane; cron triggers fire unattended from this machine's daemon (schedule grammar: `every N m/h/d` ONLY) |
 | `validation/…`, `shots/…`, `demos/…`, `evidence/…` | evidence | ▸ evidence panes; **attach via goal commands** (`gssh space goal …`), not by hand, so it links to a requirement |
 | `notes/…` | note | ✎ notes (prefer `gssh space notes`) |
-| `journal/NN-<phase>.json` | phase journal | written by `gssh space journal` — see the phase-journal skill |
-| `blame/edits.jsonl` | edit breadcrumbs | automatic; never write |
-| `review/guide.json`, `review/analysis.json` | review guide | written via `gssh space guide` — see the review-guide-narrator skill |
+| `journal/NN-<phase>.json` | phase journal | written by `gssh space journal`; consumed by the review guide (no dedicated pane — lands under Other in the rail) |
+| `blame/edits.jsonl` | edit breadcrumbs | automatic; never write (no UI pane; feeds the guide) |
+| `review/guide.json` | review guide | rendered guide; write via `gssh space guide` |
+| `review/analysis.json` | review worksheet | CLI-only intermediate (no UI pane) |
+| `.sessions/…` | session scratch | **unversioned + typeless** — see below |
 
-Files ≥2MB are stored as LFS-style pointers automatically — commit normally.
+**Large files are handled for you — and only through sanctioned commits.**
+Files ≥2MB become standard git-LFS pointers automatically at commit time (a
+managed pre-commit hook stores the bytes in the project blob store and
+commits a pointer + `.gitattributes` line). Never pass `--no-verify`: the
+publish gate refuses to sync or roll up any branch carrying raw large blobs,
+the run is flagged, and `gssh space artifacts repair` must rewrite it.
+
+## Session scratch and promote (the typing act)
+
+Your `local://` files (e.g. `local://PLAN.md`) live at
+`.gitspace/artifacts/.sessions/<your-session>/local/` — addressable and
+shareable, but **git-ignored and typeless**: nothing under `.sessions/`
+appears in feeds, rails, or dashboards, no matter how it is named. When a
+draft is worth keeping, promote it:
+
+```
+gssh space artifacts promote <path> reports/my-findings.report.json
+```
+
+Promotion copies the file into the versioned tree with provenance — that is
+the moment it gains a type (report/dashboard/data) and becomes visible to
+the product and to future agents.
+
+## Share links
+
+`gssh space artifacts share <relPath> [--ttl 30m|24h|7d] [--max-uses N]`
+mints a signed public URL for ONE file, served through the machine's relay
+(requires `serve` active). Anyone with the URL can read that file until it
+expires or is revoked (`share-list` / `share-revoke <tokenId>`). Works for
+unversioned `.sessions/` files too — you can share a plan mid-flight without
+committing it.
 
 ## Contracts you must honor when authoring
 
@@ -63,6 +110,15 @@ fed by postMessage; UI edits auto-persist, so re-read before rewriting.
   "attachments": [ { "type": "goal-doc-snapshot", "ref": "reports/x.md", "label": "…" } ] }
 ```
 
+**Trigger** (`triggers/<slug>.trigger.json`) — prefer the Crons & triggers UI
+or ask the user; if authoring by hand: `{ id, name, kind: 'cron'|'manual',
+when, writes: ["data/**"], runs: { type: 'skill', ref: 'agent-prompt',
+prompt } }`. Cron `when` accepts ONLY `every N m/h/d`. The `writes` globs
+are an ENFORCED scope: when a trigger run ends, out-of-scope artifact
+changes are automatically reverted and the run is marked failed. Runs may
+receive a capability token in their prompt — pass it verbatim to
+`gssh space artifacts commit --cap <token> …` for sanctioned writes.
+
 **Workflow spec** (`x.workflow.json`): `{ recipe, recipePath?, rollup?: [],
 phases: [{ name, inputs: [{name, io: 'source'|'artifact'}], gate?: {type:
 'human'|'orchestration'|'command', label}, loop?, created?: [{name, type,
@@ -80,8 +136,9 @@ process runs on. What you produce, per stage:
 - Author the goal doc + requirements/rubric via `gssh space goal …` (the
   system mirrors canon to `goal.md`/`rubric.json`; you never write those
   files). Each requirement declares the EVIDENCE SHAPE you'll owe later.
-- Draft the execution plan as `<name>.workflow.json` — phases, gates, what
-  each phase reads/writes. This is your contract with the reviewer.
+- Draft freely in `local://` scratch; promote the plan artifacts you commit
+  to. Draft the execution plan as `<name>.workflow.json` — phases, gates,
+  what each phase reads/writes. This is your contract with the reviewer.
 
 **Code** (the only stage that edits the repo):
 - Bracket every workflow phase with `gssh space journal phase-start --intent`
@@ -121,10 +178,14 @@ WHY from what you left behind? If not, the artifact is missing or hollow.
 
 ## Rules
 
-- Every artifact should serve a requirement, a phase, or a reader — don't
-  dump scratch files; use the code repo's gitignored areas for scratch.
+- Every artifact should serve a requirement, a phase, or a reader — scratch
+  belongs in `local://` (session scratch), promoted only when it earns a
+  place in the record.
 - Never duplicate sources of truth into artifacts (no transcript copies, no
   goal-state pastes) — link or pin hashes instead.
-- Prefer the CLIs (`gssh space goal|notes|journal|guide`, `gssh artifacts
-  status|sync|rollup`) over raw writes when one exists — they validate,
-  snapshot state, and record provenance.
+- Prefer the CLIs (`gssh space goal|notes|journal|guide`, `gssh space
+  artifacts commit|promote|share|repair`, `gssh artifacts status|sync|rollup`)
+  over raw writes when one exists — they validate, snapshot state, and
+  record provenance.
+- Never `--no-verify` in the artifacts mount; if the publish gate refuses a
+  branch, run `gssh space artifacts repair`.

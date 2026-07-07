@@ -86,7 +86,7 @@ Use these logs to:
 
 Events are observations. They become validation evidence only when scoped to a requirement and judged.
 
-- Saved event excerpts can be attached as `test-output` or `note` evidence: `space events list --process web --since 5m --format json > /tmp/web.log && space goal artifact attach --requirement "<title>" --path /tmp/web.log`.
-- For an event-driven judgment (e.g. "process emits `process.ready` before the timeout"), wire the rubric as a command judgment whose command greps the event stream and exits zero on success: `--judge command --judge-command "space events list --process web --event process.ready --since 1m --json | jq -e 'length > 0'" --expect exit-zero`.
+- Saved event excerpts can be attached as `test-output` or `note` evidence: `space events list --process web --since 5m > /tmp/web.log && space goal artifact attach --requirement "<title>" --path /tmp/web.log`.
+- For an event-driven judgment (e.g. "process emits `process.ready` before the timeout"), wire the rubric as a command judgment whose command greps the event stream and exits zero on success: `--judge command --judge-command "space events list --process web --event process.ready --since 1m | jq -se 'length > 0'" --expect exit-zero`.
 - Use `correlationId` to bind a workflow's events into one evidence bundle before attaching.
 - `process.ready` is not a goal readiness signal. Goal readiness only comes from `space goal status` after requirements are judged.

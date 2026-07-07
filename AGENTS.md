@@ -101,7 +101,6 @@ src/
 │   ├── server.ts               # WebSocket routing server
 │   ├── protocol.ts             # Message types and validation
 │   ├── registries.ts           # Machine/invite/auth/global access registries
-│   ├── jwt.ts                  # JWT token creation/verification (HMAC + Ed25519)
 │   ├── pipes.ts                # Pipe abstraction for data routing
 │   └── types.ts                # WebSocketData, RelayConfig types
 ├── serve/                      # Machine daemon (4 files)
@@ -376,7 +375,6 @@ bun src/index.ts machine serve start --relay ws://localhost:4480/ws
 | Relay server | `src/relay/server.ts` |
 | Relay protocol | `src/relay/protocol.ts` |
 | Relay registries | `src/relay/registries.ts` |
-| JWT tokens | `src/relay/jwt.ts` (HMAC + Ed25519) |
 | Machine daemon | `src/commands/serve.ts`, `src/serve/` |
 | Daemon lifecycle | `src/serve/daemon.ts` |
 | X3DH handshake | `src/lib/tmux-lite/handshake-handler.ts` |

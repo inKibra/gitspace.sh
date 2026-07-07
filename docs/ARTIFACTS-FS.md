@@ -59,10 +59,14 @@ base/.gitspace/artifacts                 ← worktree of main
   artifacts, and stays where it is (transcript-adjacent). Do not mirror it —
   never store the transcript twice. A read-only "session outputs" listing with
   an explicit *promote to artifacts* action is the only planned bridge.
-- OMP's `local://` scheme (session-local durable named docs, e.g.
-  `local://PLAN.md`) is the closer spiritual analog: artifacts are **named,
-  addressable, durable documents**, scoped to workspace/project instead of
-  session.
+- OMP's `local://` scheme IS unified with artifacts (2026-07, via the SDK's
+  `localProtocolOptions` hook): each session's `local://` root lives at
+  `<mount>/.sessions/<sessionId>/local/` — addressable as
+  `artifact://<p>/<w>/.sessions/…` and shareable mid-flight, but
+  **unversioned** (bare-repo `info/exclude`) and **typeless** (list walk +
+  `classifyArtifact` skip it). `gssh space artifacts promote` copies scratch
+  into the versioned tree — promotion is the typing act. Dead sessions'
+  scratch is GC'd after a 14-day retention window.
 
 ### Rendering
 
