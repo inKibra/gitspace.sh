@@ -20,6 +20,7 @@ import {
   applyTmuxLiteSandboxEnvironment,
   getRouterSocket,
   getPidFile,
+  getSessionDir,
   PROTOCOL_VERSION,
   PACKAGE_VERSION,
   type Command,
@@ -136,6 +137,21 @@ function initializeCliEnvironment(context: { sandboxName?: string; isTestMode: b
   }
 }
 
+
+/** Append-mode fd for the daemon's log — the process that owns PTYs, agents,
+ *  and artifacts must never log to /dev/null (instrumentation sweep #1).
+ *  Falls back to 'ignore' only if the log file can't be opened. */
+function getDaemonLogFd(): number | 'ignore' {
+  try {
+    const { openSync, mkdirSync } = require('node:fs') as typeof import('node:fs');
+    const dir = getSessionDir();
+    mkdirSync(dir, { recursive: true });
+    return openSync(`${dir}/tmux-lite-daemon.log`, 'a');
+  } catch {
+    return 'ignore';
+  }
+}
+
 const getServerCommand = (options: { testMode?: boolean } = {}): string[] => {
   // Detect if we're running as a compiled binary (not bun)
   const isCompiled = !process.execPath.endsWith('bun');
@@ -202,12 +218,15 @@ export async function ensureServer(): Promise<void> {
       return;
     }
 
-    spawn({
-      cmd: getServerCommand(),
-      stdout: "ignore",
-      stderr: "ignore",
-      env: process.env as Record<string, string>,
-    });
+    {
+      const logFd = getDaemonLogFd();
+      spawn({
+        cmd: getServerCommand(),
+        stdout: logFd,
+        stderr: logFd,
+        env: process.env as Record<string, string>,
+      });
+    }
 
     for (let i = 0; i < 60; i++) {
       await Bun.sleep(100);
@@ -1539,14 +1558,17 @@ async function main() {
       return;
     }
     console.log("Starting server...");
-    spawn({
-      cmd: getServerCommand({ testMode: isTestMode }),
-      // Use "ignore" so server doesn't inherit CLI's stdout/stderr
-      // This allows CLI to exit cleanly when piped
-      stdout: "ignore",
-      stderr: "ignore",
-      env: process.env as Record<string, string>,
-    });
+    {
+      // A log file (not inherit) keeps the CLI exiting cleanly when piped,
+      // without discarding the daemon's output.
+      const logFd = getDaemonLogFd();
+      spawn({
+        cmd: getServerCommand({ testMode: isTestMode }),
+        stdout: logFd,
+        stderr: logFd,
+        env: process.env as Record<string, string>,
+      });
+    }
     await Bun.sleep(300);
     if (!(await isServerRunning())) {
       console.error("Failed to start server");
