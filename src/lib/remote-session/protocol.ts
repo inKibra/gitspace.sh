@@ -701,6 +701,25 @@ export interface GetAgentSessionTreeRequest {
   agentSessionId: string;
 }
 
+export interface ArtifactShareMintRequest {
+  type: 'artifact_share_mint';
+  requestId: string;
+  uri: string;
+  ttlMs?: number;
+  maxUses?: number;
+}
+
+export interface ArtifactShareRevokeRequest {
+  type: 'artifact_share_revoke';
+  requestId: string;
+  tokenId: string;
+}
+
+export interface ArtifactShareListRequest {
+  type: 'artifact_share_list';
+  requestId: string;
+}
+
 export interface ArtifactListRequest {
   type: 'artifact_list';
   requestId: string;
@@ -1200,6 +1219,9 @@ export type ClientToMachineMessage =
   | GetAgentHistoryRequest
   | NavigateAgentHistoryRequest
   | GetAgentSessionTreeRequest
+  | ArtifactShareMintRequest
+  | ArtifactShareRevokeRequest
+  | ArtifactShareListRequest
   | ArtifactListRequest
   | ArtifactReadRequest
   | ArtifactWriteRequest
@@ -1371,6 +1393,9 @@ export function isBrowseMessage(msg: RemoteSessionMessage): msg is ClientToMachi
     'get_agent_history',
     'navigate_agent_history',
     'get_agent_session_tree',
+    'artifact_share_mint',
+    'artifact_share_revoke',
+    'artifact_share_list',
     'artifact_list',
     'artifact_read',
     'artifact_write',

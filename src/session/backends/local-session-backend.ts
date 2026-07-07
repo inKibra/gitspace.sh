@@ -1857,6 +1857,20 @@ export class LocalSessionBackend implements SessionBackend {
     throw new Error('Unexpected project-artifacts-remote-set response');
   }
 
+  async mintArtifactShare(uri: string, opts: { ttlMs?: number; maxUses?: number } = {}): Promise<{ url: string; tokenId: string; expiresAt: number }> {
+    const r = await this.sendTmuxCommand({ type: 'artifact-share-mint', uri, ttlMs: opts.ttlMs, maxUses: opts.maxUses });
+    if (r.type === 'artifact-share-mint') return { url: r.url, tokenId: r.tokenId, expiresAt: r.expiresAt };
+    if (r.type === 'error') throw new Error(r.message);
+    throw new Error('Unexpected artifact-share-mint response');
+  }
+
+  async revokeArtifactShare(tokenId: string): Promise<boolean> {
+    const r = await this.sendTmuxCommand({ type: 'artifact-share-revoke', tokenId });
+    if (r.type === 'artifact-share-revoke') return r.revoked;
+    if (r.type === 'error') throw new Error(r.message);
+    throw new Error('Unexpected artifact-share-revoke response');
+  }
+
   async saveWorkspaceTrigger(workspaceId: string, trigger: import('../../core/triggers.js').TriggerRecord): Promise<import('../../core/triggers.js').TriggerRecord> {
     const target = await this.resolveAgentWorkspaceTarget(workspaceId);
     const r = await this.sendTmuxCommand({ type: 'trigger-save', target, trigger });

@@ -3211,6 +3211,22 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     throw new Error('Unexpected project-artifacts-remote-set response');
   }
 
+  async mintArtifactShare(uri: string, opts: { ttlMs?: number; maxUses?: number } = {}): Promise<{ url: string; tokenId: string; expiresAt: number }> {
+    await this.waitForInitialSnapshot();
+    const r = await this.sendRpcCommand({ type: 'artifact_share_mint', requestId: crypto.randomUUID(), uri, ttlMs: opts.ttlMs, maxUses: opts.maxUses });
+    if (r.type === 'artifact-share-mint') return { url: r.url, tokenId: r.tokenId, expiresAt: r.expiresAt };
+    if (r.type === 'error') throw new Error(r.message);
+    throw new Error('Unexpected artifact-share-mint response');
+  }
+
+  async revokeArtifactShare(tokenId: string): Promise<boolean> {
+    await this.waitForInitialSnapshot();
+    const r = await this.sendRpcCommand({ type: 'artifact_share_revoke', requestId: crypto.randomUUID(), tokenId });
+    if (r.type === 'artifact-share-revoke') return r.revoked;
+    if (r.type === 'error') throw new Error(r.message);
+    throw new Error('Unexpected artifact-share-revoke response');
+  }
+
   async saveWorkspaceTrigger(workspaceId: string, trigger: import('../../core/triggers.js').TriggerRecord): Promise<import('../../core/triggers.js').TriggerRecord> {
     await this.waitForInitialSnapshot();
     const r = await this.sendRpcCommand({ type: 'trigger_save', requestId: crypto.randomUUID(), target: this.getAgentWorkspaceTarget(workspaceId), trigger });

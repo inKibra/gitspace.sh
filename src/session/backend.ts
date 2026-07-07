@@ -313,6 +313,10 @@ export interface SessionBackend {
   syncProjectArtifacts?(projectName: string): Promise<{ pushed: boolean; fastForwarded: boolean }>;
   /** One-click GitHub provisioning: create <owner>/<repo>-artifacts, wire remote+pointer, push, mirror collaborators, upload large files to GitHub LFS. */
   provisionProjectArtifacts?(projectName: string): Promise<{ slug: string; url: string; created: boolean; blobsUploaded: number; collaboratorsCopied: number }>;
+  /** Mint a signed public share link for one artifact (requires serve active on the machine). */
+  mintArtifactShare?(uri: string, opts?: { ttlMs?: number; maxUses?: number }): Promise<{ url: string; tokenId: string; expiresAt: number }>;
+  /** Revoke a share link by tokenId. */
+  revokeArtifactShare?(tokenId: string): Promise<boolean>;
   /** Persist a trigger through the registry (validates the schedule — an unfireable cron `when` is rejected). */
   saveWorkspaceTrigger?(workspaceId: string, trigger: import('../core/triggers.js').TriggerRecord): Promise<import('../core/triggers.js').TriggerRecord>;
   /** Run a trigger now: records pending, spawns + prompts the agent session, records ok/fail server-side. */

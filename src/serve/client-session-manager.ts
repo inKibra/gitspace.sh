@@ -10,7 +10,7 @@
  */
 
 import { HandshakeHandler, type HandshakeMessage, type EstablishedSession } from "../lib/tmux-lite/handshake-handler.js";
-import { createFrame, openFrame, MASTER_STREAM_ID } from "../lib/tmux-lite/crypto/frames.js";
+import { createFrame, openFrame } from "../lib/tmux-lite/crypto/frames.js";
 import { encodeControl, encodePTY, parseFrames, decodeControl, FrameType, type SessionEvent } from "../lib/tmux-lite/protocol.js";
 import { RemoteSessionHandler, type RemoteClientSession } from "../lib/remote-session/index.js";
 import { STREAM_ID, canWrite, canManage, type ServeOptions, type ClientSession, type AttachedPane, type ServeEventHandler, type HandshakeMessageEnvelope } from "./types.js";
@@ -53,12 +53,10 @@ export class ClientSessionManager {
   private sessions: Map<string, ClientSession> = new Map();
   private handshakeHandler: HandshakeHandler;
   private remoteSessionHandler: RemoteSessionHandler;
-  private options: ServeOptions;
   private eventHandler: ServeEventHandler | null = null;
   private readonly inboundMessageQueues = new Map<string, Promise<Uint8Array | null>>();
 
   constructor(options: ServeOptions) {
-    this.options = options;
     this.handshakeHandler = new HandshakeHandler({
       identity: options.identity,
       handshakeTimeoutMs: options.handshakeTimeoutMs,

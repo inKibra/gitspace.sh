@@ -17,7 +17,6 @@ import {
   type RemoteOperationKind,
   type RemoteOperationRecord,
   type RemoteOperationScope,
-  type SessionInfo,
 } from "./protocol";
 import type { MachineSnapshot } from "../tmux-lite/machine/protocol.js";
 import { applyMachineEventToSnapshot } from '../tmux-lite/machine/snapshot-patch.js';
@@ -30,7 +29,6 @@ import {
   prepareAttachSession,
   cancelPrepareAttachSession,
   deleteTmuxWorkspace,
-  createSession,
   isServerRunning,
   ensureServer,
   watchMachineEvents,
@@ -39,8 +37,6 @@ import {
 import { addWorkspaceNote, listWorkspaceNotes, removeWorkspaceNote, updateWorkspaceNote } from '../../core/workspace-metadata.js';
 
 // Import project loading / workspace operations
-import { listProjectSummaries } from "../../core/project-catalog";
-import { deleteWorkspaceCore } from "../../core/workspace";
 import { prepareWorkspaceForSession, rerunWorkspaceScriptsForSession } from "../../core/workspace-lifecycle";
 import { readProjectConfig } from '../../core/config.js';
 import { matchesWorkspaceId } from '../../utils/workspace-id.js';
@@ -55,7 +51,6 @@ import {
 import type { ReplayFrame } from '../tmux-lite/replay/types.js';
 import { readReplayManifest } from '../tmux-lite/replay/store.js';
 // Process imports
-import { getProcessSpecs } from "../processes/manager.js";
 
 import { logger } from "../../utils/logger.js";
 import { writeTraceLog } from '../../utils/trace-log.js';
@@ -192,13 +187,9 @@ function isAgentReplay(replay: { sessionName: string }): boolean {
   return replay.sessionName.startsWith('agent:');
 }
 
-function normalizeWorkspaceIdToken(workspaceId: string): string {
-  return workspaceId.includes(':') ? workspaceId.split(':').pop() ?? workspaceId : workspaceId;
-}
 
-function matchesWorkspaceIdToken(parsedWorkspaceId: string, workspaceId: string): boolean {
-  return normalizeWorkspaceIdToken(parsedWorkspaceId) === normalizeWorkspaceIdToken(workspaceId);
-}
+
+
 
 /**
  * Remote session handler
@@ -1762,6 +1753,30 @@ export class RemoteSessionHandler {
 
 
 
+
+      case 'artifact_share_mint':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, { type: 'artifact-share-mint', uri: msg.uri, ttlMs: msg.ttlMs, maxUses: msg.maxUses }, sendResponse);
+        break;
+
+      case 'artifact_share_revoke':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, { type: 'artifact-share-revoke', tokenId: msg.tokenId }, sendResponse);
+        break;
+
+      case 'artifact_share_list':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, { type: 'artifact-share-list' }, sendResponse);
+        break;
 
       case 'artifact_list':
         if (!canManage(session.accessType)) {
