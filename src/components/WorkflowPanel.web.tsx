@@ -62,16 +62,12 @@ export function WorkflowPanel({ backend, workspaceId, onOpenArtifact, onOpenGoal
 
   return (
     <div className="flex h-full min-h-0 flex-col text-[12px]">
-      {/* panel-head (mock PaneBox): uppercase title · sub · Save workflow */}
+      {/* panel-head (mock PaneBox). The mock's 'Save workflow' button shipped
+          with no handler — removed until editing exists (workflow specs are
+          agent-authored artifacts; the pane is a viewer). */}
       <div className="flex h-8 flex-none items-center gap-2 border-b border-[var(--gs-border)] bg-[#070707] px-3">
         <span className="text-[11px] uppercase tracking-[0.1em] text-[var(--gs-text-muted)]">Workflow</span>
         <span className="truncate text-[11px] text-[var(--gs-text-muted)]">phased dataflow · gated loops · gates · artifacts per phase</span>
-        <button
-          type="button"
-          className="ml-auto inline-flex cursor-pointer items-center justify-center gap-[5px] border border-[var(--gs-border)] bg-transparent px-2 py-[3px] text-[11px] text-[var(--gs-text-muted)] transition-colors hover:bg-[var(--gs-bg-active)] hover:text-[var(--gs-text)]"
-        >
-          Save workflow
-        </button>
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto p-[13px]">
         {state === 'loading' ? (
