@@ -1553,6 +1553,12 @@ export class LocalSessionBackend implements SessionBackend {
   }
 
   private async resolveAgentWorkspaceTarget(workspaceId: string): Promise<AgentWorkspaceTargetPayload> {
+    // Project agents: '<project>:@base' is a pseudo-workspace homed at the
+    // project base clone; the server normalizes the real path.
+    if (workspaceId.endsWith(':@base')) {
+      const projectName = workspaceId.slice(0, -':@base'.length);
+      return { workspaceId, workspaceName: '@base', workspacePath: '', projectName };
+    }
     const workspaces = await this.deps.scanWorkspaces();
     const workspace = workspaces.find((item) => matchesWorkspaceId(item, workspaceId));
     if (!workspace) {
@@ -1845,6 +1851,13 @@ export class LocalSessionBackend implements SessionBackend {
     if (r.type === 'project-artifacts-sync') return { pushed: r.pushed, fastForwarded: r.fastForwarded };
     if (r.type === 'error') throw new Error(r.message);
     throw new Error('Unexpected project-artifacts-remote-set response');
+  }
+
+  async provisionProjectArtifacts(projectName: string): Promise<{ slug: string; url: string; created: boolean; blobsUploaded: number; collaboratorsCopied: number }> {
+    const r = await this.sendTmuxCommand({ type: 'project-artifacts-provision', projectName });
+    if (r.type === 'project-artifacts-provision') return { slug: r.slug, url: r.url, created: r.created, blobsUploaded: r.blobsUploaded, collaboratorsCopied: r.collaboratorsCopied };
+    if (r.type === 'error') throw new Error(r.message);
+    throw new Error('Unexpected provision response');
   }
 
   async syncProjectArtifacts(projectName: string): Promise<{ pushed: boolean; fastForwarded: boolean }> {

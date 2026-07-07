@@ -764,6 +764,12 @@ interface ProjectArtifactsSyncRequest {
   projectName: string;
 }
 
+interface ProjectArtifactsProvisionRequest {
+  type: 'project_artifacts_provision';
+  requestId: string;
+  projectName: string;
+}
+
 export interface RepoTreeRequest {
   type: 'repo_tree';
   requestId: string;
@@ -1212,6 +1218,7 @@ export type ClientToMachineMessage =
   | ProjectArtifactsStatusRequest
   | ProjectArtifactsRemoteSetRequest
   | ProjectArtifactsSyncRequest
+  | ProjectArtifactsProvisionRequest
   | RepoTreeRequest
   | RepoReadRequest
   | RepoCommitRequest
@@ -1383,6 +1390,7 @@ export function isBrowseMessage(msg: RemoteSessionMessage): msg is ClientToMachi
     'project_artifacts_status',
     'project_artifacts_remote_set',
     'project_artifacts_sync',
+    'project_artifacts_provision',
     'repo_tree',
     'repo_read',
     'repo_commit',

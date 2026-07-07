@@ -76,6 +76,7 @@ export async function createWorkerHarness(): Promise<WorkerHarness> {
     compatibilityDate: '2024-12-01',
     cf: false,
     d1Databases: { DB: crypto.randomUUID() },
+    r2Buckets: { ARTIFACT_BLOBS: 'artifact-blobs' },
     bindings: {
       PORTAL_URL: 'https://gitspace.sh',
       MAX_ACCOUNTS: '99',
@@ -89,6 +90,9 @@ export async function createWorkerHarness(): Promise<WorkerHarness> {
       GITHUB_OAUTH_BASE: upstream.githubOauthBase,
       GITHUB_API_BASE: upstream.githubApiBase,
       CF_API_BASE: upstream.cloudflareApiBase,
+      CF_ARTIFACTS_API_URL: upstream.cfArtifactsApiBase,
+      CF_ARTIFACTS_API_TOKEN: upstream.cfArtifactsApiToken,
+      ARTIFACTS_GIT_BASE: 'https://artifacts.gitspace.sh',
     },
     cachePersist: false,
     kvPersist: false,

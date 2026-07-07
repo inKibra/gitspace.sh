@@ -22,6 +22,22 @@ export function registerArtifactsCommands(program: Command): void {
     .description('Project artifacts repo (branch per workspace, roll-up to main)');
 
   cmd
+    .command('provision')
+    .description('Provision a private GitHub artifacts repo (<owner>/<repo>-artifacts), push, mirror collaborators, upload blobs')
+    .option('--project <name>', 'Project (defaults to current)')
+    .action(withErrorHandler(async (options: { project?: string }) => {
+      const { projectName, projectDir } = await resolveProject(options.project);
+      const { provisionGithubArtifacts } = await import('../../core/artifacts-github.js');
+      const { getProjectBaseDir } = await import('../../core/config.js');
+      const { logger } = await import('../../utils/logger.js');
+      const r = await provisionGithubArtifacts(projectName, projectDir, getProjectBaseDir(projectName));
+      logger.success(`${r.created ? 'Created' : 'Reusing'} ${r.slug}`);
+      logger.info(`remote: ${r.url}`);
+      logger.info(`pushed: ${r.pushed} · blobs uploaded: ${r.blobsUploaded} · collaborators mirrored: ${r.collaboratorsCopied}`);
+      logger.info('Pointer committed to the code repo — other machines and teammates adopt it automatically.');
+    }));
+
+  cmd
     .command('status')
     .description('Show the artifacts repo, its branches, and remote')
     .option('--project <name>', 'Project (defaults to current)')

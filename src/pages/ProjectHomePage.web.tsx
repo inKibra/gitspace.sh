@@ -14,6 +14,7 @@
 import { useCallback, useEffect, useMemo, useState, type MouseEvent as ReactMouseEvent, type ReactElement } from 'react';
 import type { SessionBackend } from '../session/backend.js';
 import { NotePanel } from '../components/NotePanel.web.js';
+import { NativeAgentSurfaceConnected } from '../components/NativeAgentSurfaceConnected.web.js';
 import { ReportPanel } from '../components/ReportPanel.web.js';
 import type { KanbanGoalItem } from '../app/shared/board/types.js';
 import type { WorkspaceRuntimeEntry } from '../app/shared/workspace-runtime/types.js';
@@ -174,9 +175,26 @@ function ArtifactsRepoTab({ projectName, backend }: { projectName: string; backe
               )}
             </div>
             {lastSync && <div className="pt-1 text-[11px] text-[var(--gs-text-dim)]">{lastSync}</div>}
-            {!status.remote && (
+            {!status.remote && backend?.provisionProjectArtifacts && (
               <div className="mt-3 border-t border-[var(--gs-border-muted)] pt-3">
-                <div className="mb-1.5 text-[10.5px] uppercase tracking-[0.08em] text-[var(--gs-text-dim)]">connect a remote (bring your own git repo)</div>
+                <div className="mb-1.5 text-[10.5px] uppercase tracking-[0.08em] text-[var(--gs-text-dim)]">one-click — github (uses your gh auth)</div>
+                <button
+                  type="button"
+                  disabled={busy !== null}
+                  onClick={async () => {
+                    setBusy('connect');
+                    try {
+                      const r = await backend.provisionProjectArtifacts!(projectName);
+                      setLastSync(`${r.created ? 'created' : 'reusing'} ${r.slug} — pushed, ${r.blobsUploaded} blobs uploaded, ${r.collaboratorsCopied} collaborators mirrored`);
+                    } catch (e) { setLastSync(e instanceof Error ? e.message : 'provisioning failed'); }
+                    finally { setBusy(null); refresh(); }
+                  }}
+                  className="border border-[#1f4a2f] px-3 py-1 text-[11.5px] text-[var(--gs-accent)] disabled:opacity-40"
+                >
+                  {busy === 'connect' ? 'Provisioning…' : '⚡ Provision private repo on GitHub'}
+                </button>
+                <div className="mt-1 text-[10.5px] text-[var(--gs-text-ghost)]">Creates a private &lt;owner&gt;/&lt;repo&gt;-artifacts repo, pushes all branches, mirrors code-repo collaborators, uploads large-file blobs as release assets.</div>
+                <div className="mb-1.5 mt-3 text-[10.5px] uppercase tracking-[0.08em] text-[var(--gs-text-dim)]">or connect a remote (bring your own git repo)</div>
                 <div className="flex gap-2">
                   <input
                     value={url}
@@ -254,6 +272,7 @@ export function ProjectHomePage({
   goals,
   workspaces,
   backend,
+  backendKey,
   onBack,
   onOpenWorkspace,
   onOpenGoal,
@@ -264,6 +283,7 @@ export function ProjectHomePage({
   goals: KanbanGoalItem[];
   workspaces: WorkspaceRuntimeEntry[];
   backend: SessionBackend | null;
+  backendKey?: string | null;
   onBack: () => void;
   onOpenWorkspace: (workspaceId: string) => void;
   onOpenGoal: (goal: KanbanGoalItem) => void;
@@ -273,6 +293,16 @@ export function ProjectHomePage({
 }): ReactElement {
   const [artifacts, setArtifacts] = useState<ArtifactEntry[]>([]);
   const [newDashName, setNewDashName] = useState<string | null>(null);
+  const baseWorkspaceId = `${projectName}:@base`;
+  const [agentThreads, setAgentThreads] = useState<Array<{ id: string; title: string }>>([]);
+  const [threadsTick, setThreadsTick] = useState(0);
+  useEffect(() => {
+    let alive = true;
+    backend?.listAgentSessions?.(baseWorkspaceId)
+      .then((list) => { if (alive) setAgentThreads(list.filter((x) => !x.closedAt && !x.archivedAt).map((x) => ({ id: x.id, title: x.title }))); })
+      .catch(() => { /* no threads yet / backend down */ });
+    return () => { alive = false; };
+  }, [backend, baseWorkspaceId, threadsTick]);
   const [artifactsError, setArtifactsError] = useState<string | null>(null);
   const [feed, setFeed] = useState<FeedItem[]>([]);
 
@@ -429,6 +459,7 @@ export function ProjectHomePage({
     if (isArtTab(t)) return `◇ ${t.slice(4).split('/').pop() ?? t.slice(4)}`;
     if (t.startsWith('report:')) return `⚑ ${t.slice(7).split('/').pop() ?? 'report'}`;
     if (t.startsWith('note:')) return '✎ note';
+    if (t.startsWith('agent:')) return `✦ ${agentThreads.find((x) => `agent:${x.id}` === t)?.title || 'thread'}`;
     return FIXED_TAB_LABEL[t] ?? t;
   };
 
@@ -607,8 +638,21 @@ export function ProjectHomePage({
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto pb-2">
           {sbGroup('Agent')}
-          {navRow({ key: 'agent', icon: '✦', label: 'Project agent', rt: 'live', disabled: true, title: 'project agent ships next' })}
-          {navRow({ key: 'new-thread', icon: '＋', label: 'New thread', disabled: true, title: 'project agent ships next' })}
+          {agentThreads.length === 0
+            ? navRow({ key: 'agent', icon: '✦', label: 'Project agent', rt: backend?.createAgentSession ? 'idle' : undefined, disabled: true, title: 'no threads yet — start one below' })
+            : agentThreads.map((th) => navRow({ key: `agent-${th.id}`, icon: '✦', label: th.title || 'thread', tab: `agent:${th.id}` }))}
+          {navRow({
+            key: 'new-thread', icon: '＋', label: 'New thread',
+            disabled: !backend?.createAgentSession,
+            title: backend?.createAgentSession ? undefined : 'agent sessions unavailable',
+            onClick: backend?.createAgentSession ? () => {
+              void backend.createAgentSession!(baseWorkspaceId, 'project agent').then((sessions) => {
+                const created = sessions.filter((x) => !x.closedAt && !x.archivedAt).at(-1);
+                setThreadsTick((n) => n + 1);
+                if (created) openTab(`agent:${created.id}`);
+              }).catch(() => { /* surface stays */ });
+            } : undefined,
+          })}
 
           {sbGroup('Project')}
           {navRow({ key: 'overview', icon: '◎', label: 'Overview', tab: 'overview' })}
@@ -719,6 +763,11 @@ export function ProjectHomePage({
             </div>
           )}
           {active === 'artifacts-repo' && <ArtifactsRepoTab projectName={projectName} backend={backend} />}
+          {active.startsWith('agent:') && (
+            <div className="h-full min-h-0">
+              <NativeAgentSurfaceConnected backendKey={backendKey ?? undefined} workspaceId={baseWorkspaceId} agentSessionId={active.slice(6)} paneId={active} />
+            </div>
+          )}
           {active.startsWith('report:') && (
             <div className="h-full min-h-0">
               <ProjectReportTab path={active.slice(7)} read={readArtifactFromSource} />

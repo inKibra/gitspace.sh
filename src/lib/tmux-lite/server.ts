@@ -600,10 +600,54 @@ void getAgentControlReady().catch((error) => {
   console.error(`[server] failed to initialize agent control: ${message}`);
 });
 
+// Artifacts auto-sync: every 5 minutes, projects with a configured remote
+// push branches + upload missing blobs (BYO = branches only). Single-writer
+// branches make this conflict-free; failures are quiet (offline is normal).
+{
+  let syncing = false;
+  const t = setInterval(() => {
+    if (syncing) return;
+    syncing = true;
+    void (async () => {
+      try {
+        const { getArtifactsRemote } = await import('../../core/artifacts.js');
+        const { syncGithubArtifacts } = await import('../../core/artifacts-github.js');
+        const { getProjectDir } = await import('../../core/config.js');
+        const projects = [...new Set((await scanWorkspaces()).map((w) => w.projectName))];
+        for (const projectName of projects) {
+          try {
+            const projectDir = getProjectDir(projectName);
+            if (!(await getArtifactsRemote(projectDir))) continue;
+            const r = await syncGithubArtifacts(projectDir);
+            if (r.pushed || r.blobsUploaded) console.error(`[artifacts] synced ${projectName}${r.blobsUploaded ? ` (+${r.blobsUploaded} blobs)` : ''}`);
+          } catch { /* offline / auth — retry next tick */ }
+        }
+      } catch { /* scan failed */ }
+      syncing = false;
+    })();
+  }, 5 * 60_000);
+  t.unref?.();
+}
+
 // Trigger scheduler (triggers M2): this machine fires cron triggers for the
 // workspaces it hosts. Runs are ordinary agent sessions, visible in the UI.
 startTriggerScheduler(
-  async () => (await scanWorkspaces()).map((w) => ({ id: w.id, name: w.name, path: w.path, projectName: w.projectName })),
+  async () => {
+    const workspaces = (await scanWorkspaces()).map((w) => ({ id: w.id, name: w.name, path: w.path, projectName: w.projectName }));
+    // Project-scope triggers: each project's BASE clone (main artifacts mount)
+    // is a pseudo-workspace — its triggers/ fire here too, run by @base agents.
+    try {
+      const { getProjectBaseDir } = await import('../../core/config.js');
+      const { existsSync } = await import('fs');
+      for (const projectName of [...new Set(workspaces.map((w) => w.projectName))]) {
+        try {
+          const base = getProjectBaseDir(projectName);
+          if (existsSync(base)) workspaces.push({ id: `${projectName}:@base`, name: '@base', path: base, projectName });
+        } catch { /* skip */ }
+      }
+    } catch { /* workspace-only */ }
+    return workspaces;
+  },
   {
     log: (message) => console.error(`[triggers] ${message}`),
     runAgent: async (workspace, title, prompt) => {
@@ -2601,6 +2645,17 @@ routerListener = Bun.listen({
 
       for (const message of decoded.messages) {
         const cmd = message as Command;
+        // Project agents: '<project>:@base' pseudo-workspace targets resolve to
+        // the project BASE clone (main artifacts mount) — normalize here so
+        // every agent-* handler sees a real path.
+        if ('target' in cmd && cmd.target && typeof cmd.target === 'object' && 'workspaceName' in cmd.target && (cmd.target as { workspaceName?: string }).workspaceName === '@base') {
+          try {
+            const { getProjectBaseDir } = await import('../../core/config.js');
+            const t = cmd.target as { workspaceId: string; workspaceName: string; workspacePath: string; projectName: string };
+            t.workspacePath = getProjectBaseDir(t.projectName);
+            t.workspaceId = `${t.projectName}:@base`;
+          } catch { /* leave as-is; handler will error */ }
+        }
         const commandTraceStartMs = Date.now();
         writeTraceLog('tmux-command-start', {
           commandType: cmd.type,
@@ -3753,10 +3808,10 @@ routerListener = Bun.listen({
 
           case 'artifacts-read':
             try {
-              const { artifactsMountDir, readArtifact } = await import('../../core/artifacts.js');
+              const { artifactsMountDir, readArtifactResolving } = await import('../../core/artifacts.js');
               const { getProjectDir } = await import('../../core/config.js');
               const MAX_READ = 25 * 1024 * 1024;
-              const bytes = readArtifact(getProjectDir(cmd.target.projectName), artifactsMountDir(cmd.target.workspacePath), cmd.path);
+              const bytes = await readArtifactResolving(getProjectDir(cmd.target.projectName), artifactsMountDir(cmd.target.workspacePath), cmd.path);
               const truncated = bytes.length > MAX_READ;
               res = {
                 type: 'artifacts-read',
@@ -3850,6 +3905,17 @@ routerListener = Bun.listen({
             }
             break;
 
+          case 'project-artifacts-provision':
+            try {
+              const { provisionGithubArtifacts } = await import('../../core/artifacts-github.js');
+              const { getProjectBaseDir, getProjectDir } = await import('../../core/config.js');
+              const r = await provisionGithubArtifacts(cmd.projectName, getProjectDir(cmd.projectName), getProjectBaseDir(cmd.projectName));
+              res = { type: 'project-artifacts-provision', slug: r.slug, url: r.url, created: r.created, blobsUploaded: r.blobsUploaded, collaboratorsCopied: r.collaboratorsCopied };
+            } catch (e) {
+              res = { type: 'error', message: `Provisioning failed: ${e instanceof Error ? e.message : String(e)}` };
+            }
+            break;
+
           case 'project-artifacts-sync':
             try {
               const { syncArtifacts } = await import('../../core/artifacts.js');
@@ -3863,10 +3929,10 @@ routerListener = Bun.listen({
 
           case 'project-artifacts-read':
             try {
-              const { artifactsMountDir, readArtifact } = await import('../../core/artifacts.js');
+              const { artifactsMountDir, readArtifactResolving } = await import('../../core/artifacts.js');
               const { getProjectBaseDir, getProjectDir } = await import('../../core/config.js');
               const MAX_READ = 25 * 1024 * 1024;
-              const bytes = readArtifact(getProjectDir(cmd.projectName), artifactsMountDir(getProjectBaseDir(cmd.projectName)), cmd.path);
+              const bytes = await readArtifactResolving(getProjectDir(cmd.projectName), artifactsMountDir(getProjectBaseDir(cmd.projectName)), cmd.path);
               const truncated = bytes.length > MAX_READ;
               res = {
                 type: 'artifacts-read',

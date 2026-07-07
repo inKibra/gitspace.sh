@@ -5,6 +5,9 @@ export interface Env {
   // D1 Database
   DB: D1Database;
 
+  // R2 bucket for managed artifacts blobs (LFS-style split)
+  ARTIFACT_BLOBS: R2Bucket;
+
   // Environment variables
   PORTAL_URL: string;
   MAX_ACCOUNTS: string; // Global account limit (beta period)
@@ -18,6 +21,11 @@ export interface Env {
   GITHUB_OAUTH_BASE?: string;
   GITHUB_API_BASE?: string;
   CF_API_BASE?: string;
+
+  // Managed artifacts tier (CF Artifacts git hosting upstream)
+  CF_ARTIFACTS_API_URL?: string;
+  CF_ARTIFACTS_API_TOKEN?: string;
+  ARTIFACTS_GIT_BASE?: string;
 }
 
 /**

@@ -416,6 +416,7 @@ export type Command =
   | { type: 'project-artifacts-status'; projectName: string }
   | { type: 'project-artifacts-remote-set'; projectName: string; url: string }
   | { type: 'project-artifacts-sync'; projectName: string }
+  | { type: 'project-artifacts-provision'; projectName: string }
   | { type: 'repo-tree'; target: AgentWorkspaceTargetPayload }
   | { type: 'repo-read'; target: AgentWorkspaceTargetPayload; path: string }
   | { type: 'repo-commit'; target: AgentWorkspaceTargetPayload; message: string }
@@ -517,6 +518,7 @@ export type Response =
   | { type: 'artifacts-write'; commit: string }
   | { type: 'project-artifacts-status'; repoPath: string; remote: string | null; branches: string[] }
   | { type: 'project-artifacts-sync'; pushed: boolean; fastForwarded: boolean }
+  | { type: 'project-artifacts-provision'; slug: string; url: string; created: boolean; blobsUploaded: number; collaboratorsCopied: number }
   | { type: 'repo-tree'; entries: import('../../core/git.js').RepoFileEntry[] }
   | { type: 'repo-read'; base64: string | null; size: number; truncated: boolean }
   | { type: 'repo-commit'; commit: string | null }

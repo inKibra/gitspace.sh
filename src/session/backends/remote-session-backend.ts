@@ -2620,6 +2620,11 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   }
 
   private getAgentWorkspaceTarget(workspaceId: string): import('../../lib/tmux-lite/protocol.js').AgentWorkspaceTargetPayload {
+    // Project agents: pseudo-workspace at the project base; server fills the path.
+    if (workspaceId.endsWith(':@base')) {
+      const projectName = workspaceId.slice(0, -':@base'.length);
+      return { workspaceId, workspaceName: '@base', workspacePath: '', projectName };
+    }
     const snapshot = this.machineStateClient.getSnapshot();
     const workspace = Object.entries(snapshot.workspacesById).find(([key, item]) => item && (workspaceIdsMatch(key, workspaceId) || workspaceIdsMatch(item.id, workspaceId)))?.[1];
     if (!workspace) {
@@ -3197,6 +3202,14 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     if (r.type === 'project-artifacts-sync') return { pushed: r.pushed, fastForwarded: r.fastForwarded };
     if (r.type === 'error') throw new Error(r.message);
     throw new Error('Unexpected project-artifacts-remote-set response');
+  }
+
+  async provisionProjectArtifacts(projectName: string): Promise<{ slug: string; url: string; created: boolean; blobsUploaded: number; collaboratorsCopied: number }> {
+    await this.waitForInitialSnapshot();
+    const r = await this.sendRpcCommand({ type: 'project_artifacts_provision', requestId: crypto.randomUUID(), projectName });
+    if (r.type === 'project-artifacts-provision') return { slug: r.slug, url: r.url, created: r.created, blobsUploaded: r.blobsUploaded, collaboratorsCopied: r.collaboratorsCopied };
+    if (r.type === 'error') throw new Error(r.message);
+    throw new Error('Unexpected provision response');
   }
 
   async syncProjectArtifacts(projectName: string): Promise<{ pushed: boolean; fastForwarded: boolean }> {

@@ -19,6 +19,11 @@ binding = "DB"
 database_name = "gitspace"
 database_id = "54552f6a-a846-4a4c-97a9-40f185b07451"
 
+# Managed artifacts blob storage (LFS-style split; CF git hosting has no LFS)
+[[r2_buckets]]
+binding = "ARTIFACT_BLOBS"
+bucket_name = "gitspace-artifact-blobs"
+
 # Secrets (set via: wrangler secret put SECRET_NAME)
 # GITHUB_CLIENT_ID
 # GITHUB_CLIENT_SECRET
@@ -26,3 +31,6 @@ database_id = "54552f6a-a846-4a4c-97a9-40f185b07451"
 # CF_ACCOUNT_ID
 # CF_ZONE_ID
 # ENCRYPTION_KEY
+# CF_ARTIFACTS_API_URL   (CF Artifacts REST base; unset = dev in-memory upstream)
+# CF_ARTIFACTS_API_TOKEN (long-lived CF Artifacts credential; never leaves the worker)
+# ARTIFACTS_GIT_BASE     (optional; default https://artifacts.gitspace.sh)
