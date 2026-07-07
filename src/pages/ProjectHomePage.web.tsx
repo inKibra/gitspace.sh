@@ -13,11 +13,26 @@
 
 import { useCallback, useEffect, useMemo, useState, type MouseEvent as ReactMouseEvent, type ReactElement } from 'react';
 import type { SessionBackend } from '../session/backend.js';
+import { NotePanel } from '../components/NotePanel.web.js';
+import { ReportPanel } from '../components/ReportPanel.web.js';
 import type { KanbanGoalItem } from '../app/shared/board/types.js';
 import type { WorkspaceRuntimeEntry } from '../app/shared/workspace-runtime/types.js';
 import { ArtifactPanel } from '../components/ArtifactPanel.web.js';
 import { DashboardPanel } from '../components/DashboardPanel.web.js';
-import { KIND_ICON, KIND_LABEL, KIND_ORDER, classifyArtifact, type ArtifactKind } from '../components/artifact-kinds.js';
+import { KIND_ICON, KIND_LABEL, KIND_ORDER, classifyArtifact, type ArtifactKind, decodeBase64Utf8 } from '../components/artifact-kinds.js';
+
+function ProjectReportTab({ path, read }: { path: string; read: (p: string) => Promise<{ base64: string }> }): ReactElement {
+  const [report, setReport] = useState<unknown>(undefined);
+  const [err, setErr] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    read(path).then((r) => { if (alive) setReport(JSON.parse(decodeBase64Utf8(r.base64))); }).catch(() => { if (alive) setErr(true); });
+    return () => { alive = false; };
+  }, [path, read]);
+  if (err) return <div className="p-4 text-[12px] text-[var(--gs-danger)]">Failed to load {path}</div>;
+  if (report === undefined) return <div className="p-4 text-[12px] text-[var(--gs-text-dim)]">Loading…</div>;
+  return <ReportPanel report={report} />;
+}
 
 interface ArtifactEntry {
   path: string;
@@ -33,6 +48,9 @@ interface FeedItem {
   body?: string;
   /** report path for click-through */
   path?: string;
+  /** note click-through: owning workspace + note id */
+  noteId?: string;
+  noteWorkspace?: string;
 }
 
 const FEED_CHIP: Record<FeedItem['kind'], { cls: string; label: string }> = {
@@ -278,6 +296,8 @@ export function ProjectHomePage({
               kind: n.kind === 'todo' ? 'todo' : 'note',
               surface: r.value.ws,
               body: n.body,
+              noteId: n.id,
+              noteWorkspace: r.value.ws,
             });
           }
         }
@@ -303,6 +323,8 @@ export function ProjectHomePage({
   const tabLabel = (t: string): string => {
     if (isDashTab(t)) return dashName(t.slice(5));
     if (isArtTab(t)) return `◇ ${t.slice(4).split('/').pop() ?? t.slice(4)}`;
+    if (t.startsWith('report:')) return `⚑ ${t.slice(7).split('/').pop() ?? 'report'}`;
+    if (t.startsWith('note:')) return '✎ note';
     return FIXED_TAB_LABEL[t] ?? t;
   };
 
@@ -441,10 +463,10 @@ export function ProjectHomePage({
               <span className={`${CHIP} ${chip.cls}`}>{chip.label}</span>
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2">
-                  {f.path ? (
+                  {f.path || f.noteId ? (
                     <button
                       type="button"
-                      onClick={() => openTab(`art:${f.path}`)}
+                      onClick={() => openTab(f.path ? `report:${f.path}` : `note:${f.noteWorkspace}:${f.noteId}`)}
                       className="font-[family-name:var(--gs-font)] text-[11.5px] text-[var(--gs-text)] hover:underline"
                     >
                       {f.surface}
@@ -568,6 +590,19 @@ export function ProjectHomePage({
               <ArtifactPanel path={active.slice(4)} read={readArtifactFromSource} listArtifacts={async () => artifacts.map((e) => e.path)} />
             </div>
           )}
+          {active.startsWith('report:') && (
+            <div className="h-full min-h-0">
+              <ProjectReportTab path={active.slice(7)} read={readArtifactFromSource} />
+            </div>
+          )}
+          {active.startsWith('note:') && (() => {
+            const [, ws, ...idParts] = active.split(':');
+            return (
+              <div className="h-full min-h-0">
+                <NotePanel backend={backend} projectName={projectName} workspaceName={ws!} noteId={idParts.join(':')} />
+              </div>
+            );
+          })()}
         </div>
       </div>
 
