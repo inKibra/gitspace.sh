@@ -119,7 +119,7 @@ function WorkspaceCombo({ value, options, onChange }: {
 function ArtifactsRepoTab({ projectName, backend }: { projectName: string; backend: SessionBackend | null }): ReactElement {
   const [status, setStatus] = useState<{ repoPath: string; remote: string | null; branches: string[] } | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [choice, setChoice] = useState<'managed' | 'github' | 'byo' | null>(null);
+  const [choice, setChoice] = useState<'github' | 'byo' | null>(null);
   const [url, setUrl] = useState('');
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
@@ -143,15 +143,13 @@ function ArtifactsRepoTab({ projectName, backend }: { projectName: string; backe
     finally { setBusy(false); refresh(); }
   };
 
-  const OPTIONS: Array<{ key: 'managed' | 'github' | 'byo'; icon: string; title: string; badge?: string; desc: string; available: boolean }> = [
-    { key: 'managed', icon: '✦', title: 'gitspace.sh managed', badge: 'recommended · beta', desc: 'Zero setup — one repo per project on gitspace.sh infrastructure. Access follows your gitspace identity; teammates need nothing but this project.', available: Boolean(backend?.setupManagedProjectArtifacts) },
-    { key: 'github', icon: '⚡', title: 'GitHub private repo', desc: 'One click via your existing gh login: creates <owner>/<repo>-artifacts, mirrors your code-repo collaborators, large files ride as release assets.', available: Boolean(backend?.provisionProjectArtifacts) },
-    { key: 'byo', icon: '⛓', title: 'Bring your own remote', desc: 'Any git URL you control (GitLab, self-hosted, a bare repo on a server). Access is whatever the host enforces.', available: Boolean(backend?.setProjectArtifactsRemote) },
+  const OPTIONS: Array<{ key: 'github' | 'byo'; icon: string; title: string; badge?: string; desc: string; available: boolean }> = [
+    { key: 'github', icon: '⚡', title: 'GitHub private repo', badge: 'recommended', desc: 'One click via your existing gh login: creates <owner>/<repo>-artifacts, mirrors your code-repo collaborators, large files ride GitHub LFS.', available: Boolean(backend?.provisionProjectArtifacts) },
+    { key: 'byo', icon: '⛓', title: 'Bring your own remote', desc: 'Any git URL you control (GitLab, self-hosted, a bare repo on a server). Access is whatever the host enforces; large files stay local to each machine.', available: Boolean(backend?.setProjectArtifactsRemote) },
   ];
 
-  const PLAN: Record<'managed' | 'github' | 'byo', string[]> = {
-    managed: ['Provision a managed repo for this project (handle/project)', 'Wire the artifacts repo to it with short-lived scoped tokens', 'Commit the pointer to the code repo — teammates + your other machines adopt automatically', 'Push all branches now, then auto-sync every 5 minutes'],
-    github: ['Create a private <owner>/<repo>-artifacts on your GitHub', 'Mirror the code repo\u2019s collaborators onto it', 'Commit the pointer to the code repo — teammates adopt automatically', 'Push all branches + upload large-file blobs, then auto-sync every 5 minutes'],
+  const PLAN: Record<'github' | 'byo', string[]> = {
+    github: ['Create a private <owner>/<repo>-artifacts on your GitHub', 'Mirror the code repo\u2019s collaborators onto it', 'Commit the pointer to the code repo — teammates adopt automatically', 'Push all branches + upload large files to GitHub LFS, then auto-sync every 5 minutes'],
     byo: ['Set your URL as the artifacts remote', 'Commit the pointer to the code repo — teammates adopt automatically (their git auth must reach the host)', 'Push all branches now, then auto-sync every 5 minutes'],
   };
 
@@ -226,7 +224,6 @@ function ArtifactsRepoTab({ projectName, backend }: { projectName: string; backe
                   type="button"
                   disabled={busy || (choice === 'byo' && !url.trim())}
                   onClick={() => void enable(async () => {
-                    if (choice === 'managed') { const r = await backend!.setupManagedProjectArtifacts!(projectName); return `managed sharing on — ${r.project}${r.synced ? ', synced' : ' (first sync pending)'}`; }
                     if (choice === 'github') { const r = await backend!.provisionProjectArtifacts!(projectName); return `${r.created ? 'created' : 'reusing'} ${r.slug} — pushed, ${r.blobsUploaded} blobs, ${r.collaboratorsCopied} collaborators`; }
                     const r = await backend!.setProjectArtifactsRemote!(projectName, url.trim()); return `connected — ${r.pushed ? 'branches pushed' : 'adopted remote'}`;
                   })}

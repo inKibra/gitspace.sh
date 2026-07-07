@@ -3916,23 +3916,16 @@ routerListener = Bun.listen({
             }
             break;
 
-          case 'project-artifacts-managed-setup':
-            try {
-              const { setupManagedArtifacts, deriveManagedProjectRef } = await import('../../core/artifacts-managed.js');
-              const { getProjectBaseDir, getProjectDir } = await import('../../core/config.js');
-              const ref = await deriveManagedProjectRef(cmd.projectName);
-              const r = await setupManagedArtifacts({ projectDir: getProjectDir(cmd.projectName), baseDir: getProjectBaseDir(cmd.projectName), project: ref });
-              res = { type: 'project-artifacts-managed-setup', project: r.project, gitUrl: r.gitUrl, synced: r.synced };
-            } catch (e) {
-              res = { type: 'error', message: `Managed setup failed: ${e instanceof Error ? e.message : String(e)}` };
-            }
-            break;
-
           case 'project-artifacts-sync':
             try {
-              const { syncArtifacts } = await import('../../core/artifacts.js');
+              const { syncArtifacts, getArtifactsRemote } = await import('../../core/artifacts.js');
+              const { slugFromRemote, uploadMissingBlobs } = await import('../../core/artifacts-github.js');
               const { getProjectDir } = await import('../../core/config.js');
-              const sync = await syncArtifacts(getProjectDir(cmd.projectName));
+              const projectDir = getProjectDir(cmd.projectName);
+              const sync = await syncArtifacts(projectDir);
+              // GitHub remotes also move large-file blobs (GitHub LFS batch API).
+              const slug = slugFromRemote(await getArtifactsRemote(projectDir));
+              if (slug) await uploadMissingBlobs(projectDir, slug);
               res = { type: 'project-artifacts-sync', pushed: sync.pushed, fastForwarded: sync.fastForwarded };
             } catch (e) {
               res = { type: 'error', message: `Failed to sync artifacts: ${e instanceof Error ? e.message : String(e)}` };

@@ -770,12 +770,6 @@ interface ProjectArtifactsProvisionRequest {
   projectName: string;
 }
 
-interface ProjectArtifactsManagedSetupRequest {
-  type: 'project_artifacts_managed_setup';
-  requestId: string;
-  projectName: string;
-}
-
 export interface RepoTreeRequest {
   type: 'repo_tree';
   requestId: string;
@@ -1225,7 +1219,6 @@ export type ClientToMachineMessage =
   | ProjectArtifactsRemoteSetRequest
   | ProjectArtifactsSyncRequest
   | ProjectArtifactsProvisionRequest
-  | ProjectArtifactsManagedSetupRequest
   | RepoTreeRequest
   | RepoReadRequest
   | RepoCommitRequest
@@ -1398,7 +1391,6 @@ export function isBrowseMessage(msg: RemoteSessionMessage): msg is ClientToMachi
     'project_artifacts_remote_set',
     'project_artifacts_sync',
     'project_artifacts_provision',
-    'project_artifacts_managed_setup',
     'repo_tree',
     'repo_read',
     'repo_commit',

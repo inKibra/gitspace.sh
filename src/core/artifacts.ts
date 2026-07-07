@@ -187,7 +187,8 @@ function assertSafeRelPath(rel: string): void {
 
 /** Write files into a mount and commit them on its branch (one commit).
  *  Files at/over the pointer threshold are stored in the blob store and
- *  committed as LFS pointers. Provenance is attached as a git note. */
+ *  committed as LFS pointers (with matching .gitattributes lines, so external
+ *  `git lfs` clones smudge them natively). Provenance rides in a git note. */
 export async function captureArtifacts(
   projectDir: string,
   mountDir: string,
@@ -198,8 +199,9 @@ export async function captureArtifacts(
   const { blobsDir } = artifactPaths(projectDir);
   const threshold = opts.pointerThresholdBytes ?? DEFAULT_POINTER_THRESHOLD_BYTES;
   const pointers = files.filter((f) => writeCaptureFile(blobsDir, mountDir, f, threshold)).map((f) => f.path);
+  const attributesTouched = ensureLfsAttributes(mountDir, pointers);
 
-  const added = files.map((f) => escapeShellArg(f.path)).join(' ');
+  const added = files.map((f) => escapeShellArg(f.path)).concat(attributesTouched ? [escapeShellArg('.gitattributes')] : []).join(' ');
   await git(mountDir, `add -- ${added}`);
   const message = opts.message ?? `capture: ${files.map((f) => f.path).join(', ')}`.slice(0, 200);
   await git(mountDir, `commit -q -m ${escapeShellArg(message)}`, { id: true });
@@ -212,6 +214,29 @@ export async function captureArtifacts(
 
 function raiseMissingSource(path: string): never {
   throw new SpacesError(`captureArtifacts: file ${path} has neither content nor sourceFile`, 'USER_ERROR', 1);
+}
+
+/** One .gitattributes line per LFS-pointer path. GitHub LFS (and any git-lfs
+ *  clone) only treats a file as LFS when an attribute marks it, so pointer
+ *  commits and attribute lines must land together. Returns true when the
+ *  file changed (caller stages it). */
+export function ensureLfsAttributes(mountDir: string, pointerPaths: string[]): boolean {
+  if (pointerPaths.length === 0) return false;
+  const attrPath = join(mountDir, '.gitattributes');
+  const current = existsSync(attrPath) ? readFileSync(attrPath, 'utf8') : '';
+  const lines = new Set(current.split('\n').filter(Boolean));
+  let changed = false;
+  for (const p of pointerPaths) {
+    // gitattributes needs C-style quoting for paths with whitespace.
+    const pattern = /\s/.test(p) ? `"${p}"` : p;
+    const line = `${pattern} filter=lfs diff=lfs merge=lfs -text`;
+    if (!lines.has(line)) {
+      lines.add(line);
+      changed = true;
+    }
+  }
+  if (changed) writeFileSync(attrPath, `${[...lines].join('\n')}\n`);
+  return changed;
 }
 
 /** Write one capture file into the mount (pointer-splitting large bytes).
@@ -249,6 +274,7 @@ export function captureArtifactsSync(
   const { blobsDir } = artifactPaths(projectDir);
   const threshold = opts.pointerThresholdBytes ?? DEFAULT_POINTER_THRESHOLD_BYTES;
   const pointers = files.filter((f) => writeCaptureFile(blobsDir, mountDir, f, threshold)).map((f) => f.path);
+  const attributesTouched = ensureLfsAttributes(mountDir, pointers);
   const gitS = (args: string): string => {
     try {
       return execSync(`git -C ${escapeShellArg(mountDir)} ${GIT_ID} ${args}`, { encoding: 'utf8' }).trim();
@@ -256,7 +282,7 @@ export function captureArtifactsSync(
       throw new SpacesError(`git failed (${args.split(' ')[0]}): ${e instanceof Error ? e.message : e}`, 'SYSTEM_ERROR', 1);
     }
   };
-  gitS(`add -- ${files.map((f) => escapeShellArg(f.path)).join(' ')}`);
+  gitS(`add -- ${files.map((f) => escapeShellArg(f.path)).concat(attributesTouched ? [escapeShellArg('.gitattributes')] : []).join(' ')}`);
   const message = opts.message ?? `capture: ${files.map((f) => f.path).join(', ')}`.slice(0, 200);
   gitS(`commit -q -m ${escapeShellArg(message)}`);
   const commit = gitS('rev-parse HEAD');
@@ -320,15 +346,15 @@ export function readArtifact(projectDir: string, mountDir: string, relPath: stri
 
 /** Fetch a missing blob by oid (bytes or null when the store doesn't have it).
  *  Dependency-injected into {@link readArtifactResolving} so core stays
- *  testable offline; the managed tier supplies an HTTP-backed implementation. */
+ *  testable offline; the GitHub tier supplies an LFS-backed implementation. */
 export type ArtifactBlobFetcher = (oid: string, size: number) => Promise<Buffer | null>;
 
 /**
  * Async twin of {@link readArtifact}: on a pointer-miss (blob absent locally)
  * it asks a blob-fetcher for the bytes, verifies the sha256, stores the blob
- * locally, and returns it. Default fetcher is the managed tier's (when this
- * project is attached to gitspace.sh-managed artifacts); pass `blobFetcher`
- * explicitly to override, or `null` to force offline behavior.
+ * locally, and returns it. Default fetcher is GitHub LFS (when this project's
+ * artifacts remote is a github.com repo); pass `blobFetcher` explicitly to
+ * override, or `null` to force offline behavior.
  */
 export async function readArtifactResolving(
   projectDir: string,
@@ -345,7 +371,7 @@ export async function readArtifactResolving(
   const bp = blobPath(blobsDir, ptr.oid);
   if (existsSync(bp)) return readFileSync(bp);
 
-  const fetcher = opts.blobFetcher !== undefined ? opts.blobFetcher : await defaultManagedBlobFetcher(projectDir);
+  const fetcher = opts.blobFetcher !== undefined ? opts.blobFetcher : await defaultGithubBlobFetcher(projectDir);
   if (fetcher) {
     const bytes = await fetcher(ptr.oid, ptr.size).catch(() => null);
     if (bytes) {
@@ -365,11 +391,12 @@ export async function readArtifactResolving(
   throw new SpacesError(`Artifact blob missing: ${ptr.oid}`, 'SYSTEM_ERROR', 1);
 }
 
-/** Managed-tier blob fetcher for this project, or null when unmanaged. */
-async function defaultManagedBlobFetcher(projectDir: string): Promise<ArtifactBlobFetcher | null> {
+/** GitHub-LFS blob fetcher for this project, or null when the artifacts
+ *  remote isn't a github.com repo. */
+async function defaultGithubBlobFetcher(projectDir: string): Promise<ArtifactBlobFetcher | null> {
   try {
-    const managed = await import('./artifacts-managed.js');
-    return await managed.createDefaultBlobFetcher(projectDir);
+    const github = await import('./artifacts-github.js');
+    return await github.createGithubBlobFetcher(projectDir);
   } catch {
     return null;
   }
@@ -447,11 +474,10 @@ export async function pruneArtifactMounts(projectDir: string): Promise<void> {
 // ── remotes / sync (Tier 1: BYO — docs/ARTIFACTS-FS.md) ────────────────────
 
 /** The committed pointer file in the CODE repo that lets any clone rediscover
- *  its artifacts (the .gitmodules pattern). BYO form: explicit remote URL. */
+ *  its artifacts (the .gitmodules pattern): an explicit git remote URL
+ *  (GitHub-provisioned or BYO). */
 export interface ArtifactsPointerConfig {
-  /** gitspace.sh-managed identity ("handle/slug") — Tier 2, resolved later. */
-  project?: string;
-  /** BYO: explicit git remote URL for the artifacts repo. */
+  /** Explicit git remote URL for the artifacts repo. */
   remote?: string;
 }
 
@@ -487,11 +513,7 @@ export async function getArtifactsRemote(projectDir: string): Promise<string | n
   }
 }
 
-export async function setArtifactsRemote(
-  projectDir: string,
-  url: string,
-  opts: { beforeFetch?: (repoDir: string) => Promise<void> } = {},
-): Promise<void> {
+export async function setArtifactsRemote(projectDir: string, url: string): Promise<void> {
   const { repoDir } = artifactPaths(projectDir);
   // Fresh repo + remote: ADOPT the remote's main instead of seeding an
   // unrelated local root commit (a second machine attaching via
@@ -499,8 +521,6 @@ export async function setArtifactsRemote(
   if (!existsSync(join(repoDir, 'HEAD'))) {
     await initBareArtifactsRepo(repoDir);
     await git(repoDir, `remote add origin ${escapeShellArg(url)}`);
-    // Managed tier hook: install http auth config before the adopt fetch.
-    await opts.beforeFetch?.(repoDir);
     try {
       await git(repoDir, 'fetch origin --prune');
       await git(repoDir, `update-ref refs/heads/${MAIN_BRANCH} refs/remotes/origin/${MAIN_BRANCH}`);
@@ -518,61 +538,17 @@ export async function setArtifactsRemote(
   else await git(repoDir, `remote set-url origin ${escapeShellArg(url)}`);
 }
 
-// ── managed project marker (Tier 2 — gitspace.sh-managed) ──────────────────
-
-/** Local, machine-scoped marker (bare-repo git config) that this project's
- *  artifacts are gitspace.sh-managed ("handle/slug"). The committed
- *  `.gitspace/artifacts.json` is the durable cross-machine pointer; this is
- *  the resolved local state derived from it. */
-const MANAGED_PROJECT_CONFIG_KEY = 'gitspace.artifactsProject';
-
-export async function getManagedArtifactsProject(projectDir: string): Promise<string | null> {
-  const { repoDir } = artifactPaths(projectDir);
-  if (!existsSync(join(repoDir, 'HEAD'))) return null;
-  try {
-    const v = await git(repoDir, `config --get ${MANAGED_PROJECT_CONFIG_KEY}`);
-    return v || null;
-  } catch {
-    return null;
-  }
-}
-
-export async function setManagedArtifactsProject(projectDir: string, project: string): Promise<void> {
-  const repoDir = await ensureArtifactsRepo(projectDir);
-  await git(repoDir, `config ${MANAGED_PROJECT_CONFIG_KEY} ${escapeShellArg(project)}`);
-}
-
-export interface ArtifactsBlobSyncResult {
-  total: number;
-  uploaded: number;
-  alreadyPresent: number;
-  failed: number;
-}
-
 export interface ArtifactsSyncResult {
   pushed: boolean;
   fastForwarded: boolean;
-  /** Present only for managed (Tier 2) syncs — blob store upload results. */
-  blobs?: ArtifactsBlobSyncResult;
 }
 
-/** Sync the artifacts repo with its remote. BYO (Tier 1): git-only. Managed
- *  (Tier 2, when a managed project is configured): token-refreshing git sync
- *  plus blob-store upload of any local blobs the API doesn't have yet. */
+/** Git sync: fetch, fast-forward main (through the live main mount when one
+ *  exists), push all branches. Conflict-free by construction — non-ff main
+ *  means someone must roll up/curate manually. Blob transport is the GitHub
+ *  tier's job (LFS batch API in artifacts-github.ts); BYO remotes move
+ *  branches only. */
 export async function syncArtifacts(projectDir: string): Promise<ArtifactsSyncResult> {
-  const managedProject = await getManagedArtifactsProject(projectDir);
-  if (managedProject) {
-    const { syncManagedArtifacts } = await import('./artifacts-managed.js');
-    return syncManagedArtifacts(projectDir, managedProject);
-  }
-  return syncArtifactsGit(projectDir);
-}
-
-/** Git-only sync: fetch, fast-forward main (through the live main mount when
- *  one exists), push all branches. Conflict-free by construction — non-ff
- *  main means someone must roll up/curate manually. This is the whole story
- *  for BYO; the managed tier wraps it with token refresh + blob sync. */
-export async function syncArtifactsGit(projectDir: string): Promise<ArtifactsSyncResult> {
   const { repoDir } = artifactPaths(projectDir);
   const remote = await getArtifactsRemote(projectDir);
   if (!remote) throw new SpacesError('No artifacts remote configured (gssh artifacts remote add <url>)', 'USER_ERROR', 1);

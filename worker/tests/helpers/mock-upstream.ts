@@ -5,10 +5,6 @@ export interface MockUpstream {
   githubApiBase: string;
   githubOauthBase: string;
   cloudflareApiBase: string;
-  cfArtifactsApiBase: string;
-  cfArtifactsApiToken: string;
-  listArtifactRepos: () => Array<{ id: string; name: string; gitUrl: string }>;
-  getLastArtifactTokenRequest: () => { repoId: string; access: string; ttlSeconds: number } | null;
   getLastGithubOauthTokenRequest: () => Record<string, unknown> | null;
   failNextTunnelCreate: (tunnelName: string, status?: number, body?: string) => void;
   failNextCustomHostnameCreate: (hostname: string, status?: number, body?: string) => void;
@@ -72,10 +68,6 @@ export function startMockUpstream(): MockUpstream {
   let lastGithubOauthTokenRequest: Record<string, unknown> | null = null;
   const failingTunnelCreates = new Map<string, { status: number; body: string }>();
   const failingCustomHostnameCreates = new Map<string, { status: number; body: string }>();
-  const artifactRepos = new Map<string, { id: string; name: string; gitUrl: string }>();
-  let lastArtifactTokenRequest: { repoId: string; access: string; ttlSeconds: number } | null = null;
-  const cfArtifactsApiToken = 'cf-artifacts-api-token';
-
   githubUsers.set('github-access-token', {
     id: 12345,
     login: 'octocat',
@@ -125,60 +117,6 @@ export function startMockUpstream(): MockUpstream {
     fetch(request) {
       const url = new URL(request.url);
       const path = url.pathname;
-
-      // CF Artifacts git hosting mock (best-effort REST shapes; see
-      // src/services/artifacts-upstream.ts for the deploy-time caveats)
-      if (path.startsWith('/artifacts-host/')) {
-        const authToken = request.headers.get('Authorization')?.replace(/^Bearer\s+/i, '') ?? '';
-        if (authToken !== cfArtifactsApiToken) {
-          return new Response('Unauthorized', { status: 401 });
-        }
-
-        if (path === '/artifacts-host/repos' && request.method === 'POST') {
-          return readJsonObject(request).then((body) => {
-            const name = stringField(body.name, '');
-            if (!name) {
-              return new Response('Bad request', { status: 400 });
-            }
-            let repo = Array.from(artifactRepos.values()).find((entry) => entry.name === name);
-            if (!repo) {
-              repo = {
-                id: `cfrepo_${crypto.randomUUID()}`,
-                name,
-                gitUrl: `https://artifacts-upstream.example.com/${name}.git`,
-              };
-              artifactRepos.set(repo.id, repo);
-            }
-            const expires = Math.floor(Date.now() / 1000) + 86_400;
-            return Response.json({ success: true, result: { id: repo.id, name: repo.name, remote: repo.gitUrl, token: `art_v1_${'0'.repeat(40)}?expires=${expires}` } });
-          });
-        }
-
-        if (path === '/artifacts-host/tokens' && request.method === 'POST') {
-          return readJsonObject(request).then((body) => {
-            const repoName = stringField(body.repo, '');
-            const repo = Array.from(artifactRepos.values()).find((entry) => entry.name === repoName);
-            if (!repo) {
-              return new Response('Not found', { status: 404 });
-            }
-            const access = body.scope === 'read' ? 'read' : 'write';
-            const ttlSeconds = typeof body.ttl === 'number' ? body.ttl : 86_400;
-            lastArtifactTokenRequest = { repoId: repoName, access, ttlSeconds };
-            const expires = Math.floor((Date.now() + ttlSeconds * 1000) / 1000);
-            return Response.json({
-              success: true,
-              result: {
-                id: `tok_${crypto.randomUUID()}`,
-                plaintext: `art_v1_${crypto.randomUUID().replace(/-/g, '').padEnd(40, '0').slice(0, 40)}?expires=${expires}`,
-                scope: access,
-                expires_at: expires,
-              },
-            });
-          });
-        }
-
-        return new Response(`Unhandled artifacts route: ${request.method} ${path}`, { status: 404 });
-      }
 
       if (path === '/login/oauth/access_token' && request.method === 'POST') {
         return readJsonObject(request).then((body) => {
@@ -398,10 +336,6 @@ export function startMockUpstream(): MockUpstream {
     githubApiBase: base,
     githubOauthBase: base,
     cloudflareApiBase: `${base}/client/v4`,
-    cfArtifactsApiBase: `${base}/artifacts-host`,
-    cfArtifactsApiToken,
-    listArtifactRepos: () => Array.from(artifactRepos.values()),
-    getLastArtifactTokenRequest: () => lastArtifactTokenRequest,
     getLastGithubOauthTokenRequest: () => lastGithubOauthTokenRequest,
     failNextTunnelCreate: (tunnelName, status = 500, body = 'tunnel create failed') => {
       failingTunnelCreates.set(tunnelName, { status, body });

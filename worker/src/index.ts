@@ -15,7 +15,6 @@ import authHandlers from './handlers/auth';
 import identityHandlers from './handlers/identity';
 import userHandlers from './handlers/user';
 import subdomainHandlers from './handlers/subdomains';
-import artifactsHandlers from './handlers/artifacts';
 
 // Create app with typed bindings
 const app = new Hono<{ Bindings: Env; Variables: AuthContext }>();
@@ -67,12 +66,9 @@ app.use('/subdomains', authMiddleware);
 app.use('/subdomains/*', authMiddleware);
 app.use('/identity', authMiddleware);
 app.use('/identity/*', authMiddleware);
-app.use('/artifacts', authMiddleware);
-app.use('/artifacts/*', authMiddleware);
 app.route('/me', userHandlers);
 app.route('/subdomains', subdomainHandlers);
 app.route('/identity', identityHandlers);
-app.route('/artifacts', artifactsHandlers);
 
 // Root redirect to portal
 app.get('/', (c) => {

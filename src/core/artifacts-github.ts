@@ -1,20 +1,23 @@
 /**
- * GitHub-backed artifacts provisioning — the REAL managed path, zero new
+ * GitHub-backed artifacts sharing — THE managed path, zero new
  * infrastructure: every gitspace machine already has `gh` (hard dependency,
  * OAuth'd). Provisioning creates a private `<owner>/<repo>-artifacts` repo,
  * wires it as the remote, commits the pointer, pushes, and mirrors the code
- * repo's collaborators. Blobs (our ≥2MB LFS-style pointers) sync as release
- * assets on the SAME repo — asset name = sha256 oid, tag `blobs`.
+ * repo's collaborators.
  *
- * The worker/R2 tier (docs/ARTIFACTS-FS.md) remains the future scale path;
- * this one is provable end-to-end today.
+ * Large files: our pointer files are byte-for-byte standard git-LFS pointers
+ * and captures write matching .gitattributes lines, so blob storage is
+ * GitHub LFS itself — we speak the LFS batch API directly (no git-lfs binary
+ * needed) against the artifacts repo, and external `git lfs` clones interop
+ * natively.
  */
 
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { existsSync, readdirSync, mkdirSync, renameSync } from 'fs';
+import { createHash } from 'crypto';
+import { existsSync, readdirSync, readFileSync, statSync, mkdirSync, renameSync, writeFileSync } from 'fs';
 import { join, dirname } from 'path';
-import { artifactPaths, getArtifactsRemote, setArtifactsRemote, syncArtifacts, writeArtifactsPointerConfig, ensureArtifactsRepo } from './artifacts.js';
+import { artifactPaths, artifactBlobPath, getArtifactsRemote, setArtifactsRemote, syncArtifacts, writeArtifactsPointerConfig, ensureArtifactsRepo, ensureLfsAttributes, listArtifactFiles, artifactsMountDir, type ArtifactBlobFetcher } from './artifacts.js';
 import { readProjectConfig } from './config.js';
 import { SpacesError } from '../types/errors.js';
 
@@ -71,11 +74,13 @@ export async function provisionGithubArtifacts(
   }
   const url = `https://github.com/${slug}.git`;
 
-  // 2. Remote + committed pointer + full branch push. gh's credential helper
-  //    authenticates the https push.
+  // 2. Remote + committed pointer + LFS attribute backfill for pointers that
+  //    predate attribute-writing captures + full branch push. gh's credential
+  //    helper authenticates the https push.
   await gh(['auth', 'setup-git'], { allowFail: true });
   await setArtifactsRemote(projectDir, url);
   try { await writeArtifactsPointerConfig(baseDir, { remote: url }); } catch { /* base missing */ }
+  await backfillLfsAttributes(baseDir);
   const sync = await syncArtifacts(projectDir);
 
   // 3. Mirror the code repo's collaborators (best-effort, day-one access).
@@ -91,57 +96,151 @@ export async function provisionGithubArtifacts(
     }
   }
 
-  // 4. Blob upload (release assets).
+  // 4. Blob upload (GitHub LFS batch API).
   const blobsUploaded = await uploadMissingBlobs(projectDir, slug);
   return { slug, url, created, pushed: sync.pushed, collaboratorsCopied, blobsUploaded };
 }
 
-const BLOB_TAG = 'blobs';
-
-async function ensureBlobRelease(slug: string): Promise<void> {
-  const view = await gh(['release', 'view', BLOB_TAG, '--repo', slug, '--json', 'tagName'], { allowFail: true });
-  if (view.ok) return;
-  const mk = await gh(['release', 'create', BLOB_TAG, '--repo', slug, '--title', 'artifact blobs', '--notes', 'LFS-style blob store — asset name = sha256 oid. Managed by gitspace; do not edit.'], { allowFail: true });
-  if (!mk.ok && !/already exists/i.test(mk.stderr)) {
-    throw new SpacesError(`Failed to create blob release on ${slug}: ${mk.stderr.trim()}`, 'USER_ERROR', 1);
-  }
+/** Repos provisioned before capture-time attribute writing may hold pointer
+ *  files with no .gitattributes coverage — GitHub LFS ignores those. Backfill
+ *  through the base clone's main mount (best-effort; workspace branches get
+ *  their lines from ongoing captures). */
+async function backfillLfsAttributes(baseDir: string): Promise<void> {
+  try {
+    const mount = artifactsMountDir(baseDir);
+    if (!existsSync(join(mount, '.git'))) return;
+    const pointers = listArtifactFiles(mount).filter((e) => e.pointer).map((e) => e.path);
+    if (!ensureLfsAttributes(mount, pointers)) return;
+    const { execFile: ef } = await import('child_process');
+    const runGit = promisify(ef);
+    await runGit('git', ['-C', mount, '-c', 'user.name=gitspace', '-c', 'user.email=artifacts@gitspace.sh', '-c', 'commit.gpgsign=false', 'commit', '-q', '-am', 'lfs: backfill .gitattributes for existing pointers']);
+  } catch { /* best-effort */ }
 }
 
-/** Walk the local blob store; upload assets the release doesn't have. */
-export async function uploadMissingBlobs(projectDir: string, slug: string): Promise<number> {
+// ── GitHub LFS batch API ────────────────────────────────────────────────────
+
+export interface GithubLfsDeps {
+  fetchImpl?: typeof fetch;
+  /** gh OAuth token provider (default: `gh auth token`). */
+  tokenProvider?: () => Promise<string>;
+}
+
+async function ghAuthToken(): Promise<string> {
+  const r = await gh(['auth', 'token']);
+  const token = r.stdout.trim();
+  if (!token) throw new SpacesError('gh auth token returned nothing — run `gh auth login`.', 'USER_ERROR', 1);
+  return token;
+}
+
+interface LfsAction { href: string; header?: Record<string, string> }
+interface LfsBatchObject {
+  oid: string;
+  size: number;
+  actions?: { upload?: LfsAction; verify?: LfsAction; download?: LfsAction };
+  error?: { code: number; message: string };
+}
+
+const LFS_MEDIA_TYPE = 'application/vnd.git-lfs+json';
+
+async function lfsBatch(
+  slug: string,
+  operation: 'upload' | 'download',
+  objects: Array<{ oid: string; size: number }>,
+  deps: GithubLfsDeps,
+): Promise<LfsBatchObject[]> {
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const token = await (deps.tokenProvider ?? ghAuthToken)();
+  const res = await fetchImpl(`https://github.com/${slug}.git/info/lfs/objects/batch`, {
+    method: 'POST',
+    headers: {
+      Accept: LFS_MEDIA_TYPE,
+      'Content-Type': LFS_MEDIA_TYPE,
+      Authorization: `Basic ${Buffer.from(`x-access-token:${token}`).toString('base64')}`,
+    },
+    body: JSON.stringify({ operation, transfers: ['basic'], objects }),
+  });
+  if (!res.ok) throw new SpacesError(`GitHub LFS batch ${operation} failed for ${slug} (${res.status})`, 'SYSTEM_ERROR', 1);
+  const data = (await res.json()) as { objects?: LfsBatchObject[] };
+  return data.objects ?? [];
+}
+
+/** Walk the local blob store; upload objects GitHub LFS doesn't have yet.
+ *  Objects the server already has come back without an upload action. */
+export async function uploadMissingBlobs(projectDir: string, slug: string, deps: GithubLfsDeps = {}): Promise<number> {
   const { blobsDir } = artifactPaths(projectDir);
   if (!existsSync(blobsDir)) return 0;
-  const local: Array<{ oid: string; file: string }> = [];
+  const local: Array<{ oid: string; size: number; file: string }> = [];
   for (const shard of readdirSync(blobsDir)) {
     const shardDir = join(blobsDir, shard);
     try {
-      for (const oid of readdirSync(shardDir)) local.push({ oid, file: join(shardDir, oid) });
+      for (const oid of readdirSync(shardDir)) {
+        const file = join(shardDir, oid);
+        local.push({ oid, size: statSync(file).size, file });
+      }
     } catch { /* not a dir */ }
   }
   if (local.length === 0) return 0;
-  await ensureBlobRelease(slug);
-  const listed = await gh(['release', 'view', BLOB_TAG, '--repo', slug, '--json', 'assets', '--jq', '.assets[].name'], { allowFail: true });
-  const have = new Set(listed.ok ? listed.stdout.split('\n').map((x) => x.trim()).filter(Boolean) : []);
+
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const batch = await lfsBatch(slug, 'upload', local.map(({ oid, size }) => ({ oid, size })), deps);
+  const byOid = new Map(local.map((b) => [b.oid, b]));
   let uploaded = 0;
-  for (const { oid, file } of local) {
-    if (have.has(oid)) continue;
-    const up = await gh(['release', 'upload', BLOB_TAG, `${file}#${oid}`, '--repo', slug], { allowFail: true });
-    if (up.ok) uploaded += 1;
+  for (const obj of batch) {
+    const src = byOid.get(obj.oid);
+    const action = obj.actions?.upload;
+    if (!src || !action || obj.error) continue;
+    const put = await fetchImpl(action.href, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/octet-stream', ...(action.header ?? {}) },
+      body: new Uint8Array(readFileSync(src.file)),
+    });
+    if (!put.ok) continue;
+    const verify = obj.actions?.verify;
+    if (verify) {
+      await fetchImpl(verify.href, {
+        method: 'POST',
+        headers: { Accept: LFS_MEDIA_TYPE, 'Content-Type': LFS_MEDIA_TYPE, ...(verify.header ?? {}) },
+        body: JSON.stringify({ oid: obj.oid, size: src.size }),
+      }).catch(() => undefined);
+    }
+    uploaded += 1;
   }
   return uploaded;
 }
 
-/** Fetch one blob from the release store into the local blob dir. */
-export async function downloadBlob(projectDir: string, slug: string, oid: string): Promise<boolean> {
+/** Fetch one blob from GitHub LFS into the local blob store (sha256-verified). */
+export async function downloadBlob(projectDir: string, slug: string, oid: string, size: number, deps: GithubLfsDeps = {}): Promise<boolean> {
   const { blobsDir } = artifactPaths(projectDir);
-  const dest = join(blobsDir, oid.slice(0, 2), oid);
+  const dest = artifactBlobPath(blobsDir, oid);
   if (existsSync(dest)) return true;
+  const bytes = await fetchLfsObject(slug, oid, size, deps);
+  if (!bytes) return false;
   mkdirSync(dirname(dest), { recursive: true });
   const tmp = `${dest}.part`;
-  const dl = await gh(['release', 'download', BLOB_TAG, '--repo', slug, '--pattern', oid, '--output', tmp], { allowFail: true });
-  if (!dl.ok || !existsSync(tmp)) return false;
+  writeFileSync(tmp, bytes);
   renameSync(tmp, dest);
   return true;
+}
+
+async function fetchLfsObject(slug: string, oid: string, size: number, deps: GithubLfsDeps): Promise<Buffer | null> {
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const [obj] = await lfsBatch(slug, 'download', [{ oid, size }], deps);
+  const action = obj?.actions?.download;
+  if (!action || obj?.error) return null;
+  const res = await fetchImpl(action.href, { headers: action.header ?? {} });
+  if (!res.ok) return null;
+  const bytes = Buffer.from(await res.arrayBuffer());
+  const gotOid = createHash('sha256').update(bytes).digest('hex');
+  if (gotOid !== oid) return null;
+  return bytes;
+}
+
+/** Blob fetcher for {@link readArtifactResolving} — non-null only when this
+ *  project's artifacts remote is a github.com repo. */
+export async function createGithubBlobFetcher(projectDir: string, deps: GithubLfsDeps = {}): Promise<ArtifactBlobFetcher | null> {
+  const slug = slugFromRemote(await getArtifactsRemote(projectDir));
+  if (!slug) return null;
+  return (oid, size) => fetchLfsObject(slug, oid, size, deps);
 }
 
 /** github.com remotes expose the slug for blob ops; others don't. */
@@ -151,10 +250,10 @@ export function slugFromRemote(remote: string | null): string | null {
   return m ? m[1]! : null;
 }
 
-/** Full sync for a provisioned project: branches + blobs both directions on demand. */
-export async function syncGithubArtifacts(projectDir: string): Promise<{ pushed: boolean; blobsUploaded: number }> {
+/** Full sync for a provisioned project: branches via git, blobs via LFS. */
+export async function syncGithubArtifacts(projectDir: string, deps: GithubLfsDeps = {}): Promise<{ pushed: boolean; blobsUploaded: number }> {
   const sync = await syncArtifacts(projectDir);
   const slug = slugFromRemote(await getArtifactsRemote(projectDir));
-  const blobsUploaded = slug ? await uploadMissingBlobs(projectDir, slug) : 0;
+  const blobsUploaded = slug ? await uploadMissingBlobs(projectDir, slug, deps) : 0;
   return { pushed: sync.pushed, blobsUploaded };
 }

@@ -105,6 +105,10 @@ describe('captureArtifacts', () => {
     const { blobsDir } = artifactPaths(projectDir);
     expect(existsSync(join(blobsDir, ptr!.oid.slice(0, 2), ptr!.oid))).toBe(true);
     expect(readArtifact(projectDir, mount, 'demos/run.bin').equals(big)).toBe(true);
+    // Pointer captures commit matching .gitattributes lines (GitHub LFS +
+    // external git-lfs clones need the attribute to treat the file as LFS).
+    const attrs = g(mount, 'show HEAD:.gitattributes');
+    expect(attrs).toContain('demos/run.bin filter=lfs diff=lfs merge=lfs -text');
   });
 
   it('captures from a sourceFile and rejects unsafe paths', async () => {

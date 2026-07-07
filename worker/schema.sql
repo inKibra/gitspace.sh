@@ -121,18 +121,3 @@ CREATE TABLE IF NOT EXISTS serve_route_records (
 CREATE INDEX IF NOT EXISTS idx_serve_route_records_subdomain ON serve_route_records(serve_subdomain_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_serve_route_records_hostname ON serve_route_records(hostname);
 CREATE INDEX IF NOT EXISTS idx_subdomain_access_identity ON subdomain_access(identity_id);
-
--- Managed artifacts tier: one CF Artifacts repo per {handle, slug} project
-CREATE TABLE IF NOT EXISTS artifact_projects (
-  id TEXT PRIMARY KEY,                    -- uuid
-  handle TEXT NOT NULL,                   -- root subdomain of the owning user
-  slug TEXT NOT NULL,                     -- project slug within the handle
-  owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  upstream_repo_id TEXT NOT NULL,         -- CF Artifacts repo id
-  upstream_git_url TEXT NOT NULL,         -- upstream git URL (worker-internal)
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL,
-  UNIQUE(handle, slug)
-);
-
-CREATE INDEX IF NOT EXISTS idx_artifact_projects_owner ON artifact_projects(owner_user_id);

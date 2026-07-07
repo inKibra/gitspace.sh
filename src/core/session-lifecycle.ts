@@ -336,17 +336,6 @@ async function mountProjectArtifacts(projectName: string, baseDir: string): Prom
       } catch {
         /* remote unreachable / auth needed — mount proceeds locally */
       }
-    } else if (pointer?.project) {
-      // Managed (Tier 2): { "project": "handle/slug" } — adopt on this machine
-      // using its gitspace.sh auth (setupManagedArtifacts attaches to the
-      // existing backend record, installs git auth, and pulls remote history).
-      try {
-        const managed = await import('./artifacts-managed.js');
-        await managed.setupManagedArtifacts({ projectDir, baseDir, project: pointer.project });
-      } catch {
-        /* not logged in / offline — mount proceeds locally; run
-           `gssh artifacts managed setup` later to attach */
-      }
     }
     await artifacts.ensureArtifactsMount(projectDir, baseDir, 'main');
   } catch {

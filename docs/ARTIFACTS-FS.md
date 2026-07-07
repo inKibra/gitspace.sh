@@ -4,7 +4,12 @@ Durable, versioned artifact storage for gitspace projects — demos, screenshots
 goal-validation evidence, eval reports, and any other proof-of-work that agents
 and humans produce while working in a workspace.
 
-**Status**: design accepted 2026-07 · local foundation not yet implemented.
+**Status**: local foundation + GitHub sharing implemented (2026-07). Sharing is
+GitHub-first: a private `<owner>/<repo>-artifacts` repo with large files on
+**GitHub LFS**. The earlier Cloudflare-managed tier (CF Artifacts + worker-minted
+tokens + R2 LFS) was designed, built, and then **dropped 2026-07-07** — CF
+Artifacts is closed beta with no ship date, while every gitspace machine already
+has an authenticated `gh`. GitHub is the managed path.
 
 ---
 
@@ -69,25 +74,24 @@ the remote/published seam — swap the resolver, keep the components.
 ## Large files: LFS-style pointer split
 
 Raw binaries in the repo are untenable: git history compounds every version
-forever, Cloudflare Artifacts caps repos at 10 GB (inherited from the Durable
-Object SQLite ceiling — architectural, not negotiable), and Artifacts storage
-costs 33× R2 ($0.50 vs $0.015 per GB-month).
+forever, and review/sync costs scale with weight.
 
 **Split structure from weight, from day one:**
 
 - The repo holds the tree, metadata, small files (below a ~2 MB threshold), and
   **standard-format git-LFS pointer files** (content-addressed, sha256) for
-  everything bigger.
+  everything bigger. Captures also commit matching `.gitattributes` lines, so
+  the repo is a *real* git-LFS repo to any external `git lfs` clone.
 - Blobs live in a blob store:
   - **Local**: project-level blob dir beside `.artifacts.git` (dedup by hash).
-  - **Managed**: R2 behind a thin gitspace.sh LFS endpoint (the LFS batch API
-    is just "hand back upload/download URLs" — R2 presigned URLs fit exactly).
-  - **BYO**: the user's own LFS endpoint / S3-compatible store.
+  - **GitHub**: **GitHub LFS** on the artifacts repo. gitspace speaks the LFS
+    batch API directly (auth via the `gh` token) — no `git-lfs` binary needed
+    on gitspace machines, while teammates outside gitspace can still
+    `git lfs clone` the repo natively.
+  - **BYO**: branches sync over plain git; blobs stay machine-local (no blob
+    transport — the host would need its own LFS).
 - Pointers merge like text at roll-up. Deleting branches orphans pointers; a gc
   pass against reachable hashes reclaims blobs.
-- Cloudflare Artifacts has **no native LFS today** (design-goal mention only).
-  Using the standard pointer format means native support, if it ships, is a
-  config change — zero migration.
 
 ## Project identity and the backend
 
@@ -102,13 +106,9 @@ any clone of the code repo rediscover its artifacts (the `.gitmodules` /
 `.lfsconfig` pattern):
 
 ```jsonc
-// gitspace.sh-managed: identity only — backend resolves endpoints.
-// Migration-proof; leaks nothing but a slug.
-{ "project": "bradleat/gitspace-sh" }
-
-// BYO: explicit endpoints.
-{ "remote": "https://git.example.com/me/proj-artifacts.git",
-  "lfs": "https://lfs.example.com/proj" }
+// GitHub-provisioned or BYO: an explicit remote URL. github.com remotes get
+// blob transport (GitHub LFS) automatically; others sync branches only.
+{ "remote": "https://github.com/me/proj-artifacts.git" }
 ```
 
 - **Tokens/credentials never live in the repo.**
@@ -125,92 +125,41 @@ any clone of the code repo rediscover its artifacts (the `.gitmodules` /
 | Tier | Trigger | What exists |
 |---|---|---|
 | 0 · Local | `project add` (always) | `.artifacts.git` + mounts. No account, no network. |
-| 1 · BYO remote | `gssh artifacts remote add <url>` | Their remote, their auth. gitspace never sees bytes. |
-| 2 · Managed | `gssh project provision` (explicit, like `host reserve`) | Backend record + CF Artifacts repo + R2 prefix + LFS endpoint + tokens. |
+| 1 · BYO remote | `gssh artifacts remote add <url>` | Their remote, their auth. gitspace never sees bytes. Branches only — no blob transport. |
+| 2 · GitHub | `gssh artifacts provision` (or the ph wizard) | Private `<owner>/<repo>-artifacts` repo, code-repo collaborators mirrored, blobs on GitHub LFS, committed pointer. |
 
-### Backend entities (Tier 2, thin by design)
-
-| Entity | Holds | Where |
-|---|---|---|
-| Project | `handle/slug`, stable id, settings | D1/DO on the worker |
-| ArtifactRepo | CF Artifacts repo ref, token minting | Artifacts API |
-| BlobStore | R2 prefix + LFS endpoint | R2 |
-| Collaborators | identity pubkeys → read/write grants | existing invite/ACL machinery |
-| Quota | storage/ops rollup across repo + blobs | billing hook |
-
-The backend stays a **provisioning/token layer**. Project state (goal chains,
-board state, reports, review records) belongs on `main` of the artifacts repo —
-versioned, synced, merged with roll-up semantics — not in a backend database.
-The artifacts repo is the project's **spine across machines**: machine #2
-attaches by cloning the code repo (which carries `artifacts.json`) and
-authenticating.
-
-### Cloudflare Artifacts facts (verified 2026-07)
-
-- Repos/namespaces per account: **unlimited**. Per-repo: **10 GB** (DO SQLite
-  ceiling). Per-account: 1 TB, raisable. Rate: 2k req/10s per repo.
-- Auth: **repo-scoped Bearer tokens** (read | write), minted via Workers
-  binding/REST; git via `http.extraHeader`. No SSH. → `gssh` ships a git
-  credential helper for `artifacts.gitspace.sh` that exchanges the user's
-  session for short-lived tokens.
-- **No native encryption story** (standard at-rest/in-transit only) and **no
-  native LFS** — both are ours to layer if wanted.
-- ArtifactFS (their OSS lazy-hydrating mount, works against any remote) is
-  irrelevant locally; interesting later for instant-start cloud sandboxes.
-- Public beta ~May 2026; re-verify limits before building Tier 2.
+There is **no gitspace.sh backend record** for artifacts — GitHub is the
+backend. Project state (goal chains, board state, reports, review records)
+belongs on `main` of the artifacts repo — versioned, synced, merged with
+roll-up semantics — not in any database. The artifacts repo is the project's
+**spine across machines**: machine #2 attaches by cloning the code repo (which
+carries `artifacts.json`) and authenticating with its own `gh` login.
 
 ### Auth
 
-**Unmanaged (Tier 0/1) — gitspace is not in the loop.** Tier 0 has no auth
-(local bare repo). Tier 1 uses whatever the user's remote uses (SSH keys, PATs,
-their LFS endpoint); gitspace runs plain `git`, stores nothing.
+**Tier 0/1 — gitspace is not in the loop.** Tier 0 has no auth (local bare
+repo). Tier 1 uses whatever the user's remote uses (SSH keys, PATs); gitspace
+runs plain `git`, stores nothing.
 
-**Managed (Tier 2) — one chain of trust, one enforcement point:**
+**Tier 2 — GitHub is the single enforcement point:**
 
-```
-GitHub OAuth ──► gitspace.sh session ──► grant check (handle/slug)
-   ──► short-lived gitspace JWT (~15–60 min)
-      ──► artifacts.gitspace.sh worker enforces per request
-         ──► CF Artifacts (Workers binding) + R2 presigned URLs
-```
+- Git pushes authenticate through `gh auth setup-git` (gh's credential
+  helper). Blob transfers hit the **GitHub LFS batch API** with the same
+  `gh auth token`. gitspace mints nothing and stores nothing.
+- Access control = GitHub repo collaborators. Provisioning mirrors the code
+  repo's direct collaborators onto the artifacts repo; later changes are
+  managed on GitHub like any repo.
+- **No lock-in**: it's a normal GitHub repo with normal LFS — `git lfs clone`
+  works with no gitspace anywhere.
 
-- The remote URL is **`https://artifacts.gitspace.sh/<handle>/<slug>.git`** —
-  our worker proxies git smart HTTP to the CF repo via the Workers binding.
-  **CF repo-scoped tokens never leave the worker**; clients only hold
-  gitspace-minted short-lived JWTs. Revocation = delete the grant row
-  (enforced per request, instant). The proxy also preserves the
-  `artifacts.json` identity indirection (the CF repo behind a slug can move).
-- `gssh` installs a **git credential helper** scoped to `artifacts.gitspace.sh`
-  that exchanges the keychain session for fresh JWTs — rotation is invisible,
-  `git push` just works.
-- **LFS**: `…/<slug>/lfs` on the same worker, same JWT; the batch API returns
-  **time-limited R2 presigned PUT/GET URLs**, so blob bytes flow client↔R2
-  directly (the worker signs, never carries weight).
-- **Collaborator grants come in two kinds**, both minting the same JWT:
-  1. gitspace.sh account (GitHub OAuth) — the simple path;
-  2. **Ed25519 identity challenge-response** — the relay's existing machine-auth
-     mechanism; the grant table stores identity pubkeys (already exchanged by
-     the invite system), so a collaborator can access managed artifacts without
-     ever doing GitHub OAuth. `gssh invite` becomes the single onboarding
-     surface for machines *and* artifacts.
-- **Setup UX**: owner — `auth login` → `project provision` (record + CF repo +
-  R2 prefix + `artifacts.json` + credential helper). Machine #2 / collaborator —
-  clone code repo → `project add` reads `artifacts.json` → auth prompt (OAuth
-  or identity sig) → fetch + mount.
-- **No lock-in**: `git clone --mirror` + LFS fetch exports everything.
-- E2E encryption (below) layers on top unchanged — the worker authenticates and
-  signs URLs but only ever brokers ciphertext.
+### Dropped: the Cloudflare-managed tier (2026-07-07)
 
-### Encryption posture (open decision)
-
-If "gitspace.sh can't read your artifacts" should match "the relay can't read
-your terminals", it is our layer: per-project content key wrapped per identity
-(the existing X25519 machinery), file bytes encrypted before commit, paths +
-git-notes plaintext so listings work, client-side decrypt (the web app already
-does client-side crypto for terminals). Costs: ciphertext defeats git deltas
-and server-side preview. Leading candidate: **private-by-default E2E, with
-"publish" as an explicit act** that copies selected artifacts to a plaintext
-public space. Not yet decided.
+A full CF-managed tier was built (worker-provisioned CF Artifacts repos,
+short-lived repo-scoped tokens minted by the worker, R2 as the LFS blob store)
+and then removed before ever deploying: CF Artifacts is a closed beta with no
+ship date, the worker added a second auth system for capabilities GitHub gives
+us for free, and the standard-LFS pointer format means nothing was lost —
+any future host that speaks git + LFS batch is a remote-URL change away.
 
 ## Project creation & first-run experience
 
@@ -244,7 +193,7 @@ artifacts repo is born**, and the Plan-first flow is where its first contents
 install gssh → open UI → "New project" (blank | template | idea)
    → working locally, project agent live          [no GitHub, no gitspace.sh]
 → publish to GitHub                                [when code wants a remote]
-→ gssh project provision                           [when artifacts want sync/share]
+→ gssh artifacts provision                         [when artifacts want sync/share]
 → host reserve / invites                           [when collaborating]
 ```
 
@@ -275,8 +224,9 @@ slug until publish/provision mints them.
 4. **UI**: RightRail Artifacts tab (browse mount, pointer-aware previews via
    daemon HTTP route, copy-ref, evidence-block deep links).
 5. **BYO remote**: `artifacts remote add`, sync commands, `.gitspace/artifacts.json`.
-6. **Managed (post CF public beta)**: provision worker, credential helper, LFS
-   endpoint on R2, quotas; encryption decision lands here.
+6. **GitHub tier** (done): one-click provisioning (`gssh artifacts provision`
+   / ph wizard), collaborator mirroring, GitHub LFS blob transport, 5-minute
+   auto-sync in the machine daemon.
 
 ## Mini-apps and data artifacts
 
