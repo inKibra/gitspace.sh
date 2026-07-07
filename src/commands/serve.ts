@@ -53,21 +53,9 @@ import { open } from '../lib/tmux-lite/crypto/secretbox.js';
 import {
   isServeRunning,
   getServePid,
-  writeServePid,
   cleanupServeFiles,
-  startStatusServer,
-  stopStatusServer,
-  setDaemonState,
-  updateDaemonState,
-  queryServeStatus,
-  sendShutdownCommand,
-  getServeLogFile,
-  ensureServeDaemonDir,
-  type StatusResponse,
 } from '../serve/daemon.js';
 import { initializeSecretRuntime } from '../core/secret-runtime.js';
-import { getAgentState, watchAgentState } from '../lib/tmux-lite/cli.js';
-import { applyAgentDeltaToAgentState } from '../lib/tmux-lite/agent-state-reducer.js';
 import { fetchRelayIdentity } from './connect.js';
 import {
   discoverRelayCandidates as discoverRelayCandidatesBase,
@@ -550,22 +538,6 @@ export function buildServeIngressConfig(entries: ProcessHostEntry[]): string {
   return `${lines.join('\n')}\n`;
 }
 
-async function cleanupServeStartupFailure(
-  sessionManager: ClientSessionManager | null,
-): Promise<void> {
-  stopStatusServer();
-
-  if (sessionManager) {
-    try {
-      sessionManager.cleanup();
-    } catch {
-      // Best-effort cleanup.
-    }
-  }
-
-  cleanupServeFiles();
-}
-
 // ============================================================================
 // Relay Connection
 // ============================================================================
@@ -573,129 +545,9 @@ async function cleanupServeStartupFailure(
 /**
  * Connect to relay WebSocket with protocol message support
  */
-async function connectToRelay(
-  relayUrl: string,
-  machineId: string,
-  publicIdentity: PublicIdentity,
-  sessionManager: ClientSessionManager,
-  eventHandler: ServeEventHandler,
-  signingPrivateKey?: Uint8Array,
-  relayPubkey?: string,
-  bootstrapToken?: string,
-  registerPermit?: string,
-  enrollmentToken?: string,
-  deviceCertificate?: string,
-  autoYes?: boolean,
-  takeover?: boolean,
- ): Promise<{ relayPublicKey: string; relayFingerprint: string; relayLabel?: string } | null> {
-  let trustedRelayIdentity: { relayPublicKey: string; relayFingerprint: string; relayLabel?: string } | null = null;
-
-  await connectMachineRelay(
-    relayUrl,
-    machineId,
-    publicIdentity,
-    sessionManager,
-    eventHandler,
-    async (url, relayPublicKey, relayFingerprint, relayLabel, explicitPubkey) => {
-      const trustResult = await verifyRelayTrust(
-        url,
-        relayPublicKey,
-        relayFingerprint,
-        relayLabel,
-        explicitPubkey,
-        Boolean(autoYes),
-        Boolean(takeover),
-      );
-
-      if (trustResult.trusted) {
-        trustedRelayIdentity = {
-          relayPublicKey,
-          relayFingerprint: trustResult.fingerprint,
-          relayLabel,
-        };
-      }
-
-      return trustResult;
-    },
-    signingPrivateKey,
-    relayPubkey,
-    bootstrapToken,
-    registerPermit,
-    enrollmentToken,
-    deviceCertificate,
-  );
-
-  return trustedRelayIdentity;
-}
-
 /**
  * Set up shutdown handlers
  */
-export async function performServeShutdown(
-  sessionManager: Pick<ClientSessionManager, 'cleanup'>,
-  options: {
-    isDaemon?: boolean;
-    cleanup?: () => void | Promise<void>;
-    exit?: (code: number) => never;
-    timeoutMs?: number;
-  } = {}
-): Promise<never> {
-  logger.log('');
-  logger.info('Shutting down...');
-
-  const timeoutMs = options.timeoutMs ?? 3_000;
-  let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
-  let timedOut = false;
-
-  const cleanupPromise = Promise.resolve(options.cleanup?.()).then(() => sessionManager.cleanup());
-  const timeoutPromise = new Promise<void>((resolve) => {
-    timeoutHandle = setTimeout(() => {
-      timedOut = true;
-      resolve();
-    }, timeoutMs);
-  });
-
-  await Promise.race([cleanupPromise, timeoutPromise]).catch((error) => {
-    logger.error(`Shutdown cleanup failed: ${error instanceof Error ? error.message : String(error)}`);
-  }).finally(() => {
-    if (timeoutHandle) {
-      clearTimeout(timeoutHandle);
-    }
-  });
-
-  if (timedOut) {
-    logger.warning(`Shutdown cleanup timed out after ${timeoutMs}ms; forcing exit.`);
-  }
-
-  if (options.isDaemon) {
-    stopStatusServer();
-    cleanupServeFiles();
-  }
-
-  const exit = options.exit ?? process.exit;
-  return exit(0);
-}
-
-function setupShutdownHandlers(
-  sessionManager: ClientSessionManager,
-  isDaemon: boolean = false,
-  cleanup?: () => void
-): void {
-  let shutdownPromise: Promise<never> | null = null;
-  const shutdown = () => {
-    if (shutdownPromise) {
-      return;
-    }
-    shutdownPromise = performServeShutdown(sessionManager, { isDaemon, cleanup }).catch((error) => {
-      logger.error(`Shutdown failed: ${error instanceof Error ? error.message : String(error)}`);
-      process.exit(1);
-    });
-  };
-
-  process.on('SIGINT', shutdown);
-  process.on('SIGTERM', shutdown);
-}
-
 // ============================================================================
 // Daemon Commands
 // ============================================================================
