@@ -819,6 +819,14 @@ export function ProjectHomePage({
     return { ...common, version: 'unknown', render: () => <div className="p-4 text-xs text-[var(--gs-text-dim)]">Unknown tab: {t}</div> };
   });
 
+  const startProjectThread = (): void => {
+    void backend?.createAgentSession?.(baseWorkspaceId, 'project agent').then((sessions) => {
+      const created = sessions.filter((x) => !x.closedAt && !x.archivedAt).at(-1);
+      setThreadsTick((n) => n + 1);
+      if (created) openTab(`agent:${created.id}`);
+    }).catch(() => { /* surface stays */ });
+  };
+
   return (
     <div className="flex h-screen w-screen bg-[var(--gs-bg)] text-[13px]">
       {/* sidebar (mock: .ph-sb) */}
@@ -836,19 +844,22 @@ export function ProjectHomePage({
         <div className="min-h-0 flex-1 overflow-y-auto pb-2">
           {sbGroup('Agent')}
           {agentThreads.length === 0
-            ? navRow({ key: 'agent', icon: '✦', label: 'Project agent', rt: backend?.createAgentSession ? 'idle' : undefined, disabled: true, title: 'no threads yet — start one below' })
+            // First click on a fresh project: 'Project agent' STARTS the
+            // first thread (it used to be a dead disabled row pointing at
+            // 'New thread' below — nobody reads tooltips on a dead row).
+            ? navRow({
+                key: 'agent', icon: '✦', label: 'Project agent',
+                rt: backend?.createAgentSession ? 'start' : undefined,
+                disabled: !backend?.createAgentSession,
+                title: backend?.createAgentSession ? 'start the first project-agent thread' : 'agent sessions unavailable',
+                onClick: backend?.createAgentSession ? startProjectThread : undefined,
+              })
             : agentThreads.map((th) => navRow({ key: `agent-${th.id}`, icon: '✦', label: th.title || 'thread', tab: `agent:${th.id}` }))}
           {navRow({
             key: 'new-thread', icon: '＋', label: 'New thread',
             disabled: !backend?.createAgentSession,
             title: backend?.createAgentSession ? undefined : 'agent sessions unavailable',
-            onClick: backend?.createAgentSession ? () => {
-              void backend.createAgentSession!(baseWorkspaceId, 'project agent').then((sessions) => {
-                const created = sessions.filter((x) => !x.closedAt && !x.archivedAt).at(-1);
-                setThreadsTick((n) => n + 1);
-                if (created) openTab(`agent:${created.id}`);
-              }).catch(() => { /* surface stays */ });
-            } : undefined,
+            onClick: backend?.createAgentSession ? startProjectThread : undefined,
           })}
 
           {sbGroup('Project')}
