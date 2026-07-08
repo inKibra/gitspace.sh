@@ -831,7 +831,7 @@ export function ProjectHomePage({
   };
 
   return (
-    <div className="flex h-screen w-screen bg-[var(--gs-bg)] text-[13px]">
+    <div className="flex h-full w-full bg-[var(--gs-bg)] text-[13px]">
       {/* mobile drawer backdrop */}
       {navOpen && (
         <div className="fixed inset-0 z-30 bg-black/50 sm:hidden" onClick={() => setNavOpen(false)} />
