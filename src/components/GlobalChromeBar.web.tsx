@@ -62,7 +62,7 @@ export function GlobalChromeBar({ projectName, workspaces, activeKey, boardActiv
           </button>
         ))}
       </div>
-      <div className="ml-auto flex flex-shrink-0 items-center gap-2">
+      <div className="gs-chrome-actions ml-auto flex flex-shrink-0 items-center gap-2">
         {rightExtra}
         {onReportProblem && (
           <button type="button" onClick={onReportProblem} title="Report a problem" className="px-1 text-[13px] text-[var(--gs-text-muted)] hover:text-[var(--gs-text)]">

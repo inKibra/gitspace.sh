@@ -1395,6 +1395,9 @@ html {
 .ios-pwa { min-height: 100vh; min-height: -webkit-fill-available; }
 .touch-device .terminal-key { min-height: 36px; min-width: 36px; }
 .coarse-pointer .terminal-key { min-height: 40px; min-width: 40px; }
+/* Chrome-bar actions (⚠ report / ⚑ inbox / ⌘K) are tiny icon buttons — give
+   them a real tap target on touch without disturbing the dense desktop mock. */
+.touch-device .gs-chrome-actions button { min-height: 36px; min-width: 36px; display: inline-flex; align-items: center; justify-content: center; }
 
 .terminal-with-controls { padding-bottom: calc(52px + var(--keyboard-inset, 0px)); }
 .terminal-with-floating-controls { padding-bottom: calc(120px + env(safe-area-inset-bottom, 0px)); }
