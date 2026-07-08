@@ -8,7 +8,7 @@
  * fires them unattended is M2.
  */
 
-import { execSync } from 'child_process';
+import { execFileSync } from 'child_process';
 import { existsSync, readFileSync, readdirSync } from 'fs';
 import { join } from 'path';
 import { captureArtifacts } from './artifacts.js';
@@ -116,8 +116,13 @@ export async function recordTriggerRun(
 // ── run-window write enforcement (docs/ARTIFACT-PROTOCOL.md Phase 3) ────────
 
 function gitInMount(workspaceDir: string, args: string[], env?: Record<string, string>): string {
-  return execSync(
-    `git -C ${JSON.stringify(mountDirFor(workspaceDir))} -c user.name=gitspace -c user.email=artifacts@gitspace.sh -c commit.gpgsign=false ${args.join(' ')}`,
+  // execFileSync — NO shell. Filenames here are git diff output (arbitrary
+  // bytes bar NUL/slash), so any string interpolation into a shell command is
+  // RCE in the daemon that holds the signing key. Every arg is a literal argv
+  // element; consumers pass raw paths (no JSON/shell quoting).
+  return execFileSync(
+    'git',
+    ['-C', mountDirFor(workspaceDir), '-c', 'user.name=gitspace', '-c', 'user.email=artifacts@gitspace.sh', '-c', 'commit.gpgsign=false', ...args],
     { encoding: 'utf8', env: env ? { ...process.env, ...env } : undefined },
   ).trim();
 }
@@ -193,19 +198,19 @@ export async function enforceTriggerWritesPostRun(
   const paths = [...violations].sort();
   for (const file of paths) {
     const existedAtStart = (() => {
-      try { gitInMount(workspaceDir, ['cat-file', '-e', `${run.startCommit}:${JSON.stringify(file).slice(1, -1)}`]); return true; } catch { return false; }
+      try { gitInMount(workspaceDir, ['cat-file', '-e', `${run.startCommit}:${file}`]); return true; } catch { return false; }
     })();
-    if (existedAtStart) gitInMount(workspaceDir, ['checkout', run.startCommit!, '--', JSON.stringify(file)]);
+    if (existedAtStart) gitInMount(workspaceDir, ['checkout', run.startCommit!, '--', file]);
     else {
-      try { gitInMount(workspaceDir, ['rm', '-f', '-q', '--', JSON.stringify(file)]); } catch { /* already gone */ }
+      try { gitInMount(workspaceDir, ['rm', '-f', '-q', '--', file]); } catch { /* already gone */ }
     }
   }
   gitInMount(workspaceDir, ['add', '-A']);
   const message = `revert: trigger ${trigger.id} wrote outside its scope (${paths.join(', ')})`;
-  gitInMount(workspaceDir, ['commit', '-q', '-m', JSON.stringify(message)], { GSSH_ARTIFACTS_CAPTURE: '1' });
+  gitInMount(workspaceDir, ['commit', '-q', '-m', message], { GSSH_ARTIFACTS_CAPTURE: '1' });
   const revertCommit = gitInMount(workspaceDir, ['rev-parse', 'HEAD']);
   try {
-    gitInMount(workspaceDir, ['notes', 'add', '-f', '-m', JSON.stringify(JSON.stringify({ tool: 'trigger-enforcement', trigger: trigger.id })).slice(1, -1), revertCommit]);
+    gitInMount(workspaceDir, ['notes', 'add', '-f', '-m', JSON.stringify({ tool: 'trigger-enforcement', trigger: trigger.id }), revertCommit]);
   } catch { /* note best-effort */ }
   return { violations: paths, revertCommit, skippedForeignCommits };
 }

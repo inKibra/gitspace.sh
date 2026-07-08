@@ -735,20 +735,31 @@ export async function serveStart(options: {
 
 /** Tail the daemon log until interrupted (serve --foreground). */
 async function followDaemonLog(path: string): Promise<void> {
-  const { openSync, readSync, fstatSync } = await import('node:fs');
+  const { openSync, readSync, fstatSync, closeSync } = await import('node:fs');
+  // openSync returns a raw kernel fd — GC won't reclaim it, so EVERY open must
+  // be paired with closeSync or the poll loop exhausts the process fd table in
+  // minutes and the tail silently dies (ultrareview bug_004).
+  const sizeOf = (): number => {
+    const fd = openSync(path, 'r');
+    try { return fstatSync(fd).size; } finally { closeSync(fd); }
+  };
   let offset = 0;
-  try { offset = fstatSync(openSync(path, 'r')).size; } catch { /* not created yet */ }
+  try { offset = sizeOf(); } catch { /* not created yet */ }
   for (;;) {
     await Bun.sleep(500);
     try {
       const fd = openSync(path, 'r');
-      const size = fstatSync(fd).size;
-      if (size < offset) offset = 0; // rotated/truncated
-      if (size > offset) {
-        const buf = Buffer.alloc(size - offset);
-        readSync(fd, buf, 0, buf.length, offset);
-        offset = size;
-        process.stdout.write(buf);
+      try {
+        const size = fstatSync(fd).size;
+        if (size < offset) offset = 0; // rotated/truncated
+        if (size > offset) {
+          const buf = Buffer.alloc(size - offset);
+          readSync(fd, buf, 0, buf.length, offset);
+          offset = size;
+          process.stdout.write(buf);
+        }
+      } finally {
+        closeSync(fd);
       }
     } catch { /* file missing — keep waiting */ }
   }

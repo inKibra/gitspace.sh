@@ -25,6 +25,16 @@ describe('artifact:// URIs', () => {
     expect(() => parseArtifactUri('artifact://p/w/a//b')).toThrow('Unsafe');
     expect(() => parseArtifactUri('file:///etc/passwd')).toThrow('Not an artifact URI');
   });
+
+  it('rejects encoded-slash traversal in project/workspace segments (bug_002)', () => {
+    // %2F survives the [^/]+ capture, then decodes to '..' path segments that
+    // join() would resolve into a sibling project. Must be rejected.
+    expect(() => parseArtifactUri('artifact://demo/..%2F..%2Fother/reports/x.json')).toThrow('Unsafe');
+    expect(() => parseArtifactUri('artifact://..%2Fp/w/a.md')).toThrow('Unsafe');
+    expect(() => parseArtifactUri('artifact://p/%2E%2E/a.md')).toThrow('Unsafe');
+    // @base and encoded-space names stay valid (no false positives).
+    expect(parseArtifactUri('artifact://gitspace.sh/%40base/goal.md').workspace).toBe('@base');
+  });
 });
 
 describe('scope glob matcher', () => {

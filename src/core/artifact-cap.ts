@@ -36,6 +36,16 @@ export function parseArtifactUri(uri: string): ArtifactUri {
   const project = decodeURIComponent(m[1]!);
   const workspace = decodeURIComponent(m[2]!);
   const relPath = m[3] ?? '';
+  // The regex captures project/workspace as [^/]+ on the still-ENCODED segment,
+  // so %2F survives it and decodeURIComponent restores literal '/' and '..' —
+  // consumers then join(projectDir,'workspaces',workspace) straight into a
+  // sibling project (ultrareview bug_002). Every segment is a single path
+  // component: no slashes, no traversal, non-empty.
+  for (const seg of [project, workspace]) {
+    if (!seg || seg === '.' || seg === '..' || seg.includes('/')) {
+      throw new SpacesError(`Unsafe artifact URI segment: ${uri}`, 'USER_ERROR', 1);
+    }
+  }
   if (relPath && relPath.split('/').some((s) => s === '' || s === '.' || s === '..')) {
     throw new SpacesError(`Unsafe artifact URI path: ${uri}`, 'USER_ERROR', 1);
   }
