@@ -34,6 +34,31 @@ export async function resolveRepoSlug(cwd: string, exec: GhExec = defaultGhExec)
   }
 }
 
+export interface GithubIssue {
+  number: number;
+  title: string;
+  body: string;
+  url: string;
+}
+
+/** One open issue by number. Throws (via gh) if it doesn't exist. */
+export async function fetchIssue(slug: string, number: number, cwd?: string, exec: GhExec = defaultGhExec): Promise<GithubIssue> {
+  const { stdout } = await exec(['api', `repos/${slug}/issues/${number}`], cwd);
+  const j = JSON.parse(stdout) as { number: number; title: string; body?: string; html_url: string; pull_request?: unknown };
+  if (j.pull_request) throw new SpacesError(`#${number} is a pull request, not an issue`, 'USER_ERROR', 1);
+  return { number: j.number, title: j.title, body: j.body ?? '', url: j.html_url };
+}
+
+/** Open issues, newest first, optionally filtered by label. */
+export async function listIssues(slug: string, opts: { label?: string; limit?: number } = {}, cwd?: string, exec: GhExec = defaultGhExec): Promise<GithubIssue[]> {
+  const args = ['api', `repos/${slug}/issues?state=open&per_page=${opts.limit ?? 30}${opts.label ? `&labels=${encodeURIComponent(opts.label)}` : ''}`];
+  const { stdout } = await exec(args, cwd);
+  const arr = JSON.parse(stdout) as Array<{ number: number; title: string; body?: string; html_url: string; pull_request?: unknown }>;
+  return arr
+    .filter((j) => !j.pull_request) // the issues endpoint includes PRs; drop them
+    .map((j) => ({ number: j.number, title: j.title, body: j.body ?? '', url: j.html_url }));
+}
+
 export interface CreateIssueInput {
   slug: string;            // owner/repo
   title: string;

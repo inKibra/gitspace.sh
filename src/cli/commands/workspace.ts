@@ -72,6 +72,7 @@ export function registerWorkspaceCommands(parent: Command): void {
     .option('--branch <name>', 'Specify different branch name from workspace name')
     .option('--from <branch>', 'Create from specific branch instead of base')
     .option('--status <phase>', 'Kanban phase: plan, code, review, ship (default: code)')
+    .option('--issue <number>', 'Import a GitHub issue: name the workspace after it and seed its goal')
     .option('--no-setup', 'Skip setup commands')
     .action(withErrorHandler(async (workspaceName, options) => {
       const ctx = useExplicitContext(options);
@@ -85,12 +86,17 @@ export function registerWorkspaceCommands(parent: Command): void {
         );
       }
       const status = phase as typeof validPhases[number] | undefined;
+      const issueNumber = options.issue !== undefined ? Number(options.issue) : undefined;
+      if (issueNumber !== undefined && (!Number.isInteger(issueNumber) || issueNumber <= 0)) {
+        throw new SpacesError(`Invalid --issue: ${options.issue}. Must be a positive issue number.`, 'USER_ERROR', 1);
+      }
       const { addWorkspace } = await import('../../commands/add.js');
       await addWorkspace(workspaceName, {
         project: ctx.project,
         branchName: options.branch,
         fromBranch: options.from,
         status,
+        githubIssueNumber: issueNumber,
         // New CLI: never open shell (no implicit session attach)
         noShell: true,
         noSetup: options.setup === false,

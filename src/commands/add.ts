@@ -290,7 +290,7 @@ export async function addProject(options: {
  */
 export async function addWorkspace(
   workspaceNameArg: string | undefined,
-  options: (Partial<CreateWorkspaceOptions> & { project: string })
+  options: (Partial<CreateWorkspaceOptions> & { project: string; githubIssueNumber?: number })
 ): Promise<void> {
   const currentProject = options.project;
   if (!currentProject) {
@@ -306,8 +306,21 @@ export async function addWorkspace(
 
   let existsRemotely = false;
   let selectedLinearIssue: Awaited<ReturnType<typeof fetchUnstartedIssues>>[0] | undefined;
+  // Loop 2 (docs/REPORT-A-PROBLEM.md): a GitHub issue imported as a workspace.
+  let selectedGithubIssue: import('../core/github-issues.js').GithubIssue | undefined;
 
-  if (workspaceNameArg) {
+  // Non-interactive import: `gssh workspace add --issue <n>` derives the name
+  // + branch from the issue and seeds its goal after the worktree is made.
+  if (options.githubIssueNumber !== undefined && !workspaceNameArg) {
+    const { resolveRepoSlug, fetchIssue } = await import('../core/github-issues.js');
+    const slug = await resolveRepoSlug(baseDir);
+    if (!slug) {
+      throw new SpacesError(`Could not resolve a GitHub repo for project '${currentProject}' (gh auth / remote?).`, 'USER_ERROR', 1);
+    }
+    selectedGithubIssue = await fetchIssue(slug, options.githubIssueNumber, baseDir);
+    workspaceName = generateWorkspaceName(String(selectedGithubIssue.number), selectedGithubIssue.title);
+    branchName = options.branchName || workspaceName;
+  } else if (workspaceNameArg) {
     // Workspace name provided as argument - sanitize it (allows branch-like names like fix/bla-bla-blah)
     const sanitizedName = sanitizeForFileSystem(workspaceNameArg);
     if (!sanitizedName) {
@@ -511,6 +524,31 @@ export async function addWorkspace(
     await ensureArtifactsMount(getProjectDir(currentProject), workspacePath, workspaceName);
   } catch (error) {
     logger.warning(`Artifacts mount skipped: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  // If created from a GitHub issue, seed a real goal (not just a .prompt file):
+  // the goal doc opens with the issue body, and the github sourceRef links it
+  // back to the issue so the eventual guide/PR can reference & close it.
+  if (selectedGithubIssue) {
+    try {
+      const { ensureWorkspaceGoalChain, updateGoalRecord } = await import('../core/goal-chain.js');
+      const { goal } = ensureWorkspaceGoalChain(currentProject, workspaceName);
+      const body = selectedGithubIssue.body?.trim()
+        ? selectedGithubIssue.body
+        : '_(issue had no description)_';
+      updateGoalRecord(currentProject, goal.id, {
+        title: selectedGithubIssue.title,
+        doc: {
+          bodyMarkdown: `# ${selectedGithubIssue.title}\n\n${body}\n\n---\n_Imported from ${selectedGithubIssue.url}_`,
+          updatedAt: new Date().toISOString(),
+          updatedBy: 'github-import',
+        },
+        sourceRefs: [{ type: 'github', id: String(selectedGithubIssue.number), url: selectedGithubIssue.url, title: selectedGithubIssue.title }],
+      });
+      logger.success(`Seeded goal from GitHub issue #${selectedGithubIssue.number}`);
+    } catch (error) {
+      logger.warning(`Workspace created, but failed to seed goal from issue: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   // If workspace was created from a Linear issue, save issue details as markdown
