@@ -160,18 +160,13 @@ literally what "import issue → workspace" produces.
 
 ## Open decisions
 
-**How is Loop 2 triggered?** The issue exists; what turns it into a workspace?
-1. *Manual import* (recommended v1): the issue sits in GitHub until a human
-   runs `gssh workspace add --issue <n>` (or picks it in the source picker).
-   Human decides what's worth fixing; zero surprise agent activity.
-2. *One-click from the report*: the report dialog offers "file issue AND start
-   a fix workspace" so the loop closes in one action for the reporter.
-3. *Auto-import on label*: a `gitspace-fix` label (added by a human triaging)
-   auto-creates the workspace via the scheduler. Most automated; needs a poll
-   or webhook and a policy for who may apply the label.
-
-Recommended: ship 1, offer 2 as a checkbox, defer 3. Keeps a human in the loop
-on *what* gets fixed while making the common path one click.
+**How is Loop 2 triggered? — DECIDED: manual import (v1), one-click optional.**
+The issue is always filed; turning it into a workspace is a human choice:
+`gssh workspace add --issue <n>` or the source picker. The report dialog also
+offers a "also start a fix workspace now" checkbox to close the loop in one
+action for the reporter. A human stays in the loop on *what* gets fixed — no
+surprise agent activity. Auto-import-on-label (a `gitspace-fix` label + a
+poll/webhook) is a deliberate later option, not v1.
 
 **Which repo gets the issue?** Default to the affected project's own repo (the
 fix workspace is already there). A separate product-feedback repo is right for
