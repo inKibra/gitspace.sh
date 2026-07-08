@@ -258,6 +258,9 @@ export async function ensureArtifactsMount(projectDir: string, workspaceDir: str
   const mountDir = artifactsMountDir(workspaceDir);
   if (!existsSync(join(mountDir, '.git'))) {
     mkdirSync(dirname(mountDir), { recursive: true });
+    // A manually-deleted mount leaves a stale worktree registration that
+    // makes 'worktree add' refuse the same path — prune first, always.
+    await git(repoDir, 'worktree prune');
     await git(repoDir, `worktree add ${escapeShellArg(mountDir)} ${escapeShellArg(branch)}`);
   }
   await ensureCodeRepoExcludes(workspaceDir);

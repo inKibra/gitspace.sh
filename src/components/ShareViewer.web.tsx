@@ -16,6 +16,7 @@
  */
 import { useEffect, useState, type ReactElement } from 'react';
 import { ArtifactPreviewContent, MiniAppRun, type ArtifactRead } from './ArtifactPanel.web.js';
+import { parseArtifactCapUnverified } from '../core/artifact-cap.js';
 import { DashboardPanel } from './DashboardPanel.web.js';
 import { GuideShareView } from './GuideShareView.web.js';
 
@@ -85,10 +86,21 @@ export function ShareViewer({ token, rawBase }: {
   const body = (): ReactElement => {
     if (state === 'loading') return <div className="p-8 text-[12px] text-[var(--gs-text-dim)]">loading…</div>;
     if (state === 'gone' || !meta || !data) {
+      // The server is deliberately oracle-free (404 for expired = revoked =
+      // never existed). But the token itself is client-decodable — when THIS
+      // link's own stamp says it expired, we can say so without asking the
+      // server anything. A valid-looking unexpired token that still 404s is
+      // revoked-or-fake; keep that ambiguous.
+      const cap = parseArtifactCapUnverified(decodeURIComponent(token));
+      const expired = cap && Date.now() > cap.expiresAt;
       return (
         <div className="flex h-full flex-col items-center justify-center gap-2 p-8 text-center">
-          <span className="text-[14px] text-[var(--gs-text)]">This share link is gone.</span>
-          <span className="max-w-[420px] text-[12px] text-[var(--gs-text-dim)]">Expired, revoked, or never existed — ask the sender for a fresh link.</span>
+          <span className="text-[14px] text-[var(--gs-text)]">{expired ? 'This share link has expired.' : 'This share link is gone.'}</span>
+          <span className="max-w-[420px] text-[12px] text-[var(--gs-text-dim)]">
+            {expired
+              ? `It expired ${new Date(cap.expiresAt).toLocaleString()} — ask the sender for a fresh link.`
+              : 'Revoked or never existed — ask the sender for a fresh link.'}
+          </span>
         </div>
       );
     }
