@@ -775,6 +775,15 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
             const b = activeBackendKey ? multi.getBackend(activeBackendKey) : null;
             return b?.reportProblem ? (note, bundle, opts) => b.reportProblem!(note, bundle, opts) : undefined;
           })()}
+          onStartFix={(() => {
+            const projectName = projectHomeName ?? (allProjects.length === 1 ? allProjects[0]?.name : undefined);
+            if (!activeBackendKey || !projectName) return undefined;
+            return async (issueNumber: number) => {
+              await multi.createWorkspace(activeBackendKey as BackendKey, { projectName, workspaceName: '', githubIssueNumber: issueNumber });
+              await multi.listWorkspaces();
+              toast.success(`Fix workspace created for #${issueNumber}`);
+            };
+          })()}
         />
       )}
     </>

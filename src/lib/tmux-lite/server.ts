@@ -3799,6 +3799,7 @@ export async function dispatchCommand(cmd: Command): Promise<Response | null> {
               // checkbox). Resolve the repo from the named project's base clone;
               // a failure here degrades to local-only, never loses the report.
               let issueUrl: string | undefined;
+              let issueNumber: number | undefined;
               if (cmd.fileIssue && cmd.projectName) {
                 try {
                   const { resolveRepoSlug, createIssue } = await import('../../core/github-issues.js');
@@ -3809,10 +3810,11 @@ export async function dispatchCommand(cmd: Command): Promise<Response | null> {
                     const { title, body } = issueTitleAndBody(redacted);
                     const issue = await createIssue({ slug, title, body, labels: ['gitspace-report'], cwd });
                     issueUrl = issue.url;
+                    issueNumber = issue.number;
                   }
                 } catch { /* keep the local report; issueUrl stays undefined */ }
               }
-              res = { type: 'report-problem', path, issueUrl };
+              res = { type: 'report-problem', path, issueUrl, issueNumber };
             } catch (e) {
               res = { type: 'error', message: `Failed to write problem report: ${e instanceof Error ? e.message : String(e)}` };
             }

@@ -353,6 +353,14 @@ export async function addWorkspace(
       sourceOptions.splice(1, 0, 'Create from Linear issue');
     }
 
+    // Add GitHub-issue option when the project resolves to a GitHub repo
+    // (Loop 2, docs/REPORT-A-PROBLEM.md — imports an issue as a workspace).
+    const { resolveRepoSlug: resolveGhSlug } = await import('../core/github-issues.js');
+    const ghSlug = await resolveGhSlug(baseDir);
+    if (ghSlug) {
+      sourceOptions.splice(1, 0, 'Create from GitHub issue');
+    }
+
     const source = await selectItem(sourceOptions, 'How would you like to create the workspace?');
 
     if (!source) {
@@ -431,6 +439,26 @@ export async function addWorkspace(
 
       // Generate workspace name
       workspaceName = generateWorkspaceName(selectedLinearIssue.identifier, selectedLinearIssue.title);
+      branchName = options.branchName || workspaceName;
+    } else if (source === 'Create from GitHub issue') {
+      logger.info('Fetching open GitHub issues...');
+      const { listIssues } = await import('../core/github-issues.js');
+      const issues = await listIssues(ghSlug!, { limit: 30 }, baseDir);
+      if (issues.length === 0) {
+        throw new SpacesError('No open GitHub issues found', 'USER_ERROR', 1);
+      }
+      const issueOptions = issues.map((i) => `#${i.number} - ${i.title}`);
+      const picked = await selectItem(issueOptions, 'Select an issue:');
+      if (!picked) {
+        logger.info('Cancelled');
+        return;
+      }
+      const num = Number(picked.slice(1).split(' - ')[0]);
+      selectedGithubIssue = issues.find((i) => i.number === num);
+      if (!selectedGithubIssue) {
+        throw new SpacesError(`Failed to find issue #${num}`, 'SYSTEM_ERROR', 2);
+      }
+      workspaceName = generateWorkspaceName(String(selectedGithubIssue.number), selectedGithubIssue.title);
       branchName = options.branchName || workspaceName;
     } else {
       // Manual entry - accepts branch-like names (e.g., fix/bla-bla-blah) and sanitizes them

@@ -239,6 +239,7 @@ export interface CreateWorkspaceRequest {
   parentWorkspaceName?: string;
   workspaceSource?: import('../../types/lifecycle.js').WorkspaceSource;
   linearIssue?: import('../../types/lifecycle.js').SessionLinearIssueSummary;
+  githubIssueNumber?: number;
 }
 
 export interface ListWorkspaceNotesRequest {

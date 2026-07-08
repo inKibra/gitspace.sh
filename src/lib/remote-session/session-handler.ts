@@ -979,6 +979,7 @@ export class RemoteSessionHandler {
             parentWorkspaceName: msg.parentWorkspaceName,
             workspaceSource: msg.workspaceSource,
             linearIssue: msg.linearIssue,
+            githubIssueNumber: msg.githubIssueNumber,
           },
           message: 'Creating workspace',
           refreshMachineSnapshot: true,

@@ -11,17 +11,20 @@ import { getDiagnosticsRing } from '../lib/client-diagnostics.web.js';
 import { getSessionContext } from '../lib/analytics.web.js';
 import { VERSION } from '../version.generated.js';
 
-export function ReportProblemDialog({ onClose, report, projectName }: {
+export function ReportProblemDialog({ onClose, report, projectName, onStartFix }: {
   onClose: () => void;
   /** Backend sink; undefined when no backend is connected. */
-  report?: (note: string, clientBundle: unknown, opts?: { fileIssue?: boolean; projectName?: string }) => Promise<{ path: string; issueUrl?: string }>;
+  report?: (note: string, clientBundle: unknown, opts?: { fileIssue?: boolean; projectName?: string }) => Promise<{ path: string; issueUrl?: string; issueNumber?: number }>;
   /** Project whose GitHub repo an issue would be filed against (enables the checkbox). */
   projectName?: string;
+  /** 1-click: import the just-filed issue as a fix workspace (Loop 2). */
+  onStartFix?: (issueNumber: number) => Promise<void>;
 }): ReactElement {
   const [note, setNote] = useState('');
   const [fileIssue, setFileIssue] = useState<boolean>(Boolean(projectName));
   const [state, setState] = useState<'edit' | 'sending' | 'done' | 'error'>('edit');
-  const [result, setResult] = useState<{ path?: string; issueUrl?: string; error?: string }>({});
+  const [result, setResult] = useState<{ path?: string; issueUrl?: string; issueNumber?: number; error?: string }>({});
+  const [fixState, setFixState] = useState<'idle' | 'starting' | 'started'>('idle');
 
   const ring = useMemo(() => getDiagnosticsRing(), []);
   const clientBundle = useMemo(() => ({
@@ -68,7 +71,20 @@ export function ReportProblemDialog({ onClose, report, projectName }: {
               ? <div className="mb-1">GitHub issue: <a href={result.issueUrl} target="_blank" rel="noreferrer" className="underline text-[var(--gs-info)]">{result.issueUrl}</a></div>
               : fileIssue && projectName && <div className="mb-1 text-[var(--gs-warning)]">Saved locally — couldn't file a GitHub issue (no repo/auth for {projectName}).</div>}
             <div className="font-[family-name:var(--gs-font-mono)] text-[11px] break-all text-[var(--gs-text-dim)]">{result.path}</div>
-            <button type="button" onClick={onClose} className="mt-3 border border-[var(--gs-border)] px-2 py-[3px] text-[11px] hover:bg-[var(--gs-bg-active)]">Close</button>
+            <div className="mt-3 flex items-center gap-2">
+              {result.issueNumber !== undefined && onStartFix && fixState !== 'started' && (
+                <button
+                  type="button"
+                  disabled={fixState === 'starting'}
+                  onClick={() => { setFixState('starting'); void onStartFix(result.issueNumber!).then(() => setFixState('started')).catch(() => setFixState('idle')); }}
+                  className="border border-[var(--gs-border-active)] bg-[var(--gs-bg-active)] px-2.5 py-[3px] text-[11px] text-[var(--gs-text)] disabled:opacity-40"
+                >
+                  {fixState === 'starting' ? 'Starting…' : `Start a fix workspace for #${result.issueNumber}`}
+                </button>
+              )}
+              {fixState === 'started' && <span className="text-[11px] text-[var(--gs-success)]">Fix workspace created — find it on the board.</span>}
+              <button type="button" onClick={onClose} className="ml-auto border border-[var(--gs-border)] px-2 py-[3px] text-[11px] hover:bg-[var(--gs-bg-active)]">Close</button>
+            </div>
           </div>
         ) : (
           <>

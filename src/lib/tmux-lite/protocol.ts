@@ -447,7 +447,7 @@ export type Command =
   | { type: 'serve-deactivate' }
   | { type: 'serve-status' }
   | { type: 'project-artifacts-rollup'; projectName: string; workspace: string; removeBranch?: boolean }
-  | { type: 'report-problem'; note: string; clientBundleJson: string }
+  | { type: 'report-problem'; note: string; clientBundleJson: string; fileIssue?: boolean; projectName?: string }
   | { type: 'artifact-share-mint'; uri: string; ttlMs?: number; maxUses?: number; live?: boolean }
   | { type: 'artifact-share-revoke'; tokenId: string }
   | { type: 'artifact-share-list' }
@@ -469,7 +469,7 @@ export type Command =
   | { type: 'project-prepare'; repository: string; projectName?: string; baseBranch?: string; setCurrent?: boolean }
   | { type: 'project-finalize'; projectName: string; repository: string; baseBranch: string; bundle?: import('../../types/bundle.js').SpacesBundle; inputValues?: Record<string, string>; secretValues?: Record<string, string>; confirmResults?: Record<string, import('../../types/bundle.js').ConfirmStepResult>; setCurrent?: boolean }
   | { type: 'project-cancel'; projectName: string }
-  | { type: 'workspace-create'; projectName: string; workspaceName: string; branchName?: string; baseBranch?: string; parentWorkspaceName?: string; workspaceSource?: import('../../types/lifecycle.js').WorkspaceSource; linearIssue?: import('../../types/lifecycle.js').SessionLinearIssueSummary }
+  | { type: 'workspace-create'; projectName: string; workspaceName: string; branchName?: string; baseBranch?: string; parentWorkspaceName?: string; workspaceSource?: import('../../types/lifecycle.js').WorkspaceSource; linearIssue?: import('../../types/lifecycle.js').SessionLinearIssueSummary; githubIssueNumber?: number }
   | { type: 'project-delete'; projectName: string }
   | { type: 'workspace-delete'; requestId: string; projectName: string; workspaceId: string; scriptPolicy?: 'auto' | 'skip' }
   | { type: 'workspace-phase-preview'; projectName: string; workspaceName: string; phase: import('../../types/config.js').WorkspacePhase }
@@ -557,7 +557,7 @@ export type Response =
   | { type: 'project-artifacts-provision'; slug: string; url: string; created: boolean; blobsUploaded: number; collaboratorsCopied: number }
   | { type: 'serve-status'; status: { active: boolean; relayUrl?: string; relayStatus?: string; clients?: number; machineId?: string; startedAt?: number } }
   | { type: 'project-artifacts-rollup'; mergeCommit: string }
-  | { type: 'report-problem'; path: string; issueUrl?: string }
+  | { type: 'report-problem'; path: string; issueUrl?: string; issueNumber?: number }
   | { type: 'artifact-share-mint'; url: string; tokenId: string; expiresAt: number }
   | { type: 'artifact-share-revoke'; revoked: boolean }
   | { type: 'artifact-share-list'; shares: import('./artifact-share.js').ShareLedgerEntry[] }

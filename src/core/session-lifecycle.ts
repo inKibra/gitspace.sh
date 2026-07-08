@@ -20,7 +20,7 @@ import { bindPlannedGoalForWorkspace } from './goal-chain.js';
 import { detectBundleInRepo, loadBundleFromPath } from './bundle.js';
 import { applyProjectBundleState } from './project-lifecycle.js';
 import { SpacesError } from '../types/errors.js';
-import { extractRepoName, isValidBranchName, sanitizeForFileSystem } from '../utils/sanitize.js';
+import { extractRepoName, generateWorkspaceName, isValidBranchName, sanitizeForFileSystem } from '../utils/sanitize.js';
 import { generateMarkdown } from '../utils/markdown.js';
 import type { SessionLinearIssueSummary, WorkspaceSource } from '../types/lifecycle.js';
 import type { ConfirmStep, ConfirmStepResult, SpacesBundle } from '../types/bundle.js';
@@ -71,6 +71,9 @@ export interface SessionCreateWorkspaceParams {
   linearIssue?: SessionLinearIssueSummary;
   onProgress?: (message: string) => void;
   parentWorkspaceName?: string;
+  /** Loop 2: import GitHub issue #n — derives the name (when workspaceName is
+   *  empty), seeds the goal, links the github sourceRef. */
+  githubIssueNumber?: number;
 }
 
 export interface SessionCreateWorkspaceResult {
@@ -490,12 +493,23 @@ export async function createWorkspaceForSession(
   }
 
   const config = readProjectConfig(projectName);
+  const baseDir = getProjectBaseDir(projectName);
+
+  // Loop 2: fetch the issue up front so its title can name the workspace when
+  // the caller didn't supply one.
+  let githubIssue: import('./github-issues.js').GithubIssue | undefined;
+  if (params.githubIssueNumber !== undefined) {
+    const { resolveRepoSlug, fetchIssue } = await import('./github-issues.js');
+    const slug = await resolveRepoSlug(baseDir);
+    if (!slug) throw new SpacesError(`Could not resolve a GitHub repo for project '${projectName}'.`, 'USER_ERROR', 1);
+    githubIssue = await fetchIssue(slug, params.githubIssueNumber, baseDir);
+  }
+
   const { workspaceName, branchName } = resolveWorkspaceAndBranchNames(
-    params.workspaceName,
+    params.workspaceName || (githubIssue ? generateWorkspaceName(String(githubIssue.number), githubIssue.title) : params.workspaceName),
     params.branchName
   );
 
-  const baseDir = getProjectBaseDir(projectName);
   const workspacesDir = getProjectWorkspacesDir(projectName);
   const workspacePath = join(workspacesDir, workspaceName);
 
@@ -529,6 +543,21 @@ export async function createWorkspaceForSession(
     writeFileSync(join(issueArtifactDir, 'issue.md'), markdown, 'utf-8');
   }
   bindPlannedGoalForWorkspace(projectName, workspaceName);
+
+  // Loop 2: seed a real goal from the issue (same as CLI addWorkspace) — the
+  // github sourceRef links it back so the guide/PR can close the issue.
+  if (githubIssue) {
+    try {
+      const { ensureWorkspaceGoalChain, updateGoalRecord } = await import('./goal-chain.js');
+      const { goal } = ensureWorkspaceGoalChain(projectName, workspaceName);
+      const body = githubIssue.body?.trim() ? githubIssue.body : '_(issue had no description)_';
+      updateGoalRecord(projectName, goal.id, {
+        title: githubIssue.title,
+        doc: { bodyMarkdown: `# ${githubIssue.title}\n\n${body}\n\n---\n_Imported from ${githubIssue.url}_`, updatedAt: new Date().toISOString(), updatedBy: 'github-import' },
+        sourceRefs: [{ type: 'github', id: String(githubIssue.number), url: githubIssue.url, title: githubIssue.title }],
+      });
+    } catch { /* goal seed is additive; workspace remains usable */ }
+  }
 
   syncBundleWorkspaceState(projectName, workspacePath);
 
