@@ -15,7 +15,7 @@
  * testable against temp dirs; command/daemon layers resolve project names.
  */
 
-import { exec, execSync } from 'child_process';
+import { exec, execFileSync, execSync } from 'child_process';
 import { promisify } from 'util';
 import { createHash } from 'crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync, appendFileSync } from 'fs';
@@ -515,6 +515,30 @@ export function readArtifact(projectDir: string, mountDir: string, relPath: stri
   const { blobsDir } = artifactPaths(projectDir);
   const bp = blobPath(blobsDir, ptr.oid);
   if (!existsSync(bp)) throw new SpacesError(`Artifact blob missing: ${ptr.oid}`, 'SYSTEM_ERROR', 1);
+  return readFileSync(bp);
+}
+
+/**
+ * Point-in-time artifact read: `git show <commit>:<relPath>` from the bare
+ * repo (share links pin the mount HEAD at mint), with LFS pointers resolved
+ * against the local blob store. Blobs are content-addressed so a pinned
+ * pointer stays resolvable for as long as the blob exists locally.
+ */
+export function readArtifactPinned(projectDir: string, commit: string, relPath: string): Buffer {
+  assertSafeRelPath(relPath);
+  if (!/^[0-9a-f]{7,40}$/i.test(commit)) throw new SpacesError(`Invalid pinned commit: ${commit}`, 'USER_ERROR', 1);
+  const { repoDir, blobsDir } = artifactPaths(projectDir);
+  let raw: Buffer;
+  try {
+    raw = execFileSync('git', ['-C', repoDir, 'show', `${commit}:${relPath}`], { maxBuffer: 512 * 1024 * 1024 });
+  } catch {
+    throw new SpacesError(`Artifact not found at pinned commit ${commit.slice(0, 8)}: ${relPath}`, 'USER_ERROR', 1);
+  }
+  const head = raw.subarray(0, 200).toString('utf8');
+  const ptr = parseLfsPointer(head.startsWith(LFS_VERSION_LINE) ? raw.toString('utf8') : '');
+  if (!ptr) return raw;
+  const bp = blobPath(blobsDir, ptr.oid);
+  if (!existsSync(bp)) throw new SpacesError(`Artifact blob missing for pinned read: ${ptr.oid}`, 'SYSTEM_ERROR', 1);
   return readFileSync(bp);
 }
 

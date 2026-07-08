@@ -569,8 +569,8 @@ function setupClientConnection(
 const pendingShareReads = new Map<string, {
   machineId: string;
   chunks: Buffer[];
-  meta: { contentType?: string; disposition?: string; fileName?: string };
-  resolve: (r: { body: Buffer; contentType: string; disposition: string; fileName: string } | null) => void;
+  meta: { contentType?: string; disposition?: string; fileName?: string; relPath?: string; pinnedCommit?: string; expiresAt?: number };
+  resolve: (r: { body: Buffer; contentType: string; disposition: string; fileName: string; relPath?: string; pinnedCommit?: string; expiresAt?: number } | null) => void;
   timer: ReturnType<typeof setTimeout>;
 }>();
 
@@ -768,6 +768,24 @@ export function createRelayServer(config: RelayServerConfig): Server<WebSocketDa
         const notFound = () => new Response('Not found', { status: 404, headers: { 'Cache-Control': 'no-store' } });
         try {
           const token = decodeURIComponent(url.pathname.slice('/artifact-share/'.length));
+
+          // Browser navigation (no ?raw) → the share VIEWER: the same built
+          // SPA, which routes /artifact-share/* to ShareViewer and fetches
+          // bytes back through ?raw=1. curl/wget (no text/html Accept) and
+          // ?raw=1 get bytes — the pre-viewer contract still holds.
+          const wantsRaw = url.searchParams.has('raw');
+          const wantsHtml = !wantsRaw && (req.headers.get('accept') ?? '').includes('text/html');
+          if (wantsHtml) {
+            const shell = await serveStaticFile('/index.html');
+            if (shell) {
+              const headers = new Headers(shell.headers);
+              headers.set('Cache-Control', 'no-store');
+              return new Response(shell.body, { status: 200, headers });
+            }
+            // No built web assets → fall through to bytes.
+          }
+          const subPath = url.searchParams.get('path') ?? undefined;
+          if (subPath !== undefined && (subPath.length === 0 || subPath.length > 1024 || subPath.includes('..'))) return notFound();
           const { parseArtifactCapUnverified, verifyArtifactCap } = await import('../core/artifact-cap.js');
           const unverified = parseArtifactCapUnverified(token);
           if (!unverified || unverified.sub.kind !== 'link') return notFound();
@@ -781,7 +799,7 @@ export function createRelayServer(config: RelayServerConfig): Server<WebSocketDa
           if (!machine.ws) return new Response('Machine offline', { status: 503, headers: { 'Cache-Control': 'no-store' } });
 
           const requestId = generateConnectionId();
-          const result = await new Promise<{ body: Buffer; contentType: string; disposition: string; fileName: string } | null>((resolve) => {
+          const result = await new Promise<{ body: Buffer; contentType: string; disposition: string; fileName: string; relPath?: string; pinnedCommit?: string; expiresAt?: number } | null>((resolve) => {
             const timer = setTimeout(() => {
               pendingShareReads.delete(requestId);
               resolve(null);
@@ -793,7 +811,7 @@ export function createRelayServer(config: RelayServerConfig): Server<WebSocketDa
               resolve,
               timer,
             });
-            machine.ws!.send(serializeMessage({ type: 'share_read', requestId, token }));
+            machine.ws!.send(serializeMessage({ type: 'share_read', requestId, token, ...(subPath ? { subPath } : {}) }));
           });
           if (!result) return notFound();
           return new Response(new Uint8Array(result.body), {
@@ -803,6 +821,13 @@ export function createRelayServer(config: RelayServerConfig): Server<WebSocketDa
               'Content-Disposition': `${result.disposition}; filename="${result.fileName.replace(/[^\w.\-]/g, '_')}"`,
               'X-Content-Type-Options': 'nosniff',
               'Cache-Control': 'no-store',
+              // The viewer may run on a different origin in dev (vite) —
+              // share bytes are cap-gated public data, CORS is safe here.
+              'Access-Control-Allow-Origin': '*',
+              'Access-Control-Expose-Headers': 'X-Gssh-Rel-Path, X-Gssh-Pinned-Commit, X-Gssh-Expires-At, Content-Disposition',
+              ...(result.relPath ? { 'X-Gssh-Rel-Path': result.relPath } : {}),
+              ...(result.pinnedCommit ? { 'X-Gssh-Pinned-Commit': result.pinnedCommit } : {}),
+              ...(result.expiresAt ? { 'X-Gssh-Expires-At': String(result.expiresAt) } : {}),
             },
           });
         } catch {
@@ -1019,6 +1044,9 @@ async function handleProtocolMessage(
       if (chunkMsg.contentType) pending.meta.contentType = chunkMsg.contentType;
       if (chunkMsg.disposition) pending.meta.disposition = chunkMsg.disposition;
       if (chunkMsg.fileName) pending.meta.fileName = chunkMsg.fileName;
+      if (chunkMsg.relPath) pending.meta.relPath = chunkMsg.relPath;
+      if (chunkMsg.pinnedCommit) pending.meta.pinnedCommit = chunkMsg.pinnedCommit;
+      if (chunkMsg.expiresAt) pending.meta.expiresAt = chunkMsg.expiresAt;
       if (chunkMsg.dataBase64) pending.chunks.push(Buffer.from(chunkMsg.dataBase64, 'base64'));
       if (chunkMsg.done) {
         clearTimeout(pending.timer);
@@ -1028,6 +1056,9 @@ async function handleProtocolMessage(
           contentType: pending.meta.contentType ?? 'application/octet-stream',
           disposition: pending.meta.disposition ?? 'attachment',
           fileName: pending.meta.fileName ?? 'artifact',
+          relPath: pending.meta.relPath,
+          pinnedCommit: pending.meta.pinnedCommit,
+          expiresAt: pending.meta.expiresAt,
         });
       }
       return;

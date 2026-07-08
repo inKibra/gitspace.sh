@@ -119,7 +119,8 @@ function registerSpaceArtifactsCommands(space: Command): void {
     .description('Mint a signed public link for one artifact, served through your relay (requires serve active)')
     .option('--ttl <duration>', 'Link lifetime (30m / 24h / 7d)', '7d')
     .option('--max-uses <n>', 'Optional use cap')
-    .action(withErrorHandler(async (relPath: string, options: { ttl: string; maxUses?: string }) => {
+    .option('--live', 'Serve current branch state instead of pinning a point-in-time capture')
+    .action(withErrorHandler(async (relPath: string, options: { ttl: string; maxUses?: string; live?: boolean }) => {
       const ctx = requireSessionContext();
       const { send } = await import('../../lib/tmux-lite/cli.js');
       const { formatArtifactUri } = await import('../../core/artifact-cap.js');
@@ -128,6 +129,7 @@ function registerSpaceArtifactsCommands(space: Command): void {
         uri: formatArtifactUri(ctx.project, ctx.workspace, relPath),
         ttlMs: parseTtl(options.ttl),
         maxUses: options.maxUses ? Number(options.maxUses) : undefined,
+        live: options.live || undefined,
       });
       if (r.type === 'error') { logger.error(r.message); process.exit(1); }
       if (r.type !== 'artifact-share-mint') { logger.error('Unexpected response'); process.exit(1); }

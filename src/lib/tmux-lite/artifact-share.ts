@@ -35,6 +35,8 @@ export interface ShareLedgerEntry {
   maxUses?: number;
   useCount: number;
   revokedAt?: number;
+  /** Mount HEAD at mint — reads resolve via `git show` (point-in-time). Absent = live. */
+  pinnedCommit?: string;
 }
 
 interface ShareLedger {
@@ -80,11 +82,25 @@ export function shareUrlBase(relayUrl: string, hostedDomain?: string | null): st
   return `${proto}//${u.host}`;
 }
 
+/** Renderer dependencies a shared artifact may sub-read. The viewer renders
+ *  dashboards/mini-apps/guides with the product's own components, which fetch
+ *  siblings — grant exactly the conventional dirs each kind consumes. */
+function dependencyScopes(project: string, workspace: string, relPath: string): string[] {
+  const f = (dir: string) => formatArtifactUri(project, workspace, dir);
+  if (relPath.endsWith('.dashboard.json')) return [f('apps/**'), f('data/**'), f('**.data.json'), f('**.gssh.html')];
+  if (relPath.endsWith('.gssh.html')) return [f('data/**'), f('**.data.json')];
+  if (relPath === 'review/guide.json') return [f('review/**'), f('validation/**'), f('shots/**'), f('demos/**')];
+  return [];
+}
+
 export function mintShareLink(opts: {
   uri: string;
   ttlMs?: number;
   maxUses?: number;
   hostedDomain?: string | null;
+  /** Serve the CURRENT branch state on every read instead of pinning the
+   *  mount HEAD at mint. Default is pinned — a share is a capture. */
+  live?: boolean;
 }): MintShareResult {
   const ctx = getActiveServeContext();
   if (!ctx) {
@@ -96,12 +112,22 @@ export function mintShareLink(opts: {
   const token = mintArtifactCap({
     sub: { kind: 'link' },
     verbs: ['read'],
-    scope: [opts.uri],
+    scope: [opts.uri, ...dependencyScopes(parsed.project, parsed.workspace, parsed.relPath)],
     machineId: ctx.machineId,
     expiresAt,
     ...(opts.maxUses ? { maxUses: opts.maxUses } : {}),
   }, ctx.identity.signing.secretKey);
   const parsedBack = verifyArtifactCap(token, { publicKey: ctx.identity.signing.publicKey });
+
+  let pinnedCommit: string | undefined;
+  if (!opts.live) {
+    // Pin the mount HEAD: the link is a point-in-time capture. git makes
+    // this nearly free; the bare repo keeps the objects reachable.
+    const { getProjectBaseDirSync, workspaceDirFor } = shareTargetDirsSync();
+    const wsDir = parsed.workspace === '@base' ? getProjectBaseDirSync(parsed.project) : workspaceDirFor(parsed.project, parsed.workspace);
+    const { mountHead } = requireTriggers();
+    pinnedCommit = mountHead(wsDir) ?? undefined;
+  }
 
   const ledger = readLedger();
   ledger.shares[parsedBack.tokenId] = {
@@ -111,6 +137,7 @@ export function mintShareLink(opts: {
     expiresAt,
     maxUses: opts.maxUses,
     useCount: 0,
+    ...(pinnedCommit ? { pinnedCommit } : {}),
   };
   writeLedger(ledger);
 
@@ -133,6 +160,21 @@ export function revokeShareLink(tokenId: string): boolean {
 
 export function listShareLinks(): ShareLedgerEntry[] {
   return Object.values(readLedger().shares).sort((a, b) => b.createdAt - a.createdAt);
+}
+
+// Lazy requires: config/triggers pull daemon-adjacent graphs; keep the module
+// importable from light contexts.
+function shareTargetDirsSync(): { getProjectBaseDirSync: (p: string) => string; workspaceDirFor: (p: string, w: string) => string } {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const cfg = require('../../core/config.js') as { getProjectBaseDir: (p: string) => string; getProjectDir: (p: string) => string };
+  return {
+    getProjectBaseDirSync: cfg.getProjectBaseDir,
+    workspaceDirFor: (proj: string, ws: string) => join(cfg.getProjectDir(proj), 'workspaces', ws),
+  };
+}
+function requireTriggers(): { mountHead: (dir: string) => string | null } {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  return require('../../core/triggers.js') as { mountHead: (dir: string) => string | null };
 }
 
 // ── serving (the machine side of GET /artifact-share/<token>) ──────────────
@@ -159,11 +201,17 @@ export interface ShareReadResult {
   contentType: string;
   disposition: 'inline' | 'attachment';
   fileName: string;
+  relPath: string;
+  pinnedCommit?: string;
+  expiresAt: number;
 }
 
 /** Verify + ledger-enforce + resolve. Every failure is the same USER_ERROR
- *  shape upstream (the relay serves 404 — no oracle for attackers). */
-export async function consumeShareRead(token: string): Promise<ShareReadResult> {
+ *  shape upstream (the relay serves 404 — no oracle for attackers).
+ *  `subPath` = renderer dependency fetch (dashboard apps/data, guide
+ *  evidence) — validated against the cap's scope, and NOT counted against
+ *  maxUses (one human view fans out to N dependency reads). */
+export async function consumeShareRead(token: string, subPath?: string): Promise<ShareReadResult> {
   const ctx = getActiveServeContext();
   if (!ctx) throw new SpacesError('serve inactive', 'USER_ERROR', 1);
 
@@ -176,20 +224,26 @@ export async function consumeShareRead(token: string): Promise<ShareReadResult> 
   if (!entry) throw new SpacesError('unknown share (ledger fail-closed)', 'USER_ERROR', 1);
   if (entry.revokedAt) throw new SpacesError('share revoked', 'USER_ERROR', 1);
   if (Date.now() > entry.expiresAt) throw new SpacesError('share expired', 'USER_ERROR', 1);
-  if (entry.maxUses !== undefined && entry.useCount >= entry.maxUses) throw new SpacesError('share exhausted', 'USER_ERROR', 1);
-  // Single daemon process owns the ledger — the increment is serialized.
-  entry.useCount += 1;
-  writeLedger(ledger);
+  if (!subPath) {
+    if (entry.maxUses !== undefined && entry.useCount >= entry.maxUses) throw new SpacesError('share exhausted', 'USER_ERROR', 1);
+    // Single daemon process owns the ledger — the increment is serialized.
+    entry.useCount += 1;
+    writeLedger(ledger);
+  }
 
-  const uri = entry.uri;
-  const parsed = parseArtifactUri(uri);
+  const main = parseArtifactUri(entry.uri);
+  const parsed = subPath
+    ? parseArtifactUri(formatArtifactUri(main.project, main.workspace, subPath))
+    : main;
   if (!capAllows(cap, 'read', parsed)) throw new SpacesError('scope mismatch', 'USER_ERROR', 1);
 
-  const { readArtifactResolving, artifactsMountDir } = await import('../../core/artifacts.js');
+  const { readArtifactResolving, readArtifactPinned, artifactsMountDir } = await import('../../core/artifacts.js');
   const { getProjectBaseDir, getProjectDir } = await import('../../core/config.js');
   const projectDir = getProjectDir(parsed.project);
   const workspaceDir = parsed.workspace === '@base' ? getProjectBaseDir(parsed.project) : join(projectDir, 'workspaces', parsed.workspace);
-  const bytes = await readArtifactResolving(projectDir, artifactsMountDir(workspaceDir), parsed.relPath);
+  const bytes = entry.pinnedCommit
+    ? readArtifactPinned(projectDir, entry.pinnedCommit, parsed.relPath)
+    : await readArtifactResolving(projectDir, artifactsMountDir(workspaceDir), parsed.relPath);
 
   const fileName = parsed.relPath.split('/').pop() ?? 'artifact';
   const ext = fileName.includes('.') ? `.${fileName.split('.').pop()!.toLowerCase()}` : '';
@@ -199,6 +253,9 @@ export async function consumeShareRead(token: string): Promise<ShareReadResult> 
     contentType: inlineType ?? 'application/octet-stream',
     disposition: inlineType ? 'inline' : 'attachment',
     fileName,
+    relPath: parsed.relPath,
+    pinnedCommit: entry.pinnedCommit,
+    expiresAt: entry.expiresAt,
   };
 }
 

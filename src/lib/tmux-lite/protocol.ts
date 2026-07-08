@@ -445,7 +445,7 @@ export type Command =
   | { type: 'serve-deactivate' }
   | { type: 'serve-status' }
   | { type: 'project-artifacts-rollup'; projectName: string; workspace: string; removeBranch?: boolean }
-  | { type: 'artifact-share-mint'; uri: string; ttlMs?: number; maxUses?: number }
+  | { type: 'artifact-share-mint'; uri: string; ttlMs?: number; maxUses?: number; live?: boolean }
   | { type: 'artifact-share-revoke'; tokenId: string }
   | { type: 'artifact-share-list' }
   | { type: 'trigger-save'; target: AgentWorkspaceTargetPayload; trigger: import('../../core/triggers.js').TriggerRecord }

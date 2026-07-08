@@ -481,6 +481,8 @@ export interface ShareReadMessage {
   type: 'share_read';
   requestId: string;
   token: string;
+  /** Renderer dependency fetch (validated against the cap scope machine-side). */
+  subPath?: string;
 }
 
 /** Machine→relay: one chunk of a share read (final chunk sets done; errors
@@ -495,6 +497,9 @@ export interface ShareReadChunkMessage {
   contentType?: string;
   disposition?: string;
   fileName?: string;
+  relPath?: string;
+  pinnedCommit?: string;
+  expiresAt?: number;
 }
 
 export type ProtocolMessage =
@@ -677,7 +682,8 @@ function validateMessageFields(msg: Record<string, unknown>): ProtocolMessage | 
     case 'share_read': {
       if (!isValidIdentifier(msg.requestId)) return null;
       if (typeof msg.token !== 'string' || msg.token.length === 0 || msg.token.length > 8192) return null;
-      return { type: 'share_read', requestId: msg.requestId, token: msg.token };
+      if (msg.subPath !== undefined && (typeof msg.subPath !== 'string' || msg.subPath.length === 0 || msg.subPath.length > 1024 || msg.subPath.includes('..'))) return null;
+      return { type: 'share_read', requestId: msg.requestId, token: msg.token, subPath: msg.subPath };
     }
 
     case 'share_read_chunk': {
@@ -689,6 +695,9 @@ function validateMessageFields(msg: Record<string, unknown>): ProtocolMessage | 
       if (msg.contentType !== undefined && (typeof msg.contentType !== 'string' || msg.contentType.length > 128)) return null;
       if (msg.disposition !== undefined && msg.disposition !== 'inline' && msg.disposition !== 'attachment') return null;
       if (msg.fileName !== undefined && (typeof msg.fileName !== 'string' || msg.fileName.length > 256)) return null;
+      if (msg.relPath !== undefined && (typeof msg.relPath !== 'string' || msg.relPath.length > 1024)) return null;
+      if (msg.pinnedCommit !== undefined && (typeof msg.pinnedCommit !== 'string' || !/^[0-9a-f]{7,40}$/i.test(msg.pinnedCommit))) return null;
+      if (msg.expiresAt !== undefined && typeof msg.expiresAt !== 'number') return null;
       return {
         type: 'share_read_chunk',
         requestId: msg.requestId,
@@ -699,6 +708,9 @@ function validateMessageFields(msg: Record<string, unknown>): ProtocolMessage | 
         contentType: msg.contentType,
         disposition: msg.disposition as 'inline' | 'attachment' | undefined,
         fileName: msg.fileName,
+        relPath: msg.relPath,
+        pinnedCommit: msg.pinnedCommit,
+        expiresAt: msg.expiresAt,
       };
     }
 

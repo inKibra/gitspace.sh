@@ -77,7 +77,7 @@ export function ArtifactPreviewContent({ path, data }: { path: string; data: Art
 }
 
 /** Live run of a *.gssh.html mini-app: sandboxed iframe + optional data feed. */
-function MiniAppRun({ html, read, listArtifacts }: {
+export function MiniAppRun({ html, read, listArtifacts }: {
   html: string;
   read: (path: string) => Promise<ArtifactRead>;
   listArtifacts?: () => Promise<string[]>;

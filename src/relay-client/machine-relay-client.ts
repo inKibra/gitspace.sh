@@ -435,10 +435,12 @@ export async function connectMachineRelay(
               // in ≤700KB frames (relay protocol caps messages at 1MB).
               const requestId = String((msg as { requestId?: unknown }).requestId ?? '');
               const token = String((msg as { token?: unknown }).token ?? '');
+              const subPathRaw = (msg as { subPath?: unknown }).subPath;
+              const subPath = typeof subPathRaw === 'string' ? subPathRaw : undefined;
               void (async () => {
                 try {
                   const { consumeShareRead } = await import('../lib/tmux-lite/artifact-share.js');
-                  const result = await consumeShareRead(token);
+                  const result = await consumeShareRead(token, subPath);
                   const CHUNK = 512 * 1024;
                   let seq = 0;
                   for (let off = 0; off < result.bytes.length || seq === 0; off += CHUNK) {
@@ -449,7 +451,14 @@ export async function connectMachineRelay(
                       requestId,
                       seq,
                       dataBase64: slice.length > 0 ? Buffer.from(slice).toString('base64') : undefined,
-                      ...(seq === 0 ? { contentType: result.contentType, disposition: result.disposition, fileName: result.fileName } : {}),
+                      ...(seq === 0 ? {
+                        contentType: result.contentType,
+                        disposition: result.disposition,
+                        fileName: result.fileName,
+                        relPath: result.relPath,
+                        ...(result.pinnedCommit ? { pinnedCommit: result.pinnedCommit } : {}),
+                        expiresAt: result.expiresAt,
+                      } : {}),
                       ...(done ? { done: true } : {}),
                     });
                     seq += 1;
