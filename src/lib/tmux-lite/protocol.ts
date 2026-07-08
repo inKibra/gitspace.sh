@@ -10,7 +10,9 @@ import { logger } from '../../utils/logger.js';
 export const PROTOCOL_VERSION = 1;
 
 /** Package version - should match package.json */
-export const PACKAGE_VERSION = "1.0.0";
+import { VERSION } from '../../version.generated.js';
+// Single source of truth: generated from package.json by scripts/build.ts.
+export const PACKAGE_VERSION = VERSION;
 
 export const TMUX_LITE_SANDBOX_ENV = "TMUX_LITE_SANDBOX";
 const DEFAULT_ROUTER_SOCKET = "/tmp/tmux-lite.sock";

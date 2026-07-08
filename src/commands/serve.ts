@@ -90,7 +90,7 @@ import { ensureUserRootIdentityWithRecovery } from './identity-recovery.js';
 import { persistMachineIdentityFromServe } from './serve-machine-identity.js';
 
 /** Package version for daemon status */
-const PACKAGE_VERSION = '1.0.0';
+import { VERSION as PACKAGE_VERSION } from '../version.generated.js';
 
 /** Default relay URL */
 // No default relay - must use hosting or explicit --relay

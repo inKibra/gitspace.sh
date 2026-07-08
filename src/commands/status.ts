@@ -13,7 +13,7 @@ import {
 } from '../lib/tmux-lite/cli.js';
 
 /** Package version for display */
-const PACKAGE_VERSION = '1.0.0';
+import { VERSION as PACKAGE_VERSION } from '../version.generated.js';
 
 /**
  * Format uptime in human-readable format

@@ -11,7 +11,7 @@ import { getStatus as getTmuxStatus, isServerRunning as isTmuxRunning } from '..
 import { queryServeStatus, isServeRunning } from '../serve/daemon.js';
 
 /** Package version for comparison */
-const PACKAGE_VERSION = '1.0.0';
+import { VERSION as PACKAGE_VERSION } from '../version.generated.js';
 
 /** Tmux daemon status */
 export interface TmuxStatus {

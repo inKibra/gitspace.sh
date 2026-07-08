@@ -2,6 +2,12 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import "./index.css";
 import App from "../src/app.web";
+import { ErrorBoundary } from "../src/components/ErrorBoundary.web";
+import { installClientDiagnostics } from "../src/lib/client-diagnostics.web";
+
+// Capture client errors BEFORE anything mounts (docs/REPORT-A-PROBLEM.md
+// stage 1) — a throw during first render must leave a trace, not a blank page.
+installClientDiagnostics();
 
 if ('serviceWorker' in navigator) {
   void navigator.serviceWorker.getRegistrations().then((registrations) => {
@@ -22,14 +28,18 @@ if (window.location.pathname.startsWith(sharePrefix)) {
   void import('../src/components/ShareViewer.web.js').then(({ ShareViewer }) => {
     createRoot(document.getElementById("root")!).render(
       <StrictMode>
-        <ShareViewer token={token} rawBase={rawBase} />
+        <ErrorBoundary surface="share-viewer">
+          <ShareViewer token={token} rawBase={rawBase} />
+        </ErrorBoundary>
       </StrictMode>
     );
   });
 } else {
   createRoot(document.getElementById("root")!).render(
     <StrictMode>
-      <App />
+      <ErrorBoundary surface="app">
+        <App />
+      </ErrorBoundary>
     </StrictMode>
   );
 }

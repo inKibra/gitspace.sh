@@ -83,8 +83,11 @@ export function useTranscript(opts: {
         setHasMoreOlder(page.hasMore);
         requestAnimationFrame(scrollToBottom);
       })
-      .catch(() => {
-        if (alive) setOlderError('Failed to load transcript');
+      .catch((err) => {
+        // Keep the real error — this hook is a prime 'transcripts refuse to
+        // load' report source; a generic string is useless for triage.
+        if (alive) setOlderError(`Failed to load transcript: ${err instanceof Error ? err.message : String(err)}`);
+        console.error('[transcript] initial load failed', err);
       });
     return () => {
       alive = false;
@@ -103,9 +106,10 @@ export function useTranscript(opts: {
       setCommitted((prev) => [...page.blocks, ...prev]);
       cursorRef.current = page.oldestCursor ?? cursorRef.current;
       setHasMoreOlder(page.hasMore);
-    } catch {
+    } catch (err) {
       anchorRef.current = null;
-      setOlderError('Failed to load older messages');
+      setOlderError(`Failed to load older messages: ${err instanceof Error ? err.message : String(err)}`);
+      console.error('[transcript] load-older failed', err);
     } finally {
       loadingRef.current = false;
       setLoadingOlder(false);
@@ -162,7 +166,7 @@ export function useTranscript(opts: {
         setHasMoreOlder(page.hasMore);
         requestAnimationFrame(scrollToBottom);
       })
-      .catch(() => {});
+      .catch((err) => { console.error('[transcript] live refetch failed', err); });
     return () => {
       alive = false;
     };
