@@ -33,6 +33,7 @@ export class ErrorBoundary extends Component<Props, State> {
       detail: `${error.stack ?? ''}\n--- component stack ---${info.componentStack ?? ''}`,
       source: this.props.surface ?? 'app',
     });
+    void import('../lib/analytics.web.js').then((a) => a.captureException(error, { surface: this.props.surface ?? 'app' }));
   }
 
   render(): ReactNode {

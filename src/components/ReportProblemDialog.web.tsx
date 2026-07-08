@@ -8,6 +8,7 @@
  */
 import { useMemo, useState, type ReactElement } from 'react';
 import { getDiagnosticsRing } from '../lib/client-diagnostics.web.js';
+import { getSessionContext } from '../lib/analytics.web.js';
 import { VERSION } from '../version.generated.js';
 
 export function ReportProblemDialog({ onClose, report }: {
@@ -26,6 +27,9 @@ export function ReportProblemDialog({ onClose, report }: {
     userAgent: navigator.userAgent,
     viewport: { w: window.innerWidth, h: window.innerHeight },
     ring,
+    // PostHog session/replay link when analytics is on — lets the eventual
+    // GitHub issue point at the exact recorded session.
+    posthog: getSessionContext(),
   }), [ring]);
 
   const submit = async (): Promise<void> => {

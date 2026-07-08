@@ -4,10 +4,13 @@ import "./index.css";
 import App from "../src/app.web";
 import { ErrorBoundary } from "../src/components/ErrorBoundary.web";
 import { installClientDiagnostics } from "../src/lib/client-diagnostics.web";
+import { initAnalytics } from "../src/lib/analytics.web";
 
 // Capture client errors BEFORE anything mounts (docs/REPORT-A-PROBLEM.md
 // stage 1) — a throw during first render must leave a trace, not a blank page.
 installClientDiagnostics();
+// Opt-in PostHog (default-on in dev when a key is set; no-op otherwise).
+void initAnalytics();
 
 if ('serviceWorker' in navigator) {
   void navigator.serviceWorker.getRegistrations().then((registrations) => {

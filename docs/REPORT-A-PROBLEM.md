@@ -176,6 +176,28 @@ make it a config, not a hardcode.
 **Goal vs. chain granularity** — settled above: one issue → one goal by
 default; chains only when a human promotes a cluster.
 
+## PostHog telemetry (opt-in, default-on in dev)
+
+Ambient error tracking + session replay, complementary to the GitHub-issue
+work order (PostHog is upstream: auto-captured `$exception` events, auto-
+grouped issues, replays; it can forward its issues to GitHub/Linear). Wired
+in `src/lib/analytics.web.ts`, driven entirely by Vite env — **no key = total
+no-op** (nothing loaded, nothing sent):
+
+| env | meaning |
+|---|---|
+| `VITE_POSTHOG_KEY` | project API key; absence disables everything |
+| `VITE_POSTHOG_HOST` | ingestion host (default `https://us.i.posthog.com`; set to a self-hosted URL to keep data on your infra) |
+| `VITE_POSTHOG_ENABLED` | `true` to enable OUTSIDE dev (dev defaults on when a key is set) |
+| `VITE_POSTHOG_REPLAY` | `true` to enable session replay — OFF even in dev by default; a crypto tool's screen is sensitive. Always masked (`maskAllInputs`, `maskTextSelector:'*'`) |
+
+Exceptions are forwarded from the diagnostics ring's window handlers +
+ErrorBoundary via `captureException` (DOM autocapture is off — no point
+heat-mapping a terminal), with the message/stack run through `redactText`
+first. The report bundle carries `getSessionContext()` (distinct id + replay
+URL) so a filed issue links to the exact session. Self-host the host to keep
+this aligned with the own-infra stance.
+
 ## Build order
 
 1. **Quick wins (~40 LOC), independently valuable:** `PACKAGE_VERSION` from

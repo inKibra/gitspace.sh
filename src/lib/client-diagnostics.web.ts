@@ -65,6 +65,9 @@ export function installClientDiagnostics(): void {
       detail: e.error ? toDetail(e.error) : `${e.filename}:${e.lineno}:${e.colno}`,
       source: 'window',
     });
+    // Forward to PostHog error tracking when enabled (no-op otherwise). Not
+    // the console.error tap — that's noisy and PostHog logs via console.error.
+    void import('./analytics.web.js').then((a) => a.captureException(e.error ?? e.message));
   });
 
   window.addEventListener('unhandledrejection', (e: PromiseRejectionEvent) => {
@@ -74,6 +77,7 @@ export function installClientDiagnostics(): void {
       detail: toDetail(e.reason),
       source: 'promise',
     });
+    void import('./analytics.web.js').then((a) => a.captureException(e.reason));
   });
 
   // Tap console.error without swallowing it — the app's own error logging
