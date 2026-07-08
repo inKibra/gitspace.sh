@@ -706,6 +706,8 @@ export interface ReportProblemRequest {
   requestId: string;
   note: string;
   clientBundleJson: string;
+  fileIssue?: boolean;
+  projectName?: string;
 }
 
 export interface ProjectArtifactsRollupRequest {

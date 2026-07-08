@@ -767,9 +767,10 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
       {showReportProblem && (
         <ReportProblemDialog
           onClose={() => setShowReportProblem(false)}
+          projectName={projectHomeName ?? (allProjects.length === 1 ? allProjects[0]?.name : undefined)}
           report={(() => {
             const b = activeBackendKey ? multi.getBackend(activeBackendKey) : null;
-            return b?.reportProblem ? (note, bundle) => b.reportProblem!(note, bundle) : undefined;
+            return b?.reportProblem ? (note, bundle, opts) => b.reportProblem!(note, bundle, opts) : undefined;
           })()}
         />
       )}

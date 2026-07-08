@@ -11,12 +11,15 @@ import { getDiagnosticsRing } from '../lib/client-diagnostics.web.js';
 import { getSessionContext } from '../lib/analytics.web.js';
 import { VERSION } from '../version.generated.js';
 
-export function ReportProblemDialog({ onClose, report }: {
+export function ReportProblemDialog({ onClose, report, projectName }: {
   onClose: () => void;
   /** Backend sink; undefined when no backend is connected. */
-  report?: (note: string, clientBundle: unknown) => Promise<{ path: string; issueUrl?: string }>;
+  report?: (note: string, clientBundle: unknown, opts?: { fileIssue?: boolean; projectName?: string }) => Promise<{ path: string; issueUrl?: string }>;
+  /** Project whose GitHub repo an issue would be filed against (enables the checkbox). */
+  projectName?: string;
 }): ReactElement {
   const [note, setNote] = useState('');
+  const [fileIssue, setFileIssue] = useState<boolean>(Boolean(projectName));
   const [state, setState] = useState<'edit' | 'sending' | 'done' | 'error'>('edit');
   const [result, setResult] = useState<{ path?: string; issueUrl?: string; error?: string }>({});
 
@@ -36,7 +39,7 @@ export function ReportProblemDialog({ onClose, report }: {
     if (!report) { setState('error'); setResult({ error: 'No machine connected — cannot file a report right now.' }); return; }
     setState('sending');
     try {
-      const r = await report(note, clientBundle);
+      const r = await report(note, clientBundle, { fileIssue: fileIssue && Boolean(projectName), projectName });
       setResult(r); setState('done');
     } catch (e) {
       setResult({ error: e instanceof Error ? e.message : String(e) }); setState('error');
@@ -61,8 +64,10 @@ export function ReportProblemDialog({ onClose, report }: {
         {state === 'done' ? (
           <div className="text-[12px] text-[var(--gs-text-muted)]">
             <div className="mb-1 text-[var(--gs-success)]">Report saved.</div>
-            <div className="font-[family-name:var(--gs-font-mono)] text-[11px] break-all">{result.path}</div>
-            {result.issueUrl && <div className="mt-1">Issue: <a href={result.issueUrl} className="underline">{result.issueUrl}</a></div>}
+            {result.issueUrl
+              ? <div className="mb-1">GitHub issue: <a href={result.issueUrl} target="_blank" rel="noreferrer" className="underline text-[var(--gs-info)]">{result.issueUrl}</a></div>
+              : fileIssue && projectName && <div className="mb-1 text-[var(--gs-warning)]">Saved locally — couldn't file a GitHub issue (no repo/auth for {projectName}).</div>}
+            <div className="font-[family-name:var(--gs-font-mono)] text-[11px] break-all text-[var(--gs-text-dim)]">{result.path}</div>
             <button type="button" onClick={onClose} className="mt-3 border border-[var(--gs-border)] px-2 py-[3px] text-[11px] hover:bg-[var(--gs-bg-active)]">Close</button>
           </div>
         ) : (
@@ -80,6 +85,12 @@ export function ReportProblemDialog({ onClose, report }: {
               rows={4}
               className="w-full resize-y border border-[var(--gs-border)] bg-black px-2 py-1.5 text-[12px] text-[var(--gs-text)] outline-none focus:border-[var(--gs-border-active)]"
             />
+            {projectName && (
+              <label className="mt-2 flex cursor-pointer items-center gap-1.5 text-[11px] text-[var(--gs-text-muted)]">
+                <input type="checkbox" checked={fileIssue} onChange={(e) => setFileIssue(e.target.checked)} />
+                Also file a GitHub issue in <span className="font-[family-name:var(--gs-font-mono)] text-[var(--gs-text)]">{projectName}</span>’s repo
+              </label>
+            )}
             {state === 'error' && <div className="mt-2 text-[11px] text-[var(--gs-danger)]">{result.error}</div>}
             <div className="mt-3 flex items-center gap-2">
               <button

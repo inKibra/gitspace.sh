@@ -1771,7 +1771,7 @@ export class RemoteSessionHandler {
       case 'report_problem':
         // Any collaborator may report a problem — no manage gate. The bundle
         // is redacted daemon-side before it is written.
-        await this.handleTypedCommand(session, msg.requestId, { type: 'report-problem', note: msg.note, clientBundleJson: msg.clientBundleJson }, sendResponse);
+        await this.handleTypedCommand(session, msg.requestId, { type: 'report-problem', note: msg.note, clientBundleJson: msg.clientBundleJson, fileIssue: msg.fileIssue, projectName: msg.projectName }, sendResponse);
         break;
 
       case 'project_artifacts_rollup':

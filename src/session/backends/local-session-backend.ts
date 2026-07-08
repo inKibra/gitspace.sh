@@ -1857,8 +1857,8 @@ export class LocalSessionBackend implements SessionBackend {
     throw new Error('Unexpected project-artifacts-remote-set response');
   }
 
-  async reportProblem(note: string, clientBundle: unknown): Promise<{ path: string; issueUrl?: string }> {
-    const r = await this.sendTmuxCommand({ type: 'report-problem', note, clientBundleJson: JSON.stringify(clientBundle) });
+  async reportProblem(note: string, clientBundle: unknown, opts: { fileIssue?: boolean; projectName?: string } = {}): Promise<{ path: string; issueUrl?: string }> {
+    const r = await this.sendTmuxCommand({ type: 'report-problem', note, clientBundleJson: JSON.stringify(clientBundle), fileIssue: opts.fileIssue, projectName: opts.projectName });
     if (r.type === 'report-problem') return { path: r.path, issueUrl: r.issueUrl };
     if (r.type === 'error') throw new Error(r.message);
     throw new Error('Unexpected report-problem response');

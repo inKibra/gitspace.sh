@@ -3779,11 +3779,40 @@ export async function dispatchCommand(cmd: Command): Promise<Response | null> {
 
           case 'report-problem':
             try {
-              const { writeProblemReport } = await import('./problem-report.js');
+              const { buildProblemReport, issueTitleAndBody } = await import('./problem-report.js');
+              const { writeFileSync, mkdirSync } = await import('fs');
+              const { join } = await import('path');
+              const { getWorkspaceRoot } = await import('../../core/paths.js');
               let clientBundle: unknown = {};
               try { clientBundle = JSON.parse(cmd.clientBundleJson); } catch { clientBundle = { parseError: 'client bundle was not valid JSON' }; }
-              const r = writeProblemReport(cmd.note, clientBundle, Date.now());
-              res = { type: 'report-problem', path: r.path };
+              const now = Date.now();
+              const { redacted } = buildProblemReport(cmd.note, clientBundle, now);
+
+              // Always write the local report (the reversible sink + fallback).
+              const stamp = new Date(now).toISOString().replace(/[:.]/g, '-');
+              const dir = join(getWorkspaceRoot(), '.logs', 'reports', stamp);
+              mkdirSync(dir, { recursive: true, mode: 0o700 });
+              const path = join(dir, 'report.json');
+              writeFileSync(path, JSON.stringify(redacted, null, 2), { mode: 0o600 });
+
+              // Optionally publish a GitHub issue (user consented via the dialog
+              // checkbox). Resolve the repo from the named project's base clone;
+              // a failure here degrades to local-only, never loses the report.
+              let issueUrl: string | undefined;
+              if (cmd.fileIssue && cmd.projectName) {
+                try {
+                  const { resolveRepoSlug, createIssue } = await import('../../core/github-issues.js');
+                  const { getProjectBaseDir } = await import('../../core/config.js');
+                  const cwd = getProjectBaseDir(cmd.projectName);
+                  const slug = await resolveRepoSlug(cwd);
+                  if (slug) {
+                    const { title, body } = issueTitleAndBody(redacted);
+                    const issue = await createIssue({ slug, title, body, labels: ['gitspace-report'], cwd });
+                    issueUrl = issue.url;
+                  }
+                } catch { /* keep the local report; issueUrl stays undefined */ }
+              }
+              res = { type: 'report-problem', path, issueUrl };
             } catch (e) {
               res = { type: 'error', message: `Failed to write problem report: ${e instanceof Error ? e.message : String(e)}` };
             }

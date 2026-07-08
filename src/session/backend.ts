@@ -316,7 +316,7 @@ export interface SessionBackend {
   /** Merge a workspace's artifacts branch into main (curation happens at the merge; publish-gated). */
   rollupProjectArtifacts?(projectName: string, workspace: string, opts?: { removeBranch?: boolean }): Promise<{ mergeCommit: string }>;
   /** File a redacted problem report (client bundle + note) — writes locally, returns the path. */
-  reportProblem?(note: string, clientBundle: unknown): Promise<{ path: string; issueUrl?: string }>;
+  reportProblem?(note: string, clientBundle: unknown, opts?: { fileIssue?: boolean; projectName?: string }): Promise<{ path: string; issueUrl?: string }>;
   /** Mint a signed public share link for one artifact (requires serve active on the machine). */
   mintArtifactShare?(uri: string, opts?: { ttlMs?: number; maxUses?: number }): Promise<{ url: string; tokenId: string; expiresAt: number }>;
   /** Revoke a share link by tokenId. */
