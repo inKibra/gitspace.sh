@@ -1857,6 +1857,13 @@ export class LocalSessionBackend implements SessionBackend {
     throw new Error('Unexpected project-artifacts-remote-set response');
   }
 
+  async reportProblem(note: string, clientBundle: unknown): Promise<{ path: string; issueUrl?: string }> {
+    const r = await this.sendTmuxCommand({ type: 'report-problem', note, clientBundleJson: JSON.stringify(clientBundle) });
+    if (r.type === 'report-problem') return { path: r.path, issueUrl: r.issueUrl };
+    if (r.type === 'error') throw new Error(r.message);
+    throw new Error('Unexpected report-problem response');
+  }
+
   async rollupProjectArtifacts(projectName: string, workspace: string, opts: { removeBranch?: boolean } = {}): Promise<{ mergeCommit: string }> {
     const r = await this.sendTmuxCommand({ type: 'project-artifacts-rollup', projectName, workspace, removeBranch: opts.removeBranch });
     if (r.type === 'project-artifacts-rollup') return { mergeCommit: r.mergeCommit };

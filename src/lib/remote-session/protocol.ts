@@ -701,6 +701,13 @@ export interface GetAgentSessionTreeRequest {
   agentSessionId: string;
 }
 
+export interface ReportProblemRequest {
+  type: 'report_problem';
+  requestId: string;
+  note: string;
+  clientBundleJson: string;
+}
+
 export interface ProjectArtifactsRollupRequest {
   type: 'project_artifacts_rollup';
   requestId: string;
@@ -1235,6 +1242,7 @@ export type ClientToMachineMessage =
   | GetAgentHistoryRequest
   | NavigateAgentHistoryRequest
   | GetAgentSessionTreeRequest
+  | ReportProblemRequest
   | ProjectArtifactsRollupRequest
   | ArtifactShareMintRequest
   | ArtifactShareRevokeRequest
@@ -1410,6 +1418,7 @@ export function isBrowseMessage(msg: RemoteSessionMessage): msg is ClientToMachi
     'get_agent_history',
     'navigate_agent_history',
     'get_agent_session_tree',
+    'report_problem',
     'project_artifacts_rollup',
     'artifact_share_mint',
     'artifact_share_revoke',

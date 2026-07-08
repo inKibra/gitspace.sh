@@ -3777,6 +3777,18 @@ export async function dispatchCommand(cmd: Command): Promise<Response | null> {
             }
             break;
 
+          case 'report-problem':
+            try {
+              const { writeProblemReport } = await import('./problem-report.js');
+              let clientBundle: unknown = {};
+              try { clientBundle = JSON.parse(cmd.clientBundleJson); } catch { clientBundle = { parseError: 'client bundle was not valid JSON' }; }
+              const r = writeProblemReport(cmd.note, clientBundle, Date.now());
+              res = { type: 'report-problem', path: r.path };
+            } catch (e) {
+              res = { type: 'error', message: `Failed to write problem report: ${e instanceof Error ? e.message : String(e)}` };
+            }
+            break;
+
           case 'artifact-share-mint':
             try {
               const { mintShareLink } = await import('./artifact-share.js');

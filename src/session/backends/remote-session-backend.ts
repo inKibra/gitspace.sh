@@ -3226,6 +3226,14 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     throw new Error('Unexpected project-artifacts-remote-set response');
   }
 
+  async reportProblem(note: string, clientBundle: unknown): Promise<{ path: string; issueUrl?: string }> {
+    await this.waitForInitialSnapshot();
+    const r = await this.sendRpcCommand({ type: 'report_problem', requestId: crypto.randomUUID(), note, clientBundleJson: JSON.stringify(clientBundle) });
+    if (r.type === 'report-problem') return { path: r.path, issueUrl: r.issueUrl };
+    if (r.type === 'error') throw new Error(r.message);
+    throw new Error('Unexpected report-problem response');
+  }
+
   async rollupProjectArtifacts(projectName: string, workspace: string, opts: { removeBranch?: boolean } = {}): Promise<{ mergeCommit: string }> {
     await this.waitForInitialSnapshot();
     const r = await this.sendRpcCommand({ type: 'project_artifacts_rollup', requestId: crypto.randomUUID(), projectName, workspace, removeBranch: opts.removeBranch });

@@ -50,6 +50,7 @@ import { RightRail, RepoFilePanel, type RepoFileOpen } from "./components/RightR
 import { ProjectHomePage } from "./pages/ProjectHomePage.web.js";
 import { useInboxPage } from './app/react/index.js';
 import { InboxWeb } from "./components/Inbox.web.js";
+import { ReportProblemDialog } from "./components/ReportProblemDialog.web.js";
 import { useEvents, toWideEventItem, type WideEventItem } from "./components/Events.js";
 import { EventsWeb } from "./components/Events.web.js";
 import type { WideEventFilter } from "./types/events.js";
@@ -129,6 +130,7 @@ type AppInnerProps = {
 function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   const [view, setView] = useState<View>("terminal");
   const [showInbox, setShowInbox] = useState(false);
+  const [showReportProblem, setShowReportProblem] = useState(false);
   const [showScriptTerminal, setShowScriptTerminal] = useState(false);
   const [scriptWorkspaceName, setScriptWorkspaceName] = useState('workspace');
   const [showMobileControls] = useState(false);
@@ -748,18 +750,30 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
     };
   });
   const renderChromeBar = (opts: { boardActive?: boolean; activeKey?: string | null; onBoard?: () => void }) => (
-    <GlobalChromeBar
-      projectName={allProjects.length === 1 ? allProjects[0]?.name : undefined}
-      workspaces={chromeChips}
-      activeKey={opts.activeKey}
-      boardActive={opts.boardActive}
-      onBoard={opts.onBoard ?? (() => {})}
-      onProject={allProjects.length > 0 ? () => setProjectHomeName(allProjects[0]!.name) : undefined}
-      onSelectWorkspace={(key) => handleBoardSelectWorkspace(key)}
-      inboxCount={backendInboxUnreadCount}
-      onOpenInbox={() => { void inboxActions.requestInbox(); setShowInbox(true); }}
-      onOpenPalette={() => commandPalette.toggle()}
-    />
+    <>
+      <GlobalChromeBar
+        projectName={allProjects.length === 1 ? allProjects[0]?.name : undefined}
+        workspaces={chromeChips}
+        activeKey={opts.activeKey}
+        boardActive={opts.boardActive}
+        onBoard={opts.onBoard ?? (() => {})}
+        onProject={allProjects.length > 0 ? () => setProjectHomeName(allProjects[0]!.name) : undefined}
+        onSelectWorkspace={(key) => handleBoardSelectWorkspace(key)}
+        inboxCount={backendInboxUnreadCount}
+        onOpenInbox={() => { void inboxActions.requestInbox(); setShowInbox(true); }}
+        onOpenPalette={() => commandPalette.toggle()}
+        onReportProblem={() => setShowReportProblem(true)}
+      />
+      {showReportProblem && (
+        <ReportProblemDialog
+          onClose={() => setShowReportProblem(false)}
+          report={(() => {
+            const b = activeBackendKey ? multi.getBackend(activeBackendKey) : null;
+            return b?.reportProblem ? (note, bundle) => b.reportProblem!(note, bundle) : undefined;
+          })()}
+        />
+      )}
+    </>
   );
 
 

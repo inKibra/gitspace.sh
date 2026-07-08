@@ -1768,6 +1768,12 @@ export class RemoteSessionHandler {
 
 
 
+      case 'report_problem':
+        // Any collaborator may report a problem — no manage gate. The bundle
+        // is redacted daemon-side before it is written.
+        await this.handleTypedCommand(session, msg.requestId, { type: 'report-problem', note: msg.note, clientBundleJson: msg.clientBundleJson }, sendResponse);
+        break;
+
       case 'project_artifacts_rollup':
         if (!canManage(session.accessType)) {
           await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });

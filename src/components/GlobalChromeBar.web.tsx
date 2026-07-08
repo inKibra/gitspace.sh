@@ -17,7 +17,7 @@ export interface ChromeWorkspaceChip {
   statusLabel?: string;
 }
 
-export function GlobalChromeBar({ projectName, workspaces, activeKey, boardActive, onBoard, onProject, onSelectWorkspace, inboxCount = 0, onOpenInbox, onOpenPalette, rightExtra }: {
+export function GlobalChromeBar({ projectName, workspaces, activeKey, boardActive, onBoard, onProject, onSelectWorkspace, inboxCount = 0, onOpenInbox, onOpenPalette, onReportProblem, rightExtra }: {
   projectName?: string;
   workspaces: ChromeWorkspaceChip[];
   activeKey?: string | null;
@@ -28,6 +28,7 @@ export function GlobalChromeBar({ projectName, workspaces, activeKey, boardActiv
   inboxCount?: number;
   onOpenInbox?: () => void;
   onOpenPalette?: () => void;
+  onReportProblem?: () => void;
   rightExtra?: ReactElement | null;
 }): ReactElement {
   return (
@@ -63,6 +64,11 @@ export function GlobalChromeBar({ projectName, workspaces, activeKey, boardActiv
       </div>
       <div className="ml-auto flex flex-shrink-0 items-center gap-2">
         {rightExtra}
+        {onReportProblem && (
+          <button type="button" onClick={onReportProblem} title="Report a problem" className="px-1 text-[13px] text-[var(--gs-text-muted)] hover:text-[var(--gs-text)]">
+            ⚠
+          </button>
+        )}
         {onOpenInbox && (
           <button type="button" onClick={onOpenInbox} title="Inbox" className="relative px-1 text-[13px] text-[var(--gs-text-muted)] hover:text-[var(--gs-text)]">
             ⚑
