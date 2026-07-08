@@ -16,6 +16,8 @@
     "dev:web": "bun scripts/dev.ts",
     "check:lockfile-sync": "bun scripts/check-lockfile-sync.ts",
     "typecheck": "tsgo --noEmit -p tsconfig.json",
+    "test": "bun scripts/test-isolated.ts src",
+    "test:fast": "bun test",
     "lint": "eslint src/",
     "build:web": "cd web && bun install && bun run build",
     "build": "bun scripts/build.ts",

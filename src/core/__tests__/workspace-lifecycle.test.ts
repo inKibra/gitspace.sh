@@ -39,7 +39,9 @@ mock.module('../secret-runtime', () => ({
 mock.module('../../utils/run-workspace-scripts', () => ({
   runWorkspaceScripts: async () => {
     runCalls += 1
-    return { success: true }
+    // Real shape is a ScriptLifecycleOutcome ({kind, ...}), which
+    // outcomeToPrepareResult maps — the old {success:true} yielded undefined.
+    return { kind: 'ran', phasesRun: ['setup'] }
   },
 }))
 
