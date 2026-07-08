@@ -149,25 +149,28 @@ function ProjectsStrip({ projects, onOpenProjectHome, onNewProject }: {
   );
 }
 
-/** Compact theme switcher — dropdown on hover. Shows icon-only on mobile. */
+/** Compact theme switcher — click-to-toggle dropdown (works on touch + mouse). */
 function ThemePicker() {
   const { theme, setTheme } = useTheme();
   const current = THEMES.find(t => t.id === theme);
+  const [open, setOpen] = useState(false);
   return (
-    <div className="relative group">
+    <div className="relative">
+      {open && <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />}
       <button
         type="button"
+        onClick={() => setOpen((o) => !o)}
         className="px-2 py-1 text-xs rounded text-[var(--gs-text-dim)] hover:text-[var(--gs-text)] hover:bg-[var(--gs-bg-active)]"
         title={`Theme: ${current?.label ?? theme}`}
       >
         ◐<span className="hidden sm:inline"> {current?.label ?? theme}</span>
       </button>
-      <div className="hidden group-hover:block absolute right-0 top-full mt-1 py-1 min-w-[160px] bg-[var(--gs-bg-elevated)] border border-[var(--gs-border)] z-50">
+      <div className={`${open ? 'block' : 'hidden'} absolute right-0 top-full z-50 mt-1 min-w-[160px] border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] py-1`}>
         {THEMES.map(t => (
           <button
             key={t.id}
             type="button"
-            onClick={() => setTheme(t.id)}
+            onClick={() => { setTheme(t.id); setOpen(false); }}
             className={`w-full text-left px-3 py-1.5 text-xs hover:bg-[var(--gs-bg-active)] ${t.id === theme ? 'text-[var(--gs-accent)]' : 'text-[var(--gs-text-muted)]'}`}
           >
             {t.label}

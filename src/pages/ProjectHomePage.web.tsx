@@ -400,6 +400,9 @@ export function ProjectHomePage({
   const [focusRequest, setFocusRequest] = useState<{ id: string; nonce: number } | null>(null);
   const [dockApi, setDockApi] = useState<DockviewApi | null>(null);
   const [active, setActive] = useState<string>('overview');
+  // Mobile nav drawer: the 220px sidebar would eat a 375px screen, so on
+  // small screens it becomes a slide-in drawer behind a ☰ toggle.
+  const [navOpen, setNavOpen] = useState(false);
   useEffect(() => {
     if (!dockApi) return;
     setActive(dockApi.activePanel?.id ?? 'overview');
@@ -829,8 +832,15 @@ export function ProjectHomePage({
 
   return (
     <div className="flex h-screen w-screen bg-[var(--gs-bg)] text-[13px]">
-      {/* sidebar (mock: .ph-sb) */}
-      <aside className="flex w-[220px] flex-none flex-col border-r border-[var(--gs-border)] bg-[#050505]">
+      {/* mobile drawer backdrop */}
+      {navOpen && (
+        <div className="fixed inset-0 z-30 bg-black/50 sm:hidden" onClick={() => setNavOpen(false)} />
+      )}
+      {/* sidebar (mock: .ph-sb) — static column on sm+, slide-in drawer on mobile */}
+      <aside
+        onClick={() => setNavOpen(false)}
+        className={`${navOpen ? 'flex' : 'hidden'} fixed inset-y-0 left-0 z-40 w-[220px] flex-none flex-col border-r border-[var(--gs-border)] bg-[#050505] sm:static sm:z-auto sm:flex`}
+      >
         <div className="flex flex-none flex-col gap-[7px] border-b border-[var(--gs-border)] px-[13px] py-[11px]">
           <span className="font-[family-name:var(--gs-font)] text-[13px] text-[var(--gs-text)]">{projectName}</span>
           <button
@@ -907,16 +917,30 @@ export function ProjectHomePage({
 
       {/* center: dock shell — same shell as workspace panes (splits, drag,
           focus-on-reopen, persisted layout) */}
-      <div className="min-h-0 min-w-0 flex-1">
-        <DockviewWorkspaceShell
-          backendKey={backendKey ?? 'local'}
-          workspaceId={baseWorkspaceId}
-          panels={dockPanels}
-          focusRequest={focusRequest}
-          initialLayout={initialDockLayout}
-          onLayoutChange={handleDockLayoutChange}
-          onApiChange={setDockApi}
-        />
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+        {/* mobile-only header: ☰ opens the nav drawer */}
+        <div className="flex flex-none items-center gap-2 border-b border-[var(--gs-border)] bg-[#050505] px-3 py-2 sm:hidden">
+          <button
+            type="button"
+            onClick={() => setNavOpen(true)}
+            aria-label="Open navigation"
+            className="flex h-[36px] w-[36px] items-center justify-center border border-[var(--gs-border)] text-[16px] text-[var(--gs-text-muted)]"
+          >
+            ☰
+          </button>
+          <span className="truncate font-[family-name:var(--gs-font)] text-[13px] text-[var(--gs-text)]">{projectName}</span>
+        </div>
+        <div className="min-h-0 min-w-0 flex-1">
+          <DockviewWorkspaceShell
+            backendKey={backendKey ?? 'local'}
+            workspaceId={baseWorkspaceId}
+            panels={dockPanels}
+            focusRequest={focusRequest}
+            initialLayout={initialDockLayout}
+            onLayoutChange={handleDockLayoutChange}
+            onApiChange={setDockApi}
+          />
+        </div>
       </div>
 
       {/* right: project artifacts rail (mock: ProjectArtifactsRail) + shipped queue */}

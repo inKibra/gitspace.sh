@@ -51,6 +51,7 @@ import { ProjectHomePage } from "./pages/ProjectHomePage.web.js";
 import { useInboxPage } from './app/react/index.js';
 import { InboxWeb } from "./components/Inbox.web.js";
 import { ReportProblemDialog } from "./components/ReportProblemDialog.web.js";
+import { isTouchDevice, hasCoarsePointer } from "./utils/device.web.js";
 import { useEvents, toWideEventItem, type WideEventItem } from "./components/Events.js";
 import { EventsWeb } from "./components/Events.web.js";
 import type { WideEventFilter } from "./types/events.js";
@@ -133,7 +134,9 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   const [showReportProblem, setShowReportProblem] = useState(false);
   const [showScriptTerminal, setShowScriptTerminal] = useState(false);
   const [scriptWorkspaceName, setScriptWorkspaceName] = useState('workspace');
-  const [showMobileControls] = useState(false);
+  // The mobile terminal control kit (Ctrl/Esc/Tab/arrows/DPad) — on by default
+  // for touch/coarse-pointer devices, where the OS keyboard has no such keys.
+  const [showMobileControls] = useState(() => isTouchDevice() || hasCoarsePointer());
   const [inputMode, setInputMode] = useState(false);
   const [showEvents, setShowEvents] = useState(false);
   const [eventsWorkspacePath, setEventsWorkspacePath] = useState<string | null>(null);

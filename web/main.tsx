@@ -5,7 +5,11 @@ import App from "../src/app.web";
 import { ErrorBoundary } from "../src/components/ErrorBoundary.web";
 import { installClientDiagnostics } from "../src/lib/client-diagnostics.web";
 import { initAnalytics } from "../src/lib/analytics.web";
+import { applyDeviceClasses } from "../src/utils/device.web";
 
+// Stamp .touch-device / .coarse-pointer / .ios-* on the root so the tap-target
+// and safe-area CSS (index.css) actually applies — was dead (never called).
+applyDeviceClasses();
 // Capture client errors BEFORE anything mounts (docs/REPORT-A-PROBLEM.md
 // stage 1) — a throw during first render must leave a trace, not a blank page.
 installClientDiagnostics();

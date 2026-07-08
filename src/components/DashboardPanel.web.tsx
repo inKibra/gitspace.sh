@@ -283,7 +283,7 @@ export function DashboardPanel({ dashboardPath, scopeLabel, read, write, listApp
         ) : state === 'error' || !doc ? (
           <div className="px-1 py-2 text-[var(--gs-text-dim)]">Failed to load {dashboardPath}</div>
         ) : (
-          <div className="grid grid-cols-2 content-start gap-3">
+          <div className="grid grid-cols-1 content-start gap-3 sm:grid-cols-2">
             {doc.panels.length === 0 && (
               <div className="col-span-2 px-1 py-7 text-[12.5px] text-[var(--gs-text-dim)]">
                 No dashboards yet — create one, or roll up a shipped workspace's dashboards.
