@@ -833,7 +833,15 @@ export interface RunSpaceCommandRequest {
   type: 'run_space_command';
   requestId: string;
   target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
+  /** Human-typed command line (slash-command path). Tokenized with
+   *  parseCommandArgs on the daemon. For PROGRAMMATIC callers that already
+   *  hold structured args, send `args` instead — argsText is then just a
+   *  display/log join and MUST NOT be re-tokenized (parseCommandArgs has no
+   *  escapes, so quotes/backslashes in a value don't round-trip). */
   argsText: string;
+  /** Authoritative pre-tokenized args. When present the daemon uses these
+   *  verbatim and skips parseCommandArgs. */
+  args?: string[];
 }
 
 export interface GetAgentFileSuggestionsRequest {

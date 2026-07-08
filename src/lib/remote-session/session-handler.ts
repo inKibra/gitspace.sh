@@ -1997,7 +1997,9 @@ export class RemoteSessionHandler {
                     },
                   },
                   { cwd: msg.target.workspacePath },
-                  parseCommandArgs(msg.argsText),
+                  // Structured args (programmatic callers) are authoritative
+                  // and bypass the tokenizer; argsText is the human-typed path.
+                  msg.args ?? parseCommandArgs(msg.argsText),
                 ),
                 operationTimeoutMs(operation.kind),
                 `Operation timed out (${operation.kind})`,

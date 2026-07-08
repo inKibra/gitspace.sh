@@ -1119,12 +1119,27 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
 
 
   async runSpaceCommand(workspaceId: string, argsText: string): Promise<string> {
+    return this.runSpaceCommandParts(workspaceId, undefined, argsText);
+  }
+
+  /** Programmatic caller path: `parts` is authoritative and travels the wire
+   *  as a structured array (the daemon skips its tokenizer). Flattening parts
+   *  into a command line and re-tokenizing is lossy — parseCommandArgs has no
+   *  escape grammar, so any value with quotes/backslashes mis-splits. */
+  private async runSpaceCommandStructured(workspaceId: string, parts: string[]): Promise<string> {
+    return this.runSpaceCommandParts(workspaceId, parts);
+  }
+
+  private async runSpaceCommandParts(workspaceId: string, args: string[] | undefined, argsTextOverride?: string): Promise<string> {
     await this.waitForInitialSnapshot();
     const operation = await this.startOperationCommand({
       type: 'run_space_command',
       requestId: crypto.randomUUID(),
       target: this.getAgentWorkspaceTarget(workspaceId),
-      argsText,
+      // argsText stays populated for daemon trace logs; when `args` is present
+      // it is authoritative and argsText is display-only (a readable join).
+      argsText: argsTextOverride ?? (args ?? []).map((p) => (/\s/.test(p) ? JSON.stringify(p) : p)).join(' '),
+      ...(args ? { args } : {}),
     });
     const response = (await this.waitForOperation(operation.operationId)).result as RunSpaceCommandResponse | undefined;
     if (response?.type === 'run_space_command_response') return response.output;
@@ -1178,7 +1193,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     }
     if (input.judgment.kind === 'llm' && input.judgment.modelHint) parts.push('--model-hint', input.judgment.modelHint);
     if (input.required === false) parts.push('--optional');
-    const output = await this.runSpaceCommand(workspaceId, parts.map((part) => /\s/.test(part) ? JSON.stringify(part) : part).join(' '));
+    const output = await this.runSpaceCommandStructured(workspaceId, parts);
     const parsed = JSON.parse(this.unwrapSpaceCommandOutput(output)) as { goalId: string; requirement: import('../../types/goals.js').Requirement };
     await this.listWorkspaces();
     return parsed.requirement;
@@ -1206,7 +1221,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       }
       if (patch.judgment.kind === 'llm' && patch.judgment.modelHint) parts.push('--model-hint', patch.judgment.modelHint);
     }
-    const output = await this.runSpaceCommand(workspaceId, parts.map((part) => /\s/.test(part) ? JSON.stringify(part) : part).join(' '));
+    const output = await this.runSpaceCommandStructured(workspaceId, parts);
     const parsed = JSON.parse(this.unwrapSpaceCommandOutput(output)) as { goalId: string; requirement: import('../../types/goals.js').Requirement };
     await this.listWorkspaces();
     return parsed.requirement;
@@ -1215,21 +1230,21 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   async removeGoalRequirement(projectName: string, goalId: string, requirementId: string): Promise<void> {
     const workspaceId = this.getWorkspaceIdForGoal(projectName, goalId);
     const parts = ['goal', 'requirement', 'remove', '--goal', goalId, '--requirement', requirementId, '--json'];
-    await this.runSpaceCommand(workspaceId, parts.map((part) => /\s/.test(part) ? JSON.stringify(part) : part).join(' '));
+    await this.runSpaceCommandStructured(workspaceId, parts);
     await this.listWorkspaces();
   }
 
   async reorderGoalRequirement(projectName: string, goalId: string, requirementId: string, position: number): Promise<void> {
     const workspaceId = this.getWorkspaceIdForGoal(projectName, goalId);
     const parts = ['goal', 'requirement', 'reorder', '--goal', goalId, '--requirement', requirementId, '--position', String(position), '--json'];
-    await this.runSpaceCommand(workspaceId, parts.map((part) => /\s/.test(part) ? JSON.stringify(part) : part).join(' '));
+    await this.runSpaceCommandStructured(workspaceId, parts);
     await this.listWorkspaces();
   }
 
   async reopenGoalRequirement(projectName: string, goalId: string, requirementId: string): Promise<import('../../types/goals.js').Requirement> {
     const workspaceId = this.getWorkspaceIdForGoal(projectName, goalId);
     const parts = ['goal', 'requirement', 'reopen', '--goal', goalId, '--requirement', requirementId, '--json'];
-    const output = await this.runSpaceCommand(workspaceId, parts.map((part) => /\s/.test(part) ? JSON.stringify(part) : part).join(' '));
+    const output = await this.runSpaceCommandStructured(workspaceId, parts);
     const parsed = JSON.parse(this.unwrapSpaceCommandOutput(output)) as { goalId: string; requirementId: string; status: import('../../types/goals.js').RequirementStatus };
     await this.listWorkspaces();
     const goal = await this.refreshAndFetchGoal(projectName, goalId);
@@ -1244,7 +1259,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     if (input.body) parts.push('--body', input.body);
     if (input.path) parts.push('--path', input.path);
     if (input.url) parts.push('--url', input.url);
-    const output = await this.runSpaceCommand(workspaceId, parts.map((part) => /\s/.test(part) ? JSON.stringify(part) : part).join(' '));
+    const output = await this.runSpaceCommandStructured(workspaceId, parts);
     const parsed = JSON.parse(this.unwrapSpaceCommandOutput(output)) as { goalId: string; requirementId: string; evidence: import('../../types/goals.js').Evidence };
     await this.listWorkspaces();
     return parsed.evidence;
@@ -1253,7 +1268,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   async runGoalGeneration(projectName: string, goalId: string, requirementId: string): Promise<{ requirement: import('../../types/goals.js').Requirement; evidence: import('../../types/goals.js').Evidence; autoAccepted: boolean }> {
     const workspaceId = this.getWorkspaceIdForGoal(projectName, goalId);
     const parts = ['goal', 'artifact', 'run', '--goal', goalId, '--requirement', requirementId, '--json'];
-    const output = await this.runSpaceCommand(workspaceId, parts.map((part) => /\s/.test(part) ? JSON.stringify(part) : part).join(' '));
+    const output = await this.runSpaceCommandStructured(workspaceId, parts);
     const parsed = JSON.parse(this.unwrapSpaceCommandOutput(output)) as { goalId: string; requirementId: string; evidence: import('../../types/goals.js').Evidence; autoAccepted: boolean };
     await this.listWorkspaces();
     const goal = await this.refreshAndFetchGoal(projectName, goalId);
@@ -1263,7 +1278,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   async runGoalJudgment(projectName: string, goalId: string, requirementId: string): Promise<{ requirement: import('../../types/goals.js').Requirement; review: import('../../types/goals.js').Review }> {
     const workspaceId = this.getWorkspaceIdForGoal(projectName, goalId);
     const parts = ['goal', 'review', 'run', '--goal', goalId, '--requirement', requirementId, '--json'];
-    const output = await this.runSpaceCommand(workspaceId, parts.map((part) => /\s/.test(part) ? JSON.stringify(part) : part).join(' '));
+    const output = await this.runSpaceCommandStructured(workspaceId, parts);
     const parsed = JSON.parse(this.unwrapSpaceCommandOutput(output)) as { goalId: string; requirementId: string; review: import('../../types/goals.js').Review };
     await this.listWorkspaces();
     const goal = await this.refreshAndFetchGoal(projectName, goalId);
@@ -1275,7 +1290,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     const parts = ['goal', 'review', 'record', '--goal', goalId, '--requirement', requirementId, '--decision', decision, '--body', note, '--json'];
     if (score !== undefined) parts.push('--score', String(score));
     if (createdBy) parts.push('--created-by', createdBy);
-    const output = await this.runSpaceCommand(workspaceId, parts.map((part) => /\s/.test(part) ? JSON.stringify(part) : part).join(' '));
+    const output = await this.runSpaceCommandStructured(workspaceId, parts);
     const parsed = JSON.parse(this.unwrapSpaceCommandOutput(output)) as { goalId: string; requirementId: string; review: import('../../types/goals.js').Review };
     await this.listWorkspaces();
     return parsed.review;
