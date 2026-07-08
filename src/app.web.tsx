@@ -743,15 +743,27 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
 
   /** Global chrome bar (mock topbar + ActivityStrip) — shared by board + shell. */
   const CHIP_COLOR: Record<string, string> = { red: 'var(--gs-danger)', orange: 'var(--gs-warning)', blue: 'var(--gs-info)', dim: 'var(--gs-text-ghost)' };
-  const chromeChips: ChromeWorkspaceChip[] = workspaceRuntime.workspaces.map((w) => {
-    const st = workspaceRuntime.workspaceStatusById[w.selectionKey ?? w.id];
-    return {
-      key: w.selectionKey ?? w.id,
-      name: w.name,
-      phase: ((w as { phase?: string }).phase as import('./types/config.js').WorkspacePhase | undefined) ?? 'code',
-      statusColor: CHIP_COLOR[st?.primaryColor ?? 'dim'] ?? 'var(--gs-text-ghost)',
-    };
-  });
+  // The top strip is a tab bar of ACTIVE workspaces, not every workspace in
+  // every project. Active = a live terminal, an open agent (primaryColor !=
+  // 'dim' means an agent session is open/erroring), or the workspace you're
+  // currently viewing (so your current tab never disappears).
+  const chromeChips: ChromeWorkspaceChip[] = workspaceRuntime.workspaces
+    .filter((w) => {
+      const key = w.selectionKey ?? w.id;
+      const st = workspaceRuntime.workspaceStatusById[key];
+      const hasActivity = (w.sessionCount ?? 0) > 0 || (st?.primaryColor != null && st.primaryColor !== 'dim');
+      const isCurrent = key === workspaceBoardState.selectedWorkspaceId || key === attachedWorkspaceSelectionKey;
+      return hasActivity || isCurrent;
+    })
+    .map((w) => {
+      const st = workspaceRuntime.workspaceStatusById[w.selectionKey ?? w.id];
+      return {
+        key: w.selectionKey ?? w.id,
+        name: w.name,
+        phase: ((w as { phase?: string }).phase as import('./types/config.js').WorkspacePhase | undefined) ?? 'code',
+        statusColor: CHIP_COLOR[st?.primaryColor ?? 'dim'] ?? 'var(--gs-text-ghost)',
+      };
+    });
   const renderChromeBar = (opts: { boardActive?: boolean; activeKey?: string | null; onBoard?: () => void }) => (
     <>
       <GlobalChromeBar
