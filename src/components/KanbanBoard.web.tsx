@@ -628,7 +628,6 @@ function WorkspaceCard({
       {/* Footer: machine chip + gates tally */}
       <div className="mt-1.5 flex items-center gap-2">
         <span className="inline-flex items-center gap-1 text-[10.5px] text-[var(--gs-text-dim)]">
-          <span className="h-1.5 w-1.5 rounded-full bg-[var(--gs-success)]" />
           {machineLabel}
         </span>
         {gates && (

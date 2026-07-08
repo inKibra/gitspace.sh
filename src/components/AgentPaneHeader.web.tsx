@@ -185,7 +185,33 @@ export function AgentPaneHeader({
       {error && <span className="max-w-[35%] truncate text-[var(--gs-danger)]" title={error}>⚠ {error}</span>}
       <span className="ml-auto flex items-center gap-2">
         <span className={`inline-block h-2 w-2 rounded-full ${dot}`} title={label} />
-        {(onOpenAuth || onOpenHistory || canCycleRole || onSetThinkingLevel || onSetApprovalMode || onToggleFast) && (
+
+        {/* Direct controls (surfaced, not buried in the ⚙ menu): fast + undo. */}
+        {onToggleFast && control?.fastCapable && (() => {
+          const fastOn = control?.serviceTier === 'priority';
+          return (
+            <button
+              type="button"
+              onClick={onToggleFast}
+              title={fastOn ? 'Fast mode ON — click to turn off' : 'Fast mode OFF — click to turn on'}
+              className={`flex items-center gap-1 px-1 text-[11px] ${fastOn ? 'font-semibold text-[var(--gs-warning)]' : 'text-[var(--gs-text-dim)] hover:text-[var(--gs-text)]'}`}
+            >
+              ⚡ fast{fastOn ? ' on' : ''}
+            </button>
+          );
+        })()}
+        {onOpenHistory && (
+          <button
+            type="button"
+            onClick={onOpenHistory}
+            title="History — rewind / undo the conversation"
+            className="flex h-6 w-6 items-center justify-center text-[13px] text-[var(--gs-text-dim)] hover:text-[var(--gs-accent)]"
+          >
+            ⟲
+          </button>
+        )}
+
+        {(onOpenAuth || canCycleRole || onSetThinkingLevel || onSetApprovalMode) && (
           <span className="relative">
             <button
               type="button"
@@ -225,32 +251,9 @@ export function AgentPaneHeader({
                       onPick={(v) => { onSetApprovalMode(v); setMenu(null); }}
                     />
                   ) : null}
-                  {onToggleFast && control?.fastCapable && (() => {
-                    const fastOn = control?.serviceTier === 'priority';
-                    return (
-                      <button
-                        type="button"
-                        onClick={onToggleFast}
-                        title={fastOn ? 'Fast mode ON — click to turn off' : 'Fast mode OFF — click to turn on'}
-                        className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[var(--gs-text-dim)] hover:bg-[var(--gs-border)]"
-                      >
-                        ⚡ fast mode
-                        <span className={fastOn ? 'font-semibold text-[var(--gs-warning)]' : 'text-[var(--gs-text-muted)]'}>{fastOn ? 'on' : 'off'}</span>
-                      </button>
-                    );
-                  })()}
-                  {(canCycleRole || control?.thinkingLevels?.length || control?.approvalModes?.length || (onToggleFast && control?.fastCapable)) && (onOpenHistory || onOpenAuth) ? (
+                  {(canCycleRole || control?.thinkingLevels?.length || control?.approvalModes?.length) && onOpenAuth ? (
                     <div className="my-1 border-t border-[var(--gs-border)]" />
                   ) : null}
-                  {onOpenHistory && (
-                    <button
-                      type="button"
-                      onClick={() => { setMenu(null); onOpenHistory(); }}
-                      className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[var(--gs-text-dim)] hover:bg-[var(--gs-border)] hover:text-[var(--gs-text)]"
-                    >
-                      ⟲ History — rewind…
-                    </button>
-                  )}
                   {onOpenAuth && (
                     <button
                       type="button"

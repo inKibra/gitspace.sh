@@ -29,7 +29,9 @@ defineRenderer<MessageData>('message', ({ data }): ReactElement => {
     const rawAtts = (data as { attachments?: unknown }).attachments;
     const atts = Array.isArray(rawAtts) ? rawAtts.filter((a): a is string => typeof a === 'string') : [];
     return (
-      <div className="my-2 flex items-baseline">
+      // User turns are indented + accented so they stand apart from agent
+      // output (restores the pre-mock transcript styling).
+      <div className="my-2 ml-5 flex items-baseline border-l-2 border-[var(--gs-success)]/40 pl-3">
         <span className="mr-2 flex-none text-[11px] lowercase text-[var(--gs-success)]">you</span>
         <div className="min-w-0 flex-1 text-[13px] leading-[1.6] text-[var(--gs-text)] whitespace-pre-wrap">
           <KeywordText text={data.text} />
