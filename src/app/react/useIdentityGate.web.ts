@@ -54,6 +54,7 @@ export interface UseIdentityGateReturn {
   setConfirmPinValue: (v: string) => void;
   // Auth passthrough
   startLogin: () => void;
+  logout: () => void;
   // Named action handlers
   handleUnlockPin: () => void;
   /** Clear device identity, logout, and restart from login. */
@@ -286,6 +287,19 @@ export function useIdentityGate(
       setLoading(false);
     }
   }, [passwordValue]);
+  const logout = useCallback(() => {
+    auth.logout();
+    backupRef.current = null;
+    pendingMnemonicRef.current = null;
+    setStep('login');
+    setError(null);
+    setLoading(false);
+    setPasswordValue('');
+    setMnemonicValue('');
+    setNewPinValue('');
+    setConfirmPinValue('');
+  }, [auth]);
+
 
   const handleGoToMnemonicEntry = useCallback(() => {
     setStep('mnemonic-entry');
@@ -386,6 +400,7 @@ export function useIdentityGate(
     confirmPinValue,
     setConfirmPinValue,
     startLogin: auth.startLogin,
+    logout,
     handleUnlockPin,
     handleResetBrowserIdentity,
     handleLegacyMigratePin,
