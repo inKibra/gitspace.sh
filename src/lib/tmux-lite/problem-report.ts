@@ -10,11 +10,23 @@
  * reversible sink and the fallback the design specifies.
  */
 
-import { mkdirSync, writeFileSync } from 'fs';
+import { mkdirSync, writeFileSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { getWorkspaceRoot } from '../../core/paths.js';
 import { redactDeep } from '../../utils/redact.js';
-import { PACKAGE_VERSION } from './protocol.js';
+import { getTraceRing } from '../../utils/trace-log.js';
+import { PACKAGE_VERSION, getSessionDir } from './protocol.js';
+
+/** Last `maxLines` of the always-on daemon log ('server logs'). */
+function daemonLogTail(maxLines = 400): string {
+  try {
+    const text = readFileSync(join(getSessionDir(), 'tmux-lite-daemon.log'), 'utf8');
+    const lines = text.split('\n');
+    return lines.slice(-maxLines).join('\n');
+  } catch {
+    return '(daemon log unavailable)';
+  }
+}
 
 export interface ProblemReport {
   v: 1;
@@ -25,6 +37,10 @@ export interface ProblemReport {
     pid: number;
     uptimeSec: number;
     platform: string;
+    /** Server-side chain of events (always-on trace ring). */
+    traceRing: ReturnType<typeof getTraceRing>;
+    /** Tail of the daemon log ('server logs'). */
+    daemonLogTail: string;
   };
   client: unknown;
 }
@@ -39,6 +55,8 @@ export function buildProblemReport(note: string, clientBundle: unknown, now: num
       pid: process.pid,
       uptimeSec: Math.round(process.uptime()),
       platform: process.platform,
+      traceRing: getTraceRing(),
+      daemonLogTail: daemonLogTail(),
     },
     client: clientBundle,
   };

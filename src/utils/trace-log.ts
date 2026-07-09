@@ -23,7 +23,25 @@ function getTraceLogPath(): string {
   return `${getWorkspaceRootFallback()}/.agent/${DEFAULT_TRACE_FILE}`;
 }
 
+/** Bounded in-memory ring of recent trace events — ALWAYS populated (even
+ *  when GITSPACE_TRACE file logging is off) so a problem report can carry the
+ *  server-side chain of events. Cheap: bounded array, no I/O. */
+export interface TraceRingEntry { ts: string; event: string; details?: Record<string, unknown> }
+const TRACE_RING_MAX = 400;
+const traceRing: TraceRingEntry[] = [];
+
+/** A copy of the recent server trace events, oldest first. */
+export function getTraceRing(): TraceRingEntry[] {
+  return traceRing.slice();
+}
+
 export function writeTraceLog(event: string, details?: Record<string, unknown>): void {
+  if (isServerRuntime()) {
+    try {
+      traceRing.push({ ts: new Date().toISOString(), event, ...(details ? { details } : {}) });
+      if (traceRing.length > TRACE_RING_MAX) traceRing.splice(0, traceRing.length - TRACE_RING_MAX);
+    } catch { /* never affect the observed path */ }
+  }
   if (!traceEnabled()) return;
   void (async () => {
     try {

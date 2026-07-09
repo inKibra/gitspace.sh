@@ -12,7 +12,7 @@
 export interface DiagnosticEntry {
   /** epoch ms */
   t: number;
-  kind: 'error' | 'unhandledrejection' | 'console.error' | 'react' | 'rpc' | 'freeze';
+  kind: 'error' | 'unhandledrejection' | 'console.error' | 'console.warn' | 'console.log' | 'react' | 'rpc' | 'freeze' | 'click' | 'nav';
   message: string;
   /** stack or extra context, already string-ified */
   detail?: string;
@@ -80,16 +80,43 @@ export function installClientDiagnostics(): void {
     void import('./analytics.web.js').then((a) => a.captureException(e.reason));
   });
 
-  // Tap console.error without swallowing it — the app's own error logging
-  // (e.g. the transcript hooks) feeds the ring for free.
-  const origError = console.error.bind(console);
-  console.error = (...args: unknown[]) => {
-    pushDiagnostic({
-      kind: 'console.error',
-      message: args.length > 0 ? String(args[0]) : 'console.error',
-      detail: args.length > 1 ? args.slice(1).map(toDetail).join(' ') : undefined,
-      source: 'console',
-    });
-    origError(...args);
+  // Tap console.{error,warn,log,info} without swallowing — this is the
+  // breadcrumb trail (the "chain of events"), not just crashes, so a report
+  // has context even when nothing threw. Each is length-capped by the ring.
+  const tap = (level: 'error' | 'warn' | 'log' | 'info', kind: DiagnosticEntry['kind']) => {
+    const orig = console[level].bind(console);
+    console[level] = (...args: unknown[]) => {
+      pushDiagnostic({
+        kind,
+        message: (args.length > 0 ? String(args[0]) : `console.${level}`).slice(0, 500),
+        detail: args.length > 1 ? args.slice(1).map(toDetail).join(' ').slice(0, 1000) : undefined,
+        source: 'console',
+      });
+      orig(...args);
+    };
   };
+  tap('error', 'console.error');
+  tap('warn', 'console.warn');
+  tap('log', 'console.log');
+  tap('info', 'console.log');
+
+  // User-action breadcrumbs — the actual "chain of events leading up to the
+  // report." A quiet app logs nothing to console, so without this the ring is
+  // empty; clicks + navigations are what let an agent replay what happened.
+  window.addEventListener('click', (e) => {
+    const el = (e.target as HTMLElement | null)?.closest('button, a, [role="button"], [role="tab"], input, label');
+    if (!el) return;
+    const label = (el.getAttribute('aria-label') || el.getAttribute('title') || el.textContent || (el as HTMLInputElement).name || el.tagName).trim().slice(0, 80);
+    pushDiagnostic({ kind: 'click', message: label, source: el.tagName.toLowerCase() });
+  }, { capture: true });
+
+  let lastHref = window.location.href;
+  const recordNav = () => {
+    if (window.location.href === lastHref) return;
+    pushDiagnostic({ kind: 'nav', message: window.location.pathname + window.location.search, source: 'location' });
+    lastHref = window.location.href;
+  };
+  window.addEventListener('popstate', recordNav);
+  const origPush = history.pushState.bind(history);
+  history.pushState = (...args: Parameters<typeof history.pushState>) => { origPush(...args); recordNav(); };
 }

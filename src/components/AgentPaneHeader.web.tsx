@@ -79,15 +79,16 @@ export function AgentPaneHeader({
     if (id === 'model') setModelQuery('');
   };
   const kind = status?.type ?? 'idle';
-  // Compaction is active work — keep the dot green (pulsing) like a normal turn,
-  // and surface an explicit "compacting" label so it's clear what's happening.
-  const dot =
-    kind === 'busy' || kind === 'compacting'
+  // Match the canonical agent status colors used across the app (board, session
+  // rows): error/retry = red, busy/compacting = green (pulsing), idle = blue
+  // (a live but resting session), not a flat green or grey that ignores state.
+  const hasError = !!error || kind === 'retry';
+  const dot = hasError
+    ? 'bg-[var(--gs-danger)]'
+    : kind === 'busy' || kind === 'compacting'
       ? 'bg-[var(--gs-success)] animate-pulse'
-      : kind === 'retry'
-        ? 'bg-[var(--gs-warning)]'
-        : 'bg-[var(--gs-text-dim)]';
-  const label = kind === 'compacting' ? 'compacting' : kind === 'busy' ? 'working' : kind === 'retry' ? 'retrying' : 'idle';
+      : 'bg-[var(--gs-info)]';
+  const label = hasError ? 'error' : kind === 'compacting' ? 'compacting' : kind === 'busy' ? 'working' : 'idle';
 
   const current = control?.currentModel ?? null; // "provider/id"
   const displayName = model?.name ?? (current ? current.slice(current.indexOf('/') + 1) : 'agent');

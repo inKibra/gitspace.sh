@@ -27,16 +27,33 @@ export function ReportProblemDialog({ onClose, report, projectName, onStartFix }
   const [fixState, setFixState] = useState<'idle' | 'starting' | 'started'>('idle');
 
   const ring = useMemo(() => getDiagnosticsRing(), []);
-  const clientBundle = useMemo(() => ({
-    version: VERSION,
-    url: window.location.href,
-    userAgent: navigator.userAgent,
-    viewport: { w: window.innerWidth, h: window.innerHeight },
-    ring,
-    // PostHog session/replay link when analytics is on — lets the eventual
-    // GitHub issue point at the exact recorded session.
-    posthog: getSessionContext(),
-  }), [ring]);
+  const clientBundle = useMemo(() => {
+    // A snapshot of the rendered tree — the single most useful artifact for an
+    // agent to reconstruct what the user was looking at. Capped; redacted
+    // server-side (redactDeep) before anything is written or filed.
+    let domSnapshot = '';
+    try { domSnapshot = (document.getElementById('root')?.outerHTML ?? '').slice(0, 250_000); } catch { /* ignore */ }
+    // Visible top-level surface hints (open tabs, active view) pulled from the
+    // DOM so the report says WHERE the user was, not just the URL.
+    let openTabs: string[] = [];
+    try {
+      openTabs = Array.from(document.querySelectorAll('[role="tab"], .dv-tab'))
+        .map((el) => (el.textContent ?? '').trim()).filter(Boolean).slice(0, 40);
+    } catch { /* ignore */ }
+    return {
+      version: VERSION,
+      url: window.location.href,
+      userAgent: navigator.userAgent,
+      viewport: { w: window.innerWidth, h: window.innerHeight, dpr: window.devicePixelRatio },
+      ring,
+      openTabs,
+      domSnapshot,
+      capturedAt: new Date().toISOString(),
+      // PostHog session/replay link when analytics is on — lets the eventual
+      // GitHub issue point at the exact recorded session.
+      posthog: getSessionContext(),
+    };
+  }, [ring]);
 
   const submit = async (): Promise<void> => {
     if (!report) { setState('error'); setResult({ error: 'No machine connected — cannot file a report right now.' }); return; }
