@@ -291,7 +291,7 @@
     margin-bottom: 8px;
   }
 
-  .timeline-event-header .agent-tag {
+  .timeline-event-header .change-tag {
     font-family: var(--mono);
     font-size: 11px;
     padding: 3px 10px;
@@ -299,9 +299,10 @@
     font-weight: 500;
   }
 
-  .agent-a { background: var(--blue-dim); color: var(--blue); }
-  .agent-b { background: var(--orange-dim); color: var(--orange); }
-  .agent-c { background: var(--purple-dim); color: var(--purple); }
+  /* coloured by the KIND of conceptual change, not by which agent */
+  .kind-introduce { background: var(--blue-dim); color: var(--blue); }
+  .kind-move { background: var(--orange-dim); color: var(--orange); }
+  .kind-refine { background: var(--purple-dim); color: var(--purple); }
 
   .timeline-event-header .tool-tag {
     font-family: var(--mono);
@@ -900,25 +901,25 @@ abc123f  (agent-bot  2026-03-27)  }</pre>
 
     <div class="compare-card new">
       <div class="tag">Agent Blame</div>
-      <pre><span class="highlight">Agent A</span>  introduced  signup validation
-          context: "user asked for safer signup handling"
+      <pre><span class="highlight">Introduced</span>  signup validation
+          why: "user asked for safer signup handling"
 
-<span class="highlight">Agent B</span>  extracted   into shared helper
-          context: "duplicated across two endpoints"
+<span class="highlight">Extracted</span>   into a shared helper
+          why: "duplicated across two endpoints"
 
-<span class="highlight">Agent C</span>  moved       to shared/auth/validation.ts
-          context: "refactoring auth module boundaries"
+<span class="highlight">Moved</span>       to shared/auth/validation.ts
+          why: "refactoring auth module boundaries"
 
-Landed in squash commit <span class="highlight">abc123f</span></pre>
+One agent, three conceptual changes — landed in <span class="highlight">abc123f</span></pre>
     </div>
   </div>
 
   <div class="callout">
     <p>
-      <strong>The key insight:</strong> the unit of provenance is not the commit.
-      It is the mutation event — each time an agent successfully changes code.
-      Multiple events may land in a single commit, but the reasoning chain only
-      exists in the pre-commit event history.
+      <strong>The key insight:</strong> the unit of provenance is not the commit — and it is not the agent.
+      It is the <strong>conceptual change</strong>: each time an agent meaningfully transforms the code —
+      introduces, moves, refines, supersedes. Many changes may land in a single commit, but the
+      reasoning chain only exists in the pre-commit history.
     </p>
   </div>
 </section>
@@ -928,7 +929,7 @@ Landed in squash commit <span class="highlight">abc123f</span></pre>
 <!-- ═══════════════ INTERACTIVE TIMELINE ═══════════════ -->
 <section class="section">
   <div class="section-label">How It Works</div>
-  <h2>Every mutation is an event. Click to inspect.</h2>
+  <h2>Every conceptual change is an event. Click to inspect.</h2>
   <p>
     The system hooks into every mutating tool call — edit, write, bash — and captures
     what changed, how the code looked before and after, and references to the
@@ -942,10 +943,10 @@ Landed in squash commit <span class="highlight">abc123f</span></pre>
     <div class="timeline-event active" data-event="0" onclick="selectEvent(0)">
       <div class="timeline-dot"></div>
       <div class="timeline-event-header">
-        <span class="agent-tag agent-a">Agent A</span>
+        <span class="change-tag kind-introduce">Introduced</span>
         <span class="tool-tag">edit &middot; 14:32:01</span>
       </div>
-      <div class="timeline-event-title">Introduced signup validation</div>
+      <div class="timeline-event-title">Signup validation</div>
       <div class="timeline-event-desc">Added validateUser() to signup handler</div>
       <div class="timeline-detail">
         <div class="timeline-detail-inner">
@@ -976,7 +977,7 @@ Landed in squash commit <span class="highlight">abc123f</span></pre>
     <div class="timeline-event" data-event="1" onclick="selectEvent(1)">
       <div class="timeline-dot"></div>
       <div class="timeline-event-header">
-        <span class="agent-tag agent-b">Agent B</span>
+        <span class="change-tag kind-move">Moved</span>
         <span class="tool-tag">edit &middot; 14:38:22</span>
       </div>
       <div class="timeline-event-title">Extracted into shared helper</div>
@@ -1015,7 +1016,7 @@ Landed in squash commit <span class="highlight">abc123f</span></pre>
     <div class="timeline-event" data-event="2" onclick="selectEvent(2)">
       <div class="timeline-dot"></div>
       <div class="timeline-event-header">
-        <span class="agent-tag agent-c">Agent C</span>
+        <span class="change-tag kind-refine">Refined</span>
         <span class="tool-tag">edit &middot; 15:04:11</span>
       </div>
       <div class="timeline-event-title">Hardened error handling</div>
@@ -1050,7 +1051,7 @@ Landed in squash commit <span class="highlight">abc123f</span></pre>
     <div class="timeline-event" data-event="3" onclick="selectEvent(3)">
       <div class="timeline-dot"></div>
       <div class="timeline-event-header">
-        <span class="agent-tag" style="background:var(--accent-glow);color:var(--accent)">commit</span>
+        <span class="change-tag" style="background:var(--accent-glow);color:var(--accent)">commit</span>
         <span class="tool-tag">squash merge &middot; 15:12:00</span>
       </div>
       <div class="timeline-event-title">Landed as commit abc123f</div>
@@ -1107,25 +1108,25 @@ Landed in squash commit <span class="highlight">abc123f</span></pre>
       <!-- Node A -->
       <g class="lineage-node" onclick="showLineageDetail('a')">
         <rect class="lineage-label-box" x="40" y="56" width="180" height="68" stroke="#6eb4f5"/>
-        <text x="60" y="78" fill="#6eb4f5" font-family="Geist Mono, monospace" font-size="10" font-weight="600">AGENT A</text>
-        <text x="60" y="96" fill="#e8e6e3" font-family="Geist Sans, sans-serif" font-size="13">Introduced validation</text>
-        <text x="60" y="112" fill="#5a5866" font-family="Geist Mono, monospace" font-size="10">signup.ts:42-46</text>
+        <text x="60" y="78" fill="#6eb4f5" font-family="JetBrains Mono, monospace" font-size="10" font-weight="600">INTRODUCES</text>
+        <text x="60" y="96" fill="#e8e6e3" font-family="DM Sans, sans-serif" font-size="13">Introduced validation</text>
+        <text x="60" y="112" fill="#5a5866" font-family="JetBrains Mono, monospace" font-size="10">signup.ts:42-46</text>
       </g>
 
       <!-- Node B -->
       <g class="lineage-node" onclick="showLineageDetail('b')">
         <rect class="lineage-label-box" x="420" y="116" width="200" height="68" stroke="#f5b06e"/>
-        <text x="440" y="138" fill="#f5b06e" font-family="Geist Mono, monospace" font-size="10" font-weight="600">AGENT B</text>
-        <text x="440" y="156" fill="#e8e6e3" font-family="Geist Sans, sans-serif" font-size="13">Extracted to shared helper</text>
-        <text x="440" y="172" fill="#5a5866" font-family="Geist Mono, monospace" font-size="10">shared/validation.ts:1-5</text>
+        <text x="440" y="138" fill="#f5b06e" font-family="JetBrains Mono, monospace" font-size="10" font-weight="600">MOVES</text>
+        <text x="440" y="156" fill="#e8e6e3" font-family="DM Sans, sans-serif" font-size="13">Extracted to shared helper</text>
+        <text x="440" y="172" fill="#5a5866" font-family="JetBrains Mono, monospace" font-size="10">shared/validation.ts:1-5</text>
       </g>
 
       <!-- Node C -->
       <g class="lineage-node" onclick="showLineageDetail('c')">
         <rect class="lineage-label-box" x="720" y="176" width="220" height="68" stroke="#b06ef5"/>
-        <text x="740" y="198" fill="#b06ef5" font-family="Geist Mono, monospace" font-size="10" font-weight="600">AGENT C</text>
-        <text x="740" y="216" fill="#e8e6e3" font-family="Geist Sans, sans-serif" font-size="13">Hardened error handling</text>
-        <text x="740" y="232" fill="#5a5866" font-family="Geist Mono, monospace" font-size="10">shared/validation.ts:1-8</text>
+        <text x="740" y="198" fill="#b06ef5" font-family="JetBrains Mono, monospace" font-size="10" font-weight="600">REFINES</text>
+        <text x="740" y="216" fill="#e8e6e3" font-family="DM Sans, sans-serif" font-size="13">Hardened error handling</text>
+        <text x="740" y="232" fill="#5a5866" font-family="JetBrains Mono, monospace" font-size="10">shared/validation.ts:1-8</text>
       </g>
     </svg>
 
@@ -1327,12 +1328,12 @@ const blameLines = [
 
 const chains = {
   full: [
-    { dot: '#6eb4f5', summary: 'Introduced signup validation', meta: 'Agent A &middot; evt_a1b2c3 &middot; 14:32', conf: 'high', kind: 'introduces' },
-    { dot: '#f5b06e', summary: 'Extracted to shared/validation.ts', meta: 'Agent B &middot; evt_d4e5f6 &middot; 14:38', conf: 'high', kind: 'moves' },
-    { dot: '#b06ef5', summary: 'Hardened with typed AuthValidationError', meta: 'Agent C &middot; evt_g7h8i9 &middot; 15:04', conf: 'high', kind: 'refines' },
+    { dot: '#6eb4f5', summary: 'Introduced signup validation', meta: 'evt_a1b2c3 &middot; 14:32', conf: 'high', kind: 'introduces' },
+    { dot: '#f5b06e', summary: 'Extracted to shared/validation.ts', meta: 'evt_d4e5f6 &middot; 14:38', conf: 'high', kind: 'moves' },
+    { dot: '#b06ef5', summary: 'Hardened with typed AuthValidationError', meta: 'evt_g7h8i9 &middot; 15:04', conf: 'high', kind: 'refines' },
   ],
   password: [
-    { dot: '#b06ef5', summary: 'Added password length validation', meta: 'Agent C &middot; evt_g7h8i9 &middot; 15:04', conf: 'high', kind: 'introduces' },
+    { dot: '#b06ef5', summary: 'Added password length validation', meta: 'evt_g7h8i9 &middot; 15:04', conf: 'high', kind: 'introduces' },
   ],
 };
 
@@ -1415,7 +1416,7 @@ const pipelineDetails = [
 { <span class="key">"type"</span>: <span class="str">"MutationEvent"</span>,
   <span class="key">"eventId"</span>: <span class="str">"evt_a1b2c3"</span>,
   <span class="key">"sessionId"</span>: <span class="str">"ses_xyz"</span>,
-  <span class="key">"actor"</span>: <span class="str">"Agent A"</span>,
+  <span class="key">"actor"</span>: <span class="str">"agent"</span>,
   <span class="key">"toolName"</span>: <span class="str">"edit"</span>,
   <span class="key">"timestamp"</span>: <span class="num">1711540321000</span>,
   <span class="key">"summary"</span>: <span class="str">"Added signup validation"</span>,
@@ -1500,17 +1501,17 @@ ledger.mark_landed(landings)</pre>`
   <span class="num">5</span> |   }
 
 <span class="key">Provenance chain:</span>
-  <span class="str">●</span> <span class="key">Introduced</span> by Agent A
+  <span class="str">●</span> <span class="key">Introduced</span>
     "Added signup validation"
     context: user requested safer signup handling
     event: evt_a1b2c3 &middot; session: ses_xyz
 
-  <span class="str">●</span> <span class="key">Moved</span> by Agent B  (confidence: high)
+  <span class="str">●</span> <span class="key">Moved</span>  (confidence: high)
     "Extracted to shared helper"
     context: deduplicating validation across endpoints
     event: evt_d4e5f6 &middot; session: ses_abc
 
-  <span class="str">●</span> <span class="key">Refined</span> by Agent C  (confidence: high)
+  <span class="str">●</span> <span class="key">Refined</span>  (confidence: high)
     "Hardened with typed AuthValidationError"
     context: hardening auth error boundaries
     event: evt_g7h8i9 &middot; session: ses_def
