@@ -617,7 +617,7 @@ export function setAgentHostUIEmitter(emitter: HostUIBridgeEmitter | null): void
 /**
  * Route a dialog response from a client to the pending SDK Promise.
  */
-export function resolveAgentDialogResponse(response: HostUIDialogResponse): boolean {
+export function resolveAgentDialogResponse(response: HostUIDialogResponse): Promise<boolean> {
   return defaultPiCoordinator.resolveDialogResponse(response);
 }
 

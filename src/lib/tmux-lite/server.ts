@@ -4419,7 +4419,7 @@ routerListener = Bun.listen({
                 res = { type: 'agent-bool', ok: false };
                 break;
               }
-              const resolved = resolveAgentDialogResponse({
+              const resolved = await resolveAgentDialogResponse({
                 type: cmd.dialogType,
                 id: cmd.dialogId,
                 value: cmd.value as any,
