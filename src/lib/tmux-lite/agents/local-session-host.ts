@@ -555,7 +555,9 @@ export class LocalSessionHost implements AgentSessionHost {
   /** Write a single setting on this session's Settings instance so the live
    *  session sees the change immediately (its singleton is process-local in
    *  worker mode). `modelRoles.<role>` routes through setModelRole so one role
-   *  updates without clobbering the record. */
+   *  updates without clobbering the record; `task.agentModelOverrides.<agent>`
+   *  is merged into that record the same way (dotted record keys are not
+   *  schema paths — empty string clears the entry). */
   async setSetting(path: string, value: string | number | boolean): Promise<boolean> {
     const session = this.session as unknown as ControlSessionAccessors;
     const settings = session.settings ?? (await getPiSettings());
@@ -566,6 +568,20 @@ export class LocalSessionHost implements AgentSessionHost {
         withRole.setModelRole(path.slice('modelRoles.'.length), value);
         return true;
       }
+    }
+    if (path.startsWith('task.agentModelOverrides.') && typeof value === 'string') {
+      const agentName = path.slice('task.agentModelOverrides.'.length);
+      let record: Record<string, string> = {};
+      try {
+        const v = settings.get('task.agentModelOverrides');
+        if (v && typeof v === 'object' && !Array.isArray(v)) record = { ...(v as Record<string, string>) };
+      } catch {
+        /* start from empty */
+      }
+      if (value.trim()) record[agentName] = value.trim();
+      else delete record[agentName];
+      settings.set('task.agentModelOverrides', record as never);
+      return true;
     }
     settings.set(path, value);
     return true;

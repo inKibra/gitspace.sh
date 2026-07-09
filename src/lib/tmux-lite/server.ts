@@ -78,6 +78,7 @@ import {
   setAgentSetting,
   getAgentSettingsSchema,
   getAgentTools,
+  listAgentDefinitions,
   compactAgentSession,
   cycleAgentRole,
   applyAgentModelRole,
@@ -3589,6 +3590,17 @@ export async function dispatchCommand(cmd: Command): Promise<Response | null> {
             } catch (e) {
               const errMsg = e instanceof Error ? e.message : String(e);
               res = { type: 'error', message: `Failed to list tools: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-list-agents':
+            try {
+              await getAgentControlReady();
+              const agents = await listAgentDefinitions(cmd.target);
+              res = { type: 'agent-list-agents', agents };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to list agents: ${errMsg}` };
             }
             break;
 

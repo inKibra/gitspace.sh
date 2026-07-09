@@ -656,6 +656,12 @@ export interface GetAgentToolsRequest {
   agentSessionId: string;
 }
 
+export interface ListAgentDefinitionsRequest {
+  type: 'list_agent_definitions';
+  requestId: string;
+  target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
+}
+
 export interface CompactAgentSessionRequest {
   type: 'compact_agent_session';
   requestId: string;
@@ -1239,6 +1245,7 @@ export type ClientToMachineMessage =
   | RespondAgentOAuthPromptRequest
   | GetAgentSettingsSchemaRequest
   | GetAgentToolsRequest
+  | ListAgentDefinitionsRequest
   | CompactAgentSessionRequest
   | CycleAgentRoleRequest
   | ApplyAgentRoleRequest
@@ -1415,6 +1422,7 @@ export function isBrowseMessage(msg: RemoteSessionMessage): msg is ClientToMachi
     'respond_agent_oauth_prompt',
     'get_agent_settings_schema',
     'get_agent_tools',
+    'list_agent_definitions',
     'compact_agent_session',
     'cycle_agent_role',
     'apply_agent_role',

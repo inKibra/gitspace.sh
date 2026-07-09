@@ -154,6 +154,24 @@ export interface AgentNavigateResult {
  *  (return to a fork, non-destructive). */
 export type AgentNavigateMode = 'redo' | 'jump';
 
+/** A discovered subagent definition (task-tool agent) for the workspace. */
+export interface AgentDefinitionInfo {
+  name: string;
+  /** First line of the frontmatter description. */
+  description: string;
+  /** Where the definition came from. */
+  source: 'bundled' | 'user' | 'project';
+  /** Definition file path (null for embedded bundled agents). */
+  filePath: string | null;
+  /** Raw `model:` frontmatter (comma-joined pattern list), or null when unset. */
+  model: string | null;
+  /** Per-agent override from task.agentModelOverrides, or null. */
+  overrideModel: string | null;
+  /** Model pattern(s) the agent will actually use (override > frontmatter >
+   *  session default), with pi/<role> aliases expanded against settings. */
+  resolvedModel: string | null;
+}
+
 /** A tool available to the agent (for per-tool approval). */
 export interface AgentToolInfo {
   name: string;

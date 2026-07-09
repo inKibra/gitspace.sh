@@ -3,6 +3,7 @@ import { useMemo, useState, type ReactElement } from 'react';
 import type {
   AgentAuthProvider,
   AgentControlInfo,
+  AgentDefinitionInfo,
   AgentOAuthEvent,
   AgentSettingSchemaItem,
   AgentToolInfo,
@@ -20,6 +21,7 @@ export function AgentSettingsPanel({
   control,
   schema,
   tools,
+  agents = [],
   providers,
   loading,
   oauth,
@@ -35,6 +37,7 @@ export function AgentSettingsPanel({
   control?: AgentControlInfo;
   schema: AgentSettingSchemaItem[];
   tools: AgentToolInfo[];
+  agents?: AgentDefinitionInfo[];
   providers: AgentAuthProvider[];
   loading: boolean;
   oauth: ActiveOAuth;
@@ -82,7 +85,7 @@ export function AgentSettingsPanel({
 
         <div className="flex-1 overflow-y-auto px-4 py-3">
           {tab === 'models' && <ModelsTab control={control} onSetModel={onSetModel} onApplyRole={onApplyRole} onSet={set} />}
-          {tab === 'agent' && <AgentTab control={control} tools={tools} loading={loading} onSet={set} />}
+          {tab === 'agent' && <AgentTab control={control} tools={tools} agents={agents} loading={loading} onSet={set} />}
           {tab === 'settings' && <SettingsTab schema={schema} loading={loading} onSet={set} />}
           {tab === 'usage' && <UsageTab control={control} />}
           {tab === 'context' && <ContextTab control={control} onCompact={onCompact} />}
@@ -187,9 +190,48 @@ function ModelsTab({ control, onSetModel, onApplyRole, onSet }: { control?: Agen
   );
 }
 
-function AgentTab({ control, tools, loading, onSet }: { control?: AgentControlInfo; tools: AgentToolInfo[]; loading: boolean; onSet: (p: string, v: string | number | boolean) => void }): ReactElement {
+function AgentTab({ control, tools, agents, loading, onSet }: { control?: AgentControlInfo; tools: AgentToolInfo[]; agents: AgentDefinitionInfo[]; loading: boolean; onSet: (p: string, v: string | number | boolean) => void }): ReactElement {
+  const models = control?.models ?? [];
+  const roles = control?.roleCatalog ?? [];
   return (
     <div>
+      <Grp>Agents — subagent defs · model override per agent</Grp>
+      {agents.length === 0 ? (
+        <div className="text-[var(--gs-text-dim)]">{loading ? 'Loading…' : 'No agents discovered.'}</div>
+      ) : (
+        agents.map((a) => {
+          // The select holds the OVERRIDE (task.agentModelOverrides.<name>);
+          // '' = no override → the definition's own model (or session default).
+          const value = a.overrideModel ?? '';
+          const roleRefs = roles.map((r) => `pi/${r.role}`);
+          const inList = !value || roleRefs.includes(value) || models.some((m) => `${m.provider}/${m.id}` === value);
+          return (
+            <div key={`${a.source}:${a.name}`} className="flex items-center gap-2 px-1 py-1">
+              <span
+                className="w-24 shrink-0 truncate font-[family-name:var(--gs-font)] text-[var(--gs-text)]"
+                title={`${a.description}${a.filePath ? `\n${a.filePath}` : ''}`}
+              >
+                {a.name}
+              </span>
+              <span className="w-14 shrink-0 text-[10px] uppercase text-[var(--gs-text-ghost)]">{a.source}</span>
+              <select
+                value={value}
+                onChange={(e) => onSet(`task.agentModelOverrides.${a.name}`, e.target.value)}
+                title={a.resolvedModel ? `Resolves to: ${a.resolvedModel}` : undefined}
+                className="min-w-0 flex-1 truncate border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-1 py-0.5 font-[family-name:var(--gs-font-mono)] text-[var(--gs-text)]"
+              >
+                <option value="">{`— ${a.model ?? 'session model'} —`}</option>
+                {value && !inList && <option value={value}>{value}</option>}
+                {roleRefs.map((ref) => <option key={ref} value={ref}>{ref}</option>)}
+                {models.map((m) => {
+                  const ref = `${m.provider}/${m.id}`;
+                  return <option key={ref} value={ref}>{ref}</option>;
+                })}
+              </select>
+            </div>
+          );
+        })
+      )}
       <Grp>Approval mode</Grp>
       <div className="flex gap-1">
         {(control?.approvalModes ?? []).map((m) => (

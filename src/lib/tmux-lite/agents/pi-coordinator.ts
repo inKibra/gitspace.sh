@@ -14,7 +14,7 @@ import {
   getPiSettings,
   openPiSessionManager,
 } from './pi-runtime.js';
-import type { AgentControlInfo, AgentHistoryEntry, AgentOAuthEvent, AgentSettingSchemaItem, AgentToolInfo, AgentTreeNode } from '../../../agents/agent-runtime-types.js';
+import type { AgentControlInfo, AgentDefinitionInfo, AgentHistoryEntry, AgentOAuthEvent, AgentSettingSchemaItem, AgentToolInfo, AgentTreeNode } from '../../../agents/agent-runtime-types.js';
 import { getTranscriptRange } from '../../../blocks/agent/transcript-source.js';
 import type { TranscriptPage, TranscriptSource } from '../../../blocks/agent/transcript-source.js';
 import { executeSpaceCommand } from './extensions/space-command.js';
@@ -71,6 +71,40 @@ const SETTINGS_CATALOG: Array<{ path: string; label: string; kind: 'boolean' | '
   { path: 'retry.enabled', label: 'Auto-retry on errors', kind: 'boolean' },
   { path: 'tools.intentTracing', label: 'Tool intent tracing', kind: 'boolean' },
 ];
+
+/** Claude Code frontmatter model aliases → OMP role references.
+ *  - opus: Claude's deep-reasoning tier → pi/slow (reviewer-grade role)
+ *  - sonnet: Claude's balanced daily-driver → pi/task (inherits the session's
+ *    default model — the OMP equivalent of "use the normal model")
+ *  - haiku: Claude's cheap/fast tier → pi/smol
+ *  - inherit: explicit "use the parent's model" → pi/task (special-cased by
+ *    the SDK's resolveAgentModelPatterns to inherit the session model)
+ */
+const CLAUDE_MODEL_ALIAS_TO_ROLE: Record<string, string> = {
+  opus: 'pi/slow',
+  sonnet: 'pi/task',
+  haiku: 'pi/smol',
+  inherit: 'pi/task',
+};
+
+/**
+ * When an agent definition pins Claude-style model aliases that OMP cannot
+ * resolve, return the pi/<role> to map it to. Conservative: only exact known
+ * aliases (optionally with a `claude-`/bracketed variant prefix collapsed by
+ * lowercasing) trigger a mapping, and only when EVERY pattern in the list is
+ * such an alias — a mixed list already contains a resolvable pattern, so the
+ * file's own fallback chain is left in charge.
+ */
+function mapClaudeAliasModel(model: string | string[] | undefined): string | null {
+  if (!model) return null;
+  const patterns = (Array.isArray(model) ? model : model.split(','))
+    .map((p) => p.trim().toLowerCase())
+    .filter(Boolean);
+  if (patterns.length === 0) return null;
+  const roles = patterns.map((p) => CLAUDE_MODEL_ALIAS_TO_ROLE[p] ?? null);
+  if (roles.some((r) => r === null)) return null;
+  return roles[0];
+}
 
 export interface PiWorkspaceTarget {
   workspaceId: string;
@@ -426,7 +460,10 @@ export class PiCoordinator {
   }
 
   /** Write a single setting. `modelRoles.<role>` is routed to the record helper
-   *  (setModelRole) so one role is updated without clobbering the others.
+   *  (setModelRole) so one role is updated without clobbering the others, and
+   *  `task.agentModelOverrides.<agent>` is merged into the record (the SDK's
+   *  Settings.set only accepts whole schema paths — dotted record keys are not
+   *  schema paths). An empty-string value clears the agent's override.
    *
    *  Persists via the DAEMON's settings singleton (initialized on demand — see
    *  getPiSettings), then fans out to every live host so worker processes'
@@ -443,6 +480,14 @@ export class PiCoordinator {
         withRole.setModelRole(role, value);
         wrote = true;
       }
+    }
+    if (path.startsWith('task.agentModelOverrides.') && typeof value === 'string') {
+      const agentName = path.slice('task.agentModelOverrides.'.length);
+      const record = this.readAgentModelOverrides(settings);
+      if (value.trim()) record[agentName] = value.trim();
+      else delete record[agentName];
+      settings.set('task.agentModelOverrides', record as never);
+      wrote = true;
     }
     if (!wrote) settings.set(path, value);
     await Promise.all([...this.hosts.entries()].map(async ([sessionId, host]) => {
@@ -483,6 +528,99 @@ export class PiCoordinator {
       items.push({ path, tab: ui.tab ?? 'other', label: ui.label ?? path, description: ui.description, kind, value, options });
     }
     return items;
+  }
+
+  /** Discovered subagent definitions (task-tool agents) for a workspace.
+   *
+   *  Cold by design: discovery is pure file reading (bundled + .omp/agents +
+   *  extension/plugin roots) and override/role resolution reads the DAEMON's
+   *  settings singleton — no live session needed, and worker sessions see the
+   *  same config.yml, so the resolved patterns match what a spawn would use.
+   *
+   *  Also applies managed CLAUDE-ALIAS defaults: an agent file that pins a
+   *  Claude Code model alias (sonnet/opus/haiku/inherit) cannot resolve in
+   *  OMP, so map it to a pi/<role> via task.agentModelOverrides — only when
+   *  the user hasn't already set an override for that agent name. Definition
+   *  files are never rewritten; the mapping lives in settings where the
+   *  AGENTS panel shows and edits it. */
+  async listAgents(target: PiWorkspaceTarget): Promise<AgentDefinitionInfo[]> {
+    const { discoverAgents } = (await import('@oh-my-pi/pi-coding-agent/task/discovery')) as unknown as {
+      discoverAgents: (cwd: string) => Promise<{
+        agents: Array<{
+          name: string;
+          description: string;
+          source: 'bundled' | 'user' | 'project';
+          filePath?: string;
+          model?: string | string[];
+        }>;
+      }>;
+    };
+    const { resolveAgentModelPatterns } = (await import('@oh-my-pi/pi-coding-agent/config/model-resolver')) as unknown as {
+      resolveAgentModelPatterns: (options: {
+        settingsOverride?: string | string[];
+        agentModel?: string | string[];
+        settings?: unknown;
+      }) => string[];
+    };
+    const settings = await getPiSettings();
+    const { agents } = await discoverAgents(target.workspacePath);
+
+    // Managed claude-alias mapping (persisted through setSetting so live
+    // hosts' settings singletons fan-out too).
+    let overrides = this.readAgentModelOverrides(settings);
+    for (const agent of agents) {
+      if (overrides[agent.name]?.trim()) continue;
+      const mapped = mapClaudeAliasModel(agent.model);
+      if (!mapped) continue;
+      await this.setSetting(`task.agentModelOverrides.${agent.name}`, mapped);
+      overrides = { ...overrides, [agent.name]: mapped };
+    }
+
+    const sourceOrder: Record<string, number> = { project: 0, user: 1, bundled: 2 };
+    return agents
+      .slice()
+      .sort((a, b) => (sourceOrder[a.source] ?? 3) - (sourceOrder[b.source] ?? 3) || a.name.localeCompare(b.name))
+      .map((agent) => {
+        const rawModel = Array.isArray(agent.model) ? agent.model.join(', ') : agent.model ?? null;
+        const overrideModel = overrides[agent.name]?.trim() || null;
+        let resolvedModel: string | null = null;
+        try {
+          const patterns = resolveAgentModelPatterns({
+            settingsOverride: overrideModel ?? undefined,
+            agentModel: agent.model,
+            settings: settings ?? undefined,
+          });
+          resolvedModel = patterns.length > 0 ? patterns.join(', ') : null;
+        } catch {
+          /* leave unresolved */
+        }
+        return {
+          name: agent.name,
+          description: (agent.description ?? '').split('\n')[0].trim(),
+          source: agent.source,
+          filePath: agent.filePath && !agent.filePath.startsWith('embedded:') ? agent.filePath : null,
+          model: rawModel,
+          overrideModel,
+          resolvedModel,
+        };
+      });
+  }
+
+  /** Current task.agentModelOverrides record (defensively typed). */
+  private readAgentModelOverrides(settings: { get(path: string): unknown } | null): Record<string, string> {
+    try {
+      const v = settings?.get('task.agentModelOverrides');
+      if (v && typeof v === 'object' && !Array.isArray(v)) {
+        const out: Record<string, string> = {};
+        for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+          if (typeof val === 'string') out[k] = val;
+        }
+        return out;
+      }
+    } catch {
+      /* ignore */
+    }
+    return {};
   }
 
   /** Tools available to the session (for per-tool approval). Live host merges

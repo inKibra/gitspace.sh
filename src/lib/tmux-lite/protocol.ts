@@ -430,6 +430,7 @@ export type Command =
   | { type: 'agent-oauth-respond'; flowId: string; value: string }
   | { type: 'agent-settings-schema' }
   | { type: 'agent-tools'; target: AgentWorkspaceTargetPayload; agentSessionId: string }
+  | { type: 'agent-list-agents'; target: AgentWorkspaceTargetPayload }
   | { type: 'agent-compact'; target: AgentWorkspaceTargetPayload; agentSessionId: string }
   | { type: 'agent-cycle-role'; target: AgentWorkspaceTargetPayload; agentSessionId: string; direction: 'forward' | 'backward' }
   | { type: 'agent-apply-role'; target: AgentWorkspaceTargetPayload; agentSessionId: string; role: string }
@@ -547,6 +548,7 @@ export type Response =
   | { type: 'agent-settings'; settings: Array<{ path: string; label: string; kind: 'boolean' | 'enum'; value: string | boolean | null; options?: string[] }> }
   | { type: 'agent-settings-schema'; schema: import('../../agents/agent-runtime-types.js').AgentSettingSchemaItem[] }
   | { type: 'agent-tools'; tools: import('../../agents/agent-runtime-types.js').AgentToolInfo[] }
+  | { type: 'agent-list-agents'; agents: import('../../agents/agent-runtime-types.js').AgentDefinitionInfo[] }
   | { type: 'agent-history'; entries: import('../../agents/agent-runtime-types.js').AgentHistoryEntry[] }
   | { type: 'agent-tree'; nodes: import('../../agents/agent-runtime-types.js').AgentTreeNode[] }
   | { type: 'artifact-list'; entries: import('../../core/artifacts.js').ArtifactListEntry[] }

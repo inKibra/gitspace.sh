@@ -22,7 +22,7 @@ import type { WideEventFilter } from '../types/events.js';
 import type { SessionLinearIssueSummary, WorkspaceSource } from '../types/lifecycle.js';
 import type { ConfirmStepResult, SpacesBundle } from '../types/bundle.js';
 import type { AgentStateUpdateDelta, WorkspaceAgentState } from '../lib/tmux-lite/agent-event-manager.js';
-import type { AgentControlInfo, AgentHistoryEntry, AgentSettingItem, AgentSettingSchemaItem, AgentToolInfo, AgentTreeNode } from '../agents/agent-runtime-types.js';
+import type { AgentControlInfo, AgentDefinitionInfo, AgentHistoryEntry, AgentSettingItem, AgentSettingSchemaItem, AgentToolInfo, AgentTreeNode } from '../agents/agent-runtime-types.js';
 
 import type { ChainStackStatus, GoalChain, GoalRecord, GoalUpdateInput, WorkspacePhaseChangePreview } from '../types/goals.js';
 export type BackendKey = string;
@@ -284,6 +284,8 @@ export interface SessionBackend {
   getAgentSettingsSchema?(): Promise<AgentSettingSchemaItem[]>;
   /** Tools available to a session (per-tool approval). */
   getAgentTools?(workspaceId: string, agentSessionId: string): Promise<AgentToolInfo[]>;
+  /** Discovered subagent definitions for a workspace (AGENTS settings section). */
+  listAgentDefinitions?(workspaceId: string): Promise<AgentDefinitionInfo[]>;
   /** Compact a session's context. */
   compactAgentSession?(workspaceId: string, agentSessionId: string): Promise<boolean>;
   /** Cycle the active model through configured roles. */

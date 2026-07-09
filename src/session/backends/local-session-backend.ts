@@ -88,7 +88,7 @@ import {
   type WorkspaceDeleteErrorCode,
 } from '../../types/errors.js';
 import type { TerminalSnapshot } from '../backend.js';
-import type { AgentControlInfo, AgentHistoryEntry, AgentSettingItem, AgentSettingSchemaItem, AgentToolInfo, AgentTreeNode } from '../../agents/agent-runtime-types.js';
+import type { AgentControlInfo, AgentDefinitionInfo, AgentHistoryEntry, AgentSettingItem, AgentSettingSchemaItem, AgentToolInfo, AgentTreeNode } from '../../agents/agent-runtime-types.js';
 import type { AgentStateUpdateDelta, WorkspaceAgentState } from '../../lib/tmux-lite/agent-event-manager.js';
 import type { AgentWorkspaceTargetPayload } from '../../lib/tmux-lite/protocol.js';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
@@ -1753,6 +1753,14 @@ export class LocalSessionBackend implements SessionBackend {
     if (tmuxResponse.type === 'agent-tools') return tmuxResponse.tools;
     if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
     throw new Error('Unexpected tools response');
+  }
+
+  async listAgentDefinitions(workspaceId: string): Promise<AgentDefinitionInfo[]> {
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'agent-list-agents', target });
+    if (tmuxResponse.type === 'agent-list-agents') return tmuxResponse.agents;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected list-agents response');
   }
 
   async compactAgentSession(workspaceId: string, agentSessionId: string): Promise<boolean> {

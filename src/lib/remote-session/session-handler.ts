@@ -1687,6 +1687,17 @@ export class RemoteSessionHandler {
         }, sendResponse);
         break;
 
+      case 'list_agent_definitions':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, {
+          type: 'agent-list-agents',
+          target: msg.target,
+        }, sendResponse);
+        break;
+
       case 'compact_agent_session':
         if (!canManage(session.accessType)) {
           await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });

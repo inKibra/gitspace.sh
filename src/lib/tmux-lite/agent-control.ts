@@ -571,6 +571,11 @@ export async function getAgentTools(target: AgentWorkspaceTarget, agentSessionId
   return defaultPiCoordinator.getTools(target, agentSessionId);
 }
 
+/** Discovered subagent definitions for a workspace (AGENTS settings section). */
+export async function listAgentDefinitions(target: AgentWorkspaceTarget): Promise<import('../../agents/agent-runtime-types.js').AgentDefinitionInfo[]> {
+  return defaultPiCoordinator.listAgents(target);
+}
+
 /** Compact a session's context. */
 export async function compactAgentSession(target: AgentWorkspaceTarget, agentSessionId: string): Promise<boolean> {
   return defaultPiCoordinator.compactSession(target, agentSessionId);

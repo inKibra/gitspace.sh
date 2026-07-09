@@ -11,7 +11,7 @@ import { AgentPaneHeader } from './AgentPaneHeader.web.js';
 import { AgentSettingsPanel } from './AgentSettingsPanel.web.js';
 import { AgentHistoryPanel } from './AgentHistoryPanel.web.js';
 import type { Block } from '../blocks/index.js';
-import type { AgentAuthProvider, AgentControlInfo, AgentHistoryEntry, AgentModelInfo, AgentOAuthEvent, AgentSettingSchemaItem, AgentToolInfo, AgentTreeNode, SessionStatus } from '../agents/agent-runtime-types.js';
+import type { AgentAuthProvider, AgentControlInfo, AgentDefinitionInfo, AgentHistoryEntry, AgentModelInfo, AgentOAuthEvent, AgentSettingSchemaItem, AgentToolInfo, AgentTreeNode, SessionStatus } from '../agents/agent-runtime-types.js';
 import type { AttachedPaneState } from '../session/types.js';
 import type { BackendKey } from '../session/backend.js';
 import type { RemoteSessionPtyBackend } from '../session/useRemoteSessionClient.js';
@@ -224,13 +224,15 @@ export function PaneTerminalPanel({
   const [authProviders, setAuthProviders] = useState<AgentAuthProvider[]>([]);
   const [agentSchema, setAgentSchema] = useState<AgentSettingSchemaItem[]>([]);
   const [agentTools, setAgentTools] = useState<AgentToolInfo[]>([]);
+  const [agentDefs, setAgentDefs] = useState<AgentDefinitionInfo[]>([]);
   const [settingsLoading, setSettingsLoading] = useState(false);
   const loadSettingsPanel = useCallback(() => {
     setSettingsLoading(true);
     const p = backend?.getAgentAuthProviders?.call(backend).then(setAuthProviders).catch(() => undefined);
     const s = backend?.getAgentSettingsSchema?.call(backend).then(setAgentSchema).catch(() => undefined);
     const t = wsId && agentSessionId ? backend?.getAgentTools?.call(backend, wsId, agentSessionId).then(setAgentTools).catch(() => undefined) : undefined;
-    void Promise.all([p, s, t]).finally(() => setSettingsLoading(false));
+    const a = wsId ? backend?.listAgentDefinitions?.call(backend, wsId).then(setAgentDefs).catch(() => undefined) : undefined;
+    void Promise.all([p, s, t, a]).finally(() => setSettingsLoading(false));
   }, [backend, wsId, agentSessionId]);
   const openSettings = useCallback(() => { setSettingsOpen(true); loadSettingsPanel(); }, [loadSettingsPanel]);
   const handleSetApiKey = useCallback(async (provider: string, key: string) => {
@@ -410,6 +412,7 @@ export function PaneTerminalPanel({
           control={control}
           schema={agentSchema}
           tools={agentTools}
+          agents={agentDefs}
           providers={authProviders}
           loading={settingsLoading}
           oauth={oauthFlow}
