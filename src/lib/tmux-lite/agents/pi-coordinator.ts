@@ -27,14 +27,23 @@ import {
 import type { AgentEvent } from '../../../agents/backend.js';
 import { getVirtualTerminal } from '../virtual-session-registry.js';
 import type { VirtualTerminal } from './virtual-terminal.js';
-import type { AgentSessionHost, SessionHostSinks } from './session-host.js';
+import type { AgentSessionHost, SessionHostBoot, SessionHostSinks } from './session-host.js';
 import {
   LocalSessionHost,
   THINKING_LEVELS,
   APPROVAL_MODES,
   DEFAULT_TOOL_TIERS,
 } from './local-session-host.js';
+import { WorkerSessionHost } from './worker/worker-session-host.js';
 import { writeTraceLog } from '../../../utils/trace-log.js';
+
+/** Worker mode: one child process per agent session (own AsyncJobManager,
+ *  isolated SDK process-globals, crash containment). Off by default until
+ *  parity is verified; flip via GITSPACE_AGENT_WORKERS=1. */
+function agentWorkersEnabled(): boolean {
+  const v = process.env.GITSPACE_AGENT_WORKERS?.trim().toLowerCase();
+  return v === '1' || v === 'true' || v === 'on';
+}
 
 // Dynamic imports: oh-my-pi has module-level side effects (postmortem signal
 // handlers, provider registration) that conflict with OpenTUI when loaded eagerly.
@@ -515,14 +524,9 @@ export class PiCoordinator {
    */
   async createAgentSession(target: PiWorkspaceTarget, title?: string): Promise<PiAgentSessionSummary[]> {
     let bootedSessionId: string | null = null;
-    const host = await LocalSessionHost.boot(
-      target,
-      { mode: 'create', title },
-      this.createHostSinks(target, () => bootedSessionId),
-      { enableUI: !!this.hostUIEmitter },
-    );
+    const host = await this.bootHost(target, { mode: 'create', title }, () => bootedSessionId);
     bootedSessionId = host.sessionId;
-    host.title = title;
+    host.setTitle(title);
 
     const sessionId = host.sessionId;
     this.hosts.set(sessionId, host);
@@ -795,6 +799,42 @@ export class PiCoordinator {
   // Private helpers
   // -------------------------------------------------------------------------
 
+  /** Boot a session host — a worker child process when GITSPACE_AGENT_WORKERS
+   *  is on, else in-process. Same LocalSessionHost logic either way. */
+  private async bootHost(
+    target: PiWorkspaceTarget,
+    boot: SessionHostBoot,
+    getSessionId: () => string | null,
+  ): Promise<AgentSessionHost> {
+    const sinks = this.createHostSinks(target, getSessionId);
+    const enableUI = !!this.hostUIEmitter;
+    if (agentWorkersEnabled()) {
+      return WorkerSessionHost.boot(target, boot, sinks, {
+        enableUI,
+        onUnexpectedExit: (sessionId, detail) => this.handleWorkerExit(target, sessionId, detail),
+      });
+    }
+    return LocalSessionHost.boot(target, boot, sinks, { enableUI });
+  }
+
+  /** A worker died without being asked to — drop its bookkeeping and tell
+   *  clients so the session shows an error instead of hanging busy. */
+  private handleWorkerExit(target: PiWorkspaceTarget, sessionId: string, detail: string): void {
+    const relay = this.terminalRelays.get(sessionId);
+    if (relay) {
+      relay.stop();
+      this.terminalRelays.delete(sessionId);
+    }
+    this.hosts.delete(sessionId);
+    this.sessionWorkspaceIds.delete(sessionId);
+    for (const [dialogId, dialogSessionId] of this.dialogSessions) {
+      if (dialogSessionId === sessionId) this.dialogSessions.delete(dialogId);
+    }
+    console.error(`[pi-coordinator] ${detail} (session ${sessionId})`);
+    this.eventHandler?.(target, { type: 'error', sessionId, error: detail });
+    this.eventHandler?.(target, { type: 'status', sessionId, payload: { type: 'idle', event: { reason: 'worker-exit' } } });
+  }
+
   private createHostSinks(target: PiWorkspaceTarget, getSessionId: () => string | null): SessionHostSinks {
     return {
       onEvent: (event) => {
@@ -864,11 +904,10 @@ export class PiCoordinator {
           );
         }
 
-        const host = await LocalSessionHost.boot(
+        const host = await this.bootHost(
           target,
           { mode: 'open', sessionFilePath: match.path },
-          this.createHostSinks(target, () => agentSessionId),
-          { enableUI: !!this.hostUIEmitter },
+          () => agentSessionId,
         );
         if (host.sessionId !== agentSessionId) {
           await host.dispose();
@@ -876,7 +915,7 @@ export class PiCoordinator {
             `Pi session file '${match.path}' reopened as '${host.sessionId}', expected '${agentSessionId}'.`,
           );
         }
-        host.title = match.title ?? match.firstMessage ?? undefined;
+        host.setTitle(match.title ?? match.firstMessage ?? undefined);
 
         this.hosts.set(agentSessionId, host);
         this.sessionWorkspaceIds.set(agentSessionId, target.workspaceId);

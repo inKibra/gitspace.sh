@@ -115,6 +115,8 @@ export interface AgentSessionHost {
   resolveDialog(response: HostUIDialogResponse): Promise<boolean>;
   /** Mirror of composer text so extensions' getEditorText() stays accurate. */
   setEditorTextFromClient(text: string): void;
+  /** Display title used in message-event payloads. */
+  setTitle(title: string | undefined): void;
 
   // --- interactive terminal ------------------------------------------------
   /** Boot pi-tui InteractiveMode rendering to onTerminalOutput. */

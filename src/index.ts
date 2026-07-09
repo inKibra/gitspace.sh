@@ -32,6 +32,11 @@ if (process.argv.includes('--internal-process-runner')) {
 	await new Promise(() => {});
 }
 
+if (process.argv.includes('--internal-agent-worker')) {
+	await import('./lib/tmux-lite/agents/worker/agent-worker.js');
+	await new Promise(() => {});
+}
+
 // ============================================================================
 // Imports
 // ============================================================================

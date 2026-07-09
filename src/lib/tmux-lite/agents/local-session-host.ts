@@ -719,6 +719,10 @@ export class LocalSessionHost implements AgentSessionHost {
     this.hostUIBridge.setEditorTextFromClient(this.sessionId, text);
   }
 
+  setTitle(title: string | undefined): void {
+    this.title = title;
+  }
+
   // --- interactive terminal --------------------------------------------------
 
   async startTerminal(cols: number, rows: number): Promise<void> {
@@ -980,6 +984,6 @@ export class LocalSessionHost implements AgentSessionHost {
     };
   }
 
-  /** Display title used in message-event payloads; set by the coordinator. */
-  title: string | undefined;
+  /** Display title used in message-event payloads; set via setTitle. */
+  private title: string | undefined;
 }
