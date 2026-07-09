@@ -135,7 +135,7 @@ function registerSpaceArtifactsCommands(space: Command): void {
       if (r.type !== 'artifact-share-mint') { logger.error('Unexpected response'); process.exit(1); }
       logger.success('Share link (anyone with the URL can read this one file):');
       logger.log(r.url);
-      logger.info(`Expires ${new Date(r.expiresAt).toLocaleString()} · revoke: gssh space artifacts share-revoke ${r.tokenId}`);
+      logger.info(`Expires ${new Date(r.expiresAt).toLocaleString()} · revoke: space artifacts share-revoke ${r.tokenId}`);
     }));
 
   artifacts
