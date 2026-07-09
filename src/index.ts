@@ -43,10 +43,7 @@ import { logger } from './utils/logger.js';
 import { getCrashLogPath, writeCrashLog } from './utils/crash-log.js';
 import { SpacesError } from './types/errors.js';
 import { installOwnerSyncWriteHandler } from './core/owner-sync.js';
-import { findReachableRelayCandidate } from './core/relay-discovery.js';
-import { keypairExists, loadKeypair } from './core/identity.js';
 import { promptPassword } from './utils/prompts.js';
-import type { Identity } from './types/identity.js';
 
 // ============================================================================
 // Version resolution
@@ -127,144 +124,13 @@ if (isWorkspaceScopedSession() && !isAllowedWorkspaceSessionCommand(args)) {
 	process.exit(1);
 }
 
-// Detect TUI mode: no args, or only --relay / --ignore-keychain-and-skip-secrets
-let relayUrlFromArgs: string | undefined;
-let ignoreKeychainAndSkipSecrets = false;
-let hasOnlyTuiOptions = true;
-
-async function resolveRemoteTuiIdentity(options: {
-	relayRequestedExplicitly: boolean;
-	relayLabel: string;
-}): Promise<Identity | null> {
-	if (!keypairExists()) {
-		if (options.relayRequestedExplicitly) {
-			throw new SpacesError(
-				'Remote relay access requires a local device identity. Run `gssh user auth login` or create one before using `gssh --relay`.',
-				'USER_ERROR',
-				1,
-			);
-		}
-		return null;
-	}
-
-	const passwordFromEnv = process.env.GITSPACE_IDENTITY_PASSWORD;
-	if (passwordFromEnv) {
-		try {
-			return await loadKeypair(passwordFromEnv);
-		} catch (error) {
-			if (options.relayRequestedExplicitly) {
-				throw error instanceof SpacesError
-					? error
-					: new SpacesError('Failed to unlock local device identity.', 'USER_ERROR', 1);
-			}
-			logger.warning(
-				`Could not unlock local device identity for remote machines (${error instanceof Error ? error.message : String(error)}). Falling back to an interactive prompt.`,
-			);
-		}
-	}
-
-	if (!(process.stdin.isTTY && process.stdout.isTTY)) {
-		if (options.relayRequestedExplicitly) {
-			throw new SpacesError(
-				'Remote relay access requires unlocking your local device identity in an interactive terminal.',
-				'USER_ERROR',
-				1,
-			);
-		}
-		return null;
-	}
-
-	logger.log('');
-	logger.info(`Remote machines are available via ${options.relayLabel}.`);
-	const password = await promptPassword('Enter password to unlock your local device identity (leave blank to stay local):');
-	if (!password) {
-		if (options.relayRequestedExplicitly) {
-			throw new SpacesError('Cancelled', 'USER_ERROR', 1);
-		}
-		logger.dim('Starting in local-only mode. Use `gssh --relay <url>` to try again later.');
-		return null;
-	}
-
-	try {
-		return await loadKeypair(password);
-	} catch (error) {
-		if (options.relayRequestedExplicitly) {
-			throw error instanceof SpacesError
-				? error
-				: new SpacesError('Failed to unlock local device identity.', 'USER_ERROR', 1);
-		}
-		logger.warning(
-			`Could not unlock local device identity for remote machines (${error instanceof Error ? error.message : String(error)}). Starting in local-only mode.`,
-		);
-		return null;
-	}
+// Main dispatch — the CLI is the only entrypoint (the TUI was removed; the
+// interactive surface is the web app, served via `gssh machine serve start`).
+const { createProgram } = await import('./cli/index.js');
+const program = createProgram(VERSION);
+if (process.argv.length === 2) {
+	// Bare `gssh` — show help rather than doing nothing.
+	program.outputHelp();
+	process.exit(0);
 }
-
-for (let i = 0; i < args.length; i += 1) {
-	const arg = args[i];
-	if (arg === '--relay') {
-		const value = args[i + 1];
-		if (!value || value.startsWith('--')) {
-			hasOnlyTuiOptions = false;
-			break;
-		}
-		relayUrlFromArgs = value;
-		i += 1;
-		continue;
-	}
-
-	if (arg === '--ignore-keychain-and-skip-secrets') {
-		ignoreKeychainAndSkipSecrets = true;
-		continue;
-	}
-
-	hasOnlyTuiOptions = false;
-	break;
-}
-
-if (process.argv.length === 2 || hasOnlyTuiOptions) {
-	// ---- TUI mode ----
-	const { checkFirstTimeSetup } = await import('./cli/setup.js');
-	const { launchTUI } = await import('./tui/index.js');
-
-	checkFirstTimeSetup()
-		.then(async () => {
-			const relayCandidate = relayUrlFromArgs
-				? { url: relayUrlFromArgs, label: relayUrlFromArgs, source: 'explicit' as const }
-				: await findReachableRelayCandidate({ includeLocalRelay: false });
-
-			const remoteIdentity = relayCandidate
-				? await resolveRemoteTuiIdentity({
-					relayRequestedExplicitly: Boolean(relayUrlFromArgs),
-					relayLabel: relayCandidate.label,
-				})
-				: null;
-
-			const relayConfig = relayCandidate && remoteIdentity
-				? {
-					url: relayCandidate.url,
-					label: relayCandidate.label,
-					source: relayCandidate.source,
-					autoConnected: !relayUrlFromArgs,
-				}
-				: undefined;
-
-			return launchTUI(relayConfig, {
-				ignoreKeychainAndSkipSecrets,
-				remoteIdentity,
-			});
-		})
-		.catch((error) => {
-			if (error instanceof SpacesError) {
-				logger.error(error.message);
-				process.exit(error.exitCode);
-			}
-			logger.error(`Failed to launch TUI: ${error instanceof Error ? error.message : 'Unknown error'}`);
-			process.exit(1);
-		});
-} else {
-	// ---- CLI mode ----
-	const { createProgram } = await import('./cli/index.js');
-	const program = createProgram(VERSION);
-	program.parse();
-}
+program.parse();
