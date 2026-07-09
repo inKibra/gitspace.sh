@@ -785,6 +785,10 @@ export class LocalSessionHost implements AgentSessionHost {
     }
   }
 
+  kill(): void {
+    void this.dispose().catch(() => undefined);
+  }
+
   // --- internals -----------------------------------------------------------
 
   private emitQueuedMessages(): void {

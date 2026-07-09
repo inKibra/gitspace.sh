@@ -38,11 +38,11 @@ import { WorkerSessionHost } from './worker/worker-session-host.js';
 import { writeTraceLog } from '../../../utils/trace-log.js';
 
 /** Worker mode: one child process per agent session (own AsyncJobManager,
- *  isolated SDK process-globals, crash containment). Off by default until
- *  parity is verified; flip via GITSPACE_AGENT_WORKERS=1. */
+ *  isolated SDK process-globals, crash containment). ON by default;
+ *  GITSPACE_AGENT_WORKERS=0 falls back to in-process hosting. */
 function agentWorkersEnabled(): boolean {
   const v = process.env.GITSPACE_AGENT_WORKERS?.trim().toLowerCase();
-  return v === '1' || v === 'true' || v === 'on';
+  return !(v === '0' || v === 'false' || v === 'off');
 }
 
 // Dynamic imports: oh-my-pi has module-level side effects (postmortem signal
@@ -798,6 +798,23 @@ export class PiCoordinator {
   // -------------------------------------------------------------------------
   // Private helpers
   // -------------------------------------------------------------------------
+
+  /** Daemon shutdown: synchronously tear down every live host so agent worker
+   *  processes die WITH the daemon (no orphaned SDK sessions). Safe from
+   *  signal handlers — no awaits. */
+  shutdownHosts(): void {
+    for (const [sessionId, host] of this.hosts) {
+      try {
+        host.kill();
+      } catch (err) {
+        console.error(`[pi-coordinator] kill failed for ${sessionId}:`, err);
+      }
+    }
+    this.hosts.clear();
+    this.sessionWorkspaceIds.clear();
+    this.terminalRelays.clear();
+    this.dialogSessions.clear();
+  }
 
   /** Boot a session host — a worker child process when GITSPACE_AGENT_WORKERS
    *  is on, else in-process. Same LocalSessionHost logic either way. */

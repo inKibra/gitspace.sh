@@ -58,6 +58,7 @@ import {
   createAgentSession,
   ensureAgentControlInitialized,
   getAgentControlSnapshot,
+  shutdownAgentHosts,
   getKnownAgentSessions,
   listLiveAgentSessions,
   promptAgentSession,
@@ -1045,6 +1046,11 @@ function shutdownServer(options: { markRunningSessionsCrashed?: boolean } = {}):
     if (session.virtualTerminal) removeVirtualTerminal(session.info.id);
   }
   sessions.clear();
+
+  // Agent worker children die with the daemon (shutdown msg + SIGTERM; their
+  // SDK postmortem handlers run cleanup). SIGKILLed daemons are covered by the
+  // workers' IPC-disconnect + ppid watchdogs instead.
+  try { shutdownAgentHosts(); } catch {}
 
   stopListener(routerListener);
   safeUnlink(PID_FILE);

@@ -298,6 +298,23 @@ export class WorkerSessionHost implements AgentSessionHost {
     }
   }
 
+  /** Signal-handler-safe teardown: ask nicely, then SIGTERM. The worker's SDK
+   *  postmortem handlers run cleanup and exit; the ppid watchdog + IPC
+   *  disconnect cover the SIGKILL/crash cases. */
+  kill(): void {
+    this.disposed = true;
+    try {
+      this.proc.send({ t: 'shutdown' } satisfies WorkerRequest);
+    } catch {
+      /* channel already gone */
+    }
+    try {
+      this.proc.kill();
+    } catch {
+      /* already dead */
+    }
+  }
+
   // --- internals -----------------------------------------------------------
 
   private rpc(method: WorkerRpcMethod, args: unknown[], timeoutMs = RPC_TIMEOUT_MS): Promise<unknown> {

@@ -125,10 +125,20 @@ process.on('message', (raw: unknown) => {
 });
 
 // If the daemon dies, the IPC channel closes — exit rather than orphan the
-// session process (PTY children die with us via process-group teardown).
+// session process.
 process.on('disconnect', () => {
   console.error('[agent-worker] daemon disconnected; exiting');
   process.exit(1);
 });
+
+// Belt-and-suspenders for a SIGKILLed/crashed daemon where 'disconnect' never
+// fires: once reparented to init/subreaper, we're an orphan — exit.
+const initialPpid = process.ppid;
+setInterval(() => {
+  if (process.ppid !== initialPpid) {
+    console.error(`[agent-worker] daemon gone (ppid ${initialPpid} -> ${process.ppid}); exiting`);
+    process.exit(1);
+  }
+}, 5000);
 
 console.log(`[agent-worker] started pid=${process.pid}`);

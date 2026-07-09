@@ -77,6 +77,10 @@ export interface AgentSessionHost {
   // --- lifecycle ---------------------------------------------------------
   /** Tear down interactive mode, unsubscribe, dispose the SDK session. */
   dispose(): Promise<void>;
+  /** Synchronous best-effort teardown for daemon shutdown paths that cannot
+   *  await (signal handlers). Worker mode: SIGTERM the child (its SDK
+   *  postmortem handlers run cleanup + exit). */
+  kill(): void;
 
   // --- conversation ------------------------------------------------------
   /**

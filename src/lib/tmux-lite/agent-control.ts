@@ -615,6 +615,14 @@ export function setAgentHostUIEmitter(emitter: HostUIBridgeEmitter | null): void
 }
 
 /**
+ * Daemon shutdown: kill every live agent session host (worker child
+ * processes die with the daemon). Signal-handler safe.
+ */
+export function shutdownAgentHosts(): void {
+  defaultPiCoordinator.shutdownHosts();
+}
+
+/**
  * Route a dialog response from a client to the pending SDK Promise.
  */
 export function resolveAgentDialogResponse(response: HostUIDialogResponse): Promise<boolean> {
