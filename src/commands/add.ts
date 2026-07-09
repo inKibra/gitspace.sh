@@ -525,7 +525,9 @@ export async function addWorkspace(
     existsRemotely
   );
 
-  const phase = options.status ?? 'code';
+  // New workspaces start in PLAN (author the spec first) unless an explicit
+  // --status was given. A bound planned goal (below) may set its own phase.
+  const phase = options.status ?? 'plan';
   setWorkspaceStatus(currentProject, workspaceName, phase);
   let boundGoal: ReturnType<typeof bindPlannedGoalForWorkspace> = null;
   try {

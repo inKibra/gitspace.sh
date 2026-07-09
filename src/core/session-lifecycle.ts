@@ -17,6 +17,7 @@ import { fetchUnstartedIssues, getLinearConfig } from './linear.js';
 import { deleteProjectCore } from './workspace.js';
 import { syncBundleWorkspaceState } from './bundle-refresh.js';
 import { bindPlannedGoalForWorkspace } from './goal-chain.js';
+import { setWorkspaceStatus } from './workspace-metadata.js';
 import { detectBundleInRepo, loadBundleFromPath } from './bundle.js';
 import { applyProjectBundleState } from './project-lifecycle.js';
 import { SpacesError } from '../types/errors.js';
@@ -542,7 +543,11 @@ export async function createWorkspaceForSession(
     );
     writeFileSync(join(issueArtifactDir, 'issue.md'), markdown, 'utf-8');
   }
-  bindPlannedGoalForWorkspace(projectName, workspaceName);
+  const boundGoal = bindPlannedGoalForWorkspace(projectName, workspaceName);
+  // New workspaces start in PLAN (author the spec first). A bound planned goal
+  // dictates its own phase; otherwise default to plan (was implicitly 'code'
+  // via the display fallback).
+  setWorkspaceStatus(projectName, workspaceName, boundGoal?.phase ?? 'plan');
 
   // Loop 2: seed a real goal from the issue (same as CLI addWorkspace) — the
   // github sourceRef links it back so the guide/PR can close the issue.
