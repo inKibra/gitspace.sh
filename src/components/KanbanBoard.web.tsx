@@ -460,11 +460,10 @@ function PlannedGoalCard({ goal, onSelectGoal, onChainFocus, onOpenOrder, relate
           ? <div className="flex flex-wrap items-center gap-1 mt-1.5"><PmChip label={chip.label} tone={chip.tone} /></div>
           : null;
       })()}
-      {/* footer — machine chip (mock plan cards carry the card footer too) */}
-      <div className="mt-2 flex items-center gap-1.5 border-t border-[var(--gs-border-muted)] pt-1.5 text-[10.5px] text-[var(--gs-text-dim)]">
-        <span className="h-[6px] w-[6px] rounded-full bg-[var(--gs-success)]" />
-        local
-      </div>
+      {/* No machine footer: a planned goal is a spec, not a running workspace —
+          it has no machine presence and no live status (the top dot already
+          conveys planned/blocked). The old hardcoded green-dot + "local" was a
+          mock leftover that looked like a different backend. */}
     </div>
   );
 }
