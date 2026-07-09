@@ -17,7 +17,7 @@ const TEST_PID_FILE = "/tmp/tmux-lite-test.pid";
 const SERVER_SCRIPT = join(import.meta.dir, "server.ts");
 const SESSION_NAME = "proc:wide-events:sample-events:1";
 const SAMPLE_SCRIPT = join(import.meta.dir, "../../../scripts/sample-events.ts");
-const BUN_PATH = "/opt/homebrew/bin/bun";
+const BUN_PATH = process.execPath;
 
 function getTestSessionSocketPath(id: string): string {
   return join(TEST_SESSION_DIR, `tmux-lite-${id}.sock`);

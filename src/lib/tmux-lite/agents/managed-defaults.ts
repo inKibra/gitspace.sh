@@ -3,7 +3,7 @@ import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Skill } from '@oh-my-pi/pi-coding-agent/extensibility/skills';
 
-const MANAGED_SKILL_NAMES = [
+export const MANAGED_SKILL_NAMES = [
   'space-goal',
   'space-chain',
   'space-review',

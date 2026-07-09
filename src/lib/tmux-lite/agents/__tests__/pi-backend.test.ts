@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { PiBackend } from '../pi-backend.js';
 import { PiCoordinator } from '../pi-coordinator.js';
 import { ensureManagedPiBinScripts, getManagedPiBinDir, getManagedPiExtensionPaths, getPiAgentDir, setupPiEnvironment } from '../pi-runtime.js';
-import { getManagedSessionBootstrap, getManagedSkillPaths, loadManagedDefaultSkills, mergeManagedSkills } from '../managed-defaults.js';
+import { getManagedSessionBootstrap, getManagedSkillPaths, loadManagedDefaultSkills, mergeManagedSkills, MANAGED_SKILL_NAMES } from '../managed-defaults.js';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -122,27 +122,13 @@ describe('pi-runtime', () => {
 
   it('loads managed GitSpace default skills', async () => {
     const paths = getManagedSkillPaths();
-    expect(paths).toHaveLength(7);
-    expect(paths).toEqual([
-      expect.stringContaining('space-goal/SKILL.md'),
-      expect.stringContaining('space-chain/SKILL.md'),
-      expect.stringContaining('space-review/SKILL.md'),
-      expect.stringContaining('space-notes/SKILL.md'),
-      expect.stringContaining('space-process-config/SKILL.md'),
-      expect.stringContaining('space-run-process/SKILL.md'),
-      expect.stringContaining('space-event-logs/SKILL.md'),
-    ]);
+    expect(paths).toHaveLength(MANAGED_SKILL_NAMES.length);
+    expect(paths).toEqual(
+      MANAGED_SKILL_NAMES.map((name) => expect.stringContaining(`${name}/SKILL.md`)),
+    );
 
     const skills = await loadManagedDefaultSkills();
-    expect(skills.map((skill) => skill.name)).toEqual([
-      'space-goal',
-      'space-chain',
-      'space-review',
-      'space-notes',
-      'space-process-config',
-      'space-run-process',
-      'space-event-logs',
-    ]);
+    expect(skills.map((skill) => skill.name)).toEqual([...MANAGED_SKILL_NAMES]);
     expect(skills.every((skill) => skill.description.length > 0)).toBe(true);
   });
 
