@@ -743,7 +743,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   const allWorkspaceEntries = workspaceRuntime.workspaces;
 
   /** Global chrome bar (mock topbar + ActivityStrip) — shared by board + shell. */
-  const CHIP_COLOR: Record<string, string> = { red: 'var(--gs-danger)', orange: 'var(--gs-warning)', blue: 'var(--gs-info)', dim: 'var(--gs-text-ghost)' };
+  const CHIP_COLOR: Record<string, string> = { green: 'var(--gs-success)', red: 'var(--gs-danger)', orange: 'var(--gs-warning)', blue: 'var(--gs-info)', dim: 'var(--gs-text-ghost)' };
   // The top strip is a tab bar of ACTIVE workspaces, not every workspace in
   // every project. Active = a live terminal, an open agent (primaryColor !=
   // 'dim' means an agent session is open/erroring), or the workspace you're
