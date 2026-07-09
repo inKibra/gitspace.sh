@@ -2051,9 +2051,13 @@ export class RemoteSessionHandler {
     sendResponse: (data: Uint8Array) => void,
   ): Promise<void> {
     const traceStartMs = Date.now();
+    // Include the review sub-op so slow/frequent review-requests are identifiable
+    // in the trace ring (they otherwise all read as commandType "review-request").
+    const commandOp = tmuxCommand.type === 'review-request' ? tmuxCommand.operation?.op : undefined;
     writeTraceLog('machine-command-start', {
       requestId,
       commandType: tmuxCommand.type,
+      op: commandOp,
     });
     try {
       // The handler already validated tmux-lite availability during initialize().
@@ -2063,6 +2067,7 @@ export class RemoteSessionHandler {
       writeTraceLog('machine-command-tmux-response', {
         requestId,
         commandType: tmuxCommand.type,
+        op: commandOp,
         responseType: response.type,
         durationMs: Date.now() - traceStartMs,
       });
@@ -2074,6 +2079,7 @@ export class RemoteSessionHandler {
       writeTraceLog('machine-command-response-sent', {
         requestId,
         commandType: tmuxCommand.type,
+        op: commandOp,
         responseType: response.type,
         durationMs: Date.now() - traceStartMs,
       });
@@ -2082,6 +2088,7 @@ export class RemoteSessionHandler {
       writeTraceLog('machine-command-error', {
         requestId,
         commandType: tmuxCommand.type,
+        op: commandOp,
         durationMs: Date.now() - traceStartMs,
         error: message,
       });
