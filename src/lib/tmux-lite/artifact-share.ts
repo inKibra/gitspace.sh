@@ -93,7 +93,7 @@ function dependencyScopes(project: string, workspace: string, relPath: string): 
   return [];
 }
 
-export function mintShareLink(opts: {
+export async function mintShareLink(opts: {
   uri: string;
   ttlMs?: number;
   maxUses?: number;
@@ -101,7 +101,7 @@ export function mintShareLink(opts: {
   /** Serve the CURRENT branch state on every read instead of pinning the
    *  mount HEAD at mint. Default is pinned — a share is a capture. */
   live?: boolean;
-}): MintShareResult {
+}): Promise<MintShareResult> {
   const ctx = getActiveServeContext();
   if (!ctx) {
     throw new SpacesError('Share links need serve active (gssh machine serve start) — the link is served through your relay.', 'USER_ERROR', 1);
@@ -123,9 +123,9 @@ export function mintShareLink(opts: {
   if (!opts.live) {
     // Pin the mount HEAD: the link is a point-in-time capture. git makes
     // this nearly free; the bare repo keeps the objects reachable.
-    const { getProjectBaseDirSync, workspaceDirFor } = shareTargetDirsSync();
-    const wsDir = parsed.workspace === '@base' ? getProjectBaseDirSync(parsed.project) : workspaceDirFor(parsed.project, parsed.workspace);
-    const { mountHead } = requireTriggers();
+    const { getProjectBaseDir, workspaceDirFor } = await shareTargetDirs();
+    const wsDir = parsed.workspace === '@base' ? getProjectBaseDir(parsed.project) : workspaceDirFor(parsed.project, parsed.workspace);
+    const { mountHead } = await loadTriggers();
     pinnedCommit = mountHead(wsDir) ?? undefined;
   }
 
@@ -162,19 +162,18 @@ export function listShareLinks(): ShareLedgerEntry[] {
   return Object.values(readLedger().shares).sort((a, b) => b.createdAt - a.createdAt);
 }
 
-// Lazy requires: config/triggers pull daemon-adjacent graphs; keep the module
-// importable from light contexts.
-function shareTargetDirsSync(): { getProjectBaseDirSync: (p: string) => string; workspaceDirFor: (p: string, w: string) => string } {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const cfg = require('../../core/config.js') as { getProjectBaseDir: (p: string) => string; getProjectDir: (p: string) => string };
+// Lazy imports: config/triggers pull daemon-adjacent graphs; keep the module
+// importable from light contexts. These MUST be `await import()` — config.ts is
+// an async module (top-level await) and Bun rejects a sync require() of it.
+async function shareTargetDirs(): Promise<{ getProjectBaseDir: (p: string) => string; workspaceDirFor: (p: string, w: string) => string }> {
+  const cfg = await import('../../core/config.js');
   return {
-    getProjectBaseDirSync: cfg.getProjectBaseDir,
+    getProjectBaseDir: cfg.getProjectBaseDir,
     workspaceDirFor: (proj: string, ws: string) => join(cfg.getProjectDir(proj), 'workspaces', ws),
   };
 }
-function requireTriggers(): { mountHead: (dir: string) => string | null } {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  return require('../../core/triggers.js') as { mountHead: (dir: string) => string | null };
+async function loadTriggers(): Promise<{ mountHead: (dir: string) => string | null }> {
+  return await import('../../core/triggers.js');
 }
 
 // ── serving (the machine side of GET /artifact-share/<token>) ──────────────
@@ -260,6 +259,6 @@ export async function consumeShareRead(token: string, subPath?: string): Promise
 }
 
 /** Convenience for CLI/RPC mints: relPath within a workspace. */
-export function mintWorkspaceShare(project: string, workspace: string, relPath: string, opts: { ttlMs?: number; maxUses?: number; hostedDomain?: string | null } = {}): MintShareResult {
+export function mintWorkspaceShare(project: string, workspace: string, relPath: string, opts: { ttlMs?: number; maxUses?: number; hostedDomain?: string | null } = {}): Promise<MintShareResult> {
   return mintShareLink({ uri: formatArtifactUri(project, workspace, relPath), ...opts });
 }

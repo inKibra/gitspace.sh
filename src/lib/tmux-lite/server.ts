@@ -3826,7 +3826,7 @@ export async function dispatchCommand(cmd: Command): Promise<Response | null> {
               const { readHostConfig } = await import('../../commands/host.js');
               const hostConfig = readHostConfig();
               const hostedDomain = hostConfig?.subdomain ? `${hostConfig.subdomain}.gitspace.sh` : null;
-              const r = mintShareLink({ uri: cmd.uri, ttlMs: cmd.ttlMs, maxUses: cmd.maxUses, live: cmd.live, hostedDomain });
+              const r = await mintShareLink({ uri: cmd.uri, ttlMs: cmd.ttlMs, maxUses: cmd.maxUses, live: cmd.live, hostedDomain });
               res = { type: 'artifact-share-mint', url: r.url, tokenId: r.tokenId, expiresAt: r.expiresAt };
             } catch (e) {
               res = { type: 'error', message: `Failed to mint share link: ${e instanceof Error ? e.message : String(e)}` };
