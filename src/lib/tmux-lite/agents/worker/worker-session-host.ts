@@ -45,9 +45,18 @@ function getWorkerCommand(): string[] {
   // Mirror tmux-lite cli.getServerCommand(): compiled binaries re-exec
   // themselves with an internal flag; dev invokes the script directly.
   const isCompiled = !process.execPath.endsWith('bun');
-  return isCompiled
+  const cmd = isCompiled
     ? [process.execPath, '--internal-agent-worker']
     : ['bun', WORKER_SCRIPT];
+  // Own session per worker (Linux): an agent's group-wide signal (`kill 0`,
+  // ctrl-c semantics, stray `kill -- -pgid`) from a bash-tool child then hits
+  // ONLY that worker's session, never the daemon/relay/other sessions. A
+  // fresh spawn is never a group leader, so setsid execs in place — same pid,
+  // IPC fd and proc.kill() untouched.
+  if (process.platform === 'linux' && Bun.which('setsid')) {
+    return ['setsid', ...cmd];
+  }
+  return cmd;
 }
 
 interface PendingRpc {
