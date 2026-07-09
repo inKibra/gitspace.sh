@@ -112,6 +112,23 @@ function toGoalCacheKey(backendKey: string, projectName: string, goalId: string)
   return `${backendKey}:${projectName}:${goalId}`;
 }
 
+/**
+ * HTTP origin of the relay, for the report-a-problem fallback POST (a plain
+ * fetch that bypasses a wedged WebSocket). Mirrors the relay descriptor: the
+ * explicit VITE_RELAY_URL or the current host, ws→http/wss→https, `/ws` stripped.
+ */
+function relayHttpBase(): string | null {
+  try {
+    const raw = import.meta.env.VITE_RELAY_URL || `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`;
+    return raw
+      .replace(/^wss:/, 'https:')
+      .replace(/^ws:/, 'http:')
+      .replace(/\/ws\/?$/, '');
+  } catch {
+    return null;
+  }
+}
+
 const SCRIPT_ERROR_CODES = new Set([
   'SCRIPT_CANCELLED',
   'SCRIPT_FAILED',
@@ -783,6 +800,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
       {showReportProblem && (
         <ReportProblemDialog
           onClose={() => setShowReportProblem(false)}
+          relayHttpBase={relayHttpBase()}
           projectName={projectHomeName ?? (allProjects.length === 1 ? allProjects[0]?.name : undefined)}
           report={(() => {
             const b = activeBackendKey ? multi.getBackend(activeBackendKey) : null;

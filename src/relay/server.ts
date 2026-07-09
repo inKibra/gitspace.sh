@@ -562,6 +562,18 @@ function setupClientConnection(
  * Create the relay server
  */
 
+// Coarse rate limit for POST /report — spam/DoS guard on the public ingress
+// (payload is diagnostic data, redacted client-side). ~20 reports/min.
+let reportWindowStart = 0;
+let reportsThisWindow = 0;
+function consumeReportSlot(): boolean {
+  const now = Date.now();
+  if (now - reportWindowStart > 60_000) { reportWindowStart = now; reportsThisWindow = 0; }
+  if (reportsThisWindow >= 20) return false;
+  reportsThisWindow += 1;
+  return true;
+}
+
 // In-flight share reads (GET /artifact-share/<token> → machine WS round
 // trip). Keyed by requestId; bound to the machineId that must answer.
 // Module scope: the HTTP handler and the machine-message switch live in
@@ -671,6 +683,63 @@ export function createRelayServer(config: RelayServerConfig): Server<WebSocketDa
           ...stats,
           connectedClients: clientCount,
         });
+      }
+
+      // Dedicated problem-report ingress (docs/REPORT-A-PROBLEM.md). A fresh
+      // POST that bypasses the main WS (which may be wedged) and lands in the
+      // RELAY — a separate process that survives a frozen daemon. Spools to
+      // disk immediately and, when co-located with the machine (dev/self-
+      // hosted), enriches with the daemon's on-disk logs the frozen daemon
+      // can't hand over itself. Client redacts first; we redact again defensively.
+      if (url.pathname === "/report" && req.method === "POST") {
+        try {
+          if (!consumeReportSlot()) return new Response("Too many reports", { status: 429, headers: { 'Cache-Control': 'no-store' } });
+          const raw = await req.text();
+          if (raw.length > 8 * 1024 * 1024) return new Response("Report too large", { status: 413 });
+          let body: { note?: string; projectName?: string; clientBundle?: unknown };
+          try { body = JSON.parse(raw); } catch { return new Response("Invalid JSON", { status: 400 }); }
+
+          const fs = await import('node:fs');
+          const { join: pjoin } = await import('node:path');
+          const { getWorkspaceRoot } = await import('../core/paths.js');
+          const { redactDeep, redactText } = await import('../utils/redact.js');
+          const { readRecentTraceFromDisk } = await import('../utils/trace-log.js');
+          const { getSessionDir } = await import('../lib/tmux-lite/protocol.js');
+
+          // Freeze-safe server enrichment: read the daemon's on-disk logs
+          // directly (co-located only; empty when the relay isn't on the
+          // machine host). These bytes exist even if the daemon is frozen.
+          const readTail = (p: string, max = 256 * 1024): string => {
+            try { const t = fs.readFileSync(p, 'utf8'); return t.length > max ? t.slice(t.length - max) : t; } catch { return ''; }
+          };
+          const root = getWorkspaceRoot();
+          const serverDisk = {
+            daemonLogTail: redactText(readTail(pjoin(getSessionDir(), 'tmux-lite-daemon.log'))),
+            crashLogTail: redactText(readTail(pjoin(root, '.logs', 'gssh-crash.log'))),
+            traceTail: redactText(readRecentTraceFromDisk()),
+            note: 'server context read from disk by the relay (daemon may be unreachable/frozen)',
+          };
+
+          const report = redactDeep({
+            v: 1,
+            via: 'relay',
+            note: body.note ?? '',
+            projectName: body.projectName ?? null,
+            createdAt: new Date().toISOString(),
+            client: body.clientBundle ?? null,
+            serverDisk,
+          });
+
+          // Distinct dir so relay-ingested reports are obvious vs daemon-written.
+          const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+          const dir = pjoin(root, '.logs', 'reports', `${stamp}-relay`);
+          fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+          const path = pjoin(dir, 'report.json');
+          fs.writeFileSync(path, JSON.stringify(report, null, 2), { mode: 0o600 });
+          return Response.json({ ok: true, path }, { headers: { 'Cache-Control': 'no-store' } });
+        } catch {
+          return new Response("Report failed", { status: 500, headers: { 'Cache-Control': 'no-store' } });
+        }
       }
 
       // One-time browser enrollment endpoint. POST (runtime registration)

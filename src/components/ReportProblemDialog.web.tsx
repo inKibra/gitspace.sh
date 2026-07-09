@@ -9,9 +9,10 @@
 import { useMemo, useState, type ReactElement } from 'react';
 import { getDiagnosticsRing } from '../lib/client-diagnostics.web.js';
 import { getSessionContext } from '../lib/analytics.web.js';
+import { submitProblemReport } from '../lib/report-client.web.js';
 import { VERSION } from '../version.generated.js';
 
-export function ReportProblemDialog({ onClose, report, projectName, onStartFix }: {
+export function ReportProblemDialog({ onClose, report, projectName, onStartFix, relayHttpBase }: {
   onClose: () => void;
   /** Backend sink; undefined when no backend is connected. */
   report?: (note: string, clientBundle: unknown, opts?: { fileIssue?: boolean; projectName?: string }) => Promise<{ path: string; issueUrl?: string; issueNumber?: number }>;
@@ -19,11 +20,13 @@ export function ReportProblemDialog({ onClose, report, projectName, onStartFix }
   projectName?: string;
   /** 1-click: import the just-filed issue as a fix workspace (Loop 2). */
   onStartFix?: (issueNumber: number) => Promise<void>;
+  /** Relay HTTP origin for the fallback POST when the main WS is wedged. */
+  relayHttpBase?: string | null;
 }): ReactElement {
   const [note, setNote] = useState('');
   const [fileIssue, setFileIssue] = useState<boolean>(Boolean(projectName));
   const [state, setState] = useState<'edit' | 'sending' | 'done' | 'error'>('edit');
-  const [result, setResult] = useState<{ path?: string; issueUrl?: string; issueNumber?: number; error?: string }>({});
+  const [result, setResult] = useState<{ via?: 'daemon' | 'relay' | 'local'; path?: string; issueUrl?: string; issueNumber?: number; filename?: string; error?: string }>({});
   const [fixState, setFixState] = useState<'idle' | 'starting' | 'started'>('idle');
 
   const ring = useMemo(() => getDiagnosticsRing(), []);
@@ -56,10 +59,17 @@ export function ReportProblemDialog({ onClose, report, projectName, onStartFix }
   }, [ring]);
 
   const submit = async (): Promise<void> => {
-    if (!report) { setState('error'); setResult({ error: 'No machine connected — cannot file a report right now.' }); return; }
     setState('sending');
     try {
-      const r = await report(note, clientBundle, { fileIssue: fileIssue && Boolean(projectName), projectName });
+      // Resilient path: bounded RPC → relay POST → local save. Never hangs on
+      // a wedged WS, never loses the report.
+      const r = await submitProblemReport({
+        note,
+        clientBundle,
+        opts: { fileIssue: fileIssue && Boolean(projectName), projectName },
+        report,
+        relayHttpBase,
+      });
       setResult(r); setState('done');
     } catch (e) {
       setResult({ error: e instanceof Error ? e.message : String(e) }); setState('error');
@@ -83,11 +93,15 @@ export function ReportProblemDialog({ onClose, report, projectName, onStartFix }
 
         {state === 'done' ? (
           <div className="text-[12px] text-[var(--gs-text-muted)]">
-            <div className="mb-1 text-[var(--gs-success)]">Report saved.</div>
+            <div className="mb-1 text-[var(--gs-success)]">
+              {result.via === 'local' ? 'Report downloaded.' : result.via === 'relay' ? 'Report captured (via relay).' : 'Report saved.'}
+            </div>
+            {result.via === 'relay' && <div className="mb-1 text-[var(--gs-warning)]">The machine daemon didn’t respond, so the relay captured it from disk (server logs included).</div>}
+            {result.via === 'local' && <div className="mb-1 text-[var(--gs-warning)]">Couldn’t reach the machine or relay — the report was downloaded to your device so it isn’t lost. Send us the file, or retry when you’re reconnected.</div>}
             {result.issueUrl
               ? <div className="mb-1">GitHub issue: <a href={result.issueUrl} target="_blank" rel="noreferrer" className="underline text-[var(--gs-info)]">{result.issueUrl}</a></div>
-              : fileIssue && projectName && <div className="mb-1 text-[var(--gs-warning)]">Saved locally — couldn't file a GitHub issue (no repo/auth for {projectName}).</div>}
-            <div className="font-[family-name:var(--gs-font-mono)] text-[11px] break-all text-[var(--gs-text-dim)]">{result.path}</div>
+              : result.via === 'daemon' && fileIssue && projectName && <div className="mb-1 text-[var(--gs-warning)]">Saved locally — couldn't file a GitHub issue (no repo/auth for {projectName}).</div>}
+            <div className="font-[family-name:var(--gs-font-mono)] text-[11px] break-all text-[var(--gs-text-dim)]">{result.path ?? result.filename}</div>
             <div className="mt-3 flex items-center gap-2">
               {result.issueNumber !== undefined && onStartFix && fixState !== 'started' && (
                 <button
