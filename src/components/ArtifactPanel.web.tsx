@@ -155,7 +155,8 @@ export function ArtifactPanel({ path, read, listArtifacts, onShare }: {
 }): ReactElement {
   const [data, setData] = useState<ArtifactRead | null>(null);
   const [state, setState] = useState<'loading' | 'ready' | 'error'>('loading');
-  const isApp = path.endsWith('.gssh.html');
+  const isApp = path.endsWith('.gssh.html');   // mini-app: sandboxed + data feed
+  const isHtml = path.endsWith('.html');       // any HTML renders inline as a page
   const [appView, setAppView] = useState<'run' | 'source'>('run');
 
   useEffect(() => {
@@ -184,24 +185,35 @@ export function ArtifactPanel({ path, read, listArtifacts, onShare }: {
             ↗ Share
           </button>
         )}
-        {isApp && (
+        {isHtml && (
           <span className={`${onShare ? '' : 'ml-auto'} inline-flex border border-[var(--gs-border)] text-[10.5px]`}>
             {(['run', 'source'] as const).map((m) => (
               <button key={m} type="button" onClick={() => setAppView(m)}
                 className={`px-2 py-[2px] ${appView === m ? 'bg-[var(--gs-bg-active)] text-[var(--gs-text)]' : 'text-[var(--gs-text-dim)]'}`}>
-                {m === 'run' ? '▸ run' : 'source'}
+                {m === 'run' ? '▸ view' : 'source'}
               </button>
             ))}
           </span>
         )}
       </div>
-      <div className={`min-h-0 flex-1 overflow-auto ${isApp && appView === 'run' ? '' : 'p-3'}`}>
+      <div className={`min-h-0 flex-1 overflow-auto ${isHtml && appView === 'run' ? '' : 'p-3'}`}>
         {state === 'loading' ? (
           <div className="flex h-full items-center justify-center text-[var(--gs-text-dim)]">Loading…</div>
         ) : state === 'error' || !data ? (
           <div className="flex h-full items-center justify-center text-[var(--gs-danger)]">Failed to load {path}</div>
         ) : isApp && appView === 'run' ? (
           <MiniAppRun html={decodeBase64Utf8(data.base64)} read={read} listArtifacts={listArtifacts} />
+        ) : isHtml && appView === 'run' ? (
+          // Any .html renders inline as a web page — sandboxed (scripts allowed,
+          // no same-origin, so it can't touch the app), white backdrop so
+          // unstyled documents stay readable over the dark shell.
+          <iframe
+            title={path}
+            sandbox="allow-scripts"
+            srcDoc={decodeBase64Utf8(data.base64)}
+            className="min-h-0 h-full w-full flex-1 border-0"
+            style={{ background: '#fff' }}
+          />
         ) : (
           <ArtifactPreviewContent path={path} data={data} />
         )}
