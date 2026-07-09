@@ -105,7 +105,8 @@ export function AgentPaneHeader({
 
   return (
     <div className="relative flex flex-shrink-0 items-center gap-2 border-b border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-3 py-1.5 text-[11px]">
-      <span className="text-[var(--gs-accent)]">✦</span>
+      {/* Status indicator, left of the model name — colored by agent state. */}
+      <span className={`inline-block h-2 w-2 flex-none rounded-full ${dot}`} title={label} />
 
       {/* model */}
       <span className="relative">
@@ -185,7 +186,6 @@ export function AgentPaneHeader({
 
       {error && <span className="max-w-[35%] truncate text-[var(--gs-danger)]" title={error}>⚠ {error}</span>}
       <span className="ml-auto flex items-center gap-2">
-        <span className={`inline-block h-2 w-2 rounded-full ${dot}`} title={label} />
 
         {/* Direct controls (surfaced, not buried in the ⚙ menu): fast + undo. */}
         {onToggleFast && control?.fastCapable && (() => {
