@@ -52,28 +52,16 @@ export function parseArtifactUri(uri: string): ArtifactUri {
   return { project, workspace, relPath };
 }
 
-// ── local:// session scratch (docs/ARTIFACT-PROTOCOL.md Q2) ─────────────────
+// ── local:// (docs/ARTIFACT-PROTOCOL.md Q2) ─────────────────────────────────
 //
-// `local://<rel>` addresses an UNVERSIONED, session-scoped scratch file. It maps
-// to the mount-relative path `.sessions/<sid>/local/<rel>` — inside the mount
-// (so the share resolver reads it straight from the working tree) but git-
-// excluded (so it never enters branch history). Because scratch is uncommitted,
-// a local share is always LIVE (there is no commit to pin).
-//
-// The session id comes from GSSH_SPACE_SESSION (the harness sets it per agent
-// session); absent that, everything falls back to a single `default` bucket so
-// the flow still works — just workspace-scoped instead of session-scoped.
-export const LOCAL_SCRATCH_DIR = '.sessions';
-
-/** Sanitized session id: env-provided when present, else the shared default. */
-export function sessionScratchId(): string {
-  const raw = (typeof process !== 'undefined' ? process.env?.GSSH_SPACE_SESSION : undefined)?.trim();
-  const cleaned = raw ? raw.replace(/[^a-zA-Z0-9_-]/g, '-') : '';
-  return cleaned || 'default';
-}
+// `local://<rel>` is just the artifacts mount: it maps to the mount-relative
+// path `<rel>` (so local://PLAN.md → <workspace>/.gitspace/artifacts/PLAN.md).
+// It is an ordinary path in the mount; share/promote resolve it with no special
+// storage. `share local://…` serves live (working-tree state), so an in-
+// progress file can be shared before it is committed.
 
 /** Recognize `local://<rel>` (and the bare `local:` form); returns the inner
- *  rel path, or null when the string is not a local scratch reference. */
+ *  rel path, or null when the string is not a local:// reference. */
 export function parseLocalRef(ref: string): string | null {
   const m = ref.match(/^local:\/\/(.*)$/) ?? ref.match(/^local:(?!\/\/)(.*)$/);
   if (!m) return null;
@@ -82,13 +70,13 @@ export function parseLocalRef(ref: string): string | null {
   return rel;
 }
 
-/** Mount-relative path for a scratch file: `.sessions/<sid>/local/<rel>`.
- *  Validates `rel` for traversal so the composed path is always safe. */
-export function localScratchRel(rel: string, sid = sessionScratchId()): string {
+/** Mount-relative path for a local:// file — the mount root, i.e. `<rel>`
+ *  itself. Validates `rel` for traversal so the composed path is always safe. */
+export function localScratchRel(rel: string): string {
   if (!rel || rel.startsWith('/') || rel.split('/').some((s) => s === '' || s === '.' || s === '..')) {
     throw new SpacesError(`Unsafe local:// path: ${rel}`, 'USER_ERROR', 1);
   }
-  return `${LOCAL_SCRATCH_DIR}/${sid}/local/${rel}`;
+  return rel;
 }
 
 // ── glob matching (ONE canonical matcher — the hook's check is generated

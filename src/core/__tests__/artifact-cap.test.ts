@@ -11,7 +11,6 @@ import {
   parseArtifactUri,
   parseLocalRef,
   pathInScope,
-  sessionScratchId,
   verifyArtifactCap,
 } from '../artifact-cap.js';
 
@@ -40,7 +39,7 @@ describe('artifact:// URIs', () => {
   });
 });
 
-describe('local:// session scratch', () => {
+describe('local:// references', () => {
   it('recognizes local:// and bare local: forms, returns the inner rel', () => {
     expect(parseLocalRef('local://PLAN.md')).toBe('PLAN.md');
     expect(parseLocalRef('local://notes/draft.md')).toBe('notes/draft.md');
@@ -53,36 +52,23 @@ describe('local:// session scratch', () => {
     expect(() => parseLocalRef('local://')).toThrow('needs a path');
   });
 
-  it('maps to a git-excluded .sessions/<sid>/local/ mount path', () => {
-    expect(localScratchRel('PLAN.md', 'sess1')).toBe('.sessions/sess1/local/PLAN.md');
-    expect(localScratchRel('a/b.md', 'sess1')).toBe('.sessions/sess1/local/a/b.md');
+  it('maps to the mount root — local://<rel> is just <rel>', () => {
+    expect(localScratchRel('PLAN.md')).toBe('PLAN.md');
+    expect(localScratchRel('a/b.md')).toBe('a/b.md');
   });
 
-  it('rejects traversal in the scratch rel', () => {
-    expect(() => localScratchRel('../escape', 'sess1')).toThrow('Unsafe');
-    expect(() => localScratchRel('/abs', 'sess1')).toThrow('Unsafe');
-    expect(() => localScratchRel('a/./b', 'sess1')).toThrow('Unsafe');
+  it('rejects traversal in the rel', () => {
+    expect(() => localScratchRel('../escape')).toThrow('Unsafe');
+    expect(() => localScratchRel('/abs')).toThrow('Unsafe');
+    expect(() => localScratchRel('a/./b')).toThrow('Unsafe');
   });
 
-  it('session id comes from GSSH_SPACE_SESSION, sanitized, else default', () => {
-    const prev = process.env.GSSH_SPACE_SESSION;
-    try {
-      delete process.env.GSSH_SPACE_SESSION;
-      expect(sessionScratchId()).toBe('default');
-      process.env.GSSH_SPACE_SESSION = 'abc/../123 x';
-      expect(sessionScratchId()).toBe('abc----123-x');
-    } finally {
-      if (prev === undefined) delete process.env.GSSH_SPACE_SESSION;
-      else process.env.GSSH_SPACE_SESSION = prev;
-    }
-  });
-
-  it('a scratch URI stays inside its own read scope (no traversal escape)', () => {
-    const rel = localScratchRel('PLAN.md', 'sess1');
+  it('a local:// URI stays inside its own read scope (no traversal escape)', () => {
+    const rel = localScratchRel('PLAN.md');
     const uri = formatArtifactUri('p', 'w', rel);
     expect(parseArtifactUri(uri)).toEqual({ project: 'p', workspace: 'w', relPath: rel });
     expect(pathInScope(rel, [rel])).toBe(true);
-    expect(pathInScope('.sessions/other/local/PLAN.md', [rel])).toBe(false);
+    expect(pathInScope('OTHER.md', [rel])).toBe(false);
   });
 });
 

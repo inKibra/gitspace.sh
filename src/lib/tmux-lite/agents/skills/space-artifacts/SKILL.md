@@ -1,6 +1,6 @@
 ---
 name: space-artifacts
-description: The workspace artifacts filesystem — what lives at .gitspace/artifacts, every artifact kind and its contract (dashboards, mini-apps, data, reports, workflow specs, evidence, notes, journal, triggers), session scratch + promote, share links, and how to produce each one correctly. Use whenever you create, read, or reason about artifacts.
+description: The workspace artifacts filesystem — what lives at .gitspace/artifacts, every artifact kind and its contract (dashboards, mini-apps, data, reports, workflow specs, evidence, notes, journal, triggers), local:// drafts + promote, share links, and how to produce each one correctly. Use whenever you create, read, or reason about artifacts.
 ---
 
 # Workspace artifacts
@@ -50,7 +50,6 @@ mostly does not apply to you.
 | `blame/edits.jsonl` | edit breadcrumbs | automatic; never write (no UI pane; feeds the guide) |
 | `review/guide.json` | review guide | rendered guide; write via `space guide` |
 | `review/analysis.json` | review worksheet | CLI-only intermediate (no UI pane) |
-| `.sessions/…` | session scratch | **unversioned + typeless** — see below |
 
 **Large files are handled for you — and only through sanctioned commits.**
 Files ≥2MB become standard git-LFS pointers automatically at commit time (a
@@ -59,31 +58,28 @@ commits a pointer + `.gitattributes` line). Never pass `--no-verify`: the
 publish gate refuses to sync or roll up any branch carrying raw large blobs,
 the run is flagged, and `space artifacts repair` must rewrite it.
 
-## Session scratch and promote (the typing act)
+## Drafting with local:// and promote (the typing act)
 
-`local://<rel>` addresses an UNVERSIONED, session-scoped scratch file at
-`.gitspace/artifacts/.sessions/<your-session>/local/<rel>` — addressable and
-shareable, but **git-ignored and typeless**: nothing under `.sessions/`
-appears in feeds, rails, or dashboards, no matter how it is named. Draft
-freely there:
+`local://<rel>` IS the artifacts mount: `local://PLAN.md` →
+`.gitspace/artifacts/PLAN.md`. Draft freely — a file at a path that matches no
+kind convention (e.g. a bare `PLAN.md`) is just typeless working material.
+Get its absolute path (parent dirs created for you) and write to it:
 
 ```
-# get the real filesystem path (creates the dir), then write your draft to it
 p="$(space artifacts scratch-path local://PLAN.md)"
 $EDITOR "$p"     # or: your file tools write to "$p"
 ```
 
-When a draft is worth keeping, promote it — the source can be a `local://`
-reference OR any filesystem path:
+When a draft is worth keeping, promote it into a TYPED location — the source
+can be a `local://` reference OR any filesystem path:
 
 ```
 space artifacts promote local://PLAN.md reports/my-findings.report.json
 ```
 
-Promotion copies the file into the versioned tree with provenance — that is
-the moment it gains a type (report/dashboard/data) and becomes visible to
-the product and to future agents. (Scratch never enters branch history,
-rollups, or `git status`.)
+Promotion writes it to the typed path with provenance — that is the moment it
+gains a type (report/dashboard/data) and becomes visible to the product and
+to future agents.
 
 ## Share links
 
@@ -93,9 +89,9 @@ mints a signed public URL for ONE file, served through the machine's relay
 Anyone with the URL can read that file until it expires or is revoked
 (`share-list` / `share-revoke <tokenId>`). By default a share pins the file
 at its current commit (a point-in-time capture); pass `--live` to serve the
-current branch state on every read. You can also share scratch directly —
-`space artifacts share local://PLAN.md` — which is always live (scratch has
-no commit to pin), so you can share a plan mid-flight without committing it.
+current branch state on every read. A `local://` share (e.g.
+`space artifacts share local://PLAN.md`) is always live, so you can share an
+in-progress draft before committing it.
 
 ## Contracts you must honor when authoring
 
@@ -155,8 +151,8 @@ process runs on. What you produce, per stage:
 - Author the goal doc + requirements/rubric via `space goal …` (the
   system mirrors canon to `goal.md`/`rubric.json`; you never write those
   files). Each requirement declares the EVIDENCE SHAPE you'll owe later.
-- Draft freely in `local://` scratch; promote the plan artifacts you commit
-  to. Draft the execution plan as `<name>.workflow.json` — phases, gates,
+- Draft freely with `local://`; promote the plan artifacts worth keeping.
+  Draft the execution plan as `<name>.workflow.json` — phases, gates,
   what each phase reads/writes. This is your contract with the reviewer.
 
 **Code** (the only stage that edits the repo):
@@ -197,9 +193,9 @@ WHY from what you left behind? If not, the artifact is missing or hollow.
 
 ## Rules
 
-- Every artifact should serve a requirement, a phase, or a reader — scratch
-  belongs in `local://` (session scratch), promoted only when it earns a
-  place in the record.
+- Every artifact should serve a requirement, a phase, or a reader — keep
+  rough drafts as typeless `local://` files, promoted to a typed path only
+  when they earn a place in the record.
 - Never duplicate sources of truth into artifacts (no transcript copies, no
   goal-state pastes) — link or pin hashes instead.
 - Prefer the CLIs (`space goal|notes|journal|guide`, `space

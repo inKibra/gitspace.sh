@@ -1,3 +1,22 @@
+diff --git a/node_modules/@oh-my-pi/pi-coding-agent/.bun-tag-59f479ba2c7d156a b/.bun-tag-59f479ba2c7d156a
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/src/internal-urls/local-protocol.ts b/src/internal-urls/local-protocol.ts
+index 6a0daafdde71179e2db5d1a19c535cb45cf5a777..765946457d54cde5434b6b2cf2312af80e6867e4 100644
+--- a/src/internal-urls/local-protocol.ts
++++ b/src/internal-urls/local-protocol.ts
+@@ -242,7 +242,10 @@ function extractRelativePath(url: InternalUrl): string {
+ export function resolveLocalRoot(options: LocalProtocolOptions, platform: NodeJS.Platform = process.platform): string {
+ 	const artifactsDir = options.getArtifactsDir?.();
+ 	if (artifactsDir) {
+-		const candidate = path.resolve(artifactsDir, "local");
++		// GitSpace patch: local:// maps to the artifacts mount ROOT (no "local"
++		// subdir) so local://x === <workspace>/.gitspace/artifacts/x, matching the
++		// `space artifacts` CLI. getArtifactsDir already returns the mount.
++		const candidate = path.resolve(artifactsDir);
+ 		if (platform === "win32" && candidate.length >= WINDOWS_LOCAL_ROOT_MAX_CHARS) {
+ 			return shortLocalRoot(options);
+ 		}
 diff --git a/src/session/agent-session.ts b/src/session/agent-session.ts
 index f271f21bfa2fed3ce70cd3d7ac1a5fa594a58dd7..bb890abc49a841a619c701574b1983efbd588d60 100644
 --- a/src/session/agent-session.ts

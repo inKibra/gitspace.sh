@@ -490,11 +490,10 @@ export function listArtifactFiles(mountDir: string): ArtifactListEntry[] {
 }
 
 
-/** Resolve a `local://` scratch rel to its absolute path in the mount, creating
- *  the session scratch dir on demand. `<mount>/.sessions/<sid>/local/<rel>` is
- *  git-excluded (see ensureSessionsExcluded) so writes here never touch history.
+/** Resolve a `local://` rel to its absolute path in the mount at `<mount>/<rel>`,
+ *  creating any parent dirs on demand. local:// is simply the artifacts mount.
  *  Returns both the absolute path (to write/read) and the mount-relative path
- *  (to address via artifact:// URIs for share/promote). */
+ *  (to address via artifact:// URIs). */
 export function resolveLocalScratch(mountDir: string, rel: string): { absPath: string; mountRel: string } {
   const mountRel = localScratchRel(rel);
   const absPath = join(mountDir, mountRel);

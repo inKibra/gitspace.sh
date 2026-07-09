@@ -255,7 +255,10 @@ export function makeLocalProtocolOptions(cwd: string): {
   let sessionId: string | null = null;
   return {
     options: {
-      getArtifactsDir: () => (sessionId ? join(cwd, '.gitspace', 'artifacts', '.sessions', sessionId) : null),
+      // local:// maps straight into the artifacts mount. The SDK appends
+      // '/local' (path.resolve(artifactsDir, "local")), so files land at
+      // <workspace>/.gitspace/artifacts/local/ — no per-session .sessions dir.
+      getArtifactsDir: () => join(cwd, '.gitspace', 'artifacts'),
       getSessionId: () => sessionId,
     },
     bind: (id: string) => { sessionId = id; },

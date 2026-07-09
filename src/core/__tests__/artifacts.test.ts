@@ -263,23 +263,12 @@ describe('session scratch (.sessions/)', () => {
 });
 
 describe('resolveLocalScratch', () => {
-  it('creates the session scratch dir and returns matching abs + mount-rel paths', async () => {
-    const prev = process.env.GSSH_SPACE_SESSION;
-    process.env.GSSH_SPACE_SESSION = 'unit-sess';
-    try {
-      const mount = await ensureArtifactsMount(projectDir, wsDir('feat-a'), 'feat-a');
-      const { absPath, mountRel } = resolveLocalScratch(mount, 'notes/PLAN.md');
-      expect(mountRel).toBe('.sessions/unit-sess/local/notes/PLAN.md');
-      expect(absPath).toBe(join(mount, mountRel));
-      // parent dir created on demand
-      expect(existsSync(join(mount, '.sessions/unit-sess/local/notes'))).toBe(true);
-      // writing there and committing the versioned tree leaves scratch untracked
-      writeFileSync(absPath, 'draft');
-      expect(g(mount, 'status --porcelain')).toBe('');
-    } finally {
-      if (prev === undefined) delete process.env.GSSH_SPACE_SESSION;
-      else process.env.GSSH_SPACE_SESSION = prev;
-    }
+  it('maps to the mount root, creating parent dirs, matching abs + mount-rel paths', async () => {
+    const mount = await ensureArtifactsMount(projectDir, wsDir('feat-a'), 'feat-a');
+    const { absPath, mountRel } = resolveLocalScratch(mount, 'notes/PLAN.md');
+    expect(mountRel).toBe('notes/PLAN.md');
+    expect(absPath).toBe(join(mount, mountRel));
+    expect(existsSync(join(mount, 'notes'))).toBe(true);
   });
 
   it('rejects traversal', async () => {
