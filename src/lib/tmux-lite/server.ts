@@ -623,7 +623,6 @@ void getAgentControlReady().catch((error) => {
     void (async () => {
       try {
         const { getArtifactsRemote, gcSessionScratch, artifactsMountDir } = await import('../../core/artifacts.js');
-        const { syncGithubArtifacts } = await import('../../core/artifacts-github.js');
         const { getProjectDir, getProjectBaseDir } = await import('../../core/config.js');
         const scanned = await scanWorkspaces();
         const projects = [...new Set(scanned.map((w) => w.projectName))];
@@ -649,7 +648,11 @@ void getAgentControlReady().catch((error) => {
             if (!(await getArtifactsRemote(projectDir))) continue;
             let r;
             try {
-              r = await syncGithubArtifacts(projectDir);
+              // Runs in the offload child — git/LFS network I/O off the loop.
+              r = await runOffloaded<Awaited<ReturnType<typeof import('../../core/artifacts-github.js').syncGithubArtifacts>>>(
+                'artifacts-sync',
+                { projectDir },
+              );
               syncFailStreak.delete(projectName);
             } catch (e) {
               const streak = syncFailStreak.get(projectName) ?? { count: 0, notified: false };

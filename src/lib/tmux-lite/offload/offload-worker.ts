@@ -33,6 +33,12 @@ async function dispatch(op: string, payload: unknown): Promise<unknown> {
       const { operation } = payload as { operation: never };
       return executeLocalReviewOperation(operation, undefined, { allowPrompt: false });
     }
+    case 'artifacts-sync': {
+      // git fetch/push + LFS blob transport — the recurring daemon-loop cost.
+      const { syncGithubArtifacts } = await import('../../../core/artifacts-github.js');
+      const { projectDir } = payload as { projectDir: string };
+      return syncGithubArtifacts(projectDir);
+    }
     default:
       throw new Error(`unknown offload op: ${op}`);
   }
