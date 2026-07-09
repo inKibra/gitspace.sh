@@ -102,6 +102,10 @@ export interface AgentSessionHost {
   applyRole(role: string): Promise<boolean>;
   setThinkingLevel(level: string): Promise<boolean>;
   setApprovalMode(mode: string): Promise<boolean>;
+  /** Write a single setting on the session's OWN Settings singleton (worker
+   *  processes each have one). Global persistence happens daemon-side; this
+   *  keeps the live session's in-memory view in sync. */
+  setSetting(path: string, value: string | number | boolean): Promise<boolean>;
   getTools(): Promise<AgentToolInfo[]>;
   getHistory(): Promise<AgentHistoryEntry[]>;
   navigateHistory(entryId: string, mode: 'redo' | 'jump'): Promise<{ ok: boolean; editorText?: string }>;

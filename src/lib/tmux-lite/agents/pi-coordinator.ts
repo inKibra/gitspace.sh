@@ -426,19 +426,32 @@ export class PiCoordinator {
   }
 
   /** Write a single setting. `modelRoles.<role>` is routed to the record helper
-   *  (setModelRole) so one role is updated without clobbering the others. */
+   *  (setModelRole) so one role is updated without clobbering the others.
+   *
+   *  Persists via the DAEMON's settings singleton (initialized on demand — see
+   *  getPiSettings), then fans out to every live host so worker processes'
+   *  own Settings singletons see the change immediately (best-effort; a dead
+   *  worker must not fail the global write). */
   async setSetting(path: string, value: string | number | boolean): Promise<boolean> {
     const settings = await getPiSettings();
     if (!settings) return false;
+    let wrote = false;
     if (path.startsWith('modelRoles.') && typeof value === 'string') {
       const role = path.slice('modelRoles.'.length);
       const withRole = settings as { setModelRole?: (r: string, m: string) => void };
       if (typeof withRole.setModelRole === 'function') {
         withRole.setModelRole(role, value);
-        return true;
+        wrote = true;
       }
     }
-    settings.set(path, value);
+    if (!wrote) settings.set(path, value);
+    await Promise.all([...this.hosts.entries()].map(async ([sessionId, host]) => {
+      try {
+        await host.setSetting(path, value);
+      } catch (err) {
+        console.warn(`[pi-coordinator] setSetting fan-out to ${sessionId} failed:`, err instanceof Error ? err.message : err);
+      }
+    }));
     return true;
   }
 

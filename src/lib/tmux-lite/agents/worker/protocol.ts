@@ -26,6 +26,7 @@ export const WORKER_RPC_METHODS = [
   'applyRole',
   'setThinkingLevel',
   'setApprovalMode',
+  'setSetting',
   'getTools',
   'getHistory',
   'navigateHistory',

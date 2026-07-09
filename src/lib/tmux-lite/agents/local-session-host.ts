@@ -552,6 +552,25 @@ export class LocalSessionHost implements AgentSessionHost {
     return true;
   }
 
+  /** Write a single setting on this session's Settings instance so the live
+   *  session sees the change immediately (its singleton is process-local in
+   *  worker mode). `modelRoles.<role>` routes through setModelRole so one role
+   *  updates without clobbering the record. */
+  async setSetting(path: string, value: string | number | boolean): Promise<boolean> {
+    const session = this.session as unknown as ControlSessionAccessors;
+    const settings = session.settings ?? (await getPiSettings());
+    if (!settings) return false;
+    if (path.startsWith('modelRoles.') && typeof value === 'string') {
+      const withRole = settings as { setModelRole?: (r: string, m: string) => void };
+      if (typeof withRole.setModelRole === 'function') {
+        withRole.setModelRole(path.slice('modelRoles.'.length), value);
+        return true;
+      }
+    }
+    settings.set(path, value);
+    return true;
+  }
+
   /** Tools available to the live session (for per-tool approval). The SDK
    *  doesn't expose the live tool registry on the session instance, so fall
    *  back to the standard tool set; merge in any registry entries + overrides. */

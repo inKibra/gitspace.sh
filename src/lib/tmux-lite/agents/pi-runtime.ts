@@ -240,13 +240,31 @@ export async function createPiAuthStorage(): Promise<OmpAuthStorage> {
   return (await discoverAuthStorage(env.PI_CODING_AGENT_DIR)) as unknown as OmpAuthStorage;
 }
 
-/** The global settings singleton, or null if not yet initialized (no session created). */
+/**
+ * The global settings singleton for the managed agent dir.
+ *
+ * Initialized on demand: in worker mode the daemon never creates in-process
+ * SDK sessions, so nothing else ever calls Settings.init() here — but the
+ * daemon still serves global settings reads/writes (settings panel, role
+ * models) with zero live sessions. Mirrors openPiSession's env setup so the
+ * singleton binds to <workspace-root>/.pi/config.yml, not ~/.omp/agent/.
+ */
 export async function getPiSettings(): Promise<{ get(path: string): unknown; set(path: string, value: unknown): void } | null> {
   const mod = (await import('@oh-my-pi/pi-coding-agent/config/settings')) as unknown as {
+    Settings?: { init(options?: { cwd?: string; agentDir?: string }): Promise<unknown> };
     isSettingsInitialized?: () => boolean;
     settings?: { get(path: string): unknown; set(path: string, value: unknown): void };
   };
-  if (mod.isSettingsInitialized && !mod.isSettingsInitialized()) return null;
+  if (mod.isSettingsInitialized && !mod.isSettingsInitialized()) {
+    const env = applyManagedPiEnvironment();
+    if (!mod.Settings?.init) return null;
+    try {
+      await mod.Settings.init({ cwd: getWorkspaceRoot(), agentDir: env.PI_CODING_AGENT_DIR });
+    } catch (error) {
+      console.warn('[pi-runtime] Failed to initialize Pi settings singleton:', error);
+      return null;
+    }
+  }
   return mod.settings ?? null;
 }
 

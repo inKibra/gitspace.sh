@@ -219,6 +219,10 @@ export class WorkerSessionHost implements AgentSessionHost {
     return this.rpc('setApprovalMode', [mode]) as Promise<boolean>;
   }
 
+  setSetting(path: string, value: string | number | boolean): Promise<boolean> {
+    return this.rpc('setSetting', [path, value]) as Promise<boolean>;
+  }
+
   getTools(): Promise<AgentToolInfo[]> {
     return this.rpc('getTools', []) as Promise<AgentToolInfo[]>;
   }
