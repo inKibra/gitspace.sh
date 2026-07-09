@@ -22,7 +22,9 @@ export type WorkspaceDetailPageProps = WorkspaceDetailPaneProps & {
 
 export function WorkspaceDetailPage({ children, bottomContent, rightRail, ...props }: WorkspaceDetailPageProps) {
   return (
-    <div className="h-screen w-screen flex flex-col bg-[var(--gs-bg)]">
+    // Fill the container (the workspace layer below the 42px chrome bar) — NOT
+    // h-screen, which would overflow by the chrome height and clip the bottom.
+    <div className="h-full w-full flex flex-col bg-[var(--gs-bg)]">
       <WorkspaceDetailPaneWeb {...props} bottomContent={bottomContent} rightRail={rightRail}>
         {children}
       </WorkspaceDetailPaneWeb>
