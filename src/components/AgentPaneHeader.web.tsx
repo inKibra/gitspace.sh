@@ -8,7 +8,7 @@ function fmtTokens(n: number): string {
   return String(n);
 }
 
-type MenuId = 'model' | 'settings';
+type MenuId = 'model' | 'thinking' | 'settings';
 
 /** A titled option-picker section inside the ⚙ settings popover. */
 function SettingsPickerSection({
@@ -156,6 +156,42 @@ export function AgentPaneHeader({
         )}
       </span>
 
+      {/* thinking effort — surfaced in the bar (real control seam), styled to match */}
+      {control?.thinkingLevels?.length && onSetThinkingLevel ? (
+        <span className="relative">
+          <button
+            type="button"
+            onClick={() => toggle('thinking')}
+            title="Thinking effort"
+            className="flex items-center gap-1 text-[var(--gs-text-dim)] hover:text-[var(--gs-text)]"
+          >
+            <span className="text-[10px]">think</span>
+            <span className="font-mono text-[var(--gs-text)]">{control.thinkingLevel ?? 'auto'}</span>
+            <span>▾</span>
+          </button>
+          {menu === 'thinking' && (
+            <>
+              <div className="fixed inset-0 z-10" onClick={() => setMenu(null)} />
+              <div className="absolute left-0 top-full z-20 mt-1 w-32 border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] py-1 shadow-lg">
+                {control.thinkingLevels.map((l) => {
+                  const active = l === control.thinkingLevel;
+                  return (
+                    <button
+                      key={l}
+                      type="button"
+                      onClick={() => { onSetThinkingLevel(l); setMenu(null); }}
+                      className={`block w-full px-3 py-1 text-left font-mono hover:bg-[var(--gs-border)] ${active ? 'text-[var(--gs-accent)]' : 'text-[var(--gs-text)]'}`}
+                    >
+                      {active ? '● ' : '  '}{l}
+                    </button>
+                  );
+                })}
+              </div>
+            </>
+          )}
+        </span>
+      ) : null}
+
       {/* context — slim progress bar + tokens (mock .chat-ctx) */}
       {ctx && ctx.tokens != null && ctx.contextWindow > 0 ? (() => {
         const pct = Math.min(100, Math.max(0, Math.round((ctx.tokens! / ctx.contextWindow) * 100)));
@@ -212,7 +248,7 @@ export function AgentPaneHeader({
           </button>
         )}
 
-        {(onOpenAuth || canCycleRole || onSetThinkingLevel || onSetApprovalMode) && (
+        {(onOpenAuth || canCycleRole || onSetApprovalMode) && (
           <span className="relative">
             <button
               type="button"
@@ -236,14 +272,6 @@ export function AgentPaneHeader({
                       ⟳ role <span className="font-mono text-[var(--gs-text)]">{currentRole?.name ?? 'role'}</span>
                     </button>
                   )}
-                  {control?.thinkingLevels?.length && onSetThinkingLevel ? (
-                    <SettingsPickerSection
-                      label="think"
-                      value={control.thinkingLevel}
-                      options={control.thinkingLevels}
-                      onPick={(v) => { onSetThinkingLevel(v); setMenu(null); }}
-                    />
-                  ) : null}
                   {control?.approvalModes?.length && onSetApprovalMode ? (
                     <SettingsPickerSection
                       label="approve"
@@ -252,7 +280,7 @@ export function AgentPaneHeader({
                       onPick={(v) => { onSetApprovalMode(v); setMenu(null); }}
                     />
                   ) : null}
-                  {(canCycleRole || control?.thinkingLevels?.length || control?.approvalModes?.length) && onOpenAuth ? (
+                  {(canCycleRole || control?.approvalModes?.length) && onOpenAuth ? (
                     <div className="my-1 border-t border-[var(--gs-border)]" />
                   ) : null}
                   {onOpenAuth && (
