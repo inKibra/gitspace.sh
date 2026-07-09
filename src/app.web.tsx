@@ -164,22 +164,29 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   type DockExtraPane = ({ kind: 'file' } & RepoFileOpen) | { kind: 'artifact'; path: string } | { kind: 'dashboard'; path: string } | { kind: 'note'; noteId: string | null; title: string; nonce?: number } | { kind: 'goal' } | { kind: 'guide' } | { kind: 'rubric' } | { kind: 'evidence'; requirementId: string; evidenceId: string } | { kind: 'report'; path: string } | { kind: 'workflow' } | { kind: 'crons' } | { kind: 'eventlog' };
   const [dockExtraPanes, setDockExtraPanes] = useState<Record<string, DockExtraPane[]>>({});
   const [dockFocusRequests, setDockFocusRequests] = useState<Record<string, { id: string; nonce: number }>>({});
-  const openSingletonPane = useCallback((wsKey: string, pane: DockExtraPane) => {
-    setDockExtraPanes((prev) => {
-      const cur = prev[wsKey] ?? [];
-      if (cur.some((x) => x.kind === pane.kind && (pane.kind !== 'evidence' || (x.kind === 'evidence' && x.evidenceId === (pane as { evidenceId: string }).evidenceId)))) return prev;
-      return { ...prev, [wsKey]: [...cur, pane] };
-    });
-    // Focus whether newly added or already open (repeat clicks surface the pane).
-    const panelId = pane.kind === 'file' ? `file:${pane.path}`
+  // Identity of a dock pane. Path-based kinds (file/artifact/dashboard/report)
+  // are identified by their path, so DIFFERENT paths open as SEPARATE tabs;
+  // only the SAME path (or a true singleton like goal/guide) dedupes/refocuses.
+  const paneIdentity = useCallback((pane: DockExtraPane): string =>
+    pane.kind === 'file' ? `file:${pane.path}`
       : pane.kind === 'artifact' ? `artifact:${pane.path}`
       : pane.kind === 'dashboard' ? `dashboard:${pane.path}`
       : pane.kind === 'report' ? `report:${pane.path}`
       : pane.kind === 'note' ? `note:${pane.noteId ?? `new-${pane.nonce ?? 0}`}`
       : pane.kind === 'evidence' ? `evidence:${pane.evidenceId}`
-      : pane.kind;
+      : pane.kind, []);
+  const openSingletonPane = useCallback((wsKey: string, pane: DockExtraPane) => {
+    const panelId = paneIdentity(pane);
+    setDockExtraPanes((prev) => {
+      const cur = prev[wsKey] ?? [];
+      // Dedupe by identity, not kind — two artifacts/files at different paths
+      // are distinct tabs; only a repeat of the same identity is suppressed.
+      if (cur.some((x) => paneIdentity(x) === panelId)) return prev;
+      return { ...prev, [wsKey]: [...cur, pane] };
+    });
+    // Focus whether newly added or already open (repeat clicks surface the pane).
     setDockFocusRequests((prev) => ({ ...prev, [wsKey]: { id: panelId, nonce: (prev[wsKey]?.nonce ?? 0) + 1 } }));
-  }, []);
+  }, [paneIdentity]);
   const [pendingProcessEditWorkspaceId, setPendingProcessEditWorkspaceId] = useState<string | null>(null);
   const [modifiers, setModifiers] = useState<ModifierState>({
     ctrl: false,
@@ -825,23 +832,9 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   );
 
 
-  /** Workspaces whose default pane set (goal/workflow/guide) was already seeded. */
-  const seededDockRef = useRef<Set<string>>(new Set());
-  useEffect(() => {
-    const key = workspaceBoardState.selectedWorkspaceId;
-    if (!key || seededDockRef.current.has(key)) return;
-    seededDockRef.current.add(key);
-    setDockExtraPanes((prev) => {
-      const cur = prev[key] ?? [];
-      const missing: DockExtraPane[] = [];
-      // Order matters: dockview activates the last-added panel — end on goal so
-      // the mock's default active content tab (◇ Goal) wins.
-      if (!cur.some((x) => x.kind === 'guide')) missing.push({ kind: 'guide' });
-      if (!cur.some((x) => x.kind === 'workflow')) missing.push({ kind: 'workflow' });
-      if (!cur.some((x) => x.kind === 'goal')) missing.push({ kind: 'goal' });
-      return missing.length ? { ...prev, [key]: [...cur, ...missing] } : prev;
-    });
-  }, [workspaceBoardState.selectedWorkspaceId]);
+  // Workspaces open clean — no auto-seeded doc tabs. The goal/workflow/guide
+  // panes open on demand from the sidebar (they were previously auto-opened for
+  // mock parity, which cluttered every fresh workspace).
 
 
   /** *.dashboard.json artifacts for the selected workspace (sidebar Dashboards group). */
