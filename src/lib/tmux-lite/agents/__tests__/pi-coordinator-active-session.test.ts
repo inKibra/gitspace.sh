@@ -1,4 +1,9 @@
 import { afterAll, beforeEach, describe, expect, it, mock } from 'bun:test';
+
+// This file unit-tests the IN-PROCESS host path via mock.module (pi-runtime +
+// SDK mocks can't reach a worker child process). Pin the coordinator to
+// LocalSessionHost; the worker path has live coverage in pi-busy.integration.
+process.env.GITSPACE_AGENT_WORKERS = '0';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
