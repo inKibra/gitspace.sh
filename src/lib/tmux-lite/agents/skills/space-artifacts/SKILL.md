@@ -5,6 +5,12 @@ description: The workspace artifacts filesystem — what lives at .gitspace/arti
 
 # Workspace artifacts
 
+> **Entrypoint:** `space` is your canonical CLI (e.g. `space artifacts commit`,
+> `space goal …`). It is the same binary as `gssh` with the `space` arg
+> prepended, so `space X` ≡ `gssh space X` — prefer the shorter `space` form.
+> The top-level `gssh artifacts …` commands (provision/status/sync/rollup) are a
+> separate maintainer/host surface, not part of the in-session `space` CLI.
+
 `.gitspace/artifacts/` is a real git worktree on this workspace's **artifacts
 branch** (one branch per workspace, off `main`; roll-up merges it to `main`
 when the workspace ships). Everything in it is versioned, travels with the
@@ -12,7 +18,7 @@ branch, and surfaces in the product UI by **path convention**. Write files
 there and commit in that directory — never commit artifacts into the code
 repo. Two equally valid ways to commit:
 
-- `gssh space artifacts commit <paths...> -m "…"` — preferred: records
+- `space artifacts commit <paths...> -m "…"` — preferred: records
   provenance (who/which session produced it) in git-notes.
 - Plain `git -C .gitspace/artifacts add -A && git -C .gitspace/artifacts
   commit -m "…"` — also fine; a managed hook stamps basic provenance.
@@ -38,11 +44,11 @@ mostly does not apply to you.
 | `reports/<name>.report.json` | report | '⚑ Report' pane + Reports rail group; `rating` adds it to the 'Rated precedents' group |
 | `<name>.workflow.json` | workflow spec | ⟜ Workflow pane (phased dataflow) |
 | `triggers/<slug>.trigger.json` | trigger | ◷ Crons & triggers pane; cron triggers fire unattended from this machine's daemon (schedule grammar: `every N m/h/d` ONLY) |
-| `validation/…`, `shots/…`, `demos/…`, `evidence/…` | evidence | ▸ evidence panes; **attach via goal commands** (`gssh space goal …`), not by hand, so it links to a requirement |
-| `notes/…` | note | ✎ notes (prefer `gssh space notes`) |
-| `journal/NN-<phase>.json` | phase journal | written by `gssh space journal`; consumed by the review guide (no dedicated pane — lands under Other in the rail) |
+| `validation/…`, `shots/…`, `demos/…`, `evidence/…` | evidence | ▸ evidence panes; **attach via goal commands** (`space goal …`), not by hand, so it links to a requirement |
+| `notes/…` | note | ✎ notes (prefer `space notes`) |
+| `journal/NN-<phase>.json` | phase journal | written by `space journal`; consumed by the review guide (no dedicated pane — lands under Other in the rail) |
 | `blame/edits.jsonl` | edit breadcrumbs | automatic; never write (no UI pane; feeds the guide) |
-| `review/guide.json` | review guide | rendered guide; write via `gssh space guide` |
+| `review/guide.json` | review guide | rendered guide; write via `space guide` |
 | `review/analysis.json` | review worksheet | CLI-only intermediate (no UI pane) |
 | `.sessions/…` | session scratch | **unversioned + typeless** — see below |
 
@@ -51,7 +57,7 @@ Files ≥2MB become standard git-LFS pointers automatically at commit time (a
 managed pre-commit hook stores the bytes in the project blob store and
 commits a pointer + `.gitattributes` line). Never pass `--no-verify`: the
 publish gate refuses to sync or roll up any branch carrying raw large blobs,
-the run is flagged, and `gssh space artifacts repair` must rewrite it.
+the run is flagged, and `space artifacts repair` must rewrite it.
 
 ## Session scratch and promote (the typing act)
 
@@ -62,7 +68,7 @@ appears in feeds, rails, or dashboards, no matter how it is named. When a
 draft is worth keeping, promote it:
 
 ```
-gssh space artifacts promote <path> reports/my-findings.report.json
+space artifacts promote <path> reports/my-findings.report.json
 ```
 
 Promotion copies the file into the versioned tree with provenance — that is
@@ -71,7 +77,7 @@ the product and to future agents.
 
 ## Share links
 
-`gssh space artifacts share <relPath> [--ttl 30m|24h|7d] [--max-uses N]`
+`space artifacts share <relPath> [--ttl 30m|24h|7d] [--max-uses N]`
 mints a signed public URL for ONE file, served through the machine's relay
 (requires `serve` active). Anyone with the URL can read that file until it
 expires or is revoked (`share-list` / `share-revoke <tokenId>`). Works for
@@ -117,7 +123,7 @@ prompt } }`. Cron `when` accepts ONLY `every N m/h/d`. The `writes` globs
 are an ENFORCED scope: when a trigger run ends, out-of-scope artifact
 changes are automatically reverted and the run is marked failed. Runs may
 receive a capability token in their prompt — pass it verbatim to
-`gssh space artifacts commit --cap <token> …` for sanctioned writes.
+`space artifacts commit --cap <token> …` for sanctioned writes.
 
 **Workflow spec** (`x.workflow.json`): `{ recipe, recipePath?, rollup?: [],
 phases: [{ name, inputs: [{name, io: 'source'|'artifact'}], gate?: {type:
@@ -133,7 +139,7 @@ Artifacts are not an afterthought — they ARE the work product the review-gated
 process runs on. What you produce, per stage:
 
 **Plan** (spec only — repo read-only):
-- Author the goal doc + requirements/rubric via `gssh space goal …` (the
+- Author the goal doc + requirements/rubric via `space goal …` (the
   system mirrors canon to `goal.md`/`rubric.json`; you never write those
   files). Each requirement declares the EVIDENCE SHAPE you'll owe later.
 - Draft freely in `local://` scratch; promote the plan artifacts you commit
@@ -141,12 +147,12 @@ process runs on. What you produce, per stage:
   what each phase reads/writes. This is your contract with the reviewer.
 
 **Code** (the only stage that edits the repo):
-- Bracket every workflow phase with `gssh space journal phase-start --intent`
+- Bracket every workflow phase with `space journal phase-start --intent`
   / `phase-end --outcome` (see phase-journal skill). The system snapshots
   goal/workflow/review state, computes what your phase advanced, and
   auto-commits — this is what makes the review guide able to tell YOUR story
   with YOUR stated intent, and makes commit history readable.
-- Capture evidence AS requirements are satisfied (`gssh space goal …` attach
+- Capture evidence AS requirements are satisfied (`space goal …` attach
   flows) — screenshots, test output, demos land under `validation/` linked to
   their requirement. Evidence captured at the moment of proof beats evidence
   reconstructed at review time.
@@ -156,7 +162,7 @@ process runs on. What you produce, per stage:
 - Edit breadcrumbs record themselves — you do nothing.
 
 **Review** (review the change):
-- Generate/refresh the guide (`gssh space guide analyze` → narrate stale
+- Generate/refresh the guide (`space guide analyze` → narrate stale
   beats → `submit`; see review-guide-narrator skill). Your journal entries
   from Code are the grounding — this is where honest intents pay off.
 - When the reviewer requests changes: journal the fix as its own phase, and
@@ -183,9 +189,9 @@ WHY from what you left behind? If not, the artifact is missing or hollow.
   place in the record.
 - Never duplicate sources of truth into artifacts (no transcript copies, no
   goal-state pastes) — link or pin hashes instead.
-- Prefer the CLIs (`gssh space goal|notes|journal|guide`, `gssh space
+- Prefer the CLIs (`space goal|notes|journal|guide`, `gssh space
   artifacts commit|promote|share|repair`, `gssh artifacts status|sync|rollup`)
   over raw writes when one exists — they validate, snapshot state, and
   record provenance.
 - Never `--no-verify` in the artifacts mount; if the publish gate refuses a
-  branch, run `gssh space artifacts repair`.
+  branch, run `space artifacts repair`.
