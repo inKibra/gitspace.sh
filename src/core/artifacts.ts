@@ -21,7 +21,7 @@ import { createHash } from 'crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync, appendFileSync } from 'fs';
 import { dirname, join } from 'path';
 import { SpacesError } from '../types/errors.js';
-import { pathInScope } from './artifact-cap.js';
+import { pathInScope, localScratchRel } from './artifact-cap.js';
 import { escapeShellArg } from '../utils/shell-escape.js';
 
 const execAsync = promisify(exec);
@@ -489,6 +489,18 @@ export function listArtifactFiles(mountDir: string): ArtifactListEntry[] {
   return out.sort((a, b) => a.path.localeCompare(b.path));
 }
 
+
+/** Resolve a `local://` scratch rel to its absolute path in the mount, creating
+ *  the session scratch dir on demand. `<mount>/.sessions/<sid>/local/<rel>` is
+ *  git-excluded (see ensureSessionsExcluded) so writes here never touch history.
+ *  Returns both the absolute path (to write/read) and the mount-relative path
+ *  (to address via artifact:// URIs for share/promote). */
+export function resolveLocalScratch(mountDir: string, rel: string): { absPath: string; mountRel: string } {
+  const mountRel = localScratchRel(rel);
+  const absPath = join(mountDir, mountRel);
+  mkdirSync(dirname(absPath), { recursive: true });
+  return { absPath, mountRel };
+}
 
 /** Delete session-scratch dirs for sessions that are no longer live and have
  *  been idle past the retention window. The SDK has no session-dir GC. */

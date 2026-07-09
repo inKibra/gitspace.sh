@@ -18,6 +18,7 @@ import {
   makeLfsPointer,
   parseLfsPointer,
   readArtifact,
+  resolveLocalScratch,
   rollupArtifacts,
 } from '../artifacts.js';
 
@@ -258,6 +259,32 @@ describe('session scratch (.sessions/)', () => {
     expect(gcSessionScratch(mount, new Set(['sess-1']))).toBe(0); // live
     expect(gcSessionScratch(mount, new Set(), 0)).toBe(1);        // dead + past retention
     expect(existsSync(join(mount, '.sessions', 'sess-1'))).toBe(false);
+  });
+});
+
+describe('resolveLocalScratch', () => {
+  it('creates the session scratch dir and returns matching abs + mount-rel paths', async () => {
+    const prev = process.env.GSSH_SPACE_SESSION;
+    process.env.GSSH_SPACE_SESSION = 'unit-sess';
+    try {
+      const mount = await ensureArtifactsMount(projectDir, wsDir('feat-a'), 'feat-a');
+      const { absPath, mountRel } = resolveLocalScratch(mount, 'notes/PLAN.md');
+      expect(mountRel).toBe('.sessions/unit-sess/local/notes/PLAN.md');
+      expect(absPath).toBe(join(mount, mountRel));
+      // parent dir created on demand
+      expect(existsSync(join(mount, '.sessions/unit-sess/local/notes'))).toBe(true);
+      // writing there and committing the versioned tree leaves scratch untracked
+      writeFileSync(absPath, 'draft');
+      expect(g(mount, 'status --porcelain')).toBe('');
+    } finally {
+      if (prev === undefined) delete process.env.GSSH_SPACE_SESSION;
+      else process.env.GSSH_SPACE_SESSION = prev;
+    }
+  });
+
+  it('rejects traversal', async () => {
+    const mount = await ensureArtifactsMount(projectDir, wsDir('feat-a'), 'feat-a');
+    expect(() => resolveLocalScratch(mount, '../escape')).toThrow('Unsafe');
   });
 });
 

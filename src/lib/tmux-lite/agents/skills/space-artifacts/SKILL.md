@@ -61,28 +61,41 @@ the run is flagged, and `space artifacts repair` must rewrite it.
 
 ## Session scratch and promote (the typing act)
 
-Your `local://` files (e.g. `local://PLAN.md`) live at
-`.gitspace/artifacts/.sessions/<your-session>/local/` — addressable and
+`local://<rel>` addresses an UNVERSIONED, session-scoped scratch file at
+`.gitspace/artifacts/.sessions/<your-session>/local/<rel>` — addressable and
 shareable, but **git-ignored and typeless**: nothing under `.sessions/`
-appears in feeds, rails, or dashboards, no matter how it is named. When a
-draft is worth keeping, promote it:
+appears in feeds, rails, or dashboards, no matter how it is named. Draft
+freely there:
 
 ```
-space artifacts promote <path> reports/my-findings.report.json
+# get the real filesystem path (creates the dir), then write your draft to it
+p="$(space artifacts scratch-path local://PLAN.md)"
+$EDITOR "$p"     # or: your file tools write to "$p"
+```
+
+When a draft is worth keeping, promote it — the source can be a `local://`
+reference OR any filesystem path:
+
+```
+space artifacts promote local://PLAN.md reports/my-findings.report.json
 ```
 
 Promotion copies the file into the versioned tree with provenance — that is
 the moment it gains a type (report/dashboard/data) and becomes visible to
-the product and to future agents.
+the product and to future agents. (Scratch never enters branch history,
+rollups, or `git status`.)
 
 ## Share links
 
 `space artifacts share <relPath> [--ttl 30m|24h|7d] [--max-uses N]`
 mints a signed public URL for ONE file, served through the machine's relay
-(requires `serve` active). Anyone with the URL can read that file until it
-expires or is revoked (`share-list` / `share-revoke <tokenId>`). Works for
-unversioned `.sessions/` files too — you can share a plan mid-flight without
-committing it.
+(requires the machine serve daemon active — `gssh machine serve start`).
+Anyone with the URL can read that file until it expires or is revoked
+(`share-list` / `share-revoke <tokenId>`). By default a share pins the file
+at its current commit (a point-in-time capture); pass `--live` to serve the
+current branch state on every read. You can also share scratch directly —
+`space artifacts share local://PLAN.md` — which is always live (scratch has
+no commit to pin), so you can share a plan mid-flight without committing it.
 
 ## Contracts you must honor when authoring
 
@@ -189,8 +202,9 @@ WHY from what you left behind? If not, the artifact is missing or hollow.
   place in the record.
 - Never duplicate sources of truth into artifacts (no transcript copies, no
   goal-state pastes) — link or pin hashes instead.
-- Prefer the CLIs (`space goal|notes|journal|guide`, `gssh space
-  artifacts commit|promote|share|repair`, `gssh artifacts status|sync|rollup`)
+- Prefer the CLIs (`space goal|notes|journal|guide`, `space
+  artifacts commit|promote|share|scratch-path|repair`, and the top-level
+  `gssh artifacts status|sync|rollup` maintainer commands)
   over raw writes when one exists — they validate, snapshot state, and
   record provenance.
 - Never `--no-verify` in the artifacts mount; if the publish gate refuses a

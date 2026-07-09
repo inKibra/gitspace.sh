@@ -5,10 +5,13 @@ import {
   AMBIENT_WRITE_SCOPES,
   capAllows,
   formatArtifactUri,
+  localScratchRel,
   mintArtifactCap,
   parseArtifactCapUnverified,
   parseArtifactUri,
+  parseLocalRef,
   pathInScope,
+  sessionScratchId,
   verifyArtifactCap,
 } from '../artifact-cap.js';
 
@@ -34,6 +37,52 @@ describe('artifact:// URIs', () => {
     expect(() => parseArtifactUri('artifact://p/%2E%2E/a.md')).toThrow('Unsafe');
     // @base and encoded-space names stay valid (no false positives).
     expect(parseArtifactUri('artifact://gitspace.sh/%40base/goal.md').workspace).toBe('@base');
+  });
+});
+
+describe('local:// session scratch', () => {
+  it('recognizes local:// and bare local: forms, returns the inner rel', () => {
+    expect(parseLocalRef('local://PLAN.md')).toBe('PLAN.md');
+    expect(parseLocalRef('local://notes/draft.md')).toBe('notes/draft.md');
+    expect(parseLocalRef('local:PLAN.md')).toBe('PLAN.md');
+    expect(parseLocalRef('reports/x.md')).toBeNull();
+    expect(parseLocalRef('/abs/path')).toBeNull();
+  });
+
+  it('rejects an empty local:// path', () => {
+    expect(() => parseLocalRef('local://')).toThrow('needs a path');
+  });
+
+  it('maps to a git-excluded .sessions/<sid>/local/ mount path', () => {
+    expect(localScratchRel('PLAN.md', 'sess1')).toBe('.sessions/sess1/local/PLAN.md');
+    expect(localScratchRel('a/b.md', 'sess1')).toBe('.sessions/sess1/local/a/b.md');
+  });
+
+  it('rejects traversal in the scratch rel', () => {
+    expect(() => localScratchRel('../escape', 'sess1')).toThrow('Unsafe');
+    expect(() => localScratchRel('/abs', 'sess1')).toThrow('Unsafe');
+    expect(() => localScratchRel('a/./b', 'sess1')).toThrow('Unsafe');
+  });
+
+  it('session id comes from GSSH_SPACE_SESSION, sanitized, else default', () => {
+    const prev = process.env.GSSH_SPACE_SESSION;
+    try {
+      delete process.env.GSSH_SPACE_SESSION;
+      expect(sessionScratchId()).toBe('default');
+      process.env.GSSH_SPACE_SESSION = 'abc/../123 x';
+      expect(sessionScratchId()).toBe('abc----123-x');
+    } finally {
+      if (prev === undefined) delete process.env.GSSH_SPACE_SESSION;
+      else process.env.GSSH_SPACE_SESSION = prev;
+    }
+  });
+
+  it('a scratch URI stays inside its own read scope (no traversal escape)', () => {
+    const rel = localScratchRel('PLAN.md', 'sess1');
+    const uri = formatArtifactUri('p', 'w', rel);
+    expect(parseArtifactUri(uri)).toEqual({ project: 'p', workspace: 'w', relPath: rel });
+    expect(pathInScope(rel, [rel])).toBe(true);
+    expect(pathInScope('.sessions/other/local/PLAN.md', [rel])).toBe(false);
   });
 });
 

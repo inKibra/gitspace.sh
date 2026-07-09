@@ -123,13 +123,17 @@ function registerSpaceArtifactsCommands(space: Command): void {
     .action(withErrorHandler(async (relPath: string, options: { ttl: string; maxUses?: string; live?: boolean }) => {
       const ctx = requireSessionContext();
       const { send } = await import('../../lib/tmux-lite/cli.js');
-      const { formatArtifactUri } = await import('../../core/artifact-cap.js');
+      const { formatArtifactUri, parseLocalRef, localScratchRel } = await import('../../core/artifact-cap.js');
+      // `local://<rel>` shares point at session scratch. Scratch is uncommitted,
+      // so it can only be served LIVE (there is no commit to pin).
+      const localRel = parseLocalRef(relPath);
+      const mountRel = localRel ? localScratchRel(localRel) : relPath;
       const r = await send({
         type: 'artifact-share-mint',
-        uri: formatArtifactUri(ctx.project, ctx.workspace, relPath),
+        uri: formatArtifactUri(ctx.project, ctx.workspace, mountRel),
         ttlMs: parseTtl(options.ttl),
         maxUses: options.maxUses ? Number(options.maxUses) : undefined,
-        live: options.live || undefined,
+        live: localRel ? true : (options.live || undefined),
       });
       if (r.type === 'error') { logger.error(r.message); process.exit(1); }
       if (r.type !== 'artifact-share-mint') { logger.error('Unexpected response'); process.exit(1); }
@@ -205,12 +209,16 @@ function registerSpaceArtifactsCommands(space: Command): void {
     .action(withErrorHandler(async (source: string, destRelPath: string, options: { message?: string }) => {
       const ctx = requireSessionContext();
       const { getProjectDir } = await import('../../core/config.js');
-      const { captureArtifacts, artifactsMountDir } = await import('../../core/artifacts.js');
+      const { captureArtifacts, artifactsMountDir, resolveLocalScratch } = await import('../../core/artifacts.js');
+      const { parseLocalRef } = await import('../../core/artifact-cap.js');
       const { join, resolve } = await import('path');
       const { existsSync } = await import('fs');
       const projectDir = getProjectDir(ctx.project);
       const mount = artifactsMountDir(join(projectDir, 'workspaces', ctx.workspace));
-      const src = resolve(source);
+      // `local://<rel>` sources resolve to session scratch; anything else is a
+      // plain filesystem path.
+      const localRel = parseLocalRef(source);
+      const src = localRel ? resolveLocalScratch(mount, localRel).absPath : resolve(source);
       if (!existsSync(src)) {
         const { SpacesError } = await import('../../types/errors.js');
         throw new SpacesError(`Source not found: ${source}`, 'USER_ERROR', 1);
@@ -220,6 +228,20 @@ function registerSpaceArtifactsCommands(space: Command): void {
         provenance: { tool: 'promote' },
       });
       logger.success(`Promoted → ${destRelPath} (${result.commit.slice(0, 8)}). It now types as a curated artifact (feeds, rails, precedents).`);
+    }));
+
+  artifacts
+    .command('scratch-path <rel>')
+    .description('Print the absolute path of a local:// session-scratch file (creates the dir); write drafts there, then promote/share by local://<rel>')
+    .action(withErrorHandler(async (rel: string) => {
+      const ctx = requireSessionContext();
+      const { getProjectDir } = await import('../../core/config.js');
+      const { artifactsMountDir, resolveLocalScratch } = await import('../../core/artifacts.js');
+      const { parseLocalRef } = await import('../../core/artifact-cap.js');
+      const { join } = await import('path');
+      const inner = parseLocalRef(rel) ?? rel; // accept both `local://x` and bare `x`
+      const mount = artifactsMountDir(join(getProjectDir(ctx.project), 'workspaces', ctx.workspace));
+      logger.log(resolveLocalScratch(mount, inner).absPath);
     }));
 
   artifacts
