@@ -172,11 +172,27 @@ export function PaneTerminalPanel({
   const refreshControl = useCallback(() => {
     const fn = backend?.getAgentControlInfo;
     if (!fn || !wsId || !agentSessionId) return;
-    void fn.call(backend, wsId, agentSessionId).then(setControl).catch(() => undefined);
+    // Only adopt a DEFINED result — never clobber good control data with a
+    // transient undefined (agent not ready, or a race while the pane sits
+    // offscreen during a workspace switch). That clobber is what left the
+    // top bar blank on return; the model/context stays until real new data.
+    void fn.call(backend, wsId, agentSessionId).then((c) => { if (c) setControl(c); }).catch(() => undefined);
   }, [backend, wsId, agentSessionId]);
   useEffect(() => {
     refreshControl();
-  }, [refreshControl, agentStatus?.type]);
+  }, [refreshControl, agentStatus?.type, agentModel?.name]);
+  // Self-heal: if control never loaded (initial fetch raced the session
+  // becoming ready), retry briefly until it does. Stops once loaded.
+  useEffect(() => {
+    if (control) return;
+    let attempts = 0;
+    const t = setInterval(() => {
+      attempts += 1;
+      if (attempts > 8) { clearInterval(t); return; }
+      refreshControl();
+    }, 1500);
+    return () => clearInterval(t);
+  }, [control, refreshControl]);
   const [modelError, setModelError] = useState<string | null>(null);
   const handleSetModel = useCallback((provider: string, modelId: string) => {
     const fn = backend?.setAgentModel;
