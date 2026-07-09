@@ -45,6 +45,12 @@ function agentWorkersEnabled(): boolean {
   return !(v === '0' || v === 'false' || v === 'off');
 }
 
+/** Max concurrent live agent hosts (worker processes are ~400MB RSS each). */
+function maxAgentHosts(): number {
+  const n = Number.parseInt(process.env.GITSPACE_MAX_AGENT_WORKERS ?? '', 10);
+  return Number.isFinite(n) && n >= 1 ? n : 8;
+}
+
 // Dynamic imports: oh-my-pi has module-level side effects (postmortem signal
 // handlers, provider registration) that conflict with OpenTUI when loaded eagerly.
 const importSlashCommands = () => import('@oh-my-pi/pi-coding-agent/extensibility/slash-commands');
@@ -132,6 +138,9 @@ export class PiCoordinator {
   private readonly terminalRelays = new Map<string, VirtualTerminal>();
   // dialogId → agentSessionId for routing client dialog responses to the host.
   private readonly dialogSessions = new Map<string, string>();
+  // Worker-bound bookkeeping: LRU + busy tracking for the concurrency cap.
+  private readonly hostLastUsed = new Map<string, number>();
+  private readonly busySessions = new Set<string>();
   private readonly sessionsRoot: string | undefined;
   private eventHandler: ((target: PiWorkspaceTarget, event: AgentEvent) => void) | null = null;
   private hostUIEmitter: HostUIBridgeEmitter | null = null;
@@ -531,6 +540,7 @@ export class PiCoordinator {
     const sessionId = host.sessionId;
     this.hosts.set(sessionId, host);
     this.sessionWorkspaceIds.set(sessionId, target.workspaceId);
+    this.hostLastUsed.set(sessionId, Date.now());
 
     const sessionFile = await this.waitForSessionFile(target.workspacePath, sessionId);
     if (!sessionFile) {
@@ -615,6 +625,11 @@ export class PiCoordinator {
       durationMs: Date.now() - traceStartMs,
       textLength: text.length,
     });
+    this.hostLastUsed.set(agentSessionId, Date.now());
+    // Prompt acceptance marks the session busy immediately — agent_start can
+    // lag (model resolve), and the eviction policy must never pick a session
+    // that just took a turn.
+    this.busySessions.add(agentSessionId);
     await host.prompt(text, images, options);
   }
 
@@ -823,6 +838,7 @@ export class PiCoordinator {
     boot: SessionHostBoot,
     getSessionId: () => string | null,
   ): Promise<AgentSessionHost> {
+    await this.evictForCapacity();
     const sinks = this.createHostSinks(target, getSessionId);
     const enableUI = !!this.hostUIEmitter;
     if (agentWorkersEnabled()) {
@@ -834,16 +850,53 @@ export class PiCoordinator {
     return LocalSessionHost.boot(target, boot, sinks, { enableUI });
   }
 
-  /** A worker died without being asked to — drop its bookkeeping and tell
-   *  clients so the session shows an error instead of hanging busy. */
+  /** Bound live hosts (each worker is a full SDK process, ~400MB RSS). At the
+   *  cap, evict the least-recently-used host that is idle (no turn in flight)
+   *  and has no attached terminal — lazy restore reopens it from its session
+   *  file on next use. If everything is busy/attached, refuse the new boot. */
+  private async evictForCapacity(): Promise<void> {
+    const max = maxAgentHosts();
+    if (this.hosts.size < max) return;
+    const candidates = [...this.hosts.keys()]
+      .filter((id) => !this.busySessions.has(id))
+      .filter((id) => {
+        const workspaceId = this.sessionWorkspaceIds.get(id);
+        return !workspaceId || !this.hasTerminalOwners(workspaceId, id);
+      })
+      .sort((a, b) => (this.hostLastUsed.get(a) ?? 0) - (this.hostLastUsed.get(b) ?? 0));
+    const evictee = candidates[0];
+    if (!evictee) {
+      throw new Error(
+        `Agent session limit reached (${max} live; all busy or attached). ` +
+        `Close a session or raise GITSPACE_MAX_AGENT_WORKERS.`,
+      );
+    }
+    console.log(`[pi-coordinator] evicting idle agent host ${evictee} (limit ${max})`);
+    await this.disposeHost(evictee);
+  }
+
+  /** A worker died without being asked to — drop its bookkeeping, close any
+   *  attached terminals (a frozen screen is worse than a closed one), and tell
+   *  clients so the session shows an error instead of hanging busy. The next
+   *  interaction lazily restores the session from its file via ensureHost. */
   private handleWorkerExit(target: PiWorkspaceTarget, sessionId: string, detail: string): void {
     const relay = this.terminalRelays.get(sessionId);
     if (relay) {
       relay.stop();
       this.terminalRelays.delete(sessionId);
     }
+    const workspaceId = this.sessionWorkspaceIds.get(sessionId);
+    if (workspaceId) {
+      const key = this.getBindingKey(workspaceId, sessionId);
+      for (const terminalId of [...(this.terminalSessionIdsByAgentKey.get(key) ?? [])]) {
+        this.unbindTerminalSession(terminalId);
+        void terminateTmuxSession(terminalId).catch(() => undefined);
+      }
+    }
     this.hosts.delete(sessionId);
     this.sessionWorkspaceIds.delete(sessionId);
+    this.hostLastUsed.delete(sessionId);
+    this.busySessions.delete(sessionId);
     for (const [dialogId, dialogSessionId] of this.dialogSessions) {
       if (dialogSessionId === sessionId) this.dialogSessions.delete(dialogId);
     }
@@ -855,6 +908,16 @@ export class PiCoordinator {
   private createHostSinks(target: PiWorkspaceTarget, getSessionId: () => string | null): SessionHostSinks {
     return {
       onEvent: (event) => {
+        // Busy tracking for the eviction policy: never evict mid-turn. An
+        // error clears busy (a failed prompt never reaches agent_end); a
+        // retry status that follows re-marks it busy.
+        if (event.type === 'status') {
+          const p = (event as { payload?: { type?: string } }).payload;
+          if (p?.type === 'busy' || p?.type === 'compacting' || p?.type === 'retry') this.busySessions.add(event.sessionId);
+          else if (p?.type === 'idle') this.busySessions.delete(event.sessionId);
+        } else if (event.type === 'error') {
+          this.busySessions.delete(event.sessionId);
+        }
         this.eventHandler?.(target, event);
       },
       onDialogRequest: (request) => {
@@ -903,6 +966,7 @@ export class PiCoordinator {
   ): Promise<AgentSessionHost> {
     const existing = this.hosts.get(agentSessionId);
     if (existing) {
+      this.hostLastUsed.set(agentSessionId, Date.now());
       return existing;
     }
 
@@ -936,6 +1000,7 @@ export class PiCoordinator {
 
         this.hosts.set(agentSessionId, host);
         this.sessionWorkspaceIds.set(agentSessionId, target.workspaceId);
+        this.hostLastUsed.set(agentSessionId, Date.now());
         return host;
       } finally {
         this.inflightHosts.delete(agentSessionId);
@@ -956,6 +1021,8 @@ export class PiCoordinator {
       this.terminalRelays.delete(sessionId);
     }
     const host = this.hosts.get(sessionId);
+    this.hostLastUsed.delete(sessionId);
+    this.busySessions.delete(sessionId);
     if (host) {
       this.hosts.delete(sessionId);
       this.sessionWorkspaceIds.delete(sessionId);
