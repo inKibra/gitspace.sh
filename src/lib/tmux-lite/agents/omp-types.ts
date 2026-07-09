@@ -138,8 +138,8 @@ export interface OmpModule {
     additionalExtensionPaths?: string[];
     skills?: Skill[];
     hasUI?: boolean;
-    /** local:// root = the artifacts mount (<workspace>/.gitspace/artifacts).
-     *  The SDK appends '/local', so files land at <mount>/local/. */
+    /** local:// root = the artifacts mount (<workspace>/.gitspace/artifacts),
+     *  flat — the SDK's '/local' suffix is removed via bun patch. */
     localProtocolOptions?: { getArtifactsDir?: () => string | null; getSessionId?: () => string | null };
   }): Promise<OmpCreateSessionResult>;
 }

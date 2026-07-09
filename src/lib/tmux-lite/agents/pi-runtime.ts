@@ -255,9 +255,9 @@ export function makeLocalProtocolOptions(cwd: string): {
   let sessionId: string | null = null;
   return {
     options: {
-      // local:// maps straight into the artifacts mount. The SDK appends
-      // '/local' (path.resolve(artifactsDir, "local")), so files land at
-      // <workspace>/.gitspace/artifacts/local/ — no per-session .sessions dir.
+      // local:// maps straight (flat) into the artifacts mount:
+      // local://x → <workspace>/.gitspace/artifacts/x. The SDK's forced
+      // '/local' suffix is removed via bun patch (patches/@oh-my-pi…).
       getArtifactsDir: () => join(cwd, '.gitspace', 'artifacts'),
       getSessionId: () => sessionId,
     },
