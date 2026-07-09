@@ -116,7 +116,8 @@ import { signalSubprocessTree } from './process-tree.js';
 import { PortConflictError } from '../processes/port-conflicts.js';
 import { attachWorkspaceSession } from '../../session/attach-workspace-session.js';
 import { prepareWorkspaceForSession } from '../../core/workspace-lifecycle.js';
-import { executeLocalReviewOperation } from '../../core/review-executor.js';
+import type { executeLocalReviewOperation } from '../../core/review-executor.js';
+import { runOffloaded, shutdownOffloadWorker } from './offload/offload-client.js';
 import { readWorkspaceSnapshots, readWideEvents } from '../events/reader.js';
 import { loadSavedEventFilters } from '../events/filters.js';
 import { listProcessEventsDirs, resolveWorkspaceRef } from '../events/paths.js';
@@ -1051,6 +1052,7 @@ function shutdownServer(options: { markRunningSessionsCrashed?: boolean } = {}):
   // SDK postmortem handlers run cleanup). SIGKILLed daemons are covered by the
   // workers' IPC-disconnect + ppid watchdogs instead.
   try { shutdownAgentHosts(); } catch {}
+  try { shutdownOffloadWorker(); } catch {}
 
   stopListener(routerListener);
   safeUnlink(PID_FILE);
@@ -3273,7 +3275,12 @@ export async function dispatchCommand(cmd: Command): Promise<Response | null> {
 
           case 'review-request':
             try {
-              const result = await executeLocalReviewOperation(cmd.operation, scanWorkspaces, { allowPrompt: false });
+              // Review ops (GitHub import/push, big diffs) run in the offload
+              // child so their network/git I/O never stalls the daemon loop.
+              const result = await runOffloaded<Awaited<ReturnType<typeof executeLocalReviewOperation>>>(
+                'review',
+                { operation: cmd.operation },
+              );
               res = { type: 'review-response', requestId: cmd.requestId, result };
             } catch (e) {
               const errMsg = e instanceof Error ? e.message : String(e);

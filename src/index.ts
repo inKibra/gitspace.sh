@@ -37,6 +37,11 @@ if (process.argv.includes('--internal-agent-worker')) {
 	await new Promise(() => {});
 }
 
+if (process.argv.includes('--internal-offload-worker')) {
+	await import('./lib/tmux-lite/offload/offload-worker.js');
+	await new Promise(() => {});
+}
+
 // ============================================================================
 // Imports
 // ============================================================================
