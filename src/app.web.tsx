@@ -807,10 +807,14 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
             return b?.reportProblem ? (note, bundle, opts) => b.reportProblem!(note, bundle, opts) : undefined;
           })()}
           onStartFix={(() => {
-            const projectName = projectHomeName ?? (allProjects.length === 1 ? allProjects[0]?.name : undefined);
-            if (!activeBackendKey || !projectName) return undefined;
+            // Loop 2: the issue was filed to the GitSpace repo, so the fix
+            // workspace goes in the local project that tracks it (repo name =
+            // last segment of the report slug), falling back to the current one.
+            const gsProject = allProjects.find((p) => p.name === 'gitspace.sh')?.name
+              ?? projectHomeName ?? (allProjects.length === 1 ? allProjects[0]?.name : undefined);
+            if (!activeBackendKey || !gsProject) return undefined;
             return async (issueNumber: number) => {
-              await multi.createWorkspace(activeBackendKey as BackendKey, { projectName, workspaceName: '', githubIssueNumber: issueNumber });
+              await multi.createWorkspace(activeBackendKey as BackendKey, { projectName: gsProject, workspaceName: '', githubIssueNumber: issueNumber });
               await multi.listWorkspaces();
               toast.success(`Fix workspace created for #${issueNumber}`);
             };

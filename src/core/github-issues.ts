@@ -23,6 +23,14 @@ const defaultGhExec: GhExec = async (args, cwd) => {
   return { stdout };
 };
 
+/** The GitSpace product repo that "report a problem" always files into — a
+ *  report is a problem WITH GitSpace, so it goes where GitSpace is fixed.
+ *  Overridable via GITSPACE_REPORT_REPO for forks. */
+export function reportRepoSlug(): string {
+  const s = process.env.GITSPACE_REPORT_REPO?.trim();
+  return s && /^[^/\s]+\/[^/\s]+$/.test(s) ? s : 'inKibra/gitspace.sh';
+}
+
 /** `<owner>/<repo>` for the git repo at cwd, or null if not resolvable. */
 export async function resolveRepoSlug(cwd: string, exec: GhExec = defaultGhExec): Promise<string | null> {
   try {

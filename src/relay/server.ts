@@ -736,7 +736,22 @@ export function createRelayServer(config: RelayServerConfig): Server<WebSocketDa
           fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
           const path = pjoin(dir, 'report.json');
           fs.writeFileSync(path, JSON.stringify(report, null, 2), { mode: 0o600 });
-          return Response.json({ ok: true, path }, { headers: { 'Cache-Control': 'no-store' } });
+
+          // Also file the GitHub issue — the relay is co-located with the machine
+          // and shares its gh auth, so a report still becomes an issue even when
+          // the daemon is frozen. Best-effort; the disk report is the guarantee.
+          let issueUrl: string | undefined;
+          let issueNumber: number | undefined;
+          try {
+            const { createIssue, reportRepoSlug } = await import('../core/github-issues.js');
+            const noteStr = String(body.note ?? '').trim();
+            const title = (noteStr.split('\n')[0] || 'Problem report').slice(0, 120);
+            const issueBody = `${noteStr}\n\n---\n_Filed from GitSpace · report a problem (relay fallback — daemon unreachable). Full diagnostics saved on the machine; redacted._`;
+            const issue = await createIssue({ slug: reportRepoSlug(), title, body: issueBody, labels: ['gitspace-report'], cwd: root });
+            issueUrl = issue.url;
+            issueNumber = issue.number;
+          } catch { /* keep the disk report; issue stays unfiled */ }
+          return Response.json({ ok: true, path, issueUrl, issueNumber }, { headers: { 'Cache-Control': 'no-store' } });
         } catch {
           return new Response("Report failed", { status: 500, headers: { 'Cache-Control': 'no-store' } });
         }

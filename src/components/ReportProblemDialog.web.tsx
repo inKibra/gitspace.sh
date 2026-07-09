@@ -16,7 +16,8 @@ export function ReportProblemDialog({ onClose, report, projectName, onStartFix, 
   onClose: () => void;
   /** Backend sink; undefined when no backend is connected. */
   report?: (note: string, clientBundle: unknown, opts?: { fileIssue?: boolean; projectName?: string }) => Promise<{ path: string; issueUrl?: string; issueNumber?: number }>;
-  /** Project whose GitHub repo an issue would be filed against (enables the checkbox). */
+  /** The project the user was in — attached as context (the issue itself always
+   *  goes to the GitSpace repo). */
   projectName?: string;
   /** 1-click: import the just-filed issue as a fix workspace (Loop 2). */
   onStartFix?: (issueNumber: number) => Promise<void>;
@@ -24,7 +25,6 @@ export function ReportProblemDialog({ onClose, report, projectName, onStartFix, 
   relayHttpBase?: string | null;
 }): ReactElement {
   const [note, setNote] = useState('');
-  const [fileIssue, setFileIssue] = useState<boolean>(Boolean(projectName));
   const [state, setState] = useState<'edit' | 'sending' | 'done' | 'error'>('edit');
   const [result, setResult] = useState<{ via?: 'daemon' | 'relay' | 'local'; path?: string; issueUrl?: string; issueNumber?: number; filename?: string; error?: string }>({});
   const [fixState, setFixState] = useState<'idle' | 'starting' | 'started'>('idle');
@@ -66,7 +66,7 @@ export function ReportProblemDialog({ onClose, report, projectName, onStartFix, 
       const r = await submitProblemReport({
         note,
         clientBundle,
-        opts: { fileIssue: fileIssue && Boolean(projectName), projectName },
+        opts: { fileIssue: true, projectName },
         report,
         relayHttpBase,
       });
@@ -100,7 +100,7 @@ export function ReportProblemDialog({ onClose, report, projectName, onStartFix, 
             {result.via === 'local' && <div className="mb-1 text-[var(--gs-warning)]">Couldn’t reach the machine or relay — the report was downloaded to your device so it isn’t lost. Send us the file, or retry when you’re reconnected.</div>}
             {result.issueUrl
               ? <div className="mb-1">GitHub issue: <a href={result.issueUrl} target="_blank" rel="noreferrer" className="underline text-[var(--gs-info)]">{result.issueUrl}</a></div>
-              : result.via === 'daemon' && fileIssue && projectName && <div className="mb-1 text-[var(--gs-warning)]">Saved locally — couldn't file a GitHub issue (no repo/auth for {projectName}).</div>}
+              : result.via === 'daemon' && <div className="mb-1 text-[var(--gs-warning)]">Saved locally — couldn’t file the GitHub issue (check the machine’s <span className="font-[family-name:var(--gs-font-mono)]">gh</span> auth). The team can still pick it up from the report file.</div>}
             <div className="font-[family-name:var(--gs-font-mono)] text-[11px] break-all text-[var(--gs-text-dim)]">{result.path ?? result.filename}</div>
             <div className="mt-3 flex items-center gap-2">
               {result.issueNumber !== undefined && onStartFix && fixState !== 'started' && (
@@ -120,9 +120,10 @@ export function ReportProblemDialog({ onClose, report, projectName, onStartFix, 
         ) : (
           <>
             <p className="mb-2 text-[11px] leading-[1.5] text-[var(--gs-text-dim)]">
-              What went wrong? Recent client errors ({ring.length}), the current
-              page, and server context are attached and <strong>redacted</strong>
-              {' '}(tokens, home paths) before anything is written.
+              What went wrong? This files a <strong>GitHub issue in the GitSpace
+              repo</strong> so it can be fixed. Recent client errors ({ring.length}),
+              the current page, and server context are attached and{' '}
+              <strong>redacted</strong> (tokens, home paths) first.
             </p>
             <textarea
               autoFocus
@@ -132,12 +133,6 @@ export function ReportProblemDialog({ onClose, report, projectName, onStartFix, 
               rows={4}
               className="w-full resize-y border border-[var(--gs-border)] bg-black px-2 py-1.5 text-[12px] text-[var(--gs-text)] outline-none focus:border-[var(--gs-border-active)]"
             />
-            {projectName && (
-              <label className="mt-2 flex cursor-pointer items-center gap-1.5 text-[11px] text-[var(--gs-text-muted)]">
-                <input type="checkbox" checked={fileIssue} onChange={(e) => setFileIssue(e.target.checked)} />
-                Also file a GitHub issue in <span className="font-[family-name:var(--gs-font-mono)] text-[var(--gs-text)]">{projectName}</span>’s repo
-              </label>
-            )}
             {state === 'error' && <div className="mt-2 text-[11px] text-[var(--gs-danger)]">{result.error}</div>}
             <div className="mt-3 flex items-center gap-2">
               <button

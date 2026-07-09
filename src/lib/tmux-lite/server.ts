@@ -3795,24 +3795,20 @@ export async function dispatchCommand(cmd: Command): Promise<Response | null> {
               const path = join(dir, 'report.json');
               writeFileSync(path, JSON.stringify(redacted, null, 2), { mode: 0o600 });
 
-              // Optionally publish a GitHub issue (user consented via the dialog
-              // checkbox). Resolve the repo from the named project's base clone;
-              // a failure here degrades to local-only, never loses the report.
+              // Always publish a GitHub issue to the GitSpace repo — a report is
+              // a problem WITH GitSpace, so it goes where GitSpace is fixed (not
+              // the user's project). A failure here degrades to local-only and
+              // is logged, but never loses the report.
               let issueUrl: string | undefined;
               let issueNumber: number | undefined;
-              if (cmd.fileIssue && cmd.projectName) {
-                try {
-                  const { resolveRepoSlug, createIssue } = await import('../../core/github-issues.js');
-                  const { getProjectBaseDir } = await import('../../core/config.js');
-                  const cwd = getProjectBaseDir(cmd.projectName);
-                  const slug = await resolveRepoSlug(cwd);
-                  if (slug) {
-                    const { title, body } = issueTitleAndBody(redacted);
-                    const issue = await createIssue({ slug, title, body, labels: ['gitspace-report'], cwd });
-                    issueUrl = issue.url;
-                    issueNumber = issue.number;
-                  }
-                } catch { /* keep the local report; issueUrl stays undefined */ }
+              try {
+                const { createIssue, reportRepoSlug } = await import('../../core/github-issues.js');
+                const { title, body } = issueTitleAndBody(redacted);
+                const issue = await createIssue({ slug: reportRepoSlug(), title, body, labels: ['gitspace-report'], cwd: getWorkspaceRoot() });
+                issueUrl = issue.url;
+                issueNumber = issue.number;
+              } catch (e) {
+                console.error(`[report] GitHub issue filing failed (report saved locally at ${path}): ${e instanceof Error ? e.message : String(e)}`);
               }
               res = { type: 'report-problem', path, issueUrl, issueNumber };
             } catch (e) {

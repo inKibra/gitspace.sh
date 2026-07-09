@@ -18,7 +18,7 @@ const RPC_TIMEOUT_MS = 4000;
 
 export type ReportOutcome =
   | { via: 'daemon'; path: string; issueUrl?: string; issueNumber?: number }
-  | { via: 'relay'; path?: string }
+  | { via: 'relay'; path?: string; issueUrl?: string; issueNumber?: number }
   | { via: 'local'; filename: string };
 
 interface SubmitParams {
@@ -75,8 +75,9 @@ export async function submitProblemReport(params: SubmitParams): Promise<ReportO
         body: JSON.stringify({ note, projectName: params.opts.projectName, clientBundle: redactedBundle }),
       }), RPC_TIMEOUT_MS + 2000);
       if (res.ok) {
-        const j = await res.json().catch(() => ({} as { path?: string }));
-        return { via: 'relay', path: (j as { path?: string }).path };
+        const j = await res.json().catch(() => ({} as { path?: string; issueUrl?: string; issueNumber?: number }));
+        const r = j as { path?: string; issueUrl?: string; issueNumber?: number };
+        return { via: 'relay', path: r.path, issueUrl: r.issueUrl, issueNumber: r.issueNumber };
       }
     } catch {
       /* fall through to local */
