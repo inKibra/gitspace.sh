@@ -551,10 +551,14 @@ const MAX_ID_LENGTH = 256;
 const MAX_LABEL_LENGTH = 256;
 
 /**
- * Maximum total message size (1MB)
- * Security: Prevents DoS via huge allocations
+ * Maximum total message size (16MB).
+ * Security: bounds per-message allocations (DoS). Sized for real traffic:
+ * E2E-encrypted machine snapshots grow with workspace count — an 18-workspace
+ * machine already produced a 1.65MB data frame, which the previous 1MB cap
+ * silently rejected as "Invalid message format" (browser stuck on
+ * "Loading worktrees…" with no error anywhere).
  */
-const MAX_MESSAGE_SIZE = 1024 * 1024;
+const MAX_MESSAGE_SIZE = 16 * 1024 * 1024;
 
 /**
  * Pattern for valid identifiers (alphanumeric, hyphens, underscores, dots, colons)
