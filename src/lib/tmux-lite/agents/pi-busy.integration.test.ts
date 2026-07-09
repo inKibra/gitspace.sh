@@ -18,7 +18,8 @@ function writeWorkspaceProjectConfig(projectPath: string): void {
 
 function buildSubprocessPrelude(): string {
   return `
-    import { writeFileSync } from 'node:fs';
+    import { mkdirSync, writeFileSync } from 'node:fs';
+    import { join } from 'node:path';
     import {
       attachAgentSession,
       createAgentSession,
@@ -39,6 +40,65 @@ function buildSubprocessPrelude(): string {
 
     process.env.HOME = ${JSON.stringify(root)};
     applyTmuxLiteSandboxEnvironment(${JSON.stringify(`pi-busy-${basename(root)}`)});
+
+    // Hermetic model backend: the sandbox HOME has no provider credentials, so
+    // without one the SDK selects no model and prompt() fails before
+    // 'agent_start' ever fires — the busy status would never be set. Serve a
+    // local OpenAI-compatible streaming endpoint and register it as a custom
+    // provider via models.json so a real turn runs (agent_start → busy)
+    // without network access or credentials. The response streams slowly
+    // (~15s) so the turn stays running while the test polls for busy.
+    const mockEncoder = new TextEncoder();
+    const mockSse = (payload: unknown) => mockEncoder.encode('data: ' + JSON.stringify(payload) + '\\n\\n');
+    const mockModelServer = Bun.serve({
+      hostname: '127.0.0.1',
+      port: 0,
+      idleTimeout: 120,
+      async fetch(req) {
+        if (!new URL(req.url).pathname.endsWith('/chat/completions')) {
+          return new Response('not found', { status: 404 });
+        }
+        const stream = new ReadableStream<Uint8Array>({
+          async start(controller) {
+            try {
+              const base = { id: 'chatcmpl-mock', object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model: 'mock-model' };
+              controller.enqueue(mockSse({ ...base, choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }] }));
+              for (let i = 1; i <= 60; i++) {
+                controller.enqueue(mockSse({ ...base, choices: [{ index: 0, delta: { content: i + '. streaming line\\n' }, finish_reason: null }] }));
+                await Bun.sleep(250);
+              }
+              controller.enqueue(mockSse({ ...base, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 60, total_tokens: 70 } }));
+              controller.enqueue(mockEncoder.encode('data: [DONE]\\n\\n'));
+              controller.close();
+            } catch {
+              // Client disconnected mid-stream (daemon killed) — expected.
+            }
+          },
+        });
+        return new Response(stream, { headers: { 'content-type': 'text/event-stream' } });
+      },
+    });
+    const mockModelsConfig = JSON.stringify({
+      providers: {
+        mockai: {
+          baseUrl: 'http://127.0.0.1:' + mockModelServer.port + '/v1',
+          api: 'openai-completions',
+          apiKey: 'mock-key',
+          models: [{ id: 'mock-model', name: 'Mock Model', contextWindow: 200000, maxTokens: 32768, supportsTools: true, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }],
+        },
+      },
+    }, null, 2);
+    // OMP reads models.json from the default agent dir (~/.omp/agent) when
+    // PI_CODING_AGENT_DIR wasn't set at pi-utils import time, and from the
+    // GitSpace-managed dir (<workspace-root>/.pi) once it is. Write both so
+    // every daemon/worker process resolves the mock provider.
+    for (const dir of [join(${JSON.stringify(root)}, '.omp', 'agent'), join(${JSON.stringify(root)}, 'gitspace', '.pi')]) {
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, 'models.json'), mockModelsConfig);
+    }
+    function stopMockModelServer(): void {
+      try { mockModelServer.stop(true); } catch {}
+    }
 
     const busyPrompt = 'Write a detailed numbered list from 1 to 120 about terminal state propagation. One sentence per item.';
 
@@ -141,6 +201,7 @@ describe('Pi busy state integration', () => {
         process.exitCode = 1;
       } finally {
         try { await killServer(); } catch {}
+        stopMockModelServer();
       }
     `);
 
@@ -182,6 +243,7 @@ describe('Pi busy state integration', () => {
         process.exitCode = 1;
       } finally {
         try { await killServer(); } catch {}
+        stopMockModelServer();
       }
     `);
 
@@ -220,6 +282,7 @@ describe('Pi busy state integration', () => {
         process.exitCode = 1;
       } finally {
         try { await killServer(); } catch {}
+        stopMockModelServer();
       }
     `);
 
