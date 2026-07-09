@@ -193,9 +193,27 @@ function ModelsTab({ control, onSetModel, onApplyRole, onSet }: { control?: Agen
 function AgentTab({ control, tools, agents, loading, onSet }: { control?: AgentControlInfo; tools: AgentToolInfo[]; agents: AgentDefinitionInfo[]; loading: boolean; onSet: (p: string, v: string | number | boolean) => void }): ReactElement {
   const models = control?.models ?? [];
   const roles = control?.roleCatalog ?? [];
+  // Translate `pi/<role>` refs into the Model roles section's vocabulary.
+  // Display-only: values written to settings stay `pi/<role>`; the raw ref
+  // survives only in title attrs for debugging. Non-role refs pass through.
+  const roleFor = (ref: string) => roles.find((x) => `pi/${x.role}` === ref);
+  const CURRENT_MODEL = "Current model (follows this session's model)";
+  const nameForRef = (ref: string): string => {
+    const r = roleFor(ref);
+    return r ? (r.role === 'task' ? 'Current model' : r.name) : ref;
+  };
+  const labelForModel = (spec: string): string => {
+    // Multi-pattern pins ("pi/plan, pi/slow") → "Architect, Thinking".
+    const parts = spec.split(',').map((s) => s.trim()).filter(Boolean);
+    if (parts.length > 1) return parts.map(nameForRef).join(', ');
+    const r = roleFor(spec);
+    if (!r) return spec;
+    if (r.role === 'task') return CURRENT_MODEL;
+    return `${r.name} — ${r.model ?? 'auto (priority chain)'}`;
+  };
   return (
     <div>
-      <Grp>Agents — subagent defs · model override per agent</Grp>
+      <Grp>Agents — model per subagent · role names match Model roles above</Grp>
       {agents.length === 0 ? (
         <div className="text-[var(--gs-text-dim)]">{loading ? 'Loading…' : 'No agents discovered.'}</div>
       ) : (
@@ -217,12 +235,12 @@ function AgentTab({ control, tools, agents, loading, onSet }: { control?: AgentC
               <select
                 value={value}
                 onChange={(e) => onSet(`task.agentModelOverrides.${a.name}`, e.target.value)}
-                title={a.resolvedModel ? `Resolves to: ${a.resolvedModel}` : undefined}
+                title={[value ? `Override: ${value}` : null, a.resolvedModel ? `Resolves to: ${a.resolvedModel}` : null].filter(Boolean).join('\n') || undefined}
                 className="min-w-0 flex-1 truncate border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-1 py-0.5 font-[family-name:var(--gs-font-mono)] text-[var(--gs-text)]"
               >
-                <option value="">{`— ${a.model ?? 'session model'} —`}</option>
-                {value && !inList && <option value={value}>{value}</option>}
-                {roleRefs.map((ref) => <option key={ref} value={ref}>{ref}</option>)}
+                <option value="" title={a.model ?? undefined}>{`— ${a.model ? labelForModel(a.model) : CURRENT_MODEL} —`}</option>
+                {value && !inList && <option value={value} title={value}>{labelForModel(value)}</option>}
+                {roleRefs.map((ref) => <option key={ref} value={ref} title={ref}>{labelForModel(ref)}</option>)}
                 {models.map((m) => {
                   const ref = `${m.provider}/${m.id}`;
                   return <option key={ref} value={ref}>{ref}</option>;
