@@ -57,7 +57,7 @@ import { useEvents, toWideEventItem, type WideEventItem } from "./components/Eve
 import { EventsWeb } from "./components/Events.web.js";
 import type { WideEventFilter } from "./types/events.js";
 import type { WorkspacePhase } from './types/config.js';
-import type { ChainStackStatus, GoalValidation, Requirement } from './types/goals.js';
+import type { ChainStackStatus } from './types/goals.js';
 import {
   useNotifications,
   type ToastNotification,
@@ -1239,6 +1239,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
         if (!workspace) return;
         flow.showInput({
           title: 'Goal Title',
+          label: 'Goal title',
           placeholder: 'e.g. Billing UI polish',
           onSubmit: (title) => {
             const trimmed = title.trim();
@@ -3293,7 +3294,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
                 onCreateDashboard={() => {
                   flow.showInput({
                     title: 'New dashboard',
-                    message: 'Dashboard name (becomes <name>.dashboard.json on the artifacts branch)',
+                    label: 'Dashboard name (becomes <name>.dashboard.json on the artifacts branch)',
                     placeholder: 'ops',
                     onSubmit: (name) => {
                       const slug = name.trim().toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '');

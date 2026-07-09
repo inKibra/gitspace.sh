@@ -103,10 +103,6 @@ function emptyValidation(): GoalValidation {
   return { reqOrder: [], requirements: {}, events: [] };
 }
 
-function pluralize(count: number, singular: string, plural: string = `${singular}s`): string {
-  return `${count} ${count === 1 ? singular : plural}`;
-}
-
 function formatRelativeTime(iso?: string): string {
   if (!iso) return '';
   try {

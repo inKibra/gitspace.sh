@@ -492,7 +492,15 @@ function WorkspaceCard({
   const name = getWorkspaceDisplayName(entry);
   const prChip = getPullRequestChip(entry);
   const linear = entry.linear;
-  const goal = entry.goal;
+  // Enrich the base goal record into a KanbanGoalItem (adds the backend-scoped
+  // fields ChainHandle/RearrangeHandle need) — same shape as allGoalItems.
+  const goal: KanbanGoalItem | undefined = entry.goal ? {
+    ...entry.goal,
+    selectionKey: `${entry.backendKey}:goal:${entry.goal.id}`,
+    backendKey: entry.backendKey,
+    machineLabel: entry.machineLabel,
+    isRemote: entry.isRemote,
+  } : undefined;
   const isDeleting = deletionTask?.status === 'running' || deletionTask?.status === 'queued';
   const goalChip = getGoalStatusChip(goal);
   const gates = getGateTally(goal?.validation);
