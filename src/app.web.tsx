@@ -52,6 +52,7 @@ import { useInboxPage } from './app/react/index.js';
 import { InboxWeb } from "./components/Inbox.web.js";
 import { ReportProblemDialog } from "./components/ReportProblemDialog.web.js";
 import { isTouchDevice, hasCoarsePointer } from "./utils/device.web.js";
+import { shareArtifactToClipboard } from "./components/share-artifact.web.js";
 import { useEvents, toWideEventItem, type WideEventItem } from "./components/Events.js";
 import { EventsWeb } from "./components/Events.web.js";
 import type { WideEventFilter } from "./types/events.js";
@@ -3146,6 +3147,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
                   if (!fn) return Promise.reject(new Error('unavailable'));
                   return fn.call(paneBackend, workspace.id, p);
                 }}
+                onShare={() => void shareArtifactToClipboard(paneBackend, workspace.projectName, workspace.name, extra.path)}
               />
             ),
           });

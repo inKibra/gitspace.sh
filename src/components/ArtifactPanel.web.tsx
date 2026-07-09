@@ -145,11 +145,13 @@ export function MiniAppRun({ html, read, listArtifacts }: {
 }
 
 /** Dock-pane artifact viewer: header + fetched preview. */
-export function ArtifactPanel({ path, read, listArtifacts }: {
+export function ArtifactPanel({ path, read, listArtifacts, onShare }: {
   path: string;
   read: (path: string) => Promise<ArtifactRead>;
   /** Enables the mini-app data picker for *.gssh.html artifacts. */
   listArtifacts?: () => Promise<string[]>;
+  /** When set, a Share control appears in the header (copies a public link). */
+  onShare?: () => void;
 }): ReactElement {
   const [data, setData] = useState<ArtifactRead | null>(null);
   const [state, setState] = useState<'loading' | 'ready' | 'error'>('loading');
@@ -172,8 +174,18 @@ export function ArtifactPanel({ path, read, listArtifacts }: {
         <span className="text-[var(--gs-accent)]">◇</span>
         <span className="truncate font-[family-name:var(--gs-font-mono)] text-[12px] text-[var(--gs-text)]">{path}</span>
         {data && <span className="flex-shrink-0 text-[10px] text-[var(--gs-text-ghost)]">{humanSize(data.size)}{data.truncated ? ' · truncated' : ''}</span>}
+        {onShare && (
+          <button
+            type="button"
+            onClick={onShare}
+            title="Share — copy a public link to this artifact (requires serve)"
+            className="ml-auto flex-shrink-0 border border-[var(--gs-border)] px-2 py-[2px] text-[10.5px] text-[var(--gs-text-muted)] hover:border-[var(--gs-border-active)] hover:text-[var(--gs-accent)]"
+          >
+            ↗ Share
+          </button>
+        )}
         {isApp && (
-          <span className="ml-auto inline-flex border border-[var(--gs-border)] text-[10.5px]">
+          <span className={`${onShare ? '' : 'ml-auto'} inline-flex border border-[var(--gs-border)] text-[10.5px]`}>
             {(['run', 'source'] as const).map((m) => (
               <button key={m} type="button" onClick={() => setAppView(m)}
                 className={`px-2 py-[2px] ${appView === m ? 'bg-[var(--gs-bg-active)] text-[var(--gs-text)]' : 'text-[var(--gs-text-dim)]'}`}>

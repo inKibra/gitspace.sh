@@ -17,7 +17,7 @@ import type { BackendKey, SessionBackend } from '../session/backend.js';
 import { NotePanel } from '../components/NotePanel.web.js';
 import { MarkdownPreview } from '../components/MarkdownPreview.web.js';
 import { CronsPaneConnected } from '../components/CronsPaneConnected.web.js';
-import { formatArtifactUri } from '../core/artifact-cap.js';
+import { shareArtifactToClipboard } from '../components/share-artifact.web.js';
 import { toast } from '../lib/sonner.web.js';
 import { PaneTerminalPanel } from '../components/PaneTerminalPanel.web.js';
 import { DockviewWorkspaceShell, type DockviewTerminalPanel } from '../components/DockviewWorkspaceShell.web.js';
@@ -599,19 +599,12 @@ export function ProjectHomePage({
     <div className="px-[13px] pb-[5px] pt-[11px] text-[10.5px] uppercase tracking-[.12em] text-[var(--gs-text-dim)]">{label}</div>
   );
 
-  // Signed share link for one artifact (7-day default) — served through the
-  // machine's relay; requires serve active. URL lands on the clipboard.
+  // Signed share link for one artifact — served through the machine's relay;
+  // requires serve active. URL lands on the clipboard (shared helper).
   const shareArtifact = async (path: string): Promise<void> => {
-    if (!backend?.mintArtifactShare) { toast.error('Sharing unavailable on this connection.'); return; }
     const src = sourceOptions.find((o) => o.value === artifactSource) ?? sourceOptions[0];
     const workspaceSegment = src.workspaceId === null ? '@base' : src.label;
-    try {
-      const r = await backend.mintArtifactShare(formatArtifactUri(projectName, workspaceSegment, path));
-      await navigator.clipboard.writeText(r.url).catch(() => undefined);
-      toast.success(`Share link copied — anyone with it can read this file until ${new Date(r.expiresAt).toLocaleDateString()}.`);
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed to mint share link');
-    }
+    await shareArtifactToClipboard(backend, projectName, workspaceSegment, path);
   };
 
   const railRow = (e: ArtifactEntry, sub?: string): ReactElement => {
@@ -633,8 +626,8 @@ export function ProjectHomePage({
         <button
           type="button"
           onClick={(ev) => { ev.stopPropagation(); void shareArtifact(e.path); }}
-          title="Copy a public share link (expires in 7 days; requires serve)"
-          className="flex-shrink-0 px-0.5 text-[11px] text-[var(--gs-text-ghost)] hover:text-[var(--gs-text-muted)]"
+          title="Share — copy a public link to this artifact (requires serve)"
+          className="flex-shrink-0 px-0.5 text-[12px] text-[var(--gs-text-dim)] hover:text-[var(--gs-accent)]"
         >
           ↗
         </button>
@@ -799,7 +792,7 @@ export function ProjectHomePage({
     }
     if (isArtTab(t)) {
       return { ...common, version: `art|${t}|${artifactSource}|${artifactsFp}`, render: () => (
-        <ArtifactPanel path={t.slice(4)} read={readArtifactFromSource} listArtifacts={async () => artifacts.map((e) => e.path)} />
+        <ArtifactPanel path={t.slice(4)} read={readArtifactFromSource} listArtifacts={async () => artifacts.map((e) => e.path)} onShare={() => void shareArtifact(t.slice(4))} />
       ) };
     }
     if (t === 'artifacts-repo') return { ...common, version: 'artifacts-repo', render: () => <ArtifactsRepoTab projectName={projectName} backend={backend} /> };

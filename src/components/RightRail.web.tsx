@@ -7,6 +7,7 @@ import type { SessionBackend } from '../session/backend.js';
 import type { ReviewChangedFile } from '../types/review.js';
 import { langForPath } from './ArtifactPanel.web.js';
 import { KIND_ICON, KIND_LABEL, KIND_ORDER, classifyArtifact, type ArtifactKind, decodeBase64Utf8 } from './artifact-kinds.js';
+import { shareArtifactToClipboard } from './share-artifact.web.js';
 import { Highlighted } from '../blocks/render/highlight.web.js';
 import { deriveNoteLabel } from './note-label.js';
 
@@ -505,6 +506,14 @@ function ArtifactsMode({ backend, workspaceId, projectName, workspaceName, onOpe
           <span className="min-w-0 flex-1 truncate text-[var(--gs-text)]">{name}</span>
         </button>
         <span className="ml-auto flex-shrink-0 text-[10.5px] text-[var(--gs-text-dim)]">{rowMeta(a.path)}</span>
+        <button
+          type="button"
+          onClick={() => void shareArtifactToClipboard(backend, projectName, workspaceName, a.path)}
+          title="Share — copy a public link to this artifact (requires serve)"
+          className="flex-shrink-0 px-0.5 text-[var(--gs-text-ghost)] opacity-0 hover:text-[var(--gs-accent)] group-hover:opacity-100"
+        >
+          ↗
+        </button>
         <button
           type="button"
           onClick={() => toggleFav(a.path)}
