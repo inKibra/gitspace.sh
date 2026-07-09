@@ -1040,7 +1040,11 @@ export function createRelayServer(config: RelayServerConfig): Server<WebSocketDa
           if (rejectUnsignedClientMessage(ws, rawMsg)) {
             return;
           }
-          ws.send(serializeMessage(createErrorMessage("INVALID_REQUEST", "Invalid message format")));
+          // Name the offender — a bare "Invalid message format" made a Mac
+          // snapshot outage undebuggable (relay silently ate machine messages).
+          const rejectedType = rawMsg && typeof rawMsg === 'object' ? String((rawMsg as { type?: unknown }).type ?? '(none)') : '(not json)';
+          console.warn(`[relay] rejecting invalid message from ${ws.data.role ?? 'unknown'}: type=${rejectedType} len=${msgStr.length} head=${msgStr.slice(0, 160)}`);
+          ws.send(serializeMessage(createErrorMessage("INVALID_REQUEST", `Invalid message format (type=${rejectedType})`)));
           return;
         }
 
