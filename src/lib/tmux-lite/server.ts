@@ -3802,8 +3802,11 @@ export async function dispatchCommand(cmd: Command): Promise<Response | null> {
               let issueUrl: string | undefined;
               let issueNumber: number | undefined;
               try {
-                const { createIssue, reportRepoSlug } = await import('../../core/github-issues.js');
-                const { title, body } = issueTitleAndBody(redacted);
+                const { createIssue, createGist, reportRepoSlug } = await import('../../core/github-issues.js');
+                const { issueLogFiles } = await import('./problem-report.js');
+                // Attach the FULL logs (no truncation) as a gist, link it in the issue.
+                const logsUrl = await createGist(issueLogFiles(redacted), `GitSpace problem report — ${new Date(now).toISOString()}`);
+                const { title, body } = issueTitleAndBody(redacted, logsUrl ?? undefined);
                 const issue = await createIssue({ slug: reportRepoSlug(), title, body, labels: ['gitspace-report'], cwd: getWorkspaceRoot() });
                 issueUrl = issue.url;
                 issueNumber = issue.number;

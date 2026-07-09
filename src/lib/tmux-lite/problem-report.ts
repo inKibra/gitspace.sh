@@ -75,14 +75,38 @@ export function writeProblemReport(note: string, clientBundle: unknown, now: num
   return { path };
 }
 
-/** The issue title (first line of the note, trimmed) + a redacted markdown body. */
-export function issueTitleAndBody(redacted: ProblemReport): { title: string; body: string } {
+/** The full logs, as named files, to attach to the issue (uploaded as a gist —
+ *  no truncation). Returned separately so the caller can attach them. */
+export function issueLogFiles(redacted: ProblemReport): Array<{ name: string; content: string }> {
+  const client = redacted.client as {
+    ring?: Array<{ kind: string; message: string }>;
+    domSnapshot?: string;
+  } | undefined;
+  const ring = client?.ring ?? [];
+  const files: Array<{ name: string; content: string }> = [
+    { name: 'report.json', content: JSON.stringify(redacted, null, 2) },
+  ];
+  const daemonLog = redacted.server.daemonLogTail;
+  if (daemonLog && daemonLog !== '(daemon log unavailable)') files.push({ name: 'daemon.log', content: daemonLog });
+  const trace = (redacted.server.traceRing ?? [])
+    .map((t) => `[${t.ts}] ${t.event}${t.details ? ` ${JSON.stringify(t.details)}` : ''}`).join('\n');
+  if (trace) files.push({ name: 'server-trace.log', content: trace });
+  if (ring.length) files.push({ name: 'client-console.log', content: ring.map((e) => `[${e.kind}] ${e.message}`).join('\n') });
+  if (client?.domSnapshot) files.push({ name: 'dom-snapshot.html', content: client.domSnapshot });
+  return files.filter((f) => f.content);
+}
+
+/** The issue title (first line of the note, trimmed) + a redacted markdown body.
+ *  The body is a concise summary; the FULL logs ride along as a linked gist
+ *  attachment (see issueLogFiles) — pass its URL as `logsUrl`. */
+export function issueTitleAndBody(redacted: ProblemReport, logsUrl?: string): { title: string; body: string } {
   const firstLine = (redacted.note.split('\n')[0] ?? '').trim();
   const title = (firstLine || 'Problem report').slice(0, 120);
   const client = redacted.client as {
     version?: string; url?: string; userAgent?: string;
     ring?: Array<{ kind: string; message: string }>;
     posthog?: { replayUrl?: string } | null;
+    domSnapshot?: string;
   } | undefined;
   const ring = client?.ring ?? [];
   const lines = [
@@ -90,7 +114,7 @@ export function issueTitleAndBody(redacted: ProblemReport): { title: string; bod
     '',
     '---',
     '**Environment**',
-    `- gitspace: ${redacted.server.version} (${redacted.server.platform})`,
+    `- gitspace: ${redacted.server.version} (${redacted.server.platform}) · pid ${redacted.server.pid} · up ${redacted.server.uptimeSec}s`,
     client?.url ? `- page: ${client.url}` : '',
     client?.userAgent ? `- ua: ${client.userAgent}` : '',
     client?.posthog?.replayUrl ? `- [PostHog session replay](${client.posthog.replayUrl})` : '',
@@ -99,6 +123,10 @@ export function issueTitleAndBody(redacted: ProblemReport): { title: string; bod
     ...(ring.length > 0
       ? ['```', ...ring.slice(-15).map((e) => `[${e.kind}] ${e.message}`), '```']
       : ['_none captured_']),
+    '',
+    logsUrl
+      ? `**Full logs** (daemon log, server trace, client console, DOM snapshot, full report): ${logsUrl}`
+      : '_Full logs saved to the machine-local report.json (gist upload unavailable)._',
     '',
     '_Filed from GitSpace · report a problem. Diagnostics redacted (tokens, home paths)._',
   ].filter((l) => l !== '');

@@ -80,6 +80,34 @@ export interface CreatedIssue {
   url: string;
 }
 
+/** Upload files as a secret gist and return its URL, or null on failure.
+ *  GitHub has NO public API for true issue file-attachments (that upload flow is
+ *  browser/cookie-only), so a gist is the supported way to attach full files. */
+export async function createGist(
+  files: Array<{ name: string; content: string }>,
+  description: string,
+  exec: GhExec = defaultGhExec,
+): Promise<string | null> {
+  const nonEmpty = files.filter((f) => f.name && f.content);
+  if (nonEmpty.length === 0) return null;
+  const payload = {
+    description,
+    public: false,
+    files: Object.fromEntries(nonEmpty.map((f) => [f.name, { content: f.content }])),
+  };
+  const tmpFile = join(tmpdir(), `gssh-gist-${process.pid}-${Math.random().toString(36).slice(2)}.json`);
+  try {
+    writeFileSync(tmpFile, JSON.stringify(payload), 'utf-8');
+    const { stdout } = await exec(['api', 'gists', '--method', 'POST', '--input', tmpFile]);
+    const parsed = JSON.parse(stdout) as { html_url?: string };
+    return parsed.html_url ?? null;
+  } catch {
+    return null;
+  } finally {
+    try { unlinkSync(tmpFile); } catch { /* ignore */ }
+  }
+}
+
 /** Create a GitHub issue via `gh api repos/<slug>/issues --method POST`. */
 export async function createIssue(input: CreateIssueInput, exec: GhExec = defaultGhExec): Promise<CreatedIssue> {
   if (!/^[^/\s]+\/[^/\s]+$/.test(input.slug)) {

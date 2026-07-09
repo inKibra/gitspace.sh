@@ -743,10 +743,29 @@ export function createRelayServer(config: RelayServerConfig): Server<WebSocketDa
           let issueUrl: string | undefined;
           let issueNumber: number | undefined;
           try {
-            const { createIssue, reportRepoSlug } = await import('../core/github-issues.js');
+            const { createIssue, createGist, reportRepoSlug } = await import('../core/github-issues.js');
             const noteStr = String(body.note ?? '').trim();
             const title = (noteStr.split('\n')[0] || 'Problem report').slice(0, 120);
-            const issueBody = `${noteStr}\n\n---\n_Filed from GitSpace · report a problem (relay fallback — daemon unreachable). Full diagnostics saved on the machine; redacted._`;
+            const cb = (body.clientBundle ?? {}) as { url?: string; userAgent?: string; ring?: Array<{ kind: string; message: string }>; domSnapshot?: string };
+            const ring = Array.isArray(cb.ring) ? cb.ring : [];
+            // Attach the FULL logs (read from disk) as a gist — no truncation.
+            const logsUrl = await createGist([
+              { name: 'report.json', content: JSON.stringify(report, null, 2) },
+              { name: 'daemon.log', content: serverDisk.daemonLogTail },
+              { name: 'crash.log', content: serverDisk.crashLogTail },
+              { name: 'server-trace.log', content: serverDisk.traceTail },
+              { name: 'client-console.log', content: ring.map((e) => `[${e.kind}] ${e.message}`).join('\n') },
+              ...(cb.domSnapshot ? [{ name: 'dom-snapshot.html', content: cb.domSnapshot }] : []),
+            ], `GitSpace problem report (relay fallback) — ${new Date().toISOString()}`);
+            const issueBody = [
+              noteStr, '', '---', '**Environment** (relay fallback — machine daemon unreachable)',
+              cb.url ? `- page: ${cb.url}` : '', cb.userAgent ? `- ua: ${cb.userAgent}` : '',
+              '', `**Recent client errors (${ring.length})**`,
+              ...(ring.length ? ['```', ...ring.slice(-15).map((e) => `[${e.kind}] ${e.message}`), '```'] : ['_none captured_']),
+              '',
+              logsUrl ? `**Full logs** (daemon, crash, trace, client console, DOM): ${logsUrl}` : '_Full logs saved to the machine-local report.json (gist upload unavailable)._',
+              '', '_Filed from GitSpace · report a problem (relay fallback). Diagnostics read from disk; redacted._',
+            ].filter(Boolean).join('\n');
             const issue = await createIssue({ slug: reportRepoSlug(), title, body: issueBody, labels: ['gitspace-report'], cwd: root });
             issueUrl = issue.url;
             issueNumber = issue.number;
