@@ -91,15 +91,26 @@ function ensureManagedPiConfigDefaults(agentDir: string): void {
     }
   }
 
+  // Each default applies independently — only when the user hasn't set it.
+  let changed = false;
+
   const contextPromotion = isRecord(settings.contextPromotion)
     ? { ...settings.contextPromotion }
     : {};
-  if (typeof contextPromotion.enabled === 'boolean') {
-    return;
+  if (typeof contextPromotion.enabled !== 'boolean') {
+    contextPromotion.enabled = false;
+    settings.contextPromotion = contextPromotion;
+    changed = true;
   }
 
-  contextPromotion.enabled = false;
-  settings.contextPromotion = contextPromotion;
+  // Model quick-cycle starts on the DEFAULT model, not smol — OMP's baked
+  // order is [smol, default, slow], which makes the first ⟲ press downgrade.
+  if (!Array.isArray(settings.cycleOrder)) {
+    settings.cycleOrder = ['default', 'smol', 'slow'];
+    changed = true;
+  }
+
+  if (!changed) return;
   try {
     writeFileSync(configPath, YAML.stringify(settings, null, 2), { mode: 0o600 });
   } catch (error) {
