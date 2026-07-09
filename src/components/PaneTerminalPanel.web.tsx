@@ -352,6 +352,7 @@ export function PaneTerminalPanel({
             onSetThinkingLevel={handleSetThinkingLevel}
             onSetApprovalMode={handleSetApprovalMode}
             onCycleRole={handleCycleRole}
+            onApplyRole={handleApplyRole}
             onToggleFast={handleToggleFast}
             onOpenHistory={openHistory}
             onOpenAuth={openSettings}

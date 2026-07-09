@@ -8,7 +8,7 @@ function fmtTokens(n: number): string {
   return String(n);
 }
 
-type MenuId = 'model' | 'thinking' | 'settings';
+type MenuId = 'model' | 'thinking' | 'role' | 'settings';
 
 /** A titled option-picker section inside the ⚙ settings popover. */
 function SettingsPickerSection({
@@ -55,6 +55,7 @@ export function AgentPaneHeader({
   onSetThinkingLevel,
   onSetApprovalMode,
   onCycleRole,
+  onApplyRole,
   onToggleFast,
   onOpenHistory,
   onOpenAuth,
@@ -67,6 +68,7 @@ export function AgentPaneHeader({
   onSetThinkingLevel?: (level: string) => void;
   onSetApprovalMode?: (mode: string) => void;
   onCycleRole?: () => void;
+  onApplyRole?: (role: string) => void;
   onToggleFast?: () => void;
   onOpenHistory?: () => void;
   onOpenAuth?: () => void;
@@ -102,6 +104,24 @@ export function AgentPaneHeader({
   const roles = control?.roles ?? [];
   const currentRole = roles.find((r) => r.current) ?? roles[0];
   const canCycleRole = roles.length > 1 && !!onCycleRole;
+  // Role selector: the full catalog when available, else the cycle roles.
+  const roleCatalog = control?.roleCatalog ?? [];
+  const roleOptions: Array<{ role: string; name: string; model: string | null }> =
+    roleCatalog.length > 0 ? roleCatalog : roles;
+  const canPickRole = roleOptions.length > 0 && !!onApplyRole;
+  // Effective model for the Default role (resolved cycle entry first) — an
+  // unset role's effective behavior is inherit-Default-first (SDK
+  // shouldInheritDefaultBeforePriority), so label unset roles as following it.
+  const defaultRoleModel = roles.find((r) => r.role === 'default')?.model
+    ?? roleCatalog.find((r) => r.role === 'default')?.model
+    ?? null;
+  const roleModelLabel = (role: string, m: string | null): string =>
+    m ?? (role !== 'default' && defaultRoleModel ? `Default — ${defaultRoleModel}` : 'auto');
+  // Cycle roles (control.roles) whose resolved model is `ref` — drives the
+  // green in-cycle dots in the model picker. Role models may carry a
+  // ":thinking" suffix; match on the base ref.
+  const cycleRolesFor = (ref: string): string[] =>
+    roles.filter((r) => r.model === ref || (r.model?.startsWith(`${ref}:`) ?? false)).map((r) => r.name);
 
   return (
     <div className="relative flex flex-shrink-0 items-center gap-2 border-b border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-3 py-1.5 text-[11px]">
@@ -137,15 +157,23 @@ export function AgentPaneHeader({
                   shownModels.map((m) => {
                     const ref = `${m.provider}/${m.id}`;
                     const active = ref === current;
+                    const inCycle = cycleRolesFor(ref);
                     return (
                       <button
                         key={ref}
                         type="button"
                         onClick={() => { onSetModel?.(m.provider, m.id); setMenu(null); }}
-                        className={`block w-full truncate px-3 py-1 text-left font-[family-name:var(--gs-font-mono)] hover:bg-[var(--gs-border)] ${active ? 'text-[var(--gs-accent)]' : 'text-[var(--gs-text)]'}`}
+                        className={`flex w-full items-center gap-1.5 px-3 py-1 text-left font-[family-name:var(--gs-font-mono)] hover:bg-[var(--gs-border)] ${active ? 'text-[var(--gs-accent)]' : 'text-[var(--gs-text)]'}`}
                         title={ref}
                       >
-                        {active ? '● ' : '  '}{ref}
+                        <span className="w-3 flex-none">{active ? '●' : ''}</span>
+                        {/* Green dot: this model is assigned to a role in the cycle. */}
+                        <span
+                          className="h-1.5 w-1.5 flex-none rounded-full"
+                          style={{ background: inCycle.length > 0 ? 'var(--gs-success)' : 'transparent' }}
+                          title={inCycle.length > 0 ? `in cycle: ${inCycle.join(', ')}` : undefined}
+                        />
+                        <span className="truncate">{ref}</span>
                       </button>
                     );
                   })
@@ -183,6 +211,44 @@ export function AgentPaneHeader({
                       className={`block w-full px-3 py-1 text-left font-mono hover:bg-[var(--gs-border)] ${active ? 'text-[var(--gs-accent)]' : 'text-[var(--gs-text)]'}`}
                     >
                       {active ? '● ' : '  '}{l}
+                    </button>
+                  );
+                })}
+              </div>
+            </>
+          )}
+        </span>
+      ) : null}
+
+      {/* model role — pick a role from the catalog; applies via the same seam
+          as the ⚙ role-cycle button, styled to match the model/think dropdowns */}
+      {canPickRole ? (
+        <span className="relative">
+          <button
+            type="button"
+            onClick={() => toggle('role')}
+            title="Model role"
+            className="flex items-center gap-1 text-[var(--gs-text-dim)] hover:text-[var(--gs-text)]"
+          >
+            <span className="text-[10px]">role</span>
+            <span className="font-mono text-[var(--gs-text)]">{currentRole?.name ?? 'role'}</span>
+            <span>▾</span>
+          </button>
+          {menu === 'role' && (
+            <>
+              <div className="fixed inset-0 z-10" onClick={() => setMenu(null)} />
+              <div className="absolute left-0 top-full z-20 mt-1 max-h-80 w-72 overflow-y-auto border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] py-1 shadow-lg">
+                {roleOptions.map((r) => {
+                  const active = r.role === currentRole?.role;
+                  return (
+                    <button
+                      key={r.role}
+                      type="button"
+                      onClick={() => { onApplyRole?.(r.role); setMenu(null); }}
+                      className={`block w-full truncate px-3 py-1 text-left font-mono hover:bg-[var(--gs-border)] ${active ? 'text-[var(--gs-accent)]' : 'text-[var(--gs-text)]'}`}
+                      title={r.model ?? `${r.name}\nunset: inherits Default, then built-in chain`}
+                    >
+                      {active ? '● ' : '  '}{r.name} — {roleModelLabel(r.role, r.model)}
                     </button>
                   );
                 })}

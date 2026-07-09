@@ -10,8 +10,8 @@ import type {
 } from '../agents/agent-runtime-types.js';
 
 type ActiveOAuth = (AgentOAuthEvent & { provider: string }) | null;
-type Tab = 'models' | 'agent' | 'settings' | 'usage' | 'context' | 'providers';
-const TABS: Tab[] = ['models', 'agent', 'settings', 'usage', 'context', 'providers'];
+type Tab = 'models' | 'agent' | 'agents' | 'settings' | 'usage' | 'context' | 'providers';
+const TABS: Tab[] = ['models', 'agent', 'agents', 'settings', 'usage', 'context', 'providers'];
 const APPROVAL_CYCLE = ['default', 'allow', 'prompt', 'deny'];
 const TIER_COLOR: Record<string, string> = { read: 'var(--gs-info)', write: 'var(--gs-warning)', exec: 'var(--gs-danger)' };
 
@@ -85,7 +85,8 @@ export function AgentSettingsPanel({
 
         <div className="flex-1 overflow-y-auto px-4 py-3">
           {tab === 'models' && <ModelsTab control={control} onSetModel={onSetModel} onApplyRole={onApplyRole} onSet={set} />}
-          {tab === 'agent' && <AgentTab control={control} tools={tools} agents={agents} loading={loading} onSet={set} />}
+          {tab === 'agent' && <AgentTab control={control} tools={tools} loading={loading} onSet={set} />}
+          {tab === 'agents' && <AgentsTab control={control} agents={agents} loading={loading} onSet={set} />}
           {tab === 'settings' && <SettingsTab schema={schema} loading={loading} onSet={set} />}
           {tab === 'usage' && <UsageTab control={control} />}
           {tab === 'context' && <ContextTab control={control} onCompact={onCompact} />}
@@ -190,10 +191,20 @@ function ModelsTab({ control, onSetModel, onApplyRole, onSet }: { control?: Agen
   );
 }
 
-function AgentTab({ control, tools, agents, loading, onSet }: { control?: AgentControlInfo; tools: AgentToolInfo[]; agents: AgentDefinitionInfo[]; loading: boolean; onSet: (p: string, v: string | number | boolean) => void }): ReactElement {
-  const models = control?.models ?? [];
+/** Mechanics of an unset role — surfaced as a tooltip wherever we display the
+ *  "follows Default" shorthand (SDK model-resolver shouldInheritDefaultBeforePriority:
+ *  smol/slow/designer inherit the Default role first, plan collapses to slow,
+ *  advisor/tiny alias the slow/smol chains). */
+const UNSET_ROLE_MECHANICS = 'unset: inherits Default, then built-in chain';
+
+function AgentsTab({ control, agents, loading, onSet }: { control?: AgentControlInfo; agents: AgentDefinitionInfo[]; loading: boolean; onSet: (p: string, v: string | number | boolean) => void }): ReactElement {
   const roles = control?.roleCatalog ?? [];
-  // Translate `pi/<role>` refs into the Model roles section's vocabulary.
+  // Effective model for the Default role: prefer the resolved cycle entry
+  // (control.roles), then the catalog assignment.
+  const defaultModel = (control?.roles ?? []).find((r) => r.role === 'default')?.model
+    ?? roles.find((r) => r.role === 'default')?.model
+    ?? null;
+  // Translate `pi/<role>` refs into the Model roles vocabulary (Models tab).
   // Display-only: values written to settings stay `pi/<role>`; the raw ref
   // survives only in title attrs for debugging. Non-role refs pass through.
   const roleFor = (ref: string) => roles.find((x) => `pi/${x.role}` === ref);
@@ -209,20 +220,31 @@ function AgentTab({ control, tools, agents, loading, onSet }: { control?: AgentC
     const r = roleFor(spec);
     if (!r) return spec;
     if (r.role === 'task') return CURRENT_MODEL;
-    return `${r.name} — ${r.model ?? 'auto (priority chain)'}`;
+    if (r.model) return `${r.name} — ${r.model}`;
+    // Unset role: the effective behavior is inherit-the-Default-role first,
+    // so show it as following Default rather than the opaque priority chain.
+    if (r.role !== 'default' && defaultModel) return `${r.name} — Default — ${defaultModel}`;
+    return `${r.name} — auto (priority chain)`;
+  };
+  const optionTitle = (ref: string): string => {
+    const r = roleFor(ref);
+    return r && !r.model && r.role !== 'task' ? `${ref}\n${UNSET_ROLE_MECHANICS}` : ref;
   };
   return (
     <div>
-      <Grp>Agents — model per subagent · role names match Model roles above</Grp>
+      <Grp>Agents — model role per subagent · role names match the Models tab</Grp>
       {agents.length === 0 ? (
         <div className="text-[var(--gs-text-dim)]">{loading ? 'Loading…' : 'No agents discovered.'}</div>
       ) : (
         agents.map((a) => {
           // The select holds the OVERRIDE (task.agentModelOverrides.<name>);
           // '' = no override → the definition's own model (or session default).
+          // Options are ROLES only (stored as pi/<role>) — no concrete
+          // provider/id pins; a pre-existing non-role override stays visible
+          // (and clearable) but is not offered as a new choice.
           const value = a.overrideModel ?? '';
           const roleRefs = roles.map((r) => `pi/${r.role}`);
-          const inList = !value || roleRefs.includes(value) || models.some((m) => `${m.provider}/${m.id}` === value);
+          const inList = !value || roleRefs.includes(value);
           return (
             <div key={`${a.source}:${a.name}`} className="flex items-center gap-2 px-1 py-1">
               <span
@@ -240,16 +262,19 @@ function AgentTab({ control, tools, agents, loading, onSet }: { control?: AgentC
               >
                 <option value="" title={a.model ?? undefined}>{`— ${a.model ? labelForModel(a.model) : CURRENT_MODEL} —`}</option>
                 {value && !inList && <option value={value} title={value}>{labelForModel(value)}</option>}
-                {roleRefs.map((ref) => <option key={ref} value={ref} title={ref}>{labelForModel(ref)}</option>)}
-                {models.map((m) => {
-                  const ref = `${m.provider}/${m.id}`;
-                  return <option key={ref} value={ref}>{ref}</option>;
-                })}
+                {roleRefs.map((ref) => <option key={ref} value={ref} title={optionTitle(ref)}>{labelForModel(ref)}</option>)}
               </select>
             </div>
           );
         })
       )}
+    </div>
+  );
+}
+
+function AgentTab({ control, tools, loading, onSet }: { control?: AgentControlInfo; tools: AgentToolInfo[]; loading: boolean; onSet: (p: string, v: string | number | boolean) => void }): ReactElement {
+  return (
+    <div>
       <Grp>Approval mode</Grp>
       <div className="flex gap-1">
         {(control?.approvalModes ?? []).map((m) => (
