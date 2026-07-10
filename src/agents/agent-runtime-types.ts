@@ -215,6 +215,10 @@ export interface AgentControlInfo {
   roles: AgentRoleInfo[];
   /** Full role catalog (all roles + their assignment) for the config UI. */
   roleCatalog?: AgentRoleCatalogItem[];
+  /** The quick-cycle membership + order (the `cycleOrder` setting). Roles in
+   *  this list are visited by the role cycle; the settings UI toggles
+   *  membership by rewriting it. Absent when settings are unavailable. */
+  cycleOrder?: string[];
   /** Current thinking/reasoning level (e.g. "auto", "high"), or null if unknown. */
   thinkingLevel: string | null;
   /** Selectable thinking levels. */

@@ -425,7 +425,7 @@ export type Command =
   | { type: 'agent-auth-providers' }
   | { type: 'agent-set-api-key'; provider: string; key: string }
   | { type: 'agent-get-settings' }
-  | { type: 'agent-set-setting'; path: string; value: string | number | boolean }
+  | { type: 'agent-set-setting'; path: string; value: string | number | boolean | string[] }
   | { type: 'agent-oauth-login'; provider: string; flowId: string }
   | { type: 'agent-oauth-respond'; flowId: string; value: string }
   | { type: 'agent-settings-schema' }

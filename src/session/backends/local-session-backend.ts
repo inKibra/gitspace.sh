@@ -1719,7 +1719,7 @@ export class LocalSessionBackend implements SessionBackend {
     throw new Error('Unexpected settings response');
   }
 
-  async setAgentSetting(path: string, value: string | number | boolean): Promise<boolean> {
+  async setAgentSetting(path: string, value: string | number | boolean | string[]): Promise<boolean> {
     const tmuxResponse = await this.sendTmuxCommand({ type: 'agent-set-setting', path, value });
     if (tmuxResponse.type === 'agent-bool') return tmuxResponse.ok;
     if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);

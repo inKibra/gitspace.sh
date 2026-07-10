@@ -268,6 +268,23 @@ export async function getPiSettings(): Promise<{ get(path: string): unknown; set
   return mod.settings ?? null;
 }
 
+/**
+ * The user's quick-cycle role order (`cycleOrder` setting) — the roles the
+ * role cycle visits, in order. Returns null when settings are unavailable or
+ * the value is malformed/empty (callers fall back to MODEL_ROLE_IDS).
+ */
+export function readCycleOrder(settings: { get(path: string): unknown } | null | undefined): string[] | null {
+  try {
+    const v = settings?.get('cycleOrder');
+    if (Array.isArray(v) && v.length > 0 && v.every((x) => typeof x === 'string')) {
+      return v as string[];
+    }
+  } catch {
+    /* settings unavailable */
+  }
+  return null;
+}
+
 
 /**
  * local:// unification (docs/ARTIFACT-PROTOCOL.md Q2): root each session's

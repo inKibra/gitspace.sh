@@ -557,7 +557,7 @@ export async function getAgentSettings(): Promise<Array<{ path: string; label: s
 }
 
 /** Write a single setting. */
-export async function setAgentSetting(path: string, value: string | number | boolean): Promise<boolean> {
+export async function setAgentSetting(path: string, value: string | number | boolean | string[]): Promise<boolean> {
   return defaultPiCoordinator.setSetting(path, value);
 }
 

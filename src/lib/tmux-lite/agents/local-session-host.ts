@@ -39,6 +39,7 @@ import {
   openPiSession,
   persistInitialPiSessionModel,
   makeLocalProtocolOptions,
+  readCycleOrder,
 } from './pi-runtime.js';
 import { getManagedSessionBootstrap } from './managed-defaults.js';
 import { VirtualTerminal } from './virtual-terminal.js';
@@ -455,15 +456,24 @@ export class LocalSessionHost implements AgentSessionHost {
       /* settings unavailable */
     }
 
-    // Model roles (the role cycle) — resolved from the live session.
+    // Model roles (the quick role cycle) — resolved from the live session,
+    // following the user's `cycleOrder` setting (the same order the SDK's own
+    // interactive mode passes to getRoleModelCycle), so the cycle shown in the
+    // UI matches cycle-membership toggles in settings.
     let roles: AgentControlInfo['roles'] = [];
+    let cycleOrder: string[] | null = null;
+    try {
+      cycleOrder = readCycleOrder(active.settings ?? (await getPiSettings()));
+    } catch {
+      /* settings unavailable */
+    }
     try {
       if (active.getRoleModelCycle) {
         const { MODEL_ROLE_IDS, MODEL_ROLES } = (await import('@oh-my-pi/pi-coding-agent/config/model-roles')) as unknown as {
           MODEL_ROLE_IDS: string[];
           MODEL_ROLES: Record<string, { name?: string }>;
         };
-        const cycle = active.getRoleModelCycle(MODEL_ROLE_IDS);
+        const cycle = active.getRoleModelCycle(cycleOrder ?? MODEL_ROLE_IDS);
         if (cycle?.models) {
           roles = cycle.models.map((m, i) => ({
             role: m.role,
@@ -504,6 +514,7 @@ export class LocalSessionHost implements AgentSessionHost {
       models,
       roles,
       roleCatalog,
+      cycleOrder: cycleOrder ?? undefined,
       thinkingLevel,
       thinkingLevels: THINKING_LEVELS,
       approvalMode,
@@ -515,12 +526,16 @@ export class LocalSessionHost implements AgentSessionHost {
     };
   }
 
-  /** Cycle the active model through the configured roles (the cmd-P role cycle). */
+  /** Cycle the active model through the quick-cycle roles (the cmd-P role
+   *  cycle). Follows the user's `cycleOrder` setting — the SDK does NOT apply
+   *  it internally; its own interactive mode passes settings.get('cycleOrder')
+   *  as the roleOrder the same way. */
   async cycleRole(direction: 'forward' | 'backward'): Promise<boolean> {
     const session = this.session as unknown as ControlSessionAccessors;
     if (!session.cycleRoleModels) return false;
     const { MODEL_ROLE_IDS } = (await import('@oh-my-pi/pi-coding-agent/config/model-roles')) as unknown as { MODEL_ROLE_IDS: string[] };
-    const result = await session.cycleRoleModels(MODEL_ROLE_IDS, direction);
+    const order = readCycleOrder(session.settings ?? (await getPiSettings())) ?? MODEL_ROLE_IDS;
+    const result = await session.cycleRoleModels(order, direction);
     return !!result;
   }
 
@@ -558,7 +573,7 @@ export class LocalSessionHost implements AgentSessionHost {
    *  updates without clobbering the record; `task.agentModelOverrides.<agent>`
    *  is merged into that record the same way (dotted record keys are not
    *  schema paths — empty string clears the entry). */
-  async setSetting(path: string, value: string | number | boolean): Promise<boolean> {
+  async setSetting(path: string, value: string | number | boolean | string[]): Promise<boolean> {
     const session = this.session as unknown as ControlSessionAccessors;
     const settings = session.settings ?? (await getPiSettings());
     if (!settings) return false;

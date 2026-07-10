@@ -275,7 +275,7 @@ export interface SessionBackend {
   /** Read the curated agent settings catalog (machine-global). */
   getAgentSettings?(): Promise<AgentSettingItem[]>;
   /** Write a single agent setting (machine-global). */
-  setAgentSetting?(path: string, value: string | number | boolean): Promise<boolean>;
+  setAgentSetting?(path: string, value: string | number | boolean | string[]): Promise<boolean>;
   /** Start an OAuth sign-in flow (events arrive via subscribeAgentState). */
   startAgentOAuthLogin?(provider: string, flowId: string): Promise<boolean>;
   /** Provide the value an in-progress OAuth flow asked for. */

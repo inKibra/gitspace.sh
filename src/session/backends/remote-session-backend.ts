@@ -3068,7 +3068,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     throw new Error('Unexpected settings response');
   }
 
-  async setAgentSetting(path: string, value: string | number | boolean): Promise<boolean> {
+  async setAgentSetting(path: string, value: string | number | boolean | string[]): Promise<boolean> {
     await this.waitForInitialSnapshot();
     const tmuxResponse = await this.sendRpcCommand({ type: 'set_agent_setting', requestId: crypto.randomUUID(), path, value });
     if (tmuxResponse.type === 'agent-bool') return tmuxResponse.ok;

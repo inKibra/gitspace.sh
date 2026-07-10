@@ -627,7 +627,7 @@ export interface SetAgentSettingRequest {
   type: 'set_agent_setting';
   requestId: string;
   path: string;
-  value: string | number | boolean;
+  value: string | number | boolean | string[];
 }
 
 export interface StartAgentOAuthLoginRequest {

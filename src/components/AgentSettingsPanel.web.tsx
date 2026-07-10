@@ -26,7 +26,6 @@ export function AgentSettingsPanel({
   loading,
   oauth,
   onSetModel,
-  onApplyRole,
   onSetSetting,
   onSetApiKey,
   onOAuthLogin,
@@ -42,8 +41,7 @@ export function AgentSettingsPanel({
   loading: boolean;
   oauth: ActiveOAuth;
   onSetModel: (provider: string, modelId: string) => void;
-  onApplyRole: (role: string) => void;
-  onSetSetting: (path: string, value: string | number | boolean) => Promise<void>;
+  onSetSetting: (path: string, value: string | number | boolean | string[]) => Promise<void>;
   onSetApiKey: (provider: string, key: string) => Promise<void>;
   onOAuthLogin: (provider: string) => void;
   onOAuthRespond: (value: string) => void;
@@ -53,7 +51,7 @@ export function AgentSettingsPanel({
   const [tab, setTab] = useState<Tab>('models');
   const [error, setError] = useState<string | null>(null);
 
-  const set = (path: string, value: string | number | boolean) => {
+  const set = (path: string, value: string | number | boolean | string[]) => {
     setError(null);
     void onSetSetting(path, value).catch((e) => setError(e instanceof Error ? e.message : 'Failed to set'));
   };
@@ -84,7 +82,7 @@ export function AgentSettingsPanel({
         </div>
 
         <div className="flex-1 overflow-y-auto px-4 py-3">
-          {tab === 'models' && <ModelsTab control={control} onSetModel={onSetModel} onApplyRole={onApplyRole} onSet={set} />}
+          {tab === 'models' && <ModelsTab control={control} onSetModel={onSetModel} onSet={set} />}
           {tab === 'agent' && <AgentTab control={control} tools={tools} loading={loading} onSet={set} />}
           {tab === 'agents' && <AgentsTab control={control} agents={agents} loading={loading} onSet={set} />}
           {tab === 'settings' && <SettingsTab schema={schema} loading={loading} onSet={set} />}
@@ -104,11 +102,21 @@ function Grp({ children }: { children: React.ReactNode }): ReactElement {
   return <div className="mb-1 mt-3 text-[10px] uppercase tracking-wide text-[var(--gs-text-ghost)] first:mt-0">{children}</div>;
 }
 
-function ModelsTab({ control, onSetModel, onApplyRole, onSet }: { control?: AgentControlInfo; onSetModel: (p: string, id: string) => void; onApplyRole: (role: string) => void; onSet: (path: string, value: string | number | boolean) => void }): ReactElement {
+function ModelsTab({ control, onSetModel, onSet }: { control?: AgentControlInfo; onSetModel: (p: string, id: string) => void; onSet: (path: string, value: string | number | boolean | string[]) => void }): ReactElement {
   const models = control?.models ?? [];
   const current = control?.currentModel ?? null;
   const roles = control?.roleCatalog ?? [];
   const thinkingLevels = control?.thinkingLevels ?? [];
+  // Quick-cycle membership: the `cycleOrder` setting (order preserved by the
+  // control seam). Toggling rewrites the array — append on add, remove on
+  // remove — but never empties it (the cycle needs at least one role).
+  const cycleOrder = control?.cycleOrder;
+  const toggleCycle = (role: string) => {
+    if (!cycleOrder) return;
+    const next = cycleOrder.includes(role) ? cycleOrder.filter((r) => r !== role) : [...cycleOrder, role];
+    if (next.length === 0) return;
+    onSet('cycleOrder', next);
+  };
   // A role selector is `provider/id[:thinking]`. Split the trailing thinking
   // suffix (only when it's a known level) and recombine on change.
   const splitRole = (val: string | null): { base: string; think: string } => {
@@ -122,21 +130,29 @@ function ModelsTab({ control, onSetModel, onApplyRole, onSet }: { control?: Agen
     <div>
       {roles.length > 0 && (
         <>
-          <Grp>Model roles — ◉ applies now · model + thinking per role</Grp>
+          <Grp>Model roles — ◉ in quick cycle · model + thinking per role</Grp>
           {roles.map((r) => {
             const { base, think } = splitRole(r.model);
             // Keep the assigned base selectable even if its provider isn't authed.
             const inList = base ? models.some((m) => `${m.provider}/${m.id}` === base) : true;
-            const isCurrent = !!base && (r.model === current || base === current);
+            const member = !!cycleOrder?.includes(r.role);
+            const lastMember = member && (cycleOrder?.length ?? 0) <= 1;
             return (
               <div key={r.role} className="flex items-center gap-2 px-1 py-1">
                 <button
                   type="button"
-                  onClick={() => onApplyRole(r.role)}
-                  title="Apply this role's model to the session now"
-                  className={isCurrent ? 'text-[var(--gs-accent)]' : 'text-[var(--gs-text-dim)] hover:text-[var(--gs-text)]'}
+                  disabled={!cycleOrder || lastMember}
+                  onClick={() => toggleCycle(r.role)}
+                  title={lastMember
+                    ? 'in quick cycle — the cycle needs at least one role'
+                    : member
+                      ? 'in quick cycle — click to remove'
+                      : 'not in quick cycle — click to add'}
+                  className={member
+                    ? 'text-[var(--gs-success)]'
+                    : 'text-[var(--gs-text-ghost)] hover:text-[var(--gs-text-dim)] disabled:hover:text-[var(--gs-text-ghost)]'}
                 >
-                  {isCurrent ? '◉' : '○'}
+                  {member ? '◉' : '○'}
                 </button>
                 <span className="w-14 shrink-0 truncate font-[family-name:var(--gs-font)]" title={r.description ?? r.name}>{r.name}</span>
                 <select

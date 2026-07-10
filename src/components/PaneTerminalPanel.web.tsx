@@ -242,7 +242,7 @@ export function PaneTerminalPanel({
     loadSettingsPanel();
     refreshControl();
   }, [backend, loadSettingsPanel, refreshControl]);
-  const handleSetSetting = useCallback(async (path: string, value: string | number | boolean) => {
+  const handleSetSetting = useCallback(async (path: string, value: string | number | boolean | string[]) => {
     const fn = backend?.setAgentSetting;
     if (!fn) throw new Error('Not supported');
     await fn.call(backend, path, value);
@@ -258,11 +258,6 @@ export function PaneTerminalPanel({
     const fn = backend?.cycleAgentRole;
     if (!fn || !wsId || !agentSessionId) return;
     void fn.call(backend, wsId, agentSessionId, 'forward').then(() => refreshControl()).catch(() => undefined);
-  }, [backend, wsId, agentSessionId, refreshControl]);
-  const handleApplyRole = useCallback((role: string) => {
-    const fn = backend?.applyAgentModelRole;
-    if (!fn || !wsId || !agentSessionId) return;
-    void fn.call(backend, wsId, agentSessionId, role).then(() => refreshControl()).catch(() => undefined);
   }, [backend, wsId, agentSessionId, refreshControl]);
   const handleToggleFast = useCallback(() => {
     const fn = backend?.setAgentSetting;
@@ -352,7 +347,6 @@ export function PaneTerminalPanel({
             onSetThinkingLevel={handleSetThinkingLevel}
             onSetApprovalMode={handleSetApprovalMode}
             onCycleRole={handleCycleRole}
-            onApplyRole={handleApplyRole}
             onToggleFast={handleToggleFast}
             onOpenHistory={openHistory}
             onOpenAuth={openSettings}
@@ -418,7 +412,6 @@ export function PaneTerminalPanel({
           loading={settingsLoading}
           oauth={oauthFlow}
           onSetModel={handleSetModel}
-          onApplyRole={handleApplyRole}
           onSetSetting={handleSetSetting}
           onSetApiKey={handleSetApiKey}
           onOAuthLogin={handleOAuthLogin}

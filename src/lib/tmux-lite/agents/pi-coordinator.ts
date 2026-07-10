@@ -13,6 +13,7 @@ import {
   createPiModelRegistry,
   getPiSettings,
   openPiSessionManager,
+  readCycleOrder,
 } from './pi-runtime.js';
 import type { AgentControlInfo, AgentDefinitionInfo, AgentHistoryEntry, AgentOAuthEvent, AgentSettingSchemaItem, AgentToolInfo, AgentTreeNode } from '../../../agents/agent-runtime-types.js';
 import { getTranscriptRange } from '../../../blocks/agent/transcript-source.js';
@@ -336,12 +337,14 @@ export class PiCoordinator {
 
     // Full role CATALOG for the config UI (roles CYCLE needs a live session).
     let roleCatalog: AgentControlInfo['roleCatalog'] = [];
+    let cycleOrder: string[] | null = null;
     try {
       const { MODEL_ROLE_IDS, MODEL_ROLES } = (await import('@oh-my-pi/pi-coding-agent/config/model-roles')) as unknown as {
         MODEL_ROLE_IDS?: string[];
         MODEL_ROLES?: Record<string, { name?: string; description?: string }>;
       };
-      const settings = (await getPiSettings()) as { getModelRole?: (r: string) => string | undefined } | null;
+      const settings = (await getPiSettings()) as { get(path: string): unknown; getModelRole?: (r: string) => string | undefined } | null;
+      cycleOrder = readCycleOrder(settings);
       roleCatalog = (MODEL_ROLE_IDS ?? []).map((id) => ({
         role: id,
         name: MODEL_ROLES?.[id]?.name ?? id,
@@ -358,6 +361,7 @@ export class PiCoordinator {
       models,
       roles: [],
       roleCatalog,
+      cycleOrder: cycleOrder ?? undefined,
       thinkingLevel: null,
       thinkingLevels: THINKING_LEVELS,
       approvalMode,
@@ -469,9 +473,12 @@ export class PiCoordinator {
    *  getPiSettings), then fans out to every live host so worker processes'
    *  own Settings singletons see the change immediately (best-effort; a dead
    *  worker must not fail the global write). */
-  async setSetting(path: string, value: string | number | boolean): Promise<boolean> {
+  async setSetting(path: string, value: string | number | boolean | string[]): Promise<boolean> {
     const settings = await getPiSettings();
     if (!settings) return false;
+    // The quick cycle must never be emptied — the UI disables removing the
+    // last role; reject a bad write outright rather than persist it.
+    if (path === 'cycleOrder' && (!Array.isArray(value) || value.length === 0)) return false;
     let wrote = false;
     if (path.startsWith('modelRoles.') && typeof value === 'string') {
       const role = path.slice('modelRoles.'.length);
