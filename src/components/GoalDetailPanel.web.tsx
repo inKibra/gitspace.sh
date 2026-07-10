@@ -466,7 +466,7 @@ function GlanceTab(props: {
           <p className="mt-1 text-xs text-pretty text-[var(--gs-text-muted)]">Every requirement in one scan: what it is, how it&apos;s produced, how it&apos;s judged, where it stands.</p>
         </div>
         <button type="button" onClick={props.onContinueAtBlocker} className={btnPrimary('flex-shrink-0')}>
-          Continue at blocker
+          View Blocker
         </button>
       </div>
 
