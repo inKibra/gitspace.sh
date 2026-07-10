@@ -20,6 +20,7 @@ import { hashRubric } from './goal-validation.js';
 import { getWorkspaceStatus } from './workspace-metadata.js';
 import { getThreads } from './review.js';
 import { captureArtifacts } from './artifacts.js';
+import { describeOwedRequirement, gateStatusForPhase, tryLoadWorkspaceWorkflow, workflowPhaseNames } from './goal-workflow.js';
 import { SpacesError } from '../types/errors.js';
 import type { WorkspacePhase } from '../types/config.js';
 
@@ -64,6 +65,10 @@ export interface PhaseJournalEntry {
   filesTouched?: string[];
   state: { start: PhaseStateSnapshot; end?: PhaseStateSnapshot };
   delta?: PhaseJournalDelta;
+  /** Set when the phase was closed via `phase-end --revert` — the gate was
+   *  not satisfied and the workflow returns to `to` (typically plan) for
+   *  requirement rewrite. The gate stays red. */
+  reverted?: { reason: string; to: string };
 }
 
 const JOURNAL_DIR = 'journal';
@@ -235,13 +240,16 @@ async function appendGoalPhaseMarker(
   note: string,
 ): Promise<void> {
   try {
-    const goal = readWorkspaceGoal(projectName, workspaceName);
-    if (!goal) return;
     const { appendPhaseMarkerEvent } = await import('./goal-validation.js');
     const { writeGoalRecord } = await import('./goal-chain.js');
-    writeGoalRecord(projectName, {
-      ...goal,
-      validation: appendPhaseMarkerEvent(goal.validation, phase, action, note),
+    const { withGoalLock } = await import('./goal-lock.js');
+    withGoalLock(projectName, () => {
+      const goal = readWorkspaceGoal(projectName, workspaceName);
+      if (!goal) return;
+      writeGoalRecord(projectName, {
+        ...goal,
+        validation: appendPhaseMarkerEvent(goal.validation, phase, action, note),
+      });
     });
   } catch { /* non-fatal: journal entry is already written */ }
 }
@@ -279,16 +287,63 @@ export async function startPhaseJournal(
   return { file: file.slice(JOURNAL_DIR.length + 1), entry };
 }
 
+/**
+ * Gate check for closing phase `phase` (goal-rubric-workflow interconnect):
+ * blocks only when the phase is KNOWN to the workspace's single workflow and
+ * the computed gate is neither satisfied nor human-waived. Unknown phases,
+ * absent/broken workflows, and goal-less workspaces behave as before
+ * (unblocked) — the interconnect is opt-in via wfPhase on requirements.
+ */
+function assertPhaseGatePassable(projectName: string, workspaceName: string, workspaceDir: string, phase: string): void {
+  const { workflow } = tryLoadWorkspaceWorkflow(workspaceDir);
+  if (!workflow || !workflowPhaseNames(workflow).includes(phase)) return;
+  const goal = readWorkspaceGoal(projectName, workspaceName);
+  if (!goal) return;
+  const gate = gateStatusForPhase(goal, phase);
+  if (gate.passable) return;
+  const lines = [
+    `Phase "${phase}" gate is not satisfied — ${gate.unmet.length} owed requirement(s) not accepted:`,
+    '',
+    ...gate.unmet.map((r) => describeOwedRequirement(r)),
+    '',
+    'Options:',
+    '  1. Produce and judge the evidence above, then retry phase-end.',
+    `  2. The contract is wrong → space journal phase-end --revert --reason "…"  (closes this phase as reverted and returns the workflow to plan for requirement rewrite; the gate stays red).`,
+    '  3. Ask a human to waive the gate from the goal board UI. Waives are human-only — the CLI has no waive flag.',
+  ];
+  throw new SpacesError(lines.join('\n'), 'USER_ERROR', 1);
+}
+
 export async function endPhaseJournal(
   projectName: string,
   workspaceName: string,
-  input: { outcome: string; decisions?: string[]; surprises?: string[]; autoCommit?: boolean },
+  input: {
+    outcome: string;
+    decisions?: string[];
+    surprises?: string[];
+    autoCommit?: boolean;
+    /** Escape hatch: close the phase WITHOUT satisfying its gate, marked
+     *  reverted (requirements need rewrite). `to` defaults to 'plan'. */
+    revert?: { reason: string; to?: string };
+  },
   now: Date = new Date(),
 ): Promise<{ file: string; entry: PhaseJournalEntry }> {
   const workspaceDir = join(getProjectWorkspacesDir(projectName), workspaceName);
   const open = findOpenPhaseEntry(workspaceDir);
   if (!open) {
     throw new SpacesError('No open phase — call phase-start first.', 'USER_ERROR', 1);
+  }
+  const revert = input.revert && input.revert.reason.trim()
+    ? { reason: input.revert.reason.trim(), to: input.revert.to?.trim() || 'plan' }
+    : undefined;
+  if (input.revert && !revert) {
+    throw new SpacesError('--revert requires --reason: say why the contract needs rewriting.', 'USER_ERROR', 1);
+  }
+  if (!revert) {
+    // Computed gate: every owed requirement (wfPhase == phase) accepted, or
+    // human-waived. Checked BEFORE the auto-commit so a blocked phase-end
+    // leaves the repo untouched.
+    assertPhaseGatePassable(projectName, workspaceName, workspaceDir, open.entry.phase);
   }
   const mount = mountDirFor(workspaceDir);
 
@@ -336,10 +391,38 @@ export async function endPhaseJournal(
     filesTouched,
     state: { ...open.entry.state, end },
     delta: computePhaseDelta(open.entry.state.start, end),
+    ...(revert ? { reverted: revert } : {}),
   };
   await captureArtifacts(getProjectDir(projectName), mount, [
     { path: `${JOURNAL_DIR}/${open.file}`, content: JSON.stringify(entry, null, 2) + '\n' },
-  ], { message: `journal: end ${open.entry.phase}`, provenance: { tool: 'phase-journal' } });
+  ], { message: `journal: end ${open.entry.phase}${revert ? ' (reverted)' : ''}`, provenance: { tool: 'phase-journal' } });
+  if (revert) await appendGoalGateRevertMarker(projectName, workspaceName, open.entry.phase, revert);
   await appendGoalPhaseMarker(projectName, workspaceName, open.entry.phase, 'ended', input.outcome.split('\n')[0] ?? '');
   return { file: open.file, entry };
+}
+
+/**
+ * Timeline join for `phase-end --revert`: records a gate event
+ * ("phase reverted → <to>") on the goal ledger. Same degradation contract as
+ * appendGoalPhaseMarker — never blocks the journal write.
+ */
+async function appendGoalGateRevertMarker(
+  projectName: string,
+  workspaceName: string,
+  phase: string,
+  revert: { reason: string; to: string },
+): Promise<void> {
+  try {
+    const { appendGateRevertEvent } = await import('./goal-validation.js');
+    const { writeGoalRecord } = await import('./goal-chain.js');
+    const { withGoalLock } = await import('./goal-lock.js');
+    withGoalLock(projectName, () => {
+      const goal = readWorkspaceGoal(projectName, workspaceName);
+      if (!goal) return;
+      writeGoalRecord(projectName, {
+        ...goal,
+        validation: appendGateRevertEvent(goal.validation, phase, revert.to, revert.reason),
+      });
+    });
+  } catch { /* non-fatal: journal entry is already written */ }
 }

@@ -24,10 +24,14 @@ structure; you ONLY write prose for the clusters it marked stale.
      Quote or paraphrase; never invent motives. Empty grounding → describe
      what the change does and mark motive-claims as uncertain.
    - Read the worksheet's top-level `goalTimeline` (goal-validation ledger:
-     contract/generation/review/phase events, `phase`-stamped where a journal
-     phase was open) — it dates when requirements were declared, evidenced,
-     and judged; use it the same way as the journal for grounding, and to
-     anchor `satisfies` claims in time.
+     contract/generation/review/phase/gate events, `phase`-stamped where a
+     journal phase was open) — it dates when requirements were declared,
+     evidenced, and judged; use it the same way as the journal for grounding,
+     and to anchor `satisfies` claims in time. GATE events are review gold:
+     `gate waived: <phase>` means a human overrode an unmet gate (quote the
+     reason; flag what was skipped), and `phase reverted → <target>` means the
+     contract was rewritten mid-flight (narrate why per its reason — the
+     definition of done changed there).
 4. Write `sections.json`: `{ "headSha": <worksheet headSha>, "sections": [...],
    "specEvolution": "..." }`, then `gssh space guide submit --file sections.json`.
    Fix validation errors and resubmit — coverage of every stale cluster is

@@ -1087,6 +1087,22 @@ export class RemoteSessionHandler {
           workspaceName: msg.workspaceName,
         }, sendResponse);
         break;
+
+      case 'goal_gate_waive':
+        // Human-only gate waive: only a managing HUMAN client reaches this
+        // seam (UI button) — agents have no CLI path to it.
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, {
+          type: 'goal-gate-waive',
+          projectName: msg.projectName,
+          goalId: msg.goalId,
+          phase: msg.phase,
+          reason: msg.reason,
+        }, sendResponse);
+        break;
       case 'workspace_notes_list':
         if (!canManage(session.accessType)) {
           await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });

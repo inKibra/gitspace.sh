@@ -482,6 +482,10 @@ export type Command =
   | { type: 'goal-add-near-workspace'; projectName: string; workspaceName: string; title: string; position: 'before' | 'after' }
   | { type: 'goal-reorder'; projectName: string; sourceToken: string; targetToken: string; position: 'before' | 'after' }
   | { type: 'goal-stack-status'; projectName: string; workspaceName: string }
+  /** HUMAN-ONLY gate waive (goal-rubric-workflow interconnect): reachable
+   *  only through the UI — the CLI has no waive flag. Appends a timeline
+   *  event kind 'gate' with the reason and actor 'human/ui'. */
+  | { type: 'goal-gate-waive'; projectName: string; goalId: string; phase: string; reason: string }
   | { type: 'bundle-refresh-plan'; projectName: string; workspaceId: string }
   | { type: 'bundle-refresh-apply'; projectName: string; workspaceId: string; submission: import('../../types/bundle-refresh.js').BundleRefreshSubmission }
   | { type: 'bundle-config-state'; projectName: string; workspaceId: string }

@@ -261,6 +261,11 @@ export const wfCreatedArtifact = z.object({
   type: wfArtifactType,
   from: z.string().optional(),
   passedTo: z.string().optional(),
+  /** Goal-doc slice id (slugified heading — core/goal-workflow.ts
+   *  parseDocSlices) this artifact anchors to. Workflow phases reference
+   *  slice ids only; `space workflow validate` reports dangling ids as
+   *  warnings (amber state). */
+  sliceId: z.string().optional(),
 });
 export type WfCreatedArtifact = z.infer<typeof wfCreatedArtifact>;
 export const wfGateType = z.enum(['human', 'orchestration', 'command']);
@@ -306,6 +311,10 @@ export const wfPhaseArtifact = z.object({
 export type WfPhaseArtifact = z.infer<typeof wfPhaseArtifact>;
 export const wfPhase = z.object({
   name: z.string(),
+  /** Goal-doc slice ids this phase reads (heading slugs — `space goal doc
+   *  slices`). The interconnect's phase → doc join; requirement ids are
+   *  NEVER listed here (rubric chips are computed from Requirement.wfPhase). */
+  slices: z.array(z.string()).optional(),
   inputs: z.array(wfRef),
   gate: z.object({ type: wfGateType, label: z.string() }).optional(),
   loop: z.string().optional(),

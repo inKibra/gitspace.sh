@@ -1038,6 +1038,15 @@ export class LocalSessionBackend implements SessionBackend {
     throw new Error('Unexpected goal stack status response');
   }
 
+  async waiveGoalGate(projectName: string, goalId: string, phase: string, reason: string): Promise<import('../../types/goals.js').GoalRecord> {
+    const response = await this.sendTmuxCommand({ type: 'goal-gate-waive', projectName, goalId, phase, reason });
+    if (response.type === 'goal') {
+      await this.listWorkspaces();
+      return response.goal;
+    }
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected goal gate waive response');
+  }
 
   async addGoalRequirement(projectName: string, goalId: string, input: AddRequirementInput): Promise<import('../../types/goals.js').Requirement> {
     const goal = findGoalRecord(projectName, goalId);

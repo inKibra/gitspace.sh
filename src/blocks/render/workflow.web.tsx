@@ -1,6 +1,6 @@
 /** @jsxImportSource react */
-import { createContext, Fragment, useContext, useState, type ReactElement, type ReactNode } from 'react';
-import type { WfArtifactType, WfCreatedArtifact, WfGateType, WfNode, WfPhase, WfRef, WorkflowSpecData } from '../types/content.js';
+import { createContext, Fragment, useContext, type ReactElement, type ReactNode } from 'react';
+import type { WfCreatedArtifact, WfGateType, WfNode, WfPhase, WfRef, WorkflowSpecData } from '../types/content.js';
 import { modelRoleLabel, normalizeModelRole, wfNodeModelRoleLabel } from '../model-roles.js';
 import { defineRenderer } from './registry.web.js';
 import { useBlockHost } from './host.web.js';
@@ -40,14 +40,6 @@ const GATE_TONE: Record<WfGateType, string> = {
   orchestration: 'text-[var(--gs-purple)] border-[var(--gs-purple)]',
   command: 'text-[var(--gs-info)] border-[var(--gs-info)]',
 };
-
-// '+ create artifact' menu options (mock WF_ART_TYPES)
-const WF_ART_TYPES: { type: WfArtifactType; label: string }[] = [
-  { type: 'goal-slice', label: 'goal-doc line-range' },
-  { type: 'phased-goal', label: 'phased goal-doc' },
-  { type: 'rubric', label: 'reviewer rubric' },
-  { type: 'arbitrary', label: 'arbitrary artifact' },
-];
 
 // Mock routes created-artifact chips by type: rubric → rubric pane,
 // goal-slice/phased-goal → goal pane, else the named artifact viewer.
@@ -137,15 +129,12 @@ function NodeCard({ n }: { n: WfNode }): ReactElement {
   );
 }
 
-function PhaseSection({ p, index, created, menuOpen, onToggleMenu, onAdd }: {
+function PhaseSection({ p, index }: {
   p: WfPhase;
   index: number;
-  created: WfCreatedArtifact[];
-  menuOpen: boolean;
-  onToggleMenu: () => void;
-  onAdd: (type: WfArtifactType) => void;
 }): ReactElement {
   const host = useBlockHost();
+  const created = p.created ?? [];
   return (
     <div className="border border-[var(--gs-border)]">
       {/* header: phase n · name · gate banner toned by gate type */}
@@ -181,9 +170,13 @@ function PhaseSection({ p, index, created, menuOpen, onToggleMenu, onAdd }: {
           {p.gate && <span className="ml-auto text-[10px]">exit owned by <b className="font-medium text-[var(--gs-warning)]">{p.gate.label}</b></span>}
         </div>
       )}
-      {/* created artifacts — always visible, ends with '+ create artifact' */}
+      {/* created artifacts. The mock's ephemeral '+ create artifact' button
+          shipped with no real backing (it only mutated local component state)
+          — removed until creating an artifact does something real; artifacts
+          are agent-authored via the workflow spec. */}
       <div className="flex items-center gap-[7px] flex-wrap px-[11px] py-2 border-t border-[var(--gs-border-muted)] bg-[rgba(188,140,255,0.03)]">
         <span className="flex-none text-[10px] uppercase tracking-[0.08em] text-[var(--gs-purple)]">artifacts</span>
+        {created.length === 0 && <span className="text-[10.5px] text-[var(--gs-text-dim)]">none declared for this phase</span>}
         {created.map((a, i) => (
           <button
             key={i}
@@ -197,29 +190,6 @@ function PhaseSection({ p, index, created, menuOpen, onToggleMenu, onAdd }: {
             {a.passedTo && <span className="text-[10px] text-[var(--gs-info)]">→ {a.passedTo}</span>}
           </button>
         ))}
-        <span className="relative ml-1">
-          <button
-            type="button"
-            onClick={onToggleMenu}
-            className="border border-dashed border-[var(--gs-border-active)] bg-transparent px-2 py-px text-[10px] text-[var(--gs-text-dim)] hover:text-[var(--gs-text-muted)] hover:border-[var(--gs-text-muted)] cursor-pointer"
-          >
-            + create artifact
-          </button>
-          {menuOpen && (
-            <div className="absolute left-0 top-full z-20 mt-[3px] min-w-[172px] border border-[var(--gs-border-active)] bg-[var(--gs-bg-overlay)]">
-              {WF_ART_TYPES.map((t) => (
-                <button
-                  key={t.type}
-                  type="button"
-                  onClick={() => onAdd(t.type)}
-                  className="block w-full cursor-pointer bg-transparent px-2.5 py-1.5 text-left text-[11px] text-[var(--gs-text-muted)] hover:bg-[var(--gs-bg-hover)] hover:text-[var(--gs-text)]"
-                >
-                  {t.label}
-                </button>
-              ))}
-            </div>
-          )}
-        </span>
       </div>
       {/* outputs */}
       <div className="flex items-center gap-1.5 flex-wrap px-3 py-1.5 border-t border-[var(--gs-border-muted)]">
@@ -242,12 +212,6 @@ function PhaseSection({ p, index, created, menuOpen, onToggleMenu, onAdd }: {
 }
 
 function Workflow({ data }: { data: WorkflowSpecData }): ReactElement {
-  const [created, setCreated] = useState<WfCreatedArtifact[][]>(() => data.phases.map((p) => p.created ?? []));
-  const [menu, setMenu] = useState<number | null>(null);
-  const add = (pi: number, type: WfArtifactType): void => {
-    setCreated((c) => c.map((arr, i) => (i === pi ? [...arr, { name: `new ${type}`, type, passedTo: '(assign agent)' }] : arr)));
-    setMenu(null);
-  };
   return (
     <div className="flex flex-col">
       {/* head: recipe + traversal path + io key + rollup chips */}
@@ -266,14 +230,7 @@ function Workflow({ data }: { data: WorkflowSpecData }): ReactElement {
       </div>
       {data.phases.map((p, pi) => (
         <Fragment key={pi}>
-          <PhaseSection
-            p={p}
-            index={pi}
-            created={created[pi] ?? []}
-            menuOpen={menu === pi}
-            onToggleMenu={() => setMenu(menu === pi ? null : pi)}
-            onAdd={(type) => add(pi, type)}
-          />
+          <PhaseSection p={p} index={pi} />
           {pi < data.phases.length - 1 && (
             <div className={`flex items-center gap-2 px-3 py-2 text-[10.5px] text-[var(--gs-text-dim)] ${MONO}`}>
               <span className="text-[var(--gs-accent)]">▼</span>

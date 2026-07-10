@@ -99,7 +99,24 @@ export function registerSpaceCommands(parent: Command): void {
   registerSpaceJournalCommands(cmd);
   registerSpaceGuideCommands(cmd);
   registerSpaceArtifactsCommands(cmd);
+  registerSpaceWorkflowCommands(cmd);
   configureSpaceHelpRecursively(cmd);
+}
+
+function registerSpaceWorkflowCommands(space: Command): void {
+  const workflow = space
+    .command('workflow')
+    .description('The workspace’s single canonical workflow spec (*.workflow.json on the artifacts mount)');
+
+  workflow
+    .command('validate')
+    .description('Validate THE workflow: single spec, slice refs resolve to goal-doc headings, phase names sane. Dangling refs are warnings (exit 0); multiple specs / parse errors fail')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      const ctx = requireSessionContext();
+      const { validateSpaceWorkflow } = await import('../../commands/space-workflow.js');
+      validateSpaceWorkflow(ctx, options);
+    }));
 }
 
 /** '7d' / '24h' / '30m' → ms. */
@@ -287,16 +304,28 @@ function registerSpaceJournalCommands(space: Command): void {
 
   journal
     .command('phase-end')
-    .description('Close the open phase: record outcome, compute delta, auto-commit the repo')
-    .requiredOption('--outcome <text>', 'What actually happened')
+    .description('Close the open phase: record outcome, compute delta, auto-commit the repo. Blocked while the phase’s gate has owed requirements not accepted (escape: --revert; gate waives are human-only, via the UI)')
+    .option('--outcome <text>', 'What actually happened (required unless --revert)')
     .option('--decision <text...>', 'Notable decision (repeatable)')
     .option('--surprise <text...>', 'Something unexpected (repeatable)')
+    .option('--revert', 'Close WITHOUT satisfying the gate, marked reverted — the contract needs rewriting; the workflow returns to an earlier phase (default plan)')
+    .option('--reason <text>', 'Why the phase is being reverted (required with --revert)')
+    .option('--to <phase>', 'Phase the revert returns to (default: plan)')
     .option('--no-commit', 'Skip the phase-boundary auto-commit')
     .option('--json', 'Output structured JSON')
     .action(withErrorHandler(async (options) => {
       const ctx = requireSessionContext();
       const { journalPhaseEnd } = await import('../../commands/space-journal.js');
-      await journalPhaseEnd(ctx, { outcome: options.outcome, decision: options.decision, surprise: options.surprise, noCommit: options.commit === false, json: options.json });
+      await journalPhaseEnd(ctx, {
+        outcome: options.outcome,
+        decision: options.decision,
+        surprise: options.surprise,
+        noCommit: options.commit === false,
+        revert: options.revert,
+        reason: options.reason,
+        to: options.to,
+        json: options.json,
+      });
     }));
 
   journal
@@ -387,6 +416,21 @@ function registerSpaceGoalCommands(space: Command): void {
       editSpaceGoal(ctx, options);
     }));
 
+  const doc = goal
+    .command('doc')
+    .description('Goal document structure (heading-anchored slices)');
+
+  doc
+    .command('slices')
+    .description('List slice ids (slugified headings) parsed from the goal doc — the ids --slice and workflow phases reference')
+    .option('--goal <goal>', 'Goal id, workspace name, planned workspace name, or title')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      const ctx = requireSessionContext();
+      const { listSpaceGoalDocSlices } = await import('../../commands/space-goals.js');
+      listSpaceGoalDocSlices(ctx, options);
+    }));
+
   goal
     .command('status')
     .description('Show validation readiness for this goal')
@@ -417,6 +461,8 @@ function registerSpaceGoalCommands(space: Command): void {
     .option('--expect-pattern <regex>', 'Required regex when --expect=output-matches')
     .option('--model-hint <name>', 'Preferred LLM model when --judge=llm')
     .option('--optional', 'Mark the requirement optional (default: required)')
+    .option('--slice <sliceId>', 'Goal-doc slice this requirement grounds in (see `space goal doc slices`; dangling ids warn, never fail)')
+    .option('--phase <name>', 'Workflow phase that OWES this requirement — its gate blocks phase-end until acceptance (unknown names warn)')
     .option('--goal <goal>', 'Goal id, workspace name, planned workspace name, or title')
     .option('--json', 'Output structured JSON')
     .action(withErrorHandler(async (options) => {
@@ -484,6 +530,22 @@ function registerSpaceGoalCommands(space: Command): void {
       const ctx = requireSessionContext();
       const { reorderSpaceGoalRequirement } = await import('../../commands/space-goals.js');
       reorderSpaceGoalRequirement(ctx, options);
+    }));
+
+  requirement
+    .command('verdict')
+    .description('Record an accept/reject verdict against the rubric (llm/human-judged requirements — in-phase judging; command-judged use `review run`)')
+    .requiredOption('--requirement <requirement>', 'Requirement id or title')
+    .option('--accept', 'The evidence satisfies the rubric — status becomes accepted (what phase gates count)')
+    .option('--reject', 'The evidence does not satisfy the rubric — status stays review')
+    .requiredOption('--notes <text>', 'Grounding for the verdict (what was examined, against which rubric line)')
+    .option('--created-by <name>', 'Reviewer identity label')
+    .option('--goal <goal>', 'Goal id, workspace name, planned workspace name, or title')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      const ctx = requireSessionContext();
+      const { verdictSpaceGoalRequirement } = await import('../../commands/space-goals.js');
+      verdictSpaceGoalRequirement(ctx, options);
     }));
 
   requirement

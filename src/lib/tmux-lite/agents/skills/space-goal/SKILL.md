@@ -25,6 +25,8 @@ Use this skill when asked to author, fulfill, or judge a goal's validation contr
 - **Expect** (command judgment): `exit-zero | stdout-contains | stderr-empty | output-matches`.
 - **Status**: `missing | review | accepted`.
 - **Readiness**: aggregate of required requirement statuses. Reads like `Ready: all required artifacts passed judgment.`
+- **Slice**: a heading-anchored section of the goal doc. Ids are slugified headings, parsed at read time — `space goal doc slices` lists them. `--slice` grounds a requirement in the doc section it proves; dangling ids warn (amber), never fail.
+- **Phase** (`wfPhase`): the workflow phase that OWES a requirement. Set with `--phase` at authoring (defaults to the open journal phase). The phase's gate blocks `journal phase-end` until every owed required requirement is `accepted`. Unknown phase names warn — the workflow's phase list is canonical.
 
 ## Authoring requirements
 
@@ -52,6 +54,16 @@ space goal requirement add \
   --rubric "1–3 minute screencast covering: missing requirement, attach evidence, record review, readiness flips to ready." \
   --gen manual \
   --judge llm --model-hint claude-3.5-sonnet
+
+# Ground a requirement in a goal-doc slice and bind it to the workflow phase
+# that owes it (the phase gate then blocks phase-end until acceptance)
+space goal doc slices        # list slice ids (slugified headings)
+space goal requirement add \
+  --title "Rails hover screenshot" \
+  --kind screenshot \
+  --rubric "Hover reveals the kind-grouped rail; colors match the mock." \
+  --gen manual --judge human \
+  --slice validation --phase "artifact rails parity"
 ```
 
 List, update, reorder, reopen, remove use the same `--requirement <id|title>` selector:
@@ -94,7 +106,18 @@ space goal review run --requirement "Focused tests pass"
 space goal review record --requirement "Hover screenshot" --decision pass --body "Hover state matches the spec."
 space goal review record --requirement "Hover screenshot" --decision changes --body "Status colors still hard to distinguish at 100% zoom."
 space goal review record --requirement "Hover screenshot" --decision fail --body "Wrong artifact attached."
+
+# In-phase reviewer verdict (llm/human-judged requirements): apply the rubric
+# to the attached evidence and record accept/reject with grounding notes.
+# Accepted status is exactly what phase gates count. --notes is mandatory.
+space goal requirement verdict --requirement "Rails hover screenshot" \
+  --accept --notes "Screenshot shows the kind-grouped rail on hover; colors match the mock per rubric line 1."
+space goal requirement verdict --requirement "Rails hover screenshot" \
+  --reject --notes "Rail is visible but ungrouped; rubric requires kind grouping."
 ```
+
+Command-judged requirements refuse `verdict` — they auto-judge via `review run`.
+Gate waives are human-only (UI button); there is no CLI waive.
 
 Decisions:
 - `pass` → status becomes `accepted`.

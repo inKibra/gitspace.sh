@@ -141,6 +141,9 @@ export interface SessionBackend {
   updateGoal?(projectName: string, goalId: string, updates: GoalUpdateInput): Promise<GoalRecord>;
   moveGoalInChain?(projectName: string, sourceToken: string, targetToken: string, position: 'before' | 'after'): Promise<GoalChain>;
   getGoalStackStatus?(projectName: string, workspaceName: string): Promise<ChainStackStatus>;
+  /** HUMAN-ONLY: waive a computed phase gate (timeline event kind 'gate',
+   *  actor 'human/ui'). UI-button seam — the CLI has no waive flag. */
+  waiveGoalGate?(projectName: string, goalId: string, phase: string, reason: string): Promise<GoalRecord>;
   addGoalRequirement?(projectName: string, goalId: string, input: import('../core/goal-validation.js').AddRequirementInput): Promise<import('../types/goals.js').Requirement>;
   updateGoalRequirement?(projectName: string, goalId: string, requirementId: string, patch: import('../core/goal-validation.js').UpdateRequirementInput): Promise<import('../types/goals.js').Requirement>;
   removeGoalRequirement?(projectName: string, goalId: string, requirementId: string): Promise<void>;

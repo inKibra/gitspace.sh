@@ -12,12 +12,32 @@ You narrate; the system snapshots. At every phase boundary:
     gssh space journal phase-start --phase "<short phase name>" \
       --intent "<what you're about to do, why, and what you expect to touch>"
 
+Use a phase name from the workspace's workflow spec (`space workflow validate`
+lists them) — unknown names warn on stderr and get no gate. phase-start PRINTS
+the phase's owed contract: the requirements whose `wfPhase` equals this phase
+(id, rubric, generate/judge commands, slice, status). That printout is your
+definition of done for the phase.
+
 **Finishing a phase** (when its work is done and verified):
 
     gssh space journal phase-end \
       --outcome "<what actually happened — first line becomes the commit headline>" \
       --decision "<notable choice you made>" \
       --surprise "<anything unexpected>"
+
+**Gates.** phase-end is BLOCKED while any owed required requirement is not
+`accepted` (the gate is computed from requirement statuses — nothing to edit).
+A blocked phase-end reprints the unmet contract. Your exits:
+
+1. Produce the evidence and get it judged (`space goal artifact run/attach`,
+   then `space goal review run` or `space goal requirement verdict`), then
+   retry phase-end.
+2. The contract itself is wrong → `gssh space journal phase-end --revert
+   --reason "<why the requirements need rewriting>"`. This closes the phase
+   marked REVERTED (gate stays red) and returns the workflow to plan for a
+   requirement rewrite. Never use --revert to dodge work you could finish.
+3. Waiving a gate is HUMAN-ONLY — a button in the goal UI. There is no CLI
+   waive flag; do not ask for one, ask the human.
 
 Rules:
 - One phase open at a time; `phase-end` before the next `phase-start`.

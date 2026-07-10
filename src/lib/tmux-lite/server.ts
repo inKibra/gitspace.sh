@@ -3218,6 +3218,19 @@ export async function dispatchCommand(cmd: Command): Promise<Response | null> {
               res = { type: 'error', message: e instanceof Error ? e.message : String(e) };
             }
             break;
+
+          case 'goal-gate-waive':
+            // Human-only escape hatch for computed phase gates: the CLI has
+            // no waive flag, so this daemon command (a UI button) is the only
+            // path. Records a 'gate' timeline event with reason + actor.
+            try {
+              const { waiveGoalGate } = await import('../../core/goal-workflow.js');
+              res = { type: 'goal', goal: await waiveGoalGate(cmd.projectName, cmd.goalId, cmd.phase, cmd.reason, 'human/ui') };
+              void broadcastMachineSnapshotReplacement().catch(() => {});
+            } catch (e) {
+              res = { type: 'error', message: e instanceof Error ? e.message : String(e) };
+            }
+            break;
           case 'bundle-refresh-plan':
             try {
               const workspaceRef = resolveWorkspaceRef(cmd.workspaceId.includes(':') ? cmd.workspaceId : cmd.workspaceId);

@@ -311,6 +311,16 @@ export interface GoalStackStatusRequest {
   projectName: string;
   workspaceName: string;
 }
+
+/** HUMAN-ONLY phase-gate waive (UI button seam; the CLI has no waive flag). */
+export interface WaiveGoalGateRequest {
+  type: 'goal_gate_waive';
+  requestId: string;
+  projectName: string;
+  goalId: string;
+  phase: string;
+  reason: string;
+}
 export interface RerunWorkspaceScriptsRequest {
   type: 'rerun_workspace_scripts';
   requestId: string;
@@ -1195,6 +1205,7 @@ export type ClientToMachineMessage =
   | UpdateGoalRequest
   | ReorderGoalRequest
   | GoalStackStatusRequest
+  | WaiveGoalGateRequest
   | RerunWorkspaceScriptsRequest
   | RunWorkspaceOpenScriptsRequest
   | RunWorkspaceScriptSelectionRequest
@@ -1376,6 +1387,7 @@ export function isBrowseMessage(msg: RemoteSessionMessage): msg is ClientToMachi
     'goal_update',
     'goal_reorder',
     'goal_stack_status',
+    'goal_gate_waive',
     'rerun_workspace_scripts',
     'run_workspace_open_scripts',
     'run_workspace_script_selection',

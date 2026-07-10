@@ -21,6 +21,7 @@ import {
   addRequirement,
   attachManualEvidence,
   recordHumanReview,
+  recordRequirementVerdict,
   removeRequirement,
   reopenRequirement,
   reorderRequirement,
@@ -33,6 +34,8 @@ import {
   type HumanReviewDecision,
   type UpdateRequirementInput,
 } from '../core/goal-validation.js';
+import { parseDocSlices, tryLoadWorkspaceWorkflow, workflowPhaseNames } from '../core/goal-workflow.js';
+import { withGoalLock } from '../core/goal-lock.js';
 import { computeReadiness } from '../app/shared/goal-validation/readiness.js';
 import { SpacesError } from '../types/errors.js';
 import { logger } from '../utils/logger.js';
@@ -56,6 +59,32 @@ const EXPECT_KINDS: CommandExpectation['kind'][] = ['exit-zero', 'stdout-contain
 
 function printJson(value: unknown): void {
   logger.log(JSON.stringify(value, null, 2));
+}
+
+/** Warnings go to stderr so --json stdout stays parseable. */
+function warnStderr(message: string): void {
+  console.error(`⚠ ${message}`);
+}
+
+/** Workspace dir whose artifacts mount carries THE workflow for a goal. */
+function workflowWorkspaceDir(ctx: SpaceCommandContext, goal: GoalRecord): string {
+  return join(getProjectWorkspacesDir(ctx.project), goal.workspaceName ?? ctx.workspace);
+}
+
+/** Phase canon: warn (stderr) when a phase name isn't in the active
+ *  workflow's phase list. Free-form names stay allowed — no gate machinery
+ *  attaches to unknown phases. */
+function warnIfPhaseUnknownToWorkflow(ctx: SpaceCommandContext, goal: GoalRecord, phase: string): void {
+  const { workflow, error } = tryLoadWorkspaceWorkflow(workflowWorkspaceDir(ctx, goal));
+  if (error) {
+    warnStderr(error);
+    return;
+  }
+  if (!workflow) return;
+  const names = workflowPhaseNames(workflow);
+  if (names.length > 0 && !names.includes(phase)) {
+    warnStderr(`Phase "${phase}" is not in the active workflow (${workflow.path}). Known phases: ${names.join(', ')}. No gate will attach to it.`);
+  }
 }
 
 function resolveActiveGoal(ctx: SpaceCommandContext): GoalRecord {
@@ -280,15 +309,17 @@ export function showSpaceGoal(ctx: SpaceCommandContext, options: { json?: boolea
 }
 
 export function setSpaceGoal(ctx: SpaceCommandContext, options: { file?: string; stdin?: boolean; body?: string; json?: boolean }): void {
-  const goal = resolveActiveGoal(ctx);
   const bodyMarkdown = readGoalBody(options);
-  const updated = writeGoalRecord(ctx.project, {
-    ...goal,
-    doc: {
-      ...goal.doc,
-      bodyMarkdown,
-      updatedAt: new Date().toISOString(),
-    },
+  const updated = withGoalLock(ctx.project, () => {
+    const goal = resolveActiveGoal(ctx);
+    return writeGoalRecord(ctx.project, {
+      ...goal,
+      doc: {
+        ...goal.doc,
+        bodyMarkdown,
+        updatedAt: new Date().toISOString(),
+      },
+    });
   });
   if (options.json) {
     printJson(updated);
@@ -327,26 +358,43 @@ export interface AddRequirementOptions {
   expectNeedle?: string;
   expectPattern?: string;
   modelHint?: string;
+  /** Goal-doc slice id (heading slug — `space goal doc slices`). */
+  slice?: string;
+  /** Workflow phase that owes this requirement (gate join). */
+  phase?: string;
   json?: boolean;
 }
 
 export function addSpaceGoalRequirement(ctx: SpaceCommandContext, options: AddRequirementOptions): void {
-  const goal = resolveGoalForOption(ctx, options.goal);
-  const input: AddRequirementInput = {
-    title: options.title,
-    kind: assertKindArg(options.kind),
-    rubric: options.rubric,
-    required: options.required === undefined ? !options.optional : options.required,
-    generation: buildGeneration(options),
-    judgment: buildJudgment(options),
-  };
-  const { validation, requirement } = addRequirement(goal.validation, input, goal);
-  const updated = writeGoalRecord(ctx.project, { ...goal, validation });
+  const { updated, requirement } = withGoalLock(ctx.project, () => {
+    const goal = resolveGoalForOption(ctx, options.goal);
+    if (options.phase?.trim()) {
+      warnIfPhaseUnknownToWorkflow(ctx, goal, options.phase.trim());
+    }
+    if (options.slice?.trim()) {
+      const slices = parseDocSlices(goal.doc.bodyMarkdown);
+      if (!slices.some((s) => s.id === options.slice!.trim())) {
+        warnStderr(`Slice "${options.slice.trim()}" is not a heading in the goal doc (dangling ref — amber state, allowed). Known slices: ${slices.map((s) => s.id).join(', ') || '(none)'}.`);
+      }
+    }
+    const input: AddRequirementInput = {
+      title: options.title,
+      kind: assertKindArg(options.kind),
+      rubric: options.rubric,
+      required: options.required === undefined ? !options.optional : options.required,
+      generation: buildGeneration(options),
+      judgment: buildJudgment(options),
+      sliceId: options.slice?.trim() || undefined,
+      wfPhase: options.phase?.trim() || undefined,
+    };
+    const { validation, requirement } = addRequirement(goal.validation, input, goal);
+    return { updated: writeGoalRecord(ctx.project, { ...goal, validation }), requirement };
+  });
   if (options.json) {
     printJson({ goalId: updated.id, requirement });
     return;
   }
-  logger.success(`Declared ${requirement.required ? 'required' : 'optional'} requirement: ${requirement.title}`);
+  logger.success(`Declared ${requirement.required ? 'required' : 'optional'} requirement: ${requirement.title}${requirement.wfPhase ? ` (owed by phase "${requirement.wfPhase}")` : ''}`);
 }
 
 export interface UpdateRequirementOptions {
@@ -369,27 +417,29 @@ export interface UpdateRequirementOptions {
 }
 
 export function updateSpaceGoalRequirement(ctx: SpaceCommandContext, options: UpdateRequirementOptions): void {
-  const goal = resolveGoalForOption(ctx, options.goal);
-  const current = resolveRequirement(goal, options.requirement);
-  const patch: UpdateRequirementInput = {};
-  if (options.title !== undefined) patch.title = options.title;
-  if (options.kind !== undefined) patch.kind = assertKindArg(options.kind);
-  if (options.rubric !== undefined) patch.rubric = options.rubric;
-  if (options.required !== undefined) patch.required = options.required;
-  else if (options.optional) patch.required = false;
-  if (options.gen !== undefined) patch.generation = buildGeneration({ gen: options.gen, genCommand: options.genCommand });
-  if (options.judge !== undefined) {
-    patch.judgment = buildJudgment({
-      judge: options.judge,
-      judgeCommand: options.judgeCommand,
-      expect: options.expect,
-      expectNeedle: options.expectNeedle,
-      expectPattern: options.expectPattern,
-      modelHint: options.modelHint,
-    });
-  }
-  const { validation, requirement } = updateRequirement(goal.validation, current.id, patch, goal);
-  const updated = writeGoalRecord(ctx.project, { ...goal, validation });
+  const { updated, requirement } = withGoalLock(ctx.project, () => {
+    const goal = resolveGoalForOption(ctx, options.goal);
+    const current = resolveRequirement(goal, options.requirement);
+    const patch: UpdateRequirementInput = {};
+    if (options.title !== undefined) patch.title = options.title;
+    if (options.kind !== undefined) patch.kind = assertKindArg(options.kind);
+    if (options.rubric !== undefined) patch.rubric = options.rubric;
+    if (options.required !== undefined) patch.required = options.required;
+    else if (options.optional) patch.required = false;
+    if (options.gen !== undefined) patch.generation = buildGeneration({ gen: options.gen, genCommand: options.genCommand });
+    if (options.judge !== undefined) {
+      patch.judgment = buildJudgment({
+        judge: options.judge,
+        judgeCommand: options.judgeCommand,
+        expect: options.expect,
+        expectNeedle: options.expectNeedle,
+        expectPattern: options.expectPattern,
+        modelHint: options.modelHint,
+      });
+    }
+    const { validation, requirement } = updateRequirement(goal.validation, current.id, patch, goal);
+    return { updated: writeGoalRecord(ctx.project, { ...goal, validation }), requirement };
+  });
   if (options.json) {
     printJson({ goalId: updated.id, requirement });
     return;
@@ -398,10 +448,12 @@ export function updateSpaceGoalRequirement(ctx: SpaceCommandContext, options: Up
 }
 
 export function removeSpaceGoalRequirement(ctx: SpaceCommandContext, options: { goal?: string; requirement: string; json?: boolean }): void {
-  const goal = resolveGoalForOption(ctx, options.goal);
-  const current = resolveRequirement(goal, options.requirement);
-  const validation = removeRequirement(goal.validation, current.id, goal);
-  const updated = writeGoalRecord(ctx.project, { ...goal, validation });
+  const { updated, current } = withGoalLock(ctx.project, () => {
+    const goal = resolveGoalForOption(ctx, options.goal);
+    const current = resolveRequirement(goal, options.requirement);
+    const validation = removeRequirement(goal.validation, current.id, goal);
+    return { updated: writeGoalRecord(ctx.project, { ...goal, validation }), current };
+  });
   if (options.json) {
     printJson({ goalId: updated.id, removedRequirementId: current.id });
     return;
@@ -410,10 +462,12 @@ export function removeSpaceGoalRequirement(ctx: SpaceCommandContext, options: { 
 }
 
 export function reorderSpaceGoalRequirement(ctx: SpaceCommandContext, options: { goal?: string; requirement: string; position: number; json?: boolean }): void {
-  const goal = resolveGoalForOption(ctx, options.goal);
-  const current = resolveRequirement(goal, options.requirement);
-  const validation = reorderRequirement(goal.validation, current.id, options.position);
-  const updated = writeGoalRecord(ctx.project, { ...goal, validation });
+  const { updated, current } = withGoalLock(ctx.project, () => {
+    const goal = resolveGoalForOption(ctx, options.goal);
+    const current = resolveRequirement(goal, options.requirement);
+    const validation = reorderRequirement(goal.validation, current.id, options.position);
+    return { updated: writeGoalRecord(ctx.project, { ...goal, validation }), current };
+  });
   if (options.json) {
     printJson({ goalId: updated.id, requirementId: current.id, position: options.position });
     return;
@@ -445,6 +499,30 @@ export function listSpaceGoalRequirements(ctx: SpaceCommandContext, options: { g
     logger.log(`  rubric: ${r.rubric}`);
     logger.log(`  gen: ${gen}`);
     logger.log(`  judge: ${jud}`);
+    if (r.wfPhase) logger.log(`  phase: ${r.wfPhase}`);
+    if (r.sliceId) logger.log(`  slice: ${r.sliceId}`);
+  }
+}
+
+// ─── Goal doc slices ───────────────────────────────────────────────────────
+
+/** `space goal doc slices` — heading-anchored slice ids, parsed at read time
+ *  (never stored in the doc). These are the ids `--slice` and workflow
+ *  phases reference. */
+export function listSpaceGoalDocSlices(ctx: SpaceCommandContext, options: { goal?: string; json?: boolean } = {}): void {
+  const goal = resolveGoalForOption(ctx, options.goal);
+  const slices = parseDocSlices(goal.doc.bodyMarkdown);
+  if (options.json) {
+    printJson({ goalId: goal.id, slices });
+    return;
+  }
+  if (slices.length === 0) {
+    logger.log('No headings in the goal doc yet — slices are heading-anchored.');
+    return;
+  }
+  logger.log(`Slices for ${goal.title} (id ← heading):`);
+  for (const s of slices) {
+    logger.log(`${s.id}  ←  ${'#'.repeat(s.level)} ${s.heading} (line ${s.line + 1})`);
   }
 }
 
@@ -461,16 +539,19 @@ export function attachSpaceGoalEvidence(ctx: SpaceCommandContext, options: {
   url?: string;
   json?: boolean;
 }): void {
-  const goal = resolveGoalForOption(ctx, options.goal);
-  const requirement = resolveRequirement(goal, options.requirement);
   const input: AttachEvidenceInput = {
     name: options.name,
     body: readOptionalBody(options),
     path: options.path,
     url: options.url,
   };
-  const result = attachManualEvidence(ctx.project, goal, requirement.id, input);
-  writeGoalRecord(ctx.project, result.goal);
+  const { goal, requirement, result } = withGoalLock(ctx.project, () => {
+    const goal = resolveGoalForOption(ctx, options.goal);
+    const requirement = resolveRequirement(goal, options.requirement);
+    const result = attachManualEvidence(ctx.project, goal, requirement.id, input);
+    writeGoalRecord(ctx.project, result.goal);
+    return { goal, requirement, result };
+  });
   if (options.json) {
     printJson({ goalId: goal.id, requirementId: requirement.id, evidence: result.evidence });
     return;
@@ -479,10 +560,13 @@ export function attachSpaceGoalEvidence(ctx: SpaceCommandContext, options: {
 }
 
 export function runSpaceGoalGeneration(ctx: SpaceCommandContext, options: { goal?: string; requirement: string; json?: boolean }): void {
-  const goal = resolveGoalForOption(ctx, options.goal);
-  const requirement = resolveRequirement(goal, options.requirement);
-  const result = runGenerationCommand(ctx.project, goal, requirement.id);
-  writeGoalRecord(ctx.project, result.goal);
+  const { goal, requirement, result } = withGoalLock(ctx.project, () => {
+    const goal = resolveGoalForOption(ctx, options.goal);
+    const requirement = resolveRequirement(goal, options.requirement);
+    const result = runGenerationCommand(ctx.project, goal, requirement.id);
+    writeGoalRecord(ctx.project, result.goal);
+    return { goal, requirement, result };
+  });
   if (options.json) {
     printJson({ goalId: goal.id, requirementId: requirement.id, evidence: result.evidence, autoAccepted: result.autoAccepted });
     return;
@@ -491,23 +575,64 @@ export function runSpaceGoalGeneration(ctx: SpaceCommandContext, options: { goal
 }
 
 export function runSpaceGoalJudgment(ctx: SpaceCommandContext, options: { goal?: string; requirement: string; json?: boolean }): void {
-  const goal = resolveGoalForOption(ctx, options.goal);
-  const requirement = resolveRequirement(goal, options.requirement);
-  if (requirement.judgment.kind === 'command') {
-    const result = runJudgmentCommand(ctx.project, goal, requirement.id);
-    writeGoalRecord(ctx.project, result.goal);
-    if (options.json) printJson({ goalId: goal.id, requirementId: requirement.id, review: result.review });
-    else logger.success(`Command check ${result.review.tone === 'green' ? 'passed' : 'failed'}: ${result.review.note}`);
+  const outcome = withGoalLock(ctx.project, () => {
+    const goal = resolveGoalForOption(ctx, options.goal);
+    const requirement = resolveRequirement(goal, options.requirement);
+    if (requirement.judgment.kind === 'command') {
+      const result = runJudgmentCommand(ctx.project, goal, requirement.id);
+      writeGoalRecord(ctx.project, result.goal);
+      return { kind: 'command' as const, goal, requirement, result };
+    }
+    if (requirement.judgment.kind === 'llm') {
+      const result = runLlmJudgment(goal, requirement.id);
+      writeGoalRecord(ctx.project, result.goal);
+      return { kind: 'llm' as const, goal, requirement, result };
+    }
+    throw new SpacesError('Human judgment is recorded via `space goal review record`, not run.', 'USER_ERROR', 1);
+  });
+  const { goal, requirement, result } = outcome;
+  if (options.json) {
+    printJson({ goalId: goal.id, requirementId: requirement.id, review: result.review });
     return;
   }
-  if (requirement.judgment.kind === 'llm') {
-    const result = runLlmJudgment(goal, requirement.id);
+  if (outcome.kind === 'command') logger.success(`Command check ${result.review.tone === 'green' ? 'passed' : 'failed'}: ${result.review.note}`);
+  else logger.log(result.review.note);
+}
+
+export interface VerdictOptions {
+  goal?: string;
+  requirement: string;
+  accept?: boolean;
+  reject?: boolean;
+  notes?: string;
+  createdBy?: string;
+  json?: boolean;
+}
+
+/**
+ * In-phase judging for llm/human-judged requirements: the reviewer applies
+ * the rubric and records accept/reject with grounding notes. This is the
+ * agent-usable half of the gate loop — accepted requirements are what a
+ * phase gate counts. There is deliberately NO gate-waive here: waives are
+ * human-only (UI seam).
+ */
+export function verdictSpaceGoalRequirement(ctx: SpaceCommandContext, options: VerdictOptions): void {
+  if (options.accept === options.reject) {
+    throw new SpacesError('Pass exactly one of --accept or --reject.', 'USER_ERROR', 1);
+  }
+  const verdict = options.accept ? 'accept' as const : 'reject' as const;
+  const { goal, requirement, result } = withGoalLock(ctx.project, () => {
+    const goal = resolveGoalForOption(ctx, options.goal);
+    const requirement = resolveRequirement(goal, options.requirement);
+    const result = recordRequirementVerdict(goal, requirement.id, verdict, options.notes ?? '', options.createdBy);
     writeGoalRecord(ctx.project, result.goal);
-    if (options.json) printJson({ goalId: goal.id, requirementId: requirement.id, review: result.review });
-    else logger.log(result.review.note);
+    return { goal, requirement, result };
+  });
+  if (options.json) {
+    printJson({ goalId: goal.id, requirementId: requirement.id, status: result.requirement.status, review: result.review });
     return;
   }
-  throw new SpacesError('Human judgment is recorded via `space goal review record`, not run.', 'USER_ERROR', 1);
+  logger.success(`Verdict ${verdict === 'accept' ? 'accepted' : 'rejected'}: ${requirement.title} (status: ${result.requirement.status})`);
 }
 
 export function recordSpaceGoalHumanReview(ctx: SpaceCommandContext, options: {
@@ -525,11 +650,14 @@ export function recordSpaceGoalHumanReview(ctx: SpaceCommandContext, options: {
   if (!decisions.includes(options.decision as HumanReviewDecision)) {
     throw new SpacesError(`Invalid --decision: ${options.decision}. Allowed: ${decisions.join(', ')}`, 'USER_ERROR', 1);
   }
-  const goal = resolveGoalForOption(ctx, options.goal);
-  const requirement = resolveRequirement(goal, options.requirement);
   const note = readOptionalBody(options) ?? '';
-  const result = recordHumanReview(goal, requirement.id, options.decision as HumanReviewDecision, note, options.score, options.createdBy);
-  writeGoalRecord(ctx.project, result.goal);
+  const { goal, requirement, result } = withGoalLock(ctx.project, () => {
+    const goal = resolveGoalForOption(ctx, options.goal);
+    const requirement = resolveRequirement(goal, options.requirement);
+    const result = recordHumanReview(goal, requirement.id, options.decision as HumanReviewDecision, note, options.score, options.createdBy);
+    writeGoalRecord(ctx.project, result.goal);
+    return { goal, requirement, result };
+  });
   if (options.json) {
     printJson({ goalId: goal.id, requirementId: requirement.id, review: result.review });
     return;
@@ -538,10 +666,13 @@ export function recordSpaceGoalHumanReview(ctx: SpaceCommandContext, options: {
 }
 
 export function reopenSpaceGoalRequirement(ctx: SpaceCommandContext, options: { goal?: string; requirement: string; json?: boolean }): void {
-  const goal = resolveGoalForOption(ctx, options.goal);
-  const requirement = resolveRequirement(goal, options.requirement);
-  const result = reopenRequirement(goal, requirement.id);
-  writeGoalRecord(ctx.project, result.goal);
+  const { goal, requirement, result } = withGoalLock(ctx.project, () => {
+    const goal = resolveGoalForOption(ctx, options.goal);
+    const requirement = resolveRequirement(goal, options.requirement);
+    const result = reopenRequirement(goal, requirement.id);
+    writeGoalRecord(ctx.project, result.goal);
+    return { goal, requirement, result };
+  });
   if (options.json) {
     printJson({ goalId: goal.id, requirementId: requirement.id, status: result.requirement.status });
     return;

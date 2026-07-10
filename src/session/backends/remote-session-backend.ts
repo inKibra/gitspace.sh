@@ -1461,6 +1461,16 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     throw new Error('Unexpected goal stack status response');
   }
 
+  async waiveGoalGate(projectName: string, goalId: string, phase: string, reason: string): Promise<import('../../types/goals.js').GoalRecord> {
+    const response = await this.sendRpcCommand({ type: 'goal_gate_waive', requestId: crypto.randomUUID(), projectName, goalId, phase, reason });
+    if (response.type === 'goal') {
+      await this.listWorkspaces();
+      return response.goal;
+    }
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected goal gate waive response');
+  }
+
   async rerunWorkspaceScripts(projectName: string, workspaceId: string): Promise<void> {
     const operation = await this.startOperationCommand({ type: 'rerun_workspace_scripts', requestId: crypto.randomUUID(), projectName, workspaceId });
     await this.waitForOperation(operation.operationId);

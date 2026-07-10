@@ -382,6 +382,8 @@ function contractAddedPayload(requirement: Requirement): string {
   if (requirement.judgment.kind === 'llm' && requirement.judgment.modelHint) {
     lines.push(`  jud.model: ${requirement.judgment.modelHint}`);
   }
+  if (requirement.wfPhase) lines.push(`  wfPhase: ${requirement.wfPhase}`);
+  if (requirement.sliceId) lines.push(`  slice: ${requirement.sliceId}`);
   return lines.join('\n');
 }
 
@@ -437,6 +439,12 @@ export interface AddRequirementInput {
   required?: boolean;
   generation: Generation;
   judgment: Judgment;
+  /** Goal-doc slice this requirement grounds itself in (heading slug —
+   *  core/goal-workflow.ts parseDocSlices). Dangling ids are amber state. */
+  sliceId?: string;
+  /** Workflow phase that OWES this requirement (gate join). Overrides the
+   *  open-journal-phase default when set explicitly at authoring time. */
+  wfPhase?: string;
 }
 
 export function addRequirement(
@@ -451,7 +459,8 @@ export function addRequirement(
   assertGeneration(input.generation);
   assertJudgment(input.judgment);
 
-  const phase = ctx ? getOpenPhaseForGoal(ctx) : undefined;
+  const openPhase = ctx ? getOpenPhaseForGoal(ctx) : undefined;
+  const phase = input.wfPhase?.trim() || openPhase;
   const id = nextRequirementId(title);
   const requirement: Requirement = {
     id,
@@ -465,6 +474,7 @@ export function addRequirement(
     evidence: [],
     reviews: [],
     ...(phase ? { wfPhase: phase } : {}),
+    ...(input.sliceId?.trim() ? { sliceId: input.sliceId.trim() } : {}),
   };
   let next: GoalValidation = {
     ...validation,
@@ -478,7 +488,7 @@ export function addRequirement(
     title: `Requirement added: ${title}`,
     body: `Produced by ${describeGenerationSummary(input.generation)}; judged by ${describeJudgmentSummary(input.judgment)}.`,
     payload: contractAddedPayload(requirement),
-  }, phase);
+  }, openPhase);
   return { validation: next, requirement };
 }
 
@@ -879,6 +889,106 @@ export function recordHumanReview(
     requirement,
     review,
   };
+}
+
+export type Verdict = 'accept' | 'reject';
+
+/**
+ * In-phase judging (goal-rubric-workflow interconnect): a reviewer — agent
+ * applying an llm-kind rubric, or a human — records an accept/reject verdict
+ * against a requirement. Command-kind judgments auto-judge on `review run`
+ * and are refused here. Accept pins the rubric hash (canon pin) and flips
+ * the requirement to accepted, which is what computed phase gates count.
+ */
+export function recordRequirementVerdict(
+  goal: GoalRecord,
+  requirementId: string,
+  verdict: Verdict,
+  notes: string,
+  createdBy?: string,
+): { goal: GoalRecord; requirement: Requirement; review: Review } {
+  const cur = goal.validation.requirements[requirementId];
+  if (!cur) throw new SpacesError(`Unknown requirement: ${requirementId}`, 'USER_ERROR', 1);
+  if (cur.judgment.kind === 'command') {
+    throw new SpacesError('Command-judged requirements auto-judge via `space goal review run`, not verdict.', 'USER_ERROR', 1);
+  }
+  const trimmed = notes.trim();
+  if (!trimmed) {
+    throw new SpacesError('--notes is required: say what the verdict is grounded in.', 'USER_ERROR', 1);
+  }
+  const tone: ReviewTone = verdict === 'accept' ? 'green' : 'red';
+  const review: Review = {
+    id: nextReviewId(),
+    tone,
+    who: cur.judgment.kind === 'llm' ? (cur.judgment.modelHint || 'llm') : 'human',
+    note: trimmed,
+    createdAt: nowIso(),
+    createdBy,
+    judgeType: cur.judgment.kind,
+    cites: cur.evidence.map((e) => e.id),
+    rubricHash: hashRubric(cur.rubric),
+  };
+  const { validation: nextValidation, requirement } = withRequirement(goal.validation, requirementId, (r) => ({
+    ...r,
+    reviews: [...r.reviews, review],
+    status: verdict === 'accept' ? 'accepted' : 'review',
+  }));
+  const withEvent = appendEvent(nextValidation, {
+    requirementId,
+    tone,
+    kind: 'review',
+    title: `Verdict ${verdict === 'accept' ? 'accepted' : 'rejected'}: ${cur.title}`,
+    body: review.note,
+    payload: `review.verdict.${verdict === 'accept' ? 'accepted' : 'rejected'}\n  requirement: ${requirementId}\n  judge: ${cur.judgment.kind}${createdBy ? `\n  by: ${createdBy}` : ''}`,
+  }, getOpenPhaseForGoal(goal));
+  return {
+    goal: { ...goal, validation: withEvent, updatedAt: nowIso() },
+    requirement,
+    review,
+  };
+}
+
+// ─── Gate events (goal-rubric-workflow interconnect) ────────────────────────
+
+/**
+ * Human-only gate waive event. Appended by the daemon 'goal-gate-waive'
+ * command (UI seam) — never by the CLI. The waived phase lives in the
+ * payload (`phase: <name>`), which is what gateStatusForPhase matches on;
+ * the event's `phase` stamp is also set to that phase for timeline grouping.
+ */
+export function appendGateWaiveEvent(
+  validation: GoalValidation,
+  phase: string,
+  reason: string,
+  actor = 'human/ui',
+): GoalValidation {
+  return appendEvent(validation, {
+    requirementId: null,
+    tone: 'amber',
+    kind: 'gate',
+    title: `gate waived: ${phase}`,
+    body: reason,
+    payload: `gate.waived\n  phase: ${phase}\n  actor: ${actor}\n  reason: ${reason}`,
+  }, phase);
+}
+
+/** Gate escape hatch #2: the phase was reverted (requirements need rewrite —
+ *  typically back to plan). Allowed without a satisfied gate; the gate stays
+ *  red and the journal entry closes marked reverted. */
+export function appendGateRevertEvent(
+  validation: GoalValidation,
+  fromPhase: string,
+  toTarget: string,
+  reason: string,
+): GoalValidation {
+  return appendEvent(validation, {
+    requirementId: null,
+    tone: 'red',
+    kind: 'gate',
+    title: `phase reverted → ${toTarget}`,
+    body: reason,
+    payload: `gate.reverted\n  phase: ${fromPhase}\n  to: ${toTarget}\n  reason: ${reason}`,
+  }, fromPhase);
 }
 
 export function reopenRequirement(
