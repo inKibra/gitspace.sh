@@ -257,7 +257,7 @@ export function GoalDetailPanel(props: GoalDetailPanelProps) {
       <header className="flex items-start gap-3 border-b border-[var(--gs-border)] p-4">
         <div className="min-w-0 flex-1">
           <div className="text-[10px] uppercase tracking-[0.18em] tabular-nums text-[var(--gs-text-dim)]">
-            Goal {props.goal.chainPosition}/{props.goal.chainLength} · {props.goal.phase} · {props.goal.status}
+            Status · {props.goal.chainPosition}/{props.goal.chainLength} · {props.goal.phase} · {props.goal.status}
           </div>
           <h2 className="mt-1 truncate text-lg font-semibold text-[var(--gs-text)]">{props.goal.title}</h2>
           <div className="mt-1 truncate text-xs text-[var(--gs-text-muted)]">
