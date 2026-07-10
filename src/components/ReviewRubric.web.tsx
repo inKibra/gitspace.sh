@@ -1,6 +1,6 @@
 /** @jsxImportSource react */
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
-import type { Evidence, GoalValidation, Judgment, Requirement, Review } from '../types/goals.js';
+import type { CommandExpectation, Evidence, GoalValidation, Judgment, Requirement, Review } from '../types/goals.js';
 import { renderMarkdownHtml } from './markdown-render.js';
 
 /**
@@ -85,6 +85,89 @@ function compactTime(at: string): string {
   return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
+function expectationLabel(expect: CommandExpectation): string {
+  switch (expect.kind) {
+    case 'exit-zero': return 'expects exit 0';
+    case 'stdout-contains': return `stdout contains “${expect.needle}”`;
+    case 'stderr-empty': return 'expects empty stderr';
+    case 'output-matches': return `output matches /${expect.pattern}/`;
+  }
+}
+
+/** The commands a criterion carries: how to (re)generate evidence and how the verdict is checked. */
+function requirementCommands(r: Requirement): Array<{ role: 'generate' | 'verify'; command: string; expectation?: string }> {
+  const out: Array<{ role: 'generate' | 'verify'; command: string; expectation?: string }> = [];
+  if (r.generation.kind === 'command') out.push({ role: 'generate', command: r.generation.command });
+  if (r.judgment.kind === 'command') out.push({ role: 'verify', command: r.judgment.command, expectation: expectationLabel(r.judgment.expect) });
+  return out;
+}
+
+/** Latest captured run of a given command from the requirement's evidence trail. */
+function lastRunOf(r: Requirement, command: string): Evidence | undefined {
+  for (let i = r.evidence.length - 1; i >= 0; i--) {
+    const ev = r.evidence[i];
+    if (ev && ev.command === command) return ev;
+  }
+  return undefined;
+}
+
+function ExitChip({ exitCode }: { exitCode: number }): ReactElement {
+  return (
+    <span className={`inline-flex flex-shrink-0 items-center rounded-[var(--gs-chip-radius)] px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide font-[family-name:var(--gs-font-mono)] ${
+      exitCode === 0 ? 'bg-[var(--gs-chip-green-bg)] text-[var(--gs-chip-green-text)]' : 'bg-[var(--gs-chip-red-bg)] text-[var(--gs-chip-red-text)]'
+    }`}>
+      exit {exitCode}
+    </span>
+  );
+}
+
+/** Mono, copyable command row with the judgment expectation + the last captured run. */
+function CommandRow({ requirement, role, command, expectation }: {
+  requirement: Requirement;
+  role: 'generate' | 'verify';
+  command: string;
+  expectation?: string;
+}): ReactElement {
+  const [copied, setCopied] = useState(false);
+  const run = lastRunOf(requirement, command);
+  const copy = () => {
+    void navigator.clipboard?.writeText(command).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1200);
+    }).catch(() => undefined);
+  };
+  return (
+    <div className="border border-[var(--gs-border)] bg-black">
+      <div className="flex items-start gap-2 px-2 py-1.5">
+        <span className={`mt-px w-[54px] flex-shrink-0 text-[9px] uppercase tracking-[0.08em] ${role === 'verify' ? 'text-[var(--gs-success)]' : 'text-[var(--gs-info)]'}`}>
+          ❯ {role}
+        </span>
+        <code className="min-w-0 flex-1 whitespace-pre-wrap break-all text-[11px] leading-[1.5] text-[var(--gs-text)] font-[family-name:var(--gs-font-mono)]">{command}</code>
+        <button
+          type="button"
+          onClick={copy}
+          title="Copy command"
+          className="flex-shrink-0 border border-[var(--gs-border)] px-1.5 py-px text-[10px] text-[var(--gs-text-dim)] transition-[border-color,color] duration-150 hover:border-[var(--gs-border-active)] hover:text-[var(--gs-text)]"
+        >
+          {copied ? '✓ copied' : '⧉ copy'}
+        </button>
+      </div>
+      {(expectation || run) && (
+        <div className="flex flex-wrap items-center gap-2 border-t border-[var(--gs-border-muted)] px-2 py-1">
+          {expectation && <span className="text-[10px] text-[var(--gs-text-dim)]">{expectation}</span>}
+          {run && (
+            <span className="ml-auto flex items-center gap-1.5 text-[10px] text-[var(--gs-text-ghost)] font-[family-name:var(--gs-font-mono)]">
+              last run {compactTime(run.createdAt)}
+              {typeof run.exitCode === 'number' && <ExitChip exitCode={run.exitCode} />}
+            </span>
+          )}
+          {!run && expectation && <span className="ml-auto text-[10px] italic text-[var(--gs-text-ghost)]">no captured run yet</span>}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ScoreBar({ value, small }: { value: number; small?: boolean }): ReactElement {
   return (
     <span className="inline-flex items-center gap-1.5">
@@ -117,7 +200,12 @@ function GateChip({ gate }: { gate: Gate }): ReactElement {
 function EvidencePreview({ evidence }: { evidence: Evidence }): ReactElement {
   const mime = evidence.mimeType ?? '';
   if (evidence.command || evidence.stdout !== undefined) {
-    const text = [evidence.command ? `$ ${evidence.command}` : null, evidence.stdout?.trimEnd() || null]
+    const text = [
+      evidence.command ? `$ ${evidence.command}` : null,
+      evidence.stdout?.trimEnd() || null,
+      evidence.stderr?.trimEnd() ? `[stderr]\n${evidence.stderr.trimEnd()}` : null,
+      typeof evidence.exitCode === 'number' ? `(exit ${evidence.exitCode})` : null,
+    ]
       .filter(Boolean)
       .join('\n');
     return (
@@ -190,6 +278,7 @@ function EvidenceCard({ requirement, evidence, onOpenEvidence }: {
         <span className="min-w-0 truncate text-[11px] text-[var(--gs-text)] font-[family-name:var(--gs-font-mono)]">{evidence.displayName || evidence.name}</span>
         {evidence.meta && <span className="min-w-0 truncate text-[10.5px] text-[var(--gs-text-muted)]">— {evidence.meta}</span>}
         <span className="ml-auto flex-shrink-0 text-[10.5px] text-[var(--gs-text-ghost)] font-[family-name:var(--gs-font-mono)]" title="artifact ref">{evidence.id}</span>
+        {typeof evidence.exitCode === 'number' && <ExitChip exitCode={evidence.exitCode} />}
         <span className={`inline-flex flex-shrink-0 items-center rounded-[var(--gs-chip-radius)] px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide ${captured ? 'bg-[var(--gs-chip-green-bg)] text-[var(--gs-chip-green-text)]' : 'bg-[var(--gs-chip-amber-bg)] text-[var(--gs-chip-amber-text)]'}`}>
           {captured ? 'captured' : 'asserted'}
         </span>
@@ -325,7 +414,7 @@ function MakeJudgement({ requirementId, onRecordHuman, onDone }: {
 }
 
 export function ReviewRubric({ goal, onRecordHuman, onRunJudgment, onOpenEvidence }: {
-  goal: { id: string; title: string; validation: GoalValidation } | null;
+  goal: { id: string; title: string; phase?: string; validation: GoalValidation } | null;
   onRecordHuman: (requirementId: string, decision: Decision, note: string, score?: number) => Promise<void>;
   onRunJudgment?: (requirementId: string) => Promise<void>;
   onOpenEvidence?: (requirementId: string, evidenceId: string) => void;
@@ -335,6 +424,9 @@ export function ReviewRubric({ goal, onRecordHuman, onRunJudgment, onOpenEvidenc
   const [runningId, setRunningId] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const secRefs = useRef<(HTMLElement | null)[]>([]);
+  // While a click-initiated smooth scroll is in flight, the scroll-spy must
+  // not fight the explicit selection.
+  const suppressSpyUntilRef = useRef(0);
 
   const crits = useMemo(() => {
     if (!goal) return [];
@@ -354,12 +446,18 @@ export function ReviewRubric({ goal, onRecordHuman, onRunJudgment, onOpenEvidenc
       });
   }, [goal, recorded]);
 
-  // Scroll-spy: the criterion the right column is showing lights up on the left.
+  // Scroll-spy: as the USER scrolls the right column, the visible criterion
+  // lights up on the left. Deliberately not run on mount/refresh (the pane
+  // must not jump to the last item on load), and inert while the column has
+  // nothing to scroll — selection is then purely click-driven.
   useEffect(() => {
     const root = scrollRef.current;
     if (!root) return;
     const recompute = () => {
       if (secRefs.current.length === 0) return;
+      if (Date.now() < suppressSpyUntilRef.current) return;
+      const scrollable = root.scrollHeight > root.clientHeight + 4;
+      if (!scrollable) return;
       if (root.scrollTop + root.clientHeight >= root.scrollHeight - 4) {
         setActive(secRefs.current.length - 1);
         return;
@@ -371,12 +469,18 @@ export function ReviewRubric({ goal, onRecordHuman, onRunJudgment, onOpenEvidenc
       });
       setActive(idx);
     };
-    recompute();
     root.addEventListener('scroll', recompute, { passive: true });
     return () => root.removeEventListener('scroll', recompute);
   }, [crits.length]);
 
+  // Keep the selection in range when criteria are removed on refresh.
+  useEffect(() => {
+    setActive((a) => Math.max(0, Math.min(a, crits.length - 1)));
+  }, [crits.length]);
+
   const go = useCallback((i: number) => {
+    setActive(i);
+    suppressSpyUntilRef.current = Date.now() + 800;
     secRefs.current[i]?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }, []);
 
@@ -408,8 +512,13 @@ export function ReviewRubric({ goal, onRecordHuman, onRunJudgment, onOpenEvidenc
       <div className="grid min-h-0 flex-1 grid-cols-[380px_1fr]">
         {/* left rail: index (capped) + active-criterion detail + footer */}
         <div className="flex min-h-0 flex-col overflow-hidden border-r border-[var(--gs-border)] bg-[#050505]">
-          <div className="flex-none border-b border-[var(--gs-border)] px-3.5 py-3 text-[12px] font-medium text-[var(--gs-text)]">
-            Review rubric <span className="text-[var(--gs-text-ghost)]">· the contract</span>
+          <div className="flex flex-none items-center gap-2 border-b border-[var(--gs-border)] px-3.5 py-3 text-[12px] font-medium text-[var(--gs-text)]">
+            <span>Review rubric <span className="text-[var(--gs-text-ghost)]">· the contract</span></span>
+            {goal.phase && (
+              <span className="ml-auto border border-[var(--gs-border)] px-1.5 py-px text-[10px] uppercase tracking-[0.08em] text-[var(--gs-text-dim)]" title="workspace goal phase">
+                phase · {goal.phase}
+              </span>
+            )}
           </div>
           <div className="max-h-[34%] flex-none overflow-y-auto border-b border-[var(--gs-border)] py-1.5">
             {crits.map((c, i) => (
@@ -421,9 +530,15 @@ export function ReviewRubric({ goal, onRecordHuman, onRunJudgment, onOpenEvidenc
                   active === i ? 'bg-[var(--gs-bg-active)]' : 'hover:bg-[var(--gs-bg-elevated)]'
                 }`}
               >
-                <span className={`mt-1 h-2 w-2 flex-shrink-0 rounded-full ${VERDICT_DOT[c.verdict]}`} />
+                <span className={`mt-1 h-2 w-2 flex-shrink-0 rounded-full ${VERDICT_DOT[c.verdict]}`} title={VERDICT_LABEL[c.verdict]} />
                 <span className={`min-w-0 flex-1 text-[12px] leading-[1.35] ${active === i ? 'font-medium text-[var(--gs-text)]' : 'text-[var(--gs-text-muted)]'}`}>
                   {c.r.title}
+                </span>
+                <span className={`mt-0.5 flex-shrink-0 text-[10px] ${GATE_META[c.gate].cls}`} title={`${GATE_META[c.gate].label} gate`}>
+                  {GATE_META[c.gate].icon}
+                </span>
+                <span className="mt-0.5 flex-shrink-0 text-[10px] tabular-nums text-[var(--gs-text-ghost)] font-[family-name:var(--gs-font-mono)]" title={`${c.r.evidence.length} evidence`}>
+                  {c.r.evidence.length}ev
                 </span>
                 {typeof c.score === 'number' && (
                   <span className="mt-0.5 flex-shrink-0 text-[10px] tabular-nums text-[var(--gs-text-dim)] font-[family-name:var(--gs-font-mono)]">{c.score}</span>
@@ -448,6 +563,13 @@ export function ReviewRubric({ goal, onRecordHuman, onRunJudgment, onOpenEvidenc
                   className="gs-block-md mb-2.5 text-[12px] leading-[1.55] text-[var(--gs-text-muted)]"
                   dangerouslySetInnerHTML={{ __html: renderMarkdownHtml(act.r.rubric) }}
                 />
+                {requirementCommands(act.r).length > 0 && (
+                  <div className="mb-2.5 flex flex-col gap-1.5">
+                    {requirementCommands(act.r).map((cmd) => (
+                      <CommandRow key={`${cmd.role}:${cmd.command}`} requirement={act.r} role={cmd.role} command={cmd.command} expectation={cmd.expectation} />
+                    ))}
+                  </div>
+                )}
                 <div className="mb-3 flex items-center gap-2.5 text-[10.5px] text-[var(--gs-text-dim)]">
                   {typeof act.score === 'number' && <ScoreBar value={act.score} />}
                   <span>
@@ -497,6 +619,8 @@ export function ReviewRubric({ goal, onRecordHuman, onRunJudgment, onOpenEvidenc
               <div className="sticky top-0 z-10 flex flex-wrap items-center gap-[9px] border-b border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-3 py-2.5">
                 <VerdictChip verdict={c.verdict} />
                 <span className="text-[13px] font-medium text-[var(--gs-text)]">{c.r.title}</span>
+                <GateChip gate={c.gate} />
+                {typeof c.score === 'number' && <ScoreBar value={c.score} small />}
                 {c.awaiting && (
                   <span className="ml-auto border border-[rgba(188,140,255,0.3)] px-1.5 py-px text-[12px] tracking-[0.04em] text-[var(--gs-purple)]">
                     awaiting your verdict
@@ -505,6 +629,21 @@ export function ReviewRubric({ goal, onRecordHuman, onRunJudgment, onOpenEvidenc
               </div>
 
               <div className="p-3">
+                {/* criterion — what this item demands, always visible per section */}
+                <div
+                  className="gs-block-md mb-2 text-[11.5px] leading-[1.55] text-[var(--gs-text-muted)]"
+                  dangerouslySetInnerHTML={{ __html: renderMarkdownHtml(c.r.rubric) }}
+                />
+
+                {/* verification commands — how evidence is (re)generated and checked */}
+                {requirementCommands(c.r).length > 0 && (
+                  <div className="mb-3 flex flex-col gap-1.5">
+                    {requirementCommands(c.r).map((cmd) => (
+                      <CommandRow key={`${cmd.role}:${cmd.command}`} requirement={c.r} role={cmd.role} command={cmd.command} expectation={cmd.expectation} />
+                    ))}
+                  </div>
+                )}
+
                 {/* evidence */}
                 <div className="mb-2 text-[10px] uppercase tracking-[0.12em] text-[var(--gs-text-ghost)]">
                   evidence <span className="normal-case tracking-normal">· {c.r.evidence.length}</span>

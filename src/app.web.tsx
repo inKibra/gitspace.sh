@@ -2292,6 +2292,22 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
     return () => clearInterval(interval);
   }, [showEvents, eventsWorkspacePath, eventsProps.activeFilterName, backendSavedEventFilters, filteredWorkspaces, getWorkspaceRef, multi.requestEvents]);
 
+  // Rubric/evidence live refresh: agent-side CLI writes (evidence attach,
+  // command judgments run in-session) mutate goal state on disk without a
+  // daemon snapshot broadcast, so the panes go stale until the next
+  // listWorkspaces. Light poll while such a pane is open on the visible
+  // workspace detail (same pattern as the events poll above).
+  useEffect(() => {
+    if (!currentDetailWorkspace || showBoardWhileDetailMounted) return;
+    const wsKey = currentDetailWorkspace.selectionKey ?? currentDetailWorkspace.id;
+    const panes = dockExtraPanes[wsKey] ?? [];
+    if (!panes.some((pane) => pane.kind === 'rubric' || pane.kind === 'evidence')) return;
+    const interval = setInterval(() => {
+      void multi.listWorkspaces();
+    }, 5000);
+    return () => clearInterval(interval);
+  }, [currentDetailWorkspace, dockExtraPanes, multi.listWorkspaces, showBoardWhileDetailMounted]);
+
   // ─── Activity tracking for notifications ──────────────────────────────────
 
   const holdWhenIdleMs = activeNotificationConfig.toast.holdWhenIdleMs ?? 15000;
@@ -3065,7 +3081,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
             onClose: closeExtra,
             render: () => (
               <ReviewRubric
-                goal={workspaceGoalForPanels?.validation ? { id: workspaceGoalForPanels.id, title: workspaceGoalForPanels.title, validation: workspaceGoalForPanels.validation } : null}
+                goal={workspaceGoalForPanels?.validation ? { id: workspaceGoalForPanels.id, title: workspaceGoalForPanels.title, phase: workspaceGoalForPanels.phase, validation: workspaceGoalForPanels.validation } : null}
                 onRecordHuman={async (requirementId, decision, note, score) => {
                   const be = paneBackendKey ? multi.getBackend(paneBackendKey) : null;
                   const mapped = decision === 'pass' ? 'pass' : decision === 'partial' ? 'changes' : 'fail';
