@@ -15,6 +15,7 @@ import type {
 import type { AddRequirementInput, AttachEvidenceInput, HumanReviewDecision, UpdateRequirementInput } from '../core/goal-validation.js';
 import { computeReadiness } from '../app/shared/goal-validation/readiness.js';
 import { MarkdownEditor } from './MarkdownEditor.web.js';
+import { CommandEvidenceOutput } from './CommandEvidenceOutput.web.js';
 import { useGoalPhaseInfo, type SendReviewRequestFn } from '../app/react/useGoalPhaseInfo.web.js';
 import { btnDanger, btnGhost, btnPrimary, btnSecondary, chipClass, type ChipTone, R_CARD, R_CHIP, R_INPUT } from './ui/control.js';
 
@@ -910,11 +911,19 @@ function EvidenceSection(props: {
 
 function EvidenceChip(props: { evidence: Evidence }) {
   const e = props.evidence;
+  const isCommand = Boolean(e.command) || e.stdout !== undefined || e.stderr !== undefined;
   return (
-    <div className={`flex items-center gap-2 ${R_CARD} border border-[var(--gs-border)] bg-[var(--gs-bg)] px-2 py-1.5 text-xs`}>
-      <strong className="text-[var(--gs-text)]">{e.name}</strong>
-      <span className="text-[var(--gs-text-muted)]">— {e.meta}</span>
-      <span className="ml-auto text-[10px] uppercase tracking-wide text-[var(--gs-text-dim)]">via {e.source}</span>
+    <div className={`${R_CARD} border border-[var(--gs-border)] bg-[var(--gs-bg)] px-2 py-1.5 text-xs`}>
+      <div className="flex items-center gap-2">
+        <strong className="text-[var(--gs-text)]">{e.name}</strong>
+        <span className="text-[var(--gs-text-muted)]">— {e.meta}</span>
+        <span className="ml-auto text-[10px] uppercase tracking-wide text-[var(--gs-text-dim)]">via {e.source}</span>
+      </div>
+      {isCommand && (
+        <div className="mt-1.5">
+          <CommandEvidenceOutput command={e.command} stdout={e.stdout} stderr={e.stderr} exitCode={e.exitCode} variant="detail" />
+        </div>
+      )}
     </div>
   );
 }

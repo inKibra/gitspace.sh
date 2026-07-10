@@ -3,6 +3,7 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type React
 import type { CommandExpectation, Evidence, GoalValidation, Judgment, Requirement, Review } from '../types/goals.js';
 import { gateStatusForPhase, gateWaiveInfoForPhase, parseDocSlices } from '../core/goal-gates.js';
 import { renderMarkdownHtml } from './markdown-render.js';
+import { CommandEvidenceOutput } from './CommandEvidenceOutput.web.js';
 import { useGoalPhaseInfo, type SendReviewRequestFn } from '../app/react/useGoalPhaseInfo.web.js';
 
 /**
@@ -256,18 +257,14 @@ function AdvancedInChips({ phases }: { phases: string[] }): ReactElement | null 
 function EvidencePreview({ evidence }: { evidence: Evidence }): ReactElement {
   const mime = evidence.mimeType ?? '';
   if (evidence.command || evidence.stdout !== undefined) {
-    const text = [
-      evidence.command ? `$ ${evidence.command}` : null,
-      evidence.stdout?.trimEnd() || null,
-      evidence.stderr?.trimEnd() ? `[stderr]\n${evidence.stderr.trimEnd()}` : null,
-      typeof evidence.exitCode === 'number' ? `(exit ${evidence.exitCode})` : null,
-    ]
-      .filter(Boolean)
-      .join('\n');
     return (
-      <pre className="m-0 max-h-[260px] overflow-auto whitespace-pre-wrap border border-[var(--gs-border)] bg-black px-2.5 py-2 text-[11px] leading-[1.6] text-[var(--gs-text)] font-[family-name:var(--gs-font-mono)]">
-        {text || '(no output captured)'}
-      </pre>
+      <CommandEvidenceOutput
+        command={evidence.command}
+        stdout={evidence.stdout}
+        stderr={evidence.stderr}
+        exitCode={evidence.exitCode}
+        variant="rubric"
+      />
     );
   }
   if (mime.startsWith('image/') && evidence.previewUrl) {
