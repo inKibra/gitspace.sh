@@ -52,11 +52,11 @@
   --gs-border-muted: #111111;
   --gs-border-active: #444444;
 
-  /* Text */
-  --gs-text: #d4d4d4;
-  --gs-text-secondary: #b1bac4;
-  --gs-text-muted: #777777;
-  --gs-text-dim: #444444;
+  /* Text — muted/dim lifted toward white for readability (grey was too grey) */
+  --gs-text: #e6e6e6;
+  --gs-text-secondary: #c6cdd5;
+  --gs-text-muted: #9c9c9c;
+  --gs-text-dim: #6a6a6a;
   --gs-text-ghost: #282828;
   --gs-text-on-accent: #000000;
 
