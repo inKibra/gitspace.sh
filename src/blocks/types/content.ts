@@ -267,10 +267,23 @@ export const wfGateType = z.enum(['human', 'orchestration', 'command']);
 export type WfGateType = z.infer<typeof wfGateType>;
 export const wfNode = z.object({
   id: z.string(),
-  role: z.string(),
+  /** Named agent from the discovered subagent registry (task/reviewer/
+   *  designer/… — the same list the settings AGENTS tab shows via
+   *  listAgentDefinitions). One of the two canonical node identities:
+   *  surfaces display the agent name and its model chip resolves LIVE from
+   *  the registry (override > frontmatter > session default). */
+  agent: z.string().optional(),
+  /** Freeform node title — parse-only back-compat. New specs author `agent`
+   *  or `modelRole` as the node identity instead. */
+  role: z.string().optional(),
   kind: z.enum(['agent', 'gate', 'tool']),
-  /** Model-role id ('task' | 'slow' | 'smol' | 'plan', optionally 'pi/'-prefixed).
-   *  Rendered as the role display name (see src/blocks/model-roles.ts). */
+  /** OMP model-role id ('default' | 'task' | 'slow' | 'smol' | 'plan' |
+   *  'designer' | 'vision' | …, optionally 'pi/'-prefixed; display labels in
+   *  src/blocks/model-roles.ts). Canonical peer of `agent`:
+   *   - alone, it IS the node identity ("run this step with the Vision role")
+   *     — shown as the role label with the role's assigned model;
+   *   - alongside `agent`, it is an explicit per-step model override for that
+   *     agent ('reviewer · Vision — <model>'). */
   modelRole: z.string().optional(),
   /** Legacy Claude model alias ('opus'/'sonnet'/...). Parsed for back-compat
    *  only; renderers translate it to a model role and never show it raw. */

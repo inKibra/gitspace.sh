@@ -335,13 +335,47 @@ function wfModelRoleLabel(n: WfNode): string | undefined {
   return WF_MODEL_ROLE_LABELS[id] ?? id;
 }
 
+// A node identity is a NAMED AGENT (subagent registry) or a NAMED MODEL ROLE —
+// both first-class. Static resolution in the mock (it can't reach the daemon);
+// the real pane resolves LIVE from backend.listAgentDefinitions + the role
+// catalog. Mirrors the bundled registry: task inherits the session model,
+// reviewer pins pi/slow, designer pins pi/designer.
+const WF_AGENT_RESOLUTION: Record<string, string> = {
+  task: 'Current model',
+  reviewer: 'Thinking — gpt-5.5:xhigh',
+  designer: 'Designer — gpt-5.5:medium',
+};
+// Model-role id → display label + assigned model (the MODEL ROLES catalog).
+const WF_ROLE_RESOLUTION: Record<string, { label: string; model?: string }> = {
+  task: { label: 'Current model' },
+  slow: { label: 'Thinking', model: 'gpt-5.5:xhigh' },
+  smol: { label: 'Fast', model: 'gpt-5.5-mini' },
+  plan: { label: 'Architect', model: 'gpt-5.5:xhigh' },
+  designer: { label: 'Designer', model: 'gpt-5.5:medium' },
+  vision: { label: 'Vision', model: 'gemini-3-pro' },
+};
+
 function WfNodeCard({ n }: { n: WfNode }) {
-  const modelRole = wfModelRoleLabel(n);
+  // agent only → live agent resolution · agent + modelRole → the role as an
+  // explicit per-step override ('reviewer · Vision — <model>') · role-only →
+  // role label IS the identity, chip = its assigned model · legacy titles →
+  // translated role label (raw model names never render).
+  const roleId = n.modelRole ? n.modelRole.toLowerCase().replace(/^pi\//, '') : null;
+  const roleInfo = roleId ? WF_ROLE_RESOLUTION[roleId] : undefined;
+  const roleChip = roleInfo ? (roleInfo.model ? `${roleInfo.label} — ${roleInfo.model}` : roleInfo.label) : roleId ?? undefined;
+  const identity = n.agent ?? n.role ?? roleInfo?.label ?? roleId ?? undefined;
+  const modelRole = n.agent
+    ? (roleId ? roleChip : WF_AGENT_RESOLUTION[n.agent])
+    : roleId && identity === roleInfo?.label
+      ? roleInfo?.model
+      : n.modelRole || n.model
+        ? roleChip ?? wfModelRoleLabel(n)
+        : undefined;
   return (
     <div className={`wfx-node ${n.kind} ${n.status ?? ''}`}>
       <div className="wfx-node-h">
         <span className={`wdot ${n.status ?? 'pending'}`} />
-        <span className="wfx-role">{n.kind === 'gate' ? `gate · ${n.gateType}` : n.role}</span>
+        <span className="wfx-role">{n.kind === 'gate' ? `gate · ${n.gateType}` : identity}</span>
         {modelRole && <span className="wfx-model">{modelRole}</span>}
       </div>
       {n.fanout && (

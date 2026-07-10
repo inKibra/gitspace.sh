@@ -4,6 +4,8 @@ import { useEffect, useMemo, useState, type ReactElement } from 'react';
 import type { SessionBackend } from '../session/backend.js';
 import { BlockView } from '../blocks/render/registry.web.js';
 import { BlockHostProvider, type BlockAction, type BlockHost } from '../blocks/render/host.web.js';
+import { WorkflowResolutionProvider } from '../blocks/render/workflow.web.js';
+import { useWorkflowResolution } from '../app/react/useWorkflowResolution.web.js';
 
 /**
  * Workflow dock pane (mock Shell 'workflow' pane): "phased dataflow · gated
@@ -21,6 +23,10 @@ export function WorkflowPanel({ backend, workspaceId, onOpenArtifact, onOpenGoal
   const [specs, setSpecs] = useState<Array<{ path: string; data: unknown }>>([]);
   const [selected, setSelected] = useState(0);
   const [state, setState] = useState<'loading' | 'ready' | 'error'>('loading');
+  // Node identities resolve LIVE: named agents from the subagent registry
+  // (the AGENTS tab's listAgentDefinitions data) and model roles from the
+  // role catalog (getAgentControlInfo), polled slowly.
+  const resolution = useWorkflowResolution(backend, workspaceId);
 
   useEffect(() => {
     let alive = true;
@@ -103,7 +109,9 @@ export function WorkflowPanel({ backend, workspaceId, onOpenArtifact, onOpenGoal
               </div>
             )}
             <BlockHostProvider host={host}>
-              <BlockView block={{ id: cur.path, type: 'workflow', data: cur.data }} />
+              <WorkflowResolutionProvider resolution={resolution}>
+                <BlockView block={{ id: cur.path, type: 'workflow', data: cur.data }} />
+              </WorkflowResolutionProvider>
             </BlockHostProvider>
           </div>
         )}

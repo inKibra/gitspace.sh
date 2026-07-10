@@ -92,7 +92,7 @@ export type WfArtifactType = 'goal-slice' | 'phased-goal' | 'rubric' | 'note' | 
 export interface WfCreatedArtifact { name: string; type: WfArtifactType; from?: string; passedTo?: string }
 export type WfNodeKind = 'agent' | 'gate' | 'tool';
 export type WfNodeStatus = 'done' | 'running' | 'pending';
-export interface WfNode { id: string; role: string; kind: WfNodeKind; modelRole?: string; model?: string; status?: WfNodeStatus; reads?: WfRef[]; writes?: WfRef[]; out?: string; gateType?: 'human' | 'orchestration'; fanout?: { over: string; instances: string[] } }
+export interface WfNode { id: string; agent?: string; role?: string; kind: WfNodeKind; modelRole?: string; model?: string; status?: WfNodeStatus; reads?: WfRef[]; writes?: WfRef[]; out?: string; gateType?: 'human' | 'orchestration'; fanout?: { over: string; instances: string[] } }
 export interface WfPhaseArtifact { name: string; kind: string; io: WfIo; required?: boolean; status?: 'created' | 'pending' }
 export interface WfPhase { name: string; inputs: WfRef[]; nodes: WfNode[]; loop?: string; created?: WfCreatedArtifact[]; outputs: WfPhaseArtifact[]; gate?: { type: 'human' | 'orchestration'; label: string } }
 export interface WorkflowSpecData { recipe: string; recipePath?: string; rollup?: string[]; phases: WfPhase[] }

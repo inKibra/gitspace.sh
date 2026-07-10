@@ -1,7 +1,7 @@
 /** @jsxImportSource react */
-import { Fragment, useState, type ReactElement } from 'react';
+import { createContext, Fragment, useContext, useState, type ReactElement, type ReactNode } from 'react';
 import type { WfArtifactType, WfCreatedArtifact, WfGateType, WfNode, WfPhase, WfRef, WorkflowSpecData } from '../types/content.js';
-import { wfNodeModelRoleLabel } from '../model-roles.js';
+import { modelRoleLabel, normalizeModelRole, wfNodeModelRoleLabel } from '../model-roles.js';
 import { defineRenderer } from './registry.web.js';
 import { useBlockHost } from './host.web.js';
 
@@ -55,11 +55,47 @@ function cartTarget(a: WfCreatedArtifact): string {
   return a.type === 'rubric' ? 'rubric' : a.type === 'goal-slice' || a.type === 'phased-goal' ? 'goal' : `artifact:${a.name}`;
 }
 
+/** Live model resolution for workflow nodes, from the same seams the settings
+ *  surfaces use: `agents` = named agent → resolved chip label (AGENTS tab /
+ *  listAgentDefinitions via agentResolutionLabel), `roles` = model-role id →
+ *  display label + assigned model (MODEL ROLES catalog via getAgentControlInfo;
+ *  model null = follows the session model). Null when the surface has no live
+ *  backend (e.g. a transcript stream) — nodes then fall back to static labels. */
+export interface WorkflowLiveResolution {
+  agents: Record<string, string>;
+  roles: Record<string, { label: string; model: string | null }>;
+}
+
+const WorkflowResolutionContext = createContext<WorkflowLiveResolution | null>(null);
+
+export function WorkflowResolutionProvider({ resolution, children }: { resolution: WorkflowLiveResolution | null; children: ReactNode }): ReactElement {
+  return <WorkflowResolutionContext.Provider value={resolution}>{children}</WorkflowResolutionContext.Provider>;
+}
+
 function NodeCard({ n }: { n: WfNode }): ReactElement {
+  const live = useContext(WorkflowResolutionContext);
   const gate = n.kind === 'gate';
-  // Model-role display name (Thinking / Fast / Current model / Architect…) —
-  // legacy `model` aliases are translated; raw model names never render.
-  const modelRole = wfNodeModelRoleLabel(n);
+  // Node identity: a NAMED agent from the subagent registry, or a named MODEL
+  // ROLE ("run this step with the Vision role") — both canonical. Freeform
+  // `role` titles are parse-only back-compat. Chip:
+  //  - agent only → the agent's LIVE resolution ('Current model', 'Thinking — …')
+  //  - agent + modelRole → the role as an explicit per-step model override
+  //    ('reviewer · Vision — <model>')
+  //  - role-identity node → the role's assigned model from the live catalog
+  //  - legacy title nodes → authored model role label; raw aliases translate
+  //    and never render raw.
+  const roleId = n.modelRole ? normalizeModelRole(n.modelRole) : null;
+  const liveRole = roleId ? live?.roles[roleId] : undefined;
+  const roleLabel = roleId ? liveRole?.label ?? modelRoleLabel(roleId) : null;
+  const roleChip = liveRole ? (liveRole.model ? `${liveRole.label} — ${liveRole.model}` : liveRole.label) : roleLabel;
+  const identity = n.agent ?? n.role ?? roleLabel ?? undefined;
+  const modelRole = n.agent
+    ? (roleId ? roleChip ?? undefined : live?.agents[n.agent])
+    : roleId && identity === roleLabel
+      ? liveRole?.model ?? undefined // role-identity: label already shown
+      : n.modelRole || n.model
+        ? roleChip ?? wfNodeModelRoleLabel(n)
+        : undefined;
   return (
     <div
       className={`border min-w-[152px] max-w-[210px] ${
@@ -71,7 +107,7 @@ function NodeCard({ n }: { n: WfNode }): ReactElement {
       <div className={`flex items-center gap-1.5 px-2 py-1.5 text-[11px] ${gate ? '' : 'border-b border-[var(--gs-border)]'}`}>
         <StatusDot status={n.status} />
         <span className="text-[var(--gs-text)] font-medium">
-          {gate ? `gate · ${n.gateType ?? 'human'}` : n.role}
+          {gate ? `gate · ${n.gateType ?? 'human'}` : identity}
         </span>
         {modelRole && <span className={`ml-auto text-[10px] text-[var(--gs-text-dim)] ${MONO}`}>{modelRole}</span>}
       </div>
