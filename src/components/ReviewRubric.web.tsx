@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
 import type { CommandExpectation, Evidence, GoalValidation, Judgment, Requirement, Review } from '../types/goals.js';
 import { renderMarkdownHtml } from './markdown-render.js';
+import { useGoalPhaseInfo, type SendReviewRequestFn } from '../app/react/useGoalPhaseInfo.web.js';
 
 /**
  * ReviewRubric — the '☰ Review rubric' dock pane (mock: ReviewRubric.tsx).
@@ -193,6 +194,36 @@ function GateChip({ gate }: { gate: Gate }): ReactElement {
     <span className={`inline-flex items-center gap-1 rounded-[var(--gs-chip-radius)] border px-1.5 py-0.5 text-[10px] uppercase tracking-wide ${m.cls}`}>
       {m.icon} {m.label} gate
     </span>
+  );
+}
+
+/** Dim journal-phase stamp (requirements ⇄ phases join). */
+function PhaseBadge({ phase }: { phase: string }): ReactElement {
+  return (
+    <span
+      className="inline-flex items-center rounded-[var(--gs-chip-radius)] border border-[var(--gs-border)] px-1.5 py-px text-[9px] uppercase tracking-[0.08em] text-[var(--gs-text-dim)]"
+      title={`declared in phase ${phase}`}
+    >
+      ⧗ {phase}
+    </span>
+  );
+}
+
+/** 'advanced in <phase>' chips from the journal's delta.requirementsAdvanced. */
+function AdvancedInChips({ phases }: { phases: string[] }): ReactElement | null {
+  if (phases.length === 0) return null;
+  return (
+    <>
+      {phases.map((p) => (
+        <span
+          key={p}
+          className="inline-flex items-center rounded-[var(--gs-chip-radius)] border border-[rgba(188,140,255,0.3)] px-1.5 py-px text-[9px] uppercase tracking-[0.08em] text-[var(--gs-purple)]"
+          title={`status advanced during phase ${p}`}
+        >
+          advanced in {p}
+        </span>
+      ))}
+    </>
   );
 }
 
@@ -413,12 +444,18 @@ function MakeJudgement({ requirementId, onRecordHuman, onDone }: {
   );
 }
 
-export function ReviewRubric({ goal, onRecordHuman, onRunJudgment, onOpenEvidence }: {
+export function ReviewRubric({ goal, onRecordHuman, onRunJudgment, onOpenEvidence, sendReviewRequest, projectName, workspaceName }: {
   goal: { id: string; title: string; phase?: string; validation: GoalValidation } | null;
   onRecordHuman: (requirementId: string, decision: Decision, note: string, score?: number) => Promise<void>;
   onRunJudgment?: (requirementId: string) => Promise<void>;
   onOpenEvidence?: (requirementId: string, evidenceId: string) => void;
+  /** Optional journal loader (requirements ⇄ phases join): one
+   *  get_review_guide_state per pane load for 'advanced in <phase>' chips. */
+  sendReviewRequest?: SendReviewRequestFn;
+  projectName?: string;
+  workspaceName?: string;
 }): ReactElement {
+  const phaseInfo = useGoalPhaseInfo(sendReviewRequest, projectName, workspaceName);
   const [active, setActive] = useState(0);
   const [recorded, setRecorded] = useState<Record<string, boolean>>({});
   const [runningId, setRunningId] = useState<string | null>(null);
@@ -534,6 +571,11 @@ export function ReviewRubric({ goal, onRecordHuman, onRunJudgment, onOpenEvidenc
                 <span className={`min-w-0 flex-1 text-[12px] leading-[1.35] ${active === i ? 'font-medium text-[var(--gs-text)]' : 'text-[var(--gs-text-muted)]'}`}>
                   {c.r.title}
                 </span>
+                {c.r.wfPhase && (
+                  <span className="mt-0.5 flex-shrink-0 text-[9px] uppercase tracking-[0.08em] text-[var(--gs-text-ghost)]" title={`declared in phase ${c.r.wfPhase}`}>
+                    ⧗ {c.r.wfPhase}
+                  </span>
+                )}
                 <span className={`mt-0.5 flex-shrink-0 text-[10px] ${GATE_META[c.gate].cls}`} title={`${GATE_META[c.gate].label} gate`}>
                   {GATE_META[c.gate].icon}
                 </span>
@@ -620,6 +662,8 @@ export function ReviewRubric({ goal, onRecordHuman, onRunJudgment, onOpenEvidenc
                 <VerdictChip verdict={c.verdict} />
                 <span className="text-[13px] font-medium text-[var(--gs-text)]">{c.r.title}</span>
                 <GateChip gate={c.gate} />
+                {c.r.wfPhase && <PhaseBadge phase={c.r.wfPhase} />}
+                <AdvancedInChips phases={phaseInfo?.advancedPhases[c.r.id] ?? []} />
                 {typeof c.score === 'number' && <ScoreBar value={c.score} small />}
                 {c.awaiting && (
                   <span className="ml-auto border border-[rgba(188,140,255,0.3)] px-1.5 py-px text-[12px] tracking-[0.04em] text-[var(--gs-purple)]">

@@ -15,6 +15,7 @@ import type {
 import type { AddRequirementInput, AttachEvidenceInput, HumanReviewDecision, UpdateRequirementInput } from '../core/goal-validation.js';
 import { computeReadiness } from '../app/shared/goal-validation/readiness.js';
 import { MarkdownEditor } from './MarkdownEditor.web.js';
+import { useGoalPhaseInfo, type SendReviewRequestFn } from '../app/react/useGoalPhaseInfo.web.js';
 import { btnDanger, btnGhost, btnPrimary, btnSecondary, chipClass, type ChipTone, R_CARD, R_CHIP, R_INPUT } from './ui/control.js';
 
 type Tab = 'glance' | 'doc' | 'requirements' | 'timeline';
@@ -111,6 +112,36 @@ function formatRelativeTime(iso?: string): string {
   } catch {
     return '';
   }
+}
+
+/** Dim journal-phase stamp (requirements/timeline ⇄ phases join). */
+function PhaseStamp(props: { phase: string; title?: string }) {
+  return (
+    <span
+      className={`inline-flex items-center ${R_CHIP} border border-[var(--gs-border)] px-1.5 py-px text-[9px] uppercase tracking-[0.08em] text-[var(--gs-text-dim)]`}
+      title={props.title ?? `journal phase ${props.phase}`}
+    >
+      ⧗ {props.phase}
+    </span>
+  );
+}
+
+/** 'advanced in <phase>' chips from journal delta.requirementsAdvanced. */
+function AdvancedInChips(props: { phases?: string[] }) {
+  if (!props.phases || props.phases.length === 0) return null;
+  return (
+    <>
+      {props.phases.map((p) => (
+        <span
+          key={p}
+          className={`inline-flex items-center ${R_CHIP} border border-[var(--gs-purple)] px-1.5 py-px text-[9px] uppercase tracking-[0.08em] text-[var(--gs-purple)]`}
+          title={`status advanced during phase ${p}`}
+        >
+          advanced in {p}
+        </span>
+      ))}
+    </>
+  );
 }
 
 interface RequirementFormDraft {
@@ -216,12 +247,16 @@ export interface GoalDetailPanelProps {
   onRunGeneration: (goal: KanbanGoalItem, requirementId: string) => void | Promise<void>;
   onRunJudgment: (goal: KanbanGoalItem, requirementId: string) => void | Promise<void>;
   onRecordHumanReview: (goal: KanbanGoalItem, requirementId: string, decision: HumanReviewDecision, note: string) => void | Promise<void>;
+  /** Optional journal loader (requirements ⇄ phases join): one
+   *  get_review_guide_state per panel load for 'advanced in <phase>' chips. */
+  sendReviewRequest?: SendReviewRequestFn;
 }
 
 export function GoalDetailPanel(props: GoalDetailPanelProps) {
   const validation = props.goal.validation ?? emptyValidation();
   const requirements = useMemo(() => validation.reqOrder.map((id) => validation.requirements[id]).filter((r): r is Requirement => Boolean(r)), [validation]);
   const readiness = useMemo(() => computeReadiness(validation), [validation]);
+  const phaseInfo = useGoalPhaseInfo(props.sendReviewRequest, props.goal.projectName, props.goal.workspaceName);
 
   const [tab, setTab] = useState<Tab>('glance');
   const [docDraft, setDocDraft] = useState(props.goal.doc?.bodyMarkdown ?? defaultDocBody(props.goal.title));
@@ -324,6 +359,7 @@ export function GoalDetailPanel(props: GoalDetailPanelProps) {
           {tab === 'requirements' && (
             <RequirementsTab
               goalTitle={props.goal.title}
+              advancedPhases={phaseInfo?.advancedPhases}
               requirements={requirements}
               selectedReq={selectedReq}
               editingReq={editingReq}
@@ -557,6 +593,7 @@ function DocTab(props: {
 
 function RequirementsTab(props: {
   goalTitle: string;
+  advancedPhases?: Record<string, string[]>;
   requirements: Requirement[];
   selectedReq: string | null;
   editingReq: 'new' | string | null;
@@ -665,6 +702,8 @@ function RequirementsTab(props: {
                   <span>{kindLabel(r.kind)} · {r.required ? 'required' : 'optional'}</span>
                   <MechChip label={describeGenerationShort(r.generation)} tone={r.generation.kind === 'command' ? 'blue' : 'dim'} />
                   <MechChip label={describeJudgmentShort(r.judgment)} tone={r.judgment.kind === 'human' ? 'blue' : r.judgment.kind === 'llm' ? 'amber' : 'green'} />
+                  {r.wfPhase && <PhaseStamp phase={r.wfPhase} title={`declared in phase ${r.wfPhase}`} />}
+                  <AdvancedInChips phases={props.advancedPhases?.[r.id]} />
                   {r.evidence.length > 0 && <span>{r.evidence.length} evidence</span>}
                   {r.reviews.length > 0 && <span>{r.reviews.length} review{r.reviews.length === 1 ? '' : 's'}</span>}
                 </div>
@@ -685,6 +724,7 @@ function RequirementsTab(props: {
       {!props.editingReq && focused && (
         <RequirementDetail
           requirement={focused}
+          advancedPhases={props.advancedPhases?.[focused.id]}
           orderIndex={props.requirements.findIndex((r) => r.id === focused.id)}
           totalRequirements={props.requirements.length}
           onEdit={() => props.onStartEdit(focused.id)}
@@ -711,6 +751,7 @@ function MechChip(props: { label: string; tone: ChipTone }) {
 
 function RequirementDetail(props: {
   requirement: Requirement;
+  advancedPhases?: string[];
   orderIndex: number;
   totalRequirements: number;
   onEdit: () => void;
@@ -757,6 +798,8 @@ function RequirementDetail(props: {
             {r.judgment.kind === 'llm' && r.judgment.modelHint && (
               <span className="text-[10px] text-[var(--gs-text-muted)]">model: <code className="text-[var(--gs-text)]">{r.judgment.modelHint}</code></span>
             )}
+            {r.wfPhase && <PhaseStamp phase={r.wfPhase} title={`declared in phase ${r.wfPhase}`} />}
+            <AdvancedInChips phases={props.advancedPhases} />
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-1">
@@ -1133,9 +1176,12 @@ function TimelineTab(props: {
     { k: 'generation', label: 'Generation' },
     { k: 'review', label: 'Reviews' },
     { k: 'readiness', label: 'Readiness' },
+    { k: 'phase', label: 'Phases' },
   ];
   const visible = [...props.events].reverse().filter((e) => props.filter === 'all' || e.kind === props.filter);
-  const selected = visible.find((e) => e.id === props.selectedEvent) ?? visible[0] ?? null;
+  // Phase events render as section dividers, not selectable cards.
+  const selectable = visible.filter((e) => e.kind !== 'phase');
+  const selected = selectable.find((e) => e.id === props.selectedEvent) ?? selectable[0] ?? null;
 
   return (
     <div className="space-y-4">
@@ -1162,14 +1208,26 @@ function TimelineTab(props: {
       ) : (
         <div className="grid grid-cols-[1fr_360px] gap-4">
           <div className="space-y-1">
-            {visible.map((e) => (
+            {visible.map((e) => e.kind === 'phase' ? (
+              <div key={e.id} className="flex items-center gap-2 py-2" title={e.body || e.title}>
+                <span className="h-px flex-1 bg-[var(--gs-border)]" />
+                <span className="flex items-center gap-1.5 text-[10px] uppercase tracking-[0.08em] text-[var(--gs-purple)]">
+                  <span className="font-mono tabular-nums text-[var(--gs-text-dim)]">{formatRelativeTime(e.createdAt)}</span>
+                  ⧗ {e.title}
+                </span>
+                <span className="h-px flex-1 bg-[var(--gs-border)]" />
+              </div>
+            ) : (
               <button
                 key={e.id}
                 type="button"
                 onClick={() => props.onSelectEvent(e.id)}
                 className={`grid w-full gap-1 border-l-2 p-3 text-left text-xs transition-[background-color] duration-150 ${eventToneClass(e.tone)} ${selected?.id === e.id ? 'bg-[var(--gs-bg-active)]' : ''}`}
               >
-                <span className="font-mono text-[10px] uppercase tracking-wide tabular-nums text-[var(--gs-text-dim)]">{formatRelativeTime(e.createdAt)}</span>
+                <span className="flex items-center gap-2 font-mono text-[10px] uppercase tracking-wide tabular-nums text-[var(--gs-text-dim)]">
+                  {formatRelativeTime(e.createdAt)}
+                  {e.phase && <PhaseStamp phase={e.phase} title={`recorded during phase ${e.phase}`} />}
+                </span>
                 <span className="font-medium text-[var(--gs-text)]">{e.title}</span>
                 <span className="text-[var(--gs-text-muted)]">{e.body}</span>
               </button>
@@ -1177,7 +1235,10 @@ function TimelineTab(props: {
           </div>
           {selected && (
             <div className={`sticky top-0 self-start ${R_CARD} border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] p-4`}>
-              <div className="text-[10px] uppercase tracking-wide text-[var(--gs-text-dim)]">{selected.kind} event</div>
+              <div className="flex items-center gap-2 text-[10px] uppercase tracking-wide text-[var(--gs-text-dim)]">
+                {selected.kind} event
+                {selected.phase && <PhaseStamp phase={selected.phase} title={`recorded during phase ${selected.phase}`} />}
+              </div>
               <h3 className="mt-1 text-sm font-semibold text-[var(--gs-text)]">{selected.title}</h3>
               <p className="mt-1 text-xs text-[var(--gs-text-muted)]">{selected.body}</p>
               <pre className={`mt-3 overflow-auto ${R_CARD} border border-[var(--gs-border)] bg-[var(--gs-bg)] p-2 font-mono text-[10px] text-[var(--gs-text-muted)]`}>{selected.payload}</pre>

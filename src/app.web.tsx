@@ -2757,6 +2757,13 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
             onRunGeneration={handleRunGoalGeneration}
             onRunJudgment={handleRunGoalJudgment}
             onRecordHumanReview={handleRecordGoalHumanReview}
+            sendReviewRequest={selectedGoal.workspaceName
+              ? (op) => {
+                  const { backend } = getGoalMutationBackend(selectedGoal);
+                  if (!backend?.sendReviewRequest) return Promise.reject(new Error('Review requests unavailable on this backend.'));
+                  return backend.sendReviewRequest(op);
+                }
+              : undefined}
           />
         )}
       </>
@@ -3082,6 +3089,9 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
             render: () => (
               <ReviewRubric
                 goal={workspaceGoalForPanels?.validation ? { id: workspaceGoalForPanels.id, title: workspaceGoalForPanels.title, phase: workspaceGoalForPanels.phase, validation: workspaceGoalForPanels.validation } : null}
+                sendReviewRequest={paneBackend?.sendReviewRequest ? (op) => paneBackend.sendReviewRequest(op) : undefined}
+                projectName={workspace.projectName}
+                workspaceName={workspace.name}
                 onRecordHuman={async (requirementId, decision, note, score) => {
                   const be = paneBackendKey ? multi.getBackend(paneBackendKey) : null;
                   const mapped = decision === 'pass' ? 'pass' : decision === 'partial' ? 'changes' : 'fail';

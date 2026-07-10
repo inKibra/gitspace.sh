@@ -23,6 +23,11 @@ structure; you ONLY write prose for the clusters it marked stale.
    - Read `grounding.journal` — intent/outcome written WHEN the work happened.
      Quote or paraphrase; never invent motives. Empty grounding → describe
      what the change does and mark motive-claims as uncertain.
+   - Read the worksheet's top-level `goalTimeline` (goal-validation ledger:
+     contract/generation/review/phase events, `phase`-stamped where a journal
+     phase was open) — it dates when requirements were declared, evidenced,
+     and judged; use it the same way as the journal for grounding, and to
+     anchor `satisfies` claims in time.
 4. Write `sections.json`: `{ "headSha": <worksheet headSha>, "sections": [...],
    "specEvolution": "..." }`, then `gssh space guide submit --file sections.json`.
    Fix validation errors and resubmit — coverage of every stale cluster is

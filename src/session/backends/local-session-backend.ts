@@ -1042,7 +1042,7 @@ export class LocalSessionBackend implements SessionBackend {
   async addGoalRequirement(projectName: string, goalId: string, input: AddRequirementInput): Promise<import('../../types/goals.js').Requirement> {
     const goal = findGoalRecord(projectName, goalId);
     if (!goal) throw new Error(`Goal not found: ${goalId}`);
-    const { validation, requirement } = addRequirement(goal.validation, input);
+    const { validation, requirement } = addRequirement(goal.validation, input, goal);
     writeGoalRecord(projectName, { ...goal, validation });
     await this.listWorkspaces();
     return requirement;
@@ -1051,7 +1051,7 @@ export class LocalSessionBackend implements SessionBackend {
   async updateGoalRequirement(projectName: string, goalId: string, requirementId: string, patch: UpdateRequirementInput): Promise<import('../../types/goals.js').Requirement> {
     const goal = findGoalRecord(projectName, goalId);
     if (!goal) throw new Error(`Goal not found: ${goalId}`);
-    const { validation, requirement } = updateRequirement(goal.validation, requirementId, patch);
+    const { validation, requirement } = updateRequirement(goal.validation, requirementId, patch, goal);
     writeGoalRecord(projectName, { ...goal, validation });
     await this.listWorkspaces();
     return requirement;
@@ -1060,7 +1060,7 @@ export class LocalSessionBackend implements SessionBackend {
   async removeGoalRequirement(projectName: string, goalId: string, requirementId: string): Promise<void> {
     const goal = findGoalRecord(projectName, goalId);
     if (!goal) throw new Error(`Goal not found: ${goalId}`);
-    const validation = removeRequirement(goal.validation, requirementId);
+    const validation = removeRequirement(goal.validation, requirementId, goal);
     writeGoalRecord(projectName, { ...goal, validation });
     await this.listWorkspaces();
   }

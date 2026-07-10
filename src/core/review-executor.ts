@@ -194,7 +194,35 @@ export async function executeLocalReviewOperation(
         scan
       );
       const { readReviewGuideState } = await import('./review.js');
-      return { op: 'review_guide_state', state: readReviewGuideState(workspace.path, workspace.id) };
+
+      // Joins (phase-journal ⇄ goal ledger): the guide UI and the narrator
+      // share one source for the goal timeline + per-phase requirement motion.
+      let goalTimeline: import('../types/goals.js').TimelineEvent[] | undefined;
+      try {
+        const { readWorkspaceGoal } = await import('./goal-chain.js');
+        const goal = readWorkspaceGoal(operation.projectName, operation.workspaceName);
+        if (goal?.validation?.events?.length) goalTimeline = goal.validation.events;
+      } catch { /* no goal — state alone */ }
+      let journal: Array<{ phase: string; startedAt: string; endedAt?: string; requirementsAdvanced: Array<{ id: string; from: string; to: string }> }> | undefined;
+      try {
+        const { listPhaseJournalEntries } = await import('./phase-journal.js');
+        const entries = listPhaseJournalEntries(workspace.path);
+        if (entries.length > 0) {
+          journal = entries.map((e) => ({
+            phase: e.phase,
+            startedAt: e.startedAt,
+            endedAt: e.endedAt,
+            requirementsAdvanced: e.delta?.requirementsAdvanced ?? [],
+          }));
+        }
+      } catch { /* no journal mount */ }
+
+      return {
+        op: 'review_guide_state',
+        state: readReviewGuideState(workspace.path, workspace.id),
+        ...(goalTimeline ? { goalTimeline } : {}),
+        ...(journal ? { journal } : {}),
+      };
     }
 
     case 'set_review_guide_state': {

@@ -13,7 +13,9 @@ import { join } from 'path';
 import { getProjectDir, getProjectWorkspacesDir, readProjectConfig } from './config.js';
 import { analyzeReviewDiff, type ReviewAnalysis, type ReviewCluster } from './review-analysis.js';
 import { captureArtifacts } from './artifacts.js';
+import { readWorkspaceGoal } from './goal-chain.js';
 import { SpacesError } from '../types/errors.js';
+import type { GoalRecord } from '../types/goals.js';
 
 export interface GuideExhibit {
   file: string;
@@ -54,6 +56,18 @@ export interface ReviewGuide {
   sections: GuideSection[];
 }
 
+/** Goal validation timeline event serialized into the worksheet (JOIN with
+ *  the goal ledger — phase-stamped where a journal phase was open). */
+export interface WorksheetTimelineEvent {
+  at: string;
+  kind: string;
+  tone: string;
+  phase?: string;
+  requirementId: string | null;
+  title: string;
+  body: string;
+}
+
 export interface GuideWorksheet {
   headSha: string;
   baseRef: string;
@@ -68,6 +82,24 @@ export interface GuideWorksheet {
   }>;
   cachedSections: number;
   canonTimeline: Array<{ phase: string; canonChanged: string[] }>;
+  /** Goal-validation timeline (contract/generation/review/phase events),
+   *  oldest first. Optional: absent when the workspace carries no goal. */
+  goalTimeline?: WorksheetTimelineEvent[];
+}
+
+/** Serialize a goal's validation events for narrator/UI consumption. */
+export function serializeGoalTimeline(goal: GoalRecord | null): WorksheetTimelineEvent[] | undefined {
+  const events = goal?.validation?.events;
+  if (!events || events.length === 0) return undefined;
+  return events.map((e) => ({
+    at: e.createdAt,
+    kind: e.kind,
+    tone: e.tone,
+    ...(e.phase ? { phase: e.phase } : {}),
+    requirementId: e.requirementId,
+    title: e.title,
+    body: e.body,
+  }));
 }
 
 const GUIDE_PATH = 'review/guide.json';
@@ -158,6 +190,11 @@ export async function buildGuideWorksheet(projectName: string, workspaceName: st
     };
   });
 
+  let goalTimeline: WorksheetTimelineEvent[] | undefined;
+  try {
+    goalTimeline = serializeGoalTimeline(readWorkspaceGoal(projectName, workspaceName));
+  } catch { /* no goal — worksheet stays journal-grounded */ }
+
   const worksheet: GuideWorksheet = {
     headSha: analysis.headSha,
     baseRef: baseRef!,
@@ -166,6 +203,7 @@ export async function buildGuideWorksheet(projectName: string, workspaceName: st
     canonTimeline: journal
       .filter((j) => (j.delta?.canonChanged ?? []).length > 0)
       .map((j) => ({ phase: j.phase, canonChanged: j.delta!.canonChanged! })),
+    ...(goalTimeline ? { goalTimeline } : {}),
   };
 
   await captureArtifacts(getProjectDir(projectName), mount, [

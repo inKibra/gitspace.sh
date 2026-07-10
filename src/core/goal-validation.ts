@@ -13,6 +13,7 @@ import { basename, dirname, extname, join } from 'path';
 import { spawnSync } from 'child_process';
 import { getProjectBaseDir, getProjectDir, getProjectWorkspacesDir } from './config.js';
 import { artifactsMountDir, captureArtifactsSync } from './artifacts.js';
+import { getOpenJournalPhase } from './phase-journal.js';
 import { ensureWorkspaceStorageIgnored, getWorkspaceStorageDir } from './workspace-metadata.js';
 import { SpacesError } from '../types/errors.js';
 import { generateId } from '../utils/id.js';
@@ -163,16 +164,56 @@ function withRequirement(
   };
 }
 
+/** Workspace/goal shape sufficient to resolve the open journal phase. */
+export type GoalPhaseContext = Pick<GoalRecord, 'projectName' | 'workspaceName'>;
+
+/**
+ * Journal phase currently OPEN for this goal's workspace (phase-journal
+ * join). Undefined for planned goals, workspaces without an artifacts
+ * mount, or outside any phase.
+ */
+export function getOpenPhaseForGoal(goal: GoalPhaseContext): string | undefined {
+  if (!goal.workspaceName) return undefined;
+  try {
+    const workspaceDir = join(getProjectWorkspacesDir(goal.projectName), goal.workspaceName);
+    return getOpenJournalPhase(workspaceDir) ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function appendEvent(
   validation: GoalValidation,
   partial: Omit<TimelineEvent, 'id' | 'createdAt'>,
+  phase?: string,
 ): GoalValidation {
   const event: TimelineEvent = {
     ...partial,
+    ...(phase ? { phase } : {}),
     id: nextEventId(),
     createdAt: nowIso(),
   };
   return { ...validation, events: [...validation.events, event] };
+}
+
+/**
+ * Phase divider event for the goal timeline (phase-journal join). Appended
+ * by `space journal phase-start` / `phase-end` when the workspace has a goal.
+ */
+export function appendPhaseMarkerEvent(
+  validation: GoalValidation,
+  phase: string,
+  action: 'started' | 'ended',
+  note = '',
+): GoalValidation {
+  return appendEvent(validation, {
+    requirementId: null,
+    tone: 'violet',
+    kind: 'phase',
+    title: `phase ${action}: ${phase}`,
+    body: note,
+    payload: `phase.${action}\n  phase: ${phase}`,
+  }, phase);
 }
 
 function inferMimeType(sourcePath: string, kind: ArtifactKind): string | undefined {
@@ -401,6 +442,7 @@ export interface AddRequirementInput {
 export function addRequirement(
   validation: GoalValidation,
   input: AddRequirementInput,
+  ctx?: GoalPhaseContext,
 ): { validation: GoalValidation; requirement: Requirement } {
   const title = input.title.trim();
   if (!title) throw new SpacesError('Title is required.', 'USER_ERROR', 1);
@@ -409,6 +451,7 @@ export function addRequirement(
   assertGeneration(input.generation);
   assertJudgment(input.judgment);
 
+  const phase = ctx ? getOpenPhaseForGoal(ctx) : undefined;
   const id = nextRequirementId(title);
   const requirement: Requirement = {
     id,
@@ -421,6 +464,7 @@ export function addRequirement(
     judgment: input.judgment,
     evidence: [],
     reviews: [],
+    ...(phase ? { wfPhase: phase } : {}),
   };
   let next: GoalValidation = {
     ...validation,
@@ -434,7 +478,7 @@ export function addRequirement(
     title: `Requirement added: ${title}`,
     body: `Produced by ${describeGenerationSummary(input.generation)}; judged by ${describeJudgmentSummary(input.judgment)}.`,
     payload: contractAddedPayload(requirement),
-  });
+  }, phase);
   return { validation: next, requirement };
 }
 
@@ -451,6 +495,7 @@ export function updateRequirement(
   validation: GoalValidation,
   requirementId: string,
   patch: UpdateRequirementInput,
+  ctx?: GoalPhaseContext,
 ): { validation: GoalValidation; requirement: Requirement } {
   const { validation: nextRequirements, requirement } = withRequirement(validation, requirementId, (r) => {
     const merged: Requirement = {
@@ -476,11 +521,15 @@ export function updateRequirement(
     title: `Requirement edited: ${requirement.title}`,
     body: 'Contract changed.',
     payload: `contract.requirement.updated\n  id: ${requirementId}`,
-  });
+  }, ctx ? getOpenPhaseForGoal(ctx) : undefined);
   return { validation: next, requirement };
 }
 
-export function removeRequirement(validation: GoalValidation, requirementId: string): GoalValidation {
+export function removeRequirement(
+  validation: GoalValidation,
+  requirementId: string,
+  ctx?: GoalPhaseContext,
+): GoalValidation {
   const cur = validation.requirements[requirementId];
   if (!cur) throw new SpacesError(`Unknown requirement: ${requirementId}`, 'USER_ERROR', 1);
   const remaining = { ...validation.requirements };
@@ -497,7 +546,7 @@ export function removeRequirement(validation: GoalValidation, requirementId: str
     title: `Requirement removed: ${cur.title}`,
     body: 'Contract changed.',
     payload: `contract.requirement.removed\n  id: ${requirementId}`,
-  });
+  }, ctx ? getOpenPhaseForGoal(ctx) : undefined);
   return next;
 }
 
@@ -566,7 +615,7 @@ export function attachManualEvidence(
     title: `Manual evidence attached: ${evidence.name}`,
     body: `Awaiting ${cur.judgment.kind} judgment on ${cur.title}.`,
     payload: `generation.manual\n  requirement: ${requirementId}\n  artifact: ${evidence.name}`,
-  });
+  }, getOpenPhaseForGoal(goal));
   return {
     goal: { ...goal, validation: withEvent, updatedAt: nowIso() },
     requirement,
@@ -630,6 +679,7 @@ export function runGenerationCommand(
     }
     return { ...r, evidence: [...r.evidence, evidence], status, reviews };
   });
+  const phase = getOpenPhaseForGoal(goal);
   let withEvents: GoalValidation = appendEvent(nextValidation, {
     requirementId,
     tone: 'violet',
@@ -637,7 +687,7 @@ export function runGenerationCommand(
     title: `Command produced evidence: ${cur.title}`,
     body: command,
     payload: `generation.command.ran\n  requirement: ${requirementId}\n  command: ${command}\n  exit: ${exitCode}\n  artifact: ${artifactName}`,
-  });
+  }, phase);
   if (autoAccepted && cur.judgment.kind === 'command') {
     withEvents = appendEvent(withEvents, {
       requirementId,
@@ -646,7 +696,7 @@ export function runGenerationCommand(
       title: `Command check passed: ${cur.title}`,
       body: describeExpectSatisfied(cur.judgment.expect),
       payload: `review.passed\n  requirement: ${requirementId}\n  judge: command\n  expect: ${cur.judgment.expect.kind}`,
-    });
+    }, phase);
   }
   return {
     goal: { ...goal, validation: withEvents, updatedAt: nowIso() },
@@ -705,7 +755,7 @@ export function runJudgmentCommand(
     title: `Command check ${passed ? 'passed' : 'failed'}: ${cur.title}`,
     body: note,
     payload: `review.${passed ? 'passed' : 'failed'}\n  requirement: ${requirementId}\n  judge: command\n  expect: ${expect.kind}\n  exit: ${exitCode}`,
-  });
+  }, getOpenPhaseForGoal(goal));
   return {
     goal: { ...goal, validation: withEvent, updatedAt: nowIso() },
     requirement,
@@ -749,7 +799,7 @@ export function runLlmJudgment(
     title: `LLM judgment unavailable: ${cur.title}`,
     body: review.note,
     payload: `review.llm.unavailable\n  requirement: ${requirementId}\n  model: ${cur.judgment.modelHint || 'runner default'}`,
-  });
+  }, getOpenPhaseForGoal(goal));
   return {
     goal: { ...goal, validation: withEvent, updatedAt: nowIso() },
     requirement,
@@ -823,7 +873,7 @@ export function recordHumanReview(
     title: `Human review ${decision === 'pass' ? 'passed' : decision === 'changes' ? 'needs changes' : 'failed'}: ${cur.title}`,
     body: review.note,
     payload: `review.${decision === 'pass' ? 'passed' : decision === 'changes' ? 'needs_changes' : 'failed'}\n  requirement: ${requirementId}\n  judge: human${createdBy ? `\n  by: ${createdBy}` : ''}`,
-  });
+  }, getOpenPhaseForGoal(goal));
   return {
     goal: { ...goal, validation: withEvent, updatedAt: nowIso() },
     requirement,
@@ -846,7 +896,7 @@ export function reopenRequirement(
     title: `Review reopened: ${requirement.title}`,
     body: 'Previously accepted; reopened for re-review.',
     payload: `review.reopened\n  requirement: ${requirementId}`,
-  });
+  }, getOpenPhaseForGoal(goal));
   return {
     goal: { ...goal, validation: withEvent, updatedAt: nowIso() },
     requirement,

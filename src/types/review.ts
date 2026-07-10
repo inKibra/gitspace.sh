@@ -235,7 +235,21 @@ export interface ReviewChangedFile {
 /** Results returned from machine to client */
 export type ReviewResult =
   | { op: 'threads'; threads: ReviewThread[] }
-  | { op: 'review_guide_state'; state: { readSections: string[]; approval?: { by: string; at: string; headSha: string }; requestedChangesAt?: string } }
+  | {
+      op: 'review_guide_state';
+      state: { readSections: string[]; approval?: { by: string; at: string; headSha: string }; requestedChangesAt?: string };
+      /** Goal-validation timeline (phase-stamped) — one source shared by the
+       *  guide UI and the narrator. Absent when the workspace has no goal. */
+      goalTimeline?: import('./goals.js').TimelineEvent[];
+      /** Phase-journal lite: which requirements advanced in which phase.
+       *  Absent when the workspace has no journal. */
+      journal?: Array<{
+        phase: string;
+        startedAt: string;
+        endedAt?: string;
+        requirementsAdvanced: Array<{ id: string; from: string; to: string }>;
+      }>;
+    }
   | { op: 'thread_created'; thread: ReviewThread }
   | { op: 'thread_updated'; thread: ReviewThread }
   | { op: 'comment_added'; thread: ReviewThread }

@@ -78,10 +78,14 @@ export interface Requirement {
   judgment: Judgment;
   evidence: Evidence[];
   reviews: Review[];
+  /** Journal phase that was OPEN when this requirement was created
+   *  (phase-journal join). Absent on legacy requirements and when no
+   *  phase was open at creation time. */
+  wfPhase?: string;
 }
 
 export type TimelineEventTone = 'blue' | 'amber' | 'green' | 'red' | 'violet';
-export type TimelineEventKind = 'contract' | 'generation' | 'review' | 'readiness';
+export type TimelineEventKind = 'contract' | 'generation' | 'review' | 'readiness' | 'phase';
 
 export interface TimelineEvent {
   id: string;
@@ -92,6 +96,9 @@ export interface TimelineEvent {
   body: string;
   payload: string;
   createdAt: string;
+  /** Journal phase that was OPEN when this event was appended
+   *  (phase-journal join). Absent on legacy events and outside phases. */
+  phase?: string;
 }
 
 export type ReadinessStatus = 'ready' | 'awaiting-review' | 'not-ready';

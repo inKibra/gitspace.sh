@@ -340,7 +340,7 @@ export function addSpaceGoalRequirement(ctx: SpaceCommandContext, options: AddRe
     generation: buildGeneration(options),
     judgment: buildJudgment(options),
   };
-  const { validation, requirement } = addRequirement(goal.validation, input);
+  const { validation, requirement } = addRequirement(goal.validation, input, goal);
   const updated = writeGoalRecord(ctx.project, { ...goal, validation });
   if (options.json) {
     printJson({ goalId: updated.id, requirement });
@@ -388,7 +388,7 @@ export function updateSpaceGoalRequirement(ctx: SpaceCommandContext, options: Up
       modelHint: options.modelHint,
     });
   }
-  const { validation, requirement } = updateRequirement(goal.validation, current.id, patch);
+  const { validation, requirement } = updateRequirement(goal.validation, current.id, patch, goal);
   const updated = writeGoalRecord(ctx.project, { ...goal, validation });
   if (options.json) {
     printJson({ goalId: updated.id, requirement });
@@ -400,7 +400,7 @@ export function updateSpaceGoalRequirement(ctx: SpaceCommandContext, options: Up
 export function removeSpaceGoalRequirement(ctx: SpaceCommandContext, options: { goal?: string; requirement: string; json?: boolean }): void {
   const goal = resolveGoalForOption(ctx, options.goal);
   const current = resolveRequirement(goal, options.requirement);
-  const validation = removeRequirement(goal.validation, current.id);
+  const validation = removeRequirement(goal.validation, current.id, goal);
   const updated = writeGoalRecord(ctx.project, { ...goal, validation });
   if (options.json) {
     printJson({ goalId: updated.id, removedRequirementId: current.id });

@@ -203,6 +203,49 @@ export function findOpenPhaseEntry(workspaceDir: string): { file: string; entry:
   return null;
 }
 
+/** Name of the currently OPEN journal phase for a workspace, or null.
+ *  Cheap: one dir listing + parses newest-first until the open entry. */
+export function getOpenJournalPhase(workspaceDir: string): string | null {
+  return findOpenPhaseEntry(workspaceDir)?.entry.phase ?? null;
+}
+
+/** All journal entries for a workspace, oldest first. Empty without a mount. */
+export function listPhaseJournalEntries(workspaceDir: string): PhaseJournalEntry[] {
+  const mount = mountDirFor(workspaceDir);
+  if (!hasMount(workspaceDir)) return [];
+  const out: PhaseJournalEntry[] = [];
+  for (const file of journalEntries(mount)) {
+    try {
+      out.push(readEntry(mount, file));
+    } catch { /* skip unreadable */ }
+  }
+  return out;
+}
+
+/**
+ * Timeline join: phase-start/end append a divider event to the goal
+ * validation ledger when the workspace carries a goal. Never blocks the
+ * journal write — degrades silently without a goal.
+ */
+async function appendGoalPhaseMarker(
+  projectName: string,
+  workspaceName: string,
+  phase: string,
+  action: 'started' | 'ended',
+  note: string,
+): Promise<void> {
+  try {
+    const goal = readWorkspaceGoal(projectName, workspaceName);
+    if (!goal) return;
+    const { appendPhaseMarkerEvent } = await import('./goal-validation.js');
+    const { writeGoalRecord } = await import('./goal-chain.js');
+    writeGoalRecord(projectName, {
+      ...goal,
+      validation: appendPhaseMarkerEvent(goal.validation, phase, action, note),
+    });
+  } catch { /* non-fatal: journal entry is already written */ }
+}
+
 export async function startPhaseJournal(
   projectName: string,
   workspaceName: string,
@@ -232,6 +275,7 @@ export async function startPhaseJournal(
   await captureArtifacts(getProjectDir(projectName), mount, [
     { path: file, content: JSON.stringify(entry, null, 2) + '\n' },
   ], { message: `journal: start ${input.phase}`, provenance: { tool: 'phase-journal' } });
+  await appendGoalPhaseMarker(projectName, workspaceName, input.phase, 'started', input.intent);
   return { file: file.slice(JOURNAL_DIR.length + 1), entry };
 }
 
@@ -296,5 +340,6 @@ export async function endPhaseJournal(
   await captureArtifacts(getProjectDir(projectName), mount, [
     { path: `${JOURNAL_DIR}/${open.file}`, content: JSON.stringify(entry, null, 2) + '\n' },
   ], { message: `journal: end ${open.entry.phase}`, provenance: { tool: 'phase-journal' } });
+  await appendGoalPhaseMarker(projectName, workspaceName, open.entry.phase, 'ended', input.outcome.split('\n')[0] ?? '');
   return { file: open.file, entry };
 }
