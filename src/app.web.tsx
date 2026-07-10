@@ -164,6 +164,12 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   type DockExtraPane = ({ kind: 'file' } & RepoFileOpen) | { kind: 'artifact'; path: string } | { kind: 'dashboard'; path: string } | { kind: 'note'; noteId: string | null; title: string; nonce?: number } | { kind: 'goal' } | { kind: 'guide' } | { kind: 'rubric' } | { kind: 'evidence'; requirementId: string; evidenceId: string } | { kind: 'report'; path: string } | { kind: 'workflow' } | { kind: 'crons' } | { kind: 'eventlog' };
   const [dockExtraPanes, setDockExtraPanes] = useState<Record<string, DockExtraPane[]>>({});
   const [dockFocusRequests, setDockFocusRequests] = useState<Record<string, { id: string; nonce: number }>>({});
+  /** Goal-rubric-workflow interconnect chip routing (keyed by wsKey): the
+   *  goal pane scrolls to a doc slice heading; the rubric pane opens
+   *  filtered to a workflow phase's owed requirements. Nonces re-fire on
+   *  repeat clicks while the singleton panes stay open. */
+  const [goalSliceRequests, setGoalSliceRequests] = useState<Record<string, { sliceId: string; nonce: number }>>({});
+  const [rubricPhaseRequests, setRubricPhaseRequests] = useState<Record<string, { phase: string; nonce: number }>>({});
   // Identity of a dock pane. Path-based kinds (file/artifact/dashboard/report)
   // are identified by their path, so DIFFERENT paths open as SEPARATE tabs;
   // only the SAME path (or a true singleton like goal/guide) dedupes/refocuses.
@@ -187,6 +193,16 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
     // Focus whether newly added or already open (repeat clicks surface the pane).
     setDockFocusRequests((prev) => ({ ...prev, [wsKey]: { id: panelId, nonce: (prev[wsKey]?.nonce ?? 0) + 1 } }));
   }, [paneIdentity]);
+  /** Workflow slice chip → goal doc pane scrolled to the slice heading. */
+  const openGoalPaneAtSlice = useCallback((wsKey: string, sliceId: string) => {
+    setGoalSliceRequests((prev) => ({ ...prev, [wsKey]: { sliceId, nonce: (prev[wsKey]?.nonce ?? 0) + 1 } }));
+    openSingletonPane(wsKey, { kind: 'goal' });
+  }, [openSingletonPane]);
+  /** Workflow gate/rubric chip → rubric pane filtered to the phase's owed requirements. */
+  const openRubricPaneForPhase = useCallback((wsKey: string, phase: string) => {
+    setRubricPhaseRequests((prev) => ({ ...prev, [wsKey]: { phase, nonce: (prev[wsKey]?.nonce ?? 0) + 1 } }));
+    openSingletonPane(wsKey, { kind: 'rubric' });
+  }, [openSingletonPane]);
   const [pendingProcessEditWorkspaceId, setPendingProcessEditWorkspaceId] = useState<string | null>(null);
   const [modifiers, setModifiers] = useState<ModifierState>({
     ctrl: false,
@@ -2899,6 +2915,34 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
       // (mock Shell pane kinds 'file' and 'artifact').
       const wsKey = workspace.selectionKey ?? workspace.id;
       const workspaceGoalForPanels = allGoalItems.find((g) => g.workspaceName === workspace.name && g.projectName === workspace.projectName) ?? null;
+      // HUMAN-ONLY phase-gate waive (goal-rubric-workflow interconnect): a UI
+      // button by construction — the CLI has no waive flag. Reason required;
+      // records a timeline 'gate' event via backend.waiveGoalGate.
+      const waiveGateForWorkspace = (phase: string): void => {
+        const goalItem = workspaceGoalForPanels;
+        if (!goalItem) { toast.error('No goal bound to this workspace.'); return; }
+        flow.showInput({
+          title: `Waive gate · ${phase}`,
+          label: 'Reason (recorded on the goal timeline)',
+          placeholder: 'Why this gate is being waived…',
+          validation: (value) => (value.trim() ? null : 'A reason is required to waive a gate.'),
+          onSubmit: async (reason) => {
+            flow.close();
+            try {
+              const be = paneBackendKey ? multi.getBackend(paneBackendKey) : null;
+              if (!be?.waiveGoalGate) throw new Error('Gate waive unavailable on this backend.');
+              await be.waiveGoalGate(workspace.projectName, getPersistedGoalId(goalItem), phase, reason.trim());
+              toast.success(`Gate waived — ${phase}.`);
+            } catch (error) {
+              flow.showMessage({
+                title: 'Waive Gate Failed',
+                message: error instanceof Error ? error.message : String(error),
+                variant: 'error',
+              });
+            }
+          },
+        });
+      };
       const dockPaneKey = (x: DockExtraPane): string =>
         x.kind === 'note' ? `note:${x.noteId ?? ''}:${x.nonce ?? ''}`
         : x.kind === 'evidence' ? `ev:${x.evidenceId}`
@@ -2990,13 +3034,14 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
           panels.push({
             id: 'goal',
             title: '◇ Goal',
-            version: `goal|${workspaceGoalForPanels?.id ?? ''}|${chainGoalsForPane.length}|${workspaceGoalForPanels?.updatedAt ?? ''}|${(workspaceGoalForPanels?.doc?.exemplarBlockIds ?? []).length}`,
+            version: `goal|${workspaceGoalForPanels?.id ?? ''}|${chainGoalsForPane.length}|${workspaceGoalForPanels?.updatedAt ?? ''}|${(workspaceGoalForPanels?.doc?.exemplarBlockIds ?? []).length}|slice:${goalSliceRequests[wsKey]?.nonce ?? 0}`,
             onClose: closeExtra,
             render: () => (
               chainGoalsForPane.length > 0 && workspaceGoalForPanels
                 ? <GoalDocDockPane
                     goals={chainGoalsForPane}
                     initialGoalId={workspaceGoalForPanels.id}
+                    scrollToSlice={goalSliceRequests[wsKey] ?? null}
                     onOpenWorkflow={() => openSingletonPane(wsKey, { kind: 'workflow' })}
                     onToggleExemplar={async (goalId, blockId) => {
                       const be = paneBackendKey ? multi.getBackend(paneBackendKey) : null;
@@ -3084,11 +3129,14 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
           panels.push({
             id: 'rubric',
             title: '☰ Review rubric',
-            version: `rubric|${workspaceGoalForPanels?.id ?? ''}|${workspaceGoalForPanels?.updatedAt ?? ''}`,
+            version: `rubric|${workspaceGoalForPanels?.id ?? ''}|${workspaceGoalForPanels?.updatedAt ?? ''}|pf:${rubricPhaseRequests[wsKey]?.nonce ?? 0}`,
             onClose: closeExtra,
             render: () => (
               <ReviewRubric
                 goal={workspaceGoalForPanels?.validation ? { id: workspaceGoalForPanels.id, title: workspaceGoalForPanels.title, phase: workspaceGoalForPanels.phase, validation: workspaceGoalForPanels.validation } : null}
+                docMarkdown={workspaceGoalForPanels?.doc?.bodyMarkdown ?? null}
+                phaseFilterRequest={rubricPhaseRequests[wsKey] ?? null}
+                onWaiveGate={waiveGateForWorkspace}
                 sendReviewRequest={paneBackend?.sendReviewRequest ? (op) => paneBackend.sendReviewRequest(op) : undefined}
                 projectName={workspace.projectName}
                 workspaceName={workspace.name}
@@ -3109,15 +3157,23 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
           panels.push({
             id: 'workflow',
             title: '⟜ Workflow',
-            version: `workflow|${workspace.id}`,
+            version: `workflow|${workspace.id}|${workspaceGoalForPanels?.id ?? ''}|${workspaceGoalForPanels?.updatedAt ?? ''}`,
             onClose: closeExtra,
             render: () => (
               <WorkflowPanel
                 backend={paneBackend}
                 workspaceId={workspace.id}
+                goal={workspaceGoalForPanels ? {
+                  id: workspaceGoalForPanels.id,
+                  validation: workspaceGoalForPanels.validation ?? null,
+                  docMarkdown: workspaceGoalForPanels.doc?.bodyMarkdown ?? null,
+                } : null}
                 onOpenArtifact={(path) => openSingletonPane(wsKey, { kind: 'artifact', path })}
                 onOpenRubric={() => openSingletonPane(wsKey, { kind: 'rubric' })}
                 onOpenGoal={() => openSingletonPane(wsKey, { kind: 'goal' })}
+                onOpenGoalSlice={(sliceId) => openGoalPaneAtSlice(wsKey, sliceId)}
+                onOpenRubricPhase={(phase) => openRubricPaneForPhase(wsKey, phase)}
+                onWaiveGate={waiveGateForWorkspace}
               />
             ),
           });
@@ -3680,14 +3736,15 @@ function ReportPaneLoader({ path, read, onOpenAttachment }: { path: string; read
   return <ReportPanel report={report} onOpenAttachment={onOpenAttachment} />;
 }
 
-function GoalDocDockPane({ goals, initialGoalId, onToggleExemplar, onOpenWorkflow }: {
+function GoalDocDockPane({ goals, initialGoalId, onToggleExemplar, onOpenWorkflow, scrollToSlice }: {
   goals: import("./app/shared/board/types.js").KanbanGoalItem[];
   initialGoalId: string;
   onToggleExemplar?: (goalId: string, blockId: string) => void;
   onOpenWorkflow?: () => void;
+  scrollToSlice?: { sliceId: string; nonce: number } | null;
 }) {
   const [goalId, setGoalId] = useState(initialGoalId);
-  return <GoalDocPanel goals={goals} currentGoalId={goalId} onSelectGoal={setGoalId} onToggleExemplar={onToggleExemplar} onOpenWorkflow={onOpenWorkflow} />;
+  return <GoalDocPanel goals={goals} currentGoalId={goalId} onSelectGoal={setGoalId} onToggleExemplar={onToggleExemplar} onOpenWorkflow={onOpenWorkflow} scrollToSlice={scrollToSlice} />;
 }
 
 export default function App() {

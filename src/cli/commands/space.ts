@@ -454,8 +454,8 @@ function registerSpaceGoalCommands(space: Command): void {
     .requiredOption('--rubric <text>', 'Acceptance criteria: what makes this evidence acceptable')
     .requiredOption('--gen <kind>', 'Generation: manual | command')
     .option('--gen-command <command>', 'Command to run when --gen=command')
-    .requiredOption('--judge <kind>', 'Judgment: human | llm | command')
-    .option('--judge-command <command>', 'Judgment command when --judge=command')
+    .option('--judge <kind>', 'Judgment: human | llm | command. Defaults to same-run command judgment with --gen command (--expect judges the generation run itself)')
+    .option('--judge-command <command>', 'Separate judgment command when --judge=command. Omit it with --gen command for same-run judging — do NOT repeat the generation command here')
     .option('--expect <kind>', 'Command expectation: exit-zero | stdout-contains | stderr-empty | output-matches', 'exit-zero')
     .option('--expect-needle <text>', 'Required substring when --expect=stdout-contains')
     .option('--expect-pattern <regex>', 'Required regex when --expect=output-matches')
@@ -481,7 +481,7 @@ function registerSpaceGoalCommands(space: Command): void {
     .option('--gen <kind>', 'Generation: manual | command')
     .option('--gen-command <command>', 'Command to run when --gen=command')
     .option('--judge <kind>', 'Judgment: human | llm | command')
-    .option('--judge-command <command>', 'Judgment command when --judge=command')
+    .option('--judge-command <command>', 'Separate judgment command when --judge=command. Omit it on command-generated requirements for same-run judging — do NOT repeat the generation command')
     .option('--expect <kind>', 'Command expectation: exit-zero | stdout-contains | stderr-empty | output-matches')
     .option('--expect-needle <text>', 'Required substring when --expect=stdout-contains')
     .option('--expect-pattern <regex>', 'Required regex when --expect=output-matches')
@@ -600,7 +600,7 @@ function registerSpaceGoalCommands(space: Command): void {
 
   review
     .command('run')
-    .description('Run the requirement\u2019s configured judgment (command or LLM)')
+    .description('Run the requirement\u2019s configured judgment (command or LLM). Same-run command judgments judge the latest generation run without re-executing it')
     .requiredOption('--requirement <requirement>', 'Requirement id or title')
     .option('--goal <goal>', 'Goal id, workspace name, planned workspace name, or title')
     .option('--json', 'Output structured JSON')

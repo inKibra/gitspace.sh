@@ -34,7 +34,8 @@ import {
   type HumanReviewDecision,
   type UpdateRequirementInput,
 } from '../core/goal-validation.js';
-import { parseDocSlices, tryLoadWorkspaceWorkflow, workflowPhaseNames } from '../core/goal-workflow.js';
+import { isSameRunJudgment, parseDocSlices, workflowPhaseNames } from '../core/goal-gates.js';
+import { tryLoadWorkspaceWorkflow } from '../core/goal-workflow.js';
 import { withGoalLock } from '../core/goal-lock.js';
 import { computeReadiness } from '../app/shared/goal-validation/readiness.js';
 import { SpacesError } from '../types/errors.js';
@@ -149,14 +150,13 @@ function buildJudgment(input: {
   expectNeedle?: string;
   expectPattern?: string;
   modelHint?: string;
-}): Judgment {
+}, generation: Generation): Judgment {
   if (input.judge === 'human') return { kind: 'human' };
   if (input.judge === 'llm') {
     const hint = input.modelHint?.trim();
     return hint ? { kind: 'llm', modelHint: hint } : { kind: 'llm' };
   }
   if (input.judge === 'command') {
-    if (!input.judgeCommand?.trim()) throw new SpacesError('--judge-command required for command judgment.', 'USER_ERROR', 1);
     const expectKind = (input.expect ?? 'exit-zero') as CommandExpectation['kind'];
     if (!EXPECT_KINDS.includes(expectKind)) {
       throw new SpacesError(`Invalid --expect: ${expectKind}. Allowed: ${EXPECT_KINDS.join(', ')}`, 'USER_ERROR', 1);
@@ -171,7 +171,14 @@ function buildJudgment(input: {
       if (!input.expectPattern?.trim()) throw new SpacesError('--expect-pattern required for output-matches.', 'USER_ERROR', 1);
       expect = { kind: 'output-matches', pattern: input.expectPattern };
     }
-    return { kind: 'command', command: input.judgeCommand.trim(), expect };
+    const judgeCommand = input.judgeCommand?.trim();
+    if (judgeCommand) return { kind: 'command', command: judgeCommand, expect };
+    if (generation.kind !== 'command') {
+      throw new SpacesError('--judge-command required for command judgment when --gen is manual (omit it only with --gen command for same-run judging).', 'USER_ERROR', 1);
+    }
+    // Same-run judging: the generation run IS the judged run. Materialize the
+    // generation command as the marker; `review run` never re-executes it.
+    return { kind: 'command', command: generation.command, expect };
   }
   throw new SpacesError(`Invalid --judge: ${input.judge}. Allowed: human, llm, command`, 'USER_ERROR', 1);
 }
@@ -352,7 +359,8 @@ export interface AddRequirementOptions {
   optional?: boolean;
   gen: string;
   genCommand?: string;
-  judge: string;
+  /** Omitted with --gen command → defaults to same-run command judgment. */
+  judge?: string;
   judgeCommand?: string;
   expect?: string;
   expectNeedle?: string;
@@ -377,13 +385,20 @@ export function addSpaceGoalRequirement(ctx: SpaceCommandContext, options: AddRe
         warnStderr(`Slice "${options.slice.trim()}" is not a heading in the goal doc (dangling ref — amber state, allowed). Known slices: ${slices.map((s) => s.id).join(', ') || '(none)'}.`);
       }
     }
+    const generation = buildGeneration(options);
+    // No --judge with a command generation defaults to same-run command
+    // judgment: --expect is applied to the generation run itself.
+    const judge = options.judge ?? (generation.kind === 'command' ? 'command' : undefined);
+    if (!judge) {
+      throw new SpacesError('--judge required (human | llm | command). Only --gen command may omit it — that defaults to same-run command judgment.', 'USER_ERROR', 1);
+    }
     const input: AddRequirementInput = {
       title: options.title,
       kind: assertKindArg(options.kind),
       rubric: options.rubric,
       required: options.required === undefined ? !options.optional : options.required,
-      generation: buildGeneration(options),
-      judgment: buildJudgment(options),
+      generation,
+      judgment: buildJudgment({ ...options, judge }, generation),
       sliceId: options.slice?.trim() || undefined,
       wfPhase: options.phase?.trim() || undefined,
     };
@@ -394,7 +409,7 @@ export function addSpaceGoalRequirement(ctx: SpaceCommandContext, options: AddRe
     printJson({ goalId: updated.id, requirement });
     return;
   }
-  logger.success(`Declared ${requirement.required ? 'required' : 'optional'} requirement: ${requirement.title}${requirement.wfPhase ? ` (owed by phase "${requirement.wfPhase}")` : ''}`);
+  logger.success(`Declared ${requirement.required ? 'required' : 'optional'} requirement: ${requirement.title}${isSameRunJudgment(requirement) ? ' (same-run command judgment: the generation run is judged, never re-executed)' : ''}${requirement.wfPhase ? ` (owed by phase "${requirement.wfPhase}")` : ''}`);
 }
 
 export interface UpdateRequirementOptions {
@@ -435,7 +450,10 @@ export function updateSpaceGoalRequirement(ctx: SpaceCommandContext, options: Up
         expectNeedle: options.expectNeedle,
         expectPattern: options.expectPattern,
         modelHint: options.modelHint,
-      });
+      }, patch.generation ?? current.generation);
+    } else if (patch.generation?.kind === 'command' && current.judgment.kind === 'command' && isSameRunJudgment(current)) {
+      // Same-run judgments stay pinned to the generation command when it changes.
+      patch.judgment = { ...current.judgment, command: patch.generation.command };
     }
     const { validation, requirement } = updateRequirement(goal.validation, current.id, patch, goal);
     return { updated: writeGoalRecord(ctx.project, { ...goal, validation }), requirement };
@@ -494,7 +512,7 @@ export function listSpaceGoalRequirements(ctx: SpaceCommandContext, options: { g
     const jud =
       r.judgment.kind === 'human' ? 'human'
       : r.judgment.kind === 'llm' ? (r.judgment.modelHint ? `llm (${r.judgment.modelHint})` : 'llm')
-      : `command · ${r.judgment.expect.kind}`;
+      : `command · ${isSameRunJudgment(r) ? 'same-run · ' : ''}${r.judgment.expect.kind}`;
     logger.log(`${r.id} · ${r.required ? 'required' : 'optional'} · ${r.kind} · ${r.status} · ${r.title}`);
     logger.log(`  rubric: ${r.rubric}`);
     logger.log(`  gen: ${gen}`);

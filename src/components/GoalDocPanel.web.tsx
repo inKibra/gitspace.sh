@@ -1,7 +1,8 @@
 /** @jsxImportSource react */
-import { useMemo, type ReactElement } from 'react';
+import { useEffect, useMemo, useRef, type ReactElement } from 'react';
 import { renderMarkdownHtml } from './markdown-render.js';
 import { BlockView } from '../blocks/render/registry.web.js';
+import { slugifySliceId } from '../core/goal-gates.js';
 import type { GoalDoc, GoalValidation, Requirement } from '../types/goals.js';
 import type { WorkspacePhase } from '../types/config.js';
 
@@ -61,7 +62,7 @@ function RequirementRow({ requirement }: { requirement: Requirement }): ReactEle
   );
 }
 
-export function GoalDocPanel({ goals, currentGoalId, onSelectGoal, onToggleExemplar, onOpenWorkflow }: {
+export function GoalDocPanel({ goals, currentGoalId, onSelectGoal, onToggleExemplar, onOpenWorkflow, scrollToSlice }: {
   goals: GoalLike[];
   currentGoalId: string;
   onSelectGoal: (goalId: string) => void;
@@ -69,6 +70,10 @@ export function GoalDocPanel({ goals, currentGoalId, onSelectGoal, onToggleExemp
   onToggleExemplar?: (goalId: string, blockId: string) => void;
   /** Open the ⟜ Workflow pane (mock wf-tie). */
   onOpenWorkflow?: () => void;
+  /** Scroll the doc to a heading slice (workflow slice chips — the id is a
+   *  slugified heading, core/goal-gates.ts parseDocSlices). Nonce re-fires
+   *  the scroll when the pane is already open. */
+  scrollToSlice?: { sliceId: string; nonce: number } | null;
 }): ReactElement {
   const chain = useMemo(
     () => [...goals].sort((a, b) => a.chainPosition - b.chainPosition),
@@ -76,6 +81,54 @@ export function GoalDocPanel({ goals, currentGoalId, onSelectGoal, onToggleExemp
   );
   const curIndex = Math.max(0, chain.findIndex((g) => g.id === currentGoalId));
   const goal = chain[curIndex];
+  const bodyRef = useRef<HTMLDivElement>(null);
+
+  // Slice navigation: find the rendered heading whose slug (same dedupe walk
+  // as parseDocSlices) matches, scroll to it, and flash it briefly. Scrolls
+  // instantly and VERIFIES over a short window — a freshly opened dock panel
+  // is hidden until dockview activates the tab, and the activation focus can
+  // reset a scroll that landed too early.
+  useEffect(() => {
+    if (!scrollToSlice) return;
+    let cancelled = false;
+    let attempts = 0;
+    let flashed = false;
+    const tryScroll = (): void => {
+      if (cancelled) return;
+      attempts += 1;
+      const root = bodyRef.current;
+      const target = (() => {
+        if (!root) return null;
+        const seen = new Map<string, number>();
+        for (const el of Array.from(root.querySelectorAll('h1,h2,h3,h4,h5,h6'))) {
+          const base = slugifySliceId(el.textContent ?? '');
+          const count = (seen.get(base) ?? 0) + 1;
+          seen.set(base, count);
+          const id = count === 1 ? base : `${base}-${count}`;
+          if (id === scrollToSlice.sliceId) return el;
+        }
+        return null;
+      })();
+      // Visible = it has a laid-out box (hidden dockview panels have none).
+      if (target && root && target.getBoundingClientRect().height > 0) {
+        const inPlace = Math.abs(target.getBoundingClientRect().top - root.getBoundingClientRect().top) < 60;
+        if (inPlace) {
+          if (!flashed) {
+            flashed = true;
+            target.animate(
+              [{ backgroundColor: 'rgba(255,204,0,0.22)' }, { backgroundColor: 'transparent' }],
+              { duration: 1600, easing: 'ease-out' },
+            );
+          }
+          return;
+        }
+        target.scrollIntoView({ block: 'start' });
+      }
+      if (attempts < 20) setTimeout(tryScroll, 200);
+    };
+    const frame = requestAnimationFrame(tryScroll);
+    return () => { cancelled = true; cancelAnimationFrame(frame); };
+  }, [scrollToSlice?.nonce, scrollToSlice?.sliceId, scrollToSlice, currentGoalId]);
 
   if (!goal) {
     return (
@@ -165,7 +218,7 @@ export function GoalDocPanel({ goals, currentGoalId, onSelectGoal, onToggleExemp
       </div>
 
       {/* Doc body (mock gdoc-body: 18px/20px padding, wf-tie card in-flow at end) */}
-      <div className="gs-goal-doc min-h-0 flex-1 overflow-auto px-5 pt-[18px] pb-[18px]">
+      <div ref={bodyRef} className="gs-goal-doc min-h-0 flex-1 overflow-auto px-5 pt-[18px] pb-[18px]">
         {docBlocks.length > 0 ? (
           <div className="flex max-w-[880px] flex-col gap-4">
             {docBlocks.map((b) => (

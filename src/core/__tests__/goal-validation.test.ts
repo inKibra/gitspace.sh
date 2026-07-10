@@ -279,6 +279,126 @@ describe('goal validation core', () => {
     expect(judgment.review.score).toBe(0);
   });
 
+  it('same-run judgment (judge command == gen command) judges the latest generation run without re-executing', () => {
+    const workspaceDir = join(root, 'demo', 'workspaces', 'api');
+    mkdirSync(workspaceDir, { recursive: true });
+    writeFileSync(join(workspaceDir, '.gitignore'), '', 'utf-8');
+    const command = 'echo run >> runs.txt';
+    const v0 = addRequirement(defaultValidation(), {
+      title: 'Tests',
+      kind: 'test-output',
+      rubric: 'Suite must pass.',
+      generation: { kind: 'command', command },
+      judgment: { kind: 'command', command, expect: { kind: 'exit-zero' } },
+    });
+    const goal = makeGoal({ id: 'api', title: 'API', phase: 'code', workspaceName: 'api', validation: v0.validation });
+    writeGoalRecord('demo', goal);
+    const generated = runGenerationCommand('demo', goal, v0.requirement.id);
+    expect(generated.autoAccepted).toBe(true);
+    expect(readFileSync(join(workspaceDir, 'runs.txt'), 'utf-8').trim().split('\n')).toHaveLength(1);
+
+    const judged = runJudgmentCommand('demo', generated.goal, v0.requirement.id);
+    // The command did NOT run a second time — the run counter file is unchanged.
+    expect(readFileSync(join(workspaceDir, 'runs.txt'), 'utf-8').trim().split('\n')).toHaveLength(1);
+    expect(judged.review.tone).toBe('green');
+    expect(judged.requirement.status).toBe('accepted');
+    // The review cites exactly the generation evidence it judged.
+    expect(judged.review.cites).toEqual([generated.evidence.id]);
+    const event = judged.goal.validation.events.at(-1);
+    expect(event?.payload).toContain('mode: same-run');
+    expect(event?.payload).toContain(`evidence: ${generated.evidence.id}`);
+  });
+
+  it('same-run judgment fails against a failing generation run without re-executing', () => {
+    const workspaceDir = join(root, 'demo', 'workspaces', 'api');
+    mkdirSync(workspaceDir, { recursive: true });
+    writeFileSync(join(workspaceDir, '.gitignore'), '', 'utf-8');
+    const command = 'echo run >> runs.txt; exit 1';
+    const v0 = addRequirement(defaultValidation(), {
+      title: 'Tests',
+      kind: 'test-output',
+      rubric: 'Suite must pass.',
+      generation: { kind: 'command', command },
+      judgment: { kind: 'command', command, expect: { kind: 'exit-zero' } },
+    });
+    const goal = makeGoal({ id: 'api', title: 'API', phase: 'code', workspaceName: 'api', validation: v0.validation });
+    writeGoalRecord('demo', goal);
+    const generated = runGenerationCommand('demo', goal, v0.requirement.id);
+    expect(generated.autoAccepted).toBe(false);
+    const judged = runJudgmentCommand('demo', generated.goal, v0.requirement.id);
+    expect(readFileSync(join(workspaceDir, 'runs.txt'), 'utf-8').trim().split('\n')).toHaveLength(1);
+    expect(judged.review.tone).toBe('red');
+    expect(judged.review.cites).toEqual([generated.evidence.id]);
+    expect(judged.requirement.status).toBe('review');
+  });
+
+  it('same-run judgment errors clearly when no generation run exists yet', () => {
+    mkdirSync(join(root, 'demo', 'workspaces', 'api'), { recursive: true });
+    writeFileSync(join(root, 'demo', 'workspaces', 'api', '.gitignore'), '', 'utf-8');
+    const command = 'printf ok';
+    const v0 = addRequirement(defaultValidation(), {
+      title: 'Tests',
+      kind: 'test-output',
+      rubric: 'Suite must pass.',
+      generation: { kind: 'command', command },
+      judgment: { kind: 'command', command, expect: { kind: 'exit-zero' } },
+    });
+    const goal = makeGoal({ id: 'api', title: 'API', phase: 'code', workspaceName: 'api', validation: v0.validation });
+    writeGoalRecord('demo', goal);
+    expect(() => runJudgmentCommand('demo', goal, v0.requirement.id)).toThrow(/No generation run to judge yet/);
+  });
+
+  it('treats a hand-edited command judgment with no command as same-run', () => {
+    const workspaceDir = join(root, 'demo', 'workspaces', 'api');
+    mkdirSync(workspaceDir, { recursive: true });
+    writeFileSync(join(workspaceDir, '.gitignore'), '', 'utf-8');
+    const v0 = addRequirement(defaultValidation(), {
+      title: 'Tests',
+      kind: 'test-output',
+      rubric: 'Suite must pass.',
+      generation: { kind: 'command', command: 'printf ok' },
+      judgment: { kind: 'command', command: '', expect: { kind: 'stdout-contains', needle: 'ok' } },
+    });
+    const goal = makeGoal({ id: 'api', title: 'API', phase: 'code', workspaceName: 'api', validation: v0.validation });
+    writeGoalRecord('demo', goal);
+    const generated = runGenerationCommand('demo', goal, v0.requirement.id);
+    const judged = runJudgmentCommand('demo', generated.goal, v0.requirement.id);
+    expect(judged.review.tone).toBe('green');
+    expect(judged.review.cites).toEqual([generated.evidence.id]);
+  });
+
+  it('rejects command judgment without a command when generation is manual', () => {
+    expect(() => addRequirement(defaultValidation(), {
+      title: 'Tests',
+      kind: 'test-output',
+      rubric: 'Suite must pass.',
+      generation: { kind: 'manual' },
+      judgment: { kind: 'command', command: '', expect: { kind: 'exit-zero' } },
+    })).toThrow(/Command judgment requires a command/);
+  });
+
+  it('distinct judge command still re-executes on review run', () => {
+    const workspaceDir = join(root, 'demo', 'workspaces', 'api');
+    mkdirSync(workspaceDir, { recursive: true });
+    writeFileSync(join(workspaceDir, '.gitignore'), '', 'utf-8');
+    const v0 = addRequirement(defaultValidation(), {
+      title: 'Tests',
+      kind: 'test-output',
+      rubric: 'Suite must pass.',
+      generation: { kind: 'command', command: 'echo gen >> gen-runs.txt' },
+      judgment: { kind: 'command', command: 'echo judge >> judge-runs.txt', expect: { kind: 'exit-zero' } },
+    });
+    const goal = makeGoal({ id: 'api', title: 'API', phase: 'code', workspaceName: 'api', validation: v0.validation });
+    writeGoalRecord('demo', goal);
+    const generated = runGenerationCommand('demo', goal, v0.requirement.id);
+    const judged = runJudgmentCommand('demo', generated.goal, v0.requirement.id);
+    expect(readFileSync(join(workspaceDir, 'gen-runs.txt'), 'utf-8').trim().split('\n')).toHaveLength(1);
+    expect(readFileSync(join(workspaceDir, 'judge-runs.txt'), 'utf-8').trim().split('\n')).toHaveLength(1);
+    expect(judged.review.tone).toBe('green');
+    const event = judged.goal.validation.events.at(-1);
+    expect(event?.payload).not.toContain('mode: same-run');
+  });
+
   it('migrates a v1 goal record to v2', () => {
     const legacy = {
       version: 1,

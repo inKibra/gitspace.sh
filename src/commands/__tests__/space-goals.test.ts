@@ -15,6 +15,7 @@ import {
   updateSpaceGoalRequirement,
 } from '../space-goals.js';
 import { addGoalNearWorkspace, bindPlannedGoalForWorkspace, listProjectGoalKanbanItems, readWorkspaceGoal } from '../../core/goal-chain.js';
+import { isSameRunJudgment } from '../../core/goal-gates.js';
 
 const envKey = 'GITSPACE_WORKSPACE_ROOT';
 
@@ -58,6 +59,54 @@ describe('space goal commands', () => {
       status: 'missing',
     });
     expect(goal.validation.events.find((e) => e.kind === 'contract')).toBeTruthy();
+  });
+
+  it('defaults command-generated requirements to same-run command judgment when --judge is omitted', () => {
+    addSpaceGoalRequirement({ project: 'demo', workspace: 'api' }, {
+      title: 'Focused tests pass',
+      kind: 'test-output',
+      rubric: 'Exit code 0.',
+      gen: 'command',
+      genCommand: 'bun test src/foo.test.ts',
+      expect: 'exit-zero',
+    });
+    const goal = readWorkspaceGoal('demo', 'api')!;
+    const requirement = goal.validation.requirements[goal.validation.reqOrder[0]];
+    // Same-run marker: judgment command materialized from the generation command.
+    expect(requirement.generation).toEqual({ kind: 'command', command: 'bun test src/foo.test.ts' });
+    expect(requirement.judgment).toEqual({ kind: 'command', command: 'bun test src/foo.test.ts', expect: { kind: 'exit-zero' } });
+    expect(isSameRunJudgment(requirement)).toBe(true);
+  });
+
+  it('requires --judge for manual generation', () => {
+    expect(() => addSpaceGoalRequirement({ project: 'demo', workspace: 'api' }, {
+      title: 'Note', kind: 'note', rubric: 'r', gen: 'manual',
+    })).toThrow(/--judge required/);
+  });
+
+  it('keeps same-run judgment pinned to the generation command on update', () => {
+    addSpaceGoalRequirement({ project: 'demo', workspace: 'api' }, {
+      title: 'Tests', kind: 'test-output', rubric: 'r', gen: 'command', genCommand: 'bun test a.ts',
+    });
+    updateSpaceGoalRequirement({ project: 'demo', workspace: 'api' }, {
+      requirement: 'Tests', gen: 'command', genCommand: 'bun test b.ts',
+    });
+    const goal = readWorkspaceGoal('demo', 'api')!;
+    const requirement = goal.validation.requirements[goal.validation.reqOrder[0]];
+    expect(requirement.generation).toEqual({ kind: 'command', command: 'bun test b.ts' });
+    expect(requirement.judgment).toEqual({ kind: 'command', command: 'bun test b.ts', expect: { kind: 'exit-zero' } });
+    expect(isSameRunJudgment(requirement)).toBe(true);
+  });
+
+  it('keeps a distinct judge command distinct', () => {
+    addSpaceGoalRequirement({ project: 'demo', workspace: 'api' }, {
+      title: 'Budget', kind: 'test-output', rubric: 'r', gen: 'command', genCommand: 'bun run build',
+      judge: 'command', judgeCommand: 'node check-size.mjs', expect: 'exit-zero',
+    });
+    const goal = readWorkspaceGoal('demo', 'api')!;
+    const requirement = goal.validation.requirements[goal.validation.reqOrder[0]];
+    expect(requirement.judgment).toEqual({ kind: 'command', command: 'node check-size.mjs', expect: { kind: 'exit-zero' } });
+    expect(isSameRunJudgment(requirement)).toBe(false);
   });
 
   it('refuses bad requirements', () => {

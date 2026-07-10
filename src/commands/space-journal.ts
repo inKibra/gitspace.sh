@@ -7,7 +7,8 @@
 import { startPhaseJournal, endPhaseJournal, findOpenPhaseEntry } from '../core/phase-journal.js';
 import { getProjectWorkspacesDir } from '../core/config.js';
 import { resolveWorkspaceGoal } from '../core/goal-chain.js';
-import { describeOwedRequirement, gateStatusForPhase, tryLoadWorkspaceWorkflow, workflowPhaseNames } from '../core/goal-workflow.js';
+import { describeOwedRequirement, gateStatusForPhase, workflowPhaseNames } from '../core/goal-gates.js';
+import { tryLoadWorkspaceWorkflow } from '../core/goal-workflow.js';
 import { join } from 'path';
 import { logger } from '../utils/logger.js';
 import type { SpaceCommandContext } from './space-goals.js';

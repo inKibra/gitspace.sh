@@ -14,6 +14,7 @@ import { spawnSync } from 'child_process';
 import { getProjectBaseDir, getProjectDir, getProjectWorkspacesDir } from './config.js';
 import { artifactsMountDir, captureArtifactsSync } from './artifacts.js';
 import { getOpenJournalPhase } from './phase-journal.js';
+import { isSameRunJudgment } from './goal-gates.js';
 import { ensureWorkspaceStorageIgnored, getWorkspaceStorageDir } from './workspace-metadata.js';
 import { SpacesError } from '../types/errors.js';
 import { generateId } from '../utils/id.js';
@@ -112,13 +113,15 @@ function assertGeneration(generation: Generation): void {
   }
 }
 
-function assertJudgment(judgment: Judgment): void {
+function assertJudgment(judgment: Judgment, generation: Generation): void {
   if (judgment.kind !== 'human' && judgment.kind !== 'llm' && judgment.kind !== 'command') {
     throw new SpacesError(`Invalid judgment kind: ${(judgment as { kind: string }).kind}`, 'USER_ERROR', 1);
   }
   if (judgment.kind === 'command') {
-    if (!judgment.command.trim()) {
-      throw new SpacesError('Command judgment requires a command.', 'USER_ERROR', 1);
+    // Same-run judging: no judge command is fine when the generation is a
+    // command — expect is applied to the generation run itself.
+    if (!judgment.command?.trim() && generation.kind !== 'command') {
+      throw new SpacesError('Command judgment requires a command (omitting it — same-run judging — needs command generation).', 'USER_ERROR', 1);
     }
     if (!['exit-zero', 'stdout-contains', 'stderr-empty', 'output-matches'].includes(judgment.expect.kind)) {
       throw new SpacesError(`Invalid expect kind: ${judgment.expect.kind}`, 'USER_ERROR', 1);
@@ -360,10 +363,11 @@ function describeGenerationSummary(generation: Generation): string {
   return generation.kind === 'manual' ? 'manual' : `command (${generation.command})`;
 }
 
-function describeJudgmentSummary(judgment: Judgment): string {
+function describeJudgmentSummary(judgment: Judgment, generation?: Generation): string {
   if (judgment.kind === 'human') return 'human';
   if (judgment.kind === 'llm') return judgment.modelHint ? `llm (${judgment.modelHint})` : 'llm';
-  return `command · ${judgment.expect.kind}`;
+  const sameRun = generation ? isSameRunJudgment({ generation, judgment }) : false;
+  return `command · ${sameRun ? 'same-run · ' : ''}${judgment.expect.kind}`;
 }
 
 function contractAddedPayload(requirement: Requirement): string {
@@ -378,6 +382,7 @@ function contractAddedPayload(requirement: Requirement): string {
   if (requirement.judgment.kind === 'command') {
     lines.push(`  jud.command: ${requirement.judgment.command}`);
     lines.push(`  jud.expect: ${requirement.judgment.expect.kind}`);
+    if (isSameRunJudgment(requirement)) lines.push('  jud.mode: same-run');
   }
   if (requirement.judgment.kind === 'llm' && requirement.judgment.modelHint) {
     lines.push(`  jud.model: ${requirement.judgment.modelHint}`);
@@ -457,7 +462,7 @@ export function addRequirement(
   if (!input.rubric.trim()) throw new SpacesError('Rubric is required.', 'USER_ERROR', 1);
   assertKind(input.kind);
   assertGeneration(input.generation);
-  assertJudgment(input.judgment);
+  assertJudgment(input.judgment, input.generation);
 
   const openPhase = ctx ? getOpenPhaseForGoal(ctx) : undefined;
   const phase = input.wfPhase?.trim() || openPhase;
@@ -486,7 +491,7 @@ export function addRequirement(
     tone: 'blue',
     kind: 'contract',
     title: `Requirement added: ${title}`,
-    body: `Produced by ${describeGenerationSummary(input.generation)}; judged by ${describeJudgmentSummary(input.judgment)}.`,
+    body: `Produced by ${describeGenerationSummary(input.generation)}; judged by ${describeJudgmentSummary(input.judgment, input.generation)}.`,
     payload: contractAddedPayload(requirement),
   }, openPhase);
   return { validation: next, requirement };
@@ -521,7 +526,7 @@ export function updateRequirement(
     if (!merged.rubric) throw new SpacesError('Rubric is required.', 'USER_ERROR', 1);
     assertKind(merged.kind);
     assertGeneration(merged.generation);
-    assertJudgment(merged.judgment);
+    assertJudgment(merged.judgment, merged.generation);
     return merged;
   });
   const next = appendEvent(nextRequirements, {
@@ -726,21 +731,47 @@ export function runJudgmentCommand(
   if (cur.judgment.kind !== 'command') {
     throw new SpacesError('Judgment is not command-based for this requirement.', 'USER_ERROR', 1);
   }
-  if (!goal.workspaceName) {
-    throw new SpacesError('Judgment commands require a workspace-backed goal.', 'USER_ERROR', 1);
-  }
-  const cwd = join(getProjectWorkspacesDir(projectName), goal.workspaceName);
-  if (!existsSync(cwd)) {
-    throw new SpacesError(`Workspace directory does not exist: ${cwd}`, 'USER_ERROR', 1);
-  }
-  const command = cur.judgment.command;
   const expect = cur.judgment.expect;
-  const result = spawnSync(command, { cwd, shell: true, encoding: 'utf-8', maxBuffer: 1024 * 1024 * 8 });
-  const exitCode = typeof result.status === 'number' ? result.status : 1;
-  const stdout = truncate(result.stdout ?? '');
-  const stderr = truncate(result.stderr ?? (result.error ? String(result.error) : ''));
+  const sameRun = isSameRunJudgment(cur);
+  let exitCode: number;
+  let stdout: string;
+  let stderr: string;
+  let cites: string[];
+  let payloadExtra = '';
+  let noteSuffix = '';
+  if (sameRun) {
+    // Same-run judgment (gen==judge dedup): never re-execute — apply expect
+    // to the latest generation run's captured evidence.
+    const latest = [...cur.evidence].reverse().find((e) => e.source === 'command' && e.exitCode !== undefined);
+    if (!latest) {
+      throw new SpacesError(
+        `No generation run to judge yet — run \`space goal artifact run --requirement ${requirementId}\` first (same-run judgment judges the generation run instead of re-executing).`,
+        'USER_ERROR',
+        1,
+      );
+    }
+    exitCode = latest.exitCode ?? 1;
+    stdout = latest.stdout ?? '';
+    stderr = latest.stderr ?? '';
+    cites = [latest.id];
+    payloadExtra = `\n  mode: same-run\n  evidence: ${latest.id}`;
+    noteSuffix = ` Judged generation run ${latest.id} (same-run; command not re-executed).`;
+  } else {
+    if (!goal.workspaceName) {
+      throw new SpacesError('Judgment commands require a workspace-backed goal.', 'USER_ERROR', 1);
+    }
+    const cwd = join(getProjectWorkspacesDir(projectName), goal.workspaceName);
+    if (!existsSync(cwd)) {
+      throw new SpacesError(`Workspace directory does not exist: ${cwd}`, 'USER_ERROR', 1);
+    }
+    const result = spawnSync(cur.judgment.command, { cwd, shell: true, encoding: 'utf-8', maxBuffer: 1024 * 1024 * 8 });
+    exitCode = typeof result.status === 'number' ? result.status : 1;
+    stdout = truncate(result.stdout ?? '');
+    stderr = truncate(result.stderr ?? (result.error ? String(result.error) : ''));
+    cites = cur.evidence.map((e) => e.id);
+  }
   const passed = commandPasses(cur.judgment, exitCode, stdout, stderr);
-  const note = passed ? describeExpectSatisfied(expect) : describeExpectFailed(expect, exitCode);
+  const note = `${passed ? describeExpectSatisfied(expect) : describeExpectFailed(expect, exitCode)}${noteSuffix}`;
   const tone: ReviewTone = passed ? 'green' : 'red';
   const review: Review = {
     id: nextReviewId(),
@@ -750,7 +781,7 @@ export function runJudgmentCommand(
     createdAt: nowIso(),
     judgeType: 'command',
     score: passed ? 100 : 0,
-    cites: cur.evidence.map((e) => e.id),
+    cites,
     rubricHash: hashRubric(cur.rubric),
   };
   const { validation: nextValidation, requirement } = withRequirement(goal.validation, requirementId, (r) => ({
@@ -764,7 +795,7 @@ export function runJudgmentCommand(
     kind: 'review',
     title: `Command check ${passed ? 'passed' : 'failed'}: ${cur.title}`,
     body: note,
-    payload: `review.${passed ? 'passed' : 'failed'}\n  requirement: ${requirementId}\n  judge: command\n  expect: ${expect.kind}\n  exit: ${exitCode}`,
+    payload: `review.${passed ? 'passed' : 'failed'}\n  requirement: ${requirementId}\n  judge: command\n  expect: ${expect.kind}\n  exit: ${exitCode}${payloadExtra}`,
   }, getOpenPhaseForGoal(goal));
   return {
     goal: { ...goal, validation: withEvent, updatedAt: nowIso() },

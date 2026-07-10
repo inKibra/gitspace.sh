@@ -1,6 +1,7 @@
 /** @jsxImportSource react */
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
 import type { CommandExpectation, Evidence, GoalValidation, Judgment, Requirement, Review } from '../types/goals.js';
+import { gateStatusForPhase, gateWaiveInfoForPhase, parseDocSlices } from '../core/goal-gates.js';
 import { renderMarkdownHtml } from './markdown-render.js';
 import { useGoalPhaseInfo, type SendReviewRequestFn } from '../app/react/useGoalPhaseInfo.web.js';
 
@@ -193,6 +194,30 @@ function GateChip({ gate }: { gate: Gate }): ReactElement {
   return (
     <span className={`inline-flex items-center gap-1 rounded-[var(--gs-chip-radius)] border px-1.5 py-0.5 text-[10px] uppercase tracking-wide ${m.cls}`}>
       {m.icon} {m.label} gate
+    </span>
+  );
+}
+
+/** Goal-doc slice badge (requirements ⇄ doc join): info-toned `§ <id>` when
+ *  the slice is a heading in the current goal doc, amber 'slice missing'
+ *  when the id dangles. `known === null` = doc unknown, never amber. */
+function SliceBadge({ sliceId, known }: { sliceId: string; known: boolean | null }): ReactElement {
+  if (known === false) {
+    return (
+      <span
+        className="inline-flex items-center gap-1 rounded-[var(--gs-chip-radius)] border border-[var(--gs-warning)] bg-[var(--gs-chip-amber-bg)] px-1.5 py-px text-[9px] uppercase tracking-[0.08em] text-[var(--gs-chip-amber-text)]"
+        title={`"${sliceId}" is not a heading in the goal doc`}
+      >
+        ⚠ slice missing: {sliceId}
+      </span>
+    );
+  }
+  return (
+    <span
+      className="inline-flex items-center rounded-[var(--gs-chip-radius)] border border-[rgba(91,155,255,0.25)] px-1.5 py-px text-[9px] uppercase tracking-[0.08em] text-[var(--gs-info)]"
+      title={`grounded in goal-doc slice ${sliceId}`}
+    >
+      § {sliceId}
     </span>
   );
 }
@@ -444,8 +469,17 @@ function MakeJudgement({ requirementId, onRecordHuman, onDone }: {
   );
 }
 
-export function ReviewRubric({ goal, onRecordHuman, onRunJudgment, onOpenEvidence, sendReviewRequest, projectName, workspaceName }: {
+export function ReviewRubric({ goal, docMarkdown, phaseFilterRequest, onWaiveGate, onRecordHuman, onRunJudgment, onOpenEvidence, sendReviewRequest, projectName, workspaceName }: {
   goal: { id: string; title: string; phase?: string; validation: GoalValidation } | null;
+  /** Goal-doc markdown — drives slice badges (requirements ⇄ doc join) and
+   *  the dangling-slice amber state. Undefined = doc unknown, never amber. */
+  docMarkdown?: string | null;
+  /** Open filtered to a workflow phase's owed requirements (wfPhase join) —
+   *  the workflow pane's rubric/gate chips route here. Nonce re-applies the
+   *  filter when the pane is already open. */
+  phaseFilterRequest?: { phase: string; nonce: number } | null;
+  /** HUMAN-ONLY gate waive (backend.waiveGoalGate seam — reason required). */
+  onWaiveGate?: (phase: string) => void;
   onRecordHuman: (requirementId: string, decision: Decision, note: string, score?: number) => Promise<void>;
   onRunJudgment?: (requirementId: string) => Promise<void>;
   onOpenEvidence?: (requirementId: string, evidenceId: string) => void;
@@ -459,13 +493,24 @@ export function ReviewRubric({ goal, onRecordHuman, onRunJudgment, onOpenEvidenc
   const [active, setActive] = useState(0);
   const [recorded, setRecorded] = useState<Record<string, boolean>>({});
   const [runningId, setRunningId] = useState<string | null>(null);
+  const [phaseFilter, setPhaseFilter] = useState<string | null>(phaseFilterRequest?.phase ?? null);
+  const [groupBySlice, setGroupBySlice] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const secRefs = useRef<(HTMLElement | null)[]>([]);
   // While a click-initiated smooth scroll is in flight, the scroll-spy must
   // not fight the explicit selection.
   const suppressSpyUntilRef = useRef(0);
 
-  const crits = useMemo(() => {
+  // Re-apply the phase filter when a workflow chip re-targets an open pane.
+  useEffect(() => {
+    if (phaseFilterRequest) setPhaseFilter(phaseFilterRequest.phase);
+  }, [phaseFilterRequest?.nonce, phaseFilterRequest?.phase]);
+
+  // Doc slices (same parse the CLI uses) for badges + group-by-slice order.
+  const docSlices = useMemo(() => (docMarkdown != null ? parseDocSlices(docMarkdown) : null), [docMarkdown]);
+  const knownSliceIds = useMemo(() => (docSlices ? new Set(docSlices.map((s) => s.id)) : null), [docSlices]);
+
+  const allCrits = useMemo(() => {
     if (!goal) return [];
     return goal.validation.reqOrder
       .map((id) => goal.validation.requirements[id])
@@ -482,6 +527,26 @@ export function ReviewRubric({ goal, onRecordHuman, onRunJudgment, onOpenEvidenc
         };
       });
   }, [goal, recorded]);
+
+  // Phase filter (wfPhase join) + optional group-by-slice ordering: known
+  // slices in doc order, dangling slices next (amber), sliceless last.
+  const crits = useMemo(() => {
+    let list = phaseFilter ? allCrits.filter((c) => c.r.wfPhase === phaseFilter) : allCrits;
+    if (groupBySlice) {
+      const rank = (sliceId?: string): string => {
+        if (!sliceId) return '2';
+        const idx = docSlices?.findIndex((s) => s.id === sliceId) ?? -1;
+        return idx >= 0 ? `0:${String(idx).padStart(4, '0')}` : `1:${sliceId}`;
+      };
+      list = [...list].sort((a, b) => rank(a.r.sliceId).localeCompare(rank(b.r.sliceId)));
+    }
+    return list;
+  }, [allCrits, phaseFilter, groupBySlice, docSlices]);
+
+  // Live computed gate for the filtered phase (goal-rubric-workflow
+  // interconnect) — drives the strip's chip + the human-only waive button.
+  const filterGate = phaseFilter && goal ? gateStatusForPhase({ validation: goal.validation }, phaseFilter) : null;
+  const filterWaive = filterGate?.waived && goal && phaseFilter ? gateWaiveInfoForPhase(goal.validation, phaseFilter) : null;
 
   // Scroll-spy: as the USER scrolls the right column, the visible criterion
   // lights up on the left. Deliberately not run on mount/refresh (the pane
@@ -531,7 +596,7 @@ export function ReviewRubric({ goal, onRecordHuman, onRunJudgment, onOpenEvidenc
     }
   }, [onRunJudgment, runningId]);
 
-  if (!goal || crits.length === 0) {
+  if (!goal || allCrits.length === 0) {
     return (
       <div className="gs-ui flex h-full min-h-0 flex-col items-center justify-center gap-1 bg-[var(--gs-bg)] p-6 text-center">
         <div className="text-[13px] text-[var(--gs-text-dim)]">☰ No review rubric yet</div>
@@ -542,20 +607,70 @@ export function ReviewRubric({ goal, onRecordHuman, onRunJudgment, onOpenEvidenc
     );
   }
 
-  const act = crits[Math.min(active, crits.length - 1)];
+  const act = crits.length > 0 ? crits[Math.min(active, crits.length - 1)] : undefined;
 
   return (
     <div className="gs-ui flex h-full min-h-0 flex-col bg-[var(--gs-bg)]">
+      {/* phase-gate strip (wfPhase filter): the phase's COMPUTED gate + the
+          human-only waive. Opened from the workflow pane's gate/rubric chips. */}
+      {phaseFilter && (
+        <div className="flex flex-none flex-wrap items-center gap-2 border-b border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-3.5 py-2">
+          <span className="text-[10px] uppercase tracking-[0.08em] text-[var(--gs-text-dim)]">phase gate</span>
+          <span className="text-[12px] font-medium text-[var(--gs-text)]">{phaseFilter}</span>
+          {filterGate && (
+            filterGate.owed.length === 0 ? (
+              <span className="border border-[var(--gs-border)] px-1.5 py-px text-[10.5px] text-[var(--gs-text-dim)]" title="no requirements owed by this phase — gate trivially satisfied">◇ trivial</span>
+            ) : filterGate.satisfied ? (
+              <span className="border border-[rgba(0,255,102,0.35)] px-1.5 py-px text-[10.5px] text-[var(--gs-success)]" title={`all ${filterGate.owed.length} owed requirement(s) accepted`}>✓ satisfied · {filterGate.owed.length} owed</span>
+            ) : filterGate.waived ? (
+              <span className="border border-[var(--gs-warning)] px-1.5 py-px text-[10.5px] text-[var(--gs-warning)]" title={filterWaive ? `waived by ${filterWaive.actor}: ${filterWaive.reason}` : 'gate waived by a human'}>◆ waived · {filterGate.unmet.length} unmet</span>
+            ) : (
+              <span className="border border-[var(--gs-danger)] px-1.5 py-px text-[10.5px] text-[var(--gs-danger)]">✕ {filterGate.owed.length} owed, {filterGate.unmet.length} unmet</span>
+            )
+          )}
+          {filterGate && !filterGate.satisfied && !filterGate.waived && onWaiveGate && (
+            <button
+              type="button"
+              onClick={() => onWaiveGate(phaseFilter)}
+              title="Human-only: waive this gate with a recorded reason"
+              className="border border-dashed border-[var(--gs-warning)] bg-transparent px-1.5 py-px text-[10.5px] text-[var(--gs-warning)] cursor-pointer hover:bg-[var(--gs-chip-amber-bg)]"
+            >
+              waive…
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => setPhaseFilter(null)}
+            className="ml-auto border border-[var(--gs-border)] bg-transparent px-1.5 py-px text-[10.5px] text-[var(--gs-text-dim)] cursor-pointer hover:border-[var(--gs-border-active)] hover:text-[var(--gs-text)]"
+          >
+            ✕ show all criteria
+          </button>
+        </div>
+      )}
       <div className="grid min-h-0 flex-1 grid-cols-[380px_1fr]">
         {/* left rail: index (capped) + active-criterion detail + footer */}
         <div className="flex min-h-0 flex-col overflow-hidden border-r border-[var(--gs-border)] bg-[#050505]">
           <div className="flex flex-none items-center gap-2 border-b border-[var(--gs-border)] px-3.5 py-3 text-[12px] font-medium text-[var(--gs-text)]">
             <span>Review rubric <span className="text-[var(--gs-text-ghost)]">· the contract</span></span>
-            {goal.phase && (
-              <span className="ml-auto border border-[var(--gs-border)] px-1.5 py-px text-[10px] uppercase tracking-[0.08em] text-[var(--gs-text-dim)]" title="workspace goal phase">
-                phase · {goal.phase}
-              </span>
-            )}
+            <span className="ml-auto flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => setGroupBySlice((v) => !v)}
+                title="group criteria by goal-doc slice"
+                className={`border px-1.5 py-px text-[10px] font-normal uppercase tracking-[0.08em] cursor-pointer ${
+                  groupBySlice
+                    ? 'border-[var(--gs-border-active)] bg-[var(--gs-bg-active)] text-[var(--gs-text)]'
+                    : 'border-[var(--gs-border)] bg-transparent text-[var(--gs-text-dim)] hover:text-[var(--gs-text)]'
+                }`}
+              >
+                § by slice
+              </button>
+              {goal.phase && (
+                <span className="border border-[var(--gs-border)] px-1.5 py-px text-[10px] font-normal uppercase tracking-[0.08em] text-[var(--gs-text-dim)]" title="workspace goal phase">
+                  phase · {goal.phase}
+                </span>
+              )}
+            </span>
           </div>
           <div className="max-h-[34%] flex-none overflow-y-auto border-b border-[var(--gs-border)] py-1.5">
             {crits.map((c, i) => (
@@ -599,6 +714,7 @@ export function ReviewRubric({ goal, onRecordHuman, onRunJudgment, onOpenEvidenc
                     <span className="border border-[var(--gs-border)] px-[5px] py-px text-[10.5px] uppercase tracking-[0.08em] text-[var(--gs-text-dim)]">required</span>
                   )}
                   <GateChip gate={act.gate} />
+                  {act.r.sliceId && <SliceBadge sliceId={act.r.sliceId} known={knownSliceIds ? knownSliceIds.has(act.r.sliceId) : null} />}
                 </div>
                 <div className="mb-2 text-[14px] font-medium leading-[1.4] text-[var(--gs-text)]">{act.r.title}</div>
                 <div
@@ -652,17 +768,41 @@ export function ReviewRubric({ goal, onRecordHuman, onRunJudgment, onOpenEvidenc
 
         {/* right: lean per-criterion sections — evidence cards + judgement rows */}
         <div ref={scrollRef} className="min-h-0 overflow-y-auto px-[18px] py-4">
+          {crits.length === 0 && phaseFilter && (
+            <div className="mt-6 text-center text-[12px] text-[var(--gs-text-dim)]">
+              No requirements owed by phase <span className="text-[var(--gs-text)]">{phaseFilter}</span> — the gate is trivially satisfied.
+            </div>
+          )}
           {crits.map((c, i) => (
-            <section
-              key={c.r.id}
-              ref={(el) => { secRefs.current[i] = el; }}
-              className={`mb-4 scroll-mt-2 border bg-[var(--gs-bg-elevated)] transition-[border-color] duration-150 ${active === i ? 'border-[var(--gs-border-active)]' : 'border-[var(--gs-border)]'}`}
-            >
+            <Fragment key={c.r.id}>
+              {/* group-by-slice section headers (doc order; dangling amber) */}
+              {groupBySlice && (i === 0 || (crits[i - 1]!.r.sliceId ?? '') !== (c.r.sliceId ?? '')) && (
+                c.r.sliceId ? (
+                  knownSliceIds && !knownSliceIds.has(c.r.sliceId) ? (
+                    <div className="mb-2 mt-1 flex items-baseline gap-2 text-[11px] text-[var(--gs-warning)]">
+                      <span>⚠ slice missing: <span className="font-[family-name:var(--gs-font-mono)]">{c.r.sliceId}</span></span>
+                      <span className="text-[10px] text-[var(--gs-text-ghost)]">not a heading in the goal doc</span>
+                    </div>
+                  ) : (
+                    <div className="mb-2 mt-1 flex items-baseline gap-2 text-[11px] text-[var(--gs-info)]">
+                      <span>§ {docSlices?.find((s) => s.id === c.r.sliceId)?.heading ?? c.r.sliceId}</span>
+                      <span className="font-[family-name:var(--gs-font-mono)] text-[10px] text-[var(--gs-text-ghost)]">{c.r.sliceId}</span>
+                    </div>
+                  )
+                ) : (
+                  <div className="mb-2 mt-1 text-[11px] text-[var(--gs-text-dim)]">(no slice)</div>
+                )
+              )}
+              <section
+                ref={(el) => { secRefs.current[i] = el; }}
+                className={`mb-4 scroll-mt-2 border bg-[var(--gs-bg-elevated)] transition-[border-color] duration-150 ${active === i ? 'border-[var(--gs-border-active)]' : 'border-[var(--gs-border)]'}`}
+              >
               <div className="sticky top-0 z-10 flex flex-wrap items-center gap-[9px] border-b border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-3 py-2.5">
                 <VerdictChip verdict={c.verdict} />
                 <span className="text-[13px] font-medium text-[var(--gs-text)]">{c.r.title}</span>
                 <GateChip gate={c.gate} />
                 {c.r.wfPhase && <PhaseBadge phase={c.r.wfPhase} />}
+                {c.r.sliceId && <SliceBadge sliceId={c.r.sliceId} known={knownSliceIds ? knownSliceIds.has(c.r.sliceId) : null} />}
                 <AdvancedInChips phases={phaseInfo?.advancedPhases[c.r.id] ?? []} />
                 {typeof c.score === 'number' && <ScoreBar value={c.score} small />}
                 {c.awaiting && (
@@ -710,7 +850,8 @@ export function ReviewRubric({ goal, onRecordHuman, onRunJudgment, onOpenEvidenc
                   <div>{c.r.reviews.map((rv) => <JudgementRow key={rv.id} review={rv} />)}</div>
                 )}
               </div>
-            </section>
+              </section>
+            </Fragment>
           ))}
 
           {/* right-column footer callout (mock .callout.rc-foot) */}

@@ -1,6 +1,8 @@
 /** @jsxImportSource react */
 import { createContext, Fragment, useContext, type ReactElement, type ReactNode } from 'react';
 import type { WfCreatedArtifact, WfGateType, WfNode, WfPhase, WfRef, WorkflowSpecData } from '../types/content.js';
+import type { GoalValidation } from '../../types/goals.js';
+import { gateStatusForPhase, gateWaiveInfoForPhase, type GateStatus } from '../../core/goal-gates.js';
 import { modelRoleLabel, normalizeModelRole, wfNodeModelRoleLabel } from '../model-roles.js';
 import { defineRenderer } from './registry.web.js';
 import { useBlockHost } from './host.web.js';
@@ -30,9 +32,21 @@ const DOT: Record<string, string> = {
   done: 'bg-[var(--gs-success)]',
   running: 'bg-[var(--gs-success)] animate-pulse',
   pending: 'bg-[var(--gs-text-dim)]',
+  // Gate-derived dot states (live interconnect — the ACTIVE workflow's node
+  // dots reflect the phase's computed gate, not the static JSON status).
+  'gate-unmet': 'bg-[var(--gs-danger)]',
+  'gate-waived': 'bg-[var(--gs-warning)]',
 };
-function StatusDot({ status }: { status?: WfNode['status'] }): ReactElement {
-  return <span className={`w-[7px] h-[7px] rounded-full flex-none ${DOT[status ?? 'pending']}`} />;
+function StatusDot({ status, title }: { status?: WfNode['status'] | 'gate-unmet' | 'gate-waived'; title?: string }): ReactElement {
+  return <span title={title} className={`w-[7px] h-[7px] rounded-full flex-none ${DOT[status ?? 'pending']}`} />;
+}
+
+/** Node dot state derived from a phase's computed gate (live workflow). */
+function gateDotStatus(gate: GateStatus): 'done' | 'pending' | 'gate-unmet' | 'gate-waived' {
+  if (gate.owed.length === 0) return 'pending'; // trivial — dim
+  if (gate.satisfied) return 'done';
+  if (gate.waived) return 'gate-waived';
+  return 'gate-unmet';
 }
 
 const GATE_TONE: Record<WfGateType, string> = {
@@ -41,10 +55,14 @@ const GATE_TONE: Record<WfGateType, string> = {
   command: 'text-[var(--gs-info)] border-[var(--gs-info)]',
 };
 
-// Mock routes created-artifact chips by type: rubric → rubric pane,
-// goal-slice/phased-goal → goal pane, else the named artifact viewer.
-function cartTarget(a: WfCreatedArtifact): string {
-  return a.type === 'rubric' ? 'rubric' : a.type === 'goal-slice' || a.type === 'phased-goal' ? 'goal' : `artifact:${a.name}`;
+// Created-artifact chips route by type: rubric → rubric pane FILTERED to the
+// owning phase's owed requirements (rubric-phase:<name>), goal-slice/
+// phased-goal → goal pane (scrolled to the slice heading when the artifact
+// carries a sliceId), else the named artifact viewer.
+function cartTarget(a: WfCreatedArtifact, phase?: string): string {
+  if (a.type === 'rubric') return phase ? `rubric-phase:${phase}` : 'rubric';
+  if (a.type === 'goal-slice' || a.type === 'phased-goal') return a.sliceId ? `goal-slice:${a.sliceId}` : 'goal';
+  return `artifact:${a.name}`;
 }
 
 /** Live model resolution for workflow nodes, from the same seams the settings
@@ -64,7 +82,28 @@ export function WorkflowResolutionProvider({ resolution, children }: { resolutio
   return <WorkflowResolutionContext.Provider value={resolution}>{children}</WorkflowResolutionContext.Provider>;
 }
 
-function NodeCard({ n }: { n: WfNode }): ReactElement {
+/** Live phase gates for the ACTIVE workflow (goal-rubric-workflow
+ *  interconnect): the surface injects the bound goal's validation so each
+ *  phase renders its COMPUTED gate (core/goal-gates.ts gateStatusForPhase)
+ *  instead of static JSON state. Null when the surface has no live goal
+ *  (transcript streams, galleries) or the spec isn't the workspace's single
+ *  canonical workflow — phases then render statically, exactly as before. */
+export interface WorkflowLiveGates {
+  validation: GoalValidation;
+  /** Slice ids currently derivable from the goal doc (dangling check);
+   *  null when the doc is unknown — slice chips then never amber. */
+  docSliceIds: Set<string> | null;
+  /** Surface offers the HUMAN-ONLY waive (backend.waiveGoalGate seam). */
+  canWaive: boolean;
+}
+
+const WorkflowGatesContext = createContext<WorkflowLiveGates | null>(null);
+
+export function WorkflowGatesProvider({ gates, children }: { gates: WorkflowLiveGates | null; children: ReactNode }): ReactElement {
+  return <WorkflowGatesContext.Provider value={gates}>{children}</WorkflowGatesContext.Provider>;
+}
+
+function NodeCard({ n, dotOverride }: { n: WfNode; dotOverride?: 'done' | 'pending' | 'gate-unmet' | 'gate-waived' }): ReactElement {
   const live = useContext(WorkflowResolutionContext);
   const gate = n.kind === 'gate';
   // Node identity: a NAMED agent from the subagent registry, or a named MODEL
@@ -97,7 +136,10 @@ function NodeCard({ n }: { n: WfNode }): ReactElement {
       }`}
     >
       <div className={`flex items-center gap-1.5 px-2 py-1.5 text-[11px] ${gate ? '' : 'border-b border-[var(--gs-border)]'}`}>
-        <StatusDot status={n.status} />
+        <StatusDot
+          status={dotOverride ?? n.status}
+          title={dotOverride ? 'live: reflects this phase’s computed gate' : undefined}
+        />
         <span className="text-[var(--gs-text)] font-medium">
           {gate ? `gate · ${n.gateType ?? 'human'}` : identity}
         </span>
@@ -129,20 +171,107 @@ function NodeCard({ n }: { n: WfNode }): ReactElement {
   );
 }
 
+/** Live gate chip: computed from the bound goal's validation — satisfied
+ *  (green) / unmet (red, 'n owed, m unmet', opens the rubric filtered to the
+ *  phase) / waived (amber, reason on hover) / trivial (dim, nothing owed). */
+function PhaseGateChip({ gate, waiveTitle, onOpenRubric }: {
+  gate: GateStatus;
+  waiveTitle?: string;
+  onOpenRubric: () => void;
+}): ReactElement {
+  const base = 'whitespace-nowrap text-[10.5px] px-1.5 py-px border';
+  if (gate.owed.length === 0) {
+    return <span className={`${base} text-[var(--gs-text-dim)] border-[var(--gs-border)]`} title="no requirements owed by this phase — gate trivially satisfied">◇ gate · trivial</span>;
+  }
+  if (gate.satisfied) {
+    return (
+      <button type="button" onClick={onOpenRubric} title={`all ${gate.owed.length} owed requirement(s) accepted — open the rubric filtered to this phase`} className={`${base} cursor-pointer bg-transparent text-[var(--gs-success)] border-[rgba(0,255,102,0.35)] hover:border-[var(--gs-success)]`}>
+        ✓ gate · satisfied · {gate.owed.length} owed
+      </button>
+    );
+  }
+  if (gate.waived) {
+    return (
+      <button type="button" onClick={onOpenRubric} title={waiveTitle ?? 'gate waived by a human'} className={`${base} cursor-pointer bg-transparent text-[var(--gs-warning)] border-[var(--gs-warning)]`}>
+        ◆ gate · waived · {gate.unmet.length} unmet
+      </button>
+    );
+  }
+  return (
+    <button type="button" onClick={onOpenRubric} title="open the rubric filtered to this phase's owed requirements" className={`${base} cursor-pointer bg-transparent text-[var(--gs-danger)] border-[var(--gs-danger)] hover:bg-[var(--gs-chip-red-bg)]`}>
+      ✕ gate · {gate.owed.length} owed, {gate.unmet.length} unmet
+    </button>
+  );
+}
+
 function PhaseSection({ p, index }: {
   p: WfPhase;
   index: number;
 }): ReactElement {
   const host = useBlockHost();
+  const liveGates = useContext(WorkflowGatesContext);
   const created = p.created ?? [];
+  // Live computed gate for this phase (goal-rubric-workflow interconnect).
+  const gate = liveGates ? gateStatusForPhase({ validation: liveGates.validation }, p.name) : null;
+  const waiveInfo = gate?.waived && liveGates ? gateWaiveInfoForPhase(liveGates.validation, p.name) : null;
+  const dotOverride = gate ? gateDotStatus(gate) : undefined;
+  const openRubricForPhase = (): void => host.dispatch({ kind: 'open', target: `rubric-phase:${p.name}` });
   return (
     <div className="border border-[var(--gs-border)]">
-      {/* header: phase n · name · gate banner toned by gate type */}
-      <div className="flex items-center gap-2 px-3 py-2 bg-[var(--gs-bg-elevated)] border-b border-[var(--gs-border)]">
+      {/* header: phase n · name · live gate chip (computed) · gate banner toned by gate type */}
+      <div className="flex items-center gap-2 flex-wrap px-3 py-2 bg-[var(--gs-bg-elevated)] border-b border-[var(--gs-border)]">
         <span className="text-[10.5px] uppercase tracking-[0.1em] text-[var(--gs-text-dim)]">phase {index + 1}</span>
         <span className="text-[12.5px] font-medium text-[var(--gs-text)]">{p.name}</span>
-        {p.gate && <span className={`ml-auto whitespace-nowrap text-[10.5px] px-1.5 py-px border ${GATE_TONE[p.gate.type]}`}>◆ gate · {p.gate.label}</span>}
+        <span className="ml-auto flex items-center gap-1.5">
+          {gate && (
+            <PhaseGateChip
+              gate={gate}
+              waiveTitle={waiveInfo ? `waived by ${waiveInfo.actor}: ${waiveInfo.reason}` : undefined}
+              onOpenRubric={openRubricForPhase}
+            />
+          )}
+          {gate && !gate.satisfied && !gate.waived && liveGates?.canWaive && (
+            <button
+              type="button"
+              onClick={() => host.dispatch({ kind: 'run', actionId: 'gate-waive', payload: { phase: p.name } })}
+              title="Human-only: waive this gate with a recorded reason"
+              className="whitespace-nowrap border border-dashed border-[var(--gs-warning)] bg-transparent px-1.5 py-px text-[10.5px] text-[var(--gs-warning)] cursor-pointer hover:bg-[var(--gs-chip-amber-bg)]"
+            >
+              waive…
+            </button>
+          )}
+          {p.gate && <span className={`whitespace-nowrap text-[10.5px] px-1.5 py-px border ${GATE_TONE[p.gate.type]}`}>◆ gate · {p.gate.label}</span>}
+        </span>
       </div>
+      {/* goal-doc slices this phase reads (heading-anchored; chips open the
+          goal doc scrolled to the heading; dangling ids render amber) */}
+      {(p.slices?.length ?? 0) > 0 && (
+        <div className="flex items-center gap-1.5 flex-wrap px-3 py-1.5 border-b border-[var(--gs-border-muted)]">
+          <span className="flex-none text-[10px] uppercase tracking-[0.08em] text-[var(--gs-text-dim)]">slices</span>
+          {p.slices!.map((sliceId) => {
+            const dangling = liveGates?.docSliceIds ? !liveGates.docSliceIds.has(sliceId) : false;
+            return dangling ? (
+              <span
+                key={sliceId}
+                title={`"${sliceId}" is not a heading in the goal doc`}
+                className={`inline-flex items-center gap-1 ${MONO} text-[10.5px] px-1.5 py-px border border-[var(--gs-warning)] bg-[var(--gs-chip-amber-bg)] text-[var(--gs-chip-amber-text)]`}
+              >
+                ⚠ slice missing: {sliceId}
+              </span>
+            ) : (
+              <button
+                key={sliceId}
+                type="button"
+                onClick={() => host.dispatch({ kind: 'open', target: `goal-slice:${sliceId}` })}
+                title="open the goal doc at this heading"
+                className={`inline-flex items-center gap-1 ${MONO} text-[10.5px] px-1.5 py-px border cursor-pointer text-[var(--gs-accent)] border-[rgba(0,255,102,0.3)] bg-[rgba(0,255,102,0.04)] hover:border-[var(--gs-accent)]`}
+              >
+                § {sliceId}
+              </button>
+            );
+          })}
+        </div>
+      )}
       {/* inputs */}
       <div className="flex items-center gap-1.5 flex-wrap px-3 py-1.5 border-b border-[var(--gs-border-muted)]">
         <span className="flex-none w-[22px] text-[10px] uppercase tracking-[0.08em] text-[var(--gs-text-dim)]">in</span>
@@ -158,7 +287,7 @@ function PhaseSection({ p, index }: {
                 <span className="text-[10px] text-[var(--gs-text-muted)]">▶</span>
               </div>
             )}
-            <NodeCard n={n} />
+            <NodeCard n={n} dotOverride={dotOverride} />
           </Fragment>
         ))}
       </div>
@@ -181,7 +310,7 @@ function PhaseSection({ p, index }: {
           <button
             key={i}
             type="button"
-            onClick={() => host.dispatch({ kind: 'open', target: cartTarget(a) })}
+            onClick={() => host.dispatch({ kind: 'open', target: cartTarget(a, p.name) })}
             className="inline-flex items-center gap-[7px] border border-[var(--gs-border)] border-l-2 border-l-[var(--gs-purple)] hover:border-[var(--gs-purple)] bg-[#0a0a0a] px-2 py-[3px] text-[11px] cursor-pointer transition-colors"
           >
             <span className="text-[10.5px] uppercase tracking-[0.04em] text-[var(--gs-purple)]">{a.type}</span>

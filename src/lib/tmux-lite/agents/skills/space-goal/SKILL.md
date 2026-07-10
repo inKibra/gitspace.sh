@@ -23,6 +23,7 @@ Use this skill when asked to author, fulfill, or judge a goal's validation contr
 - **Generation**: how evidence appears — `manual` (a human/agent attaches it) or `command` (a command produces it).
 - **Judgment**: how evidence is judged — `human` (Pass / Needs changes / Fail with a note), `llm` (an LLM applies the rubric), or `command` (a shell command applies the rubric with a structured `expect`).
 - **Expect** (command judgment): `exit-zero | stdout-contains | stderr-empty | output-matches`.
+- **Same-run judgment** (default for command-generated requirements): the generation run IS the judged run — `expect` is applied to its captured exit/stdout/stderr. One execution, one verdict. Never pass `--judge-command` with the same command as `--gen-command`; only pass it when a genuinely different command judges the evidence.
 - **Status**: `missing | review | accepted`.
 - **Readiness**: aggregate of required requirement statuses. Reads like `Ready: all required artifacts passed judgment.`
 - **Slice**: a heading-anchored section of the goal doc. Ids are slugified headings, parsed at read time — `space goal doc slices` lists them. `--slice` grounds a requirement in the doc section it proves; dangling ids warn (amber), never fail.
@@ -39,13 +40,24 @@ space goal requirement add \
   --gen manual \
   --judge human
 
-# Declare a command-generated + command-judged requirement (auto-accepts on exit zero)
+# Declare a command-generated requirement. Omit --judge entirely: it defaults
+# to same-run command judgment — --expect judges the generation run itself
+# (auto-accepts when it passes; `review run` re-judges the latest run without
+# executing the suite a second time). Do NOT repeat the command as --judge-command.
 space goal requirement add \
   --title "Focused tests pass" \
   --kind test-output \
   --rubric "Suite completes with 0 failures. No skipped tests. Exit code 0." \
   --gen command --gen-command "bun test src/components/__tests__/KanbanBoard.web.test.tsx" \
-  --judge command --judge-command "bun test src/components/__tests__/KanbanBoard.web.test.tsx" --expect exit-zero
+  --expect exit-zero
+
+# Only pass --judge-command when a DIFFERENT command judges the evidence
+space goal requirement add \
+  --title "Bundle stays under budget" \
+  --kind test-output \
+  --rubric "Production build succeeds and main chunk stays under 500 KB." \
+  --gen command --gen-command "bun run build" \
+  --judge command --judge-command "node scripts/check-bundle-size.mjs" --expect exit-zero
 
 # Declare an LLM-judged requirement
 space goal requirement add \
@@ -94,12 +106,14 @@ space goal artifact attach --requirement "Diff summary of routing changes" --bod
 space goal artifact run --requirement "Focused tests pass"
 ```
 
-`space goal artifact run` executes the requirement's `generation.command` in the workspace cwd, captures stdout/stderr/exit, attaches an inline `Evidence` record with `source: 'command'`. If the requirement is also command-judged with `expect: exit-zero` and the command exited 0, the run auto-records a passing review in the same step.
+`space goal artifact run` executes the requirement's `generation.command` in the workspace cwd, captures stdout/stderr/exit, attaches an inline `Evidence` record with `source: 'command'`. If the requirement is command-judged and the run satisfies `expect`, the run auto-records a passing review in the same step — for same-run judgments this is the whole loop.
 
 ## Judging requirements
 
 ```sh
-# Run the configured judgment (command or LLM)
+# Run the configured judgment (command or LLM). Same-run command judgments
+# judge the LATEST generation run's captured output — the command is not
+# re-executed. Errors if no generation run exists yet (run `artifact run` first).
 space goal review run --requirement "Focused tests pass"
 
 # Record a human review (required for human-judged requirements)

@@ -2,9 +2,11 @@ import { decodeBase64Utf8 } from './artifact-kinds.js';
 /** @jsxImportSource react */
 import { useEffect, useMemo, useState, type ReactElement } from 'react';
 import type { SessionBackend } from '../session/backend.js';
+import type { GoalValidation } from '../types/goals.js';
+import { parseDocSlices, workflowSpecWarnings, type WorkspaceWorkflowSpec } from '../core/goal-gates.js';
 import { BlockView } from '../blocks/render/registry.web.js';
 import { BlockHostProvider, type BlockAction, type BlockHost } from '../blocks/render/host.web.js';
-import { WorkflowResolutionProvider } from '../blocks/render/workflow.web.js';
+import { WorkflowGatesProvider, WorkflowResolutionProvider, type WorkflowLiveGates } from '../blocks/render/workflow.web.js';
 import { useWorkflowResolution } from '../app/react/useWorkflowResolution.web.js';
 
 /**
@@ -12,13 +14,28 @@ import { useWorkflowResolution } from '../app/react/useWorkflowResolution.web.js
  * loops · gates · artifacts per phase". The spec is artifact-driven — agents
  * commit `*.workflow.json` (WorkflowSpecData) to the workspace artifacts
  * branch and this pane renders it through the 'workflow' block renderer.
+ *
+ * Goal-rubric-workflow interconnect: when the workspace's goal is bound
+ * (`goal` prop) and the spec is THE single canonical workflow, phases render
+ * live COMPUTED gates (core/goal-gates.ts), slice chips navigate to the goal
+ * doc, rubric chips open the rubric filtered to the phase, and `space
+ * workflow validate` warnings surface as an amber strip in the header.
  */
-export function WorkflowPanel({ backend, workspaceId, onOpenArtifact, onOpenGoal, onOpenRubric }: {
+export function WorkflowPanel({ backend, workspaceId, goal, onOpenArtifact, onOpenGoal, onOpenRubric, onOpenGoalSlice, onOpenRubricPhase, onWaiveGate }: {
   backend: SessionBackend | null;
   workspaceId: string;
+  /** The workspace's bound goal (validation drives computed gates; the doc
+   *  markdown drives slice dangling checks). Null = no goal, render static. */
+  goal?: { id: string; validation?: GoalValidation | null; docMarkdown?: string | null } | null;
   onOpenArtifact?: (path: string) => void;
   onOpenGoal?: () => void;
   onOpenRubric?: () => void;
+  /** Open the goal doc pane scrolled to a slice heading. */
+  onOpenGoalSlice?: (sliceId: string) => void;
+  /** Open the rubric pane filtered to a phase's owed requirements. */
+  onOpenRubricPhase?: (phase: string) => void;
+  /** HUMAN-ONLY gate waive (backend.waiveGoalGate seam — reason required). */
+  onWaiveGate?: (phase: string) => void;
 }): ReactElement {
   const [specs, setSpecs] = useState<Array<{ path: string; data: unknown }>>([]);
   const [selected, setSelected] = useState(0);
@@ -54,17 +71,68 @@ export function WorkflowPanel({ backend, workspaceId, onOpenArtifact, onOpenGoal
   const host = useMemo<BlockHost>(() => ({
     resolve: () => {},
     dispatch: (action: BlockAction) => {
+      // Human-only gate waive (the renderer's 'waive…' button).
+      if (action.kind === 'run' && action.actionId === 'gate-waive') {
+        const phase = (action.payload as { phase?: string } | undefined)?.phase;
+        if (phase) onWaiveGate?.(phase);
+        return;
+      }
       if (action.kind !== 'open') return;
-      // Created-artifact chips route by type (mock): rubric → rubric pane,
-      // goal-slice/phased-goal → goal pane, else the artifact viewer.
+      // Chip routing: rubric chips + gate chips open the rubric filtered to
+      // the phase; slice chips open the goal doc at the heading; else the
+      // named artifact viewer.
+      if (action.target.startsWith('rubric-phase:')) {
+        const phase = action.target.slice('rubric-phase:'.length);
+        if (onOpenRubricPhase) onOpenRubricPhase(phase); else onOpenRubric?.();
+        return;
+      }
       if (action.target === 'rubric') { onOpenRubric?.(); return; }
+      if (action.target.startsWith('goal-slice:')) {
+        const sliceId = action.target.slice('goal-slice:'.length);
+        if (onOpenGoalSlice) onOpenGoalSlice(sliceId); else onOpenGoal?.();
+        return;
+      }
       if (action.target === 'goal') { onOpenGoal?.(); return; }
       onOpenArtifact?.(action.target.replace(/^artifact:/, ''));
     },
     readOnly: true,
-  }), [onOpenArtifact, onOpenGoal, onOpenRubric]);
+  }), [onOpenArtifact, onOpenGoal, onOpenRubric, onOpenGoalSlice, onOpenRubricPhase, onWaiveGate]);
 
   const cur = specs[selected];
+
+  // Doc slices from the bound goal (same parse the CLI uses — parity with
+  // `space workflow validate`, which treats a missing doc as no slices).
+  const docSliceIds = useMemo(
+    () => parseDocSlices(goal?.docMarkdown ?? '').map((s) => s.id),
+    [goal?.docMarkdown],
+  );
+
+  // Live gates only for THE canonical workflow (one *.workflow.json — the
+  // same one-per-workspace rule loadWorkspaceWorkflow enforces).
+  const gates = useMemo<WorkflowLiveGates | null>(() => {
+    if (specs.length !== 1 || !goal?.validation) return null;
+    // Same dangling rule as the warnings strip / CLI: a missing doc means no
+    // known slices, so every ref ambers (truthful — there are no headings).
+    return {
+      validation: goal.validation,
+      docSliceIds: new Set(docSliceIds),
+      canWaive: Boolean(onWaiveGate),
+    };
+  }, [specs.length, goal?.validation, docSliceIds, onWaiveGate]);
+
+  // `space workflow validate` warnings, computed on the pane's own data
+  // (amber state — dangling slice refs, phase-name oddities, extra specs).
+  const warnings = useMemo(() => {
+    if (state !== 'ready') return [];
+    const list: string[] = [];
+    if (specs.length > 1) {
+      list.push(`Multiple workflow specs on the artifacts mount — a workspace has ONE workflow. Found: ${specs.map((s) => s.path).join(', ')}.`);
+    }
+    if (cur && goal !== undefined) {
+      list.push(...workflowSpecWarnings(cur.data as WorkspaceWorkflowSpec, docSliceIds));
+    }
+    return list;
+  }, [state, specs, cur, goal, docSliceIds]);
 
   return (
     <div className="flex h-full min-h-0 flex-col text-[12px]">
@@ -75,6 +143,17 @@ export function WorkflowPanel({ backend, workspaceId, onOpenArtifact, onOpenGoal
         <span className="text-[11px] uppercase tracking-[0.1em] text-[var(--gs-text-muted)]">Workflow</span>
         <span className="truncate text-[11px] text-[var(--gs-text-muted)]">phased dataflow · gated loops · gates · artifacts per phase</span>
       </div>
+      {/* amber strip: `space workflow validate` warnings (none → nothing) */}
+      {warnings.length > 0 && (
+        <div className="flex-none border-b border-[var(--gs-border)] border-l-2 border-l-[var(--gs-warning)] bg-[rgba(255,204,0,0.04)] px-3 py-1.5">
+          {warnings.map((w, i) => (
+            <div key={i} className="flex items-baseline gap-1.5 text-[11px] leading-[1.5] text-[var(--gs-warning)]">
+              <span className="flex-none">⚠</span>
+              <span className="min-w-0 text-[var(--gs-text-muted)]">{w}</span>
+            </div>
+          ))}
+        </div>
+      )}
       <div className="min-h-0 flex-1 overflow-y-auto p-[13px]">
         {state === 'loading' ? (
           <div className="flex h-full items-center justify-center text-[var(--gs-text-dim)]">Loading…</div>
@@ -110,7 +189,9 @@ export function WorkflowPanel({ backend, workspaceId, onOpenArtifact, onOpenGoal
             )}
             <BlockHostProvider host={host}>
               <WorkflowResolutionProvider resolution={resolution}>
-                <BlockView block={{ id: cur.path, type: 'workflow', data: cur.data }} />
+                <WorkflowGatesProvider gates={gates}>
+                  <BlockView block={{ id: cur.path, type: 'workflow', data: cur.data }} />
+                </WorkflowGatesProvider>
               </WorkflowResolutionProvider>
             </BlockHostProvider>
           </div>

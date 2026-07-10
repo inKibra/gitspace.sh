@@ -20,7 +20,8 @@ import { hashRubric } from './goal-validation.js';
 import { getWorkspaceStatus } from './workspace-metadata.js';
 import { getThreads } from './review.js';
 import { captureArtifacts } from './artifacts.js';
-import { describeOwedRequirement, gateStatusForPhase, tryLoadWorkspaceWorkflow, workflowPhaseNames } from './goal-workflow.js';
+import { describeOwedRequirement, gateStatusForPhase, workflowPhaseNames } from './goal-gates.js';
+import { tryLoadWorkspaceWorkflow } from './goal-workflow.js';
 import { SpacesError } from '../types/errors.js';
 import type { WorkspacePhase } from '../types/config.js';
 

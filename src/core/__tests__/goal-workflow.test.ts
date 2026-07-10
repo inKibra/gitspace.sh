@@ -3,12 +3,8 @@ import { execFileSync } from 'child_process';
 import { mkdirSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import {
-  gateStatusForPhase,
-  loadWorkspaceWorkflow,
-  parseDocSlices,
-  validateWorkspaceWorkflow,
-} from '../goal-workflow.js';
+import { gateStatusForPhase, parseDocSlices } from '../goal-gates.js';
+import { loadWorkspaceWorkflow, validateWorkspaceWorkflow } from '../goal-workflow.js';
 import { startPhaseJournal, endPhaseJournal, findOpenPhaseEntry } from '../phase-journal.js';
 import { ensureArtifactsRepo, ensureArtifactsMount } from '../artifacts.js';
 import { readWorkspaceGoal, writeGoalRecord } from '../goal-chain.js';

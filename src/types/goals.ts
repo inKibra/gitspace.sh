@@ -19,6 +19,12 @@ export type CommandExpectation =
 export type Judgment =
   | { kind: 'human' }
   | { kind: 'llm'; modelHint?: string }
+  /** Command judgment. Same-run marker (gen==judge dedup): when `command`
+   *  equals the generation command (the CLI materializes this when
+   *  `--judge-command` is omitted) — or is absent on hand-edited records —
+   *  `review run` does NOT re-execute; it applies `expect` to the latest
+   *  generation run's captured evidence (core/goal-gates.ts
+   *  isSameRunJudgment). */
   | { kind: 'command'; command: string; expect: CommandExpectation };
 
 export type RequirementStatus = 'missing' | 'review' | 'accepted';
@@ -79,13 +85,20 @@ export interface Requirement {
   evidence: Evidence[];
   reviews: Review[];
   /** Journal phase that was OPEN when this requirement was created
-   *  (phase-journal join). Absent on legacy requirements and when no
-   *  phase was open at creation time. */
+   *  (phase-journal join), or the phase explicitly declared at authoring
+   *  time (`requirement add --phase`). The active workflow's phase list is
+   *  canonical; unknown names warn but are allowed. Requirements with a
+   *  wfPhase are OWED by that phase's gate. Absent on legacy requirements
+   *  and when no phase was open at creation time. */
   wfPhase?: string;
+  /** Goal-doc slice this requirement grounds itself in (heading-anchored,
+   *  id = slugified heading — see core/goal-workflow.ts parseDocSlices).
+   *  Dangling slice ids are amber validation state, never a hard error. */
+  sliceId?: string;
 }
 
 export type TimelineEventTone = 'blue' | 'amber' | 'green' | 'red' | 'violet';
-export type TimelineEventKind = 'contract' | 'generation' | 'review' | 'readiness' | 'phase';
+export type TimelineEventKind = 'contract' | 'generation' | 'review' | 'readiness' | 'phase' | 'gate';
 
 export interface TimelineEvent {
   id: string;
