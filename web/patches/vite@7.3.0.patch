@@ -1,0 +1,22 @@
+diff --git a/dist/node/chunks/config.js b/dist/node/chunks/config.js
+index f8ee63def2c0358a11681247b87362ea7bd1abde..be58b981c25e7944ee22fb4476d73aa5dcd9227b 100644
+--- a/dist/node/chunks/config.js
++++ b/dist/node/chunks/config.js
+@@ -21600,7 +21600,7 @@ var require_ws_incoming = /* @__PURE__ */ __commonJSMin(((exports) => {
+ 		function onOutgoingError(err$2) {
+ 			if (cb) cb(err$2, req$4, socket);
+ 			else server.emit("error", err$2, req$4, socket);
+-			socket.destroySoon();
++			(typeof socket.destroySoon === "function" ? socket.destroySoon() : socket.end());
+ 		}
+ 		proxyReq.on("response", (proxyRes) => {
+ 			log$1("got non-ws HTTP response", {
+@@ -21629,7 +21629,7 @@ var require_ws_incoming = /* @__PURE__ */ __commonJSMin(((exports) => {
+ 				});
+ 				proxyRes.on("end", () => {
+ 					writeChunk("");
+-					socket.destroySoon();
++					(typeof socket.destroySoon === "function" ? socket.destroySoon() : socket.end());
+ 				});
+ 			} else proxyRes.resume();
+ 		});

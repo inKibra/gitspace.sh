@@ -1,5 +1,18 @@
 import { builtinModules } from 'node:module'
 import { readFileSync } from 'node:fs'
+import net from 'node:net'
+
+// Bun-compat: vite's WS proxy teardown calls socket.destroySoon(), which
+// Bun's net.Socket lacks — the whole dev supervisor died on certain client
+// disconnects (took the stack down three times in one day). There is no real
+// `node` on some dev machines (Bun shims `node` to itself), so polyfill here
+// where the dev-server process is guaranteed to load it. No-op under real node.
+const socketProto = net.Socket.prototype as unknown as { destroySoon?: (this: net.Socket) => void }
+if (!socketProto.destroySoon) {
+  socketProto.destroySoon = function destroySoon(this: net.Socket) {
+    this.end()
+  }
+}
 
 import { defineConfig, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'

@@ -433,12 +433,10 @@ async function main(): Promise<void> {
   // Phase 3: Start Vite dev server with enrollment token
   const enrollToken = process.env.DEV_ENROLL_TOKEN ?? crypto.randomUUID();
   log('dev', 'Starting Vite...');
-  // Run vite under node, not bun: vite's HMR socket teardown calls
-  // socket.destroySoon(), which Bun's net.Socket lacks — under bun the whole
-  // dev supervisor dies on certain client disconnects (TypeError:
-  // socket.destroySoon is not a function). agent-surfaces-app already runs
-  // its vite under node for the same reason.
-  spawnChild('web', ['node', join(WEB_DIR, 'node_modules', '.bin', 'vite'), '--port', String(vitePort), '--host'], {
+  // NOTE: spawning 'node' here was a placebo — machines without a real node
+  // get Bun's node shim (bun itself). The destroySoon Bun-compat gap is
+  // polyfilled in web/vite.config.ts instead, which holds under either runtime.
+  spawnChild('web', ['bunx', 'vite', '--port', String(vitePort), '--host'], {
     RELAY_PORT: String(relayPort),
     VITE_RELAY_URL: relayUrl,
     DEV_IDENTITY_PATH: devIdentityPath,
