@@ -324,13 +324,25 @@ function RefChip({ r }: { r: WfRef }) {
   return <span className={`wfx-ref ${r.io}`}><span className="wfx-ref-ic">{r.io === 'artifact' ? '◇' : '▤'}</span>{r.name}</span>;
 }
 
+// Model-role ids → user vocabulary. The workflow surface speaks roles
+// natively — raw model names never render; legacy `model` aliases translate.
+const WF_MODEL_ROLE_LABELS: Record<string, string> = { task: 'Current model', slow: 'Thinking', smol: 'Fast', plan: 'Architect' };
+const WF_MODEL_ALIAS_TO_ROLE: Record<string, string> = { opus: 'slow', sonnet: 'task', haiku: 'smol', inherit: 'task' };
+function wfModelRoleLabel(n: WfNode): string | undefined {
+  const role = n.modelRole ?? (n.model ? WF_MODEL_ALIAS_TO_ROLE[n.model.toLowerCase()] : undefined);
+  if (!role) return undefined;
+  const id = role.toLowerCase().replace(/^pi\//, '');
+  return WF_MODEL_ROLE_LABELS[id] ?? id;
+}
+
 function WfNodeCard({ n }: { n: WfNode }) {
+  const modelRole = wfModelRoleLabel(n);
   return (
     <div className={`wfx-node ${n.kind} ${n.status ?? ''}`}>
       <div className="wfx-node-h">
         <span className={`wdot ${n.status ?? 'pending'}`} />
         <span className="wfx-role">{n.kind === 'gate' ? `gate · ${n.gateType}` : n.role}</span>
-        {n.model && <span className="wfx-model">{n.model}</span>}
+        {modelRole && <span className="wfx-model">{modelRole}</span>}
       </div>
       {n.fanout && (
         <div className="wfx-fan">

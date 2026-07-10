@@ -269,6 +269,11 @@ export const wfNode = z.object({
   id: z.string(),
   role: z.string(),
   kind: z.enum(['agent', 'gate', 'tool']),
+  /** Model-role id ('task' | 'slow' | 'smol' | 'plan', optionally 'pi/'-prefixed).
+   *  Rendered as the role display name (see src/blocks/model-roles.ts). */
+  modelRole: z.string().optional(),
+  /** Legacy Claude model alias ('opus'/'sonnet'/...). Parsed for back-compat
+   *  only; renderers translate it to a model role and never show it raw. */
   model: z.string().optional(),
   status: z.enum(['done', 'running', 'pending']).optional(),
   gateType: wfGateType.optional(),

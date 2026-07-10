@@ -785,8 +785,8 @@ export const workflowSpec: Block = { id: id('wf'), type: 'workflow', data: {
         { name: 'type-review rubric', type: 'rubric', from: 'authored for this phase', passedTo: 'reviewer agent' },
       ],
       nodes: [
-        { id: 'i1', role: 'implementation agent', kind: 'agent', model: 'sonnet', status: 'done', reads: [{ name: 'types brief', io: 'artifact' }, { name: 'effects/a.ts', io: 'source' }], writes: [{ name: 'types.ts', io: 'source' }], out: 'draft types.ts' },
-        { id: 'r1', role: 'reviewer agent', kind: 'agent', model: 'opus', status: 'done', reads: [{ name: 'type-review rubric', io: 'artifact' }, { name: 'types.ts', io: 'source' }], writes: [{ name: 'type-review.md', io: 'artifact' }], out: 'verdict + notes' },
+        { id: 'i1', role: 'implementation agent', kind: 'agent', modelRole: 'task', status: 'done', reads: [{ name: 'types brief', io: 'artifact' }, { name: 'effects/a.ts', io: 'source' }], writes: [{ name: 'types.ts', io: 'source' }], out: 'draft types.ts' },
+        { id: 'r1', role: 'reviewer agent', kind: 'agent', modelRole: 'slow', status: 'done', reads: [{ name: 'type-review rubric', io: 'artifact' }, { name: 'types.ts', io: 'source' }], writes: [{ name: 'type-review.md', io: 'artifact' }], out: 'verdict + notes' },
         { id: 'g1', role: 'gate', kind: 'gate', gateType: 'human', status: 'done' },
       ],
       outputs: [{ name: 'types.ts', kind: 'code', io: 'source', required: true, status: 'created' }, { name: 'type-review.md', kind: 'note', io: 'artifact', required: true, status: 'created' }],
@@ -798,9 +798,9 @@ export const workflowSpec: Block = { id: id('wf'), type: 'workflow', data: {
       loop: 'failing tests OR reviewer “changes” → implementation re-runs',
       created: [{ name: 'core rubric', type: 'rubric', from: 'authored for this phase', passedTo: 'reviewer agent' }],
       nodes: [
-        { id: 'i2', role: 'implementation agent', kind: 'agent', model: 'sonnet', status: 'done', reads: [{ name: 'types.ts', io: 'source' }], writes: [{ name: 'core.ts', io: 'source' }, { name: 'core.test.ts', io: 'source' }], out: 'core.ts + tests' },
+        { id: 'i2', role: 'implementation agent', kind: 'agent', modelRole: 'task', status: 'done', reads: [{ name: 'types.ts', io: 'source' }], writes: [{ name: 'core.ts', io: 'source' }, { name: 'core.test.ts', io: 'source' }], out: 'core.ts + tests' },
         { id: 't2', role: 'test runner', kind: 'tool', status: 'done', reads: [{ name: 'core.test.ts', io: 'source' }], writes: [{ name: 'test-results', io: 'artifact' }], out: 'results' },
-        { id: 'r2', role: 'reviewer agent', kind: 'agent', model: 'opus', status: 'running', reads: [{ name: 'core rubric', io: 'artifact' }, { name: 'core.ts', io: 'source' }, { name: 'test-results', io: 'artifact' }], writes: [{ name: 'core-review.md', io: 'artifact' }], out: 'verdict' },
+        { id: 'r2', role: 'reviewer agent', kind: 'agent', modelRole: 'slow', status: 'running', reads: [{ name: 'core rubric', io: 'artifact' }, { name: 'core.ts', io: 'source' }, { name: 'test-results', io: 'artifact' }], writes: [{ name: 'core-review.md', io: 'artifact' }], out: 'verdict' },
         { id: 'g2', role: 'gate', kind: 'gate', gateType: 'orchestration', status: 'pending' },
       ],
       outputs: [{ name: 'core.ts', kind: 'code', io: 'source', required: true, status: 'created' }, { name: 'core.test.ts', kind: 'test', io: 'source', required: true, status: 'created' }, { name: 'test-results', kind: 'evidence', io: 'artifact', required: true, status: 'created' }],
@@ -815,8 +815,8 @@ export const workflowSpec: Block = { id: id('wf'), type: 'workflow', data: {
         { name: 'visual-diff rubric', type: 'rubric', passedTo: 'reviewer agent' },
       ],
       nodes: [
-        { id: 'i3', role: 'implementation agent', kind: 'agent', model: 'sonnet', status: 'pending', reads: [{ name: 'migration plan', io: 'artifact' }, { name: 'core.ts', io: 'source' }], writes: [{ name: 'pipeline.ts', io: 'source' }, { name: 'Editor.tsx', io: 'source' }], out: 'migrated files' },
-        { id: 'r3', role: 'reviewer agent', kind: 'agent', model: 'opus', status: 'pending', reads: [{ name: 'visual-diff rubric', io: 'artifact' }, { name: 'diff', io: 'source' }], writes: [{ name: 'migrate-review.md', io: 'artifact' }], out: 'verdict', fanout: { over: 'each changed consumer', instances: ['pipeline.ts', 'Editor.tsx', 'Scramble.ts'] } },
+        { id: 'i3', role: 'implementation agent', kind: 'agent', modelRole: 'task', status: 'pending', reads: [{ name: 'migration plan', io: 'artifact' }, { name: 'core.ts', io: 'source' }], writes: [{ name: 'pipeline.ts', io: 'source' }, { name: 'Editor.tsx', io: 'source' }], out: 'migrated files' },
+        { id: 'r3', role: 'reviewer agent', kind: 'agent', modelRole: 'slow', status: 'pending', reads: [{ name: 'visual-diff rubric', io: 'artifact' }, { name: 'diff', io: 'source' }], writes: [{ name: 'migrate-review.md', io: 'artifact' }], out: 'verdict', fanout: { over: 'each changed consumer', instances: ['pipeline.ts', 'Editor.tsx', 'Scramble.ts'] } },
         { id: 'g3', role: 'gate', kind: 'gate', gateType: 'human', status: 'pending' },
       ],
       outputs: [{ name: 'pipeline.ts + Editor.tsx', kind: 'code', io: 'source', required: true, status: 'pending' }, { name: 'before/after.png', kind: 'screenshot', io: 'artifact', required: true, status: 'pending' }],

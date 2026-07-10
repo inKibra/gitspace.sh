@@ -17,6 +17,7 @@ import {
 } from './pi-runtime.js';
 import type { AgentControlInfo, AgentDefinitionInfo, AgentHistoryEntry, AgentOAuthEvent, AgentSettingSchemaItem, AgentToolInfo, AgentTreeNode } from '../../../agents/agent-runtime-types.js';
 import { getTranscriptRange } from '../../../blocks/agent/transcript-source.js';
+import { CLAUDE_MODEL_ALIAS_TO_MODEL_ROLE } from '../../../blocks/model-roles.js';
 import type { TranscriptPage, TranscriptSource } from '../../../blocks/agent/transcript-source.js';
 import { executeSpaceCommand } from './extensions/space-command.js';
 import { listPiSessions, findPiSessionFile, type PiSessionFileInfo } from './pi-session-files.js';
@@ -73,20 +74,15 @@ const SETTINGS_CATALOG: Array<{ path: string; label: string; kind: 'boolean' | '
   { path: 'tools.intentTracing', label: 'Tool intent tracing', kind: 'boolean' },
 ];
 
-/** Claude Code frontmatter model aliases → OMP role references.
- *  - opus: Claude's deep-reasoning tier → pi/slow (reviewer-grade role)
- *  - sonnet: Claude's balanced daily-driver → pi/task (inherits the session's
- *    default model — the OMP equivalent of "use the normal model")
- *  - haiku: Claude's cheap/fast tier → pi/smol
- *  - inherit: explicit "use the parent's model" → pi/task (special-cased by
- *    the SDK's resolveAgentModelPatterns to inherit the session model)
- */
-const CLAUDE_MODEL_ALIAS_TO_ROLE: Record<string, string> = {
-  opus: 'pi/slow',
-  sonnet: 'pi/task',
-  haiku: 'pi/smol',
-  inherit: 'pi/task',
-};
+/** Claude Code frontmatter model aliases → OMP role references ('pi/slow',
+ *  'pi/task', …). The alias table itself lives in the shared, bundle-safe
+ *  module src/blocks/model-roles.ts (web renderers translate legacy `model`
+ *  values with it); 'inherit'/'sonnet' → task are special-cased by the SDK's
+ *  resolveAgentModelPatterns to inherit the session model. */
+function claudeAliasToOmpRole(alias: string): string | null {
+  const role = CLAUDE_MODEL_ALIAS_TO_MODEL_ROLE[alias];
+  return role ? `pi/${role}` : null;
+}
 
 /**
  * When an agent definition pins Claude-style model aliases that OMP cannot
@@ -102,7 +98,7 @@ function mapClaudeAliasModel(model: string | string[] | undefined): string | nul
     .map((p) => p.trim().toLowerCase())
     .filter(Boolean);
   if (patterns.length === 0) return null;
-  const roles = patterns.map((p) => CLAUDE_MODEL_ALIAS_TO_ROLE[p] ?? null);
+  const roles = patterns.map((p) => claudeAliasToOmpRole(p));
   if (roles.some((r) => r === null)) return null;
   return roles[0];
 }

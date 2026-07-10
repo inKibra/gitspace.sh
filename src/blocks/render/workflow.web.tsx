@@ -1,6 +1,7 @@
 /** @jsxImportSource react */
 import { Fragment, useState, type ReactElement } from 'react';
 import type { WfArtifactType, WfCreatedArtifact, WfGateType, WfNode, WfPhase, WfRef, WorkflowSpecData } from '../types/content.js';
+import { wfNodeModelRoleLabel } from '../model-roles.js';
 import { defineRenderer } from './registry.web.js';
 import { useBlockHost } from './host.web.js';
 
@@ -56,6 +57,9 @@ function cartTarget(a: WfCreatedArtifact): string {
 
 function NodeCard({ n }: { n: WfNode }): ReactElement {
   const gate = n.kind === 'gate';
+  // Model-role display name (Thinking / Fast / Current model / Architect…) —
+  // legacy `model` aliases are translated; raw model names never render.
+  const modelRole = wfNodeModelRoleLabel(n);
   return (
     <div
       className={`border min-w-[152px] max-w-[210px] ${
@@ -69,7 +73,7 @@ function NodeCard({ n }: { n: WfNode }): ReactElement {
         <span className="text-[var(--gs-text)] font-medium">
           {gate ? `gate · ${n.gateType ?? 'human'}` : n.role}
         </span>
-        {n.model && <span className={`ml-auto text-[10px] text-[var(--gs-text-dim)] ${MONO}`}>{n.model}</span>}
+        {modelRole && <span className={`ml-auto text-[10px] text-[var(--gs-text-dim)] ${MONO}`}>{modelRole}</span>}
       </div>
       {n.fanout && (
         <div className="px-2 pt-1 pb-1.5 border-t border-dashed border-[var(--gs-border)]">
