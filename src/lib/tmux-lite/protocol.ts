@@ -398,6 +398,12 @@ export type Command =
   | { type: 'agent-watch' }
   | { type: 'machine-snapshot' } // legacy tmux router alias for getMachineSnapshot
   | { type: 'machine-watch' }    // legacy tmux router alias for watchMachineEvents
+  /** Force a full snapshot rebuild from sources (client-detected nonce gap
+   *  or explicit reconciliation). Replies with a machine-snapshot response. */
+  | { type: 'machine-resync' }
+  /** Fire-and-forget notify from the space CLI after a goal.json write: the
+   *  daemon re-reads that project's goals and emits scoped machine deltas. */
+  | { type: 'goal-changed'; projectName: string; workspaceName?: string }
   | {
       type: 'workspace-set-phase';
       projectName: string;

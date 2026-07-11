@@ -1,6 +1,8 @@
 import type {
   MachineAgentSessionRecord,
   MachineEvent,
+  MachineGoalRecord,
+  MachineProcessRecord,
   MachineSnapshot,
   MachineTerminalSessionRecord,
   MachineWorkspaceRecord,
@@ -49,10 +51,14 @@ export function applyWorkspaceRemoved(snapshot: MachineSnapshot, workspaceId: st
 
 export function applyTerminalSessionUpsert(snapshot: MachineSnapshot, session: MachineTerminalSessionRecord): MachineSnapshot {
   const terminalSessionsById = { ...snapshot.terminalSessionsById, [session.id]: session };
+  // Agent-kind terminals are excluded from the per-workspace terminal lists —
+  // matching the full snapshot build (they surface via agent sessions).
   const terminalSessionIdsByWorkspaceId = session.workspaceId
     ? {
         ...snapshot.terminalSessionIdsByWorkspaceId,
-        [session.workspaceId]: ensureUniqueId(snapshot.terminalSessionIdsByWorkspaceId[session.workspaceId] ?? [], session.id),
+        [session.workspaceId]: session.kind === 'agent'
+          ? removeId(snapshot.terminalSessionIdsByWorkspaceId[session.workspaceId] ?? [], session.id)
+          : ensureUniqueId(snapshot.terminalSessionIdsByWorkspaceId[session.workspaceId] ?? [], session.id),
       }
     : snapshot.terminalSessionIdsByWorkspaceId;
   return {
@@ -110,6 +116,92 @@ export function applyAgentSessionRemoved(snapshot: MachineSnapshot, sessionId: s
   };
 }
 
+export function applyProcessUpsert(snapshot: MachineSnapshot, process: MachineProcessRecord): MachineSnapshot {
+  return {
+    ...snapshot,
+    generatedAt: new Date().toISOString(),
+    processesById: { ...snapshot.processesById, [process.id]: process },
+    processIdsByWorkspaceId: {
+      ...snapshot.processIdsByWorkspaceId,
+      [process.workspaceId]: ensureUniqueId(snapshot.processIdsByWorkspaceId[process.workspaceId] ?? [], process.id),
+    },
+  };
+}
+
+export function applyProcessRemoved(snapshot: MachineSnapshot, processId: string, workspaceId: string): MachineSnapshot {
+  if (!snapshot.processesById[processId]) return snapshot;
+  const processesById = { ...snapshot.processesById };
+  delete processesById[processId];
+  return {
+    ...snapshot,
+    generatedAt: new Date().toISOString(),
+    processesById,
+    processIdsByWorkspaceId: {
+      ...snapshot.processIdsByWorkspaceId,
+      [workspaceId]: removeId(snapshot.processIdsByWorkspaceId[workspaceId] ?? [], processId),
+    },
+  };
+}
+
+export function applyWorkspaceDerivedReplaced(
+  snapshot: MachineSnapshot,
+  workspaceId: string,
+  derived: {
+    terminalSessionIds: string[];
+    agentSessionIds: string[];
+    processIds: string[];
+    summary: MachineWorkspaceRecord['summary'];
+  },
+): MachineSnapshot {
+  const existing = snapshot.workspacesById[workspaceId];
+  if (!existing) return snapshot;
+  return {
+    ...snapshot,
+    generatedAt: new Date().toISOString(),
+    workspacesById: {
+      ...snapshot.workspacesById,
+      [workspaceId]: {
+        ...existing,
+        terminalSessionIds: derived.terminalSessionIds,
+        agentSessionIds: derived.agentSessionIds,
+        processIds: derived.processIds,
+        summary: derived.summary,
+      },
+    },
+  };
+}
+
+export function applyProjectGoalsReplaced(
+  snapshot: MachineSnapshot,
+  projectId: string,
+  goalsById: Record<string, MachineGoalRecord>,
+  goalOrder: string[],
+): MachineSnapshot {
+  const previousProjectGoalIds = snapshot.goalIdsByProjectId?.[projectId] ?? [];
+  const nextGoalsById: Record<string, MachineGoalRecord> = { ...(snapshot.goalsById ?? {}) };
+  for (const goalId of previousProjectGoalIds) {
+    delete nextGoalsById[goalId];
+  }
+  for (const [goalId, goal] of Object.entries(goalsById)) {
+    nextGoalsById[goalId] = goal;
+  }
+  // Preserve cross-project positions where possible: keep the other projects'
+  // ids in place, drop this project's old ids, append this project's new order.
+  const removed = new Set(previousProjectGoalIds);
+  const retained = (snapshot.goalOrder ?? []).filter((goalId) => !removed.has(goalId));
+  const nextGoalOrder = [...retained, ...goalOrder];
+  return {
+    ...snapshot,
+    generatedAt: new Date().toISOString(),
+    goalsById: nextGoalsById,
+    goalOrder: nextGoalOrder,
+    goalIdsByProjectId: {
+      ...(snapshot.goalIdsByProjectId ?? {}),
+      [projectId]: [...goalOrder],
+    },
+  };
+}
+
 export function applyMachineEventToSnapshot(snapshot: MachineSnapshot, event: MachineEvent): MachineSnapshot {
   switch (event.type) {
     case 'snapshot-replaced':
@@ -126,5 +218,30 @@ export function applyMachineEventToSnapshot(snapshot: MachineSnapshot, event: Ma
       return applyAgentSessionUpsert({ ...snapshot, snapshotNonce: event.snapshotNonce }, event.session);
     case 'agent-session-removed':
       return applyAgentSessionRemoved({ ...snapshot, snapshotNonce: event.snapshotNonce }, event.sessionId, event.workspaceId);
+    case 'process-upserted':
+      return applyProcessUpsert({ ...snapshot, snapshotNonce: event.snapshotNonce }, event.process);
+    case 'process-removed':
+      return applyProcessRemoved({ ...snapshot, snapshotNonce: event.snapshotNonce }, event.processId, event.workspaceId);
+    case 'project-goals-replaced':
+      return applyProjectGoalsReplaced(
+        { ...snapshot, snapshotNonce: event.snapshotNonce },
+        event.projectId,
+        event.goalsById,
+        event.goalOrder,
+      );
+    case 'workspace-derived-replaced':
+      return applyWorkspaceDerivedReplaced(
+        { ...snapshot, snapshotNonce: event.snapshotNonce },
+        event.workspaceId,
+        event,
+      );
+    default: {
+      // Forward compatibility: an unknown event type must never wipe the
+      // snapshot. Advance the nonce (the sender consumed one) and keep state.
+      const unknown = event as { snapshotNonce?: number };
+      return typeof unknown.snapshotNonce === 'number'
+        ? { ...snapshot, snapshotNonce: unknown.snapshotNonce }
+        : snapshot;
+    }
   }
 }

@@ -14,6 +14,7 @@ import { defaultValidation, migrateGoalRecord, moveGoalValidationToWorkspace } f
 import { computeReadiness } from '../app/shared/goal-validation/readiness.js';
 import { ensureWorkspaceStorageIgnored, getWorkspaceStatus, getWorkspaceStorageDir, setWorkspaceStatus } from './workspace-metadata.js';
 import { SpacesError } from '../types/errors.js';
+import { queueGoalChangeNotify } from './goal-notify.js';
 import { generateId } from '../utils/id.js';
 import { sanitizeForFileSystem } from '../utils/sanitize.js';
 import type { GoalChain, GoalChainState, GoalKanbanItem, GoalRecord, GoalUpdateInput, WorkspacePhaseCascadeItem, WorkspacePhaseChangePreview } from '../types/goals.js';
@@ -107,6 +108,7 @@ export function readGoalChainState(projectName: string): GoalChainState {
 }
 
 export function writeGoalChainState(projectName: string, state: GoalChainState): void {
+  queueGoalChangeNotify(projectName);
   ensureProjectGoalStorageIgnored(projectName);
   writeJsonFile(getProjectGoalChainStatePath(projectName), {
     ...state,
@@ -253,6 +255,9 @@ export function getGoalRecord(projectName: string, goalId: string): GoalRecord |
 }
 
 export function writeGoalRecord(projectName: string, goal: GoalRecord): GoalRecord {
+  // CLI-write visibility (ticket #3): queue a fire-and-forget daemon notify
+  // so watching clients get a scoped delta instead of waiting on a poll.
+  queueGoalChangeNotify(projectName);
   if (goal.workspaceName) {
     const written = writeWorkspaceGoal(projectName, goal.workspaceName, goal);
     mirrorGoalCanonToArtifacts(projectName, goal.workspaceName, written);

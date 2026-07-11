@@ -103,9 +103,17 @@ import { setInProcessSessionSource } from '../processes/ports.js';
 import { addWorkspaceNote, listWorkspaceNotes, removeWorkspaceNote, updateWorkspaceNote } from '../../core/workspace-metadata.js';
 import { addGoalNearWorkspace, applyWorkspaceGoalPhaseChange, moveGoalInChain, previewWorkspaceGoalPhaseChange, updateGoalRecord } from '../../core/goal-chain.js';
 import { getSpaceStackStatus } from '../../commands/space-goals.js';
-import { buildMachineSnapshot } from './machine/build.js';
-import type { MachineSnapshot } from './machine/protocol.js';
-import { subscribeWorkspacePmUpdates } from './machine/pm-links.js';
+import { buildMachineSnapshot, buildGoalRecordsForProject } from './machine/build.js';
+import type { MachineEvent, MachineSnapshot } from './machine/protocol.js';
+import { applyMachineEventToSnapshot } from './machine/snapshot-patch.js';
+import {
+  computeAgentWorkspaceDeltaEvents,
+  computePmDeltaEvents,
+  computeProjectGoalsDeltaEvents,
+  computeTerminalDeltaEvents,
+} from './machine/live-model.js';
+import { subscribeWorkspacePmUpdates, getWorkspacePmSnapshot } from './machine/pm-links.js';
+import { suppressGoalChangeNotify } from '../../core/goal-notify.js';
 import { scanWorkspaces } from '../remote-session/workspace-scanner.js';
 import { startTriggerScheduler } from './trigger-scheduler.js';
 import { setCommandDispatcher } from './command-dispatch.js';
@@ -271,6 +279,18 @@ const inbox: InboxItem[] = [];
 let routerListener: any = null;
 let shuttingDown = false;
 let machineSnapshotNonce = 0;
+/** Live in-memory machine model (ticket #3). Mutation sites apply scoped
+ *  deltas to this model and stream them to watchers; the full rebuild is
+ *  demoted to connect/resync + a slow reconciliation cadence. */
+let liveMachineSnapshot: MachineSnapshot | null = null;
+/** Runtime workspace records captured by the last full build — reused by the
+ *  scoped PM update (fingerprints for the pm cache) without re-scanning. */
+let lastWorkspaceRuntimeRecords: import('./protocol.js').WorkspaceRuntimeRecord[] = [];
+let machineSnapshotBuildsInFlight = 0;
+
+// The daemon's own goal writes are already covered by scoped updates in the
+// command handlers — don't loop a goal-changed notify back to ourselves.
+suppressGoalChangeNotify();
 
 function stopListener(listener: any): void {
   if (!listener || typeof listener.stop !== "function") {
@@ -442,42 +462,56 @@ function shouldBroadcastMachineSnapshotForAgentDelta(delta: import('./agent-even
 }
 
 
-async function buildCurrentMachineSnapshot(options: { bumpNonce?: boolean } = {}): Promise<MachineSnapshot> {
+async function buildCurrentMachineSnapshot(): Promise<MachineSnapshot> {
   const traceStartMs = Date.now();
-  await syncKnownWorkspaces();
+  machineSnapshotBuildsInFlight += 1;
   try {
-    await getAgentControlReady();
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    console.warn(`[server] machine snapshot proceeding without agent runtime: ${message}`);
+    await syncKnownWorkspaces();
+    try {
+      await getAgentControlReady();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`[server] machine snapshot proceeding without agent runtime: ${message}`);
+    }
+    if (machineSnapshotNonce === 0) {
+      machineSnapshotNonce = 1;
+    }
+    writeTraceLog('machine-snapshot-build-start', {
+      nextNonce: machineSnapshotNonce,
+      sessions: sessions.size,
+      machineWatchers: machineStateWatchers.size,
+    });
+    const workspaceSnapshot = await getWorkspaceRuntimeSnapshot({
+      sessions: Array.from(sessions.values()).map(getSessionInfo),
+      agentStateByWorkspaceId: getAgentControlSnapshot(),
+    });
+    lastWorkspaceRuntimeRecords = workspaceSnapshot;
+    const snapshot = buildMachineSnapshot({
+      snapshotNonce: machineSnapshotNonce,
+      terminalSessions: Array.from(sessions.values()).map(getSessionInfo),
+      workspaces: workspaceSnapshot,
+      agentStateByWorkspaceId: getAgentControlSnapshot(),
+    });
+    liveMachineSnapshot = snapshot;
+    writeTraceLog('machine-snapshot-build-end', {
+      snapshotNonce: snapshot.snapshotNonce,
+      durationMs: Date.now() - traceStartMs,
+      sessions: sessions.size,
+      workspaceCount: snapshot.workspaceOrder.length,
+      machineWatchers: machineStateWatchers.size,
+    });
+    return snapshot;
+  } finally {
+    machineSnapshotBuildsInFlight -= 1;
   }
-  if (options.bumpNonce || machineSnapshotNonce === 0) {
-    machineSnapshotNonce += 1;
-  }
-  writeTraceLog('machine-snapshot-build-start', {
-    bumpNonce: options.bumpNonce === true,
-    nextNonce: machineSnapshotNonce,
-    sessions: sessions.size,
-    machineWatchers: machineStateWatchers.size,
-  });
-  const workspaceSnapshot = await getWorkspaceRuntimeSnapshot({
-    sessions: Array.from(sessions.values()).map(getSessionInfo),
-    agentStateByWorkspaceId: getAgentControlSnapshot(),
-  });
-  const snapshot = buildMachineSnapshot({
-    snapshotNonce: machineSnapshotNonce,
-    terminalSessions: Array.from(sessions.values()).map(getSessionInfo),
-    workspaces: workspaceSnapshot,
-    agentStateByWorkspaceId: getAgentControlSnapshot(),
-  });
-  writeTraceLog('machine-snapshot-build-end', {
-    snapshotNonce: snapshot.snapshotNonce,
-    durationMs: Date.now() - traceStartMs,
-    sessions: sessions.size,
-    workspaceCount: snapshot.workspaceOrder.length,
-    machineWatchers: machineStateWatchers.size,
-  });
-  return snapshot;
+}
+
+/** Serve the live model while watchers keep it maintained; rebuild when the
+ *  model is absent or could have gone stale (no watcher = structural changes
+ *  skip their full-rebuild broadcasts). */
+async function getCurrentMachineSnapshot(): Promise<MachineSnapshot> {
+  if (liveMachineSnapshot && machineStateWatchers.size > 0) return liveMachineSnapshot;
+  return buildCurrentMachineSnapshot();
 }
 
 let machineSnapshotBroadcastPromise: Promise<void> | null = null;
@@ -487,7 +521,12 @@ let machineSnapshotBroadcastQueued = false;
 async function broadcastMachineSnapshotReplacementOnce(): Promise<void> {
   const traceStartMs = Date.now();
   if (machineStateWatchers.size === 0) return;
-  const snapshot = await buildCurrentMachineSnapshot({ bumpNonce: true });
+  const snapshot = await buildCurrentMachineSnapshot();
+  // Stamp the nonce AFTER the build completes so it stays ahead of any
+  // scoped deltas emitted while the build was in flight.
+  machineSnapshotNonce += 1;
+  snapshot.snapshotNonce = machineSnapshotNonce;
+  liveMachineSnapshot = snapshot;
   writeTraceLog('machine-snapshot-broadcast-start', {
     snapshotNonce: snapshot.snapshotNonce,
     buildAndQueueDelayMs: Date.now() - traceStartMs,
@@ -533,6 +572,111 @@ async function broadcastMachineSnapshotReplacement(): Promise<void> {
   return machineSnapshotBroadcastPromise;
 }
 
+// ─── Scoped machine deltas (ticket #3) ──────────────────────────────────────
+
+/**
+ * Compute scoped delta events against the live model, stamp each with the
+ * next nonce, apply them to the model via the same transform clients use,
+ * and stream them to machine watchers.
+ *
+ * Falls back to the full-rebuild path when a rebuild is racing us (the
+ * rebuild re-reads all sources, so the mutation is captured either way).
+ */
+function emitScopedMachineEvents(compute: (snapshot: MachineSnapshot) => MachineEvent[]): void {
+  if (!liveMachineSnapshot) {
+    // No consumer has ever materialized the model — nothing to maintain.
+    return;
+  }
+  if (machineSnapshotBroadcastPromise || machineSnapshotBuildsInFlight > 0) {
+    machineSnapshotBroadcastQueued = true;
+    if (!machineSnapshotBroadcastPromise) {
+      void broadcastMachineSnapshotReplacement().catch(() => {});
+    }
+    return;
+  }
+  let events: MachineEvent[];
+  try {
+    events = compute(liveMachineSnapshot);
+  } catch (error) {
+    writeTraceLog('machine-delta-compute-error', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    void broadcastMachineSnapshotReplacement().catch(() => {});
+    return;
+  }
+  if (events.length === 0) return;
+
+  for (const event of events) {
+    machineSnapshotNonce += 1;
+    (event as { snapshotNonce: number }).snapshotNonce = machineSnapshotNonce;
+    liveMachineSnapshot = applyMachineEventToSnapshot(liveMachineSnapshot, event);
+  }
+  liveMachineSnapshot = { ...liveMachineSnapshot, snapshotNonce: machineSnapshotNonce };
+
+  if (machineStateWatchers.size === 0) return;
+  let deltaBytes = 0;
+  try {
+    deltaBytes = JSON.stringify(events).length;
+  } catch { /* trace-only */ }
+  writeTraceLog('machine-delta-broadcast', {
+    eventTypes: events.map((event) => event.type),
+    snapshotNonce: machineSnapshotNonce,
+    deltaBytes,
+    watchers: machineStateWatchers.size,
+  });
+  for (const socket of machineStateWatchers) {
+    try {
+      for (const event of events) {
+        sendRouterResponse(socket, { type: 'machine-event', event });
+      }
+    } catch {
+      machineStateWatchers.delete(socket);
+    }
+  }
+}
+
+/** One terminal session changed (created / exited / removed). */
+function applyTerminalScopedUpdate(sessionId: string): void {
+  emitScopedMachineEvents((snapshot) => {
+    const data = sessions.get(sessionId);
+    return computeTerminalDeltaEvents(snapshot, sessionId, data ? getSessionInfo(data) : null);
+  });
+}
+
+/** One workspace's agent-session state changed (agent-event-manager delta). */
+function applyAgentScopedUpdate(workspaceId: string): void {
+  emitScopedMachineEvents((snapshot) =>
+    computeAgentWorkspaceDeltaEvents(snapshot, workspaceId, getAgentControlSnapshot()[workspaceId]));
+}
+
+/** One project's goal state changed (goal command or CLI goal-changed notify). */
+function applyGoalScopedUpdate(projectName: string): void {
+  emitScopedMachineEvents((snapshot) =>
+    computeProjectGoalsDeltaEvents(snapshot, projectName, buildGoalRecordsForProject(projectName)));
+}
+
+/** PR/Linear sync state moved for some workspace(s). */
+function applyPmScopedUpdate(): void {
+  if (lastWorkspaceRuntimeRecords.length === 0) {
+    void broadcastMachineSnapshotReplacement().catch(() => {});
+    return;
+  }
+  emitScopedMachineEvents((snapshot) =>
+    computePmDeltaEvents(snapshot, getWorkspacePmSnapshot(lastWorkspaceRuntimeRecords)));
+}
+
+/** The full rebuild is demoted to a slow reconciliation cadence — it trues up
+ *  anything a scoped delta could not see and re-exercises the resync path. */
+const MACHINE_SNAPSHOT_RECONCILE_INTERVAL_MS = 5 * 60_000;
+const machineSnapshotReconcileTimer = setInterval(() => {
+  if (machineStateWatchers.size === 0) return;
+  writeTraceLog('machine-snapshot-reconcile', { watchers: machineStateWatchers.size });
+  void broadcastMachineSnapshotReplacement().catch(() => {});
+}, MACHINE_SNAPSHOT_RECONCILE_INTERVAL_MS);
+// The daemon's socket listeners own process lifetime — the reconcile cadence
+// must never be what keeps a process (e.g. a test import) alive.
+machineSnapshotReconcileTimer.unref?.();
+
 let agentControlSubscribed = false;
 let workspacePmSubscribed = false;
 
@@ -542,9 +686,9 @@ async function getAgentControlReady(): Promise<void> {
     subscribeAgentControl((delta) => {
       broadcastAgentStateDelta(delta);
       if (shouldBroadcastMachineSnapshotForAgentDelta(delta)) {
-        void broadcastMachineSnapshotReplacement().catch(() => {
-          // non-fatal
-        });
+        // Scoped: rebuild only this workspace's agent records in the live
+        // model instead of the O(everything) full snapshot per delta.
+        applyAgentScopedUpdate(delta.workspaceId);
       }
     });
     agentControlSubscribed = true;
@@ -587,9 +731,7 @@ function ensureWorkspacePmSubscribed(): void {
     return;
   }
   subscribeWorkspacePmUpdates(() => {
-    void broadcastMachineSnapshotReplacement().catch(() => {
-      // non-fatal
-    });
+    applyPmScopedUpdate();
   });
   workspacePmSubscribed = true;
 }
@@ -958,7 +1100,7 @@ async function terminateSessionData(session: SessionData, mode: TerminationMode,
     }
     cleanupSessionResources(session, { killed: true });
     disposeSessionTerminal(session);
-    void broadcastMachineSnapshotReplacement().catch(() => {});
+    applyTerminalScopedUpdate(session.info.id);
     return;
   }
 
@@ -967,14 +1109,14 @@ async function terminateSessionData(session: SessionData, mode: TerminationMode,
     removeVirtualTerminal(session.info.id);
     cleanupSessionResources(session, { killed: true });
     disposeSessionTerminal(session);
-    void broadcastMachineSnapshotReplacement().catch(() => {});
+    applyTerminalScopedUpdate(session.info.id);
     return;
   }
 
   if (!session.proc) {
     cleanupSessionResources(session, { killed: true });
     disposeSessionTerminal(session);
-    void broadcastMachineSnapshotReplacement().catch(() => {});
+    applyTerminalScopedUpdate(session.info.id);
     return;
   }
 
@@ -1005,7 +1147,7 @@ async function terminateSessionData(session: SessionData, mode: TerminationMode,
     }
     cleanupSessionResources(session, { killed: true });
     disposeSessionTerminal(session);
-    void broadcastMachineSnapshotReplacement().catch(() => {});
+    applyTerminalScopedUpdate(session.info.id);
   }, graceMs);
 
   return promise;
@@ -1966,7 +2108,7 @@ function handleProcessExit(
 
     xterm.dispose();
     cleanupSessionResources(session);
-    void broadcastMachineSnapshotReplacement().catch(() => {});
+    applyTerminalScopedUpdate(session.info.id);
     console.log(`[${sessionName}] exited (${code})`);
   };
 }
@@ -2877,7 +3019,7 @@ export async function dispatchCommand(cmd: Command): Promise<Response | null> {
                 recordReplay: cmd.recordReplay,
                 metadata: cmd.metadata,
               });
-              void broadcastMachineSnapshotReplacement().catch(() => {});
+              applyTerminalScopedUpdate(session.id);
               res = { type: "session", session };
             } catch (e) {
               const errMsg = e instanceof Error ? e.message : String(e);
@@ -2895,7 +3037,7 @@ export async function dispatchCommand(cmd: Command): Promise<Response | null> {
                 hidden: cmd.hidden,
                 metadata: cmd.metadata,
               });
-              void broadcastMachineSnapshotReplacement().catch(() => {});
+              applyTerminalScopedUpdate(session.id);
               res = { type: 'session', session };
             } catch (e) {
               const errMsg = e instanceof Error ? e.message : String(e);
@@ -2936,11 +3078,37 @@ export async function dispatchCommand(cmd: Command): Promise<Response | null> {
 
           case 'machine-snapshot':
             try {
-              const snapshot = await buildCurrentMachineSnapshot();
+              const snapshot = await getCurrentMachineSnapshot();
               res = { type: 'machine-snapshot', snapshot };
             } catch (e) {
               const errMsg = e instanceof Error ? e.message : String(e);
               res = { type: 'error', message: `Failed to load machine snapshot: ${errMsg}` };
+            }
+            break;
+
+          case 'machine-resync':
+            // Client-detected nonce gap (or explicit reconciliation): force a
+            // full rebuild from sources so the caller gets trued-up state.
+            try {
+              const snapshot = await buildCurrentMachineSnapshot();
+              writeTraceLog('machine-resync', { snapshotNonce: snapshot.snapshotNonce });
+              res = { type: 'machine-snapshot', snapshot };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to resync machine snapshot: ${errMsg}` };
+            }
+            break;
+
+          case 'goal-changed':
+            // Fire-and-forget notify from the space CLI after a goal.json
+            // write — re-read that project's goals and emit scoped deltas.
+            try {
+              writeTraceLog('goal-changed-notify', { projectName: cmd.projectName, workspaceName: cmd.workspaceName });
+              applyGoalScopedUpdate(cmd.projectName);
+              res = { type: 'ok' };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to apply goal change: ${errMsg}` };
             }
             break;
 
@@ -2981,7 +3149,7 @@ export async function dispatchCommand(cmd: Command): Promise<Response | null> {
           case 'workspace-set-phase':
             try {
               applyWorkspaceGoalPhaseChange(cmd.projectName, cmd.workspaceName, cmd.phase, { cascade: cmd.cascade });
-              void broadcastMachineSnapshotReplacement().catch(() => {});
+              applyGoalScopedUpdate(cmd.projectName);
               res = { type: 'ok' };
             } catch (e) {
               const errMsg = e instanceof Error ? e.message : String(e);
@@ -3095,6 +3263,7 @@ export async function dispatchCommand(cmd: Command): Promise<Response | null> {
           case 'project-create':
             try {
               const result = await createProjectForSession(cmd);
+              void broadcastMachineSnapshotReplacement().catch(() => {});
               res = { type: 'project-created', ...result };
             } catch (e) {
               res = { type: 'error', message: e instanceof Error ? e.message : String(e) };
@@ -3112,6 +3281,7 @@ export async function dispatchCommand(cmd: Command): Promise<Response | null> {
           case 'project-finalize':
             try {
               const result = await finalizePreparedProjectForSession(cmd);
+              void broadcastMachineSnapshotReplacement().catch(() => {});
               res = { type: 'project-created', ...result };
             } catch (e) {
               res = { type: 'error', message: e instanceof Error ? e.message : String(e) };
@@ -3130,6 +3300,7 @@ export async function dispatchCommand(cmd: Command): Promise<Response | null> {
           case 'workspace-create':
             try {
               res = { type: 'workspace-created', ...(await createWorkspaceForSession(cmd)) };
+              void broadcastMachineSnapshotReplacement().catch(() => {});
             } catch (e) {
               res = { type: 'error', message: e instanceof Error ? e.message : String(e) };
             }
@@ -3138,6 +3309,7 @@ export async function dispatchCommand(cmd: Command): Promise<Response | null> {
           case 'project-delete':
             try {
               await deleteProjectForSession({ projectName: cmd.projectName });
+              void broadcastMachineSnapshotReplacement().catch(() => {});
               res = { type: 'project-deleted', projectName: cmd.projectName };
             } catch (e) {
               res = { type: 'error', message: e instanceof Error ? e.message : String(e) };
@@ -3187,7 +3359,7 @@ export async function dispatchCommand(cmd: Command): Promise<Response | null> {
           case 'goal-update':
             try {
               res = { type: 'goal', goal: updateGoalRecord(cmd.projectName, cmd.goalId, cmd.updates) };
-              void broadcastMachineSnapshotReplacement().catch(() => {});
+              applyGoalScopedUpdate(cmd.projectName);
             } catch (e) {
               res = { type: 'error', message: e instanceof Error ? e.message : String(e) };
             }
@@ -3196,7 +3368,7 @@ export async function dispatchCommand(cmd: Command): Promise<Response | null> {
           case 'goal-add-near-workspace':
             try {
               res = { type: 'goal', goal: addGoalNearWorkspace(cmd.projectName, cmd.workspaceName, cmd.title, cmd.position) };
-              void broadcastMachineSnapshotReplacement().catch(() => {});
+              applyGoalScopedUpdate(cmd.projectName);
             } catch (e) {
               res = { type: 'error', message: e instanceof Error ? e.message : String(e) };
             }
@@ -3205,7 +3377,7 @@ export async function dispatchCommand(cmd: Command): Promise<Response | null> {
           case 'goal-reorder':
             try {
               res = { type: 'goal-chain', chain: moveGoalInChain(cmd.projectName, cmd.sourceToken, cmd.targetToken, cmd.position) };
-              void broadcastMachineSnapshotReplacement().catch(() => {});
+              applyGoalScopedUpdate(cmd.projectName);
             } catch (e) {
               res = { type: 'error', message: e instanceof Error ? e.message : String(e) };
             }
@@ -3226,7 +3398,7 @@ export async function dispatchCommand(cmd: Command): Promise<Response | null> {
             try {
               const { waiveGoalGate } = await import('../../core/goal-workflow.js');
               res = { type: 'goal', goal: await waiveGoalGate(cmd.projectName, cmd.goalId, cmd.phase, cmd.reason, 'human/ui') };
-              void broadcastMachineSnapshotReplacement().catch(() => {});
+              applyGoalScopedUpdate(cmd.projectName);
             } catch (e) {
               res = { type: 'error', message: e instanceof Error ? e.message : String(e) };
             }
@@ -4326,7 +4498,7 @@ routerListener = Bun.listen({
                 res = { type: 'error', message: 'attach-prepare requires sessionId or workspaceId' };
                 break;
               }
-              void broadcastMachineSnapshotReplacement().catch(() => {});
+              applyTerminalScopedUpdate(targetSession.id);
               writeResponse({ type: 'attach-prepared', requestId: cmd.requestId, session: targetSession, workspaceId, viewOnly: cmd.viewOnly });
               continue;
             } catch (e) {
@@ -4375,7 +4547,7 @@ routerListener = Bun.listen({
 
           case 'machine-watch':
             try {
-              const snapshot = await buildCurrentMachineSnapshot();
+              const snapshot = await getCurrentMachineSnapshot();
               socketState.watchesMachineState = true;
               machineStateWatchers.add(socket);
               writeResponse({ type: 'machine-snapshot', snapshot });
@@ -4422,7 +4594,12 @@ routerListener = Bun.listen({
               const session = await ensureAgentTerminalSession(cmd.target, cmd.agentSessionId, { cols: cmd.cols, rows: cmd.rows });
               agentSessionWatchOwners.set(cmd.agentSessionId, socket);
               res = { type: 'session', session };
-              void broadcastMachineSnapshotReplacement().catch(() => {});
+              applyTerminalScopedUpdate(session.id);
+              // The agent record's linkedTerminalSessionId derives from this
+              // terminal — refresh the workspace's agent records too.
+              if (session.metadata?.workspaceId) {
+                applyAgentScopedUpdate(session.metadata.workspaceId);
+              }
             } catch (e) {
               const errMsg = e instanceof Error ? e.message : String(e);
               res = { type: 'error', message: `Failed to attach agent session: ${errMsg}` };
@@ -4481,7 +4658,7 @@ routerListener = Bun.listen({
         }
         if (res.type === 'machine-watch-started') {
           try {
-            const snapshot = await buildCurrentMachineSnapshot();
+            const snapshot = await getCurrentMachineSnapshot();
             sendRouterResponse(socket, { type: 'machine-snapshot', snapshot });
           } catch {}
         }

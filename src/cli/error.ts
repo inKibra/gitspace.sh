@@ -48,5 +48,14 @@ export function withErrorHandler<T extends unknown[]>(
     } catch (error) {
       handleError(error);
     }
+    // Goal writes queue a fire-and-forget daemon notify — flush it before
+    // the process exits. Bounded and best-effort; a no-op for commands that
+    // didn't touch goal state. Never affects the command's exit status.
+    try {
+      const { flushGoalChangeNotify } = await import('../core/goal-notify.js');
+      await flushGoalChangeNotify();
+    } catch {
+      // fire-and-forget
+    }
   };
 }

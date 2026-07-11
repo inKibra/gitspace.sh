@@ -2446,4 +2446,91 @@ it('does not emit attached until the real attach event arrives and preserves pre
     });
   });
 
+  it('opts into machine deltas, applies contiguous machine_event pushes, and resyncs on a nonce gap', async () => {
+    const socket = createFakeSocket();
+    const backend = createBackend(socket);
+    const events: BackendEvent[] = [];
+    backend.onEvent((event) => events.push(event));
+
+    await connectAndHandshake(backend, socket);
+    await Bun.sleep(0);
+
+    // Handshake completion fires the additive watch_machine_events opt-in.
+    const sentCommands = socket.sent
+      .map((raw) => decodeRelayDataCommand(cryptoAdapter, raw))
+      .filter((cmd): cmd is { type: string; requestId?: string } => !!cmd && typeof cmd === 'object');
+    const watchRequest = sentCommands.find((cmd) => cmd.type === 'watch_machine_events');
+    expect(watchRequest).toBeDefined();
+
+    // Machine answers with the baseline snapshot for the delta nonce chain.
+    const baseline = { ...createMachineSnapshotWithWorkspace(), snapshotNonce: 10 };
+    socket.handlers?.onMessage(
+      makeRelayDataPayload(cryptoAdapter, {
+        type: 'refresh_machine_snapshot',
+        requestId: watchRequest!.requestId,
+        snapshot: baseline,
+      }),
+    );
+    await Bun.sleep(0);
+
+    // Contiguous delta (nonce 11) applies to the reducer-facing model.
+    socket.handlers?.onMessage(
+      makeRelayDataPayload(cryptoAdapter, {
+        type: 'machine_event',
+        event: {
+          type: 'workspace-upserted',
+          snapshotNonce: 11,
+          workspace: {
+            ...createMachineSnapshotWithWorkspace().workspacesById['alpha:ws-1'],
+            phase: 'review',
+          },
+        },
+      }),
+    );
+    await Bun.sleep(0);
+
+    const applied = events
+      .filter((event): event is Extract<BackendEvent, { type: 'machine_snapshot' }> => event.type === 'machine_snapshot')
+      .at(-1)?.snapshot;
+    expect(applied?.snapshotNonce).toBe(11);
+    expect(applied?.workspacesById['alpha:ws-1']?.phase).toBe('review');
+
+    // Gap (nonce 15 while we sit at 11) → the backend requests a full refresh.
+    socket.handlers?.onMessage(
+      makeRelayDataPayload(cryptoAdapter, {
+        type: 'machine_event',
+        event: { type: 'workspace-removed', snapshotNonce: 15, workspaceId: 'alpha:ws-1' },
+      }),
+    );
+    await Bun.sleep(0);
+
+    const refreshRequest = socket.sent
+      .map((raw) => decodeRelayDataCommand(cryptoAdapter, raw))
+      .filter((cmd): cmd is { type: string; requestId?: string } => !!cmd && typeof cmd === 'object')
+      .find((cmd) => cmd.type === 'refresh_machine_snapshot');
+    expect(refreshRequest).toBeDefined();
+
+    // The gapped event must NOT have been applied.
+    const beforeResync = events
+      .filter((event): event is Extract<BackendEvent, { type: 'machine_snapshot' }> => event.type === 'machine_snapshot')
+      .at(-1)?.snapshot;
+    expect(beforeResync?.workspacesById['alpha:ws-1']).toBeDefined();
+
+    // Resync response replaces the model wholesale.
+    socket.handlers?.onMessage(
+      makeRelayDataPayload(cryptoAdapter, {
+        type: 'refresh_machine_snapshot',
+        requestId: refreshRequest!.requestId,
+        snapshot: { ...createEmptyMachineSnapshot(), snapshotNonce: 20 },
+      }),
+    );
+    await Bun.sleep(0);
+
+    const resynced = events
+      .filter((event): event is Extract<BackendEvent, { type: 'machine_snapshot' }> => event.type === 'machine_snapshot')
+      .at(-1)?.snapshot;
+    expect(resynced?.snapshotNonce).toBe(20);
+    expect(resynced?.workspacesById['alpha:ws-1']).toBeUndefined();
+  });
+
 });

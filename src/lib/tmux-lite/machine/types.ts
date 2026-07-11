@@ -260,4 +260,29 @@ export type MachineEvent =
   | { type: 'terminal-session-upserted'; snapshotNonce: number; session: MachineTerminalSessionRecord }
   | { type: 'terminal-session-removed'; snapshotNonce: number; sessionId: string; workspaceId?: string }
   | { type: 'agent-session-upserted'; snapshotNonce: number; session: MachineAgentSessionRecord }
-  | { type: 'agent-session-removed'; snapshotNonce: number; sessionId: string; workspaceId: string };
+  | { type: 'agent-session-removed'; snapshotNonce: number; sessionId: string; workspaceId: string }
+  | { type: 'process-upserted'; snapshotNonce: number; process: MachineProcessRecord }
+  | { type: 'process-removed'; snapshotNonce: number; processId: string; workspaceId: string }
+  /** Scoped goal refresh: replaces ALL goals belonging to one project.
+   *  goalOrder is project-scoped (ordering within the project). */
+  | {
+      type: 'project-goals-replaced';
+      snapshotNonce: number;
+      projectId: string;
+      goalsById: Record<string, MachineGoalRecord>;
+      goalOrder: string[];
+    }
+  /** Slim workspace refresh for session-derived fields (id lists + summary
+   *  counts) — avoids re-shipping the whole record (embedded goal docs are
+   *  heavy) on every terminal/agent lifecycle event. No-op if the workspace
+   *  record is unknown (both sides apply the same transform, so it is
+   *  unknown on both). */
+  | {
+      type: 'workspace-derived-replaced';
+      snapshotNonce: number;
+      workspaceId: string;
+      terminalSessionIds: string[];
+      agentSessionIds: string[];
+      processIds: string[];
+      summary: MachineWorkspaceRecord['summary'];
+    };

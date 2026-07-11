@@ -207,6 +207,9 @@ export class RemoteSessionHandler {
   private machineWatchUnsubscribe: (() => void) | null = null;
   /** connectionId → async send function for unsolicited machine snapshot pushes */
   private machineSnapshotWatchers = new Map<string, (msg: MachineToClientMessage) => Promise<void>>();
+  /** Connections that opted into scoped machine deltas (`watch_machine_events`).
+   *  Legacy clients stay on full machine_snapshot pushes. */
+  private machineDeltaConnectionIds = new Set<string>();
   /** Periodic timer that fetches fresh snapshots for client reconciliation */
   private reconciliationTimer: ReturnType<typeof setInterval> | null = null;
   private machineSnapshotRefreshInFlight: Promise<void> | null = null;
@@ -252,15 +255,20 @@ export class RemoteSessionHandler {
         onEvent: (event) => {
           if (event.type === 'snapshot-replaced') {
             this.latestMachineSnapshot = event.snapshot;
-          } else if (this.latestMachineSnapshot) {
-            this.latestMachineSnapshot = applyMachineEventToSnapshot(this.latestMachineSnapshot, event);
+            // A replacement resets every client's baseline — full push to all.
+            void this.broadcastMachineSnapshot({ type: 'machine_snapshot', snapshot: event.snapshot });
+            return;
           }
-          if (this.latestMachineSnapshot) {
-            void this.broadcastMachineSnapshot({
-              type: 'machine_snapshot',
-              snapshot: this.latestMachineSnapshot,
-            });
+          if (!this.latestMachineSnapshot) return;
+          // Contiguity: scoped deltas carry consecutive nonces. A gap means we
+          // missed events — refetch (and re-baseline every client) instead of
+          // applying onto diverged state.
+          if (event.snapshotNonce !== this.latestMachineSnapshot.snapshotNonce + 1) {
+            void this.refreshMachineSnapshot('nonce-gap');
+            return;
           }
+          this.latestMachineSnapshot = applyMachineEventToSnapshot(this.latestMachineSnapshot, event);
+          void this.broadcastMachineDelta(event);
         },
         onError: (error) => {
           console.warn('[remote-session] Machine watch error:', error.message);
@@ -305,12 +313,27 @@ export class RemoteSessionHandler {
    */
   onClientLeavesBrowsing(connectionId: string): void {
     this.machineSnapshotWatchers.delete(connectionId);
+    this.machineDeltaConnectionIds.delete(connectionId);
   }
 
   private async broadcastMachineSnapshot(msg: { type: 'machine_snapshot'; snapshot: MachineSnapshot }): Promise<void> {
     const promises: Promise<void>[] = [];
     for (const sendFn of this.machineSnapshotWatchers.values()) {
       promises.push(sendFn(msg).catch(() => undefined));
+    }
+    await Promise.allSettled(promises);
+  }
+
+  /** Scoped delta fan-out: machine_event to opted-in clients, full snapshot
+   *  to legacy clients (old web bundles keep working unchanged). */
+  private async broadcastMachineDelta(event: import('../tmux-lite/machine/protocol.js').MachineEvent): Promise<void> {
+    const promises: Promise<void>[] = [];
+    for (const [connectionId, sendFn] of this.machineSnapshotWatchers) {
+      if (this.machineDeltaConnectionIds.has(connectionId)) {
+        promises.push(sendFn({ type: 'machine_event', event }).catch(() => undefined));
+      } else if (this.latestMachineSnapshot) {
+        promises.push(sendFn({ type: 'machine_snapshot', snapshot: this.latestMachineSnapshot }).catch(() => undefined));
+      }
     }
     await Promise.allSettled(promises);
   }
@@ -332,7 +355,13 @@ export class RemoteSessionHandler {
           throw new Error(response.type === 'error' ? response.message : `Unexpected machine snapshot response (${response.type})`);
         }
         const snapshot = response.snapshot;
+        const previousNonce = this.latestMachineSnapshot?.snapshotNonce;
         this.latestMachineSnapshot = snapshot;
+        // Reconciliation no-op: identical nonce means every watcher already
+        // has this state — don't re-send the full snapshot to everyone.
+        if (reason === 'periodic-reconciliation' && previousNonce === snapshot.snapshotNonce) {
+          return;
+        }
         await this.broadcastMachineSnapshot({ type: 'machine_snapshot', snapshot });
       } catch (error) {
         console.warn(`[remote-session] Failed to refresh machine snapshot (${reason}): ${error instanceof Error ? error.message : String(error)}`);
@@ -1004,6 +1033,31 @@ export class RemoteSessionHandler {
             snapshot,
           });
         } catch (error) {
+          await this.sendError(session, sendResponse, 'UNAVAILABLE', error instanceof Error ? error.message : String(error), { requestId: msg.requestId });
+        }
+        break;
+
+      case 'watch_machine_events':
+        // Opt in to scoped machine deltas (ticket #3). Reply with a full
+        // snapshot as the nonce baseline; machine_event pushes follow.
+        try {
+          this.machineDeltaConnectionIds.add(session.connectionId);
+          if (!this.latestMachineSnapshot) {
+            await this.refreshMachineSnapshot('watch-machine-events');
+          }
+          const snapshot = this.latestMachineSnapshot;
+          if (!snapshot) {
+            this.machineDeltaConnectionIds.delete(session.connectionId);
+            await this.sendError(session, sendResponse, 'UNAVAILABLE', 'Machine snapshot unavailable', { requestId: msg.requestId });
+            break;
+          }
+          await this.sendMessage(session, sendResponse, {
+            type: 'refresh_machine_snapshot',
+            requestId: msg.requestId,
+            snapshot,
+          });
+        } catch (error) {
+          this.machineDeltaConnectionIds.delete(session.connectionId);
           await this.sendError(session, sendResponse, 'UNAVAILABLE', error instanceof Error ? error.message : String(error), { requestId: msg.requestId });
         }
         break;

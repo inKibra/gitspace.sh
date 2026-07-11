@@ -254,6 +254,17 @@ export interface RefreshMachineSnapshotRequest {
   type: 'refresh_machine_snapshot';
   requestId: string;
 }
+
+/**
+ * Opt in to scoped machine deltas (ticket #3): after this, the machine pushes
+ * `machine_event` messages instead of a full `machine_snapshot` per change.
+ * Additive — clients that never send it keep receiving full snapshots, and a
+ * machine that predates it answers with an error the client swallows.
+ */
+export interface WatchMachineEventsRequest {
+  type: 'watch_machine_events';
+  requestId: string;
+}
 export interface AddWorkspaceNoteRequest {
   type: 'workspace_note_add';
   requestId: string;
@@ -1150,6 +1161,16 @@ export interface MachineSnapshotPush {
 }
 
 /**
+ * Machine pushes one scoped machine delta to a client that opted in via
+ * `watch_machine_events`. Full `machine_snapshot` pushes remain the resync
+ * path (and the only path for legacy clients).
+ */
+export interface MachineEventPush {
+  type: 'machine_event';
+  event: import('../tmux-lite/machine/protocol.js').MachineEvent;
+}
+
+/**
  * Machine pushes a host UI dialog request to the client.
  * The client should render the dialog and send back an agent-dialog-response.
  */
@@ -1197,6 +1218,7 @@ export type ClientToMachineMessage =
   // Workspace CRUD
   | CreateWorkspaceRequest
   | RefreshMachineSnapshotRequest
+  | WatchMachineEventsRequest
   | ListWorkspaceNotesRequest
   | AddWorkspaceNoteRequest
   | UpdateWorkspaceNoteRequest
@@ -1318,6 +1340,7 @@ export type MachineToClientMessage =
   | AgentStateSnapshotPush
   | AgentStateUpdatePush
   | MachineSnapshotPush
+  | MachineEventPush
   | AgentDialogRequestPush
   | AgentUIEventPush;
 
@@ -1379,6 +1402,7 @@ export function isBrowseMessage(msg: RemoteSessionMessage): msg is ClientToMachi
     'delete_project',
     'create_workspace',
     'refresh_machine_snapshot',
+    'watch_machine_events',
     'workspace_notes_list',
     'workspace_note_add',
     'workspace_note_update',

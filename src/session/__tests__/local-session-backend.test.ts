@@ -1736,6 +1736,66 @@ describe('LocalSessionBackend', () => {
     });
   });
 
+  it('applies contiguous machine deltas and resyncs on a nonce gap', async () => {
+    const events: BackendEvent[] = [];
+    const workspace = {
+      id: 'ws-1',
+      name: 'ws-1',
+      path: '/tmp/ws-1',
+      projectName: 'alpha',
+      branch: 'main',
+      sessionCount: 0,
+      isStale: false,
+    };
+    const baseSnapshot = await buildSnapshotForDeps({
+      scanWorkspaces: async () => [workspace],
+      listSessions: async () => [],
+    });
+    baseSnapshot.snapshotNonce = 10;
+    const resyncSnapshot = { ...baseSnapshot, snapshotNonce: 20 };
+    const resyncMachineSnapshot = mock(async () => resyncSnapshot);
+    let watchHandlers: {
+      onEvent?: (event: import('../../lib/tmux-lite/machine/protocol.js').MachineEvent) => void;
+    } = {};
+    const backend = createBackend({
+      getMachineSnapshot: mock(async () => baseSnapshot),
+      resyncMachineSnapshot,
+      watchMachineEvents: async (handlers) => {
+        watchHandlers = handlers;
+        return () => {};
+      },
+    });
+    backend.onEvent((event) => events.push(event));
+    await backend.connect();
+
+    // Contiguous delta (nonce 11) applies to the model.
+    const terminalRecord = {
+      id: 'shell-live',
+      name: 'shell-live',
+      socketPath: '/tmp/shell-live.sock',
+      cwd: '/tmp/ws-1',
+      kind: 'shell' as const,
+      hidden: false,
+      state: 'running' as const,
+      attached: false,
+      createdAt: 1,
+    };
+    watchHandlers.onEvent!({ type: 'terminal-session-upserted', snapshotNonce: 11, session: { ...terminalRecord, workspaceId: 'alpha:ws-1', projectId: 'alpha' } });
+    expect(resyncMachineSnapshot).toHaveBeenCalledTimes(0);
+    const applied = events.filter((event) => event.type === 'machine_snapshot').at(-1);
+    expect(applied && 'snapshot' in applied ? applied.snapshot.snapshotNonce : null).toBe(11);
+    expect(applied && 'snapshot' in applied ? applied.snapshot.terminalSessionsById['shell-live'] : undefined).toBeDefined();
+
+    // Gap (nonce 15 while we sit at 11) → the backend requests a resync and
+    // replaces its model with the forced rebuild.
+    watchHandlers.onEvent!({ type: 'terminal-session-removed', snapshotNonce: 15, sessionId: 'shell-live', workspaceId: 'alpha:ws-1' });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(resyncMachineSnapshot).toHaveBeenCalledTimes(1);
+    const resynced = events.filter((event) => event.type === 'machine_snapshot').at(-1);
+    expect(resynced && 'snapshot' in resynced ? resynced.snapshot.snapshotNonce : null).toBe(20);
+  });
+
   it('refreshes machine state before attaching a newly created agent session terminal', async () => {
     const events: BackendEvent[] = [];
     const agentTerminalSession = {

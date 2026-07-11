@@ -1005,6 +1005,16 @@ export async function getMachineSnapshot(): Promise<import('./machine/protocol.j
   throw new Error('Unexpected response');
 }
 
+/** Force a full daemon-side rebuild (client-detected nonce gap): the daemon
+ *  re-reads all sources instead of serving its live model. */
+export async function resyncMachineSnapshot(): Promise<import('./machine/protocol.js').MachineSnapshot> {
+  await ensureServer();
+  const res = await send({ type: 'machine-resync' });
+  if (res.type === 'machine-snapshot') return res.snapshot;
+  if (res.type === 'error') throw new Error(res.message);
+  throw new Error('Unexpected response');
+}
+
 export async function setWorkspacePhase(
   projectName: string,
   workspaceName: string,

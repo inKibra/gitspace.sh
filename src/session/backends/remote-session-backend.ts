@@ -285,6 +285,7 @@ const MACHINE_TO_CLIENT_TYPES = new Set<string>([
   'agent_state_snapshot',
   'agent_state_update',
   'machine_snapshot',
+  'machine_event',
   'agent_dialog_request',
   'agent_ui_event',
 ]);
@@ -1983,7 +1984,39 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       this.handshakeState = null;
       this.emit({ type: 'status', status: 'connected' });
       this.resolveConnect();
+      // Opt in to scoped machine deltas (additive: old machines answer with
+      // an error and we silently stay on full machine_snapshot pushes).
+      void this.enableMachineDeltaStream();
     }
+  }
+
+  /** Ask the machine to stream scoped machine_event deltas (ticket #3). */
+  private async enableMachineDeltaStream(): Promise<void> {
+    try {
+      const response = await this.sendRpcCommand({ type: 'watch_machine_events', requestId: crypto.randomUUID() });
+      if (response.type === 'refresh_machine_snapshot') {
+        // Baseline snapshot for the delta nonce chain.
+        this.machineStateClient.replaceSnapshot(response.snapshot);
+        this.syncAgentStateCacheIntoMachineSnapshot();
+        this.emitDerivedMachineState();
+        this.resolveInitialSnapshot();
+      }
+    } catch {
+      // Legacy machine — full snapshot pushes keep flowing.
+    }
+  }
+
+  /** Nonce-gap recovery for the delta stream: one in-flight refresh. */
+  private machineDeltaResyncInFlight = false;
+
+  private requestMachineDeltaResync(): void {
+    if (this.machineDeltaResyncInFlight) return;
+    this.machineDeltaResyncInFlight = true;
+    void this.refreshMachineSnapshot()
+      .catch(() => undefined)
+      .finally(() => {
+        this.machineDeltaResyncInFlight = false;
+      });
   }
 
   private async handleMachineMessage(message: MachineToClientMessage): Promise<void> {
@@ -2054,6 +2087,31 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       case 'refresh_machine_snapshot':
         this.resolveRefreshMachineSnapshot(message as RefreshMachineSnapshotResponse);
         return;
+      case 'machine_event': {
+        const event = message.event;
+        if (event.type !== 'snapshot-replaced') {
+          const expected = this.machineStateClient.getSnapshot().snapshotNonce + 1;
+          if (event.snapshotNonce !== expected) {
+            this.requestMachineDeltaResync();
+            return;
+          }
+        }
+        this.machineStateClient.applyEvent(event);
+        this.emitDerivedMachineState();
+        if (event.type === 'terminal-session-removed') {
+          for (const pane of [...this.panes.values()]) {
+            if (pane.sessionId === event.sessionId) {
+              this.panes.delete(pane.paneId);
+              this.emit({ type: 'pane_exited', paneId: pane.paneId, sessionId: pane.sessionId });
+              if (pane.paneId === DEFAULT_PANE_ID) {
+                this.attachLifecycle.emitExited(undefined, pane.sessionId);
+                this.attachedAgentSessionId = null;
+              }
+            }
+          }
+        }
+        return;
+      }
       case 'machine_snapshot':
         this.machineStateClient.replaceSnapshot(message.snapshot);
         if (Object.keys(this.agentStateCache).length === 0) {

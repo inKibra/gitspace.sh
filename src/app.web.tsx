@@ -2310,21 +2310,10 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
     return () => clearInterval(interval);
   }, [showEvents, eventsWorkspacePath, eventsProps.activeFilterName, backendSavedEventFilters, filteredWorkspaces, getWorkspaceRef, multi.requestEvents]);
 
-  // Rubric/evidence live refresh: agent-side CLI writes (evidence attach,
-  // command judgments run in-session) mutate goal state on disk without a
-  // daemon snapshot broadcast, so the panes go stale until the next
-  // listWorkspaces. Light poll while such a pane is open on the visible
-  // workspace detail (same pattern as the events poll above).
-  useEffect(() => {
-    if (!currentDetailWorkspace || showBoardWhileDetailMounted) return;
-    const wsKey = currentDetailWorkspace.selectionKey ?? currentDetailWorkspace.id;
-    const panes = dockExtraPanes[wsKey] ?? [];
-    if (!panes.some((pane) => pane.kind === 'rubric' || pane.kind === 'evidence')) return;
-    const interval = setInterval(() => {
-      void multi.listWorkspaces();
-    }, 5000);
-    return () => clearInterval(interval);
-  }, [currentDetailWorkspace, dockExtraPanes, multi.listWorkspaces, showBoardWhileDetailMounted]);
+  // Rubric/evidence live refresh: agent-side CLI goal writes now reach the
+  // daemon via the fire-and-forget `goal-changed` notify, which emits a
+  // scoped machine delta to every watching client — no poll needed
+  // (ticket #3; the 5s listWorkspaces stopgap lived here).
 
   // ─── Activity tracking for notifications ──────────────────────────────────
 

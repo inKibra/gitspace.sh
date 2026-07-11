@@ -13,6 +13,7 @@ import {
   prepareAttachSession,
   ensureServer,
   getMachineSnapshot,
+  resyncMachineSnapshot,
   createSession,
   terminateSession,
   createCheckpoint,
@@ -116,6 +117,9 @@ export interface LocalSessionBackendDependencies {
   getReplayFrame: typeof getReplayFrameOffline;
   getReplayTimeline: typeof getReplayTimelineOffline;
   getMachineSnapshot: typeof getMachineSnapshot;
+  /** Forced full-rebuild fetch for nonce-gap recovery. Falls back to
+   *  getMachineSnapshot when absent. */
+  resyncMachineSnapshot?: typeof getMachineSnapshot;
   watchMachineEvents: typeof watchMachineEvents;
   dismissReplay: typeof dismissReplayOffline;
   undismissReplay: typeof undismissReplayOffline;
@@ -378,6 +382,7 @@ function buildDeps(
     getReplayFrame: getReplayFrameOffline,
     getReplayTimeline: getReplayTimelineOffline,
     getMachineSnapshot,
+    resyncMachineSnapshot,
     watchMachineEvents,
     dismissReplay: dismissReplayOffline,
     undismissReplay: undismissReplayOffline,
@@ -424,6 +429,28 @@ export class LocalSessionBackend implements SessionBackend {
   private readonly agentStateHandlers = new Set<(delta: AgentStateUpdateDelta) => void>();
   private stopAgentWatch: (() => void) | null = null;
   private readonly machineStateClient = new MachineStateClient();
+  private machineResyncInFlight: Promise<void> | null = null;
+
+  /** Nonce-gap recovery: fetch a forced full rebuild and replace the model.
+   *  Single-flight — a burst of gapped events triggers one resync. */
+  private requestMachineResync(): void {
+    if (this.machineResyncInFlight) return;
+    this.machineResyncInFlight = (async () => {
+      try {
+        const resync = this.deps.resyncMachineSnapshot ?? this.deps.getMachineSnapshot;
+        const snapshot = await resync();
+        this.machineStateClient.replaceSnapshot(snapshot);
+        this.agentStateCache = machineSnapshotToAgentState(snapshot);
+        this.broadcastAgentSnapshot();
+        this.emitDerivedMachineState();
+      } catch {
+        // Recoverable: the next snapshot-replaced (5-min reconciliation) or
+        // reconnect trues the model up.
+      } finally {
+        this.machineResyncInFlight = null;
+      }
+    })();
+  }
 
   constructor(options: LocalSessionBackendOptions = {}) {
     this.descriptor = options.descriptor ?? DEFAULT_DESCRIPTOR;
@@ -460,6 +487,16 @@ export class LocalSessionBackend implements SessionBackend {
           this.emitDerivedMachineState();
         },
         onEvent: (event) => {
+          // Contiguity check: every scoped delta carries the next nonce. A
+          // gap (dropped event, daemon restart) means our model diverged —
+          // request a forced resync instead of applying onto bad state.
+          if (event.type !== 'snapshot-replaced') {
+            const expected = this.machineStateClient.getSnapshot().snapshotNonce + 1;
+            if (event.snapshotNonce !== expected) {
+              this.requestMachineResync();
+              return;
+            }
+          }
           const machineSnapshot = this.machineStateClient.applyEvent(event);
           this.agentStateCache = machineSnapshotToAgentState(machineSnapshot);
           this.broadcastAgentSnapshot();

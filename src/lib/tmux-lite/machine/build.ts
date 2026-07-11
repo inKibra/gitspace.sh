@@ -39,7 +39,7 @@ function determineAgentState(
 }
 
 
-function resolveWorkspaceIdForTerminal(
+export function resolveWorkspaceIdForTerminal(
   session: Session,
   workspacesById: Record<string, MachineWorkspaceRecord>,
 ): string | undefined {
@@ -107,6 +107,200 @@ function cloneWorkspaceRecord(workspace: WorkspaceRuntimeRecord): MachineWorkspa
   };
 }
 
+/** Build one terminal session record. Shared by the full snapshot build and
+ *  the live-model scoped updates so both paths stay byte-identical. */
+export function buildTerminalRecord(
+  session: Session,
+  workspacesById: Record<string, MachineWorkspaceRecord>,
+): MachineTerminalSessionRecord {
+  const workspaceId = resolveWorkspaceIdForTerminal(session, workspacesById);
+  const projectId = workspaceId ? workspacesById[workspaceId]?.projectId : undefined;
+  const processIdentity = getProcessIdentity(session);
+  return {
+    id: session.id,
+    name: session.name,
+    workspaceId,
+    projectId,
+    socketPath: session.socketPath,
+    cwd: session.cwd,
+    kind: session.kind === 'agent'
+      ? 'agent'
+      : processIdentity.processName
+        ? 'process'
+        : 'shell',
+    hidden: session.hidden === true,
+    state: determineTerminalState(session),
+    attached: session.attached,
+    createdAt: session.createdAt,
+    exitCode: session.exitCode,
+    processTitle: session.processTitle,
+    terminalTitle: session.terminalTitle,
+    lastAlertKind: session.lastAlertKind,
+    lastAlertPreview: session.lastAlertPreview,
+    lastAlertAt: session.lastAlertAt,
+    unreadAlertCount: session.unreadAlertCount,
+    processName: processIdentity.processName,
+    processInstance: processIdentity.processInstance,
+    linkedAgentSessionId: session.metadata?.agentSessionId,
+    metadata: session.metadata,
+  };
+}
+
+/** Machine-scoped goal records for one project (ids prefixed `project:`). */
+export function buildGoalRecordsForProject(projectName: string): MachineGoalRecord[] {
+  let goals: MachineGoalRecord[] = [];
+  try {
+    goals = listProjectGoalKanbanItems(projectName);
+  } catch {
+    goals = [];
+  }
+  return goals.map((goal) => ({
+    ...goal,
+    id: `${projectName}:${goal.id}`,
+    previousGoalId: goal.previousGoalId ? `${projectName}:${goal.previousGoalId}` : undefined,
+  }));
+}
+
+/** Build the agent session records for one workspace (live + archived),
+ *  mirroring the full-snapshot build exactly. */
+export function buildAgentSessionRecordsForWorkspace(params: {
+  workspaceId: string;
+  projectId: string;
+  workspace: WorkspaceAgentState | undefined;
+  terminalSessionsById: Record<string, MachineTerminalSessionRecord>;
+}): MachineAgentSessionRecord[] {
+  const { workspaceId, projectId, workspace, terminalSessionsById } = params;
+  const records: MachineAgentSessionRecord[] = [];
+  const archivedSessions = getArchivedSessions(workspaceId);
+  const archivedSessionIds = new Set(archivedSessions.map((session) => session.sessionId));
+  const seen = new Set<string>();
+
+  if (workspace) {
+    for (const session of workspace.sessions) {
+      if (archivedSessionIds.has(session.id) || session.archivedAt) continue;
+      const pendingPermissionIds = (workspace.pendingPermissions[session.id] ?? []).map((permission) => permission.id);
+      const pendingQuestionIds = (workspace.pendingQuestions[session.id] ?? []).map((q) => q.id);
+      const linkedTerminal = Object.values(terminalSessionsById).find(
+        (terminal) => terminal.workspaceId === workspaceId && terminal.linkedAgentSessionId === session.id,
+      );
+      const errorMessage = workspace.errorMessages[session.id]
+        ?? (workspace.statuses[session.id]?.type === 'retry' ? 'retrying' : undefined);
+      records.push({
+        id: session.id,
+        workspaceId,
+        projectId,
+        title: session.title,
+        state: determineAgentState(
+          workspace,
+          session.id,
+          session.closedAt,
+          errorMessage,
+          pendingQuestionIds.length,
+          pendingPermissionIds.length,
+        ),
+        updatedAt: session.updatedAt,
+        closedAt: session.closedAt,
+        pendingPermissionIds,
+        pendingPermissionCount: pendingPermissionIds.length,
+        pendingQuestionIds,
+        pendingQuestionCount: pendingQuestionIds.length,
+        errorMessage,
+        lastMessagePreview: workspace.lastMessages[session.id],
+        linkedTerminalSessionId: linkedTerminal?.id,
+        modelInfo: workspace.modelInfo?.[session.id],
+        todoPhases: workspace.todoPhases?.[session.id],
+        queuedMessages: workspace.queuedMessages?.[session.id],
+      });
+      seen.add(session.id);
+    }
+  }
+
+  for (const archived of archivedSessions) {
+    if (seen.has(archived.sessionId)) continue;
+    records.push({
+      id: archived.sessionId,
+      workspaceId,
+      projectId,
+      title: archived.title,
+      state: 'archived',
+      archivedAt: archived.archivedAt,
+      pendingPermissionIds: [],
+      pendingPermissionCount: 0,
+      pendingQuestionIds: [],
+      pendingQuestionCount: 0,
+    });
+    seen.add(archived.sessionId);
+  }
+
+  return records;
+}
+
+/** Agent-state summary counts for a workspace record. */
+export function computeAgentSummaryCounts(agents: MachineAgentSessionRecord[]): {
+  agentCount: number;
+  runningAgentCount: number;
+  waitingAgentCount: number;
+  permissionAgentCount: number;
+  retryingAgentCount: number;
+  closedAgentCount: number;
+  archivedAgentCount: number;
+} {
+  let runningAgentCount = 0;
+  let waitingAgentCount = 0;
+  let permissionAgentCount = 0;
+  let retryingAgentCount = 0;
+  let closedAgentCount = 0;
+  let archivedAgentCount = 0;
+  for (const agent of agents) {
+    switch (agent.state) {
+      case 'running': runningAgentCount += 1; break;
+      case 'waiting': waitingAgentCount += 1; break;
+      case 'permission-needed': permissionAgentCount += 1; break;
+      case 'retrying': retryingAgentCount += 1; break;
+      case 'closed': closedAgentCount += 1; break;
+      case 'archived': archivedAgentCount += 1; break;
+    }
+  }
+  return {
+    agentCount: agents.length,
+    runningAgentCount,
+    waitingAgentCount,
+    permissionAgentCount,
+    retryingAgentCount,
+    closedAgentCount,
+    archivedAgentCount,
+  };
+}
+
+/** Terminal summary counts for a workspace record (visible shells/processes:
+ *  hidden and agent-kind terminals are excluded, matching the scanner). */
+export function computeTerminalSummaryCounts(terminals: MachineTerminalSessionRecord[]): {
+  terminalCount: number;
+  attachedTerminalCount: number;
+  runningTerminalCount: number;
+  failedTerminalCount: number;
+} {
+  const relevant = terminals.filter((terminal) => !terminal.hidden && terminal.kind !== 'agent');
+  return {
+    terminalCount: relevant.length,
+    attachedTerminalCount: relevant.filter((terminal) => terminal.attached).length,
+    runningTerminalCount: relevant.filter((terminal) => terminal.exitCode === undefined).length,
+    failedTerminalCount: relevant.filter((terminal) => terminal.exitCode !== undefined && terminal.exitCode !== 0).length,
+  };
+}
+
+/** Process summary run/fail counts derived from process-carrying terminals. */
+export function computeProcessSummaryCounts(terminals: MachineTerminalSessionRecord[]): {
+  runningProcessCount: number;
+  failedProcessCount: number;
+} {
+  const relevant = terminals.filter((terminal) => !!terminal.processName);
+  return {
+    runningProcessCount: relevant.filter((terminal) => terminal.exitCode === undefined).length,
+    failedProcessCount: relevant.filter((terminal) => terminal.exitCode !== undefined && terminal.exitCode !== 0).length,
+  };
+}
+
 function listGoalsForSnapshot(projectNames: string[]): {
   goalsById: Record<string, MachineGoalRecord>;
   goalOrder: string[];
@@ -120,19 +314,7 @@ function listGoalsForSnapshot(projectNames: string[]): {
 
   for (const projectName of projectNames) {
     goalIdsByProjectId[projectName] = [];
-    let goals: MachineGoalRecord[] = [];
-    try {
-      goals = listProjectGoalKanbanItems(projectName);
-    } catch {
-      goals = [];
-    }
-
-    for (const goal of goals) {
-      const machineGoal: MachineGoalRecord = {
-        ...goal,
-        id: `${projectName}:${goal.id}`,
-        previousGoalId: goal.previousGoalId ? `${projectName}:${goal.previousGoalId}` : undefined,
-      };
+    for (const machineGoal of buildGoalRecordsForProject(projectName)) {
       goalsById[machineGoal.id] = machineGoal;
       goalOrder.push(machineGoal.id);
       goalIdsByProjectId[projectName].push(machineGoal.id);
@@ -212,37 +394,9 @@ export function buildMachineSnapshot(params: {
   const processIdsByWorkspaceId: Record<string, string[]> = {};
 
   for (const session of terminalSessions) {
-    const workspaceId = resolveWorkspaceIdForTerminal(session, workspacesById);
-    const projectId = workspaceId ? workspacesById[workspaceId]?.projectId : undefined;
-    const processIdentity = getProcessIdentity(session);
-    const terminalRecord: MachineTerminalSessionRecord = {
-      id: session.id,
-      name: session.name,
-      workspaceId,
-      projectId,
-      socketPath: session.socketPath,
-      cwd: session.cwd,
-      kind: session.kind === 'agent'
-        ? 'agent'
-        : processIdentity.processName
-          ? 'process'
-          : 'shell',
-      hidden: session.hidden === true,
-      state: determineTerminalState(session),
-      attached: session.attached,
-      createdAt: session.createdAt,
-      exitCode: session.exitCode,
-      processTitle: session.processTitle,
-      terminalTitle: session.terminalTitle,
-      lastAlertKind: session.lastAlertKind,
-      lastAlertPreview: session.lastAlertPreview,
-      lastAlertAt: session.lastAlertAt,
-      unreadAlertCount: session.unreadAlertCount,
-      processName: processIdentity.processName,
-      processInstance: processIdentity.processInstance,
-      linkedAgentSessionId: session.metadata?.agentSessionId,
-      metadata: session.metadata,
-    };
+    const terminalRecord = buildTerminalRecord(session, workspacesById);
+    const workspaceId = terminalRecord.workspaceId;
+    const projectId = terminalRecord.projectId;
     terminalSessionsById[session.id] = terminalRecord;
     if (workspaceId && terminalRecord.kind !== 'agent') {
       terminalSessionIdsByWorkspaceId[workspaceId] = [
@@ -289,46 +443,16 @@ export function buildMachineSnapshot(params: {
   for (const [workspaceId, workspace] of Object.entries(agentStateByWorkspaceId)) {
     // Project agents live on the '<project>:@base' pseudo-workspace (no
     // scanner record) — pass their sessions through so transcripts render.
-    const workspaceRecord = workspacesById[workspaceId]
-      ?? (workspaceId.endsWith(':@base') ? { projectId: workspaceId.slice(0, -':@base'.length) } as (typeof workspacesById)[string] : undefined);
-    if (!workspaceRecord) continue;
-    const archivedSessions = getArchivedSessions(workspaceId);
-    const archivedSessionIds = new Set(archivedSessions.map((session) => session.sessionId));
-    for (const session of workspace.sessions) {
-      if (archivedSessionIds.has(session.id) || session.archivedAt) continue;
-      const pendingPermissionIds = (workspace.pendingPermissions[session.id] ?? []).map((permission) => permission.id);
-      const pendingQuestionIds = (workspace.pendingQuestions[session.id] ?? []).map((q) => q.id);
-      const linkedTerminal = Object.values(terminalSessionsById).find(
-        (terminal) => terminal.workspaceId === workspaceId && terminal.linkedAgentSessionId === session.id,
-      );
-      const errorMessage = workspace.errorMessages[session.id]
-        ?? (workspace.statuses[session.id]?.type === 'retry' ? 'retrying' : undefined);
-      const record: MachineAgentSessionRecord = {
-        id: session.id,
-        workspaceId,
-        projectId: workspaceRecord.projectId,
-        title: session.title,
-        state: determineAgentState(
-          workspace,
-          session.id,
-          session.closedAt,
-          errorMessage,
-          pendingQuestionIds.length,
-          pendingPermissionIds.length,
-        ),
-        updatedAt: session.updatedAt,
-        closedAt: session.closedAt,
-        pendingPermissionIds,
-        pendingPermissionCount: pendingPermissionIds.length,
-        pendingQuestionIds,
-        pendingQuestionCount: pendingQuestionIds.length,
-        errorMessage,
-        lastMessagePreview: workspace.lastMessages[session.id],
-        linkedTerminalSessionId: linkedTerminal?.id,
-        modelInfo: workspace.modelInfo?.[session.id],
-        todoPhases: workspace.todoPhases?.[session.id],
-        queuedMessages: workspace.queuedMessages?.[session.id],
-      };
+    const projectId = workspacesById[workspaceId]?.projectId
+      ?? (workspaceId.endsWith(':@base') ? workspaceId.slice(0, -':@base'.length) : undefined);
+    if (projectId === undefined) continue;
+    const records = buildAgentSessionRecordsForWorkspace({
+      workspaceId,
+      projectId,
+      workspace,
+      terminalSessionsById,
+    });
+    for (const record of records) {
       agentSessionsById[record.id] = record;
       agentSessionIdsByWorkspaceId[workspaceId] = [...(agentSessionIdsByWorkspaceId[workspaceId] ?? []), record.id];
       // '@base' pseudo-workspaces have no scanner record in the map — their
@@ -341,77 +465,20 @@ export function buildMachineSnapshot(params: {
         };
       }
     }
-
-      for (const archived of archivedSessions) {
-        if (agentSessionsById[archived.sessionId]) continue;
-        const record: MachineAgentSessionRecord = {
-          id: archived.sessionId,
-          workspaceId,
-          projectId: workspaceRecord.projectId,
-          title: archived.title,
-          state: 'archived',
-          archivedAt: archived.archivedAt,
-          pendingPermissionIds: [],
-          pendingPermissionCount: 0,
-          pendingQuestionIds: [],
-          pendingQuestionCount: 0,
-        };
-      agentSessionsById[record.id] = record;
-      agentSessionIdsByWorkspaceId[workspaceId] = [...(agentSessionIdsByWorkspaceId[workspaceId] ?? []), record.id];
-      if (workspacesById[workspaceId]) {
-        workspacesById[workspaceId] = {
-          ...workspacesById[workspaceId],
-          agentSessionIds: [...workspacesById[workspaceId].agentSessionIds, record.id],
-        };
-      }
-    }
   }
 
   for (const [workspaceId, workspaceRecord] of Object.entries(workspacesById)) {
     const agentIds = agentSessionIdsByWorkspaceId[workspaceId] ?? [];
-    let runningAgentCount = 0;
-    let waitingAgentCount = 0;
-    let permissionAgentCount = 0;
-    let retryingAgentCount = 0;
-    let closedAgentCount = 0;
-    let archivedAgentCount = 0;
-
-    for (const agentId of agentIds) {
-      const agent = agentSessionsById[agentId];
-      if (!agent) continue;
-      switch (agent.state) {
-        case 'running':
-          runningAgentCount += 1;
-          break;
-        case 'waiting':
-          waitingAgentCount += 1;
-          break;
-        case 'permission-needed':
-          permissionAgentCount += 1;
-          break;
-        case 'retrying':
-          retryingAgentCount += 1;
-          break;
-        case 'closed':
-          closedAgentCount += 1;
-          break;
-        case 'archived':
-          archivedAgentCount += 1;
-          break;
-      }
-    }
+    const agents = agentIds
+      .map((agentId) => agentSessionsById[agentId])
+      .filter((agent): agent is MachineAgentSessionRecord => !!agent);
 
     workspacesById[workspaceId] = {
       ...workspaceRecord,
       summary: {
         ...workspaceRecord.summary,
+        ...computeAgentSummaryCounts(agents),
         agentCount: agentIds.length,
-        runningAgentCount,
-        waitingAgentCount,
-        permissionAgentCount,
-        retryingAgentCount,
-        closedAgentCount,
-        archivedAgentCount,
       },
     };
   }
