@@ -15,6 +15,7 @@ import type { Identity, PublicIdentity } from '../../types/identity.js';
 import type { ServeEventHandler } from '../../serve/types.js';
 import type { AgentStateUpdateDelta, WorkspaceAgentState } from './agent-event-manager.js';
 import { SpacesError } from '../../types/errors.js';
+import { writeTraceLog } from '../../utils/trace-log.js';
 
 export interface ServeRuntimeConfig {
   relayUrl: string;
@@ -142,22 +143,72 @@ export async function activateServeRuntime(config: ServeRuntimeConfig, deps: Ser
     const { applyAgentDeltaToAgentState } = await import('./agent-state-reducer.js');
 
     currentAgentSnapshot = Object.fromEntries((await getAgentState()).map((w) => [w.workspaceId, w]));
-    runtime.stopAgentWatch = await watchAgentState({
-      onSnapshot: (workspaces) => {
-        currentAgentSnapshot = Object.fromEntries(workspaces.map((w) => [w.workspaceId, w]));
-      },
-      onUpdate: (delta) => {
-        currentAgentSnapshot = applyAgentDeltaToAgentState(currentAgentSnapshot, delta);
-        void runtime.sessionManager.broadcastAgentStateUpdate(delta);
-      },
-      onDialogRequest: (request) => {
-        void runtime.sessionManager.broadcastRawMessage({ type: 'agent_dialog_request', request });
-      },
-      onUIEvent: (event) => {
-        void runtime.sessionManager.broadcastRawMessage({ type: 'agent_ui_event', event });
-      },
-      onError: (error) => log(`agent watch failed: ${error.message}`),
-    });
+
+    // The agent watch is the ONLY conduit for agent deltas to web clients — if
+    // it dies and stays dead, every connected client silently stops seeing
+    // agent activity forever. So: reconnect with capped backoff, and refresh
+    // the snapshot on restart (deltas emitted during the gap were lost).
+    let watchStopped = false;
+    let watchRetryTimer: ReturnType<typeof setTimeout> | null = null;
+    let watchCloser: (() => void) | null = null;
+    let watchRestartAttempts = 0;
+
+    const scheduleWatchRestart = (cause: string): void => {
+      if (watchStopped || watchRetryTimer) return;
+      const delayMs = Math.min(30_000, 1_000 * 2 ** Math.min(watchRestartAttempts, 5));
+      watchRestartAttempts += 1;
+      writeTraceLog('agent-watch-closed', { cause, restartAttempt: watchRestartAttempts, delayMs });
+      log(`agent watch closed (${cause}) — restarting in ${delayMs}ms (attempt ${watchRestartAttempts})`);
+      watchRetryTimer = setTimeout(() => {
+        watchRetryTimer = null;
+        if (watchStopped) return;
+        startAgentWatch()
+          .then(async () => {
+            const attempts = watchRestartAttempts;
+            watchRestartAttempts = 0;
+            writeTraceLog('agent-watch-restarted', { attempts });
+            log('agent watch restarted');
+            // Deltas during the gap are gone — resync the retained snapshot.
+            try {
+              currentAgentSnapshot = Object.fromEntries((await getAgentState()).map((w) => [w.workspaceId, w]));
+            } catch (error) {
+              log(`agent snapshot resync failed after watch restart: ${error instanceof Error ? error.message : String(error)}`);
+            }
+          })
+          .catch((error) => {
+            scheduleWatchRestart(`restart failed: ${error instanceof Error ? error.message : String(error)}`);
+          });
+      }, delayMs);
+    };
+
+    const startAgentWatch = async (): Promise<void> => {
+      watchCloser = await watchAgentState({
+        onSnapshot: (workspaces) => {
+          currentAgentSnapshot = Object.fromEntries(workspaces.map((w) => [w.workspaceId, w]));
+        },
+        onUpdate: (delta) => {
+          currentAgentSnapshot = applyAgentDeltaToAgentState(currentAgentSnapshot, delta);
+          void runtime.sessionManager.broadcastAgentStateUpdate(delta);
+        },
+        onDialogRequest: (request) => {
+          void runtime.sessionManager.broadcastRawMessage({ type: 'agent_dialog_request', request });
+        },
+        onUIEvent: (event) => {
+          void runtime.sessionManager.broadcastRawMessage({ type: 'agent_ui_event', event });
+        },
+        onError: (error) => scheduleWatchRestart(error.message),
+      });
+    };
+
+    await startAgentWatch();
+    runtime.stopAgentWatch = () => {
+      watchStopped = true;
+      if (watchRetryTimer) {
+        clearTimeout(watchRetryTimer);
+        watchRetryTimer = null;
+      }
+      try { watchCloser?.(); } catch { /* already closed */ }
+    };
 
     const eventHandler: ServeEventHandler = (event) => {
       switch (event.type) {

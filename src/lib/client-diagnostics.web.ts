@@ -44,6 +44,21 @@ function toDetail(v: unknown): string {
 }
 
 /**
+ * Record a failed RPC command into the ring (kind 'rpc'). Call sites are the
+ * UI layers that awaited an engine/backend command and caught the rejection —
+ * this is what makes "the prompt RPC failed silently" reconstructable from a
+ * problem report. Never throws.
+ */
+export function recordRpcFailure(command: string, error: unknown, context?: Record<string, unknown>): void {
+  const message = error instanceof Error ? error.message : String(error);
+  let detail = toDetail(error);
+  if (context) {
+    try { detail = `${detail} · ${JSON.stringify(context)}`; } catch { /* ignore */ }
+  }
+  pushDiagnostic({ kind: 'rpc', message: `${command} failed: ${message}`.slice(0, 500), detail: detail.slice(0, 1000), source: command });
+}
+
+/**
  * Install the global capture hooks. Idempotent. Call once, before mount.
  * `Date.now()` is used directly (this is browser runtime, not a workflow).
  */

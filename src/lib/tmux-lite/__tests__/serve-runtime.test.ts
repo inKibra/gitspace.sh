@@ -102,4 +102,50 @@ describe('serve runtime activation', () => {
     const ok = await activateServeRuntime(fakeConfig(), fakeDeps(fakeSessionManager()));
     expect(ok.active).toBe(true);
   });
+
+  it('reconnects the agent watch after a watch failure (deltas resume, snapshot resynced)', async () => {
+    const sm = fakeSessionManager();
+    let watchStarts = 0;
+    let snapshotReads = 0;
+    let lastHandlers: { onError: (e: Error) => void } | null = null;
+    const deps = fakeDeps(sm);
+    deps.getAgentState = async () => {
+      snapshotReads += 1;
+      return [];
+    };
+    (deps as { watchAgentState: unknown }).watchAgentState = async (handlers: { onError: (e: Error) => void }) => {
+      watchStarts += 1;
+      lastHandlers = handlers;
+      return () => undefined;
+    };
+
+    await activateServeRuntime(fakeConfig(), deps);
+    expect(watchStarts).toBe(1);
+    const readsBeforeFailure = snapshotReads;
+
+    // Simulate the watch socket dying — the bridge must come back on its own
+    // (first backoff step is 1s) and refresh the retained snapshot.
+    lastHandlers!.onError(new Error('Agent watch connection closed'));
+    await new Promise((r) => setTimeout(r, 1300));
+    expect(watchStarts).toBe(2);
+    expect(snapshotReads).toBeGreaterThan(readsBeforeFailure);
+  });
+
+  it('does not restart the agent watch after deactivation', async () => {
+    const sm = fakeSessionManager();
+    let watchStarts = 0;
+    let lastHandlers: { onError: (e: Error) => void } | null = null;
+    const deps = fakeDeps(sm);
+    (deps as { watchAgentState: unknown }).watchAgentState = async (handlers: { onError: (e: Error) => void }) => {
+      watchStarts += 1;
+      lastHandlers = handlers;
+      return () => undefined;
+    };
+
+    await activateServeRuntime(fakeConfig(), deps);
+    lastHandlers!.onError(new Error('Agent watch connection closed'));
+    await deactivateServeRuntime(); // cancels the pending restart
+    await new Promise((r) => setTimeout(r, 1300));
+    expect(watchStarts).toBe(1);
+  });
 });

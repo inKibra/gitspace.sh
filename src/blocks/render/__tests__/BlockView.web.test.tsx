@@ -1,8 +1,9 @@
-import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
-import { render } from '@testing-library/react';
+import { afterAll, beforeAll, describe, expect, it, mock } from 'bun:test';
+import { fireEvent, render } from '@testing-library/react';
 
 import { setupTestDom, teardownTestDom } from '../../../test/setup-dom.js';
 import { BlockView } from '../registry.web.js';
+import { BlockHostProvider, type BlockHost } from '../host.web.js';
 import '../content.web.js'; // registers markdown/callout/code/code-ref/data-structure
 import '../transcript.web.js'; // registers message/thinking/tool-call
 // note: diff.web is intentionally NOT imported — it pulls @pierre/diffs, which
@@ -76,5 +77,47 @@ describe('web BlockView', () => {
     const { container } = render(<BlockView block={{ id: 'm2', type: 'message', data: { role: 'robot', text: 'x' } }} />);
     expect(container.textContent).toContain('invalid block');
     expect(container.textContent).toContain('role');
+  });
+
+  it('renders a pending (optimistic) user message dimmed with a sending marker', () => {
+    const { container } = render(<BlockView block={{ id: 'u1', type: 'message', data: { role: 'user', text: 'hello there', pending: true } }} />);
+    expect(container.textContent).toContain('hello there');
+    expect(container.textContent).toContain('sending…');
+    expect(container.innerHTML).toContain('opacity-60');
+  });
+
+  it('error block Retry dispatches a retry-prompt action through the host', () => {
+    const dispatch = mock(() => {});
+    const host: BlockHost = { resolve: () => {}, dispatch, readOnly: false };
+    const { container } = render(
+      <BlockHostProvider host={host}>
+        <BlockView block={{ id: 'e1', type: 'error', data: { text: 'send failed' } }} />
+      </BlockHostProvider>,
+    );
+    const retry = Array.from(container.getElementsByTagName('button')).find((b) => b.textContent?.includes('Retry')) as HTMLButtonElement;
+    expect(retry).toBeTruthy();
+    fireEvent.click(retry);
+    expect(dispatch).toHaveBeenCalledWith({ kind: 'run', actionId: 'retry-prompt', payload: { blockId: 'e1' } });
+  });
+
+  it('error block Retry is disabled on a read-only host', () => {
+    const dispatch = mock(() => {});
+    const host: BlockHost = { resolve: () => {}, dispatch, readOnly: true };
+    const { container } = render(
+      <BlockHostProvider host={host}>
+        <BlockView block={{ id: 'e2', type: 'error', data: { text: 'send failed' } }} />
+      </BlockHostProvider>,
+    );
+    const retry = Array.from(container.getElementsByTagName('button')).find((b) => b.textContent?.includes('Retry')) as HTMLButtonElement;
+    expect(retry).toBeTruthy();
+    expect(retry.disabled).toBe(true);
+    fireEvent.click(retry);
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it('aborted error blocks offer no retry', () => {
+    const { container } = render(<BlockView block={{ id: 'e3', type: 'error', data: { text: 'stopped', aborted: true } }} />);
+    expect(container.textContent).toContain('stopped');
+    expect(container.textContent).not.toContain('Retry');
   });
 });

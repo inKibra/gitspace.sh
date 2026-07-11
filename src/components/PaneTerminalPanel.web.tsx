@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AttachedTerminalPaneWeb } from './AttachedTerminalPane.web.js';
 import { applyModifiersToInput, type ModifierState } from './TerminalControls.web.js';
 import type { SessionTerminalHandle } from './SessionTerminal.web.js';
-import { NativeAgentSurfaceConnected } from './NativeAgentSurfaceConnected.web.js';
+import { NativeAgentSurfaceConnected, type PromptLifecycleEvent, type PromptSubmitMode } from './NativeAgentSurfaceConnected.web.js';
 import { AgentTranscript, type BlockHost } from '../blocks/render/index.web.js';
 import { pendingInteractionBlocks } from '../blocks/agent/transcript-blocks.js';
 import { AgentPaneHeader } from './AgentPaneHeader.web.js';
@@ -19,6 +19,17 @@ import type { RemoteSessionPtyBackend } from '../session/useRemoteSessionClient.
 const PAGE_UP = '\x1b[5~';
 const PAGE_DOWN = '\x1b[6~';
 const NO_LIVE: Block[] = [];
+
+/** Client-side optimistic echo of the user's just-submitted prompt: shown
+ *  pending until the server's transcript_live echo arrives; flipped to failed
+ *  (with a working Retry) when the prompt RPC rejects. */
+interface OptimisticPrompt {
+  id: string;
+  text: string;
+  mode: PromptSubmitMode;
+  status: 'pending' | 'failed';
+  error?: string;
+}
 
 export interface PaneTerminalPanelProps {
   pane: AttachedPaneState;
@@ -109,6 +120,35 @@ export function PaneTerminalPanel({
     },
     [backend, wsId, agentSessionId],
   );
+  // Last prompt the user attempted for THIS pane (kept even after a successful
+  // send + composer clear) so the transcript's Retry can re-send it, plus the
+  // optimistic echo the transcript renders while the server echo is in flight.
+  const lastPromptRef = useRef<{ text: string; mode: PromptSubmitMode } | null>(null);
+  const [optimistic, setOptimistic] = useState<OptimisticPrompt | null>(null);
+  const optimisticSeq = useRef(0);
+  const [retrySignal, setRetrySignal] = useState<{ text: string; mode: PromptSubmitMode; nonce: number } | null>(null);
+  const handlePromptLifecycle = useCallback((event: PromptLifecycleEvent) => {
+    if (event.phase === 'submitted') {
+      lastPromptRef.current = { text: event.text, mode: event.mode };
+      optimisticSeq.current += 1;
+      setOptimistic({ id: `optimistic:${optimisticSeq.current}`, text: event.text, mode: event.mode, status: 'pending' });
+      return;
+    }
+    // failed → mark the matching optimistic echo failed (keeps Retry visible).
+    setOptimistic((o) => (o && o.text === event.text ? { ...o, status: 'failed', error: event.error } : o));
+  }, []);
+  const retryLastPrompt = useCallback(() => {
+    const last = lastPromptRef.current;
+    if (!last) return;
+    setRetrySignal((prev) => ({ text: last.text, mode: last.mode, nonce: (prev?.nonce ?? 0) + 1 }));
+  }, []);
+  // New session in this pane → stale optimistic echo must not carry over.
+  useEffect(() => {
+    setOptimistic(null);
+    setRetrySignal(null);
+    lastPromptRef.current = null;
+  }, [wsId, agentSessionId]);
+
   const transcriptHost = useMemo<BlockHost>(() => ({
     readOnly: false,
     resolve: (blockId, response) => {
@@ -126,8 +166,11 @@ export function PaneTerminalPanel({
         void backend.sendDialogResponse(questionId, 'select', typeof response === 'string' ? response : String(response)).catch(() => undefined);
       }
     },
-    dispatch: () => {},
-  }), [backend, wsId, agentSessionId]);
+    dispatch: (action) => {
+      // Transcript error blocks' Retry → re-send this pane's last prompt.
+      if (action.kind === 'run' && action.actionId === 'retry-prompt') retryLastPrompt();
+    },
+  }), [backend, wsId, agentSessionId, retryLastPrompt]);
 
   // Live transcript suffix: stream the in-progress turn from the agent-state
   // deltas. On commit, clear it — the hook folds the finished turn into history.
@@ -137,9 +180,39 @@ export function PaneTerminalPanel({
     const unsub = backend.subscribeAgentState((delta) => {
       if (delta.type !== 'agent_transcript_live' || delta.workspaceId !== wsId || delta.sessionId !== agentSessionId) return;
       setLiveBlocks(delta.committed ? NO_LIVE : delta.blocks);
+      // Reconcile the optimistic user echo against the server's live transcript:
+      // once the server echoes the user's message (or the turn commits), the
+      // optimistic copy is redundant. A failed optimistic only clears on an
+      // exact text match — the message provably got through despite the error.
+      setOptimistic((o) => {
+        if (!o) return o;
+        const echoed = delta.blocks.some((b) => {
+          if (b.type !== 'message') return false;
+          const d = b.data as { role?: string; text?: string };
+          return d.role === 'user' && d.text === o.text;
+        });
+        if (echoed) return null;
+        if (o.status === 'pending' && delta.committed) return null;
+        return o;
+      });
     });
     return unsub;
   }, [backend, wsId, agentSessionId]);
+
+  // Optimistic echo → transcript blocks (a pending/dim user message; plus an
+  // error block with a working Retry when the prompt failed).
+  const optimisticBlocks = useMemo<Block[]>(() => {
+    if (!optimistic) return NO_LIVE;
+    const message: Block = {
+      id: optimistic.id,
+      type: 'message',
+      data: { role: 'user', text: optimistic.text, ...(optimistic.status === 'pending' ? { pending: true } : {}) },
+    };
+    if (optimistic.status === 'failed') {
+      return [message, { id: `${optimistic.id}:error`, type: 'error', data: { text: optimistic.error ?? 'Failed to send message' } }];
+    }
+    return [message];
+  }, [optimistic]);
 
   // Pending interactive blocks (permissions / questions / todos) from agent state,
   // shown at the foot of the transcript and resolved through the host.
@@ -353,7 +426,14 @@ export function PaneTerminalPanel({
             error={modelError}
           />
           <div className="flex-1 min-h-0 bg-[var(--gs-bg)]">
-            <AgentTranscript fetchRange={fetchTranscriptRange} live={liveBlocks} pending={pendingBlocks} host={transcriptHost} pageSize={30} refreshNonce={transcriptRefresh} />
+            <AgentTranscript
+              fetchRange={fetchTranscriptRange}
+              live={liveBlocks}
+              pending={optimisticBlocks.length > 0 ? [...pendingBlocks, ...optimisticBlocks] : pendingBlocks}
+              host={transcriptHost}
+              pageSize={30}
+              refreshNonce={transcriptRefresh}
+            />
           </div>
         </>
       ) : (
@@ -399,6 +479,8 @@ export function PaneTerminalPanel({
             agentSessionId={pane.agentSessionId}
             paneId={pane.paneId}
             externalDraft={composerInjection}
+            onPromptLifecycle={handlePromptLifecycle}
+            retrySignal={retrySignal}
           />
         </div>
       ) : null}

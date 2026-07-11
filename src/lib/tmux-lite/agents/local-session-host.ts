@@ -28,6 +28,7 @@ import { LiveTurn } from '../../../blocks/agent/live-turn.js';
 import type { AgentEvent as SdkAgentEvent } from '@oh-my-pi/pi-agent-core';
 import type { AgentPromptImage } from '../protocol.js';
 import { recordEditBreadcrumb, flushEditBreadcrumbs } from './edit-breadcrumbs.js';
+import { writeTraceLog } from '../../../utils/trace-log.js';
 import { HostUIBridgeState, type HostUIDialogResponse } from './host-ui-bridge.js';
 import type { OmpAgentSession, OmpCreateSessionResult } from './omp-types.js';
 import {
@@ -340,6 +341,10 @@ export class LocalSessionHost implements AgentSessionHost {
       })
       .catch((err: unknown) => {
         const error = err instanceof Error ? err.message : String(err);
+        // Fire-and-forget rejection: the prompt RPC already acked, so this is
+        // the ONLY server-side record that the SDK swallowed the turn
+        // (hypothesis-1 detector for "message never appears").
+        writeTraceLog('agent-prompt-sdk-error', { sessionId: this.sessionId, error });
         console.error(`[session-host] prompt failed for session ${this.sessionId}:`, err);
         this.sinks.onEvent({ type: 'error', sessionId: this.sessionId, error });
       });

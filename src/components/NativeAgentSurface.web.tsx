@@ -44,8 +44,10 @@ export interface NativeAgentSurfaceProps {
   workingMessage?: string;
   /** Pending dialog request from the Pi SDK. */
   pendingDialog: HostUIDialogRequest | null;
-  /** Called when the user submits text from the native composer. */
-  onSubmit: (text: string, images: Array<{ dataUrl: string; name: string }>, files: Array<{ name: string; dataUrl: string }>, mode: NativeComposerSubmitMode) => void;
+  /** Called when the user submits text from the native composer. Returning
+   *  `false` preserves the composer draft (failed send); returning a string
+   *  replaces it (slash-command output). See NativeComposer's onSubmit. */
+  onSubmit: (text: string, images: Array<{ dataUrl: string; name: string }>, files: Array<{ name: string; dataUrl: string }>, mode: NativeComposerSubmitMode) => void | boolean | string | Promise<void | boolean | string>;
   /** Called when the user wants to abort the agent. */
   onAbort?: () => void;
   /** Called when the user responds to a host UI dialog. */

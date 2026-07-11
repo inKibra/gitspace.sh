@@ -1,6 +1,7 @@
 import { useState, type ReactElement } from 'react';
 import type { ErrorData, ImageData, MessageData, SubagentData, ThinkingData, ToolCallData } from '../types/transcript.js';
 import { defineRenderer, BlockView } from './registry.web.js';
+import { useBlockHost } from './host.web.js';
 import { Markdown } from './markdown.web.js';
 import { segmentMagicKeywords } from '../agent/magic-keywords.js';
 
@@ -28,13 +29,20 @@ defineRenderer<MessageData>('message', ({ data }): ReactElement => {
     // render chips only when a producer actually supplies them.
     const rawAtts = (data as { attachments?: unknown }).attachments;
     const atts = Array.isArray(rawAtts) ? rawAtts.filter((a): a is string => typeof a === 'string') : [];
+    const pending = data.pending === true;
     return (
       // User turns are indented + accented so they stand apart from agent
-      // output (restores the pre-mock transcript styling).
-      <div className="my-2 ml-5 flex items-baseline border-l-2 border-[var(--gs-success)]/40 pl-3">
+      // output (restores the pre-mock transcript styling). Optimistic echoes
+      // (submitted, server echo not yet received) render dimmed with a pulse.
+      <div className={`my-2 ml-5 flex items-baseline border-l-2 border-[var(--gs-success)]/40 pl-3${pending ? ' opacity-60' : ''}`}>
         <span className="mr-2 flex-none text-[11px] lowercase text-[var(--gs-success)]">you</span>
         <div className="min-w-0 flex-1 text-[13px] leading-[1.6] text-[var(--gs-text)] whitespace-pre-wrap">
           <KeywordText text={data.text} />
+          {pending && (
+            <span className="ml-2 inline-flex items-center gap-1 align-middle text-[10px] text-[var(--gs-text-dim)]">
+              <span className="inline-block h-[6px] w-[6px] rounded-full bg-[var(--gs-text-dim)] animate-pulse" /> sending…
+            </span>
+          )}
           {atts.length > 0 && (
             <span className="ml-2 inline-flex flex-wrap gap-1.5 align-middle">
               {atts.map((a) => (
@@ -167,10 +175,22 @@ defineRenderer<SubagentData>('subagent', ({ data }): ReactElement => (
 ));
 
 // ── error ─────────────────────────────────────────────────────────────────
-defineRenderer<ErrorData>('error', ({ data }): ReactElement => (
-  <div className={`my-2 flex items-center gap-2 border px-2 py-1.5 text-[12px] ${data.aborted ? 'border-[var(--gs-border-active)] bg-[var(--gs-bg-active)] text-[var(--gs-text-muted)]' : 'border-[var(--gs-danger)] bg-[rgba(255,51,51,0.06)] text-[var(--gs-text-secondary)]'}`}>
-    <span className={data.aborted ? 'text-[var(--gs-text-dim)]' : 'text-[var(--gs-danger)]'}>{data.aborted ? '◼' : '⚠'}</span>
-    <span className="flex-1">{data.text}</span>
-    {!data.aborted && <button type="button" className="text-[11px] border border-[var(--gs-border)] px-2 py-0.5 text-[var(--gs-text)]">Retry</button>}
-  </div>
-));
+defineRenderer<ErrorData>('error', ({ data, block }): ReactElement => {
+  const host = useBlockHost();
+  return (
+    <div className={`my-2 flex items-center gap-2 border px-2 py-1.5 text-[12px] ${data.aborted ? 'border-[var(--gs-border-active)] bg-[var(--gs-bg-active)] text-[var(--gs-text-muted)]' : 'border-[var(--gs-danger)] bg-[rgba(255,51,51,0.06)] text-[var(--gs-text-secondary)]'}`}>
+      <span className={data.aborted ? 'text-[var(--gs-text-dim)]' : 'text-[var(--gs-danger)]'}>{data.aborted ? '◼' : '⚠'}</span>
+      <span className="flex-1">{data.text}</span>
+      {!data.aborted && (
+        <button
+          type="button"
+          disabled={host.readOnly}
+          onClick={() => host.dispatch({ kind: 'run', actionId: 'retry-prompt', payload: { blockId: block.id } })}
+          className="text-[11px] border border-[var(--gs-border)] px-2 py-0.5 text-[var(--gs-text)] disabled:opacity-50"
+        >
+          Retry
+        </button>
+      )}
+    </div>
+  );
+});

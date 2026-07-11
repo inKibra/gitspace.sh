@@ -6,6 +6,10 @@ import { blockEnvelope } from '../block.js';
 export const messageData = z.object({
   role: z.enum(['user', 'assistant']),
   text: z.string(),
+  /** Client-side optimistic echo: the message was submitted but the server's
+   *  transcript echo has not arrived yet. Rendered dimmed with a pending pulse;
+   *  never produced by the server. */
+  pending: z.boolean().optional(),
 });
 export type MessageData = z.infer<typeof messageData>;
 defineBlock({
