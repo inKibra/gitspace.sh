@@ -67,6 +67,8 @@ export function backendEventToActions(backendKey: BackendKey, event: BackendEven
       return [{ type: 'SET_COMMAND_ERROR', backendKey, commandError: { code: event.code, message: event.message } }];
     case 'error':
       return [{ type: 'SET_BACKEND_STATUS', backendKey, status: 'error', error: event.message }];
+    case 'snapshot_error':
+      return [{ type: 'SET_SNAPSHOT_ERROR', backendKey, message: event.message }];
     case 'script_output':
       return [{
         type: 'SET_SCRIPT_STATE',

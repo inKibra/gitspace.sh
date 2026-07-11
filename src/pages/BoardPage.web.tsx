@@ -43,6 +43,10 @@ export interface BoardPageProps {
   /** True when backend is connected but workspaces haven't arrived yet. */
   loading?: boolean;
   loadingLabel?: string;
+  /** When set, the loading state failed (e.g. snapshot timed out) — render the reason instead of the spinner. */
+  loadingError?: string | null;
+  /** Retry action for a failed load (reconnects the backend). */
+  onRetryLoad?: () => void;
 }
 
 function isTypingTarget(target: EventTarget | null): boolean {
@@ -256,6 +260,8 @@ export function BoardPage({
 	  boardMessage,
 	  loading = false,
 	  loadingLabel = 'Loading worktrees...',
+	  loadingError = null,
+	  onRetryLoad,
 }: BoardPageProps) {
   const [boardView, setBoardView] = useState<'workspaces' | 'stacks'>('workspaces');
   const projects = useMemo(
@@ -409,9 +415,24 @@ export function BoardPage({
       {/* Kanban board — fills remaining height */}
       <div className="flex-1 min-h-0 px-3 pb-3 pt-1 overflow-auto">
         {loading ? (
-          <div className="flex items-center justify-center h-full">
-            <div className="text-sm text-[var(--gs-text-muted)]">{loadingLabel}</div>
-          </div>
+          loadingError ? (
+            <div className="flex flex-col items-center justify-center gap-3 h-full px-6 text-center">
+              <div className="text-sm text-[var(--gs-danger)]">Failed to load worktrees</div>
+              <div className="max-w-md text-xs text-[var(--gs-text-muted)]">{loadingError}</div>
+              {onRetryLoad && (
+                <button
+                  onClick={onRetryLoad}
+                  className="px-3 py-1.5 text-xs rounded border border-[var(--gs-border)] bg-[var(--gs-btn-secondary-bg)] text-[var(--gs-text)] hover:bg-[var(--gs-border)]"
+                >
+                  Retry
+                </button>
+              )}
+            </div>
+          ) : (
+            <div className="flex items-center justify-center h-full">
+              <div className="text-sm text-[var(--gs-text-muted)]">{loadingLabel}</div>
+            </div>
+          )
         ) : (
           <KanbanBoardWeb
             groups={groups}

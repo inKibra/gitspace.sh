@@ -195,6 +195,77 @@ export class GitSpaceEngine {
     return this.engineState.backends[key] ?? null;
   }
 
+  /**
+   * Force a reconnect of a backend (used by the board's retry action when a
+   * connect or initial-snapshot deadline fired). Remote backends hold a
+   * one-shot relay socket, so retry recreates the backend and re-runs the
+   * routing + handshake + snapshot sequence; the local backend reconnects
+   * in place.
+   */
+  async retryBackend(key: BackendKey): Promise<void> {
+    this.dispatch({ type: 'SET_SNAPSHOT_ERROR', backendKey: key, message: null });
+
+    const remoteEntry = [...this.registeredRemoteBackends.entries()].find(([, backendKey]) => backendKey === key);
+    if (remoteEntry) {
+      const [machineId] = remoteEntry;
+      const { createRemoteBackend } = this.platform;
+      const relayUrl = this.relay?.url;
+      const identity = this.identity;
+      const deviceCertificate = this.deviceCert;
+      if (!createRemoteBackend || !relayUrl || !identity || !deviceCertificate) {
+        throw new Error('Relay configuration unavailable; cannot retry remote backend');
+      }
+      const wasActive = this.engineState.activeBackendKey === key;
+      const machineLabel = this.engineState.backends[key]?.descriptor.label;
+
+      this.registeredRemoteBackends.delete(machineId);
+      await this.manager.unregister(key).catch(() => undefined);
+      this.dispatch({ type: 'UNREGISTER_BACKEND', backendKey: key });
+
+      const { backend } = createRemoteBackend({
+        relayUrl,
+        identity,
+        machineId,
+        deviceCertificate,
+        machineLabel,
+        storage: this.platform.storage,
+      });
+      this.dispatch({ type: 'REGISTER_BACKEND', descriptor: backend.descriptor });
+      this.manager.register(backend);
+      this.registeredRemoteBackends.set(machineId, key);
+      if (wasActive) {
+        this.dispatch({ type: 'SET_ACTIVE_BACKEND', backendKey: key });
+      }
+      try {
+        await this.manager.connect(key);
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.error(`[engine] Backend retry failed (${key}): ${message}`);
+        this.dispatch({ type: 'SET_BACKEND_STATUS', backendKey: key, status: 'error', error: message });
+        throw error;
+      }
+      backend.listProjects().catch(() => undefined);
+      backend.listWorkspaces().catch(() => undefined);
+      backend.listSessions().catch(() => undefined);
+      return;
+    }
+
+    const backend = this.manager.get(key);
+    if (!backend) throw new Error(`No backend registered: ${key}`);
+    try {
+      await this.manager.disconnect(key);
+      await this.manager.connect(key);
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.error(`[engine] Backend retry failed (${key}): ${message}`);
+      this.dispatch({ type: 'SET_BACKEND_STATUS', backendKey: key, status: 'error', error: message });
+      throw error;
+    }
+    backend.listProjects().catch(() => undefined);
+    backend.listWorkspaces().catch(() => undefined);
+    backend.listSessions().catch(() => undefined);
+  }
+
   // ─── Fanout actions (ALL connected backends) ────────────────────────────────
 
   listProjects(): void {

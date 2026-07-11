@@ -16,6 +16,7 @@ function createBackendState(descriptor: BackendDescriptor): BackendSessionState 
       sessions: [],
       replays: [],
       machineSnapshot: null,
+      snapshotError: null,
       operations: {},
       inbox: [],
       inboxUnreadCount: 0,
@@ -223,6 +224,24 @@ export function sessionEngineReducer(
           [action.backendKey]: {
             ...backend,
             machineSnapshot: action.snapshot,
+            // A real snapshot supersedes a previous load failure.
+            snapshotError: action.snapshot ? null : backend.snapshotError,
+          },
+        },
+      };
+    }
+
+    case 'SET_SNAPSHOT_ERROR': {
+      const backend = state.backends[action.backendKey];
+      if (!backend) return state;
+      if (backend.snapshotError === action.message) return state;
+      return {
+        ...state,
+        backends: {
+          ...state.backends,
+          [action.backendKey]: {
+            ...backend,
+            snapshotError: action.message,
           },
         },
       };

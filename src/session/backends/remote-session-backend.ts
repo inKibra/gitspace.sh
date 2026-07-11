@@ -91,6 +91,28 @@ const DEFAULT_PANE_STREAM_ID = 2;
 const DEFAULT_PANE_ID = 'default';
 const DEFAULT_LIFECYCLE_TIMEOUT_MS = 12_000;
 const DEFAULT_INITIAL_SNAPSHOT_TIMEOUT_MS = 15_000;
+/** Deadline for the full connect sequence (relay routing + X3DH handshake). */
+const CONNECT_TIMEOUT_MS = 20_000;
+/** Keepalive ping cadence on the machine channel (relay answers pong). */
+const PING_INTERVAL_MS = 15_000;
+/** No pong within this window ⇒ the channel is dead (half-open socket). */
+const PONG_LIVENESS_TIMEOUT_MS = 45_000;
+
+/** Timeout instrumentation: daemon-side trace log (no-op in the browser) plus
+ *  the browser client-diagnostics ring (ticket #5 leans on both). */
+function traceTimeoutEvent(event: string, details: Record<string, unknown>): void {
+  writeTraceLog(event, details);
+  if (typeof window !== 'undefined') {
+    void import('../../lib/client-diagnostics.web.js')
+      .then((mod) => mod.pushDiagnostic({
+        kind: 'rpc',
+        message: event,
+        detail: JSON.stringify(details),
+        source: 'remote-session',
+      }))
+      .catch(() => undefined);
+  }
+}
 const OPERATION_COMMAND_TYPES = new Set<string>([
   'create_project',
   'prepare_project_creation',
@@ -412,6 +434,10 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   private connectPromise: Promise<void> | null = null;
   private connectResolve: (() => void) | null = null;
   private connectReject: ((error: Error) => void) | null = null;
+  private connectDeadline: ReturnType<typeof setTimeout> | null = null;
+  private connectStartedAtMs = 0;
+  private pingTimer: ReturnType<typeof setInterval> | null = null;
+  private lastPongAtMs = 0;
   private initialSnapshotPromise: Promise<void> | null = null;
   private initialSnapshotResolve: (() => void) | null = null;
   private initialSnapshotReject: ((error: Error) => void) | null = null;
@@ -535,6 +561,23 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       this.connectResolve = resolve;
       this.connectReject = reject;
     });
+    // Bound the whole connect sequence — a relay that never routes us to the
+    // machine, or a machine that never completes the handshake, must reject
+    // instead of leaving the UI on an infinite "connecting" state.
+    this.connectStartedAtMs = Date.now();
+    this.clearConnectDeadline();
+    this.connectDeadline = setTimeout(() => {
+      this.connectDeadline = null;
+      const elapsedMs = Date.now() - this.connectStartedAtMs;
+      traceTimeoutEvent('remote-connect-timeout', {
+        machineId: this.machineId,
+        timeoutMs: CONNECT_TIMEOUT_MS,
+        elapsedMs,
+      });
+      const message = `Timed out connecting to machine ${this.machineId} (no handshake within ${Math.round(CONNECT_TIMEOUT_MS / 1000)}s)`;
+      this.emit({ type: 'status', status: 'error', error: message });
+      this.rejectConnect(new Error(message));
+    }, CONNECT_TIMEOUT_MS);
     this.initialSnapshotReceived = false;
     this.initialSnapshotPromise = new Promise<void>((resolve, reject) => {
       this.initialSnapshotResolve = resolve;
@@ -1797,6 +1840,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
         this.rejectConnect(new Error(message.message));
         return;
       case 'pong':
+        this.lastPongAtMs = Date.now();
         return;
       default:
         return;
@@ -2478,7 +2522,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
         const pending = this.pendingTypedCommands.get(requestId);
         if (!pending) return;
         this.pendingTypedCommands.delete(requestId);
-        writeTraceLog('remote-command-timeout', {
+        traceTimeoutEvent('remote-command-timeout', {
           requestId,
           commandType: request.type,
           durationMs: Date.now() - pending.startedAtMs,
@@ -2520,6 +2564,11 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
         const pending = this.pendingOperationStarts.get(requestId);
         if (!pending) return;
         this.pendingOperationStarts.delete(requestId);
+        traceTimeoutEvent('remote-operation-start-timeout', {
+          requestId,
+          commandType: request.type,
+          durationMs: Date.now() - pending.startedAtMs,
+        });
         reject(new Error(`Timed out waiting for operation acceptance (${request.type})`));
       }, DEFAULT_LIFECYCLE_TIMEOUT_MS);
       this.pendingOperationStarts.set(requestId, { resolve, reject, timeout, startedAtMs });
@@ -2611,12 +2660,18 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     }
     return new Promise<RemoteOperationRecord>((resolve, reject) => {
       const operation = this.operations.get(operationId);
+      const timeoutMs = operationCompletionTimeoutMs(operation);
       const timeout = setTimeout(() => {
         const pending = this.pendingOperationCompletions.get(operationId);
         if (!pending) return;
         this.pendingOperationCompletions.delete(operationId);
+        traceTimeoutEvent('remote-operation-completion-timeout', {
+          operationId,
+          operationKind: operation?.kind,
+          timeoutMs,
+        });
         pending.reject(new Error(`Timed out waiting for operation completion (${operationId})`));
-      }, operationCompletionTimeoutMs(operation));
+      }, timeoutMs);
       this.pendingOperationCompletions.set(operationId, { resolve, reject, timeout });
     });
   }
@@ -2664,7 +2719,50 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     };
   }
 
+  private clearConnectDeadline(): void {
+    if (this.connectDeadline) {
+      clearTimeout(this.connectDeadline);
+      this.connectDeadline = null;
+    }
+  }
+
+  private startPingLoop(): void {
+    this.stopPingLoop();
+    this.lastPongAtMs = Date.now();
+    this.pingTimer = setInterval(() => {
+      if (!this.isConnected) return;
+      const sincePongMs = Date.now() - this.lastPongAtMs;
+      if (sincePongMs > PONG_LIVENESS_TIMEOUT_MS) {
+        traceTimeoutEvent('remote-liveness-timeout', {
+          machineId: this.machineId,
+          sincePongMs,
+          livenessTimeoutMs: PONG_LIVENESS_TIMEOUT_MS,
+        });
+        const message = `Lost connection to machine ${this.machineId} (no pong for ${Math.round(sincePongMs / 1000)}s)`;
+        this.stopPingLoop();
+        this.emit({ type: 'status', status: 'error', error: message });
+        // Force the socket closed so the onClose path resets state; the
+        // directory client re-registers the backend when the machine is
+        // reachable again.
+        try { this.socketAdapter.close(this.socket); } catch { /* already closed */ }
+        return;
+      }
+      try {
+        this.socketAdapter.send(this.socket, JSON.stringify({ type: 'ping', timestamp: Date.now() }));
+      } catch { /* socket is closing; liveness check will handle it */ }
+    }, PING_INTERVAL_MS);
+  }
+
+  private stopPingLoop(): void {
+    if (this.pingTimer) {
+      clearInterval(this.pingTimer);
+      this.pingTimer = null;
+    }
+  }
+
   private resolveConnect(): void {
+    this.clearConnectDeadline();
+    this.startPingLoop();
     if (this.connectResolve) {
       this.connectResolve();
     }
@@ -2674,6 +2772,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   }
 
   private rejectConnect(error: Error): void {
+    this.clearConnectDeadline();
     this.listenersAttached = false;
     if (this.connectReject) {
       this.connectReject(error);
@@ -2684,6 +2783,8 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   }
 
   private resetState(): void {
+    this.clearConnectDeadline();
+    this.stopPingLoop();
     this.listenersAttached = false;
     this.isConnected = false;
     this.attachLifecycle.reset();
@@ -2748,6 +2849,8 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       return;
     }
     this.initialSnapshotReceived = true;
+    // Snapshot arrived — clear any stale load-failure state in the UI.
+    this.emit({ type: 'snapshot_error', message: null });
     this.initialSnapshotResolve?.();
     this.initialSnapshotResolve = null;
     this.initialSnapshotReject = null;
@@ -2757,13 +2860,24 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     if (this.initialSnapshotReceived || !this.initialSnapshotPromise) {
       return;
     }
+    const startedAtMs = Date.now();
     let timeout: ReturnType<typeof setTimeout> | undefined;
     try {
       await Promise.race([
         this.initialSnapshotPromise,
         new Promise<void>((_, reject) => {
           timeout = setTimeout(() => {
-            reject(new Error(`Timed out waiting for initial machine snapshot from ${this.machineId}`));
+            const message = `Timed out waiting for initial machine snapshot from ${this.machineId}`;
+            traceTimeoutEvent('remote-snapshot-timeout', {
+              machineId: this.machineId,
+              timeoutMs: DEFAULT_INITIAL_SNAPSHOT_TIMEOUT_MS,
+              elapsedMs: Date.now() - startedAtMs,
+            });
+            // Surface into backend state so the board renders a real error
+            // instead of an infinite "Loading worktrees..." spinner (the
+            // engine's fanout list* calls only log the rejection).
+            this.emit({ type: 'snapshot_error', message });
+            reject(new Error(message));
           }, DEFAULT_INITIAL_SNAPSHOT_TIMEOUT_MS);
         }),
       ]);

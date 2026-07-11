@@ -54,6 +54,8 @@ export interface BackendSessionState {
   sessions: SessionInfo[];
   replays: ReplayInfo[];
   machineSnapshot: MachineSnapshot | null;
+  /** Set when the initial machine snapshot failed to load (e.g. timed out); cleared when a snapshot arrives. */
+  snapshotError: string | null;
   operations: Record<string, RemoteOperationRecord>;
 
   inbox: InboxItem[];
@@ -105,6 +107,7 @@ export type SessionEngineAction =
   | { type: 'SET_SESSIONS'; backendKey: BackendKey; sessions: SessionInfo[] }
   | { type: 'SET_REPLAYS'; backendKey: BackendKey; replays: ReplayInfo[] }
   | { type: 'SET_MACHINE_SNAPSHOT'; backendKey: BackendKey; snapshot: MachineSnapshot | null }
+  | { type: 'SET_SNAPSHOT_ERROR'; backendKey: BackendKey; message: string | null }
   | {
       type: 'SET_INBOX';
       backendKey: BackendKey;

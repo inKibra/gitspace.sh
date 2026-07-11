@@ -499,6 +499,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
     handleSelectWorkspace: rawHandleBoardSelectWorkspace,
     worktreeCount,
     loading: boardLoading,
+    loadError: boardLoadError,
     selectedWorkspaceProjectName,
   } = useBoardPageModel({
     state: multiMachineState,
@@ -512,6 +513,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
     mode: terminalMode,
     activeBackendKey,
     activeBackendHasSnapshot: activeBackendState?.machineSnapshot != null,
+    activeBackendSnapshotError: activeBackendState?.snapshotError ?? null,
   });
   const workspaceRuntime = useWorkspaceRuntimeModel(multiMachineState);
 
@@ -3578,6 +3580,14 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
           boardMessage={boardGoalOrderMessage}
           loading={boardLoading}
           loadingLabel="Loading worktrees..."
+          loadingError={boardLoadError}
+          onRetryLoad={() => {
+            if (!activeBackendKey) return;
+            void multi.retryBackend(activeBackendKey).catch((error: unknown) => {
+              const message = error instanceof Error ? error.message : String(error);
+              toast.error(`Reconnect failed: ${message}`);
+            });
+          }}
         />
         {renderDetailPages(null)}
         </div>
@@ -3699,6 +3709,9 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
         <div className="text-center">
           <h1 className="text-xl font-bold text-[var(--gs-text)] mb-4">GitSpace</h1>
           <div className="text-sm text-[var(--gs-text-muted)] mb-4">{statusMessage}</div>
+          {isError && activeBackendState?.error && (
+            <div className="max-w-md mx-auto text-xs text-[var(--gs-danger)] mb-2">{activeBackendState.error}</div>
+          )}
           {!isError && (
             <div className="flex gap-1 justify-center">
               {[0, 1, 2].map((i) => (

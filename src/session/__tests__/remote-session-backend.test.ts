@@ -527,6 +527,9 @@ describe('RemoteSessionBackend', () => {
     });
     await connectAndHandshakeWithoutSnapshot(backend, socket);
 
+    const events: BackendEvent[] = [];
+    backend.onEvent((event) => events.push(event));
+
     jest.useFakeTimers();
     try {
       const projectsPromise = backend.listProjects();
@@ -536,6 +539,13 @@ describe('RemoteSessionBackend', () => {
     } finally {
       jest.useRealTimers();
     }
+
+    // The timeout must surface as backend state (snapshot_error) so the board
+    // renders an error + retry instead of an infinite loading spinner.
+    expect(events).toContainEqual({
+      type: 'snapshot_error',
+      message: 'Timed out waiting for initial machine snapshot from machine-1',
+    });
   });
 
   it('accepts workspace-phase-preview responses from the remote machine', async () => {

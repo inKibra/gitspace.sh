@@ -195,3 +195,64 @@ it('keeps default attached fields consistent when adding the default pane', () =
   expect(next.backends.local.attachedSessionMeta).toEqual({ sessionName: 'acme:ws-1:1' });
   expect(next.backends.local.attachedPanes.default?.workspaceId).toBe('acme:ws-1');
 });
+
+describe('snapshot error state (ticket #4: bounded RPCs surface in the UI)', () => {
+  const registered = sessionEngineReducer(createInitialSessionEngineState(), {
+    type: 'REGISTER_BACKEND',
+    descriptor: { key: 'local', kind: 'local', label: 'Local' },
+  });
+
+  it('initializes snapshotError to null', () => {
+    expect(registered.backends.local.snapshotError).toBeNull();
+  });
+
+  it('SET_SNAPSHOT_ERROR stores the failure reason', () => {
+    const next = sessionEngineReducer(registered, {
+      type: 'SET_SNAPSHOT_ERROR',
+      backendKey: 'local',
+      message: 'Timed out waiting for initial machine snapshot from machine-1',
+    });
+    expect(next.backends.local.snapshotError).toBe(
+      'Timed out waiting for initial machine snapshot from machine-1'
+    );
+  });
+
+  it('a real machine snapshot clears a prior snapshot error', () => {
+    const withError = sessionEngineReducer(registered, {
+      type: 'SET_SNAPSHOT_ERROR',
+      backendKey: 'local',
+      message: 'Timed out waiting for initial machine snapshot from machine-1',
+    });
+    const next = sessionEngineReducer(withError, {
+      type: 'SET_MACHINE_SNAPSHOT',
+      backendKey: 'local',
+      snapshot: {
+        schemaVersion: 1,
+        capturedAtMs: Date.now(),
+        projectsById: {},
+        projectOrder: [],
+        workspacesById: {},
+        workspaceOrder: [],
+        terminalSessionsById: {},
+        agentSessionsById: {},
+        operationsById: {},
+        inboxItemsById: {},
+      } as never,
+    });
+    expect(next.backends.local.snapshotError).toBeNull();
+  });
+
+  it('SET_SNAPSHOT_ERROR with null clears the error (retry path)', () => {
+    const withError = sessionEngineReducer(registered, {
+      type: 'SET_SNAPSHOT_ERROR',
+      backendKey: 'local',
+      message: 'boom',
+    });
+    const next = sessionEngineReducer(withError, {
+      type: 'SET_SNAPSHOT_ERROR',
+      backendKey: 'local',
+      message: null,
+    });
+    expect(next.backends.local.snapshotError).toBeNull();
+  });
+});

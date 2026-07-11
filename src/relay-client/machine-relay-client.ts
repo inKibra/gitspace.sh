@@ -236,6 +236,11 @@ export async function connectMachineRelay(
     const baseReconnectDelay = 1000;
     const maxReconnectDelay = 30000;
     const pingIntervalMs = 15_000;
+    // No pong within this window ⇒ half-open socket: terminate so the normal
+    // onclose → reconnect path runs (a dead TCP connection can otherwise sit
+    // silently for many minutes while clients see the machine as online).
+    const pongLivenessTimeoutMs = 45_000;
+    let lastPongAtMs = 0;
     let resolved = false;
     let pingTimer: ReturnType<typeof setInterval> | null = null;
     let stopped = false;
@@ -268,8 +273,20 @@ export async function connectMachineRelay(
 
     const startPing = (ws: WebSocket) => {
       stopPing();
+      lastPongAtMs = Date.now();
       pingTimer = setInterval(() => {
         if (ws.readyState !== WebSocket.OPEN) {
+          return;
+        }
+        const sincePongMs = Date.now() - lastPongAtMs;
+        if (sincePongMs > pongLivenessTimeoutMs) {
+          console.log(`[serve] Relay liveness lost: no pong for ${Math.round(sincePongMs / 1000)}s, terminating connection`);
+          stopPing();
+          try {
+            ws.terminate();
+          } catch {
+            try { ws.close(); } catch { /* already closed */ }
+          }
           return;
         }
         ws.send(JSON.stringify({ type: 'ping', timestamp: Date.now() }));
@@ -478,6 +495,7 @@ export async function connectMachineRelay(
             }
 
             case 'pong':
+              lastPongAtMs = Date.now();
               break;
 
             default:

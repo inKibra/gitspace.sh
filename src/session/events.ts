@@ -42,6 +42,7 @@ export type BackendEvent =
   | { type: 'session_exited'; sessionId: string; exitCode?: number }
   | { type: 'command_error'; code?: string; message: string }
   | { type: 'error'; message: string }
+  | { type: 'snapshot_error'; message: string | null }
   | { type: 'events'; events: WideEvent[]; liveEventIds: string[]; savedEventFilters?: SavedEventFilter[] }
   | { type: 'machine_snapshot'; snapshot: MachineSnapshot }
   | { type: 'operation_snapshot'; operations: RemoteOperationRecord[] }
