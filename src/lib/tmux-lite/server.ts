@@ -3820,41 +3820,17 @@ export async function dispatchCommand(cmd: Command): Promise<Response | null> {
 
           case 'report-problem':
             try {
-              const { buildProblemReport, issueTitleAndBody } = await import('./problem-report.js');
-              const { writeFileSync, mkdirSync } = await import('fs');
-              const { join } = await import('path');
-              const { getWorkspaceRoot } = await import('../../core/paths.js');
+              // Local write (the reversible sink + fallback) + GitHub issue to
+              // the GitSpace repo — a report is a problem WITH GitSpace, so it
+              // goes where GitSpace is fixed (not the user's project). Issue
+              // failure degrades to local-only inside fileProblemReport.
+              // Agent-originated reports (origin 'agent') ride the same routine
+              // via fileAgentReport (pi-coordinator onAgentReport sink).
+              const { fileProblemReport } = await import('./problem-report.js');
               let clientBundle: unknown = {};
               try { clientBundle = JSON.parse(cmd.clientBundleJson); } catch { clientBundle = { parseError: 'client bundle was not valid JSON' }; }
-              const now = Date.now();
-              const { redacted } = buildProblemReport(cmd.note, clientBundle, now);
-
-              // Always write the local report (the reversible sink + fallback).
-              const stamp = new Date(now).toISOString().replace(/[:.]/g, '-');
-              const dir = join(getWorkspaceRoot(), '.logs', 'reports', stamp);
-              mkdirSync(dir, { recursive: true, mode: 0o700 });
-              const path = join(dir, 'report.json');
-              writeFileSync(path, JSON.stringify(redacted, null, 2), { mode: 0o600 });
-
-              // Always publish a GitHub issue to the GitSpace repo — a report is
-              // a problem WITH GitSpace, so it goes where GitSpace is fixed (not
-              // the user's project). A failure here degrades to local-only and
-              // is logged, but never loses the report.
-              let issueUrl: string | undefined;
-              let issueNumber: number | undefined;
-              try {
-                const { createIssue, createGist, reportRepoSlug } = await import('../../core/github-issues.js');
-                const { issueLogFiles } = await import('./problem-report.js');
-                // Attach the FULL logs (no truncation) as a gist, link it in the issue.
-                const logsUrl = await createGist(issueLogFiles(redacted), `GitSpace problem report — ${new Date(now).toISOString()}`);
-                const { title, body } = issueTitleAndBody(redacted, logsUrl ?? undefined);
-                const issue = await createIssue({ slug: reportRepoSlug(), title, body, labels: ['gitspace-report'], cwd: getWorkspaceRoot() });
-                issueUrl = issue.url;
-                issueNumber = issue.number;
-              } catch (e) {
-                console.error(`[report] GitHub issue filing failed (report saved locally at ${path}): ${e instanceof Error ? e.message : String(e)}`);
-              }
-              res = { type: 'report-problem', path, issueUrl, issueNumber };
+              const filed = await fileProblemReport(cmd.note, clientBundle, Date.now());
+              res = { type: 'report-problem', path: filed.path, issueUrl: filed.issueUrl, issueNumber: filed.issueNumber };
             } catch (e) {
               res = { type: 'error', message: `Failed to write problem report: ${e instanceof Error ? e.message : String(e)}` };
             }

@@ -1085,6 +1085,23 @@ export class PiCoordinator {
         if (!sessionId) return;
         this.terminalRelays.get(sessionId)?.write(data);
       },
+      onAgentReport: (payload) => {
+        // Agent invoked the SDK's report_tool_issue tool — file it through the
+        // same pipeline as user reports (local write + issue + gist), with
+        // origin 'agent'. Worker mode delivers this over IPC; in-process mode
+        // calls it directly. Fire-and-forget: filing must never block the turn.
+        void (async () => {
+          try {
+            const { fileAgentReport } = await import('../problem-report.js');
+            const filed = await fileAgentReport(payload, Date.now());
+            console.log(
+              `[pi-coordinator] agent report filed for session ${payload.sessionId} -> ${filed.issueUrl ?? filed.path}`,
+            );
+          } catch (err) {
+            console.error('[pi-coordinator] agent report filing failed:', err);
+          }
+        })();
+      },
     };
   }
 

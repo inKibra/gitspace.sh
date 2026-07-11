@@ -12,7 +12,7 @@
 
 import type { AgentEvent } from '../../../../agents/backend.js';
 import type { HostUIDialogRequest, HostUIEvent } from '../host-ui-bridge.js';
-import type { SessionHostBoot, SessionHostTarget } from '../session-host.js';
+import type { AgentReportPayload, SessionHostBoot, SessionHostTarget } from '../session-host.js';
 
 /** Promise-returning AgentSessionHost methods forwardable as RPCs. */
 export const WORKER_RPC_METHODS = [
@@ -73,7 +73,9 @@ export type WorkerNotification =
   | { t: 'event'; event: AgentEvent }
   | { t: 'dialog-request'; request: HostUIDialogRequest }
   | { t: 'ui-event'; event: HostUIEvent }
-  | { t: 'terminal-output'; data: string };
+  | { t: 'terminal-output'; data: string }
+  /** Agent invoked the SDK's report tool — route to the daemon's report pipeline. */
+  | { t: 'agent-report'; payload: AgentReportPayload };
 
 export function isWorkerRequest(msg: unknown): msg is WorkerRequest {
   return typeof msg === 'object' && msg !== null && typeof (msg as { t?: unknown }).t === 'string';

@@ -26,9 +26,37 @@ import type {
 import {
   isWorkerNotification,
   type WorkerCastMethod,
+  type WorkerNotification,
   type WorkerRequest,
   type WorkerRpcMethod,
 } from './protocol.js';
+
+/**
+ * Route a worker→daemon sink-push notification to the matching sink callback.
+ * Returns false for boot/RPC bookkeeping messages (handled by the ipc closure).
+ * Exported for protocol-level unit tests.
+ */
+export function routeWorkerSinkNotification(msg: WorkerNotification, sinks: SessionHostSinks): boolean {
+  switch (msg.t) {
+    case 'event':
+      sinks.onEvent(msg.event);
+      return true;
+    case 'dialog-request':
+      sinks.onDialogRequest(msg.request);
+      return true;
+    case 'ui-event':
+      sinks.onUiEvent(msg.event);
+      return true;
+    case 'terminal-output':
+      sinks.onTerminalOutput(msg.data);
+      return true;
+    case 'agent-report':
+      sinks.onAgentReport(msg.payload);
+      return true;
+    default:
+      return false;
+  }
+}
 
 /** Session boot: SDK import + session open + model-registry refresh (network). */
 const BOOT_TIMEOUT_MS = 120_000;
@@ -128,17 +156,8 @@ export class WorkerSessionHost implements AgentSessionHost {
           case 'rpc-result':
             hostRef?.settleRpc(msg.id, msg.ok, msg.ok ? msg.result : msg.error);
             return;
-          case 'event':
-            sinks.onEvent(msg.event);
-            return;
-          case 'dialog-request':
-            sinks.onDialogRequest(msg.request);
-            return;
-          case 'ui-event':
-            sinks.onUiEvent(msg.event);
-            return;
-          case 'terminal-output':
-            sinks.onTerminalOutput(msg.data);
+          default:
+            routeWorkerSinkNotification(msg, sinks);
             return;
         }
       },

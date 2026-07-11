@@ -50,6 +50,48 @@ export type SessionHostBoot =
   | { mode: 'open'; sessionFilePath: string; title?: string };
 
 /**
+ * An agent-originated problem report, captured when the agent invokes the
+ * OMP SDK's `report_tool_issue` tool. Routed into GitSpace's report-a-problem
+ * pipeline (docs/REPORT-A-PROBLEM.md) with origin 'agent'. JSON-serializable
+ * so it crosses the worker IPC boundary unchanged.
+ */
+export interface AgentReportPayload {
+  sessionId: string;
+  workspaceId: string;
+  workspaceName: string;
+  projectName: string;
+  sessionTitle?: string;
+  /** The agent's active model (provider/id) at report time, if known. */
+  model?: string;
+  /** The tool the agent is reporting about (the SDK tool's `tool` param). */
+  tool: string;
+  /** The agent's description of the unexpected behavior. */
+  report: string;
+}
+
+/**
+ * Pure extraction of a `report_tool_issue` invocation from an SDK session
+ * event (`tool_execution_end` / `tool_result`). Returns null for any other
+ * tool or an empty report. Exported for protocol-level unit tests.
+ */
+export function extractAgentReportInput(
+  piEvent: Record<string, unknown>,
+): { toolCallId: string; tool: string; report: string } | null {
+  const toolName = piEvent.toolName ?? piEvent.tool_name;
+  if (toolName !== 'report_tool_issue') return null;
+  const input = piEvent.input;
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) return null;
+  const record = input as Record<string, unknown>;
+  const report = typeof record.report === 'string' ? record.report.trim() : '';
+  if (!report) return null;
+  return {
+    toolCallId: String(piEvent.toolCallId ?? piEvent.tool_call_id ?? ''),
+    tool: typeof record.tool === 'string' && record.tool.length > 0 ? record.tool : 'unknown',
+    report,
+  };
+}
+
+/**
  * Callbacks the host fires as the session runs. All payloads are
  * JSON-serializable so they can cross the worker IPC boundary unchanged.
  */
@@ -62,6 +104,8 @@ export interface SessionHostSinks {
   onUiEvent(event: HostUIEvent): void;
   /** Rendered terminal bytes from the session's interactive mode. */
   onTerminalOutput(data: string): void;
+  /** The agent invoked the SDK's report tool — route into the report pipeline. */
+  onAgentReport(payload: AgentReportPayload): void;
 }
 
 /** Commands contributed by the live session (skills, extensions, custom). */

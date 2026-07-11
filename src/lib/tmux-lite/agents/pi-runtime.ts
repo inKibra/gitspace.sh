@@ -110,6 +110,19 @@ function ensureManagedPiConfigDefaults(agentDir: string): void {
     changed = true;
   }
 
+  // Inject the SDK's report_tool_issue tool so agents can report unexpected
+  // tool behavior. GitSpace routes those invocations into its own
+  // report-a-problem pipeline (origin 'agent'; see problem-report.ts).
+  // The SDK's OWN upstream push (qa.omp.sh) stays off: it requires
+  // dev.autoqa.consent === 'granted', and headless GitSpace hosts register no
+  // consent handler, so the SDK's default-deny applies.
+  const dev = isRecord(settings.dev) ? { ...settings.dev } : {};
+  if (typeof dev.autoqa !== 'boolean') {
+    dev.autoqa = true;
+    settings.dev = dev;
+    changed = true;
+  }
+
   if (!changed) return;
   try {
     writeFileSync(configPath, YAML.stringify(settings, null, 2), { mode: 0o600 });

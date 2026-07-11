@@ -44,12 +44,13 @@ import {
 import { getManagedSessionBootstrap } from './managed-defaults.js';
 import { VirtualTerminal } from './virtual-terminal.js';
 import { startVirtualInteractiveMode, type VirtualInteractiveModeHandle } from './virtual-interactive-mode.js';
-import type {
-  AgentSessionHost,
-  SessionCommandInfo,
-  SessionHostBoot,
-  SessionHostSinks,
-  SessionHostTarget,
+import {
+  extractAgentReportInput,
+  type AgentSessionHost,
+  type SessionCommandInfo,
+  type SessionHostBoot,
+  type SessionHostSinks,
+  type SessionHostTarget,
 } from './session-host.js';
 
 // Dynamic import: oh-my-pi has module-level side effects (postmortem signal
@@ -967,6 +968,10 @@ export class LocalSessionHost implements AgentSessionHost {
               typeof toolName === 'string' ? toolName : undefined,
               piEvent.input,
             );
+            // SDK report_tool_issue → GitSpace report pipeline (origin 'agent').
+            // Observed here (sanctioned event stream) rather than patching the SDK.
+            const agentReport = extractAgentReportInput(piEvent);
+            if (agentReport) this.emitAgentReport(agentReport);
             // Always extract todo phases from tool_execution_end regardless of tool
             const phases = (this.session as any).getTodoPhases?.();
             if (Array.isArray(phases)) {
@@ -1036,6 +1041,37 @@ export class LocalSessionHost implements AgentSessionHost {
     this.unsubscribe = () => {
       for (const unsub of unsubscribers) unsub();
     };
+  }
+
+  /** Tool-call ids already routed as agent reports — the SDK can emit both
+   *  'tool_execution_end' and 'tool_result' for one call; report each once. */
+  private readonly agentReportedCallIds = new Set<string>();
+
+  /** Route a report_tool_issue invocation to the daemon's report pipeline. */
+  private emitAgentReport(extracted: { toolCallId: string; tool: string; report: string }): void {
+    if (extracted.toolCallId) {
+      if (this.agentReportedCallIds.has(extracted.toolCallId)) return;
+      this.agentReportedCallIds.add(extracted.toolCallId);
+      // Bounded: drop the oldest id — dedupe only matters for adjacent events.
+      if (this.agentReportedCallIds.size > 200) {
+        const oldest = this.agentReportedCallIds.values().next().value;
+        if (oldest !== undefined) this.agentReportedCallIds.delete(oldest);
+      }
+    }
+    const model = (this.session as { model?: { id?: string; name?: string; provider?: string } }).model;
+    const modelStr = model
+      ? [model.provider, model.id ?? model.name].filter((p): p is string => typeof p === 'string' && p.length > 0).join('/')
+      : undefined;
+    this.sinks.onAgentReport({
+      sessionId: this.sessionId,
+      workspaceId: this.target.workspaceId,
+      workspaceName: this.target.workspaceName,
+      projectName: this.target.projectName,
+      sessionTitle: this.title,
+      model: modelStr || undefined,
+      tool: extracted.tool,
+      report: extracted.report,
+    });
   }
 
   /** Display title used in message-event payloads; set via setTitle. */

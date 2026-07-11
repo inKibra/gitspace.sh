@@ -44,6 +44,7 @@ const sinks: SessionHostSinks = {
   onDialogRequest: (request) => send({ t: 'dialog-request', request }),
   onUiEvent: (event) => send({ t: 'ui-event', event }),
   onTerminalOutput: (data) => send({ t: 'terminal-output', data }),
+  onAgentReport: (payload) => send({ t: 'agent-report', payload }),
 };
 
 async function handleInit(msg: Extract<WorkerRequest, { t: 'init' }>): Promise<void> {
