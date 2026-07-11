@@ -113,6 +113,16 @@ function traceTimeoutEvent(event: string, details: Record<string, unknown>): voi
       .catch(() => undefined);
   }
 }
+/** Ticket #5: every generic RPC rejection (timeout, send failure, error
+ *  response, disconnect flush) lands in the browser diagnostics ring with the
+ *  command type + elapsed time. No-op outside the browser; never throws. */
+function recordRpcRejection(command: string, error: unknown, elapsedMs: number): void {
+  if (typeof window === 'undefined') return;
+  void import('../../lib/client-diagnostics.web.js')
+    .then((mod) => mod.recordRpcFailure(command, error, { elapsedMs }))
+    .catch(() => undefined);
+}
+
 const OPERATION_COMMAND_TYPES = new Set<string>([
   'create_project',
   'prepare_project_creation',
@@ -2571,6 +2581,13 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     const requestId = request.requestId;
     const startedAtMs = Date.now();
     return new Promise<TypedCommandResponse>((resolve, reject) => {
+      // Every rejection path — timeout below, send failure below, error
+      // response / disconnect flush via the stored pending entry — records
+      // into the browser diagnostics ring with command type + elapsed.
+      const rejectWithDiagnostics = (error: Error): void => {
+        recordRpcRejection(request.type, error, Date.now() - startedAtMs);
+        reject(error);
+      };
       writeTraceLog('remote-command-send', {
         requestId,
         commandType: request.type,
@@ -2586,9 +2603,9 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
           durationMs: Date.now() - pending.startedAtMs,
           pendingCount: this.pendingTypedCommands.size,
         });
-        reject(new Error(`Timed out waiting for command response (${request.type})`));
+        rejectWithDiagnostics(new Error(`Timed out waiting for command response (${request.type})`));
       }, DEFAULT_LIFECYCLE_TIMEOUT_MS);
-      this.pendingTypedCommands.set(requestId, { resolve, reject, timeout, startedAtMs });
+      this.pendingTypedCommands.set(requestId, { resolve, reject: rejectWithDiagnostics, timeout, startedAtMs });
       void this.sendCommand(request).catch((error) => {
         const pending = this.pendingTypedCommands.get(requestId);
         if (!pending) return;

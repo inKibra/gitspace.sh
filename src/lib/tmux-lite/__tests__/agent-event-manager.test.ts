@@ -111,6 +111,28 @@ describe('AgentEventManager', () => {
     expect(deltas.at(-1)).toEqual({ type: 'agent_state_snapshot', workspaces: harness.manager.getSnapshot() });
   });
 
+  it('emits every failure attempt: identical consecutive errors carry increasing errorSeq', () => {
+    const harness = createManager();
+    const deltas = collectDeltas(harness.manager);
+    harness.manager.registerWorkspace('workspace-1', '/tmp/workspace-1');
+
+    harness.manager.setExternalError('workspace-1', 'session-1', 'prompt failed');
+    harness.manager.setExternalError('workspace-1', 'session-1', 'prompt failed');
+
+    const errors = deltas.filter((delta) => delta.type === 'agent_session_error');
+    expect(errors).toHaveLength(2);
+    expect(errors[0]).toMatchObject({
+      workspaceId: 'workspace-1',
+      sessionId: 'session-1',
+      errorMessage: 'prompt failed',
+    });
+    const first = errors[0] as Extract<AgentStateUpdateDelta, { type: 'agent_session_error' }>;
+    const second = errors[1] as Extract<AgentStateUpdateDelta, { type: 'agent_session_error' }>;
+    expect(typeof first.errorSeq).toBe('number');
+    expect(second.errorSeq!).toBeGreaterThan(first.errorSeq!);
+    expect(harness.manager.getSnapshot()['workspace-1']?.errorMessages['session-1']).toBe('prompt failed');
+  });
+
   it('rejects invalid last-message coalescing intervals', () => {
     expect(() => new AgentEventManager({ lastMessageEmitIntervalMs: Number.NaN })).toThrow(
       'lastMessageEmitIntervalMs must be a non-negative finite number',

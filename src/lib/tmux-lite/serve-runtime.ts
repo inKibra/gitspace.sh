@@ -185,6 +185,13 @@ export async function activateServeRuntime(config: ServeRuntimeConfig, deps: Ser
       watchCloser = await watchAgentState({
         onSnapshot: (workspaces) => {
           currentAgentSnapshot = Object.fromEntries(workspaces.map((w) => [w.workspaceId, w]));
+          // Catch-up push (ticket #5): the daemon sends a full agent-state
+          // snapshot on every (re)subscribe — relay it to already-connected
+          // clients too, so state they missed during a watch gap converges
+          // instead of staying stale until the next delta.
+          if (runtime.sessionManager.establishedSessionCount > 0) {
+            void runtime.sessionManager.broadcastRawMessage({ type: 'agent_state_snapshot', workspaces });
+          }
         },
         onUpdate: (delta) => {
           currentAgentSnapshot = applyAgentDeltaToAgentState(currentAgentSnapshot, delta);

@@ -131,6 +131,30 @@ describe('serve runtime activation', () => {
     expect(snapshotReads).toBeGreaterThan(readsBeforeFailure);
   });
 
+  it('rebroadcasts the full agent snapshot to established clients on watch (re)subscribe', async () => {
+    const sm = fakeSessionManager();
+    const rawBroadcasts: unknown[] = [];
+    sm.broadcastRawMessage = ((message: unknown) => { rawBroadcasts.push(message); }) as never;
+    let lastHandlers: { onSnapshot: (w: unknown[]) => void } | null = null;
+    const deps = fakeDeps(sm);
+    (deps as { watchAgentState: unknown }).watchAgentState = async (handlers: { onSnapshot: (w: unknown[]) => void }) => {
+      lastHandlers = handlers;
+      return () => undefined;
+    };
+
+    await activateServeRuntime(fakeConfig(), deps);
+    const workspaces = [{ workspaceId: 'ws-1', sessions: [], statuses: {}, pendingPermissions: {}, pendingQuestions: {}, lastMessages: {}, errorMessages: {}, todoPhases: {}, modelInfo: {}, queuedMessages: {} }];
+
+    // No established clients — nothing to catch up.
+    lastHandlers!.onSnapshot(workspaces);
+    expect(rawBroadcasts).toHaveLength(0);
+
+    // With established clients, the resubscribe snapshot is pushed to them.
+    (sm as { establishedSessionCount: number }).establishedSessionCount = 1;
+    lastHandlers!.onSnapshot(workspaces);
+    expect(rawBroadcasts).toEqual([{ type: 'agent_state_snapshot', workspaces }]);
+  });
+
   it('does not restart the agent watch after deactivation', async () => {
     const sm = fakeSessionManager();
     let watchStarts = 0;

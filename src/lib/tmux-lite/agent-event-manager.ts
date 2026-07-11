@@ -55,7 +55,7 @@ export type AgentStateUpdateDelta =
   | { type: 'agent_permission_removed'; workspaceId: string; sessionId: string; permissionId: string }
   | { type: 'agent_question_added'; workspaceId: string; sessionId: string; question: PendingQuestion }
   | { type: 'agent_question_removed'; workspaceId: string; sessionId: string; requestId: string }
-  | { type: 'agent_session_error'; workspaceId: string; sessionId: string; errorMessage: string }
+  | { type: 'agent_session_error'; workspaceId: string; sessionId: string; errorMessage: string; errorSeq?: number }
   | { type: 'agent_last_message'; workspaceId: string; sessionId: string; preview: string }
   | { type: 'agent_session_created'; workspaceId: string; sessionId: string; title: string }
   | { type: 'agent_session_updated'; workspaceId: string; sessionId: string; title: string }
@@ -108,6 +108,8 @@ export class AgentEventManager {
   private readonly scheduleTimeout: (callback: () => void, delay: number) => TimerHandle;
   private readonly cancelTimeout: (handle: TimerHandle) => void;
   private readonly lastMessageEmitTimes = new Map<string, number>();
+  /** Monotonic per-manager counter keying agent_session_error deltas by attempt. */
+  private errorSeq = 0;
   private readonly pendingLastMessageDeltas = new Map<string, LastMessageDelta>();
   private readonly pendingLastMessageTimers = new Map<string, TimerHandle>();
 
@@ -303,9 +305,13 @@ export class AgentEventManager {
   setExternalError(workspaceId: string, sessionId: string, errorMessage: string): void {
     this.markSessionOpen(workspaceId, sessionId);
     const state = this.getOrCreateState(workspaceId);
-    if (state.errorMessages[sessionId] === errorMessage) return;
+    // Key by attempt, not message text (ticket #5): every runtime 'error'
+    // event is a distinct failure, and clients (Retry flow) must see each
+    // one — a second identical failure used to emit nothing. The monotonic
+    // errorSeq makes consecutive identical messages distinguishable deltas.
     state.errorMessages[sessionId] = errorMessage;
-    this.emit({ type: 'agent_session_error', workspaceId, sessionId, errorMessage });
+    this.errorSeq += 1;
+    this.emit({ type: 'agent_session_error', workspaceId, sessionId, errorMessage, errorSeq: this.errorSeq });
   }
 
   setExternalTodoPhases(workspaceId: string, sessionId: string, phases: TodoPhase[]): void {

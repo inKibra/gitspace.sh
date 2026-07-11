@@ -109,6 +109,20 @@ describe('command routing (dispatch vs socket loop)', () => {
     expect(dangling).toEqual([]);
   });
 
+  test('agent-watch subscribe pushes an initial agent-state catch-up snapshot', () => {
+    // Ticket #5: a (re)subscribing watcher — notably the serve-runtime bridge
+    // after a reconnect — must receive the current agent state immediately,
+    // not wait for the next delta. Source-structural like the rest of this
+    // file: the loop must follow 'agent-watch-started' with an 'agent-state'
+    // push built from the live control snapshot.
+    const loop = loopRegion();
+    const gate = loop.indexOf("res.type === 'agent-watch-started'");
+    expect(gate).toBeGreaterThan(-1);
+    const pushWindow = loop.slice(gate, gate + 400);
+    expect(pushWindow).toContain("type: 'agent-state'");
+    expect(pushWindow).toContain('getAgentControlSnapshot()');
+  });
+
   test('sanity: extraction found real case sets', () => {
     // Guard the parser itself — if server.ts is refactored such that these
     // regexes go blind, fail loudly instead of vacuously passing.
