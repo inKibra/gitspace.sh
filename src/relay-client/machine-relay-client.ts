@@ -1,7 +1,7 @@
 import WebSocket from 'ws';
 import { logger } from '../utils/logger.js';
 import { signMessage } from '../relay/signing.js';
-import { PROTOCOL_VERSION } from '../relay/protocol.js';
+import { PROTOCOL_VERSION, RELAY_MAX_WS_PAYLOAD } from '../relay/protocol.js';
 import { ed25519 } from '@noble/curves/ed25519.js';
 import type { ServeEventHandler } from '../serve/types.js';
 
@@ -56,7 +56,12 @@ export async function requestUnlockGrantViaRelay(options: {
 
   return await new Promise<UnlockGrantResponse>((resolve, reject) => {
     let completed = false;
-    const ws = new WebSocket(url.toString());
+    // Ticket #42B: match the relay's transport receive cap on this direction
+    // (relay→machine) so a large legit frame isn't 1006-killed by the ws
+    // client's own maxPayload. The critical cap is the relay's Bun.serve
+    // maxPayloadLength (machine→relay direction is what 1006'd), but we set
+    // both for symmetry and to make the bound explicit/testable.
+    const ws = new WebSocket(url.toString(), { maxPayload: RELAY_MAX_WS_PAYLOAD });
     const timeoutId = setTimeout(() => {
       fail('Timed out waiting for relay unlock grant');
     }, timeoutMs);
@@ -187,7 +192,20 @@ function signChallengeAndCreateRegistration(
   }
 }
 
+// Ticket #42.4 (trace): warn when the machine emits a large data frame so the
+// oversize sender that 1006'd the relay is visible in serve logs — this is how
+// ticket #42 part A finds what to slim. Base64 inflates the wire frame ~33%, so
+// the on-wire JSON is larger than this raw byte count.
+const DATA_FRAME_WARN_BYTES = 4 * 1024 * 1024;
+
 function createDataMessage(connectionId: string, data: Uint8Array | Buffer): string {
+  if (data.length > DATA_FRAME_WARN_BYTES) {
+    logger.warning(
+      `[serve] oversize data frame to relay: conn=${connectionId} ` +
+      `raw=${(data.length / (1024 * 1024)).toFixed(2)}MB ` +
+      `(~${((data.length * 4 / 3) / (1024 * 1024)).toFixed(2)}MB base64 on wire)`,
+    );
+  }
   return JSON.stringify({
     type: 'data',
     connectionId,
@@ -296,7 +314,9 @@ export async function connectMachineRelay(
     const connect = () => {
       if (stopped) return;
       console.log(`[serve] Connecting to relay: ${url.toString()}`);
-      const ws = new WebSocket(url.toString());
+      // Ticket #42B: raise the ws client receive cap to match the relay so
+      // large legit relay→machine frames aren't 1006-killed by the client.
+      const ws = new WebSocket(url.toString(), { maxPayload: RELAY_MAX_WS_PAYLOAD });
       currentWs = ws;
       ws.binaryType = 'arraybuffer';
 

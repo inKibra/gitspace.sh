@@ -561,6 +561,56 @@ const MAX_LABEL_LENGTH = 256;
 const MAX_MESSAGE_SIZE = 16 * 1024 * 1024;
 
 /**
+ * Transport-level WebSocket receive cap for the relay's Bun.serve
+ * (`maxPayloadLength`).
+ *
+ * Ticket #42B (the backstop): Bun's default maxPayloadLength is 16MB, and it is
+ * enforced by uWebSockets at the TRANSPORT layer — a frame over the cap is
+ * closed with 1006 ("Received too big message") BEFORE our app-level
+ * parseMessage / MAX_MESSAGE_SIZE (above, also 16MB) ever runs. That is exactly
+ * what killed a machine at browser-connect time:
+ *   [relay] machine ... disconnected (1006: Received too big message)
+ * cascading the client to 1000.
+ *
+ * The relay routes OPAQUE E2E-encrypted `data` frames — it cannot inspect or
+ * repackage them, so it must NOT guillotine a transiently-large legit frame at
+ * a low cap. We set the transport cap generously ABOVE the app cap so oversize
+ * frames are handled (rejected with a real error, or app-chunked) by our code
+ * rather than silently 1006-killing the whole connection. App-layer chunking
+ * (PTY output at PTY_CHUNK_SIZE=512KB, xterm serialize chunks) keeps normal
+ * frames far below this. Lives in protocol.ts (not server.ts) so the machine
+ * relay client can import it without pulling in the heavy relay server graph.
+ */
+export const RELAY_MAX_WS_PAYLOAD = 64 * 1024 * 1024;
+
+/**
+ * Warn threshold for oversize WS frames. Any frame larger than this is logged
+ * with its type so the oversize sender is visible in relay logs — this is how
+ * ticket #42 part A (slimming the oversize sender) finds what to trim.
+ */
+export const RELAY_WS_PAYLOAD_WARN = 4 * 1024 * 1024;
+
+/**
+ * TODO (ticket #42.3 — DEFERRED): app-layer chunking for the DATA-ROUTING path.
+ *
+ * When a `data` frame payload exceeds a safe threshold (~1MB), split it into
+ * ordered chunks with a small envelope {chunkId, seq, total} and reassemble on
+ * the receiving client/machine BEFORE base64-decode → decrypt → parse, mirroring
+ * the PTY chunking pattern (writeChunkedPtyToClient, PTY_CHUNK_SIZE=512KB in
+ * src/lib/tmux-lite/server.ts). Wire on BOTH send paths (machine
+ * relay-client createDataMessage; web/remote client send) and BOTH receive
+ * paths (machine relay-client `data` case; web/remote client receive) so the
+ * relay keeps routing opaque envelopes it cannot inspect. Small frames stay
+ * unchanged (backward compatible) — only oversize frames chunk.
+ *
+ * Deferred because: (1) raising RELAY_MAX_WS_PAYLOAD to 64MB already unblocks
+ * the immediate 1006 ("Received too big message"), and (2) ticket #42 part A is
+ * slimming the oversize sender, which may make chunking unnecessary. The
+ * RELAY_WS_PAYLOAD_WARN trace above surfaces any remaining oversize senders so
+ * we can decide whether chunking is still needed.
+ */
+
+/**
  * Pattern for valid identifiers (alphanumeric, hyphens, underscores, dots, colons)
  * Security: Prevents injection attacks via malicious identifier content
  *

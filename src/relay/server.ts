@@ -17,7 +17,7 @@ import type { Server, ServerWebSocket } from "bun";
 import type { RelayServerConfig, WebSocketData } from "./types";
 import { ed25519 } from "@noble/curves/ed25519.js";
 import { signMessage, verifySignedMessage, getSignerPublicKey, type SignedMessage } from "./signing.js";
-import { PROTOCOL_VERSION } from "./protocol.js";
+import { PROTOCOL_VERSION, RELAY_MAX_WS_PAYLOAD, RELAY_WS_PAYLOAD_WARN } from "./protocol.js";
 import { formatRelayFingerprint, type RelayIdentity } from "./identity.js";
 import { deriveIdentityId } from "../lib/tmux-lite/crypto/identity.js";
 import { x25519 } from "@noble/curves/ed25519.js";
@@ -987,6 +987,12 @@ export function createRelayServer(config: RelayServerConfig): Server<WebSocketDa
     },
 
     websocket: {
+      // Ticket #42B: raise the transport receive cap explicitly and generously
+      // above the app-level MAX_MESSAGE_SIZE (16MB) so a transiently-large legit
+      // E2E frame is handled by our code instead of being 1006-killed by
+      // uWebSockets before parseMessage ever runs. See RELAY_MAX_WS_PAYLOAD.
+      maxPayloadLength: RELAY_MAX_WS_PAYLOAD,
+
       open(ws) {
         const { role, connectionId } = ws.data;
         console.log(`[ws] ${role} ${connectionId} connected`);
@@ -1019,6 +1025,28 @@ export function createRelayServer(config: RelayServerConfig): Server<WebSocketDa
           ? message
           : new TextDecoder().decode(message instanceof ArrayBuffer ? message : message);
 
+        // Ticket #42.4 (trace): surface oversize frames so part A can find the
+        // culprit. Frames over RELAY_WS_PAYLOAD_WARN are logged with their type;
+        // frames that reach the transport cap (RELAY_MAX_WS_PAYLOAD) would have
+        // 1006-closed the socket before this handler runs, so this warn is the
+        // early-warning band below that hard limit.
+        const frameSize = typeof message === "string" ? message.length : message.byteLength;
+        if (frameSize > RELAY_WS_PAYLOAD_WARN) {
+          let frameType = "(unparsed)";
+          try {
+            const peeked = JSON.parse(msgStr) as { type?: unknown };
+            frameType = typeof peeked?.type === "string" ? peeked.type : "(no-type)";
+          } catch {
+            // leave as "(unparsed)"
+          }
+          console.warn(
+            `[relay] oversize WS frame from ${ws.data.role ?? "unknown"} ` +
+            `(${ws.data.machineId || ws.data.connectionId}): type=${frameType} ` +
+            `size=${(frameSize / (1024 * 1024)).toFixed(2)}MB ` +
+            `(warn>${(RELAY_WS_PAYLOAD_WARN / (1024 * 1024)).toFixed(0)}MB, cap=${(RELAY_MAX_WS_PAYLOAD / (1024 * 1024)).toFixed(0)}MB)`,
+          );
+        }
+
         let rawMsg: unknown = null;
         // Handle ping/pong for keepalive FIRST (before protocol parsing)
         // These are simple keepalive messages, not protocol messages
@@ -1035,29 +1063,46 @@ export function createRelayServer(config: RelayServerConfig): Server<WebSocketDa
           // Not valid JSON - continue with normal handling
         }
 
-        const parsed = parseMessage(msgStr);
-        if (!parsed) {
-          if (rejectUnsignedClientMessage(ws, rawMsg)) {
+        // Ticket #42.2 (fail soft): never let one bad/oversize frame drop the
+        // whole connection. parseMessage() and handleDataMessage() already
+        // fail-soft (return null / log-and-return on bad input), but wrap the
+        // routing body so any unexpected throw is logged and skipped instead of
+        // propagating out of the ws handler. NOTE: a transport-level 1006 from
+        // uWebSockets (frame over maxPayloadLength) closes the socket BEFORE
+        // this handler runs and cannot be caught here — the lever for that is
+        // the raised RELAY_MAX_WS_PAYLOAD cap + app-layer chunking, not this
+        // try/catch.
+        try {
+          const parsed = parseMessage(msgStr);
+          if (!parsed) {
+            if (rejectUnsignedClientMessage(ws, rawMsg)) {
+              return;
+            }
+            // Name the offender — a bare "Invalid message format" made a Mac
+            // snapshot outage undebuggable (relay silently ate machine messages).
+            const rejectedType = rawMsg && typeof rawMsg === 'object' ? String((rawMsg as { type?: unknown }).type ?? '(none)') : '(not json)';
+            console.warn(`[relay] rejecting invalid message from ${ws.data.role ?? 'unknown'}: type=${rejectedType} len=${msgStr.length} head=${msgStr.slice(0, 160)}`);
+            ws.send(serializeMessage(createErrorMessage("INVALID_REQUEST", `Invalid message format (type=${rejectedType})`)));
             return;
           }
-          // Name the offender — a bare "Invalid message format" made a Mac
-          // snapshot outage undebuggable (relay silently ate machine messages).
-          const rejectedType = rawMsg && typeof rawMsg === 'object' ? String((rawMsg as { type?: unknown }).type ?? '(none)') : '(not json)';
-          console.warn(`[relay] rejecting invalid message from ${ws.data.role ?? 'unknown'}: type=${rejectedType} len=${msgStr.length} head=${msgStr.slice(0, 160)}`);
-          ws.send(serializeMessage(createErrorMessage("INVALID_REQUEST", `Invalid message format (type=${rejectedType})`)));
-          return;
-        }
 
-        // Route data and handshake messages between client and machine
-        // All other message types are protocol messages handled by the relay
-        if (parsed.type !== "data" && parsed.type !== "handshake") {
-          // Handle protocol message
-          void handleProtocolMessage(state, ws, parsed);
-          return;
-        }
+          // Route data and handshake messages between client and machine
+          // All other message types are protocol messages handled by the relay
+          if (parsed.type !== "data" && parsed.type !== "handshake") {
+            // Handle protocol message
+            void handleProtocolMessage(state, ws, parsed);
+            return;
+          }
 
-        // Handle data/handshake message - route based on role and connectionId
-        handleDataMessage(state, ws, message);
+          // Handle data/handshake message - route based on role and connectionId
+          handleDataMessage(state, ws, message);
+        } catch (err) {
+          console.error(
+            `[relay] error handling frame from ${ws.data.role ?? "unknown"} ` +
+            `(${ws.data.machineId || ws.data.connectionId}): ` +
+            `${err instanceof Error ? err.message : String(err)} — connection kept alive`,
+          );
+        }
       },
 
       close(ws, code, reason) {
