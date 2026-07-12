@@ -515,8 +515,8 @@ export class GitSpaceEngine {
   sendDialogResponse(
     backendKey: BackendKey,
     dialogId: string,
-    dialogType: 'select' | 'confirm' | 'input' | 'editor',
-    value: string | boolean | undefined,
+    dialogType: import('../../lib/tmux-lite/agents/host-ui-bridge.js').HostUIDialogResponseType,
+    value: import('../../lib/tmux-lite/agents/host-ui-bridge.js').HostUIDialogResponseValue,
   ): Promise<void> {
     return this.withBackend(backendKey, (b) =>
       b.sendDialogResponse?.(dialogId, dialogType, value) ?? Promise.resolve()

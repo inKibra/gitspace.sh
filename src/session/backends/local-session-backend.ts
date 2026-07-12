@@ -2135,7 +2135,7 @@ export class LocalSessionBackend implements SessionBackend {
     throw new Error('Unexpected stage upload response');
   }
 
-  async sendDialogResponse(dialogId: string, dialogType: 'select' | 'confirm' | 'input' | 'editor', value: string | boolean | undefined): Promise<void> {
+  async sendDialogResponse(dialogId: string, dialogType: import('../../lib/tmux-lite/agents/host-ui-bridge.js').HostUIDialogResponseType, value: import('../../lib/tmux-lite/agents/host-ui-bridge.js').HostUIDialogResponseValue): Promise<void> {
     const response = await this.sendTmuxCommand({ type: 'agent-dialog-response', dialogId, dialogType, value });
     if (response.type === 'agent-bool') {
       if (response.ok) return;

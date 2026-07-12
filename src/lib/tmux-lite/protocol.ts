@@ -519,8 +519,8 @@ export type Command =
   | {
       type: 'agent-dialog-response';
       dialogId: string;
-      dialogType: 'select' | 'confirm' | 'input' | 'editor';
-      value: string | boolean | undefined;
+      dialogType: import('./agents/host-ui-bridge.js').HostUIDialogResponseType;
+      value: import('./agents/host-ui-bridge.js').HostUIDialogResponseValue;
     }
   | { type: "kill-server" }
   | { type: "inbox" }

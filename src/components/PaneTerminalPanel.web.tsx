@@ -160,11 +160,6 @@ export function PaneTerminalPanel({
           .catch(() => undefined);
         return;
       }
-      // host-ui question blocks: q:<id>:<index> → answer the question dialog
-      if (blockId.startsWith('q:') && backend.sendDialogResponse) {
-        const questionId = blockId.slice(2).split(':')[0];
-        void backend.sendDialogResponse(questionId, 'select', typeof response === 'string' ? response : String(response)).catch(() => undefined);
-      }
     },
     dispatch: (action) => {
       // Transcript error blocks' Retry → re-send this pane's last prompt.
@@ -226,7 +221,6 @@ export function PaneTerminalPanel({
       setPendingBlocks(snap
         ? pendingInteractionBlocks({
             permissions: snap.pendingPermissions?.[agentSessionId],
-            questions: snap.pendingQuestions?.[agentSessionId],
             todoPhases: snap.todoPhases?.[agentSessionId],
             error: snap.errorMessages?.[agentSessionId] ?? null,
           })

@@ -18,9 +18,7 @@ import type {
   AgentHistoryEntry,
   AgentToolInfo,
   AgentTreeNode,
-  PendingQuestion,
   Permission,
-  QuestionInfo,
 } from '../../../agents/agent-runtime-types.js';
 import { getTranscriptRange } from '../../../blocks/agent/transcript-source.js';
 import type { TranscriptPage, TranscriptSource } from '../../../blocks/agent/transcript-source.js';
@@ -118,67 +116,8 @@ function previewMessageText(content: unknown): string {
   return '';
 }
 
-// ---------------------------------------------------------------------------
-// Ask-question parsing (moved from the removed gitspace-status extension)
-// ---------------------------------------------------------------------------
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
-}
-
-function parseQuestionOptions(input: unknown): Array<{ label: string; description?: string }> {
-  if (!Array.isArray(input)) return [];
-  return input.flatMap((option) => {
-    if (typeof option === 'string') return [{ label: option }];
-    if (isRecord(option) && typeof option.label === 'string') {
-      return [{ label: option.label, description: typeof option.description === 'string' ? option.description : undefined }];
-    }
-    return [];
-  });
-}
-
-function parseAskQuestions(input: Record<string, unknown>): QuestionInfo[] {
-  if (Array.isArray(input.questions)) {
-    const parsed = input.questions.flatMap((q: unknown) => {
-      if (!isRecord(q) || typeof q.question !== 'string') return [];
-      return [{
-        question: q.question as string,
-        header: typeof q.header === 'string' ? q.header : 'Question',
-        options: parseQuestionOptions(q.options),
-        multiple: q.multiple === true,
-        custom: q.custom === true,
-      } satisfies QuestionInfo];
-    });
-    if (parsed.length > 0) return parsed;
-  }
-  if (typeof input.question === 'string') {
-    return [{
-      question: input.question,
-      header: typeof input.header === 'string' ? input.header : 'Question',
-      options: parseQuestionOptions(input.options),
-      multiple: input.multiple === true,
-      custom: input.custom === true,
-    }];
-  }
-  if (typeof input.prompt === 'string') {
-    return [{
-      question: input.prompt,
-      header: 'Question',
-      options: parseQuestionOptions(input.options),
-      multiple: input.multiple === true,
-      custom: true,
-    }];
-  }
-  return [{ question: 'Agent requested additional input.', header: 'Question', options: [], custom: true }];
-}
-
-function buildPendingQuestion(toolCallId: string, sessionId: string, input: Record<string, unknown>): PendingQuestion {
-  return {
-    id: toolCallId,
-    sessionID: sessionId,
-    questions: parseAskQuestions(input),
-    tool: { messageID: toolCallId, callID: toolCallId },
-  };
 }
 
 // ---------------------------------------------------------------------------
@@ -947,22 +886,6 @@ export class LocalSessionHost implements AgentSessionHost {
             return;
           }
 
-          // Ask tool: track pending questions
-          case 'tool_execution_start':
-          case 'tool_call': {
-            const toolName = piEvent.toolName ?? piEvent.tool_name;
-            if (toolName !== 'ask') break;
-            const toolCallId = String(piEvent.toolCallId ?? piEvent.tool_call_id ?? '');
-            if (!toolCallId) break;
-            const input = isRecord(piEvent.input) ? piEvent.input : {};
-            emit({
-              type: 'question_added',
-              sessionId,
-              question: buildPendingQuestion(toolCallId, sessionId, input),
-            });
-            return;
-          }
-
           case 'tool_execution_end':
           case 'tool_result': {
             const toolName = piEvent.toolName ?? piEvent.tool_name;
@@ -982,11 +905,7 @@ export class LocalSessionHost implements AgentSessionHost {
             if (Array.isArray(phases)) {
               emit({ type: 'status', sessionId, payload: { type: 'todo_update', phases } });
             }
-            if (toolName !== 'ask') break;
-            const toolCallId = String(piEvent.toolCallId ?? piEvent.tool_call_id ?? '');
-            if (!toolCallId) break;
-            emit({ type: 'question_removed', sessionId, questionId: toolCallId });
-            return;
+            break;
           }
 
           case 'todo_reminder': {

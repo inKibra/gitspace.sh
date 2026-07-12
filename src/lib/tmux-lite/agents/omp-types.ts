@@ -87,6 +87,35 @@ export interface OmpDialogOptions {
   helpText?: string;
 }
 
+// ---------------------------------------------------------------------------
+// Multi-question ask form — a single native dialog that presents every
+// question from one `ask` tool call at once (as opposed to the SDK's default
+// of one `select` per question, navigated with ←/→). The host bridge exposes
+// this as `askForm`; the SDK's ask tool is patched to call it for 2+ questions.
+// ---------------------------------------------------------------------------
+
+export interface OmpAskFormOption {
+  label: string;
+  description?: string;
+}
+
+export interface OmpAskFormQuestion {
+  id: string;
+  question: string;
+  options: OmpAskFormOption[];
+  /** Allow selecting multiple options (checkbox) vs. exactly one (radio). */
+  multiple: boolean;
+  /** Index of the recommended option, if any. */
+  recommended?: number;
+}
+
+export interface OmpAskFormAnswer {
+  id: string;
+  selectedOptions: string[];
+  /** Free-text "Other" answer, when provided. */
+  customInput?: string;
+}
+
 /**
  * Host-implementable subset of Pi's ExtensionUIContext.
  *
@@ -97,6 +126,12 @@ export interface OmpDialogOptions {
  */
 export interface OmpHostUIContext {
   select(title: string, options: string[], dialogOptions?: OmpDialogOptions): Promise<string | undefined>;
+  /**
+   * Present several questions as a single native multi-question form and return
+   * one answer per question. Resolves `undefined` when the user cancels the
+   * whole form. Used by the patched `ask` tool for calls with 2+ questions.
+   */
+  askForm(title: string, questions: OmpAskFormQuestion[]): Promise<OmpAskFormAnswer[] | undefined>;
   confirm(title: string, message: string, dialogOptions?: OmpDialogOptions): Promise<boolean>;
   input(title: string, placeholder?: string, dialogOptions?: OmpDialogOptions): Promise<string | undefined>;
   notify(message: string, type?: 'info' | 'warning' | 'error'): void;

@@ -66,16 +66,6 @@ export type AgentEvent =
       permissionId: string | null;
     }
   | {
-      type: 'question_added';
-      sessionId: string;
-      question: import('./agent-runtime-types.js').PendingQuestion;
-    }
-  | {
-      type: 'question_removed';
-      sessionId: string;
-      questionId: string;
-    }
-  | {
       type: 'status';
       sessionId: string;
       payload: unknown;

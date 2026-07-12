@@ -136,12 +136,6 @@ export function ensureAgentControlInitialized(): Promise<void> {
           case 'error':
             defaultAgentEventManager.setExternalError(target.workspaceId, event.sessionId, event.error);
             break;
-          case 'question_added':
-            defaultAgentEventManager.addPendingQuestion(target.workspaceId, event.sessionId, event.question);
-            break;
-          case 'question_removed':
-            defaultAgentEventManager.removePendingQuestion(target.workspaceId, event.sessionId, event.questionId);
-            break;
           case 'permission_added':
             defaultAgentEventManager.addPendingPermission(target.workspaceId, event.sessionId, event.permission);
             break;

@@ -581,8 +581,8 @@ export interface RespondAgentDialogRequest {
   type: 'respond_agent_dialog';
   requestId: string;
   dialogId: string;
-  dialogType: 'select' | 'confirm' | 'input' | 'editor';
-  value: string | boolean | undefined;
+  dialogType: import('../tmux-lite/agents/host-ui-bridge.js').HostUIDialogResponseType;
+  value: import('../tmux-lite/agents/host-ui-bridge.js').HostUIDialogResponseValue;
 }
 
 export interface RespondAgentPermissionRequest {

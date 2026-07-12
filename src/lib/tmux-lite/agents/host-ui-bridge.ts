@@ -12,7 +12,12 @@
  * Dialog requests are emitted to the owning native client and resolved from its response.
  */
 
-import type { OmpHostUIContext, OmpDialogOptions } from './omp-types.js';
+import type {
+  OmpHostUIContext,
+  OmpDialogOptions,
+  OmpAskFormQuestion,
+  OmpAskFormAnswer,
+} from './omp-types.js';
 
 type HostUIDialogOptions = Pick<OmpDialogOptions, 'helpText'>;
 // ---------------------------------------------------------------------------
@@ -27,6 +32,13 @@ export type HostUIDialogRequest =
       title: string;
       options: string[];
       dialogOptions?: HostUIDialogOptions;
+    }
+  | {
+      type: 'ask-form';
+      id: string;
+      sessionId: string;
+      title: string;
+      questions: OmpAskFormQuestion[];
     }
   | {
       type: 'confirm';
@@ -58,9 +70,15 @@ export type HostUIDialogRequest =
 
 export type HostUIDialogResponse =
   | { type: 'select'; id: string; value: string | undefined }
+  | { type: 'ask-form'; id: string; value: OmpAskFormAnswer[] | undefined }
   | { type: 'confirm'; id: string; value: boolean }
   | { type: 'input'; id: string; value: string | undefined }
   | { type: 'editor'; id: string; value: string | undefined };
+
+/** Discriminant + value unions of {@link HostUIDialogResponse}, for the
+ *  transport signatures that carry a dialog reply (dialogType + value). */
+export type HostUIDialogResponseType = HostUIDialogResponse['type'];
+export type HostUIDialogResponseValue = HostUIDialogResponse['value'];
 
 // ---------------------------------------------------------------------------
 // Status / notification events — server → client (fire-and-forget)
@@ -142,6 +160,17 @@ function isValidDialogResponseValue(dialogType: HostUIDialogResponse['type'], va
     case 'input':
     case 'editor':
       return typeof value === 'string' || typeof value === 'undefined';
+    case 'ask-form':
+      return (
+        typeof value === 'undefined' ||
+        (Array.isArray(value) &&
+          value.every(
+            (answer) =>
+              !!answer &&
+              typeof (answer as OmpAskFormAnswer).id === 'string' &&
+              Array.isArray((answer as OmpAskFormAnswer).selectedOptions),
+          ))
+      );
     default:
       return false;
   }
@@ -181,6 +210,16 @@ export class HostUIBridgeState {
           title,
           options,
           dialogOptions: sanitizeDialogOptions(dialogOptions),
+        });
+      },
+
+      askForm: (title, questions) => {
+        return this.requestDialog<OmpAskFormAnswer[] | undefined>(emitter, {
+          type: 'ask-form',
+          id: nextDialogId(),
+          sessionId,
+          title,
+          questions,
         });
       },
 

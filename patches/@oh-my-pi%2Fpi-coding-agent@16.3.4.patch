@@ -1,6 +1,9 @@
 diff --git a/node_modules/@oh-my-pi/pi-coding-agent/.bun-tag-59f479ba2c7d156a b/.bun-tag-59f479ba2c7d156a
 new file mode 100644
 index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/@oh-my-pi/pi-coding-agent/.bun-tag-d0ef8787a917fc3b b/.bun-tag-d0ef8787a917fc3b
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
 diff --git a/src/internal-urls/local-protocol.ts b/src/internal-urls/local-protocol.ts
 index 6a0daafdde71179e2db5d1a19c535cb45cf5a777..765946457d54cde5434b6b2cf2312af80e6867e4 100644
 --- a/src/internal-urls/local-protocol.ts
@@ -45,3 +48,70 @@ index f271f21bfa2fed3ce70cd3d7ac1a5fa594a58dd7..bb890abc49a841a619c701574b1983ef
  	/**
  	 * Pop the last queued message (steering first, then follow-up).
  	 * Used by dequeue keybinding to restore messages to editor one at a time.
+diff --git a/src/tools/ask.ts b/src/tools/ask.ts
+index 42de7f930d631cebfb7503620a4cdc409b889865..226a619dbfaca39becf60d6f61a9bd891c478172 100644
+--- a/src/tools/ask.ts
++++ b/src/tools/ask.ts
+@@ -843,6 +843,62 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
+ 			return { content: [{ type: "text" as const, text: responseText }], details };
+ 		}
+ 
++		// GitSpace patch: when the host UI exposes a native multi-question form
++		// (`askForm`), present all 2+ questions in ONE dialog instead of the
++		// sequential per-question `select` flow below. Single questions keep the
++		// plain `select` path above; surfaces without `askForm` (e.g. the Pi TUI)
++		// fall through to the sequential loop.
++		type AskFormQuestion = {
++			id: string;
++			question: string;
++			options: Array<{ label: string; description?: string }>;
++			multiple: boolean;
++			recommended?: number;
++		};
++		type AskFormAnswer = { id: string; selectedOptions: string[]; customInput?: string };
++		const askForm = (context.ui as { askForm?: (title: string, questions: AskFormQuestion[]) => Promise<AskFormAnswer[] | undefined> }).askForm;
++		if (typeof askForm === "function") {
++			const formQuestions: AskFormQuestion[] = params.questions.map(q => ({
++				id: q.id,
++				question: q.question,
++				options: q.options.map(o => ({
++					label: o.label,
++					...(o.description?.trim() ? { description: o.description.trim() } : {}),
++				})),
++				multiple: q.multi ?? false,
++				...(q.recommended !== undefined ? { recommended: q.recommended } : {}),
++			}));
++			const runForm = () => askForm.call(context.ui, "Agent questions", formQuestions);
++			let answers: AskFormAnswer[] | undefined;
++			try {
++				answers = signal ? await untilAborted(signal, runForm) : await runForm();
++			} catch (error) {
++				if (error instanceof Error && error.name === "AbortError") {
++					throw new ToolAbortError("Ask input was cancelled");
++				}
++				throw error;
++			}
++			if (answers === undefined) {
++				context.abort();
++				throw new ToolAbortError("Ask tool was cancelled by the user");
++			}
++			const answerById = new Map(answers.map(a => [a.id, a]));
++			const results: QuestionResult[] = params.questions.map(q => {
++				const answer = answerById.get(q.id);
++				return {
++					id: q.id,
++					question: q.question,
++					options: q.options.map(o => o.label),
++					multi: q.multi ?? false,
++					selectedOptions: answer?.selectedOptions ?? [],
++					customInput: answer?.customInput,
++				};
++			});
++			const details: AskToolDetails = { results };
++			const responseText = `User answers:\n${results.map(formatQuestionResult).join("\n")}`;
++			return { content: [{ type: "text" as const, text: responseText }], details };
++		}
++
+ 		const resultsByIndex: Array<QuestionResult | undefined> = Array.from({ length: params.questions.length });
+ 		let questionIndex = 0;
+ 		while (questionIndex < params.questions.length) {

@@ -1128,7 +1128,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     throw new Error('Unexpected stage upload response');
   }
 
-  async sendDialogResponse(dialogId: string, dialogType: 'select' | 'confirm' | 'input' | 'editor', value: string | boolean | undefined): Promise<void> {
+  async sendDialogResponse(dialogId: string, dialogType: import('../../lib/tmux-lite/agents/host-ui-bridge.js').HostUIDialogResponseType, value: import('../../lib/tmux-lite/agents/host-ui-bridge.js').HostUIDialogResponseValue): Promise<void> {
     const response = await this.sendRpcCommand({ type: 'respond_agent_dialog', requestId: crypto.randomUUID(), dialogId, dialogType, value });
     if (response.type === 'agent-bool') {
       if (response.ok) return;

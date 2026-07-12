@@ -367,7 +367,7 @@ export interface SessionBackend {
   openWorkspaceInEditor?(workspaceId: string, editorId: WorkspaceEditorId): Promise<void>;
   stageUpload?(workspaceId: string, fileName: string, data: string, mimeType: string): Promise<{ stagedPath: string }>;
   /** Send a dialog response back to the server for a pending host UI dialog. */
-  sendDialogResponse?(dialogId: string, dialogType: 'select' | 'confirm' | 'input' | 'editor', value: string | boolean | undefined): Promise<void>;
+  sendDialogResponse?(dialogId: string, dialogType: import('../lib/tmux-lite/agents/host-ui-bridge.js').HostUIDialogResponseType, value: import('../lib/tmux-lite/agents/host-ui-bridge.js').HostUIDialogResponseValue): Promise<void>;
 
   /** Retrieve the persisted last-selected agent session ID for a workspace. */
   getAgentSessionPreference(workspaceId: string): Promise<string | null>;
