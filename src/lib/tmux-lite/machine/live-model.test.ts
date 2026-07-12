@@ -254,6 +254,36 @@ describe('computeProjectGoalsDeltaEvents', () => {
     const next = applyAll(snapshot, computeProjectGoalsDeltaEvents(snapshot, 'demo', [goal]));
     expect(computeProjectGoalsDeltaEvents(next, 'demo', [makeGoal()])).toEqual([]);
   });
+
+  it('applies a slim-shape goal record (ticket #42) through the delta round-trip', () => {
+    const snapshot = makeSnapshot();
+    // The slim snapshot projection: readiness + requirement status only,
+    // empty event/review trails, stripped doc body.
+    const slim = makeGoal({
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      doc: { bodyMarkdown: '', updatedAt: '2026-01-01T00:00:00.000Z' },
+      validation: {
+        reqOrder: ['r1'],
+        requirements: {
+          r1: {
+            id: 'r1', title: 'Tests', kind: 'test-output', required: true, rubric: 'green',
+            status: 'accepted', generation: { kind: 'manual' }, judgment: { kind: 'human' },
+            evidence: [], reviews: [],
+          },
+        },
+        events: [],
+        readiness: { status: 'ready', summary: 'Ready', detail: 'ok', totals: { total: 1, missing: 0, review: 0, accepted: 1 } },
+      },
+    });
+    const next = applyAll(snapshot, computeProjectGoalsDeltaEvents(snapshot, 'demo', [slim]));
+    const applied = next.goalsById?.['demo:goal-1'];
+    expect(applied?.validation?.readiness?.totals.accepted).toBe(1);
+    expect(applied?.validation?.requirements['r1'].status).toBe('accepted');
+    expect(applied?.validation?.events).toEqual([]);
+    expect(applied?.doc?.bodyMarkdown).toBe('');
+    // Bound workspace record picks up the slim goal + its phase.
+    expect(next.workspacesById['demo:ws-1'].goal?.validation?.events).toEqual([]);
+  });
 });
 
 describe('applyMachineEventToSnapshot forward compatibility', () => {

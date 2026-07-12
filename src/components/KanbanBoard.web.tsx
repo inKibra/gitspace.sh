@@ -65,8 +65,10 @@ function statusEdgeColor(primaryColor: string | undefined): string {
   }
 }
 
-/** Accepted/total gates from goal validation requirements. */
-function getGateTally(validation?: {
+/** Accepted/total gates from goal validation requirements. Reads the slim
+ *  snapshot projection (ticket #42): readiness totals first, requirement
+ *  statuses as the fallback — neither needs the dropped evidence/reviews. */
+export function getGateTally(validation?: {
   requirements?: Record<string, { status: string }>;
   readiness?: { totals?: { accepted: number; total: number } };
 }): { passed: number; total: number } | null {

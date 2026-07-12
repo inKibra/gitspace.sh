@@ -298,6 +298,14 @@ export interface UpdateGoalRequest {
   updates: import('../../types/goals.js').GoalUpdateInput;
 }
 
+/** Cold detail fetch (ticket #42): full goal doc + validation, on demand. */
+export interface GetGoalDetailRequest {
+  type: 'get_goal_detail';
+  requestId: string;
+  projectName: string;
+  goalId: string;
+}
+
 export interface AddGoalNearWorkspaceRequest {
   type: 'goal_add_near_workspace';
   requestId: string;
@@ -1225,6 +1233,7 @@ export type ClientToMachineMessage =
   | RemoveWorkspaceNoteRequest
   | AddGoalNearWorkspaceRequest
   | UpdateGoalRequest
+  | GetGoalDetailRequest
   | ReorderGoalRequest
   | GoalStackStatusRequest
   | WaiveGoalGateRequest
@@ -1409,6 +1418,7 @@ export function isBrowseMessage(msg: RemoteSessionMessage): msg is ClientToMachi
     'workspace_note_remove',
     'goal_add_near_workspace',
     'goal_update',
+    'get_goal_detail',
     'goal_reorder',
     'goal_stack_status',
     'goal_gate_waive',

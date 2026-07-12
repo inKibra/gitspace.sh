@@ -57,7 +57,7 @@ import { useEvents, toWideEventItem, type WideEventItem } from "./components/Eve
 import { EventsWeb } from "./components/Events.web.js";
 import type { WideEventFilter } from "./types/events.js";
 import type { WorkspacePhase } from './types/config.js';
-import type { ChainStackStatus } from './types/goals.js';
+import type { ChainStackStatus, GoalDoc, GoalValidation } from './types/goals.js';
 import {
   useNotifications,
   type ToastNotification,
@@ -552,6 +552,18 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
       }),
     }))
   ), [applyGoalEdgeStatus, workspaceBoardState.groups]);
+  // Cold goal-detail cache (ticket #42): the connect snapshot ships a slim goal
+  // projection (no evidence output / reviews / timeline / doc body). Detail
+  // views need the full record, so we lazy-fetch it via `getGoalDetail` and
+  // overlay it here — every consumer of `allGoalItems` (detail panel, rubric,
+  // goal-doc/workflow panes, evidence panes) transparently sees full data once
+  // the fetch lands, keyed by the goal's `updatedAt` so edits invalidate it.
+  const [goalDetailCache, setGoalDetailCache] = useState<Record<string, { updatedAt?: string; doc: GoalDoc; validation: GoalValidation }>>({});
+  const enrichGoalWithDetail = useCallback((goal: KanbanGoalItem): KanbanGoalItem => {
+    const detail = goalDetailCache[goal.id];
+    if (!detail || detail.updatedAt !== goal.updatedAt) return goal;
+    return { ...goal, doc: detail.doc, validation: detail.validation };
+  }, [goalDetailCache]);
   const allGoalItems = useMemo(() => {
     const planned = boardGroupsWithGoalStatus.flatMap((group) => group.plannedGoals ?? []);
     const backed = boardGroupsWithGoalStatus.flatMap((group) =>
@@ -565,8 +577,8 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
         } : null)
         .filter((goal): goal is KanbanGoalItem => Boolean(goal)),
     );
-    return [...planned, ...backed];
-  }, [boardGroupsWithGoalStatus]);
+    return [...planned, ...backed].map(enrichGoalWithDetail);
+  }, [boardGroupsWithGoalStatus, enrichGoalWithDetail]);
   const [selectedGoalKey, setSelectedGoalKey] = useState<string | null>(null);
   const [goalDetailMessage, setGoalDetailMessage] = useState<string | null>(null);
   const [goalStackStatus, setGoalStackStatus] = useState<ChainStackStatus | null>(null);
@@ -1425,6 +1437,42 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
       multi.localBackendKey;
     return { backend: multi.getBackend(backendKey), workspace };
   }, [activeBackendKey, multi, multiMachineState.backendOrder, resolveGoalCommandWorkspace]);
+
+  // Lazy goal-detail fetch (ticket #42): pull the full doc + validation for a
+  // goal into `goalDetailCache` when a detail view opens. Deduped per goal id +
+  // updatedAt so an edited goal refetches but an open pane does not thrash.
+  const goalDetailInFlightRef = useRef<Set<string>>(new Set());
+  const fetchGoalDetail = useCallback((goal: KanbanGoalItem | null | undefined) => {
+    if (!goal) return;
+    const cached = goalDetailCache[goal.id];
+    if (cached && cached.updatedAt === goal.updatedAt) return;
+    const inflightKey = `${goal.id}@${goal.updatedAt ?? ''}`;
+    if (goalDetailInFlightRef.current.has(inflightKey)) return;
+    const { backend } = getGoalMutationBackend(goal);
+    if (!backend?.getGoalDetail) return;
+    goalDetailInFlightRef.current.add(inflightKey);
+    void backend.getGoalDetail(goal.projectName, getPersistedGoalId(goal))
+      .then((detail) => {
+        setGoalDetailCache((prev) => ({ ...prev, [goal.id]: { updatedAt: goal.updatedAt, doc: detail.doc, validation: detail.validation } }));
+      })
+      .catch(() => undefined)
+      .finally(() => { goalDetailInFlightRef.current.delete(inflightKey); });
+  }, [goalDetailCache, getGoalMutationBackend, getPersistedGoalId]);
+  const selectedGoalHasDetail = Boolean(selectedGoal && goalDetailCache[selectedGoal.id]?.updatedAt === selectedGoal.updatedAt);
+
+  // Fetch full detail when the goal detail panel opens.
+  useEffect(() => {
+    fetchGoalDetail(selectedGoal);
+  }, [selectedGoal?.id, selectedGoal?.updatedAt, fetchGoalDetail]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Fetch full detail for the goal bound to the visible workspace pane so its
+  // goal-doc / workflow / rubric / evidence surfaces render real content.
+  useEffect(() => {
+    if (!currentDetailWorkspace) return;
+    const wsGoal = allGoalItems.find((g) =>
+      g.workspaceName === currentDetailWorkspace.name && g.projectName === currentDetailWorkspace.projectName);
+    fetchGoalDetail(wsGoal);
+  }, [currentDetailWorkspace?.selectionKey, allGoalItems, fetchGoalDetail]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const handleSaveGoalDoc = useCallback(async (goal: KanbanGoalItem, bodyMarkdown: string) => {
     setGoalSaving(true);
     try {
@@ -2750,6 +2798,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
             stackStatus={goalStackStatus}
             message={goalDetailMessage}
             saving={goalSaving}
+            detailLoading={!selectedGoalHasDetail}
             onClose={() => setSelectedGoalKey(null)}
             onSaveDoc={handleSaveGoalDoc}
             onCreateWorkspace={handleCreatePlannedGoalWorkspace}

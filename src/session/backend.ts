@@ -139,6 +139,9 @@ export interface SessionBackend {
   previewWorkspaceStatusChange?(projectName: string, workspaceName: string, phase: import('../types/config.js').WorkspacePhase): Promise<WorkspacePhaseChangePreview>;
   addGoalNearWorkspace?(projectName: string, workspaceName: string, title: string, position: 'before' | 'after'): Promise<GoalRecord>;
   updateGoal?(projectName: string, goalId: string, updates: GoalUpdateInput): Promise<GoalRecord>;
+  /** Cold detail fetch (ticket #42): full goal doc + validation for one goal,
+   *  pulled lazily when a detail view opens (the connect snapshot is slim). */
+  getGoalDetail?(projectName: string, goalId: string): Promise<{ doc: import('../types/goals.js').GoalDoc; validation: import('../types/goals.js').GoalValidation }>;
   moveGoalInChain?(projectName: string, sourceToken: string, targetToken: string, position: 'before' | 'after'): Promise<GoalChain>;
   getGoalStackStatus?(projectName: string, workspaceName: string): Promise<ChainStackStatus>;
   /** HUMAN-ONLY: waive a computed phase gate (timeline event kind 'gate',

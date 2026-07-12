@@ -1,6 +1,6 @@
 import { listProjectSummaries } from '../../../core/project-catalog.js';
 import { listProjectGoalKanbanItems } from '../../../core/goal-chain.js';
-import { getArchivedSessions } from '../../../agents/agent-db.js';
+import { countArchivedSessions, getArchivedSessions } from '../../../agents/agent-db.js';
 import type { WorkspaceAgentState } from '../agent-event-manager.js';
 import type { Session, WorkspaceRuntimeRecord } from '../protocol.js';
 import { parseProcessSessionName } from '../../processes/names.js';
@@ -146,7 +146,78 @@ export function buildTerminalRecord(
   };
 }
 
-/** Machine-scoped goal records for one project (ids prefixed `project:`). */
+/**
+ * Slim a goal's validation for the connect snapshot (ticket #42). The board and
+ * its fallback tally only need each requirement's `status` plus the precomputed
+ * `readiness` totals — the unbounded-with-uptime content (evidence
+ * stdout/stderr/body, reviews, and the timeline event log) is dropped here and
+ * pulled on demand via the `goal-detail` RPC. Requirement metadata shells are
+ * bounded (one per declared requirement) so they stay for the board fallback.
+ */
+/** Reduce a requirement's evidence for the snapshot: keep only the latest
+ *  entry per command (manual entries kept individually) and strip the heavy
+ *  captured streams — `goal-detail` serves the full trail with output. */
+function slimEvidence(
+  evidence: import('../../../types/goals.js').Evidence[],
+): import('../../../types/goals.js').Evidence[] {
+  const latestByKey = new Map<string, import('../../../types/goals.js').Evidence>();
+  for (const entry of evidence) {
+    // Command evidence dedups by command; manual/other stays per-entry (id key).
+    const key = entry.command ? `cmd:${entry.command}` : `id:${entry.id}`;
+    const existing = latestByKey.get(key);
+    if (!existing || entry.createdAt >= existing.createdAt) {
+      latestByKey.set(key, entry);
+    }
+  }
+  return [...latestByKey.values()].map((entry) => ({
+    ...entry,
+    stdout: undefined,
+    stderr: undefined,
+    body: undefined,
+  }));
+}
+
+function slimGoalValidation(
+  validation: import('../../../types/goals.js').GoalValidation | undefined,
+): import('../../../types/goals.js').GoalValidation | undefined {
+  if (!validation) return undefined;
+  const requirements: import('../../../types/goals.js').GoalValidation['requirements'] = {};
+  for (const [id, requirement] of Object.entries(validation.requirements)) {
+    // Keep the bounded shell; drop the review trail entirely (full trail via
+    // goal-detail) and reduce evidence to the latest entry per command with
+    // its heavy stdout/stderr/body stripped — both grow with machine uptime.
+    requirements[id] = {
+      ...requirement,
+      evidence: slimEvidence(requirement.evidence),
+      reviews: [],
+    };
+  }
+  return {
+    reqOrder: validation.reqOrder,
+    requirements,
+    events: [],
+    readiness: validation.readiness,
+  };
+}
+
+/** Slim a goal's doc for the snapshot: the body markdown and composed blocks
+ *  are served by `goal-detail`; only bounded metadata is kept. */
+function slimGoalDoc(
+  doc: import('../../../types/goals.js').GoalDoc | undefined,
+): import('../../../types/goals.js').GoalDoc | undefined {
+  if (!doc) return undefined;
+  return {
+    bodyMarkdown: '',
+    updatedAt: doc.updatedAt,
+    updatedBy: doc.updatedBy,
+    exemplarBlockIds: doc.exemplarBlockIds,
+  };
+}
+
+/** Machine-scoped goal records for one project (ids prefixed `project:`).
+ *  The doc + validation are slimmed to a board projection here — the connect
+ *  snapshot must not carry evidence/reviews/timeline that grow with uptime
+ *  (ticket #42); detail views lazy-fetch the full record via `goal-detail`. */
 export function buildGoalRecordsForProject(projectName: string): MachineGoalRecord[] {
   let goals: MachineGoalRecord[] = [];
   try {
@@ -158,20 +229,29 @@ export function buildGoalRecordsForProject(projectName: string): MachineGoalReco
     ...goal,
     id: `${projectName}:${goal.id}`,
     previousGoalId: goal.previousGoalId ? `${projectName}:${goal.previousGoalId}` : undefined,
+    doc: slimGoalDoc(goal.doc),
+    validation: slimGoalValidation(goal.validation),
   }));
 }
 
-/** Build the agent session records for one workspace (live + archived),
- *  mirroring the full-snapshot build exactly. */
+/** Newest archived agent sessions per workspace carried inline in the snapshot
+ *  (ticket #42). Older ones are reachable via the agent-sessions RPC. */
+export const ARCHIVED_SNAPSHOT_LIMIT = 20;
+
+/** Build the agent session records for one workspace (live + newest archived),
+ *  mirroring the full-snapshot build exactly. Archived sessions are capped to
+ *  the newest `ARCHIVED_SNAPSHOT_LIMIT`; `archivedMoreCount` reports how many
+ *  older ones were left out so the UI can show an 'N more' affordance. */
 export function buildAgentSessionRecordsForWorkspace(params: {
   workspaceId: string;
   projectId: string;
   workspace: WorkspaceAgentState | undefined;
   terminalSessionsById: Record<string, MachineTerminalSessionRecord>;
-}): MachineAgentSessionRecord[] {
+}): { records: MachineAgentSessionRecord[]; archivedMoreCount: number } {
   const { workspaceId, projectId, workspace, terminalSessionsById } = params;
   const records: MachineAgentSessionRecord[] = [];
-  const archivedSessions = getArchivedSessions(workspaceId);
+  const archivedSessions = getArchivedSessions(workspaceId, ARCHIVED_SNAPSHOT_LIMIT);
+  const archivedTotal = countArchivedSessions(workspaceId);
   const archivedSessionIds = new Set(archivedSessions.map((session) => session.sessionId));
   const seen = new Set<string>();
 
@@ -232,7 +312,7 @@ export function buildAgentSessionRecordsForWorkspace(params: {
     seen.add(archived.sessionId);
   }
 
-  return records;
+  return { records, archivedMoreCount: Math.max(0, archivedTotal - archivedSessions.length) };
 }
 
 /** Agent-state summary counts for a workspace record. */
@@ -439,6 +519,7 @@ export function buildMachineSnapshot(params: {
 
   const agentSessionsById: Record<string, MachineAgentSessionRecord> = {};
   const agentSessionIdsByWorkspaceId: Record<string, string[]> = {};
+  const archivedMoreCountByWorkspaceId: Record<string, number> = {};
 
   for (const [workspaceId, workspace] of Object.entries(agentStateByWorkspaceId)) {
     // Project agents live on the '<project>:@base' pseudo-workspace (no
@@ -446,12 +527,13 @@ export function buildMachineSnapshot(params: {
     const projectId = workspacesById[workspaceId]?.projectId
       ?? (workspaceId.endsWith(':@base') ? workspaceId.slice(0, -':@base'.length) : undefined);
     if (projectId === undefined) continue;
-    const records = buildAgentSessionRecordsForWorkspace({
+    const { records, archivedMoreCount } = buildAgentSessionRecordsForWorkspace({
       workspaceId,
       projectId,
       workspace,
       terminalSessionsById,
     });
+    archivedMoreCountByWorkspaceId[workspaceId] = archivedMoreCount;
     for (const record of records) {
       agentSessionsById[record.id] = record;
       agentSessionIdsByWorkspaceId[workspaceId] = [...(agentSessionIdsByWorkspaceId[workspaceId] ?? []), record.id];
@@ -479,6 +561,7 @@ export function buildMachineSnapshot(params: {
         ...workspaceRecord.summary,
         ...computeAgentSummaryCounts(agents),
         agentCount: agentIds.length,
+        archivedMoreCount: archivedMoreCountByWorkspaceId[workspaceId] ?? 0,
       },
     };
   }

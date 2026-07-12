@@ -1498,6 +1498,14 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     throw new Error('Unexpected goal update response');
   }
 
+  async getGoalDetail(projectName: string, goalId: string): Promise<{ doc: import('../../types/goals.js').GoalDoc; validation: import('../../types/goals.js').GoalValidation }> {
+    await this.waitForInitialSnapshot();
+    const response = await this.sendRpcCommand({ type: 'get_goal_detail', requestId: crypto.randomUUID(), projectName, goalId });
+    if (response.type === 'goal-detail') return { doc: response.doc, validation: response.validation };
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected goal detail response');
+  }
+
   async moveGoalInChain(projectName: string, sourceToken: string, targetToken: string, position: 'before' | 'after'): Promise<import('../../types/goals.js').GoalChain> {
     const response = await this.sendRpcCommand({ type: 'goal_reorder', requestId: crypto.randomUUID(), projectName, sourceToken, targetToken, position });
     if (response.type === 'goal-chain') {

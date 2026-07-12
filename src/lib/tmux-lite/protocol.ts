@@ -488,6 +488,11 @@ export type Command =
   | { type: 'goal-add-near-workspace'; projectName: string; workspaceName: string; title: string; position: 'before' | 'after' }
   | { type: 'goal-reorder'; projectName: string; sourceToken: string; targetToken: string; position: 'before' | 'after' }
   | { type: 'goal-stack-status'; projectName: string; workspaceName: string }
+  /** Cold detail fetch for one goal (ticket #42): the connect snapshot ships a
+   *  slim goal projection; the full doc + validation (evidence/reviews/events)
+   *  are pulled on demand when a detail view opens. Mirrors
+   *  agent-transcript-range's lazy-load shape. */
+  | { type: 'goal-detail'; projectName: string; goalId: string }
   /** HUMAN-ONLY gate waive (goal-rubric-workflow interconnect): reachable
    *  only through the UI — the CLI has no waive flag. Appends a timeline
    *  event kind 'gate' with the reason and actor 'human/ui'. */
@@ -607,6 +612,7 @@ export type Response =
   | { type: 'workspace-phase-preview'; preview: import('../../types/goals.js').WorkspacePhaseChangePreview }
   | { type: 'workspace-note'; note: import('../../types/workspace.js').WorkspaceNote }
   | { type: 'goal'; goal: import('../../types/goals.js').GoalRecord }
+  | { type: 'goal-detail'; doc: import('../../types/goals.js').GoalDoc; validation: import('../../types/goals.js').GoalValidation }
   | { type: 'goal-chain'; chain: import('../../types/goals.js').GoalChain }
   | { type: 'goal-stack-status'; status: import('../../types/goals.js').ChainStackStatus }
   | { type: 'bundle-refresh-plan'; plan: import('../../types/bundle-refresh.js').BundleRefreshPlan }

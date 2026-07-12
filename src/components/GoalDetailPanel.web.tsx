@@ -251,6 +251,10 @@ export interface GoalDetailPanelProps {
   /** Optional journal loader (requirements ⇄ phases join): one
    *  get_review_guide_state per panel load for 'advanced in <phase>' chips. */
   sendReviewRequest?: SendReviewRequestFn;
+  /** True while the full goal detail (evidence output, reviews, timeline, doc
+   *  body) is still being lazy-fetched (ticket #42). The snapshot fields render
+   *  as a slim fallback until it lands. */
+  detailLoading?: boolean;
 }
 
 export function GoalDetailPanel(props: GoalDetailPanelProps) {
@@ -308,6 +312,12 @@ export function GoalDetailPanel(props: GoalDetailPanelProps) {
       {props.message && (
         <div className="border-b border-[var(--gs-chip-amber-text)] bg-[var(--gs-chip-amber-bg)] px-4 py-2 text-xs text-[var(--gs-chip-amber-text)]">
           {props.message}
+        </div>
+      )}
+
+      {props.detailLoading && (
+        <div className="border-b border-[var(--gs-border)] bg-[var(--gs-bg)] px-4 py-1.5 text-[11px] text-[var(--gs-text-dim)]" style={{ animation: 'pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite' }}>
+          Loading full detail (evidence output, reviews, timeline)…
         </div>
       )}
 

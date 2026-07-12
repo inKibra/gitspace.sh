@@ -211,7 +211,7 @@ export function computeAgentWorkspaceDeltaEvents(
     ?? (workspaceId.endsWith(':@base') ? workspaceId.slice(0, -':@base'.length) : undefined);
   if (projectId === undefined) return [];
 
-  const records = buildAgentSessionRecordsForWorkspace({
+  const { records, archivedMoreCount } = buildAgentSessionRecordsForWorkspace({
     workspaceId,
     projectId,
     workspace: agentState,
@@ -241,6 +241,7 @@ export function computeAgentWorkspaceDeltaEvents(
       summary: {
         ...workspace.summary,
         ...computeAgentSummaryCounts(records),
+        archivedMoreCount,
       },
     };
     if (!recordsEqual(workspace, updated)) {

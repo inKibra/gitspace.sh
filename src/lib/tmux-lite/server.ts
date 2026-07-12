@@ -101,7 +101,8 @@ import { normalizeWorkspacePath } from '../../agents/agent-runtime-shared.js';
 import { getWorkspaceRuntimeSnapshot } from './workspace-runtime.js';
 import { setInProcessSessionSource } from '../processes/ports.js';
 import { addWorkspaceNote, listWorkspaceNotes, removeWorkspaceNote, updateWorkspaceNote } from '../../core/workspace-metadata.js';
-import { addGoalNearWorkspace, applyWorkspaceGoalPhaseChange, moveGoalInChain, previewWorkspaceGoalPhaseChange, updateGoalRecord } from '../../core/goal-chain.js';
+import { addGoalNearWorkspace, applyWorkspaceGoalPhaseChange, getGoalRecord, findGoalRecord, moveGoalInChain, previewWorkspaceGoalPhaseChange, updateGoalRecord } from '../../core/goal-chain.js';
+import { computeReadiness } from '../../app/shared/goal-validation/readiness.js';
 import { getSpaceStackStatus } from '../../commands/space-goals.js';
 import { buildMachineSnapshot, buildGoalRecordsForProject } from './machine/build.js';
 import type { MachineEvent, MachineSnapshot } from './machine/protocol.js';
@@ -3386,6 +3387,26 @@ export async function dispatchCommand(cmd: Command): Promise<Response | null> {
           case 'goal-stack-status':
             try {
               res = { type: 'goal-stack-status', status: getSpaceStackStatus({ project: cmd.projectName, workspace: cmd.workspaceName }) };
+            } catch (e) {
+              res = { type: 'error', message: e instanceof Error ? e.message : String(e) };
+            }
+            break;
+
+          case 'goal-detail':
+            // Cold detail fetch (ticket #42): the snapshot carries a slim goal
+            // projection; this serves the full doc + validation (with computed
+            // readiness) for one goal on demand.
+            try {
+              const goal = getGoalRecord(cmd.projectName, cmd.goalId) ?? findGoalRecord(cmd.projectName, cmd.goalId);
+              if (!goal) {
+                res = { type: 'error', message: `Goal not found: ${cmd.goalId}` };
+                break;
+              }
+              res = {
+                type: 'goal-detail',
+                doc: goal.doc,
+                validation: { ...goal.validation, readiness: computeReadiness(goal.validation) },
+              };
             } catch (e) {
               res = { type: 'error', message: e instanceof Error ? e.message : String(e) };
             }

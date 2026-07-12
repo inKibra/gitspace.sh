@@ -2,9 +2,11 @@ import { describe, expect, it } from 'bun:test';
 import { mkdirSync, rmSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { buildMachineSnapshot } from './build.js';
-import { bindGoalToWorkspace, upsertGoalChain, writePlannedGoal } from '../../../core/goal-chain.js';
+import { buildMachineSnapshot, buildGoalRecordsForProject, buildAgentSessionRecordsForWorkspace, ARCHIVED_SNAPSHOT_LIMIT } from './build.js';
+import { bindGoalToWorkspace, getGoalRecord, upsertGoalChain, writePlannedGoal } from '../../../core/goal-chain.js';
 import { addRequirement, attachManualEvidence, defaultValidation, runGenerationCommand } from '../../../core/goal-validation.js';
+import { upsertArchivedSession } from '../../../agents/agent-db.js';
+import type { GoalValidation } from '../../../types/goals.js';
 import type { WorkspaceRuntimeRecord } from '../protocol.js';
 import type { WorkspaceAgentState } from '../agent-event-manager.js';
 import type { Session } from '../protocol.js';
@@ -255,6 +257,136 @@ describe('buildMachineSnapshot', () => {
       const apiGoal = snapshot.goalsById?.['demo:api'];
       const apiReq = apiGoal?.validation?.requirements[apiValidation.requirement.id];
       expect(apiReq?.evidence?.[0]).toMatchObject({ name: 'Planned URL', url: 'http://localhost:5173/planned-artifact' });
+    } finally {
+      if (previousWorkspaceRoot === undefined) {
+        delete process.env.GITSPACE_WORKSPACE_ROOT;
+      } else {
+        process.env.GITSPACE_WORKSPACE_ROOT = previousWorkspaceRoot;
+      }
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('slims the goal projection for the snapshot but keeps the full record for goal-detail (ticket #42)', () => {
+    const root = join(tmpdir(), `machine-slim-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    const previousWorkspaceRoot = process.env.GITSPACE_WORKSPACE_ROOT;
+    process.env.GITSPACE_WORKSPACE_ROOT = root;
+
+    try {
+      mkdirSync(join(root, 'demo', 'workspaces'), { recursive: true });
+      writeFileSync(join(root, 'demo', '.config.json'), JSON.stringify({
+        name: 'demo', repository: 'owner/repo', baseBranch: 'main',
+        createdAt: new Date(0).toISOString(), lastAccessed: new Date(0).toISOString(),
+      }), 'utf-8');
+      upsertGoalChain('demo', {
+        id: 'billing', title: 'Billing', projectName: 'demo', goalIds: ['heavy'],
+        createdAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString(),
+      });
+
+      // A goal fat with the fields that grow unbounded with machine uptime:
+      // evidence output, review trails, and a timeline event log.
+      const bigStdout = 'x'.repeat(40_000);
+      const validation: GoalValidation = {
+        reqOrder: ['req-1'],
+        requirements: {
+          'req-1': {
+            id: 'req-1', title: 'Tests pass', kind: 'test-output', required: true,
+            rubric: 'bun test is green', status: 'accepted',
+            generation: { kind: 'command', command: 'bun test' },
+            judgment: { kind: 'command', command: 'bun test', expect: { kind: 'exit-zero' } },
+            evidence: [
+              { id: 'ev-old', name: 'run 1', meta: 'cmd', source: 'command', createdAt: new Date(1000).toISOString(), command: 'bun test', stdout: bigStdout, stderr: bigStdout, exitCode: 0 },
+              { id: 'ev-new', name: 'run 2', meta: 'cmd', source: 'command', createdAt: new Date(2000).toISOString(), command: 'bun test', stdout: bigStdout, stderr: bigStdout, exitCode: 0 },
+            ],
+            reviews: [
+              { id: 'rv-1', tone: 'green', who: 'human', note: 'looks good', createdAt: new Date(3000).toISOString() },
+            ],
+          },
+        },
+        events: [
+          { id: 'e1', requirementId: 'req-1', tone: 'green', kind: 'review', title: 'passed', body: 'ok', payload: 'p', createdAt: new Date(3000).toISOString() },
+          { id: 'e2', requirementId: 'req-1', tone: 'blue', kind: 'contract', title: 'added', body: 'x', payload: 'p', createdAt: new Date(1000).toISOString() },
+        ],
+      };
+      writePlannedGoal('demo', {
+        version: 2, id: 'heavy', chainId: 'billing', title: 'Heavy goal', projectName: 'demo',
+        phase: 'review', plannedWorkspaceName: 'heavy-ws',
+        doc: { bodyMarkdown: '# Heavy\n\n'.repeat(500), updatedAt: new Date(0).toISOString(), blocks: [{ id: 'b1', type: 'intent', data: {} }] },
+        validation,
+        createdAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString(),
+      });
+
+      const [slim] = buildGoalRecordsForProject('demo');
+      const slimReq = slim.validation!.requirements['req-1'];
+
+      // Board fallback inputs survive: status + readiness totals.
+      expect(slimReq.status).toBe('accepted');
+      expect(slim.validation!.readiness?.totals.total).toBe(1);
+      expect(slim.validation!.readiness?.totals.accepted).toBe(1);
+
+      // Unbounded-with-uptime content is dropped from the snapshot.
+      expect(slim.validation!.events).toEqual([]);
+      expect(slimReq.reviews).toEqual([]);
+      // Evidence deduped to latest-per-command with heavy streams stripped.
+      expect(slimReq.evidence).toHaveLength(1);
+      expect(slimReq.evidence[0].id).toBe('ev-new');
+      expect(slimReq.evidence[0].stdout).toBeUndefined();
+      expect(slimReq.evidence[0].stderr).toBeUndefined();
+      // Doc body + blocks dropped.
+      expect(slim.doc!.bodyMarkdown).toBe('');
+      expect(slim.doc!.blocks).toBeUndefined();
+
+      // The measured payload shrinks by orders of magnitude.
+      const slimBytes = JSON.stringify(slim).length;
+      const fullRecord = getGoalRecord('demo', 'heavy')!;
+      const fullBytes = JSON.stringify({ ...slim, doc: fullRecord.doc, validation: fullRecord.validation }).length;
+      expect(slimBytes * 10).toBeLessThan(fullBytes);
+
+      // goal-detail's source (goal store) still carries the full record.
+      expect(fullRecord.validation.events).toHaveLength(2);
+      expect(fullRecord.validation.requirements['req-1'].reviews).toHaveLength(1);
+      expect(fullRecord.validation.requirements['req-1'].evidence[0].stdout).toBe(bigStdout);
+      expect(fullRecord.doc.bodyMarkdown.length).toBeGreaterThan(1000);
+    } finally {
+      if (previousWorkspaceRoot === undefined) {
+        delete process.env.GITSPACE_WORKSPACE_ROOT;
+      } else {
+        process.env.GITSPACE_WORKSPACE_ROOT = previousWorkspaceRoot;
+      }
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('caps inline archived agent sessions and reports archivedMoreCount (ticket #42)', () => {
+    const root = join(tmpdir(), `machine-archived-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    const previousWorkspaceRoot = process.env.GITSPACE_WORKSPACE_ROOT;
+    process.env.GITSPACE_WORKSPACE_ROOT = root;
+    try {
+      mkdirSync(root, { recursive: true });
+      const workspaceId = 'demo:archive-heavy';
+      const total = ARCHIVED_SNAPSHOT_LIMIT + 7;
+      for (let i = 0; i < total; i++) {
+        upsertArchivedSession({
+          workspaceId,
+          sessionId: `arch-${String(i).padStart(2, '0')}`,
+          title: `Archived ${i}`,
+          archivedAt: new Date(1_700_000_000_000 + i * 1000).toISOString(),
+        });
+      }
+
+      const { records, archivedMoreCount } = buildAgentSessionRecordsForWorkspace({
+        workspaceId,
+        projectId: 'demo',
+        workspace: undefined,
+        terminalSessionsById: {},
+      });
+
+      const archivedRecords = records.filter((r) => r.state === 'archived');
+      expect(archivedRecords).toHaveLength(ARCHIVED_SNAPSHOT_LIMIT);
+      expect(archivedMoreCount).toBe(7);
+      // Newest are the ones kept inline.
+      expect(archivedRecords.some((r) => r.id === `arch-${String(total - 1).padStart(2, '0')}`)).toBe(true);
+      expect(archivedRecords.some((r) => r.id === 'arch-00')).toBe(false);
     } finally {
       if (previousWorkspaceRoot === undefined) {
         delete process.env.GITSPACE_WORKSPACE_ROOT;

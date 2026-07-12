@@ -140,6 +140,10 @@ export interface MachineWorkspaceRecord {
     retryingAgentCount: number;
     closedAgentCount: number;
     archivedAgentCount: number;
+    /** Archived sessions beyond the newest few carried inline in the snapshot
+     *  (ticket #42). `archivedAgentCount + archivedMoreCount` is the true total;
+     *  the extras are fetched on demand via the agent-sessions RPC. */
+    archivedMoreCount?: number;
     configuredProcessCount: number;
     runningProcessCount: number;
     failedProcessCount: number;
