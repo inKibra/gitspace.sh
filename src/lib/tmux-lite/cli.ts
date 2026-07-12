@@ -13,7 +13,7 @@
  */
 
 import { spawn } from "bun";
-import { existsSync, readFileSync, unlinkSync } from "fs";
+import { existsSync, readFileSync, unlinkSync, closeSync } from "fs";
 import { select } from "@inquirer/prompts";
 import { createBufferedSocketWriter } from "../../utils/bun-socket-writer";
 import { writeTraceLog } from "../../utils/trace-log";
@@ -281,6 +281,11 @@ export async function ensureServer(): Promise<void> {
         stderr: logFd,
         env: process.env as Record<string, string>,
       });
+      // Bun dups the numeric fd into the child; the parent's copy is a leak
+      // (one per daemon spawn) — close it. 'ignore' has nothing to close.
+      if (typeof logFd === 'number') {
+        try { closeSync(logFd); } catch { /* already closed */ }
+      }
     }
 
     for (let i = 0; i < 60; i++) {
@@ -1718,6 +1723,10 @@ async function main() {
         stderr: logFd,
         env: process.env as Record<string, string>,
       });
+      // Bun dups the numeric fd into the child; close the parent's leaked copy.
+      if (typeof logFd === 'number') {
+        try { closeSync(logFd); } catch { /* already closed */ }
+      }
     }
     await Bun.sleep(300);
     if (!(await isServerRunning())) {

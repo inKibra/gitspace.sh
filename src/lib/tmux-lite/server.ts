@@ -15,6 +15,7 @@ import { VirtualTerminal } from './agents/virtual-terminal.js';
 import { registerVirtualTerminal, removeVirtualTerminal } from './virtual-session-registry.js';
 import { forwardVirtualTerminalOutput } from './virtual-output-forwarder.js';
 import { writeTraceLog } from '../../utils/trace-log.js';
+import { raiseFileDescriptorLimitAtBoot } from '../../utils/rlimit.js';
 import { getNotificationConfig, updateNotificationConfig, type NotificationConfig } from "../../core/config.js";
 import { DEFAULT_NOTIFICATION_CONFIG } from "../../types/config.js";
 import {
@@ -164,6 +165,11 @@ const rawArgs = process.argv.slice(2);
 if (rawArgs.includes("--test")) {
   applyTmuxLiteSandboxEnvironment("test", { preserveExplicit: true });
 }
+
+// Raise the open-fd limit before we start spawning PTYs, agent workers, and
+// their bash-tool children. The raised soft limit is inherited by every child
+// we fork, so this one call protects the whole session tree. Best-effort.
+raiseFileDescriptorLimitAtBoot("tmux-lite-daemon");
 
 const ROUTER_SOCKET = getRouterSocket();
 const PID_FILE = getPidFile();
@@ -1077,6 +1083,13 @@ function cleanupSessionResources(session: SessionData, options: { removeFromMap?
     session.client = null;
   }
   stopListener(session.listener);
+  // Close the PTY master fd. Bun.Terminal holds /dev/ptmx (plus its pts slave)
+  // and does NOT release it when the child proc dies — without this, every
+  // create+terminate cycle leaks ~4 fds and the daemon eventually hits EBADF.
+  if (session.ptyTerminal) {
+    try { session.ptyTerminal.close(); } catch {}
+    session.ptyTerminal = null;
+  }
   safeUnlink(session.info.socketPath);
   if (options.removeFromMap !== false) {
     sessions.delete(session.info.id);
@@ -2484,11 +2497,14 @@ function cleanupFailedSessionCreation(
   proc: Bun.Subprocess,
   xterm: XTerminal,
   disposeDsr: () => void,
-  socketPath: string
+  socketPath: string,
+  ptyTerminal?: Bun.Terminal | null
 ): void {
   try { disposeDsr(); } catch {}
   try { signalSubprocessTree(proc, 'SIGKILL'); } catch {}
   try { xterm.dispose(); } catch {}
+  // Release the PTY master fd on the failed-startup path too.
+  if (ptyTerminal) { try { ptyTerminal.close(); } catch {} }
   safeUnlink(socketPath);
   console.warn(`[${sessionName}] cleaned up failed session startup`);
 }
@@ -2642,7 +2658,7 @@ function createSession(
       socket: socketHandlers,
     });
   } catch (error) {
-    cleanupFailedSessionCreation(sessionName, proc, xterm, disposeDsr, socketPath);
+    cleanupFailedSessionCreation(sessionName, proc, xterm, disposeDsr, socketPath, ptyTerminal);
     throw error;
   }
 

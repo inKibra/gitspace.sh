@@ -14,6 +14,7 @@
 
 import type { LocalSessionHost } from '../local-session-host.js';
 import type { SessionHostSinks } from '../session-host.js';
+import { raiseFileDescriptorLimitAtBoot } from '../../../../utils/rlimit.js';
 import {
   WORKER_RPC_METHODS,
   WORKER_CAST_METHODS,
@@ -21,6 +22,10 @@ import {
   type WorkerNotification,
   type WorkerRequest,
 } from './protocol.js';
+
+// This worker spawns bash-tool children of its own; raise the fd limit here too
+// (belt-and-suspenders on top of the daemon's inherited limit). Best-effort.
+raiseFileDescriptorLimitAtBoot('agent-worker');
 
 const RPC_METHODS = new Set<string>(WORKER_RPC_METHODS);
 const CAST_METHODS = new Set<string>(WORKER_CAST_METHODS);
