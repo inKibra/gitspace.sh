@@ -196,6 +196,51 @@ it('keeps default attached fields consistent when adding the default pane', () =
   expect(next.backends.local.attachedPanes.default?.workspaceId).toBe('acme:ws-1');
 });
 
+describe('host UI dialog state (ticket #43: agent ask/host-UI dialogs)', () => {
+  const registered = sessionEngineReducer(createInitialSessionEngineState(), {
+    type: 'REGISTER_BACKEND',
+    descriptor: { key: 'local', kind: 'local', label: 'Local' },
+  });
+  const request = {
+    type: 'select',
+    id: 'dlg-1',
+    sessionId: 'agent-sess-1',
+    title: 'Pick a color.',
+    options: ['red', 'green', 'blue'],
+  } as never;
+
+  it('SET_HOST_UI_DIALOG stores the request under its agent session id', () => {
+    const next = sessionEngineReducer(registered, {
+      type: 'SET_HOST_UI_DIALOG',
+      backendKey: 'local',
+      request,
+    });
+    expect(next.backends.local.pendingDialogByAgentSessionId['agent-sess-1']).toBe(request);
+  });
+
+  it('CLEAR_HOST_UI_DIALOG clears by agentSessionId even when it is not the attached session', () => {
+    // The overlay reads pendingDialogByAgentSessionId[resolvedAgentSessionId].
+    // Before the fix, CLEAR only removed the entry when the dialog session was
+    // the attached one (via the pendingDialogRequest mirror), so a dialog for a
+    // non-attached session stayed stuck. The caller now passes agentSessionId.
+    const withDialog = sessionEngineReducer(registered, {
+      type: 'SET_HOST_UI_DIALOG',
+      backendKey: 'local',
+      request,
+    });
+    // pendingDialogRequest mirror is null here (dialog session != attached).
+    expect(withDialog.backends.local.pendingDialogRequest).toBeNull();
+
+    const cleared = sessionEngineReducer(withDialog, {
+      type: 'CLEAR_HOST_UI_DIALOG',
+      backendKey: 'local',
+      agentSessionId: 'agent-sess-1',
+    });
+    expect(cleared.backends.local.pendingDialogByAgentSessionId['agent-sess-1']).toBeUndefined();
+    expect(cleared.backends.local.pendingDialogRequest).toBeNull();
+  });
+});
+
 describe('snapshot error state (ticket #4: bounded RPCs surface in the UI)', () => {
   const registered = sessionEngineReducer(createInitialSessionEngineState(), {
     type: 'REGISTER_BACKEND',

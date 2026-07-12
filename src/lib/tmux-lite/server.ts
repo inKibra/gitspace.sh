@@ -118,6 +118,7 @@ import { suppressGoalChangeNotify } from '../../core/goal-notify.js';
 import { scanWorkspaces } from '../remote-session/workspace-scanner.js';
 import { startTriggerScheduler } from './trigger-scheduler.js';
 import { setCommandDispatcher } from './command-dispatch.js';
+import { deliverDialogRequest, isDialogResponseAuthorized } from './agent-dialog-delivery.js';
 import { formatArtifactUri, mintArtifactCap, verifyArtifactCap, capAllows, parseArtifactUri } from '../../core/artifact-cap.js';
 import { getOrCreateArtifactCapKeypair } from '../../core/artifact-cap-key.js';
 import { matchesWorkspaceId, toCanonicalWorkspaceId } from '../../utils/workspace-id.js';
@@ -369,6 +370,11 @@ if (process.env.GITSPACE_TRACE?.trim()) {
 }
 const agentSessionWatchOwners = new Map<string, object>();
 const agentDialogOwners = new Map<string, object>();
+// Dialogs delivered over the agent-state watcher conduit (serve+relay app)
+// rather than to a single same-socket owner. Their response may arrive on any
+// command socket (the app answers over a fresh RPC), so they resolve by
+// dialogId regardless of the delivering socket. First valid response wins.
+const conduitDeliveredDialogs = new Set<string>();
 
 function getRouterSocketState(socket: object): RouterSocketState {
   let state = routerSocketStates.get(socket);
@@ -698,19 +704,19 @@ async function getAgentControlReady(): Promise<void> {
     // and UI events are broadcast to all watching clients.
     setAgentHostUIEmitter({
       emitDialogRequest(request) {
-        const socket = pickAgentDialogWatcher(request.sessionId);
-        if (!socket) {
-          throw new Error(`No watching client for session ${request.sessionId}`);
-        }
-        try {
-          agentDialogOwners.set(request.id, socket);
-          sendRouterResponse(socket, { type: 'agent-dialog-request', request });
-        } catch (error) {
-          agentDialogOwners.delete(request.id);
-          agentSessionWatchOwners.delete(request.sessionId);
-          clearRouterSocketState(socket);
-          throw error instanceof Error ? error : new Error(String(error));
-        }
+        deliverDialogRequest(request, {
+          pickSameSocketOwner: (sessionId) => pickAgentDialogWatcher(sessionId),
+          watchers: () => agentStateWatchers,
+          send: (socket, req) => sendRouterResponse(socket, { type: 'agent-dialog-request', request: req }),
+          setOwner: (dialogId, socket) => agentDialogOwners.set(dialogId, socket),
+          markConduitDelivered: (dialogId) => conduitDeliveredDialogs.add(dialogId),
+          onSameSocketError: (socket, req) => {
+            agentDialogOwners.delete(req.id);
+            agentSessionWatchOwners.delete(req.sessionId);
+            clearRouterSocketState(socket);
+          },
+          onWatcherError: (socket) => clearRouterSocketState(socket),
+        });
       },
       emitEvent(event) {
         for (const socket of agentStateWatchers) {
@@ -4629,8 +4635,10 @@ routerListener = Bun.listen({
 
           case 'agent-dialog-response':
             try {
-              const owner = agentDialogOwners.get(cmd.dialogId);
-              if (!owner || owner !== socket) {
+              // Same-socket dialogs (path a) may only be answered by the socket
+              // they were delivered to. Conduit-delivered dialogs (path b, the
+              // serve+relay app) resolve by dialogId from any command socket.
+              if (!isDialogResponseAuthorized(cmd.dialogId, socket, agentDialogOwners, conduitDeliveredDialogs)) {
                 res = { type: 'agent-bool', ok: false };
                 break;
               }
@@ -4639,7 +4647,10 @@ routerListener = Bun.listen({
                 id: cmd.dialogId,
                 value: cmd.value as any,
               });
+              // First valid response wins; drop the tracking so late/duplicate
+              // responses find no pending dialog and no-op (ok:false).
               agentDialogOwners.delete(cmd.dialogId);
+              conduitDeliveredDialogs.delete(cmd.dialogId);
               res = { type: 'agent-bool', ok: resolved };
             } catch (e) {
               const errMsg = e instanceof Error ? e.message : String(e);

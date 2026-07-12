@@ -199,15 +199,23 @@ export function NativeAgentSurfaceConnected({ backendKey, workspaceId, agentSess
 
   const handleDialogResponse = useCallback((response: HostUIDialogResponse) => {
     if (!resolvedBackendKey) return;
+    // Clear by the session the overlay is keyed on so the modal always
+    // dismisses on success.
+    const clear = () => engine.clearPendingDialog(resolvedBackendKey, resolvedAgentSessionId ?? undefined);
     void engine.sendDialogResponse(resolvedBackendKey, response.id, response.type, response.value)
-      .then(() => {
-        engine.clearPendingDialog(resolvedBackendKey);
-      })
+      .then(clear)
       .catch((error) => {
+        // A dialog the daemon already resolved (late/duplicate answer) is gone
+        // server-side — dismiss the modal instead of stranding it. Genuine
+        // transport failures keep the modal so the user can retry.
+        if (error instanceof Error && /no longer pending/i.test(error.message)) {
+          clear();
+          return;
+        }
         console.error('Failed to send dialog response', error);
         toast.error(error instanceof Error ? error.message : 'Failed to submit dialog response');
       });
-  }, [engine, resolvedBackendKey]);
+  }, [engine, resolvedBackendKey, resolvedAgentSessionId]);
 
   const handleRequestCommands = useCallback(async () => {
     if (!resolvedBackendKey || !resolvedWorkspaceId) return [];

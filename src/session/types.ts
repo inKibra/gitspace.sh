@@ -189,5 +189,5 @@ export type SessionEngineAction =
       sessionId: string;
       message: string | undefined;
     }
-  | { type: 'CLEAR_HOST_UI_DIALOG'; backendKey: BackendKey }
+  | { type: 'CLEAR_HOST_UI_DIALOG'; backendKey: BackendKey; agentSessionId?: string }
   | { type: 'SET_PENDING_AGENT_ATTACH'; backendKey: BackendKey; pending: boolean };

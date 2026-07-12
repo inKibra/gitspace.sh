@@ -583,6 +583,14 @@ export function sessionEngineReducer(
       const backend = state.backends[action.backendKey];
       if (!backend) return state;
       const pendingDialogByAgentSessionId = { ...backend.pendingDialogByAgentSessionId };
+      // Clear the per-session entry the overlay actually reads from. The
+      // attached-session mirror (pendingDialogRequest) is only populated when
+      // the dialog's session is the attached one, so relying on it alone left
+      // the modal stuck whenever the answered session differed from (or led)
+      // the attached-session mirror. Prefer the caller-supplied session id.
+      if (action.agentSessionId) {
+        delete pendingDialogByAgentSessionId[action.agentSessionId];
+      }
       if (backend.pendingDialogRequest) {
         delete pendingDialogByAgentSessionId[backend.pendingDialogRequest.sessionId];
       }

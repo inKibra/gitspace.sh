@@ -523,8 +523,8 @@ export class GitSpaceEngine {
     );
   }
 
-  clearPendingDialog(backendKey: BackendKey): void {
-    this.dispatch({ type: 'CLEAR_HOST_UI_DIALOG', backendKey });
+  clearPendingDialog(backendKey: BackendKey, agentSessionId?: string): void {
+    this.dispatch({ type: 'CLEAR_HOST_UI_DIALOG', backendKey, agentSessionId });
   }
 
   getAgentSessionPreference(ref: BackendScopedWorkspaceRef): Promise<string | null> {
