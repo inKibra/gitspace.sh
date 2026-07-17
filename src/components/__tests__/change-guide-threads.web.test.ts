@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'bun:test';
 import {
   guideLineAnnotations,
+  lineAnchor,
   lineRangeLabel,
   lineTargetFromSelection,
+  withDraftAnnotation,
 } from '../change-guide-threads.web.js';
-import type { ReviewThread, ThreadTarget } from '../../types/review.js';
+import type { LineTarget, ReviewThread, ThreadTarget } from '../../types/review.js';
 
 /**
  * Part B of review-comments-in-the-guide: line-anchored threads ride the
@@ -129,6 +131,94 @@ describe('guideLineAnnotations (threads -> DiffLineAnnotation[])', () => {
     );
     expect(annotations).toHaveLength(1);
     expect(annotations[0]!.metadata.threads[0]!.resolved).toBe(true);
+  });
+});
+
+describe('withDraftAnnotation (pending composer -> DiffLineAnnotation[])', () => {
+  const draft = (file: string, startLine: number, endLine: number, side: 'LEFT' | 'RIGHT'): LineTarget =>
+    ({ kind: 'line', file, startLine, endLine, side });
+
+  it('anchors the composer at the selected line, on the selected side', () => {
+    const annotations = withDraftAnnotation([], draft('src/a.ts', 5, 5, 'RIGHT'), 'src/a.ts');
+    expect(annotations).toHaveLength(1);
+    expect(annotations[0]!.side).toBe('additions');
+    expect(annotations[0]!.lineNumber).toBe(5);
+    expect(annotations[0]!.metadata.draft).toEqual(draft('src/a.ts', 5, 5, 'RIGHT'));
+    // No thread anchors here yet — the slot exists only to host the composer.
+    expect(annotations[0]!.metadata.threads).toEqual([]);
+  });
+
+  it('anchors the composer where the resulting thread will live (same anchor mapping)', () => {
+    const target = draft('src/a.ts', 12, 18, 'RIGHT');
+    const composer = withDraftAnnotation([], target, 'src/a.ts')[0]!;
+    const settled = guideLineAnnotations([thread('t1', target)], 'src/a.ts')[0]!;
+    expect({ side: composer.side, lineNumber: composer.lineNumber })
+      .toEqual({ side: settled.side, lineNumber: settled.lineNumber });
+  });
+
+  it('shares the slot when a thread already anchors there (one annotation per line)', () => {
+    const existing = guideLineAnnotations([thread('t1', lineTarget('src/a.ts', 7, 7, 'RIGHT'))], 'src/a.ts');
+    const annotations = withDraftAnnotation(existing, draft('src/a.ts', 7, 7, 'RIGHT'), 'src/a.ts');
+    // A second annotation at this anchor would collide on the renderer's
+    // `annotation-additions-7` slot and be dropped — so it merges instead.
+    expect(annotations).toHaveLength(1);
+    expect(annotations[0]!.metadata.threads.map((t) => t.id)).toEqual(['t1']);
+    expect(annotations[0]!.metadata.draft).toBeDefined();
+  });
+
+  it('keeps a draft opposite an existing same-line thread on its own side', () => {
+    const existing = guideLineAnnotations([thread('t1', lineTarget('src/a.ts', 7, 7, 'RIGHT'))], 'src/a.ts');
+    const annotations = withDraftAnnotation(existing, draft('src/a.ts', 7, 7, 'LEFT'), 'src/a.ts');
+    expect(annotations.map((a) => a.side)).toEqual(['deletions', 'additions']);
+    expect(annotations[0]!.metadata.draft).toBeDefined();
+    expect(annotations[1]!.metadata.draft).toBeUndefined();
+  });
+
+  it('inserts the draft in anchor order so re-renders do not reshuffle the DOM', () => {
+    const existing = guideLineAnnotations([
+      thread('a', lineTarget('src/a.ts', 4, 4, 'RIGHT')),
+      thread('c', lineTarget('src/a.ts', 30, 30, 'RIGHT')),
+    ], 'src/a.ts');
+    const annotations = withDraftAnnotation(existing, draft('src/a.ts', 12, 12, 'RIGHT'), 'src/a.ts');
+    expect(annotations.map((a) => a.lineNumber)).toEqual([4, 12, 30]);
+  });
+
+  it('anchors an inverted drag at its lowest line and never below line 1', () => {
+    expect(withDraftAnnotation([], draft('src/a.ts', 18, 12, 'RIGHT'), 'src/a.ts')[0]!.lineNumber).toBe(12);
+    expect(withDraftAnnotation([], draft('src/a.ts', 0, 0, 'RIGHT'), 'src/a.ts')[0]!.lineNumber).toBe(1);
+  });
+
+  it('matches a renamed file via its previous path', () => {
+    const annotations = withDraftAnnotation([], draft('old/name.ts', 5, 5, 'LEFT'), 'new/name.ts', 'old/name.ts');
+    expect(annotations).toHaveLength(1);
+    expect(annotations[0]!.side).toBe('deletions');
+  });
+
+  it('ignores a draft targeting another file', () => {
+    expect(withDraftAnnotation([], draft('src/b.ts', 5, 5, 'RIGHT'), 'src/a.ts')).toEqual([]);
+  });
+
+  it('returns the annotations UNCHANGED with no draft (keeps the memo stable)', () => {
+    const existing = guideLineAnnotations([thread('t1', lineTarget('src/a.ts', 7, 7, 'RIGHT'))], 'src/a.ts');
+    expect(withDraftAnnotation(existing, null, 'src/a.ts')).toBe(existing);
+    expect(withDraftAnnotation(existing, undefined, 'src/a.ts')).toBe(existing);
+  });
+
+  it('never mutates the memoized thread annotations it overlays', () => {
+    const existing = guideLineAnnotations([thread('t1', lineTarget('src/a.ts', 7, 7, 'RIGHT'))], 'src/a.ts');
+    const snapshot = structuredClone(existing);
+    withDraftAnnotation(existing, draft('src/a.ts', 7, 7, 'RIGHT'), 'src/a.ts');
+    withDraftAnnotation(existing, draft('src/a.ts', 9, 9, 'RIGHT'), 'src/a.ts');
+    expect(existing).toEqual(snapshot);
+  });
+});
+
+describe('lineAnchor', () => {
+  it('maps a target to its (side, line) slot — first line, clamped, side-mapped', () => {
+    expect(lineAnchor({ kind: 'line', file: 'a', startLine: 18, endLine: 12, side: 'RIGHT' }))
+      .toEqual({ side: 'additions', lineNumber: 12 });
+    expect(lineAnchor({ kind: 'line', file: 'a', startLine: 0, endLine: 0, side: 'LEFT' }))
+      .toEqual({ side: 'deletions', lineNumber: 1 });
   });
 });
 

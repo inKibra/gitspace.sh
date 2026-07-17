@@ -9,6 +9,7 @@ import {
   guideLineAnnotations,
   lineRangeLabel,
   lineTargetFromSelection,
+  withDraftAnnotation,
   type GuideThreadMeta,
 } from './change-guide-threads.web.js';
 import { CommentComposer, ReviewCommentList } from './review-comment-ui.web.js';
@@ -233,6 +234,37 @@ function InlineThreadCard({ threads, actions }: {
   );
 }
 
+/**
+ * The composer for a FRESH line thread, rendered as a draft annotation — inline
+ * at the line it targets, through the same slot the resulting thread lands in.
+ * The reviewer writes the comment where the comment will end up.
+ *
+ * Chrome only: the textarea, the submit/cancel keys and the draft retention on
+ * a failed write all belong to the shared CommentComposer.
+ */
+function InlineDraftComposer({ target, actions, onDone }: {
+  target: LineTarget;
+  actions: GuideThreadActions;
+  onDone: () => void;
+}): ReactElement {
+  return (
+    <div className="my-1 border-l-2 border-l-[var(--gs-accent)] bg-[var(--gs-bg-elevated)] px-2.5 py-1.5 font-[family-name:var(--gs-font)]">
+      <CommentComposer
+        compact
+        rows={3}
+        label={<>Commenting on <span className="font-[family-name:var(--gs-font-mono)] text-[var(--gs-info)]">{lineRangeLabel(target)}</span> · {target.side === 'LEFT' ? 'old' : 'new'} side</>}
+        placeholder="Leave a review comment…"
+        submitLabel="Comment"
+        // A throw keeps the composer open with its text — CommentComposer
+        // surfaces the error and holds the draft, so onDone runs only on a
+        // durable write.
+        onSubmit={async (body) => { await actions.onCreateThread(target, body); onDone(); }}
+        onCancel={onDone}
+      />
+    </div>
+  );
+}
+
 /* ── Per-file diff block (lazy fetch via get_file_diff, rendered with PatchDiff) ── */
 
 function FileDiffBlock({ backend, projectName, workspaceName, file, onOpenFile, threads, actions }: {
@@ -302,14 +334,31 @@ function FileDiffBlock({ backend, projectName, workspaceName, file, onOpenFile, 
      MOUNTED PatchDiff, so windowed-away and size-gated blocks cost nothing. */
   const [composeTarget, setComposeTarget] = useState<LineTarget | null>(null);
 
-  const lineAnnotations = useMemo(
+  const threadAnnotations = useMemo(
     () => guideLineAnnotations(threads, file.path, file.prevPath),
     [threads, file.path, file.prevPath],
   );
 
-  const renderAnnotation = useCallback((annotation: DiffLineAnnotation<GuideThreadMeta>) => (
-    <InlineThreadCard threads={annotation.metadata.threads} actions={actions} />
-  ), [actions]);
+  /* The pending composer rides the SAME annotation mechanism as the threads, so
+     it opens inline at the selected line rather than under the diff. Overlaid in
+     its own memo: the thread mapping above is the expensive half and shouldn't
+     re-run when the selection moves. */
+  const lineAnnotations = useMemo(
+    () => withDraftAnnotation(threadAnnotations, composeTarget, file.path, file.prevPath),
+    [threadAnnotations, composeTarget, file.path, file.prevPath],
+  );
+
+  const renderAnnotation = useCallback((annotation: DiffLineAnnotation<GuideThreadMeta>) => {
+    const { threads: anchored, draft } = annotation.metadata;
+    return (
+      <>
+        {anchored.length > 0 && <InlineThreadCard threads={anchored} actions={actions} />}
+        {draft && actions && (
+          <InlineDraftComposer target={draft} actions={actions} onDone={() => setComposeTarget(null)} />
+        )}
+      </>
+    );
+  }, [actions]);
 
   const handleLineSelectionEnd = useCallback((range: SelectedLineRange | null) => {
     if (!range || !actions) return;
@@ -377,24 +426,6 @@ function FileDiffBlock({ backend, projectName, workspaceName, file, onOpenFile, 
           />
         ) : null}
       </div>
-
-      {/* Composer for a fresh line thread — opens under the diff on selection. */}
-      {composeTarget && actions && (
-        <div className="border-t border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-2.5 py-2">
-          <CommentComposer
-            compact
-            rows={3}
-            label={<>Commenting on <span className="font-[family-name:var(--gs-font-mono)] text-[var(--gs-info)]">{lineRangeLabel(composeTarget)}</span> · {composeTarget.side === 'LEFT' ? 'old' : 'new'} side</>}
-            placeholder="Leave a review comment…"
-            submitLabel="Comment"
-            onSubmit={async (body) => {
-              await actions.onCreateThread(composeTarget, body);
-              setComposeTarget(null);
-            }}
-            onCancel={() => setComposeTarget(null)}
-          />
-        </div>
-      )}
     </div>
   );
 }

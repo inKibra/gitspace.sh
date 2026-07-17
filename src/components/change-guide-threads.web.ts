@@ -17,8 +17,17 @@ import type { LineTarget, ReviewThread } from '../types/review.js';
 
 /** Metadata carried on each inline annotation the guide renders. */
 export interface GuideThreadMeta {
-  /** Threads anchored at this (file, side, line) — usually one, more when stacked. */
+  /**
+   * Threads anchored at this (file, side, line) — usually one, more when
+   * stacked. Empty when the anchor exists only to host a draft.
+   */
   threads: ReviewThread[];
+  /**
+   * The pending new-thread composer anchored here, if the reviewer selected
+   * this line. Rides the annotation meta rather than a separate annotation so
+   * the composer shares the one slot an anchor gets (see withDraftAnnotation).
+   */
+  draft?: LineTarget;
 }
 
 /** review LineTarget side <-> @pierre/diffs annotation side. */
@@ -54,6 +63,33 @@ export function isLineThreadForFile(thread: ReviewThread, file: string, prevFile
   return thread.target.file === file || (prevFile !== undefined && thread.target.file === prevFile);
 }
 
+/** Does this target name `file`? (matches renames via prevFile) */
+function isTargetForFile(target: LineTarget, file: string, prevFile?: string): boolean {
+  return target.file === file || (prevFile !== undefined && target.file === prevFile);
+}
+
+/**
+ * The (side, line) slot a line target renders at.
+ *
+ * A range anchors at its FIRST line, and never above line 1. A thread and the
+ * draft that becomes it run through here together, which is what makes the
+ * composer open exactly where the resulting thread will live.
+ */
+export function lineAnchor(target: LineTarget): { side: AnnotationSide; lineNumber: number } {
+  return {
+    side: sideToAnnotationSide(target.side),
+    lineNumber: Math.max(1, Math.min(target.startLine, target.endLine)),
+  };
+}
+
+/** Deterministic anchor order: deletions before additions, then by line. */
+function compareAnchors(
+  a: DiffLineAnnotation<GuideThreadMeta>,
+  b: DiffLineAnnotation<GuideThreadMeta>,
+): number {
+  return a.side === b.side ? a.lineNumber - b.lineNumber : a.side === 'deletions' ? -1 : 1;
+}
+
 /**
  * Map a workspace's threads to the annotations for ONE file's diff.
  *
@@ -77,9 +113,7 @@ export function guideLineAnnotations(
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 
   for (const thread of relevant) {
-    const target = thread.target as LineTarget;
-    const side = sideToAnnotationSide(target.side);
-    const lineNumber = Math.max(1, Math.min(target.startLine, target.endLine));
+    const { side, lineNumber } = lineAnchor(thread.target as LineTarget);
     const key = `${side}:${lineNumber}`;
 
     const existing = byAnchor.get(key);
@@ -90,9 +124,46 @@ export function guideLineAnnotations(
     byAnchor.set(key, { side, lineNumber, metadata: { threads: [thread] } });
   }
 
-  return [...byAnchor.values()].sort((a, b) => (
-    a.side === b.side ? a.lineNumber - b.lineNumber : a.side === 'deletions' ? -1 : 1
-  ));
+  return [...byAnchor.values()].sort(compareAnchors);
+}
+
+/**
+ * Overlay the pending new-thread draft onto a file's thread annotations.
+ *
+ * The composer is an annotation like any other, so it renders inline at the
+ * line it targets instead of under the diff — the reviewer writes the comment
+ * where the comment will end up.
+ *
+ * Kept separate from `guideLineAnnotations` on purpose: the thread mapping is
+ * the expensive half and re-runs only when threads change, while the draft
+ * changes on every selection. Returns the input array UNCHANGED (same identity)
+ * when there's no draft, so the no-draft render path stays memo-stable.
+ *
+ * Never mutates `annotations` — the caller memoizes it.
+ */
+export function withDraftAnnotation(
+  annotations: DiffLineAnnotation<GuideThreadMeta>[],
+  draft: LineTarget | null | undefined,
+  file: string,
+  prevFile?: string,
+): DiffLineAnnotation<GuideThreadMeta>[] {
+  if (!draft || !isTargetForFile(draft, file, prevFile)) return annotations;
+
+  const { side, lineNumber } = lineAnchor(draft);
+  const at = annotations.findIndex((a) => a.side === side && a.lineNumber === lineNumber);
+
+  // Commenting on a line that ALREADY has a thread: share that anchor's slot.
+  // The renderer keys slots by `annotation-<side>-<line>`, so a second
+  // annotation here would collide — the composer instead renders beneath the
+  // line's existing threads, inside their annotation.
+  if (at >= 0) {
+    const existing = annotations[at]!;
+    const merged = [...annotations];
+    merged[at] = { ...existing, metadata: { ...existing.metadata, draft } };
+    return merged;
+  }
+
+  return [...annotations, { side, lineNumber, metadata: { threads: [], draft } }].sort(compareAnchors);
 }
 
 /** Human label for a line target — 'L12' or 'L12–L18'. */
