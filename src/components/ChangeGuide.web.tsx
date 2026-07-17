@@ -1,9 +1,17 @@
 /** @jsxImportSource react */
-import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactElement } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactElement } from 'react';
 import { PatchDiff } from '@pierre/diffs/react';
+import type { DiffLineAnnotation, FileDiffOptions, SelectedLineRange } from '@pierre/diffs';
 import type { SessionBackend } from '../session/backend.js';
 import { renderMarkdownHtml } from './markdown-render.js';
-import type { ReviewChangedFile } from '../types/review.js';
+import type { HunkDecision, LineTarget, ReviewChangedFile, ReviewThread } from '../types/review.js';
+import {
+  guideLineAnnotations,
+  lineRangeLabel,
+  lineTargetFromSelection,
+  type GuideThreadMeta,
+} from './change-guide-threads.web.js';
+import { CommentComposer, ReviewCommentList } from './review-comment-ui.web.js';
 
 /**
  * ChangeGuidePane — the '⛓ Change Guide' review dock pane (mock: stages/ReviewStage.tsx).
@@ -122,14 +130,121 @@ export function buildWalkSteps(files: ReviewChangedFile[]): WalkStep[] {
   });
 }
 
+/* ── Line-anchored review threads (rendered INSIDE the diff via annotations) ── */
+
+/** Actions the guide's line threads need — one object so the props stay flat. */
+export interface GuideThreadActions {
+  onCreateThread: (target: LineTarget, body: string) => Promise<void>;
+  onAddReply: (threadId: string, body: string) => Promise<void>;
+  onUpdateThread: (threadId: string, updates: { resolved?: boolean; decision?: HunkDecision }) => Promise<void>;
+  onUpdateComment: (threadId: string, commentId: string, body: string) => Promise<void>;
+  onDeleteComment: (threadId: string, commentId: string) => Promise<void>;
+}
+
+/**
+ * One anchor's worth of threads, rendered inline in the diff at the line the
+ * thread targets. Comment rendering + the reply composer are the SHARED ones
+ * (review-comment-ui.web.tsx) that ThreadPanel uses — this only adds the
+ * in-diff chrome (anchor label, resolve toggle, collapse).
+ */
+function InlineThreadCard({ threads, actions }: {
+  threads: ReviewThread[];
+  actions: GuideThreadActions | null;
+}): ReactElement {
+  const [replyingTo, setReplyingTo] = useState<string | null>(null);
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
+
+  return (
+    <div className="my-1 flex flex-col gap-1">
+      {threads.map((thread) => {
+        const target = thread.target as LineTarget;
+        const isCollapsed = collapsed.has(thread.id);
+        return (
+          <div
+            key={thread.id}
+            data-thread-id={thread.id}
+            className={`border-l-2 bg-[var(--gs-bg-elevated)] px-2.5 py-1.5 font-[family-name:var(--gs-font)] ${
+              thread.resolved ? 'border-l-[var(--gs-border-active)] opacity-70' : 'border-l-[var(--gs-info)]'
+            }`}
+          >
+            <div className="mb-1 flex items-center gap-2 text-[10px]">
+              <button
+                type="button"
+                onClick={() => setCollapsed((prev) => {
+                  const next = new Set(prev);
+                  if (next.has(thread.id)) next.delete(thread.id); else next.add(thread.id);
+                  return next;
+                })}
+                className="text-[var(--gs-text-dim)] hover:text-[var(--gs-text)]"
+                title={isCollapsed ? 'Expand thread' : 'Collapse thread'}
+              >
+                {isCollapsed ? '▸' : '▾'}
+              </button>
+              <span className="font-[family-name:var(--gs-font-mono)] tabular-nums text-[var(--gs-info)]">
+                {lineRangeLabel(target)}
+              </span>
+              <span className="text-[var(--gs-text-dim)]">
+                {thread.comments.length} comment{thread.comments.length === 1 ? '' : 's'}
+              </span>
+              {thread.resolved && <span className="text-[var(--gs-text-dim)]">✓ resolved</span>}
+              {actions && (
+                <button
+                  type="button"
+                  onClick={() => { void actions.onUpdateThread(thread.id, { resolved: !thread.resolved }).catch(() => {}); }}
+                  className="ml-auto border border-[var(--gs-border)] px-1.5 py-px text-[10px] text-[var(--gs-text-muted)] hover:border-[var(--gs-border-active)] hover:text-[var(--gs-text)]"
+                >
+                  {thread.resolved ? 'Re-open' : 'Resolve'}
+                </button>
+              )}
+            </div>
+
+            {!isCollapsed && (
+              <>
+                <ReviewCommentList
+                  comments={thread.comments}
+                  compact
+                  onUpdateComment={actions ? (commentId, body) => actions.onUpdateComment(thread.id, commentId, body) : undefined}
+                  onDeleteComment={actions ? (commentId) => actions.onDeleteComment(thread.id, commentId) : undefined}
+                />
+                {actions && (replyingTo === thread.id ? (
+                  <CommentComposer
+                    placeholder="Write a reply…"
+                    submitLabel="Reply"
+                    rows={2}
+                    compact
+                    onSubmit={async (body) => { await actions.onAddReply(thread.id, body); setReplyingTo(null); }}
+                    onCancel={() => setReplyingTo(null)}
+                  />
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setReplyingTo(thread.id)}
+                    className="border border-[var(--gs-border)] px-1.5 py-px text-[10.5px] text-[var(--gs-info)] hover:border-[var(--gs-border-active)]"
+                  >
+                    Reply
+                  </button>
+                ))}
+              </>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 /* ── Per-file diff block (lazy fetch via get_file_diff, rendered with PatchDiff) ── */
 
-function FileDiffBlock({ backend, projectName, workspaceName, file, onOpenFile }: {
+function FileDiffBlock({ backend, projectName, workspaceName, file, onOpenFile, threads, actions }: {
   backend: SessionBackend | null;
   projectName: string;
   workspaceName: string;
   file: WalkStepFile;
   onOpenFile?: (path: string) => void;
+  /** Workspace threads (all kinds) — filtered to this file's line threads here. */
+  threads: ReviewThread[];
+  /** null on read-only surfaces → diff renders, comment affordances don't. */
+  actions: GuideThreadActions | null;
 }): ReactElement {
   const [patch, setPatch] = useState<string | null>(null);
   const [state, setState] = useState<'loading' | 'ready' | 'empty' | 'error'>('loading');
@@ -181,6 +296,35 @@ function FileDiffBlock({ backend, projectName, workspaceName, file, onOpenFile }
   const HUGE_PATCH_BYTES = 60_000;
   const isHuge = patch !== null && patch.length > HUGE_PATCH_BYTES;
 
+  /* ── Line threads for this file ──────────────────────────────────────────
+     Annotations are derived from the ONE workspace-level get_threads the pane
+     already runs — no per-file/per-line fetching. They're only ever handed to a
+     MOUNTED PatchDiff, so windowed-away and size-gated blocks cost nothing. */
+  const [composeTarget, setComposeTarget] = useState<LineTarget | null>(null);
+
+  const lineAnnotations = useMemo(
+    () => guideLineAnnotations(threads, file.path, file.prevPath),
+    [threads, file.path, file.prevPath],
+  );
+
+  const renderAnnotation = useCallback((annotation: DiffLineAnnotation<GuideThreadMeta>) => (
+    <InlineThreadCard threads={annotation.metadata.threads} actions={actions} />
+  ), [actions]);
+
+  const handleLineSelectionEnd = useCallback((range: SelectedLineRange | null) => {
+    if (!range || !actions) return;
+    setComposeTarget(lineTargetFromSelection(range, file.path));
+  }, [actions, file.path]);
+
+  const diffOptions = useMemo((): FileDiffOptions<GuideThreadMeta> => ({
+    diffStyle: 'unified',
+    theme: 'pierre-dark',
+    disableFileHeader: true,
+    // Selection drives thread creation; read-only surfaces get an inert diff.
+    enableLineSelection: actions !== null,
+    onLineSelectionEnd: handleLineSelectionEnd,
+  }), [actions, handleLineSelectionEnd]);
+
   return (
     <div ref={hostRef} className="border border-[var(--gs-border)]">
       <button
@@ -225,9 +369,32 @@ function FileDiffBlock({ backend, projectName, workspaceName, file, onOpenFile }
             )}
           </div>
         ) : patch ? (
-          <PatchDiff patch={patch} options={{ diffStyle: 'unified', theme: 'pierre-dark', disableFileHeader: true }} />
+          <PatchDiff
+            patch={patch}
+            options={diffOptions}
+            lineAnnotations={lineAnnotations}
+            renderAnnotation={renderAnnotation}
+          />
         ) : null}
       </div>
+
+      {/* Composer for a fresh line thread — opens under the diff on selection. */}
+      {composeTarget && actions && (
+        <div className="border-t border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-2.5 py-2">
+          <CommentComposer
+            compact
+            rows={3}
+            label={<>Commenting on <span className="font-[family-name:var(--gs-font-mono)] text-[var(--gs-info)]">{lineRangeLabel(composeTarget)}</span> · {composeTarget.side === 'LEFT' ? 'old' : 'new'} side</>}
+            placeholder="Leave a review comment…"
+            submitLabel="Comment"
+            onSubmit={async (body) => {
+              await actions.onCreateThread(composeTarget, body);
+              setComposeTarget(null);
+            }}
+            onCancel={() => setComposeTarget(null)}
+          />
+        </div>
+      )}
     </div>
   );
 }
@@ -259,8 +426,9 @@ export function ChangeGuidePane({ backend, projectName, workspaceName, workspace
   const [reloadTick, setReloadTick] = useState(0);
   const [guideMode, setGuideMode] = useState(false);
   const [specEvolution, setSpecEvolution] = useState<string | null>(null);
-  const [threadsOpen, setThreadsOpen] = useState(0);
-  const [unresolvedSummaries, setUnresolvedSummaries] = useState<string[]>([]);
+  /** ONE get_threads per workspace feeds both the Approve gate and the
+   *  line-anchored inline threads in every file diff. */
+  const [threads, setThreads] = useState<ReviewThread[]>([]);
   const [fileStats, setFileStats] = useState<Map<string, { additions?: number; deletions?: number; changeType: string }>>(new Map());
   const scrollRef = useRef<HTMLDivElement>(null);
   const secRefs = useRef<Array<HTMLElement | null>>([]);
@@ -328,21 +496,70 @@ export function ChangeGuidePane({ backend, projectName, workspaceName, workspace
       })
       .catch(() => undefined);
 
-    // Open threads gate Approve (settled: threads block).
+    // Open threads gate Approve (settled: threads block) AND anchor inline.
     void backend.sendReviewRequest({ op: 'get_threads', projectName, workspaceName })
-      .then((r) => {
-        if (!alive || r.op !== 'threads') return;
-        const open = r.threads.filter((t) => !t.resolved);
-        setThreadsOpen(open.length);
-        setUnresolvedSummaries(open.map((t) => {
-          const target = t.target.kind === 'workspace' ? 'workspace' : (t.target as { file?: string }).file ?? 'file';
-          const first = t.comments[0]?.body?.split('\n')[0] ?? '';
-          return `- [${target}] ${first}`.slice(0, 200);
-        }));
-      })
+      .then((r) => { if (alive && r.op === 'threads') setThreads(r.threads); })
       .catch(() => undefined);
     return () => { alive = false; };
   }, [backend, projectName, workspaceName, workspaceId, reloadTick]);
+
+  /* ── Line-thread actions ──────────────────────────────────────────────────
+     Every mutation returns the updated thread, so we splice it into local state
+     rather than re-fetching the workspace's threads on each keystroke-sized
+     action. `null` when the backend has no review seam (read-only host / share
+     viewer) — the diffs then render with no comment affordances at all. */
+  const threadActions = useMemo((): GuideThreadActions | null => {
+    if (!backend?.sendReviewRequest) return null;
+    // Bind: the backends implement this as a class method, so it must stay
+    // attached to its receiver (a bare reference loses `this`).
+    const send = (op: Parameters<NonNullable<SessionBackend['sendReviewRequest']>>[0]) =>
+      backend.sendReviewRequest!(op);
+
+    const applyThread = (thread: ReviewThread): void => {
+      setThreads((prev) => prev.some((t) => t.id === thread.id)
+        ? prev.map((t) => (t.id === thread.id ? thread : t))
+        : [...prev, thread]);
+    };
+
+    return {
+      onCreateThread: async (target, body) => {
+        const r = await send({ op: 'create_thread', projectName, workspaceName, target, body });
+        if (r.op === 'thread_created') applyThread(r.thread);
+      },
+      onAddReply: async (threadId, body) => {
+        const r = await send({ op: 'add_reply', projectName, workspaceName, threadId, body });
+        if (r.op === 'comment_added') applyThread(r.thread);
+      },
+      onUpdateThread: async (threadId, updates) => {
+        const r = await send({ op: 'update_thread', projectName, workspaceName, threadId, ...updates });
+        if (r.op === 'thread_updated') applyThread(r.thread);
+      },
+      onUpdateComment: async (threadId, commentId, body) => {
+        const r = await send({ op: 'update_comment', projectName, workspaceName, threadId, commentId, body });
+        if (r.op === 'comment_updated') applyThread(r.thread);
+      },
+      onDeleteComment: async (threadId, commentId) => {
+        const r = await send({ op: 'delete_comment', projectName, workspaceName, threadId, commentId });
+        // Deleting the last comment deletes the thread (core/review.ts) — drop it.
+        if (r.op !== 'comment_deleted') return;
+        if (r.thread.comments.length === 0) setThreads((prev) => prev.filter((t) => t.id !== threadId));
+        else applyThread(r.thread);
+      },
+    };
+  }, [backend, projectName, workspaceName]);
+
+  /** Approve gate + the request-changes prompt read off the same thread list. */
+  const { threadsOpen, unresolvedSummaries } = useMemo(() => {
+    const open = threads.filter((t) => !t.resolved);
+    return {
+      threadsOpen: open.length,
+      unresolvedSummaries: open.map((t) => {
+        const target = t.target.kind === 'workspace' ? 'workspace' : (t.target as { file?: string }).file ?? 'file';
+        const first = t.comments[0]?.body?.split('\n')[0] ?? '';
+        return `- [${target}] ${first}`.slice(0, 200);
+      }),
+    };
+  }, [threads]);
 
   /** Persist read-state in guide-mode (fire-and-forget; heuristic mode stays in-memory). */
   const persistRead = useCallback((nextDone: Set<number>, allSteps: WalkStep[]) => {
@@ -643,6 +860,8 @@ export function ChangeGuidePane({ backend, projectName, workspaceName, workspace
                     workspaceName={workspaceName}
                     file={f}
                     onOpenFile={onOpenFile}
+                    threads={threads}
+                    actions={threadActions}
                   />
                 ))}
                 {s.comment && (
