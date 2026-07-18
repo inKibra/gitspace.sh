@@ -13,6 +13,8 @@
  *   4. on that failure too → download the report locally so it's never lost
  */
 import { redactDeep } from '../utils/redact.js';
+import { getDiagnosticsRing } from './client-diagnostics.web.js';
+import { VERSION } from '../version.generated.js';
 
 const RPC_TIMEOUT_MS = 4000;
 
@@ -86,4 +88,57 @@ export async function submitProblemReport(params: SubmitParams): Promise<ReportO
 
   // 3) Last resort: never lose the report — hand the user the file.
   return { via: 'local', ...saveLocally({ v: 1, note, createdAt: new Date().toISOString(), client: redactedBundle }) };
+}
+
+/**
+ * Assemble a diagnostic bundle WITHOUT the React app tree — the diagnostics
+ * ring (which holds the crash's react entry, pushed by
+ * ErrorBoundary.componentDidCatch) plus a raw `#root` DOM snapshot and a
+ * timestamp. Every read is guarded; this must never throw, because it is
+ * called from the last-line-of-defense error fallback.
+ */
+export function buildBrokenStateBundle(): unknown {
+  let ring: unknown[] = [];
+  try { ring = getDiagnosticsRing(); } catch { /* ignore */ }
+  let domSnapshot = '';
+  try { domSnapshot = (document.getElementById('root')?.outerHTML ?? '').slice(0, 250_000); } catch { /* ignore */ }
+  let url = '';
+  try { url = window.location.href; } catch { /* ignore */ }
+  let userAgent = '';
+  try { userAgent = navigator.userAgent; } catch { /* ignore */ }
+  let viewport: { w: number; h: number; dpr: number } | undefined;
+  try { viewport = { w: window.innerWidth, h: window.innerHeight, dpr: window.devicePixelRatio }; } catch { /* ignore */ }
+  return {
+    version: VERSION,
+    brokenState: true,
+    url,
+    userAgent,
+    viewport,
+    ring,
+    domSnapshot,
+    capturedAt: new Date().toISOString(),
+  };
+}
+
+/**
+ * Self-contained report path for the BROKEN screens (ErrorBoundary fallback,
+ * connection-failed) where no backend RPC is available. Captures the crash
+ * bundle synchronously from module state, then submits via the resilient
+ * relay → local fallback with NO `report` RPC (the backend is down/unknown
+ * here). Resolves with the outcome; never rejects for a lost report.
+ */
+export function reportFromBrokenState(
+  note: string,
+  opts: { relayHttpBase?: string | null; projectName?: string },
+): Promise<ReportOutcome> {
+  // Capture NOW (synchronously) so the crash evidence is snapshotted before
+  // any await, reload, or further teardown can wipe the in-memory ring.
+  const clientBundle = buildBrokenStateBundle();
+  return submitProblemReport({
+    note,
+    clientBundle,
+    opts: { fileIssue: true, projectName: opts.projectName },
+    report: undefined,
+    relayHttpBase: opts.relayHttpBase ?? null,
+  });
 }

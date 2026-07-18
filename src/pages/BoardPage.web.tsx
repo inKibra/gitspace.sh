@@ -47,6 +47,8 @@ export interface BoardPageProps {
   loadingError?: string | null;
   /** Retry action for a failed load (reconnects the backend). */
   onRetryLoad?: () => void;
+  /** Open the report-a-problem dialog from the failed-load state. */
+  onReportProblem?: () => void;
 }
 
 function isTypingTarget(target: EventTarget | null): boolean {
@@ -262,6 +264,7 @@ export function BoardPage({
 	  loadingLabel = 'Loading worktrees...',
 	  loadingError = null,
 	  onRetryLoad,
+	  onReportProblem,
 }: BoardPageProps) {
   const [boardView, setBoardView] = useState<'workspaces' | 'stacks'>('workspaces');
   const projects = useMemo(
@@ -419,14 +422,24 @@ export function BoardPage({
             <div className="flex flex-col items-center justify-center gap-3 h-full px-6 text-center">
               <div className="text-sm text-[var(--gs-danger)]">Failed to load worktrees</div>
               <div className="max-w-md text-xs text-[var(--gs-text-muted)]">{loadingError}</div>
-              {onRetryLoad && (
-                <button
-                  onClick={onRetryLoad}
-                  className="px-3 py-1.5 text-xs rounded border border-[var(--gs-border)] bg-[var(--gs-btn-secondary-bg)] text-[var(--gs-text)] hover:bg-[var(--gs-border)]"
-                >
-                  Retry
-                </button>
-              )}
+              <div className="flex items-center gap-2">
+                {onRetryLoad && (
+                  <button
+                    onClick={onRetryLoad}
+                    className="px-3 py-1.5 text-xs rounded border border-[var(--gs-border)] bg-[var(--gs-btn-secondary-bg)] text-[var(--gs-text)] hover:bg-[var(--gs-border)]"
+                  >
+                    Retry
+                  </button>
+                )}
+                {onReportProblem && (
+                  <button
+                    onClick={onReportProblem}
+                    className="px-3 py-1.5 text-xs rounded border border-[var(--gs-border)] text-[var(--gs-text-dim)] hover:text-[var(--gs-text)] hover:bg-[var(--gs-border)]"
+                  >
+                    Report a problem
+                  </button>
+                )}
+              </div>
             </div>
           ) : (
             <div className="flex items-center justify-center h-full">

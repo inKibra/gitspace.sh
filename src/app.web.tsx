@@ -51,6 +51,7 @@ import { ProjectHomePage } from "./pages/ProjectHomePage.web.js";
 import { useInboxPage } from './app/react/index.js';
 import { InboxWeb } from "./components/Inbox.web.js";
 import { ReportProblemDialog } from "./components/ReportProblemDialog.web.js";
+import { relayHttpBase } from "./lib/relay-http.web.js";
 import { isTouchDevice, hasCoarsePointer } from "./utils/device.web.js";
 import { shareArtifactToClipboard } from "./components/share-artifact.web.js";
 import { useEvents, toWideEventItem, type WideEventItem } from "./components/Events.js";
@@ -110,23 +111,6 @@ const DELETE_ERROR_CODES = new Set([
 
 function toGoalCacheKey(backendKey: string, projectName: string, goalId: string): string {
   return `${backendKey}:${projectName}:${goalId}`;
-}
-
-/**
- * HTTP origin of the relay, for the report-a-problem fallback POST (a plain
- * fetch that bypasses a wedged WebSocket). Mirrors the relay descriptor: the
- * explicit VITE_RELAY_URL or the current host, ws→http/wss→https, `/ws` stripped.
- */
-function relayHttpBase(): string | null {
-  try {
-    const raw = import.meta.env.VITE_RELAY_URL || `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`;
-    return raw
-      .replace(/^wss:/, 'https:')
-      .replace(/^ws:/, 'http:')
-      .replace(/\/ws\/?$/, '');
-  } catch {
-    return null;
-  }
 }
 
 const SCRIPT_ERROR_CODES = new Set([
@@ -3619,6 +3603,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
           loading={boardLoading}
           loadingLabel="Loading worktrees..."
           loadingError={boardLoadError}
+          onReportProblem={() => setShowReportProblem(true)}
           onRetryLoad={() => {
             if (!activeBackendKey) return;
             void multi.retryBackend(activeBackendKey).catch((error: unknown) => {
@@ -3758,15 +3743,34 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
             </div>
           )}
           {isError && (
-            <button
-              onClick={() => window.location.reload()}
-              className="mt-4 px-6 py-3 text-base bg-[var(--gs-btn-secondary-bg)] hover:bg-[var(--gs-border)] active:bg-[var(--gs-bg-elevated)] rounded-lg text-[var(--gs-text)] min-h-[48px] border border-[var(--gs-border)]"   
-            >
-              Retry
-            </button>
+            <div className="mt-4 flex flex-col items-center gap-2">
+              <button
+                onClick={() => window.location.reload()}
+                className="px-6 py-3 text-base bg-[var(--gs-btn-secondary-bg)] hover:bg-[var(--gs-border)] active:bg-[var(--gs-bg-elevated)] rounded-lg text-[var(--gs-text)] min-h-[48px] border border-[var(--gs-border)]"
+              >
+                Retry
+              </button>
+              {/* The app tree is alive here (just no backend), so reuse the full
+                  dialog — but with NO backend RPC (report undefined), so it goes
+                  straight to the relay → local fallback. */}
+              <button
+                onClick={() => setShowReportProblem(true)}
+                className="px-4 py-2 text-sm text-[var(--gs-text-dim)] hover:text-[var(--gs-text)] underline"
+              >
+                Report a problem
+              </button>
+            </div>
           )}
         </div>
       </div>
+      {showReportProblem && (
+        <ReportProblemDialog
+          onClose={() => setShowReportProblem(false)}
+          relayHttpBase={relayHttpBase()}
+          projectName={projectHomeName ?? (allProjects.length === 1 ? allProjects[0]?.name : undefined)}
+          report={undefined}
+        />
+      )}
       <Toaster theme="dark" position="bottom-right" richColors />
     </>
   );
