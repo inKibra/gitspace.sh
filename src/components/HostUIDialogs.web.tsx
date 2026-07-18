@@ -19,8 +19,36 @@ const BTN_CANCEL = 'gs-button-secondary';
 const BTN_PRIMARY = 'gs-button-primary';
 const FIELD = 'gs-field';
 
+/**
+ * A dialog request can reach the overlay from a live broadcast, an attach
+ * catch-up re-emit, or a session that is not the foreground/attached one. Render
+ * defensively: a request whose per-type payload is missing/misshapen must never
+ * throw during render (which would take down the whole pane / React tree). An
+ * unrenderable request is dropped (logged) instead.
+ */
+function isRenderableDialogRequest(request: HostUIDialogRequest): boolean {
+  if (!request || typeof request !== 'object' || typeof (request as { id?: unknown }).id !== 'string') return false;
+  switch (request.type) {
+    case 'select':
+      return Array.isArray(request.options);
+    case 'ask-form':
+      return Array.isArray(request.questions) && request.questions.every((q) => q && Array.isArray(q.options));
+    case 'confirm':
+      return typeof request.message === 'string';
+    case 'input':
+    case 'editor':
+      return true;
+    default:
+      return false;
+  }
+}
+
 export function HostUIDialogOverlay({ request, onResponse }: HostUIDialogOverlayProps) {
   if (!request) return null;
+  if (!isRenderableDialogRequest(request)) {
+    console.error('[HostUIDialogs] dropping unrenderable dialog request', request);
+    return null;
+  }
 
   const dismiss = () => {
     switch (request.type) {

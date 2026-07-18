@@ -330,7 +330,7 @@ export async function stageUploadFile(
   target: AgentWorkspaceTarget,
   fileName: string,
   data: string,
-  mimeType: string,
+  _mimeType: string,
 ): Promise<{ stagedPath: string }> {
   await ensureAgentControlInitialized();
   const { join, basename } = await import('path');
@@ -626,6 +626,15 @@ export function shutdownAgentHosts(): void {
  */
 export function resolveAgentDialogResponse(response: HostUIDialogResponse): Promise<boolean> {
   return defaultPiCoordinator.resolveDialogResponse(response);
+}
+
+/**
+ * Every still-pending host-UI dialog request across live sessions. Used by the
+ * serve-runtime connect-time catch-up to re-push dialogs to a (re)connecting
+ * client that missed the original broadcast while the agent stayed blocked.
+ */
+export function getPendingAgentDialogRequests(): import('./agents/host-ui-bridge.js').HostUIDialogRequest[] {
+  return defaultPiCoordinator.getPendingDialogRequests();
 }
 
 export async function listAgentCommands(

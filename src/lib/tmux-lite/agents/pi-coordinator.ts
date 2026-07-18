@@ -169,6 +169,12 @@ export class PiCoordinator {
   private readonly terminalRelays = new Map<string, VirtualTerminal>();
   // dialogId → agentSessionId for routing client dialog responses to the host.
   private readonly dialogSessions = new Map<string, string>();
+  // dialogId → the full pending request, retained for the lifetime of the
+  // pending dialog so it can be RE-EMITTED to a (re)connecting client — a
+  // remounted pane / reconnected browser missed the original live broadcast and
+  // the agent is still blocked waiting. Same dialogId (never minted anew) so the
+  // existing agent-dialog-response path resolves it.
+  private readonly pendingDialogRequests = new Map<string, HostUIDialogRequest>();
   // Worker-bound bookkeeping: LRU + busy tracking for the concurrency cap.
   private readonly hostLastUsed = new Map<string, number>();
   private readonly busySessions = new Set<string>();
@@ -207,6 +213,7 @@ export class PiCoordinator {
   async resolveDialogResponse(response: HostUIDialogResponse): Promise<boolean> {
     const sessionId = this.dialogSessions.get(response.id);
     this.dialogSessions.delete(response.id);
+    this.pendingDialogRequests.delete(response.id);
     if (sessionId) {
       const host = this.hosts.get(sessionId);
       if (host) return host.resolveDialog(response);
@@ -750,7 +757,7 @@ export class PiCoordinator {
    *
    * Compare with closeAgentSession() which kills the tmux terminal session.
    */
-  async interruptAgentSession(target: PiWorkspaceTarget, agentSessionId: string): Promise<boolean> {
+  async interruptAgentSession(_target: PiWorkspaceTarget, agentSessionId: string): Promise<boolean> {
     const host = this.hosts.get(agentSessionId);
     if (!host) {
       return false;
@@ -983,6 +990,7 @@ export class PiCoordinator {
     this.sessionWorkspaceIds.clear();
     this.terminalRelays.clear();
     this.dialogSessions.clear();
+    this.pendingDialogRequests.clear();
   }
 
   /** Boot a session host — a worker child process when GITSPACE_AGENT_WORKERS
@@ -1052,7 +1060,10 @@ export class PiCoordinator {
     this.hostLastUsed.delete(sessionId);
     this.busySessions.delete(sessionId);
     for (const [dialogId, dialogSessionId] of this.dialogSessions) {
-      if (dialogSessionId === sessionId) this.dialogSessions.delete(dialogId);
+      if (dialogSessionId === sessionId) {
+        this.dialogSessions.delete(dialogId);
+        this.pendingDialogRequests.delete(dialogId);
+      }
     }
     console.error(`[pi-coordinator] ${detail} (session ${sessionId})`);
     this.eventHandler?.(target, { type: 'error', sessionId, error: detail });
@@ -1112,10 +1123,12 @@ export class PiCoordinator {
     if (emitter) {
       try {
         this.dialogSessions.set(request.id, request.sessionId);
+        this.pendingDialogRequests.set(request.id, request);
         emitter.emitDialogRequest(request);
         return;
       } catch (err) {
         this.dialogSessions.delete(request.id);
+        this.pendingDialogRequests.delete(request.id);
         console.warn(
           `[pi-coordinator] No client to answer dialog ${request.id} (${request.type}); cancelling:`,
           err instanceof Error ? err.message : err,
@@ -1128,6 +1141,17 @@ export class PiCoordinator {
       ? { type: 'confirm', id: request.id, value: false }
       : { type: request.type, id: request.id, value: undefined };
     void host.resolveDialog(cancel).catch(() => undefined);
+  }
+
+  /**
+   * Every still-pending dialog request across all live sessions. Used for the
+   * connect-time catch-up (serve-runtime): a browser that connected/reconnected
+   * after a dialog fired missed the live broadcast while the agent stayed blocked
+   * on the ask, so these are re-pushed to it. The stored objects carry the
+   * ORIGINAL dialogId, so the existing agent-dialog-response path resolves them.
+   */
+  getPendingDialogRequests(): HostUIDialogRequest[] {
+    return [...this.pendingDialogRequests.values()];
   }
 
   private async ensureHost(
@@ -1184,7 +1208,10 @@ export class PiCoordinator {
 
   private async disposeHost(sessionId: string): Promise<void> {
     for (const [dialogId, dialogSessionId] of this.dialogSessions) {
-      if (dialogSessionId === sessionId) this.dialogSessions.delete(dialogId);
+      if (dialogSessionId === sessionId) {
+        this.dialogSessions.delete(dialogId);
+        this.pendingDialogRequests.delete(dialogId);
+      }
     }
     const relay = this.terminalRelays.get(sessionId);
     if (relay) {

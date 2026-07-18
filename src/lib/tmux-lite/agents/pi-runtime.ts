@@ -36,7 +36,6 @@ async function agentRegistryForWorkspace(cwd: string): Promise<unknown> {
   workspaceAgentRegistries.set(cwd, registry);
   return registry;
 }
-const importPiAi = () => import('@oh-my-pi/pi-ai');
 /**
  * Pi agent directory, scoped under the configured workspace root.
  *

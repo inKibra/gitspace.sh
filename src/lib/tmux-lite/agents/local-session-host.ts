@@ -56,6 +56,36 @@ import {
 // handlers, provider registration) that conflict with OpenTUI when loaded eagerly.
 const importSdk = () => import('@oh-my-pi/pi-coding-agent/sdk');
 
+// OMP's `theme` is an uninitialized module `var` until an interactive/TUI path
+// calls initTheme() (today only startVirtualInteractiveMode does). Several tool
+// implementations — notably the `ask` tool (getDoneOptionLabel → theme.status)
+// — dereference `theme` unconditionally, so a session that only ever drives the
+// NATIVE surface (no PTY terminal booted) crashes the tool with
+// "undefined is not an object (evaluating 'theme.status')" the moment it asks.
+// `theme` is a process-global, so initialize it once, eagerly, before any host
+// boots. Never let a theme failure block session creation.
+let ompThemeInitPromise: Promise<void> | null = null;
+function ensureOmpThemeInitialized(): Promise<void> {
+  if (!ompThemeInitPromise) {
+    ompThemeInitPromise = (async () => {
+      try {
+        const themeMod = await import('@oh-my-pi/pi-coding-agent/modes/theme/theme') as {
+          theme?: unknown;
+          initTheme: (enableWatcher: boolean, symbolPreset?: unknown, colorBlindMode?: unknown, darkTheme?: string, lightTheme?: string) => Promise<void>;
+        };
+        // Already initialized by a terminal/interactive path — leave it be.
+        if (themeMod.theme) return;
+        await themeMod.initTheme(false);
+      } catch (err) {
+        // Reset so a later boot can retry; boot must still proceed.
+        ompThemeInitPromise = null;
+        console.error('[session-host] OMP theme init failed (ask/select dialogs may be degraded):', err instanceof Error ? err.message : err);
+      }
+    })();
+  }
+  return ompThemeInitPromise;
+}
+
 export const THINKING_LEVELS = ['auto', 'off', 'minimal', 'low', 'medium', 'high', 'xhigh'];
 export const APPROVAL_MODES = ['always-ask', 'write', 'yolo'];
 
@@ -205,6 +235,9 @@ export class LocalSessionHost implements AgentSessionHost {
     sinks: SessionHostSinks,
     config: LocalSessionHostConfig = {},
   ): Promise<LocalSessionHost> {
+    // Ensure the OMP theme singleton exists before any tool (e.g. `ask`) can
+    // dereference it — native-surface-only sessions never boot a terminal.
+    await ensureOmpThemeInitialized();
     if (boot.mode === 'open') {
       const { session, setToolUIContext } = await openPiSession(target.workspacePath, boot.sessionFilePath);
       return new LocalSessionHost({ target, session, setToolUIContext, sinks, config });

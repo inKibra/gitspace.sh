@@ -233,6 +233,25 @@ export async function activateServeRuntime(config: ServeRuntimeConfig, deps: Ser
           if (Object.keys(currentAgentSnapshot).length > 0) {
             void runtime.sessionManager.sendAgentStateSnapshot((event as { connectionId: string }).connectionId, currentAgentSnapshot);
           }
+          // Dialog catch-up (BUG B): a client that connected/reconnected AFTER a
+          // dialog fired missed the live `agent_dialog_request` broadcast while
+          // the agent stayed blocked on the ask, so its per-session pending-dialog
+          // map is empty and the overlay never reappears. Re-push every still-
+          // pending dialog (original dialogId preserved, so the existing
+          // agent-dialog-response path resolves it). Broadcast is idempotent for
+          // already-connected clients — they just re-set the same map entry. This
+          // is the dialog analog of the agent-state snapshot catch-up above (#5).
+          void (async () => {
+            try {
+              const { getPendingAgentDialogRequests } = await import('./agent-control.js');
+              const pending = getPendingAgentDialogRequests();
+              for (const request of pending) {
+                await runtime.sessionManager.broadcastRawMessage({ type: 'agent_dialog_request', request });
+              }
+            } catch (error) {
+              log(`dialog catch-up on client connect failed: ${error instanceof Error ? error.message : String(error)}`);
+            }
+          })();
           break;
         case 'client_disconnected':
           runtime.status.clients = runtime.sessionManager.establishedSessionCount;
