@@ -19,6 +19,27 @@ describe('HostUIDialogOverlay render safety (BUG A)', () => {
     view.unmount();
   });
 
+  it('renders select options that are {label, description} objects (SDK shape) without crashing', () => {
+    // The SDK's ask tool passes ExtensionUISelectItem objects, not strings —
+    // rendering the raw object was a React "Objects are not valid as a child" crash.
+    const request: HostUIDialogRequest = {
+      type: 'select', id: 'dlg-obj', sessionId: 's1', title: 'Pick a color',
+      options: [
+        { label: 'Green', description: 'go' },
+        { label: 'Red', description: 'stop' },
+      ],
+    };
+    let picked: unknown = null;
+    const view = render(<HostUIDialogOverlay request={request} onResponse={(r) => { picked = r; }} />);
+    expect(document.body.textContent).toContain('Green');
+    expect(document.body.textContent).toContain('go'); // description shown
+    // Clicking sends the LABEL string (what the ask tool matches on), not the object.
+    const greenBtn = Array.from(document.getElementsByTagName('button')).find((b) => b.textContent?.includes('Green'));
+    (greenBtn as HTMLButtonElement).click();
+    expect(picked).toEqual({ type: 'select', id: 'dlg-obj', value: 'Green' });
+    view.unmount();
+  });
+
   it('does not throw on a malformed ask-form request (question missing options)', () => {
     // A dialog request for a background/other session can arrive misshapen; the
     // render must never take down the pane. Cast past the type to model the wire

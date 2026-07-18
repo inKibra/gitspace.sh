@@ -152,16 +152,25 @@ function SelectDialog({ request, onResponse }: SelectDialogProps) {
           <div className="gs-empty-panel">No options available.</div>
         ) : (
           <div className="gs-select-list max-h-72 overflow-y-auto">
-            {request.options.map((option, idx) => (
-              <button
-                key={idx}
-                type="button"
-                onClick={() => pick(option)}
-                className="gs-select-item"
-              >
-                {option}
-              </button>
-            ))}
+            {request.options.map((option, idx) => {
+              // The SDK passes {label, description} objects; older/plain callers
+              // pass strings. Never render the raw object (React child crash).
+              const label = typeof option === 'string' ? option : option.label;
+              const description = typeof option === 'string' ? undefined : option.description;
+              return (
+                <button
+                  key={idx}
+                  type="button"
+                  onClick={() => pick(label)}
+                  className="gs-select-item"
+                >
+                  <span className="text-[var(--gs-text)]">{label}</span>
+                  {description ? (
+                    <span className="ml-2 text-xs text-[var(--gs-text-dim)]">{description}</span>
+                  ) : null}
+                </button>
+              );
+            })}
           </div>
         )}
         <div className="flex justify-end">

@@ -30,7 +30,11 @@ export type HostUIDialogRequest =
       id: string;
       sessionId: string;
       title: string;
-      options: string[];
+      /** The SDK's ask tool passes ExtensionUISelectItem OBJECTS ({label,
+       *  description}), not strings — the declared param on OmpHostUIContext.select
+       *  is a lie the runtime doesn't honor. Carry either shape; the bridge
+       *  normalizes and the web dialog tolerates both. */
+      options: Array<string | { label: string; description?: string }>;
       dialogOptions?: HostUIDialogOptions;
     }
   | {
