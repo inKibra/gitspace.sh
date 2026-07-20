@@ -1442,7 +1442,11 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
       .catch(() => undefined)
       .finally(() => { goalDetailInFlightRef.current.delete(inflightKey); });
   }, [goalDetailCache, getGoalMutationBackend, getPersistedGoalId]);
-  const selectedGoalHasDetail = Boolean(selectedGoal && goalDetailCache[selectedGoal.id]?.updatedAt === selectedGoal.updatedAt);
+  const hasGoalDetail = useCallback(
+    (goal: KanbanGoalItem) => goalDetailCache[goal.id]?.updatedAt === goal.updatedAt,
+    [goalDetailCache],
+  );
+  const selectedGoalHasDetail = Boolean(selectedGoal && hasGoalDetail(selectedGoal));
 
   // Fetch full detail when the goal detail panel opens.
   useEffect(() => {
@@ -3058,13 +3062,18 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
           panels.push({
             id: 'goal',
             title: '◇ Goal',
-            version: `goal|${workspaceGoalForPanels?.id ?? ''}|${chainGoalsForPane.length}|${workspaceGoalForPanels?.updatedAt ?? ''}|${(workspaceGoalForPanels?.doc?.exemplarBlockIds ?? []).length}|slice:${goalSliceRequests[wsKey]?.nonce ?? 0}`,
+            // `detail:` tracks which chain goals have their lazy-fetched doc in
+            // hand — without it the pane never repaints when `goal-detail`
+            // resolves for a goal owned by another workspace (ticket #49).
+            version: `goal|${workspaceGoalForPanels?.id ?? ''}|${chainGoalsForPane.length}|${workspaceGoalForPanels?.updatedAt ?? ''}|${(workspaceGoalForPanels?.doc?.exemplarBlockIds ?? []).length}|slice:${goalSliceRequests[wsKey]?.nonce ?? 0}|detail:${chainGoalsForPane.filter(hasGoalDetail).map((g) => g.id).join(',')}`,
             onClose: closeExtra,
             render: () => (
               chainGoalsForPane.length > 0 && workspaceGoalForPanels
                 ? <GoalDocDockPane
                     goals={chainGoalsForPane}
                     initialGoalId={workspaceGoalForPanels.id}
+                    onRequestGoalDetail={fetchGoalDetail}
+                    hasGoalDetail={hasGoalDetail}
                     scrollToSlice={goalSliceRequests[wsKey] ?? null}
                     onOpenWorkflow={() => openSingletonPane(wsKey, { kind: 'workflow' })}
                     onToggleExemplar={async (goalId, blockId) => {
@@ -3791,15 +3800,24 @@ function ReportPaneLoader({ path, read, onOpenAttachment }: { path: string; read
   return <ReportPanel report={report} onOpenAttachment={onOpenAttachment} />;
 }
 
-function GoalDocDockPane({ goals, initialGoalId, onToggleExemplar, onOpenWorkflow, scrollToSlice }: {
+function GoalDocDockPane({ goals, initialGoalId, onToggleExemplar, onOpenWorkflow, scrollToSlice, onRequestGoalDetail, hasGoalDetail }: {
   goals: import("./app/shared/board/types.js").KanbanGoalItem[];
   initialGoalId: string;
   onToggleExemplar?: (goalId: string, blockId: string) => void;
   onOpenWorkflow?: () => void;
   scrollToSlice?: { sliceId: string; nonce: number } | null;
+  /** Lazy-fetch the doc/validation for whichever chain goal the pane navigates
+   *  to (ticket #49). The chain spans other workspaces' goals, whose detail the
+   *  selected-goal / visible-workspace effects never request. */
+  onRequestGoalDetail?: (goal: import("./app/shared/board/types.js").KanbanGoalItem) => void;
+  hasGoalDetail?: (goal: import("./app/shared/board/types.js").KanbanGoalItem) => boolean;
 }) {
   const [goalId, setGoalId] = useState(initialGoalId);
-  return <GoalDocPanel goals={goals} currentGoalId={goalId} onSelectGoal={setGoalId} onToggleExemplar={onToggleExemplar} onOpenWorkflow={onOpenWorkflow} scrollToSlice={scrollToSlice} />;
+  const currentGoal = goals.find((g) => g.id === goalId);
+  useEffect(() => {
+    if (currentGoal) onRequestGoalDetail?.(currentGoal);
+  }, [currentGoal?.id, currentGoal?.updatedAt, onRequestGoalDetail]); // eslint-disable-line react-hooks/exhaustive-deps
+  return <GoalDocPanel goals={goals} currentGoalId={goalId} onSelectGoal={setGoalId} onToggleExemplar={onToggleExemplar} onOpenWorkflow={onOpenWorkflow} scrollToSlice={scrollToSlice} docLoading={currentGoal ? !(hasGoalDetail?.(currentGoal) ?? true) : false} />;
 }
 
 export default function App() {

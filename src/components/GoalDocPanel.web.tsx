@@ -62,10 +62,14 @@ function RequirementRow({ requirement }: { requirement: Requirement }): ReactEle
   );
 }
 
-export function GoalDocPanel({ goals, currentGoalId, onSelectGoal, onToggleExemplar, onOpenWorkflow, scrollToSlice }: {
+export function GoalDocPanel({ goals, currentGoalId, onSelectGoal, onToggleExemplar, onOpenWorkflow, scrollToSlice, docLoading }: {
   goals: GoalLike[];
   currentGoalId: string;
   onSelectGoal: (goalId: string) => void;
+  /** The doc/validation detail for `currentGoalId` has not arrived yet (ticket
+   *  #42: the connect snapshot ships slim goals; bodies load via `goal-detail`).
+   *  Distinguishes "still fetching" from "genuinely no doc authored". */
+  docLoading?: boolean;
   /** Persist exemplar starring on the goal doc (mock exstar). */
   onToggleExemplar?: (goalId: string, blockId: string) => void;
   /** Open the ⟜ Workflow pane (mock wf-tie). */
@@ -250,6 +254,10 @@ export function GoalDocPanel({ goals, currentGoalId, onSelectGoal, onToggleExemp
             {requirements.map((r) => (
               <RequirementRow key={r.id} requirement={r} />
             ))}
+          </div>
+        ) : docLoading ? (
+          <div className="max-w-[880px] text-[12.5px] leading-[1.6] text-[var(--gs-text-dim)]">
+            Loading goal doc…
           </div>
         ) : (
           <div className="max-w-[880px] text-[12.5px] leading-[1.6] text-[var(--gs-text-dim)]">
