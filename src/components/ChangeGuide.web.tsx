@@ -504,7 +504,7 @@ export function ChangeGuidePane({ backend, projectName, workspaceName, workspace
    * height is the one thing an offset can't survive, and a file block is a much
    * smaller bet than a whole section.
    */
-  const holdAnchor = useCallback((key: string, offset = -6): (() => void) => {
+  const holdAnchor = useCallback((key: string, offset = -6, capMs = 8000): (() => void) => {
     const root = scrollRef.current;
     if (!root || !key) return () => {};
     const find = (): HTMLElement | null => root.querySelector<HTMLElement>(`[data-guide-anchor="${key}"]`);
@@ -527,7 +527,7 @@ export function ChangeGuidePane({ backend, projectName, workspaceName, workspace
        of pixels seconds later. Release after the anchor has been still for
        ~half a second; the hard cap only guards a pathological never-settling
        layout. */
-    const hardCap = Date.now() + 8000;
+    const hardCap = Date.now() + capMs;
     let stillFor = 0;
     const hold = (): void => {
       if (cancelled) return;
@@ -624,10 +624,31 @@ export function ChangeGuidePane({ backend, projectName, workspaceName, workspace
     });
   }, [viewKey, steps, active, done, loadState, gateTick]);
 
+  /* Timeline click: jump to a section and CONVERGE on it.
+     A one-shot `scrollIntoView` lands short, badly — measured in the running
+     app, a click on section 28 from the top landed 11,023px above it, and one
+     on section 5 landed 21,534px above it. The reason is windowing: the file
+     blocks between here and there are unmounted spacers (a never-measured one
+     is a single "Loading diff…" line), so the target's offset is computed
+     against a page that is far shorter than the page you arrive on. The blocks
+     fetch and expand as they come near, the target slides down, and the scroll
+     — already committed to a number — stops where the target USED to be.
+     So don't scroll to a number, hold the anchor: `holdAnchor` re-asserts the
+     target's position every frame until it stops moving, which is exactly the
+     convergence this needs. Deliberately NOT smooth — a per-frame hold and a
+     smooth animation fight for scrollTop, and an animation toward a coordinate
+     that moves 20k px is a lie anyway. The first hold frame is the jump; the
+     rest are the corrections, and they're invisible because the anchor is what
+     stays still while the content around it settles.
+     Longer cap than a restore: a cold far jump traverses many unfetched blocks
+     and can need several seconds of correction rounds. Reviewer input (wheel /
+     touch / key / pointer) still cancels the hold instantly, so scrolling away
+     mid-navigation is never undone. */
   const go = useCallback((i: number): void => {
     releaseHoldRef.current();
-    secRefs.current[i]?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  }, []);
+    setActive(i);
+    holdAnchor(`s${i}`, 0, 20000);
+  }, [holdAnchor]);
 
   const toggleDone = useCallback((i: number): void => {
     setDone((d) => {
