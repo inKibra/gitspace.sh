@@ -1,6 +1,9 @@
 diff --git a/node_modules/@oh-my-pi/pi-coding-agent/.bun-tag-59f479ba2c7d156a b/.bun-tag-59f479ba2c7d156a
 new file mode 100644
 index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/@oh-my-pi/pi-coding-agent/.bun-tag-81e5c3c5177b724 b/.bun-tag-81e5c3c5177b724
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
 diff --git a/node_modules/@oh-my-pi/pi-coding-agent/.bun-tag-d0ef8787a917fc3b b/.bun-tag-d0ef8787a917fc3b
 new file mode 100644
 index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
@@ -20,11 +23,80 @@ index 6a0daafdde71179e2db5d1a19c535cb45cf5a777..765946457d54cde5434b6b2cf2312af8
  		if (platform === "win32" && candidate.length >= WINDOWS_LOCAL_ROOT_MAX_CHARS) {
  			return shortLocalRoot(options);
  		}
+diff --git a/src/sdk.ts b/src/sdk.ts
+index af74e4bb017677cfeae3d4039283b32b9323944b..c6b5c009db7d0f7e2b0b0977697932a54052fcf7 100644
+--- a/src/sdk.ts
++++ b/src/sdk.ts
+@@ -2693,6 +2693,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
+ 		// parent's manager via `options.mcpManager` and MUST NOT disconnect it.
+ 		const ownedMcpManager = options.mcpManager ? undefined : mcpManager;
+ 		session = new AgentSession({
++			// GitSpace patch: thread the host's local:// mapping into the session
++			// itself, not just the tool session, so plan-reference / plan-mode /
++			// image-vision resolution uses the same root as every tool.
++			localProtocolOptions,
+ 			advisorWatchdogPrompt,
+ 			advisorContextPrompt,
+ 			advisorSharedInstructions: discoveredAdvisors.sharedInstructions,
 diff --git a/src/session/agent-session.ts b/src/session/agent-session.ts
-index f271f21bfa2fed3ce70cd3d7ac1a5fa594a58dd7..bb890abc49a841a619c701574b1983efbd588d60 100644
+index f271f21bfa2fed3ce70cd3d7ac1a5fa594a58dd7..1dbd0df5bbdcc11d821b64d48b3bd1769aac3a85 100644
 --- a/src/session/agent-session.ts
 +++ b/src/session/agent-session.ts
-@@ -8206,6 +8206,23 @@ export class AgentSession {
+@@ -645,6 +645,15 @@ export interface AgentSessionConfig {
+ 	agent: Agent;
+ 	sessionManager: SessionManager;
+ 	settings: Settings;
++	/**
++	 * GitSpace patch: the `local://` root mapping supplied by the embedding host
++	 * via `createAgentSession({ localProtocolOptions })`. Without this the
++	 * session's own `local://` resolution (plan-reference re-injection, plan-mode
++	 * message, image vision fallback) silently used the SessionManager's private
++	 * `.pi/sessions/<...>` dir while every tool used the host's dir — so a plan
++	 * written to `local://<slug>-plan.md` was never found again.
++	 */
++	localProtocolOptions?: LocalProtocolOptions;
+ 	/** Whether the caller explicitly requested yolo/auto-approve behavior for this session. */
+ 	autoApprove?: boolean;
+ 	/** Models to cycle through with Ctrl+P (from --models flag) */
+@@ -1500,6 +1509,8 @@ export class AgentSession {
+ 	readonly agent: Agent;
+ 	readonly sessionManager: SessionManager;
+ 	readonly settings: Settings;
++	/** GitSpace patch: host-supplied `local://` mapping; see AgentSessionConfig. */
++	readonly hostLocalProtocolOptions?: LocalProtocolOptions;
+ 	readonly yieldQueue: YieldQueue;
+ 	fileSnapshotStore?: InMemorySnapshotStore;
+ 	#autoApprove: boolean;
+@@ -1983,6 +1994,7 @@ export class AgentSession {
+ 	constructor(config: AgentSessionConfig) {
+ 		this.agent = config.agent;
+ 		this.sessionManager = config.sessionManager;
++		this.hostLocalProtocolOptions = config.localProtocolOptions;
+ 		this.settings = config.settings;
+ 		this.#autoApprove = config.autoApprove === true;
+ 		// Power assertions are taken per turn (see #beginInFlight); nothing acquired here.
+@@ -5021,10 +5033,16 @@ export class AgentSession {
+ 	}
+ 
+ 	#localProtocolOptions(): LocalProtocolOptions {
+-		return {
+-			getArtifactsDir: () => this.sessionManager.getArtifactsDir(),
+-			getSessionId: () => this.sessionManager.getSessionId(),
+-		};
++		// GitSpace patch: prefer the host-supplied mapping (the same object every
++		// tool, subagent, and eval bridge resolves `local://` against) so the
++		// session's own resolution can never drift to a different root. Falls back
++		// to the SessionManager pair for plain SDK consumers that pass nothing.
++		return (
++			this.hostLocalProtocolOptions ?? {
++				getArtifactsDir: () => this.sessionManager.getArtifactsDir(),
++				getSessionId: () => this.sessionManager.getSessionId(),
++			}
++		);
+ 	}
+ 
+ 	#maybeAbortStreamingEdit(event: AgentEvent): void {
+@@ -8206,6 +8224,23 @@ export class AgentSession {
  		};
  	}
  

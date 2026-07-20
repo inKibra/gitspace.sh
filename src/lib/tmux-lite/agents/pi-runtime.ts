@@ -17,6 +17,32 @@ const importSdk = () => import('@oh-my-pi/pi-coding-agent/sdk');
 const importSessionManagerModule = () => import('@oh-my-pi/pi-coding-agent/session/session-manager');
 const importModelRegistryModule = () => import('@oh-my-pi/pi-coding-agent/config/model-registry');
 const importAgentRegistryModule = () => import('@oh-my-pi/pi-coding-agent/registry/agent-registry');
+const importInternalUrlRegistryHelpers = () =>
+  import('@oh-my-pi/pi-coding-agent/internal-urls/registry-helpers');
+
+/**
+ * Make a session's artifacts directory visible to the `artifact://` and
+ * `agent://` protocol handlers.
+ *
+ * Those handlers enumerate dirs via `artifactsDirsFromRegistry()`, which walks
+ * `AgentRegistry.global()` — but sessions we boot with a per-workspace registry
+ * (see {@link agentRegistryForWorkspace}) never appear there, so the global list
+ * comes back empty and every `artifact://<id>` fails with
+ * "Artifact <id> not found. Available: none" even though the file is on disk in
+ * that session's own artifacts dir. `registerArtifactsDir` is the SDK's
+ * supported side channel for exactly this case.
+ */
+async function registerSessionArtifactsDir(artifactsDir: string | null | undefined): Promise<void> {
+  if (!artifactsDir) return;
+  try {
+    const { registerArtifactsDir } = (await importInternalUrlRegistryHelpers()) as unknown as {
+      registerArtifactsDir: (dir: string) => () => void;
+    };
+    registerArtifactsDir(artifactsDir);
+  } catch (err) {
+    console.error('[pi-runtime] failed to register artifacts dir for artifact:// resolution:', err);
+  }
+}
 
 /**
  * Per-WORKSPACE agent registries for IRC routing. OMP's IrcBus defaults to a
@@ -372,6 +398,7 @@ export async function openPiSession(cwd: string, sessionFilePath: string) {
     throw new Error('Unexpected createAgentSession result shape — SDK version may be incompatible');
   }
   localProtocol.bind(session.sessionId);
+  await registerSessionArtifactsDir(sessionManager.getArtifactsDir?.());
   if (restoredModel && !session.model) {
     await session.setModel(restoredModel);
   }
