@@ -65,6 +65,37 @@ export interface WalkStep {
 
 const ROOT_GROUP = '(root)';
 
+/* ── View state that outlives an unmount ───────────────────────────────────────
+   Losing your place in the guide has two distinct causes, measured in the
+   running app rather than assumed:
+     1. A dock TAB SWITCH does NOT unmount this pane — dockview hides it. React
+        state survives, but the pane loses layout, the windowed diffs collapse
+        to spacers and the browser clamps scrollTop to 0. Handled in the pane
+        itself (see `holdAnchor` + the ResizeObserver).
+     2. A real UNMOUNT — closing and reopening the guide tab, or a dock layout
+        rebuild — drops everything. That is what this cache is for: a
+        module-level store keyed by pane identity, the same shape of solution as
+        `goalDetailCache` in app.web.tsx.
+   Either way the restore is by ANCHOR, never by pixels: content height depends
+   on which diffs are expanded and which lazy diffs have loaded, so a saved
+   scrollTop lands somewhere else entirely. */
+
+interface GuideViewState {
+  /** Anchor: the section id (or `#n`) that was active, never a pixel offset. */
+  activeSectionKey: string | null;
+  /** Click-gated (large) diffs the reviewer had opened. */
+  openedDiffPaths: string[];
+  /** Marked-complete sections (guide-mode also persists these server-side). */
+  doneKeys: string[];
+}
+
+const guideViewCache = new Map<string, GuideViewState>();
+
+/** Stable per-section key: guide sections carry an id, heuristic ones don't. */
+function stepKey(s: WalkStep): string {
+  return s.sectionId ?? `#${s.n}`;
+}
+
 /** Tone → who-line color for section comment threads (mock styles.css .thread .who.*). */
 const THREAD_TONE: Record<WalkStepComment['tone'], string> = {
   pass: 'text-[var(--gs-accent)]',
@@ -267,7 +298,7 @@ function InlineDraftComposer({ target, actions, onDone }: {
 
 /* ── Per-file diff block (lazy fetch via get_file_diff, rendered with PatchDiff) ── */
 
-function FileDiffBlock({ backend, projectName, workspaceName, file, onOpenFile, threads, actions }: {
+function FileDiffBlock({ backend, projectName, workspaceName, file, onOpenFile, threads, actions, anchorKey, gateOpened = false, onGateOpen }: {
   backend: SessionBackend | null;
   projectName: string;
   workspaceName: string;
@@ -277,6 +308,13 @@ function FileDiffBlock({ backend, projectName, workspaceName, file, onOpenFile, 
   threads: ReviewThread[];
   /** null on read-only surfaces → diff renders, comment affordances don't. */
   actions: GuideThreadActions | null;
+  /** Scroll-restore anchor id — file blocks are the finest-grained anchor the
+   *  pane has, so a restore lands within one block rather than one section. */
+  anchorKey: string;
+  /** Restored from the view cache: this large diff was open before the unmount. */
+  gateOpened?: boolean;
+  /** Records the click-gate opening so it survives the next unmount. */
+  onGateOpen?: (path: string) => void;
 }): ReactElement {
   const [patch, setPatch] = useState<string | null>(null);
   const [state, setState] = useState<'loading' | 'ready' | 'empty' | 'error'>('loading');
@@ -286,7 +324,7 @@ function FileDiffBlock({ backend, projectName, workspaceName, file, onOpenFile, 
   // position holds and the DOM stays bounded.
   const [visible, setVisible] = useState(false); // ever been near → fetch
   const [nearView, setNearView] = useState(false); // currently near → mount
-  const [renderHuge, setRenderHuge] = useState(false);
+  const [renderHuge, setRenderHuge] = useState(gateOpened);
   const hostRef = useRef<HTMLDivElement>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
   const heightRef = useRef<number | null>(null);
@@ -375,7 +413,7 @@ function FileDiffBlock({ backend, projectName, workspaceName, file, onOpenFile, 
   }), [actions, handleLineSelectionEnd]);
 
   return (
-    <div ref={hostRef} className="border border-[var(--gs-border)]">
+    <div ref={hostRef} data-guide-anchor={anchorKey} className="border border-[var(--gs-border)]">
       <button
         type="button"
         onClick={() => onOpenFile?.(file.path)}
@@ -412,7 +450,7 @@ function FileDiffBlock({ backend, projectName, workspaceName, file, onOpenFile, 
         ) : patch && isHuge && !renderHuge ? (
           <div className="flex items-center gap-2 px-2 py-2 text-[11px] text-[var(--gs-text-dim)]">
             Large diff ({Math.round(patch.length / 1024)}KB) — heavy to render inline.
-            <button type="button" onClick={() => setRenderHuge(true)} className="border border-[var(--gs-border)] px-1.5 py-px text-[10.5px] text-[var(--gs-text-muted)] hover:text-[var(--gs-text)]">render anyway</button>
+            <button type="button" onClick={() => { setRenderHuge(true); onGateOpen?.(file.path); }} className="border border-[var(--gs-border)] px-1.5 py-px text-[10.5px] text-[var(--gs-text-muted)] hover:text-[var(--gs-text)]">render anyway</button>
             {onOpenFile && (
               <button type="button" onClick={() => onOpenFile(file.path)} className="border border-[var(--gs-border)] px-1.5 py-px text-[10.5px] text-[var(--gs-text-muted)] hover:text-[var(--gs-text)]">open as tab</button>
             )}
@@ -463,6 +501,18 @@ export function ChangeGuidePane({ backend, projectName, workspaceName, workspace
   const [fileStats, setFileStats] = useState<Map<string, { additions?: number; deletions?: number; changeType: string }>>(new Map());
   const scrollRef = useRef<HTMLDivElement>(null);
   const secRefs = useRef<Array<HTMLElement | null>>([]);
+
+  /* ── View state that must outlive a dockview tab switch ─────────────────── */
+  const viewKey = workspaceId ?? `${projectName}/${workspaceName}`;
+  /** Opened click-gates, mirrored in a ref so FileDiffBlock can read it at mount. */
+  const openedGatesRef = useRef<Set<string>>(new Set(guideViewCache.get(viewKey)?.openedDiffPaths ?? []));
+  const [gateTick, setGateTick] = useState(0);
+  const noteGateOpen = useCallback((path: string): void => {
+    openedGatesRef.current.add(path);
+    setGateTick((t) => t + 1);
+  }, []);
+  /** Restore runs once per pane identity per mount. */
+  const restoredRef = useRef<string | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -606,6 +656,11 @@ export function ChangeGuidePane({ backend, projectName, workspaceName, workspace
     const root = scrollRef.current;
     if (!root || steps.length === 0) return;
     const recompute = (): void => {
+      // A hidden dock tab has no layout: every rect collapses to 0 and the
+      // windowed diffs swap to spacers, which would otherwise walk `active` to
+      // the last step (all tops <= the line) and then to the first (scrollTop
+      // clamped to 0). Ignore the spy entirely while the pane isn't laid out.
+      if (!root.isConnected || root.clientHeight === 0) return;
       if (root.scrollTop + root.clientHeight >= root.scrollHeight - 4) { setActive(steps.length - 1); return; }
       const line = root.getBoundingClientRect().top + 72;
       let idx = 0;
@@ -618,7 +673,158 @@ export function ChangeGuidePane({ backend, projectName, workspaceName, workspace
     return () => io.disconnect();
   }, [steps]);
 
+  /* ── Restore by ANCHOR, never by pixels ───────────────────────────────────
+     Two things can lose the reviewer's place, and both land here:
+       · a dock TAB SWITCH — the pane keeps its React state but loses layout,
+         so the windowed diffs collapse to spacers and the browser clamps
+         scrollTop to 0; when the tab comes back the content re-expands under a
+         scroll offset that now means something completely different.
+       · a real UNMOUNT — closing and reopening the guide tab, or a layout
+         rebuild — which drops everything, hence the module cache.
+     Both restore the same way: re-open the click-gated diffs first (the file
+     blocks read `gateOpened` at mount), then pull the ANCHORED ELEMENT back to
+     its old offset and HOLD it there, because the lazy diffs above and below
+     keep changing height for a while after the scroll. Any real scroll input
+     from the reviewer wins immediately. */
+  const activeRef = useRef(active);
+  activeRef.current = active;
+  /** Last known reading position: the anchored element at the fold + its offset. */
+  const anchorRef = useRef<{ key: string; offset: number; idx: number } | null>(null);
+  /** Cancels an in-flight anchor hold — the timeline lives outside the scroll
+   *  root, so its clicks can't reach the hold's own listeners. */
+  const releaseHoldRef = useRef<() => void>(() => {});
+
+  /**
+   * Pin the element tagged `data-guide-anchor={key}` at `offset` px from the top
+   * of the scroll viewport and keep it there while the lazy diffs settle.
+   *
+   * `offset` is what makes this a position restore rather than a jump-to-heading:
+   * it carries how far past the anchor the reviewer had actually read. Anchors
+   * are placed on sections AND on every file-diff block, so the nearest one above
+   * the fold is never far — which matters, because the anchored element's own
+   * height is the one thing an offset can't survive, and a file block is a much
+   * smaller bet than a whole section.
+   */
+  const holdAnchor = useCallback((key: string, offset = -6): (() => void) => {
+    const root = scrollRef.current;
+    if (!root || !key) return () => {};
+    const find = (): HTMLElement | null => root.querySelector<HTMLElement>(`[data-guide-anchor="${key}"]`);
+    let raf = 0;
+    let cancelled = false;
+    const events = ['wheel', 'touchstart', 'keydown', 'pointerdown'] as const;
+    const stop = (): void => {
+      cancelled = true;
+      cancelAnimationFrame(raf);
+      for (const ev of events) root.removeEventListener(ev, stop);
+      if (releaseHoldRef.current === stop) releaseHoldRef.current = () => {};
+    };
+    // Any real navigation intent wins over the restore, instantly.
+    for (const ev of events) root.addEventListener(ev, stop, { passive: true });
+    releaseHoldRef.current();
+    releaseHoldRef.current = stop;
+    /* Hold until the anchor STOPS MOVING, not for a fixed time: coming back to
+       the tab re-expands the windowed diffs from their spacer estimates, and a
+       block that was never measured (120px placeholder) can grow by thousands
+       of pixels seconds later. Release after the anchor has been still for
+       ~half a second; the hard cap only guards a pathological never-settling
+       layout. */
+    const hardCap = Date.now() + 8000;
+    let stillFor = 0;
+    const hold = (): void => {
+      if (cancelled) return;
+      const el = find();
+      if (el && root.clientHeight > 0) {
+        const delta = el.getBoundingClientRect().top - root.getBoundingClientRect().top - offset;
+        if (Math.abs(delta) > 1) { root.scrollTop += delta; stillFor = 0; }
+        else stillFor += 1;
+      }
+      if (stillFor >= 30 || Date.now() > hardCap) { stop(); return; }
+      raf = requestAnimationFrame(hold);
+    };
+    raf = requestAnimationFrame(hold);
+    return stop;
+  }, []);
+
+  /* Tab switch: the pane loses and regains layout without ever unmounting.
+     Watch the scroll root's size — 0 means the tab went away (snapshot the
+     anchor), non-0 again means it came back (restore it). */
+  useEffect(() => {
+    const root = scrollRef.current;
+    if (!root || steps.length === 0) return;
+    /* The anchor has to be sampled while the pane is still laid out — by the
+       time the tab is hidden, scrollTop is already clamped and every rect reads
+       0, so measuring then would capture the damage instead of the position. */
+    const sample = (): void => {
+      if (root.clientHeight === 0) return;
+      const rootTop = root.getBoundingClientRect().top;
+      let best: { key: string; offset: number } | null = null;
+      // The last anchored element that starts at or above the fold — the thing
+      // the reviewer is actually looking at.
+      for (const el of root.querySelectorAll<HTMLElement>('[data-guide-anchor]')) {
+        const offset = el.getBoundingClientRect().top - rootTop;
+        if (offset > 1) break;
+        best = { key: el.dataset.guideAnchor!, offset };
+      }
+      if (best) anchorRef.current = { ...best, idx: activeRef.current };
+    };
+    root.addEventListener('scroll', sample, { passive: true });
+    sample();
+
+    let wasHidden = root.clientHeight === 0;
+    let release = (): void => {};
+    const ro = new ResizeObserver(() => {
+      const laidOut = root.clientHeight > 0;
+      if (!laidOut) { wasHidden = true; return; }
+      if (!wasHidden) return;
+      wasHidden = false;
+      const anchor = anchorRef.current;
+      if (!anchor) return;
+      setActive(anchor.idx);
+      release();
+      release = holdAnchor(anchor.key, anchor.offset);
+    });
+    ro.observe(root);
+    return () => { ro.disconnect(); release(); root.removeEventListener('scroll', sample); };
+  }, [steps, holdAnchor]);
+
+  /* Real unmount (tab closed and reopened, layout rebuilt): the module cache is
+     the only thing left, so replay it once per pane identity. */
+  useEffect(() => {
+    if (loadState !== 'ready' || steps.length === 0) return;
+    if (restoredRef.current === viewKey) return;
+    restoredRef.current = viewKey;
+
+    const cached = guideViewCache.get(viewKey);
+    openedGatesRef.current = new Set(cached?.openedDiffPaths ?? []);
+    setGateTick((t) => t + 1);
+    if (!cached) return;
+
+    if (cached.doneKeys.length > 0) {
+      const keys = new Set(cached.doneKeys);
+      setDone(new Set(steps.map((s, i) => (keys.has(stepKey(s)) ? i : -1)).filter((i) => i >= 0)));
+    }
+
+    const idx = steps.findIndex((s) => stepKey(s) === cached.activeSectionKey);
+    if (idx <= 0) return;
+    setActive(idx);
+    // Nothing is laid out yet after a fresh mount, so the section top is the
+    // only honest target — an intra-section offset would be measured against
+    // content that hasn't loaded.
+    return holdAnchor(`s${idx}`);
+  }, [loadState, steps, viewKey, holdAnchor]);
+
+  /* Park the anchor + gates + read-state so the next mount can restore them. */
+  useEffect(() => {
+    if (loadState !== 'ready' || steps.length === 0) return;
+    guideViewCache.set(viewKey, {
+      activeSectionKey: steps[active] ? stepKey(steps[active]!) : null,
+      openedDiffPaths: [...openedGatesRef.current],
+      doneKeys: steps.filter((_, i) => done.has(i)).map(stepKey),
+    });
+  }, [viewKey, steps, active, done, loadState, gateTick]);
+
   const go = useCallback((i: number): void => {
+    releaseHoldRef.current();
     secRefs.current[i]?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }, []);
 
@@ -814,6 +1020,7 @@ export function ChangeGuidePane({ backend, projectName, workspaceName, workspace
             <section
               key={s.n}
               ref={(el) => { secRefs.current[i] = el; }}
+              data-guide-anchor={`s${i}`}
               className={`mb-[18px] scroll-mt-[6px] border ${isDone ? 'border-[rgba(0,255,102,0.3)]' : 'border-[var(--gs-border)]'}`}
             >
               <div className={`flex items-center gap-2.5 border-b border-[var(--gs-border)] px-[11px] py-[9px] ${isDone ? 'bg-[rgba(0,255,102,0.05)]' : 'bg-[var(--gs-bg-elevated)]'}`}>
@@ -893,6 +1100,9 @@ export function ChangeGuidePane({ backend, projectName, workspaceName, workspace
                     onOpenFile={onOpenFile}
                     threads={threads}
                     actions={threadActions}
+                    anchorKey={`f${i}:${f.path}`}
+                    gateOpened={openedGatesRef.current.has(f.path)}
+                    onGateOpen={noteGateOpen}
                   />
                 ))}
                 {s.comment && (
