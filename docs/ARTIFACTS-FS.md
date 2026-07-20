@@ -82,29 +82,69 @@ it collided with the existing `space artifacts promote`, which means something
 else entirely (scratch → versioned tree, the typing act). Instead, a project
 agent simply sees the whole tree. Nothing moves, so nothing dangles.
 
+### What lives where
+
+**Reports stay in the goal folder** — `goals/<goal-id>/reports/`. A quirk or
+`good-pattern` report is project *knowledge*, but it is goal *provenance*, and
+since there is no promote verb it never moves. Cross-goal corpus search is
+therefore a glob over `goals/*/reports/`, not a read of `reports/`.
+
+That has a sharp edge: every skill that teaches corpus-grounding currently
+hardcodes the flat path (`space-goal-doc` says
+`rg '"surface"' .gitspace/artifacts/reports/`). Left unchanged, agents will
+search an empty directory and conclude there is no precedent — silently, which
+is the failure mode this project keeps hitting. Writing a report is unaffected:
+`local://` binds to the goal folder, so `reports/<name>.report.json` stays
+correct by construction.
+
+**Skills come in variants, selected at injection time by agent kind** — not one
+skill with an "if you are a project agent" branch. A project agent's `local://`
+is the tree root, so it *can* violate the `goals/**` guard; putting both sets of
+instructions in every context and relying on the agent to identify itself
+correctly is how that guard gets broken. A workspace agent should never read
+"you may write at root." The shared contract belongs in one place so the
+variants only differ where the binding differs. (A new skill name must be added
+to `MANAGED_SKILL_NAMES` or it silently will not install.) The CLI scope check
+exists regardless — skills are guidance, not enforcement.
+
+### Migration off the flat mount
+
+Required before any roll-up runs, or the root collisions this model exists to
+prevent will happen on the first merge.
+
+- **Per workspace branch**: everything except the inherited baseline
+  (`README.md`, created by `init artifacts` on `main` and present only because
+  the branch came off `main`) moves under `goals/<goal-id>/`. Mechanical
+  `git mv` plus a commit, per branch.
+- **`main` is left alone.** Its root is already a mix of rolled-up workspace
+  artifacts (there are real `rollup: …` merge commits) and things authored
+  directly on `main` (dashboards, the build-health mini-app), and nothing in the
+  path distinguishes them — you would have to walk each file's history. Since
+  main's current content is largely test residue from building roll-up itself
+  (`test report`, `rollup-live-test`, `phase2check` probes), a provenance-walking
+  migration is not worth building. Treat main's root as project-level; move
+  anything that turns out to matter by hand.
+- `space artifacts commit` assumes the mount root *is* the worktree root. That
+  assumption is the likeliest place for hidden breakage.
+
 ### Open questions (decided model, undecided mechanics)
 
 The model above is settled. These are not, and each is cheap to answer now and
 expensive to answer after agents have learned the wrong shape:
 
-1. **Migration.** Existing workspaces are flat — `goal.md`, `rubric.json`,
-   `README.md`, `journal/` all sit at the mount root. That is exactly why
-   roll-up would conflict today: every workspace branch has identically named
-   files at the same paths. Moving them under `goals/<goal-id>/` needs a
-   migration, and `space artifacts commit` currently assumes the mount root *is*
-   the worktree root — the likeliest place for hidden assumptions.
-2. **`main` is contended.** Roll-ups merge into it while a project agent has it
+1. **`main` is contended.** Roll-ups merge into it while a project agent has it
    checked out and is committing. Git serialises, but two near-simultaneous
    roll-ups plus a live project agent will produce failed merges at random
    without an explicit locking story.
-3. **Worktree growth.** Branching from `main` materialises every published
+2. **Worktree growth.** Branching from `main` materialises every published
    goal's artifacts, including screenshots and video. Favourites-only roll-up
    blunts this a lot; sparse-checkout (materialise project artifacts + your goal
    + chain neighbours) is the lever if it still bites, and was deliberately
    deferred rather than designed in.
-4. **Who may favourite.** Assumed to be the user, in the workspace. If agents
-   may favourite their own work, roll-up becomes self-service — probably
-   fine, since roll-up is cheap and reversible, but it has not been decided.
+3. ~~Who may favourite.~~ **Decided: users favourite, in the workspace.** Not
+   agents — the point of favouriting is human judgement about what is worth
+   keeping, and an agent favouriting its own output makes roll-up self-service
+   and the shared record self-congratulatory.
 
 ### Relationship to OMP
 
