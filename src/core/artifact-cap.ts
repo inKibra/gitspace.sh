@@ -54,11 +54,14 @@ export function parseArtifactUri(uri: string): ArtifactUri {
 
 // ── local:// (docs/ARTIFACT-PROTOCOL.md Q2) ─────────────────────────────────
 //
-// `local://<rel>` is just the artifacts mount: it maps to the mount-relative
-// path `<rel>` (so local://PLAN.md → <workspace>/.gitspace/artifacts/PLAN.md).
-// It is an ordinary path in the mount; share/promote resolve it with no special
-// storage. `share local://…` serves live (working-tree state), so an in-
-// progress file can be shared before it is committed.
+// `local://<rel>` means "the root I OWN" — not a fixed path. The host binds it
+// per session (docs/ARTIFACTS-FS.md): a workspace/goal session resolves it to
+// `<mount>/goals/<goal-id>/<rel>`, a project session to `<mount>/<rel>`. It is
+// an ordinary path under that root; share/promote resolve it with no special
+// storage. Callers lift it to a mount-relative path with
+// `artifactsScope(dir).rel(...)` before it reaches git or an artifact:// URI.
+// `share local://…` serves live (working-tree state), so an in-progress file
+// can be shared before it is committed.
 
 /** Recognize `local://<rel>` (and the bare `local:` form); returns the inner
  *  rel path, or null when the string is not a local:// reference. */
@@ -70,8 +73,10 @@ export function parseLocalRef(ref: string): string | null {
   return rel;
 }
 
-/** Mount-relative path for a local:// file — the mount root, i.e. `<rel>`
- *  itself. Validates `rel` for traversal so the composed path is always safe. */
+/** Scope-relative path for a local:// file — `<rel>` itself, relative to the
+ *  root the session owns (NOT the mount root; callers lift it with
+ *  `artifactsScope(dir).rel(...)`). Validates `rel` for traversal so the
+ *  composed path is always safe. */
 export function localScratchRel(rel: string): string {
   if (!rel || rel.startsWith('/') || rel.split('/').some((s) => s === '' || s === '.' || s === '..')) {
     throw new SpacesError(`Unsafe local:// path: ${rel}`, 'USER_ERROR', 1);
@@ -118,7 +123,13 @@ export function pathInScope(relPath: string, scopeGlobs: string[]): boolean {
 
 /** Compile-time write scopes for gitspace's own producers — an auditable
  *  registry, not runtime checks. Every entry names paths a producer writes
- *  through captureArtifacts today. */
+ *  through captureArtifacts today.
+ *
+ *  These globs are GOAL-RELATIVE: every producer below is a workspace
+ *  producer, and its writes land under the goal folder the workspace owns
+ *  (`goals/<goal-id>/journal/…`). Producers scope-lift with
+ *  `artifactsScope(workspaceDir).rel(...)` before handing a path to git —
+ *  see docs/ARTIFACTS-FS.md "Tree layout". */
 export const AMBIENT_WRITE_SCOPES: Record<string, string[]> = {
   triggers: ['triggers/**'],
   'phase-journal': ['journal/**'],

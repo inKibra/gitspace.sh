@@ -121,6 +121,7 @@ import { startTriggerScheduler } from './trigger-scheduler.js';
 import { setCommandDispatcher } from './command-dispatch.js';
 import { deliverDialogRequest, isDialogResponseAuthorized } from './agent-dialog-delivery.js';
 import { formatArtifactUri, mintArtifactCap, verifyArtifactCap, capAllows, parseArtifactUri } from '../../core/artifact-cap.js';
+import { triggerWriteScopes as triggerWriteScopesSync } from '../../core/triggers.js';
 import { getOrCreateArtifactCapKeypair } from '../../core/artifact-cap-key.js';
 import { matchesWorkspaceId, toCanonicalWorkspaceId } from '../../utils/workspace-id.js';
 import { getProcessSpecs, startProcessInstance, stopProcessInstance } from '../processes/manager.js';
@@ -895,7 +896,9 @@ startTriggerScheduler(
     watchSessionIdle: watchAgentSessionIdle,
     mintCap: (workspace, trigger) => {
       try {
-        const scope = trigger.writes.filter(Boolean);
+        // A trigger's `writes` are goal-relative; artifact:// caps are
+        // mount-relative. Lift before minting (docs/ARTIFACTS-FS.md).
+        const scope = triggerWriteScopesSync(workspace.path, trigger.writes ?? []);
         if (scope.length === 0) return null;
         return mintArtifactCap({
           sub: { kind: 'trigger', id: trigger.id },
@@ -3945,9 +3948,14 @@ export async function dispatchCommand(cmd: Command): Promise<Response | null> {
 
           case 'artifact-write':
             try {
-              const { captureArtifacts } = await import('../../core/artifacts.js');
-              const { projectDir, mountDir, relPath } = await resolveArtifactUriDirs(cmd.uri);
+              const { captureArtifacts, artifactsScope, assertGoalScopeWrite } = await import('../../core/artifacts.js');
+              const { projectDir, workspaceDir, mountDir, relPath } = await resolveArtifactUriDirs(cmd.uri);
               if (!relPath) { res = { type: 'error', message: 'artifact-write needs a file path in the URI' }; break; }
+              // Guard: `goals/**` is roll-up-only. artifact:// paths are
+              // mount-relative, so a UI or agent browsing @base (whose scope
+              // IS the tree root) could otherwise write straight into another
+              // workspace's goal folder and break its next roll-up merge.
+              assertGoalScopeWrite(artifactsScope(workspaceDir), [relPath]);
               // A presented capability is VERIFIED (fail closed) and its scope
               // enforced; provenance comes from the verified subject. Cap-less
               // writes (the UI) keep web-ui provenance and no extra scope.
@@ -4111,7 +4119,7 @@ export async function dispatchCommand(cmd: Command): Promise<Response | null> {
               if (!trigger) { res = { type: 'error', message: `Unknown trigger: ${cmd.triggerId}` }; break; }
               let capToken: string | undefined;
               try {
-                const scope = trigger.writes.filter(Boolean);
+                const scope = triggerWriteScopesSync(cmd.target.workspacePath, trigger.writes ?? []);
                 if (scope.length > 0) {
                   capToken = mintArtifactCap({
                     sub: { kind: 'trigger', id: trigger.id },

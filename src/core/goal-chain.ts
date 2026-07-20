@@ -9,7 +9,7 @@ import {
 } from 'fs';
 import { dirname, join } from 'path';
 import { getProjectDir, getProjectWorkspacesDir } from './config.js';
-import { captureArtifactsSync } from './artifacts.js';
+import { artifactsScope, captureArtifactsSync } from './artifacts.js';
 import { defaultValidation, getPlannedGoalValidationDir, migrateGoalRecord, moveGoalValidationToWorkspace } from './goal-validation.js';
 import { computeReadiness } from '../app/shared/goal-validation/readiness.js';
 import { ensureWorkspaceStorageIgnored, getWorkspaceStatus, getWorkspaceStorageDir, setWorkspaceStatus } from './workspace-metadata.js';
@@ -275,8 +275,8 @@ export function writeGoalRecord(projectName: string, goal: GoalRecord): GoalReco
 function mirrorGoalCanonToArtifacts(projectName: string, workspaceName: string, goal: GoalRecord): void {
   try {
     const workspaceDir = join(getProjectWorkspacesDir(projectName), workspaceName);
-    const mountDir = join(workspaceDir, '.gitspace', 'artifacts');
-    if (!existsSync(join(mountDir, '.git'))) return;
+    const scope = artifactsScope(workspaceDir);
+    if (!existsSync(join(scope.mountDir, '.git'))) return;
     const rubricCanon = {
       goalId: goal.id,
       requirements: (goal.validation?.reqOrder ?? Object.keys(goal.validation?.requirements ?? {}))
@@ -290,18 +290,21 @@ function mirrorGoalCanonToArtifacts(projectName: string, workspaceName: string, 
       goal.doc?.bodyMarkdown ?? '',
       goal.doc?.blocks?.length ? `\n<!-- blocks:${JSON.stringify(goal.doc.blocks)} -->` : '',
     ].join('\n');
+    // Canon lands in the goal's own folder (`goals/<goal-id>/goal.md`), not at
+    // the mount root. Root canon is exactly what used to make two workspace
+    // branches collide on roll-up (docs/ARTIFACTS-FS.md "Tree layout").
     const files = [
-      { path: 'goal.md', content: goalMd },
-      { path: 'rubric.json', content: `${JSON.stringify(rubricCanon, null, 2)}\n` },
+      { path: scope.rel('goal.md'), content: goalMd },
+      { path: scope.rel('rubric.json'), content: `${JSON.stringify(rubricCanon, null, 2)}\n` },
     ];
     // Skip the commit when canon is unchanged (captureArtifactsSync would
     // no-op on identical content, but avoid the git round-trip entirely).
     const unchanged = files.every((f) => {
-      const target = join(mountDir, f.path);
+      const target = join(scope.mountDir, f.path);
       return existsSync(target) && readFileSync(target, 'utf-8') === f.content;
     });
     if (unchanged) return;
-    captureArtifactsSync(getProjectDir(projectName), mountDir, files, {
+    captureArtifactsSync(getProjectDir(projectName), scope.mountDir, files, {
       message: `canon: goal ${goal.id}`,
       provenance: { tool: 'goal-canon' },
     });

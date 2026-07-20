@@ -297,7 +297,7 @@ describe('canon write-through (docs/REVIEW-GUIDE.md)', () => {
     rmSync(root, { recursive: true, force: true });
   });
 
-  it('mirrors goal.md + rubric.json to the artifacts mount on goal writes', async () => {
+  it('mirrors goal.md + rubric.json into the goal folder on goal writes', async () => {
     const { ensureArtifactsRepo, ensureArtifactsMount } = await import('../artifacts.js');
     const { writeGoalRecord } = await import('../goal-chain.js');
     const projectDir = join(root, 'demo');
@@ -312,8 +312,13 @@ describe('canon write-through (docs/REVIEW-GUIDE.md)', () => {
     const goal = makeGoal({ id: 'g1', title: 'Canon goal', phase: 'code', workspaceName: 'ws1', validation: add.validation });
     writeGoalRecord('demo', goal);
 
-    expect(readFileSync(join(mount, 'goal.md'), 'utf-8')).toContain('# Canon goal');
-    const rubric = JSON.parse(readFileSync(join(mount, 'rubric.json'), 'utf-8'));
+    // Canon lands in the goal's own disjoint folder, never at the mount root —
+    // root canon is what made two workspace branches collide on roll-up
+    // (docs/ARTIFACTS-FS.md "Tree layout").
+    const goalDir = join(mount, 'goals', 'g1');
+    expect(readFileSync(join(goalDir, 'goal.md'), 'utf-8')).toContain('# Canon goal');
+    expect(existsSync(join(mount, 'goal.md'))).toBe(false);
+    const rubric = JSON.parse(readFileSync(join(goalDir, 'rubric.json'), 'utf-8'));
     expect(rubric.requirements[0]).toMatchObject({ title: 'R', rubric: 'must do X' });
 
     // second identical write does not add a canon commit; a rubric edit does

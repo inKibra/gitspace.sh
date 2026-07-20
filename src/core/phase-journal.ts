@@ -19,7 +19,7 @@ import { readWorkspaceGoal } from './goal-chain.js';
 import { hashRubric } from './goal-validation.js';
 import { getWorkspaceStatus } from './workspace-metadata.js';
 import { getThreads } from './review.js';
-import { captureArtifacts } from './artifacts.js';
+import { artifactsScope, captureArtifacts } from './artifacts.js';
 import { describeOwedRequirement, gateStatusForPhase, workflowPhaseNames } from './goal-gates.js';
 import { tryLoadWorkspaceWorkflow } from './goal-workflow.js';
 import { SpacesError } from '../types/errors.js';
@@ -78,6 +78,13 @@ function mountDirFor(workspaceDir: string): string {
   return join(workspaceDir, '.gitspace', 'artifacts');
 }
 
+/** The goal folder this workspace owns — journal entries, canon, breadcrumbs
+ *  and the workflow spec all live under it, not at the mount root
+ *  (docs/ARTIFACTS-FS.md "Tree layout"). */
+function scopeDirFor(workspaceDir: string): string {
+  return artifactsScope(workspaceDir).rootDir;
+}
+
 function hasMount(workspaceDir: string): boolean {
   return existsSync(join(mountDirFor(workspaceDir), '.git'));
 }
@@ -103,6 +110,7 @@ function slugify(name: string): string {
 export function snapshotPhaseState(projectName: string, workspaceName: string, now: Date = new Date()): PhaseStateSnapshot {
   const workspaceDir = join(getProjectWorkspacesDir(projectName), workspaceName);
   const mount = mountDirFor(workspaceDir);
+  const scopeDir = scopeDirFor(workspaceDir);
   const goal = readWorkspaceGoal(projectName, workspaceName);
 
   const requirements: Record<string, string> = {};
@@ -126,10 +134,10 @@ export function snapshotPhaseState(projectName: string, workspaceName: string, n
   let workflow: PhaseStateSnapshot['workflow'];
   let workflowHash: string | undefined;
   if (hasMount(workspaceDir)) {
-    const specs = readdirSync(mount).filter((f) => f.endsWith('.workflow.json')).sort();
+    const specs = readdirSync(scopeDir).filter((f) => f.endsWith('.workflow.json')).sort();
     for (const spec of specs) {
       try {
-        const raw = readFileSync(join(mount, spec), 'utf8');
+        const raw = readFileSync(join(scopeDir, spec), 'utf8');
         workflowHash = hashRubric((workflowHash ?? '') + raw);
         const parsed = JSON.parse(raw) as { phases?: Array<{ name?: string; nodes?: Array<{ id?: string; status?: string }> }> };
         const nodes: Record<string, string> = {};
@@ -157,8 +165,8 @@ export function snapshotPhaseState(projectName: string, workspaceName: string, n
     evidenceIds,
     canon: {
       artifactsSha: hasMount(workspaceDir) ? gitHead(mount) : undefined,
-      goalDocHash: contentHash(join(mount, 'goal.md')),
-      rubricHash: contentHash(join(mount, 'rubric.json')),
+      goalDocHash: contentHash(join(scopeDir, 'goal.md')),
+      rubricHash: contentHash(join(scopeDir, 'rubric.json')),
       workflowHash,
     },
   };
@@ -187,22 +195,22 @@ export function computePhaseDelta(start: PhaseStateSnapshot, end: PhaseStateSnap
   };
 }
 
-function journalEntries(mount: string): string[] {
-  const dir = join(mount, JOURNAL_DIR);
+function journalEntries(scopeDir: string): string[] {
+  const dir = join(scopeDir, JOURNAL_DIR);
   if (!existsSync(dir)) return [];
   return readdirSync(dir).filter((f) => f.endsWith('.json')).sort();
 }
 
-function readEntry(mount: string, file: string): PhaseJournalEntry {
-  return JSON.parse(readFileSync(join(mount, JOURNAL_DIR, file), 'utf8')) as PhaseJournalEntry;
+function readEntry(scopeDir: string, file: string): PhaseJournalEntry {
+  return JSON.parse(readFileSync(join(scopeDir, JOURNAL_DIR, file), 'utf8')) as PhaseJournalEntry;
 }
 
 export function findOpenPhaseEntry(workspaceDir: string): { file: string; entry: PhaseJournalEntry } | null {
-  const mount = mountDirFor(workspaceDir);
+  const scopeDir = scopeDirFor(workspaceDir);
   if (!hasMount(workspaceDir)) return null;
-  for (const file of journalEntries(mount).reverse()) {
+  for (const file of journalEntries(scopeDir).reverse()) {
     try {
-      const entry = readEntry(mount, file);
+      const entry = readEntry(scopeDir, file);
       if (!entry.endedAt) return { file, entry };
     } catch { /* skip unreadable */ }
   }
@@ -217,12 +225,12 @@ export function getOpenJournalPhase(workspaceDir: string): string | null {
 
 /** All journal entries for a workspace, oldest first. Empty without a mount. */
 export function listPhaseJournalEntries(workspaceDir: string): PhaseJournalEntry[] {
-  const mount = mountDirFor(workspaceDir);
+  const scopeDir = scopeDirFor(workspaceDir);
   if (!hasMount(workspaceDir)) return [];
   const out: PhaseJournalEntry[] = [];
-  for (const file of journalEntries(mount)) {
+  for (const file of journalEntries(scopeDir)) {
     try {
-      out.push(readEntry(mount, file));
+      out.push(readEntry(scopeDir, file));
     } catch { /* skip unreadable */ }
   }
   return out;
@@ -269,8 +277,8 @@ export async function startPhaseJournal(
   if (open) {
     throw new SpacesError(`Phase "${open.entry.phase}" is still open (${open.file}) — end it first.`, 'USER_ERROR', 1);
   }
-  const mount = mountDirFor(workspaceDir);
-  const seq = String(journalEntries(mount).length + 1).padStart(2, '0');
+  const scope = artifactsScope(workspaceDir);
+  const seq = String(journalEntries(scope.rootDir).length + 1).padStart(2, '0');
   const file = `${JOURNAL_DIR}/${seq}-${slugify(input.phase)}.json`;
   const entry: PhaseJournalEntry = {
     version: 1,
@@ -281,8 +289,8 @@ export async function startPhaseJournal(
     commits: { startSha: gitHead(workspaceDir) },
     state: { start: snapshotPhaseState(projectName, workspaceName, now) },
   };
-  await captureArtifacts(getProjectDir(projectName), mount, [
-    { path: file, content: JSON.stringify(entry, null, 2) + '\n' },
+  await captureArtifacts(getProjectDir(projectName), scope.mountDir, [
+    { path: scope.rel(file), content: JSON.stringify(entry, null, 2) + '\n' },
   ], { message: `journal: start ${input.phase}`, provenance: { tool: 'phase-journal' } });
   await appendGoalPhaseMarker(projectName, workspaceName, input.phase, 'started', input.intent);
   return { file: file.slice(JOURNAL_DIR.length + 1), entry };
@@ -346,7 +354,7 @@ export async function endPhaseJournal(
     // leaves the repo untouched.
     assertPhaseGatePassable(projectName, workspaceName, workspaceDir, open.entry.phase);
   }
-  const mount = mountDirFor(workspaceDir);
+  const scope = artifactsScope(workspaceDir);
 
   // Auto-commit the CODE repo at the phase boundary (message from the outcome
   // headline) so commit order becomes a good narrative signal by construction.
@@ -368,7 +376,7 @@ export async function endPhaseJournal(
 
   // filesTouched joined from tier-1 breadcrumbs within the phase window.
   let filesTouched: string[] | undefined;
-  const crumbLog = join(mount, 'blame', 'edits.jsonl');
+  const crumbLog = join(scope.rootDir, 'blame', 'edits.jsonl');
   if (existsSync(crumbLog)) {
     const since = open.entry.startedAt;
     const files = new Set<string>();
@@ -394,8 +402,8 @@ export async function endPhaseJournal(
     delta: computePhaseDelta(open.entry.state.start, end),
     ...(revert ? { reverted: revert } : {}),
   };
-  await captureArtifacts(getProjectDir(projectName), mount, [
-    { path: `${JOURNAL_DIR}/${open.file}`, content: JSON.stringify(entry, null, 2) + '\n' },
+  await captureArtifacts(getProjectDir(projectName), scope.mountDir, [
+    { path: scope.rel(`${JOURNAL_DIR}/${open.file}`), content: JSON.stringify(entry, null, 2) + '\n' },
   ], { message: `journal: end ${open.entry.phase}${revert ? ' (reverted)' : ''}`, provenance: { tool: 'phase-journal' } });
   if (revert) await appendGoalGateRevertMarker(projectName, workspaceName, open.entry.phase, revert);
   await appendGoalPhaseMarker(projectName, workspaceName, open.entry.phase, 'ended', input.outcome.split('\n')[0] ?? '');

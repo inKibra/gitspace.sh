@@ -82,15 +82,17 @@ const BREADCRUMB_LOG = 'blame/edits.jsonl';
 export async function flushEditBreadcrumbs(workspacePath: string, projectDir: string): Promise<number> {
   const buffer = buffers.get(workspacePath);
   if (!buffer || buffer.length === 0) return 0;
-  const mountDir = join(workspacePath, '.gitspace', 'artifacts');
-  if (!existsSync(join(mountDir, '.git'))) return 0; // no mount — degrade silently, keep buffering bounded
+  const { artifactsScope, captureArtifacts } = await import('../../../core/artifacts.js');
+  // Breadcrumbs are goal provenance: they land in the goal folder this
+  // workspace owns, not at the mount root (docs/ARTIFACTS-FS.md).
+  const scope = artifactsScope(workspacePath);
+  if (!existsSync(join(scope.mountDir, '.git'))) return 0; // no mount — degrade silently, keep buffering bounded
   buffers.set(workspacePath, []);
-  const logPath = join(mountDir, BREADCRUMB_LOG);
+  const logPath = scope.abs(BREADCRUMB_LOG);
   const existing = existsSync(logPath) ? readFileSync(logPath, 'utf8') : '';
   const appended = existing + buffer.map((c) => JSON.stringify(c)).join('\n') + '\n';
-  const { captureArtifacts } = await import('../../../core/artifacts.js');
-  await captureArtifacts(projectDir, mountDir, [
-    { path: BREADCRUMB_LOG, content: appended },
+  await captureArtifacts(projectDir, scope.mountDir, [
+    { path: scope.rel(BREADCRUMB_LOG), content: appended },
   ], {
     message: `blame: ${buffer.length} edit breadcrumb${buffer.length === 1 ? '' : 's'}`,
     provenance: { tool: 'edit-breadcrumbs' },

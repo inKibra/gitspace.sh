@@ -19,7 +19,7 @@ import { exec, execFileSync, execSync } from 'child_process';
 import { promisify } from 'util';
 import { createHash } from 'crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync, appendFileSync } from 'fs';
-import { dirname, join } from 'path';
+import { basename, dirname, join } from 'path';
 import { SpacesError } from '../types/errors.js';
 import { pathInScope, localScratchRel } from './artifact-cap.js';
 import { escapeShellArg } from '../utils/shell-escape.js';
@@ -49,6 +49,136 @@ export function artifactPaths(projectDir: string): ArtifactPaths {
 
 export function artifactsMountDir(workspaceOrBaseDir: string): string {
   return join(workspaceOrBaseDir, MOUNT_RELATIVE);
+}
+
+// ── goal-keyed layout / scope roots (docs/ARTIFACTS-FS.md "Tree layout") ────
+//
+// Every goal owns `goals/<goal-id>/` and NOTHING else; project-level artifacts
+// live at the tree root. Disjoint goal folders are what make roll-up (merging a
+// workspace's artifacts branch into main) mechanically conflict-free — two
+// workspaces can never touch the same path. The flat layout (goal.md,
+// rubric.json, reports/ at the mount root of every branch) collided on every
+// merge, which is why it was migrated away from.
+//
+// `local://` means "the root I own", bound per session:
+//   workspace / goal agent → goals/<goal-id>/      project agent → tree root
+
+export const ARTIFACTS_GOALS_DIR = 'goals';
+
+/** Mount-relative root of one goal's subtree. */
+export function goalScopeRel(goalId: string): string {
+  assertSafeRelPath(`${ARTIFACTS_GOALS_DIR}/${goalId}`);
+  return `${ARTIFACTS_GOALS_DIR}/${goalId}`;
+}
+
+/** Does a mount-relative path fall inside ANY goal folder? */
+export function isGoalScopedPath(relPath: string): boolean {
+  return relPath === ARTIFACTS_GOALS_DIR || relPath.startsWith(`${ARTIFACTS_GOALS_DIR}/`);
+}
+
+/**
+ * The goal id owning a workspace, read straight off the workspace's goal
+ * record. Read as raw JSON rather than through `core/goal-chain.ts` on
+ * purpose: goal-chain imports this module (canon write-through), so importing
+ * it back would be a cycle, and `core/config.ts` has a top-level await that
+ * makes it unsafe to pull into this dependency-light layer.
+ *
+ * Returns null for a dir that owns no goal — the project base clone (which
+ * mounts `main`), or a workspace created before goal records existed. Callers
+ * treat null as "scope is the tree root".
+ */
+export function readWorkspaceGoalId(workspaceDir: string): string | null {
+  const name = basename(workspaceDir);
+  const goalFile = join(workspaceDir, '.gitspace', 'workspace', name, 'goal.json');
+  if (!existsSync(goalFile)) return null;
+  try {
+    const id = (JSON.parse(readFileSync(goalFile, 'utf8')) as { id?: unknown }).id;
+    return typeof id === 'string' && id.length > 0 ? id : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The artifacts scope a session owns: the mount plus the sub-root that
+ * `local://` binds to. One object so callers never have to decide whether a
+ * path is mount-relative or scope-relative by hand.
+ */
+export interface ArtifactsScope {
+  /** Absolute path of the artifacts worktree mount. */
+  mountDir: string;
+  /** Mount-relative scope root: `goals/<id>` for a workspace, '' for project. */
+  rootRel: string;
+  /** Absolute path of the scope root — what `local://` binds to. */
+  rootDir: string;
+  /** True when this scope is the whole tree (project agent / base clone). */
+  isProjectRoot: boolean;
+  /** Scope-relative path → mount-relative path (what git commits). */
+  rel(scopeRelPath: string): string;
+  /** Scope-relative path → absolute path on disk. */
+  abs(scopeRelPath: string): string;
+}
+
+/** Resolve the artifacts scope for a workspace (or base) directory. */
+export function artifactsScope(workspaceOrBaseDir: string): ArtifactsScope {
+  const mountDir = artifactsMountDir(workspaceOrBaseDir);
+  const goalId = readWorkspaceGoalId(workspaceOrBaseDir);
+  const rootRel = goalId ? goalScopeRel(goalId) : '';
+  return {
+    mountDir,
+    rootRel,
+    rootDir: rootRel ? join(mountDir, rootRel) : mountDir,
+    isProjectRoot: rootRel === '',
+    rel: (p: string) => (rootRel ? `${rootRel}/${p}` : p),
+    abs: (p: string) => join(mountDir, rootRel ? `${rootRel}/${p}` : p),
+  };
+}
+
+/**
+ * Guard: `goals/**` is ROLL-UP-ONLY (docs/ARTIFACTS-FS.md).
+ *
+ * A project agent's `local://` is the tree root, so it CAN write into a goal
+ * folder — it must not. The only writer of `goals/<id>/**` is the workspace
+ * that owns the goal, and the only way that content reaches `main` is the
+ * roll-up merge. If anything else edits a goal folder, the next roll-up of
+ * that goal conflicts and the conflict-free property this layout exists for
+ * is gone. Enforcement lives here rather than in skill prose because "the
+ * agent knows not to" has a poor track record.
+ */
+/**
+ * Companion guard for SCOPE-relative input (the paths a caller types at the
+ * `space artifacts` CLI). Those get lifted through the scope root before git
+ * sees them, so a workspace typing `goals/<other>/x` would silently become
+ * `goals/<mine>/goals/<other>/x` — an ENOENT, or worse a real nested `goals/`
+ * dir — instead of the refusal the author deserves. Reaching for `goals/` in
+ * scope-relative space always means "I want another goal's folder", which is
+ * never the caller's to write.
+ */
+export function assertScopeRelPathsNotGoalPrefixed(scope: ArtifactsScope, scopeRelPaths: string[]): void {
+  if (scope.isProjectRoot) return; // at the tree root `goals/x` IS the real path — assertGoalScopeWrite judges it
+  const offenders = scopeRelPaths.filter((p) => isGoalScopedPath(p));
+  if (offenders.length === 0) return;
+  throw new SpacesError(
+    `Paths are relative to the goal folder you own (${scope.rootRel}), so ${offenders.join(', ')} would nest a second goals/ dir inside it. `
+      + 'Write your own artifacts with a plain relative path (e.g. `reports/x.report.json`); '
+      + 'to change another goal use `space goal set --goal <id>` — `goals/**` is roll-up-only.',
+    'USER_ERROR',
+    1,
+  );
+}
+
+export function assertGoalScopeWrite(scope: ArtifactsScope, mountRelPaths: string[]): void {
+  const offenders = mountRelPaths.filter(
+    (p) => isGoalScopedPath(p) && !(scope.rootRel && (p === scope.rootRel || p.startsWith(`${scope.rootRel}/`))),
+  );
+  if (offenders.length === 0) return;
+  throw new SpacesError(
+    `goals/** is roll-up-only: ${offenders.join(', ')} is outside this session's scope (${scope.rootRel || 'project root'}). `
+      + 'A goal folder has exactly one writer — the workspace that owns it — because that is what keeps roll-up merges conflict-free. '
+      + 'To change another goal, use `space goal set --goal <id>`; to add project-level artifacts, write at the tree root.',
+    'USER_ERROR',
+    1,
+  );
 }
 
 async function git(cwdOrRepo: string, args: string, opts: { id?: boolean; env?: Record<string, string> } = {}): Promise<string> {

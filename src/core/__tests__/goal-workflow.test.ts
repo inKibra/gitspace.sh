@@ -2,11 +2,11 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { execFileSync } from 'child_process';
 import { mkdirSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
-import { join } from 'path';
+import { dirname, join } from 'path';
 import { gateStatusForPhase, parseDocSlices } from '../goal-gates.js';
 import { loadWorkspaceWorkflow, validateWorkspaceWorkflow } from '../goal-workflow.js';
 import { startPhaseJournal, endPhaseJournal, findOpenPhaseEntry } from '../phase-journal.js';
-import { ensureArtifactsRepo, ensureArtifactsMount } from '../artifacts.js';
+import { artifactsScope, ensureArtifactsRepo, ensureArtifactsMount } from '../artifacts.js';
 import { readWorkspaceGoal, writeGoalRecord } from '../goal-chain.js';
 import {
   addRequirement,
@@ -160,6 +160,16 @@ let projectDir: string;
 let workspaceDir: string;
 let mount: string;
 
+/** Write the workspace's workflow spec where one actually lives: the goal
+ *  folder the workspace owns once it has a goal record, the mount root before
+ *  that (docs/ARTIFACTS-FS.md "Tree layout"). The scope is resolved at call
+ *  time, so gate tests write the spec AFTER writeGoalRecord. */
+function writeSpec(name: string, spec: unknown): void {
+  const abs = artifactsScope(workspaceDir).abs(name);
+  mkdirSync(dirname(abs), { recursive: true });
+  writeFileSync(abs, typeof spec === 'string' ? spec : JSON.stringify(spec));
+}
+
 function makeGoal(validation: GoalRecord['validation'], bodyMarkdown = '# Goal\n\n## Rails\n\n## Validation\n'): GoalRecord {
   const now = new Date(0).toISOString();
   return {
@@ -203,14 +213,14 @@ afterEach(() => {
 describe('loadWorkspaceWorkflow / validateWorkspaceWorkflow', () => {
   it('returns null without a spec and errors listing paths on multiples', () => {
     expect(loadWorkspaceWorkflow(workspaceDir)).toBeNull();
-    writeFileSync(join(mount, 'a.workflow.json'), JSON.stringify(WORKFLOW_SPEC));
+    writeSpec('a.workflow.json', WORKFLOW_SPEC);
     expect(loadWorkspaceWorkflow(workspaceDir)?.path).toBe('a.workflow.json');
-    writeFileSync(join(mount, 'b.workflow.json'), JSON.stringify(WORKFLOW_SPEC));
+    writeSpec('b.workflow.json', WORKFLOW_SPEC);
     expect(() => loadWorkspaceWorkflow(workspaceDir)).toThrow(/a\.workflow\.json, b\.workflow\.json/);
   });
 
   it('reports dangling slice refs as warnings, resolved refs clean', () => {
-    writeFileSync(join(mount, 'a.workflow.json'), JSON.stringify({
+    writeSpec('a.workflow.json', ({
       recipe: 'r',
       phases: [
         { name: 'build', slices: ['rails', 'missing-slice'], created: [{ name: 'brief', type: 'goal-slice', sliceId: 'validation' }] },
@@ -226,20 +236,20 @@ describe('loadWorkspaceWorkflow / validateWorkspaceWorkflow', () => {
   });
 
   it('throws on an unparseable spec', () => {
-    writeFileSync(join(mount, 'a.workflow.json'), '{nope');
+    writeSpec('a.workflow.json', '{nope');
     expect(() => validateWorkspaceWorkflow(workspaceDir, null)).toThrow(/Unreadable workflow spec/);
   });
 });
 
 describe('gate-blocked phase-end', () => {
   it('blocks phase-end while an owed requirement is unmet, unblocks after verdict accept', async () => {
-    writeFileSync(join(mount, 'a.workflow.json'), JSON.stringify(WORKFLOW_SPEC));
     let v = defaultValidation();
     const added = addRequirement(v, {
       title: 'Rails proof', kind: 'note', rubric: 'must show rails',
       generation: { kind: 'manual' }, judgment: { kind: 'llm' }, wfPhase: 'build', sliceId: 'rails',
     });
     writeGoalRecord('demo', makeGoal(added.validation));
+    writeSpec('a.workflow.json', WORKFLOW_SPEC);
 
     await startPhaseJournal('demo', 'ws1', { phase: 'build', intent: 'build the rails' });
     let blocked: Error | null = null;
@@ -266,13 +276,13 @@ describe('gate-blocked phase-end', () => {
   });
 
   it('phase-end --revert closes the phase without the gate and records a gate event', async () => {
-    writeFileSync(join(mount, 'a.workflow.json'), JSON.stringify(WORKFLOW_SPEC));
     let v = defaultValidation();
     const added = addRequirement(v, {
       title: 'Rails proof', kind: 'note', rubric: 'must show rails',
       generation: { kind: 'manual' }, judgment: { kind: 'llm' }, wfPhase: 'build',
     });
     writeGoalRecord('demo', makeGoal(added.validation));
+    writeSpec('a.workflow.json', WORKFLOW_SPEC);
 
     await startPhaseJournal('demo', 'ws1', { phase: 'build', intent: 'build the rails' });
     const ended = await endPhaseJournal('demo', 'ws1', {
@@ -293,13 +303,13 @@ describe('gate-blocked phase-end', () => {
   });
 
   it('a human waive event unblocks phase-end without acceptance', async () => {
-    writeFileSync(join(mount, 'a.workflow.json'), JSON.stringify(WORKFLOW_SPEC));
     let v = defaultValidation();
     const added = addRequirement(v, {
       title: 'Rails proof', kind: 'note', rubric: 'must show rails',
       generation: { kind: 'manual' }, judgment: { kind: 'human' }, wfPhase: 'build',
     });
     writeGoalRecord('demo', makeGoal(appendGateWaiveEvent(added.validation, 'build', 'demo cut', 'human/ui')));
+    writeSpec('a.workflow.json', WORKFLOW_SPEC);
 
     await startPhaseJournal('demo', 'ws1', { phase: 'build', intent: 'build' });
     const ended = await endPhaseJournal('demo', 'ws1', { outcome: 'done under waive', autoCommit: false });
@@ -307,7 +317,6 @@ describe('gate-blocked phase-end', () => {
   });
 
   it('phases unknown to the workflow (or with nothing owed) end unblocked — backward compat', async () => {
-    writeFileSync(join(mount, 'a.workflow.json'), JSON.stringify(WORKFLOW_SPEC));
     let v = defaultValidation();
     // Owed by a FREE-FORM phase name that is not in the workflow: no gate machinery.
     const added = addRequirement(v, {
@@ -315,6 +324,7 @@ describe('gate-blocked phase-end', () => {
       generation: { kind: 'manual' }, judgment: { kind: 'human' }, wfPhase: 'freeform-spike',
     });
     writeGoalRecord('demo', makeGoal(added.validation));
+    writeSpec('a.workflow.json', WORKFLOW_SPEC);
 
     await startPhaseJournal('demo', 'ws1', { phase: 'freeform-spike', intent: 'spike' });
     const spike = await endPhaseJournal('demo', 'ws1', { outcome: 'spiked', autoCommit: false });

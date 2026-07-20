@@ -1,6 +1,6 @@
 ---
 name: space-artifacts
-description: The workspace artifacts filesystem — what lives at .gitspace/artifacts, every artifact kind and its contract (dashboards, mini-apps, data, reports, workflow specs, evidence, notes, journal, triggers), local:// drafts + promote, share links, and how to produce each one correctly. Use whenever you create, read, or reason about artifacts.
+description: The workspace artifacts filesystem — the goal-keyed tree at .gitspace/artifacts, what your `local://` root is, every artifact kind and its contract (dashboards, mini-apps, data, reports, workflow specs, evidence, notes, journal, triggers), local:// drafts + promote, share links, and how to produce each one correctly. Use whenever you create, read, or reason about artifacts.
 ---
 
 # Workspace artifacts
@@ -22,12 +22,36 @@ branch** (one branch per workspace, off `main`; roll-up merges it to `main`
 when the workspace ships). Everything in it is versioned, travels with the
 branch, and surfaces in the product UI by **path convention**. Write files
 there and commit in that directory — never commit artifacts into the code
-repo. Two equally valid ways to commit:
+repo.
+
+## The tree: every goal owns one folder
+
+```
+.gitspace/artifacts/            ← the mount (the whole branch)
+  <project-level artifacts>     ← docs, mini-apps, the curated library
+  goals/<goal-id>/              ← ONE disjoint subtree per goal
+    goal.md  rubric.json  journal/  reports/  review/  apps/  …
+```
+
+**You own `goals/<your-goal-id>/` and nothing else.** That disjointness is
+load-bearing: because no two workspaces ever touch the same path, merging your
+branch into `main` at roll-up is *mechanically* conflict-free. Writing outside
+your folder breaks that and is refused by the CLI.
+
+**Every path you type is relative to the root you own.** `reports/x.report.json`
+means `goals/<your-goal-id>/reports/x.report.json` — the `space artifacts`
+verbs and `local://` all resolve against your root, so you never write the
+`goals/<goal-id>/` prefix yourself. The tables and examples below are written
+in that space.
+
+Two equally valid ways to commit:
 
 - `space artifacts commit <paths...> -m "…"` — preferred: records
   provenance (who/which session produced it) in git-notes.
 - Plain `git -C .gitspace/artifacts add -A && git -C .gitspace/artifacts
-  commit -m "…"` — also fine; a managed hook stamps basic provenance.
+  commit -m "…"` — also fine; a managed hook stamps basic provenance. Note git
+  paths are MOUNT-relative, so here you do write the full
+  `goals/<your-goal-id>/…` path.
 
 ## Project agents (@base)
 
@@ -37,9 +61,19 @@ the **`main` branch — the project's rolled-up institutional memory**, not a
 scratch branch. Treat writes as project-global: curate reports and
 dashboards that summarize across workspaces, tend rated precedents, maintain
 project-level triggers. Goal/journal/phase machinery is workspace-scoped and
-mostly does not apply to you.
+mostly does not apply to you. Your `local://` is the **tree root**, so your
+paths carry no `goals/` prefix.
+
+**`goals/**` is roll-up-only.** Because your root is the whole tree you *can*
+write into a goal folder — do not. Each goal folder has exactly one writer (the
+workspace that owns it) and one path onto `main` (the roll-up merge); anything
+else makes that workspace's next roll-up conflict. The CLI refuses it. To change
+a goal, use `space goal set --goal <id>`.
 
 ## The kinds (path convention → UI surface)
+
+Conventions are relative to the root you own (a workspace's
+`goals/<goal-id>/`, a project agent's tree root).
 
 | Convention | Kind | Surfaced as |
 |---|---|---|
@@ -66,8 +100,10 @@ the run is flagged, and `space artifacts repair` must rewrite it.
 
 ## Drafting with local:// and promote (the typing act)
 
-`local://<rel>` IS the artifacts mount: `local://PLAN.md` →
-`.gitspace/artifacts/PLAN.md`. Draft freely — a file at a path that matches no
+`local://<rel>` means **the root you own** — not a fixed path. In a workspace
+`local://PLAN.md` → `.gitspace/artifacts/goals/<your-goal-id>/PLAN.md`; for a
+project agent it is `.gitspace/artifacts/PLAN.md`. You never spell the prefix:
+ask for the path rather than composing one by hand. Draft freely — a file at a path that matches no
 kind convention (e.g. a bare `PLAN.md`) is just typeless working material.
 Get its absolute path (parent dirs created for you) and write to it:
 
@@ -98,6 +134,27 @@ at its current commit (a point-in-time capture); pass `--live` to serve the
 current branch state on every read. A `local://` share (e.g.
 `space artifacts share local://PLAN.md`) is always live, so you can share an
 in-progress draft before committing it.
+
+## Reading across goals (precedent, prior art)
+
+Your own artifacts are `local://` / plain relative paths. **Everything another
+goal produced lives under its own folder**, so cross-goal search is a glob over
+`goals/*/`, never a bare read of `reports/`:
+
+```
+rg '"surface"' .gitspace/artifacts/goals/*/reports/     # all goals' reports
+ls .gitspace/artifacts/goals/*/                          # what other goals made
+ls .gitspace/artifacts/                                  # project-level artifacts
+```
+
+A bare `.gitspace/artifacts/reports/` is the PROJECT-level report dir and is
+usually empty — searching it and concluding "no precedent exists" is the
+failure mode this layout most invites. Use the glob.
+
+Your branch came off `main`, so every published goal and project artifact is
+already on disk: read it with ordinary tools (`ls`, `rg`, `Read`). What you
+cannot see is a neighbour's unpublished work — that is the correct boundary.
+Cross-scope *writes* always go through the `space` CLI, never a file write.
 
 ## Contracts you must honor when authoring
 
@@ -135,7 +192,8 @@ fed by postMessage; UI edits auto-persist, so re-read before rewriting.
 or ask the user; if authoring by hand: `{ id, name, kind: 'cron'|'manual',
 when, writes: ["data/**"], runs: { type: 'skill', ref: 'agent-prompt',
 prompt } }`. Cron `when` accepts ONLY `every N m/h/d`. The `writes` globs
-are an ENFORCED scope: when a trigger run ends, out-of-scope artifact
+are relative to the root you own (`data/**` means
+`goals/<your-goal-id>/data/**`) and are an ENFORCED scope: when a trigger run ends, out-of-scope artifact
 changes are automatically reverted and the run is marked failed. Runs may
 receive a capability token in their prompt — pass it verbatim to
 `space artifacts commit --cap <token> …` for sanctioned writes.
@@ -190,7 +248,9 @@ process runs on. What you produce, per stage:
 **Ship** (post-merge ops):
 - Close the final journal phase; ensure workflow statuses are final.
 - Roll-up (`gssh artifacts rollup <workspace>`) merges the whole record — canon history,
-  journal, evidence, dashboards, guide — into `main`. Your artifacts become
+  journal, evidence, dashboards, guide — into `main`, arriving intact at
+  `goals/<your-goal-id>/`. Nothing moves and nothing is renamed, so every
+  reference to your artifacts keeps resolving. Your goal folder becomes part of
   the project's institutional memory and the seed corpus for the next chain's
   precedents.
 

@@ -12,7 +12,7 @@ import { existsSync, readFileSync, readdirSync } from 'fs';
 import { join } from 'path';
 import { getProjectDir, getProjectWorkspacesDir, readProjectConfig } from './config.js';
 import { analyzeReviewDiff, type ReviewAnalysis, type ReviewCluster } from './review-analysis.js';
-import { captureArtifacts } from './artifacts.js';
+import { artifactsScope, captureArtifacts, type ArtifactsScope } from './artifacts.js';
 import { readWorkspaceGoal } from './goal-chain.js';
 import { SpacesError } from '../types/errors.js';
 import type { GoalRecord } from '../types/goals.js';
@@ -105,12 +105,14 @@ export function serializeGoalTimeline(goal: GoalRecord | null): WorksheetTimelin
 const GUIDE_PATH = 'review/guide.json';
 const WORKSHEET_PATH = 'review/analysis.json';
 
-function mountDirFor(projectName: string, workspaceName: string): string {
-  return join(getProjectWorkspacesDir(projectName), workspaceName, '.gitspace', 'artifacts');
+/** The workspace's artifacts scope — GUIDE_PATH et al are relative to the
+ *  goal folder it owns (`goals/<goal-id>/review/…`), never the mount root. */
+function scopeFor(projectName: string, workspaceName: string): ArtifactsScope {
+  return artifactsScope(join(getProjectWorkspacesDir(projectName), workspaceName));
 }
 
 export function readReviewGuide(projectName: string, workspaceName: string): ReviewGuide | null {
-  const path = join(mountDirFor(projectName, workspaceName), GUIDE_PATH);
+  const path = scopeFor(projectName, workspaceName).abs(GUIDE_PATH);
   if (!existsSync(path)) return null;
   try {
     return JSON.parse(readFileSync(path, 'utf8')) as ReviewGuide;
@@ -169,14 +171,14 @@ export async function buildGuideWorksheet(projectName: string, workspaceName: st
       baseRef = 'main';
     }
   }
-  const mount = mountDirFor(projectName, workspaceName);
-  if (!existsSync(join(mount, '.git'))) {
+  const scope = scopeFor(projectName, workspaceName);
+  if (!existsSync(join(scope.mountDir, '.git'))) {
     throw new SpacesError('Review guide requires the artifacts mount (.gitspace/artifacts).', 'USER_ERROR', 1);
   }
   const analysis: ReviewAnalysis = analyzeReviewDiff(workspaceDir, baseRef!);
   const cached = readReviewGuide(projectName, workspaceName);
   const cachedByCluster = new Map((cached?.sections ?? []).map((s) => [s.clusterId, s]));
-  const journal = readJournal(mount);
+  const journal = readJournal(scope.rootDir);
 
   const clusters = analysis.clusters.map((cluster) => {
     const phases = new Set(cluster.signals.journalPhases ?? []);
@@ -186,7 +188,7 @@ export async function buildGuideWorksheet(projectName: string, workspaceName: st
     return {
       ...cluster,
       stale: cachedByCluster.get(cluster.id)?.contentHash !== cluster.contentHash,
-      grounding: { journal: entries, sessions: breadcrumbSessions(mount, cluster.files) },
+      grounding: { journal: entries, sessions: breadcrumbSessions(scope.rootDir, cluster.files) },
     };
   });
 
@@ -206,8 +208,8 @@ export async function buildGuideWorksheet(projectName: string, workspaceName: st
     ...(goalTimeline ? { goalTimeline } : {}),
   };
 
-  await captureArtifacts(getProjectDir(projectName), mount, [
-    { path: WORKSHEET_PATH, content: JSON.stringify(worksheet, null, 2) + '\n' },
+  await captureArtifacts(getProjectDir(projectName), scope.mountDir, [
+    { path: scope.rel(WORKSHEET_PATH), content: JSON.stringify(worksheet, null, 2) + '\n' },
   ], { message: `guide: worksheet @ ${analysis.headSha.slice(0, 7)}`, provenance: { tool: 'review-guide' } });
   return worksheet;
 }
@@ -225,8 +227,8 @@ export async function submitGuideSections(
   input: { headSha: string; sections: GuideSection[]; specEvolution?: string },
   now: Date = new Date(),
 ): Promise<ReviewGuide> {
-  const mount = mountDirFor(projectName, workspaceName);
-  const worksheetPath = join(mount, WORKSHEET_PATH);
+  const scope = scopeFor(projectName, workspaceName);
+  const worksheetPath = scope.abs(WORKSHEET_PATH);
   if (!existsSync(worksheetPath)) {
     throw new SpacesError('No worksheet — run `gssh space guide analyze` first.', 'USER_ERROR', 1);
   }
@@ -275,8 +277,8 @@ export async function submitGuideSections(
     specEvolution: input.specEvolution ?? cached?.specEvolution,
     sections,
   };
-  await captureArtifacts(getProjectDir(projectName), mount, [
-    { path: GUIDE_PATH, content: JSON.stringify(guide, null, 2) + '\n' },
+  await captureArtifacts(getProjectDir(projectName), scope.mountDir, [
+    { path: scope.rel(GUIDE_PATH), content: JSON.stringify(guide, null, 2) + '\n' },
   ], { message: `guide: ${sections.length} sections @ ${guide.headSha.slice(0, 7)}`, provenance: { tool: 'review-guide' } });
   return guide;
 }

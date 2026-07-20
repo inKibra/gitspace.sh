@@ -75,10 +75,13 @@ describe('phase journal', () => {
     const subject = execFileSync('git', ['-C', workspaceDir, 'log', '-1', '--format=%s'], { encoding: 'utf8' }).trim();
     expect(subject).toBe('rails parity: rails match the mock');
 
-    // journal entry is committed on the artifacts branch
-    const files = execFileSync('git', ['-C', mount, 'ls-files', 'journal'], { encoding: 'utf8' }).trim();
-    expect(files).toBe('journal/01-rails-parity.json');
-    const persisted = JSON.parse(readFileSync(join(mount, files), 'utf8'));
+    // journal entry is committed on the artifacts branch, inside the disjoint
+    // goal folder this workspace owns (docs/ARTIFACTS-FS.md "Tree layout") —
+    // never at the mount root, where two branches would collide at roll-up.
+    const files = execFileSync('git', ['-C', mount, 'ls-files', 'goals'], { encoding: 'utf8' }).trim();
+    expect(files.split('\n')).toContain('goals/g1/journal/01-rails-parity.json');
+    expect(execFileSync('git', ['-C', mount, 'ls-files', 'journal'], { encoding: 'utf8' }).trim()).toBe('');
+    const persisted = JSON.parse(readFileSync(join(mount, 'goals/g1/journal/01-rails-parity.json'), 'utf8'));
     expect(persisted.delta.requirementsAdvanced).toHaveLength(1);
     expect(findOpenPhaseEntry(workspaceDir)).toBeNull();
   });

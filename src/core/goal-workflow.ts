@@ -26,6 +26,7 @@ import {
   type WorkspaceWorkflow,
   type WorkspaceWorkflowSpec,
 } from './goal-gates.js';
+import { artifactsScope } from './artifacts.js';
 
 // ─── Workspace workflow (single canonical *.workflow.json) ─────────────────
 
@@ -33,10 +34,19 @@ function artifactsMountDirFor(workspaceDir: string): string {
   return join(workspaceDir, '.gitspace', 'artifacts');
 }
 
+/** A workspace's workflow spec is a GOAL artifact — it lives in the goal
+ *  folder the workspace owns, not at the mount root (docs/ARTIFACTS-FS.md).
+ *  Globbing the mount root would find every OTHER goal's spec once branches
+ *  roll up, which is exactly the "multiple workflow specs" error below. */
+function workflowSearchDirFor(workspaceDir: string): string {
+  return artifactsScope(workspaceDir).rootDir;
+}
+
 export function listWorkflowSpecPaths(workspaceDir: string): string[] {
-  const mount = artifactsMountDirFor(workspaceDir);
-  if (!existsSync(join(mount, '.git'))) return [];
-  return readdirSync(mount).filter((f) => f.endsWith('.workflow.json')).sort();
+  if (!existsSync(join(artifactsMountDirFor(workspaceDir), '.git'))) return [];
+  const dir = workflowSearchDirFor(workspaceDir);
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir).filter((f) => f.endsWith('.workflow.json')).sort();
 }
 
 /**
@@ -55,7 +65,7 @@ export function loadWorkspaceWorkflow(workspaceDir: string): WorkspaceWorkflow |
     );
   }
   const path = paths[0]!;
-  const abs = join(artifactsMountDirFor(workspaceDir), path);
+  const abs = join(workflowSearchDirFor(workspaceDir), path);
   let spec: WorkspaceWorkflowSpec;
   try {
     spec = JSON.parse(readFileSync(abs, 'utf8')) as WorkspaceWorkflowSpec;

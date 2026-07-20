@@ -11,7 +11,7 @@
 import { execFileSync } from 'child_process';
 import { existsSync, readFileSync, readdirSync } from 'fs';
 import { join } from 'path';
-import { captureArtifacts } from './artifacts.js';
+import { artifactsScope, captureArtifacts } from './artifacts.js';
 import { pathInScope } from './artifact-cap.js';
 import { validateTriggerWhen } from './trigger-grammar.js';
 import { SpacesError } from '../types/errors.js';
@@ -43,6 +43,25 @@ function mountDirFor(workspaceDir: string): string {
   return join(workspaceDir, '.gitspace', 'artifacts');
 }
 
+/** Triggers are goal artifacts: `goals/<goal-id>/triggers/<slug>.trigger.json`.
+ *  TRIGGER_DIR is relative to the goal folder the workspace owns, so scope-lift
+ *  every path that git sees (docs/ARTIFACTS-FS.md "Tree layout"). */
+function triggerDirRel(workspaceDir: string): string {
+  return artifactsScope(workspaceDir).rel(TRIGGER_DIR);
+}
+
+/**
+ * Lift a trigger's `writes` globs from goal-relative (how the user authors
+ * them, and how the agent addresses them via `local://`) to mount-relative
+ * (what artifact:// caps carry and what a git diff reports). Minting and
+ * enforcement MUST use the same space or a trigger either cannot write
+ * anything or is checked against nothing.
+ */
+export function triggerWriteScopes(workspaceDir: string, writes: string[]): string[] {
+  const { rel } = artifactsScope(workspaceDir);
+  return writes.filter(Boolean).map((g) => rel(g));
+}
+
 export function triggerSlug(name: string): string {
   const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48);
   if (!slug) throw new SpacesError('Trigger name must contain letters or digits.', 'USER_ERROR', 1);
@@ -50,7 +69,7 @@ export function triggerSlug(name: string): string {
 }
 
 export function listTriggers(workspaceDir: string): TriggerRecord[] {
-  const dir = join(mountDirFor(workspaceDir), TRIGGER_DIR);
+  const dir = artifactsScope(workspaceDir).abs(TRIGGER_DIR);
   if (!existsSync(dir)) return [];
   const out: TriggerRecord[] = [];
   for (const f of readdirSync(dir).filter((x) => x.endsWith('.trigger.json')).sort()) {
@@ -83,7 +102,7 @@ export async function saveTrigger(
     id,
   };
   await captureArtifacts(projectDir, mount, [
-    { path: `${TRIGGER_DIR}/${id}.trigger.json`, content: JSON.stringify(record, null, 2) + '\n' },
+    { path: `${triggerDirRel(workspaceDir)}/${id}.trigger.json`, content: JSON.stringify(record, null, 2) + '\n' },
   ], { message: `trigger: save ${record.name}`, provenance: { tool: 'triggers' } });
   return record;
 }
@@ -96,7 +115,7 @@ export async function recordTriggerRun(
   now: Date = new Date(),
 ): Promise<TriggerRecord> {
   const mount = mountDirFor(workspaceDir);
-  const path = join(mount, TRIGGER_DIR, `${triggerId}.trigger.json`);
+  const path = artifactsScope(workspaceDir).abs(`${TRIGGER_DIR}/${triggerId}.trigger.json`);
   if (!existsSync(path)) throw new SpacesError(`Unknown trigger: ${triggerId}`, 'USER_ERROR', 1);
   const record = JSON.parse(readFileSync(path, 'utf8')) as TriggerRecord;
   const entry = { at: now.toISOString(), ...run };
@@ -108,7 +127,7 @@ export async function recordTriggerRun(
     runLog: [...(record.runLog ?? []), entry].slice(-20),
   };
   await captureArtifacts(projectDir, mount, [
-    { path: `${TRIGGER_DIR}/${triggerId}.trigger.json`, content: JSON.stringify(next, null, 2) + '\n' },
+    { path: `${triggerDirRel(workspaceDir)}/${triggerId}.trigger.json`, content: JSON.stringify(next, null, 2) + '\n' },
   ], { message: `trigger: run ${record.name} (${run.status})`, provenance: { tool: 'triggers' } });
   return next;
 }
@@ -160,7 +179,7 @@ export async function enforceTriggerWritesPostRun(
   trigger: TriggerRecord,
   run: { sessionId?: string; startCommit?: string },
 ): Promise<TriggerRunEnforcement> {
-  const writes = (trigger.writes ?? []).filter(Boolean);
+  const writes = triggerWriteScopes(workspaceDir, trigger.writes ?? []);
   if (writes.length === 0 || !run.startCommit) return { violations: [], skippedForeignCommits: 0 };
 
   let commits: string[] = [];
@@ -187,7 +206,7 @@ export async function enforceTriggerWritesPostRun(
       changed = gitInMount(workspaceDir, ['diff-tree', '--no-commit-id', '--name-only', '-r', commit]).split('\n').map((f) => f.trim()).filter(Boolean);
     } catch { continue; }
     for (const file of changed) {
-      if (file === '.gitattributes' || file.startsWith(`${TRIGGER_DIR}/`)) continue; // run bookkeeping is always in scope
+      if (file === '.gitattributes' || file.startsWith(`${triggerDirRel(workspaceDir)}/`)) continue; // run bookkeeping is always in scope
       if (!pathInScope(file, writes)) violations.add(file);
     }
   }

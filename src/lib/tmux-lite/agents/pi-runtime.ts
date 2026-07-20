@@ -6,6 +6,7 @@ import { getWorkspaceRoot } from '../../../core/paths.js';
 import type { AgentWorkspaceTarget } from '../../../agents/backend.js';
 import { resolveWorkspaceSessionLauncherArgs } from '../../../session/workspace-shell-hooks.js';
 import { escapeShellArg } from '../../../utils/shell-escape.js';
+import { artifactsScope } from '../../../core/artifacts.js';
 import type { OmpAgentSession, OmpAuthStorage, OmpCreateSessionResult, OmpModelRegistry } from './omp-types.js';
 import { getManagedSessionBootstrap } from './managed-defaults.js';
 
@@ -339,10 +340,22 @@ export function makeLocalProtocolOptions(cwd: string): {
   let sessionId: string | null = null;
   return {
     options: {
-      // local:// maps straight (flat) into the artifacts mount:
-      // local://x → <workspace>/.gitspace/artifacts/x. The SDK's forced
+      // local:// means "the root I own" (docs/ARTIFACTS-FS.md) — NOT a fixed
+      // path. A workspace/goal session binds to its own goal folder
+      // (local://x → <mount>/goals/<goal-id>/x); a project session (the base
+      // clone, which mounts main and owns no goal) binds to the tree root.
+      // That binding is what keeps every workspace's writes inside a disjoint
+      // subtree, which is what makes roll-up conflict-free. The SDK's forced
       // '/local' suffix is removed via bun patch (patches/@oh-my-pi…).
-      getArtifactsDir: () => join(cwd, '.gitspace', 'artifacts'),
+      // Resolved per call, not once: a workspace's goal record may be created
+      // after the session starts, and the binding must follow it.
+      getArtifactsDir: () => {
+        const { rootDir } = artifactsScope(cwd);
+        // The goal folder is created lazily — the SDK expects the dir to exist
+        // before it resolves a local:// write into it.
+        try { mkdirSync(rootDir, { recursive: true }); } catch { /* mount absent */ }
+        return rootDir;
+      },
       getSessionId: () => sessionId,
     },
     bind: (id: string) => { sessionId = id; },

@@ -19,7 +19,9 @@ structure; you ONLY write prose for the clusters it marked stale.
    worksheet's `baseRef`, which is the ref your `git diff` reads in step 3 —
    so re-analyze rather than hand-diffing a different base.
    Add `--json` for structured output.
-2. Read `.gitspace/artifacts/review/analysis.json`. Clusters arrive in READER
+2. Read the worksheet the previous step wrote. It lands in the goal folder
+   this workspace owns, so glob rather than hardcoding an id:
+   `.gitspace/artifacts/goals/*/review/analysis.json`. Clusters arrive in READER
    ORDER; big components are pre-split into build-order beats via
    `signals.beat = { component, seq, of }` — beat 1 is the foundation layer
    (files no other changed file depends on), later beats consume earlier ones.

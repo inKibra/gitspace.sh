@@ -127,9 +127,27 @@ function parseTtl(ttl: string): number {
   return n * (m[2] === 'm' ? 60_000 : m[2] === 'h' ? 3_600_000 : 86_400_000);
 }
 
+/**
+ * Resolve the calling session's artifacts scope — the root it OWNS.
+ *
+ * Every `space artifacts` path argument is SCOPE-relative, not mount-relative,
+ * so it lines up exactly with `local://`: an agent writes `local://reports/x`
+ * and captures it as `reports/x`. For a workspace session the scope root is
+ * `goals/<goal-id>/`, so that commits as `goals/<goal-id>/reports/x` — the
+ * disjoint subtree that keeps roll-up conflict-free (docs/ARTIFACTS-FS.md).
+ */
+async function requireArtifactsScope(): Promise<{ ctx: { project: string; workspace: string }; projectDir: string; scope: import('../../core/artifacts.js').ArtifactsScope }> {
+  const ctx = requireSessionContext();
+  const { getProjectDir } = await import('../../core/config.js');
+  const { artifactsScope } = await import('../../core/artifacts.js');
+  const { join } = await import('path');
+  const projectDir = getProjectDir(ctx.project);
+  return { ctx, projectDir, scope: artifactsScope(join(projectDir, 'workspaces', ctx.workspace)) };
+}
+
 /** Artifact-protocol verbs (docs/ARTIFACT-PROTOCOL.md). */
 function registerSpaceArtifactsCommands(space: Command): void {
-  const artifacts = space.command('artifacts').description('Workspace artifacts (mount at .gitspace/artifacts)');
+  const artifacts = space.command('artifacts').description('Workspace artifacts (paths are relative to the root you own — your goal folder)');
 
   artifacts
     .command('share <relPath>')
@@ -138,14 +156,16 @@ function registerSpaceArtifactsCommands(space: Command): void {
     .option('--max-uses <n>', 'Optional use cap')
     .option('--live', 'Serve current branch state instead of pinning a point-in-time capture')
     .action(withErrorHandler(async (relPath: string, options: { ttl: string; maxUses?: string; live?: boolean }) => {
-      const ctx = requireSessionContext();
+      const { ctx, scope } = await requireArtifactsScope();
       const { send } = await import('../../lib/tmux-lite/cli.js');
       const { formatArtifactUri, parseLocalRef, localScratchRel } = await import('../../core/artifact-cap.js');
-      // `local://<rel>` is the artifacts MOUNT root (artifact-cap.ts): it names
-      // the working-tree file `<rel>` in the mount, which may not be committed
-      // yet — so it is always served LIVE (there is no commit to pin).
+      // artifact:// URIs are MOUNT-relative (that is what the daemon's
+      // path-jailed reader resolves), but the argument the caller types is
+      // SCOPE-relative like every other `space artifacts` path — so lift it
+      // through the scope root here. A `local://<rel>` names a working-tree
+      // file that may not be committed yet, so it is always served LIVE.
       const localRel = parseLocalRef(relPath);
-      const mountRel = localRel ? localScratchRel(localRel) : relPath;
+      const mountRel = scope.rel(localRel ? localScratchRel(localRel) : relPath);
       const r = await send({
         type: 'artifact-share-mint',
         uri: formatArtifactUri(ctx.project, ctx.workspace, mountRel),
@@ -190,12 +210,15 @@ function registerSpaceArtifactsCommands(space: Command): void {
     .requiredOption('-m, --message <message>', 'Commit message')
     .option('--cap <token>', 'Capability token (from a trigger run prompt) — verified, and the write scope is enforced')
     .action(withErrorHandler(async (paths: string[], options: { message: string; cap?: string }) => {
-      const ctx = requireSessionContext();
-      const { getProjectDir } = await import('../../core/config.js');
-      const { captureArtifacts, artifactsMountDir } = await import('../../core/artifacts.js');
+      const { ctx, projectDir, scope } = await requireArtifactsScope();
+      const { captureArtifacts, assertGoalScopeWrite, assertScopeRelPathsNotGoalPrefixed } = await import('../../core/artifacts.js');
       const { join } = await import('path');
-      const projectDir = getProjectDir(ctx.project);
-      const mount = artifactsMountDir(join(projectDir, 'workspaces', ctx.workspace));
+      // Paths are scope-relative; `mountPaths` are what git actually commits.
+      assertScopeRelPathsNotGoalPrefixed(scope, paths);
+      const mountPaths = paths.map((p) => scope.rel(p));
+      // Guard: `goals/**` is roll-up-only. A project session's scope IS the
+      // tree root, so nothing stops it typing `goals/<other>/x` — this does.
+      assertGoalScopeWrite(scope, mountPaths);
 
       let allowedWrites: string[] | undefined;
       let provenance: Record<string, string | undefined> = { tool: 'cli' };
@@ -203,20 +226,23 @@ function registerSpaceArtifactsCommands(space: Command): void {
         const { verifyArtifactCap, capAllows, parseArtifactUri, formatArtifactUri } = await import('../../core/artifact-cap.js');
         const { getOrCreateArtifactCapKeypair } = await import('../../core/artifact-cap-key.js');
         const cap = verifyArtifactCap(options.cap, { publicKey: getOrCreateArtifactCapKeypair().publicKey });
-        for (const p of paths) {
-          if (!capAllows(cap, 'write', parseArtifactUri(formatArtifactUri(ctx.project, ctx.workspace, p)))) {
+        // Cap scopes are artifact:// URIs, which are mount-relative — check the
+        // lifted paths, not the scope-relative ones the caller typed.
+        for (const mountRel of mountPaths) {
+          if (!capAllows(cap, 'write', parseArtifactUri(formatArtifactUri(ctx.project, ctx.workspace, mountRel)))) {
             const { SpacesError } = await import('../../types/errors.js');
-            throw new SpacesError(`Capability does not permit writing ${p} (scope: ${cap.scope.join(', ')})`, 'USER_ERROR', 1);
+            throw new SpacesError(`Capability does not permit writing ${mountRel} (scope: ${cap.scope.join(', ')})`, 'USER_ERROR', 1);
           }
         }
         allowedWrites = cap.scope.map((u) => { try { return parseArtifactUri(u).relPath || '**'; } catch { return '(invalid)'; } });
         provenance = { tool: cap.sub.kind, ...(cap.sub.kind === 'trigger' ? { trigger: cap.sub.id } : {}), ...(cap.sub.kind === 'session' ? { session: cap.sub.id } : {}) };
       }
-      const result = await captureArtifacts(projectDir, mount, paths.map((p) => ({ path: p, sourceFile: join(mount, p) })), {
-        message: options.message,
-        provenance,
-        allowedWrites,
-      });
+      const result = await captureArtifacts(
+        projectDir,
+        scope.mountDir,
+        mountPaths.map((mountRel) => ({ path: mountRel, sourceFile: join(scope.mountDir, mountRel) })),
+        { message: options.message, provenance, allowedWrites },
+      );
       logger.success(`Captured ${paths.length} file(s) → ${result.commit.slice(0, 8)}${result.pointers.length ? ` (${result.pointers.length} as LFS pointers)` : ''}`);
     }));
 
@@ -225,23 +251,23 @@ function registerSpaceArtifactsCommands(space: Command): void {
     .description('Promote an uncommitted working file (e.g. a local:// file in the artifacts mount) into the versioned artifacts tree — the TYPING act')
     .option('-m, --message <message>', 'Commit message')
     .action(withErrorHandler(async (source: string, destRelPath: string, options: { message?: string }) => {
-      const ctx = requireSessionContext();
-      const { getProjectDir } = await import('../../core/config.js');
-      const { captureArtifacts, artifactsMountDir, resolveLocalScratch } = await import('../../core/artifacts.js');
+      const { projectDir, scope } = await requireArtifactsScope();
+      const { captureArtifacts, resolveLocalScratch, assertGoalScopeWrite, assertScopeRelPathsNotGoalPrefixed } = await import('../../core/artifacts.js');
       const { parseLocalRef } = await import('../../core/artifact-cap.js');
-      const { join, resolve } = await import('path');
+      const { resolve } = await import('path');
       const { existsSync } = await import('fs');
-      const projectDir = getProjectDir(ctx.project);
-      const mount = artifactsMountDir(join(projectDir, 'workspaces', ctx.workspace));
-      // `local://<rel>` sources resolve inside the artifacts mount; anything
-      // else is a plain filesystem path.
+      // `local://<rel>` sources resolve inside the root this session owns;
+      // anything else is a plain filesystem path.
       const localRel = parseLocalRef(source);
-      const src = localRel ? resolveLocalScratch(mount, localRel).absPath : resolve(source);
+      const src = localRel ? resolveLocalScratch(scope.rootDir, localRel).absPath : resolve(source);
       if (!existsSync(src)) {
         const { SpacesError } = await import('../../types/errors.js');
         throw new SpacesError(`Source not found: ${source}`, 'USER_ERROR', 1);
       }
-      const result = await captureArtifacts(projectDir, mount, [{ path: destRelPath, sourceFile: src }], {
+      assertScopeRelPathsNotGoalPrefixed(scope, [destRelPath]);
+      const destMountRel = scope.rel(destRelPath);
+      assertGoalScopeWrite(scope, [destMountRel]);
+      const result = await captureArtifacts(projectDir, scope.mountDir, [{ path: destMountRel, sourceFile: src }], {
         message: options.message ?? `promote: ${destRelPath}`,
         provenance: { tool: 'promote' },
       });
@@ -252,14 +278,12 @@ function registerSpaceArtifactsCommands(space: Command): void {
     .command('scratch-path <rel>')
     .description('Print the absolute path a local://<rel> reference resolves to — <rel> inside the artifacts mount (parent dirs are created). Write drafts there, then promote/share them by local://<rel>')
     .action(withErrorHandler(async (rel: string) => {
-      const ctx = requireSessionContext();
-      const { getProjectDir } = await import('../../core/config.js');
-      const { artifactsMountDir, resolveLocalScratch } = await import('../../core/artifacts.js');
+      const { scope } = await requireArtifactsScope();
+      const { resolveLocalScratch } = await import('../../core/artifacts.js');
       const { parseLocalRef } = await import('../../core/artifact-cap.js');
-      const { join } = await import('path');
       const inner = parseLocalRef(rel) ?? rel; // accept both `local://x` and bare `x`
-      const mount = artifactsMountDir(join(getProjectDir(ctx.project), 'workspaces', ctx.workspace));
-      logger.log(resolveLocalScratch(mount, inner).absPath);
+      // local:// binds to the root this session owns, not the mount root.
+      logger.log(resolveLocalScratch(scope.rootDir, inner).absPath);
     }));
 
   artifacts

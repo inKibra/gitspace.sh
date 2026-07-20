@@ -114,7 +114,7 @@ targets it directly, the same way every `space goal` verb does.
 
 The new workspace branches from the previous chain goal's HEAD when one exists. Otherwise it branches from the project base. After creation:
 - The goal record moves from planned storage to workspace-local storage.
-- Any planned validation evidence (the artifacts dir) is moved into the workspace.
+- Any planned validation evidence (the artifacts dir) is moved into the workspace, under the goal's own folder on the artifacts mount (`goals/<goal-id>/`).
 - The workspace's phase is set to the goal's phase.
 
 ## Advance phase

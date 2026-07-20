@@ -12,7 +12,7 @@ import {
 import { basename, dirname, extname, join } from 'path';
 import { spawnSync } from 'child_process';
 import { getProjectBaseDir, getProjectDir, getProjectWorkspacesDir } from './config.js';
-import { artifactsMountDir, captureArtifactsSync } from './artifacts.js';
+import { artifactsScope, captureArtifactsSync } from './artifacts.js';
 import { getOpenJournalPhase } from './phase-journal.js';
 import { isSameRunJudgment } from './goal-gates.js';
 import { ensureWorkspaceStorageIgnored, getWorkspaceStorageDir } from './workspace-metadata.js';
@@ -289,13 +289,17 @@ function storeEvidenceFile(
   const root = goal.workspaceName
     ? join(getProjectWorkspacesDir(projectName), goal.workspaceName)
     : getProjectBaseDir(projectName);
-  const mountDir = artifactsMountDir(root);
+  const scope = artifactsScope(root);
+  const mountDir = scope.mountDir;
   if (!existsSync(join(mountDir, '.git'))) {
     return copyEvidenceFile(validationDir, evidenceId, sourcePath, kind);
   }
   const displayName = basename(sourcePath);
   const safeName = sanitizeForFileSystem(displayName) || 'artifact';
-  const relativePath = `validation/${goal.id}/${evidenceId}-${safeName}`;
+  // Evidence is goal provenance — `goals/<goal-id>/validation/...` for a
+  // workspace, or `validation/<goal-id>/...` at root for a planned goal
+  // evidenced from the base clone (which owns no goal folder).
+  const relativePath = scope.rel(`validation/${goal.id}/${evidenceId}-${safeName}`);
   captureArtifactsSync(getProjectDir(projectName), mountDir, [{ path: relativePath, sourceFile: sourcePath }], {
     message: `evidence: ${goal.id} ${displayName}`,
     provenance: {
