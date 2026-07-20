@@ -3000,7 +3000,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
           panels.push({
             id: `file:${extra.path}`,
             title: `${extra.changed ? '± ' : '▤ '}${name}`,
-            version: `file|${extra.path}|${extra.changed}|${extra.prevPath ?? ''}`,
+            version: `file|${extra.path}|${extra.changed}|${extra.prevPath ?? ''}|${extra.line ?? ''}`,
             onClose: closeExtra,
             render: () => (
               <RepoFilePanel
@@ -3011,6 +3011,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
                 path={extra.path}
                 changed={extra.changed}
                 prevPath={extra.prevPath}
+                line={extra.line}
               />
             ),
           });

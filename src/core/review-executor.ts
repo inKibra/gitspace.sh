@@ -299,7 +299,8 @@ export async function executeLocalReviewOperation(
       );
       const result = await getWorkspaceFileContextRange(
         workspace.path,
-        workspace.baseBranch,
+        // Same ref the diff came from — see the op's `base` doc.
+        operation.base ?? workspace.baseBranch,
         operation.filePath,
         operation.prevFilePath,
         {

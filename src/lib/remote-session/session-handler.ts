@@ -2007,6 +2007,19 @@ export class RemoteSessionHandler {
         }, sendResponse);
         break;
 
+      case 'repo_search':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, {
+          type: 'repo-search',
+          target: msg.target,
+          query: msg.query,
+          caseSensitive: msg.caseSensitive,
+        }, sendResponse);
+        break;
+
       case 'list_agent_commands':
         if (!canManage(session.accessType)) {
           await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });

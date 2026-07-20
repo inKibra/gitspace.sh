@@ -1992,6 +1992,14 @@ export class LocalSessionBackend implements SessionBackend {
     throw new Error('Unexpected repo-read response');
   }
 
+  async searchRepoContent(workspaceId: string, query: string, options?: { caseSensitive?: boolean }): Promise<{ hits: Array<{ path: string; line: number; text: string }>; truncated: boolean }> {
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'repo-search', target, query, caseSensitive: options?.caseSensitive });
+    if (tmuxResponse.type === 'repo-search') return { hits: tmuxResponse.hits, truncated: tmuxResponse.truncated };
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected repo-search response');
+  }
+
   async commitWorkspaceChanges(workspaceId: string, message: string): Promise<string | null> {
     const target = await this.resolveAgentWorkspaceTarget(workspaceId);
     const tmuxResponse = await this.sendTmuxCommand({ type: 'repo-commit', target, message });

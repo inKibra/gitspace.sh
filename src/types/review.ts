@@ -203,6 +203,13 @@ export type ReviewOperation =
       filePath: string;
       /** Optional old path for renames (rename from) */
       prevFilePath?: string;
+      /**
+       * Ref the old side comes from. MUST match the ref the diff being expanded
+       * was produced against — the repo view can diff vs any ref, and pulling
+       * context from the workspace base instead would splice the wrong file's
+       * text into the gaps. Omit for the workspace's base branch.
+       */
+      base?: string;
       /** 1-based inclusive range on old/base side. Omit for full file */
       oldStart?: number;
       /** 1-based inclusive range on old/base side. Omit for full file */

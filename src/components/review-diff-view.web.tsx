@@ -136,10 +136,12 @@ export async function requestFileContext(
   workspaceName: string,
   filePath: string,
   prevFilePath?: string,
+  /** Ref the diff was taken against — omit for the workspace's base branch. */
+  base?: string,
 ): Promise<{ oldLines: string[]; newLines: string[]; oldTotal: number; newTotal: number } | null> {
   if (!backend?.sendReviewRequest) return null;
   const r = await backend.sendReviewRequest({
-    op: 'get_file_context_range', projectName, workspaceName, filePath, prevFilePath,
+    op: 'get_file_context_range', projectName, workspaceName, filePath, prevFilePath, base,
   });
   if (r.op !== 'file_context_range') return null;
   return {
@@ -168,6 +170,58 @@ export function expandToAbsoluteLines(lines: string[], start: number, total: num
     output[absoluteIndex] = lines[index] ?? '';
   }
   return output;
+}
+
+/* ── View mode: a whole file, through the same surface ─────────────────────── */
+
+/** What a View-mode render turned out to be, so the caller can label it. */
+export interface FileViewPatch {
+  /** Unified patch whose every line is CONTEXT — i.e. the file, unchanged. */
+  patch: string;
+  /** Lines actually included (== total unless the cap bit). */
+  shownLines: number;
+  totalLines: number;
+  truncated: boolean;
+}
+
+/**
+ * Render a plain file — no diff — through the review surface.
+ *
+ * The repo view's DEFAULT is View: clicking a file shows the file, the way an
+ * IDE does. But a reviewer must still be able to comment on any line there, and
+ * ReviewDiffView already owns commenting (hover '+', drag-select, inline
+ * threads, the composer). Rebuilding that for plain files is exactly the
+ * fourth-diff-surface failure this module exists to prevent.
+ *
+ * So instead of a second renderer, View mode is expressed as a diff the renderer
+ * already understands: a single hunk in which every line is a CONTEXT line. The
+ * parse yields real 1-based line numbers on both sides, so a LineTarget minted
+ * from a hover or a drag lands on the file's actual line — no diff-side
+ * assumptions leak in, because in an all-context hunk both sides agree.
+ * Nothing in ReviewDiffView had to change to support this.
+ *
+ * Capped because the whole file becomes one shiki-highlighted hunk; callers
+ * gate very large files rather than locking the main thread.
+ */
+export function fileViewPatch(filePath: string, text: string, maxLines = 4000): FileViewPatch {
+  // A trailing newline is a line terminator, not an empty final line.
+  const all = text.split('\n');
+  if (all.length > 0 && all[all.length - 1] === '') all.pop();
+  const totalLines = all.length;
+  const lines = all.slice(0, maxLines);
+  const shownLines = lines.length;
+
+  // An empty file has no hunk to render at all.
+  const body = shownLines === 0
+    ? ''
+    : `@@ -1,${shownLines} +1,${shownLines} @@\n${lines.map((line) => ` ${line}`).join('\n')}\n`;
+
+  return {
+    patch: `diff --git a/${filePath} b/${filePath}\n--- a/${filePath}\n+++ b/${filePath}\n${body}`,
+    shownLines,
+    totalLines,
+    truncated: shownLines < totalLines,
+  };
 }
 
 /* ── Inline thread chrome ──────────────────────────────────────────────────── */
@@ -272,17 +326,19 @@ function InlineThreadCard({ threads, actions }: {
  * Chrome only: the textarea, the submit/cancel keys and the draft retention on
  * a failed write all belong to the shared CommentComposer.
  */
-function InlineDraftComposer({ target, actions, onDone }: {
+function InlineDraftComposer({ target, actions, onDone, plain }: {
   target: LineTarget;
   actions: ReviewDiffActions;
   onDone: () => void;
+  /** View mode: there are no sides, so don't claim the comment is on the 'new' one. */
+  plain?: boolean;
 }): ReactElement {
   return (
     <div className="my-1 border-l-2 border-l-[var(--gs-accent)] bg-[var(--gs-bg-elevated)] px-2.5 py-1.5 font-[family-name:var(--gs-font)]">
       <CommentComposer
         compact
         rows={3}
-        label={<>Commenting on <span className="font-[family-name:var(--gs-font-mono)] text-[var(--gs-info)]">{lineRangeLabel(target)}</span> · {target.side === 'LEFT' ? 'old' : 'new'} side</>}
+        label={<>Commenting on <span className="font-[family-name:var(--gs-font-mono)] text-[var(--gs-info)]">{lineRangeLabel(target)}</span>{plain ? null : <> · {target.side === 'LEFT' ? 'old' : 'new'} side</>}</>}
         placeholder="Leave a review comment…"
         submitLabel="Comment"
         // A throw keeps the composer open with its text — CommentComposer
@@ -347,6 +403,11 @@ export interface ReviewDiffViewProps {
    * ranges the reviewer expanded aren't thrown away on the next scroll.
    */
   onContextLoaded?: () => void;
+  /**
+   * This patch is a whole-file View render (see fileViewPatch), not a real
+   * diff. Only affects wording — there are no old/new sides to name.
+   */
+  plain?: boolean;
 }
 
 export function ReviewDiffView({
@@ -358,6 +419,7 @@ export function ReviewDiffView({
   onRequestContext,
   contextKey,
   onContextLoaded,
+  plain,
 }: ReviewDiffViewProps): ReactElement {
   const [composeTarget, setComposeTarget] = useState<LineTarget | null>(null);
   /* Seed from the cache so a remount (windowed away and back, or a dock tab
@@ -421,11 +483,11 @@ export function ReviewDiffView({
       <>
         {anchored.length > 0 && <InlineThreadCard threads={anchored} actions={actions} />}
         {draft && actions && (
-          <InlineDraftComposer target={draft} actions={actions} onDone={() => setComposeTarget(null)} />
+          <InlineDraftComposer target={draft} actions={actions} plain={plain} onDone={() => setComposeTarget(null)} />
         )}
       </>
     );
-  }, [actions]);
+  }, [actions, plain]);
 
   const handleLineSelectionEnd = useCallback((range: SelectedLineRange | null) => {
     if (!range || !actions) return;

@@ -2,7 +2,7 @@
  * Git and worktree operations
  */
 
-import { exec } from 'child_process';
+import { exec, execFile } from 'child_process';
 import { promisify } from 'util';
 import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
@@ -13,6 +13,8 @@ import type { WorktreeInfo } from '../types/workspace.js';
 import type { ReviewChangedFile } from '../types/review.js';
 
 const execAsync = promisify(exec);
+/** argv form — REQUIRED wherever user input becomes a command argument. */
+const execFileAsync = promisify(execFile);
 
 const BASE_REF_CACHE_TTL_MS = 60_000;
 const BASE_REF_CACHE_MAX_ENTRIES = 256;
@@ -654,6 +656,25 @@ export async function getWorkspaceFileContextRange(
   }
 }
 
+/**
+ * Does this ref want the `origin/` prefix tried first?
+ *
+ * For a bare branch name it does: `origin/develop` is the shared truth, while a
+ * local `develop` may be months stale. But the repo view lets a reviewer name
+ * ANY ref, and for those the prefix is actively wrong — `origin/HEAD` exists in
+ * most clones and points at the remote's DEFAULT branch, so asking to diff vs
+ * HEAD silently returned the diff vs develop instead. Same trap for a sha
+ * (`origin/<sha>` is meaningless) and for an already-qualified ref.
+ */
+function prefersOriginPrefix(ref: string): boolean {
+  if (ref === 'HEAD' || ref.startsWith('HEAD~') || ref.startsWith('HEAD^')) return false;
+  // Already qualified: origin/x, upstream/x, refs/tags/x.
+  if (ref.includes('/')) return false;
+  // A commit sha names one commit; no remote-tracking equivalent exists.
+  if (/^[0-9a-f]{7,40}$/i.test(ref)) return false;
+  return true;
+}
+
 async function resolveComparableBaseRef(
   workspacePath: string,
   baseBranch: string
@@ -674,16 +695,21 @@ async function resolveComparableBaseRef(
 
   const resolvePromise = (async () => {
     // Best effort fetch. Keep short timeout to avoid hanging review requests.
-    try {
-      await execAsync(`git fetch origin ${escapeShellArg(baseBranch)} --quiet`, {
-        cwd: workspacePath,
-        timeout: 8000,
-      });
-    } catch {
-      logger.debug(`Could not fetch origin/${baseBranch}, using local refs`);
+    // Only for branch names — fetching a sha or HEAD just burns the timeout.
+    if (prefersOriginPrefix(baseBranch)) {
+      try {
+        await execAsync(`git fetch origin ${escapeShellArg(baseBranch)} --quiet`, {
+          cwd: workspacePath,
+          timeout: 8000,
+        });
+      } catch {
+        logger.debug(`Could not fetch origin/${baseBranch}, using local refs`);
+      }
     }
 
-    const candidates = [`origin/${baseBranch}`, baseBranch];
+    const candidates = prefersOriginPrefix(baseBranch)
+      ? [`origin/${baseBranch}`, baseBranch]
+      : [baseBranch];
     for (const candidate of candidates) {
       try {
         await execAsync(`git rev-parse --verify ${escapeShellArg(candidate)}`, {
@@ -915,6 +941,73 @@ export function readRepoFile(workspacePath: string, relPath: string): Buffer | n
   const abs = join(workspacePath, relPath);
   if (!existsSync(abs)) return null;
   return readFileSync(abs);
+}
+
+export interface RepoSearchHit {
+  path: string;
+  /** 1-based line number, so the hit opens the viewer AT the line. */
+  line: number;
+  /** The matching line's text, clipped — this is preview chrome, not content. */
+  text: string;
+}
+
+export interface RepoSearchResult {
+  hits: RepoSearchHit[];
+  /** True when the cap was hit, so the UI can say "showing first N". */
+  truncated: boolean;
+}
+
+/**
+ * Repo-wide content search, backing the repo view's search box.
+ *
+ * `git grep` rather than a walk: it already honours .gitignore, skips binaries
+ * (-I) and is fast on a large tree. --untracked so a file the agent just wrote
+ * is findable before it is staged.
+ *
+ * The query is USER INPUT and goes through execFile argv — never a shell string.
+ * `-F` keeps it a literal, so a query full of regex metacharacters searches for
+ * those characters instead of exploding.
+ */
+export async function searchRepoContent(
+  workspacePath: string,
+  query: string,
+  options: { maxHits?: number; caseSensitive?: boolean } = {},
+): Promise<RepoSearchResult> {
+  const needle = query.trim();
+  if (!needle) return { hits: [], truncated: false };
+  const maxHits = options.maxHits ?? 300;
+
+  const args = [
+    'grep', '-z', '-n', '-I', '--no-color', '--untracked', '-F',
+    ...(options.caseSensitive ? [] : ['-i']),
+    // Per-file cap keeps one generated file from consuming the whole budget.
+    '-m', '20',
+    '-e', needle, '--', '.',
+  ];
+
+  let stdout = '';
+  try {
+    ({ stdout } = await execFileAsync('git', args, { cwd: workspacePath, maxBuffer: 32 * 1024 * 1024 }));
+  } catch (error) {
+    // git grep exits 1 for "no matches" — that is a normal empty result, not a
+    // failure. Anything else is real.
+    const code = (error as { code?: number }).code;
+    if (code === 1) return { hits: [], truncated: false };
+    throw error;
+  }
+
+  const hits: RepoSearchHit[] = [];
+  let truncated = false;
+  for (const record of stdout.split('\n')) {
+    if (!record) continue;
+    const [path, lineText, ...rest] = record.split('\0');
+    if (!path || !lineText) continue;
+    const line = Number.parseInt(lineText, 10);
+    if (!Number.isFinite(line)) continue;
+    if (hits.length >= maxHits) { truncated = true; break; }
+    hits.push({ path, line, text: rest.join('\0').slice(0, 400) });
+  }
+  return { hits, truncated };
 }
 
 /** Stage everything and commit. Returns the commit sha (null when nothing to commit). */

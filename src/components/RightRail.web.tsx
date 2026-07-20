@@ -4,12 +4,11 @@ import { useFileTree, FileTree } from '@pierre/trees/react';
 import type { GitStatusEntry } from '@pierre/trees';
 import type { SessionBackend } from '../session/backend.js';
 import type { ReviewChangedFile } from '../types/review.js';
-import { langForPath } from './ArtifactPanel.web.js';
 import { KIND_ICON, KIND_LABEL, KIND_ORDER, classifyArtifact, type ArtifactKind, decodeBase64Utf8 } from './artifact-kinds.js';
 import { shareArtifactToClipboard } from './share-artifact.web.js';
-import { Highlighted } from '../blocks/render/highlight.web.js';
 import { deriveNoteLabel } from './note-label.js';
-import { ReviewDiffView, requestFileContext, useReviewThreads } from './review-diff-view.web.js';
+import { ReviewDiffView, requestFileContext, useReviewThreads, fileViewPatch } from './review-diff-view.web.js';
+import { documentKindFor, HtmlDocFrame, PdfDocFrame } from './document-preview.web.js';
 
 /**
  * RightRail — the workspace view's persistent right column (mock: RightRail.tsx).
@@ -83,6 +82,8 @@ export interface RepoFileOpen {
   path: string;
   changed: boolean;
   prevPath?: string;
+  /** Opened from a search hit — the viewer scrolls to this 1-based line. */
+  line?: number;
 }
 
 export function RightRail({
@@ -193,6 +194,29 @@ function RepoMode({ backend, workspaceId, projectName, workspaceName, onOpenFile
   const [commitMsg, setCommitMsg] = useState('');
   const [committing, setCommitting] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  /* Search replaces the tree while a query is active; clearing it restores the
+     tree, so the two never compete for the same space. */
+  const [query, setQuery] = useState('');
+  const [search, setSearch] = useState<{ hits: RepoSearchHit[]; truncated: boolean; query: string } | null>(null);
+  const [searching, setSearching] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
+
+  const runSearch = useCallback(async (raw: string): Promise<void> => {
+    const q = raw.trim();
+    if (!q) { setSearch(null); setSearchError(null); return; }
+    if (!backend?.searchRepoContent) { setSearchError('Search is unavailable on this connection.'); return; }
+    setSearching(true);
+    setSearchError(null);
+    try {
+      const r = await backend.searchRepoContent(workspaceId, q);
+      setSearch({ hits: r.hits, truncated: r.truncated, query: q });
+    } catch (e) {
+      setSearchError(e instanceof Error ? e.message : 'Search failed');
+      setSearch(null);
+    } finally {
+      setSearching(false);
+    }
+  }, [backend, workspaceId]);
 
   const refresh = useCallback(() => {
     if (!backend || !workspaceId) return;
@@ -255,8 +279,35 @@ function RepoMode({ backend, workspaceId, projectName, workspaceName, onOpenFile
             {[...new Set([baseBranch || 'main', 'main', 'develop'])].map((b) => <option key={b} value={b}>{b}</option>)}
           </select>
         </div>
+        <div className="flex flex-shrink-0 items-center gap-1.5 border-b border-[var(--gs-border-muted)] px-3 py-1.5 text-[11px]">
+          <span className="text-[var(--gs-text-dim)]">⌕</span>
+          <input
+            value={query}
+            onChange={(e) => { setQuery(e.target.value); if (!e.target.value.trim()) { setSearch(null); setSearchError(null); } }}
+            onKeyDown={(e) => { if (e.key === 'Enter') void runSearch(query); if (e.key === 'Escape') { setQuery(''); setSearch(null); } }}
+            placeholder="Search file contents…"
+            title="Repo-wide content search — press Enter"
+            className="min-w-0 flex-1 border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-1.5 py-0.5 text-[11px] text-[var(--gs-text)] outline-none focus:border-[var(--gs-accent)]"
+          />
+          {(search || searching) && (
+            <button
+              type="button"
+              onClick={() => { setQuery(''); setSearch(null); setSearchError(null); }}
+              title="Clear search"
+              className="flex-shrink-0 px-1 text-[var(--gs-text-dim)] hover:text-[var(--gs-text)]"
+            >
+              ✕
+            </button>
+          )}
+        </div>
         <div className="min-h-0 flex-1 overflow-y-auto pb-1 text-[11.5px]">
-          {loading && entries.length === 0 ? (
+          {searching ? (
+            <div className="px-3 py-3 text-center text-[var(--gs-text-dim)]">Searching…</div>
+          ) : searchError ? (
+            <div className="px-3 py-3 text-center text-[var(--gs-danger)]">{searchError}</div>
+          ) : search ? (
+            <RepoSearchResults hits={search.hits} truncated={search.truncated} query={search.query} onOpenFile={onOpenFile} />
+          ) : loading && entries.length === 0 ? (
             <div className="px-3 py-3 text-center text-[var(--gs-text-dim)]">Loading…</div>
           ) : error ? (
             <div className="px-3 py-3 text-center text-[var(--gs-danger)]">{error}</div>
@@ -313,9 +364,79 @@ function RepoMode({ backend, workspaceId, projectName, workspaceName, onOpenFile
   );
 }
 
-/* ── Repo file panel (dock tab content): Pierre diff for changed files ─────── */
+/* ── Repo content search ──────────────────────────────────────────────────── */
 
-export function RepoFilePanel({ backend, workspaceId, projectName, workspaceName, path, changed, prevPath }: {
+interface RepoSearchHit { path: string; line: number; text: string }
+
+/**
+ * Repo-wide content search, rendered in place of the file tree while a query is
+ * active. A hit opens the SAME viewer the tree opens, scrolled to the matching
+ * line — so search is a way into the repo view, not a separate reader.
+ */
+function RepoSearchResults({ hits, truncated, query, onOpenFile }: {
+  hits: RepoSearchHit[];
+  truncated: boolean;
+  query: string;
+  onOpenFile: (file: RepoFileOpen) => void;
+}): ReactElement {
+  /* Group by file: 30 hits across 3 files should read as 3 files. */
+  const byFile = useMemo(() => {
+    const map = new Map<string, RepoSearchHit[]>();
+    for (const hit of hits) {
+      const list = map.get(hit.path);
+      if (list) list.push(hit); else map.set(hit.path, [hit]);
+    }
+    return [...map.entries()];
+  }, [hits]);
+
+  if (hits.length === 0) {
+    return <div className="px-3 py-3 text-center text-[var(--gs-text-ghost)]">No matches for “{query}”.</div>;
+  }
+
+  return (
+    <div className="pb-2">
+      <div className="px-3 py-1 text-[10px] uppercase tracking-[.1em] text-[var(--gs-text-muted)]">
+        {hits.length}{truncated ? '+' : ''} match{hits.length === 1 ? '' : 'es'} in {byFile.length} file{byFile.length === 1 ? '' : 's'}
+      </div>
+      {byFile.map(([filePath, fileHits]) => (
+        <div key={filePath} className="mb-1">
+          <div className="truncate px-3 py-[2px] font-[family-name:var(--gs-font-mono)] text-[10.5px] text-[var(--gs-text-dim)]" title={filePath}>
+            {filePath}
+          </div>
+          {fileHits.map((hit) => (
+            <button
+              key={`${hit.line}`}
+              type="button"
+              onClick={() => onOpenFile({ path: hit.path, changed: false, line: hit.line })}
+              className="flex w-full items-start gap-2 px-3 py-[1px] text-left hover:bg-[var(--gs-bg-active)]"
+              title={`${filePath}:${hit.line}`}
+            >
+              <span className="w-8 flex-shrink-0 text-right font-[family-name:var(--gs-font-mono)] text-[10px] tabular-nums text-[var(--gs-text-ghost)]">{hit.line}</span>
+              <span className="min-w-0 flex-1 truncate font-[family-name:var(--gs-font-mono)] text-[10.5px] text-[var(--gs-text)]">{hit.text.trim()}</span>
+            </button>
+          ))}
+        </div>
+      ))}
+      {truncated && <div className="px-3 py-1 text-[10px] text-[var(--gs-text-ghost)]">Showing the first results — narrow the query for more.</div>}
+    </div>
+  );
+}
+
+/* ── Repo file panel (dock tab content) ───────────────────────────────────────
+   VIEW is the default: clicking a file shows the FILE, the way an editor does.
+   Diff-vs-a-ref is a toggle on top of it, not the landing state — diff-first is
+   the Change Guide's job, and a reader browsing the tree is usually reading,
+   not reviewing a change. Both modes render through the SAME ReviewDiffView, so
+   line comments, the hover '+', drag-select and inline threads work identically
+   whether or not a diff is on screen (see fileViewPatch). */
+
+/** Lines above which View mode waits for a click before highlighting.
+ *  shiki runs on the main thread; a 20k-line file would freeze the pane. */
+const VIEW_RENDER_GATE = 2000;
+/** Hard cap on what View mode will render even after the gate is accepted. */
+const VIEW_MAX_LINES = 6000;
+
+export function RepoFilePanel({ backend, workspaceId, projectName, workspaceName, path, changed, prevPath, line }: {
   backend: SessionBackend | null;
   workspaceId: string;
   projectName: string;
@@ -323,74 +444,267 @@ export function RepoFilePanel({ backend, workspaceId, projectName, workspaceName
   path: string;
   changed: boolean;
   prevPath?: string;
+  /** Scroll target when opened from a search hit. */
+  line?: number;
 }): ReactElement {
-  const [patch, setPatch] = useState<string | null>(null);
-  const [content, setContent] = useState<string | null>(null);
-  const [state, setState] = useState<'loading' | 'ready' | 'error'>('loading');
+  const [mode, setMode] = useState<'view' | 'diff'>('view');
+  /** '' = the workspace's base branch (whatever the server resolves). */
+  const [diffRef, setDiffRef] = useState('');
+  const [refDraft, setRefDraft] = useState('');
+  const [baseBranch, setBaseBranch] = useState('');
+  const [docView, setDocView] = useState<'doc' | 'source'>('doc');
+  const [gateAccepted, setGateAccepted] = useState(false);
 
-  /* A changed file opened as its own tab is a REVIEW surface, not a preview:
-     same threads, same hover '+', same context expansion as the Change Guide.
-     It used to render a bare read-only PatchDiff, so arriving here from the file
-     tree meant you simply could not comment. */
+  const [read, setRead] = useState<{ base64: string | null; size: number; truncated: boolean } | null>(null);
+  const [patch, setPatch] = useState<string | null>(null);
+  const [state, setState] = useState<'loading' | 'ready' | 'error'>('loading');
+  const [diffState, setDiffState] = useState<'idle' | 'loading' | 'ready' | 'empty' | 'error'>('idle');
+
+  const docKind = documentKindFor(path);
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  /* One get_threads for the pane; both modes annotate from it. A file opened
+     from the tree is a REVIEW surface, not a preview — same threads, same
+     affordances as the Change Guide. */
   const { threads, actions } = useReviewThreads(backend, projectName, workspaceName);
+  /* Context must come from the SAME ref the diff did, or expanding a gap would
+     splice in text from a different version of the file. */
   const requestContext = useCallback(
-    () => requestFileContext(backend, projectName, workspaceName, path, prevPath),
-    [backend, projectName, workspaceName, path, prevPath],
+    () => requestFileContext(backend, projectName, workspaceName, path, prevPath, diffRef || undefined),
+    [backend, projectName, workspaceName, path, prevPath, diffRef],
   );
 
+  /* ── View: the file's current content ─────────────────────────────────── */
   useEffect(() => {
     let alive = true;
     setState('loading');
-    setPatch(null);
-    setContent(null);
+    setRead(null);
+    setGateAccepted(false);
+    setDocView('doc');
     void (async () => {
       try {
-        if (changed && backend?.sendReviewRequest) {
-          const r = await backend.sendReviewRequest({ op: 'get_file_diff', projectName, workspaceName, filePath: path, prevFilePath: prevPath });
-          const diff = (r as { diff?: string; patch?: string }) ?? {};
-          const text = diff.patch ?? diff.diff;
-          if (text && text.trim()) {
-            if (alive) { setPatch(text); setState('ready'); }
-            return;
-          }
-        }
-        const read = await backend?.readRepoFile?.(workspaceId, path);
+        const r = await backend?.readRepoFile?.(workspaceId, path);
         if (!alive) return;
-        if (!read || read.base64 === null) { setState('error'); return; }
-        setContent(decodeBase64Utf8(read.base64));
+        if (!r || r.base64 === null) { setState('error'); return; }
+        setRead(r);
         setState('ready');
       } catch {
         if (alive) setState('error');
       }
     })();
     return () => { alive = false; };
-  }, [backend, workspaceId, projectName, workspaceName, path, changed, prevPath]);
+  }, [backend, workspaceId, path]);
+
+  /* ── Diff: fetched only once the toggle is actually used ──────────────── */
+  useEffect(() => {
+    if (mode !== 'diff' || !backend?.sendReviewRequest) return;
+    let alive = true;
+    setDiffState('loading');
+    setPatch(null);
+    void (async () => {
+      try {
+        const r = await backend.sendReviewRequest!({
+          op: 'get_file_diff', projectName, workspaceName, filePath: path, prevFilePath: prevPath,
+          base: diffRef || undefined,
+        });
+        if (!alive) return;
+        const payload = (r as { diff?: string; patch?: string; baseBranch?: string }) ?? {};
+        if (payload.baseBranch) setBaseBranch(payload.baseBranch);
+        const text = payload.patch ?? payload.diff;
+        if (text && text.trim()) { setPatch(text); setDiffState('ready'); }
+        else setDiffState('empty');
+      } catch {
+        if (alive) setDiffState('error');
+      }
+    })();
+    return () => { alive = false; };
+  }, [mode, diffRef, backend, projectName, workspaceName, path, prevPath]);
+
+  /* Learn the base branch's real name so the ref picker can name it. */
+  useEffect(() => {
+    if (baseBranch || !backend?.sendReviewRequest) return;
+    let alive = true;
+    void backend.sendReviewRequest({ op: 'get_changed_files', projectName, workspaceName })
+      .then((r) => {
+        if (alive && r && 'op' in r && r.op === 'changed_files') setBaseBranch((r as { baseBranch?: string }).baseBranch ?? '');
+      })
+      .catch(() => undefined);
+    return () => { alive = false; };
+  }, [backend, projectName, workspaceName, baseBranch]);
+
+  const text = useMemo(() => {
+    if (!read?.base64) return null;
+    try { return decodeBase64Utf8(read.base64); } catch { return null; }
+  }, [read]);
+
+  /* The whole file, expressed as an all-context patch so the review surface
+     renders it. Only built once the size gate is satisfied. */
+  const viewPatch = useMemo(() => {
+    if (text === null) return null;
+    const total = text.split('\n').length;
+    if (total > VIEW_RENDER_GATE && !gateAccepted) return null;
+    return fileViewPatch(path, text, VIEW_MAX_LINES);
+  }, [text, path, gateAccepted]);
+
+  /* Scroll to the line a search hit pointed at, once it has actually rendered.
+     The rows live inside the renderer's SHADOW root, so a light-DOM query never
+     sees them — the lookup has to hop through the host's shadowRoot. Rows are
+     also built asynchronously, so this polls briefly rather than assuming the
+     line exists on the first frame. */
+  useEffect(() => {
+    if (!line || mode !== 'view' || !viewPatch) return;
+    let tries = 0;
+    const timer = window.setInterval(() => {
+      tries += 1;
+      const host = scrollRef.current;
+      if (!host || tries > 60) { window.clearInterval(timer); return; }
+      const shadowHost = host.querySelector('diffs-container');
+      const row = shadowHost?.shadowRoot?.querySelector(`[data-line="${line}"]`);
+      if (row instanceof HTMLElement) {
+        row.scrollIntoView({ block: 'center' });
+        // A brief tint so the eye lands on the matched line, not just its region.
+        row.style.background = 'var(--gs-bg-active)';
+        window.setTimeout(() => { row.style.background = ''; }, 2200);
+        window.clearInterval(timer);
+      }
+    }, 50);
+    return () => window.clearInterval(timer);
+  }, [line, mode, viewPatch]);
+
+  const totalLines = text === null ? 0 : text.split('\n').length;
+  const showingDoc = docKind !== null && docView === 'doc' && mode === 'view';
 
   return (
     <div className="flex h-full min-h-0 flex-col text-[12px]">
-      <div className="flex flex-shrink-0 items-center gap-2 border-b border-[var(--gs-border-muted)] px-3 py-1.5">
+      <div className="flex flex-shrink-0 flex-wrap items-center gap-2 border-b border-[var(--gs-border-muted)] px-3 py-1.5">
         <span className="truncate font-[family-name:var(--gs-font-mono)] text-[12px] text-[var(--gs-text)]">{path}</span>
         {changed && <span className="flex-shrink-0 rounded-full border border-[#4a3a1f] px-1.5 text-[10px] text-[var(--gs-warning)]">changed</span>}
+
+        {/* View / Diff — the mode toggle. View is where a file opens. */}
+        <span className="ml-auto inline-flex flex-shrink-0 border border-[var(--gs-border)] text-[10.5px]">
+          {(['view', 'diff'] as const).map((m) => (
+            <button
+              key={m}
+              type="button"
+              onClick={() => setMode(m)}
+              title={m === 'view' ? 'Show the file as it is now' : 'Compare this file against a ref'}
+              className={`px-2 py-[2px] ${mode === m ? 'bg-[var(--gs-bg-active)] text-[var(--gs-text)]' : 'text-[var(--gs-text-dim)]'}`}
+            >
+              {m === 'view' ? 'view' : 'diff'}
+            </button>
+          ))}
+        </span>
+
+        {/* Document / source, for the file types that ARE documents. */}
+        {docKind && mode === 'view' && (
+          <span className="inline-flex flex-shrink-0 border border-[var(--gs-border)] text-[10.5px]">
+            {(['doc', 'source'] as const).map((v) => (
+              <button
+                key={v}
+                type="button"
+                onClick={() => setDocView(v)}
+                disabled={v === 'source' && docKind === 'pdf'}
+                className={`px-2 py-[2px] disabled:opacity-30 ${docView === v ? 'bg-[var(--gs-bg-active)] text-[var(--gs-text)]' : 'text-[var(--gs-text-dim)]'}`}
+              >
+                {v === 'doc' ? (docKind === 'pdf' ? '▤ document' : '▸ page') : 'source'}
+              </button>
+            ))}
+          </span>
+        )}
       </div>
-      <div className="min-h-0 flex-1 overflow-auto p-2">
-        {state === 'loading' ? (
-          <div className="flex h-full items-center justify-center text-[var(--gs-text-dim)]">Loading…</div>
-        ) : state === 'error' ? (
-          <div className="flex h-full items-center justify-center text-[var(--gs-danger)]">Failed to load {path}</div>
-        ) : patch ? (
-          <ReviewDiffView
-            patch={patch}
-            filePath={path}
-            prevFilePath={prevPath}
-            threads={threads}
-            actions={actions}
-            onRequestContext={requestContext}
-            contextKey={`${projectName}/${workspaceName}/${path}`}
+
+      {/* Ref picker — only meaningful in diff mode. Base branch, HEAD, or any
+          ref typed in; there is deliberately no commit browser in v1. */}
+      {mode === 'diff' && (
+        <div className="flex flex-shrink-0 flex-wrap items-center gap-1.5 border-b border-[var(--gs-border-muted)] px-3 py-1.5 text-[11px]">
+          <span className="text-[var(--gs-text-dim)]">diff vs</span>
+          {[
+            { value: '', label: baseBranch || 'base branch' },
+            { value: 'HEAD', label: 'HEAD' },
+          ].map((opt) => (
+            <button
+              key={opt.value || 'base'}
+              type="button"
+              onClick={() => { setDiffRef(opt.value); setRefDraft(''); }}
+              className={`border px-1.5 py-[1px] ${diffRef === opt.value
+                ? 'border-[var(--gs-accent)] text-[var(--gs-accent)]'
+                : 'border-[var(--gs-border)] text-[var(--gs-text-dim)] hover:border-[var(--gs-border-active)]'}`}
+            >
+              {opt.label}
+            </button>
+          ))}
+          <input
+            value={refDraft}
+            onChange={(e) => setRefDraft(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter' && refDraft.trim()) setDiffRef(refDraft.trim()); }}
+            placeholder="branch, tag or sha…"
+            title="Any ref git understands — press Enter"
+            className="w-[170px] border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-1.5 py-[1px] text-[11px] text-[var(--gs-text)] outline-none focus:border-[var(--gs-accent)]"
           />
-        ) : langForPath(path) ? (
-          <Highlighted text={(content ?? '').slice(0, 300_000)} lang={langForPath(path)} name={path} />
+          {diffRef && diffRef !== 'HEAD' && (
+            <span className="font-[family-name:var(--gs-font-mono)] text-[10.5px] text-[var(--gs-accent)]">@ {diffRef}</span>
+          )}
+        </div>
+      )}
+
+      <div ref={scrollRef} className={`min-h-0 flex-1 overflow-auto ${showingDoc ? '' : 'p-2'}`}>
+        {mode === 'diff' ? (
+          diffState === 'loading' ? (
+            <div className="flex h-full items-center justify-center text-[var(--gs-text-dim)]">Loading diff…</div>
+          ) : diffState === 'error' ? (
+            <div className="flex h-full items-center justify-center text-[var(--gs-danger)]">Could not diff {path} against {diffRef || baseBranch || 'base'}.</div>
+          ) : diffState === 'empty' || !patch ? (
+            <div className="flex h-full items-center justify-center text-[var(--gs-text-ghost)]">No changes vs {diffRef || baseBranch || 'base'}.</div>
+          ) : (
+            <ReviewDiffView
+              patch={patch}
+              filePath={path}
+              prevFilePath={prevPath}
+              threads={threads}
+              actions={actions}
+              onRequestContext={requestContext}
+              contextKey={`${projectName}/${workspaceName}/${path}@${diffRef || 'base'}`}
+            />
+          )
+        ) : state === 'loading' ? (
+          <div className="flex h-full items-center justify-center text-[var(--gs-text-dim)]">Loading…</div>
+        ) : state === 'error' || !read ? (
+          <div className="flex h-full items-center justify-center text-[var(--gs-danger)]">Failed to load {path}</div>
+        ) : showingDoc && docKind === 'pdf' ? (
+          <PdfDocFrame base64={read.base64 ?? ''} title={path} />
+        ) : showingDoc && docKind === 'html' ? (
+          <HtmlDocFrame html={text ?? ''} title={path} />
+        ) : text === null ? (
+          <div className="flex h-full items-center justify-center text-[var(--gs-text-dim)]">Binary file — no inline view.</div>
+        ) : viewPatch === null ? (
+          /* Size gate: shiki blocks the main thread, so a big file waits for
+             an explicit click rather than freezing the pane on open. */
+          <div className="flex h-full flex-col items-center justify-center gap-2 text-[var(--gs-text-dim)]">
+            <span>{totalLines.toLocaleString()} lines — large file.</span>
+            <button
+              type="button"
+              onClick={() => setGateAccepted(true)}
+              className="border border-[var(--gs-border)] px-2 py-1 text-[11px] text-[var(--gs-accent)] hover:border-[var(--gs-accent)]"
+            >
+              Render {Math.min(totalLines, VIEW_MAX_LINES).toLocaleString()} lines
+            </button>
+          </div>
         ) : (
-          <pre className="whitespace-pre-wrap font-[family-name:var(--gs-font-mono)] text-[11px] text-[var(--gs-text)]">{content}</pre>
+          <>
+            <ReviewDiffView
+              plain
+              patch={viewPatch.patch}
+              filePath={path}
+              threads={threads}
+              actions={actions}
+              contextKey={`${projectName}/${workspaceName}/${path}@view`}
+            />
+            {viewPatch.truncated && (
+              <div className="px-2 py-1 text-[10.5px] text-[var(--gs-text-dim)]">
+                Showing the first {viewPatch.shownLines.toLocaleString()} of {viewPatch.totalLines.toLocaleString()} lines.
+              </div>
+            )}
+          </>
         )}
       </div>
     </div>

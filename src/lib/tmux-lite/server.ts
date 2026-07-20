@@ -4293,6 +4293,16 @@ export async function dispatchCommand(cmd: Command): Promise<Response | null> {
             }
             break;
 
+          case 'repo-search':
+            try {
+              const { searchRepoContent } = await import('../../core/git.js');
+              const found = await searchRepoContent(cmd.target.workspacePath, cmd.query, { caseSensitive: cmd.caseSensitive });
+              res = { type: 'repo-search', hits: found.hits, truncated: found.truncated };
+            } catch (e) {
+              res = { type: 'error', message: `Failed to search repo: ${e instanceof Error ? e.message : String(e)}` };
+            }
+            break;
+
           case 'workspace-editor-open':
             try {
               const result = await openWorkspaceInEditor(cmd.editorId, cmd.target.workspacePath);

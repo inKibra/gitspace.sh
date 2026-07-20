@@ -463,6 +463,7 @@ export type Command =
   | { type: 'repo-tree'; target: AgentWorkspaceTargetPayload }
   | { type: 'repo-read'; target: AgentWorkspaceTargetPayload; path: string }
   | { type: 'repo-commit'; target: AgentWorkspaceTargetPayload; message: string }
+  | { type: 'repo-search'; target: AgentWorkspaceTargetPayload; query: string; caseSensitive?: boolean }
   | { type: 'workspace-editors-list'; target: AgentWorkspaceTargetPayload }
   | { type: 'workspace-editor-open'; target: AgentWorkspaceTargetPayload; editorId: import('../../utils/open-editor.js').WorkspaceEditorId }
   | { type: 'agent-file-suggestions'; target: AgentWorkspaceTargetPayload; prefix: string; limit?: number }
@@ -583,6 +584,7 @@ export type Response =
   | { type: 'repo-tree'; entries: import('../../core/git.js').RepoFileEntry[] }
   | { type: 'repo-read'; base64: string | null; size: number; truncated: boolean }
   | { type: 'repo-commit'; commit: string | null }
+  | { type: 'repo-search'; hits: import('../../core/git.js').RepoSearchHit[]; truncated: boolean }
   | { type: 'agent-navigate'; ok: boolean; editorText?: string }
   | { type: 'workspace-editors'; editors: import('../../utils/open-editor.js').WorkspaceEditorOption[] }
   | { type: 'agent-file-suggestions'; suggestions: Array<{ path: string; isDirectory: boolean }> }

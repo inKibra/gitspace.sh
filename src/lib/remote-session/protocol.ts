@@ -853,6 +853,14 @@ export interface RepoCommitRequest {
   message: string;
 }
 
+export interface RepoSearchRequest {
+  type: 'repo_search';
+  requestId: string;
+  target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
+  query: string;
+  caseSensitive?: boolean;
+}
+
 export interface ListAgentCommandsRequest {
   type: 'list_agent_commands';
   requestId: string;
@@ -1311,6 +1319,7 @@ export type ClientToMachineMessage =
   | RepoTreeRequest
   | RepoReadRequest
   | RepoCommitRequest
+  | RepoSearchRequest
   | ListAgentCommandsRequest
   | ListWorkspaceEditorsRequest
   | OpenWorkspaceEditorRequest
@@ -1492,6 +1501,7 @@ export function isBrowseMessage(msg: RemoteSessionMessage): msg is ClientToMachi
     'repo_tree',
     'repo_read',
     'repo_commit',
+    'repo_search',
     'list_agent_commands',
     'list_workspace_editors',
     'open_workspace_editor',

@@ -338,6 +338,8 @@ export interface SessionBackend {
   listRepoFiles?(workspaceId: string): Promise<Array<{ path: string; status?: string }>>;
   /** Read a workspace file (path-jailed, capped). Null base64 = missing. */
   readRepoFile?(workspaceId: string, path: string): Promise<{ base64: string | null; size: number; truncated: boolean }>;
+  /** Repo-wide content search (git grep: gitignore-aware, binaries skipped). */
+  searchRepoContent?(workspaceId: string, query: string, options?: { caseSensitive?: boolean }): Promise<{ hits: Array<{ path: string; line: number; text: string }>; truncated: boolean }>;
   /** Stage all + commit. Returns the sha, or null when nothing to commit. */
   commitWorkspaceChanges?(workspaceId: string, message: string): Promise<string | null>;
   /** Navigate the conversation tree: `redo` rewinds to the message's parent and

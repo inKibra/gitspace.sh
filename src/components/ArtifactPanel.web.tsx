@@ -3,6 +3,7 @@ import { decodeBase64Utf8 } from './artifact-kinds.js';
 import { useEffect, useRef, useState, type ReactElement } from 'react';
 import { renderMarkdownHtml } from './markdown-render.js';
 import { Highlighted } from '../blocks/render/highlight.web.js';
+import { PdfDocFrame } from './document-preview.web.js';
 
 /**
  * Artifact viewer content — used as a DOCK PANE in the workspace multi-view
@@ -53,6 +54,11 @@ export interface ArtifactRead {
 /** Pure renderer for fetched artifact bytes. */
 export function ArtifactPreviewContent({ path, data }: { path: string; data: ArtifactRead }): ReactElement {
   const mime = mimeFor(path);
+  // A PDF artifact is a document, not "binary — no inline preview". Same viewer
+  // the repo view uses, so both surfaces read PDFs the same way.
+  if (path.toLowerCase().endsWith('.pdf')) {
+    return <div className="h-full min-h-[420px] w-full"><PdfDocFrame base64={data.base64} title={path} /></div>;
+  }
   if (mime?.startsWith('image/')) {
     return <img src={`data:${mime};base64,${data.base64}`} alt={path} className="max-h-full max-w-full border border-[var(--gs-border)]" />;
   }
