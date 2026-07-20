@@ -3,15 +3,18 @@ import { join } from 'path';
 import { execFileSync } from 'child_process';
 import { tmpdir } from 'os';
 import {
-  addGoalNearWorkspace,
+  addGoalToChain,
   bindGoalToWorkspace,
   ensureWorkspaceGoalChain,
   findGoalRecord,
   getGoalRecord,
   listProjectGoalKanbanItems,
   moveGoalInChain,
+  previewMoveGoalInChain,
   readGoalChainState,
+  removeGoalFromChain,
   writeGoalRecord,
+  type ChainMutationResult,
 } from '../core/goal-chain.js';
 import { getProjectBaseDir, getProjectWorkspacesDir, readProjectConfig } from '../core/config.js';
 import { createWorktree } from '../core/git.js';
@@ -282,16 +285,76 @@ export function showSpaceChain(ctx: SpaceCommandContext, options: { json?: boole
   }
 }
 
-export function addSpaceChainGoal(ctx: SpaceCommandContext, title: string, position: 'before' | 'after', options: { json?: boolean } = {}): void {
-  const goal = addGoalNearWorkspace(ctx.project, ctx.workspace, title, position);
-  if (options.json) {
-    printJson(goal);
-    return;
+/** Print the resulting order of a chain mutation. There is no undo, so every
+ *  mutating verb shows where the chain lands — and `--dry-run` shows only
+ *  this, having written nothing. */
+function reportChainMutation(ctx: SpaceCommandContext, result: ChainMutationResult, headline: string): void {
+  logger.log(result.dryRun ? `[dry-run] ${headline} (nothing written)` : headline);
+  logger.log(`${result.chain.title} (${result.chain.id})`);
+  for (const entry of result.order) {
+    const marker = entry.workspaceName === ctx.workspace ? '*' : ' ';
+    const isSubject = entry.id === result.goal?.id;
+    const workspace = entry.workspaceName ?? 'no-workspace';
+    logger.log(`${marker} ${entry.position}. ${workspace} · ${entry.phase} · ${entry.status} · ${entry.title}${isSubject ? '   <-- ' + (result.dryRun ? 'would be here' : 'here') : ''}`);
   }
-  logger.success(`Added goal ${position} current workspace: ${goal.title}`);
+  for (const warning of result.warnings) {
+    warnStderr(warning);
+  }
 }
 
-export function moveSpaceChainGoal(ctx: SpaceCommandContext, sourceToken: string, targetToken: string, position: 'before' | 'after', options: { json?: boolean } = {}): void {
+export interface AddChainGoalOptions {
+  json?: boolean;
+  dryRun?: boolean;
+  /** Anchor goal for add-before/add-after (defaults to the active goal). */
+  goal?: string;
+  /** Absolute insert at the end of the chain. */
+  tail?: boolean;
+  /** Absolute insert at a 0-indexed position. */
+  at?: number;
+}
+
+export function addSpaceChainGoal(
+  ctx: SpaceCommandContext,
+  title: string,
+  position: 'before' | 'after' | undefined,
+  options: AddChainGoalOptions = {},
+): void {
+  if (options.tail && options.at !== undefined) {
+    throw new SpacesError('Use either --tail or --at <index>, not both.', 'USER_ERROR', 1);
+  }
+  if (!position && !options.tail && options.at === undefined) {
+    throw new SpacesError('`space chain add` needs --tail or --at <index>. Use add-after/add-before to insert relative to a goal.', 'USER_ERROR', 1);
+  }
+  const result = addGoalToChain(ctx.project, ctx.workspace, {
+    title,
+    anchor: options.goal,
+    position,
+    tail: options.tail,
+    index: options.at,
+    dryRun: options.dryRun,
+  });
+  if (options.json) {
+    printJson(result);
+    return;
+  }
+  const where = options.tail
+    ? 'at the end of the chain'
+    : options.at !== undefined
+      ? `at position ${options.at}`
+      : `${position} ${options.goal ?? 'the current workspace goal'}`;
+  reportChainMutation(ctx, result, `${result.dryRun ? 'Would add' : 'Added'} goal ${where}: ${result.goal?.title}`);
+}
+
+export function moveSpaceChainGoal(ctx: SpaceCommandContext, sourceToken: string, targetToken: string, position: 'before' | 'after', options: { json?: boolean; dryRun?: boolean } = {}): void {
+  if (options.dryRun) {
+    const preview = previewMoveGoalInChain(ctx.project, sourceToken, targetToken, position);
+    if (options.json) {
+      printJson(preview);
+      return;
+    }
+    reportChainMutation(ctx, preview, `Would move "${preview.goal?.title}" ${position} ${targetToken}`);
+    return;
+  }
   const chain = moveGoalInChain(ctx.project, sourceToken, targetToken, position);
   if (options.json) {
     printJson(chain);
@@ -300,10 +363,36 @@ export function moveSpaceChainGoal(ctx: SpaceCommandContext, sourceToken: string
   logger.success(`Saved goal order for chain ${chain.title}. Git stack unchanged; run space stack status when ready.`);
 }
 
+export function removeSpaceChainGoal(
+  ctx: SpaceCommandContext,
+  token: string,
+  options: { json?: boolean; force?: boolean; detachOnly?: boolean; dryRun?: boolean } = {},
+): void {
+  const result = removeGoalFromChain(ctx.project, token, {
+    force: options.force,
+    detachOnly: options.detachOnly,
+    dryRun: options.dryRun,
+  });
+  if (options.json) {
+    printJson(result);
+    return;
+  }
+  const fate = result.deletedPlannedDoc
+    ? 'planned doc deleted'
+    : result.goal?.workspaceName
+      ? 'detached from chain; workspace kept'
+      : 'detached from chain; planned doc kept';
+  reportChainMutation(
+    ctx,
+    result,
+    `${result.dryRun ? 'Would remove' : 'Removed'} "${result.goal?.title}" (${fate})`,
+  );
+}
+
 // ─── Goal doc ──────────────────────────────────────────────────────────────
 
-export function showSpaceGoal(ctx: SpaceCommandContext, options: { json?: boolean } = {}): void {
-  const goal = resolveActiveGoal(ctx);
+export function showSpaceGoal(ctx: SpaceCommandContext, options: { goal?: string; json?: boolean } = {}): void {
+  const goal = resolveGoalForOption(ctx, options.goal);
   if (options.json) {
     printJson(goal);
     return;
@@ -315,10 +404,10 @@ export function showSpaceGoal(ctx: SpaceCommandContext, options: { json?: boolea
   logger.log(goal.doc.bodyMarkdown.trimEnd());
 }
 
-export function setSpaceGoal(ctx: SpaceCommandContext, options: { file?: string; stdin?: boolean; body?: string; json?: boolean }): void {
+export function setSpaceGoal(ctx: SpaceCommandContext, options: { goal?: string; file?: string; stdin?: boolean; body?: string; json?: boolean }): void {
   const bodyMarkdown = readGoalBody(options);
   const updated = withGoalLock(ctx.project, () => {
-    const goal = resolveActiveGoal(ctx);
+    const goal = resolveGoalForOption(ctx, options.goal);
     return writeGoalRecord(ctx.project, {
       ...goal,
       doc: {
@@ -335,8 +424,8 @@ export function setSpaceGoal(ctx: SpaceCommandContext, options: { file?: string;
   logger.success(`Updated goal doc: ${updated.title}`);
 }
 
-export function editSpaceGoal(ctx: SpaceCommandContext, options: { editor?: string; json?: boolean } = {}): void {
-  const goal = resolveActiveGoal(ctx);
+export function editSpaceGoal(ctx: SpaceCommandContext, options: { goal?: string; editor?: string; json?: boolean } = {}): void {
+  const goal = resolveGoalForOption(ctx, options.goal);
   const editor = options.editor || process.env.EDITOR;
   if (!editor) {
     throw new SpacesError('EDITOR is not set. Use `space goal set --file goal.md` or pass --editor.', 'USER_ERROR', 1);
@@ -345,7 +434,8 @@ export function editSpaceGoal(ctx: SpaceCommandContext, options: { editor?: stri
   writeFileSync(filePath, goal.doc.bodyMarkdown, 'utf-8');
   execFileSync(editor, [filePath], { stdio: 'inherit' });
   const bodyMarkdown = readFileSync(filePath, 'utf-8');
-  setSpaceGoal(ctx, { body: bodyMarkdown, json: options.json });
+  // Re-target by id so the write lands on the goal we opened, not the active one.
+  setSpaceGoal(ctx, { goal: goal.id, body: bodyMarkdown, json: options.json });
 }
 
 // ─── Requirements ──────────────────────────────────────────────────────────

@@ -39,16 +39,51 @@ space stack status
 ## Plan goals
 
 ```sh
-# Add a new planned goal before/after the current workspace goal
+# Anchored insert. The anchor defaults to the ACTIVE workspace goal,
+# but --goal anchors on ANY goal in the chain.
 space chain add-before --title "Wire connector hover state"
 space chain add-after  --title "Capture screencast"
+space chain add-after  --goal billing-schema --title "Backfill job"
 
-# Reorder: move a goal before/after another goal in the chain
-space chain move-before billing-api      # move active goal before billing-api
-space chain move-after  billing-schema   # move active goal after billing-schema
+# Absolute insert: end of chain, or an explicit 0-indexed position.
+space chain add --tail --title "Ship notes"
+space chain add --at 2 --title "Telemetry pass"
+
+# Reorder. --goal moves a goal OTHER than the active one.
+space chain move-before billing-api                        # move active goal before billing-api
+space chain move-after  billing-schema                     # move active goal after billing-schema
+space chain move-after  billing-api --goal billing-ui      # move billing-ui after billing-api
+
+# Remove. Planned goals are detached AND their doc is deleted.
+space chain remove billing-ui                  # planned → detached + planned/<id>.json deleted
+space chain rm billing-ui --detach-only        # detached, doc kept on disk (orphaned)
+space chain remove billing-api --force         # workspace-backed → detach only; worktree kept
 ```
 
-Reorder is enforced against phase: you cannot place a `code` goal before a `plan` ancestor. The CLI rejects this.
+Every mutating verb (`add`, `add-before`, `add-after`, `move-before`, `move-after`, `remove`) accepts `--dry-run`, which prints the resulting chain order and any guard warning **without writing**. There is no undo — preview first.
+
+```sh
+space chain add --tail --title "Ship notes" --dry-run
+space chain remove billing-ui --dry-run
+```
+
+Both reorder and insert are enforced against phase: you cannot place a goal ahead of one that has already moved past `plan`. A new planned goal always reads as phase `plan`, so `add-before` an anchor already in `review` is rejected. `remove` refuses a workspace-backed goal without `--force`, and never deletes a worktree.
+
+## Author a PLANNED goal
+
+A planned goal has no workspace, but its whole body and validation contract are authorable today — every `space goal` verb takes `--goal`:
+
+```sh
+space goal set --goal billing-ui --body "# Billing UI\n\n## Objective\n..."
+space goal show --goal billing-ui
+space goal doc slices --goal billing-ui
+space goal requirement add --goal billing-ui \
+  --title "Screenshot of the invoice table" --kind screenshot \
+  --rubric "Shows the paid/unpaid badge" --gen manual --judge human
+space goal status --goal billing-ui
+```
+
+Without `--goal`, every one of these targets the active workspace goal.
 
 ## Bind a planned goal to a workspace
 

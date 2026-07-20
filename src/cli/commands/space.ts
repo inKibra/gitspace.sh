@@ -384,7 +384,8 @@ function registerSpaceGoalCommands(space: Command): void {
 
   goal
     .command('show')
-    .description('Show the current goal document')
+    .description('Show a goal document — any goal in the project via --goal (defaults to the active workspace goal)')
+    .option('--goal <goal>', 'Goal id, workspace name, planned workspace name, or title')
     .option('--json', 'Output structured JSON')
     .action(withErrorHandler(async (options) => {
       const ctx = requireSessionContext();
@@ -394,7 +395,8 @@ function registerSpaceGoalCommands(space: Command): void {
 
   goal
     .command('set')
-    .description('Replace the current goal document')
+    .description('Replace a goal document — any goal in the project via --goal, including PLANNED goals (defaults to the active workspace goal)')
+    .option('--goal <goal>', 'Goal id, workspace name, planned workspace name, or title')
     .option('--file <path>', 'Read goal markdown from file')
     .option('--stdin', 'Read goal markdown from stdin')
     .option('--body <text>', 'Goal markdown body')
@@ -407,7 +409,8 @@ function registerSpaceGoalCommands(space: Command): void {
 
   goal
     .command('edit')
-    .description('Edit the current goal document with EDITOR')
+    .description('Edit a goal document with EDITOR — any goal in the project via --goal (defaults to the active workspace goal)')
+    .option('--goal <goal>', 'Goal id, workspace name, planned workspace name, or title')
     .option('--editor <command>', 'Editor command')
     .option('--json', 'Output structured JSON')
     .action(withErrorHandler(async (options) => {
@@ -418,7 +421,7 @@ function registerSpaceGoalCommands(space: Command): void {
 
   const doc = goal
     .command('doc')
-    .description('Goal document structure (heading-anchored slices)');
+    .description('Goal document structure (heading-anchored slices) — any goal via --goal');
 
   doc
     .command('slices')
@@ -645,9 +648,25 @@ function registerSpaceChainCommands(space: Command): void {
     }));
 
   chain
-    .command('add-after')
-    .description('Add a planned goal after the current workspace goal')
+    .command('add')
+    .description('Add a planned goal at an absolute position — --tail (end of chain) or --at <index>')
     .requiredOption('--title <title>', 'Goal title')
+    .option('--tail', 'Append at the end of the chain')
+    .option('--at <index>', '0-indexed position to insert at', (v) => parseInt(v, 10))
+    .option('--dry-run', 'Print the resulting chain order without writing anything')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      const ctx = requireSessionContext();
+      const { addSpaceChainGoal } = await import('../../commands/space-goals.js');
+      addSpaceChainGoal(ctx, options.title, undefined, { ...options, at: options.at });
+    }));
+
+  chain
+    .command('add-after')
+    .description('Add a planned goal after an anchor goal — any goal via --goal (anchor defaults to the active workspace goal)')
+    .requiredOption('--title <title>', 'Goal title')
+    .option('--goal <goal>', 'Anchor goal: id, workspace name, planned workspace name, or title (defaults to current workspace goal)')
+    .option('--dry-run', 'Print the resulting chain order without writing anything')
     .option('--json', 'Output structured JSON')
     .action(withErrorHandler(async (options) => {
       const ctx = requireSessionContext();
@@ -657,8 +676,10 @@ function registerSpaceChainCommands(space: Command): void {
 
   chain
     .command('add-before')
-    .description('Add a planned goal before the current workspace goal')
+    .description('Add a planned goal before an anchor goal — any goal via --goal (anchor defaults to the active workspace goal)')
     .requiredOption('--title <title>', 'Goal title')
+    .option('--goal <goal>', 'Anchor goal: id, workspace name, planned workspace name, or title (defaults to current workspace goal)')
+    .option('--dry-run', 'Print the resulting chain order without writing anything')
     .option('--json', 'Output structured JSON')
     .action(withErrorHandler(async (options) => {
       const ctx = requireSessionContext();
@@ -667,10 +688,26 @@ function registerSpaceChainCommands(space: Command): void {
     }));
 
   chain
+    .command('remove')
+    .alias('rm')
+    .description('Remove a goal from the chain — planned goals are detached AND deleted; workspace-backed goals need --force and are only detached')
+    .argument('<goal>', 'Goal id, workspace name, planned workspace name, or title to remove')
+    .option('--detach-only', 'Detach from the chain but keep the planned doc on disk (orphaned)')
+    .option('--force', 'Required to detach a workspace-backed goal; the worktree and its goal.json are kept')
+    .option('--dry-run', 'Print the resulting chain order without writing anything')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (goalToken, options) => {
+      const ctx = requireSessionContext();
+      const { removeSpaceChainGoal } = await import('../../commands/space-goals.js');
+      removeSpaceChainGoal(ctx, goalToken, options);
+    }));
+
+  chain
     .command('move-before')
-    .description('Move the current goal before another goal in the current project')
+    .description('Move any goal before another goal in the chain — pass --goal to move a goal other than the active one')
     .argument('<target>', 'Goal id, workspace name, planned workspace name, or title to move before')
     .option('--goal <goal>', 'Goal id, workspace name, planned workspace name, or title to move (defaults to current workspace goal)')
+    .option('--dry-run', 'Print the resulting chain order without writing anything')
     .option('--json', 'Output structured JSON')
     .action(withErrorHandler(async (targetToken, options) => {
       const ctx = requireSessionContext();
@@ -680,9 +717,10 @@ function registerSpaceChainCommands(space: Command): void {
 
   chain
     .command('move-after')
-    .description('Move the current goal after another goal in the current project')
+    .description('Move any goal after another goal in the chain — pass --goal to move a goal other than the active one')
     .argument('<target>', 'Goal id, workspace name, planned workspace name, or title to move after')
     .option('--goal <goal>', 'Goal id, workspace name, planned workspace name, or title to move (defaults to current workspace goal)')
+    .option('--dry-run', 'Print the resulting chain order without writing anything')
     .option('--json', 'Output structured JSON')
     .action(withErrorHandler(async (targetToken, options) => {
       const ctx = requireSessionContext();

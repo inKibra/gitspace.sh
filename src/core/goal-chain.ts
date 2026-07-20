@@ -10,7 +10,7 @@ import {
 import { dirname, join } from 'path';
 import { getProjectDir, getProjectWorkspacesDir } from './config.js';
 import { captureArtifactsSync } from './artifacts.js';
-import { defaultValidation, migrateGoalRecord, moveGoalValidationToWorkspace } from './goal-validation.js';
+import { defaultValidation, getPlannedGoalValidationDir, migrateGoalRecord, moveGoalValidationToWorkspace } from './goal-validation.js';
 import { computeReadiness } from '../app/shared/goal-validation/readiness.js';
 import { ensureWorkspaceStorageIgnored, getWorkspaceStatus, getWorkspaceStorageDir, setWorkspaceStatus } from './workspace-metadata.js';
 import { SpacesError } from '../types/errors.js';
@@ -551,38 +551,290 @@ export function ensureWorkspaceGoalChain(projectName: string, workspaceName: str
   return { chain: upsertGoalChain(projectName, chain), goal: writtenGoal };
 }
 
-export function addGoalNearWorkspace(projectName: string, workspaceName: string, title: string, position: 'before' | 'after'): GoalRecord {
-  const { chain, goal } = ensureWorkspaceGoalChain(projectName, workspaceName);
-  const newGoal: GoalRecord = writePlannedGoal(projectName, {
-    version: 2,
-    id: makeGoalId(title),
-    chainId: chain.id,
-    title,
-    projectName,
-    phase: goal.phase,
-    plannedWorkspaceName: sanitizeForFileSystem(title) || undefined,
-    doc: defaultGoalDoc(title),
-    validation: defaultGoalValidation(),
-    createdAt: nowIso(),
-    updatedAt: nowIso(),
-  });
-  const currentIndex = chain.goalIds.indexOf(goal.id);
-  const goalIds = [...chain.goalIds];
-  let insertIndex = position === 'before' ? currentIndex : currentIndex + 1;
+/** One row of a rendered chain order — what `--dry-run` prints. */
+export interface ChainOrderEntry {
+  id: string;
+  title: string;
+  status: 'planned' | 'workspace-backed';
+  workspaceName?: string;
+  phase: GoalRecord['phase'];
+  position: number;
+}
 
-  if (position === 'after') {
-    while (insertIndex < goalIds.length) {
-      const descendant = getGoalRecord(projectName, goalIds[insertIndex]);
-      if (!descendant || descendant.workspaceName) {
-        break;
-      }
-      insertIndex += 1;
+/** Shared result of a chain-mutating verb, so `--dry-run` and the real
+ *  write return the identical shape (the preview IS the plan). */
+export interface ChainMutationResult {
+  chain: GoalChain;
+  goalIds: string[];
+  order: ChainOrderEntry[];
+  /** The goal added (add verbs) or removed (remove verb). */
+  goal?: GoalRecord;
+  /** Non-fatal guard/cascade notes to surface to the caller. */
+  warnings: string[];
+  dryRun: boolean;
+  /** Remove verb: whether the planned doc was (or would be) deleted. */
+  deletedPlannedDoc?: boolean;
+}
+
+/** Render a prospective chain order without writing it. `pending` lets the
+ *  caller describe a goal that does not exist on disk yet (dry-run adds). */
+function describeChainOrder(projectName: string, goalIds: string[], pending?: GoalRecord): ChainOrderEntry[] {
+  const byId = new Map(listProjectGoalRecords(projectName).map((goal) => [goal.id, goal]));
+  if (pending) byId.set(pending.id, pending);
+  const entries: ChainOrderEntry[] = [];
+  goalIds.forEach((goalId, index) => {
+    const goal = byId.get(goalId);
+    if (!goal) return;
+    entries.push({
+      id: goal.id,
+      title: goal.title,
+      status: goal.workspaceName ? 'workspace-backed' : 'planned',
+      workspaceName: goal.workspaceName ?? goal.plannedWorkspaceName,
+      phase: goal.phase,
+      position: index + 1,
+    });
+  });
+  return entries;
+}
+
+/** Run the reorder guard and collect its complaint instead of throwing —
+ *  used where a phase conflict is worth reporting but not worth refusing. */
+function collectPhaseOrderWarning(projectName: string, goalIds: string[], warnings: string[]): void {
+  try {
+    assertChainGoalOrderPhasesAllowed(projectName, goalIds);
+  } catch (error) {
+    warnings.push(error instanceof Error ? error.message : String(error));
+  }
+}
+
+export interface AddGoalToChainInput {
+  title: string;
+  /** Anchored insert: goal id / workspace / planned workspace / title. */
+  anchor?: string;
+  /** Anchored insert side. Ignored for `tail` / `index`. */
+  position?: 'before' | 'after';
+  /** Absolute insert at the end of the chain. */
+  tail?: boolean;
+  /** Absolute insert at a 0-indexed position. */
+  index?: number;
+  dryRun?: boolean;
+}
+
+/**
+ * Insert a planned goal into the active workspace's chain. Supports anchored
+ * inserts (`--goal <target>` + before/after, defaulting to the active goal)
+ * and absolute inserts (`--tail`, `--at <index>`). Enforces the same
+ * phase-legality rule the reorder path enforces.
+ */
+export function addGoalToChain(
+  projectName: string,
+  workspaceName: string,
+  input: AddGoalToChainInput,
+): ChainMutationResult {
+  const { chain, goal: activeGoal } = ensureWorkspaceGoalChain(projectName, workspaceName);
+  const goalIds = [...chain.goalIds];
+  const warnings: string[] = [];
+
+  let insertIndex: number;
+  let phaseSourceId: string | undefined;
+
+  if (input.index !== undefined) {
+    if (!Number.isInteger(input.index) || input.index < 0) {
+      throw new SpacesError(`--at must be a non-negative integer (got ${input.index}).`, 'USER_ERROR', 1);
     }
+    if (input.index > goalIds.length) {
+      throw new SpacesError(
+        `--at ${input.index} is past the end of the chain (${goalIds.length} goal${goalIds.length === 1 ? '' : 's'}). Use --tail to append.`,
+        'USER_ERROR',
+        1,
+      );
+    }
+    insertIndex = input.index;
+    phaseSourceId = goalIds[insertIndex] ?? goalIds[goalIds.length - 1];
+  } else if (input.tail) {
+    insertIndex = goalIds.length;
+    phaseSourceId = goalIds[goalIds.length - 1];
+  } else {
+    const position = input.position ?? 'after';
+    const anchor = input.anchor ? findGoalRecord(projectName, input.anchor) : activeGoal;
+    if (!anchor) {
+      throw new SpacesError(`Anchor goal not found: ${input.anchor}`, 'USER_ERROR', 1);
+    }
+    const anchorIndex = goalIds.indexOf(anchor.id);
+    if (anchorIndex < 0) {
+      throw new SpacesError(`Anchor goal is not in chain ${chain.title}: ${input.anchor ?? anchor.id}`, 'USER_ERROR', 1);
+    }
+    insertIndex = position === 'before' ? anchorIndex : anchorIndex + 1;
+    // With an IMPLICIT anchor (the active goal), `after` lands past any
+    // planned goals already trailing it, so repeated add-after calls append
+    // in the order they were issued. An EXPLICIT --goal anchor is taken
+    // literally: "after X" means immediately after X.
+    if (position === 'after' && !input.anchor) {
+      while (insertIndex < goalIds.length) {
+        const descendant = getGoalRecord(projectName, goalIds[insertIndex]);
+        if (!descendant || descendant.workspaceName) break;
+        insertIndex += 1;
+      }
+    }
+    phaseSourceId = anchor.id;
   }
 
-  goalIds.splice(Math.max(0, insertIndex), 0, newGoal.id);
-  upsertGoalChain(projectName, { ...chain, goalIds });
-  return newGoal;
+  const phaseSource = phaseSourceId ? getGoalRecord(projectName, phaseSourceId) : undefined;
+  const timestamp = nowIso();
+  const pendingGoal: GoalRecord = {
+    version: 2,
+    id: makeGoalId(input.title),
+    chainId: chain.id,
+    title: input.title,
+    projectName,
+    phase: phaseSource?.phase ?? activeGoal.phase,
+    plannedWorkspaceName: sanitizeForFileSystem(input.title) || undefined,
+    doc: defaultGoalDoc(input.title),
+    validation: defaultGoalValidation(),
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+
+  const nextGoalIds = [...goalIds];
+  nextGoalIds.splice(Math.max(0, insertIndex), 0, pendingGoal.id);
+
+  // A brand-new planned goal always reads as phase `plan`. The reorder guard
+  // forbids a descendant from outpacing an ancestor, so the only way this
+  // insert can be illegal is if something at or after `insertIndex` has
+  // already moved past plan. (The new goal as a *descendant* is always fine.)
+  const { goalsById, phases } = buildGoalPhaseMap(projectName, goalIds);
+  for (let i = insertIndex; i < goalIds.length; i += 1) {
+    const descendantId = goalIds[i];
+    const descendantPhase = descendantId ? phases.get(descendantId) : undefined;
+    if (descendantPhase && phaseIndex(descendantPhase) > phaseIndex('plan')) {
+      const descendant = descendantId ? goalsById.get(descendantId) : undefined;
+      throw new SpacesError(
+        `Cannot insert "${input.title}" before "${descendant?.title ?? descendantId}": ${descendantPhase} is further along than plan.`,
+        'USER_ERROR',
+        1,
+      );
+    }
+  }
+  // Surface (never block on) a pre-existing violation in the untouched order.
+  collectPhaseOrderWarning(projectName, goalIds, warnings);
+
+  if (input.dryRun) {
+    return {
+      chain: { ...chain, goalIds: nextGoalIds },
+      goalIds: nextGoalIds,
+      order: describeChainOrder(projectName, nextGoalIds, pendingGoal),
+      goal: pendingGoal,
+      warnings,
+      dryRun: true,
+    };
+  }
+
+  const newGoal = writePlannedGoal(projectName, pendingGoal);
+  const nextChain = upsertGoalChain(projectName, { ...chain, goalIds: nextGoalIds });
+  return {
+    chain: nextChain,
+    goalIds: nextGoalIds,
+    order: describeChainOrder(projectName, nextGoalIds),
+    goal: newGoal,
+    warnings,
+    dryRun: false,
+  };
+}
+
+export function addGoalNearWorkspace(projectName: string, workspaceName: string, title: string, position: 'before' | 'after'): GoalRecord {
+  const result = addGoalToChain(projectName, workspaceName, { title, position });
+  return result.goal as GoalRecord;
+}
+
+export interface RemoveGoalFromChainOptions {
+  /** Required to detach a workspace-backed goal. */
+  force?: boolean;
+  /** Detach from the chain but leave planned/<id>.json on disk. */
+  detachOnly?: boolean;
+  dryRun?: boolean;
+}
+
+/**
+ * Remove a goal from its chain. A planned goal is detached AND its doc is
+ * deleted (unless `detachOnly`). A workspace-backed goal is never dropped
+ * implicitly — it needs `force`, and even then only detaches; the worktree
+ * and its goal.json are left alone.
+ */
+export function removeGoalFromChain(
+  projectName: string,
+  token: string,
+  options: RemoveGoalFromChainOptions = {},
+): ChainMutationResult {
+  const goal = findGoalRecord(projectName, token);
+  if (!goal) {
+    throw new SpacesError(`Goal not found: ${token}`, 'USER_ERROR', 1);
+  }
+
+  const state = readGoalChainState(projectName);
+  const chain = state.chains.find((item) => item.id === goal.chainId);
+  if (!chain) {
+    throw new SpacesError(`Chain not found: ${goal.chainId}`, 'USER_ERROR', 1);
+  }
+  if (!chain.goalIds.includes(goal.id)) {
+    throw new SpacesError(`Goal is not in chain ${chain.title}: ${token}`, 'USER_ERROR', 1);
+  }
+
+  if (goal.workspaceName && !options.force) {
+    throw new SpacesError(
+      `"${goal.title}" is backed by workspace "${goal.workspaceName}". Remove the workspace first ` +
+        `(\`gssh workspace remove ${goal.workspaceName} --project ${projectName}\`), or pass --force to detach ` +
+        'the goal from the chain and leave the worktree in place.',
+      'USER_ERROR',
+      1,
+    );
+  }
+
+  const warnings: string[] = [];
+  const nextGoalIds = chain.goalIds.filter((id) => id !== goal.id);
+  if (nextGoalIds.length === 0) {
+    warnings.push(`Chain "${chain.title}" will have no goals left after this removal.`);
+  }
+  if (goal.workspaceName) {
+    warnings.push(
+      `Workspace "${goal.workspaceName}" and its goal.json are left in place; only the chain link is removed.`,
+    );
+  }
+  // Removing a member of a legal order cannot introduce a violation, but
+  // report it rather than silently swallow if the chain was already bad.
+  collectPhaseOrderWarning(projectName, nextGoalIds, warnings);
+
+  const deletesPlannedDoc = !goal.workspaceName && !options.detachOnly;
+  if (!goal.workspaceName && options.detachOnly) {
+    warnings.push(`Planned doc kept at ${getPlannedGoalPath(projectName, goal.id)} (orphaned — no chain references it).`);
+  }
+
+  if (options.dryRun) {
+    return {
+      chain: { ...chain, goalIds: nextGoalIds },
+      goalIds: nextGoalIds,
+      order: describeChainOrder(projectName, nextGoalIds),
+      goal,
+      warnings,
+      dryRun: true,
+      deletedPlannedDoc: deletesPlannedDoc,
+    };
+  }
+
+  const nextChain = upsertGoalChain(projectName, { ...chain, goalIds: nextGoalIds });
+  if (deletesPlannedDoc) {
+    rmSync(getPlannedGoalPath(projectName, goal.id), { force: true });
+    rmSync(getPlannedGoalValidationDir(projectName, goal.id), { recursive: true, force: true });
+  }
+
+  return {
+    chain: nextChain,
+    goalIds: nextGoalIds,
+    order: describeChainOrder(projectName, nextGoalIds),
+    goal,
+    warnings,
+    dryRun: false,
+    deletedPlannedDoc: deletesPlannedDoc,
+  };
 }
 
 export function moveGoalInChain(projectName: string, sourceToken: string, targetToken: string, position: 'before' | 'after'): GoalChain {
@@ -611,6 +863,49 @@ export function moveGoalInChain(projectName: string, sourceToken: string, target
   withoutSource.splice(insertIndex, 0, source.id);
   assertChainGoalOrderPhasesAllowed(projectName, withoutSource);
   return upsertGoalChain(projectName, { ...chain, goalIds: withoutSource });
+}
+
+/**
+ * Preview a reorder without writing: same resolution + guards as
+ * `moveGoalInChain`, but returns the prospective order instead of saving it.
+ */
+export function previewMoveGoalInChain(
+  projectName: string,
+  sourceToken: string,
+  targetToken: string,
+  position: 'before' | 'after',
+): ChainMutationResult {
+  const source = findGoalRecord(projectName, sourceToken);
+  const target = findGoalRecord(projectName, targetToken);
+  if (!source) {
+    throw new SpacesError(`Goal not found: ${sourceToken}`, 'USER_ERROR', 1);
+  }
+  if (!target) {
+    throw new SpacesError(`Target goal not found: ${targetToken}`, 'USER_ERROR', 1);
+  }
+  if (source.chainId !== target.chainId) {
+    throw new SpacesError('Cannot move goals across chains in the linear MVP.', 'USER_ERROR', 1);
+  }
+  const state = readGoalChainState(projectName);
+  const chain = state.chains.find((item) => item.id === source.chainId);
+  if (!chain) {
+    throw new SpacesError(`Chain not found: ${source.chainId}`, 'USER_ERROR', 1);
+  }
+  const withoutSource = chain.goalIds.filter((id) => id !== source.id);
+  const targetIndex = withoutSource.indexOf(target.id);
+  if (targetIndex < 0) {
+    throw new SpacesError(`Target goal is not in chain: ${targetToken}`, 'USER_ERROR', 1);
+  }
+  withoutSource.splice(position === 'before' ? targetIndex : targetIndex + 1, 0, source.id);
+  assertChainGoalOrderPhasesAllowed(projectName, withoutSource);
+  return {
+    chain: { ...chain, goalIds: withoutSource },
+    goalIds: withoutSource,
+    order: describeChainOrder(projectName, withoutSource),
+    goal: source,
+    warnings: [],
+    dryRun: true,
+  };
 }
 
 export function listProjectGoalKanbanItems(projectName: string): GoalKanbanItem[] {
