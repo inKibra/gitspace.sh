@@ -1,18 +1,14 @@
 /** @jsxImportSource react */
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactElement } from 'react';
-import { PatchDiff } from '@pierre/diffs/react';
-import type { DiffLineAnnotation, FileDiffOptions, SelectedLineRange } from '@pierre/diffs';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
 import type { SessionBackend } from '../session/backend.js';
 import { renderMarkdownHtml } from './markdown-render.js';
-import type { HunkDecision, LineTarget, ReviewChangedFile, ReviewThread } from '../types/review.js';
+import type { ReviewChangedFile, ReviewThread } from '../types/review.js';
 import {
-  guideLineAnnotations,
-  lineRangeLabel,
-  lineTargetFromSelection,
-  withDraftAnnotation,
-  type GuideThreadMeta,
-} from './change-guide-threads.web.js';
-import { CommentComposer, ReviewCommentList } from './review-comment-ui.web.js';
+  ReviewDiffView,
+  requestFileContext,
+  useReviewThreads,
+  type ReviewDiffActions,
+} from './review-diff-view.web.js';
 
 /**
  * ChangeGuidePane — the '⛓ Change Guide' review dock pane (mock: stages/ReviewStage.tsx).
@@ -87,6 +83,8 @@ interface GuideViewState {
   openedDiffPaths: string[];
   /** Marked-complete sections (guide-mode also persists these server-side). */
   doneKeys: string[];
+  /** Files whose unmodified context the reviewer had expanded. */
+  expandedPaths: string[];
 }
 
 const guideViewCache = new Map<string, GuideViewState>();
@@ -162,143 +160,17 @@ export function buildWalkSteps(files: ReviewChangedFile[]): WalkStep[] {
   });
 }
 
-/* ── Line-anchored review threads (rendered INSIDE the diff via annotations) ── */
+/* ── Line-anchored review threads ──────────────────────────────────────────────
+   The thread chrome, the composer and the hover '+' affordance all live in the
+   shared ReviewDiffView now, so the guide and a changed file opened as its own
+   tab render the identical reviewable diff. */
 
-/** Actions the guide's line threads need — one object so the props stay flat. */
-export interface GuideThreadActions {
-  onCreateThread: (target: LineTarget, body: string) => Promise<void>;
-  onAddReply: (threadId: string, body: string) => Promise<void>;
-  onUpdateThread: (threadId: string, updates: { resolved?: boolean; decision?: HunkDecision }) => Promise<void>;
-  onUpdateComment: (threadId: string, commentId: string, body: string) => Promise<void>;
-  onDeleteComment: (threadId: string, commentId: string) => Promise<void>;
-}
+/** @deprecated Prefer ReviewDiffActions — kept as the guide's public prop name. */
+export type GuideThreadActions = ReviewDiffActions;
 
-/**
- * One anchor's worth of threads, rendered inline in the diff at the line the
- * thread targets. Comment rendering + the reply composer are the SHARED ones
- * (review-comment-ui.web.tsx) that ThreadPanel uses — this only adds the
- * in-diff chrome (anchor label, resolve toggle, collapse).
- */
-function InlineThreadCard({ threads, actions }: {
-  threads: ReviewThread[];
-  actions: GuideThreadActions | null;
-}): ReactElement {
-  const [replyingTo, setReplyingTo] = useState<string | null>(null);
-  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
+/* ── Per-file diff block (lazy fetch via get_file_diff, rendered with ReviewDiffView) ── */
 
-  return (
-    <div className="my-1 flex flex-col gap-1">
-      {threads.map((thread) => {
-        const target = thread.target as LineTarget;
-        const isCollapsed = collapsed.has(thread.id);
-        return (
-          <div
-            key={thread.id}
-            data-thread-id={thread.id}
-            className={`border-l-2 bg-[var(--gs-bg-elevated)] px-2.5 py-1.5 font-[family-name:var(--gs-font)] ${
-              thread.resolved ? 'border-l-[var(--gs-border-active)] opacity-70' : 'border-l-[var(--gs-info)]'
-            }`}
-          >
-            <div className="mb-1 flex items-center gap-2 text-[10px]">
-              <button
-                type="button"
-                onClick={() => setCollapsed((prev) => {
-                  const next = new Set(prev);
-                  if (next.has(thread.id)) next.delete(thread.id); else next.add(thread.id);
-                  return next;
-                })}
-                className="text-[var(--gs-text-dim)] hover:text-[var(--gs-text)]"
-                title={isCollapsed ? 'Expand thread' : 'Collapse thread'}
-              >
-                {isCollapsed ? '▸' : '▾'}
-              </button>
-              <span className="font-[family-name:var(--gs-font-mono)] tabular-nums text-[var(--gs-info)]">
-                {lineRangeLabel(target)}
-              </span>
-              <span className="text-[var(--gs-text-dim)]">
-                {thread.comments.length} comment{thread.comments.length === 1 ? '' : 's'}
-              </span>
-              {thread.resolved && <span className="text-[var(--gs-text-dim)]">✓ resolved</span>}
-              {actions && (
-                <button
-                  type="button"
-                  onClick={() => { void actions.onUpdateThread(thread.id, { resolved: !thread.resolved }).catch(() => {}); }}
-                  className="ml-auto border border-[var(--gs-border)] px-1.5 py-px text-[10px] text-[var(--gs-text-muted)] hover:border-[var(--gs-border-active)] hover:text-[var(--gs-text)]"
-                >
-                  {thread.resolved ? 'Re-open' : 'Resolve'}
-                </button>
-              )}
-            </div>
-
-            {!isCollapsed && (
-              <>
-                <ReviewCommentList
-                  comments={thread.comments}
-                  compact
-                  onUpdateComment={actions ? (commentId, body) => actions.onUpdateComment(thread.id, commentId, body) : undefined}
-                  onDeleteComment={actions ? (commentId) => actions.onDeleteComment(thread.id, commentId) : undefined}
-                />
-                {actions && (replyingTo === thread.id ? (
-                  <CommentComposer
-                    placeholder="Write a reply…"
-                    submitLabel="Reply"
-                    rows={2}
-                    compact
-                    onSubmit={async (body) => { await actions.onAddReply(thread.id, body); setReplyingTo(null); }}
-                    onCancel={() => setReplyingTo(null)}
-                  />
-                ) : (
-                  <button
-                    type="button"
-                    onClick={() => setReplyingTo(thread.id)}
-                    className="border border-[var(--gs-border)] px-1.5 py-px text-[10.5px] text-[var(--gs-info)] hover:border-[var(--gs-border-active)]"
-                  >
-                    Reply
-                  </button>
-                ))}
-              </>
-            )}
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-/**
- * The composer for a FRESH line thread, rendered as a draft annotation — inline
- * at the line it targets, through the same slot the resulting thread lands in.
- * The reviewer writes the comment where the comment will end up.
- *
- * Chrome only: the textarea, the submit/cancel keys and the draft retention on
- * a failed write all belong to the shared CommentComposer.
- */
-function InlineDraftComposer({ target, actions, onDone }: {
-  target: LineTarget;
-  actions: GuideThreadActions;
-  onDone: () => void;
-}): ReactElement {
-  return (
-    <div className="my-1 border-l-2 border-l-[var(--gs-accent)] bg-[var(--gs-bg-elevated)] px-2.5 py-1.5 font-[family-name:var(--gs-font)]">
-      <CommentComposer
-        compact
-        rows={3}
-        label={<>Commenting on <span className="font-[family-name:var(--gs-font-mono)] text-[var(--gs-info)]">{lineRangeLabel(target)}</span> · {target.side === 'LEFT' ? 'old' : 'new'} side</>}
-        placeholder="Leave a review comment…"
-        submitLabel="Comment"
-        // A throw keeps the composer open with its text — CommentComposer
-        // surfaces the error and holds the draft, so onDone runs only on a
-        // durable write.
-        onSubmit={async (body) => { await actions.onCreateThread(target, body); onDone(); }}
-        onCancel={onDone}
-      />
-    </div>
-  );
-}
-
-/* ── Per-file diff block (lazy fetch via get_file_diff, rendered with PatchDiff) ── */
-
-function FileDiffBlock({ backend, projectName, workspaceName, file, onOpenFile, threads, actions, anchorKey, gateOpened = false, onGateOpen }: {
+function FileDiffBlock({ backend, projectName, workspaceName, file, onOpenFile, threads, actions, anchorKey, gateOpened = false, onGateOpen, contextOpened = false, onContextOpen }: {
   backend: SessionBackend | null;
   projectName: string;
   workspaceName: string;
@@ -315,16 +187,25 @@ function FileDiffBlock({ backend, projectName, workspaceName, file, onOpenFile, 
   gateOpened?: boolean;
   /** Records the click-gate opening so it survives the next unmount. */
   onGateOpen?: (path: string) => void;
+  /** Restored from the view cache: the reviewer had expanded context here. */
+  contextOpened?: boolean;
+  /** Records a context expansion so it survives the next unmount. */
+  onContextOpen?: (path: string) => void;
 }): ReactElement {
   const [patch, setPatch] = useState<string | null>(null);
   const [state, setState] = useState<'loading' | 'ready' | 'empty' | 'error'>('loading');
   // Windowed rendering (guide diffs accumulate thousands of DOM nodes):
-  // fetch once when first near the viewport, but keep PatchDiff MOUNTED only
+  // fetch once when first near the viewport, but keep the diff MOUNTED only
   // while near — far-away blocks swap to a measured-height spacer so scroll
   // position holds and the DOM stays bounded.
   const [visible, setVisible] = useState(false); // ever been near → fetch
   const [nearView, setNearView] = useState(false); // currently near → mount
   const [renderHuge, setRenderHuge] = useState(gateOpened);
+  /* Expanding unmodified context is a deliberate act, and the expanded ranges
+     live inside the renderer — recycling the block would silently throw them
+     away. So a block the reviewer has expanded opts OUT of windowing and stays
+     mounted. Bounded by construction: only files they actually opened up. */
+  const [pinned, setPinned] = useState(contextOpened ?? false);
   const hostRef = useRef<HTMLDivElement>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
   const heightRef = useRef<number | null>(null);
@@ -362,55 +243,21 @@ function FileDiffBlock({ backend, projectName, workspaceName, file, onOpenFile, 
     return () => { alive = false; };
   }, [visible, backend, projectName, workspaceName, file.path, file.prevPath]);
 
-  /** Above this, PatchDiff+shiki blocks the main thread — gate behind a click. */
+  /** Above this, the renderer + shiki block the main thread — gate behind a click. */
   const HUGE_PATCH_BYTES = 60_000;
   const isHuge = patch !== null && patch.length > HUGE_PATCH_BYTES;
 
-  /* ── Line threads for this file ──────────────────────────────────────────
-     Annotations are derived from the ONE workspace-level get_threads the pane
-     already runs — no per-file/per-line fetching. They're only ever handed to a
-     MOUNTED PatchDiff, so windowed-away and size-gated blocks cost nothing. */
-  const [composeTarget, setComposeTarget] = useState<LineTarget | null>(null);
-
-  const threadAnnotations = useMemo(
-    () => guideLineAnnotations(threads, file.path, file.prevPath),
-    [threads, file.path, file.prevPath],
+  /* The whole file's text, fetched on demand so unmodified gaps can expand.
+     Passed as a thunk: ReviewDiffView decides WHEN (first separator click), the
+     guide only says HOW. */
+  const requestContext = useCallback(
+    () => requestFileContext(backend, projectName, workspaceName, file.path, file.prevPath),
+    [backend, projectName, workspaceName, file.path, file.prevPath],
   );
-
-  /* The pending composer rides the SAME annotation mechanism as the threads, so
-     it opens inline at the selected line rather than under the diff. Overlaid in
-     its own memo: the thread mapping above is the expensive half and shouldn't
-     re-run when the selection moves. */
-  const lineAnnotations = useMemo(
-    () => withDraftAnnotation(threadAnnotations, composeTarget, file.path, file.prevPath),
-    [threadAnnotations, composeTarget, file.path, file.prevPath],
-  );
-
-  const renderAnnotation = useCallback((annotation: DiffLineAnnotation<GuideThreadMeta>) => {
-    const { threads: anchored, draft } = annotation.metadata;
-    return (
-      <>
-        {anchored.length > 0 && <InlineThreadCard threads={anchored} actions={actions} />}
-        {draft && actions && (
-          <InlineDraftComposer target={draft} actions={actions} onDone={() => setComposeTarget(null)} />
-        )}
-      </>
-    );
-  }, [actions]);
-
-  const handleLineSelectionEnd = useCallback((range: SelectedLineRange | null) => {
-    if (!range || !actions) return;
-    setComposeTarget(lineTargetFromSelection(range, file.path));
-  }, [actions, file.path]);
-
-  const diffOptions = useMemo((): FileDiffOptions<GuideThreadMeta> => ({
-    diffStyle: 'unified',
-    theme: 'pierre-dark',
-    disableFileHeader: true,
-    // Selection drives thread creation; read-only surfaces get an inert diff.
-    enableLineSelection: actions !== null,
-    onLineSelectionEnd: handleLineSelectionEnd,
-  }), [actions, handleLineSelectionEnd]);
+  const handleContextLoaded = useCallback(() => {
+    setPinned(true);
+    onContextOpen?.(file.path);
+  }, [onContextOpen, file.path]);
 
   return (
     <div ref={hostRef} data-guide-anchor={anchorKey} className="border border-[var(--gs-border)]">
@@ -427,19 +274,8 @@ function FileDiffBlock({ backend, projectName, workspaceName, file, onOpenFile, 
           )}
         </span>
       </button>
-      <div
-        ref={bodyRef}
-        className="overflow-x-auto"
-        style={{
-          '--diffs-dark-bg': '#000000',
-          '--diffs-addition-color-override': 'rgb(0, 255, 102)',
-          '--diffs-fg-number-override': 'var(--gs-text-ghost)',
-          '--diffs-font-size': '11.5px',
-          '--diffs-line-height': '18px',
-          '--diffs-font-family': 'var(--gs-font)',
-        } as CSSProperties}
-      >
-        {visible && !nearView && state === 'ready' ? (
+      <div ref={bodyRef} className="overflow-x-auto">
+        {visible && !nearView && !pinned && state === 'ready' ? (
           <div style={{ height: heightRef.current ?? 120 }} aria-hidden="true" />
         ) : !visible || state === 'loading' ? (
           <div className="px-2 py-2 text-[11px] text-[var(--gs-text-dim)]">Loading diff…</div>
@@ -456,11 +292,15 @@ function FileDiffBlock({ backend, projectName, workspaceName, file, onOpenFile, 
             )}
           </div>
         ) : patch ? (
-          <PatchDiff
+          <ReviewDiffView
             patch={patch}
-            options={diffOptions}
-            lineAnnotations={lineAnnotations}
-            renderAnnotation={renderAnnotation}
+            filePath={file.path}
+            prevFilePath={file.prevPath}
+            threads={threads}
+            actions={actions}
+            onRequestContext={requestContext}
+            contextKey={`${projectName}/${workspaceName}/${file.path}`}
+            onContextLoaded={handleContextLoaded}
           />
         ) : null}
       </div>
@@ -496,8 +336,9 @@ export function ChangeGuidePane({ backend, projectName, workspaceName, workspace
   const [guideMode, setGuideMode] = useState(false);
   const [specEvolution, setSpecEvolution] = useState<string | null>(null);
   /** ONE get_threads per workspace feeds both the Approve gate and the
-   *  line-anchored inline threads in every file diff. */
-  const [threads, setThreads] = useState<ReviewThread[]>([]);
+   *  line-anchored inline threads in every file diff. Shared with the file-tab
+   *  surface so a comment left in either place is the same thread. */
+  const { threads, actions: threadActions } = useReviewThreads(backend, projectName, workspaceName);
   const [fileStats, setFileStats] = useState<Map<string, { additions?: number; deletions?: number; changeType: string }>>(new Map());
   const scrollRef = useRef<HTMLDivElement>(null);
   const secRefs = useRef<Array<HTMLElement | null>>([]);
@@ -506,9 +347,16 @@ export function ChangeGuidePane({ backend, projectName, workspaceName, workspace
   const viewKey = workspaceId ?? `${projectName}/${workspaceName}`;
   /** Opened click-gates, mirrored in a ref so FileDiffBlock can read it at mount. */
   const openedGatesRef = useRef<Set<string>>(new Set(guideViewCache.get(viewKey)?.openedDiffPaths ?? []));
+  /** Files expanded past their hunks — pinned out of windowing, same as gates. */
+  const expandedPathsRef = useRef<Set<string>>(new Set(guideViewCache.get(viewKey)?.expandedPaths ?? []));
   const [gateTick, setGateTick] = useState(0);
   const noteGateOpen = useCallback((path: string): void => {
     openedGatesRef.current.add(path);
+    setGateTick((t) => t + 1);
+  }, []);
+  const noteContextOpen = useCallback((path: string): void => {
+    if (expandedPathsRef.current.has(path)) return;
+    expandedPathsRef.current.add(path);
     setGateTick((t) => t + 1);
   }, []);
   /** Restore runs once per pane identity per mount. */
@@ -577,57 +425,8 @@ export function ChangeGuidePane({ backend, projectName, workspaceName, workspace
       })
       .catch(() => undefined);
 
-    // Open threads gate Approve (settled: threads block) AND anchor inline.
-    void backend.sendReviewRequest({ op: 'get_threads', projectName, workspaceName })
-      .then((r) => { if (alive && r.op === 'threads') setThreads(r.threads); })
-      .catch(() => undefined);
     return () => { alive = false; };
   }, [backend, projectName, workspaceName, workspaceId, reloadTick]);
-
-  /* ── Line-thread actions ──────────────────────────────────────────────────
-     Every mutation returns the updated thread, so we splice it into local state
-     rather than re-fetching the workspace's threads on each keystroke-sized
-     action. `null` when the backend has no review seam (read-only host / share
-     viewer) — the diffs then render with no comment affordances at all. */
-  const threadActions = useMemo((): GuideThreadActions | null => {
-    if (!backend?.sendReviewRequest) return null;
-    // Bind: the backends implement this as a class method, so it must stay
-    // attached to its receiver (a bare reference loses `this`).
-    const send = (op: Parameters<NonNullable<SessionBackend['sendReviewRequest']>>[0]) =>
-      backend.sendReviewRequest!(op);
-
-    const applyThread = (thread: ReviewThread): void => {
-      setThreads((prev) => prev.some((t) => t.id === thread.id)
-        ? prev.map((t) => (t.id === thread.id ? thread : t))
-        : [...prev, thread]);
-    };
-
-    return {
-      onCreateThread: async (target, body) => {
-        const r = await send({ op: 'create_thread', projectName, workspaceName, target, body });
-        if (r.op === 'thread_created') applyThread(r.thread);
-      },
-      onAddReply: async (threadId, body) => {
-        const r = await send({ op: 'add_reply', projectName, workspaceName, threadId, body });
-        if (r.op === 'comment_added') applyThread(r.thread);
-      },
-      onUpdateThread: async (threadId, updates) => {
-        const r = await send({ op: 'update_thread', projectName, workspaceName, threadId, ...updates });
-        if (r.op === 'thread_updated') applyThread(r.thread);
-      },
-      onUpdateComment: async (threadId, commentId, body) => {
-        const r = await send({ op: 'update_comment', projectName, workspaceName, threadId, commentId, body });
-        if (r.op === 'comment_updated') applyThread(r.thread);
-      },
-      onDeleteComment: async (threadId, commentId) => {
-        const r = await send({ op: 'delete_comment', projectName, workspaceName, threadId, commentId });
-        // Deleting the last comment deletes the thread (core/review.ts) — drop it.
-        if (r.op !== 'comment_deleted') return;
-        if (r.thread.comments.length === 0) setThreads((prev) => prev.filter((t) => t.id !== threadId));
-        else applyThread(r.thread);
-      },
-    };
-  }, [backend, projectName, workspaceName]);
 
   /** Approve gate + the request-changes prompt read off the same thread list. */
   const { threadsOpen, unresolvedSummaries } = useMemo(() => {
@@ -796,6 +595,7 @@ export function ChangeGuidePane({ backend, projectName, workspaceName, workspace
 
     const cached = guideViewCache.get(viewKey);
     openedGatesRef.current = new Set(cached?.openedDiffPaths ?? []);
+    expandedPathsRef.current = new Set(cached?.expandedPaths ?? []);
     setGateTick((t) => t + 1);
     if (!cached) return;
 
@@ -819,6 +619,7 @@ export function ChangeGuidePane({ backend, projectName, workspaceName, workspace
     guideViewCache.set(viewKey, {
       activeSectionKey: steps[active] ? stepKey(steps[active]!) : null,
       openedDiffPaths: [...openedGatesRef.current],
+      expandedPaths: [...expandedPathsRef.current],
       doneKeys: steps.filter((_, i) => done.has(i)).map(stepKey),
     });
   }, [viewKey, steps, active, done, loadState, gateTick]);
@@ -1103,6 +904,8 @@ export function ChangeGuidePane({ backend, projectName, workspaceName, workspace
                     anchorKey={`f${i}:${f.path}`}
                     gateOpened={openedGatesRef.current.has(f.path)}
                     onGateOpen={noteGateOpen}
+                    contextOpened={expandedPathsRef.current.has(f.path)}
+                    onContextOpen={noteContextOpen}
                   />
                 ))}
                 {s.comment && (

@@ -1,6 +1,5 @@
 /** @jsxImportSource react */
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
-import { PatchDiff } from '@pierre/diffs/react';
 import { useFileTree, FileTree } from '@pierre/trees/react';
 import type { GitStatusEntry } from '@pierre/trees';
 import type { SessionBackend } from '../session/backend.js';
@@ -10,6 +9,7 @@ import { KIND_ICON, KIND_LABEL, KIND_ORDER, classifyArtifact, type ArtifactKind,
 import { shareArtifactToClipboard } from './share-artifact.web.js';
 import { Highlighted } from '../blocks/render/highlight.web.js';
 import { deriveNoteLabel } from './note-label.js';
+import { ReviewDiffView, requestFileContext, useReviewThreads } from './review-diff-view.web.js';
 
 /**
  * RightRail — the workspace view's persistent right column (mock: RightRail.tsx).
@@ -328,6 +328,16 @@ export function RepoFilePanel({ backend, workspaceId, projectName, workspaceName
   const [content, setContent] = useState<string | null>(null);
   const [state, setState] = useState<'loading' | 'ready' | 'error'>('loading');
 
+  /* A changed file opened as its own tab is a REVIEW surface, not a preview:
+     same threads, same hover '+', same context expansion as the Change Guide.
+     It used to render a bare read-only PatchDiff, so arriving here from the file
+     tree meant you simply could not comment. */
+  const { threads, actions } = useReviewThreads(backend, projectName, workspaceName);
+  const requestContext = useCallback(
+    () => requestFileContext(backend, projectName, workspaceName, path, prevPath),
+    [backend, projectName, workspaceName, path, prevPath],
+  );
+
   useEffect(() => {
     let alive = true;
     setState('loading');
@@ -368,7 +378,15 @@ export function RepoFilePanel({ backend, workspaceId, projectName, workspaceName
         ) : state === 'error' ? (
           <div className="flex h-full items-center justify-center text-[var(--gs-danger)]">Failed to load {path}</div>
         ) : patch ? (
-          <PatchDiff patch={patch} options={{ diffStyle: 'unified', theme: 'pierre-dark', disableFileHeader: true }} />
+          <ReviewDiffView
+            patch={patch}
+            filePath={path}
+            prevFilePath={prevPath}
+            threads={threads}
+            actions={actions}
+            onRequestContext={requestContext}
+            contextKey={`${projectName}/${workspaceName}/${path}`}
+          />
         ) : langForPath(path) ? (
           <Highlighted text={(content ?? '').slice(0, 300_000)} lang={langForPath(path)} name={path} />
         ) : (
