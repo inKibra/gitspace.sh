@@ -29,7 +29,31 @@ Use this skill when asked to author, fulfill, or judge a goal's validation contr
 - **Slice**: a heading-anchored section of the goal doc. Ids are slugified headings, parsed at read time — `space goal doc slices` lists them. `--slice` grounds a requirement in the doc section it proves; dangling ids warn (amber), never fail.
 - **Phase** (`wfPhase`): the workflow phase that OWES a requirement. Set with `--phase` at authoring (defaults to the open journal phase). The phase's gate blocks `journal phase-end` until every owed required requirement is `accepted`. Unknown phase names warn — the workflow's phase list is canonical.
 
+## Target another goal in the chain (`--goal`)
+
+Every verb below defaults to the **current workspace's** goal, but takes
+`--goal <id | workspace name | planned workspace name | title>` to act on **any
+goal in the chain** — including a *planned* goal that has no workspace yet.
+That is how you author a downstream goal's contract before anyone starts it:
+
+```sh
+space goal show     --goal billing-ui          # read another goal
+space goal set      --goal billing-ui --body "# Billing UI\n\n## Objective\n…"
+space goal doc slices --goal billing-ui        # its slice ids
+space goal requirement add --goal billing-ui \
+  --title "Checkout screenshot" --kind screenshot --rubric "Cart totals visible" \
+  --gen manual --judge human --slice objective
+space goal status   --goal billing-ui          # its readiness
+```
+
+Use `space chain show` to see the chain and pick a target. Authoring a planned
+goal's doc + contract up front is the intended way to plan a multi-goal block —
+you do NOT need to make the goal active first.
+
 ## Authoring requirements
+
+These examples act on the current workspace's goal; add `--goal <target>` to any
+of them to author a different goal in the chain.
 
 ```sh
 # Declare a manual + human requirement
