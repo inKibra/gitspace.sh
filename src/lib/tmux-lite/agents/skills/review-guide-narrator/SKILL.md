@@ -11,8 +11,14 @@ structure; you ONLY write prose for the clusters it marked stale.
 
 ## Process
 
-1. `gssh space guide analyze` — builds and commits the worksheet
-   (base = the project's configured base branch).
+1. `gssh space guide analyze` — builds and commits the worksheet. The base
+   defaults to the project's configured base branch, but it is NOT fixed:
+   `gssh space guide analyze --base <ref>` diffs against any ref. Use it when
+   the review should be scoped to something other than the project base (a
+   stacked parent branch, a tag, an earlier sha). Whatever you pass becomes the
+   worksheet's `baseRef`, which is the ref your `git diff` reads in step 3 —
+   so re-analyze rather than hand-diffing a different base.
+   Add `--json` for structured output.
 2. Read `.gitspace/artifacts/review/analysis.json`. Clusters arrive in READER
    ORDER; big components are pre-split into build-order beats via
    `signals.beat = { component, seq, of }` — beat 1 is the foundation layer
@@ -36,6 +42,9 @@ structure; you ONLY write prose for the clusters it marked stale.
    "specEvolution": "..." }`, then `gssh space guide submit --file sections.json`.
    Fix validation errors and resubmit — coverage of every stale cluster is
    enforced server-side.
+5. `gssh space guide show` — read back the committed guide to confirm what
+   landed (`--json` for the structured form). Use it to check which sections
+   carried over as non-stale before re-narrating anything.
 
 ## Storytelling rules (the part that makes it a guide, not a list)
 

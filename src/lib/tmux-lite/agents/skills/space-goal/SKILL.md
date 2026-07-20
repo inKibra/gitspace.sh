@@ -21,7 +21,7 @@ Use this skill when asked to author, fulfill, or judge a goal's validation contr
 - **Requirement**: a declared expectation with `kind`, `title`, `rubric`, `generation`, `judgment`, and `required` flag.
 - **Kind**: `screenshot | video | test-output | note | file | url`.
 - **Generation**: how evidence appears — `manual` (a human/agent attaches it) or `command` (a command produces it).
-- **Judgment**: how evidence is judged — `human` (Pass / Needs changes / Fail with a note), `llm` (an LLM applies the rubric), or `command` (a shell command applies the rubric with a structured `expect`).
+- **Judgment**: how evidence is judged — `human` (Pass / Needs changes / Fail with a note), `llm` (**runner NOT implemented — see below; judge it yourself with `requirement verdict`**), or `command` (a shell command applies the rubric with a structured `expect`).
 - **Expect** (command judgment): `exit-zero | stdout-contains | stderr-empty | output-matches`.
 - **Same-run judgment** (default for command-generated requirements): the generation run IS the judged run — `expect` is applied to its captured exit/stdout/stderr. One execution, one verdict. Never pass `--judge-command` with the same command as `--gen-command`; only pass it when a genuinely different command judges the evidence.
 - **Status**: `missing | review | accepted`.
@@ -39,6 +39,8 @@ That is how you author a downstream goal's contract before anyone starts it:
 ```sh
 space goal show     --goal billing-ui          # read another goal
 space goal set      --goal billing-ui --body "# Billing UI\n\n## Objective\n…"
+space goal set      --goal billing-ui --file docs/billing-goal.md   # or --stdin
+space goal edit     --goal billing-ui          # open in $EDITOR (--editor <cmd> to override)
 space goal doc slices --goal billing-ui        # its slice ids
 space goal requirement add --goal billing-ui \
   --title "Checkout screenshot" --kind screenshot --rubric "Cart totals visible" \
@@ -83,7 +85,13 @@ space goal requirement add \
   --gen command --gen-command "bun run build" \
   --judge command --judge-command "node scripts/check-bundle-size.mjs" --expect exit-zero
 
-# Declare an LLM-judged requirement
+# Declare an LLM-judged requirement.
+# WARNING: the LLM judgment runner is NOT implemented. `review run` on this
+# requirement records an amber "not yet implemented" review and never accepts
+# it, so the owing phase's gate stays blocked. You must close it yourself with
+# `space goal requirement verdict --accept|--reject --notes "…"`. Prefer
+# `--judge human` unless you specifically want the llm label; the closing
+# action is identical either way.
 space goal requirement add \
   --title "Video demonstrating evidence → review → readiness" \
   --kind video \
@@ -123,8 +131,12 @@ space goal artifact attach --requirement "Screenshot showing the hover state" --
 # Manual: attach a URL (only for URL requirements)
 space goal artifact attach --requirement "Deployed preview URL" --url https://preview.example.com/pr-42
 
-# Manual: attach a note body
+# Manual: attach a note body (--file <path> / --stdin read the body instead)
 space goal artifact attach --requirement "Diff summary of routing changes" --body "Removed redundant projection; routed connectors through anchor map."
+
+# Any attach takes --name <label> to set the artifact's display label
+space goal artifact attach --requirement "Screenshot showing the hover state" \
+  --path /abs/path/to/shot.png --name "Hover state, 100% zoom"
 
 # Command-generated evidence: run the configured generation command
 space goal artifact run --requirement "Focused tests pass"
@@ -135,13 +147,17 @@ space goal artifact run --requirement "Focused tests pass"
 ## Judging requirements
 
 ```sh
-# Run the configured judgment (command or LLM). Same-run command judgments
-# judge the LATEST generation run's captured output — the command is not
-# re-executed. Errors if no generation run exists yet (run `artifact run` first).
+# Run the configured judgment. COMMAND judgments only — same-run command
+# judgments judge the LATEST generation run's captured output, the command is
+# not re-executed. Errors if no generation run exists yet (run `artifact run`
+# first). Do NOT use this for llm-judged requirements: the llm runner is
+# unimplemented and only records an unavailable review (see below).
 space goal review run --requirement "Focused tests pass"
 
-# Record a human review (required for human-judged requirements)
-space goal review record --requirement "Hover screenshot" --decision pass --body "Hover state matches the spec."
+# Record a human review (required for human-judged requirements).
+# Optional: --score <0-100> (rejected outside that range), --created-by <name>
+# as a reviewer identity label, and --file <path>/--stdin instead of --body.
+space goal review record --requirement "Hover screenshot" --decision pass --body "Hover state matches the spec." --score 90 --created-by reviewer-agent
 space goal review record --requirement "Hover screenshot" --decision changes --body "Status colors still hard to distinguish at 100% zoom."
 space goal review record --requirement "Hover screenshot" --decision fail --body "Wrong artifact attached."
 
@@ -152,10 +168,32 @@ space goal requirement verdict --requirement "Rails hover screenshot" \
   --accept --notes "Screenshot shows the kind-grouped rail on hover; colors match the mock per rubric line 1."
 space goal requirement verdict --requirement "Rails hover screenshot" \
   --reject --notes "Rail is visible but ungrouped; rubric requires kind grouping."
+
+# Optional reviewer identity label on a verdict
+space goal requirement verdict --requirement "Rails hover screenshot" \
+  --accept --notes "…" --created-by review-agent
 ```
 
 Command-judged requirements refuse `verdict` — they auto-judge via `review run`.
 Gate waives are human-only (UI button); there is no CLI waive.
+
+### LLM-judged requirements: judge them yourself
+
+**The LLM judgment runner is not implemented.** `space goal review run` on an
+`llm` requirement records an *amber* review whose note reads "LLM judgment
+runner is not yet implemented…" and sets the status to `review`. It never sets
+`accepted`. Since phase gates count only `accepted`, an llm requirement left to
+`review run` blocks `space journal phase-end` permanently.
+
+The working path is to apply the rubric yourself and record the verdict:
+
+```sh
+space goal requirement verdict --requirement "<title>" --accept --notes "<what you examined, against which rubric line>"
+```
+
+This is the same command `phase-end` prints for you when it lists an owed
+llm-judged requirement. `--notes` is mandatory — it is the grounding record that
+stands in for the missing runner.
 
 Decisions:
 - `pass` → status becomes `accepted`.
@@ -169,20 +207,34 @@ A note is **required** for `changes` and `fail`. A passing review without a note
 1. Read the goal doc (`space goal show`) and the current readiness (`space goal status`).
 2. If no requirements are declared, declare them first. Phrase requirements as intent ("Screenshot showing the full chain hover state"), not as storage records ("upload PNG").
 3. For each missing requirement, decide between manual attachment or command generation based on what already exists in the repo.
-4. After attaching/generating evidence, judge the requirement. Prefer command judgments when a check is automatable (tests, linters, exit codes). Use human judgment for taste-based artifacts (screenshots, videos, design notes). Use LLM judgment when the rubric is text-evaluable but you can't enumerate it (e.g. "video shows state transitions").
+4. After attaching/generating evidence, judge the requirement. Prefer command judgments when a check is automatable (tests, linters, exit codes). Use human judgment for taste-based artifacts (screenshots, videos, design notes). `llm` judgment is only a *label* today — its runner is unimplemented, and you close it with `requirement verdict` exactly as you would a human-judged one.
 5. Re-run `space goal status` to confirm readiness. The aggregate sentence is the deliverable, not the table.
 
 ## Readiness phrasing
 
-`space goal status` produces one of:
+`space goal status` prints **four lines**, not one sentence:
+
+```text
+Validation readiness for <goal title>: <ready | not-ready | awaiting-review>
+<summary sentence>
+<detail — the non-zero counts, joined by " · ">
+Required: N · missing: N · review: N · accepted: N
+```
+
+The **summary** (line 2) is the sentence to quote. It is exactly one of:
 
 - `No required artifacts declared.` — author the contract.
+- `Ready: all required artifacts passed judgment.` — done.
+- `N requirement(s) failed review.` — fix the artifact and re-attach. Checked
+  BEFORE missing, so a failed review is reported even while artifacts are also missing.
 - `N required artifact(s) missing.` — produce evidence.
 - `N artifact(s) attached but not judged.` — judge them.
-- `N requirement(s) failed review.` — fix the artifact and re-attach.
-- `Ready: all required artifacts passed judgment.` — done.
 
-Do not paraphrase readiness as "looks good" or "I think we're done." Quote the sentence.
+Counts are properly pluralized (`1 required artifact missing.` /
+`2 required artifacts missing.`) — the `(s)` above is shorthand, not literal
+output. Quote the summary line as printed; do not paraphrase readiness as
+"looks good" or "I think we're done." Use `--json` for `{goalId, readiness}`
+when you need the fields rather than the prose.
 
 ## Non-goals
 

@@ -58,11 +58,40 @@ space events list --correlation-id req_123 --limit 200
 # Oldest startup events in a time window
 space events list --process web --since 30m --event process.start --head 20
 
+# Bounded time window: --since and --until both accept a duration or ISO timestamp
+space events list --process web --since 2h --until 30m --limit 200
+
+# Control sort order explicitly (asc = oldest first, desc = newest first)
+space events list --process web --since 1h --order asc
+
 # Inspect one event in full
 space events show --event-id evt_123
 ```
 
-`tail` prints recent events and exits. Use `tail --follow` when continuous streaming is required.
+### `list --tail` vs `tail` — two different things
+
+`--tail [n]` is BOTH a flag on `list` and a separate `events tail` subcommand.
+They are not interchangeable:
+
+- **`space events list --tail [n]`** — a *windowing* flag. `list` applies your
+  filters across the log, then returns the NEWEST n of the matches. Its
+  counterpart is `--head [n]` (oldest n). Use this when you want the last n
+  events *matching a query*.
+- **`space events tail`** — a *subcommand* with its own defaults (`--limit 50`
+  rather than list's 100) and its own flag set. It is the "show me what just
+  happened" verb, and it is the ONLY one that can stream: `--follow`.
+  Without `--follow` it prints recent events and exits.
+
+`tail` also takes `--event-id <id>` and `--correlation-id <id>`, so you can
+follow a single correlated workflow live:
+
+```sh
+space events tail --correlation-id req_123 --follow
+```
+
+Both verbs share `--filter`, `--process`, `--level`, `--event`, `--event-id`,
+`--correlation-id`, `--since`, and `--until`. Only `list` has `--head`,
+`--tail`, and `--order`; only `tail` has `--follow`.
 
 ## Instrumentation guidance
 

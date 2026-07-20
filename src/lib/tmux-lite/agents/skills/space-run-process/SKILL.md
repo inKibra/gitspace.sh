@@ -29,6 +29,57 @@ space events tail --filter processName=web --limit 50
 
 Outside a workspace, use the `gssh workspace service ... --project <p> --workspace <w>` variants.
 
+### Choosing which URL `service open` opens
+
+A service can expose several HTTP ports, and each port can have both a local
+`localhost` URL and a hosted (remote) URL. Say which one you mean:
+
+```sh
+space service open --name web --port api    # one port, by name or number
+space service open --name web --all         # every HTTP port on the service
+space service open --name web --local       # prefer local localhost URLs
+space service open --name web --remote      # require a hosted URL (fails if hosting is off)
+```
+
+`--local` is a preference; `--remote` is a requirement. Report which URL you
+actually opened — do not assume a hosted URL exists.
+
+## Hosting: how a service gets a remote URL
+
+`--remote` only resolves when tmux-lite service hosting is configured. That is a
+separate subsystem from the process config:
+
+```sh
+space hosting status          # is hosting on, and under which base host + machine name
+space hosting select [host]   # choose the base host for hosted service routes
+space hosting set-name <name> # machine name used in hosted routes
+space hosting enable          # / disable / clear
+```
+
+Check `space hosting status` before promising anyone a remote URL, and before
+diagnosing `--remote` failures as a process problem — an unhosted workspace is
+the more common cause.
+
+## Bundle: workspace inputs and secrets
+
+Process commands often read values that come from the workspace bundle rather
+than from `processes.json`. When a process is missing config or a secret:
+
+```sh
+space bundle status            # bundle state for this workspace
+space bundle show              # current values, secret SET-status, confirm status
+space bundle refresh [--force] # re-run onboarding (previous values become defaults)
+
+# All four edit flags are repeatable
+space bundle edit --input <key=value>
+space bundle edit --secret <key>          # PROMPTS for the value; never pass it inline
+space bundle edit --secret-unset <key>
+space bundle edit --confirm <id=passed|skipped>
+```
+
+`space bundle show` reports whether a secret is set, never its value — keep it
+that way in anything you report.
+
 ## State model
 
 - `configured`: process exists in `.gitspace/processes.json`.
@@ -51,7 +102,8 @@ Outside a workspace, use the `gssh workspace service ... --project <p> --workspa
 
 Process output is often the evidence a goal requirement is asking for. Don't capture it separately from the validation contract:
 
-- For `test-output` requirements with command generation, the rubric command is the process command. Wire it via `space goal requirement add --gen command --gen-command "<test command>" --judge command --judge-command "<test command>" --expect exit-zero`, then call `space goal artifact run --requirement "<title>"`. The run captures stdout/stderr/exit and auto-judges on exit-zero.
+- For `test-output` requirements with command generation, the rubric command is the process command. Wire it via `space goal requirement add --gen command --gen-command "<test command>" --expect exit-zero` — **omit `--judge` and `--judge-command` entirely**. That is a same-run judgment: `--expect` is applied to the generation run's own captured exit/stdout/stderr. Then call `space goal artifact run --requirement "<title>"`; the run captures stdout/stderr/exit and auto-judges on exit-zero. One execution, one verdict.
+- **Never repeat the generation command as `--judge-command`.** Same-run detection is plain string equality between the two commands, so any drift at all — an extra flag, different whitespace, a changed path — silently stops matching and `review run` executes your entire test suite a **second** time as a separate real subprocess. There is no warning when this happens. Only pass `--judge-command` when a genuinely different command judges the evidence.
 - For requirements that depend on process readiness (e.g. "API responds at /healthz"), prefer a command judgment that exits zero when readiness is observed (`curl --fail -sS http://127.0.0.1:$PORT/healthz`). Wire it as `--judge command --judge-command "<probe>" --expect exit-zero`.
 - When attaching saved process logs as evidence, scope to a requirement: `space goal artifact attach --requirement "<title>" --path <log-path>`.
 - A process being `ready` does not mark a goal requirement `accepted`. The mapping is explicit: a successful command judgment writes the review.

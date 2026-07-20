@@ -32,11 +32,28 @@ Teach the actual GitSpace process config file, not an invented readiness schema:
       },
       "ports": [{ "name": "web", "protocol": "http" }],
       "events": { "enabled": true },
-      "restart": "on-failure"
+      "restart": { "policy": "on-failure", "maxAttempts": 5, "backoffMs": 2000, "maxBackoffMs": 30000 }
     }
   ]
 }
 ```
+
+`restart` is an **object**, never a string. Writing `"restart": "on-failure"` does not
+configure restarts — it silently disables them, because the policy is read as
+`definition.restart?.policy`, which is `undefined` on a string and falls back to
+`never`. Only `policy` is required; `maxAttempts` (5), `backoffMs` (2000), and
+`maxBackoffMs` (30000) default as shown.
+
+**Do not rely on the loader to catch your mistakes.** Config validation is
+partial and the normalizer passes most fields straight through. A misspelled
+key, a wrong type, or an invented field is typically **ignored** — the default
+silently applies, and depending on the call path you may get a stderr warning
+or nothing at all. Unknown/extra fields are never an error.
+
+So "the process started and nothing complained" is NOT proof your config was
+understood. After editing `.gitspace/processes.json`, verify the behavior you
+configured actually happens — e.g. kill the process and confirm it really
+restarts — rather than trusting the file.
 
 Current process config supports command/args/cwd/env/instances/autostart/restart/events/ports. It does not currently have first-class readiness-check or stop-timeout fields, so readiness must be emitted by the process and verified by the operator/agent.
 

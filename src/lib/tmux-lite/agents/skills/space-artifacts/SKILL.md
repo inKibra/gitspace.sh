@@ -11,6 +11,12 @@ description: The workspace artifacts filesystem — what lives at .gitspace/arti
 > The top-level `gssh artifacts …` commands (provision/status/sync/rollup) are a
 > separate maintainer/host surface, not part of the in-session `space` CLI.
 
+> **Orient first:** `space context` (add `--json` for fields) resolves where you
+> actually are — project, workspace, workspace status, and note/todo counts.
+> Run it before any workspace-scoped command when you are unsure which
+> project+workspace you are operating on; every `space` verb below is scoped to
+> that resolved context.
+
 `.gitspace/artifacts/` is a real git worktree on this workspace's **artifacts
 branch** (one branch per workspace, off `main`; roll-up merges it to `main`
 when the workspace ships). Everything in it is versioned, travels with the
@@ -183,7 +189,7 @@ process runs on. What you produce, per stage:
 
 **Ship** (post-merge ops):
 - Close the final journal phase; ensure workflow statuses are final.
-- Roll-up (`gssh artifacts rollup`) merges the whole record — canon history,
+- Roll-up (`gssh artifacts rollup <workspace>`) merges the whole record — canon history,
   journal, evidence, dashboards, guide — into `main`. Your artifacts become
   the project's institutional memory and the seed corpus for the next chain's
   precedents.
@@ -200,7 +206,7 @@ WHY from what you left behind? If not, the artifact is missing or hollow.
   goal-state pastes) — link or pin hashes instead.
 - Prefer the CLIs (`space goal|notes|journal|guide`, `space
   artifacts commit|promote|share|scratch-path|repair`, and the top-level
-  `gssh artifacts status|sync|rollup` maintainer commands)
+  `gssh artifacts status|sync|rollup <workspace>` maintainer commands)
   over raw writes when one exists — they validate, snapshot state, and
   record provenance.
 - Never `--no-verify` in the artifacts mount; if the publish gate refuses a

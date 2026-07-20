@@ -23,9 +23,36 @@ Use this skill when asked to create, inspect, update, or apply workspace notes.
 
 ## How to create or update notes
 
-- Use GitSpace notes commands, not direct edits to the JSON storage.
+Use these commands, not direct edits to the JSON storage. Every verb takes
+`--json` for structured output; `list` and `hunks`-style reads take
+`--format json|text` instead.
+
+```sh
+space notes list --format json          # ids + metadata (json is the default)
+
+# Create. --body inline, or --stdin for multi-line markdown (preferred for real bodies).
+space notes add --body "Routing decision: connectors go through the anchor map."
+cat draft.md | space notes add --stdin
+space notes add --stdin --todo --priority high   # a todo instead of a note
+
+# Update by id. Only the flags you pass change.
+space notes update --id <id> --body "<new markdown>"
+space notes update --id <id> --priority medium
+space notes update --id <id> --todo     # convert note → todo
+space notes update --id <id> --note     # convert todo → note
+space notes update --id <id> --done     # or --undone
+
+# Todo state has dedicated verbs
+space notes done   --id <id>
+space notes undone --id <id>
+
+space notes remove --id <id>
+```
+
+- Priority is `low | medium | high`, and only meaningful on todos.
+- `update --body` REPLACES the body. To append, read the note first
+  (`list --format json`), compose the full new body, then write it back.
 - Preserve note IDs and user-written structure when updating.
-- Use stdin/body flags for markdown bodies; mark todo state with the dedicated note commands when applicable.
 
 ## Applying notes
 

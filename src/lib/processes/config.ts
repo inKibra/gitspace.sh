@@ -166,6 +166,23 @@ function normalizeProcessDefinition(process: unknown): ProcessDefinition | null 
   };
 }
 
+/** Most call sites use `loadProcessesConfig`, which drops the diagnostic. A bad
+ *  field (e.g. `"restart": "on-failure"` instead of `{"policy":"on-failure"}`)
+ *  would then be ignored in silence, so warn once per distinct problem. */
+const warnedConfigProblems = new Set<string>();
+
+function warnOnceAboutConfigProblem(path: string, message: string): void {
+  const key = `${path}\u0000${message}`;
+  if (warnedConfigProblems.has(key)) return;
+  warnedConfigProblems.add(key);
+  console.error(`[processes] ${message} (${path})`);
+}
+
+/** Test seam: forget which problems have already been reported. */
+export function resetProcessesConfigWarnings(): void {
+  warnedConfigProblems.clear();
+}
+
 export function getProcessesConfigPath(workspacePath: string): string {
   return join(workspacePath, '.gitspace', 'processes.json');
 }
@@ -186,6 +203,7 @@ export function loadProcessesConfigWithDiagnostics(workspacePath: string): Proce
     parsed = parseJsonc(raw) as ProcessesConfig;
   } catch (error) {
     const message = error instanceof Error ? error.message : 'invalid JSONC';
+    warnOnceAboutConfigProblem(path, `Failed to parse .gitspace/processes.json: ${message}`);
     return {
       config: { processes: [] },
       error: `Failed to parse .gitspace/processes.json: ${message}`,
@@ -201,10 +219,9 @@ export function loadProcessesConfigWithDiagnostics(workspacePath: string): Proce
   };
   const validation = validateProcessesConfig(normalized);
   if (!validation.valid) {
-    return {
-      config: normalized,
-      error: `Invalid .gitspace/processes.json: ${validation.errors.join(', ')}`,
-    };
+    const message = `Invalid .gitspace/processes.json: ${validation.errors.join(', ')}`;
+    warnOnceAboutConfigProblem(path, message);
+    return { config: normalized, error: message };
   }
   return { config: normalized, error: null };
 }

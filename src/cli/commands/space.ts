@@ -141,8 +141,9 @@ function registerSpaceArtifactsCommands(space: Command): void {
       const ctx = requireSessionContext();
       const { send } = await import('../../lib/tmux-lite/cli.js');
       const { formatArtifactUri, parseLocalRef, localScratchRel } = await import('../../core/artifact-cap.js');
-      // `local://<rel>` shares point at session scratch. Scratch is uncommitted,
-      // so it can only be served LIVE (there is no commit to pin).
+      // `local://<rel>` is the artifacts MOUNT root (artifact-cap.ts): it names
+      // the working-tree file `<rel>` in the mount, which may not be committed
+      // yet — so it is always served LIVE (there is no commit to pin).
       const localRel = parseLocalRef(relPath);
       const mountRel = localRel ? localScratchRel(localRel) : relPath;
       const r = await send({
@@ -221,7 +222,7 @@ function registerSpaceArtifactsCommands(space: Command): void {
 
   artifacts
     .command('promote <source> <destRelPath>')
-    .description('Promote a working file (e.g. session scratch) into the versioned artifacts tree — the TYPING act')
+    .description('Promote an uncommitted working file (e.g. a local:// file in the artifacts mount) into the versioned artifacts tree — the TYPING act')
     .option('-m, --message <message>', 'Commit message')
     .action(withErrorHandler(async (source: string, destRelPath: string, options: { message?: string }) => {
       const ctx = requireSessionContext();
@@ -232,8 +233,8 @@ function registerSpaceArtifactsCommands(space: Command): void {
       const { existsSync } = await import('fs');
       const projectDir = getProjectDir(ctx.project);
       const mount = artifactsMountDir(join(projectDir, 'workspaces', ctx.workspace));
-      // `local://<rel>` sources resolve to session scratch; anything else is a
-      // plain filesystem path.
+      // `local://<rel>` sources resolve inside the artifacts mount; anything
+      // else is a plain filesystem path.
       const localRel = parseLocalRef(source);
       const src = localRel ? resolveLocalScratch(mount, localRel).absPath : resolve(source);
       if (!existsSync(src)) {
@@ -249,7 +250,7 @@ function registerSpaceArtifactsCommands(space: Command): void {
 
   artifacts
     .command('scratch-path <rel>')
-    .description('Print the absolute path of a local:// session-scratch file (creates the dir); write drafts there, then promote/share by local://<rel>')
+    .description('Print the absolute path a local://<rel> reference resolves to — <rel> inside the artifacts mount (parent dirs are created). Write drafts there, then promote/share them by local://<rel>')
     .action(withErrorHandler(async (rel: string) => {
       const ctx = requireSessionContext();
       const { getProjectDir } = await import('../../core/config.js');
@@ -425,7 +426,7 @@ function registerSpaceGoalCommands(space: Command): void {
 
   doc
     .command('slices')
-    .description('List slice ids (slugified headings) parsed from the goal doc — the ids --slice and workflow phases reference')
+    .description('List slice ids (slugified headings) parsed from a goal doc — any goal in the project via --goal (defaults to the active workspace goal). These are the ids --slice and workflow phases reference')
     .option('--goal <goal>', 'Goal id, workspace name, planned workspace name, or title')
     .option('--json', 'Output structured JSON')
     .action(withErrorHandler(async (options) => {
@@ -436,7 +437,7 @@ function registerSpaceGoalCommands(space: Command): void {
 
   goal
     .command('status')
-    .description('Show validation readiness for this goal')
+    .description('Show validation readiness for a goal — any goal in the project via --goal (defaults to the active workspace goal)')
     .option('--goal <goal>', 'Goal id, workspace name, planned workspace name, or title')
     .option('--json', 'Output structured JSON')
     .action(withErrorHandler(async (options) => {
@@ -451,13 +452,13 @@ function registerSpaceGoalCommands(space: Command): void {
 
   requirement
     .command('add')
-    .description('Declare an artifact requirement on the validation contract')
+    .description('Declare an artifact requirement on a goal validation contract — any goal in the project via --goal (defaults to the active workspace goal)')
     .requiredOption('--title <title>', 'Requirement title (e.g. "Screenshot showing the hover state")')
     .requiredOption('--kind <kind>', 'Artifact kind: screenshot, video, test-output, note, file, url')
     .requiredOption('--rubric <text>', 'Acceptance criteria: what makes this evidence acceptable')
     .requiredOption('--gen <kind>', 'Generation: manual | command')
     .option('--gen-command <command>', 'Command to run when --gen=command')
-    .option('--judge <kind>', 'Judgment: human | llm | command. Defaults to same-run command judgment with --gen command (--expect judges the generation run itself)')
+    .option('--judge <kind>', 'Judgment: human | llm | command. Defaults to same-run command judgment with --gen command (--expect judges the generation run itself). llm has NO runner yet — it behaves like human: close it with `requirement verdict`')
     .option('--judge-command <command>', 'Separate judgment command when --judge=command. Omit it with --gen command for same-run judging — do NOT repeat the generation command here')
     .option('--expect <kind>', 'Command expectation: exit-zero | stdout-contains | stderr-empty | output-matches', 'exit-zero')
     .option('--expect-needle <text>', 'Required substring when --expect=stdout-contains')
@@ -476,14 +477,14 @@ function registerSpaceGoalCommands(space: Command): void {
 
   requirement
     .command('update')
-    .description('Update an existing requirement on the validation contract')
+    .description('Update an existing requirement on a goal validation contract — any goal in the project via --goal (defaults to the active workspace goal)')
     .requiredOption('--requirement <requirement>', 'Requirement id or title')
     .option('--title <title>', 'New requirement title')
     .option('--kind <kind>', 'Artifact kind: screenshot, video, test-output, note, file, url')
     .option('--rubric <text>', 'Acceptance criteria')
     .option('--gen <kind>', 'Generation: manual | command')
     .option('--gen-command <command>', 'Command to run when --gen=command')
-    .option('--judge <kind>', 'Judgment: human | llm | command')
+    .option('--judge <kind>', 'Judgment: human | llm | command (llm has no runner yet — it behaves like human: close it with `requirement verdict`)')
     .option('--judge-command <command>', 'Separate judgment command when --judge=command. Omit it on command-generated requirements for same-run judging — do NOT repeat the generation command')
     .option('--expect <kind>', 'Command expectation: exit-zero | stdout-contains | stderr-empty | output-matches')
     .option('--expect-needle <text>', 'Required substring when --expect=stdout-contains')
@@ -501,7 +502,7 @@ function registerSpaceGoalCommands(space: Command): void {
 
   requirement
     .command('remove')
-    .description('Remove an artifact requirement from this goal')
+    .description('Remove an artifact requirement from a goal — any goal in the project via --goal (defaults to the active workspace goal)')
     .requiredOption('--requirement <requirement>', 'Requirement id or title')
     .option('--goal <goal>', 'Goal id, workspace name, planned workspace name, or title')
     .option('--json', 'Output structured JSON')
@@ -513,7 +514,7 @@ function registerSpaceGoalCommands(space: Command): void {
 
   requirement
     .command('list')
-    .description('List artifact requirements on this goal')
+    .description('List artifact requirements on a goal — any goal in the project via --goal (defaults to the active workspace goal)')
     .option('--goal <goal>', 'Goal id, workspace name, planned workspace name, or title')
     .option('--json', 'Output structured JSON')
     .action(withErrorHandler(async (options) => {
@@ -524,7 +525,7 @@ function registerSpaceGoalCommands(space: Command): void {
 
   requirement
     .command('reorder')
-    .description('Move an artifact requirement to a specific position (0-indexed)')
+    .description('Move an artifact requirement to a specific position (0-indexed) on any goal in the project via --goal (defaults to the active workspace goal)')
     .requiredOption('--requirement <requirement>', 'Requirement id or title')
     .requiredOption('--position <index>', '0-indexed target position', (v) => parseInt(v, 10))
     .option('--goal <goal>', 'Goal id, workspace name, planned workspace name, or title')
@@ -537,7 +538,7 @@ function registerSpaceGoalCommands(space: Command): void {
 
   requirement
     .command('verdict')
-    .description('Record an accept/reject verdict against the rubric (llm/human-judged requirements — in-phase judging; command-judged use `review run`)')
+    .description('Record an accept/reject verdict against the rubric on any goal in the project via --goal (defaults to the active workspace goal). For llm/human-judged requirements — in-phase judging; command-judged use `review run`')
     .requiredOption('--requirement <requirement>', 'Requirement id or title')
     .option('--accept', 'The evidence satisfies the rubric — status becomes accepted (what phase gates count)')
     .option('--reject', 'The evidence does not satisfy the rubric — status stays review')
@@ -553,7 +554,7 @@ function registerSpaceGoalCommands(space: Command): void {
 
   requirement
     .command('reopen')
-    .description('Reopen a requirement for re-review (sets status back to review)')
+    .description('Reopen a requirement for re-review (sets status back to review) on any goal in the project via --goal (defaults to the active workspace goal)')
     .requiredOption('--requirement <requirement>', 'Requirement id or title')
     .option('--goal <goal>', 'Goal id, workspace name, planned workspace name, or title')
     .option('--json', 'Output structured JSON')
@@ -569,7 +570,7 @@ function registerSpaceGoalCommands(space: Command): void {
 
   artifact
     .command('attach')
-    .description('Attach an artifact manually against a declared requirement')
+    .description('Attach an artifact manually against a declared requirement on any goal in the project via --goal (defaults to the active workspace goal)')
     .requiredOption('--requirement <requirement>', 'Requirement id or title to fulfill')
     .option('--name <label>', 'Display label for the attached artifact')
     .option('--body <text>', 'Inline body (for note evidence)')
@@ -587,7 +588,7 @@ function registerSpaceGoalCommands(space: Command): void {
 
   artifact
     .command('run')
-    .description('Run the requirement\u2019s configured generation command to produce evidence')
+    .description('Run the requirement\u2019s configured generation command to produce evidence \u2014 requirements on any goal in the project via --goal (defaults to the active workspace goal)')
     .requiredOption('--requirement <requirement>', 'Requirement id or title')
     .option('--goal <goal>', 'Goal id, workspace name, planned workspace name, or title')
     .option('--json', 'Output structured JSON')
@@ -599,11 +600,11 @@ function registerSpaceGoalCommands(space: Command): void {
 
   const review = goal
     .command('review')
-    .description('Judge a requirement against its rubric (record human review or run command/LLM judgment)');
+    .description('Judge a requirement against its rubric (record a human review, or run a command judgment)');
 
   review
     .command('run')
-    .description('Run the requirement\u2019s configured judgment (command or LLM). Same-run command judgments judge the latest generation run without re-executing it')
+    .description('Run the requirement\u2019s configured COMMAND judgment (same-run command judgments judge the latest generation run without re-executing it). No LLM runner exists yet: an llm-judged requirement only records an "unavailable" amber review and never accepts \u2014 close it with `space goal requirement verdict --requirement <id> --accept|--reject --notes "\u2026"`')
     .requiredOption('--requirement <requirement>', 'Requirement id or title')
     .option('--goal <goal>', 'Goal id, workspace name, planned workspace name, or title')
     .option('--json', 'Output structured JSON')
@@ -615,7 +616,7 @@ function registerSpaceGoalCommands(space: Command): void {
 
   review
     .command('record')
-    .description('Record a human review decision for a requirement')
+    .description('Record a human review decision for a requirement on any goal in the project via --goal (defaults to the active workspace goal)')
     .requiredOption('--requirement <requirement>', 'Requirement id or title')
     .requiredOption('--decision <decision>', 'pass | changes | fail')
     .option('--body <text>', 'Review note')

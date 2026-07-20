@@ -46,6 +46,10 @@ space chain add-after  --title "Capture screencast"
 space chain add-after  --goal billing-schema --title "Backfill job"
 
 # Absolute insert: end of chain, or an explicit 0-indexed position.
+# `add` REQUIRES exactly one of --tail or --at <index>. Passing neither fails
+# with "needs --tail or --at <index>"; passing both fails with "Use either
+# --tail or --at <index>, not both." To insert relative to a goal, use
+# add-after/add-before instead — `add` takes no anchor.
 space chain add --tail --title "Ship notes"
 space chain add --at 2 --title "Telemetry pass"
 
@@ -98,7 +102,15 @@ space chain create-workspace
 
 # Or specify a different name/branch
 space chain create-workspace --name billing-ui --branch feat/billing-ui
+
+# Bind ANY planned goal in the chain, not just the active one.
+# --goal takes a goal id, planned workspace name, or title.
+space chain create-workspace --goal billing-ui
+space chain create-workspace --goal "Billing UI" --branch feat/billing-ui
 ```
+
+You do not have to make a planned goal active before binding it — `--goal`
+targets it directly, the same way every `space goal` verb does.
 
 The new workspace branches from the previous chain goal's HEAD when one exists. Otherwise it branches from the project base. After creation:
 - The goal record moves from planned storage to workspace-local storage.
