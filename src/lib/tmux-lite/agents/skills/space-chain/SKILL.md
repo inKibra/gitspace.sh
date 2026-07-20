@@ -67,7 +67,12 @@ space chain add --tail --title "Ship notes" --dry-run
 space chain remove billing-ui --dry-run
 ```
 
-Phase legality differs by verb. **Reorder** (`move-*`) is enforced — you cannot move a goal ahead of one that has already advanced past it. **Insert** (`add-*`) is not blocked: a new goal *inherits the phase of the goal it anchors on*, and any residual phase-order complaint is reported as a warning, never a refusal. So inserting a prerequisite before work already in `review` is allowed and simply warns. `remove` refuses a workspace-backed goal without `--force`, and never deletes a worktree.
+Both reorder and insert are **enforced** against phase, and both **refuse** — they do not warn.
+
+- **Reorder** (`move-*`): you cannot move a goal ahead of one that has already advanced past it.
+- **Insert** (`add-*`): a brand-new planned goal reads as phase `plan`, so the insert is **rejected** if any goal *at or after* the insert point has already moved past `plan` — e.g. `add-before` an anchor that is in `review` fails with `Cannot insert "<title>" before "<goal>": review is further along than plan.` Insert **after** the advanced work instead, or move that goal back to `plan` first.
+
+Only a phase violation that already existed in the untouched order is reported as a warning. `remove` refuses a workspace-backed goal without `--force`, and never deletes a worktree.
 
 ## Author a PLANNED goal
 
