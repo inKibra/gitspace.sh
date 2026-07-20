@@ -29,12 +29,31 @@ has an authenticated `gh`. GitHub is the managed path.
 
 ```
 ~/gitspace/<project>/.artifacts.git      ← bare artifacts repo (one per project)
-  main                                   ← long-lived project artifacts ("base")
+  main                                   ← the shared record
   <workspace-name>                       ← branched off main at workspace creation
 
 <workspace>/.gitspace/artifacts          ← `git worktree add` of its branch (gitignored)
 base/.gitspace/artifacts                 ← worktree of main
 ```
+
+### Tree layout (the thing that makes roll-up safe)
+
+```
+<artifacts repo root>
+  <project-level artifacts>              ← docs, mini-apps, the curated library
+  goals/<goal-id>/                       ← one disjoint subtree per goal
+    goal.md  rubric.json  journal/  reports/  review/  apps/  …
+```
+
+Every goal owns `goals/<goal-id>/` and **nothing else**. This is load-bearing:
+because goal folders are disjoint, two workspaces can never touch the same path,
+so merging a workspace branch into `main` is *mechanically* conflict-free. That
+is what lets roll-up be routine rather than a ceremony.
+
+The goal id is the folder name — not `<workspace>-<goal-id>`. A goal id is
+already a slug plus a disambiguator, and more importantly the **workspace name
+is ephemeral** (the worktree is deleted at ship and the name can be reused)
+while the goal id is permanent. Artifacts outlive the workspace that made them.
 
 - A workspace is **a code branch + an artifacts branch**. Same lifecycle, same
   mental model.
@@ -46,11 +65,46 @@ base/.gitspace/artifacts                 ← worktree of main
   mutates content commits.
 - **Freshen** = merge `main` into the workspace branch (like updating a code
   branch against base).
-- **Roll-up** = merge the workspace's artifacts branch into `main`, with a
-  curation pass in the merge (move keepers to durable paths, drop scratch —
-  workspaces can collide on paths and binaries don't merge, so roll-up is where
-  curation belongs).
+- **Favorite** = the user marks an artifact worth keeping. This is the curation
+  step, and it happens **in the workspace, at capture time** — by the person who
+  can actually judge the work, while the context is still live.
+- **Roll-up** (`gssh artifacts rollup <workspace>`) = merge the workspace's
+  artifacts branch into `main`. Only favorited artifacts are rolled up. Because
+  goal folders are disjoint this merge cannot conflict, so it needs no curation
+  pass and can run automatically (on favorite, or gate-aware at phase end).
+  Roll-up is now *plumbing*: the judgement already happened at favorite time.
 - **Abandon** = delete the branch with the workspace. `main` stays clean.
+
+There is deliberately **no project-level "promote" verb.** An earlier design had
+goal artifacts move up into a project folder; it was dropped because moving
+files breaks every reference to them (forcing stable-id addressing) and because
+it collided with the existing `space artifacts promote`, which means something
+else entirely (scratch → versioned tree, the typing act). Instead, a project
+agent simply sees the whole tree. Nothing moves, so nothing dangles.
+
+### Open questions (decided model, undecided mechanics)
+
+The model above is settled. These are not, and each is cheap to answer now and
+expensive to answer after agents have learned the wrong shape:
+
+1. **Migration.** Existing workspaces are flat — `goal.md`, `rubric.json`,
+   `README.md`, `journal/` all sit at the mount root. That is exactly why
+   roll-up would conflict today: every workspace branch has identically named
+   files at the same paths. Moving them under `goals/<goal-id>/` needs a
+   migration, and `space artifacts commit` currently assumes the mount root *is*
+   the worktree root — the likeliest place for hidden assumptions.
+2. **`main` is contended.** Roll-ups merge into it while a project agent has it
+   checked out and is committing. Git serialises, but two near-simultaneous
+   roll-ups plus a live project agent will produce failed merges at random
+   without an explicit locking story.
+3. **Worktree growth.** Branching from `main` materialises every published
+   goal's artifacts, including screenshots and video. Favourites-only roll-up
+   blunts this a lot; sparse-checkout (materialise project artifacts + your goal
+   + chain neighbours) is the lever if it still bites, and was deliberately
+   deferred rather than designed in.
+4. **Who may favourite.** Assumed to be the user, in the workspace. If agents
+   may favourite their own work, roll-up becomes self-service — probably
+   fine, since roll-up is cheap and reversible, but it has not been decided.
 
 ### Relationship to OMP
 
@@ -60,13 +114,46 @@ base/.gitspace/artifacts                 ← worktree of main
   never store the transcript twice. A read-only "session outputs" listing with
   an explicit *promote to artifacts* action is the only planned bridge.
 - OMP's `local://` scheme IS unified with artifacts (2026-07, via the SDK's
-  `localProtocolOptions` hook): each session's `local://` root lives at
-  `<mount>/.sessions/<sessionId>/local/` — addressable as
-  `artifact://<p>/<w>/.sessions/…` and shareable mid-flight, but
-  **unversioned** (bare-repo `info/exclude`) and **typeless** (list walk +
-  `classifyArtifact` skip it). `gssh space artifacts promote` copies scratch
-  into the versioned tree — promotion is the typing act. Dead sessions'
-  scratch is GC'd after a 14-day retention window.
+  `localProtocolOptions` hook plus a bun patch that removes the SDK's forced
+  `/local` subdir). `gssh space artifacts promote` copies scratch into the
+  versioned tree — promotion is the typing act. Dead sessions' scratch is GC'd
+  after a 14-day retention window.
+
+#### `local://` means "the root I own"
+
+It is not a fixed path. The host binds it per session via `getArtifactsDir`, so
+the same scheme means the right thing to each kind of agent:
+
+| Agent | `local://` binds to | Sees | Writes |
+| --- | --- | --- | --- |
+| Workspace / goal agent | `goals/<goal-id>/` | whole mount (published goals + project artifacts, because its branch came off `main`) | its own goal folder |
+| Project agent | the tree root | everything | project-level artifacts at root |
+
+One rule for every agent: **you write to `local://`; everything else you read.**
+Cross-scope reads need no protocol — a workspace branches from `main`, so
+published goals and project artifacts are already materialized on disk, and the
+skills already tell agents to read the mount with `ls` / `rg` / `Read`. What a
+workspace *cannot* see is a neighbour's un-published work, which is the correct
+boundary rather than a gap.
+
+Cross-scope **mutations** go through the `space` CLI, never through a file
+write — that is what preserves provenance. Authoring a downstream goal's doc is
+`space goal set --goal <id>`, not reaching into another folder.
+
+There is no `project://` scheme, and none is planned. OMP 17 does not add one
+either (its "project memory" is a memory *backend*, not a URL scheme). A new
+scheme would mean more OMP patch surface, and patch-dependent behaviour has a
+track record here of failing silently and being found weeks later.
+
+##### Guard: `goals/**` is roll-up-only
+
+Because a project agent's `local://` is the tree root, it *can* write into a
+goal folder. It must not. If it edits `goals/<id>/x` on `main` while that
+workspace later rolls up changes to the same file, the merge conflicts — and
+roll-up is conflict-free precisely because each goal folder has a single
+writer. The only writer of `goals/**` is the roll-up merge. Enforce this in
+`space artifacts commit` as a scope check rather than relying on the skill to
+say so; "the agent knows not to" has a poor track record.
 
 ### Rendering
 
