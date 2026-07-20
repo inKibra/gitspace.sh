@@ -250,6 +250,20 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   const attachedBackendState = attachedBackendKey ? multi.getBackendState(attachedBackendKey) : null;
   const terminalStatus = activeBackendState?.status ?? 'disconnected';
   const reviewTerminalStatus = reviewBackendState?.status ?? 'disconnected';
+  // The connect screen's actions (Retry / Report a problem) used to render only
+  // for status 'error'. But the state users actually get stuck in is
+  // 'disconnected' ("waiting for relay...") or an endless 'connecting' — and
+  // both showed pulsing dots with NO affordance at all, so there was no way to
+  // report the very failure worth reporting. Reveal the actions once we are
+  // plainly not making progress. Declared here (not in the connect-screen
+  // branch) because that branch sits below early returns.
+  const [connectStalled, setConnectStalled] = useState(false);
+  useEffect(() => {
+    if (terminalStatus === 'connected') { setConnectStalled(false); return; }
+    setConnectStalled(false);
+    const t = setTimeout(() => setConnectStalled(true), 8000);
+    return () => clearTimeout(t);
+  }, [terminalStatus]);
   const terminalMode = attachedBackendState?.mode ?? (activeBackendState?.mode ?? 'browsing');
   const attachedSessionName = attachedBackendState?.attachedSessionName ?? null;
   const attachedSessionMeta = attachedBackendState?.attachedSessionMeta ?? null;
@@ -3734,6 +3748,9 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   }[terminalStatus] ?? "Loading...";
 
   const isError = terminalStatus === "error";
+  // 'disconnected' is not 'error', but it is just as stuck — and a connect that
+  // never resolves is the most report-worthy failure of all.
+  const showConnectActions = isError || terminalStatus === "disconnected" || connectStalled;
 
   return (
     <>
@@ -3751,7 +3768,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
               ))}
             </div>
           )}
-          {isError && (
+          {showConnectActions && (
             <div className="mt-4 flex flex-col items-center gap-2">
               <button
                 onClick={() => window.location.reload()}
