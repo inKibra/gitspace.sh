@@ -1075,17 +1075,11 @@ function ArtifactsMode({ backend, workspaceId, projectName, workspaceName, onOpe
                 </button>
               </div>
             ))}
-            {reports.filter((r) => r.rating !== undefined && matches(`${r.surface}`)).length > 0 && (
-              <div className="px-3 pb-1 pt-2.5 text-[10px] uppercase tracking-[.12em] text-[var(--gs-text-dim)]">Rated precedents · seed from these</div>
-            )}
-            {reports.filter((r) => r.rating !== undefined && matches(`${r.surface}`)).map((r) => (
-              <button key={`prec:${r.path}`} type="button" onClick={onOpenGoalPane} title={r.surface}
-                className="flex w-full items-center gap-1.5 px-3 py-[2px] text-left hover:bg-[var(--gs-bg-active)]">
-                <span className="w-4 flex-shrink-0 text-center text-[var(--gs-text-ghost)]">⛓</span>
-                <span className="min-w-0 flex-1 truncate text-[var(--gs-text)]">{r.surface}</span>
-                <span className="ml-auto flex-shrink-0 text-[10px] tracking-[1px] text-[var(--gs-warning)]">{'★'.repeat(Math.min(5, r.rating ?? 0))}{'☆'.repeat(Math.max(0, 5 - (r.rating ?? 0)))}</span>
-              </button>
-            ))}
+            {/* "Rated precedents" removed: it only read THIS workspace's own
+                reports and clicking opened THIS workspace's goal doc, so it was
+                self-referential, not precedents from past work. If reinstated it
+                must read rated reports across every goal folder (inherited from
+                main) and open the precedent itself. */}
           </>
         )}
       </div>
