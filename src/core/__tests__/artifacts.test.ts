@@ -12,6 +12,7 @@ import {
   abandonArtifacts,
   artifactPaths,
   artifactsMountDir,
+  artifactsScope,
   captureArtifacts,
   ensureArtifactsMount,
   ensureArtifactsRepo,
@@ -21,6 +22,7 @@ import {
   resolveLocalScratch,
   rollupArtifacts,
 } from '../artifacts.js';
+import { toggleFavorite } from '../artifacts-favorites.js';
 
 let projectDir: string;
 const wsDir = (name: string): string => join(projectDir, 'workspaces', name);
@@ -171,6 +173,79 @@ describe('rollupArtifacts', () => {
     await expect(rollupArtifacts(projectDir, 'c1')).rejects.toThrow('conflicts');
     // main mount left clean (merge aborted)
     expect(g(baseMount, 'status --porcelain')).toBe('');
+  });
+});
+
+describe('rollupArtifacts — favorites filter (goal-keyed)', () => {
+  /** Give a workspace a goal record so artifactsScope binds to goals/<gid>/. */
+  const setupGoalWorkspace = (name: string, gid: string): string => {
+    const ws = wsDir(name);
+    const metaDir = join(ws, '.gitspace', 'workspace', name);
+    mkdirSync(metaDir, { recursive: true });
+    writeFileSync(join(metaDir, 'goal.json'), JSON.stringify({ id: gid }));
+    return ws;
+  };
+
+  it('rolls up the canonical record + favorited proof only; excludes the rest', async () => {
+    const gid = 'goal-abc';
+    const ws = setupGoalWorkspace('feat', gid);
+    const mount = await ensureArtifactsMount(projectDir, ws, 'feat');
+    const scope = artifactsScope(ws);
+    expect(scope.rootRel).toBe(`goals/${gid}`);
+
+    await captureArtifacts(projectDir, mount, [
+      // canonical record (always rolls up)
+      { path: scope.rel('goal.md'), content: '# goal' },
+      { path: scope.rel('rubric.json'), content: '{}' },
+      { path: scope.rel('journal/01-plan.json'), content: '{}' },
+      { path: scope.rel('review/guide.json'), content: '{}' },
+      { path: scope.rel('validation/goal-abc/ev-x-shot.png'), content: 'PNG' },
+      { path: scope.rel('plan.workflow.json'), content: '{}' },
+      // curated proof (rolls up only if favorited)
+      { path: scope.rel('demos/keep.webm'), content: 'keepbytes' },
+      { path: scope.rel('demos/drop.webm'), content: 'dropbytes' },
+      { path: scope.rel('reports/loose.report.json'), content: '{}' },
+    ]);
+    // Star exactly one proof artifact (commits goals/<gid>/.favorites.json).
+    await toggleFavorite(projectDir, scope, scope.rel('demos/keep.webm'));
+
+    const { mergeCommit } = await rollupArtifacts(projectDir, 'feat');
+    const { repoDir } = artifactPaths(projectDir);
+    const onMain = (p: string): string => g(repoDir, `ls-tree -r --name-only ${mergeCommit} -- ${JSON.stringify(p)}`);
+
+    // canonical present
+    expect(g(repoDir, `show ${mergeCommit}:goals/${gid}/goal.md`)).toBe('# goal');
+    expect(onMain(`goals/${gid}/rubric.json`)).toContain('rubric.json');
+    expect(onMain(`goals/${gid}/journal/01-plan.json`)).toContain('01-plan.json');
+    expect(onMain(`goals/${gid}/review/guide.json`)).toContain('guide.json');
+    expect(onMain(`goals/${gid}/validation/goal-abc/ev-x-shot.png`)).toContain('ev-x-shot.png');
+    expect(onMain(`goals/${gid}/plan.workflow.json`)).toContain('plan.workflow.json');
+    expect(onMain(`goals/${gid}/.favorites.json`)).toContain('.favorites.json');
+    // favorited proof present
+    expect(g(repoDir, `show ${mergeCommit}:goals/${gid}/demos/keep.webm`)).toBe('keepbytes');
+    // non-favorited proof absent
+    expect(onMain(`goals/${gid}/demos/drop.webm`)).toBe('');
+    expect(onMain(`goals/${gid}/reports/loose.report.json`)).toBe('');
+
+    // Provenance note records workspace + goal + curation counts.
+    const note = JSON.parse(g(repoDir, `notes show ${mergeCommit}`));
+    expect(note.tool).toBe('rollup');
+    expect(note.goals).toEqual([gid]);
+    expect(note.excluded).toBe(2);
+  });
+
+  it('two goals roll up into disjoint folders on main without conflict', async () => {
+    const wsA = setupGoalWorkspace('a', 'goal-a');
+    const wsB = setupGoalWorkspace('b', 'goal-b');
+    const ma = await ensureArtifactsMount(projectDir, wsA, 'a');
+    const mb = await ensureArtifactsMount(projectDir, wsB, 'b');
+    await captureArtifacts(projectDir, ma, [{ path: 'goals/goal-a/goal.md', content: 'A' }]);
+    await captureArtifacts(projectDir, mb, [{ path: 'goals/goal-b/goal.md', content: 'B' }]);
+    await rollupArtifacts(projectDir, 'a');
+    const { mergeCommit } = await rollupArtifacts(projectDir, 'b'); // must not conflict
+    const { repoDir } = artifactPaths(projectDir);
+    expect(g(repoDir, `show ${mergeCommit}:goals/goal-a/goal.md`)).toBe('A');
+    expect(g(repoDir, `show ${mergeCommit}:goals/goal-b/goal.md`)).toBe('B');
   });
 });
 

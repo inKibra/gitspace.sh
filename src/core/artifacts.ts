@@ -21,13 +21,15 @@ import { createHash } from 'crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync, appendFileSync } from 'fs';
 import { basename, dirname, join } from 'path';
 import { SpacesError } from '../types/errors.js';
-import { pathInScope, localScratchRel } from './artifact-cap.js';
+import { pathInScope, localScratchRel, AMBIENT_WRITE_SCOPES } from './artifact-cap.js';
 import { escapeShellArg } from '../utils/shell-escape.js';
 
 const execAsync = promisify(exec);
 
 /** Machine identity for artifacts commits (artifact commits are tool-authored). */
 const GIT_ID = `-c user.name=${escapeShellArg('gitspace')} -c user.email=${escapeShellArg('artifacts@gitspace.sh')} -c commit.gpgsign=false`;
+/** argv form of {@link GIT_ID} for execFileSync plumbing (no shell). */
+const GIT_ID_ARGV = ['-c', 'user.name=gitspace', '-c', 'user.email=artifacts@gitspace.sh', '-c', 'commit.gpgsign=false'];
 
 export const DEFAULT_POINTER_THRESHOLD_BYTES = 2 * 1024 * 1024;
 const ARTIFACTS_REPO_DIR = '.artifacts.git';
@@ -792,12 +794,187 @@ async function worktreeFor(repoDir: string, branch: string): Promise<string | nu
   return null;
 }
 
+// ── roll-up filter: canonical record vs. curated proof ──────────────────────
+//
+// Roll-up is favourites-aware (docs/ARTIFACTS-FS.md "Favorite"/"Roll-up"). A
+// goal folder carries two kinds of thing:
+//
+//   1. The CANONICAL RECORD — what the goal SYSTEM writes to define the goal on
+//      main: goal.md, rubric.json, the workflow spec, journal/, review/,
+//      validation evidence, and the favourites manifest itself. This ALWAYS
+//      rolls up, favourited or not: it is the goal's structural record and the
+//      backing for its judged reviews (evidence outlives the workspace).
+//   2. CURATED PROOF — everything else the user or an agent captured into the
+//      goal folder (demos/, shots/, apps/, loose reports, arbitrary captures).
+//      This rolls up ONLY when the user starred it (present in .favorites.json).
+//
+// The canonical set is DERIVED from the goal-system producer registry
+// (AMBIENT_WRITE_SCOPES) rather than hardcoded, so a new producer's writes are
+// canonical automatically. The workflow spec and favourites manifest are the
+// two structural files authored at the goal-scope ROOT (not through a dedicated
+// producer), so they are added explicitly.
+//
+// NOTE: this makes triggers/** and blame/** canonical too — they are
+// goal-system structured records (a favourited data artifact whose trigger def
+// or edit-breadcrumb was dropped would dangle), not free-form captures.
+
+/** Goal-relative globs whose files are the goal's canonical record (always
+ *  rolled up). AMBIENT_WRITE_SCOPES entries are already goal-relative; the
+ *  root-level `.gitattributes` (lfs-backfill) is excluded here because it lives
+ *  at the mount root, is never inside a goal folder, and is passed through as a
+ *  project-level path by the filter. */
+export const CANONICAL_GOAL_GLOBS: string[] = [
+  ...new Set(Object.values(AMBIENT_WRITE_SCOPES).flat().filter((g) => g !== '.gitattributes')),
+  '*.workflow.json',
+  '.favorites.json',
+];
+
+/** The goal id owning a mount-relative path, or null when the path is not
+ *  inside any goal folder (project-level artifacts at the tree root). */
+function goalIdOfMountRel(mountRelPath: string): string | null {
+  const prefix = `${ARTIFACTS_GOALS_DIR}/`;
+  if (!mountRelPath.startsWith(prefix)) return null;
+  const rest = mountRelPath.slice(prefix.length);
+  const slash = rest.indexOf('/');
+  return slash <= 0 ? null : rest.slice(0, slash);
+}
+
+/** execFileSync git (no shell) for filtering plumbing — file paths are
+ *  arbitrary bytes bar NUL/slash, so they must never be interpolated into a
+ *  shell string. `raw` skips the trailing-newline trim for -z output. */
+function gitx(
+  repoDir: string,
+  args: string[],
+  opts: { id?: boolean; input?: string; env?: Record<string, string>; raw?: boolean } = {},
+): string {
+  const full = ['-C', repoDir, ...(opts.id ? GIT_ID_ARGV : []), ...args];
+  try {
+    const out = execFileSync('git', full, {
+      encoding: 'utf8',
+      input: opts.input,
+      env: opts.env ? { ...process.env, ...opts.env } : process.env,
+      maxBuffer: 64 * 1024 * 1024,
+    });
+    return opts.raw ? out : out.trim();
+  } catch (e) {
+    throw new SpacesError(`git failed (${args[0]}): ${e instanceof Error ? e.message : String(e)}`, 'SYSTEM_ERROR', 1);
+  }
+}
+
+const splitZ = (s: string): string[] => s.split('\0').filter(Boolean);
+
+/** Scope-relative favourites read OFF THE BRANCH (a membership test — no
+ *  daemon, no translation; the manifest stores goal-relative relpaths). */
+function readBranchFavoritesScopeRel(repoDir: string, branch: string, goalId: string): Set<string> {
+  let raw: string;
+  try {
+    raw = execFileSync('git', ['-C', repoDir, 'show', `${branch}:${ARTIFACTS_GOALS_DIR}/${goalId}/.favorites.json`], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'], // a missing manifest is normal — no stderr noise
+    });
+  } catch {
+    return new Set(); // no manifest on this branch
+  }
+  try {
+    const doc = JSON.parse(raw) as { favorites?: unknown };
+    if (!Array.isArray(doc.favorites)) return new Set();
+    return new Set(
+      doc.favorites
+        .filter((x): x is string => typeof x === 'string')
+        .map((p) => p.replace(/^\/+/, '').replace(/\/+$/, ''))
+        .filter(Boolean),
+    );
+  } catch {
+    return new Set();
+  }
+}
+
+interface FilteredRollup {
+  /** SHA of the filtered commit (parent = branch tip) to merge into main. */
+  commit: string;
+  ownedGoalIds: string[];
+  canonicalCount: number;
+  favoritedCount: number;
+  excludedCount: number;
+}
+
+/**
+ * Compose a FILTERED commit off the branch tip: the branch's tree with every
+ * non-canonical, non-favourited file inside an OWNED goal folder removed. The
+ * commit's parent is the branch tip, so merging it into main keeps the branch's
+ * real history reachable (merge-base advances → freshen/re-rollup still work).
+ *
+ * Only goal folders the branch OWNS (changed since the merge-base) are
+ * filtered; inherited goal folders (materialised by freshen, already on main)
+ * and project-level paths pass through untouched — so disjoint goal folders
+ * stay conflict-free and a legacy flat branch (no goal folders) yields a tree
+ * identical to the branch, i.e. the old plain-merge behaviour.
+ */
+function buildFilteredRollupCommit(repoDir: string, branch: string): FilteredRollup {
+  const mergeBase = gitx(repoDir, ['merge-base', MAIN_BRANCH, branch]);
+  const changed = splitZ(gitx(repoDir, ['diff', '--name-only', '-z', `${mergeBase}..${branch}`], { raw: true }));
+  const ownedGoalIds = new Set<string>();
+  for (const p of changed) {
+    const gid = goalIdOfMountRel(p);
+    if (gid) ownedGoalIds.add(gid);
+  }
+
+  const favByGid = new Map<string, Set<string>>();
+  for (const gid of ownedGoalIds) favByGid.set(gid, readBranchFavoritesScopeRel(repoDir, branch, gid));
+
+  const files = splitZ(gitx(repoDir, ['ls-tree', '-r', '-z', '--name-only', branch], { raw: true }));
+  const excluded: string[] = [];
+  let canonicalCount = 0;
+  let favoritedCount = 0;
+  for (const p of files) {
+    const gid = goalIdOfMountRel(p);
+    if (!gid || !ownedGoalIds.has(gid)) continue; // project-level or inherited → keep as-is
+    const goalRel = p.slice(`${ARTIFACTS_GOALS_DIR}/${gid}/`.length);
+    if (pathInScope(goalRel, CANONICAL_GOAL_GLOBS)) {
+      canonicalCount += 1;
+      continue;
+    }
+    if (favByGid.get(gid)!.has(goalRel)) {
+      favoritedCount += 1;
+      continue;
+    }
+    excluded.push(p);
+  }
+
+  const tempIndex = join(repoDir, `.rollup-index-${Date.now()}-${process.pid}`);
+  const tempWork = join(repoDir, `.rollup-work-${Date.now()}-${process.pid}`);
+  mkdirSync(tempWork, { recursive: true });
+  try {
+    const env = { GIT_INDEX_FILE: tempIndex };
+    gitx(repoDir, ['read-tree', branch], { env });
+    if (excluded.length > 0) {
+      // update-index refuses to run in a bare repo; a throwaway work-tree
+      // (never written to — --force-remove only touches the index) satisfies
+      // that check without materialising anything.
+      gitx(repoDir, ['-c', 'core.bare=false', `--work-tree=${tempWork}`, 'update-index', '--force-remove', '-z', '--stdin'], {
+        env,
+        input: `${excluded.join('\0')}\0`,
+      });
+    }
+    const tree = gitx(repoDir, ['write-tree'], { env });
+    const branchTip = gitx(repoDir, ['rev-parse', branch]);
+    const msg = `rollup-filter: ${branch} (canonical ${canonicalCount}, favorited ${favoritedCount}, excluded ${excluded.length})`;
+    const commit = gitx(repoDir, ['commit-tree', tree, '-p', branchTip, '-m', msg], { id: true });
+    return { commit, ownedGoalIds: [...ownedGoalIds], canonicalCount, favoritedCount, excludedCount: excluded.length };
+  } finally {
+    rmSync(tempIndex, { force: true });
+    rmSync(tempWork, { recursive: true, force: true });
+  }
+}
+
 /**
  * Merge a workspace's artifacts branch into main (no-ff, so roll-ups stay
- * visible in history). Uses the existing main mount when present, otherwise a
- * temporary worktree. On merge conflict the merge is aborted and a
- * USER_ERROR is thrown (roll-up is where curation happens — the caller
- * surfaces the conflict for a manual pass).
+ * visible in history) — FAVOURITES-AWARE. The canonical record always rolls
+ * up; curated proof only when the user starred it (docs/ARTIFACTS-FS.md). A
+ * filtered commit is composed off the branch tip (canonical + favourited only)
+ * and that is what merges, so disjoint goal folders stay conflict-free while a
+ * genuine same-path collision still surfaces as a conflict for manual curation.
+ * Uses the existing main mount when present, otherwise a temporary worktree.
  */
 export async function rollupArtifacts(
   projectDir: string,
@@ -808,8 +985,10 @@ export async function rollupArtifacts(
   if (branch === MAIN_BRANCH) throw new SpacesError('Cannot roll up main into itself', 'USER_ERROR', 1);
   if (!(await branchExists(repoDir, branch))) throw new SpacesError(`No artifacts branch: ${branch}`, 'USER_ERROR', 1);
 
-  // Gate: a --no-verify raw blob committed between sync ticks must not reach
-  // main through a rollup merge either.
+  // Gate FIRST: a --no-verify raw blob committed between sync ticks must not
+  // reach main through a rollup merge either. Scans the whole branch (matches
+  // the sync gate); a raw large file means --no-verify abuse and needs repair
+  // regardless of whether it would have been rolled up.
   const offenders = await scanRawBlobOffenders(repoDir, `${escapeShellArg(branch)} --not ${MAIN_BRANCH}`);
   if (offenders.length > 0) {
     const list = offenders.map((o) => `${o.path} (${(o.size / (1024 * 1024)).toFixed(1)} MB)`).join(', ');
@@ -819,6 +998,8 @@ export async function rollupArtifacts(
       1,
     );
   }
+
+  const filtered = buildFilteredRollupCommit(repoDir, branch);
 
   let mainDir = await worktreeFor(repoDir, MAIN_BRANCH);
   let temp: string | null = null;
@@ -830,7 +1011,7 @@ export async function rollupArtifacts(
   try {
     const message = opts.message ?? `rollup: ${branch}`;
     try {
-      await git(mainDir, `merge --no-ff -m ${escapeShellArg(message)} ${escapeShellArg(branch)}`, { id: true });
+      await git(mainDir, `merge --no-ff -m ${escapeShellArg(message)} ${escapeShellArg(filtered.commit)}`, { id: true });
     } catch (e) {
       await git(mainDir, 'merge --abort').catch(() => undefined);
       throw new SpacesError(
@@ -840,6 +1021,19 @@ export async function rollupArtifacts(
       );
     }
     const mergeCommit = await git(mainDir, 'rev-parse HEAD');
+    // Provenance note: enrich with workspace + goal(s) + curation counts. Gate
+    // rating/state would need a goal-chain read (a module cycle from this
+    // dependency-light layer), so it is left to the richer trigger-confirmation
+    // surface (#48 follow-up) — this stays cheap.
+    const note = JSON.stringify({
+      tool: 'rollup',
+      workspace: branch,
+      goals: filtered.ownedGoalIds,
+      canonical: filtered.canonicalCount,
+      favorited: filtered.favoritedCount,
+      excluded: filtered.excludedCount,
+    });
+    await git(mainDir, `notes add -f -m ${escapeShellArg(note)} ${mergeCommit}`, { id: true }).catch(() => undefined);
     if (opts.removeBranch) {
       const mounted = await worktreeFor(repoDir, branch);
       if (mounted) await git(repoDir, `worktree remove --force ${escapeShellArg(mounted)}`);

@@ -219,6 +219,21 @@ describe('loadWorkspaceWorkflow / validateWorkspaceWorkflow', () => {
     expect(() => loadWorkspaceWorkflow(workspaceDir)).toThrow(/a\.workflow\.json, b\.workflow\.json/);
   });
 
+  it('resolves the per-goal workflow on a mount carrying multiple goals (no throw)', () => {
+    // The multi-goal landmine: once two goals roll up, main/the mount carries
+    // goals/<A>/a.workflow.json AND goals/<B>/b.workflow.json. Globbing the
+    // mount root would find both and throw the one-workflow error; goal-scoped
+    // resolution (goals/<owned-goal-id>/) must return only the owned one.
+    writeGoalRecord('demo', makeGoal(defaultValidation())); // ws1 owns goal g1
+    writeSpec('a.workflow.json', WORKFLOW_SPEC); // → goals/g1/a.workflow.json
+    // A neighbour goal's workflow also present on the same mount:
+    const neighbour = join(mount, 'goals', 'g2', 'b.workflow.json');
+    mkdirSync(dirname(neighbour), { recursive: true });
+    writeFileSync(neighbour, JSON.stringify(WORKFLOW_SPEC));
+    expect(() => loadWorkspaceWorkflow(workspaceDir)).not.toThrow();
+    expect(loadWorkspaceWorkflow(workspaceDir)?.path).toBe('a.workflow.json');
+  });
+
   it('reports dangling slice refs as warnings, resolved refs clean', () => {
     writeSpec('a.workflow.json', ({
       recipe: 'r',
