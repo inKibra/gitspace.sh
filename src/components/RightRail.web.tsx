@@ -1059,11 +1059,21 @@ function ArtifactsMode({ backend, workspaceId, projectName, workspaceName, onOpe
               <div className="px-3 pb-1 pt-2.5 text-[10px] uppercase tracking-[.12em] text-[var(--gs-text-dim)]">Reports · good + bad</div>
             )}
             {reports.filter((r) => matches(`${r.kind} ${r.surface} ${r.note}`)).map((r) => (
-              <button key={r.path} type="button" onClick={() => onOpenReport?.(r.path)} title={r.note}
-                className="flex w-full items-center gap-1.5 px-3 py-[2px] text-left hover:bg-[var(--gs-bg-active)]">
-                <span className={`flex-shrink-0 rounded-full border px-1 text-[9px] uppercase ${REPORT_TONE[r.kind] ?? 'border-[var(--gs-border)] text-[var(--gs-text-dim)]'}`}>{r.kind}</span>
-                <span className="min-w-0 flex-1 truncate text-[var(--gs-text)]">{r.surface}</span>
-              </button>
+              <div key={r.path} className="group flex w-full items-center gap-1.5 px-3 py-[2px] hover:bg-[var(--gs-bg-active)]">
+                <button type="button" onClick={() => onOpenReport?.(r.path)} title={r.note}
+                  className="flex min-w-0 flex-1 items-center gap-1.5 text-left">
+                  <span className={`flex-shrink-0 rounded-full border px-1 text-[9px] uppercase ${REPORT_TONE[r.kind] ?? 'border-[var(--gs-border)] text-[var(--gs-text-dim)]'}`}>{r.kind}</span>
+                  <span className="min-w-0 flex-1 truncate text-[var(--gs-text)]">{r.surface}</span>
+                </button>
+                {/* Reports are favorite-gated for roll-up (docs/ARTIFACTS-FS.md):
+                    an un-favorited report never reaches the corpus, so the ★ must
+                    be reachable here — reports are excluded from the generic
+                    artifact groups that carry it. */}
+                <button type="button" onClick={() => toggleFav(r.path)} title="favorite — roll this report up into the corpus"
+                  className={`flex-shrink-0 px-0.5 ${favs.has(r.path) ? 'text-[#f0b429]' : 'text-[var(--gs-text-ghost)] opacity-0 group-hover:opacity-100'}`}>
+                  ★
+                </button>
+              </div>
             ))}
             {reports.filter((r) => r.rating !== undefined && matches(`${r.surface}`)).length > 0 && (
               <div className="px-3 pb-1 pt-2.5 text-[10px] uppercase tracking-[.12em] text-[var(--gs-text-dim)]">Rated precedents · seed from these</div>
