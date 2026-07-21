@@ -6,58 +6,53 @@ import { Badge } from "../../app/components/ui/badge";
 export function Pricing() {
   const plans = [
     {
-      name: "Local",
+      name: "Open Source Preview",
       price: "Free",
-      period: "forever",
-      description: "For individual developers working locally.",
+      period: "today",
+      description: "The whole harness, self-hosted. Open code you can read and run.",
       features: [
-        "Unlimited workspaces",
-        "TUI & CLI",
-        "Setup scripts",
-        "Linear integration",
-        "Git Stack (when released)"
-      ],
-      notIncluded: [
-        "Remote access"
+        "Unlimited workspaces & agents",
+        "The full lifecycle: plan, build, review, ship",
+        "Self-hosted relay & remote access",
+        "TUI, web UI & CLI",
+        "Linear integration"
       ],
       cta: "Star on GitHub",
-      variant: "outline",
+      variant: "default",
+      popular: true,
       link: "https://github.com/inkibra/gitspace.sh"
     },
     {
-      name: "Pro",
-      price: "$4.99",
-      period: "/month",
-      description: "Remote access and AI workflow superpowers.",
+      name: "Cloud",
+      price: "$100",
+      period: "/user/month",
+      description: "Managed relay and your fleet at yourname.gitspace.sh.",
       features: [
-        "Everything in Local",
-        "Remote access",
+        "Everything in Open Source Preview",
+        "Hosted relay, zero setup",
+        "Your gitspace.sh subdomain",
         "Unlimited machines",
-        "Session sharing",
-        "90-day inbox history",
-        "Priority support"
-      ],
-      cta: "Coming Soon",
-      variant: "default",
-      popular: true,
-      disabled: true
-    },
-    {
-      name: "Enterprise",
-      price: "Contact Us",
-      period: "",
-      description: "For organizations with custom security and scale needs.",
-      features: [
-        "Everything in Pro",
-        "Team sharing",
-        "Shared inbox",
-        "Audit logs",
-        "SSO & SAML",
-        "Dedicated support"
+        "Inbox history"
       ],
       cta: "Coming Soon",
       variant: "outline",
       disabled: true
+    },
+    {
+      name: "Enterprise Rollout",
+      price: "Contact Us",
+      period: "",
+      description: "inkibra stands up an agent factory and runs it for your team.",
+      features: [
+        "Everything in Cloud",
+        "Agent factory standup for your codebase",
+        "Private or on-prem deployment",
+        "Prescribed delivery flow, tuned to your team",
+        "Run by the team that builds GitSpace"
+      ],
+      cta: "Talk to inkibra",
+      variant: "outline",
+      link: "mailto:hello@inkibra.com"
     }
   ];
 
@@ -66,15 +61,15 @@ export function Pricing() {
       <div className="container px-4 mx-auto">
         <div className="text-center mb-16">
           <h2 className="text-3xl md:text-5xl font-bold mb-4">Simple Pricing</h2>
-          <p className="text-zinc-400">Local-only is always free. Pay for remote access.</p>
+          <p className="text-zinc-400">Run it yourself for free, today. Managed cloud is coming. Enterprise means we build it with you.</p>
         </div>
 
         <div className="grid md:grid-cols-3 gap-8 max-w-6xl mx-auto">
           {plans.map((plan, i) => (
-            <Card key={i} className={`relative bg-zinc-900/50 border-zinc-800 hover:border-zinc-700 transition-all ${plan.popular ? 'border-green-500/50 shadow-green-900/20 shadow-2xl' : ''}`}>
+            <Card key={i} className={`relative rounded-none bg-[#080808] border-[#1a1a1a] hover:border-zinc-700 transition-all ${plan.popular ? 'border-green-500/50 shadow-green-900/20 shadow-2xl' : ''}`}>
               {plan.popular && (
                 <div className="absolute -top-3 left-1/2 -translate-x-1/2">
-                    <Badge className="bg-green-500 text-black hover:bg-green-600">Most Popular</Badge>
+                    <Badge className="bg-green-500 text-black hover:bg-green-600 rounded-none">Available Now</Badge>
                 </div>
               )}
               
@@ -111,7 +106,7 @@ export function Pricing() {
                   <Button
                       asChild
                       variant={plan.variant as "default" | "outline"}
-                      className={`w-full ${plan.variant === 'default' ? 'bg-white text-black hover:bg-gray-200' : 'border-zinc-700 text-white hover:bg-zinc-800'}`}
+                      className={`w-full rounded-none ${plan.variant === 'default' ? 'bg-white text-black hover:bg-gray-200' : 'border-zinc-700 text-white hover:bg-zinc-800'}`}
                   >
                     <a href={plan.link} target="_blank" rel="noopener noreferrer">
                       {plan.name === "Local" && <Github className="w-4 h-4 mr-2" />}
@@ -121,7 +116,7 @@ export function Pricing() {
                 ) : (
                   <Button 
                       variant={plan.variant as "default" | "outline"} 
-                      className={`w-full ${plan.variant === 'default' ? 'bg-white text-black hover:bg-gray-200' : 'border-zinc-700 text-white hover:bg-zinc-800'}`}
+                      className={`w-full rounded-none ${plan.variant === 'default' ? 'bg-white text-black hover:bg-gray-200' : 'border-zinc-700 text-white hover:bg-zinc-800'}`}
                       disabled={plan.disabled}
                   >
                     {plan.cta}
@@ -133,7 +128,7 @@ export function Pricing() {
         </div>
 
         <div className="text-center mt-12 text-zinc-500 text-sm">
-            Self-host the relay? It's open source. Run it on your infra.
+            Self-host the relay? The code is open. Run it on your infra.
         </div>
       </div>
     </section>

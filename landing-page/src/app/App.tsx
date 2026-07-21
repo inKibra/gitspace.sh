@@ -3,7 +3,8 @@ import LandingPage from "../pages/LandingPage";
 import Dashboard from "../pages/Dashboard";
 import TerminalView from "../pages/TerminalView";
 import DocsPage from "../pages/DocsPage";
-import BlogPost from "../pages/BlogPost";
+import BlogPost from "../episodes/01-babysitting-agents-sucks/index";
+import BlogIndex from "../pages/BlogIndex";
 import AgentRubricPage from "../pages/AgentRubricPage";
 import { useEffect } from "react";
 import { useLocation } from "react-router-dom";
@@ -44,7 +45,7 @@ export default function App() {
       <Routes>
         <Route path="/" element={<LandingPage />} />
         <Route path="/blog/babysitting-agents-sucks" element={<BlogPost />} />
-        <Route path="/blog" element={<BlogPost />} />
+        <Route path="/blog" element={<BlogIndex />} />
         <Route path="/docs" element={<DocsPage />} />
         <Route path="/agent-rubric" element={<AgentRubricPage />} />
         <Route path="/login" element={<Login />} />

@@ -1,5 +1,14 @@
 import { SquareCheck, Square } from "lucide-react";
 
+/** Product visual language: flat black, #1a1a1a hairlines, square corners. */
+const C = {
+  cell: "#050505",
+  border: "#1a1a1a",
+  borderMuted: "#111111",
+  dim: "#6a6a6a",
+  green: "#00ff66",
+};
+
 export function Comparison() {
   const sections = [
     {
@@ -18,21 +27,19 @@ export function Comparison() {
       items: [
         { text: "Access from any device", checked: true },
         { text: "End-to-end encryption", checked: true },
-        { text: "Session sharing (view/write)", checked: true },
-        { text: "Inbox notifications", checked: true },
-        { text: "Public subdomains (planned)", checked: false },
+        { text: "Public subdomains on gitspace.sh", checked: true },
+        { text: "Inbox tracks what you missed", checked: true },
         { text: "Self-host option", checked: true }
       ]
     },
     {
-      title: "GIT STACK (Coming)",
+      title: "THE AGENT FLEET",
       items: [
-        { text: "AI commit analysis", checked: false },
-        { text: "Automatic PR splitting", checked: false },
-        { text: "Dependency detection", checked: false },
-        { text: "Stacked PR creation", checked: false },
-        { text: "Interactive editing", checked: false },
-        { text: "Explanation of reasoning", checked: false }
+        { text: "Agent sessions per workspace", checked: true },
+        { text: "Fleet strip: running / idle / asked you", checked: true },
+        { text: "Native ask forms for agent questions", checked: true },
+        { text: "Goals & review rubrics", checked: true },
+        { text: "Phase journal & change guides", checked: true }
       ]
     },
     {
@@ -40,9 +47,7 @@ export function Comparison() {
       items: [
         { text: "GitHub", checked: true },
         { text: "Linear", checked: true },
-        { text: "Works with any AI agent", checked: true },
-        { text: "VS Code extension (planned)", checked: false },
-        { text: "Slack notifications (planned)", checked: false }
+        { text: "Works with any AI agent", checked: true }
       ]
     }
   ];
@@ -52,20 +57,30 @@ export function Comparison() {
       <div className="container px-4 mx-auto">
         <div className="text-center mb-16">
           <h2 className="text-3xl md:text-5xl font-bold mb-4">Everything you need</h2>
-          <p className="text-zinc-400">A complete platform, not just a tool.</p>
+          <p className="text-zinc-400">Workspaces, remote access, and the agent fleet in one harness.</p>
         </div>
 
-        <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-8">
+        <div
+          className="grid md:grid-cols-2 lg:grid-cols-4 border-t border-l"
+          style={{ borderColor: C.border }}
+        >
           {sections.map((section, i) => (
-            <div key={i} className="space-y-6">
-              <h3 className="font-mono text-sm font-bold text-zinc-500 border-b border-zinc-800 pb-2 mb-4 tracking-wider">
+            <div
+              key={i}
+              className="p-6 border-b border-r"
+              style={{ background: C.cell, borderColor: C.border }}
+            >
+              <h3
+                className="font-mono text-xs font-bold pb-3 mb-4 tracking-[0.18em]"
+                style={{ color: C.dim, borderBottom: `1px solid ${C.borderMuted}` }}
+              >
                 {section.title}
               </h3>
               <ul className="space-y-3">
                 {section.items.map((item, j) => (
                   <li key={j} className="flex items-start text-sm group">
                     {item.checked ? (
-                      <SquareCheck className="w-4 h-4 text-green-500 mr-3 mt-0.5 shrink-0" />
+                      <SquareCheck className="w-4 h-4 mr-3 mt-0.5 shrink-0" style={{ color: C.green }} />
                     ) : (
                       <Square className="w-4 h-4 text-zinc-700 mr-3 mt-0.5 shrink-0" />
                     )}
