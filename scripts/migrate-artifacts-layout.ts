@@ -47,11 +47,12 @@
  *    that tag already exists the branch is REFUSED (a rerun can't clobber a
  *    backup). The exact undo command is printed.
  *  - Uses `git mv` so history follows (rename recorded). One commit per branch.
- *  - On ANY ambiguity (no goal record, dirty worktree, pre-existing backup
- *    tag, unexpected structure) the branch is SKIPPED and reported — never
- *    guessed, never forced.
- *  - Uncommitted working-tree edits in a mounted worktree are preserved: a
- *    dirty branch is skipped rather than touched.
+ *  - On ANY ambiguity (no goal record, pre-existing backup tag, unexpected
+ *    structure) the branch is SKIPPED and reported — never guessed, never forced.
+ *  - Uncommitted TRACKED edits in a mounted worktree are preserved and migrated:
+ *    they are committed as a labeled "wip:" snapshot before the move (content is
+ *    never lost; the backup tag captures that snapshot). Untracked files are left
+ *    where they are — they are not part of the branch.
  *
  * USAGE
  * -----
@@ -329,17 +330,31 @@ function applyBranch(repo: ProjectRepo, plan: BranchPlan): ApplyOutcome {
     return { ok: false, message: `REFUSED: backup tag ${tag} already exists (interrupted prior run?). Inspect it, then delete it to retry: git -C ${repo.repoDir} tag -d ${tag}` };
   }
 
-  // 2. Choose the worktree to operate in; never disturb uncommitted edits.
+  // 2. Choose the worktree to operate in. If the mount has uncommitted TRACKED
+  //    changes, "just move the stuff": commit them as a labeled WIP snapshot
+  //    first, then migrate normally. Content is never lost — the backup tag in
+  //    step 3 is taken AFTER this commit, so undo restores the state with these
+  //    edits committed at their pre-migration paths (on undo they stay committed
+  //    rather than reverting to uncommitted). Untracked files (??) are left
+  //    alone — they are not part of the branch and are not migrated.
   let worktreeDir = mountDir;
   let tempWorktree: string | null = null;
+  let wipCount = 0;
   if (worktreeDir) {
     const dirty = dirtyTracked(worktreeDir);
     if (dirty.length > 0) {
-      return { ok: false, message: `SKIPPED: mounted worktree has uncommitted tracked changes (${dirty.length}) — commit or stash them, then rerun. Left untouched.` };
+      git(worktreeDir, ['add', '-u']);
+      gitId(
+        worktreeDir,
+        ['commit', '-q', '-m', 'wip: pre-migration snapshot of uncommitted artifact changes'],
+        { GSSH_ARTIFACTS_CAPTURE: '1' },
+      );
+      wipCount = dirty.length;
     }
   }
 
-  // 3. Backup BEFORE any mutation.
+  // 3. Backup AFTER the WIP snapshot (so undo cannot lose the user's edits) but
+  //    BEFORE any file move.
   git(repo.repoDir, ['tag', tag, `refs/heads/${branch}`]);
 
   try {
@@ -370,7 +385,8 @@ function applyBranch(repo: ProjectRepo, plan: BranchPlan): ApplyOutcome {
     const undo = mountDir
       ? `git -C ${mountDir} reset --hard ${tag}   # then: git -C ${repo.repoDir} tag -d ${tag}`
       : `git -C ${repo.repoDir} branch -f ${branch} ${tag}   # then: git -C ${repo.repoDir} tag -d ${tag}`;
-    return { ok: true, message: `migrated ${produced.length} file(s) into ${rootRel}/ (backup tag ${tag})`, undo };
+    const wipNote = wipCount > 0 ? ` (committed ${wipCount} uncommitted change${wipCount === 1 ? '' : 's'} as a WIP snapshot first)` : '';
+    return { ok: true, message: `migrated ${produced.length} file(s) into ${rootRel}/${wipNote} (backup tag ${tag})`, undo };
   } finally {
     if (tempWorktree) gitTry(repo.repoDir, ['worktree', 'remove', '--force', tempWorktree]);
   }
