@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>GitSpace — Agent Strip</title>
+<style>
+  /* ── Tokens lifted verbatim from web/index.css (default "brutalist" theme) ── */
+  :root {
+    --gs-font: 'Geist Mono', 'JetBrains Mono', 'SF Mono', monaco, 'Cascadia Code', monospace;
+    --gs-bg: #000000;
+    --gs-bg-active: #0a0a0a;
+    --gs-border-muted: #111111;
+    --gs-text: #d4d4d4;
+    --gs-text-muted: #777777;
+    --gs-text-ghost: #282828;
+    --gs-accent: #00ff66;   /* green  — running        */
+    --gs-info: #4488ff;     /* blue   — idle / waiting  */
+    --gs-warning-bright: #ffcc00; /* amber — needs you   */
+    --gs-danger-hover: #ff5555;   /* red   — error       */
+    --gs-accent-glow: 0 0 8px rgba(0, 255, 102, 0.25);
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body {
+    background: var(--gs-bg);
+    font-family: var(--gs-font);
+    -webkit-font-smoothing: antialiased;
+    color: var(--gs-text);
+  }
+
+  /* Capture stage — 1920×1080, the strip sits a touch above centre */
+  #stage {
+    width: 1920px;
+    height: 1080px;
+    background: var(--gs-bg);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 64px;
+    overflow: hidden;
+  }
+
+  /* ── The pill strip (scaled-up but faithful to WorkspaceDetailPane.web.tsx) ── */
+  #strip {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    border: 1px solid var(--gs-border-muted);
+    background: var(--gs-bg);
+    padding: 10px 14px;
+    border-radius: 2px;
+  }
+
+  .project-label {
+    font-size: 17px;
+    color: var(--gs-text-ghost);
+    padding: 0 10px 0 4px;
+    user-select: none;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  /* All motion is driven from JS in render(T) — no CSS transitions, so a hard
+     seek to any timestamp produces the exact settled frame. */
+  .pill {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 9px 13px;
+    border-radius: 4px;
+    font-size: 17px;
+    color: var(--gs-text-muted);
+    white-space: nowrap;
+    flex-shrink: 0;
+    overflow: hidden;
+    transform-origin: center;
+  }
+  .pill.current { background: var(--gs-bg-active); color: var(--gs-text); }
+
+  .dot  { font-size: 18px; line-height: 1; }
+  .bolt { color: var(--gs-warning-bright); overflow: hidden; }
+
+  /* ── Caption ── */
+  #caption {
+    height: 28px;
+    font-size: 20px;
+    letter-spacing: .02em;
+    color: var(--gs-text-muted);
+    text-align: center;
+  }
+</style>
+</head>
+<body>
+  <div id="stage">
+    <div id="strip"></div>
+    <div id="caption"></div>
+  </div>
+
+<script>
+/* ────────────────────────────────────────────────────────────────────────
+   Deterministic timeline. Capture tools call window.__seek(ms); a live
+   preview loop runs by default. All visual state is a pure function of T.
+   ──────────────────────────────────────────────────────────────────────── */
+
+const COLORS = {
+  green:  '#00ff66',  // --gs-accent
+  blue:   '#4488ff',  // --gs-info
+  orange: '#ffcc00',  // --gs-warning-bright
+  dim:    '#282828',  // --gs-text-ghost
+};
+
+// ── interpolation helpers ──
+const clamp01 = (x) => (x < 0 ? 0 : x > 1 ? 1 : x);
+const easeOut = (t) => 1 - Math.pow(1 - t, 3);
+const hexRgb  = (h) => [1,3,5].map((i)=>parseInt(h.slice(i,i+2),16));
+const RGB = { green: hexRgb(COLORS.green), blue: hexRgb(COLORS.blue), orange: hexRgb(COLORS.orange) };
+const lerp = (a,b,t) => a + (b-a)*t;
+const mix  = (c1,c2,t) => `rgb(${Math.round(lerp(c1[0],c2[0],t))},${Math.round(lerp(c1[1],c2[1],t))},${Math.round(lerp(c1[2],c2[2],t))})`;
+
+const FADE = 340;   // status colour cross-fade
+const REMOVE = 420; // pill collapse on close
+const POP = 240;    // celebratory bump on resolve
+
+// Each pill: name, the status at each beat, optional removeAt (ms).
+// status ∈ green | blue | orange.  "current" pill is the one you're viewing.
+const PILLS = [
+  { name: 'auth-refactor',     status: 'green'  },
+  { name: 'billing-webhooks',  status: 'orange', resolveAt: 1100, to: 'green' },
+  { name: 'search-index',      status: 'blue',   resolveAt: 2600, to: 'green' },
+  { name: 'mobile-nav',        status: 'green', current: true },
+  { name: 'rate-limiter',      status: 'orange', resolveAt: 1800, to: 'green' },
+  { name: 'staging-deploy',    status: 'blue',   removeAt: 3400 },
+  { name: 'csv-export',        status: 'green'  },
+];
+
+const CAPTIONS = [
+  { t: 0,    text: 'Seven agents. One glance.' },
+  { t: 1100, text: 'Amber = an agent is waiting on you   →   approve' },
+  { t: 2600, text: 'Blue = an idle slot   →   put it to work, or close it' },
+  { t: 4200, text: 'Fleet green. Fully utilized, fully attended.', green: true },
+];
+
+const DURATION = 5800; // ms (loops)
+window.__duration = DURATION;
+
+// ── Build DOM once ──
+const strip = document.getElementById('strip');
+const caption = document.getElementById('caption');
+const label = document.createElement('span');
+label.className = 'project-label';
+label.textContent = 'gitspace:';
+strip.appendChild(label);
+
+const nodes = PILLS.map(p => {
+  const el = document.createElement('div');
+  el.className = 'pill' + (p.current ? ' current' : '');
+  const dot  = document.createElement('span'); dot.className = 'dot'; dot.textContent = '●';
+  const name = document.createElement('span'); name.textContent = p.name;
+  const bolt = document.createElement('span'); bolt.className = 'bolt'; bolt.textContent = '⚡';
+  el.append(dot, name, bolt);
+  strip.appendChild(el);
+  return { el, dot, bolt, p, natural: 0 };
+});
+// Freeze each pill's natural width so the collapse-on-close has something to lerp to.
+nodes.forEach(n => { n.natural = n.el.offsetWidth; n.el.style.maxWidth = n.natural + 'px'; });
+
+function render(T) {
+  let greenFloor = 1; // min "resolved-ness" across the strip → drives payoff glow
+  for (const n of nodes) {
+    const { p } = n;
+
+    // status colour cross-fade (status → p.to), eased
+    const prog = p.resolveAt != null ? easeOut(clamp01((T - p.resolveAt) / FADE)) : 0;
+    const from = RGB[p.status];
+    const to   = RGB[p.to || p.status];
+    n.dot.style.color = mix(from, to, prog);
+
+    // green glow on the dot, proportional to how "green" it is
+    const endsGreen = (p.to || p.status) === 'green';
+    const greenFactor = endsGreen ? (p.resolveAt != null ? prog : 1) : 0;
+    n.dot.style.textShadow = greenFactor > 0 ? `0 0 7px rgba(0,255,102,${0.6 * greenFactor})` : 'none';
+
+    // ⚡ bolt fades/collapses as an orange pill is approved
+    const boltVis = p.status === 'orange' ? (1 - prog) : 0;
+    n.bolt.style.opacity  = boltVis;
+    n.bolt.style.maxWidth = (22 * boltVis) + 'px';
+
+    // collapse-on-close
+    const rp = p.removeAt != null ? easeOut(clamp01((T - p.removeAt) / REMOVE)) : 0;
+    // celebratory bump at the instant of resolve
+    let pop = 0;
+    if (p.resolveAt != null) { const d = T - p.resolveAt; if (d >= 0 && d < POP) pop = Math.sin((d / POP) * Math.PI); }
+    n.el.style.opacity   = 1 - rp;
+    n.el.style.maxWidth   = (n.natural * (1 - rp)) + 'px';
+    n.el.style.paddingLeft = n.el.style.paddingRight = (13 * (1 - rp)) + 'px';
+    n.el.style.transform = `scale(${(1 - 0.15 * rp) * (1 + 0.12 * pop)})`;
+
+    // a closed slot counts as fully resolved; an open one counts by its greenness
+    greenFloor = Math.min(greenFloor, Math.max(greenFactor, rp));
+  }
+
+  // payoff glow ramps in as the whole strip resolves
+  const g = easeOut(greenFloor);
+  strip.style.boxShadow   = g > 0 ? `0 0 ${30 * g}px rgba(0,255,102,${0.20 * g})` : 'none';
+  strip.style.borderColor = mix(hexRgb('111111'), RGB.green, 0.4 * g);
+
+  // caption (discrete beats; colour shifts green at the payoff)
+  let cap = CAPTIONS[0];
+  for (const c of CAPTIONS) if (T >= c.t) cap = c;
+  caption.textContent = cap.text;
+  if (cap.green) { caption.style.color = mix(hexRgb('777777'), RGB.green, g); caption.style.textShadow = `0 0 8px rgba(0,255,102,${0.25 * g})`; }
+  else { caption.style.color = '#777777'; caption.style.textShadow = 'none'; }
+}
+
+// Public seek hook for capture tools (hyperframes / Playwright / etc.)
+window.__seek = (ms) => render(((ms % DURATION) + DURATION) % DURATION);
+
+// Live preview loop (paused automatically once a tool starts seeking)
+let auto = true;
+window.__pauseAuto = () => { auto = false; };
+const _seek = window.__seek;
+window.__seek = (ms) => { auto = false; _seek(ms); };
+
+let start = null;
+function loop(ts) {
+  if (auto) {
+    if (start == null) start = ts;
+    _seek(ts - start);
+  }
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+render(0);
+</script>
+</body>
+</html>

@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>VO Recorder — keep your fleet green</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #000; color: #e6e6e6; font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+  header { display: flex; align-items: center; gap: 14px; padding: 12px 20px; border-bottom: 1px solid #1a1a1a; }
+  header .block { width: 12px; height: 20px; background: #00ff66; }
+  header h1 { font-size: 14px; font-weight: 500; letter-spacing: .08em; }
+  header .spacer { flex: 1; }
+  button { background: #000; color: #e6e6e6; border: 1px solid #1a1a1a; padding: 10px 18px; font: inherit; font-size: 14px; cursor: pointer; }
+  button:hover { background: #0a0a0a; }
+  button.primary { background: #00ff66; color: #000; border-color: #00ff66; font-weight: 600; }
+  button.primary:hover { background: #00cc52; }
+  button:disabled { opacity: .35; cursor: default; }
+  main { flex: 1; display: flex; min-height: 0; }
+  .left { width: 46%; display: flex; flex-direction: column; border-right: 1px solid #1a1a1a; }
+  video { width: 100%; background: #000; border-bottom: 1px solid #1a1a1a; }
+  .meter-wrap { padding: 14px 20px; }
+  .meter-label { font-size: 11px; letter-spacing: .18em; color: #6a6a6a; margin-bottom: 8px; }
+  .meter { height: 10px; background: #0a0a0a; border: 1px solid #1a1a1a; }
+  .meter i { display: block; height: 100%; width: 0%; background: #00ff66; transition: width 60ms linear; }
+  .takes { padding: 6px 20px 20px; overflow-y: auto; flex: 1; }
+  .takes h2 { font-size: 11px; letter-spacing: .18em; color: #6a6a6a; margin: 10px 0; }
+  .take { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
+  .take b { font-size: 13px; font-weight: 500; }
+  .take audio { height: 30px; flex: 1; }
+  .take a { color: #00ff66; font-size: 13px; }
+  .right { flex: 1; display: flex; flex-direction: column; padding: 28px 34px; min-height: 0; overflow-y: auto; }
+  .countdown { font-size: 90px; color: #00ff66; text-align: center; display: none; }
+  .line { padding: 16px 18px; margin-bottom: 10px; border-left: 4px solid #1a1a1a; color: #6a6a6a; font-size: 22px; line-height: 1.5; transition: color .15s, border-color .15s, background .15s; }
+  .line .cue { display: block; font-size: 11px; letter-spacing: .14em; color: #3a3a3a; margin-bottom: 6px; }
+  .line.active { color: #e6e6e6; border-color: #00ff66; background: #080808; }
+  .line.active .cue { color: #00ff66; }
+  .line.next { color: #9c9c9c; }
+  .hint { margin-top: auto; padding-top: 16px; font-size: 12px; color: #6a6a6a; line-height: 1.7; }
+  .rec { display: none; align-items: center; gap: 8px; color: #ff5555; font-size: 13px; }
+  .rec i { width: 10px; height: 10px; border-radius: 50%; background: #ff5555; animation: blink 1s infinite; }
+  @keyframes blink { 50% { opacity: .2; } }
+</style>
+</head>
+<body>
+<header>
+  <div class="block"></div>
+  <h1>VO RECORDER · fleet-green</h1>
+  <div class="rec" id="rec"><i></i> RECORDING</div>
+  <div class="spacer"></div>
+  <select id="mics" style="display:none; background:#000; color:#e6e6e6; border:1px solid #1a1a1a; padding:10px 12px; font:inherit; font-size:13px; max-width:280px;"></select>
+  <button id="arm">1 · Arm mic</button>
+  <button id="start" class="primary" disabled>2 · Start take</button>
+  <button id="stop" disabled>Stop</button>
+</header>
+<main>
+  <div class="left">
+    <video id="vid" src="/out/01-fleet-green.mp4" muted playsinline></video>
+    <div class="meter-wrap">
+      <div class="meter-label">MIC LEVEL</div>
+      <div class="meter"><i id="meter"></i></div>
+    </div>
+    <div class="takes"><h2>TAKES</h2><div id="takes"></div></div>
+  </div>
+  <div class="right">
+    <div class="countdown" id="count"></div>
+    <div id="lines"></div>
+    <div class="hint">
+      Video is muted on purpose — the lines light up when it's your moment, so nothing bleeds into the mic.<br/>
+      Recording starts 2s before the video. Flub a line? Just say it again and keep going — takes get comped.<br/>
+      When happy: download the best take (lands in ~/Downloads) and tell Claude the take number.
+    </div>
+  </div>
+</main>
+<script>
+const LINES = [
+  { t0: 0.0,  t1: 2.0,  cue: 'CARDS FLYING · RISER', text: 'Babysitting agents doesn’t have to suck.' },
+  { t0: 2.0,  t1: 3.8,  cue: 'BOARD LANDS', text: 'This is your fleet.' },
+  { t0: 4.0,  t1: 6.8,  cue: 'TWO DOTS TURN', text: 'Blue means idle. Amber means it has a question.' },
+  { t0: 9.5,  t1: 10.6, cue: 'SUBMIT CLICK', text: 'One answer…' },
+  { t0: 13.2, t1: 13.9, cue: 'SEND CLICK', text: '…one nudge…' },
+  { t0: 13.9, t1: 15.6, cue: 'LIGHT SWEEP · PULL BACK', text: '…and everything’s moving again.' },
+  { t0: 16.4, t1: 18.0, cue: 'TAGLINE TYPES', text: 'Keep your fleet green.' },
+];
+const LEAD = 2.0; // seconds of recording before video starts
+const PRE = 0.6;  // highlight lines slightly early so you start on time
+
+const vid = document.getElementById('vid');
+const linesEl = document.getElementById('lines');
+const armBtn = document.getElementById('arm');
+const startBtn = document.getElementById('start');
+const stopBtn = document.getElementById('stop');
+const takesEl = document.getElementById('takes');
+const meterEl = document.getElementById('meter');
+const countEl = document.getElementById('count');
+const recEl = document.getElementById('rec');
+
+LINES.forEach((l) => {
+  const d = document.createElement('div');
+  d.className = 'line';
+  d.innerHTML = '<span class="cue">' + l.cue + '</span>' + l.text;
+  linesEl.appendChild(d);
+});
+const lineEls = [...document.querySelectorAll('.line')];
+
+let stream, recorder, chunks = [], takeN = 0, raf;
+const micsEl = document.getElementById('mics');
+
+async function grabStream(deviceId) {
+  if (stream) stream.getTracks().forEach((t) => t.stop());
+  stream = await navigator.mediaDevices.getUserMedia({
+    audio: {
+      echoCancellation: false,
+      noiseSuppression: false,
+      ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
+    },
+  });
+  // level meter (rebuilt per device)
+  const ctx = new AudioContext();
+  const src = ctx.createMediaStreamSource(stream);
+  const an = ctx.createAnalyser();
+  an.fftSize = 512;
+  src.connect(an);
+  const buf = new Uint8Array(an.fftSize);
+  (function loop() {
+    if (!stream.active) return;
+    an.getByteTimeDomainData(buf);
+    let peak = 0;
+    for (const v of buf) peak = Math.max(peak, Math.abs(v - 128) / 128);
+    meterEl.style.width = Math.min(100, peak * 260) + '%';
+    meterEl.style.background = peak > 0.85 ? '#ff5555' : '#00ff66';
+    requestAnimationFrame(loop);
+  })();
+}
+
+armBtn.onclick = async () => {
+  await grabStream(); // permission first — device labels are blank until granted
+  const devices = (await navigator.mediaDevices.enumerateDevices()).filter(
+    (d) => d.kind === 'audioinput',
+  );
+  micsEl.innerHTML = '';
+  const currentId = stream.getAudioTracks()[0].getSettings().deviceId;
+  for (const d of devices) {
+    const o = document.createElement('option');
+    o.value = d.deviceId;
+    o.textContent = d.label || 'mic ' + d.deviceId.slice(0, 6);
+    if (d.deviceId === currentId) o.selected = true;
+    micsEl.appendChild(o);
+  }
+  micsEl.style.display = 'block';
+  micsEl.onchange = () => grabStream(micsEl.value);
+  armBtn.textContent = 'mic armed ✓';
+  armBtn.disabled = true;
+  startBtn.disabled = false;
+};
+
+startBtn.onclick = async () => {
+  startBtn.disabled = true;
+  stopBtn.disabled = false;
+  chunks = [];
+  recorder = new MediaRecorder(stream, { mimeType: 'audio/webm;codecs=opus' });
+  recorder.ondataavailable = (e) => chunks.push(e.data);
+  recorder.onstop = saveTake;
+  vid.pause();
+  vid.currentTime = 0;
+  recorder.start();
+  recEl.style.display = 'flex';
+  // 2s lead: countdown, then roll video
+  countEl.style.display = 'block';
+  linesEl.style.display = 'none';
+  for (const n of ['2', '1']) {
+    countEl.textContent = n;
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  countEl.style.display = 'none';
+  linesEl.style.display = 'block';
+  vid.play();
+  (function sync() {
+    const t = vid.currentTime;
+    lineEls.forEach((el, i) => {
+      const l = LINES[i];
+      el.className = 'line' +
+        (t >= l.t0 - PRE && t <= l.t1 + 0.4 ? ' active'
+          : t >= l.t0 - 2.2 && t < l.t0 - PRE ? ' next' : '');
+    });
+    if (!vid.paused) raf = requestAnimationFrame(sync);
+  })();
+  vid.onended = () => setTimeout(() => stopBtn.click(), 600);
+};
+
+stopBtn.onclick = () => {
+  if (recorder && recorder.state !== 'inactive') recorder.stop();
+  stopBtn.disabled = true;
+  startBtn.disabled = false;
+  recEl.style.display = 'none';
+  cancelAnimationFrame(raf);
+  vid.pause();
+  lineEls.forEach((el) => (el.className = 'line'));
+};
+
+function saveTake() {
+  takeN++;
+  const blob = new Blob(chunks, { type: 'audio/webm' });
+  const url = URL.createObjectURL(blob);
+  const name = 'vo-take' + takeN + '-lead2000.webm';
+  const d = document.createElement('div');
+  d.className = 'take';
+  d.innerHTML = '<b>take ' + takeN + '</b><audio controls src="' + url + '"></audio>' +
+    '<a href="' + url + '" download="' + name + '">download</a>';
+  takesEl.prepend(d);
+}
+</script>
+</body>
+</html>
