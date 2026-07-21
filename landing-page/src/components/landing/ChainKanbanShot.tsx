@@ -231,21 +231,29 @@ export function ChainKanbanShot() {
           <span style={{ color: C.muted }}>acme</span>
         </div>
         <div className="flex items-center px-3 border-l" style={{ borderColor: C.border, background: "#0c0c0c", color: C.text }}>
-          ⊞ chains
+          ⊞ board
         </div>
-        {(Object.keys(CHAINS) as ChainId[]).map((id) => (
+        {/* the strip is ALWAYS active workspaces + their agent status — never chains */}
+        {[
+          { name: "checkout-flags", dot: C.green, phase: "build" },
+          { name: "retry-backoff", dot: C.green, phase: "fix" },
+          { name: "docs-migration", dot: C.green, phase: "docs" },
+          { name: "backfill-job", dot: C.blue, phase: "review" },
+          { name: "docs-getting-started", dot: C.blue, phase: "review" },
+        ].map((w) => (
           <div
-            key={id}
+            key={w.name}
             className="hidden md:flex items-center gap-1.5 px-3 border-l whitespace-nowrap"
-            style={{ borderColor: C.border, color: active === id ? C.text : C.muted }}
+            style={{ borderColor: C.border, color: C.muted }}
           >
-            <span style={{ width: 8, height: 8, background: CHAINS[id].color, display: "inline-block", flex: "none" }} />
-            {CHAINS[id].title}
-            <span className="text-[9px]" style={{ color: C.dim }}>{CHAINS[id].order.length} goals</span>
+            <span style={{ width: 8, height: 8, background: w.dot, display: "inline-block", flex: "none" }} />
+            {w.name}
+            <span className="uppercase text-[8px] tracking-wider" style={{ color: C.dim }}>{w.phase}</span>
           </div>
         ))}
-        <div className="ml-auto hidden sm:flex items-center px-3" style={{ color: C.dim }}>
-          space chain show
+        <div className="ml-auto hidden sm:flex items-center gap-3 px-3" style={{ color: C.dim }}>
+          <span>⚑</span>
+          <span className="border px-1.5 text-[9px]" style={{ borderColor: C.border }}>⌘K</span>
         </div>
       </div>
 

@@ -83,16 +83,30 @@ demos, and the site section for that stage all ship together and cross-link.
 
 - **Nº 01 · Implement — "Babysitting agents sucks."** SHIPPED. The strip,
   idle vs. question, answer the ambers. Film + 4 interactive demos live.
-- **Nº 02 · Review — "Evidence, not vibes."** Hook: "'Looks good to me' is
-  not a review when the author is a machine." Demos: a live rubric you can
-  run (checks fire command judges, captured output appears as evidence); an
-  agent-blame game (here's a diff — which conceptual change produced it?);
-  a change-guide explorer. Film ep02: amber → review → evidence → merge.
-- **Nº 03 · Operate — "Shipped isn't done."** Hook: merge is the midpoint;
-  goals have an afterlife. Demos: project view across goals; a shipped goal
-  reopening on a regression signal; the board the morning after shipping.
-- (Reserve: Nº 04 · Plan — "State the goal." Goal chains, plans as artifacts
-  both humans and agents read.)
+- **Nº 02 · "Evidence, not vibes."** (implementation-proof review) Hook:
+  "'Looks good to me' is not a review when the author is a machine."
+  Demos: a live rubric you can run (checks fire command judges, captured
+  output attaches as evidence, incl. a screenshot artifact). Film ep02:
+  amber → review → evidence → merge.
+- **Nº 03 · "The change guide."** (code review as a build-order story)
+  review-guide-narrator: analyzer computes foundations → wiring → surfaces,
+  the agent narrates each beat grounded in the phase journal. Demo: a
+  change-guide explorer over a real-shaped diff. Distinct from Nº 02: this
+  is reading the code; that is judging the outcome. Both shown on the
+  homepage's Review stage.
+- **Nº 04 · "The workflow and the goal."** (plan process) Goals derive
+  validation contracts; workflows are node graphs with phases; the phase
+  journal declares intent and records outcomes. Demo: build a goal → watch
+  the workflow nodes and rubric derive.
+- **Nº 05 · "The agent change."** (agent blame) Conceptual changes made by
+  an agent: introduced / moved / refined, proof-carrying blame from the
+  phase journal. Seed: docs/agent-blame.html (already reframed).
+- **Nº 06 · "Goals ship in order."** (goal chains) The chain lens, stack
+  edges, planned-vs-workspace-backed goals. Seed:
+  workspace-chain-kanban-ux.html + the homepage ChainKanbanShot.
+- **Nº 07 · "Shipped isn't done."** (operations dashboards) Cron refreshing
+  dashboards from rolled-up artifacts; shipped goals reopening on regression
+  signals; the board the morning after shipping.
 
 ## Content inventory (raw material for site sections + posts)
 
@@ -122,12 +136,12 @@ zinc cards are the OLD language — migrate on touch. Done: v2 sections,
 ProductShots, Security, Pricing. Remaining: Navbar, Footer, Features,
 Comparison, CTA, blog demo islands.
 
-## Open decisions (provisional picks marked ▸, pending Bradley's confirmation)
+## Decisions (RESOLVED 2026-07-21)
 
-1. **Name the prescribed flow.** ▸ "Fleet Green" — already the video tagline,
+1. **Flow name: "Fleet Green"** (confirmed; shipped on the homepage) — already the video tagline,
    blog thesis, and asset motif. (Alternatives considered: "the Goal Chain,"
    unnamed.)
-2. **Enterprise handoff mechanics.** ▸ /enterprise page framing the
+2. **Enterprise handoff: /enterprise page** (built; CTA = Bradley's Google Calendar booking link) framing the
    agent-factory engagement, then linking to inkibra. (Interim: mailto.)
-3. **PM/lifecycle story prominence.** ▸ Stage-level ("operate" stage of the
+3. **PM story: stage-level** (Operate stage of the flow) ("operate" stage of the
    flow), not hero-level, while the ops features are young.

@@ -3,13 +3,15 @@ import { useCallback, useEffect, useRef, useState } from "react";
 /**
  * ProcessSection — the Fleet Green process, acted out.
  *
- * One deterministic 42s loop: a goal types itself, a workspace grows, the
- * fleet strip runs, an agent asks its question (the ask form appears IN the
- * process, where it belongs), the validation contract judges its evidence
- * requirement by requirement, the artifacts get promoted and rolled up to
- * main, the goal ships. The five stage cards below are the player's timeline —
- * the active card is lit and fills; clicking a card seeks the simulation to
- * that stage.
+ * One deterministic 54s loop: a goal types itself and derives a workflow
+ * graph, gitspace sets up a workspace by itself, an agent works in a real
+ * transcript (text + tool-use rows) and asks its one question, review runs as
+ * two explicit gates (change guide, then the validation contract judging
+ * evidence — including a screenshot), and operations close the loop with a
+ * cron-refreshed dashboard, promote, and rollup. The only human act in the
+ * whole sim is answering the ask form. The five stage cards below are the
+ * player's timeline — the active card is lit and fills; clicking a card seeks
+ * the simulation to that stage.
  *
  * Engineering: a single rAF clock; every scene renders as a pure function of
  * elapsed ms (seeking = moving the clock). Paused off-viewport via
@@ -36,51 +38,65 @@ const C = {
   blue: "#4488ff",
 };
 
-/* ── the timeline: absolute ms within one 42s loop ──────────────────────── */
+/* ── the timeline: absolute ms within one 54s loop ──────────────────────── */
 
-const LOOP = 42000;
-const STAGE_STARTS = [0, 7000, 13000, 24000, 32000] as const;
-const STAGE_ENDS = [7000, 13000, 24000, 32000, LOOP] as const;
+const LOOP = 54000;
+const STAGE_STARTS = [0, 11000, 18000, 31000, 42000] as const;
+const STAGE_ENDS = [11000, 18000, 31000, 42000, LOOP] as const;
 
 const EV = {
-  // 01 · plan
+  // 01 · plan — goal doc, validation contract, then the workflow spec graph
   typeTitle: 400,
   typeBody: 2100,
   goalChip: 4300,
   rubric: 5200,
-  handoff: 6100,
-  // 02 · context
-  treeMain: 7200,
-  treeBranch: 7900,
-  wsBadge: 8400,
-  setup: [8900, 9600, 10300, 11000] as const,
-  cleanRoom: 11800,
-  // 03 · implement
-  strip: 13200,
-  work: [13600, 14300, 15000, 15700] as const,
-  ask: 16500,
-  formIn: 17300,
-  pick: 19300,
-  submit: 20600,
-  formExit: 21050,
-  answered: 21800,
-  post: [22600, 23300] as const,
-  // 04 · review — the validation contract: evidence attaches, judgments run,
-  // statuses flip missing → review → accepted (space-goal / space-review vocab)
-  statusCmd: 29800,
-  ready: 30200,
-  // 05 · operate — the artifacts afterlife: promote, rollup, then shipped
-  promote: 32400,
-  promoteDone: 33200,
-  rollup: 33800,
-  rollupFill: 34000,
-  rollupDone: 35000,
-  cron: 35400,
-  fill: 36000,
-  shipped: 37700,
-  board: 38400,
-  caption: 39200,
-  next: 40400,
+  wfLine: 6200,
+  wfNode: [6900, 7500, 7800, 8500, 9400] as const, // api · web · worker · canary · ship
+  wfEdge: [7200, 8200, 9100] as const,
+  handoff: 10200,
+  // 02 · context — gitspace runs setup itself; no human at a prompt
+  treeMain: 11200,
+  treeBranch: 11900,
+  wsBadge: 12400,
+  setup: [12900, 13600, 14300, 15000] as const,
+  autoCaption: 15900,
+  cleanRoom: 16800,
+  // 03 · implement — the agent transcript: text + tool-use rows, then the ask
+  strip: 18200,
+  kicker: 18500,
+  asst1: 18800,
+  tool: [19500, 20300, 21100] as const,
+  asst2: 21900,
+  ask: 22600,
+  formIn: 23400,
+  pick: 25400,
+  submit: 26700,
+  formExit: 27150,
+  answered: 27900,
+  canaryTool: 28700,
+  asst3: 29500,
+  // 04 · review — gate 1: CODE REVIEW (the change guide's build-order story),
+  // gate 2: IMPLEMENTATION PROOF (the validation contract judging evidence)
+  guideLabel: 31300,
+  guideStep: [31900, 32800, 33700] as const,
+  guideChip: 34100,
+  proofLabel: 34400,
+  statusCmd: 40000,
+  ready: 40500,
+  // 05 · operate — promote, rollup, cron-refreshed ops dashboard, shipped
+  promote: 42400,
+  promoteDone: 43200,
+  rollup: 43800,
+  rollupFill: 44000,
+  rollupDone: 45000,
+  dash: 45700,
+  cronTick: 47600,
+  dashCommit: 48900,
+  fill: 49400,
+  shipped: 51100,
+  board: 51800,
+  caption: 52600,
+  next: 53400,
 } as const;
 
 /**
@@ -93,33 +109,36 @@ const REQS = [
     title: "Focused tests pass",
     rubric: "Suite completes with 0 failures.",
     artifact: "test-run.json",
-    appear: 24300,
-    attach: 25300,
-    judge: 25900,
-    accept: 26600,
+    shot: false,
+    appear: 34600,
+    attach: 35400,
+    judge: 36000,
+    accept: 36700,
   },
   {
     title: "Canary clean",
     rubric: "api error rate 0.00% over 10m.",
     artifact: "canary-metrics.json",
-    appear: 24500,
-    attach: 26400,
-    judge: 27100,
-    accept: 27800,
+    shot: false,
+    appear: 34750,
+    attach: 36500,
+    judge: 37200,
+    accept: 37900,
   },
   {
-    title: "Change guide written",
-    rubric: "Guide narrates every phase.",
-    artifact: "review/guide.json",
-    appear: 24700,
-    attach: 27600,
-    judge: 28300,
-    accept: 29100,
+    title: "Checkout flow verified",
+    rubric: "One code path; totals render.",
+    artifact: "checkout-flow.png",
+    shot: true,
+    appear: 34900,
+    attach: 37700,
+    judge: 38500,
+    accept: 39300,
   },
 ] as const;
 
 /** Good static frame per stage (used by reduced-motion seeking). */
-const STAGE_FREEZE = [5600, 12200, 19800, 28400, 39500] as const;
+const STAGE_FREEZE = [9000, 16000, 25800, 38700, 48400] as const;
 
 const GOAL_TITLE = "# Remove checkout_v2 flag from all services";
 const GOAL_BODY = "Done means: zero references, tests green, canary clean.";
@@ -211,6 +230,55 @@ function Pip({ color, pulse = false, bloom = false }: { color: string; pulse?: b
   );
 }
 
+/** Marks a command the SYSTEM runs — never a human at a prompt. */
+function Sys() {
+  return (
+    <span className="select-none flex-none" style={{ color: C.ghost }}>
+      gitspace ·
+    </span>
+  );
+}
+
+/** A workflow-spec node; pops in lit as it derives from the goal. */
+function WfNode({ t, at, label }: { t: number; at: number; label: string }) {
+  if (t < at) return null;
+  return (
+    <span
+      className="pf-pop px-1.5 py-0.5 text-[8px] whitespace-nowrap"
+      style={{ border: `1px solid ${C.green}55`, color: C.text, background: C.surface }}
+    >
+      {label}
+    </span>
+  );
+}
+
+/** A hairline edge between workflow nodes; draws left→right. */
+function WfEdge({ t, at }: { t: number; at: number }) {
+  const p = clamp01((t - at) / 250);
+  return (
+    <span className="relative flex-none" style={{ width: 12, height: 1, background: p > 0 ? C.border : "transparent" }}>
+      <span className="absolute left-0 top-0 h-full" style={{ width: `${p * 100}%`, background: `${C.green}88` }} />
+    </span>
+  );
+}
+
+/** A tool-use row in the agent transcript (▸ tag · result). */
+function ToolRow({ t, at, tag, body }: { t: number; at: number; tag: string; body: string }) {
+  if (t < at) return null;
+  return (
+    <div
+      className="pf-rise flex w-fit max-w-full items-center gap-2 px-2 py-1 text-[10px]"
+      style={{ border: `1px solid ${C.border}`, background: C.surface }}
+    >
+      <span className="flex-none" style={{ color: C.ghost }}>▸</span>
+      <span className="flex-none text-[8px] px-1" style={{ border: `1px solid ${C.borderMuted}`, color: C.dim }}>
+        {tag}
+      </span>
+      <span className="truncate" style={{ color: C.muted }}>{body}</span>
+    </div>
+  );
+}
+
 /* ── scenes (each a pure function of t) ─────────────────────────────────── */
 
 function PlanScene({ t }: { t: number }) {
@@ -243,6 +311,26 @@ function PlanScene({ t }: { t: number }) {
         <L t={t} at={EV.rubric}>
           <span style={{ color: C.green }}>←</span> validation contract derived · 3 requirements, each with a rubric
         </L>
+        <L t={t} at={EV.wfLine}>
+          <span style={{ color: C.green }}>←</span> workflow spec derived · remove-checkout-v2.workflow.json
+        </L>
+      </div>
+      {/* the plan AS a workflow: phases materialize as a node graph */}
+      {t >= EV.wfNode[0] && (
+        <div className="pf-rise mt-3 flex items-center overflow-hidden">
+          <WfNode t={t} at={EV.wfNode[0]} label="remove-api" />
+          <WfEdge t={t} at={EV.wfEdge[0]} />
+          <span className="flex flex-col gap-1">
+            <WfNode t={t} at={EV.wfNode[1]} label="remove-web" />
+            <WfNode t={t} at={EV.wfNode[2]} label="remove-worker" />
+          </span>
+          <WfEdge t={t} at={EV.wfEdge[1]} />
+          <WfNode t={t} at={EV.wfNode[3]} label="verify-canary" />
+          <WfEdge t={t} at={EV.wfEdge[2]} />
+          <WfNode t={t} at={EV.wfNode[4]} label="ship" />
+        </div>
+      )}
+      <div className="mt-3 space-y-1">
         <L t={t} at={EV.handoff}>
           → handing to a workspace…
         </L>
@@ -253,10 +341,10 @@ function PlanScene({ t }: { t: number }) {
 
 function ContextScene({ t }: { t: number }) {
   const setupLines = [
-    "$ git worktree add ../checkout-flags",
-    "$ setup/install.sh · deps ✓",
-    "$ bundle: env + secrets ✓",
-    "$ agent boot · goal.json loaded ✓",
+    "git worktree add ../checkout-flags",
+    "setup/install.sh · deps ✓",
+    "bundle: env + secrets ✓",
+    "agent boot · goal.json loaded ✓",
   ];
   return (
     <div>
@@ -282,10 +370,14 @@ function ContextScene({ t }: { t: number }) {
       <div className="mt-4 space-y-1">
         {setupLines.map((line, i) => (
           <L key={line} t={t} at={EV.setup[i]}>
-            {line}
+            <Sys />
+            <span>{line}</span>
           </L>
         ))}
-        <L t={t} at={EV.cleanRoom} color={C.green}>
+        <L t={t} at={EV.autoCaption} color={C.green}>
+          workspace setup runs itself — you never typed a command.
+        </L>
+        <L t={t} at={EV.cleanRoom} color={C.muted}>
           agent: starting from a clean room
         </L>
       </div>
@@ -386,16 +478,15 @@ function AskPanel({ t }: { t: number }) {
 
 function ImplementScene({ t }: { t: number }) {
   const flagsColor = t >= EV.ask && t < EV.answered ? C.amber : C.green;
-  const workLines = [
-    "edit services/api/flags.ts · −42 lines",
-    "rm web/src/checkout_v2.tsx",
-    "grep -r checkout_v2 · 3 refs left",
-    "worker: removing flag guards…",
+  const tools = [
+    { tag: "edit", body: "services/api/flags.ts · −42 lines" },
+    { tag: "bash", body: "bun test · 142 passed" },
+    { tag: "grep", body: "checkout_v2 · 3 refs left" },
   ];
   return (
     <div className="relative h-full">
       {t >= EV.strip && (
-        <div className="pf-rise flex flex-wrap items-center gap-x-4 gap-y-1.5 mb-4">
+        <div className="pf-rise flex flex-wrap items-center gap-x-4 gap-y-1.5 mb-3">
           {FLEET.map((w) => {
             const isFlags = w.name === "checkout-flags";
             const color = isFlags ? flagsColor : w.base === "blue" ? C.blue : C.green;
@@ -412,12 +503,24 @@ function ImplementScene({ t }: { t: number }) {
           })}
         </div>
       )}
+      {/* the agent transcript: assistant text + tool-use rows */}
+      {t >= EV.kicker && (
+        <div className="pf-rise text-[8px] tracking-[0.18em] mb-1.5" style={{ color: C.ghost }}>
+          PI · CLAUDE-FABLE-5 · CHECKOUT-FLAGS
+        </div>
+      )}
       <div className="space-y-1">
-        {workLines.map((line, i) => (
-          <L key={line} t={t} at={EV.work[i]}>
-            {line}
-          </L>
-        ))}
+        <L t={t} at={EV.asst1} color={C.text}>
+          Removing the flag from api first — it gates the other two services.
+        </L>
+        <div className="space-y-1">
+          {tools.map((tool, i) => (
+            <ToolRow key={tool.tag} t={t} at={EV.tool[i]} tag={tool.tag} body={tool.body} />
+          ))}
+        </div>
+        <L t={t} at={EV.asst2} color={C.text}>
+          web and worker still reference it. Rollout order is a judgment call — asking.
+        </L>
         {t >= EV.ask && t < EV.answered && (
           <div className="pf-rise pt-1">
             <span className="text-[10px] px-1.5 py-0.5" style={{ color: C.amber, border: `1px solid ${C.amber}44` }}>
@@ -426,10 +529,12 @@ function ImplementScene({ t }: { t: number }) {
           </div>
         )}
         <L t={t} at={EV.answered} color={C.green}>
-          ✓ answer applied: canary, api first
+          ✓ you · Canary: api first, watch errors 10m
         </L>
-        <L t={t} at={EV.post[0]}>canary: api deploy · errors 0.00%</L>
-        <L t={t} at={EV.post[1]}>proceeding: web, worker</L>
+        <ToolRow t={t} at={EV.canaryTool} tag="bash" body="canary api · errors 0.00%" />
+        <L t={t} at={EV.asst3} color={C.text}>
+          Canary is clean — proceeding with web and worker.
+        </L>
       </div>
       <AskPanel t={t} />
     </div>
@@ -478,7 +583,17 @@ function ReqRow({ t, r }: { t: number; r: (typeof REQS)[number] }) {
         rubric: {r.rubric}
       </div>
       {status !== "missing" && (
-        <div className="pl-[16px] mt-1">
+        <div className="pl-[16px] mt-1 flex items-center gap-1.5">
+          {r.shot && (
+            <span
+              className="pf-pop flex flex-none flex-col justify-between p-[3px]"
+              style={{ width: 26, height: 18, border: `1px solid ${C.border}`, background: C.bg }}
+            >
+              <span style={{ height: 2, width: "100%", background: "#2a2a2a" }} />
+              <span style={{ height: 2, width: "70%", background: "#222222" }} />
+              <span style={{ height: 3, width: 10, background: C.green }} />
+            </span>
+          )}
           <span
             className="pf-pop text-[8.5px] px-1 py-px"
             style={{ color: C.muted, border: `1px solid ${C.border}`, background: C.bg }}
@@ -491,19 +606,64 @@ function ReqRow({ t, r }: { t: number; r: (typeof REQS)[number] }) {
   );
 }
 
+/** A review sub-phase label: green while its gate is running, then dims. */
+function GateLabel({ t, at, until, text }: { t: number; at: number; until: number; text: string }) {
+  if (t < at) return null;
+  const active = t < until;
+  return (
+    <div className="pf-rise text-[8.5px] tracking-[0.18em] mb-2" style={{ color: active ? C.green : C.dim }}>
+      {text}
+    </div>
+  );
+}
+
 function ReviewScene({ t }: { t: number }) {
+  const guide = [
+    ["Step 1 — Foundations", "flag registry drops checkout_v2"],
+    ["Step 2 — Wiring", "api · web · worker guards removed"],
+    ["Step 3 — Surfaces", "one checkout path remains"],
+  ] as const;
   return (
     <div>
       <div className="text-[9px] tracking-[0.18em] mb-3" style={{ color: C.dim }}>
-        REVIEW — THE VALIDATION CONTRACT
+        REVIEW — TWO GATES
       </div>
-      <div className="space-y-1.5 max-w-md">
-        {REQS.map((r) => (
-          <ReqRow key={r.title} t={t} r={r} />
-        ))}
+      <div className="grid sm:grid-cols-2 gap-x-6 gap-y-3">
+        {/* gate 1: the change guide narrates the diff in build order */}
+        <div>
+          <GateLabel t={t} at={EV.guideLabel} until={EV.proofLabel} text="CODE REVIEW · CHANGE GUIDE" />
+          <div className="space-y-1.5">
+            {guide.map(([step, desc], i) => (
+              <L key={step} t={t} at={EV.guideStep[i]} color={C.dim}>
+                <span className="flex-none" style={{ color: C.muted }}>{step}:</span>
+                <span>{desc}</span>
+              </L>
+            ))}
+          </div>
+          {t >= EV.guideChip && (
+            <span
+              className="pf-pop mt-2 text-[8.5px] px-1 py-px"
+              style={{ color: C.muted, border: `1px solid ${C.border}`, background: C.bg }}
+            >
+              ⎘ review/guide.json
+            </span>
+          )}
+        </div>
+        {/* gate 2: the validation contract judges the evidence */}
+        <div>
+          <GateLabel t={t} at={EV.proofLabel} until={LOOP} text="IMPLEMENTATION PROOF · RUBRIC" />
+          <div className="space-y-1">
+            {REQS.map((r) => (
+              <ReqRow key={r.title} t={t} r={r} />
+            ))}
+          </div>
+        </div>
       </div>
       <div className="mt-3 space-y-1">
-        <L t={t} at={EV.statusCmd}>$ space goal status</L>
+        <L t={t} at={EV.statusCmd}>
+          <Sys />
+          <span>space goal status</span>
+        </L>
         <L t={t} at={EV.ready} color={C.green}>
           Ready: all required artifacts passed judgment.
         </L>
@@ -521,14 +681,15 @@ function OperateScene({ t }: { t: number }) {
         OPERATE — THE ARTIFACTS AFTERLIFE
       </div>
       {/* promote: scratch draft becomes a typed artifact in the versioned tree */}
-      <div className="space-y-1.5 mb-4">
+      <div className="space-y-1.5 mb-3">
         <L t={t} at={EV.promote} color={C.muted}>
           <span
-            className={`w-3 text-center ${t >= EV.promoteDone ? "pf-pop" : ""}`}
+            className={`w-3 flex-none text-center ${t >= EV.promoteDone ? "pf-pop" : ""}`}
             style={{ color: t >= EV.promoteDone ? C.green : C.ghost }}
           >
             {t >= EV.promoteDone ? "✓" : "…"}
           </span>
+          <Sys />
           <span className="truncate">
             space artifacts promote scratch/rollout-notes.md <span style={{ color: C.green }}>→</span> docs/rollout.md
           </span>
@@ -550,16 +711,74 @@ function OperateScene({ t }: { t: number }) {
                 ✓
               </span>
             )}
-            {t >= EV.cron && (
-              <span
-                className="pf-breathe text-[8px] px-1 py-px"
-                style={{ color: C.blue, border: `1px solid ${C.blue}44` }}
-              >
-                ◷ cron · nightly
-              </span>
-            )}
           </div>
         )}
+      </div>
+      {/* the ops dashboard: a cron tick refreshes the tiles from fresh data */}
+      {t >= EV.dash &&
+        (() => {
+          const fresh = t >= EV.cronTick;
+          const ticking = t >= EV.cronTick - 400 && t < EV.cronTick + 900;
+          const sec = Math.max(0, Math.floor((t - EV.cronTick) / 1000));
+          const tiles: Array<[string, string]> = fresh
+            ? [
+                ["error rate", "0.00%"],
+                ["canary", "clean ✓"],
+                ["rollout", "100%"],
+              ]
+            : [
+                ["error rate", "0.02%"],
+                ["canary", "clean"],
+                ["rollout", "62%"],
+              ];
+          return (
+            <div className="pf-rise max-w-sm mb-3" style={{ border: `1px solid ${C.border}`, background: C.surface }}>
+              <div className="flex items-center gap-2 px-2.5 py-1.5" style={{ borderBottom: `1px solid ${C.borderMuted}` }}>
+                <span className="text-[8px] tracking-[0.16em]" style={{ color: C.dim }}>
+                  ▦ OPS DASHBOARD
+                </span>
+                <span
+                  className={`text-[8px] px-1 py-px ${ticking ? "animate-pulse" : "pf-breathe"}`}
+                  style={{
+                    color: C.blue,
+                    border: `1px solid ${C.blue}44`,
+                    boxShadow: ticking ? `0 0 10px ${C.blue}66` : "none",
+                  }}
+                >
+                  ◷ cron · nightly
+                </span>
+                <span
+                  key={fresh ? "fresh" : "stale"}
+                  className="pf-pop ml-auto text-[8px] tabular-nums"
+                  style={{ color: fresh ? C.green : C.ghost }}
+                >
+                  {fresh ? `updated ${sec}s ago` : "updated 8h ago"}
+                </span>
+              </div>
+              <div className="grid grid-cols-3 gap-px" style={{ background: C.borderMuted }}>
+                {tiles.map(([label, value]) => (
+                  <div key={label} className="px-2 py-1.5" style={{ background: C.bg }}>
+                    <div className="text-[7.5px] uppercase tracking-wider" style={{ color: C.ghost }}>
+                      {label}
+                    </div>
+                    <div
+                      key={value}
+                      className="pf-pop text-[12px] tabular-nums"
+                      style={{ color: fresh ? C.green : C.muted }}
+                    >
+                      {value}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        })()}
+      <div className="space-y-1 mb-3">
+        <L t={t} at={EV.dashCommit}>
+          <Sys />
+          <span>data/rollout.data.json refreshed → rolled up to main</span>
+        </L>
       </div>
       <div className="flex items-center gap-3 mb-4">
         <span className="text-[10px] w-40 truncate" style={{ color: C.muted }}>
@@ -728,7 +947,7 @@ export function ProcessSection() {
               </button>
             )}
           </div>
-          <div className="relative h-[340px] md:h-[360px] overflow-hidden" style={{ background: C.bg }}>
+          <div className="relative h-[400px] md:h-[380px] overflow-hidden" style={{ background: C.bg }}>
             <div key={stage} className="pf-rise absolute inset-0 p-5 md:p-6">
               <Scene t={t} />
             </div>

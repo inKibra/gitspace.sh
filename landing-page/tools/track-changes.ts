@@ -13,13 +13,7 @@
  * A raw word-diff view stays at http://localhost:5191/.
  */
 
-const FILES = [
-  'src/episodes/01-babysitting-agents-sucks/index.tsx',
-  'src/episodes/01-babysitting-agents-sucks/islands/FindTheOne.tsx',
-  'src/episodes/01-babysitting-agents-sucks/islands/AxesPeel.tsx',
-  'src/episodes/01-babysitting-agents-sucks/islands/WordsVsColor.tsx',
-  'src/episodes/01-babysitting-agents-sucks/islands/ResolveFleet.tsx',
-];
+const FILES = ['src/episodes'];
 
 const root = new URL('..', import.meta.url).pathname;
 const CORS = {

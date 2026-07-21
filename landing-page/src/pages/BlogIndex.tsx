@@ -11,6 +11,12 @@ const POSTS = [
     date: "July 2026",
     image: "/blog/babysitting-agents-sucks-og.png",
   },
+  { slug: "evidence-not-vibes", kicker: "The agent fleet · Nº 02", title: "Evidence, not vibes.", dek: "“Looks good to me” is not a review when the author is a machine. Rubrics, command judges, and evidence you can replay.", date: "Draft", image: null },
+  { slug: "the-change-guide", kicker: "The agent fleet · Nº 03", title: "The change guide.", dek: "Code review as a build-order story: foundations, wiring, surfaces. The analyzer computes it; the agent narrates it.", date: "Draft", image: null },
+  { slug: "the-workflow-and-the-goal", kicker: "The agent fleet · Nº 04", title: "The workflow and the goal.", dek: "State the goal and the contract derives: requirements, rubrics, workflow nodes, and an honest phase journal.", date: "Draft", image: null },
+  { slug: "the-agent-change", kicker: "The agent fleet · Nº 05", title: "The agent change.", dek: "Blame for the agent age: not who typed the line, but which conceptual change introduced, moved, or refined it.", date: "Draft", image: null },
+  { slug: "goals-ship-in-order", kicker: "The agent fleet · Nº 06", title: "Goals ship in order.", dek: "Chains are the plan over goals. Workspaces come and go as execution reaches them.", date: "Draft", image: null },
+  { slug: "shipped-isnt-done", kicker: "The agent fleet · Nº 07", title: "Shipped isn’t done.", dek: "Merge is the midpoint. Cron refreshes dashboards from rolled-up artifacts; shipped goals reopen on signals.", date: "Draft", image: null },
 ];
 
 export default function BlogIndex() {
@@ -36,7 +42,14 @@ export default function BlogIndex() {
               href={`/blog/${p.slug}`}
               className="group rounded-lg border border-zinc-800 bg-zinc-950 overflow-hidden hover:border-zinc-600 transition-colors"
             >
-              <img src={p.image} alt={p.title} className="w-full border-b border-zinc-800" />
+              {p.image ? (
+                <img src={p.image} alt={p.title} className="w-full border-b border-[#1a1a1a]" />
+              ) : (
+                <div className="flex items-center justify-between px-6 py-8 border-b border-[#1a1a1a] font-mono">
+                  <span className="text-4xl font-black text-zinc-800">{p.kicker.slice(-5)}</span>
+                  <span className="text-[11px] uppercase tracking-widest text-zinc-600">draft · read it, demos inside</span>
+                </div>
+              )}
               <div className="p-6">
                 <div className="text-[12px] font-mono text-green-500/80 uppercase tracking-widest mb-2">{p.kicker}</div>
                 <h2 className="text-2xl md:text-3xl font-bold tracking-tight mb-2">{p.title}</h2>

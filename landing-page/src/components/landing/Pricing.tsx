@@ -52,7 +52,7 @@ export function Pricing() {
       ],
       cta: "Talk to inkibra",
       variant: "outline",
-      link: "mailto:hello@inkibra.com"
+      link: "/enterprise"
     }
   ];
 
@@ -108,7 +108,7 @@ export function Pricing() {
                       variant={plan.variant as "default" | "outline"}
                       className={`w-full rounded-none ${plan.variant === 'default' ? 'bg-white text-black hover:bg-gray-200' : 'border-zinc-700 text-white hover:bg-zinc-800'}`}
                   >
-                    <a href={plan.link} target="_blank" rel="noopener noreferrer">
+                    <a href={plan.link} {...(plan.link.startsWith("http") ? { target: "_blank", rel: "noopener noreferrer" } : {})}>
                       {plan.name === "Local" && <Github className="w-4 h-4 mr-2" />}
                       {plan.cta}
                     </a>
