@@ -4,6 +4,9 @@ index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2
 diff --git a/node_modules/@oh-my-pi/pi-coding-agent/.bun-tag-81e5c3c5177b724 b/.bun-tag-81e5c3c5177b724
 new file mode 100644
 index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/@oh-my-pi/pi-coding-agent/.bun-tag-a58bfedc695c2580 b/.bun-tag-a58bfedc695c2580
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
 diff --git a/node_modules/@oh-my-pi/pi-coding-agent/.bun-tag-d0ef8787a917fc3b b/.bun-tag-d0ef8787a917fc3b
 new file mode 100644
 index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
@@ -120,6 +123,70 @@ index f271f21bfa2fed3ce70cd3d7ac1a5fa594a58dd7..1dbd0df5bbdcc11d821b64d48b3bd176
  	/**
  	 * Pop the last queued message (steering first, then follow-up).
  	 * Used by dequeue keybinding to restore messages to editor one at a time.
+diff --git a/src/session/blob-store.ts b/src/session/blob-store.ts
+index 5eaa3e7845563a217cc4504e2c80cf4f82abb1a0..a4cfd9738e77b912df4435450144755da539aa5c 100644
+--- a/src/session/blob-store.ts
++++ b/src/session/blob-store.ts
+@@ -190,6 +190,20 @@ export function isImageDataUrl(data: string): boolean {
+ 	return data.startsWith("data:image/") && data.includes(";base64,");
+ }
+ 
++/**
++ * GitSpace patch: structurally-valid placeholder for an image whose backing blob
++ * is missing (evicted / resolved against a different blobs dir). A 1x1 fully
++ * transparent PNG. Previously the resolvers returned the raw `blob:sha256:...`
++ * reference on a miss, which downstream was spliced into an `image_url` /
++ * `data:` URL as if it were base64 — producing an "invalid image_url / invalid
++ * base64" provider 400 that permanently bricked the session until manually
++ * cleared. Returning a real (empty) image keeps the payload valid so the request
++ * always succeeds; the model simply sees a blank image instead of a hard error.
++ */
++const MISSING_IMAGE_PLACEHOLDER_BASE64 =
++	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
++const MISSING_IMAGE_PLACEHOLDER_DATA_URL = `data:image/png;base64,${MISSING_IMAGE_PLACEHOLDER_BASE64}`;
++
+ /**
+  * Externalize a provider image data URL to the blob store, returning a blob reference.
+  * The full data URL string is preserved so transport-native history can be reconstructed on resume.
+@@ -242,8 +256,10 @@ export async function resolveImageDataUrl(blobStore: BlobStore, data: string): P
+ 
+ 	const buffer = await blobStore.get(hash);
+ 	if (!buffer) {
+-		logger.warn("Blob not found for persisted image data URL", { hash });
+-		return data;
++		// GitSpace patch: degrade to a valid transparent-PNG data URL instead of
++		// returning the unresolved ref (which becomes an invalid image_url → 400).
++		logger.warn("Blob not found for persisted image data URL; using placeholder", { hash });
++		return MISSING_IMAGE_PLACEHOLDER_DATA_URL;
+ 	}
+ 	return buffer.toString("utf8");
+ }
+@@ -259,8 +275,10 @@ export async function resolveImageData(blobStore: BlobStore, data: string): Prom
+ 
+ 	const buffer = await blobStore.get(hash);
+ 	if (!buffer) {
+-		logger.warn("Blob not found for image reference", { hash });
+-		return data; // Return the ref as-is; downstream will see invalid base64 but won't crash
++		// GitSpace patch: return valid transparent-PNG base64 instead of the raw
++		// ref, so the restored image block never carries invalid base64.
++		logger.warn("Blob not found for image reference; using placeholder", { hash });
++		return MISSING_IMAGE_PLACEHOLDER_BASE64;
+ 	}
+ 	return buffer.toString("base64");
+ }
+@@ -272,8 +290,10 @@ export function resolveImageDataSync(blobStore: BlobStore, data: string): string
+ 
+ 	const buffer = blobStore.getSync(hash);
+ 	if (!buffer) {
+-		logger.warn("Blob not found for image reference", { hash });
+-		return data;
++		// GitSpace patch: return valid transparent-PNG base64 instead of the raw
++		// ref, so the restored image block never carries invalid base64.
++		logger.warn("Blob not found for image reference; using placeholder", { hash });
++		return MISSING_IMAGE_PLACEHOLDER_BASE64;
+ 	}
+ 	return buffer.toString("base64");
+ }
 diff --git a/src/tools/ask.ts b/src/tools/ask.ts
 index 42de7f930d631cebfb7503620a4cdc409b889865..226a619dbfaca39becf60d6f61a9bd891c478172 100644
 --- a/src/tools/ask.ts
