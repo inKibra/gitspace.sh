@@ -134,6 +134,73 @@ function WorkspaceCombo({ value, options, onChange }: {
   );
 }
 
+/**
+ * GOAL FILTER: a client-only sibling of the source WorkspaceCombo. It does NOT
+ * change the artifact source — it focuses one already-loaded rolled-up goal
+ * within `main`. Same look as WorkspaceCombo (chain-grouped dropdown) plus an
+ * "All goals" sentinel and a dimmed goal-id secondary on each row.
+ */
+function GoalCombo({ value, options, onChange }: {
+  value: string;
+  options: Array<{ value: string; label: string; chain: string }>;
+  onChange: (value: string) => void;
+}): ReactElement {
+  const [open, setOpen] = useState(false);
+  const [q, setQ] = useState('');
+  const cur = options.find((o) => o.value === value);
+  const curLabel = value === 'all' || !cur ? 'All goals' : cur.label;
+  const ql = q.toLowerCase();
+  const filtered = options.filter((o) => `${o.chain} ${o.label} ${o.value}`.toLowerCase().includes(ql));
+  const chains = [...new Set(filtered.map((o) => o.chain))];
+  const allMatches = 'all goals'.includes(ql);
+  return (
+    <div className="relative border-b border-[var(--gs-border)] px-2.5 py-2">
+      <div className="relative flex items-center">
+        <span className="pointer-events-none absolute left-2 text-[11px] text-[var(--gs-text-ghost)]">◎</span>
+        <input
+          value={open ? q : curLabel}
+          placeholder="focus a goal…"
+          onFocus={() => { setOpen(true); setQ(''); }}
+          onChange={(e) => setQ(e.target.value)}
+          onBlur={() => setTimeout(() => setOpen(false), 130)}
+          className="w-full border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] py-1 pl-7 pr-6 font-[family-name:var(--gs-font)] text-[11px] text-[var(--gs-text)] outline-none placeholder:text-[var(--gs-text-ghost)] focus:border-[var(--gs-border-active)]"
+        />
+        <span className="pointer-events-none absolute right-2 text-[10px] text-[var(--gs-text-dim)]">▾</span>
+      </div>
+      {open && (
+        <div className="absolute inset-x-2.5 top-[38px] z-30 max-h-[240px] overflow-auto border border-[var(--gs-border-active)] bg-[var(--gs-bg-overlay)] shadow-[0_8px_24px_rgba(0,0,0,.6)]">
+          {allMatches && (
+            <button
+              type="button"
+              onMouseDown={() => { onChange('all'); setOpen(false); }}
+              className={`block w-full px-[9px] py-1.5 text-left font-[family-name:var(--gs-font)] text-[11px] ${value === 'all' ? 'bg-[var(--gs-bg-active)] text-[var(--gs-text)]' : 'text-[var(--gs-text-muted)] hover:bg-[var(--gs-bg-hover)]'}`}
+            >
+              All goals
+            </button>
+          )}
+          {chains.map((chain) => (
+            <div key={chain}>
+              <div className="px-[9px] pb-[3px] pt-[7px] text-[10px] uppercase tracking-[.1em] text-[var(--gs-text-dim)]">{chain}</div>
+              {filtered.filter((o) => o.chain === chain).map((o) => (
+                <button
+                  key={o.value}
+                  type="button"
+                  onMouseDown={() => { onChange(o.value); setOpen(false); }}
+                  className={`flex w-full items-baseline gap-2 px-[9px] py-1.5 text-left font-[family-name:var(--gs-font)] text-[11px] ${o.value === value ? 'bg-[var(--gs-bg-active)] text-[var(--gs-text)]' : 'text-[var(--gs-text-muted)] hover:bg-[var(--gs-bg-hover)]'}`}
+                >
+                  <span className="min-w-0 flex-1 truncate">{o.label}</span>
+                  <span className="flex-none font-[family-name:var(--gs-font)] text-[9.5px] text-[var(--gs-text-ghost)]">{o.value}</span>
+                </button>
+              ))}
+            </div>
+          ))}
+          {filtered.length === 0 && !allMatches && <div className="px-[9px] py-2 text-[11px] text-[var(--gs-text-dim)]">no matches</div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /** CONFIG → Artifacts repo: wizard — sharing is OPTIONAL; local always works. */
 function ArtifactsRepoTab({ projectName, backend }: { projectName: string; backend: SessionBackend | null }): ReactElement {
   const [status, setStatus] = useState<{ repoPath: string; remote: string | null; branches: string[]; pointerCommitted?: boolean } | null>(null);
@@ -495,6 +562,11 @@ export function ProjectHomePage({
     return next;
   });
   const [railView, setRailView] = useState<'sel' | 'fav'>('sel');
+  // GOAL FILTER (client-only, Artifacts view only): focus one rolled-up goal
+  // within `main` WITHOUT changing the source. 'all' = the full stacked view.
+  // Reset whenever the source changes so a stale focus never carries over.
+  const [goalFilter, setGoalFilter] = useState<string>('all');
+  useEffect(() => { setGoalFilter('all'); }, [artifactSource]);
 
   // Recently shipped roll-up flow (mock: rolled/rating/stars).
   const shipped = shippedWorkspaces ?? [];
@@ -637,6 +709,33 @@ export function ProjectHomePage({
   }, [artifacts, readArtifactFromSource]);
   const favEntries = useMemo(() => artifacts.filter((e) => favs.has(e.path)), [artifacts, favs]);
   const dashboards = useMemo(() => artifacts.filter((e) => classifyArtifact(e.path) === 'dashboard'), [artifacts]);
+
+  // GOAL FILTER options: one per REAL rolled-up goal folder (the root/Project
+  // section, goalId === '', never counts). Label is the title goalSections
+  // already derived; chain is best-effort from the board goal record (goal
+  // folder id === board goal id, both from makeGoalId), 'goals' otherwise.
+  const goalFilterOptions = useMemo(
+    () => goalSections
+      .filter((s) => s.goalId !== '')
+      .map((s) => ({
+        value: s.goalId,
+        label: goalMeta.titles[s.goalId] ?? s.goalId,
+        chain: goals.find((g) => g.id === s.goalId)?.chainTitle ?? 'goals',
+      })),
+    [goalSections, goalMeta, goals],
+  );
+  // Selector shows only on `main` with >=2 real goals to focus between.
+  const showGoalFilter = artifactSource === 'main' && goalFilterOptions.length >= 2;
+  // Drop a focus that points at a goal no longer present (e.g. after reload).
+  useEffect(() => {
+    if (goalFilter !== 'all' && !goalFilterOptions.some((o) => o.value === goalFilter)) setGoalFilter('all');
+  }, [goalFilter, goalFilterOptions]);
+  // Focused → just that goal's section (Project section drops away with it);
+  // 'all' (or selector hidden) → the full stacked view unchanged.
+  const visibleGoalSections = useMemo(
+    () => (showGoalFilter && goalFilter !== 'all' ? goalSections.filter((s) => s.goalId === goalFilter) : goalSections),
+    [goalSections, goalFilter, showGoalFilter],
+  );
 
   const dashName = (path: string): string => (path.split('/').pop() ?? path).replace('.dashboard.json', '');
   const tabLabel = (t: string): string => {
@@ -1026,6 +1125,9 @@ export function ProjectHomePage({
             options={sourceOptions.map((o) => ({ value: o.value, label: o.label, chain: o.chain }))}
             onChange={(v) => setArtifactSource(v)}
           />
+          {showGoalFilter && (
+            <GoalCombo value={goalFilter} options={goalFilterOptions} onChange={setGoalFilter} />
+          )}
           <div className="flex border-b border-[var(--gs-border)]">
             <button type="button" onClick={() => setRailView('sel')} className={`flex-1 py-[7px] text-[11px] ${railView === 'sel' ? 'bg-[var(--gs-bg-elevated)] text-[var(--gs-text)] shadow-[inset_0_-2px_0_var(--gs-accent)]' : 'text-[var(--gs-text-muted)]'}`}>Artifacts</button>
             <button type="button" onClick={() => setRailView('fav')} className={`flex-1 py-[7px] text-[11px] ${railView === 'fav' ? 'bg-[var(--gs-bg-elevated)] text-[var(--gs-text)] shadow-[inset_0_-2px_0_var(--gs-accent)]' : 'text-[var(--gs-text-muted)]'}`}>★ Favorites <span className="text-[var(--gs-text-ghost)]">{favs.size > 0 ? favs.size : ''}</span></button>
@@ -1043,7 +1145,7 @@ export function ProjectHomePage({
               <div className="mt-1 text-[10px] text-[var(--gs-text-ghost)]">Roll up a workspace to promote artifacts to main.</div>
             </div>
           ) : (
-            goalSections.map((sec, i) => {
+            visibleGoalSections.map((sec, i) => {
               // A purely flat/root listing (no goal folders) keeps the plain
               // kind-grouped look — no lone PROJECT header over everything.
               const showHeader = !(goalSections.length === 1 && sec.goalId === '');
