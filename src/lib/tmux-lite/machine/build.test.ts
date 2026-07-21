@@ -70,6 +70,31 @@ describe('buildMachineSnapshot', () => {
     expect(snapshot.workspacesById['demo:ws-1']?.summary.runningAgentCount).toBe(0);
     expect(snapshot.workspacesById['demo:ws-1']?.summary.waitingAgentCount).toBe(1);
   });
+  it('treats a compacting agent as running (active), so the board green-pulses it', () => {
+    const snapshot = buildMachineSnapshot({
+      snapshotNonce: 1,
+      terminalSessions: [],
+      workspaces: [makeWorkspace()],
+      agentStateByWorkspaceId: {
+        'demo:ws-1': {
+          workspaceId: 'demo:ws-1',
+          sessions: [{ id: 'agent-1', title: 'Agent 1' }],
+          statuses: { 'agent-1': { type: 'compacting' } },
+          pendingPermissions: {},
+          pendingQuestions: {},
+          lastMessages: {},
+          errorMessages: {},
+          todoPhases: {},
+          modelInfo: {},
+          queuedMessages: {},
+        } satisfies WorkspaceAgentState,
+      },
+    });
+
+    expect(snapshot.agentSessionsById['agent-1']?.state).toBe('running');
+    expect(snapshot.workspacesById['demo:ws-1']?.summary.runningAgentCount).toBe(1);
+    expect(snapshot.workspacesById['demo:ws-1']?.summary.waitingAgentCount).toBe(0);
+  });
   it('marks an agent permission-needed when external permission or question state is present', () => {
     const snapshot = buildMachineSnapshot({
       snapshotNonce: 1,

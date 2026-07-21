@@ -88,7 +88,7 @@ export function getAgentSessionDisplayState(session: AgentSessionInfo): AgentSes
   if (session.errorMessage) {
     return 'error';
   }
-  if (session.status?.type === 'busy') {
+  if (session.status?.type === 'busy' || session.status?.type === 'compacting') {
     return 'running';
   }
   if (session.status?.type === 'retry') {

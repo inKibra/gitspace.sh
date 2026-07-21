@@ -86,7 +86,8 @@ export function deriveWorkspaceStatusSummary(
       agents.red += 1;
       continue;
     }
-    if (agent.status?.type === 'busy') {
+    // 'compacting' is active work like 'busy' — green (green-pulse), not idle.
+    if (agent.status?.type === 'busy' || agent.status?.type === 'compacting') {
       agents.green += 1;
       continue;
     }

@@ -34,7 +34,9 @@ function determineAgentState(
   if (pendingPermissionCount > 0 || pendingQuestionCount > 0) return 'permission-needed';
   const status = workspace.statuses[sessionId];
   if (status?.type === 'retry' || errorMessage) return 'retrying';
-  if (status?.type === 'busy') return 'running';
+  // 'compacting' (auto-compaction in progress) is active work, like 'busy' —
+  // it must surface as a running/green-pulse agent on the board, not idle.
+  if (status?.type === 'busy' || status?.type === 'compacting') return 'running';
   return 'waiting';
 }
 

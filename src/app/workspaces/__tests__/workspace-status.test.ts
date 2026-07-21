@@ -155,6 +155,16 @@ describe('deriveWorkspaceStatusSummary', () => {
     expect(summary.primaryColor).toBe('orange');
   });
 
+  it('greens a compacting agent (active work), like busy', () => {
+    const workspace = makeWorkspace({ processes: [] });
+    const summary = deriveWorkspaceStatusSummary(workspace, [], [
+      { id: 'agent-1', workspaceId: 'proj:ws', title: 'Claude', status: { type: 'compacting' } },
+    ]);
+
+    expect(summary.agents.green).toBe(1);
+    expect(summary.primaryColor).toBe('green');
+  });
+
   it('shows green when any agent is busy even if another is idle', () => {
     const workspace = makeWorkspace();
     const summary = deriveWorkspaceStatusSummary(workspace, [], [
