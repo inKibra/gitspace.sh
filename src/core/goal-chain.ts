@@ -23,6 +23,7 @@ const PROJECT_GOAL_STORAGE_DIR = join('.gitspace', 'goals');
 const PROJECT_GOAL_GITIGNORE_ENTRY = '.gitspace/goals/';
 const PROJECT_GOAL_GITIGNORE_MARKER = '# gssh goal local state';
 const PLANNED_GOAL_DIR = 'planned';
+const ARCHIVED_GOAL_DIR = 'archived';
 const CHAIN_STATE_FILE = 'chains.json';
 const WORKSPACE_GOAL_FILE = 'goal.json';
 
@@ -77,6 +78,11 @@ export function getProjectGoalChainStatePath(projectName: string): string {
 export function getPlannedGoalPath(projectName: string, goalId: string): string {
   assertSafeSegment(goalId, 'goalId');
   return join(getProjectGoalStorageDir(projectName), PLANNED_GOAL_DIR, `${goalId}.json`);
+}
+
+export function getArchivedGoalPath(projectName: string, goalId: string): string {
+  assertSafeSegment(goalId, 'goalId');
+  return join(getProjectGoalStorageDir(projectName), ARCHIVED_GOAL_DIR, `${goalId}.json`);
 }
 
 export function getWorkspaceGoalPath(projectName: string, workspaceName: string): string {
@@ -162,6 +168,52 @@ export function writePlannedGoal(projectName: string, goal: GoalRecord): GoalRec
   return nextGoal;
 }
 
+export function readArchivedGoal(projectName: string, goalId: string): GoalRecord | null {
+  const raw = readJsonFile<unknown>(getArchivedGoalPath(projectName, goalId));
+  return raw ? migrateGoalRecord(raw) : null;
+}
+
+/**
+ * Persist a goal to the project-level archived store. Stamps `archivedAt`
+ * (first archive wins for provenance; callers wanting a fresh timestamp pass
+ * an already-cleared field). Overwrites any prior archived copy of the same
+ * id — the caller archives from the freshest source (the live goal.json at
+ * delete time), so an older archived copy is strictly staler.
+ */
+export function writeArchivedGoal(projectName: string, goal: GoalRecord): GoalRecord {
+  ensureProjectGoalStorageIgnored(projectName);
+  const timestamp = nowIso();
+  const nextGoal: GoalRecord = {
+    ...goal,
+    version: 2,
+    projectName,
+    archivedAt: goal.archivedAt || timestamp,
+    updatedAt: timestamp,
+  };
+  writeJsonFile(getArchivedGoalPath(projectName, goal.id), nextGoal);
+  return nextGoal;
+}
+
+/**
+ * Archive a workspace-backed goal before its worktree (and the goal.json
+ * inside it) is destroyed. Reads the live goal.json, relocates it to the
+ * project-level archived store, and stamps `archivedAt`. The chain link is
+ * deliberately KEPT — the id now resolves to the archived record via
+ * listProjectGoalRecords' fallback. No-op (returns null) when the workspace
+ * has no goal. Idempotent: re-archiving overwrites with the freshest state.
+ */
+export function archiveWorkspaceGoal(projectName: string, workspaceName: string): GoalRecord | null {
+  const goal = readWorkspaceGoal(projectName, workspaceName);
+  if (!goal) {
+    return null;
+  }
+  // Force a fresh archive timestamp even if the live record somehow carried a
+  // stale one (e.g. a previously-archived goal that was re-bound then deleted).
+  const archived = writeArchivedGoal(projectName, { ...goal, archivedAt: nowIso() });
+  queueGoalChangeNotify(projectName);
+  return archived;
+}
+
 export function readWorkspaceGoal(projectName: string, workspaceName: string): GoalRecord | null {
   const raw = readJsonFile<unknown>(getWorkspaceGoalPath(projectName, workspaceName));
   return raw ? migrateGoalRecord(raw) : null;
@@ -202,6 +254,16 @@ export function listPlannedGoals(projectName: string): GoalRecord[] {
     .filter((goal): goal is GoalRecord => goal !== null);
 }
 
+export function listArchivedGoals(projectName: string): GoalRecord[] {
+  const dir = join(getProjectGoalStorageDir(projectName), ARCHIVED_GOAL_DIR);
+  return listJsonFiles(dir)
+    .map((filePath) => {
+      const raw = readJsonFile<unknown>(filePath);
+      return raw ? migrateGoalRecord(raw) : null;
+    })
+    .filter((goal): goal is GoalRecord => goal !== null);
+}
+
 export function listWorkspaceGoals(projectName: string): GoalRecord[] {
   const workspacesDir = getProjectWorkspacesDir(projectName);
   if (!existsSync(workspacesDir)) {
@@ -214,7 +276,14 @@ export function listWorkspaceGoals(projectName: string): GoalRecord[] {
 }
 
 export function listProjectGoalRecords(projectName: string): GoalRecord[] {
+  // Resolution precedence (lowest → highest, later writes win by id):
+  //   archived (fallback for a deleted workspace) < planned (not yet started)
+  //   < live workspace goal (freshest/editable). An archived record only
+  //   surfaces when no live/planned record with that id exists.
   const byId = new Map<string, GoalRecord>();
+  for (const goal of listArchivedGoals(projectName)) {
+    byId.set(goal.id, goal);
+  }
   for (const goal of listPlannedGoals(projectName)) {
     byId.set(goal.id, goal);
   }

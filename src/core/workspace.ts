@@ -76,6 +76,12 @@ export interface DeleteWorkspaceResult {
   errorCode?: 'WORKSPACE_NOT_FOUND' | 'REMOVE_SCRIPT_FAILED' | 'WORKTREE_REMOVE_FAILED';
   error?: string;
   removeScriptError?: string;
+  /** True when the workspace had a goal that was relocated to the
+   *  project-level archived store before the worktree was destroyed. */
+  goalArchived?: boolean;
+  /** Id of the archived goal (present when goalArchived is true). Still
+   *  resolvable via getGoalRecord and still linked in its chain. */
+  goalId?: string;
 }
 
 /**
@@ -192,6 +198,25 @@ export async function deleteWorkspaceCore(
     } else {
       options.onProgress?.('Skipping cleanup scripts...');
     }
+  }
+
+  // Preserve the workspace's goal BEFORE the worktree (and the goal.json
+  // living inside it) is destroyed. The record is relocated to the
+  // project-level archived store and its chain link is deliberately kept, so
+  // the goal id still resolves (getGoalRecord fallback) and the chain stays
+  // intact. Best-effort: a goal failure must never block workspace deletion.
+  // Imported lazily (like pruneArtifactMounts below) so the goal-chain module
+  // graph stays out of workspace.ts's static load graph.
+  try {
+    const { archiveWorkspaceGoal } = await import('./goal-chain.js');
+    const archived = archiveWorkspaceGoal(projectName, workspaceName);
+    if (archived) {
+      options.onProgress?.('Archiving goal...');
+      result.goalArchived = true;
+      result.goalId = archived.id;
+    }
+  } catch (e) {
+    logger.debug(`Failed to archive goal for ${workspaceName}: ${e}`);
   }
 
   // Remove worktree

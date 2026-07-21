@@ -151,6 +151,12 @@ export async function removeWorkspace(
 
 	logger.success(`Removed worktree: ${workspaceName}`)
 
+	if (result.goalArchived) {
+		logger.info(
+			`Goal archived (not lost): still viewable and linked in its chain${result.goalId ? ` (${result.goalId})` : ''}`
+		)
+	}
+
 	if (result.sessionsKilled > 0) {
 		logger.info(`Terminated ${result.sessionsKilled} active session(s)`)
 	}

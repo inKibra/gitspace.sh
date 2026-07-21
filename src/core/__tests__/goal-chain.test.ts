@@ -6,17 +6,23 @@ import { tmpdir } from 'os';
 import {
   addGoalNearWorkspace,
   applyWorkspaceGoalPhaseChange,
+  archiveWorkspaceGoal,
   bindPlannedGoalForWorkspace,
+  getArchivedGoalPath,
+  getGoalRecord,
   getPlannedGoalPath,
   getWorkspaceGoalPath,
   listProjectGoalKanbanItems,
   moveGoalInChain,
   previewWorkspaceGoalPhaseChange,
+  readArchivedGoal,
   readWorkspaceGoal,
   setWorkspaceStatusForGoalChain,
   upsertGoalChain,
+  writeArchivedGoal,
   writeGoalRecord,
   writePlannedGoal,
+  writeWorkspaceGoal,
 } from '../goal-chain.js';
 import { getWorkspaceStatus, setWorkspaceStatus } from '../workspace-metadata.js';
 import {
@@ -247,6 +253,75 @@ describe('goal-chain storage', () => {
     setWorkspaceStatusForGoalChain('demo', 'child', 'code');
     expect(getWorkspaceStatus('demo', 'child')).toBe('code');
     expect(() => setWorkspaceStatusForGoalChain('demo', 'child', 'review')).toThrow(/Max allowed phase is code/);
+  });
+
+  it('round-trips an archived goal record through the project-level store', () => {
+    const goal = makeGoal({ id: 'schema', title: 'Billing schema', phase: 'code', workspaceName: 'billing-schema' });
+    const written = writeArchivedGoal('demo', goal);
+    expect(written.archivedAt).toBeTruthy();
+    expect(existsSync(getArchivedGoalPath('demo', 'schema'))).toBe(true);
+
+    const read = readArchivedGoal('demo', 'schema');
+    expect(read?.id).toBe('schema');
+    expect(read?.phase).toBe('code');
+    expect(read?.archivedAt).toBe(written.archivedAt);
+  });
+
+  it('archives a workspace goal and keeps the chain link (id still resolves)', () => {
+    mkdirSync(join(root, 'demo', 'workspaces', 'billing-schema'), { recursive: true });
+    upsertGoalChain('demo', {
+      id: 'billing',
+      title: 'Billing rollout',
+      projectName: 'demo',
+      goalIds: ['schema'],
+      createdAt: new Date(0).toISOString(),
+      updatedAt: new Date(0).toISOString(),
+    });
+    writeWorkspaceGoal('demo', 'billing-schema', makeGoal({ id: 'schema', title: 'Billing schema', phase: 'review', workspaceName: 'billing-schema' }));
+
+    const archived = archiveWorkspaceGoal('demo', 'billing-schema');
+    expect(archived?.id).toBe('schema');
+    expect(archived?.archivedAt).toBeTruthy();
+    expect(existsSync(getArchivedGoalPath('demo', 'schema'))).toBe(true);
+
+    // Simulate the worktree (and its goal.json) being destroyed by delete.
+    rmSync(join(root, 'demo', 'workspaces', 'billing-schema'), { recursive: true, force: true });
+
+    // The chain link survives and still resolves to the archived record, which
+    // preserves the goal's phase (buildGoalPhaseMap / kanban do not crash).
+    const items = listProjectGoalKanbanItems('demo');
+    expect(items.map((item) => item.id)).toEqual(['schema']);
+    expect(items[0]?.phase).toBe('review');
+    expect(items[0]?.title).toBe('Billing schema');
+  });
+
+  it('getGoalRecord falls back to the archived store after the workspace is gone', () => {
+    mkdirSync(join(root, 'demo', 'workspaces', 'billing-schema'), { recursive: true });
+    writeWorkspaceGoal('demo', 'billing-schema', makeGoal({ id: 'schema', title: 'Billing schema', phase: 'ship', workspaceName: 'billing-schema' }));
+    archiveWorkspaceGoal('demo', 'billing-schema');
+    rmSync(join(root, 'demo', 'workspaces', 'billing-schema'), { recursive: true, force: true });
+
+    const resolved = getGoalRecord('demo', 'schema');
+    expect(resolved?.id).toBe('schema');
+    expect(resolved?.phase).toBe('ship');
+    expect(resolved?.archivedAt).toBeTruthy();
+  });
+
+  it('archiveWorkspaceGoal no-ops when the workspace has no goal', () => {
+    mkdirSync(join(root, 'demo', 'workspaces', 'empty'), { recursive: true });
+    expect(archiveWorkspaceGoal('demo', 'empty')).toBeNull();
+    expect(existsSync(getArchivedGoalPath('demo', 'empty'))).toBe(false);
+  });
+
+  it('prefers the live workspace goal over an archived record with the same id', () => {
+    writeArchivedGoal('demo', makeGoal({ id: 'schema', title: 'Stale archived', phase: 'plan', workspaceName: 'billing-schema' }));
+    mkdirSync(join(root, 'demo', 'workspaces', 'billing-schema'), { recursive: true });
+    writeWorkspaceGoal('demo', 'billing-schema', makeGoal({ id: 'schema', title: 'Live goal', phase: 'code', workspaceName: 'billing-schema' }));
+
+    const resolved = getGoalRecord('demo', 'schema');
+    expect(resolved?.title).toBe('Live goal');
+    expect(resolved?.phase).toBe('code');
+    expect(resolved?.archivedAt).toBeUndefined();
   });
 
   it('previews and applies descendant cascades for backward ancestor moves', () => {

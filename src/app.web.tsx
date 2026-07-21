@@ -2151,7 +2151,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
     const sessionCount = workspace.sessionCount || 0;
     flow.showConfirmTyped({
       title: 'Delete Workspace',
-      message: `Are you sure you want to delete workspace "${workspace.name}"?`,
+      message: `Are you sure you want to delete workspace "${workspace.name}"? Its goal, if any, is archived (still viewable and linked in its chain) — not lost.`,
       confirmText: workspace.name,
       warning: sessionCount > 0 ? `This will kill ${sessionCount} active session(s)!` : undefined,
       onConfirm: async () => {
@@ -2165,7 +2165,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
     const sessionCount = workspace.sessionCount || 0;
     flow.showConfirmTyped({
       title: 'Delete Workspace (Skip Scripts)',
-      message: `Delete workspace \"${workspace.name}\" without running cleanup scripts?`,
+      message: `Delete workspace \"${workspace.name}\" without running cleanup scripts? Its goal, if any, is archived (still viewable and linked in its chain) — not lost.`,
       confirmText: workspace.name,
       warning: sessionCount > 0
         ? `This will kill ${sessionCount} active session(s) and skip cleanup scripts.`

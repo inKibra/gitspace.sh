@@ -170,6 +170,13 @@ export interface GoalRecord {
   sourceRefs?: SourceRef[];
   createdAt: string;
   updatedAt: string;
+  /** Set when the goal's backing workspace was deleted and the record was
+   *  relocated to the project-level archived store
+   *  (`.gitspace/goals/archived/<id>.json`). The record stays resolvable as a
+   *  fallback (see goal-chain.ts listProjectGoalRecords) and keeps its chain
+   *  link. Absent on live workspace-backed and planned goals. Additive:
+   *  existing readers ignore it. */
+  archivedAt?: string;
 }
 
 // ─── Chain / kanban / stack ─────────────────────────────────────────────────
