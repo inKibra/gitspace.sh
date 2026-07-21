@@ -140,53 +140,52 @@ function WorkspaceCombo({ value, options, onChange }: {
  * within `main`. Same look as WorkspaceCombo (chain-grouped dropdown) plus an
  * "All goals" sentinel and a dimmed goal-id secondary on each row.
  */
-function GoalCombo({ value, options, onChange }: {
-  value: string;
+/** The goal SECTION HEADER doubles as the goal picker: the title you're reading
+ *  IS the control. One goal is shown at a time; clicking the header (when >1
+ *  goal is rolled up) drops a chain-grouped menu to switch which one. No "all
+ *  goals" — the view is always one goal + the Project section. */
+function GoalHeaderPicker({ goalId, title, rating, options, onChange }: {
+  goalId: string;
+  title: string;
+  rating?: number;
   options: Array<{ value: string; label: string; chain: string }>;
   onChange: (value: string) => void;
 }): ReactElement {
   const [open, setOpen] = useState(false);
-  const [q, setQ] = useState('');
-  const cur = options.find((o) => o.value === value);
-  const curLabel = value === 'all' || !cur ? 'All goals' : cur.label;
-  const ql = q.toLowerCase();
-  const filtered = options.filter((o) => `${o.chain} ${o.label} ${o.value}`.toLowerCase().includes(ql));
-  const chains = [...new Set(filtered.map((o) => o.chain))];
-  const allMatches = 'all goals'.includes(ql);
+  const switchable = options.length > 1;
+  const chains = [...new Set(options.map((o) => o.chain))];
   return (
-    <div className="relative border-b border-[var(--gs-border)] px-2.5 py-2">
-      <div className="relative flex items-center">
-        <span className="pointer-events-none absolute left-2 text-[11px] text-[var(--gs-text-ghost)]">◎</span>
-        <input
-          value={open ? q : curLabel}
-          placeholder="focus a goal…"
-          onFocus={() => { setOpen(true); setQ(''); }}
-          onChange={(e) => setQ(e.target.value)}
-          onBlur={() => setTimeout(() => setOpen(false), 130)}
-          className="w-full border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] py-1 pl-7 pr-6 font-[family-name:var(--gs-font)] text-[11px] text-[var(--gs-text)] outline-none placeholder:text-[var(--gs-text-ghost)] focus:border-[var(--gs-border-active)]"
-        />
-        <span className="pointer-events-none absolute right-2 text-[10px] text-[var(--gs-text-dim)]">▾</span>
-      </div>
-      {open && (
-        <div className="absolute inset-x-2.5 top-[38px] z-30 max-h-[240px] overflow-auto border border-[var(--gs-border-active)] bg-[var(--gs-bg-overlay)] shadow-[0_8px_24px_rgba(0,0,0,.6)]">
-          {allMatches && (
-            <button
-              type="button"
-              onMouseDown={() => { onChange('all'); setOpen(false); }}
-              className={`block w-full px-[9px] py-1.5 text-left font-[family-name:var(--gs-font)] text-[11px] ${value === 'all' ? 'bg-[var(--gs-bg-active)] text-[var(--gs-text)]' : 'text-[var(--gs-text-muted)] hover:bg-[var(--gs-bg-hover)]'}`}
-            >
-              All goals
-            </button>
-          )}
+    <div className="relative border-b border-[var(--gs-border-muted)]">
+      <button
+        type="button"
+        disabled={!switchable}
+        onClick={() => setOpen((o) => !o)}
+        onBlur={() => setTimeout(() => setOpen(false), 130)}
+        title={switchable ? `goals/${goalId}/ — click to switch goal` : `goals/${goalId}/`}
+        className={`flex w-full items-baseline gap-1.5 px-3 pb-[5px] pt-[11px] text-left ${switchable ? 'hover:bg-[var(--gs-bg-hover)]' : ''}`}
+      >
+        <span className="min-w-0 truncate text-[11.5px] font-medium text-[var(--gs-text)]">{title}</span>
+        {rating !== undefined && (
+          <span title={`rated ${rating}/5 at roll-up`} className="flex-none text-[10px] tracking-[.08em] text-[var(--gs-warning)]">
+            {'★'.repeat(Math.max(1, Math.min(5, Math.round(rating))))}
+          </span>
+        )}
+        <span className="ml-auto flex min-w-0 items-baseline gap-1">
+          <span className="min-w-0 flex-shrink truncate font-[family-name:var(--gs-font)] text-[9.5px] text-[var(--gs-text-ghost)]">{goalId}</span>
+          {switchable && <span className="flex-none text-[10px] text-[var(--gs-text-dim)]">▾</span>}
+        </span>
+      </button>
+      {open && switchable && (
+        <div className="absolute inset-x-2 top-[34px] z-30 max-h-[240px] overflow-auto border border-[var(--gs-border-active)] bg-[var(--gs-bg-overlay)] shadow-[0_8px_24px_rgba(0,0,0,.6)]">
           {chains.map((chain) => (
             <div key={chain}>
               <div className="px-[9px] pb-[3px] pt-[7px] text-[10px] uppercase tracking-[.1em] text-[var(--gs-text-dim)]">{chain}</div>
-              {filtered.filter((o) => o.chain === chain).map((o) => (
+              {options.filter((o) => o.chain === chain).map((o) => (
                 <button
                   key={o.value}
                   type="button"
                   onMouseDown={() => { onChange(o.value); setOpen(false); }}
-                  className={`flex w-full items-baseline gap-2 px-[9px] py-1.5 text-left font-[family-name:var(--gs-font)] text-[11px] ${o.value === value ? 'bg-[var(--gs-bg-active)] text-[var(--gs-text)]' : 'text-[var(--gs-text-muted)] hover:bg-[var(--gs-bg-hover)]'}`}
+                  className={`flex w-full items-baseline gap-2 px-[9px] py-1.5 text-left font-[family-name:var(--gs-font)] text-[11px] ${o.value === goalId ? 'bg-[var(--gs-bg-active)] text-[var(--gs-text)]' : 'text-[var(--gs-text-muted)] hover:bg-[var(--gs-bg-hover)]'}`}
                 >
                   <span className="min-w-0 flex-1 truncate">{o.label}</span>
                   <span className="flex-none font-[family-name:var(--gs-font)] text-[9.5px] text-[var(--gs-text-ghost)]">{o.value}</span>
@@ -194,7 +193,6 @@ function GoalCombo({ value, options, onChange }: {
               ))}
             </div>
           ))}
-          {filtered.length === 0 && !allMatches && <div className="px-[9px] py-2 text-[11px] text-[var(--gs-text-dim)]">no matches</div>}
         </div>
       )}
     </div>
@@ -567,11 +565,11 @@ export function ProjectHomePage({
     return next;
   });
   const [railView, setRailView] = useState<'sel' | 'fav'>('sel');
-  // GOAL FILTER (client-only, Artifacts view only): focus one rolled-up goal
-  // within `main` WITHOUT changing the source. 'all' = the full stacked view.
-  // Reset whenever the source changes so a stale focus never carries over.
-  const [goalFilter, setGoalFilter] = useState<string>('all');
-  useEffect(() => { setGoalFilter('all'); }, [artifactSource]);
+  // GOAL SELECTION (client-only, Artifacts view only): which single rolled-up
+  // goal the rail shows on `main` (its header is the picker). Never changes the
+  // source. Default/repair to a present goal happens below once goalSections is
+  // known; a selection still valid on the current source is preserved.
+  const [selectedGoal, setSelectedGoal] = useState<string>('');
 
   // Recently shipped roll-up flow (mock: rolled/rating/stars).
   const shipped = shippedWorkspaces ?? [];
@@ -764,32 +762,30 @@ export function ProjectHomePage({
   const favEntries = useMemo(() => artifacts.filter((e) => favs.has(e.path)), [artifacts, favs]);
   const dashboards = useMemo(() => artifacts.filter((e) => classifyArtifact(e.path) === 'dashboard'), [artifacts]);
 
-  // GOAL FILTER options: one per REAL rolled-up goal folder (the root/Project
-  // section, goalId === '', never counts). Label is the title goalSections
-  // already derived; chain is best-effort from the board goal record (goal
-  // folder id === board goal id, both from makeGoalId), 'goals' otherwise.
-  const goalFilterOptions = useMemo(
-    () => goalSections
-      .filter((s) => s.goalId !== '')
-      .map((s) => ({
-        value: s.goalId,
-        label: goalMeta.titles[s.goalId] ?? s.goalId,
-        chain: goals.find((g) => g.id === s.goalId)?.chainTitle ?? 'goals',
-      })),
-    [goalSections, goalMeta, goals],
+  // One goal at a time: the rolled-up goal folders (root/Project excluded) and
+  // the lone Project section, split out. Picker options — one per REAL goal;
+  // label = the title goalSections derived; chain best-effort from the board
+  // goal record (goal folder id === board goal id, both from makeGoalId).
+  const realGoalSections = useMemo(() => goalSections.filter((s) => s.goalId !== ''), [goalSections]);
+  const projectSection = useMemo(() => goalSections.find((s) => s.goalId === '') ?? null, [goalSections]);
+  const goalPickerOptions = useMemo(
+    () => realGoalSections.map((s) => ({
+      value: s.goalId,
+      label: goalMeta.titles[s.goalId] ?? s.goalId,
+      chain: goals.find((g) => g.id === s.goalId)?.chainTitle ?? 'goals',
+    })),
+    [realGoalSections, goalMeta, goals],
   );
-  // Selector shows only on `main` with >=2 real goals to focus between.
-  const showGoalFilter = artifactSource === 'main' && goalFilterOptions.length >= 2;
-  // Drop a focus that points at a goal no longer present (e.g. after reload).
+  // Header-as-picker is active on `main` when there's at least one rolled-up
+  // goal; then the rail shows exactly ONE goal + Project (no stacked "all").
+  const goalPickerActive = artifactSource === 'main' && realGoalSections.length >= 1;
+  // Default/repair the selection to a present goal (first — no cheap recency
+  // signal in the listing, so first-in-sort, not truly most-recent).
   useEffect(() => {
-    if (goalFilter !== 'all' && !goalFilterOptions.some((o) => o.value === goalFilter)) setGoalFilter('all');
-  }, [goalFilter, goalFilterOptions]);
-  // Focused → just that goal's section (Project section drops away with it);
-  // 'all' (or selector hidden) → the full stacked view unchanged.
-  const visibleGoalSections = useMemo(
-    () => (showGoalFilter && goalFilter !== 'all' ? goalSections.filter((s) => s.goalId === goalFilter) : goalSections),
-    [goalSections, goalFilter, showGoalFilter],
-  );
+    if (!goalPickerActive) return;
+    const ids = realGoalSections.map((s) => s.goalId);
+    if (!ids.includes(selectedGoal)) setSelectedGoal(ids[0]);
+  }, [goalPickerActive, realGoalSections, selectedGoal]);
 
   const dashName = (path: string): string => (path.split('/').pop() ?? path).replace('.dashboard.json', '');
   const tabLabel = (t: string): string => {
@@ -1179,9 +1175,6 @@ export function ProjectHomePage({
             options={sourceOptions.map((o) => ({ value: o.value, label: o.label, chain: o.chain }))}
             onChange={(v) => setArtifactSource(v)}
           />
-          {showGoalFilter && (
-            <GoalCombo value={goalFilter} options={goalFilterOptions} onChange={setGoalFilter} />
-          )}
           <div className="flex border-b border-[var(--gs-border)]">
             <button type="button" onClick={() => setRailView('sel')} className={`flex-1 py-[7px] text-[11px] ${railView === 'sel' ? 'bg-[var(--gs-bg-elevated)] text-[var(--gs-text)] shadow-[inset_0_-2px_0_var(--gs-accent)]' : 'text-[var(--gs-text-muted)]'}`}>Artifacts</button>
             <button type="button" onClick={() => setRailView('fav')} className={`flex-1 py-[7px] text-[11px] ${railView === 'fav' ? 'bg-[var(--gs-bg-elevated)] text-[var(--gs-text)] shadow-[inset_0_-2px_0_var(--gs-accent)]' : 'text-[var(--gs-text-muted)]'}`}>★ Favorites <span className="text-[var(--gs-text-ghost)]">{favs.size > 0 ? favs.size : ''}</span></button>
@@ -1198,38 +1191,59 @@ export function ProjectHomePage({
               No artifacts in this source yet.
               <div className="mt-1 text-[10px] text-[var(--gs-text-ghost)]">Roll up a workspace to promote artifacts to main.</div>
             </div>
-          ) : (
-            visibleGoalSections.map((sec, i) => {
-              // A purely flat/root listing (no goal folders) keeps the plain
-              // kind-grouped look — no lone PROJECT header over everything.
-              const showHeader = !(goalSections.length === 1 && sec.goalId === '');
-              const rating = sec.goalId === '' ? undefined : goalMeta.ratings[sec.goalId];
+          ) : goalPickerActive ? (
+            // On main: exactly ONE rolled-up goal (its header IS the picker) +
+            // the Project section below. No stacked "all goals".
+            (() => {
+              const sec = realGoalSections.find((s) => s.goalId === selectedGoal) ?? realGoalSections[0];
               return (
-                <div key={sec.goalId || '·project'}>
-                  {showHeader && (
-                    <div className={`flex items-baseline gap-1.5 border-b border-[var(--gs-border-muted)] px-3 pb-[5px] pt-[11px] ${i > 0 ? 'mt-1.5' : ''}`}>
-                      <span className="min-w-0 truncate text-[11.5px] font-medium text-[var(--gs-text)]" title={sec.goalId === '' ? 'project-root artifacts' : `goals/${sec.goalId}/`}>
-                        {sec.goalId === '' ? 'Project' : (goalMeta.titles[sec.goalId] ?? sec.goalId)}
-                      </span>
-                      {rating !== undefined && (
-                        <span title={`rated ${rating}/5 at roll-up`} className="flex-none text-[10px] tracking-[.08em] text-[var(--gs-warning)]">
-                          {'★'.repeat(Math.max(1, Math.min(5, Math.round(rating))))}
-                        </span>
-                      )}
-                      {sec.goalId !== '' && (
-                        <span className="ml-auto min-w-0 flex-shrink truncate font-[family-name:var(--gs-font)] text-[9.5px] text-[var(--gs-text-ghost)]">{sec.goalId}</span>
-                      )}
+                <>
+                  {sec && (
+                    <div key={sec.goalId}>
+                      <GoalHeaderPicker
+                        goalId={sec.goalId}
+                        title={goalMeta.titles[sec.goalId] ?? sec.goalId}
+                        rating={goalMeta.ratings[sec.goalId]}
+                        options={goalPickerOptions}
+                        onChange={setSelectedGoal}
+                      />
+                      {sec.kindGroups.map(([kind, files]) => (
+                        <div key={kind}>
+                          <div className="px-3 pb-[3px] pt-[9px] text-[10.5px] uppercase tracking-[.12em] text-[var(--gs-text-dim)]">{KIND_LABEL[kind]}</div>
+                          {files.map((e) => railRow(e, undefined, toGoalRelative(e.path)))}
+                        </div>
+                      ))}
                     </div>
                   )}
-                  {sec.kindGroups.map(([kind, files]) => (
-                    <div key={kind}>
-                      <div className="px-3 pb-[3px] pt-[9px] text-[10.5px] uppercase tracking-[.12em] text-[var(--gs-text-dim)]">{KIND_LABEL[kind]}</div>
-                      {files.map((e) => railRow(e, undefined, sec.goalId === '' ? undefined : toGoalRelative(e.path)))}
+                  {projectSection && (
+                    <div key="·project">
+                      <div className="mt-1.5 flex items-baseline border-b border-[var(--gs-border-muted)] px-3 pb-[5px] pt-[11px]">
+                        <span className="text-[11.5px] font-medium text-[var(--gs-text)]" title="project-root artifacts">Project</span>
+                      </div>
+                      {projectSection.kindGroups.map(([kind, files]) => (
+                        <div key={kind}>
+                          <div className="px-3 pb-[3px] pt-[9px] text-[10.5px] uppercase tracking-[.12em] text-[var(--gs-text-dim)]">{KIND_LABEL[kind]}</div>
+                          {files.map((e) => railRow(e))}
+                        </div>
+                      ))}
                     </div>
-                  ))}
-                </div>
+                  )}
+                </>
               );
-            })
+            })()
+          ) : (
+            // Non-main source (a live workspace) or a purely flat listing: keep
+            // the plain kind-grouped look, no goal picker.
+            goalSections.map((sec) => (
+              <div key={sec.goalId || '·project'}>
+                {sec.kindGroups.map(([kind, files]) => (
+                  <div key={kind}>
+                    <div className="px-3 pb-[3px] pt-[9px] text-[10.5px] uppercase tracking-[.12em] text-[var(--gs-text-dim)]">{KIND_LABEL[kind]}</div>
+                    {files.map((e) => railRow(e, undefined, sec.goalId === '' ? undefined : toGoalRelative(e.path)))}
+                  </div>
+                ))}
+              </div>
+            ))
           ))}
           </div>
         </div>
