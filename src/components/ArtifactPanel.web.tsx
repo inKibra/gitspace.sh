@@ -1,4 +1,4 @@
-import { decodeBase64Utf8 } from './artifact-kinds.js';
+import { decodeBase64Utf8, toGoalRelative } from './artifact-kinds.js';
 /** @jsxImportSource react */
 import { useEffect, useRef, useState, type ReactElement } from 'react';
 import { renderMarkdownHtml } from './markdown-render.js';
@@ -98,7 +98,9 @@ export function MiniAppRun({ html, read, listArtifacts }: {
     let alive = true;
     void listArtifacts().then((paths) => {
       if (!alive) return;
-      const opts = paths.filter((x) => x.endsWith('.data.json') || x.startsWith('data/'));
+      // `data/` is a goal-relative folder convention; paths arrive mount-relative
+      // (`goals/<id>/data/x`), so normalize before the prefix match.
+      const opts = paths.filter((x) => x.endsWith('.data.json') || toGoalRelative(x).startsWith('data/'));
       setDataOptions(opts);
       if (opts.length === 1) setDataPath(opts[0]!);
     }).catch(() => undefined);

@@ -27,7 +27,7 @@ import type { KanbanGoalItem } from '../app/shared/board/types.js';
 import type { WorkspaceRuntimeEntry } from '../app/shared/workspace-runtime/types.js';
 import { ArtifactPanel } from '../components/ArtifactPanel.web.js';
 import { DashboardPanel } from '../components/DashboardPanel.web.js';
-import { KIND_ICON, KIND_LABEL, KIND_ORDER, classifyArtifact, type ArtifactKind, decodeBase64Utf8, encodeBase64Utf8 } from '../components/artifact-kinds.js';
+import { KIND_ICON, KIND_LABEL, KIND_ORDER, classifyArtifact, toGoalRelative, type ArtifactKind, decodeBase64Utf8, encodeBase64Utf8 } from '../components/artifact-kinds.js';
 
 function ProjectReportTab({ path, read }: { path: string; read: (p: string) => Promise<{ base64: string }> }): ReactElement {
   const [report, setReport] = useState<unknown>(undefined);
@@ -525,8 +525,11 @@ export function ProjectHomePage({
     void (async () => {
       const items: FeedItem[] = [];
       for (const a of artifacts) {
-        if (a.path.startsWith('reports/')) {
-          items.push({ kind: 'report', surface: a.path.slice('reports/'.length), body: 'project artifact', path: a.path });
+        // Reports live goal-relative under `reports/`; the daemon lists them
+        // mount-relative (`goals/<id>/reports/x`), so normalize before matching.
+        const rel = toGoalRelative(a.path);
+        if (rel.startsWith('reports/')) {
+          items.push({ kind: 'report', surface: rel.slice('reports/'.length), body: 'project artifact', path: a.path });
         }
       }
       if (backend?.listWorkspaceNotes) {

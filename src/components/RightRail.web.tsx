@@ -4,7 +4,7 @@ import { useFileTree, FileTree } from '@pierre/trees/react';
 import type { GitStatusEntry } from '@pierre/trees';
 import type { SessionBackend } from '../session/backend.js';
 import type { ReviewChangedFile } from '../types/review.js';
-import { KIND_ICON, KIND_LABEL, KIND_ORDER, classifyArtifact, type ArtifactKind, decodeBase64Utf8 } from './artifact-kinds.js';
+import { KIND_ICON, KIND_LABEL, KIND_ORDER, classifyArtifact, toGoalRelative, type ArtifactKind, decodeBase64Utf8 } from './artifact-kinds.js';
 import { shareArtifactToClipboard } from './share-artifact.web.js';
 import { deriveNoteLabel } from './note-label.js';
 import { ReviewDiffView, requestFileContext, useReviewThreads, fileViewPatch } from './review-diff-view.web.js';
@@ -834,7 +834,18 @@ function ArtifactsMode({ backend, workspaceId, projectName, workspaceName, onOpe
     const mergeFn = backend?.mergeWorkspaceFavorites;
     const load = legacy.length > 0 && mergeFn
       ? mergeFn.call(backend, workspaceId, legacy).then((list) => {
-          try { window.localStorage.removeItem(legacyFavKey); } catch { /* */ }
+          // Clear localStorage ONLY when every legacy favorite provably survived
+          // into the manifest. The merge is existence-gated server-side, so a
+          // reconcile that runs BEFORE this machine's artifacts migration (files
+          // still flat, goal-keyed paths not yet on disk) would drop favorites —
+          // clearing then would make that loss permanent. Keeping the key lets a
+          // later reload (post-migration, files present) recover them. A dead
+          // favorite (file genuinely gone) harmlessly keeps the key around.
+          const survived = new Set(list.map(toGoalRelative));
+          const allPreserved = legacy.every((p) => survived.has(toGoalRelative(p)));
+          if (allPreserved) {
+            try { window.localStorage.removeItem(legacyFavKey); } catch { /* */ }
+          }
           return list;
         })
       : listFn.call(backend, workspaceId);
@@ -842,24 +853,55 @@ function ArtifactsMode({ backend, workspaceId, projectName, workspaceName, onOpe
     return () => { alive = false; };
   }, [backend, workspaceId, legacyFavKey]);
 
+  // Special files open their DEDICATED viewers, never the raw JSON pane — a
+  // rubric is the ☰ rubric pane, a workflow the ⟜ workflow pane, the goal doc
+  // the ◇ goal pane. This holds even for a favorited special file opened from
+  // the Favorites view, so "rubric.json is just a json file" can't recur there.
   const openByKind = (path: string, kind: ArtifactKind): void => {
     if (kind === 'dashboard') onOpenDashboard(path);
     else if (kind === 'workflow' && onOpenWorkflowPane) onOpenWorkflowPane();
+    else if (kind === 'rubric' && onOpenRubricPane) onOpenRubricPane();
+    else if (kind === 'goal' && onOpenGoalPane) onOpenGoalPane();
     else onOpenArtifact(path);
   };
 
   const ql = query.trim().toLowerCase();
   const matches = (text: string): boolean => !ql || text.toLowerCase().includes(ql);
+
+  // Which special files actually exist as artifacts (classified on the SAME
+  // normalized basis as everything else, so a goal-keyed `goals/<id>/rubric.json`
+  // counts). The GOAL section is the single curated home for these; the generic
+  // kind groups must not re-list them (that duplication is the reported bug:
+  // a second star-able goal.md and a raw-JSON rubric.json / workflow row).
+  const specialPresent = useMemo(() => {
+    let goal = false, rubric = false, workflow = false;
+    for (const e of entries) {
+      if (e.path === 'README.md' || e.path.endsWith('.report.json')) continue;
+      const k = classifyArtifact(e.path);
+      if (k === 'goal') goal = true;
+      else if (k === 'rubric') rubric = true;
+      else if (k === 'workflow') workflow = true;
+    }
+    return { goal, rubric, workflow };
+  }, [entries]);
+
+  // A kind is CURATED (surfaced only in the GOAL section) exactly when the GOAL
+  // section shows a row for it — so nothing is ever hidden, only de-duplicated.
+  const curatedGoal = Boolean(onOpenGoalPane);
+  const curatedRubric = Boolean(onOpenRubricPane) && ((goalSummary?.reqCount ?? 0) > 0 || specialPresent.rubric);
+  const curatedWorkflow = Boolean(onOpenWorkflowPane) && specialPresent.workflow;
+
   const groups = useMemo(() => {
     const byKind = new Map<ArtifactKind, Array<{ path: string; kind: ArtifactKind }>>();
     for (const e of entries) {
       if (e.path === 'README.md' || e.path.endsWith('.report.json')) continue;
       const kind = classifyArtifact(e.path);
+      if ((kind === 'goal' && curatedGoal) || (kind === 'rubric' && curatedRubric) || (kind === 'workflow' && curatedWorkflow)) continue;
       if (!matches(`${kind} ${e.path}`)) continue;
       (byKind.get(kind) ?? byKind.set(kind, []).get(kind)!).push({ path: e.path, kind });
     }
     return KIND_ORDER.map((k) => [k, byKind.get(k) ?? []] as const).filter(([, a]) => a.length > 0);
-  }, [entries, ql]);
+  }, [entries, ql, curatedGoal, curatedRubric, curatedWorkflow]);
 
   const favList = useMemo(
     () => entries.filter((e) => favs.has(e.path)).map((e) => ({ path: e.path, kind: classifyArtifact(e.path) })),
@@ -922,31 +964,51 @@ function ArtifactsMode({ backend, workspaceId, projectName, workspaceName, onOpe
             : favList.map(row)
         ) : (
           <>
-            {/* GOAL group (mock artifactTree Goal rows) */}
-            {onOpenGoalPane && matches('goal doc') && (
-              <>
-                <div className="px-3 pb-1 pt-2.5 text-[10px] uppercase tracking-[.12em] text-[var(--gs-text-dim)]">Goal</div>
-                <button type="button" onClick={onOpenGoalPane} className="flex w-full items-center gap-1.5 px-3 py-[2px] text-left hover:bg-[var(--gs-bg-active)]">
-                  <span className="w-4 flex-shrink-0 text-center text-[var(--gs-text-ghost)]">◇</span>
-                  <span className="min-w-0 flex-1 truncate text-[var(--gs-text)]">goal.md</span>
-                  <span className="ml-auto flex-shrink-0 text-[10.5px] text-[var(--gs-text-dim)]">doc</span>
-                </button>
-                {goalSummary && goalSummary.chainLength > 1 && (
-                  <button type="button" onClick={onOpenGoalPane} className="flex w-full items-center gap-1.5 px-3 py-[2px] text-left hover:bg-[var(--gs-bg-active)]">
-                    <span className="w-4 flex-shrink-0 text-center text-[var(--gs-text-ghost)]">⛓</span>
-                    <span className="min-w-0 flex-1 truncate text-[var(--gs-text)]">chain · {goalSummary.chainLength} goals</span>
-                    <span className="ml-auto flex-shrink-0 text-[10.5px] tabular-nums text-[var(--gs-text-dim)]">{goalSummary.chainPosition} of {goalSummary.chainLength}</span>
-                  </button>
-                )}
-                {goalSummary && goalSummary.reqCount > 0 && onOpenRubricPane && (
-                  <button type="button" onClick={onOpenRubricPane} className="flex w-full items-center gap-1.5 px-3 py-[2px] text-left hover:bg-[var(--gs-bg-active)]">
-                    <span className="w-4 flex-shrink-0 text-center text-[var(--gs-text-ghost)]">☰</span>
-                    <span className="min-w-0 flex-1 truncate text-[var(--gs-text)]">{goalSummary.reqCount} requirements</span>
-                    <span className="ml-auto flex-shrink-0 text-[10.5px] text-[var(--gs-text-dim)]">rubric</span>
-                  </button>
-                )}
-              </>
-            )}
+            {/* GOAL group (mock artifactTree Goal rows) — the SINGLE curated home
+                for the goal doc, its rubric and its workflow spec. Each of those
+                special files is excluded from the generic kind groups above, so it
+                shows here exactly once, opening its dedicated pane (never raw JSON).
+                Rows gate on their own search terms so the section stays findable. */}
+            {(() => {
+              const goalRow = curatedGoal && matches('goal doc goal.md');
+              const chainRow = Boolean(goalSummary && goalSummary.chainLength > 1) && matches('chain goals');
+              const rubricRow = curatedRubric && matches('rubric requirements rubric.json');
+              const workflowRow = curatedWorkflow && matches('workflow spec');
+              if (!goalRow && !chainRow && !rubricRow && !workflowRow) return null;
+              return (
+                <>
+                  <div className="px-3 pb-1 pt-2.5 text-[10px] uppercase tracking-[.12em] text-[var(--gs-text-dim)]">Goal</div>
+                  {goalRow && (
+                    <button type="button" onClick={onOpenGoalPane} className="flex w-full items-center gap-1.5 px-3 py-[2px] text-left hover:bg-[var(--gs-bg-active)]">
+                      <span className="w-4 flex-shrink-0 text-center text-[var(--gs-text-ghost)]">◇</span>
+                      <span className="min-w-0 flex-1 truncate text-[var(--gs-text)]">goal.md</span>
+                      <span className="ml-auto flex-shrink-0 text-[10.5px] text-[var(--gs-text-dim)]">doc</span>
+                    </button>
+                  )}
+                  {chainRow && (
+                    <button type="button" onClick={onOpenGoalPane} className="flex w-full items-center gap-1.5 px-3 py-[2px] text-left hover:bg-[var(--gs-bg-active)]">
+                      <span className="w-4 flex-shrink-0 text-center text-[var(--gs-text-ghost)]">⛓</span>
+                      <span className="min-w-0 flex-1 truncate text-[var(--gs-text)]">chain · {goalSummary!.chainLength} goals</span>
+                      <span className="ml-auto flex-shrink-0 text-[10.5px] tabular-nums text-[var(--gs-text-dim)]">{goalSummary!.chainPosition} of {goalSummary!.chainLength}</span>
+                    </button>
+                  )}
+                  {rubricRow && (
+                    <button type="button" onClick={onOpenRubricPane} className="flex w-full items-center gap-1.5 px-3 py-[2px] text-left hover:bg-[var(--gs-bg-active)]">
+                      <span className="w-4 flex-shrink-0 text-center text-[var(--gs-text-ghost)]">☰</span>
+                      <span className="min-w-0 flex-1 truncate text-[var(--gs-text)]">{(goalSummary?.reqCount ?? 0) > 0 ? `${goalSummary!.reqCount} requirements` : 'rubric.json'}</span>
+                      <span className="ml-auto flex-shrink-0 text-[10.5px] text-[var(--gs-text-dim)]">rubric</span>
+                    </button>
+                  )}
+                  {workflowRow && (
+                    <button type="button" onClick={onOpenWorkflowPane} className="flex w-full items-center gap-1.5 px-3 py-[2px] text-left hover:bg-[var(--gs-bg-active)]">
+                      <span className="w-4 flex-shrink-0 text-center text-[var(--gs-text-ghost)]">⟜</span>
+                      <span className="min-w-0 flex-1 truncate text-[var(--gs-text)]">workflow</span>
+                      <span className="ml-auto flex-shrink-0 text-[10.5px] text-[var(--gs-text-dim)]">spec</span>
+                    </button>
+                  )}
+                </>
+              );
+            })()}
             {onOpenEvents && matches('event log') && (
               <>
               <div className="px-3 pb-1 pt-2.5 text-[10px] uppercase tracking-[.12em] text-[var(--gs-text-dim)]">Events</div>
@@ -969,7 +1031,7 @@ function ArtifactsMode({ backend, workspaceId, projectName, workspaceName, onOpe
               </button>
             ))}
             {(groups.find(([k]) => k === 'evidence')?.[1] ?? []).map(row)}
-            {groups.length === 0 && (
+            {groups.length === 0 && entries.length === 0 && (
               <div className="px-3 py-4 text-center text-[var(--gs-text-dim)]">
                 No artifacts yet.
                 <div className="mt-1 text-[10px] text-[var(--gs-text-ghost)]">Goal evidence, demos and reports land here.</div>
