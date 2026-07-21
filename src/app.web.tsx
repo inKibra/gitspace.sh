@@ -80,6 +80,7 @@ import {
 } from './machine/multi/types.js';
 import { useBoardPageModel } from './app/shared/board/useBoardPageModel.js';
 import { computeReadiness } from './app/shared/goal-validation/readiness.js';
+import { goalGateSummary } from './core/goal-gates.js';
 import { getShiftArrowPhaseChange } from './app/shared/board/phase-movement.js';
 import { selectBackendSnapshot } from './machine/multi/selectors.js';
 import type { KanbanGoalItem, WorkspaceBoardGroup } from './app/shared/board/types.js';
@@ -1474,6 +1475,94 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
       g.workspaceName === currentDetailWorkspace.name && g.projectName === currentDetailWorkspace.projectName);
     fetchGoalDetail(wsGoal);
   }, [currentDetailWorkspace?.selectionKey, allGoalItems, fetchGoalDetail]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Gate-aware roll-up guard ──────────────────────────────────────────────
+  // Rolling up merges a workspace's artifacts branch into main — the closest
+  // thing to irreversible in this model. Before merging, resolve the shipped
+  // workspace's goal and surface its gate/readiness state. GREEN (every
+  // required requirement accepted or its phase waived) → a light confirm.
+  // NON-GREEN → a danger confirm that names the actual unmet requirements and
+  // states plainly that unmet gates are being overridden. Warn-and-confirm,
+  // never a hard block: the human has waive authority. Returns true iff the
+  // roll-up ran (false = user cancelled); rejects only if the roll-up itself
+  // failed, so the caller's catch surfaces the real error.
+  const rollupWorkspaceGuarded = useCallback(async (
+    backend: import('./session/backend.js').SessionBackend | null,
+    projectName: string,
+    workspaceName: string,
+    goal: KanbanGoalItem | null,
+  ): Promise<boolean> => {
+    if (!backend?.rollupProjectArtifacts) throw new Error('Roll-up unavailable on this connection.');
+    const runRollup = () => backend.rollupProjectArtifacts!(projectName, workspaceName);
+
+    // Resolve the shipped workspace's goal FRESH validation. Project home's
+    // snapshot may be slimmed, so refetch via getGoalDetail (ticket #49)
+    // rather than trusting the possibly-absent goal.validation on the item.
+    let validation: import('./types/goals.js').GoalValidation | null = goal?.validation ?? null;
+    let fetchFailed = false;
+    if (goal && backend.getGoalDetail) {
+      try {
+        const detail = await backend.getGoalDetail(projectName, getPersistedGoalId(goal));
+        validation = detail.validation;
+      } catch {
+        fetchFailed = true;
+      }
+    }
+    const summary = validation ? goalGateSummary({ validation }) : null;
+
+    const confirmRollup = (opts: { title: string; message: string; variant: 'info' | 'danger'; confirmLabel: string }) =>
+      new Promise<boolean>((resolve, reject) => {
+        flow.showConfirm({
+          title: opts.title,
+          message: opts.message,
+          variant: opts.variant,
+          confirmLabel: opts.confirmLabel,
+          cancelLabel: 'Cancel',
+          onConfirm: async () => {
+            try { await runRollup(); resolve(true); }
+            catch (e) { reject(e instanceof Error ? e : new Error(String(e))); }
+          },
+          onCancel: () => resolve(false),
+        });
+      });
+
+    // GREEN: proceed with a light, non-nagging confirm.
+    if (summary?.green) {
+      const note = summary.requiredTotal > 0
+        ? `All ${summary.requiredTotal} required requirement${summary.requiredTotal === 1 ? '' : 's'} accepted or waived.`
+        : 'No required requirements declared.';
+      return confirmRollup({
+        title: `Roll up “${workspaceName}”`,
+        message: `${note}\n\nRolling up merges this workspace's artifacts branch into main. Continue?`,
+        variant: 'info',
+        confirmLabel: 'Roll up',
+      });
+    }
+
+    // NON-GREEN: name the actual blockers and require explicit override.
+    let blockers: string;
+    if (summary) {
+      blockers = summary.unmet
+        .map((u) => `  • ${u.requirement.title} — ${u.phase ? `${u.phase} phase` : 'no phase'} · ${u.requirement.status}`)
+        .join('\n');
+    } else if (goal) {
+      blockers = fetchFailed
+        ? '  • Could not load this goal\'s validation — gate state is unverified.'
+        : '  • This goal has no validation contract.';
+    } else {
+      blockers = '  • No goal is bound to this workspace — gate state is unverified.';
+    }
+    const count = summary ? summary.unmet.length : 1;
+    return confirmRollup({
+      title: `Roll up “${workspaceName}” anyway?`,
+      message:
+        `Rolling up merges this workspace's artifacts branch into main — the closest thing to irreversible here.\n\n`
+        + `${count} required gate${count === 1 ? '' : 's'} ${count === 1 ? 'is' : 'are'} NOT satisfied:\n${blockers}\n\n`
+        + `Proceeding overrides ${count === 1 ? 'this unmet gate' : 'these unmet gates'} on your authority.`,
+      variant: 'danger',
+      confirmLabel: 'Roll up anyway',
+    });
+  }, [getPersistedGoalId, flow]);
 
   const handleSaveGoalDoc = useCallback(async (goal: KanbanGoalItem, bodyMarkdown: string) => {
     setGoalSaving(true);
@@ -3572,8 +3661,8 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
               }))}
             onRollup={async (workspaceName) => {
               const be = phBackendKey ? multi.getBackend(phBackendKey) : null;
-              if (!be?.rollupProjectArtifacts) throw new Error('Roll-up unavailable on this connection.');
-              await be.rollupProjectArtifacts(projectHomeName, workspaceName);
+              const goal = phGoals.find((g) => g.workspaceName === workspaceName) ?? null;
+              return rollupWorkspaceGuarded(be, projectHomeName, workspaceName, goal);
             }}
           />
           </div>

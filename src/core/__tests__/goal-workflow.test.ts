@@ -3,7 +3,7 @@ import { execFileSync } from 'child_process';
 import { mkdirSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { dirname, join } from 'path';
-import { gateStatusForPhase, parseDocSlices } from '../goal-gates.js';
+import { gateStatusForPhase, goalGateSummary, parseDocSlices } from '../goal-gates.js';
 import { loadWorkspaceWorkflow, validateWorkspaceWorkflow } from '../goal-workflow.js';
 import { startPhaseJournal, endPhaseJournal, findOpenPhaseEntry } from '../phase-journal.js';
 import { artifactsScope, ensureArtifactsRepo, ensureArtifactsMount } from '../artifacts.js';
@@ -104,6 +104,54 @@ describe('gateStatusForPhase', () => {
     expect(gate.passable).toBe(true);
     // The waive is phase-scoped.
     expect(gateStatusForPhase({ validation: v }, 'ship').waived).toBe(false);
+  });
+});
+
+// ─── goalGateSummary (roll-up guard signal, pure) ───────────────────────────
+
+describe('goalGateSummary', () => {
+  it('is green when there are no required requirements', () => {
+    const s = goalGateSummary({ validation: validationWith({ title: 'opt', phase: 'build', required: false }) });
+    expect(s.green).toBe(true);
+    expect(s.unmet).toHaveLength(0);
+    expect(s.requiredTotal).toBe(0);
+  });
+
+  it('is green when every required requirement is accepted', () => {
+    const s = goalGateSummary({ validation: validationWith(
+      { title: 'a', phase: 'build', accept: true },
+      { title: 'b', phase: 'ship', accept: true },
+    ) });
+    expect(s.green).toBe(true);
+    expect(s.requiredTotal).toBe(2);
+  });
+
+  it('lists unmet required requirements with their phase', () => {
+    const s = goalGateSummary({ validation: validationWith(
+      { title: 'a', phase: 'build' },
+      { title: 'b', phase: 'ship', accept: true },
+      { title: 'c' },
+    ) });
+    expect(s.green).toBe(false);
+    expect(s.unmet.map((u) => u.requirement.title)).toEqual(['a', 'c']);
+    expect(s.unmet.map((u) => u.phase)).toEqual(['build', null]);
+  });
+
+  it('honors a human waive: an unaccepted req in a waived phase is not unmet', () => {
+    const v = appendGateWaiveEvent(validationWith({ title: 'a', phase: 'build' }), 'build', 'demo deadline', 'human/ui');
+    const s = goalGateSummary({ validation: v });
+    expect(s.green).toBe(true);
+    expect(s.unmet).toHaveLength(0);
+  });
+
+  it('a waive on one phase does not clear an unmet req in another phase', () => {
+    const v = appendGateWaiveEvent(
+      validationWith({ title: 'a', phase: 'build' }, { title: 'b', phase: 'ship' }),
+      'build', 'ok', 'human/ui',
+    );
+    const s = goalGateSummary({ validation: v });
+    expect(s.green).toBe(false);
+    expect(s.unmet.map((u) => u.requirement.title)).toEqual(['b']);
   });
 });
 

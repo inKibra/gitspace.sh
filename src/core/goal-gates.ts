@@ -179,6 +179,52 @@ export function gateStatusForPhase(goal: Pick<GoalRecord, 'validation'>, phase: 
   return { phase, owed, unmet, satisfied, waived, passable: satisfied || waived };
 }
 
+/** One required requirement that is NOT green (not accepted, and — when it
+ *  belongs to a workflow phase — that phase has not been waived). */
+export interface UnmetRequiredGate {
+  requirement: Requirement;
+  /** wfPhase the requirement is owed by, or null when unphased/legacy. */
+  phase: string | null;
+}
+
+export interface GoalGateSummary {
+  /** true iff every REQUIRED requirement is accepted, or its owning phase's
+   *  gate was waived by a human. Trivially green when no required reqs exist. */
+  green: boolean;
+  /** The required requirements blocking green (accepted-or-waived fails). */
+  unmet: UnmetRequiredGate[];
+  /** Count of required requirements considered. */
+  requiredTotal: number;
+}
+
+/**
+ * Goal-level "is validation satisfied" signal for the roll-up guard.
+ *
+ * Honest definition: every REQUIRED requirement is accepted OR its owning
+ * workflow phase's gate was waived by a human. This deliberately combines the
+ * two half-signals — readiness (which knows "accepted" but ignores human waive
+ * authority) and per-phase gates (which honor waives but only see requirements
+ * that declare a wfPhase, missing unphased/legacy required reqs). Neither alone
+ * answers "may this goal merge to main"; together they do.
+ */
+export function goalGateSummary(goal: Pick<GoalRecord, 'validation'>): GoalGateSummary {
+  const validation = goal.validation;
+  const requirements = (validation.reqOrder ?? [])
+    .map((id) => validation.requirements[id])
+    .filter((r): r is Requirement => Boolean(r))
+    .filter((r) => r.required !== false);
+  const events = validation.events ?? [];
+  const phaseWaived = (phase: string): boolean => events.some((e) => isWaiveEventForPhase(e, phase));
+  const unmet: UnmetRequiredGate[] = [];
+  for (const r of requirements) {
+    if (r.status === 'accepted') continue;
+    const phase = r.wfPhase ?? null;
+    if (phase && phaseWaived(phase)) continue;
+    unmet.push({ requirement: r, phase });
+  }
+  return { green: unmet.length === 0, unmet, requiredTotal: requirements.length };
+}
+
 export interface GateWaiveInfo {
   reason: string;
   actor: string;

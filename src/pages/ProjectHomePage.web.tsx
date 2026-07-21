@@ -355,7 +355,9 @@ export function ProjectHomePage({
   onOpenGoal: (goal: KanbanGoalItem) => void;
   /** shipped workspaces queued for roll-up (integrator wires from backend rollup) */
   shippedWorkspaces?: Array<{ name: string; chain: string }>;
-  onRollup?: (workspaceName: string) => Promise<void>;
+  /** Resolves true iff the roll-up ran; false if the user cancelled the
+   *  gate-aware confirmation (the workspace then stays queued). */
+  onRollup?: (workspaceName: string) => Promise<boolean>;
 }): ReactElement {
   const [artifacts, setArtifacts] = useState<ArtifactEntry[]>([]);
   const [newDashName, setNewDashName] = useState<string | null>(null);
@@ -494,7 +496,8 @@ export function ProjectHomePage({
     }
     setRollBusy(name);
     try {
-      await onRollup(name);
+      const rolled = await onRollup(name);
+      if (!rolled) { setRollBusy(null); return; } // user cancelled the gate confirm — stay queued
       setRolled((r) => ({ ...r, [name]: true }));
       setRatingWs(null);
       // Persist the rating as a rated precedent (previously dropped on the
