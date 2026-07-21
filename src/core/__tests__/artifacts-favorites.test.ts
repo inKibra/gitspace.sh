@@ -64,7 +64,8 @@ describe('toggleFavorite', () => {
     expect(doc.schema).toBe(FAVORITES_SCHEMA_V1);
     expect(doc.favorites).toEqual(['apps/metronome.gssh.html']); // GOAL-relative, not mount-relative
     // Returns mount-relative for the UI.
-    expect(after).toEqual([`goals/${goalId}/apps/metronome.gssh.html`]);
+    expect(after.favorites).toEqual([`goals/${goalId}/apps/metronome.gssh.html`]);
+    expect(after.snapshotSkipped).toEqual([]);
 
     // Committed on the branch (would sync); reload persists via re-read.
     expect(g(mountDir, `ls-tree -r --name-only ${wsName}`)).toContain(`goals/${goalId}/.favorites.json`);
@@ -75,13 +76,107 @@ describe('toggleFavorite', () => {
     const { scope } = await setup(['reports/x.report.json']);
     await toggleFavorite(projectDir, scope, `goals/${goalId}/reports/x.report.json`);
     const after = await toggleFavorite(projectDir, scope, `goals/${goalId}/reports/x.report.json`);
-    expect(after).toEqual([]);
+    expect(after.favorites).toEqual([]);
     expect(readFavoritesScopeRel(scope)).toEqual([]);
   });
 
   it('rejects favoriting an artifact outside the goal folder', async () => {
     const { scope } = await setup(['reports/x.report.json']);
     await expect(toggleFavorite(projectDir, scope, 'README.md')).rejects.toThrow(/goal/i);
+  });
+});
+
+describe('toggleFavorite — attachment snapshots (favorited reports freeze their targets)', () => {
+  const reportRel = 'reports/quirk.report.json';
+  const reportDoc = (attachments: unknown[]): string => `${JSON.stringify({
+    kind: 'workflow-quirk', surface: 'test', note: 'n', attachments,
+  }, null, 2)}\n`;
+
+  it('snapshots resolvable attachments beside the report, rewrites snapshotRef, one commit with the manifest; dangling refs are skipped, favorite still succeeds', async () => {
+    const { scope, mountDir } = await setup(['reports/target.md', 'demos/clip.webm']);
+    // A mount-root (project-level) file the goal-relative candidate misses but
+    // the as-is fallback finds.
+    writeFileSync(join(mountDir, 'root-doc.md'), 'root doc');
+    g(mountDir, 'add root-doc.md');
+    g(mountDir, '-c user.name=t -c user.email=t@t commit -q -m root-doc');
+    // The report: goal-relative ref, old-flat ref, mount-relative fallback ref,
+    // and a dangling ref.
+    const abs = scope.abs(reportRel);
+    mkdirSync(dirname(abs), { recursive: true });
+    writeFileSync(abs, reportDoc([
+      { type: 'tool', ref: 'reports/target.md', label: 'goal-relative' },
+      { type: 'tool', ref: 'demos/clip.webm', label: 'old-flat (same rule)' },
+      { type: 'tool', ref: 'root-doc.md', label: 'mount-root fallback' },
+      { type: 'conversation', ref: 'reports/ghost.md', label: 'dangling' },
+    ]));
+    g(mountDir, 'add -A');
+    g(mountDir, '-c user.name=t -c user.email=t@t commit -q -m report');
+    const headBefore = g(mountDir, 'rev-parse HEAD');
+
+    const res = await toggleFavorite(projectDir, scope, `goals/${goalId}/${reportRel}`);
+    expect(res.favorites).toEqual([`goals/${goalId}/${reportRel}`]);
+    expect(res.snapshotSkipped).toEqual(['reports/ghost.md']);
+
+    // Snapshots live beside the report, inside the goal folder.
+    expect(readFileSync(scope.abs('reports/quirk.attachments/target.md'), 'utf8')).toBe('content:reports/target.md');
+    expect(readFileSync(scope.abs('reports/quirk.attachments/clip.webm'), 'utf8')).toBe('content:demos/clip.webm');
+    expect(readFileSync(scope.abs('reports/quirk.attachments/root-doc.md'), 'utf8')).toBe('root doc');
+
+    // Report JSON gained ADDITIVE snapshotRefs (live refs untouched), on the
+    // same report-prefix-relative basis as refs; the dangling one gained none.
+    const doc = JSON.parse(readFileSync(abs, 'utf8'));
+    expect(doc.attachments[0]).toEqual({ type: 'tool', ref: 'reports/target.md', label: 'goal-relative', snapshotRef: 'reports/quirk.attachments/target.md' });
+    expect(doc.attachments[1].snapshotRef).toBe('reports/quirk.attachments/clip.webm');
+    expect(doc.attachments[2].snapshotRef).toBe('reports/quirk.attachments/root-doc.md');
+    expect(doc.attachments[3].snapshotRef).toBeUndefined();
+
+    // Exactly ONE capture commit: manifest + report rewrite + snapshots together.
+    expect(g(mountDir, `rev-list --count ${headBefore}..HEAD`)).toBe('1');
+    const committed = g(mountDir, 'show --name-only --format= HEAD').split('\n').filter(Boolean).sort();
+    expect(committed).toEqual([
+      `goals/${goalId}/.favorites.json`,
+      `goals/${goalId}/reports/quirk.attachments/clip.webm`,
+      `goals/${goalId}/reports/quirk.attachments/root-doc.md`,
+      `goals/${goalId}/reports/quirk.attachments/target.md`,
+      `goals/${goalId}/reports/quirk.report.json`,
+    ].sort());
+  });
+
+  it('is idempotent: unfavorite keeps snapshots; re-favorite makes a manifest-only commit', async () => {
+    const { scope, mountDir } = await setup(['reports/target.md']);
+    const abs = scope.abs(reportRel);
+    mkdirSync(dirname(abs), { recursive: true });
+    writeFileSync(abs, reportDoc([{ type: 'tool', ref: 'reports/target.md' }]));
+    g(mountDir, 'add -A');
+    g(mountDir, '-c user.name=t -c user.email=t@t commit -q -m report');
+
+    await toggleFavorite(projectDir, scope, `goals/${goalId}/${reportRel}`);
+    const reportAfterFirst = readFileSync(abs, 'utf8');
+
+    // Unfavorite: snapshots are committed history — they stay.
+    const un = await toggleFavorite(projectDir, scope, `goals/${goalId}/${reportRel}`);
+    expect(un.favorites).toEqual([]);
+    expect(existsSync(scope.abs('reports/quirk.attachments/target.md'))).toBe(true);
+
+    // Re-favorite: snapshotRef already present + file exists → no new snapshot
+    // churn; the commit touches ONLY the manifest.
+    const re = await toggleFavorite(projectDir, scope, `goals/${goalId}/${reportRel}`);
+    expect(re.snapshotSkipped).toEqual([]);
+    expect(readFileSync(abs, 'utf8')).toBe(reportAfterFirst);
+    const committed = g(mountDir, 'show --name-only --format= HEAD').split('\n').filter(Boolean);
+    expect(committed).toEqual([`goals/${goalId}/.favorites.json`]);
+  });
+
+  it('favoriting a non-report never snapshots; favoriting a malformed report succeeds un-snapshotted', async () => {
+    const { scope, mountDir } = await setup(['demos/clip.webm', 'reports/broken.report.json']);
+    const r1 = await toggleFavorite(projectDir, scope, `goals/${goalId}/demos/clip.webm`);
+    expect(r1.snapshotSkipped).toEqual([]);
+    // broken.report.json holds 'content:…' seed text — not JSON.
+    const r2 = await toggleFavorite(projectDir, scope, `goals/${goalId}/reports/broken.report.json`);
+    expect(r2.favorites).toContain(`goals/${goalId}/reports/broken.report.json`);
+    expect(r2.snapshotSkipped).toEqual([]);
+    expect(existsSync(scope.abs('reports/broken.attachments'))).toBe(false);
+    expect(g(mountDir, 'show --name-only --format= HEAD').split('\n').filter(Boolean)).toEqual([`goals/${goalId}/.favorites.json`]);
   });
 });
 
@@ -116,9 +211,19 @@ describe('mergeFavorites (localStorage reconciliation)', () => {
     expect(head2).toBe(head1);
   });
 
-  it('skips dead paths (verifyExists) so the manifest never stores a missing target', async () => {
+  it('is LOSSLESS — a legacy favorite whose file is momentarily absent is kept, not dropped', async () => {
     const { scope } = await setup(['apps/a.gssh.html']);
+    // reports/ghost.report.json has no file on disk. This models the data-loss
+    // bug: reconciliation running BEFORE a machine's artifact migration (files
+    // still flat, goal-keyed paths not yet present) must NOT drop the favorite —
+    // dropping it, then clearing localStorage, lost it permanently. A dead entry
+    // in the manifest is harmless and self-heals when migration lands its file.
     const merged = await mergeFavorites(projectDir, scope, ['apps/a.gssh.html', 'reports/ghost.report.json']);
-    expect(merged).toEqual([`goals/${goalId}/apps/a.gssh.html`]);
+    expect(merged).toEqual([
+      `goals/${goalId}/apps/a.gssh.html`,
+      `goals/${goalId}/reports/ghost.report.json`,
+    ]);
+    // And it is genuinely persisted goal-relative in the manifest.
+    expect(readFavoritesScopeRel(scope)).toEqual(['apps/a.gssh.html', 'reports/ghost.report.json']);
   });
 });

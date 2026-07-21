@@ -582,7 +582,7 @@ export type Response =
   | { type: 'artifact-share-mint'; url: string; tokenId: string; expiresAt: number }
   | { type: 'artifact-share-revoke'; revoked: boolean }
   | { type: 'artifact-share-list'; shares: import('./artifact-share.js').ShareLedgerEntry[] }
-  | { type: 'favorites'; favorites: string[] }
+  | { type: 'favorites'; favorites: string[]; snapshotSkipped?: string[] }
   | { type: 'trigger-save'; trigger: import('../../core/triggers.js').TriggerRecord }
   | { type: 'trigger-run-now'; sessionId: string }
   | { type: 'repo-tree'; entries: import('../../core/git.js').RepoFileEntry[] }

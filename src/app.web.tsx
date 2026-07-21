@@ -43,7 +43,7 @@ import { EvidencePanel } from "./components/EvidencePanel.web.js";
 import { ReportPanel } from "./components/ReportPanel.web.js";
 import { WorkflowPanel } from "./components/WorkflowPanel.web.js";
 import { CronsPaneConnected } from "./components/CronsPaneConnected.web.js";
-import { decodeBase64Utf8, encodeBase64Utf8 } from "./components/artifact-kinds.js";
+import { decodeBase64Utf8, encodeBase64Utf8, resolveAttachmentRef } from "./components/artifact-kinds.js";
 import { GlobalChromeBar, type ChromeWorkspaceChip } from "./components/GlobalChromeBar.web.js";
 import { GlobalTaskbar } from "./components/GlobalTaskbar.web.js";
 import { RightRail, RepoFilePanel, type RepoFileOpen } from "./components/RightRail.web.js";
@@ -3346,7 +3346,12 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
                   if (!fn) return Promise.reject(new Error('unavailable'));
                   return fn.call(paneBackend, workspace.id, p2);
                 }}
-                onOpenAttachment={(ref) => openSingletonPane(wsKey, { kind: 'artifact', path: ref })}
+                list={async () => {
+                  const fn = paneBackend?.listWorkspaceArtifacts;
+                  if (!fn) return [];
+                  return (await fn.call(paneBackend, workspace.id)).map((a) => a.path);
+                }}
+                onOpenAttachment={(resolved) => openSingletonPane(wsKey, { kind: 'artifact', path: resolved })}
               />
             ),
           });
@@ -3894,17 +3899,34 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
 
 // ─── Outer shell ────────────────────────────────────────────────────────────
 
-function ReportPaneLoader({ path, read, onOpenAttachment }: { path: string; read: (p: string) => Promise<{ base64: string }>; onOpenAttachment?: (ref: string) => void }) {
+function ReportPaneLoader({ path, read, list, onOpenAttachment }: {
+  path: string;
+  read: (p: string) => Promise<{ base64: string }>;
+  /** Artifact listing (mount-relative paths) — the existence oracle for
+   *  attachment-ref resolution. Optional: without it refs resolve
+   *  optimistically to the anchored candidate. */
+  list?: () => Promise<string[]>;
+  /** Receives the RESOLVED mount-relative artifact path. */
+  onOpenAttachment?: (path: string) => void;
+}) {
   const [report, setReport] = useState<unknown>(undefined);
   const [err, setErr] = useState(false);
+  const [known, setKnown] = useState<Set<string> | null>(null);
   useEffect(() => {
     let alive = true;
     read(path).then((r) => { if (alive) setReport(JSON.parse(decodeBase64Utf8(r.base64))); }).catch(() => { if (alive) setErr(true); });
+    if (list) list().then((paths) => { if (alive) setKnown(new Set(paths)); }).catch(() => { /* fall back to optimistic resolution */ });
     return () => { alive = false; };
-  }, [path, read]);
+  }, [path, read, list]);
+  // Attachment refs are anchored to THE REPORT'S OWN goals/<id>/ prefix — never
+  // to the viewing workspace's goal (resolveAttachmentRef, artifact-kinds.ts).
+  const resolveRef = useCallback(
+    (ref: string) => (known ? resolveAttachmentRef(path, ref, (p) => known.has(p)) : resolveAttachmentRef(path, ref)),
+    [path, known],
+  );
   if (err) return <div className="flex h-full items-center justify-center text-[12px] text-[var(--gs-danger)]">Failed to load report.</div>;
   if (report === undefined) return <div className="flex h-full items-center justify-center text-[12px] text-[var(--gs-text-dim)]">Loading…</div>;
-  return <ReportPanel report={report} onOpenAttachment={onOpenAttachment} />;
+  return <ReportPanel report={report} onOpenAttachment={onOpenAttachment} resolveRef={resolveRef} />;
 }
 
 function GoalDocDockPane({ goals, initialGoalId, onToggleExemplar, onOpenWorkflow, scrollToSlice, onRequestGoalDetail, hasGoalDetail }: {

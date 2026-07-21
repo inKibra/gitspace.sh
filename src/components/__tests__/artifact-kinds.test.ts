@@ -7,7 +7,7 @@
  * same, so a not-yet-migrated repo and a project-root artifact never regress.
  */
 import { describe, expect, it } from 'bun:test';
-import { classifyArtifact, toGoalRelative, type ArtifactKind } from '../artifact-kinds.js';
+import { attachmentRefCandidates, classifyArtifact, resolveAttachmentRef, toGoalRelative, type ArtifactKind } from '../artifact-kinds.js';
 
 const GID = 'multi-pane-be05a1cc';
 
@@ -67,6 +67,53 @@ describe('classifyArtifact — flat paths still classify (backward-compatible)',
   for (const [path, kind] of cases) {
     it(`${path} → ${kind}`, () => expect(classifyArtifact(path)).toBe(kind));
   }
+});
+
+describe('resolveAttachmentRef — anchored to the REPORT\'S OWN prefix, never ambient goal context', () => {
+  const report = `goals/${GID}/reports/x.report.json`;
+  const inSet = (...paths: string[]) => (p: string): boolean => paths.includes(p);
+
+  it('goal-keyed report + goal-relative ref → resolves inside the report\'s goal folder', () => {
+    expect(resolveAttachmentRef(report, 'reports/x.md', inSet(`goals/${GID}/reports/x.md`)))
+      .toBe(`goals/${GID}/reports/x.md`);
+  });
+
+  it('goal-keyed report + OLD-FLAT ref written pre-migration → same rule (old-flat == goal-relative after migration)', () => {
+    expect(resolveAttachmentRef(report, 'demos/y.webm', inSet(`goals/${GID}/demos/y.webm`)))
+      .toBe(`goals/${GID}/demos/y.webm`);
+  });
+
+  it('report on a FLAT (un-migrated) repo → ref resolves at the mount root', () => {
+    expect(resolveAttachmentRef('reports/x.report.json', 'demos/y.webm', inSet('demos/y.webm')))
+      .toBe('demos/y.webm');
+  });
+
+  it('rolled-up report viewed from MAIN → the report\'s OWN goal folder, not any other goal', () => {
+    // Both goal folders exist on main; only the report's own prefix may win.
+    const exists = inSet(`goals/${GID}/reports/x.md`, 'goals/other-goal-123/reports/x.md');
+    expect(resolveAttachmentRef(report, 'reports/x.md', exists)).toBe(`goals/${GID}/reports/x.md`);
+    expect(attachmentRefCandidates(report, 'reports/x.md')).toEqual([`goals/${GID}/reports/x.md`, 'reports/x.md']);
+  });
+
+  it('FALLBACK: anchored candidate missing → the ref as-is (mount-relative refs keep working)', () => {
+    expect(resolveAttachmentRef(report, 'reports/artifacts-fs-rollout.md', inSet('reports/artifacts-fs-rollout.md')))
+      .toBe('reports/artifacts-fs-rollout.md');
+  });
+
+  it('ref already mount-relative under goals/ → never double-prefixed', () => {
+    expect(attachmentRefCandidates(report, `goals/${GID}/reports/x.md`)).toEqual([`goals/${GID}/reports/x.md`]);
+    expect(resolveAttachmentRef(report, `goals/${GID}/reports/x.md`, inSet(`goals/${GID}/reports/x.md`)))
+      .toBe(`goals/${GID}/reports/x.md`);
+  });
+
+  it('neither candidate exists → null (caller renders a missing state, not a broken viewer)', () => {
+    expect(resolveAttachmentRef(report, 'reports/no-such.md', () => false)).toBeNull();
+  });
+
+  it('no existence oracle → optimistic anchored candidate', () => {
+    expect(resolveAttachmentRef(report, 'reports/x.md')).toBe(`goals/${GID}/reports/x.md`);
+    expect(resolveAttachmentRef('reports/x.report.json', 'reports/x.md')).toBe('reports/x.md');
+  });
 });
 
 describe('classifyArtifact — session scratch is never typed', () => {

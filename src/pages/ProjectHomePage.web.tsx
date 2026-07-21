@@ -27,9 +27,16 @@ import type { KanbanGoalItem } from '../app/shared/board/types.js';
 import type { WorkspaceRuntimeEntry } from '../app/shared/workspace-runtime/types.js';
 import { ArtifactPanel } from '../components/ArtifactPanel.web.js';
 import { DashboardPanel } from '../components/DashboardPanel.web.js';
-import { KIND_ICON, KIND_LABEL, KIND_ORDER, classifyArtifact, toGoalRelative, type ArtifactKind, decodeBase64Utf8, encodeBase64Utf8 } from '../components/artifact-kinds.js';
+import { KIND_ICON, KIND_LABEL, KIND_ORDER, classifyArtifact, resolveAttachmentRef, toGoalRelative, type ArtifactKind, decodeBase64Utf8, encodeBase64Utf8 } from '../components/artifact-kinds.js';
 
-function ProjectReportTab({ path, read }: { path: string; read: (p: string) => Promise<{ base64: string }> }): ReactElement {
+function ProjectReportTab({ path, read, knownPaths, onOpenAttachment }: {
+  path: string;
+  read: (p: string) => Promise<{ base64: string }>;
+  /** Current artifact listing (existence oracle for attachment resolution). */
+  knownPaths?: string[];
+  /** Receives the RESOLVED mount-relative artifact path. */
+  onOpenAttachment?: (path: string) => void;
+}): ReactElement {
   const [report, setReport] = useState<unknown>(undefined);
   const [err, setErr] = useState(false);
   useEffect(() => {
@@ -37,9 +44,16 @@ function ProjectReportTab({ path, read }: { path: string; read: (p: string) => P
     read(path).then((r) => { if (alive) setReport(JSON.parse(decodeBase64Utf8(r.base64))); }).catch(() => { if (alive) setErr(true); });
     return () => { alive = false; };
   }, [path, read]);
+  // Anchor refs to THE REPORT'S OWN goals/<id>/ prefix — a rolled-up report on
+  // main resolves into its own goal folder, never any ambient goal context.
+  const known = useMemo(() => (knownPaths ? new Set(knownPaths) : null), [knownPaths]);
+  const resolveRef = useCallback(
+    (ref: string) => (known ? resolveAttachmentRef(path, ref, (p) => known.has(p)) : resolveAttachmentRef(path, ref)),
+    [path, known],
+  );
   if (err) return <div className="p-4 text-[12px] text-[var(--gs-text-dim)]">Not a structured report — open it from the rail to view as a document.</div>;
   if (report === undefined) return <div className="p-4 text-[12px] text-[var(--gs-text-dim)]">Loading…</div>;
-  return <ReportPanel report={report} />;
+  return <ReportPanel report={report} resolveRef={resolveRef} onOpenAttachment={onOpenAttachment} />;
 }
 
 interface ArtifactEntry {
@@ -811,7 +825,14 @@ export function ProjectHomePage({
       ) };
     }
     if (t.startsWith('report:')) {
-      return { ...common, version: `report|${t}|${artifactSource}`, render: () => <ProjectReportTab path={t.slice(7)} read={readArtifactFromSource} /> };
+      return { ...common, version: `report|${t}|${artifactSource}|${artifactsFp}`, render: () => (
+        <ProjectReportTab
+          path={t.slice(7)}
+          read={readArtifactFromSource}
+          knownPaths={artifacts.map((e) => e.path)}
+          onOpenAttachment={(resolved) => openTab(resolved.endsWith('.report.json') ? `report:${resolved}` : `art:${resolved}`)}
+        />
+      ) };
     }
     if (t.startsWith('note:')) {
       const [, ws, ...idParts] = t.split(':');

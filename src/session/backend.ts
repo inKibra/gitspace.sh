@@ -312,8 +312,10 @@ export interface SessionBackend {
    *  committed `.favorites.json` manifest through the daemon — not localStorage. */
   listWorkspaceFavorites?(workspaceId: string): Promise<string[]>;
   /** Toggle one favorite (add/remove) — commits the manifest, returns the full
-   *  updated list (mount-relative). */
-  toggleWorkspaceFavorite?(workspaceId: string, path: string): Promise<string[]>;
+   *  updated list (mount-relative). Favoriting a report also snapshots its
+   *  attachments; refs whose target could not be found come back in
+   *  `snapshotSkipped` (the favorite itself still succeeded). */
+  toggleWorkspaceFavorite?(workspaceId: string, path: string): Promise<{ favorites: string[]; snapshotSkipped?: string[] }>;
   /** Union-merge favorites into the manifest (localStorage reconciliation);
    *  idempotent, returns the full updated list (mount-relative). */
   mergeWorkspaceFavorites?(workspaceId: string, paths: string[]): Promise<string[]>;

@@ -3409,10 +3409,10 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     throw new Error('Unexpected favorites-list response');
   }
 
-  async toggleWorkspaceFavorite(workspaceId: string, path: string): Promise<string[]> {
+  async toggleWorkspaceFavorite(workspaceId: string, path: string): Promise<{ favorites: string[]; snapshotSkipped?: string[] }> {
     await this.waitForInitialSnapshot();
     const tmuxResponse = await this.sendRpcCommand({ type: 'favorites_toggle', requestId: crypto.randomUUID(), uri: this.artifactUriFor(workspaceId, path) });
-    if (tmuxResponse.type === 'favorites') return tmuxResponse.favorites;
+    if (tmuxResponse.type === 'favorites') return { favorites: tmuxResponse.favorites, snapshotSkipped: tmuxResponse.snapshotSkipped };
     if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
     throw new Error('Unexpected favorites-toggle response');
   }

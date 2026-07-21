@@ -3998,8 +3998,12 @@ export async function dispatchCommand(cmd: Command): Promise<Response | null> {
               const { artifactsScope } = await import('../../core/artifacts.js');
               const { projectDir, workspaceDir, relPath } = await resolveArtifactUriDirs(cmd.uri);
               if (!relPath) { res = { type: 'error', message: 'favorites-toggle needs a file path in the URI' }; break; }
-              const favorites = await toggleFavorite(projectDir, artifactsScope(workspaceDir), relPath);
-              res = { type: 'favorites', favorites };
+              const result = await toggleFavorite(projectDir, artifactsScope(workspaceDir), relPath);
+              res = {
+                type: 'favorites',
+                favorites: result.favorites,
+                ...(result.snapshotSkipped.length > 0 ? { snapshotSkipped: result.snapshotSkipped } : {}),
+              };
             } catch (e) {
               res = { type: 'error', message: `Failed to toggle favorite: ${e instanceof Error ? e.message : String(e)}` };
             }

@@ -1890,9 +1890,9 @@ export class LocalSessionBackend implements SessionBackend {
     throw new Error('Unexpected favorites-list response');
   }
 
-  async toggleWorkspaceFavorite(workspaceId: string, path: string): Promise<string[]> {
+  async toggleWorkspaceFavorite(workspaceId: string, path: string): Promise<{ favorites: string[]; snapshotSkipped?: string[] }> {
     const tmuxResponse = await this.sendTmuxCommand({ type: 'favorites-toggle', uri: await this.artifactUriFor(workspaceId, path) });
-    if (tmuxResponse.type === 'favorites') return tmuxResponse.favorites;
+    if (tmuxResponse.type === 'favorites') return { favorites: tmuxResponse.favorites, snapshotSkipped: tmuxResponse.snapshotSkipped };
     if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
     throw new Error('Unexpected favorites-toggle response');
   }

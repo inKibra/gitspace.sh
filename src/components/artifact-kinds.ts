@@ -35,6 +35,51 @@ export function toGoalRelative(path: string): string {
   return path.replace(/^goals\/[^/]+\//, '');
 }
 
+/** The leading `goals/<goal-id>/` segment of a mount-relative path, or '' when
+ *  the path is flat (pre-migration repo) or project-root. */
+export function goalPrefixOf(path: string): string {
+  const m = /^goals\/[^/]+\//.exec(path);
+  return m ? m[0] : '';
+}
+
+/**
+ * Candidate mount-relative paths for a report attachment ref, in preference
+ * order. Refs inside `*.report.json` are written GOAL-RELATIVE (`local://`
+ * binds to the goal folder), so they must be anchored to THE REPORT'S OWN
+ * `goals/<id>/` prefix — never to any ambient/current goal context. That one
+ * rule covers the whole matrix:
+ *   - report at goals/<id>/reports/x.report.json + ref `reports/x.md`
+ *       → goals/<id>/reports/x.md
+ *   - same report + OLD-FLAT ref written pre-migration (`demos/y.webm`)
+ *       → goals/<id>/demos/y.webm (old-flat == goal-relative after migration)
+ *   - report on a FLAT (un-migrated) repo → ref resolves at the mount root
+ *   - report under goals/<id>/ viewed from MAIN (rolled-up) → that SAME <id>
+ *       folder, not the viewing workspace's goal
+ * FALLBACK: the ref as-is — covers refs already written mount-relative.
+ * A ref that itself starts with `goals/` is already mount-relative (goal-
+ * relative paths can never legitimately start with `goals/`; nested goals/
+ * dirs are refused at capture time), so it gets no anchored candidate.
+ */
+export function attachmentRefCandidates(reportPath: string, ref: string): string[] {
+  const clean = ref.replace(/^\/+/, '');
+  const prefix = goalPrefixOf(reportPath);
+  if (!prefix || clean.startsWith('goals/')) return [clean];
+  return [prefix + clean, clean];
+}
+
+/**
+ * Resolve a report attachment ref to the mount-relative path to open, or null
+ * when NO candidate exists (the caller must surface a missing state, never a
+ * broken viewer). `exists` is the existence oracle — prefer a membership test
+ * against the artifact listing; a read-probe works too. Without an oracle the
+ * anchored candidate is returned optimistically.
+ */
+export function resolveAttachmentRef(reportPath: string, ref: string, exists?: (path: string) => boolean): string | null {
+  const candidates = attachmentRefCandidates(reportPath, ref);
+  if (!exists) return candidates[0] ?? null;
+  return candidates.find(exists) ?? null;
+}
+
 /** Classify an artifact path (conventions per docs/ARTIFACTS-FS.md). Accepts a
  *  mount-relative goal-keyed path (`goals/<id>/reports/x`) or a flat one. */
 export function classifyArtifact(path: string): ArtifactKind {

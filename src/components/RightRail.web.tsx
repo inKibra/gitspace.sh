@@ -6,6 +6,7 @@ import type { SessionBackend } from '../session/backend.js';
 import type { ReviewChangedFile } from '../types/review.js';
 import { KIND_ICON, KIND_LABEL, KIND_ORDER, classifyArtifact, toGoalRelative, type ArtifactKind, decodeBase64Utf8 } from './artifact-kinds.js';
 import { shareArtifactToClipboard } from './share-artifact.web.js';
+import { toast } from '../lib/sonner.web.js';
 import { deriveNoteLabel } from './note-label.js';
 import { ReviewDiffView, requestFileContext, useReviewThreads, fileViewPatch } from './review-diff-view.web.js';
 import { documentKindFor, HtmlDocFrame, PdfDocFrame } from './document-preview.web.js';
@@ -780,7 +781,14 @@ function ArtifactsMode({ backend, workspaceId, projectName, workspaceName, onOpe
       return next;
     });
     fn.call(backend, workspaceId, id)
-      .then((list) => setFavs(new Set(list)))
+      .then((res) => {
+        setFavs(new Set(res.favorites));
+        // Favoriting a report snapshots its attachments server-side; refs whose
+        // target could not be found are skipped (favorite still stuck) — say so.
+        if (res.snapshotSkipped && res.snapshotSkipped.length > 0) {
+          toast.warning(`Favorited, but ${res.snapshotSkipped.length} attachment${res.snapshotSkipped.length === 1 ? '' : 's'} could not be snapshotted: ${res.snapshotSkipped.join(', ')}`);
+        }
+      })
       .catch(() => setFavs((prev) => { // revert on failure (e.g. out-of-goal-scope)
         const next = new Set(prev);
         if (next.has(id)) next.delete(id);
