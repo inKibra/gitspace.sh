@@ -111,6 +111,32 @@ describe('AgentEventManager', () => {
     expect(deltas.at(-1)).toEqual({ type: 'agent_state_snapshot', workspaces: harness.manager.getSnapshot() });
   });
 
+  it('returns a not-running session to dormant: closing clears frozen retry + error', () => {
+    // When a session's live worker goes away (evicted / no owners / crash), the
+    // coordinator emits a dormant lifecycle event that the agent-control bridge
+    // maps onto markSessionClosed. That must clear the frozen retry status and
+    // error so the session reads dormant (grey), not a stale red.
+    const harness = createManager();
+    harness.manager.registerWorkspace('workspace-1', '/tmp/workspace-1');
+
+    harness.manager.setExternalStatus('workspace-1', 'session-1', {
+      type: 'retry',
+      attempt: 2,
+      message: 'rate limit',
+      next: 0,
+    });
+    harness.manager.setExternalError('workspace-1', 'session-1', 'rate limit');
+    expect(harness.manager.getSnapshot()['workspace-1']?.statuses['session-1']?.type).toBe('retry');
+    expect(harness.manager.getSnapshot()['workspace-1']?.errorMessages['session-1']).toBe('rate limit');
+
+    harness.manager.markSessionClosed('workspace-1', 'session-1');
+
+    const state = harness.manager.getSnapshot()['workspace-1'];
+    expect(state?.statuses['session-1']).toBeUndefined();
+    expect(state?.errorMessages['session-1']).toBeUndefined();
+    expect(state?.sessions.find((s) => s.id === 'session-1')?.closedAt).toBeDefined();
+  });
+
   it('emits every failure attempt: identical consecutive errors carry increasing errorSeq', () => {
     const harness = createManager();
     const deltas = collectDeltas(harness.manager);

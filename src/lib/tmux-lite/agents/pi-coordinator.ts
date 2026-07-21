@@ -170,6 +170,11 @@ export class PiCoordinator {
   private readonly hosts = new Map<string, AgentSessionHost>();
   // Reverse index: agentSessionId → workspaceId, kept in sync with hosts.
   private readonly sessionWorkspaceIds = new Map<string, string>();
+  // agentSessionId → its workspace target, kept in sync with hosts. Lets host
+  // teardown (eviction / no-owners / crash) emit a lifecycle event for a
+  // session whose live worker is gone, so the snapshot returns it to the
+  // dormant (not-running) state instead of freezing its last busy/retry/error.
+  private readonly sessionTargets = new Map<string, PiWorkspaceTarget>();
   // Daemon-side VirtualTerminal relays (registry VT per agent session): client
   // keystrokes route host-ward, host render bytes route xterm/client-ward.
   private readonly terminalRelays = new Map<string, VirtualTerminal>();
@@ -712,6 +717,7 @@ export class PiCoordinator {
     const sessionId = host.sessionId;
     this.hosts.set(sessionId, host);
     this.sessionWorkspaceIds.set(sessionId, target.workspaceId);
+    this.sessionTargets.set(sessionId, target);
     this.hostLastUsed.set(sessionId, Date.now());
 
     const sessionFile = await this.waitForSessionFile(target.workspacePath, sessionId);
@@ -999,6 +1005,7 @@ export class PiCoordinator {
     }
     this.hosts.clear();
     this.sessionWorkspaceIds.clear();
+    this.sessionTargets.clear();
     this.terminalRelays.clear();
     this.dialogSessions.clear();
     this.pendingDialogRequests.clear();
@@ -1049,8 +1056,10 @@ export class PiCoordinator {
 
   /** A worker died without being asked to — drop its bookkeeping, close any
    *  attached terminals (a frozen screen is worse than a closed one), and tell
-   *  clients so the session shows an error instead of hanging busy. The next
-   *  interaction lazily restores the session from its file via ensureHost. */
+   *  clients the session is no longer running so it returns to the dormant
+   *  (grey) state instead of hanging busy or freezing on its last error. Red is
+   *  reserved for a live, currently-erroring session; a worker that is gone is
+   *  not running. The next interaction lazily restores it from its file. */
   private handleWorkerExit(target: PiWorkspaceTarget, sessionId: string, detail: string): void {
     const relay = this.terminalRelays.get(sessionId);
     if (relay) {
@@ -1067,6 +1076,7 @@ export class PiCoordinator {
     }
     this.hosts.delete(sessionId);
     this.sessionWorkspaceIds.delete(sessionId);
+    this.sessionTargets.delete(sessionId);
     this.hostLastUsed.delete(sessionId);
     this.busySessions.delete(sessionId);
     for (const [dialogId, dialogSessionId] of this.dialogSessions) {
@@ -1076,8 +1086,17 @@ export class PiCoordinator {
       }
     }
     console.error(`[pi-coordinator] ${detail} (session ${sessionId})`);
-    this.eventHandler?.(target, { type: 'error', sessionId, error: detail });
-    this.eventHandler?.(target, { type: 'status', sessionId, payload: { type: 'idle', event: { reason: 'worker-exit' } } });
+    this.eventHandler?.(target, { type: 'status', sessionId, payload: { type: 'dormant', reason: 'worker-exit' } });
+  }
+
+  /** Tell clients a session's live worker is gone (evicted / no owners / crash)
+   *  so its snapshot record returns to the dormant, not-running state. Emitted
+   *  as a synthetic status; the agent-control bridge maps 'dormant' onto
+   *  markSessionClosed, clearing the frozen busy/retry/error. */
+  private emitSessionDormant(sessionId: string): void {
+    const target = this.sessionTargets.get(sessionId);
+    if (!target) return;
+    this.eventHandler?.(target, { type: 'status', sessionId, payload: { type: 'dormant', reason: 'host-stopped' } });
   }
 
   private createHostSinks(target: PiWorkspaceTarget, getSessionId: () => string | null): SessionHostSinks {
@@ -1205,6 +1224,7 @@ export class PiCoordinator {
 
         this.hosts.set(agentSessionId, host);
         this.sessionWorkspaceIds.set(agentSessionId, target.workspaceId);
+        this.sessionTargets.set(agentSessionId, target);
         this.hostLastUsed.set(agentSessionId, Date.now());
         return host;
       } finally {
@@ -1232,8 +1252,13 @@ export class PiCoordinator {
     this.hostLastUsed.delete(sessionId);
     this.busySessions.delete(sessionId);
     if (host) {
+      // Return the session to the dormant (not-running) state before dropping
+      // its bookkeeping — its live worker is going away, so the snapshot must
+      // not keep reporting its last busy/retry/error as if it were still live.
+      this.emitSessionDormant(sessionId);
       this.hosts.delete(sessionId);
       this.sessionWorkspaceIds.delete(sessionId);
+      this.sessionTargets.delete(sessionId);
       await host.dispose();
     }
   }

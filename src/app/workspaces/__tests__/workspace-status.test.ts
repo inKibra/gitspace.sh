@@ -92,6 +92,26 @@ describe('deriveWorkspaceStatusSummary', () => {
     expect(summary.primaryColor).toBe('red');
   });
 
+  it('keeps a not-running (closed/dormant) agent grey, never red — even with a stale error', () => {
+    // Red is reserved for a live, currently-erroring session. A session whose
+    // worker is gone is returned to the dormant (closed) state; a lingering
+    // error on it must not colour the workspace red.
+    const workspace = makeWorkspace({ processes: [] });
+    const summary = deriveWorkspaceStatusSummary(workspace, [], [
+      {
+        id: 'agent-1',
+        workspaceId: 'proj:ws',
+        title: 'Claude',
+        closedAt: '2026-01-01T00:00:00.000Z',
+        errorMessage: 'rate limit exceeded',
+        status: { type: 'retry', attempt: 1, message: 'rate limit exceeded', next: Date.now() },
+      },
+    ]);
+
+    expect(summary.agents.red).toBe(0);
+    expect(summary.primaryColor).toBe('dim');
+  });
+
   it('does not count managed process sessions as terminals', () => {
     const workspace = makeWorkspace();
     const sessions: SessionInfo[] = [

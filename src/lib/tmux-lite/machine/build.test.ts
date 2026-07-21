@@ -357,6 +357,53 @@ describe('buildMachineSnapshot', () => {
     }
   });
 
+  it('reports a not-running (dormant/closed) session as closed, never retrying — even with a stale error', () => {
+    // A live worker that hit a retry surfaces as 'retrying' (the red-worthy
+    // state): this is the current-error case that SHOULD show red.
+    const liveRetry: WorkspaceAgentState = {
+      workspaceId: 'demo:ws-1',
+      sessions: [{ id: 's1', title: 'Claude' }],
+      statuses: { s1: { type: 'retry', attempt: 2, message: 'rate limit', next: 0 } },
+      pendingPermissions: {},
+      pendingQuestions: {},
+      lastMessages: {},
+      errorMessages: {},
+      todoPhases: {},
+      modelInfo: {},
+      queuedMessages: {},
+    };
+    const live = buildAgentSessionRecordsForWorkspace({
+      workspaceId: 'demo:ws-1',
+      projectId: 'demo',
+      workspace: liveRetry,
+      terminalSessionsById: {},
+    });
+    expect(live.records.find((r) => r.id === 's1')?.state).toBe('retrying');
+
+    // Once the worker is gone, the coordinator returns the session to the
+    // dormant state (closedAt set, transient status/error cleared). Even if a
+    // stale error somehow lingered, a closed session must never read 'retrying'.
+    const dormant: WorkspaceAgentState = {
+      workspaceId: 'demo:ws-1',
+      sessions: [{ id: 's1', title: 'Claude', closedAt: '2026-01-01T00:00:00.000Z' }],
+      statuses: {},
+      pendingPermissions: {},
+      pendingQuestions: {},
+      lastMessages: {},
+      errorMessages: { s1: 'rate limit' },
+      todoPhases: {},
+      modelInfo: {},
+      queuedMessages: {},
+    };
+    const closed = buildAgentSessionRecordsForWorkspace({
+      workspaceId: 'demo:ws-1',
+      projectId: 'demo',
+      workspace: dormant,
+      terminalSessionsById: {},
+    });
+    expect(closed.records.find((r) => r.id === 's1')?.state).toBe('closed');
+  });
+
   it('caps inline archived agent sessions and reports archivedMoreCount (ticket #42)', () => {
     const root = join(tmpdir(), `machine-archived-${Date.now()}-${Math.random().toString(36).slice(2)}`);
     const previousWorkspaceRoot = process.env.GITSPACE_WORKSPACE_ROOT;

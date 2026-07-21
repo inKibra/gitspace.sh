@@ -108,6 +108,13 @@ export function ensureAgentControlInitialized(): Promise<void> {
                 message: String((payload as any).message ?? 'Retrying...'),
                 next: Number((payload as any).next ?? Date.now()),
               });
+            } else if (payload?.type === 'dormant') {
+              // The session's live worker is gone (evicted / no owners / crash):
+              // return it to the dormant, not-running state (same representation
+              // it has at daemon startup) so a card shows grey, not a frozen
+              // busy/retry/error. Red is reserved for a live, currently-erroring
+              // session. The next interaction lazily reboots it via ensureHost.
+              defaultAgentEventManager.markSessionClosed(target.workspaceId, event.sessionId);
             } else if (payload?.type === 'todo_update' && Array.isArray((payload as any).phases)) {
               defaultAgentEventManager.setExternalTodoPhases(target.workspaceId, event.sessionId, (payload as any).phases);
             } else if (payload?.type === 'model_update') {
