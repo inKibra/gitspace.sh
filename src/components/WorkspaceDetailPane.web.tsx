@@ -228,7 +228,7 @@ function SidebarContent(props: {
   const {
     workspaceReplays, activeAgentSessions, archivedAgentSessions, showArchivedAgents, toggleArchivedAgents,
     agentRows, agentTodoPhases, sessionRows, visibleReplayRows, hasMoreReplayRows, seeAllReplayLabel,
-    notesSummary, visibleRecentNoteRows, serviceRows, pmRows, footerActions,
+    notesSummary, visibleRecentNoteRows, serviceRows, pmRows, footerActions, processConfigError,
     actions: detailActions,
   } = detailModel;
   const shellSessions = workspaceSessions.filter((s) => !s.processName);
@@ -479,6 +479,17 @@ function SidebarContent(props: {
 
       <div className="mt-auto pt-2 border-t border-[var(--gs-border-muted)]">
         <div className="px-[13px] pt-[5px] pb-[5px] text-[10.5px] uppercase tracking-[.12em] text-[var(--gs-text-dim)]">Workspace</div>
+        {processConfigError && (
+          <button
+            type="button"
+            onClick={() => void detailActions.footerAction('edit-process-config')}
+            title="Click to edit .gitspace/processes.json"
+            className="mx-1.5 mb-1 flex w-[calc(100%-12px)] flex-col gap-0.5 rounded border border-[var(--gs-danger-hover)] bg-[var(--gs-chip-red-bg)] px-2 py-1 text-left"
+          >
+            <span className="text-[10px] uppercase tracking-[.1em] text-[var(--gs-danger-hover)]">⚠ Invalid processes.json</span>
+            <span className="text-[11px] leading-snug text-[var(--gs-text)] break-words">{processConfigError}</span>
+          </button>
+        )}
         {pendingPermissions > 0 && (
           <div className="px-1.5 text-[11px] text-[var(--gs-warning-bright)]">⚡ {pendingPermissions} pending permission{pendingPermissions !== 1 ? 's' : ''}</div>
         )}

@@ -440,6 +440,7 @@ export function useWorkspaceDetailModel(input: WorkspaceDetailModelInput): Works
     notesSummary,
     visibleTodoRows,
     visibleRecentNoteRows,
+    processConfigError: workspace.processConfigError,
     serviceRows,
     pmRows,
     footerActions,

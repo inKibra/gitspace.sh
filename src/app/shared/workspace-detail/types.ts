@@ -98,6 +98,10 @@ export interface WorkspaceDetailModel {
   notesSummary?: WorkspaceNotesSummary;
   visibleTodoRows: WorkspaceDetailNoteRow[];
   visibleRecentNoteRows: WorkspaceDetailNoteRow[];
+  /** The workspace's `.gitspace/processes.json` failed to parse/validate. This
+   *  is what shows the card's "svc error" — surfaced here so the detail view can
+   *  display the actual message instead of a bare red dot. */
+  processConfigError?: string;
   serviceRows: Array<{
     key: string;
     processName: string;
