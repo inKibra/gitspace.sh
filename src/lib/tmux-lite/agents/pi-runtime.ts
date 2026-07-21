@@ -17,7 +17,6 @@ import { getManagedSessionBootstrap } from './managed-defaults.js';
 const importSdk = () => import('@oh-my-pi/pi-coding-agent/sdk');
 const importSessionManagerModule = () => import('@oh-my-pi/pi-coding-agent/session/session-manager');
 const importModelRegistryModule = () => import('@oh-my-pi/pi-coding-agent/config/model-registry');
-const importAgentRegistryModule = () => import('@oh-my-pi/pi-coding-agent/registry/agent-registry');
 const importInternalUrlRegistryHelpers = () =>
   import('@oh-my-pi/pi-coding-agent/internal-urls/registry-helpers');
 
@@ -26,12 +25,14 @@ const importInternalUrlRegistryHelpers = () =>
  * `agent://` protocol handlers.
  *
  * Those handlers enumerate dirs via `artifactsDirsFromRegistry()`, which walks
- * `AgentRegistry.global()` — but sessions we boot with a per-workspace registry
- * (see {@link agentRegistryForWorkspace}) never appear there, so the global list
- * comes back empty and every `artifact://<id>` fails with
- * "Artifact <id> not found. Available: none" even though the file is on disk in
- * that session's own artifacts dir. `registerArtifactsDir` is the SDK's
- * supported side channel for exactly this case.
+ * `AgentRegistry.global()`. A reopened session now registers in that global
+ * registry (same as the fresh-create path), so its dir is discoverable there
+ * and this call is a redundant belt-and-suspenders. It is retained because it
+ * is cheap, harmless (dedup collapses the duplicate dir), and guarantees
+ * `artifact://<id>` resolution during the async gap between `SessionManager.open`
+ * and the SDK's `attachSession(global)` — and against any future SDK change
+ * that stops registering reopened sessions globally. `registerArtifactsDir` is
+ * the SDK's supported side channel for exactly this.
  */
 async function registerSessionArtifactsDir(artifactsDir: string | null | undefined): Promise<void> {
   if (!artifactsDir) return;
@@ -45,24 +46,6 @@ async function registerSessionArtifactsDir(artifactsDir: string | null | undefin
   }
 }
 
-/**
- * Per-WORKSPACE agent registries for IRC routing. OMP's IrcBus defaults to a
- * process-global AgentRegistry — correct when one process hosts one agent
- * tree, but our daemon hosts every workspace's sessions in-process, which
- * made agents in different workspaces addressable IRC peers (workflow spawns
- * in workspace A were messaging agents in workspace B). Scoping the registry
- * by workspace cwd confines IRC (send/list/wait) to same-workspace agents;
- * subagents inherit their parent session's registry.
- */
-const workspaceAgentRegistries = new Map<string, unknown>();
-async function agentRegistryForWorkspace(cwd: string): Promise<unknown> {
-  const existing = workspaceAgentRegistries.get(cwd);
-  if (existing) return existing;
-  const { AgentRegistry } = (await importAgentRegistryModule()) as unknown as { AgentRegistry: new () => unknown };
-  const registry = new AgentRegistry();
-  workspaceAgentRegistries.set(cwd, registry);
-  return registry;
-}
 /**
  * Pi agent directory, scoped under the configured workspace root.
  *
@@ -403,8 +386,14 @@ export async function openPiSession(cwd: string, sessionFilePath: string) {
     skills: managedBootstrap.skills,
     hasUI: true,
     localProtocolOptions: localProtocol.options,
-    // IRC scoping: one registry per workspace, not the process-global one.
-    agentRegistry: (await agentRegistryForWorkspace(cwd)) as never,
+    // No agentRegistry override: use the SDK's process-global AgentRegistry, the
+    // same as the fresh-create path (local-session-host.ts). Under mandatory
+    // per-session workers each session already owns its process, so the global
+    // registry contains exactly this session's tree — a per-workspace scoped
+    // registry bought no cross-session isolation (directed IRC send/wait/inbox
+    // resolve via IrcBus.global()/AgentRegistry.global() regardless) and only
+    // broke same-workspace main<->subagent IRC on reopen, since task subagents
+    // always register in the global registry.
   });
   const { session, setToolUIContext } = result as unknown as OmpCreateSessionResult;
   if (!session?.sessionId) {

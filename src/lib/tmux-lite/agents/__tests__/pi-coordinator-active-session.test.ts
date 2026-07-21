@@ -1,9 +1,11 @@
 import { afterAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 
-// This file unit-tests the IN-PROCESS host path via mock.module (pi-runtime +
-// SDK mocks can't reach a worker child process). Pin the coordinator to
-// LocalSessionHost; the worker path has live coverage in pi-busy.integration.
-process.env.GITSPACE_AGENT_WORKERS = '0';
+// This file unit-tests the coordinator's session-open serialization and command
+// routing against an IN-PROCESS host, injected via the PiCoordinator
+// `hostFactory` seam (mock.module of pi-runtime + the SDK can't reach a worker
+// child process). Worker hosting is mandatory in production; the real worker
+// path has live coverage in pi-busy.integration. The injected factory boots a
+// LocalSessionHost — the exact host logic the worker child runs internally.
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -85,6 +87,12 @@ mock.module('@oh-my-pi/pi-coding-agent/extensibility/slash-commands', () => ({
 }));
 
 const { PiCoordinator } = await import('../pi-coordinator.js');
+const { LocalSessionHost } = await import('../local-session-host.js');
+
+// Inject an in-process LocalSessionHost so the coordinator's real open/prompt/
+// command logic runs against the mocked pi-runtime + SDK (a worker child would
+// re-import the un-mocked modules in its own process).
+const inProcessHostFactory = { hostFactory: LocalSessionHost.boot };
 
 // One shared temp workspace + sessions root, created once for all tests.
 // The session file is permanent for the test run — each test creates a fresh
@@ -130,7 +138,7 @@ describe('PiCoordinator active session open serialization', () => {
   });
 
   it('shares one in-flight open operation for concurrent callers', async () => {
-    const coordinator = new PiCoordinator(SESSIONS_DIR);
+    const coordinator = new PiCoordinator(SESSIONS_DIR, inProcessHostFactory);
 
     const firstCall = coordinator.promptAgentSession(sessionTarget, AGENT_SESSION_ID, 'first message');
     const secondCall = coordinator.promptAgentSession(sessionTarget, AGENT_SESSION_ID, 'second message');
@@ -143,7 +151,7 @@ describe('PiCoordinator active session open serialization', () => {
   });
 
   it('clears active-session in-flight state after a failed open so a retry can proceed', async () => {
-    const coordinator = new PiCoordinator(SESSIONS_DIR);
+    const coordinator = new PiCoordinator(SESSIONS_DIR, inProcessHostFactory);
     shouldFailOpenOnce = true;
 
     await expect(
@@ -158,7 +166,7 @@ describe('PiCoordinator active session open serialization', () => {
   });
 
   it('passes /space commands through to the Pi session extension handler', async () => {
-    const coordinator = new PiCoordinator(SESSIONS_DIR);
+    const coordinator = new PiCoordinator(SESSIONS_DIR, inProcessHostFactory);
 
     await coordinator.promptAgentSession(sessionTarget, AGENT_SESSION_ID, '/space review list');
 
@@ -167,7 +175,7 @@ describe('PiCoordinator active session open serialization', () => {
   });
 
   it('acknowledges /compact immediately without waiting for compaction to finish', async () => {
-    const coordinator = new PiCoordinator(SESSIONS_DIR);
+    const coordinator = new PiCoordinator(SESSIONS_DIR, inProcessHostFactory);
     blockCompact = true;
 
     await coordinator.promptAgentSession(sessionTarget, AGENT_SESSION_ID, '/compact keep the summary');
@@ -181,7 +189,7 @@ describe('PiCoordinator active session open serialization', () => {
 
 
   it('includes built-in commands before a session is active', async () => {
-    const coordinator = new PiCoordinator(SESSIONS_DIR);
+    const coordinator = new PiCoordinator(SESSIONS_DIR, inProcessHostFactory);
 
     const commands = await coordinator.listAvailableCommands(sessionTarget);
 
@@ -191,7 +199,7 @@ describe('PiCoordinator active session open serialization', () => {
     ]));
   });
   it('includes extension and skill commands in available command listings', async () => {
-    const coordinator = new PiCoordinator(SESSIONS_DIR);
+    const coordinator = new PiCoordinator(SESSIONS_DIR, inProcessHostFactory);
 
     await coordinator.promptAgentSession(sessionTarget, AGENT_SESSION_ID, 'prime session');
     const commands = await coordinator.listAvailableCommands(sessionTarget);

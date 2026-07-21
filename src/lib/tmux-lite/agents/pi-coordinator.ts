@@ -31,21 +31,27 @@ import { getVirtualTerminal } from '../virtual-session-registry.js';
 import type { VirtualTerminal } from './virtual-terminal.js';
 import type { AgentSessionHost, SessionHostBoot, SessionHostSinks } from './session-host.js';
 import {
-  LocalSessionHost,
   THINKING_LEVELS,
   APPROVAL_MODES,
   DEFAULT_TOOL_TIERS,
 } from './local-session-host.js';
-import { WorkerSessionHost } from './worker/worker-session-host.js';
+import { WorkerSessionHost, type WorkerSessionHostConfig } from './worker/worker-session-host.js';
 import { writeTraceLog } from '../../../utils/trace-log.js';
 
-/** Worker mode: one child process per agent session (own AsyncJobManager,
- *  isolated SDK process-globals, crash containment). ON by default;
- *  GITSPACE_AGENT_WORKERS=0 falls back to in-process hosting. */
-function agentWorkersEnabled(): boolean {
-  const v = process.env.GITSPACE_AGENT_WORKERS?.trim().toLowerCase();
-  return !(v === '0' || v === 'false' || v === 'off');
-}
+/**
+ * Boots the per-session host. Production always uses {@link WorkerSessionHost}
+ * (one child process per agent session); the seam exists so unit tests can
+ * inject an in-process/fake host without spawning a real child. There is no
+ * daemon-level in-process fallback — worker hosting is mandatory (each session's
+ * own process is what isolates its SDK process-globals, AsyncJobManager, IRC
+ * bus and artifact registry from every other session).
+ */
+export type SessionHostFactory = (
+  target: PiWorkspaceTarget,
+  boot: SessionHostBoot,
+  sinks: SessionHostSinks,
+  config: WorkerSessionHostConfig,
+) => Promise<AgentSessionHost>;
 
 /** Max concurrent live agent hosts (worker processes are ~400MB RSS each). */
 function maxAgentHosts(): number {
@@ -146,8 +152,8 @@ interface TerminalSessionBinding {
  * PiCoordinator — the daemon-side ROUTER for agent sessions.
  *
  * It does not touch live SDK sessions itself: each live session is owned by an
- * AgentSessionHost (LocalSessionHost in-process today; WorkerSessionHost proxy
- * over a per-session child process in worker mode). The coordinator:
+ * AgentSessionHost — a WorkerSessionHost proxy over a per-session child process
+ * (the child runs a LocalSessionHost). The coordinator:
  *   - discovers/boots hosts and tracks them by agent session id,
  *   - forwards commands to the owning host,
  *   - fans host events/dialog requests back out to clients,
@@ -181,9 +187,14 @@ export class PiCoordinator {
   private readonly sessionsRoot: string | undefined;
   private eventHandler: ((target: PiWorkspaceTarget, event: AgentEvent) => void) | null = null;
   private hostUIEmitter: HostUIBridgeEmitter | null = null;
+  // Production always boots a WorkerSessionHost (one child process per session);
+  // tests inject an in-process/fake host. No daemon-level in-process fallback.
+  private readonly hostFactory: SessionHostFactory;
 
-  constructor(sessionsRoot?: string) {
+  constructor(sessionsRoot?: string, options?: { hostFactory?: SessionHostFactory }) {
     this.sessionsRoot = sessionsRoot;
+    this.hostFactory =
+      options?.hostFactory ?? ((target, boot, sinks, config) => WorkerSessionHost.boot(target, boot, sinks, config));
   }
 
   setEventHandler(handler: ((target: PiWorkspaceTarget, event: AgentEvent) => void) | null): void {
@@ -993,8 +1004,10 @@ export class PiCoordinator {
     this.pendingDialogRequests.clear();
   }
 
-  /** Boot a session host — a worker child process when GITSPACE_AGENT_WORKERS
-   *  is on, else in-process. Same LocalSessionHost logic either way. */
+  /** Boot a session host. Always a worker child process in production (via
+   *  {@link hostFactory}); tests may inject an in-process/fake host. The child
+   *  runs a LocalSessionHost internally (see agent-worker.ts) — the per-session
+   *  process boundary is what isolates SDK process-globals, IRC and artifacts. */
   private async bootHost(
     target: PiWorkspaceTarget,
     boot: SessionHostBoot,
@@ -1003,13 +1016,10 @@ export class PiCoordinator {
     await this.evictForCapacity();
     const sinks = this.createHostSinks(target, getSessionId);
     const enableUI = !!this.hostUIEmitter;
-    if (agentWorkersEnabled()) {
-      return WorkerSessionHost.boot(target, boot, sinks, {
-        enableUI,
-        onUnexpectedExit: (sessionId, detail) => this.handleWorkerExit(target, sessionId, detail),
-      });
-    }
-    return LocalSessionHost.boot(target, boot, sinks, { enableUI });
+    return this.hostFactory(target, boot, sinks, {
+      enableUI,
+      onUnexpectedExit: (sessionId, detail) => this.handleWorkerExit(target, sessionId, detail),
+    });
   }
 
   /** Bound live hosts (each worker is a full SDK process, ~400MB RSS). At the
