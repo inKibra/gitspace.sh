@@ -3669,6 +3669,10 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
               const goal = phGoals.find((g) => g.workspaceName === workspaceName) ?? null;
               return rollupWorkspaceGuarded(be, projectHomeName, workspaceName, goal);
             }}
+            onDeleteWorkspace={(workspaceName) => {
+              const ws = phWorkspaces.find((w) => w.workspace.name === workspaceName)?.workspace;
+              if (ws) handleDeleteWorkspace(ws);
+            }}
           />
           </div>
           <GlobalTaskbar tasks={taskBarTasks} onDismiss={(id) => workspaceRemovalTasks.dismissTask(id)} />

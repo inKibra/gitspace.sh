@@ -426,6 +426,7 @@ export function ProjectHomePage({
   onOpenGoal,
   shippedWorkspaces,
   onRollup,
+  onDeleteWorkspace,
 }: {
   projectName: string;
   goals: KanbanGoalItem[];
@@ -440,6 +441,10 @@ export function ProjectHomePage({
   /** Resolves true iff the roll-up ran; false if the user cancelled the
    *  gate-aware confirmation (the workspace then stays queued). */
   onRollup?: (workspaceName: string) => Promise<boolean>;
+  /** Delete an already-rolled-up shipped workspace via the existing
+   *  workspace-delete flow (WITH its typed-confirmation prompt). The rolled-up
+   *  artifacts persist on main; only the disposable worktree is removed. */
+  onDeleteWorkspace?: (workspaceName: string) => void | Promise<void>;
 }): ReactElement {
   const [artifacts, setArtifacts] = useState<ArtifactEntry[]>([]);
   const [newDashName, setNewDashName] = useState<string | null>(null);
@@ -574,8 +579,56 @@ export function ProjectHomePage({
   const [ratingWs, setRatingWs] = useState<string | null>(null);
   const [stars, setStars] = useState<Record<string, number>>({});
   const [rollBusy, setRollBusy] = useState<string | null>(null);
+
+  // DURABLE rolled-up detection: a workspace is already rolled up iff its
+  // goals/<id>/ prefix is present on the artifacts MAIN branch. That signal
+  // must be correct regardless of the current source selector — a workspace
+  // source would make `artifacts` its own branch and hide the truth — so we
+  // keep a DEDICATED project-main listing (listProjectArtifacts) in its own
+  // state rather than reusing `artifacts`. Refetched via mainTick after a
+  // roll-up so the row flips to its rolled-up state without a reload.
+  const [mainGoalIds, setMainGoalIds] = useState<Set<string>>(new Set());
+  const [mainTick, setMainTick] = useState(0);
+  useEffect(() => {
+    let alive = true;
+    backend?.listProjectArtifacts?.(projectName)
+      .then((list) => {
+        if (!alive) return;
+        const ids = new Set<string>();
+        for (const e of list) {
+          const prefix = goalPrefixOf(e.path);
+          if (prefix) ids.add(prefix.slice('goals/'.length, -1));
+        }
+        setMainGoalIds(ids);
+      })
+      .catch(() => { /* main listing unavailable — treat as none rolled up */ });
+    return () => { alive = false; };
+  }, [backend, projectName, mainTick]);
+  // workspace → PERSISTED goal id (the artifacts folder key). Board goal ids
+  // are namespaced `${projectName}:${folderId}`, but the goals/<id>/ folders on
+  // main carry the bare folder id — strip the project prefix to match (same
+  // rule as app.web.tsx's getPersistedGoalId).
+  const goalIdOf = useCallback(
+    (workspaceName: string): string | null => {
+      const goal = goals.find((g) => g.workspaceName === workspaceName);
+      if (!goal) return null;
+      return goal.id.startsWith(`${goal.projectName}:`) ? goal.id.slice(goal.projectName.length + 1) : goal.id;
+    },
+    [goals],
+  );
+  // Rolled up = this session's roll-up OR the goal folder is already on main.
+  const isRolledUp = useCallback(
+    (workspaceName: string): boolean => {
+      if (rolled[workspaceName] === true) return true;
+      const gid = goalIdOf(workspaceName);
+      return gid !== null && mainGoalIds.has(gid);
+    },
+    [rolled, goalIdOf, mainGoalIds],
+  );
+
   const doRollUp = async (name: string): Promise<void> => {
     if (rollBusy !== null) return;
+    if (isRolledUp(name)) return; // belt-and-suspenders: never roll up twice
     if (!onRollup) {
       setRolled((r) => ({ ...r, [name]: true }));
       setRatingWs(null);
@@ -600,6 +653,7 @@ export function ProjectHomePage({
         await backend.writeProjectArtifact(projectName, `reports/rollup-${name}.report.json`, encodeBase64Utf8(JSON.stringify(report, null, 2) + '\n'), `rollup: rate ${name} ${rating}/5`).catch(() => undefined);
       }
       loadArtifacts();
+      setMainTick((t) => t + 1); // refresh the durable rolled-up set
     } catch (e) {
       toast.error(e instanceof Error ? e.message : 'Roll-up failed');
     }
@@ -1193,8 +1247,9 @@ export function ProjectHomePage({
               <div className="px-3 py-2.5 text-[11px] text-[var(--gs-text-dim)]">Nothing shipped yet — shipped workspaces queue here for roll-up.</div>
             ) : (
               shipped.map((s) => {
-                const done = rolled[s.name] === true;
+                const rolledUp = isRolledUp(s.name);
                 const rated = ratingWs === s.name;
+                const gid = goalIdOf(s.name);
                 return (
                   <div
                     key={s.name}
@@ -1203,13 +1258,31 @@ export function ProjectHomePage({
                     <div className="flex items-center gap-[9px]">
                       <div className="flex min-w-0 flex-1 flex-col gap-0.5">
                         <span className="font-[family-name:var(--gs-font)] text-[11.5px] text-[var(--gs-text)]">{s.name}</span>
-                        <span className="text-[10px] text-[var(--gs-text-dim)]">{s.chain} · shipped</span>
+                        <span className="text-[10px] text-[var(--gs-text-dim)]">
+                          {rolledUp ? `${s.chain} · shipped → rolled up` : `${s.chain} · shipped`}
+                        </span>
                       </div>
-                      {done
-                        ? <span className={`${CHIP} bg-[var(--gs-chip-green-bg)] text-[var(--gs-chip-green-text)]`}>rolled up</span>
-                        : !rated && <button type="button" onClick={() => setRatingWs(s.name)} className={XS_BTN}>Check & roll up</button>}
+                      {rolledUp ? (
+                        // Durable: artifacts are on main. Offer to delete the now
+                        // disposable worktree instead of a second roll-up.
+                        <div className="flex items-center gap-1.5">
+                          <span
+                            className={`${CHIP} bg-[var(--gs-chip-green-bg)] text-[var(--gs-chip-green-text)]`}
+                            title={gid ? `goals/${gid}/` : 'rolled up to main'}
+                          >✓ rolled up</span>
+                          {onDeleteWorkspace && (
+                            <button
+                              type="button"
+                              onClick={() => { void onDeleteWorkspace(s.name); }}
+                              className={XS_BTN}
+                            >Delete workspace</button>
+                          )}
+                        </div>
+                      ) : !rated ? (
+                        <button type="button" onClick={() => setRatingWs(s.name)} className={XS_BTN}>Check & roll up</button>
+                      ) : null}
                     </div>
-                    {rated && !done && (
+                    {rated && !rolledUp && (
                       <div className="border border-[rgba(188,140,255,0.2)] bg-[var(--gs-bg)] px-2.5 py-2">
                         <div className="mb-[7px] text-[10.5px] text-[var(--gs-purple)]">
                           Rate the artifacts you're rolling up <span className="text-[var(--gs-text-dim)]">— feeds rated precedents</span>
