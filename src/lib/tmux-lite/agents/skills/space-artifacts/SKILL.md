@@ -187,6 +187,14 @@ fed by postMessage; UI edits auto-persist, so re-read before rewriting.
   "rating": 4,                     // optional 1-5 → appears in Rated precedents
   "attachments": [ { "type": "goal-doc-snapshot", "ref": "reports/x.md", "label": "…" } ] }
 ```
+> **A report only enters the shared corpus if it is FAVORITED.** Roll-up carries
+> a goal's canonical record (goal.md, rubric, journal, workflow, evidence…) to
+> `main` automatically, but reports are *curated*: an un-favorited report stays
+> on the workspace branch and never reaches `main`, so future workspaces (which
+> branch from `main`) can't ground on it. Filing a report is necessary but not
+> sufficient — the user favorites (★) the ones worth keeping, and only those
+> become durable and corpus-visible. If a report matters, say so and ask the
+> user to favorite it; do not assume filing alone makes it persist.
 
 **Trigger** (`triggers/<slug>.trigger.json`) — prefer the Crons & triggers UI
 or ask the user; if authoring by hand: `{ id, name, kind: 'cron'|'manual',
