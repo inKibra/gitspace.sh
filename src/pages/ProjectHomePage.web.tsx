@@ -152,15 +152,17 @@ function GoalHeaderPicker({ goalId, title, rating, options, onChange }: {
   onChange: (value: string) => void;
 }): ReactElement {
   const [open, setOpen] = useState(false);
+  const [q, setQ] = useState('');
   const switchable = options.length > 1;
-  const chains = [...new Set(options.map((o) => o.chain))];
+  const ql = q.trim().toLowerCase();
+  const filtered = options.filter((o) => `${o.chain} ${o.label} ${o.value}`.toLowerCase().includes(ql));
+  const chains = [...new Set(filtered.map((o) => o.chain))];
   return (
     <div className="relative border-b border-[var(--gs-border-muted)]">
       <button
         type="button"
         disabled={!switchable}
-        onClick={() => setOpen((o) => !o)}
-        onBlur={() => setTimeout(() => setOpen(false), 130)}
+        onClick={() => { setOpen((o) => !o); setQ(''); }}
         title={switchable ? `goals/${goalId}/ — click to switch goal` : `goals/${goalId}/`}
         className={`flex w-full items-baseline gap-1.5 px-3 pb-[5px] pt-[11px] text-left ${switchable ? 'hover:bg-[var(--gs-bg-hover)]' : ''}`}
       >
@@ -176,11 +178,23 @@ function GoalHeaderPicker({ goalId, title, rating, options, onChange }: {
         </span>
       </button>
       {open && switchable && (
-        <div className="absolute inset-x-2 top-[34px] z-30 max-h-[240px] overflow-auto border border-[var(--gs-border-active)] bg-[var(--gs-bg-overlay)] shadow-[0_8px_24px_rgba(0,0,0,.6)]">
+        <div className="absolute inset-x-2 top-[34px] z-30 max-h-[280px] overflow-auto border border-[var(--gs-border-active)] bg-[var(--gs-bg-overlay)] shadow-[0_8px_24px_rgba(0,0,0,.6)]">
+          {/* Type-to-search over the rolled-up goals. Autofocus anchors the
+              picker's focus here — its blur (deferred so an option mousedown
+              lands first) is what closes the menu. */}
+          <input
+            autoFocus
+            value={q}
+            placeholder="search goals…"
+            onChange={(e) => setQ(e.target.value)}
+            onBlur={() => setTimeout(() => setOpen(false), 130)}
+            onKeyDown={(e) => { if (e.key === 'Escape') setOpen(false); }}
+            className="sticky top-0 w-full border-b border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-[9px] py-1.5 font-[family-name:var(--gs-font)] text-[11px] text-[var(--gs-text)] outline-none placeholder:text-[var(--gs-text-ghost)]"
+          />
           {chains.map((chain) => (
             <div key={chain}>
               <div className="px-[9px] pb-[3px] pt-[7px] text-[10px] uppercase tracking-[.1em] text-[var(--gs-text-dim)]">{chain}</div>
-              {options.filter((o) => o.chain === chain).map((o) => (
+              {filtered.filter((o) => o.chain === chain).map((o) => (
                 <button
                   key={o.value}
                   type="button"
@@ -193,6 +207,7 @@ function GoalHeaderPicker({ goalId, title, rating, options, onChange }: {
               ))}
             </div>
           ))}
+          {filtered.length === 0 && <div className="px-[9px] py-2 text-[11px] text-[var(--gs-text-dim)]">no matches</div>}
         </div>
       )}
     </div>
