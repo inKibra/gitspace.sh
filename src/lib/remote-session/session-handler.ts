@@ -1924,6 +1924,30 @@ export class RemoteSessionHandler {
         await this.handleTypedCommand(session, msg.requestId, { type: 'artifact-write', uri: msg.uri, contentBase64: msg.contentBase64, message: msg.message, cap: msg.cap }, sendResponse);
         break;
 
+      case 'favorites_list':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, { type: 'favorites-list', uriPrefix: msg.uriPrefix }, sendResponse);
+        break;
+
+      case 'favorites_toggle':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, { type: 'favorites-toggle', uri: msg.uri }, sendResponse);
+        break;
+
+      case 'favorites_merge':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, { type: 'favorites-merge', uriPrefix: msg.uriPrefix, paths: msg.paths }, sendResponse);
+        break;
+
       case 'project_artifacts_status':
         if (!canManage(session.accessType)) {
           await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });

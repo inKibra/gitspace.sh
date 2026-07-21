@@ -458,6 +458,9 @@ export type Command =
   | { type: 'artifact-share-mint'; uri: string; ttlMs?: number; maxUses?: number; live?: boolean }
   | { type: 'artifact-share-revoke'; tokenId: string }
   | { type: 'artifact-share-list' }
+  | { type: 'favorites-list'; uriPrefix: string }
+  | { type: 'favorites-toggle'; uri: string }
+  | { type: 'favorites-merge'; uriPrefix: string; paths: string[] }
   | { type: 'trigger-save'; target: AgentWorkspaceTargetPayload; trigger: import('../../core/triggers.js').TriggerRecord }
   | { type: 'trigger-run-now'; target: AgentWorkspaceTargetPayload; triggerId: string }
   | { type: 'repo-tree'; target: AgentWorkspaceTargetPayload }
@@ -579,6 +582,7 @@ export type Response =
   | { type: 'artifact-share-mint'; url: string; tokenId: string; expiresAt: number }
   | { type: 'artifact-share-revoke'; revoked: boolean }
   | { type: 'artifact-share-list'; shares: import('./artifact-share.js').ShareLedgerEntry[] }
+  | { type: 'favorites'; favorites: string[] }
   | { type: 'trigger-save'; trigger: import('../../core/triggers.js').TriggerRecord }
   | { type: 'trigger-run-now'; sessionId: string }
   | { type: 'repo-tree'; entries: import('../../core/git.js').RepoFileEntry[] }

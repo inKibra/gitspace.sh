@@ -3401,6 +3401,30 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     throw new Error('Unexpected artifact-write response');
   }
 
+  async listWorkspaceFavorites(workspaceId: string): Promise<string[]> {
+    await this.waitForInitialSnapshot();
+    const tmuxResponse = await this.sendRpcCommand({ type: 'favorites_list', requestId: crypto.randomUUID(), uriPrefix: this.artifactUriFor(workspaceId) });
+    if (tmuxResponse.type === 'favorites') return tmuxResponse.favorites;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected favorites-list response');
+  }
+
+  async toggleWorkspaceFavorite(workspaceId: string, path: string): Promise<string[]> {
+    await this.waitForInitialSnapshot();
+    const tmuxResponse = await this.sendRpcCommand({ type: 'favorites_toggle', requestId: crypto.randomUUID(), uri: this.artifactUriFor(workspaceId, path) });
+    if (tmuxResponse.type === 'favorites') return tmuxResponse.favorites;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected favorites-toggle response');
+  }
+
+  async mergeWorkspaceFavorites(workspaceId: string, paths: string[]): Promise<string[]> {
+    await this.waitForInitialSnapshot();
+    const tmuxResponse = await this.sendRpcCommand({ type: 'favorites_merge', requestId: crypto.randomUUID(), uriPrefix: this.artifactUriFor(workspaceId), paths });
+    if (tmuxResponse.type === 'favorites') return tmuxResponse.favorites;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected favorites-merge response');
+  }
+
   async listProjectArtifacts(projectName: string): Promise<Array<{ path: string; size: number; pointer: boolean }>> {
     await this.waitForInitialSnapshot();
     const tmuxResponse = await this.sendRpcCommand({ type: 'artifact_list', requestId: crypto.randomUUID(), uriPrefix: formatArtifactUri(projectName, '@base') });

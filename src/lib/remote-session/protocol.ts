@@ -794,6 +794,25 @@ export interface ArtifactWriteRequest {
   cap?: string;
 }
 
+export interface FavoritesListRequest {
+  type: 'favorites_list';
+  requestId: string;
+  uriPrefix: string;
+}
+
+export interface FavoritesToggleRequest {
+  type: 'favorites_toggle';
+  requestId: string;
+  uri: string;
+}
+
+export interface FavoritesMergeRequest {
+  type: 'favorites_merge';
+  requestId: string;
+  uriPrefix: string;
+  paths: string[];
+}
+
 interface ProjectArtifactsStatusRequest {
   type: 'project_artifacts_status';
   requestId: string;
@@ -1310,6 +1329,9 @@ export type ClientToMachineMessage =
   | ArtifactListRequest
   | ArtifactReadRequest
   | ArtifactWriteRequest
+  | FavoritesListRequest
+  | FavoritesToggleRequest
+  | FavoritesMergeRequest
   | ProjectArtifactsStatusRequest
   | ProjectArtifactsRemoteSetRequest
   | ProjectArtifactsSyncRequest
@@ -1492,6 +1514,9 @@ export function isBrowseMessage(msg: RemoteSessionMessage): msg is ClientToMachi
     'artifact_list',
     'artifact_read',
     'artifact_write',
+    'favorites_list',
+    'favorites_toggle',
+    'favorites_merge',
     'project_artifacts_status',
     'project_artifacts_remote_set',
     'project_artifacts_sync',

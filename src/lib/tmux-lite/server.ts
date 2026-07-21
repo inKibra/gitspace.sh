@@ -3981,6 +3981,42 @@ export async function dispatchCommand(cmd: Command): Promise<Response | null> {
             }
             break;
 
+          case 'favorites-list':
+            try {
+              const { readFavoritesMountRel } = await import('../../core/artifacts-favorites.js');
+              const { artifactsScope } = await import('../../core/artifacts.js');
+              const { workspaceDir } = await resolveArtifactUriDirs(cmd.uriPrefix);
+              res = { type: 'favorites', favorites: readFavoritesMountRel(artifactsScope(workspaceDir)) };
+            } catch (e) {
+              res = { type: 'error', message: `Failed to list favorites: ${e instanceof Error ? e.message : String(e)}` };
+            }
+            break;
+
+          case 'favorites-toggle':
+            try {
+              const { toggleFavorite } = await import('../../core/artifacts-favorites.js');
+              const { artifactsScope } = await import('../../core/artifacts.js');
+              const { projectDir, workspaceDir, relPath } = await resolveArtifactUriDirs(cmd.uri);
+              if (!relPath) { res = { type: 'error', message: 'favorites-toggle needs a file path in the URI' }; break; }
+              const favorites = await toggleFavorite(projectDir, artifactsScope(workspaceDir), relPath);
+              res = { type: 'favorites', favorites };
+            } catch (e) {
+              res = { type: 'error', message: `Failed to toggle favorite: ${e instanceof Error ? e.message : String(e)}` };
+            }
+            break;
+
+          case 'favorites-merge':
+            try {
+              const { mergeFavorites } = await import('../../core/artifacts-favorites.js');
+              const { artifactsScope } = await import('../../core/artifacts.js');
+              const { projectDir, workspaceDir } = await resolveArtifactUriDirs(cmd.uriPrefix);
+              const favorites = await mergeFavorites(projectDir, artifactsScope(workspaceDir), cmd.paths, { verifyExists: true });
+              res = { type: 'favorites', favorites };
+            } catch (e) {
+              res = { type: 'error', message: `Failed to reconcile favorites: ${e instanceof Error ? e.message : String(e)}` };
+            }
+            break;
+
           case 'serve-activate':
             try {
               const { activateServeRuntime } = await import('./serve-runtime.js');

@@ -763,17 +763,31 @@ function ArtifactsMode({ backend, workspaceId, projectName, workspaceName, onOpe
   const [view, setView] = useState<'sel' | 'fav'>('sel');
   const [query, setQuery] = useState('');
   const [reports, setReports] = useState<ReportRow[]>([]);
-  const favKey = `gssh:artifact-favs:${projectName}`;
-  const [favs, setFavs] = useState<Set<string>>(() => {
-    try { return new Set(JSON.parse(window.localStorage.getItem(favKey) ?? '[]') as string[]); } catch { return new Set(); }
-  });
-  const toggleFav = (id: string): void => setFavs((prev) => {
-    const next = new Set(prev);
-    if (next.has(id)) next.delete(id);
-    else next.add(id);
-    try { window.localStorage.setItem(favKey, JSON.stringify([...next])); } catch { /* */ }
-    return next;
-  });
+  // Favorites are DURABLE now: a `.favorites.json` manifest committed to the
+  // workspace's artifacts branch, read/written through the daemon (survives a
+  // machine move, syncs with the artifacts, and is readable by the rollup CLI).
+  // `favs` holds MOUNT-relative paths (same basis as entries[].path).
+  const legacyFavKey = `gssh:artifact-favs:${projectName}`;
+  const [favs, setFavs] = useState<Set<string>>(new Set());
+  const toggleFav = (id: string): void => {
+    const fn = backend?.toggleWorkspaceFavorite;
+    if (!fn) return;
+    // Optimistic flip; the RPC returns the authoritative list and we reconcile.
+    setFavs((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+    fn.call(backend, workspaceId, id)
+      .then((list) => setFavs(new Set(list)))
+      .catch(() => setFavs((prev) => { // revert on failure (e.g. out-of-goal-scope)
+        const next = new Set(prev);
+        if (next.has(id)) next.delete(id);
+        else next.add(id);
+        return next;
+      }));
+  };
 
   useEffect(() => {
     let alive = true;
@@ -804,6 +818,29 @@ function ArtifactsMode({ backend, workspaceId, projectName, workspaceName, onOpe
     });
     return () => { alive = false; };
   }, [backend, workspaceId, projectName, workspaceName]);
+
+  // Load favorites from the manifest (via RPC) and RECONCILE any legacy
+  // browser-localStorage favorites into it once per browser. Reconciliation is
+  // a server-side UNION that normalizes both path bases (old flat pre-goal-keyed
+  // paths and new mount-relative `goals/<id>/…`) to the same goal-relative key,
+  // so it dedups correctly and is idempotent. After merging, THIS browser's key
+  // is cleared so it never re-injects stale entries.
+  useEffect(() => {
+    let alive = true;
+    const listFn = backend?.listWorkspaceFavorites;
+    if (!listFn) return;
+    let legacy: string[] = [];
+    try { legacy = JSON.parse(window.localStorage.getItem(legacyFavKey) ?? '[]') as string[]; } catch { legacy = []; }
+    const mergeFn = backend?.mergeWorkspaceFavorites;
+    const load = legacy.length > 0 && mergeFn
+      ? mergeFn.call(backend, workspaceId, legacy).then((list) => {
+          try { window.localStorage.removeItem(legacyFavKey); } catch { /* */ }
+          return list;
+        })
+      : listFn.call(backend, workspaceId);
+    load.then((list) => { if (alive) setFavs(new Set(list)); }).catch(() => { /* leave empty */ });
+    return () => { alive = false; };
+  }, [backend, workspaceId, legacyFavKey]);
 
   const openByKind = (path: string, kind: ArtifactKind): void => {
     if (kind === 'dashboard') onOpenDashboard(path);

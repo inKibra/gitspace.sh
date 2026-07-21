@@ -308,6 +308,15 @@ export interface SessionBackend {
   readWorkspaceArtifact?(workspaceId: string, path: string): Promise<{ base64: string; size: number; truncated: boolean }>;
   /** Write an artifact into the workspace mount (commit-on-write). */
   writeWorkspaceArtifact?(workspaceId: string, path: string, contentBase64: string, message?: string): Promise<string>;
+  /** List favorited artifacts for a workspace (mount-relative paths). Reads the
+   *  committed `.favorites.json` manifest through the daemon — not localStorage. */
+  listWorkspaceFavorites?(workspaceId: string): Promise<string[]>;
+  /** Toggle one favorite (add/remove) — commits the manifest, returns the full
+   *  updated list (mount-relative). */
+  toggleWorkspaceFavorite?(workspaceId: string, path: string): Promise<string[]>;
+  /** Union-merge favorites into the manifest (localStorage reconciliation);
+   *  idempotent, returns the full updated list (mount-relative). */
+  mergeWorkspaceFavorites?(workspaceId: string, paths: string[]): Promise<string[]>;
   /** List the PROJECT's artifacts (base clone's main mount). */
   listProjectArtifacts?(projectName: string): Promise<Array<{ path: string; size: number; pointer: boolean }>>;
   /** Read one project artifact (pointer-resolved) as base64. */
