@@ -27,7 +27,8 @@ import type { KanbanGoalItem } from '../app/shared/board/types.js';
 import type { WorkspaceRuntimeEntry } from '../app/shared/workspace-runtime/types.js';
 import { ArtifactPanel } from '../components/ArtifactPanel.web.js';
 import { DashboardPanel } from '../components/DashboardPanel.web.js';
-import { KIND_ICON, KIND_LABEL, KIND_ORDER, classifyArtifact, resolveAttachmentRef, toGoalRelative, type ArtifactKind, decodeBase64Utf8, encodeBase64Utf8 } from '../components/artifact-kinds.js';
+import { KIND_ICON, KIND_LABEL, KIND_ORDER, classifyArtifact, goalPrefixOf, resolveAttachmentRef, toGoalRelative, type ArtifactKind, decodeBase64Utf8, encodeBase64Utf8 } from '../components/artifact-kinds.js';
+import { sanitizeForFileSystem } from '../utils/sanitize.js';
 
 function ProjectReportTab({ path, read, knownPaths, onOpenAttachment }: {
   path: string;
@@ -571,15 +572,69 @@ export function ProjectHomePage({
     return () => { alive = false; };
   }, [artifacts, backend, workspaces, projectName]);
 
-  const kindGroups = useMemo(() => {
-    const byKind = new Map<ArtifactKind, ArtifactEntry[]>();
+  // Goal-sectioned grouping: the artifacts tree keys rolled-up work by
+  // goals/<id>/ (docs/ARTIFACTS-FS.md), so the rail groups BY GOAL first —
+  // one section per goal folder plus a PROJECT section for root artifacts —
+  // keeping the kind grouping within each section. Section order: goal
+  // sections alphabetical by id (the listing carries no commit times, and
+  // ordering must not grow a new RPC), PROJECT last.
+  const goalSections = useMemo(() => {
+    const byGoal = new Map<string, ArtifactEntry[]>();
     for (const e of artifacts) {
-      if (e.path === 'README.md') continue;
-      const k = classifyArtifact(e.path);
-      (byKind.get(k) ?? byKind.set(k, []).get(k)!).push(e);
+      const prefix = goalPrefixOf(e.path);
+      const id = prefix ? prefix.slice('goals/'.length, -1) : '';
+      (byGoal.get(id) ?? byGoal.set(id, []).get(id)!).push(e);
     }
-    return KIND_ORDER.map((k) => [k, byKind.get(k) ?? []] as const).filter(([, a]) => a.length > 0);
+    const sections = [...byGoal.entries()].map(([goalId, entries]) => {
+      const byKind = new Map<ArtifactKind, ArtifactEntry[]>();
+      for (const e of entries) {
+        const k = classifyArtifact(e.path);
+        (byKind.get(k) ?? byKind.set(k, []).get(k)!).push(e);
+      }
+      return {
+        goalId,
+        kindGroups: KIND_ORDER.map((k) => [k, byKind.get(k) ?? []] as const).filter(([, a]) => a.length > 0),
+      };
+    });
+    sections.sort((a, b) => (a.goalId === '' ? 1 : b.goalId === '' ? -1 : a.goalId.localeCompare(b.goalId)));
+    return sections;
   }, [artifacts]);
+
+  // Section-header metadata: goal TITLE from goals/<id>/goal.md (first `# `
+  // heading; goal id as fallback) and the roll-up rating from root
+  // reports/rollup-<workspace>.report.json. Rating reports are keyed by
+  // WORKSPACE name while goal folders are keyed by GOAL id; workspace-born
+  // goal ids are sanitizeForFileSystem(workspace) + '-' + 8 hex, so a prefix
+  // match recovers the link. Title-seeded goals won't match — rating is
+  // best-effort, absent is fine (deliberately no separate mapping store).
+  const [goalMeta, setGoalMeta] = useState<{ titles: Record<string, string>; ratings: Record<string, number> }>({ titles: {}, ratings: {} });
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      const titles: Record<string, string> = {};
+      const ratings: Record<string, number> = {};
+      const paths = new Set(artifacts.map((e) => e.path));
+      const ids = [...new Set(artifacts.map((e) => goalPrefixOf(e.path)).filter(Boolean))].map((p) => p.slice('goals/'.length, -1));
+      await Promise.allSettled(ids.map(async (id) => {
+        if (!paths.has(`goals/${id}/goal.md`)) return;
+        const r = await readArtifactFromSource(`goals/${id}/goal.md`);
+        const heading = /^#\s+(.+)$/m.exec(decodeBase64Utf8(r.base64));
+        if (heading) titles[id] = heading[1].trim();
+      }));
+      const reportPaths = artifacts.map((e) => e.path).filter((p) => /^reports\/rollup-.+\.report\.json$/.test(p));
+      await Promise.allSettled(reportPaths.map(async (p) => {
+        const r = await readArtifactFromSource(p);
+        const rep = JSON.parse(decodeBase64Utf8(r.base64)) as { surface?: unknown; rating?: unknown };
+        if (typeof rep.surface !== 'string' || typeof rep.rating !== 'number') return;
+        const stem = sanitizeForFileSystem(rep.surface);
+        for (const id of ids) {
+          if (id.startsWith(`${stem}-`) && /^[0-9a-f]{8}$/.test(id.slice(stem.length + 1))) ratings[id] = rep.rating;
+        }
+      }));
+      if (alive) setGoalMeta({ titles, ratings });
+    })();
+    return () => { alive = false; };
+  }, [artifacts, readArtifactFromSource]);
   const favEntries = useMemo(() => artifacts.filter((e) => favs.has(e.path)), [artifacts, favs]);
   const dashboards = useMemo(() => artifacts.filter((e) => classifyArtifact(e.path) === 'dashboard'), [artifacts]);
 
@@ -627,9 +682,9 @@ export function ProjectHomePage({
     await shareArtifactToClipboard(backend, projectName, workspaceSegment, path);
   };
 
-  const railRow = (e: ArtifactEntry, sub?: string): ReactElement => {
+  const railRow = (e: ArtifactEntry, sub?: string, displayName?: string): ReactElement => {
     const kind = classifyArtifact(e.path);
-    const name = e.path.split('/').pop() ?? e.path;
+    const name = displayName ?? (e.path.split('/').pop() ?? e.path);
     return (
       <div
         key={`${sub ?? ''}:${e.path}`}
@@ -982,18 +1037,43 @@ export function ProjectHomePage({
             favEntries.length === 0
               ? <div className="px-3 py-[18px] text-[12px] text-[var(--gs-text-dim)]">No favorites yet — ★ an artifact to pin it across the project.</div>
               : favEntries.map((e) => railRow(e))
-          ) : kindGroups.length === 0 ? (
+          ) : goalSections.length === 0 ? (
             <div className="px-3 py-[18px] text-[12px] text-[var(--gs-text-dim)]">
               No artifacts in this source yet.
               <div className="mt-1 text-[10px] text-[var(--gs-text-ghost)]">Roll up a workspace to promote artifacts to main.</div>
             </div>
           ) : (
-            kindGroups.map(([kind, files]) => (
-              <div key={kind}>
-                <div className="px-3 pb-[3px] pt-[9px] text-[10.5px] uppercase tracking-[.12em] text-[var(--gs-text-dim)]">{KIND_LABEL[kind]}</div>
-                {files.map((e) => railRow(e))}
-              </div>
-            ))
+            goalSections.map((sec, i) => {
+              // A purely flat/root listing (no goal folders) keeps the plain
+              // kind-grouped look — no lone PROJECT header over everything.
+              const showHeader = !(goalSections.length === 1 && sec.goalId === '');
+              const rating = sec.goalId === '' ? undefined : goalMeta.ratings[sec.goalId];
+              return (
+                <div key={sec.goalId || '·project'}>
+                  {showHeader && (
+                    <div className={`flex items-baseline gap-1.5 border-b border-[var(--gs-border-muted)] px-3 pb-[5px] pt-[11px] ${i > 0 ? 'mt-1.5' : ''}`}>
+                      <span className="min-w-0 truncate text-[11.5px] font-medium text-[var(--gs-text)]" title={sec.goalId === '' ? 'project-root artifacts' : `goals/${sec.goalId}/`}>
+                        {sec.goalId === '' ? 'Project' : (goalMeta.titles[sec.goalId] ?? sec.goalId)}
+                      </span>
+                      {rating !== undefined && (
+                        <span title={`rated ${rating}/5 at roll-up`} className="flex-none text-[10px] tracking-[.08em] text-[var(--gs-warning)]">
+                          {'★'.repeat(Math.max(1, Math.min(5, Math.round(rating))))}
+                        </span>
+                      )}
+                      {sec.goalId !== '' && (
+                        <span className="ml-auto min-w-0 flex-shrink truncate font-[family-name:var(--gs-font)] text-[9.5px] text-[var(--gs-text-ghost)]">{sec.goalId}</span>
+                      )}
+                    </div>
+                  )}
+                  {sec.kindGroups.map(([kind, files]) => (
+                    <div key={kind}>
+                      <div className="px-3 pb-[3px] pt-[9px] text-[10.5px] uppercase tracking-[.12em] text-[var(--gs-text-dim)]">{KIND_LABEL[kind]}</div>
+                      {files.map((e) => railRow(e, undefined, sec.goalId === '' ? undefined : toGoalRelative(e.path)))}
+                    </div>
+                  ))}
+                </div>
+              );
+            })
           ))}
           </div>
         </div>
