@@ -588,7 +588,19 @@ export interface ArtifactListEntry {
 }
 
 /** Recursively list a mount's files (pointer-aware, `.git` excluded). */
-export function listArtifactFiles(mountDir: string): ArtifactListEntry[] {
+/**
+ * List artifact files under the mount, returning MOUNT-relative paths.
+ *
+ * `scopeRel` restricts the walk to one subtree (e.g. a workspace's own
+ * `goals/<goal-id>/`) while still returning mount-relative paths. This is what
+ * keeps a WORKSPACE view from showing every rolled-up goal inherited from
+ * `main`: a workspace's artifacts branch is branched off `main`, so the mount
+ * physically contains every `goals/<other-id>/`; scoping to the workspace's own
+ * goal folder shows only its artifacts. `@base`/project listings pass no scope
+ * (rootRel === '') and still walk the whole mount (that's the project-home view,
+ * which SHOULD show all goals).
+ */
+export function listArtifactFiles(mountDir: string, scopeRel = ''): ArtifactListEntry[] {
   const out: ArtifactListEntry[] = [];
   const walk = (rel: string): void => {
     const abs = rel ? join(mountDir, rel) : mountDir;
@@ -616,8 +628,9 @@ export function listArtifactFiles(mountDir: string): ArtifactListEntry[] {
       }
     }
   };
-  if (!existsSync(mountDir)) return out;
-  walk('');
+  const startAbs = scopeRel ? join(mountDir, scopeRel) : mountDir;
+  if (!existsSync(startAbs)) return out;
+  walk(scopeRel);
   return out.sort((a, b) => a.path.localeCompare(b.path));
 }
 

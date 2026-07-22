@@ -3925,9 +3925,13 @@ export async function dispatchCommand(cmd: Command): Promise<Response | null> {
 
           case 'artifact-list':
             try {
-              const { listArtifactFiles } = await import('../../core/artifacts.js');
-              const { mountDir } = await resolveArtifactUriDirs(cmd.uriPrefix);
-              res = { type: 'artifact-list', entries: listArtifactFiles(mountDir) };
+              const { listArtifactFiles, artifactsScope } = await import('../../core/artifacts.js');
+              const { workspaceDir, mountDir } = await resolveArtifactUriDirs(cmd.uriPrefix);
+              // Scope a WORKSPACE listing to its own goal folder so it does not
+              // show every rolled-up goal inherited from main; @base/project
+              // listings resolve rootRel==='' and still walk the whole mount.
+              const { rootRel } = artifactsScope(workspaceDir);
+              res = { type: 'artifact-list', entries: listArtifactFiles(mountDir, rootRel) };
             } catch (e) {
               res = { type: 'error', message: `Failed to list artifacts: ${e instanceof Error ? e.message : String(e)}` };
             }
