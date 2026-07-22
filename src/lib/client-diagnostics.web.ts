@@ -12,7 +12,7 @@
 export interface DiagnosticEntry {
   /** epoch ms */
   t: number;
-  kind: 'error' | 'unhandledrejection' | 'console.error' | 'console.warn' | 'console.log' | 'react' | 'rpc' | 'freeze' | 'click' | 'nav';
+  kind: 'error' | 'unhandledrejection' | 'console.error' | 'console.warn' | 'console.log' | 'react' | 'rpc' | 'freeze' | 'click' | 'nav' | 'transport';
   message: string;
   /** stack or extra context, already string-ified */
   detail?: string;
@@ -59,12 +59,37 @@ export function recordRpcFailure(command: string, error: unknown, context?: Reco
 }
 
 /**
+ * Route transport diagnostics (oversize-send / close / ledger) into the ring so
+ * they ride in the problem-report bundle. Structured entry (kind 'transport');
+ * the human console lines the guard/close helpers also emit are tapped
+ * separately as 'console.warn'. Never throws. (ticket #42.4)
+ */
+export function installBrowserTransportDiagnostics(): void {
+  void import('./tmux-lite/transport-diagnostics.js')
+    .then((mod) => {
+      mod.setTransportDiagnosticSink((diagnostic) => {
+        pushDiagnostic({
+          kind: 'transport',
+          message: diagnostic.kind === 'transport-oversize-send'
+            ? `oversize ${diagnostic.type} ${(diagnostic.size / (1024 * 1024)).toFixed(2)}MB on ${diagnostic.socket}`
+            : `close ${diagnostic.role} ${diagnostic.socket} code=${diagnostic.code ?? 'none'} abnormal=${diagnostic.abnormal}`,
+          detail: (() => { try { return JSON.stringify(diagnostic); } catch { return String(diagnostic.kind); } })(),
+          source: 'transport',
+        });
+      });
+    })
+    .catch(() => undefined);
+}
+
+/**
  * Install the global capture hooks. Idempotent. Call once, before mount.
  * `Date.now()` is used directly (this is browser runtime, not a workflow).
  */
 export function installClientDiagnostics(): void {
   if (installed || typeof window === 'undefined') return;
   installed = true;
+
+  installBrowserTransportDiagnostics();
 
   // Inspectable handle: the report dialog reads the ring from here, and it's a
   // useful console debugging hook (`__gsDiag.ring()`).

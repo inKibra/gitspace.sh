@@ -18,6 +18,7 @@ import type { RelayServerConfig, WebSocketData } from "./types";
 import { ed25519 } from "@noble/curves/ed25519.js";
 import { signMessage, verifySignedMessage, getSignerPublicKey, type SignedMessage } from "./signing.js";
 import { PROTOCOL_VERSION, RELAY_MAX_WS_PAYLOAD, RELAY_WS_PAYLOAD_WARN } from "./protocol.js";
+import { FrameLedger, peekFrameType, summarizeClose } from "../lib/tmux-lite/transport-diagnostics.js";
 import { formatRelayFingerprint, type RelayIdentity } from "./identity.js";
 import { deriveIdentityId } from "../lib/tmux-lite/crypto/identity.js";
 import { x25519 } from "@noble/curves/ed25519.js";
@@ -960,6 +961,9 @@ export function createRelayServer(config: RelayServerConfig): Server<WebSocketDa
           machineId: "", // Set later by protocol messages
           role,
           connectionId: generateConnectionId(),
+          // Ticket #42.4: per-connection rolling frame ledger for the close diag.
+          ledger: new FrameLedger(),
+          openedAtMs: Date.now(),
         };
 
         // Upgrade to WebSocket
@@ -1031,6 +1035,9 @@ export function createRelayServer(config: RelayServerConfig): Server<WebSocketDa
         // 1006-closed the socket before this handler runs, so this warn is the
         // early-warning band below that hard limit.
         const frameSize = typeof message === "string" ? message.length : message.byteLength;
+        // Ticket #42.4: ledger EVERY inbound frame (recv from the relay's POV) so
+        // an abnormal close can name the last frames this connection carried.
+        ws.data.ledger?.record("recv", frameSize, peekFrameType(msgStr, "(unparsed)"));
         if (frameSize > RELAY_WS_PAYLOAD_WARN) {
           let frameType = "(unparsed)";
           try {
@@ -1110,6 +1117,20 @@ export function createRelayServer(config: RelayServerConfig): Server<WebSocketDa
         console.log(
           `[ws] ${role} ${connectionId} disconnected (${code}: ${reason})`
         );
+        // Ticket #42.4: enrich the relay close log with THIS connection's last
+        // frame size/type + (on abnormal close) its rolling ledger — the relay's
+        // own view of what it last routed before the drop.
+        if (ws.data.ledger) {
+          summarizeClose({
+            role: role === "machine" ? "machine" : "client",
+            socket: `${connectionId}${machineId ? `/${machineId}` : ""}`,
+            code,
+            reason,
+            ledger: ws.data.ledger,
+            startedAtMs: ws.data.openedAtMs ?? 0,
+            log: (m) => console.log(m),
+          });
+        }
 
         // Clean up pending challenge if any
         pendingChallenges.delete(connectionId);

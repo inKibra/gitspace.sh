@@ -8,8 +8,9 @@
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'bun:test';
 import { setupTestDom, teardownTestDom } from '../../test/setup-dom.js';
-import { pushDiagnostic } from '../client-diagnostics.web.js';
+import { installBrowserTransportDiagnostics, pushDiagnostic } from '../client-diagnostics.web.js';
 import { buildBrokenStateBundle, reportFromBrokenState, submitProblemReport } from '../report-client.web.js';
+import { guardOversizeSend, MAX_FRAME_SIZE_BYTES } from '../tmux-lite/transport-diagnostics.js';
 
 // saveLocally() needs URL.createObjectURL — happy-dom may not implement it, so
 // stub the blob-URL round-trip (and count downloads) without a real browser.
@@ -40,6 +41,26 @@ describe('buildBrokenStateBundle', () => {
     const bundle = buildBrokenStateBundle() as { brokenState: boolean; ring: Array<{ kind: string; message: string }> };
     expect(bundle.brokenState).toBe(true);
     expect(bundle.ring.some((e) => e.kind === 'react' && e.message === 'boom-in-render')).toBe(true);
+  });
+
+  it('carries client-side transport diagnostics (ticket #42.4)', async () => {
+    // Register the browser sink (async dynamic import inside).
+    installBrowserTransportDiagnostics();
+    await new Promise((r) => setTimeout(r, 0));
+    // Fire the send-side oversize guard — it should route a structured
+    // 'transport' entry into the ring via the browser sink.
+    guardOversizeSend({
+      socket: 'machine-abc',
+      role: 'client',
+      size: MAX_FRAME_SIZE_BYTES + 500_000,
+      type: 'machine_snapshot',
+      log: () => {},
+    });
+    const bundle = buildBrokenStateBundle() as { ring: Array<{ kind: string; message: string; detail?: string }> };
+    const entry = bundle.ring.find((e) => e.kind === 'transport');
+    expect(entry).toBeDefined();
+    expect(entry?.message).toContain('machine_snapshot');
+    expect(entry?.detail).toContain('transport-oversize-send');
   });
 });
 

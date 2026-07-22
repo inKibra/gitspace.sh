@@ -3,8 +3,19 @@ import { logger } from '../utils/logger.js';
 import { signMessage } from '../relay/signing.js';
 import { PROTOCOL_VERSION, RELAY_MAX_WS_PAYLOAD } from '../relay/protocol.js';
 import { chunkFrame, FrameChunkReassembler, FRAME_CHUNK_SIZE } from '../lib/tmux-lite/crypto/frame-chunk.js';
+import {
+  FrameLedger,
+  guardOversizeSend,
+  peekFrameType,
+  summarizeClose,
+} from '../lib/tmux-lite/transport-diagnostics.js';
+import { installServerTransportDiagnostics } from '../lib/tmux-lite/transport-diagnostics-server.js';
 import { ed25519 } from '@noble/curves/ed25519.js';
 import type { ServeEventHandler } from '../serve/types.js';
+
+// Machine side runs in the serve daemon: route transport diagnostics into the
+// trace ring so they ride in the problem-report bundle (report.server.traceRing).
+installServerTransportDiagnostics();
 
 export type RelayTrustResult =
   | { trusted: true }
@@ -208,8 +219,26 @@ function signChallengeAndCreateRegistration(
 // the already-encrypted ciphertext bytes, so E2E is intact and the relay keeps
 // routing opaque payloads it cannot inspect. Small frames are returned unwrapped
 // (backward compatible). Reassembly happens on the receiver before decryption.
-function createDataMessages(connectionId: string, data: Uint8Array | Buffer): string[] {
+function createDataMessages(
+  connectionId: string,
+  data: Uint8Array | Buffer,
+  ledger?: FrameLedger,
+): string[] {
   const frameBytes = data instanceof Uint8Array ? data : Buffer.from(data);
+  // Ticket #42.4: instrument the machine→relay send boundary. `frameBytes` is
+  // the already-encrypted logical frame PRE-chunk, so its size is the real
+  // producer's payload size (best-effort type peek is 'data' for encrypted
+  // frames; session-handler names the true producer at the plaintext boundary).
+  const frameType = peekFrameType(frameBytes, 'data');
+  guardOversizeSend({
+    socket: connectionId,
+    role: 'machine',
+    size: frameBytes.length,
+    type: frameType,
+    willChunk: true,
+    log: (m) => logger.warning(m),
+  });
+  ledger?.record('send', frameBytes.length, frameType);
   const chunks = chunkFrame(frameBytes, FRAME_CHUNK_SIZE);
   if (chunks.length > 1) {
     logger.dim(
@@ -228,10 +257,11 @@ function createDataMessages(connectionId: string, data: Uint8Array | Buffer): st
 
 function createSendCallback(
   ws: WebSocket,
-  connectionId: string
+  connectionId: string,
+  ledger?: FrameLedger,
 ): (data: Buffer) => void {
   return (sendData) => {
-    for (const message of createDataMessages(connectionId, sendData)) {
+    for (const message of createDataMessages(connectionId, sendData, ledger)) {
       ws.send(message);
     }
   };
@@ -338,14 +368,32 @@ export async function connectMachineRelay(
       const ws = new WebSocket(url.toString(), { maxPayload: RELAY_MAX_WS_PAYLOAD });
       currentWs = ws;
       ws.binaryType = 'arraybuffer';
+      // Ticket #42.4: per-socket rolling frame ledger + connect timestamp, reset
+      // on every (re)connect. On an abnormal close its contents are dumped so the
+      // close diagnostic names the last frames this end saw.
+      const frameLedger = new FrameLedger();
+      let connectedAtMs = 0;
 
       ws.onopen = () => {
+        connectedAtMs = Date.now();
         console.log('[serve] WebSocket connected, waiting for relay identity...');
       };
 
       ws.onclose = (event) => {
         stopPing();
         console.log(`[serve] WebSocket closed: code=${event.code} reason=${event.reason || 'none'}`);
+        // Ticket #42.4: the machine's OWN close view — code + reason + last
+        // frame each way + ledger — the exact signal that was missing when the
+        // relay only logged "machine disconnected". Routed to the trace ring.
+        summarizeClose({
+          role: 'machine',
+          socket: machineId,
+          code: event.code,
+          reason: event.reason,
+          ledger: frameLedger,
+          startedAtMs: connectedAtMs,
+          log: (m) => console.log(m),
+        });
         eventHandler({
           type: 'relay_disconnected',
           code: event.code,
@@ -452,7 +500,7 @@ export async function connectMachineRelay(
 
             case 'client_connected':
               sessionManager.handleConnect(msg.connectionId);
-              sessionManager.setSendCallback(msg.connectionId, createSendCallback(ws, msg.connectionId));
+              sessionManager.setSendCallback(msg.connectionId, createSendCallback(ws, msg.connectionId, frameLedger));
               break;
 
             case 'client_disconnected':
@@ -463,6 +511,9 @@ export async function connectMachineRelay(
             case 'data':
               if (msg.data && msg.connectionId) {
                 const wireBytes = Buffer.from(msg.data, 'base64');
+                // Ticket #42.4: record the recv boundary (size + outer envelope
+                // type only — the inner frame is encrypted).
+                frameLedger.record('recv', wireBytes.length, 'data');
 
                 // Ticket #42.3: reassemble chunked frames before decrypt. Small
                 // (unchunked) frames pass straight through as a single chunk.
@@ -482,7 +533,7 @@ export async function connectMachineRelay(
                 const messageData = assembled.frame;
 
                 if (!sessionManager.getSession(msg.connectionId)) {
-                  sessionManager.setSendCallback(msg.connectionId, createSendCallback(ws, msg.connectionId));
+                  sessionManager.setSendCallback(msg.connectionId, createSendCallback(ws, msg.connectionId, frameLedger));
                 }
 
                 const response = await sessionManager.handleMessage(
@@ -491,7 +542,7 @@ export async function connectMachineRelay(
                 );
 
                 if (response) {
-                  for (const message of createDataMessages(msg.connectionId, response)) {
+                  for (const message of createDataMessages(msg.connectionId, response, frameLedger)) {
                     ws.send(message);
                   }
                 }

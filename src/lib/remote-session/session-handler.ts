@@ -8,7 +8,13 @@ import { executeSpaceCommand } from '../tmux-lite/agents/extensions/space-comman
 import { parseCommandArgs } from '@oh-my-pi/pi-coding-agent/utils/command-args';
 const importExecModule = () => import('@oh-my-pi/pi-coding-agent/exec/exec');
 import { createFrame, openFrame } from "../tmux-lite/crypto/frames";
+import { guardOversizeSend } from "../tmux-lite/transport-diagnostics.js";
+import { installServerTransportDiagnostics } from "../tmux-lite/transport-diagnostics-server.js";
 import { scanWorkspaces } from "./workspace-scanner";
+
+// Machine daemon: ensure transport diagnostics reach the trace ring even when
+// the relay client module hasn't loaded (e.g. a purely local serve).
+installServerTransportDiagnostics();
 import {
   parseRemoteMessage,
   serializeRemoteMessage,
@@ -2668,6 +2674,18 @@ export class RemoteSessionHandler {
   ): Promise<void> {
     const json = serializeRemoteMessage(msg);
     const data = new TextEncoder().encode(json);
+    // Ticket #42.4: name the producer AT THE SOURCE. This is the plaintext
+    // encrypt boundary, so `msg.type` (e.g. machine_snapshot) and the true
+    // logical size are both known — the encrypted-frame guard in
+    // machine-relay-client can only see the outer 'data' envelope. Chunking
+    // still splits it safely; this flags any producer emitting a >1MB payload.
+    guardOversizeSend({
+      socket: session.connectionId,
+      role: 'machine',
+      size: data.length,
+      type: msg.type,
+      willChunk: true,
+    });
     const frame = await createFrame(0, data, session.sessionKeys.sendKey);
     sendResponse(frame);
   }

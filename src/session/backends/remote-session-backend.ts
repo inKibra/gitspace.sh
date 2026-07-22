@@ -73,6 +73,15 @@ import {
 } from '../../machine/state/selectors.js';
 import type { Response as TmuxResponse } from '../../lib/tmux-lite/protocol.js';
 import { chunkFrame, FrameChunkReassembler, FRAME_CHUNK_SIZE } from '../../lib/tmux-lite/crypto/frame-chunk.js';
+import {
+  FrameLedger,
+  guardOversizeSend,
+  summarizeClose,
+} from '../../lib/tmux-lite/transport-diagnostics.js';
+// No-op in the browser (window guard); under node/TUI it routes transport
+// diagnostics into the trace ring. Browser routing is installed by
+// installClientDiagnostics (client-diagnostics.web).
+import { installServerTransportDiagnostics } from '../../lib/tmux-lite/transport-diagnostics-server.js';
 import type { AddRequirementInput, AttachEvidenceInput, HumanReviewDecision, UpdateRequirementInput } from '../../core/goal-validation.js';
 type TypedCommandResponse = TmuxResponse | RunSpaceCommandResponse | RefreshMachineSnapshotResponse;
 import { createEmptyMachineSnapshot } from '../../machine/state/client.js';
@@ -467,6 +476,9 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   /** Ticket #42.3: reassembles chunked machine→client data frames (e.g. a large
    *  machine_snapshot) before decryption. Non-chunk frames pass through. */
   private readonly frameReassembler = new FrameChunkReassembler();
+  /** Ticket #42.4: per-socket rolling frame ledger (last 20 send/recv), dumped
+   *  in the transport-close diagnostic on an abnormal close. Reset on connect. */
+  private readonly frameLedger = new FrameLedger();
   private pendingReplayFrame:
     | {
         replayId: string;
@@ -534,6 +546,9 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     this.crypto = options.crypto;
     this.handshake = options.handshake;
     this.storage = options.storage;
+    // Ticket #42.4: under node/TUI, route transport diagnostics into the trace
+    // ring (no-op in the browser, where installClientDiagnostics wires the ring).
+    installServerTransportDiagnostics();
   }
 
   onEvent(handler: (event: BackendEvent) => void): () => void {
@@ -1762,6 +1777,10 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     }
 
     const frame = await this.crypto.createFrame(pane.streamId, data, key.sendKey);
+    // Ticket #42.4: flag + ledger the logical (pre-chunk) send. PTY input is
+    // normally tiny; a >1MB frame here means an unexpectedly large write.
+    guardOversizeSend({ socket: this.machineId, role: 'client', size: frame.length, type: 'pty', willChunk: true });
+    this.frameLedger.record('send', frame.length, 'pty');
     // Ticket #42.3: chunk oversize frames so none exceeds the relay transport
     // cap. Small frames yield a single (unwrapped) chunk — unchanged behavior.
     for (const chunk of chunkFrame(frame, FRAME_CHUNK_SIZE)) {
@@ -1791,6 +1810,17 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
         this.sendRelayConnectMessage();
       },
       onClose: (info) => {
+        // Ticket #42.4: the CLIENT's OWN close view — code + reason + last frame
+        // each way + ledger (on abnormal close) — routed to the diagnostics ring
+        // / trace ring so the report names why this end dropped.
+        summarizeClose({
+          role: 'client',
+          socket: this.machineId,
+          code: info?.code,
+          reason: info?.reason,
+          ledger: this.frameLedger,
+          startedAtMs: this.connectStartedAtMs,
+        });
         const closeMessage = info?.code || info?.reason
           ? `Socket closed before handshake completed (code=${info?.code ?? 'unknown'}, reason=${info?.reason || 'none'})`
           : 'Socket closed before handshake completed';
@@ -1888,6 +1918,9 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
 
   private async handleRelayDataPayload(base64Data: string): Promise<void> {
     const wireBytes = this.crypto.decodeBase64(base64Data);
+    // Ticket #42.4: record the recv boundary (size + outer 'data' type only —
+    // the inner frame is encrypted until openFrame below).
+    this.frameLedger.record('recv', wireBytes.length, 'data');
 
     // Ticket #42.3: reassemble chunked oversize frames (e.g. a large
     // machine_snapshot) before decryption. Unchunked frames return immediately
@@ -2520,6 +2553,10 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     const streamId = this.crypto.controlStreamId ?? DEFAULT_CONTROL_STREAM_ID;
     const payload = new TextEncoder().encode(JSON.stringify(message));
     const frame = await this.crypto.createFrame(streamId, payload, keys.sendKey);
+    // Ticket #42.4: the inner control `message.type` is known here (pre-encrypt),
+    // so name the producer + ledger the logical (pre-chunk) send.
+    guardOversizeSend({ socket: this.machineId, role: 'client', size: frame.length, type: message.type, willChunk: true });
+    this.frameLedger.record('send', frame.length, message.type);
     // Ticket #42.3: chunk oversize frames (control frames are normally small, so
     // this yields a single unwrapped chunk — unchanged behavior).
     for (const chunk of chunkFrame(frame, FRAME_CHUNK_SIZE)) {
@@ -2903,6 +2940,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     this.pendingAttachedAgentSession = null;
     this.pendingReplayFrameChunks.clear();
     this.frameReassembler.reset();
+    this.frameLedger.reset();
     this.rejectPendingReplayFrame('Remote session disconnected', { force: true });
     this.rejectPendingReplayTimeline('Remote session disconnected', undefined, true);
     this.rejectPendingDismissReplay('Remote session disconnected', undefined, true);

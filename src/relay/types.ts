@@ -11,6 +11,7 @@
 import type { ServerWebSocket } from "bun";
 import type { StoredIdentity } from "../types/identity.js";
 import type { RelayIdentity } from "./identity.js";
+import type { FrameLedger } from "../lib/tmux-lite/transport-diagnostics.js";
 
 /**
  * WebSocket data attached to each connection
@@ -28,6 +29,12 @@ export interface WebSocketData {
   clientIdentityId?: string;
   /** Permissions (for clients) */
   permissions?: ("read" | "write")[];
+  /** Ticket #42.4: per-connection rolling frame ledger (last ~20 frames the
+   *  relay saw), dumped on abnormal close so the relay's close log names the
+   *  last frame size/type it routed. */
+  ledger?: FrameLedger;
+  /** Epoch ms this connection opened (for close-diagnostic uptime). */
+  openedAtMs?: number;
 }
 
 /**
