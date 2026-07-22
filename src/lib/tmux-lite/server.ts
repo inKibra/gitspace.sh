@@ -927,22 +927,23 @@ startTriggerScheduler(
 /** Resolve an artifact:// URI to on-disk dirs, lazily mounting. The '@base'
  *  workspace segment is the project base clone's main mount — this one
  *  segment replaces the whole former project-artifacts-* RPC family. */
-async function resolveArtifactUriDirs(uri: string): Promise<{ projectDir: string; workspaceDir: string; mountDir: string; relPath: string }> {
+async function resolveArtifactUriDirs(uri: string): Promise<{ projectDir: string; workspaceDir: string; mountDir: string; relPath: string; isBase: boolean }> {
   const { parseArtifactUri } = await import('../../core/artifact-cap.js');
   const { artifactsMountDir, ensureArtifactsMount } = await import('../../core/artifacts.js');
   const { getProjectBaseDir, getProjectDir } = await import('../../core/config.js');
   const { existsSync } = await import('fs');
   const { join } = await import('path');
   const parsed = parseArtifactUri(uri);
+  const isBase = parsed.workspace === '@base';
   const projectDir = getProjectDir(parsed.project);
-  const workspaceDir = parsed.workspace === '@base' ? getProjectBaseDir(parsed.project) : join(projectDir, 'workspaces', parsed.workspace);
+  const workspaceDir = isBase ? getProjectBaseDir(parsed.project) : join(projectDir, 'workspaces', parsed.workspace);
   const mountDir = artifactsMountDir(workspaceDir);
   if (!existsSync(join(mountDir, '.git'))) {
     try {
-      await ensureArtifactsMount(projectDir, workspaceDir, parsed.workspace === '@base' ? 'main' : parsed.workspace);
+      await ensureArtifactsMount(projectDir, workspaceDir, isBase ? 'main' : parsed.workspace);
     } catch { /* unmountable — lists read empty; writes fail loudly below */ }
   }
-  return { projectDir, workspaceDir, mountDir, relPath: parsed.relPath };
+  return { projectDir, workspaceDir, mountDir, relPath: parsed.relPath, isBase };
 }
 
 /** Fire `onIdle` once when an agent session completes a run (busy → idle).
@@ -3944,12 +3945,22 @@ export async function dispatchCommand(cmd: Command): Promise<Response | null> {
           case 'artifact-list':
             try {
               const { listArtifactFiles, artifactsScope } = await import('../../core/artifacts.js');
-              const { workspaceDir, mountDir } = await resolveArtifactUriDirs(cmd.uriPrefix);
-              // Scope a WORKSPACE listing to its own goal folder so it does not
-              // show every rolled-up goal inherited from main; @base/project
-              // listings resolve rootRel==='' and still walk the whole mount.
+              const { workspaceDir, mountDir, isBase } = await resolveArtifactUriDirs(cmd.uriPrefix);
+              // A WORKSPACE must never show OTHER goals inherited from main (its
+              // branch is off main, so the mount physically carries goals/<other>/).
+              //   - @base/project listing: whole mount (the project-home view SHOULD
+              //     show all rolled-up goals grouped by goal).
+              //   - workspace WITH a resolvable goal: scope to goals/<its-id>/.
+              //   - workspace WITHOUT a resolvable goal (rootRel===''): drop every
+              //     goals/** so no OTHER goal leaks — root-level artifacts only.
+              //     (Without this, the null-goal case fell back to the whole mount.)
               const { rootRel } = artifactsScope(workspaceDir);
-              res = { type: 'artifact-list', entries: listArtifactFiles(mountDir, rootRel) };
+              const entries = isBase
+                ? listArtifactFiles(mountDir)
+                : rootRel
+                  ? listArtifactFiles(mountDir, rootRel)
+                  : listArtifactFiles(mountDir).filter((e) => !e.path.startsWith('goals/'));
+              res = { type: 'artifact-list', entries };
             } catch (e) {
               res = { type: 'error', message: `Failed to list artifacts: ${e instanceof Error ? e.message : String(e)}` };
             }
