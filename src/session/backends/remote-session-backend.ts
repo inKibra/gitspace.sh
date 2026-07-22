@@ -72,6 +72,7 @@ import {
   machineSnapshotToWorkspaces,
 } from '../../machine/state/selectors.js';
 import type { Response as TmuxResponse } from '../../lib/tmux-lite/protocol.js';
+import { chunkFrame, FrameChunkReassembler, FRAME_CHUNK_SIZE } from '../../lib/tmux-lite/crypto/frame-chunk.js';
 import type { AddRequirementInput, AttachEvidenceInput, HumanReviewDecision, UpdateRequirementInput } from '../../core/goal-validation.js';
 type TypedCommandResponse = TmuxResponse | RunSpaceCommandResponse | RefreshMachineSnapshotResponse;
 import { createEmptyMachineSnapshot } from '../../machine/state/client.js';
@@ -463,6 +464,9 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       }
     | null = null;
   private replayFrameRequestSeq = 0;
+  /** Ticket #42.3: reassembles chunked machine→client data frames (e.g. a large
+   *  machine_snapshot) before decryption. Non-chunk frames pass through. */
+  private readonly frameReassembler = new FrameChunkReassembler();
   private pendingReplayFrame:
     | {
         replayId: string;
@@ -1758,9 +1762,12 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     }
 
     const frame = await this.crypto.createFrame(pane.streamId, data, key.sendKey);
-    const encoded = this.crypto.encodeBase64(frame);
-    const message: RelayDataMessage = { type: 'data', data: encoded, priority: 'bulk' };
-    this.socketAdapter.send(this.socket, JSON.stringify(message));
+    // Ticket #42.3: chunk oversize frames so none exceeds the relay transport
+    // cap. Small frames yield a single (unwrapped) chunk — unchanged behavior.
+    for (const chunk of chunkFrame(frame, FRAME_CHUNK_SIZE)) {
+      const message: RelayDataMessage = { type: 'data', data: this.crypto.encodeBase64(chunk), priority: 'bulk' };
+      this.socketAdapter.send(this.socket, JSON.stringify(message));
+    }
   }
 
   async resizePty(cols: number, rows: number): Promise<void> {
@@ -1880,7 +1887,20 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   }
 
   private async handleRelayDataPayload(base64Data: string): Promise<void> {
-    const encryptedBytes = this.crypto.decodeBase64(base64Data);
+    const wireBytes = this.crypto.decodeBase64(base64Data);
+
+    // Ticket #42.3: reassemble chunked oversize frames (e.g. a large
+    // machine_snapshot) before decryption. Unchunked frames return immediately
+    // and unchanged; a partial chunk is buffered and we wait for the rest.
+    const assembled = this.frameReassembler.receive(wireBytes);
+    if (assembled.kind === 'partial') {
+      return;
+    }
+    if (assembled.kind === 'error') {
+      this.emit({ type: 'error', message: `Dropped malformed data chunk: ${assembled.message}` });
+      return;
+    }
+    const encryptedBytes = assembled.frame;
 
     if (!this.isConnected) {
       const plaintextMaybeHandshake = safeJsonParse(new TextDecoder().decode(encryptedBytes));
@@ -2500,9 +2520,12 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     const streamId = this.crypto.controlStreamId ?? DEFAULT_CONTROL_STREAM_ID;
     const payload = new TextEncoder().encode(JSON.stringify(message));
     const frame = await this.crypto.createFrame(streamId, payload, keys.sendKey);
-    const encoded = this.crypto.encodeBase64(frame);
-    const relayMessage: RelayDataMessage = { type: 'data', data: encoded, priority: 'control' };
-    this.socketAdapter.send(this.socket, JSON.stringify(relayMessage));
+    // Ticket #42.3: chunk oversize frames (control frames are normally small, so
+    // this yields a single unwrapped chunk — unchanged behavior).
+    for (const chunk of chunkFrame(frame, FRAME_CHUNK_SIZE)) {
+      const relayMessage: RelayDataMessage = { type: 'data', data: this.crypto.encodeBase64(chunk), priority: 'control' };
+      this.socketAdapter.send(this.socket, JSON.stringify(relayMessage));
+    }
   }
 
   private assertConnected(): void {
@@ -2879,6 +2902,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     this.attachedAgentSessionId = null;
     this.pendingAttachedAgentSession = null;
     this.pendingReplayFrameChunks.clear();
+    this.frameReassembler.reset();
     this.rejectPendingReplayFrame('Remote session disconnected', { force: true });
     this.rejectPendingReplayTimeline('Remote session disconnected', undefined, true);
     this.rejectPendingDismissReplay('Remote session disconnected', undefined, true);

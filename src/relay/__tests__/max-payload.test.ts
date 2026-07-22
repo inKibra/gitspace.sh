@@ -19,6 +19,7 @@ import WebSocket from "ws";
 import type { Server } from "bun";
 import { generateRelayIdentity } from "../identity";
 import { RELAY_MAX_WS_PAYLOAD, RELAY_WS_PAYLOAD_WARN } from "../protocol";
+import { chunkFrame, FRAME_CHUNK_SIZE } from "../../lib/tmux-lite/crypto/frame-chunk";
 import { startRelayServer } from "./helpers/ports";
 import { ensureControlStore } from "../control/store";
 import type { WebSocketData } from "../types";
@@ -151,4 +152,74 @@ describe("relay does not 1006-kill oversize frames (live)", () => {
       try { ws.close(); } catch { /* ignore */ }
     }
   }, 15000);
+
+  // Ticket #42.3 (the durable fix — before/after in one place).
+  //
+  // BEFORE (mechanism of the bug): a single frame OVER the transport cap is
+  // 1006-killed ("Received too big message") before any app code runs, dropping
+  // the whole session. AFTER: the same oversize payload, split by chunkFrame
+  // into sub-cap chunks, rides as many frames the relay accepts — the socket
+  // never 1006s. Reassembly integrity is covered by the frame-chunk unit tests;
+  // here we prove the transport half: chunked sends stay connected.
+
+  async function sendAndObserve(payloads: (string | Uint8Array)[]): Promise<
+    | { kind: "closed"; code: number; reason: string }
+    | { kind: "survived" }
+  > {
+    const ws = new WebSocket(relayUrl, { maxPayload: RELAY_MAX_WS_PAYLOAD });
+    return await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("test timed out")), 12000);
+      let closed = false;
+      ws.on("open", () => {
+        for (const p of payloads) ws.send(p);
+        // Give the relay time to process/close; if still open after a beat,
+        // the frames were all accepted at the transport layer.
+        setTimeout(() => {
+          if (!closed) {
+            clearTimeout(timer);
+            const open = ws.readyState === ws.OPEN;
+            try { ws.close(); } catch { /* ignore */ }
+            resolve(open ? { kind: "survived" } : { kind: "closed", code: 1006, reason: "not open" });
+          }
+        }, 400);
+      });
+      ws.on("close", (code, reason) => {
+        if (closed) return;
+        closed = true;
+        clearTimeout(timer);
+        resolve({ kind: "closed", code, reason: reason.toString() });
+      });
+      ws.on("error", () => { /* close event carries the outcome */ });
+    });
+  }
+
+  test("BEFORE: a single frame over the 64MB cap is 1006-killed", async () => {
+    const outcome = await sendAndObserve(["z".repeat(RELAY_MAX_WS_PAYLOAD + 1024 * 1024)]);
+    expect(outcome.kind).toBe("closed");
+    if (outcome.kind === "closed") {
+      expect(outcome.code).toBe(1006);
+    }
+  }, 20000);
+
+  test("AFTER: the same oversize payload, chunked, never 1006s (stays connected)", async () => {
+    // A frame larger than the transport cap — chunkFrame splits it so no single
+    // wire frame approaches the cap.
+    const oversize = new Uint8Array(RELAY_MAX_WS_PAYLOAD + 8 * 1024 * 1024);
+    const chunks = chunkFrame(oversize, FRAME_CHUNK_SIZE);
+    expect(chunks.length).toBeGreaterThan(1);
+    // Each chunk, base64-wrapped in a data envelope, must be under the cap.
+    const envelopes = chunks.map((c) =>
+      JSON.stringify({ type: "data", data: Buffer.from(c).toString("base64") }),
+    );
+    for (const e of envelopes) expect(e.length).toBeLessThan(RELAY_MAX_WS_PAYLOAD);
+
+    const outcome = await sendAndObserve(envelopes);
+    // The socket must NOT be transport-killed. (The relay drops these as data
+    // from an unregistered client, but keeps the connection alive.)
+    if (outcome.kind === "closed") {
+      expect(outcome.code).not.toBe(1006);
+    } else {
+      expect(outcome.kind).toBe("survived");
+    }
+  }, 20000);
 });

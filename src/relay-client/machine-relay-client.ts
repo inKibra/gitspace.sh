@@ -2,6 +2,7 @@ import WebSocket from 'ws';
 import { logger } from '../utils/logger.js';
 import { signMessage } from '../relay/signing.js';
 import { PROTOCOL_VERSION, RELAY_MAX_WS_PAYLOAD } from '../relay/protocol.js';
+import { chunkFrame, FrameChunkReassembler, FRAME_CHUNK_SIZE } from '../lib/tmux-lite/crypto/frame-chunk.js';
 import { ed25519 } from '@noble/curves/ed25519.js';
 import type { ServeEventHandler } from '../serve/types.js';
 
@@ -56,11 +57,14 @@ export async function requestUnlockGrantViaRelay(options: {
 
   return await new Promise<UnlockGrantResponse>((resolve, reject) => {
     let completed = false;
-    // Ticket #42B: match the relay's transport receive cap on this direction
-    // (relay→machine) so a large legit frame isn't 1006-killed by the ws
-    // client's own maxPayload. The critical cap is the relay's Bun.serve
-    // maxPayloadLength (machine→relay direction is what 1006'd), but we set
-    // both for symmetry and to make the bound explicit/testable.
+    // NOTE (verified empirically, Bun 1.3): the `ws` package's `maxPayload`
+    // option is a NO-OP under Bun — the client accepts frames of ANY size
+    // regardless of this value (it fails lenient, not strict). The ONLY frame
+    // size enforcer in the whole path is the relay's Bun.serve maxPayloadLength
+    // (RELAY_MAX_WS_PAYLOAD = 64MB), which 1006s ("Received too big message") on
+    // receive over the cap. This option is kept for correctness under Node/`ws`
+    // but is NOT what prevents the 1006 — the durable fix is ticket #42.3
+    // chunking (frame-chunk.ts), which keeps every frame far below the cap.
     const ws = new WebSocket(url.toString(), { maxPayload: RELAY_MAX_WS_PAYLOAD });
     const timeoutId = setTimeout(() => {
       fail('Timed out waiting for relay unlock grant');
@@ -192,25 +196,32 @@ function signChallengeAndCreateRegistration(
   }
 }
 
-// Ticket #42.4 (trace): warn when the machine emits a large data frame so the
-// oversize sender that 1006'd the relay is visible in serve logs — this is how
-// ticket #42 part A finds what to slim. Base64 inflates the wire frame ~33%, so
-// the on-wire JSON is larger than this raw byte count.
-const DATA_FRAME_WARN_BYTES = 4 * 1024 * 1024;
-
-function createDataMessage(connectionId: string, data: Uint8Array | Buffer): string {
-  if (data.length > DATA_FRAME_WARN_BYTES) {
-    logger.warning(
-      `[serve] oversize data frame to relay: conn=${connectionId} ` +
-      `raw=${(data.length / (1024 * 1024)).toFixed(2)}MB ` +
-      `(~${((data.length * 4 / 3) / (1024 * 1024)).toFixed(2)}MB base64 on wire)`,
+// Ticket #42.3 (the durable fix): split an oversize encrypted `data` frame into
+// ordered chunks so no single WS frame is pathologically large. A single legit
+// payload — e.g. a full machine_snapshot, which grows with workspace/agent count
+// (a 6.68MB frame was seen in the field) — must never ride as one frame, or it
+// risks the relay's 64MB transport cap that 1006-kills the whole session. Each
+// chunk stays ≤ ~2.7MB base64 on the wire (FRAME_CHUNK_SIZE=2MB raw), far below
+// the relay's RELAY_WS_PAYLOAD_WARN (4MB) and cap (64MB). Chunking wraps the
+// already-encrypted ciphertext bytes, so E2E is intact and the relay keeps
+// routing opaque payloads it cannot inspect. Small frames are returned unwrapped
+// (backward compatible). Reassembly happens on the receiver before decryption.
+function createDataMessages(connectionId: string, data: Uint8Array | Buffer): string[] {
+  const frameBytes = data instanceof Uint8Array ? data : Buffer.from(data);
+  const chunks = chunkFrame(frameBytes, FRAME_CHUNK_SIZE);
+  if (chunks.length > 1) {
+    logger.dim(
+      `[serve] chunked oversize data frame: conn=${connectionId} ` +
+      `raw=${(frameBytes.length / (1024 * 1024)).toFixed(2)}MB into ${chunks.length} chunks`,
     );
   }
-  return JSON.stringify({
-    type: 'data',
-    connectionId,
-    data: Buffer.from(data).toString('base64'),
-  });
+  return chunks.map((chunk) =>
+    JSON.stringify({
+      type: 'data',
+      connectionId,
+      data: Buffer.from(chunk).toString('base64'),
+    }),
+  );
 }
 
 function createSendCallback(
@@ -218,7 +229,9 @@ function createSendCallback(
   connectionId: string
 ): (data: Buffer) => void {
   return (sendData) => {
-    ws.send(createDataMessage(connectionId, sendData));
+    for (const message of createDataMessages(connectionId, sendData)) {
+      ws.send(message);
+    }
   };
 }
 
@@ -263,6 +276,9 @@ export async function connectMachineRelay(
     let pingTimer: ReturnType<typeof setInterval> | null = null;
     let stopped = false;
     let currentWs: WebSocket | null = null;
+    // Ticket #42.3: reassemble chunked client→machine data frames (keyed by
+    // connectionId) before handing bytes to the session decrypt path.
+    const dataReassemblers = new Map<string, FrameChunkReassembler>();
     lifecycle?.onStop(() => {
       stopped = true;
       stopPing();
@@ -314,8 +330,9 @@ export async function connectMachineRelay(
     const connect = () => {
       if (stopped) return;
       console.log(`[serve] Connecting to relay: ${url.toString()}`);
-      // Ticket #42B: raise the ws client receive cap to match the relay so
-      // large legit relay→machine frames aren't 1006-killed by the client.
+      // See note in requestUnlockGrantViaRelay: `ws` `maxPayload` is a no-op
+      // under Bun (client accepts any size). The binding cap is the relay's
+      // Bun.serve; ticket #42.3 chunking keeps frames well below it.
       const ws = new WebSocket(url.toString(), { maxPayload: RELAY_MAX_WS_PAYLOAD });
       currentWs = ws;
       ws.binaryType = 'arraybuffer';
@@ -437,12 +454,30 @@ export async function connectMachineRelay(
               break;
 
             case 'client_disconnected':
+              dataReassemblers.delete(msg.connectionId);
               sessionManager.handleDisconnect(msg.connectionId, msg.reason || 'Client disconnected');
               break;
 
             case 'data':
               if (msg.data && msg.connectionId) {
-                const messageData = Buffer.from(msg.data, 'base64');
+                const wireBytes = Buffer.from(msg.data, 'base64');
+
+                // Ticket #42.3: reassemble chunked frames before decrypt. Small
+                // (unchunked) frames pass straight through as a single chunk.
+                let reassembler = dataReassemblers.get(msg.connectionId);
+                if (!reassembler) {
+                  reassembler = new FrameChunkReassembler();
+                  dataReassemblers.set(msg.connectionId, reassembler);
+                }
+                const assembled = reassembler.receive(wireBytes);
+                if (assembled.kind === 'partial') {
+                  break;
+                }
+                if (assembled.kind === 'error') {
+                  logger.warning(`[serve] dropping malformed data chunk (conn=${msg.connectionId}): ${assembled.message}`);
+                  break;
+                }
+                const messageData = assembled.frame;
 
                 if (!sessionManager.getSession(msg.connectionId)) {
                   sessionManager.setSendCallback(msg.connectionId, createSendCallback(ws, msg.connectionId));
@@ -454,7 +489,9 @@ export async function connectMachineRelay(
                 );
 
                 if (response) {
-                  ws.send(createDataMessage(msg.connectionId, response));
+                  for (const message of createDataMessages(msg.connectionId, response)) {
+                    ws.send(message);
+                  }
                 }
               }
               break;
