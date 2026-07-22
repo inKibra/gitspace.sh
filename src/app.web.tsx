@@ -58,7 +58,8 @@ import { useEvents, toWideEventItem, type WideEventItem } from "./components/Eve
 import { EventsWeb } from "./components/Events.web.js";
 import type { WideEventFilter } from "./types/events.js";
 import type { WorkspacePhase } from './types/config.js';
-import type { ChainStackStatus, GoalDoc, GoalValidation } from './types/goals.js';
+import type { ChainStackStatus, GoalChainSummary, GoalDoc, GoalValidation } from './types/goals.js';
+import type { AddPlannedGoalPosition } from './core/goal-chain.js';
 import {
   useNotifications,
   type ToastNotification,
@@ -1244,60 +1245,164 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   });
 
 
+  // Chain-centric goal creation — no workspaces involved. Pick (or create) a
+  // CHAIN, name the goal, and place it only at positions the phase constraint
+  // allows (a new goal is 'plan', so it can never sit before a goal already
+  // past 'plan'). The workspace-free path for the create menu's Goal option.
   const openCreateGoalFlow = useCallback((projectName?: string | null) => {
-    const candidateWorkspaces = allWorkspaceEntries.filter((workspace) => !projectName || workspace.projectName === projectName);
-    if (candidateWorkspaces.length === 0) {
+    const backendKey = getTargetBackendKey();
+    const projectNames = allProjects.map((project) => project.name);
+    if (projectNames.length === 0) {
       flow.showMessage({
-        title: 'Create Goal',
-        message: 'Create a workspace first, then add goals before or after it.',
+        title: 'New goal',
+        message: 'Create a project first, then add goals to a chain.',
         variant: 'info',
       });
       return;
     }
 
-    flow.showSelect<string>({
-      title: 'Anchor Goal To Workspace',
-      searchable: true,
-      options: candidateWorkspaces.map((workspace) => ({
-        label: workspace.name,
-        description: `${workspace.projectName} · ${workspace.branch ?? workspace.path}`,
-        value: workspace.selectionKey ?? workspace.id,
-      })),
-      onSelect: (workspaceKey) => {
-        const workspace = candidateWorkspaces.find((item) => (item.selectionKey ?? item.id) === workspaceKey);
-        if (!workspace) return;
-        flow.showInput({
-          title: 'Goal Title',
-          label: 'Goal title',
-          placeholder: 'e.g. Billing UI polish',
-          onSubmit: (title) => {
-            const trimmed = title.trim();
-            if (!trimmed) return;
-            flow.showSelect<'before' | 'after'>({
-              title: 'Goal Position',
-              options: [
-                { label: 'After workspace', description: `Add after ${workspace.name}`, value: 'after' },
-                { label: 'Before workspace', description: `Add before ${workspace.name}`, value: 'before' },
-              ],
-              onSelect: async (position) => {
-                try {
-                  await multi.addGoalNearWorkspace(workspace.backendKey as BackendKey, workspace.projectName, workspace.name, trimmed, position);
-                  flow.close();
-                  toast.success(`Added goal "${trimmed}"`);
-                } catch (error) {
-                  flow.showMessage({
-                    title: 'Create Goal Failed',
-                    message: error instanceof Error ? error.message : String(error),
-                    variant: 'error',
-                  });
-                }
-              },
+    const showError = (error: unknown) => {
+      flow.showMessage({
+        title: 'Create Goal Failed',
+        message: error instanceof Error ? error.message : String(error),
+        variant: 'error',
+      });
+    };
+
+    // Insert-index k is legal iff every goal at or after k is still 'plan'
+    // (mirrors the core guard exactly — the UI never offers a rejected slot).
+    const showPositionPicker = (project: string, chain: GoalChainSummary, goalTitle: string) => {
+      const goals = chain.goals;
+      const legalAt = (k: number) => goals.slice(k).every((goal) => goal.phase === 'plan');
+      const options: Array<{ label: string; description?: string; value: AddPlannedGoalPosition }> = [];
+      if (goals.length === 0) {
+        options.push({ label: 'First goal', description: 'This chain is empty', value: { kind: 'tail' } });
+      } else {
+        if (legalAt(0)) {
+          options.push({ label: 'Start of chain', description: `Before ${goals[0]!.title}`, value: { kind: 'index', index: 0 } });
+        }
+        for (let k = 1; k < goals.length; k += 1) {
+          if (legalAt(k)) {
+            options.push({
+              label: `After ${goals[k - 1]!.title}`,
+              description: `Before ${goals[k]!.title}`,
+              value: { kind: 'anchor', anchor: goals[k - 1]!.id, side: 'after' },
             });
-          },
-        });
-      },
+          }
+        }
+        // Tail is always legal (nothing sits after it).
+        options.push({ label: 'End of chain', description: `After ${goals[goals.length - 1]!.title}`, value: { kind: 'tail' } });
+      }
+
+      flow.showSelect<AddPlannedGoalPosition>({
+        title: 'Goal position',
+        message: `Chain: ${chain.title}`,
+        options,
+        onSelect: async (position) => {
+          try {
+            await multi.addPlannedGoalToChain(backendKey, project, { title: goalTitle, chainId: chain.id, position });
+            flow.close();
+            toast.success(`Added goal "${goalTitle}"`);
+          } catch (error) {
+            showError(error);
+          }
+        },
+      });
+    };
+
+    const promptGoalForExistingChain = (project: string, chain: GoalChainSummary) => {
+      flow.showInput({
+        title: 'New goal',
+        label: 'Goal title',
+        placeholder: 'e.g. Add invoice PDF export',
+        onSubmit: (title) => {
+          const trimmed = title.trim();
+          if (!trimmed) return;
+          showPositionPicker(project, chain, trimmed);
+        },
+      });
+    };
+
+    const promptNewChain = (project: string) => {
+      flow.showInput({
+        title: 'New chain',
+        label: 'Chain title',
+        placeholder: 'e.g. Billing revamp',
+        onSubmit: (chainTitle) => {
+          const trimmedChain = chainTitle.trim();
+          if (!trimmedChain) return;
+          flow.showInput({
+            title: 'First goal',
+            label: 'Goal title',
+            placeholder: 'e.g. Design billing schema',
+            onSubmit: async (goalTitle) => {
+              const trimmedGoal = goalTitle.trim();
+              if (!trimmedGoal) return;
+              try {
+                await multi.addPlannedGoalToChain(backendKey, project, { title: trimmedGoal, newChainTitle: trimmedChain });
+                flow.close();
+                toast.success(`Created chain "${trimmedChain}" with goal "${trimmedGoal}"`);
+              } catch (error) {
+                showError(error);
+              }
+            },
+          });
+        },
+      });
+    };
+
+    const showChainPicker = (project: string, chains: GoalChainSummary[]) => {
+      flow.showSelect<string>({
+        title: 'Select chain',
+        message: `Project: ${project}`,
+        searchable: chains.length > 6,
+        options: [
+          { label: '＋ New chain', description: 'Start a new chain with this goal as its first', value: '__new_chain__' },
+          ...chains.map((chain) => ({
+            label: chain.title,
+            description: `${chain.goals.length} goal${chain.goals.length === 1 ? '' : 's'}`,
+            value: chain.id,
+          })),
+        ],
+        onSelect: (value) => {
+          if (value === '__new_chain__') {
+            promptNewChain(project);
+            return;
+          }
+          const chain = chains.find((item) => item.id === value);
+          if (!chain) return;
+          promptGoalForExistingChain(project, chain);
+        },
+      });
+    };
+
+    const startForProject = (project: string) => {
+      flow.showLoading({ title: 'New goal', message: `Loading chains for ${project}…` });
+      void (async () => {
+        try {
+          const chains = await multi.listGoalChains(backendKey, project);
+          showChainPicker(project, chains);
+        } catch (error) {
+          showError(error);
+        }
+      })();
+    };
+
+    if (projectName) {
+      startForProject(projectName);
+      return;
+    }
+    if (projectNames.length === 1) {
+      startForProject(projectNames[0]!);
+      return;
+    }
+    flow.showSelect<string>({
+      title: 'Select project',
+      searchable: projectNames.length > 6,
+      options: projectNames.map((name) => ({ label: name, value: name })),
+      onSelect: (name) => startForProject(name),
     });
-  }, [allWorkspaceEntries, flow, multi]);
+  }, [allProjects, flow, multi, getTargetBackendKey]);
 
   const lifecycleController = useLifecycleActions({
     client: sessionClient,

@@ -490,6 +490,12 @@ export type Command =
   | { type: 'workspace-note-remove'; projectName: string; workspaceName: string; noteId: string }
   | { type: 'goal-update'; projectName: string; goalId: string; updates: import('../../types/goals.js').GoalUpdateInput }
   | { type: 'goal-add-near-workspace'; projectName: string; workspaceName: string; title: string; position: 'before' | 'after' }
+  /** List the project's chains projected for the create-goal UI (chain title +
+   *  ordered goals with effective phases). Workspace-free chain picker. */
+  | { type: 'goal-chains-list'; projectName: string }
+  /** Chain-centric planned-goal creation (no workspace): seed a new chain or
+   *  insert into an existing one at a legal position. */
+  | { type: 'goal-add-planned'; projectName: string; input: import('../../core/goal-chain.js').AddPlannedGoalToChainInput }
   | { type: 'goal-reorder'; projectName: string; sourceToken: string; targetToken: string; position: 'before' | 'after' }
   | { type: 'goal-stack-status'; projectName: string; workspaceName: string }
   /** Cold detail fetch for one goal (ticket #42): the connect snapshot ships a
@@ -620,6 +626,7 @@ export type Response =
   | { type: 'goal'; goal: import('../../types/goals.js').GoalRecord }
   | { type: 'goal-detail'; doc: import('../../types/goals.js').GoalDoc; validation: import('../../types/goals.js').GoalValidation }
   | { type: 'goal-chain'; chain: import('../../types/goals.js').GoalChain }
+  | { type: 'goal-chains'; chains: import('../../types/goals.js').GoalChainSummary[] }
   | { type: 'goal-stack-status'; status: import('../../types/goals.js').ChainStackStatus }
   | { type: 'bundle-refresh-plan'; plan: import('../../types/bundle-refresh.js').BundleRefreshPlan }
   | { type: 'bundle-refresh-applied'; projectName: string; workspaceId: string }

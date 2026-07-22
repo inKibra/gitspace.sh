@@ -1525,6 +1525,23 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     throw new Error('Unexpected goal detail response');
   }
 
+  async listGoalChains(projectName: string): Promise<import('../../types/goals.js').GoalChainSummary[]> {
+    const response = await this.sendRpcCommand({ type: 'goal_chains_list', requestId: crypto.randomUUID(), projectName });
+    if (response.type === 'goal-chains') return response.chains;
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected goal chains list response');
+  }
+
+  async addPlannedGoalToChain(projectName: string, input: import('../../core/goal-chain.js').AddPlannedGoalToChainInput): Promise<import('../../types/goals.js').GoalRecord> {
+    const response = await this.sendRpcCommand({ type: 'goal_add_planned', requestId: crypto.randomUUID(), projectName, input });
+    if (response.type === 'goal') {
+      await this.listWorkspaces();
+      return response.goal;
+    }
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected planned goal add response');
+  }
+
   async moveGoalInChain(projectName: string, sourceToken: string, targetToken: string, position: 'before' | 'after'): Promise<import('../../types/goals.js').GoalChain> {
     const response = await this.sendRpcCommand({ type: 'goal_reorder', requestId: crypto.randomUUID(), projectName, sourceToken, targetToken, position });
     if (response.type === 'goal-chain') {

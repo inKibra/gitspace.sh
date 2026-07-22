@@ -143,6 +143,12 @@ export interface SessionBackend {
    *  pulled lazily when a detail view opens (the connect snapshot is slim). */
   getGoalDetail?(projectName: string, goalId: string): Promise<{ doc: import('../types/goals.js').GoalDoc; validation: import('../types/goals.js').GoalValidation }>;
   moveGoalInChain?(projectName: string, sourceToken: string, targetToken: string, position: 'before' | 'after'): Promise<GoalChain>;
+  /** List the project's chains (title + ordered goals with effective phases)
+   *  for the workspace-free create-goal flow. */
+  listGoalChains?(projectName: string): Promise<import('../types/goals.js').GoalChainSummary[]>;
+  /** Chain-centric planned-goal creation (no workspace): seed a new chain or
+   *  insert a planned goal at a legal position in an existing chain. */
+  addPlannedGoalToChain?(projectName: string, input: import('../core/goal-chain.js').AddPlannedGoalToChainInput): Promise<GoalRecord>;
   getGoalStackStatus?(projectName: string, workspaceName: string): Promise<ChainStackStatus>;
   /** HUMAN-ONLY: waive a computed phase gate (timeline event kind 'gate',
    *  actor 'human/ui'). UI-button seam — the CLI has no waive flag. */

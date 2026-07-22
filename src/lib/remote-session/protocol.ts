@@ -324,6 +324,21 @@ export interface ReorderGoalRequest {
   position: 'before' | 'after';
 }
 
+/** List the project's chains for the workspace-free create-goal flow. */
+export interface ListGoalChainsRequest {
+  type: 'goal_chains_list';
+  requestId: string;
+  projectName: string;
+}
+
+/** Chain-centric planned-goal creation (no workspace). */
+export interface AddPlannedGoalRequest {
+  type: 'goal_add_planned';
+  requestId: string;
+  projectName: string;
+  input: import('../../core/goal-chain.js').AddPlannedGoalToChainInput;
+}
+
 export interface GoalStackStatusRequest {
   type: 'goal_stack_status';
   requestId: string;
@@ -1262,6 +1277,8 @@ export type ClientToMachineMessage =
   | UpdateGoalRequest
   | GetGoalDetailRequest
   | ReorderGoalRequest
+  | ListGoalChainsRequest
+  | AddPlannedGoalRequest
   | GoalStackStatusRequest
   | WaiveGoalGateRequest
   | RerunWorkspaceScriptsRequest
@@ -1451,6 +1468,8 @@ export function isBrowseMessage(msg: RemoteSessionMessage): msg is ClientToMachi
     'goal_update',
     'get_goal_detail',
     'goal_reorder',
+    'goal_chains_list',
+    'goal_add_planned',
     'goal_stack_status',
     'goal_gate_waive',
     'rerun_workspace_scripts',

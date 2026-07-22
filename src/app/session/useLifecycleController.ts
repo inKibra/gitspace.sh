@@ -799,7 +799,7 @@ export function useLifecycleController(
     const options = [
       { label: 'Workspace', description: 'Create a new workspace', value: 'workspace' as const },
       ...(openCreateGoalFlow
-        ? [{ label: 'Goal', description: 'Add a planned goal to a workspace chain', value: 'goal' as const }]
+        ? [{ label: 'Goal', description: 'Add a goal to a chain (new or existing)', value: 'goal' as const }]
         : []),
       { label: 'Project', description: 'Clone a repo — or start from scratch', value: 'project' as const },
     ];

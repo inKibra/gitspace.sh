@@ -1148,6 +1148,29 @@ export class RemoteSessionHandler {
         }, sendResponse);
         break;
 
+      case 'goal_chains_list':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, {
+          type: 'goal-chains-list',
+          projectName: msg.projectName,
+        }, sendResponse);
+        break;
+
+      case 'goal_add_planned':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, {
+          type: 'goal-add-planned',
+          projectName: msg.projectName,
+          input: msg.input,
+        }, sendResponse);
+        break;
+
       case 'goal_stack_status':
         if (!canManage(session.accessType)) {
           await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });

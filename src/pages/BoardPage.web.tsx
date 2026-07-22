@@ -122,7 +122,7 @@ function ProjectsStrip({ projects, onOpenProjectHome, onNewProject }: {
           onClick={onNewProject}
           className="ml-auto rounded bg-[var(--gs-accent)] px-2 py-1 text-xs text-[var(--gs-text-on-accent)] hover:bg-[var(--gs-accent-hover)]"
         >
-          ＋ New project
+          ＋ New
         </button>
       </div>
       <div className="grid grid-cols-[repeat(auto-fill,minmax(220px,1fr))] gap-2.5">

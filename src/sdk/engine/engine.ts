@@ -643,6 +643,22 @@ export class GitSpaceEngine {
     });
   }
 
+  listGoalChains(backendKey: BackendKey, projectName: string): Promise<import('../../types/goals.js').GoalChainSummary[]> {
+    return this.withBackend(backendKey, async (b) => {
+      if (!b.listGoalChains) throw new Error('Goal chains unavailable');
+      return b.listGoalChains(projectName);
+    });
+  }
+
+  addPlannedGoalToChain(backendKey: BackendKey, projectName: string, input: import('../../core/goal-chain.js').AddPlannedGoalToChainInput): Promise<import('../../types/goals.js').GoalRecord> {
+    return this.withBackend(backendKey, async (b) => {
+      if (!b.addPlannedGoalToChain) throw new Error('Goal creation unavailable');
+      const goal = await b.addPlannedGoalToChain(projectName, input);
+      await b.listWorkspaces();
+      return goal;
+    });
+  }
+
   getGoalStackStatus(backendKey: BackendKey, projectName: string, workspaceName: string): Promise<import('../../types/goals.js').ChainStackStatus> {
     return this.withBackend(backendKey, async (b) => {
       if (!b.getGoalStackStatus) throw new Error('Goal stack status unavailable');

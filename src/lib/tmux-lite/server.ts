@@ -102,7 +102,7 @@ import { normalizeWorkspacePath } from '../../agents/agent-runtime-shared.js';
 import { getWorkspaceRuntimeSnapshot } from './workspace-runtime.js';
 import { setInProcessSessionSource } from '../processes/ports.js';
 import { addWorkspaceNote, listWorkspaceNotes, removeWorkspaceNote, updateWorkspaceNote } from '../../core/workspace-metadata.js';
-import { addGoalNearWorkspace, applyWorkspaceGoalPhaseChange, getGoalRecord, findGoalRecord, moveGoalInChain, previewWorkspaceGoalPhaseChange, updateGoalRecord } from '../../core/goal-chain.js';
+import { addGoalNearWorkspace, addPlannedGoalToChain, applyWorkspaceGoalPhaseChange, getGoalRecord, findGoalRecord, listGoalChainSummaries, moveGoalInChain, previewWorkspaceGoalPhaseChange, updateGoalRecord } from '../../core/goal-chain.js';
 import { computeReadiness } from '../../app/shared/goal-validation/readiness.js';
 import { getSpaceStackStatus } from '../../commands/space-goals.js';
 import { buildMachineSnapshot, buildGoalRecordsForProject } from './machine/build.js';
@@ -3394,6 +3394,24 @@ export async function dispatchCommand(cmd: Command): Promise<Response | null> {
           case 'goal-add-near-workspace':
             try {
               res = { type: 'goal', goal: addGoalNearWorkspace(cmd.projectName, cmd.workspaceName, cmd.title, cmd.position) };
+              applyGoalScopedUpdate(cmd.projectName);
+            } catch (e) {
+              res = { type: 'error', message: e instanceof Error ? e.message : String(e) };
+            }
+            break;
+
+          case 'goal-chains-list':
+            try {
+              res = { type: 'goal-chains', chains: listGoalChainSummaries(cmd.projectName) };
+            } catch (e) {
+              res = { type: 'error', message: e instanceof Error ? e.message : String(e) };
+            }
+            break;
+
+          case 'goal-add-planned':
+            try {
+              const result = addPlannedGoalToChain(cmd.projectName, cmd.input);
+              res = { type: 'goal', goal: result.goal as import('../../types/goals.js').GoalRecord };
               applyGoalScopedUpdate(cmd.projectName);
             } catch (e) {
               res = { type: 'error', message: e instanceof Error ? e.message : String(e) };

@@ -5,6 +5,7 @@ import { execFileSync } from 'child_process';
 import { tmpdir } from 'os';
 import {
   addGoalNearWorkspace,
+  addPlannedGoalToChain,
   applyWorkspaceGoalPhaseChange,
   archiveWorkspaceGoal,
   bindPlannedGoalForWorkspace,
@@ -12,6 +13,7 @@ import {
   getGoalRecord,
   getPlannedGoalPath,
   getWorkspaceGoalPath,
+  listGoalChainSummaries,
   listProjectGoalKanbanItems,
   moveGoalInChain,
   previewWorkspaceGoalPhaseChange,
@@ -351,6 +353,104 @@ describe('goal-chain storage', () => {
     applyWorkspaceGoalPhaseChange('demo', 'base', 'plan', { cascade: true });
     expect(getWorkspaceStatus('demo', 'base')).toBe('plan');
     expect(getWorkspaceStatus('demo', 'child')).toBe('plan');
+  });
+});
+
+describe('chain-centric planned goal creation (workspace-free)', () => {
+  let root: string;
+  let previousRoot: string | undefined;
+
+  beforeEach(() => {
+    root = join(tmpdir(), `goal-chain-planned-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    previousRoot = process.env.GITSPACE_WORKSPACE_ROOT;
+    process.env.GITSPACE_WORKSPACE_ROOT = root;
+    mkdirSync(join(root, 'demo', 'workspaces'), { recursive: true });
+    writeFileSync(join(root, 'demo', '.config.json'), JSON.stringify({
+      name: 'demo',
+      repository: 'owner/repo',
+      baseBranch: 'main',
+      createdAt: new Date(0).toISOString(),
+      lastAccessed: new Date(0).toISOString(),
+    }), 'utf-8');
+  });
+
+  afterEach(() => {
+    if (previousRoot === undefined) delete process.env.GITSPACE_WORKSPACE_ROOT;
+    else process.env.GITSPACE_WORKSPACE_ROOT = previousRoot;
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('creates a new chain seeded with a single planned goal', () => {
+    const result = addPlannedGoalToChain('demo', { title: 'Design schema', newChainTitle: 'Billing revamp' });
+    expect(result.chain.title).toBe('Billing revamp');
+    expect(result.chain.goalIds).toEqual([result.goal!.id]);
+    expect(result.goal!.workspaceName).toBeUndefined();
+    expect(result.goal!.title).toBe('Design schema');
+
+    const chains = listGoalChainSummaries('demo');
+    expect(chains).toHaveLength(1);
+    expect(chains[0]!.title).toBe('Billing revamp');
+    expect(chains[0]!.goals.map((g) => g.title)).toEqual(['Design schema']);
+    expect(chains[0]!.goals[0]!.phase).toBe('plan');
+    expect(chains[0]!.goals[0]!.status).toBe('planned');
+  });
+
+  it('appends to an existing chain at the tail', () => {
+    const first = addPlannedGoalToChain('demo', { title: 'First', newChainTitle: 'Chain A' });
+    const chainId = first.chain.id;
+    addPlannedGoalToChain('demo', { title: 'Second', chainId, position: { kind: 'tail' } });
+
+    const chain = listGoalChainSummaries('demo')[0]!;
+    expect(chain.goals.map((g) => g.title)).toEqual(['First', 'Second']);
+  });
+
+  it('inserts before a goal (start of chain) and after an anchor', () => {
+    const first = addPlannedGoalToChain('demo', { title: 'B', newChainTitle: 'Chain A' });
+    const chainId = first.chain.id;
+    // Insert at start (index 0) → goes before B.
+    addPlannedGoalToChain('demo', { title: 'A', chainId, position: { kind: 'index', index: 0 } });
+    // Insert after the A anchor.
+    const chainNow = listGoalChainSummaries('demo')[0]!;
+    const aGoal = chainNow.goals.find((g) => g.title === 'A')!;
+    addPlannedGoalToChain('demo', { title: 'A2', chainId, position: { kind: 'anchor', anchor: aGoal.id, side: 'after' } });
+
+    const chain = listGoalChainSummaries('demo')[0]!;
+    expect(chain.goals.map((g) => g.title)).toEqual(['A', 'A2', 'B']);
+  });
+
+  it('refuses inserting before a goal that has advanced past plan', () => {
+    // A workspace-backed goal in 'code' anchors the chain head.
+    mkdirSync(join(root, 'demo', 'workspaces', 'built'), { recursive: true });
+    upsertGoalChain('demo', {
+      id: 'chainX',
+      title: 'Chain X',
+      projectName: 'demo',
+      goalIds: ['built'],
+      createdAt: new Date(0).toISOString(),
+      updatedAt: new Date(0).toISOString(),
+    });
+    writeWorkspaceGoal('demo', 'built', makeGoal({ id: 'built', chainId: 'chainX', title: 'Built', phase: 'code', workspaceName: 'built' }));
+    setWorkspaceStatus('demo', 'built', 'code');
+
+    // The summary reports the effective phase so the UI can filter.
+    const chain = listGoalChainSummaries('demo')[0]!;
+    expect(chain.goals[0]!.phase).toBe('code');
+
+    // Inserting at index 0 (before the 'code' goal) is illegal and must throw.
+    expect(() => addPlannedGoalToChain('demo', { title: 'New', chainId: 'chainX', position: { kind: 'index', index: 0 } }))
+      .toThrow(/further along than plan/);
+    // Inserting before the anchor is equally illegal.
+    expect(() => addPlannedGoalToChain('demo', { title: 'New', chainId: 'chainX', position: { kind: 'anchor', anchor: 'built', side: 'before' } }))
+      .toThrow(/further along than plan/);
+    // Tail (after the 'code' goal) is legal.
+    const ok = addPlannedGoalToChain('demo', { title: 'New', chainId: 'chainX', position: { kind: 'tail' } });
+    expect(ok.goalIds).toEqual(['built', ok.goal!.id]);
+  });
+
+  it('rejects a missing chain and a blank title', () => {
+    expect(() => addPlannedGoalToChain('demo', { title: 'X', chainId: 'nope' })).toThrow(/Chain not found/);
+    expect(() => addPlannedGoalToChain('demo', { title: '   ', newChainTitle: 'Chain' })).toThrow(/Goal title is required/);
+    expect(() => addPlannedGoalToChain('demo', { title: 'X', newChainTitle: '  ' })).toThrow(/Chain title is required/);
   });
 });
 

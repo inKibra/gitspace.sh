@@ -196,6 +196,25 @@ export interface GoalChainState {
   chains: GoalChain[];
 }
 
+/** One goal in a chain summary — enough for the create-goal UI to compute
+ *  which insert positions are legal (a new 'plan' goal cannot be placed at or
+ *  before a goal whose effective phase is past 'plan'). */
+export interface GoalChainSummaryGoal {
+  id: string;
+  title: string;
+  /** Effective phase (planned goals always read as 'plan'). */
+  phase: GoalPhase;
+  status: 'planned' | 'workspace-backed';
+}
+
+/** A project chain projected for the chain-picker: title + ordered goals with
+ *  their effective phases. Returned by the `listGoalChains` backend RPC. */
+export interface GoalChainSummary {
+  id: string;
+  title: string;
+  goals: GoalChainSummaryGoal[];
+}
+
 export interface GoalKanbanItem {
   id: string;
   chainId: string;

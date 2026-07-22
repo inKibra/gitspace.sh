@@ -17,7 +17,7 @@ import { SpacesError } from '../types/errors.js';
 import { queueGoalChangeNotify } from './goal-notify.js';
 import { generateId } from '../utils/id.js';
 import { sanitizeForFileSystem } from '../utils/sanitize.js';
-import type { GoalChain, GoalChainState, GoalKanbanItem, GoalRecord, GoalUpdateInput, WorkspacePhaseCascadeItem, WorkspacePhaseChangePreview } from '../types/goals.js';
+import type { GoalChain, GoalChainState, GoalChainSummary, GoalChainSummaryGoal, GoalKanbanItem, GoalRecord, GoalUpdateInput, WorkspacePhaseCascadeItem, WorkspacePhaseChangePreview } from '../types/goals.js';
 
 const PROJECT_GOAL_STORAGE_DIR = join('.gitspace', 'goals');
 const PROJECT_GOAL_GITIGNORE_ENTRY = '.gitspace/goals/';
@@ -307,6 +307,11 @@ function defaultGoalValidation(): GoalRecord['validation'] {
 function makeGoalId(title: string): string {
   const sanitized = sanitizeForFileSystem(title).slice(0, 48);
   return `${sanitized || 'goal'}-${generateId().slice(0, 8)}`;
+}
+
+function makeChainId(title: string): string {
+  const sanitized = sanitizeForFileSystem(title).slice(0, 48);
+  return `chain-${sanitized || 'chain'}-${generateId().slice(0, 8)}`;
 }
 
 export function findGoalRecord(projectName: string, token: string): GoalRecord | null {
@@ -816,6 +821,186 @@ export function addGoalToChain(
 export function addGoalNearWorkspace(projectName: string, workspaceName: string, title: string, position: 'before' | 'after'): GoalRecord {
   const result = addGoalToChain(projectName, workspaceName, { title, position });
   return result.goal as GoalRecord;
+}
+
+/**
+ * List the project's chains projected for the create-goal UI: each chain's
+ * title plus its goals in order with their EFFECTIVE phase (a planned goal
+ * with no workspace always reads as 'plan'). The UI uses the phases to offer
+ * only positions that `addPlannedGoalToChain` would accept.
+ */
+export function listGoalChainSummaries(projectName: string): GoalChainSummary[] {
+  const state = readGoalChainState(projectName);
+  const goalsById = new Map(listProjectGoalRecords(projectName).map((goal) => [goal.id, goal]));
+  return state.chains.map((chain) => {
+    const goals: GoalChainSummaryGoal[] = [];
+    for (const goalId of chain.goalIds) {
+      const goal = goalsById.get(goalId);
+      if (!goal) continue;
+      goals.push({
+        id: goal.id,
+        title: goal.title,
+        phase: getEffectiveGoalPhase(projectName, goal),
+        status: goal.workspaceName ? 'workspace-backed' : 'planned',
+      });
+    }
+    return { id: chain.id, title: chain.title, goals };
+  });
+}
+
+/** Where a new planned goal lands in an existing chain. Mirrors the legal
+ *  spots the UI is allowed to offer. */
+export type AddPlannedGoalPosition =
+  | { kind: 'tail' }
+  | { kind: 'index'; index: number }
+  | { kind: 'anchor'; anchor: string; side: 'before' | 'after' };
+
+export interface AddPlannedGoalToChainInput {
+  title: string;
+  /** Target an existing chain by id. Mutually exclusive with newChainTitle. */
+  chainId?: string;
+  /** Create a brand-new chain seeded with this goal as its only member. */
+  newChainTitle?: string;
+  /** Position within an existing chain. Ignored when newChainTitle is set
+   *  (a new chain is empty, so the goal is its tail). Defaults to tail. */
+  position?: AddPlannedGoalPosition;
+}
+
+/**
+ * Chain-centric goal creation — no workspace involved. Either seeds a NEW
+ * chain with a first planned goal, or inserts a planned goal at a position in
+ * an EXISTING chain. Enforces the same phase-legality rule as `addGoalToChain`:
+ * a brand-new goal reads as 'plan', so an insert is refused if any goal at or
+ * after the insert point has advanced past 'plan'. The workspace-free sibling
+ * of `addGoalToChain`.
+ */
+export function addPlannedGoalToChain(
+  projectName: string,
+  input: AddPlannedGoalToChainInput,
+): ChainMutationResult {
+  const title = input.title.trim();
+  if (!title) {
+    throw new SpacesError('Goal title is required.', 'USER_ERROR', 1);
+  }
+  const timestamp = nowIso();
+
+  // ── New chain: create the chain and seed it with this single planned goal ──
+  if (input.newChainTitle !== undefined) {
+    const chainTitle = input.newChainTitle.trim();
+    if (!chainTitle) {
+      throw new SpacesError('Chain title is required.', 'USER_ERROR', 1);
+    }
+    const chainId = makeChainId(chainTitle);
+    const pendingGoal: GoalRecord = {
+      version: 2,
+      id: makeGoalId(title),
+      chainId,
+      title,
+      projectName,
+      phase: 'plan',
+      plannedWorkspaceName: sanitizeForFileSystem(title) || undefined,
+      doc: defaultGoalDoc(title),
+      validation: defaultGoalValidation(),
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+    const newGoal = writePlannedGoal(projectName, pendingGoal);
+    const chain = upsertGoalChain(projectName, {
+      id: chainId,
+      title: chainTitle,
+      projectName,
+      goalIds: [newGoal.id],
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    });
+    return {
+      chain,
+      goalIds: chain.goalIds,
+      order: describeChainOrder(projectName, chain.goalIds),
+      goal: newGoal,
+      warnings: [],
+      dryRun: false,
+    };
+  }
+
+  // ── Existing chain: insert at the requested (legal) position ──
+  if (!input.chainId) {
+    throw new SpacesError('addPlannedGoalToChain requires a chainId or a newChainTitle.', 'USER_ERROR', 1);
+  }
+  const state = readGoalChainState(projectName);
+  const chain = state.chains.find((item) => item.id === input.chainId);
+  if (!chain) {
+    throw new SpacesError(`Chain not found: ${input.chainId}`, 'USER_ERROR', 1);
+  }
+  const goalIds = [...chain.goalIds];
+  const position = input.position ?? { kind: 'tail' };
+
+  let insertIndex: number;
+  if (position.kind === 'tail') {
+    insertIndex = goalIds.length;
+  } else if (position.kind === 'index') {
+    if (!Number.isInteger(position.index) || position.index < 0 || position.index > goalIds.length) {
+      throw new SpacesError(
+        `Insert index ${position.index} is out of range for chain "${chain.title}" (${goalIds.length} goal${goalIds.length === 1 ? '' : 's'}).`,
+        'USER_ERROR',
+        1,
+      );
+    }
+    insertIndex = position.index;
+  } else {
+    const anchorIndex = goalIds.indexOf(position.anchor);
+    if (anchorIndex < 0) {
+      throw new SpacesError(`Anchor goal is not in chain "${chain.title}": ${position.anchor}`, 'USER_ERROR', 1);
+    }
+    insertIndex = position.side === 'before' ? anchorIndex : anchorIndex + 1;
+  }
+
+  // A brand-new planned goal always reads as phase `plan`. The insert is
+  // illegal iff any goal at or after `insertIndex` has advanced past plan.
+  const { goalsById, phases } = buildGoalPhaseMap(projectName, goalIds);
+  for (let i = insertIndex; i < goalIds.length; i += 1) {
+    const descendantId = goalIds[i];
+    const descendantPhase = descendantId ? phases.get(descendantId) : undefined;
+    if (descendantPhase && phaseIndex(descendantPhase) > phaseIndex('plan')) {
+      const descendant = descendantId ? goalsById.get(descendantId) : undefined;
+      throw new SpacesError(
+        `Cannot insert "${title}" before "${descendant?.title ?? descendantId}": ${descendantPhase} is further along than plan.`,
+        'USER_ERROR',
+        1,
+      );
+    }
+  }
+
+  const pendingGoal: GoalRecord = {
+    version: 2,
+    id: makeGoalId(title),
+    chainId: chain.id,
+    title,
+    projectName,
+    phase: 'plan',
+    plannedWorkspaceName: sanitizeForFileSystem(title) || undefined,
+    doc: defaultGoalDoc(title),
+    validation: defaultGoalValidation(),
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+  const nextGoalIds = [...goalIds];
+  nextGoalIds.splice(Math.max(0, insertIndex), 0, pendingGoal.id);
+
+  const warnings: string[] = [];
+  // Surface (never block on) a pre-existing violation in the untouched order.
+  collectPhaseOrderWarning(projectName, goalIds, warnings);
+
+  const newGoal = writePlannedGoal(projectName, pendingGoal);
+  const nextChain = upsertGoalChain(projectName, { ...chain, goalIds: nextGoalIds });
+  return {
+    chain: nextChain,
+    goalIds: nextGoalIds,
+    order: describeChainOrder(projectName, nextGoalIds),
+    goal: newGoal,
+    warnings,
+    dryRun: false,
+  };
 }
 
 export interface RemoveGoalFromChainOptions {
