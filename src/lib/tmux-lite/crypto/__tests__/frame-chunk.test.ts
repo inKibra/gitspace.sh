@@ -53,10 +53,14 @@ describe('chunkFrame / FrameChunkReassembler', () => {
     const chunks = chunkFrame(frame, FRAME_CHUNK_SIZE);
     expect(chunks.length).toBeGreaterThan(1);
 
-    // Every wire chunk stays well below the relay warn + cap.
+    // Every wire chunk stays UNDER 1MB (the design frame limit), and therefore
+    // well below the relay warn (4MB) and the 64MB transport backstop.
+    const ONE_MB = 1024 * 1024;
     for (const chunk of chunks) {
       expect(isChunkEnvelope(chunk)).toBe(true);
+      // Exact base64 length of the wire payload, plus the ~60-byte JSON envelope.
       const base64Bytes = Math.ceil(chunk.length / 3) * 4;
+      expect(base64Bytes + 64).toBeLessThan(ONE_MB);
       expect(base64Bytes).toBeLessThan(RELAY_WS_PAYLOAD_WARN);
       expect(base64Bytes).toBeLessThan(RELAY_MAX_WS_PAYLOAD);
     }

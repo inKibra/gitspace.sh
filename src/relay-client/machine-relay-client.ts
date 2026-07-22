@@ -199,11 +199,13 @@ function signChallengeAndCreateRegistration(
 // Ticket #42.3 (the durable fix): split an oversize encrypted `data` frame into
 // ordered chunks so no single WS frame is pathologically large. A single legit
 // payload — e.g. a full machine_snapshot, which grows with workspace/agent count
-// (a 6.68MB frame was seen in the field) — must never ride as one frame, or it
-// risks the relay's 64MB transport cap that 1006-kills the whole session. Each
-// chunk stays ≤ ~2.7MB base64 on the wire (FRAME_CHUNK_SIZE=2MB raw), far below
-// the relay's RELAY_WS_PAYLOAD_WARN (4MB) and cap (64MB). Chunking wraps the
-// already-encrypted ciphertext bytes, so E2E is intact and the relay keeps
+// (a 6.68MB frame was seen in the field, and 1006'd the whole session with
+// "Received too big message") — must never ride as one frame. Each chunk stays
+// UNDER 1MB on the wire (FRAME_CHUNK_SIZE=512KB raw ⇒ ~683KB base64), matching
+// the 1MB frame limit the whole system is designed around (tmux-lite
+// MAX_FRAME_SIZE, PTY_CHUNK_SIZE, share-read) so oversize frames are safe on
+// EVERY transport path, not just the local relay's 64MB backstop. Chunking wraps
+// the already-encrypted ciphertext bytes, so E2E is intact and the relay keeps
 // routing opaque payloads it cannot inspect. Small frames are returned unwrapped
 // (backward compatible). Reassembly happens on the receiver before decryption.
 function createDataMessages(connectionId: string, data: Uint8Array | Buffer): string[] {

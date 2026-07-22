@@ -49,11 +49,24 @@ const MAGIC3 = 0x31; // '1' (envelope version)
 const HEADER_LENGTH = 12;
 
 /**
- * Default max bytes of ciphertext per chunk. 2MB raw ⇒ ~2.7MB base64 on the
- * wire — comfortably below RELAY_WS_PAYLOAD_WARN (4MB) and far below the 64MB
- * transport cap, so a chunked payload never warns and never 1006s.
+ * Default max bytes of ciphertext per chunk.
+ *
+ * 512KB raw ⇒ ~683KB base64 on the wire (plus a ~60-byte JSON envelope), which
+ * keeps every `data` frame UNDER 1MB. This deliberately matches the 1MB
+ * "maximum frame size" the rest of the system is built around — see
+ * tmux-lite/protocol.ts `MAX_FRAME_SIZE` ("Matches relay protocol limit for
+ * consistency across all transport paths"), the PTY chunker
+ * (`PTY_CHUNK_SIZE = 512KB`, "well under the 1MB limit"), and the share-read
+ * streamer (≤512KB "relay protocol caps messages at 1MB").
+ *
+ * WHY 1MB, NOT THE 64MB Bun.serve BACKSTOP: the local relay's `maxPayloadLength`
+ * is a generous 64MB backstop, but a real deployment's machine↔relay path can
+ * pass through hops with a ~1MB frame limit (the design limit above). A 6.68MB
+ * machine_snapshot exceeded that and 1006'd the whole session. Bounding to
+ * <1MB keeps oversize frames safe on EVERY transport path, not just the local
+ * 64MB one.
  */
-export const FRAME_CHUNK_SIZE = 2 * 1024 * 1024;
+export const FRAME_CHUNK_SIZE = 512 * 1024;
 
 /** Max chunks per message (u16). 65535 * 2MB ≈ 128GB — a non-constraint. */
 const MAX_CHUNKS = 0xffff;
