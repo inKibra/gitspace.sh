@@ -701,6 +701,46 @@ export function readArtifactPinned(projectDir: string, commit: string, relPath: 
   return readFileSync(bp);
 }
 
+/**
+ * The rich, rolled-up goal doc (`goals/<goalId>/goal.md`) read from artifacts
+ * `main`, or null when it isn't there (never rolled up, no repo, or missing).
+ * This survives workspace deletion — the authored doc lives on main after
+ * roll-up, whereas the goal record's embedded `doc.bodyMarkdown` is only a stub.
+ */
+export function readRolledUpGoalMd(projectDir: string, goalId: string): string | null {
+  if (!/^[A-Za-z0-9._-]+$/.test(goalId)) return null;
+  const { repoDir } = artifactPaths(projectDir);
+  if (!existsSync(repoDir)) return null;
+  try {
+    const raw = execFileSync(
+      'git',
+      ['-C', repoDir, 'show', `${MAIN_BRANCH}:${ARTIFACTS_GOALS_DIR}/${goalId}/goal.md`],
+      { maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] },
+    );
+    const text = raw.toString('utf8');
+    return text.trim().length > 0 ? text : null;
+  } catch {
+    return null; // not on main / no repo / not found
+  }
+}
+
+/**
+ * The rich goal doc from a live workspace's artifacts mount
+ * (`<mount>/goals/<goalId>/goal.md`), or null when absent. Used at delete time
+ * (the mount still exists) to capture the doc before the worktree is destroyed.
+ */
+export function readWorkspaceGoalMd(workspaceDir: string, goalId: string): string | null {
+  if (!/^[A-Za-z0-9._-]+$/.test(goalId)) return null;
+  const file = join(artifactsMountDir(workspaceDir), ARTIFACTS_GOALS_DIR, goalId, 'goal.md');
+  try {
+    if (!existsSync(file)) return null;
+    const text = readFileSync(file, 'utf8');
+    return text.trim().length > 0 ? text : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Fetch a missing blob by oid (bytes or null when the store doesn't have it).
  *  Dependency-injected into {@link readArtifactResolving} so core stays
  *  testable offline; the GitHub tier supplies an LFS-backed implementation. */

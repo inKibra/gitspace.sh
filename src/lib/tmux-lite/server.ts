@@ -104,7 +104,7 @@ import { normalizeWorkspacePath } from '../../agents/agent-runtime-shared.js';
 import { getWorkspaceRuntimeSnapshot } from './workspace-runtime.js';
 import { setInProcessSessionSource } from '../processes/ports.js';
 import { addWorkspaceNote, listWorkspaceNotes, removeWorkspaceNote, updateWorkspaceNote } from '../../core/workspace-metadata.js';
-import { addGoalNearWorkspace, addPlannedGoalToChain, applyWorkspaceGoalPhaseChange, getGoalRecord, findGoalRecord, listGoalChainSummaries, moveGoalInChain, previewWorkspaceGoalPhaseChange, updateGoalRecord } from '../../core/goal-chain.js';
+import { addGoalNearWorkspace, addPlannedGoalToChain, applyWorkspaceGoalPhaseChange, getGoalRecord, findGoalRecord, listGoalChainSummaries, moveGoalInChain, previewWorkspaceGoalPhaseChange, resolveGoalDocBody, updateGoalRecord } from '../../core/goal-chain.js';
 import { computeReadiness } from '../../app/shared/goal-validation/readiness.js';
 import { getSpaceStackStatus } from '../../commands/space-goals.js';
 import { buildMachineSnapshot, buildGoalRecordsForProject } from './machine/build.js';
@@ -3480,9 +3480,12 @@ export async function dispatchCommand(cmd: Command): Promise<Response | null> {
                 res = { type: 'error', message: `Goal not found: ${cmd.goalId}` };
                 break;
               }
+              // Prefer the rich goals/<id>/goal.md (live workspace mount, then
+              // rolled-up artifacts main) over the record's stub doc; fall back
+              // to the record's embedded doc last. Survives workspace deletion.
               res = {
                 type: 'goal-detail',
-                doc: goal.doc,
+                doc: { ...(goal.doc ?? { updatedAt: goal.updatedAt }), bodyMarkdown: resolveGoalDocBody(cmd.projectName, goal) },
                 validation: { ...goal.validation, readiness: computeReadiness(goal.validation) },
               };
             } catch (e) {

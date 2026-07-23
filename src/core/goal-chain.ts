@@ -9,7 +9,7 @@ import {
 } from 'fs';
 import { dirname, join } from 'path';
 import { getProjectDir, getProjectWorkspacesDir } from './config.js';
-import { artifactsScope, captureArtifactsSync } from './artifacts.js';
+import { artifactsScope, captureArtifactsSync, readRolledUpGoalMd, readWorkspaceGoalMd } from './artifacts.js';
 import { defaultValidation, getPlannedGoalValidationDir, migrateGoalRecord, moveGoalValidationToWorkspace } from './goal-validation.js';
 import { computeReadiness } from '../app/shared/goal-validation/readiness.js';
 import { ensureWorkspaceStorageIgnored, getWorkspaceStatus, getWorkspaceStorageDir, setWorkspaceStatus } from './workspace-metadata.js';
@@ -202,14 +202,59 @@ export function writeArchivedGoal(projectName: string, goal: GoalRecord): GoalRe
  * listProjectGoalRecords' fallback. No-op (returns null) when the workspace
  * has no goal. Idempotent: re-archiving overwrites with the freshest state.
  */
+/**
+ * Recover a goal's body markdown from a `goals/<id>/goal.md` file, which the
+ * canon mirror writes as `# <title>\n\n<body>\n<!-- blocks:… -->`. Strips the
+ * mirror's leading title header and trailing machine blocks comment so the
+ * result round-trips back to a record `doc.bodyMarkdown`. Best-effort: content
+ * that doesn't match the mirror shape is returned as-is.
+ */
+function goalMdToBody(goalMd: string, title: string): string {
+  let s = goalMd;
+  const header = `# ${title}`;
+  if (s.startsWith(header)) s = s.slice(header.length).replace(/^\n+/, '');
+  s = s.replace(/\n?<!--\s*blocks:[\s\S]*-->\s*$/, '');
+  return s.trimEnd();
+}
+
+/**
+ * Resolve a goal's DISPLAY doc body, preferring the rich `goals/<id>/goal.md`
+ * over the record's (often stub) embedded `doc.bodyMarkdown`. Fallback order:
+ *   1. live workspace mount `goals/<id>/goal.md`  (freshest, unrolled edits)
+ *   2. rolled-up `goals/<id>/goal.md` on artifacts main
+ *   3. the record's embedded `doc.bodyMarkdown`    (last resort — archived stub)
+ */
+export function resolveGoalDocBody(projectName: string, goal: GoalRecord): string {
+  if (goal.workspaceName) {
+    const workspaceDir = join(getProjectWorkspacesDir(projectName), goal.workspaceName);
+    const md = readWorkspaceGoalMd(workspaceDir, goal.id);
+    if (md) return goalMdToBody(md, goal.title);
+  }
+  const rolled = readRolledUpGoalMd(getProjectDir(projectName), goal.id);
+  if (rolled) return goalMdToBody(rolled, goal.title);
+  return goal.doc?.bodyMarkdown ?? '';
+}
+
 export function archiveWorkspaceGoal(projectName: string, workspaceName: string): GoalRecord | null {
   const goal = readWorkspaceGoal(projectName, workspaceName);
   if (!goal) {
     return null;
   }
+  // Capture the RICH doc (goals/<id>/goal.md, from the still-present workspace
+  // mount, falling back to the rolled-up copy on artifacts main) into the
+  // archived record — the record's own embedded doc is only a stub, and the
+  // worktree (and its goal.md) is about to be destroyed. This makes the archived
+  // record a true last-resort doc source after deletion.
+  const workspaceDir = join(getProjectWorkspacesDir(projectName), workspaceName);
+  const richMd = readWorkspaceGoalMd(workspaceDir, goal.id)
+    ?? readRolledUpGoalMd(getProjectDir(projectName), goal.id);
+  const richBody = richMd ? goalMdToBody(richMd, goal.title) : undefined;
+  const goalToArchive: GoalRecord = richBody && richBody.length > (goal.doc?.bodyMarkdown?.length ?? 0)
+    ? { ...goal, doc: { ...(goal.doc ?? { updatedAt: nowIso() }), bodyMarkdown: richBody } }
+    : goal;
   // Force a fresh archive timestamp even if the live record somehow carried a
   // stale one (e.g. a previously-archived goal that was re-bound then deleted).
-  const archived = writeArchivedGoal(projectName, { ...goal, archivedAt: nowIso() });
+  const archived = writeArchivedGoal(projectName, { ...goalToArchive, archivedAt: nowIso() });
   queueGoalChangeNotify(projectName);
   return archived;
 }
