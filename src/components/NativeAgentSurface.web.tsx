@@ -6,10 +6,9 @@
  * session is attached, and renders host UI dialogs from the Pi SDK.
  */
 
-import { createPortal } from 'react-dom';
 import { NativeComposer } from './NativeComposer.web.js';
 import type { NativeComposerSubmitMode } from './NativeComposer.web.js';
-import { HostUIDialogOverlay } from './HostUIDialogs.web.js';
+import { HostUIDialogInline } from './HostUIDialogs.web.js';
 import type { HostUIDialogRequest, HostUIDialogResponse } from '../lib/tmux-lite/agents/host-ui-bridge.js';
 
 
@@ -87,20 +86,18 @@ export function NativeAgentSurface({
   onRequestFileSuggestions,
   workflowLabel,
 }: NativeAgentSurfaceProps) {
-  // Dialog overlay stays as a portal (always on top)
-  const dialogOverlay = pendingDialog ? createPortal(
-    <HostUIDialogOverlay
-      request={pendingDialog}
-      onResponse={onDialogResponse}
-    />,
-    document.body,
+  // Agent questions render INLINE in the chat (above the composer), not as a
+  // backdrop modal — the user needs to read the conversation to answer, and a
+  // full-screen overlay hides it. See HostUIDialogInline.
+  const dialog = pendingDialog ? (
+    <HostUIDialogInline request={pendingDialog} onResponse={onDialogResponse} />
   ) : null;
 
-  if (!agentAttached) return dialogOverlay;
+  if (!agentAttached) return dialog;
 
   return (
     <>
-      {dialogOverlay}
+      {dialog}
       {/* Composer rendered inline (no portal, no fixed positioning) */}
       {workingMessage && (
         <div

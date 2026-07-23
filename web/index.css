@@ -926,6 +926,23 @@ html {
   overflow: hidden;
 }
 
+/* Inline (in-chat) agent dialog: sits above the composer in normal flow so the
+   transcript stays readable above it. Reshapes the modal card to full pane
+   width / natural height, and bounds its own height so a long question scrolls
+   internally instead of shoving the composer off-screen. */
+.gs-agent-dialog-inline {
+  border-top: 1px solid var(--gs-border-muted);
+  max-height: 55vh;
+  overflow-y: auto;
+}
+.gs-agent-dialog-inline .gs-shell-card {
+  width: 100%;
+  min-height: auto;
+  max-height: none;
+  border-left: none;
+  border-right: none;
+}
+
 .gs-shell-card::before {
   content: '';
   position: absolute;

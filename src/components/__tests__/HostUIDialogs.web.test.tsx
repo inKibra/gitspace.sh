@@ -2,11 +2,33 @@ import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
 import React from 'react';
 import { render } from '@testing-library/react';
 import { setupTestDom, teardownTestDom } from '../../test/setup-dom.js';
-import { HostUIDialogOverlay } from '../HostUIDialogs.web.js';
+import { HostUIDialogOverlay, HostUIDialogInline } from '../HostUIDialogs.web.js';
 import type { HostUIDialogRequest } from '../../lib/tmux-lite/agents/host-ui-bridge.js';
 
 beforeAll(() => setupTestDom());
 afterAll(() => teardownTestDom());
+
+describe('HostUIDialogInline (in-chat, no backdrop)', () => {
+  it('renders the dialog in-place (no portal/backdrop) so the chat stays visible', () => {
+    const request: HostUIDialogRequest = {
+      type: 'select', id: 'dlg-inline', sessionId: 's1', title: 'Pick', options: ['red', 'green'],
+    };
+    const view = render(<HostUIDialogInline request={request} onResponse={() => {}} />);
+    // Content renders INTO the component's own container (in normal flow) — the
+    // portal overlay would instead put it on document.body. In-flow rendering is
+    // what keeps the transcript above it visible.
+    expect(view.container.textContent).toContain('Pick');
+    expect(view.container.textContent).toContain('green');
+    view.unmount();
+  });
+
+  it('drops a malformed request without throwing', () => {
+    const bad = { type: 'ask-form', id: 'x', sessionId: 's1', title: 't', questions: [{ id: 'q' }] } as unknown as HostUIDialogRequest;
+    let view: ReturnType<typeof render> | undefined;
+    expect(() => { view = render(<HostUIDialogInline request={bad} onResponse={() => {}} />); }).not.toThrow();
+    view?.unmount();
+  });
+});
 
 describe('HostUIDialogOverlay render safety (BUG A)', () => {
   it('renders a well-formed select dialog', () => {

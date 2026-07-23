@@ -70,20 +70,7 @@ export function HostUIDialogOverlay({ request, onResponse }: HostUIDialogOverlay
     }
   };
 
-  const content = (() => {
-    switch (request.type) {
-      case 'select':
-        return <SelectDialog key={request.id} request={request} onResponse={onResponse} />;
-      case 'ask-form':
-        return <AskFormDialog key={request.id} request={request} onResponse={onResponse} />;
-      case 'confirm':
-        return <ConfirmDialog key={request.id} request={request} onResponse={onResponse} />;
-      case 'input':
-        return <InputDialog key={request.id} request={request} onResponse={onResponse} />;
-      case 'editor':
-        return <EditorDialog key={request.id} request={request} onResponse={onResponse} />;
-    }
-  })();
+  const content = dialogContentFor(request, onResponse);
 
   return createPortal(
     <div className="gs-overlay-root" onClick={dismiss}>
@@ -92,6 +79,45 @@ export function HostUIDialogOverlay({ request, onResponse }: HostUIDialogOverlay
     </div>,
     document.body,
   );
+}
+
+/** The dialog card for a request, without any overlay/portal chrome. Shared by
+ *  the modal overlay and the inline (in-chat) presentation. */
+function dialogContentFor(
+  request: HostUIDialogRequest,
+  onResponse: (r: HostUIDialogResponse) => void,
+): ReactNode {
+  switch (request.type) {
+    case 'select':
+      return <SelectDialog key={request.id} request={request} onResponse={onResponse} />;
+    case 'ask-form':
+      return <AskFormDialog key={request.id} request={request} onResponse={onResponse} />;
+    case 'confirm':
+      return <ConfirmDialog key={request.id} request={request} onResponse={onResponse} />;
+    case 'input':
+      return <InputDialog key={request.id} request={request} onResponse={onResponse} />;
+    case 'editor':
+      return <EditorDialog key={request.id} request={request} onResponse={onResponse} />;
+    default:
+      return null;
+  }
+}
+
+/**
+ * Inline (in-chat) variant: renders the dialog card in normal document flow — no
+ * portal, no backdrop — so it sits directly above the composer while the
+ * transcript stays visible and scrollable above it. This is the right shape for
+ * an agent question: you need to read the conversation to answer it. A tall
+ * dialog scrolls within its own bounded region (.gs-agent-dialog-inline in CSS)
+ * rather than pushing the composer off-screen.
+ */
+export function HostUIDialogInline({ request, onResponse }: HostUIDialogOverlayProps) {
+  if (!request) return null;
+  if (!isRenderableDialogRequest(request)) {
+    console.error('[HostUIDialogs] dropping unrenderable dialog request', request);
+    return null;
+  }
+  return <div className="gs-agent-dialog-inline">{dialogContentFor(request, onResponse)}</div>;
 }
 
 interface DialogShellProps {
