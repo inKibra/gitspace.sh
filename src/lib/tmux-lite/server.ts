@@ -425,19 +425,53 @@ function clearRouterSocketState(socket: object): void {
   routerSocketStates.delete(socket);
 }
 
+/** Log a size breakdown for any oversized router response. Fires only for large
+ *  responses (rare), so it's safe to leave on: drilling into the single biggest
+ *  child at each level, it names the exact section → record → field that's fat
+ *  (e.g. `agentSessionsById → <id> → lastMessagePreview`). Ship these logs from a
+ *  machine that hits the size to pinpoint the producer. */
+const ROUTER_RESPONSE_WARN_BYTES = 8 * 1024 * 1024;
+function summarizeLargeRouterResponse(response: Response, totalBytes: number): string {
+  const type = (response as { type?: string }).type ?? 'unknown';
+  const lines = [`[router-size] LARGE response type=${type} total=${(totalBytes / 1024 / 1024).toFixed(2)}MB`];
+  const visit = (obj: unknown, path: string, depth: number): void => {
+    if (depth > 4 || !obj || typeof obj !== 'object') return;
+    const sized = Object.entries(obj as Record<string, unknown>)
+      .map(([k, v]) => [k, Buffer.byteLength(JSON.stringify(v ?? null))] as [string, number])
+      .filter(([, sz]) => sz > 128 * 1024)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 5);
+    for (const [k, sz] of sized) {
+      const child = (obj as Record<string, unknown>)[k];
+      const n = child && typeof child === 'object' ? Object.keys(child).length : undefined;
+      lines.push(`${'  '.repeat(depth + 1)}${path}${k}: ${(sz / 1024 / 1024).toFixed(2)}MB${n !== undefined ? ` (${n} entries)` : ''}`);
+    }
+    if (sized[0]) visit((obj as Record<string, unknown>)[sized[0][0]], `${path}${sized[0][0]}.`, depth + 1);
+  };
+  try { visit(response, '', 0); } catch { /* diagnostic must never throw */ }
+  return lines.join('\n');
+}
+
 function sendRouterResponse(socket: any, response: Response): void {
   const socketState = getRouterSocketState(socket);
   let frame: Buffer;
   try {
     frame = encodeRouterMessage(response);
+    if (frame.length > ROUTER_RESPONSE_WARN_BYTES) {
+      console.error(summarizeLargeRouterResponse(response, frame.length));
+    }
   } catch (err) {
     // An oversize response (e.g. a huge machine snapshot exceeding
     // MAX_ROUTER_MESSAGE_SIZE) must NEVER crash the daemon — encodeRouterMessage
     // throws, and this runs inside the socket 'data' handler where an uncaught
     // throw takes the whole process down (machine flips offline, clients see
-    // "Disconnected"). Degrade to a compact error the client can surface.
+    // "Disconnected"). Degrade to a compact error the client can surface, and log
+    // a breakdown so the producer can be pinpointed from the daemon log.
     const message = err instanceof Error ? err.message : String(err);
+    let approxBytes = 0;
+    try { approxBytes = Buffer.byteLength(JSON.stringify(response)); } catch { /* ignore */ }
     console.error(`[tmux-lite] router response dropped (${(response as { type?: string }).type}): ${message}`);
+    console.error(summarizeLargeRouterResponse(response, approxBytes));
     try {
       frame = encodeRouterMessage({ type: 'error', message: `Response too large to send: ${message}` });
     } catch {
