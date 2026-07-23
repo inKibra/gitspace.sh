@@ -59,6 +59,7 @@ export function AgentPaneHeader({
   onOpenHistory,
   onOpenAuth,
   error,
+  awaitingInput,
 }: {
   model?: AgentModelInfo;
   status?: SessionStatus;
@@ -71,6 +72,11 @@ export function AgentPaneHeader({
   onOpenHistory?: () => void;
   onOpenAuth?: () => void;
   error?: string | null;
+  /** Session is blocked on the user (an ask dialog / pending permission).
+   *  Overrides busy→green so the header agrees with the board and the visible
+   *  dialog — a mid-turn ask keeps status.type='busy', so without this the dot
+   *  reads green while a question is on screen. */
+  awaitingInput?: boolean;
 }): ReactElement {
   const [menu, setMenu] = useState<MenuId | null>(null);
   const [modelQuery, setModelQuery] = useState('');
@@ -80,15 +86,18 @@ export function AgentPaneHeader({
   };
   const kind = status?.type ?? 'idle';
   // Match the canonical agent status colors used across the app (board, session
-  // rows): error/retry = red, busy/compacting = green (pulsing), idle = blue
-  // (a live but resting session), not a flat green or grey that ignores state.
+  // rows): awaiting-input = amber (blocked on the user — matches board's
+  // permission-needed, and takes precedence exactly as determineAgentState does)
+  // > error/retry = red > busy/compacting = green (pulsing) > idle = blue.
   const hasError = !!error || kind === 'retry';
-  const dot = hasError
-    ? 'bg-[var(--gs-danger)]'
-    : kind === 'busy' || kind === 'compacting'
-      ? 'bg-[var(--gs-success)] animate-pulse'
-      : 'bg-[var(--gs-info)]';
-  const label = hasError ? 'error' : kind === 'compacting' ? 'compacting' : kind === 'busy' ? 'working' : 'idle';
+  const dot = awaitingInput
+    ? 'bg-[var(--gs-warning-bright)]'
+    : hasError
+      ? 'bg-[var(--gs-danger)]'
+      : kind === 'busy' || kind === 'compacting'
+        ? 'bg-[var(--gs-success)] animate-pulse'
+        : 'bg-[var(--gs-info)]';
+  const label = awaitingInput ? 'waiting' : hasError ? 'error' : kind === 'compacting' ? 'compacting' : kind === 'busy' ? 'working' : 'idle';
 
   const current = control?.currentModel ?? null; // "provider/id"
   const displayName = model?.name ?? (current ? current.slice(current.indexOf('/') + 1) : 'agent');

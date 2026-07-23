@@ -356,12 +356,13 @@ function ArtifactsRepoTab({ projectName, backend }: { projectName: string; backe
  * against the `<project>:@base` pseudo-workspace. PaneTerminalPanel's agent
  * branch only touches SessionBackend methods, so the pty-backend cast is safe.
  */
-function ProjectAgentPane({ backend, backendKey, workspaceId, agentSessionId, paneId }: {
+function ProjectAgentPane({ backend, backendKey, workspaceId, agentSessionId, paneId, awaitingInput }: {
   backend: SessionBackend | null;
   backendKey: BackendKey | null;
   workspaceId: string;
   agentSessionId: string;
   paneId: string;
+  awaitingInput?: boolean;
 }): ReactElement {
   const [modifiers, setModifiers] = useState({ ctrl: false, shift: false, alt: false });
   const pane = useMemo(() => ({
@@ -388,6 +389,7 @@ function ProjectAgentPane({ backend, backendKey, workspaceId, agentSessionId, pa
       modifiers={modifiers}
       onModifiersChange={setModifiers}
       showFloatingControls={false}
+      awaitingInput={awaitingInput}
     />
   );
 }
@@ -1045,7 +1047,7 @@ export function ProjectHomePage({
     if (t === 'crons') return { ...common, version: 'crons', render: () => <CronsPaneConnected backend={backend} workspaceId={baseWorkspaceId} /> };
     if (t.startsWith('agent:')) {
       return { ...common, version: `agent|${t}`, render: () => (
-        <ProjectAgentPane backend={backend} backendKey={backendKey ?? null} workspaceId={baseWorkspaceId} agentSessionId={t.slice(6)} paneId={t} />
+        <ProjectAgentPane backend={backend} backendKey={backendKey ?? null} workspaceId={baseWorkspaceId} agentSessionId={t.slice(6)} paneId={t} awaitingInput={agentSessionsById?.[t.slice(6)]?.state === 'permission-needed'} />
       ) };
     }
     if (t.startsWith('report:')) {

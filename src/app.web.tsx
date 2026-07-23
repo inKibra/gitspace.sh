@@ -3125,6 +3125,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
               modifiers={modifiers}
               onModifiersChange={setModifiers}
               showFloatingControls={showInlineFloatingControls}
+              awaitingInput={(agentSession as { state?: string } | null | undefined)?.state === 'permission-needed'}
             />
           ),
         };

@@ -48,6 +48,9 @@ export interface PaneTerminalPanelProps {
   modifiers: ModifierState;
   onModifiersChange: (next: ModifierState) => void;
   showFloatingControls: boolean;
+  /** Session is blocked on the user (ask dialog / pending permission) — drives
+   *  the header dot amber so it agrees with the board and the on-screen dialog. */
+  awaitingInput?: boolean;
 }
 
 export function PaneTerminalPanel({
@@ -67,6 +70,7 @@ export function PaneTerminalPanel({
   modifiers,
   onModifiersChange,
   showFloatingControls,
+  awaitingInput,
 }: PaneTerminalPanelProps) {
   const terminalRef = useRef<SessionTerminalHandle>(null);
 
@@ -418,6 +422,7 @@ export function PaneTerminalPanel({
             onOpenHistory={openHistory}
             onOpenAuth={openSettings}
             error={modelError}
+            awaitingInput={awaitingInput}
           />
           <div className="flex-1 min-h-0 bg-[var(--gs-bg)]">
             <AgentTranscript
