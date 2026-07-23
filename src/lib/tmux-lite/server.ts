@@ -4196,7 +4196,37 @@ export async function dispatchCommand(cmd: Command): Promise<Response | null> {
               const { fileProblemReport } = await import('./problem-report.js');
               let clientBundle: unknown = {};
               try { clientBundle = JSON.parse(cmd.clientBundleJson); } catch { clientBundle = { parseError: 'client bundle was not valid JSON' }; }
-              const filed = await fileProblemReport(cmd.note, clientBundle, Date.now());
+              // Authoritative agent-status dump: per-session raw status.type +
+              // pending permission/question counts (from the AgentEventManager)
+              // AND the coordinator's open dialogs. A status bug like "asking a
+              // question but the pane shows green" is exactly a mismatch between
+              // these (status=busy, but a dialog is open) — capturing it makes
+              // the report self-diagnosable against the DOM snapshot.
+              const serverAgentState = (() => {
+                try {
+                  const snap = getAgentControlSnapshot();
+                  const sessions: unknown[] = [];
+                  for (const [workspaceId, w] of Object.entries(snap)) {
+                    for (const s of w.sessions ?? []) {
+                      sessions.push({
+                        workspaceId,
+                        sessionId: s.id,
+                        title: s.title,
+                        status: w.statuses?.[s.id]?.type ?? 'idle',
+                        pendingPermissions: (w.pendingPermissions?.[s.id] ?? []).length,
+                        pendingQuestions: (w.pendingQuestions?.[s.id] ?? []).length,
+                        closedAt: s.closedAt,
+                        errorMessage: w.errorMessages?.[s.id],
+                        lastMessage: w.lastMessages?.[s.id]?.slice(0, 120),
+                      });
+                    }
+                  }
+                  return { sessions, pendingDialogs: getPendingAgentDialogs() };
+                } catch (e) {
+                  return { error: e instanceof Error ? e.message : String(e) };
+                }
+              })();
+              const filed = await fileProblemReport(cmd.note, clientBundle, Date.now(), { serverAgentState });
               res = { type: 'report-problem', path: filed.path, issueUrl: filed.issueUrl, issueNumber: filed.issueNumber };
             } catch (e) {
               res = { type: 'error', message: `Failed to write problem report: ${e instanceof Error ? e.message : String(e)}` };

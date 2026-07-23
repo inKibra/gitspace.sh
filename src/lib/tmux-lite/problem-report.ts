@@ -48,6 +48,12 @@ export interface AgentReportContext {
 export interface ProblemReportOptions {
   origin?: ProblemReportOrigin;
   agent?: AgentReportContext;
+  /** Compact authoritative agent-status dump gathered by the caller (the daemon
+   *  has direct access): per-session raw status.type, pending permission/question
+   *  counts, derived board state, plus the coordinator's open dialogs. Makes
+   *  status-inconsistency bugs (e.g. "asking a question but shows green")
+   *  diagnosable from the report alone by comparing it against the DOM snapshot. */
+  serverAgentState?: unknown;
 }
 
 export interface ProblemReport {
@@ -66,6 +72,8 @@ export interface ProblemReport {
     traceRing: ReturnType<typeof getTraceRing>;
     /** Tail of the daemon log ('server logs'). */
     daemonLogTail: string;
+    /** Compact authoritative agent-status dump (see ProblemReportOptions). */
+    agentState?: unknown;
   };
   client: unknown;
 }
@@ -89,6 +97,7 @@ export function buildProblemReport(
       platform: process.platform,
       traceRing: getTraceRing(),
       daemonLogTail: daemonLogTail(),
+      ...(options.serverAgentState !== undefined ? { agentState: options.serverAgentState } : {}),
     },
     client: clientBundle,
   };
