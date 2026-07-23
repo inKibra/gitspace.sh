@@ -345,6 +345,38 @@ export function makeLocalProtocolOptions(cwd: string): {
   };
 }
 
+/** Callbacks driven by the compaction-status extension; bound to a session
+ *  host's status sink after the session is created. */
+export interface CompactionStatusHolder {
+  onStart: (() => void) | null;
+  onEnd: (() => void) | null;
+}
+
+/**
+ * Inline SDK extension that observes the session-level compaction hooks
+ * (`session_before_compact` / `session_compact`). These are emitted via the SDK
+ * extension runner — NOT the agent event stream (which only carries the AUTO
+ * `auto_compaction_start/end` variants) — so they are the only signal a manual
+ * `/compact` (incl. `snapcompact`) produces. Handlers observe only (return
+ * nothing), so they never modify or cancel a compaction (the SDK only acts on a
+ * returned `.compaction`). The returned holder is bound to the session host's
+ * status sink after `createAgentSession` returns.
+ */
+export function createCompactionStatusExtension(): {
+  // Typed loosely at the SDK boundary (matches this file's other SDK casts): the
+  // strict ExtensionFactory/ExtensionAPI types carry per-event `on` overloads
+  // that a generic registrar can't satisfy structurally.
+  extension: (pi: any) => void;
+  holder: CompactionStatusHolder;
+} {
+  const holder: CompactionStatusHolder = { onStart: null, onEnd: null };
+  const extension = (pi: any): void => {
+    pi.on('session_before_compact', () => { holder.onStart?.(); });
+    pi.on('session_compact', () => { holder.onEnd?.(); });
+  };
+  return { extension, holder };
+}
+
 /**
  * Re-open an existing Pi session file in-process so GitSpace can subscribe to live SDK events
  * again after a tmux-lite restart.
@@ -375,6 +407,7 @@ export async function openPiSession(cwd: string, sessionFilePath: string) {
   const managedBootstrap = await getManagedSessionBootstrap(cwd, env.PI_CODING_AGENT_DIR, discoverSkills);
 
   const localProtocol = makeLocalProtocolOptions(cwd);
+  const compaction = createCompactionStatusExtension();
   const result = await createAgentSession({
     agentDir: env.PI_CODING_AGENT_DIR,
     sessionManager,
@@ -383,6 +416,7 @@ export async function openPiSession(cwd: string, sessionFilePath: string) {
     modelRegistry,
     model: restoredModel,
     additionalExtensionPaths: getManagedPiExtensionPaths(),
+    extensions: [compaction.extension],
     skills: managedBootstrap.skills,
     hasUI: true,
     localProtocolOptions: localProtocol.options,
@@ -409,6 +443,7 @@ export async function openPiSession(cwd: string, sessionFilePath: string) {
     sessionManager,
     session,
     setToolUIContext,
+    compactionStatus: compaction.holder,
   };
 }
 

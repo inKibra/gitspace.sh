@@ -39,6 +39,8 @@ import {
   persistInitialPiSessionModel,
   makeLocalProtocolOptions,
   readCycleOrder,
+  createCompactionStatusExtension,
+  type CompactionStatusHolder,
 } from './pi-runtime.js';
 import { getManagedSessionBootstrap } from './managed-defaults.js';
 import { VirtualTerminal } from './virtual-terminal.js';
@@ -208,6 +210,9 @@ export class LocalSessionHost implements AgentSessionHost {
    *  compaction that finishes mid-turn returns to busy rather than idle. */
   private turnActive = false;
   private uiInstalled = false;
+  /** Bound to the compaction-status extension so manual/snap `/compact` surfaces
+   *  a `compacting` status (the agent event stream only carries auto). */
+  private compactionStatus: CompactionStatusHolder | null = null;
 
   private constructor(args: {
     target: SessionHostTarget;
@@ -215,12 +220,14 @@ export class LocalSessionHost implements AgentSessionHost {
     setToolUIContext: OmpCreateSessionResult['setToolUIContext'];
     sinks: SessionHostSinks;
     config: LocalSessionHostConfig;
+    compactionStatus?: CompactionStatusHolder | null;
   }) {
     this.target = args.target;
     this.session = args.session;
     this.setToolUIContext = args.setToolUIContext;
     this.sinks = args.sinks;
     this.sessionId = args.session.sessionId;
+    this.compactionStatus = args.compactionStatus ?? null;
     this.bindSessionEvents();
     if (args.config.enableUI) this.enableUI();
   }
@@ -239,19 +246,21 @@ export class LocalSessionHost implements AgentSessionHost {
     // dereference it — native-surface-only sessions never boot a terminal.
     await ensureOmpThemeInitialized();
     if (boot.mode === 'open') {
-      const { session, setToolUIContext } = await openPiSession(target.workspacePath, boot.sessionFilePath);
-      return new LocalSessionHost({ target, session, setToolUIContext, sinks, config });
+      const { session, setToolUIContext, compactionStatus } = await openPiSession(target.workspacePath, boot.sessionFilePath);
+      return new LocalSessionHost({ target, session, setToolUIContext, sinks, config, compactionStatus });
     }
 
     const { createAgentSession: createPiAgentSessionSdk, discoverSkills } = await importSdk();
     const { agentDir, sessionManager } = await createPiSessionManager(target.workspacePath);
     const managedBootstrap = await getManagedSessionBootstrap(target.workspacePath, agentDir, discoverSkills);
     const localProtocol = makeLocalProtocolOptions(target.workspacePath);
+    const compaction = createCompactionStatusExtension();
     const result = await createPiAgentSessionSdk({
       agentDir,
       sessionManager,
       cwd: target.workspacePath,
       additionalExtensionPaths: getManagedPiExtensionPaths(),
+      extensions: [compaction.extension],
       skills: managedBootstrap.skills,
       hasUI: true,
       localProtocolOptions: localProtocol.options,
@@ -266,7 +275,7 @@ export class LocalSessionHost implements AgentSessionHost {
     }
     await persistInitialPiSessionModel(session);
     await sessionManager.rewriteEntries();
-    return new LocalSessionHost({ target, session, setToolUIContext, sinks, config });
+    return new LocalSessionHost({ target, session, setToolUIContext, sinks, config, compactionStatus: compaction.holder });
   }
 
   /** Install the host-UI bridge so extension dialogs route to the native surface. */
@@ -993,6 +1002,31 @@ export class LocalSessionHost implements AgentSessionHost {
           }
         });
       }
+    }
+
+    // --- Manual/snap compaction status via the SDK extension hooks ---
+    // Only `auto_compaction_start/end` reach the agent event stream (AUTO
+    // compaction). A manual `/compact` (incl. `snapcompact`) instead fires the
+    // extension-runner hooks `session_before_compact` / `session_compact`, so
+    // without hooking those a manual compaction never sets a `compacting` status
+    // and the session reads as `waiting` (blue). The compactionStatus holder is
+    // driven by an inline SDK extension registered at session creation (see
+    // createCompactionStatusExtension); bind it to this host's status sink here.
+    if (this.compactionStatus) {
+      this.compactionStatus.onStart = () => {
+        emit({ type: 'status', sessionId, payload: { type: 'compacting' } });
+      };
+      this.compactionStatus.onEnd = () => {
+        // Mirror auto_compaction_end: back to busy if a turn is still running
+        // (compaction can happen mid-turn), otherwise idle.
+        emit({ type: 'status', sessionId, payload: { type: this.turnActive ? 'busy' : 'idle' } });
+      };
+      unsubscribers.push(() => {
+        if (this.compactionStatus) {
+          this.compactionStatus.onStart = null;
+          this.compactionStatus.onEnd = null;
+        }
+      });
     }
 
     this.unsubscribe = () => {
