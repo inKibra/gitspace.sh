@@ -557,9 +557,13 @@ function WorkspaceCard({
           />
         </div>
       )}
-      {/* Name + dot */}
+      {/* Name + dot — green (an agent doing active work, incl. compacting)
+          pulses so it reads as live, not resting. */}
       <div className="flex items-center gap-2">
-        <span className="h-2 w-2 flex-shrink-0 rounded-full" style={{ background: edgeColor }} />
+        <span
+          className={`h-2 w-2 flex-shrink-0 rounded-full ${primaryColor === 'green' ? 'animate-pulse' : ''}`}
+          style={{ background: edgeColor }}
+        />
         <span className="font-mono font-medium text-[12px] truncate">{name}</span>
         {goal && <ChainHandle goal={goal} related={related} />}
         {goal && <RearrangeHandle onOpenOrder={() => onOpenOrder?.(goal.chainId)} />}

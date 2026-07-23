@@ -434,6 +434,7 @@ export function ProjectHomePage({
   workspaces,
   backend,
   backendKey,
+  agentSessionsById,
   onBack,
   onOpenWorkspace,
   onOpenGoal,
@@ -446,6 +447,10 @@ export function ProjectHomePage({
   workspaces: WorkspaceRuntimeEntry[];
   backend: SessionBackend | null;
   backendKey?: string | null;
+  /** Live agent-session states (keyed by session id) from the machine snapshot,
+   *  used to color the project-agent thread rows (amber when a thread is blocked
+   *  on a question, green-pulse while working, etc.). */
+  agentSessionsById?: Record<string, { state?: string }>;
   onBack: () => void;
   onOpenWorkspace: (workspaceId: string) => void;
   onOpenGoal: (goal: KanbanGoalItem) => void;
@@ -1103,7 +1108,49 @@ export function ProjectHomePage({
                 title: backend?.createAgentSession ? 'start the first project-agent thread' : 'agent sessions unavailable',
                 onClick: backend?.createAgentSession ? startProjectThread : undefined,
               })
-            : agentThreads.map((th) => navRow({ key: `agent-${th.id}`, icon: '✦', label: th.title || 'thread', tab: `agent:${th.id}` }))}
+            : agentThreads.map((th) => {
+                const st = agentSessionsById?.[th.id]?.state;
+                // Same status palette as workspace-agent rows (WorkspaceDetailPane).
+                const iconColor =
+                  st === 'permission-needed' ? 'text-[var(--gs-warning-bright)]'
+                  : st === 'running' ? 'text-[var(--gs-running)]'
+                  : st === 'retrying' ? 'text-[var(--gs-danger)]'
+                  : null;
+                const tab = `agent:${th.id}`;
+                const on = active === tab;
+                return (
+                  <div key={`agent-${th.id}`} className="group flex items-center">
+                    <button
+                      type="button"
+                      onClick={() => openTab(tab)}
+                      className={`flex min-w-0 flex-1 items-center gap-[9px] px-[13px] py-[5px] text-left text-[12px] transition-colors ${
+                        on
+                          ? 'bg-[var(--gs-bg-active)] text-[var(--gs-text)] shadow-[inset_2px_0_0_var(--gs-accent)]'
+                          : 'text-[var(--gs-text-muted)] hover:bg-[var(--gs-bg-hover)] hover:text-[var(--gs-text)]'
+                      }`}
+                    >
+                      <span className={`w-[14px] flex-none text-center ${iconColor ?? (on ? 'text-[var(--gs-accent)]' : 'text-[var(--gs-text-dim)]')} ${st === 'running' ? 'animate-pulse' : ''}`}>✦</span>
+                      <span className="min-w-0 flex-1 truncate">{th.title || 'thread'}</span>
+                    </button>
+                    {backend?.closeAgentSession && (
+                      <button
+                        type="button"
+                        title="Exit thread"
+                        onClick={() => void backend.closeAgentSession?.(baseWorkspaceId, th.id).then(() => setThreadsTick((t) => t + 1))}
+                        className="flex-none px-1 text-[10px] text-[var(--gs-text-ghost)] opacity-0 transition-opacity hover:text-[var(--gs-text-muted)] group-hover:opacity-100"
+                      >×</button>
+                    )}
+                    {backend?.archiveAgentSession && (
+                      <button
+                        type="button"
+                        title="Archive thread"
+                        onClick={() => void backend.archiveAgentSession?.(baseWorkspaceId, th.id).then(() => setThreadsTick((t) => t + 1))}
+                        className="flex-none px-1 text-[10px] text-[var(--gs-text-ghost)] opacity-0 transition-opacity hover:text-[var(--gs-text-muted)] group-hover:opacity-100"
+                      >arc</button>
+                    )}
+                  </div>
+                );
+              })}
           {navRow({
             key: 'new-thread', icon: '＋', label: 'New thread',
             disabled: !backend?.createAgentSession,
