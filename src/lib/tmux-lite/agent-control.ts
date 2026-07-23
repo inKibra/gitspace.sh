@@ -219,6 +219,13 @@ export function getAgentControlSnapshot(): Record<string, WorkspaceAgentState> {
   return defaultAgentEventManager.getSnapshot();
 }
 
+/** Dialogs (agent "ask") currently awaiting a user answer — the live source the
+ *  machine-snapshot build folds into a session's pending-question count so the
+ *  session shows amber while blocked on the user. */
+export function getPendingAgentDialogs(): Array<{ workspaceId: string; sessionId: string; dialogId: string }> {
+  return defaultPiCoordinator.getPendingDialogs();
+}
+
 export function rebindPiTerminalSessionOwnership(
   workspaceId: string,
   terminalSessionId: string,

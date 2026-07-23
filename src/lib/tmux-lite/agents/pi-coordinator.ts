@@ -223,6 +223,22 @@ export class PiCoordinator {
   }
 
   /**
+   * The dialogs currently awaiting a user answer, keyed for status derivation.
+   * This is the single source of truth for "this session is blocked on the
+   * user" — the machine-snapshot build reads it live (rather than mirroring it
+   * into a second store) so a session shows amber exactly while a dialog is open
+   * and clears the instant it resolves, on every path, with no chance of drift.
+   */
+  getPendingDialogs(): Array<{ workspaceId: string; sessionId: string; dialogId: string }> {
+    const out: Array<{ workspaceId: string; sessionId: string; dialogId: string }> = [];
+    for (const [dialogId, sessionId] of this.dialogSessions) {
+      const workspaceId = this.sessionWorkspaceIds.get(sessionId);
+      if (workspaceId) out.push({ workspaceId, sessionId, dialogId });
+    }
+    return out;
+  }
+
+  /**
    * Route a dialog response from a client to the owning host's pending Promise.
    * Returns true if the dialog was found and resolved.
    */

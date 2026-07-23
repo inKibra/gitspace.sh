@@ -95,6 +95,7 @@ import {
   markAgentSessionIdle,
   setAgentHostUIEmitter,
   resolveAgentDialogResponse,
+  getPendingAgentDialogs,
   listAgentCommands,
   getFileSuggestions,
 } from './agent-control.js';
@@ -504,11 +505,19 @@ async function buildCurrentMachineSnapshot(): Promise<MachineSnapshot> {
       agentStateByWorkspaceId: getAgentControlSnapshot(),
     });
     lastWorkspaceRuntimeRecords = workspaceSnapshot;
+    // Live "ask" dialogs (workspaceId -> sessionId -> dialogIds) read straight
+    // from the coordinator, so a session blocked on a user dialog shows amber.
+    const pendingDialogIdsByWorkspace: Record<string, Record<string, string[]>> = {};
+    for (const { workspaceId, sessionId, dialogId } of getPendingAgentDialogs()) {
+      const bySession = (pendingDialogIdsByWorkspace[workspaceId] ??= {});
+      (bySession[sessionId] ??= []).push(dialogId);
+    }
     const snapshot = buildMachineSnapshot({
       snapshotNonce: machineSnapshotNonce,
       terminalSessions: Array.from(sessions.values()).map(getSessionInfo),
       workspaces: workspaceSnapshot,
       agentStateByWorkspaceId: getAgentControlSnapshot(),
+      pendingDialogIdsByWorkspace,
     });
     liveMachineSnapshot = snapshot;
     writeTraceLog('machine-snapshot-build-end', {
@@ -715,6 +724,10 @@ async function getAgentControlReady(): Promise<void> {
     // and UI events are broadcast to all watching clients.
     setAgentHostUIEmitter({
       emitDialogRequest(request) {
+        // A new "ask" dialog now blocks this session on the user — rebuild the
+        // snapshot so the session flips amber promptly (the build reads the
+        // coordinator's live open-dialog set).
+        void broadcastMachineSnapshotReplacement().catch(() => {});
         deliverDialogRequest(request, {
           pickSameSocketOwner: (sessionId) => pickAgentDialogWatcher(sessionId),
           watchers: () => agentStateWatchers,
@@ -4766,6 +4779,9 @@ routerListener = Bun.listen({
               // responses find no pending dialog and no-op (ok:false).
               agentDialogOwners.delete(cmd.dialogId);
               conduitDeliveredDialogs.delete(cmd.dialogId);
+              // Dialog answered -> the coordinator's open-dialog set shrank;
+              // rebuild so the session clears amber promptly.
+              if (resolved) void broadcastMachineSnapshotReplacement().catch(() => {});
               res = { type: 'agent-bool', ok: resolved };
             } catch (e) {
               const errMsg = e instanceof Error ? e.message : String(e);

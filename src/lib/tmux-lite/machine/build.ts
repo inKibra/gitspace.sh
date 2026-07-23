@@ -249,8 +249,13 @@ export function buildAgentSessionRecordsForWorkspace(params: {
   projectId: string;
   workspace: WorkspaceAgentState | undefined;
   terminalSessionsById: Record<string, MachineTerminalSessionRecord>;
+  /** Live "ask" dialog ids per session (single source of truth: the
+   *  coordinator's open dialogs). Folded into pendingQuestionIds so a session
+   *  blocked on a user dialog shows amber, cleared automatically when it
+   *  resolves. */
+  pendingDialogIdsBySession?: Record<string, string[]>;
 }): { records: MachineAgentSessionRecord[]; archivedMoreCount: number } {
-  const { workspaceId, projectId, workspace, terminalSessionsById } = params;
+  const { workspaceId, projectId, workspace, terminalSessionsById, pendingDialogIdsBySession } = params;
   const records: MachineAgentSessionRecord[] = [];
   const archivedSessions = getArchivedSessions(workspaceId, ARCHIVED_SNAPSHOT_LIMIT);
   const archivedTotal = countArchivedSessions(workspaceId);
@@ -261,7 +266,10 @@ export function buildAgentSessionRecordsForWorkspace(params: {
     for (const session of workspace.sessions) {
       if (archivedSessionIds.has(session.id) || session.archivedAt) continue;
       const pendingPermissionIds = (workspace.pendingPermissions[session.id] ?? []).map((permission) => permission.id);
-      const pendingQuestionIds = (workspace.pendingQuestions[session.id] ?? []).map((q) => q.id);
+      const pendingQuestionIds = [
+        ...(workspace.pendingQuestions[session.id] ?? []).map((q) => q.id),
+        ...(pendingDialogIdsBySession?.[session.id] ?? []),
+      ];
       const linkedTerminal = Object.values(terminalSessionsById).find(
         (terminal) => terminal.workspaceId === workspaceId && terminal.linkedAgentSessionId === session.id,
       );
@@ -415,8 +423,11 @@ export function buildMachineSnapshot(params: {
   terminalSessions: Session[];
   workspaces: WorkspaceRuntimeRecord[];
   agentStateByWorkspaceId: Record<string, WorkspaceAgentState>;
+  /** Live "ask" dialog ids, keyed workspaceId -> sessionId -> dialogIds. Sourced
+   *  from the coordinator's open dialogs so blocked sessions show amber. */
+  pendingDialogIdsByWorkspace?: Record<string, Record<string, string[]>>;
 }): MachineSnapshot {
-  const { snapshotNonce, terminalSessions, workspaces, agentStateByWorkspaceId } = params;
+  const { snapshotNonce, terminalSessions, workspaces, agentStateByWorkspaceId, pendingDialogIdsByWorkspace } = params;
 
   const projectsById: Record<string, MachineProjectRecord> = {};
   const projectOrder: string[] = [];
@@ -534,6 +545,7 @@ export function buildMachineSnapshot(params: {
       projectId,
       workspace,
       terminalSessionsById,
+      pendingDialogIdsBySession: pendingDialogIdsByWorkspace?.[workspaceId],
     });
     archivedMoreCountByWorkspaceId[workspaceId] = archivedMoreCount;
     for (const record of records) {
