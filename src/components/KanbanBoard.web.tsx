@@ -995,23 +995,35 @@ export function KanbanBoardWeb({
       </div>
 
       {/* ── Desktop: side-by-side columns ── */}
-      {chainSummaries.length > 0 && activeChainId !== null && (
+      {/* The Goal Chains bar is ALWAYS shown (not gated on hover): it used to
+          mount only when activeChainId was set, and mounting this in-flow strip
+          pushed the columns down — moving the hovered card out from under the
+          cursor, which cleared activeChainId, which unmounted the bar, which
+          sprang the columns back… a hover-thrash loop. Persistent bar = no
+          layout shift on hover; hovering a card/chip just HIGHLIGHTS its chain
+          (scale/brightness are transforms/filters, never a reflow). */}
+      {chainSummaries.length > 0 && (
         <div className="hidden sm:flex items-center gap-2 border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-3 py-2 text-xs text-[var(--gs-text-muted)]" onMouseLeave={() => setActiveChainId(null)} onBlur={() => setActiveChainId(null)}>
           <span className="font-semibold uppercase tracking-[0.14em] text-[var(--gs-text-dim)]">Goal Chains</span>
-          {chainSummaries.map((chain) => (
-            <button
-              key={chain.chainId}
-              type="button"
-              onMouseEnter={() => setActiveChainId(chain.chainId)}
-              onFocus={() => setActiveChainId(chain.chainId)}
-              onClick={() => openOrderEditor(chain.chainId)}
-              className={`${R_CHIP} border px-2 py-1 transition-[filter,scale] duration-150 ease-out hover:brightness-125 focus:brightness-125 active:scale-[0.96]`}
-              style={{ color: chain.palette.fg, borderColor: chain.palette.border, backgroundColor: chain.palette.bg }}
-              title={`Click to rearrange this chain. Order: ${chain.goals.map((goal) => `${goal.chainPosition}. ${goal.workspaceName ?? goal.plannedWorkspaceName ?? goal.title}`).join(' → ')}`}
-            >
-              ⛓ {chain.title} · 1-{chain.count}
-            </button>
-          ))}
+          {chainSummaries.map((chain) => {
+            const isActive = chain.chainId === activeChainId;
+            return (
+              <button
+                key={chain.chainId}
+                type="button"
+                onMouseEnter={() => setActiveChainId(chain.chainId)}
+                onFocus={() => setActiveChainId(chain.chainId)}
+                onClick={() => openOrderEditor(chain.chainId)}
+                className={`${R_CHIP} border px-2 py-1 transition-[filter,transform,opacity] duration-150 ease-out hover:brightness-125 focus:brightness-125 active:scale-[0.96] ${
+                  activeChainId ? (isActive ? 'scale-[1.04] brightness-125' : 'opacity-45') : ''
+                }`}
+                style={{ color: chain.palette.fg, borderColor: chain.palette.border, backgroundColor: chain.palette.bg }}
+                title={`Click to rearrange this chain. Order: ${chain.goals.map((goal) => `${goal.chainPosition}. ${goal.workspaceName ?? goal.plannedWorkspaceName ?? goal.title}`).join(' → ')}`}
+              >
+                ⛓ {chain.title} · 1-{chain.count}
+              </button>
+            );
+          })}
         </div>
       )}
       <div className={`hidden sm:flex flex-1 gap-4 overflow-x-auto ${fullHeight ? 'h-full' : ''}`}>

@@ -394,7 +394,7 @@ export function BoardPage({
       {!loading && (
         <div className="flex flex-shrink-0 items-center px-4 pb-1 pt-2.5">
           <span className="text-[10px] uppercase tracking-[0.12em] text-[var(--gs-text-dim)]">
-            {boardView === 'workspaces' ? 'All workspaces · across projects' : 'Goal stacks · alignment across the chain'}
+            {boardView === 'workspaces' ? 'All workspaces · across projects' : 'Goal chains · alignment across the chain'}
           </span>
           <span className="ml-2.5 inline-flex border border-[var(--gs-border)]">
             <button
@@ -409,7 +409,7 @@ export function BoardPage({
               onClick={() => setBoardView('stacks')}
               className={`px-[11px] py-[3px] text-[11px] ${boardView === 'stacks' ? 'bg-[var(--gs-bg-active)] text-[var(--gs-text)] shadow-[inset_0_-2px_0_var(--gs-accent)]' : 'text-[var(--gs-text-dim)] hover:text-[var(--gs-text)]'}`}
             >
-              Stacks
+              Chains
             </button>
           </span>
         </div>
