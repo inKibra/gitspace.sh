@@ -427,8 +427,25 @@ function clearRouterSocketState(socket: object): void {
 
 function sendRouterResponse(socket: any, response: Response): void {
   const socketState = getRouterSocketState(socket);
-  if (socketState.writer) socketState.writer.write(encodeRouterMessage(response));
-  else socket.write(encodeRouterMessage(response));
+  let frame: Buffer;
+  try {
+    frame = encodeRouterMessage(response);
+  } catch (err) {
+    // An oversize response (e.g. a huge machine snapshot exceeding
+    // MAX_ROUTER_MESSAGE_SIZE) must NEVER crash the daemon — encodeRouterMessage
+    // throws, and this runs inside the socket 'data' handler where an uncaught
+    // throw takes the whole process down (machine flips offline, clients see
+    // "Disconnected"). Degrade to a compact error the client can surface.
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[tmux-lite] router response dropped (${(response as { type?: string }).type}): ${message}`);
+    try {
+      frame = encodeRouterMessage({ type: 'error', message: `Response too large to send: ${message}` });
+    } catch {
+      return; // even the error frame failed — give up rather than crash
+    }
+  }
+  if (socketState.writer) socketState.writer.write(frame);
+  else socket.write(frame);
 }
 
 const MIN_TERMINAL_COLS = 20;

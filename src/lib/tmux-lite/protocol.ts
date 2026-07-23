@@ -163,7 +163,15 @@ export function getSessionSocketPath(id: string): string {
   return socketPath;
 }
 
-export const MAX_ROUTER_MESSAGE_SIZE = 32 * 1024 * 1024;
+// This is a LOCAL IPC unix-socket cap (daemon ↔ CLI / serve-runtime), not a
+// network limit — the 4-byte length header supports up to 4 GiB. 32 MiB was too
+// tight: a large machine snapshot / agent-state / transcript response can exceed
+// it, and encodeRouterMessage throwing inside the socket 'data' handler took the
+// whole daemon down (clients then saw "Disconnected"). 128 MiB gives real
+// headroom; sendRouterResponse now also degrades gracefully rather than crashing
+// if a response somehow still exceeds it. (A response this large is itself a
+// bloat smell worth slimming at the source — see machine snapshot build.)
+export const MAX_ROUTER_MESSAGE_SIZE = 128 * 1024 * 1024;
 
 
 const ROUTER_FRAME_HEADER_BYTES = 4;
