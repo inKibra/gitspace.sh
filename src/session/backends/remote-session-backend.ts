@@ -3157,22 +3157,18 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       return false;
     }
 
+    // Existence authority: the MACHINE SNAPSHOT owns which agents exist; the
+    // agent-state feed only ENRICHES agents that already exist in the snapshot.
+    // Both streams originate from the same daemon AgentEventManager, so the
+    // snapshot always carries the feed's agents eventually — the only difference
+    // is arrival timing. The old code let a (possibly stale) agent-state cache
+    // both prune snapshot agents it hadn't seen yet and re-add agents the
+    // snapshot had dropped, which is the "blink in and out" flicker. So: no
+    // add, no remove here — agents are added/removed only via machine snapshot
+    // deltas (agent-session-upserted/removed, snapshot replace).
     let changed = false;
-    const nextIds = new Set(workspace.sessions.map((session) => session.id));
-    for (const existingId of snapshot.agentSessionIdsByWorkspaceId[workspace.workspaceId] ?? []) {
-      const existing = snapshot.agentSessionsById[existingId];
-      if (existing && existing.state !== 'archived' && !nextIds.has(existingId)) {
-        this.machineStateClient.applyEvent({
-          type: 'agent-session-removed',
-          snapshotNonce: snapshot.snapshotNonce,
-          sessionId: existingId,
-          workspaceId: workspace.workspaceId,
-        });
-        changed = true;
-      }
-    }
-
     for (const session of workspace.sessions) {
+      if (!snapshot.agentSessionsById[session.id]) continue; // feed-only → wait for the snapshot to introduce it
       const record = this.toMachineAgentSessionRecord(workspace, session.id);
       if (!record) continue;
       this.machineStateClient.applyEvent({
