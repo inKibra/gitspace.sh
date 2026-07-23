@@ -14,6 +14,7 @@
 
 import { spawn } from "bun";
 import { existsSync, readFileSync, unlinkSync, closeSync } from "fs";
+import { getCodeVersion } from "./code-version.js";
 import { select } from "@inquirer/prompts";
 import { createBufferedSocketWriter } from "../../utils/bun-socket-writer";
 import { writeTraceLog } from "../../utils/trace-log";
@@ -253,6 +254,72 @@ export async function isServerRunning(): Promise<boolean> {
   }
 }
 
+// --- Stale-daemon detection --------------------------------------------------
+//
+// The relay client + E2E client-session-manager (the frame-chunking send path)
+// run INSIDE this daemon (serve-runtime.ts). ensureServer() reuses an already
+// running daemon without reloading its code, so a daemon started before a code
+// change keeps executing the OLD code — e.g. emitting un-chunked oversize frames
+// the relay rejects with a 1006. The daemon reports the code identity it booted
+// with (status.codeVersion); the CLI compares it to the current value and, when
+// they differ, recycles the daemon so the new code loads. See code-version.ts
+// for how that identity is derived (baked BUILD_ID in prod, a per-dev-run token
+// from scripts/dev.ts in dev, null → "don't police" otherwise).
+
+/** Freshness of the running daemon relative to the current code identity:
+ *   - 'fresh'      : daemon's code identity matches the current one — reuse it.
+ *   - 'stale-idle' : identities differ AND the daemon has no active sessions —
+ *                    safe to auto-recycle without losing work.
+ *   - 'stale-busy' : identities differ BUT sessions/agents are running — do NOT
+ *                    silently kill them; warn and reuse.
+ *   - 'unknown'    : can't tell (no current identity, daemon didn't answer, or a
+ *                    daemon predating codeVersion) — reuse rather than churn. */
+async function evaluateDaemonFreshness(): Promise<"fresh" | "stale-idle" | "stale-busy" | "unknown"> {
+  const expected = getCodeVersion();
+  if (expected === null) return "unknown"; // dev-from-source without a token, etc.
+  let daemonVersion: string | null;
+  let sessions: number;
+  try {
+    const res = await send({ type: "status" }, { timeoutMs: 5000 });
+    if (res.type !== "status") return "unknown";
+    daemonVersion = res.codeVersion;
+    sessions = res.sessions;
+  } catch {
+    return "unknown"; // transient error — don't recycle on a bad signal
+  }
+  if (daemonVersion == null) return "unknown"; // daemon predates codeVersion reporting
+  if (daemonVersion === expected) return "fresh";
+  return sessions > 0 ? "stale-busy" : "stale-idle";
+}
+
+/** Stop the running daemon and wait for it to actually exit, so the next
+ *  ensureServer() spawns a fresh process. Graceful kill-server first, then a
+ *  pidfile SIGTERM/SIGKILL fallback for a wedged one. */
+async function recycleStaleServer(): Promise<void> {
+  const pid = getServerPid();
+  try {
+    await send({ type: "kill-server" }, { timeoutMs: 3000 });
+  } catch {
+    /* wedged or already gone — fall through to the pid-based fallback */
+  }
+  const stillAlive = (): boolean =>
+    pid !== null ? isProcessRunning(pid) : existsSync(getRouterSocket());
+  for (let i = 0; i < 50 && stillAlive(); i++) {
+    await Bun.sleep(100);
+  }
+  if (pid !== null && isProcessRunning(pid)) {
+    try { process.kill(pid, "SIGTERM"); } catch { /* raced to exit */ }
+    for (let i = 0; i < 20 && isProcessRunning(pid); i++) await Bun.sleep(100);
+    if (isProcessRunning(pid)) {
+      try { process.kill(pid, "SIGKILL"); } catch { /* raced to exit */ }
+      await Bun.sleep(200);
+    }
+  }
+  // Clear stale socket/pid files so isServerRunning() reports gone.
+  try { unlinkSync(getRouterSocket()); } catch { /* already gone */ }
+  cleanupStalePidFile();
+}
+
 // Start server if not running
 let ensureServerPromise: Promise<void> | null = null;
 
@@ -268,9 +335,24 @@ export async function ensureServer(): Promise<void> {
 
   ensureServerPromise = (async () => {
     if (await isServerRunning()) {
-      await send({ type: 'agent-state' });
-      await refreshHostingAfterEnsure();
-      return;
+      const freshness = await evaluateDaemonFreshness();
+      if (freshness === "stale-idle") {
+        console.error(
+          "[tmux-lite] running daemon is on a different code version than the current build — recycling it to load the new code",
+        );
+        await recycleStaleServer();
+        // fall through to spawn a fresh daemon below
+      } else {
+        if (freshness === "stale-busy") {
+          console.error(
+            "[tmux-lite] WARNING: the running daemon is on a different code version than the current build but has active sessions — " +
+              "it will keep serving the OLD code. Run `gssh machine tmux stop` (or stop your sessions) to reload when safe.",
+          );
+        }
+        await send({ type: 'agent-state' });
+        await refreshHostingAfterEnsure();
+        return;
+      }
     }
 
     {

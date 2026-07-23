@@ -644,8 +644,8 @@ export type Response =
   | { type: "error"; message: string; code?: string; processName?: string; portConflicts?: import('../processes/port-conflicts.js').PortConflictInfo[] }
   | { type: "inbox"; items: InboxItem[] }
   | { type: 'notification-config'; config: import('../../notifications/types.js').NotificationConfig }
-  | { type: "version"; version: string; protocol: number }
-  | { type: "status"; version: string; protocol: number; pid: number; uptime: number; sessions: number; attached: number };
+  | { type: "version"; version: string; protocol: number; codeVersion: string | null }
+  | { type: "status"; version: string; protocol: number; pid: number; uptime: number; sessions: number; attached: number; codeVersion: string | null };
 
 export interface Session {
   id: string;

@@ -16,6 +16,7 @@ import { registerVirtualTerminal, removeVirtualTerminal } from './virtual-sessio
 import { forwardVirtualTerminalOutput } from './virtual-output-forwarder.js';
 import { writeTraceLog } from '../../utils/trace-log.js';
 import { raiseFileDescriptorLimitAtBoot } from '../../utils/rlimit.js';
+import { getCodeVersion } from './code-version.js';
 import { getNotificationConfig, updateNotificationConfig, type NotificationConfig } from "../../core/config.js";
 import { DEFAULT_NOTIFICATION_CONFIG } from "../../types/config.js";
 import {
@@ -175,6 +176,9 @@ raiseFileDescriptorLimitAtBoot("tmux-lite-daemon");
 const ROUTER_SOCKET = getRouterSocket();
 const PID_FILE = getPidFile();
 const SERVER_START_TIME = Date.now();
+// Frozen at boot: the code identity this daemon is actually running. The CLI
+// compares it against the current value to recycle a daemon on stale code.
+const BOOT_CODE_VERSION = getCodeVersion();
 const RECORD_REPLAY_INPUT = process.env.TMUX_LITE_REPLAY_RECORD_INPUT === "1";
 const REPLAY_CHECKPOINT_MIN_INTERVAL_MS = 2000;
 const REPLAY_CHECKPOINT_BYTE_INTERVAL = 128 * 1024;
@@ -4444,6 +4448,9 @@ export async function dispatchCommand(cmd: Command): Promise<Response | null> {
               type: "version",
               version: PACKAGE_VERSION,
               protocol: PROTOCOL_VERSION,
+              // The code identity this daemon booted with; the CLI compares it to
+              // the current value to recycle a daemon on stale code.
+              codeVersion: BOOT_CODE_VERSION,
             };
             break;
 
@@ -4458,6 +4465,7 @@ export async function dispatchCommand(cmd: Command): Promise<Response | null> {
               uptime: Math.floor((Date.now() - SERVER_START_TIME) / 1000),
               sessions: sessionList.length,
               attached: attachedCount,
+              codeVersion: BOOT_CODE_VERSION,
             };
             break;
           }

@@ -245,6 +245,12 @@ const DEV_PASSWORD = 'dev';
 
 async function main(): Promise<void> {
   const sandboxName = deriveSandboxName();
+  // Per-dev-run code identity. Every dev:web launch mints a fresh token that all
+  // children (relay, serve→tmux-lite daemon, vite) inherit. On restart the token
+  // changes, so any tmux-lite daemon that survived from the previous run reports
+  // the OLD token and ensureServer() recycles it — this is what makes a dev:web
+  // restart actually reload server code (see src/lib/tmux-lite/code-version.ts).
+  process.env.GITSPACE_CODE_VERSION = `dev-${crypto.randomUUID()}`;
   // relayPort: random free port (no preferred port) so stale daemons can't
   // collide with us. vitePort prefers the classic 5173 for habitual DX.
   const [relayPort, vitePort] = await Promise.all([
