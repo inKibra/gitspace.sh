@@ -148,7 +148,7 @@ describe('rollupArtifacts', () => {
     expect(g(repoDir, 'worktree list').split('\n').length).toBe(2); // bare + done mount
   });
 
-  it('merges through an existing main mount and can remove the branch', async () => {
+  it('advances main in the object DB (not a mount working tree) and can remove the branch', async () => {
     const base = join(projectDir, 'base');
     mkdirSync(base, { recursive: true });
     mkdirSync(wsDir('ship'), { recursive: true });
@@ -156,10 +156,39 @@ describe('rollupArtifacts', () => {
     const mount = await ensureArtifactsMount(projectDir, wsDir('ship'), 'ship');
     await captureArtifacts(projectDir, mount, [{ path: 'r.md', content: 'r' }]);
     await rollupArtifacts(projectDir, 'ship', { removeBranch: true });
-    expect(readFileSync(join(baseMount, 'r.md'), 'utf8')).toBe('r'); // landed in the live main mount
     const { repoDir } = artifactPaths(projectDir);
+    // Landed on refs/heads/main in the object DB — readable without any worktree.
+    expect(g(repoDir, 'show main:r.md')).toBe('r');
+    // A base main mount is fast-forwarded (reset --keep) so it stays consistent
+    // with the ref we advanced — clean status, and the file is present — instead
+    // of showing phantom deletions.
+    expect(g(baseMount, 'status --porcelain')).toBe('');
+    expect(readFileSync(join(baseMount, 'r.md'), 'utf8')).toBe('r');
     expect(g(repoDir, 'branch --list ship')).toBe(''); // branch gone
     expect(existsSync(join(artifactsMountDir(wsDir('ship')), '.git'))).toBe(false); // mount gone
+  });
+
+  it('lands on main even when a mount has drifted onto another branch', async () => {
+    const base = join(projectDir, 'base');
+    mkdirSync(base, { recursive: true });
+    mkdirSync(wsDir('drifty'), { recursive: true });
+    const baseMount = await ensureArtifactsMount(projectDir, base, 'main');
+    const mount = await ensureArtifactsMount(projectDir, wsDir('drifty'), 'drifty');
+    const { repoDir } = artifactPaths(projectDir);
+    // Simulate the wrong-branch incident: the base mount gets checked out onto
+    // some OTHER branch. The old worktree-based rollup would have merged into
+    // whatever the mount sat on; the object-DB rollup must still advance main.
+    g(repoDir, 'branch other main');
+    g(baseMount, 'checkout other');
+    const driftyBefore = g(repoDir, 'rev-parse drifty');
+    await captureArtifacts(projectDir, mount, [{ path: 'proof.md', content: 'ok' }]);
+    const driftyAfterCapture = g(repoDir, 'rev-parse drifty');
+    await rollupArtifacts(projectDir, 'drifty');
+    expect(g(repoDir, 'show main:proof.md')).toBe('ok'); // main advanced
+    // The merge never advanced 'drifty' — its tip is exactly the capture commit.
+    expect(g(repoDir, 'rev-parse drifty')).toBe(driftyAfterCapture);
+    expect(driftyAfterCapture).not.toBe(driftyBefore); // capture did commit onto drifty
+    expect(g(repoDir, 'log --oneline drifty')).not.toContain('rollup');
   });
 
   it('aborts cleanly on conflicts', async () => {

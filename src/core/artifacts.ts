@@ -15,7 +15,7 @@
  * testable against temp dirs; command/daemon layers resolve project names.
  */
 
-import { exec, execFileSync, execSync } from 'child_process';
+import { exec, execFileSync, execSync, spawnSync } from 'child_process';
 import { promisify } from 'util';
 import { createHash } from 'crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync, appendFileSync } from 'fs';
@@ -394,9 +394,44 @@ export async function ensureArtifactsMount(projectDir: string, workspaceDir: str
     // makes 'worktree add' refuse the same path — prune first, always.
     await git(repoDir, 'worktree prune');
     await git(repoDir, `worktree add ${escapeShellArg(mountDir)} ${escapeShellArg(branch)}`);
+  } else {
+    await reconcileMountBranch(mountDir, branch);
   }
   await ensureCodeRepoExcludes(workspaceDir);
   return mountDir;
+}
+
+/**
+ * A linked mount can drift onto the wrong branch (someone ran `git checkout`
+ * inside `.gitspace/artifacts`, or a base mount got switched to a workspace
+ * branch — the historical wrong-branch incident). Roll-up no longer cares
+ * (it merges in the object DB), but reads through the mount's working tree
+ * would still return the wrong branch's content, so realign it here.
+ *
+ * SAFE-ONLY: never a destructive checkout over the sparse/curation working
+ * tree. If the mount has any uncommitted change it is LEFT AS-IS with a
+ * warning — realigning it would discard in-flight curation, which the mount
+ * model forbids. A clean mount is realigned with a plain branch checkout
+ * (loses nothing).
+ */
+async function reconcileMountBranch(mountDir: string, expected: string): Promise<void> {
+  let current: string;
+  try {
+    current = await git(mountDir, 'rev-parse --abbrev-ref HEAD');
+  } catch {
+    return; // not a healthy worktree — leave it for a higher-level repair
+  }
+  if (current === expected) return;
+  const dirty = (await git(mountDir, 'status --porcelain').catch(() => '')).trim();
+  if (dirty) {
+    console.warn(
+      `[artifacts] mount ${mountDir} is on '${current}', expected '${expected}', but has uncommitted changes — left as-is`,
+    );
+    return;
+  }
+  await git(mountDir, `checkout ${escapeShellArg(expected)}`).catch((e) => {
+    console.warn(`[artifacts] could not realign mount ${mountDir} to '${expected}': ${e instanceof Error ? e.message : e}`);
+  });
 }
 
 // ── LFS pointers ────────────────────────────────────────────────────────────
@@ -1021,13 +1056,51 @@ function buildFilteredRollupCommit(repoDir: string, branch: string): FilteredRol
 }
 
 /**
+ * 3-way merge two commits ENTIRELY in the object DB (no worktree, no index
+ * file, no checked-out branch). `git merge-tree --write-tree` finds
+ * merge-base(ours, theirs) itself and writes the merged tree, so the base is
+ * merge-base(main, branch) exactly as a real merge would use — disjoint goal
+ * folders stay conflict-free, a genuine same-path collision still surfaces.
+ *
+ * Exit 0 → clean, stdout's first line is the merged tree OID. Exit 1 →
+ * conflicts, first line is still a (conflicted) tree, remainder lists the
+ * offending paths. Any other status is a real git error.
+ */
+function mergeTreeWriteTree(
+  repoDir: string,
+  ours: string,
+  theirs: string,
+): { clean: boolean; tree: string; conflicts: string } {
+  const res = spawnSync('git', ['-C', repoDir, 'merge-tree', '--write-tree', ours, theirs], {
+    encoding: 'utf8',
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  if (res.error) throw new SpacesError(`git merge-tree failed: ${res.error.message}`, 'SYSTEM_ERROR', 1);
+  const stdout = res.stdout ?? '';
+  const tree = stdout.split('\n')[0]?.trim() ?? '';
+  if (res.status === 0) return { clean: true, tree, conflicts: '' };
+  if (res.status === 1) {
+    // After the tree OID and a blank line, git prints the conflicted-file
+    // section; surface its first path for the curate-manually message.
+    const rest = stdout.split('\n').slice(1).map((l) => l.trim()).filter(Boolean);
+    return { clean: false, tree, conflicts: rest.join(', ') };
+  }
+  throw new SpacesError(`git merge-tree failed: ${res.stderr || stdout || `exit ${res.status}`}`, 'SYSTEM_ERROR', 1);
+}
+
+/**
  * Merge a workspace's artifacts branch into main (no-ff, so roll-ups stay
  * visible in history) — FAVOURITES-AWARE. The canonical record always rolls
  * up; curated proof only when the user starred it (docs/ARTIFACTS-FS.md). A
  * filtered commit is composed off the branch tip (canonical + favourited only)
  * and that is what merges, so disjoint goal folders stay conflict-free while a
  * genuine same-path collision still surfaces as a conflict for manual curation.
- * Uses the existing main mount when present, otherwise a temporary worktree.
+ *
+ * The merge happens in the object DB and advances `refs/heads/main` by a
+ * compare-and-swap `update-ref` — it NEVER touches a worktree, so a mount that
+ * has drifted onto another branch can no longer capture the merge (the
+ * historical wrong-branch defect) and no mount's index/working tree is
+ * disturbed.
  */
 export async function rollupArtifacts(
   projectDir: string,
@@ -1053,49 +1126,94 @@ export async function rollupArtifacts(
   }
 
   const filtered = buildFilteredRollupCommit(repoDir, branch);
+  const message = opts.message ?? `rollup: ${branch}`;
 
-  let mainDir = await worktreeFor(repoDir, MAIN_BRANCH);
-  let temp: string | null = null;
-  if (!mainDir) {
-    temp = join(projectDir, `.artifacts-rollup-${Date.now()}`);
-    await git(repoDir, `worktree add ${escapeShellArg(temp)} ${MAIN_BRANCH}`);
-    mainDir = temp;
-  }
-  try {
-    const message = opts.message ?? `rollup: ${branch}`;
-    try {
-      await git(mainDir, `merge --no-ff -m ${escapeShellArg(message)} ${escapeShellArg(filtered.commit)}`, { id: true });
-    } catch (e) {
-      await git(mainDir, 'merge --abort').catch(() => undefined);
+  // Snapshot the base main mount's cleanliness BEFORE we advance the ref. If
+  // it is clean now, it carries no curation to lose, so we may hard-sync its
+  // working tree to the new tip afterwards; if it is dirty we leave it alone.
+  // (Checked before the ref move because advancing main behind a checked-out
+  // mount makes `status` show phantom deletions that can't be told apart from
+  // real edits after the fact.)
+  const mainMount = await worktreeFor(repoDir, MAIN_BRANCH);
+  const mainMountClean =
+    mainMount !== null && (await git(mainMount, 'status --porcelain').catch(() => 'dirty')).trim() === '';
+
+  // Retry the read-merge-CAS cycle if main advanced under us (a concurrent
+  // rollup); update-ref's compare-and-swap is the guard that makes this safe.
+  let mergeCommit = '';
+  for (let attempt = 0; ; attempt++) {
+    const oldMain = gitx(repoDir, ['rev-parse', MAIN_BRANCH]);
+    const merged = mergeTreeWriteTree(repoDir, oldMain, filtered.commit);
+    if (!merged.clean) {
       throw new SpacesError(
-        `Artifacts roll-up of ${branch} has conflicts — curate manually (${e instanceof Error ? e.message.split('\n')[0] : e})`,
+        `Artifacts roll-up of ${branch} has conflicts — curate manually${merged.conflicts ? ` (${merged.conflicts})` : ''}`,
         'USER_ERROR',
         1,
       );
     }
-    const mergeCommit = await git(mainDir, 'rev-parse HEAD');
-    // Provenance note: enrich with workspace + goal(s) + curation counts. Gate
-    // rating/state would need a goal-chain read (a module cycle from this
-    // dependency-light layer), so it is left to the richer trigger-confirmation
-    // surface (#48 follow-up) — this stays cheap.
-    const note = JSON.stringify({
-      tool: 'rollup',
-      workspace: branch,
-      goals: filtered.ownedGoalIds,
-      canonical: filtered.canonicalCount,
-      favorited: filtered.favoritedCount,
-      excluded: filtered.excludedCount,
+    // no-ff: two parents (oldMain, filtered tip) keep the roll-up a visible
+    // merge in history and keep the branch's real commits reachable.
+    const newMain = gitx(repoDir, ['commit-tree', merged.tree, '-p', oldMain, '-p', filtered.commit, '-m', message], {
+      id: true,
     });
-    await git(mainDir, `notes add -f -m ${escapeShellArg(note)} ${mergeCommit}`, { id: true }).catch(() => undefined);
-    if (opts.removeBranch) {
-      const mounted = await worktreeFor(repoDir, branch);
-      if (mounted) await git(repoDir, `worktree remove --force ${escapeShellArg(mounted)}`);
-      await git(repoDir, `branch -D ${escapeShellArg(branch)}`);
+    const cas = spawnSync('git', ['-C', repoDir, 'update-ref', `refs/heads/${MAIN_BRANCH}`, newMain, oldMain], {
+      encoding: 'utf8',
+    });
+    if (cas.status === 0) {
+      mergeCommit = newMain;
+      // A base mount checked out on main is now behind the ref we advanced
+      // (its working tree lacks the rolled-up files → phantom deletions in
+      // `status`, which a later capture there could commit back, reverting the
+      // roll-up). Hard-sync its working tree to the new tip — SAFE ONLY because
+      // we verified it was clean beforehand, so nothing is clobbered. A dirty
+      // mount is left untouched; reads should go through the object DB.
+      if (mainMount && mainMountClean) {
+        const sync = spawnSync('git', ['-C', mainMount, 'reset', '--hard', newMain], { encoding: 'utf8' });
+        if (sync.status !== 0) {
+          console.warn(
+            `[artifacts] base main mount ${mainMount} not synced after rollup (${(sync.stderr || '').trim()}) — read main via the object DB`,
+          );
+        }
+      } else if (mainMount) {
+        console.warn(
+          `[artifacts] base main mount ${mainMount} has local changes — not synced after rollup; read main via the object DB`,
+        );
+      }
+      break;
     }
-    return { mergeCommit };
-  } finally {
-    if (temp) await git(repoDir, `worktree remove --force ${escapeShellArg(temp)}`).catch(() => undefined);
+    if (attempt >= 3) {
+      throw new SpacesError(
+        `Artifacts roll-up of ${branch} kept losing the race for main — retry`,
+        'SYSTEM_ERROR',
+        1,
+      );
+    }
+    // main moved between rev-parse and update-ref: re-read and re-merge.
   }
+
+  // Provenance note: enrich with workspace + goal(s) + curation counts. Gate
+  // rating/state would need a goal-chain read (a module cycle from this
+  // dependency-light layer), so it is left to the richer trigger-confirmation
+  // surface (#48 follow-up) — this stays cheap.
+  const note = JSON.stringify({
+    tool: 'rollup',
+    workspace: branch,
+    goals: filtered.ownedGoalIds,
+    canonical: filtered.canonicalCount,
+    favorited: filtered.favoritedCount,
+    excluded: filtered.excludedCount,
+  });
+  try {
+    gitx(repoDir, ['notes', 'add', '-f', '-m', note, mergeCommit], { id: true });
+  } catch {
+    // provenance note is best-effort — never fail a completed roll-up on it
+  }
+  if (opts.removeBranch) {
+    const mounted = await worktreeFor(repoDir, branch);
+    if (mounted) await git(repoDir, `worktree remove --force ${escapeShellArg(mounted)}`);
+    await git(repoDir, `branch -D ${escapeShellArg(branch)}`);
+  }
+  return { mergeCommit };
 }
 
 /** Clean up stale worktree registrations after a workspace dir was deleted
