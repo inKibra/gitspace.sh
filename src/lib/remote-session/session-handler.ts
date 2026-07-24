@@ -1730,6 +1730,14 @@ export class RemoteSessionHandler {
         await this.handleTypedCommand(session, msg.requestId, { type: 'agent-remove-account', provider: msg.provider, credentialId: msg.credentialId }, sendResponse);
         break;
 
+      case 'check_agent_provider_usage':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, { type: 'agent-provider-usage', provider: msg.provider }, sendResponse);
+        break;
+
       case 'set_agent_provider_api_key':
         if (!canManage(session.accessType)) {
           await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });

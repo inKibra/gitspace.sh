@@ -438,6 +438,7 @@ export type Command =
   | { type: 'agent-set-approval-mode'; target: AgentWorkspaceTargetPayload; agentSessionId: string; mode: string }
   | { type: 'agent-auth-providers' }
   | { type: 'agent-remove-account'; provider: string; credentialId: number }
+  | { type: 'agent-provider-usage'; provider: string }
   | { type: 'agent-set-api-key'; provider: string; key: string }
   | { type: 'agent-get-settings' }
   | { type: 'agent-set-setting'; path: string; value: string | number | boolean | string[] }
@@ -580,6 +581,7 @@ export type Response =
   | { type: 'agent-set-model'; ok: boolean }
   | { type: 'agent-auth-providers'; providers: Array<{ provider: string; hasAuth: boolean; accounts?: Array<{ id: number; type: string; label: string; disabled: boolean }> }> }
   | { type: 'agent-remove-account'; ok: boolean }
+  | { type: 'agent-provider-usage'; accounts: Array<{ id: number; email?: string; ok: boolean | null; reason?: string; limits: Array<{ label: string; unit?: string; used?: number; limit?: number; remaining?: number; remainingFraction?: number; resetsAt?: number }> }> }
   | { type: 'agent-settings'; settings: Array<{ path: string; label: string; kind: 'boolean' | 'enum'; value: string | boolean | null; options?: string[] }> }
   | { type: 'agent-settings-schema'; schema: import('../../agents/agent-runtime-types.js').AgentSettingSchemaItem[] }
   | { type: 'agent-tools'; tools: import('../../agents/agent-runtime-types.js').AgentToolInfo[] }

@@ -284,6 +284,8 @@ export interface SessionBackend {
   getAgentAuthProviders?(): Promise<Array<{ provider: string; hasAuth: boolean; accounts?: Array<{ id: number; type: string; label: string; disabled: boolean }> }>>;
   /** Remove one account (credential) from a provider's pool by row id. */
   removeAgentProviderAccount?(provider: string, credentialId: number): Promise<boolean>;
+  /** Probe live usage/limit windows for a provider's accounts (on-demand). */
+  checkAgentProviderUsage?(provider: string): Promise<Array<{ id: number; email?: string; ok: boolean | null; reason?: string; limits: Array<{ label: string; unit?: string; used?: number; limit?: number; remaining?: number; remainingFraction?: number; resetsAt?: number }> }>>;
   /** Store an API key for a provider (machine-global). */
   setAgentProviderApiKey?(provider: string, key: string): Promise<boolean>;
   /** Read the curated agent settings catalog (machine-global). */

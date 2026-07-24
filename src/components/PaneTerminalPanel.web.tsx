@@ -320,6 +320,11 @@ export function PaneTerminalPanel({
     loadSettingsPanel();
     refreshControl();
   }, [backend, loadSettingsPanel, refreshControl]);
+  const handleCheckUsage = useCallback(async (provider: string) => {
+    const fn = backend?.checkAgentProviderUsage;
+    if (!fn) throw new Error('Not supported');
+    return fn.call(backend, provider);
+  }, [backend]);
   const handleSetSetting = useCallback(async (path: string, value: string | number | boolean | string[]) => {
     const fn = backend?.setAgentSetting;
     if (!fn) throw new Error('Not supported');
@@ -505,6 +510,7 @@ export function PaneTerminalPanel({
           onOAuthLogin={handleOAuthLogin}
           onOAuthRespond={handleOAuthRespond}
           onRemoveAccount={handleRemoveAccount}
+          onCheckUsage={handleCheckUsage}
           onCompact={handleCompact}
           onClose={() => { setSettingsOpen(false); setOauthFlow(null); oauthFlowIdRef.current = null; }}
         />

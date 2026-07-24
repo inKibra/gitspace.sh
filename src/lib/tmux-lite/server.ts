@@ -76,6 +76,7 @@ import {
   setAgentApprovalMode,
   getAgentAuthProviders,
   removeAgentProviderAccount,
+  checkAgentProviderUsage,
   setAgentProviderApiKey,
   getAgentSettings,
   setAgentSetting,
@@ -3873,6 +3874,17 @@ export async function dispatchCommand(cmd: Command): Promise<Response | null> {
             } catch (e) {
               const errMsg = e instanceof Error ? e.message : String(e);
               res = { type: 'error', message: `Failed to remove account: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-provider-usage':
+            try {
+              await getAgentControlReady();
+              const accounts = await checkAgentProviderUsage(cmd.provider);
+              res = { type: 'agent-provider-usage', accounts };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to check usage: ${errMsg}` };
             }
             break;
 

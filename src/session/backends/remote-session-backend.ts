@@ -3356,6 +3356,14 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     throw new Error('Unexpected remove-account response');
   }
 
+  async checkAgentProviderUsage(provider: string): Promise<Array<{ id: number; email?: string; ok: boolean | null; reason?: string; limits: Array<{ label: string; unit?: string; used?: number; limit?: number; remaining?: number; remainingFraction?: number; resetsAt?: number }> }>> {
+    await this.waitForInitialSnapshot();
+    const tmuxResponse = await this.sendRpcCommand({ type: 'check_agent_provider_usage', requestId: crypto.randomUUID(), provider });
+    if (tmuxResponse.type === 'agent-provider-usage') return tmuxResponse.accounts;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected provider-usage response');
+  }
+
   async setAgentProviderApiKey(provider: string, key: string): Promise<boolean> {
     await this.waitForInitialSnapshot();
     const tmuxResponse = await this.sendRpcCommand({ type: 'set_agent_provider_api_key', requestId: crypto.randomUUID(), provider, key });

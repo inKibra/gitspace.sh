@@ -471,6 +471,43 @@ export class PiCoordinator {
     }
   }
 
+  /** Probe live usage/limits for a provider's accounts (network round-trip via
+   *  the SDK's per-provider usage provider — e.g. Codex's rate-limit windows).
+   *  On-demand: it hits the upstream usage endpoint, so callers gate it behind
+   *  a user action rather than the settings-open path. */
+  async checkProviderUsage(provider: string): Promise<Array<{
+    id: number;
+    email?: string;
+    ok: boolean | null;
+    reason?: string;
+    limits: Array<{ label: string; unit?: string; used?: number; limit?: number; remaining?: number; remainingFraction?: number; resetsAt?: number }>;
+  }>> {
+    const auth = await createPiAuthStorage();
+    if (!auth.checkCredentials) return [];
+    try {
+      const results = await auth.checkCredentials({ timeoutMs: 12_000 });
+      return results
+        .filter((r) => r.provider === provider)
+        .map((r) => ({
+          id: r.id,
+          email: r.email,
+          ok: r.ok,
+          reason: r.reason,
+          limits: (r.report?.limits ?? []).map((l) => ({
+            label: l.label,
+            unit: l.unit,
+            used: l.used,
+            limit: l.limit,
+            remaining: l.remaining,
+            remainingFraction: l.remainingFraction,
+            resetsAt: l.resetsAt,
+          })),
+        }));
+    } catch {
+      return [];
+    }
+  }
+
   /** Store an API key for a provider. */
   async setProviderApiKey(provider: string, key: string): Promise<boolean> {
     const auth = await createPiAuthStorage();

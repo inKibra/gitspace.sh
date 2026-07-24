@@ -31,6 +31,7 @@ export function AgentSettingsPanel({
   onOAuthLogin,
   onOAuthRespond,
   onRemoveAccount,
+  onCheckUsage,
   onCompact,
   onClose,
 }: {
@@ -47,6 +48,7 @@ export function AgentSettingsPanel({
   onOAuthLogin: (provider: string) => void;
   onOAuthRespond: (value: string) => void;
   onRemoveAccount: (provider: string, credentialId: number) => Promise<void>;
+  onCheckUsage: (provider: string) => Promise<AccountUsage[]>;
   onCompact: () => void;
   onClose: () => void;
 }): ReactElement {
@@ -91,7 +93,7 @@ export function AgentSettingsPanel({
           {tab === 'usage' && <UsageTab control={control} />}
           {tab === 'context' && <ContextTab control={control} onCompact={onCompact} />}
           {tab === 'providers' && (
-            <ProvidersTab providers={providers} loading={loading} oauth={oauth} onOAuthLogin={onOAuthLogin} onOAuthRespond={onOAuthRespond} onSetApiKey={onSetApiKey} onRemoveAccount={onRemoveAccount} />
+            <ProvidersTab providers={providers} loading={loading} oauth={oauth} onOAuthLogin={onOAuthLogin} onOAuthRespond={onOAuthRespond} onSetApiKey={onSetApiKey} onRemoveAccount={onRemoveAccount} onCheckUsage={onCheckUsage} />
           )}
           {error && <div className="mt-2 text-[var(--gs-danger)]">⚠ {error}</div>}
         </div>
@@ -423,7 +425,19 @@ function ContextTab({ control, onCompact }: { control?: AgentControlInfo; onComp
   );
 }
 
-function ProvidersTab({ providers, loading, oauth, onOAuthLogin, onOAuthRespond, onSetApiKey, onRemoveAccount }: {
+type AccountUsage = { id: number; email?: string; ok: boolean | null; reason?: string; limits: Array<{ label: string; unit?: string; used?: number; limit?: number; remaining?: number; remainingFraction?: number; resetsAt?: number }> };
+
+/** Fraction of a limit window still available (0..1), from whichever field the
+ *  provider reported. Returns null when it can't be derived. */
+function remainingFractionOf(l: AccountUsage['limits'][number]): number | null {
+  if (typeof l.remainingFraction === 'number') return Math.max(0, Math.min(1, l.remainingFraction));
+  if (typeof l.remaining === 'number' && typeof l.limit === 'number' && l.limit > 0) return Math.max(0, Math.min(1, l.remaining / l.limit));
+  if (typeof l.used === 'number' && typeof l.limit === 'number' && l.limit > 0) return Math.max(0, Math.min(1, 1 - l.used / l.limit));
+  if (l.unit === 'percent' && typeof l.used === 'number') return Math.max(0, Math.min(1, 1 - l.used / 100));
+  return null;
+}
+
+function ProvidersTab({ providers, loading, oauth, onOAuthLogin, onOAuthRespond, onSetApiKey, onRemoveAccount, onCheckUsage }: {
   providers: AgentAuthProvider[];
   loading: boolean;
   oauth: ActiveOAuth;
@@ -431,13 +445,22 @@ function ProvidersTab({ providers, loading, oauth, onOAuthLogin, onOAuthRespond,
   onOAuthRespond: (v: string) => void;
   onSetApiKey: (p: string, key: string) => Promise<void>;
   onRemoveAccount: (provider: string, credentialId: number) => Promise<void>;
+  onCheckUsage: (provider: string) => Promise<AccountUsage[]>;
 }): ReactElement {
   const [editing, setEditing] = useState<string | null>(null);
   const [keyValue, setKeyValue] = useState('');
   const [promptValue, setPromptValue] = useState('');
   const [saving, setSaving] = useState(false);
   const [removingId, setRemovingId] = useState<number | null>(null);
+  const [usage, setUsage] = useState<Record<string, AccountUsage[]>>({});
+  const [usageLoading, setUsageLoading] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const checkUsage = async (provider: string) => {
+    setUsageLoading(provider); setErr(null);
+    try { setUsage((prev) => ({ ...prev, [provider]: await onCheckUsage(provider) })); }
+    catch (e) { setErr(e instanceof Error ? e.message : 'Usage check failed'); }
+    finally { setUsageLoading(null); }
+  };
   const saveKey = async (provider: string) => {
     if (!keyValue.trim()) return;
     setSaving(true); setErr(null);
@@ -472,27 +495,56 @@ function ProvidersTab({ providers, loading, oauth, onOAuthLogin, onOAuthRespond,
                 ? <span className="text-[var(--gs-success)]">✓ {(p.accounts?.length ?? 0) > 1 ? `${p.accounts!.length} accounts` : 'signed in'}</span>
                 : <span className="text-[var(--gs-text-dim)]">not signed in</span>}
               <button type="button" onClick={() => onOAuthLogin(p.provider)} className="ml-auto text-[var(--gs-accent)] hover:underline" title="Sign in another account — the SDK keeps them as a pool and rotates on rate limits">{(p.accounts?.length ?? 0) > 0 ? 'add account' : 'sign in'}</button>
+              {p.hasAuth && (
+                <button type="button" disabled={usageLoading === p.provider} onClick={() => void checkUsage(p.provider)} className="text-[var(--gs-accent)] hover:underline disabled:opacity-50" title="Fetch live plan usage / limits for this provider's accounts">{usageLoading === p.provider ? 'checking…' : 'usage'}</button>
+              )}
               <button type="button" onClick={() => { setEditing(editing === p.provider ? null : p.provider); setKeyValue(''); setErr(null); }} className="text-[var(--gs-accent)] hover:underline">{p.hasAuth ? 'update key' : 'add key'}</button>
             </div>
             {/* Account pool: each OAuth/API-key credential for this provider,
                 with per-account removal (the SDK auto-rotates across them). */}
             {(p.accounts?.length ?? 0) > 0 && (
               <div className="mt-1 flex flex-col gap-0.5 pl-3">
-                {p.accounts!.map((acct) => (
-                  <div key={acct.id} className="flex items-center gap-2 text-[11px]">
-                    <span className="text-[var(--gs-text-ghost)]">{acct.type === 'oauth' ? '◈' : '⚿'}</span>
-                    <span className={`min-w-0 flex-1 truncate font-[family-name:var(--gs-font-mono)] ${acct.disabled ? 'text-[var(--gs-text-ghost)] line-through' : 'text-[var(--gs-text-dim)]'}`} title={acct.disabled ? 'disabled (auth failed) — remove and re-add' : acct.label}>{acct.label}{acct.disabled ? ' — disabled' : ''}</span>
-                    <button
-                      type="button"
-                      disabled={removingId === acct.id}
-                      onClick={() => { setRemovingId(acct.id); void onRemoveAccount(p.provider, acct.id).catch((e) => setErr(e instanceof Error ? e.message : 'Remove failed')).finally(() => setRemovingId(null)); }}
-                      className="flex-shrink-0 text-[var(--gs-text-ghost)] hover:text-[var(--gs-danger)] disabled:opacity-40"
-                      title="Remove this account"
-                    >
-                      {removingId === acct.id ? '…' : '✕'}
-                    </button>
+                {p.accounts!.map((acct) => {
+                  const acctUsage = usage[p.provider]?.find((a) => a.id === acct.id);
+                  return (
+                  <div key={acct.id}>
+                    <div className="flex items-center gap-2 text-[11px]">
+                      <span className="text-[var(--gs-text-ghost)]">{acct.type === 'oauth' ? '◈' : '⚿'}</span>
+                      <span className={`min-w-0 flex-1 truncate font-[family-name:var(--gs-font-mono)] ${acct.disabled ? 'text-[var(--gs-text-ghost)] line-through' : 'text-[var(--gs-text-dim)]'}`} title={acct.disabled ? 'disabled (auth failed) — remove and re-add' : acct.label}>{acct.label}{acct.disabled ? ' — disabled' : ''}</span>
+                      <button
+                        type="button"
+                        disabled={removingId === acct.id}
+                        onClick={() => { setRemovingId(acct.id); void onRemoveAccount(p.provider, acct.id).catch((e) => setErr(e instanceof Error ? e.message : 'Remove failed')).finally(() => setRemovingId(null)); }}
+                        className="flex-shrink-0 text-[var(--gs-text-ghost)] hover:text-[var(--gs-danger)] disabled:opacity-40"
+                        title="Remove this account"
+                      >
+                        {removingId === acct.id ? '…' : '✕'}
+                      </button>
+                    </div>
+                    {acctUsage && (
+                      <div className="ml-4 mt-0.5 flex flex-col gap-0.5">
+                        {acctUsage.ok === false && <div className="text-[10px] text-[var(--gs-danger)]">⚠ {acctUsage.reason ?? 'usage check failed'}</div>}
+                        {acctUsage.ok !== false && acctUsage.limits.length === 0 && <div className="text-[10px] text-[var(--gs-text-ghost)]">no limit data reported</div>}
+                        {acctUsage.limits.map((l, i) => {
+                          const frac = remainingFractionOf(l);
+                          const pct = frac != null ? Math.round(frac * 100) : null;
+                          const barColor = frac == null ? 'var(--gs-text-dim)' : frac < 0.15 ? 'var(--gs-danger)' : frac < 0.4 ? 'var(--gs-warning)' : 'var(--gs-success)';
+                          return (
+                            <div key={i} className="flex items-center gap-1.5 text-[10px] text-[var(--gs-text-dim)]">
+                              <span className="w-16 shrink-0 truncate" title={l.label}>{l.label}</span>
+                              <div className="h-1.5 w-16 shrink-0 overflow-hidden border border-[var(--gs-border-muted)] bg-[var(--gs-bg)]">
+                                {pct != null && <div className="h-full" style={{ width: `${pct}%`, background: barColor }} />}
+                              </div>
+                              <span className="shrink-0 tabular-nums">{pct != null ? `${pct}% left` : (typeof l.remaining === 'number' ? `${l.remaining} left` : '—')}</span>
+                              {typeof l.resetsAt === 'number' && <span className="shrink-0 text-[var(--gs-text-ghost)]">· resets {new Date(l.resetsAt).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}</span>}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
                   </div>
-                ))}
+                  );
+                })}
               </div>
             )}
             {editing === p.provider && (

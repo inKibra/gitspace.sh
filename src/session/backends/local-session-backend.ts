@@ -1782,6 +1782,13 @@ export class LocalSessionBackend implements SessionBackend {
     throw new Error('Unexpected remove-account response');
   }
 
+  async checkAgentProviderUsage(provider: string): Promise<Array<{ id: number; email?: string; ok: boolean | null; reason?: string; limits: Array<{ label: string; unit?: string; used?: number; limit?: number; remaining?: number; remainingFraction?: number; resetsAt?: number }> }>> {
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'agent-provider-usage', provider });
+    if (tmuxResponse.type === 'agent-provider-usage') return tmuxResponse.accounts;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected provider-usage response');
+  }
+
   async setAgentProviderApiKey(provider: string, key: string): Promise<boolean> {
     const tmuxResponse = await this.sendTmuxCommand({ type: 'agent-set-api-key', provider, key });
     if (tmuxResponse.type === 'agent-bool') return tmuxResponse.ok;

@@ -662,6 +662,12 @@ export interface RemoveAgentProviderAccountRequest {
   credentialId: number;
 }
 
+export interface CheckAgentProviderUsageRequest {
+  type: 'check_agent_provider_usage';
+  requestId: string;
+  provider: string;
+}
+
 export interface SetAgentProviderApiKeyRequest {
   type: 'set_agent_provider_api_key';
   requestId: string;
@@ -1332,6 +1338,7 @@ export type ClientToMachineMessage =
   | SetAgentApprovalModeRequest
   | GetAgentAuthProvidersRequest
   | RemoveAgentProviderAccountRequest
+  | CheckAgentProviderUsageRequest
   | SetAgentProviderApiKeyRequest
   | GetAgentSettingsRequest
   | SetAgentSettingRequest
@@ -1520,6 +1527,7 @@ export function isBrowseMessage(msg: RemoteSessionMessage): msg is ClientToMachi
     'set_agent_approval_mode',
     'get_agent_auth_providers',
     'remove_agent_provider_account',
+    'check_agent_provider_usage',
     'set_agent_provider_api_key',
     'get_agent_settings',
     'set_agent_setting',

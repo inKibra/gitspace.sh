@@ -80,6 +80,19 @@ export interface OmpAuthStorage {
   }>;
   /** Remove ONE stored credential (account) by its row id. */
   removeCredential?(provider: string, credentialId: number): Promise<boolean>;
+  /** Probe each credential's provider usage endpoint (network). Returns per-
+   *  credential health + the subscription's limit windows (remaining/reset). */
+  checkCredentials?(options?: { timeoutMs?: number }): Promise<Array<{
+    id: number;
+    provider: string;
+    email?: string;
+    accountId?: string;
+    ok: boolean | null;
+    reason?: string;
+    report?: {
+      limits?: Array<{ label: string; unit?: string; used?: number; limit?: number; remaining?: number; remainingFraction?: number; resetsAt?: number }>;
+    };
+  }>>;
 }
 
 // ---------------------------------------------------------------------------

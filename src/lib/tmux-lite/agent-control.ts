@@ -559,6 +559,11 @@ export async function removeAgentProviderAccount(provider: string, credentialId:
   return defaultPiCoordinator.removeProviderAccount(provider, credentialId);
 }
 
+/** Probe live usage/limit windows for a provider's accounts (on-demand). */
+export async function checkAgentProviderUsage(provider: string): Promise<Array<{ id: number; email?: string; ok: boolean | null; reason?: string; limits: Array<{ label: string; unit?: string; used?: number; limit?: number; remaining?: number; remainingFraction?: number; resetsAt?: number }> }>> {
+  return defaultPiCoordinator.checkProviderUsage(provider);
+}
+
 /** Store an API key for a provider. */
 export async function setAgentProviderApiKey(provider: string, key: string): Promise<boolean> {
   return defaultPiCoordinator.setProviderApiKey(provider, key);
