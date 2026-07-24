@@ -32,10 +32,11 @@ const RESET = '\x1b[0m';
 const BOLD = '\x1b[1m';
 const DIM = '\x1b[2m';
 const COLORS = {
-  relay: '\x1b[36m',   // cyan
-  serve: '\x1b[33m',   // yellow
-  web:   '\x1b[35m',   // magenta
-  dev:   '\x1b[32m',   // green
+  relay:  '\x1b[36m',   // cyan
+  serve:  '\x1b[33m',   // yellow
+  web:    '\x1b[35m',   // magenta
+  dev:    '\x1b[32m',   // green
+  daemon: '\x1b[34m',   // blue — tmux-lite daemon log (startup, caps, wedge points)
 };
 
 function prefix(label: keyof typeof COLORS): string {
@@ -118,6 +119,31 @@ function deriveDevRuntimeDir(): string {
 
 const children: Subprocess[] = [];
 let shuttingDown = false;
+let daemonLogTail: Subprocess | null = null;
+
+/**
+ * Surface the tmux-lite daemon log in the dev console. The daemon is a detached
+ * grandchild whose stdout/stderr go to a log FILE, so its startup, [snapshot-cap]
+ * / [agent-state-cap], serve-activation step logs, and any wedge point were
+ * invisible here — you had to know the path and cat it. Tail it with a [daemon]
+ * prefix so everything the daemon says shows up live alongside relay/serve/web.
+ */
+function tailDaemonLog(sandboxName: string): void {
+  if (daemonLogTail) return;
+  const logPath = `/tmp/tmux-lite-${sandboxName}/tmux-lite-daemon.log`;
+  try {
+    // -n 100: recent context; -F: follow by name even though the file may not
+    // exist yet (the daemon creates it when it first spawns) and across recreation.
+    daemonLogTail = spawn(['tail', '-n', '100', '-F', logPath], {
+      cwd: ROOT,
+      stdout: 'pipe',
+      stderr: 'ignore',
+    });
+    pipeOutput(daemonLogTail, 'daemon');
+  } catch (err) {
+    log('dev', `could not tail daemon log (${logPath}): ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
 
 function pipeOutput(proc: Subprocess, label: keyof typeof COLORS): void {
   const pfx = prefix(label);
@@ -215,6 +241,10 @@ async function shutdown(exitCode = 0): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
   log('dev', 'Shutting down...');
+
+  // Stop tailing the daemon log first so it doesn't emit during teardown.
+  try { daemonLogTail?.kill('SIGTERM'); } catch { /* already gone */ }
+  daemonLogTail = null;
 
   // Kill in reverse order: vite -> serve -> relay
   for (const child of [...children].reverse()) {
@@ -452,6 +482,11 @@ async function main(): Promise<void> {
   // the identity, activates the serve runtime inside the tmux-lite daemon,
   // and EXITS 0. Deliberately not spawnChild-tracked — a clean exit is the
   // success signal here, not a stack failure.
+  // Surface the daemon log NOW — serve activation spawns the daemon, and this is
+  // exactly where a wedge (e.g. an oversized startup scan) would otherwise be an
+  // opaque 15s serve-activate timeout. -F handles the file not existing yet.
+  tailDaemonLog(sandboxName);
+
   log('dev', 'Activating serve in the machine daemon...');
   const serveProc = spawn([
     'bun', ENTRY, 'machine', 'serve', 'start',

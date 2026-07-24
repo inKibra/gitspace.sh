@@ -173,16 +173,28 @@ export function ensureAgentControlInitialized(): Promise<void> {
  */
 async function seedPiSessions(): Promise<void> {
   const snapshot = defaultAgentEventManager.getSnapshot();
-  for (const workspaceId of Object.keys(snapshot)) {
+  const workspaceIds = Object.keys(snapshot);
+  const startedAt = Date.now();
+  let sessionCount = 0;
+  for (const workspaceId of workspaceIds) {
     try {
       const target = buildTargetFromWorkspaceId(workspaceId);
       if (!target) continue;
+      const wsStart = Date.now();
       const sessions = await defaultPiCoordinator.refreshAgentSessions(target);
+      sessionCount += sessions.length;
       defaultAgentEventManager.syncKnownSessions(workspaceId, sessions);
+      const wsElapsed = Date.now() - wsStart;
+      // A slow workspace here (many/large transcripts) blocks daemon startup and
+      // is the classic serve-activate wedge — surface it rather than hide it.
+      if (wsElapsed > 1000) {
+        console.error(`[seed-pi] slow workspace ${workspaceId}: ${sessions.length} session(s) in ${wsElapsed}ms`);
+      }
     } catch {
       // non-fatal — workspace may not have Pi sessions yet
     }
   }
+  console.error(`[seed-pi] seeded ${sessionCount} session(s) across ${workspaceIds.length} workspace(s) in ${Date.now() - startedAt}ms`);
 }
 
 function buildTargetFromWorkspaceId(workspaceId: string): PiWorkspaceTarget | null {
