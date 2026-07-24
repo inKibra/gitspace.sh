@@ -741,37 +741,42 @@ export function createRelayServer(config: RelayServerConfig): Server<WebSocketDa
           // Also file the GitHub issue — the relay is co-located with the machine
           // and shares its gh auth, so a report still becomes an issue even when
           // the daemon is frozen. Best-effort; the disk report is the guarantee.
-          let issueUrl: string | undefined;
-          let issueNumber: number | undefined;
-          try {
-            const { createIssue, createGist, reportRepoSlug } = await import('../core/github-issues.js');
-            const noteStr = String(body.note ?? '').trim();
-            const title = (noteStr.split('\n')[0] || 'Problem report').slice(0, 120);
-            const cb = (body.clientBundle ?? {}) as { url?: string; userAgent?: string; ring?: Array<{ kind: string; message: string }>; domSnapshot?: string };
-            const ring = Array.isArray(cb.ring) ? cb.ring : [];
-            // Attach the FULL logs (read from disk) as a gist — no truncation.
-            const logsUrl = await createGist([
-              { name: 'report.json', content: JSON.stringify(report, null, 2) },
-              { name: 'daemon.log', content: serverDisk.daemonLogTail },
-              { name: 'crash.log', content: serverDisk.crashLogTail },
-              { name: 'server-trace.log', content: serverDisk.traceTail },
-              { name: 'client-console.log', content: ring.map((e) => `[${e.kind}] ${e.message}`).join('\n') },
-              ...(cb.domSnapshot ? [{ name: 'dom-snapshot.html', content: cb.domSnapshot }] : []),
-            ], `GitSpace problem report (relay fallback) — ${new Date().toISOString()}`);
-            const issueBody = [
-              noteStr, '', '---', '**Environment** (relay fallback — machine daemon unreachable)',
-              cb.url ? `- page: ${cb.url}` : '', cb.userAgent ? `- ua: ${cb.userAgent}` : '',
-              '', `**Recent client errors (${ring.length})**`,
-              ...(ring.length ? ['```', ...ring.slice(-15).map((e) => `[${e.kind}] ${e.message}`), '```'] : ['_none captured_']),
-              '',
-              logsUrl ? `**Full logs** (daemon, crash, trace, client console, DOM): ${logsUrl}` : '_Full logs saved to the machine-local report.json (gist upload unavailable)._',
-              '', '_Filed from GitSpace · report a problem (relay fallback). Diagnostics read from disk; redacted._',
-            ].filter(Boolean).join('\n');
-            const issue = await createIssue({ slug: reportRepoSlug(), title, body: issueBody, labels: ['gitspace-report'], cwd: root });
-            issueUrl = issue.url;
-            issueNumber = issue.number;
-          } catch { /* keep the disk report; issue stays unfiled */ }
-          return Response.json({ ok: true, path, issueUrl, issueNumber }, { headers: { 'Cache-Control': 'no-store' } });
+          // File in the BACKGROUND and only wait a small budget: a hammered relay
+          // or slow gh/GitHub must not hold the HTTP response past the client's
+          // report timeout and cost the user their report. The disk report (with
+          // both machine + relay logs, read above) is already persisted.
+          const { raceReportFiling } = await import('../lib/tmux-lite/problem-report.js');
+          const filing = (async (): Promise<{ issueUrl?: string; issueNumber?: number }> => {
+            try {
+              const { createIssue, createGist, reportRepoSlug } = await import('../core/github-issues.js');
+              const noteStr = String(body.note ?? '').trim();
+              const title = (noteStr.split('\n')[0] || 'Problem report').slice(0, 120);
+              const cb = (body.clientBundle ?? {}) as { url?: string; userAgent?: string; ring?: Array<{ kind: string; message: string }>; domSnapshot?: string };
+              const ring = Array.isArray(cb.ring) ? cb.ring : [];
+              // Attach the FULL logs (read from disk) as a gist — no truncation.
+              const logsUrl = await createGist([
+                { name: 'report.json', content: JSON.stringify(report, null, 2) },
+                { name: 'daemon.log', content: serverDisk.daemonLogTail },
+                { name: 'crash.log', content: serverDisk.crashLogTail },
+                { name: 'server-trace.log', content: serverDisk.traceTail },
+                { name: 'client-console.log', content: ring.map((e) => `[${e.kind}] ${e.message}`).join('\n') },
+                ...(cb.domSnapshot ? [{ name: 'dom-snapshot.html', content: cb.domSnapshot }] : []),
+              ], `GitSpace problem report (relay fallback) — ${new Date().toISOString()}`);
+              const issueBody = [
+                noteStr, '', '---', '**Environment** (relay fallback — machine daemon unreachable)',
+                cb.url ? `- page: ${cb.url}` : '', cb.userAgent ? `- ua: ${cb.userAgent}` : '',
+                '', `**Recent client errors (${ring.length})**`,
+                ...(ring.length ? ['```', ...ring.slice(-15).map((e) => `[${e.kind}] ${e.message}`), '```'] : ['_none captured_']),
+                '',
+                logsUrl ? `**Full logs** (daemon, crash, trace, client console, DOM): ${logsUrl}` : '_Full logs saved to the machine-local report.json (gist upload unavailable)._',
+                '', '_Filed from GitSpace · report a problem (relay fallback). Diagnostics read from disk; redacted._',
+              ].filter(Boolean).join('\n');
+              const issue = await createIssue({ slug: reportRepoSlug(), title, body: issueBody, labels: ['gitspace-report'], cwd: root });
+              return { issueUrl: issue.url, issueNumber: issue.number };
+            } catch { return {}; /* keep the disk report; issue stays unfiled */ }
+          })();
+          const filed = await raceReportFiling(filing);
+          return Response.json({ ok: true, path, issueUrl: filed.issueUrl, issueNumber: filed.issueNumber }, { headers: { 'Cache-Control': 'no-store' } });
         } catch {
           return new Response("Report failed", { status: 500, headers: { 'Cache-Control': 'no-store' } });
         }

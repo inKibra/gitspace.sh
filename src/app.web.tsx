@@ -3074,11 +3074,25 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
         );
       terminalMemoryDebugGauge('app.workspacePaneEntries', workspacePaneEntries.length);
       const runtime = workspace.selectionKey ? workspaceRuntime.runtimeByWorkspace[workspace.selectionKey] ?? null : null;
+      // Agent status for the transcript header must come from the SAME
+      // authoritative source the sidebar/kanban read — the machine snapshot's
+      // agentSessionsById, where open ask-dialogs are folded into
+      // 'permission-needed'. runtime.agentSessions is a separate copy that does
+      // not carry the dialog fold, which is why the header stayed green ("shows
+      // yellow in the sidebar and kanban but not at the top of the transcript").
+      const paneSnapshotAgents = paneBackendKey
+        ? multi.getBackendState(paneBackendKey)?.snapshot?.agentSessionsById
+        : undefined;
       const panels: import('./components/DockviewWorkspaceShell.web.js').DockviewTerminalPanel[] = workspacePaneEntries.map((pane) => {
         const shortSessionName = (pane.sessionName ?? pane.sessionId).split(':').pop() ?? pane.sessionId;
         const agentSession = pane.agentSessionId
           ? runtime?.agentSessions.find((session) => session.id === pane.agentSessionId)
           : null;
+        const snapshotAgentState = pane.agentSessionId
+          ? (paneSnapshotAgents?.[pane.agentSessionId]?.state as string | undefined)
+          : undefined;
+        const paneRunning = snapshotAgentState === 'running';
+        const paneAwaitingInput = snapshotAgentState === 'permission-needed';
         const title = agentSession
           ? getAgentSessionDisplayTitle({ id: agentSession.id, title: agentSession.title })
           : pane.agentSessionId
@@ -3095,14 +3109,17 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
           inputMode,
           String(keyboardVisible),
           String(showInlineFloatingControls),
-          String((agentSession as { state?: string } | null | undefined)?.state === 'running'),
+          // Encode the FULL agent state so any transition (e.g.
+          // running→permission-needed) bumps the version and the dock panel
+          // actually re-renders — 'running'-only missed the amber transition.
+          snapshotAgentState ?? '',
         ].join('|');
         terminalMemoryDebugIncrement('app.terminalPanelDescriptor.created');
         return {
           id: pane.paneId,
           title,
           version: panelVersion,
-          running: (agentSession as { state?: string } | null | undefined)?.state === 'running',
+          running: paneRunning,
           onClose: () => paneBackend?.detachPane?.(pane.paneId).catch(() => undefined),
           render: () => (
             <PaneTerminalPanel
@@ -3125,7 +3142,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
               modifiers={modifiers}
               onModifiersChange={setModifiers}
               showFloatingControls={showInlineFloatingControls}
-              awaitingInput={(agentSession as { state?: string } | null | undefined)?.state === 'permission-needed'}
+              awaitingInput={paneAwaitingInput}
             />
           ),
         };

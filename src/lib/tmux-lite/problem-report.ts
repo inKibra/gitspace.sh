@@ -117,6 +117,28 @@ export function writeProblemReport(
   return { path: writeRedactedReport(redacted, now) };
 }
 
+/**
+ * How long a report submission WAITS for the GitHub filing before responding.
+ * Kept comfortably under the client's report-RPC timeout (report-client.web.ts,
+ * RPC_TIMEOUT_MS = 4000) so a slow gh/GitHub can't turn a successful, disk-saved
+ * report into a client-side timeout. The filing keeps running past this budget.
+ */
+export const REPORT_FILING_BUDGET_MS = 3000;
+
+/** Wait for `filing` up to the budget; on expiry return empty and let it run on. */
+export function raceReportFiling<T extends { issueUrl?: string; issueNumber?: number }>(
+  filing: Promise<T>,
+  budgetMs = REPORT_FILING_BUDGET_MS,
+): Promise<{ issueUrl?: string; issueNumber?: number }> {
+  // filing already catches its own errors (resolves, never rejects), so the
+  // background continuation after a timeout can't surface an unhandled rejection.
+  return Promise.race([
+    filing,
+    new Promise<{ issueUrl?: string; issueNumber?: number }>((resolve) =>
+      setTimeout(() => resolve({}), budgetMs)),
+  ]);
+}
+
 function writeRedactedReport(redacted: ProblemReport, now: number): string {
   const stamp = new Date(now).toISOString().replace(/[:.]/g, '-');
   const dir = join(getWorkspaceRoot(), '.logs', 'reports', stamp);
@@ -219,27 +241,33 @@ export async function fileProblemReport(
   const { redacted } = buildProblemReport(note, clientBundle, now, options);
   const path = writeRedactedReport(redacted, now);
 
-  let issueUrl: string | undefined;
-  let issueNumber: number | undefined;
-  try {
-    const { createIssue, createGist, reportRepoSlug } = await import('../../core/github-issues.js');
-    // Attach the FULL logs (no truncation) as a gist, link it in the issue.
-    const logsUrl = await createGist(
-      issueLogFiles(redacted),
-      `GitSpace problem report — ${new Date(now).toISOString()}`,
-      exec,
-    );
-    const { title, body } = issueTitleAndBody(redacted, logsUrl ?? undefined);
-    const issue = await createIssue(
-      { slug: reportRepoSlug(), title, body, labels: ['gitspace-report'], cwd: getWorkspaceRoot() },
-      exec,
-    );
-    issueUrl = issue.url;
-    issueNumber = issue.number;
-  } catch (e) {
-    console.error(`[report] GitHub issue filing failed (report saved locally at ${path}): ${e instanceof Error ? e.message : String(e)}`);
-  }
-  return { path, issueUrl, issueNumber };
+  // The disk report is the guarantee; GitHub filing is best-effort. A hammered
+  // machine (or slow gh/GitHub) must NOT hold the RPC open past the client's
+  // timeout and cost the user their whole report — so we file in the background
+  // and only WAIT for it up to a small budget. If it lands in time the caller
+  // gets the issue url; otherwise it keeps filing after we've already responded.
+  const filing = (async (): Promise<{ issueUrl?: string; issueNumber?: number }> => {
+    try {
+      const { createIssue, createGist, reportRepoSlug } = await import('../../core/github-issues.js');
+      // Attach the FULL logs (no truncation) as a gist, link it in the issue.
+      const logsUrl = await createGist(
+        issueLogFiles(redacted),
+        `GitSpace problem report — ${new Date(now).toISOString()}`,
+        exec,
+      );
+      const { title, body } = issueTitleAndBody(redacted, logsUrl ?? undefined);
+      const issue = await createIssue(
+        { slug: reportRepoSlug(), title, body, labels: ['gitspace-report'], cwd: getWorkspaceRoot() },
+        exec,
+      );
+      return { issueUrl: issue.url, issueNumber: issue.number };
+    } catch (e) {
+      console.error(`[report] GitHub issue filing failed (report saved locally at ${path}): ${e instanceof Error ? e.message : String(e)}`);
+      return {};
+    }
+  })();
+  const filed = await raceReportFiling(filing);
+  return { path, issueUrl: filed.issueUrl, issueNumber: filed.issueNumber };
 }
 
 /**
