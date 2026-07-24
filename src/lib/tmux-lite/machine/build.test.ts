@@ -70,6 +70,36 @@ describe('buildMachineSnapshot', () => {
     expect(snapshot.workspacesById['demo:ws-1']?.summary.runningAgentCount).toBe(0);
     expect(snapshot.workspacesById['demo:ws-1']?.summary.waitingAgentCount).toBe(1);
   });
+  it('caps an oversized snapshot below the reassembly ceiling by trimming heavy fields', () => {
+    // A single session with ~30 MiB of queued text would push the snapshot past
+    // the client's frame reassembly cap and kill the connection. The build must
+    // shed it down under budget instead.
+    const huge = 'x'.repeat(30 * 1024 * 1024);
+    const snapshot = buildMachineSnapshot({
+      snapshotNonce: 1,
+      terminalSessions: [],
+      workspaces: [makeWorkspace()],
+      agentStateByWorkspaceId: {
+        'demo:ws-1': {
+          workspaceId: 'demo:ws-1',
+          sessions: [{ id: 'agent-1', title: 'Agent 1' }],
+          statuses: {},
+          pendingPermissions: {},
+          pendingQuestions: {},
+          lastMessages: {},
+          errorMessages: {},
+          todoPhases: {},
+          modelInfo: {},
+          queuedMessages: { 'agent-1': { steering: [huge], followUp: [] } },
+        } satisfies WorkspaceAgentState,
+      },
+    });
+
+    // Session still present (existence preserved), heavy text trimmed.
+    expect(snapshot.agentSessionsById['agent-1']).toBeDefined();
+    expect((snapshot.agentSessionsById['agent-1']?.queuedMessages?.steering[0]?.length ?? 0)).toBeLessThanOrEqual(200);
+    expect(JSON.stringify(snapshot).length).toBeLessThan(128 * 1024 * 1024);
+  });
   it('treats a compacting agent as running (active), so the board green-pulses it', () => {
     const snapshot = buildMachineSnapshot({
       snapshotNonce: 1,

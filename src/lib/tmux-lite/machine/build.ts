@@ -418,6 +418,76 @@ function listGoalsForSnapshot(projectNames: string[]): {
 }
 
 
+/**
+ * Hard ceiling on the serialized machine snapshot, kept well under the client's
+ * frame reassembly cap (frame-chunk.ts MAX_REASSEMBLED_BYTES = 128 MiB). A
+ * snapshot that crosses the reassembly cap is DROPPED by the client as a
+ * "malformed chunk" and the whole app dies with "Connection failed" — there is
+ * no recovery. So the daemon must never emit one that big. This budget triggers
+ * only in the pathological case (normal snapshots are tens of KB); when it does,
+ * we degrade the at-a-glance projection rather than kill the connection.
+ */
+const SNAPSHOT_SIZE_BUDGET_BYTES = 24 * 1024 * 1024;
+/** When trimming, how much per-message/preview text to keep for display. */
+const CAP_TEXT_CHARS = 200;
+const CAP_TODO_PHASES = 40;
+
+/** Enforce SNAPSHOT_SIZE_BUDGET_BYTES by progressively trimming the heaviest
+ *  per-session fields (freshly built here, so mutating them is safe). Logs
+ *  `[snapshot-cap]` with the top byte contributors so an oversized snapshot is
+ *  self-diagnosing — this is the diagnostic we otherwise had to ask users for. */
+function enforceSnapshotSizeBudget(snapshot: MachineSnapshot): MachineSnapshot {
+  let json: string;
+  try { json = JSON.stringify(snapshot); } catch { return snapshot; }
+  if (json.length <= SNAPSHOT_SIZE_BUDGET_BYTES) return snapshot;
+
+  const before = json.length;
+  const records = Object.values(snapshot.agentSessionsById);
+  const top = records
+    .map((r) => ({
+      id: r.id.slice(0, 8),
+      bytes: JSON.stringify(r).length,
+      queued: JSON.stringify(r.queuedMessages ?? null).length,
+      todo: JSON.stringify(r.todoPhases ?? null).length,
+      lastMsg: (r.lastMessagePreview ?? '').length,
+    }))
+    .sort((a, b) => b.bytes - a.bytes)
+    .slice(0, 10);
+
+  const applied: string[] = [];
+  const pass = (label: string, fn: (r: MachineAgentSessionRecord) => void): boolean => {
+    for (const r of records) fn(r);
+    applied.push(label);
+    json = JSON.stringify(snapshot);
+    return json.length <= SNAPSHOT_SIZE_BUDGET_BYTES;
+  };
+
+  // Order matters: shed the fields most likely to carry raw pasted text first.
+  const done =
+    pass('queuedMessages', (r) => {
+      if (!r.queuedMessages) return;
+      r.queuedMessages = {
+        steering: r.queuedMessages.steering.map((m) => m.slice(0, CAP_TEXT_CHARS)),
+        followUp: r.queuedMessages.followUp.map((m) => m.slice(0, CAP_TEXT_CHARS)),
+      };
+    })
+    || pass('todoPhases', (r) => {
+      if (Array.isArray(r.todoPhases) && r.todoPhases.length > CAP_TODO_PHASES) {
+        r.todoPhases = r.todoPhases.slice(0, CAP_TODO_PHASES);
+      }
+    })
+    || pass('lastMessagePreview', (r) => {
+      if (r.lastMessagePreview) r.lastMessagePreview = r.lastMessagePreview.slice(0, CAP_TEXT_CHARS);
+    });
+
+  console.error(
+    `[snapshot-cap] snapshot ${before} bytes exceeded budget ${SNAPSHOT_SIZE_BUDGET_BYTES}; `
+    + `trimmed [${applied.join(', ')}] -> ${json.length} bytes${done ? '' : ' (STILL OVER)'}; `
+    + `top contributors: ${top.map((t) => `${t.id}=${t.bytes}b(q${t.queued}/t${t.todo}/m${t.lastMsg})`).join(', ')}`,
+  );
+  return snapshot;
+}
+
 export function buildMachineSnapshot(params: {
   snapshotNonce: number;
   terminalSessions: Session[];
@@ -580,7 +650,7 @@ export function buildMachineSnapshot(params: {
     };
   }
 
-  return {
+  return enforceSnapshotSizeBudget({
     snapshotNonce,
     generatedAt: new Date().toISOString(),
     projectsById,
@@ -601,5 +671,5 @@ export function buildMachineSnapshot(params: {
     replayIdsByWorkspaceId: {},
     notificationsById: {},
     notificationOrder: [],
-  };
+  });
 }
