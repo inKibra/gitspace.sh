@@ -190,6 +190,11 @@ function RepoMode({ backend, workspaceId, projectName, workspaceName, onOpenFile
   const [changed, setChanged] = useState<ReviewChangedFile[]>([]);
   const [baseBranch, setBaseBranch] = useState<string>('');
   const [baseOverride, setBaseOverride] = useState<string>('');
+  const [branches, setBranches] = useState<string[]>([]);
+  /** Tree scope: 'all' shows the full working directory (tracked + untracked
+   *  on disk); 'changed' filters to files that differ from base. Defaults to
+   *  changed while reviewing, full otherwise. */
+  const [treeFilter, setTreeFilter] = useState<'all' | 'changed'>(reviewing ? 'changed' : 'all');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [commitMsg, setCommitMsg] = useState('');
@@ -229,6 +234,7 @@ function RepoMode({ backend, workspaceId, projectName, workspaceName, onOpenFile
         if (r && 'op' in r && r.op === 'changed_files') {
           setChanged((r as { files: ReviewChangedFile[] }).files ?? []);
           setBaseBranch((r as { baseBranch?: string }).baseBranch ?? '');
+          setBranches((r as { branches?: string[] }).branches ?? []);
         }
       });
     void Promise.allSettled([tree, changes])
@@ -266,9 +272,22 @@ function RepoMode({ backend, workspaceId, projectName, workspaceName, onOpenFile
       <div className="flex min-h-0 flex-1 flex-col">
         <div className="flex h-[30px] flex-shrink-0 items-center gap-[7px] border-b border-[var(--gs-border-muted)] px-3 text-[10px] uppercase tracking-[.1em] text-[var(--gs-text-muted)]">
           <span>▾</span>
-          {reviewing ? 'Diffs' : 'Files'}
+          {treeFilter === 'changed' ? 'Diffs' : 'Files'}
           {reviewing && <span className="rounded-full border border-[#4a3a1f] px-1.5 normal-case tracking-normal text-[var(--gs-warning)]">review</span>}
-          <span className="ml-auto normal-case tracking-normal text-[var(--gs-text-ghost)]">backed by <span className="text-[var(--gs-text-dim)]">@pierre/trees</span></span>
+          {/* Scope toggle: full working dir (on disk, incl. untracked) vs only-changed. */}
+          <span className="ml-auto flex items-center gap-0.5 normal-case tracking-normal">
+            {(['all', 'changed'] as const).map((f) => (
+              <button
+                key={f}
+                type="button"
+                onClick={() => setTreeFilter(f)}
+                className={`px-1.5 py-0.5 text-[10px] ${treeFilter === f ? 'bg-[var(--gs-bg-active)] text-[var(--gs-text)]' : 'text-[var(--gs-text-dim)] hover:text-[var(--gs-text)]'}`}
+                title={f === 'all' ? 'All files on disk (tracked + untracked)' : 'Only files changed vs base'}
+              >
+                {f === 'all' ? 'All' : 'Changed'}
+              </button>
+            ))}
+          </span>
         </div>
         <div className="flex flex-shrink-0 items-center gap-2 border-b border-[var(--gs-border-muted)] px-3 py-1.5 text-[11px]">
           <span className="text-[var(--gs-text-dim)]">diff vs</span>
@@ -277,7 +296,7 @@ function RepoMode({ backend, workspaceId, projectName, workspaceName, onOpenFile
             onChange={(e) => setBaseOverride(e.target.value === baseBranch ? '' : e.target.value)}
             className="border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-1.5 py-0.5 text-[11px] text-[var(--gs-text)]"
           >
-            {[...new Set([baseBranch || 'main', 'main', 'develop'])].map((b) => <option key={b} value={b}>{b}</option>)}
+            {[...new Set([baseBranch, ...branches].filter(Boolean))].map((b) => <option key={b} value={b}>{b}</option>)}
           </select>
         </div>
         <div className="flex flex-shrink-0 items-center gap-1.5 border-b border-[var(--gs-border-muted)] px-3 py-1.5 text-[11px]">
@@ -313,7 +332,16 @@ function RepoMode({ backend, workspaceId, projectName, workspaceName, onOpenFile
           ) : error ? (
             <div className="px-3 py-3 text-center text-[var(--gs-danger)]">{error}</div>
           ) : (
-            <PierreRepoTree entries={entries} changedSet={changedSet} onOpenFile={onOpenFile} />
+            <PierreRepoTree
+              entries={treeFilter === 'changed'
+                // "Changed" = differs from base right now: committed diffs
+                // (changedSet) OR any working-tree status (modified, staged, or
+                // untracked '?') so on-disk/untracked edits show here too.
+                ? entries.filter((e) => changedSet.has(e.path) || Boolean(e.status))
+                : entries}
+              changedSet={changedSet}
+              onOpenFile={onOpenFile}
+            />
           )}
         </div>
       </div>

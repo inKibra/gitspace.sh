@@ -251,11 +251,13 @@ export async function executeLocalReviewOperation(
         scan
       );
       const changed = await getWorkspaceChangedFiles(workspace.path, operation.base ?? workspace.baseBranch);
+      const { listLocalBranches } = await import('./git.js');
       return {
         op: 'changed_files',
         files: changed.files,
         baseBranch: changed.baseBranch,
         headBranch: changed.headBranch,
+        branches: await listLocalBranches(workspace.path),
       };
     }
 

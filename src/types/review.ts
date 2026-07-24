@@ -275,6 +275,9 @@ export type ReviewResult =
       files: ReviewChangedFile[];
       baseBranch: string;
       headBranch: string;
+      /** The repo's actual local branches (for the "diff vs" selector) — so the
+       *  UI offers real branches instead of hardcoded main/develop. */
+      branches?: string[];
     }
   | { op: 'diff'; diff: string; baseBranch: string; headBranch: string }
   | {

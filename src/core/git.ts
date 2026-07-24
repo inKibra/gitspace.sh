@@ -468,6 +468,23 @@ export async function getWorkspaceDiff(
 }
 
 /**
+ * The repo's actual local branches, most-recently-committed first — for the
+ * "diff vs" selector, so it offers real branches (including sibling workspaces /
+ * chain branches, which ARE local branches) instead of hardcoded main/develop.
+ */
+export async function listLocalBranches(workspacePath: string): Promise<string[]> {
+  try {
+    const { stdout } = await execAsync(
+      "git for-each-ref --sort=-committerdate --format='%(refname:short)' refs/heads",
+      { cwd: workspacePath, maxBuffer: 4 * 1024 * 1024 },
+    );
+    return stdout.split('\n').map((s) => s.trim().replace(/^'|'$/g, '')).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+/**
  * List changed files in a workspace branch vs base branch.
  */
 export async function getWorkspaceChangedFiles(
