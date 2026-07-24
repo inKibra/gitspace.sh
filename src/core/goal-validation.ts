@@ -193,6 +193,43 @@ export function compactGoalValidation(validation: GoalValidation): GoalValidatio
   return changed ? { ...validation, requirements, events } : validation;
 }
 
+/** Any single inline evidence field larger than this is stripped on-disk-repair.
+ *  Evidence content this big belongs in an artifact file, not inline in the goal
+ *  record — inline data-URI screenshots are what pushed one goal to 100+ MB. */
+const DISK_INLINE_FIELD_MAX = 64 * 1024;
+const INLINE_BLOB_FIELDS = ['body', 'stdout', 'stderr', 'url', 'previewUrl'] as const;
+
+/**
+ * Aggressive on-disk repair: count-cap (compactGoalValidation) AND strip any
+ * oversized inline evidence field (a data-URI blob stuffed inline). The caller
+ * MUST have backed up the original first — the stripped bytes are only preserved
+ * in that backup. Returns the compacted validation and whether anything changed.
+ */
+export function compactGoalValidationForDisk(validation: GoalValidation): { validation: GoalValidation; changed: boolean } {
+  const counted = compactGoalValidation(validation);
+  let strippedAny = false;
+  const requirements: Record<string, Requirement> = {};
+  for (const [id, r] of Object.entries(counted.requirements)) {
+    let reqStripped = false;
+    const evidence = r.evidence.map((e) => {
+      let entry = e;
+      for (const field of INLINE_BLOB_FIELDS) {
+        const value = (entry as unknown as Record<string, unknown>)[field];
+        if (typeof value === 'string' && value.length > DISK_INLINE_FIELD_MAX) {
+          if (entry === e) entry = { ...e };
+          (entry as unknown as Record<string, unknown>)[field] = `[stripped ${value.length} bytes on compaction — see goal.json backup]`;
+          reqStripped = true;
+        }
+      }
+      return entry;
+    });
+    if (reqStripped) { strippedAny = true; requirements[id] = { ...r, evidence }; }
+    else requirements[id] = r;
+  }
+  const changed = counted !== validation || strippedAny;
+  return { validation: strippedAny ? { ...counted, requirements } : counted, changed };
+}
+
 function withRequirement(
   validation: GoalValidation,
   requirementId: string,

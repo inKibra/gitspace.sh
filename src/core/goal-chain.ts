@@ -5,12 +5,14 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'fs';
 import { dirname, join } from 'path';
 import { getProjectDir, getProjectWorkspacesDir } from './config.js';
+import { listProjectSummaries } from './project-catalog.js';
 import { artifactsScope, captureArtifactsSync, readRolledUpGoalMd, readWorkspaceGoalMd } from './artifacts.js';
-import { defaultValidation, getPlannedGoalValidationDir, migrateGoalRecord, moveGoalValidationToWorkspace } from './goal-validation.js';
+import { compactGoalValidationForDisk, defaultValidation, getPlannedGoalValidationDir, migrateGoalRecord, moveGoalValidationToWorkspace } from './goal-validation.js';
 import { computeReadiness } from '../app/shared/goal-validation/readiness.js';
 import { ensureWorkspaceStorageIgnored, getWorkspaceStatus, getWorkspaceStorageDir, setWorkspaceStatus } from './workspace-metadata.js';
 import { SpacesError } from '../types/errors.js';
@@ -336,6 +338,65 @@ export function listProjectGoalRecords(projectName: string): GoalRecord[] {
     byId.set(goal.id, goal);
   }
   return [...byId.values()];
+}
+
+/** A goal.json larger than this on disk is a compaction candidate. Normal goals
+ *  are a few KB; only a runaway (inline data-URI evidence) crosses this. */
+const GOAL_FILE_COMPACT_THRESHOLD_BYTES = 2 * 1024 * 1024;
+
+/**
+ * Startup self-heal: rewrite any bloated goal record small, in place. A goal that
+ * accumulated inline data-URI evidence reached 100+ MB, which OOM'd the daemon
+ * (snapshot/goal-detail serialization) and broke goal-detail (response exceeds
+ * the frame reassembly cap). Stat-first so untouched goals cost nothing; for an
+ * oversized one, back up the full original ONCE (nothing is lost) then write the
+ * count-capped, inline-blob-stripped record. Best-effort and self-contained: a
+ * failure on one goal never blocks daemon startup.
+ */
+export function compactBloatedGoalRecordsOnDisk(nowMs: number): { compacted: number; freedBytes: number; details: string[] } {
+  const details: string[] = [];
+  let compacted = 0;
+  let freedBytes = 0;
+  let projects: { name: string }[] = [];
+  try { projects = listProjectSummaries(); } catch { return { compacted, freedBytes, details }; }
+
+  for (const project of projects) {
+    const candidatePaths: string[] = [];
+    try {
+      candidatePaths.push(...listJsonFiles(join(getProjectGoalStorageDir(project.name), PLANNED_GOAL_DIR)));
+      candidatePaths.push(...listJsonFiles(join(getProjectGoalStorageDir(project.name), ARCHIVED_GOAL_DIR)));
+      const workspacesDir = getProjectWorkspacesDir(project.name);
+      if (existsSync(workspacesDir)) {
+        for (const entry of readdirSync(workspacesDir, { withFileTypes: true })) {
+          if (!entry.isDirectory()) continue;
+          try { candidatePaths.push(getWorkspaceGoalPath(project.name, entry.name)); } catch { /* unsafe name */ }
+        }
+      }
+    } catch { /* project storage unreadable — skip */ }
+
+    for (const path of candidatePaths) {
+      try {
+        if (!existsSync(path)) continue;
+        const size = statSync(path).size;
+        if (size < GOAL_FILE_COMPACT_THRESHOLD_BYTES) continue;
+        const raw = readFileSync(path, 'utf-8');
+        const goal = migrateGoalRecord(JSON.parse(raw));
+        const { validation, changed } = compactGoalValidationForDisk(goal.validation);
+        if (!changed) continue;
+        const backup = `${path}.bloated-${nowMs}.bak`;
+        if (!existsSync(backup)) writeFileSync(backup, raw, { mode: 0o600 });
+        const next = JSON.stringify({ ...goal, validation });
+        writeFileSync(path, next);
+        const after = Buffer.byteLength(next);
+        freedBytes += Math.max(0, size - after);
+        compacted += 1;
+        details.push(`${project.name}:${goal.id} ${(size / 1e6).toFixed(1)}MB -> ${(after / 1e6).toFixed(2)}MB (backup: ${backup})`);
+      } catch (err) {
+        details.push(`compact failed for ${path}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+  }
+  return { compacted, freedBytes, details };
 }
 
 function defaultGoalDoc(title: string): GoalRecord['doc'] {

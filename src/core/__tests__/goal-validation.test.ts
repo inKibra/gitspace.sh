@@ -12,6 +12,7 @@ import {
   getPlannedGoalValidationDir,
   getWorkspaceGoalValidationDir,
   compactGoalValidation,
+  compactGoalValidationForDisk,
   migrateGoalRecord,
   moveGoalValidationToWorkspace,
   recordHumanReview,
@@ -548,5 +549,28 @@ describe('compactGoalValidation (append-only pruning)', () => {
   it('returns the same object when already within caps (no needless churn)', () => {
     const validation: GoalValidation = { reqOrder: [], requirements: {}, events: [] };
     expect(compactGoalValidation(validation)).toBe(validation);
+  });
+
+  it('strips oversized inline evidence fields for disk (keeps metadata)', () => {
+    const bigBody = 'x'.repeat(200 * 1024); // 200KB inline blob (e.g. a data-URI)
+    const validation: GoalValidation = {
+      reqOrder: ['req-1'],
+      requirements: {
+        'req-1': {
+          id: 'req-1', title: 'R', kind: 'screenshot', required: true, rubric: 'r', status: 'review',
+          generation: { kind: 'manual' }, judgment: { kind: 'human' },
+          evidence: [{ id: 'ev-1', name: 'shot', meta: 'm', source: 'manual', createdAt: '2026-01-01T00:00:00.000Z', body: bigBody, url: 'http://ok/small' }],
+          reviews: [],
+        },
+      },
+      events: [],
+    };
+    const { validation: out, changed } = compactGoalValidationForDisk(validation);
+    expect(changed).toBe(true);
+    const ev = out.requirements['req-1']!.evidence[0]!;
+    expect(ev.body!.length).toBeLessThan(200); // stripped to a marker
+    expect(ev.body).toContain('stripped');
+    expect(ev.url).toBe('http://ok/small'); // small field preserved
+    expect(ev.id).toBe('ev-1'); // metadata preserved
   });
 });

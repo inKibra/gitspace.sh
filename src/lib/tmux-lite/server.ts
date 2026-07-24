@@ -107,6 +107,7 @@ import { addWorkspaceNote, listWorkspaceNotes, removeWorkspaceNote, updateWorksp
 import { addGoalNearWorkspace, addPlannedGoalToChain, applyWorkspaceGoalPhaseChange, getGoalRecord, findGoalRecord, listGoalChainSummaries, moveGoalInChain, previewWorkspaceGoalPhaseChange, resolveGoalDocBody, updateGoalRecord } from '../../core/goal-chain.js';
 import { computeReadiness } from '../../app/shared/goal-validation/readiness.js';
 import { getSpaceStackStatus } from '../../commands/space-goals.js';
+import { compactBloatedGoalRecordsOnDisk } from '../../core/goal-chain.js';
 import { buildMachineSnapshot, buildGoalRecordsForProject } from './machine/build.js';
 import type { MachineEvent, MachineSnapshot } from './machine/protocol.js';
 import { applyMachineEventToSnapshot } from './machine/snapshot-patch.js';
@@ -832,6 +833,24 @@ async function resolveWorkspaceIdForRuntimePath(workspacePath: string): Promise<
   const workspaces = await scanWorkspaces();
   const match = workspaces.find((workspace) => normalizeWorkspacePath(workspace.path) === normalizedPath);
   return match ? toCanonicalWorkspaceId(match) : null;
+}
+
+// Startup self-heal — run SYNCHRONOUSLY before agent-control init, the first
+// snapshot build, or any serve-activate is dispatched: a goal record bloated
+// with inline data-URI evidence (100+ MB) OOMs the daemon on snapshot/goal-detail
+// serialization and exceeds the client's frame reassembly cap. Stat-first, so a
+// healthy install pays only cheap stats; an oversized goal is backed up in full
+// and rewritten small in place. Best-effort — never blocks startup on failure.
+try {
+  const result = compactBloatedGoalRecordsOnDisk(Date.now());
+  if (result.compacted > 0) {
+    console.error(`[goal-compact] repaired ${result.compacted} bloated goal record(s), freed ~${(result.freedBytes / 1e6).toFixed(1)}MB`);
+    for (const line of result.details) console.error(`[goal-compact]   ${line}`);
+  } else {
+    for (const line of result.details) console.error(`[goal-compact] ${line}`);
+  }
+} catch (error) {
+  console.error(`[goal-compact] startup compaction failed: ${error instanceof Error ? error.message : String(error)}`);
 }
 
 void getAgentControlReady().catch((error) => {
