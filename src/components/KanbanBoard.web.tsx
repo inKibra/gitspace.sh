@@ -419,8 +419,13 @@ function PlannedGoalCard({ goal, onSelectGoal, onChainFocus, onOpenOrder, relate
   const handleClick = () => {
     onSelectGoal?.(goal);
   };
-  // Blocked state is encoded via the status dot + left-border tone (no chip).
-  const edgeColor = goal.blockedReason ? 'var(--gs-warning)' : 'var(--gs-text-dim)';
+  // A planned goal is a spec with no workspace yet — style it as "under
+  // construction" (dashed outline + faint diagonal caution stripes), NOT amber,
+  // which reads as an agent asking a question. Blocked stays distinct via a red
+  // dot/edge; a plain planned goal is a muted, quiet placeholder.
+  const blocked = Boolean(goal.blockedReason);
+  const edgeColor = blocked ? 'var(--gs-danger)' : 'var(--gs-text-dim)';
+  const CONSTRUCTION_STRIPES = 'repeating-linear-gradient(-45deg, rgba(255,204,102,0.07) 0 7px, transparent 7px 15px)';
 
   return (
     <div
@@ -438,9 +443,10 @@ function PlannedGoalCard({ goal, onSelectGoal, onChainFocus, onOpenOrder, relate
           handleClick();
         }
       }}
-      className={`gs-card-anim group relative w-full px-3 py-2.5 border border-[var(--gs-border)] border-l-2 bg-[var(--gs-bg-surface)] text-left transition-[background-color,border-color,opacity] duration-150 hover:bg-[var(--gs-bg-hover)] hover:border-[var(--gs-border-active)] ${related === false ? 'opacity-40' : related === true ? 'ring-1' : ''}`}
+      className={`gs-card-anim order-1 group relative w-full px-3 py-2.5 border border-dashed border-[var(--gs-border)] border-l-2 bg-[var(--gs-bg-surface)] text-left transition-[background-color,border-color,opacity] duration-150 hover:bg-[var(--gs-bg-hover)] hover:border-[var(--gs-border-active)] ${related === false ? 'opacity-40' : related === true ? 'ring-1' : ''}`}
       style={{
         borderLeftColor: related ? getChainPalette(goal.chainId).fg : edgeColor,
+        backgroundImage: CONSTRUCTION_STRIPES,
         animation: 'gs-card-in .3s cubic-bezier(0.2,0,0,1) both',
         animationDelay: `${index * 45}ms`,
         ...(related ? { ['--tw-ring-color' as string]: getChainPalette(goal.chainId).fg } : {}),
