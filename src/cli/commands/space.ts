@@ -82,9 +82,9 @@ export function registerSpaceCommands(parent: Command): void {
     .description('Show resolved workspace context')
     .option('--json', 'Output structured JSON')
     .action(withErrorHandler(async (options) => {
-      requireSessionContext();
+      const ctx = requireSessionContext();
       const { showSpaceContext } = await import('../../commands/review.js');
-      await showSpaceContext(options);
+      await showSpaceContext({ ...options, project: ctx.project, workspace: ctx.workspace });
     }));
 
   registerSpaceReviewCommands(cmd);
@@ -793,9 +793,9 @@ function registerSpaceNotesCommands(space: Command): void {
     .description('List workspace notes')
     .option('--format <format>', 'Output format: json (default) or text')
     .action(withErrorHandler(async (options) => {
-      requireSessionContext();
+      const ctx = requireSessionContext();
       const { listNotes } = await import('../../commands/notes.js');
-      await listNotes(options);
+      await listNotes({ ...options, project: ctx.project, workspace: ctx.workspace });
     }));
 
   notes
@@ -807,9 +807,9 @@ function registerSpaceNotesCommands(space: Command): void {
     .option('--priority <priority>', 'Todo priority: low, medium, high')
     .option('--json', 'Output structured JSON')
     .action(withErrorHandler(async (options) => {
-      requireSessionContext();
+      const ctx = requireSessionContext();
       const { addNote } = await import('../../commands/notes.js');
-      await addNote(options);
+      await addNote({ ...options, project: ctx.project, workspace: ctx.workspace });
     }));
 
   notes
@@ -824,9 +824,9 @@ function registerSpaceNotesCommands(space: Command): void {
     .option('--undone', 'Mark todo open')
     .option('--json', 'Output structured JSON')
     .action(withErrorHandler(async (options) => {
-      requireSessionContext();
+      const ctx = requireSessionContext();
       const { updateNote } = await import('../../commands/notes.js');
-      await updateNote(options);
+      await updateNote({ ...options, project: ctx.project, workspace: ctx.workspace });
     }));
 
   notes
@@ -835,9 +835,9 @@ function registerSpaceNotesCommands(space: Command): void {
     .requiredOption('--id <id>', 'Note id')
     .option('--json', 'Output structured JSON')
     .action(withErrorHandler(async (options) => {
-      requireSessionContext();
+      const ctx = requireSessionContext();
       const { removeNote } = await import('../../commands/notes.js');
-      await removeNote(options);
+      await removeNote({ ...options, project: ctx.project, workspace: ctx.workspace });
     }));
 
   notes
@@ -846,9 +846,9 @@ function registerSpaceNotesCommands(space: Command): void {
     .requiredOption('--id <id>', 'Note id')
     .option('--json', 'Output structured JSON')
     .action(withErrorHandler(async (options) => {
-      requireSessionContext();
+      const ctx = requireSessionContext();
       const { markNoteDone } = await import('../../commands/notes.js');
-      await markNoteDone(options);
+      await markNoteDone({ ...options, project: ctx.project, workspace: ctx.workspace });
     }));
 
   notes
@@ -857,9 +857,9 @@ function registerSpaceNotesCommands(space: Command): void {
     .requiredOption('--id <id>', 'Note id')
     .option('--json', 'Output structured JSON')
     .action(withErrorHandler(async (options) => {
-      requireSessionContext();
+      const ctx = requireSessionContext();
       const { markNoteUndone } = await import('../../commands/notes.js');
-      await markNoteUndone(options);
+      await markNoteUndone({ ...options, project: ctx.project, workspace: ctx.workspace });
     }));
 }
 
