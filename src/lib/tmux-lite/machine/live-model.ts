@@ -205,6 +205,11 @@ export function computeAgentWorkspaceDeltaEvents(
   snapshot: MachineSnapshot,
   workspaceId: string,
   agentState: WorkspaceAgentState | undefined,
+  /** Open ask-dialog ids per session for this workspace. MUST be passed (from
+   *  the coordinator) or a scoped delta rebuilds the agent record WITHOUT the
+   *  dialog fold and clobbers the full snapshot's amber (permission-needed)
+   *  back to green — the exact mismatch behind "asking but shows green". */
+  pendingDialogIdsBySession?: Record<string, string[]>,
 ): MachineEvent[] {
   const workspace = snapshot.workspacesById[workspaceId];
   const projectId = workspace?.projectId
@@ -216,6 +221,7 @@ export function computeAgentWorkspaceDeltaEvents(
     projectId,
     workspace: agentState,
     terminalSessionsById: snapshot.terminalSessionsById,
+    pendingDialogIdsBySession,
   });
 
   const events: MachineEvent[] = [];

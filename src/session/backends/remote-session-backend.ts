@@ -3072,8 +3072,22 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       return null;
     }
 
-    const pendingPermissionIds = (workspace.pendingPermissions[sessionId] ?? []).map((permission) => permission.id);
-    const pendingQuestionIds = (workspace.pendingQuestions[sessionId] ?? []).map((question) => question.id);
+    // The agent-state feed (AgentEventManager) is the source for permissions,
+    // but open ASK DIALOGS are folded into pendingQuestionIds server-side in
+    // build.ts (the coordinator owns them; the AgentEventManager doesn't). This
+    // enrichment must UNION with the snapshot's existing pending ids or it would
+    // clobber the dialog-driven amber back to green on every agent-state update
+    // — the "asking but shows green" bug. The snapshot stays authoritative: when
+    // it drops the dialog (answered), the union drops it too.
+    const existing = snapshot.agentSessionsById[sessionId];
+    const pendingPermissionIds = Array.from(new Set([
+      ...(workspace.pendingPermissions[sessionId] ?? []).map((permission) => permission.id),
+      ...(existing?.pendingPermissionIds ?? []),
+    ]));
+    const pendingQuestionIds = Array.from(new Set([
+      ...(workspace.pendingQuestions[sessionId] ?? []).map((question) => question.id),
+      ...(existing?.pendingQuestionIds ?? []),
+    ]));
     const status = workspace.statuses[sessionId];
     const errorMessage = workspace.errorMessages[sessionId]
       ?? (status?.type === 'retry' ? status.message : undefined);

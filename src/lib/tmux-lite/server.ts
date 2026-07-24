@@ -723,8 +723,17 @@ function applyTerminalScopedUpdate(sessionId: string): void {
 
 /** One workspace's agent-session state changed (agent-event-manager delta). */
 function applyAgentScopedUpdate(workspaceId: string): void {
+  // Fold this workspace's open ask-dialogs into the scoped delta exactly as the
+  // full snapshot build does — otherwise the delta rebuilds agent records with
+  // pendingQuestionCount=0 and clobbers the amber (permission-needed) on every
+  // agent-state change while a question is on screen.
+  const pendingDialogIdsBySession: Record<string, string[]> = {};
+  for (const { workspaceId: wid, sessionId, dialogId } of getPendingAgentDialogs()) {
+    if (wid !== workspaceId) continue;
+    (pendingDialogIdsBySession[sessionId] ??= []).push(dialogId);
+  }
   emitScopedMachineEvents((snapshot) =>
-    computeAgentWorkspaceDeltaEvents(snapshot, workspaceId, getAgentControlSnapshot()[workspaceId]));
+    computeAgentWorkspaceDeltaEvents(snapshot, workspaceId, getAgentControlSnapshot()[workspaceId], pendingDialogIdsBySession));
 }
 
 /** One project's goal state changed (goal command or CLI goal-changed notify). */
