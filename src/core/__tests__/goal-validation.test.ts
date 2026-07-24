@@ -11,6 +11,7 @@ import {
   getGoalValidationDir,
   getPlannedGoalValidationDir,
   getWorkspaceGoalValidationDir,
+  compactGoalValidation,
   migrateGoalRecord,
   moveGoalValidationToWorkspace,
   recordHumanReview,
@@ -23,6 +24,7 @@ import {
   updateRequirement,
 } from '../goal-validation.js';
 import { writeGoalRecord, writePlannedGoal } from '../goal-chain.js';
+import type { GoalValidation } from '../../types/goals.js';
 import type { GoalRecord } from '../../types/goals.js';
 
 const envKey = 'GITSPACE_WORKSPACE_ROOT';
@@ -504,5 +506,47 @@ describe('canon pins (docs/REVIEW-GUIDE.md)', () => {
     // legacy acceptances without a pin are never reported stale
     const legacy = { ...edited, reviews: edited.reviews.map((r) => ({ ...r, rubricHash: undefined })) };
     expect(isAcceptanceStale(legacy)).toBe(false);
+  });
+});
+
+describe('compactGoalValidation (append-only pruning)', () => {
+  it('caps evidence + reviews per requirement and the timeline, keeping the newest', () => {
+    const evidence = Array.from({ length: 40 }, (_, i) => ({
+      id: `ev-${i}`, name: 'artifact', meta: `run ${i}`, source: 'command' as const,
+      createdAt: `2026-01-01T00:${String(i).padStart(2, '0')}:00.000Z`, command: 'echo', exitCode: 0, stdout: 'x'.repeat(1000),
+    }));
+    const reviews = Array.from({ length: 40 }, (_, i) => ({
+      id: `rv-${i}`, tone: 'green' as const, who: 'command', note: `r${i}`, createdAt: `2026-01-01T01:${String(i).padStart(2, '0')}:00.000Z`,
+    }));
+    const events = Array.from({ length: 400 }, (_, i) => ({
+      id: `evt-${i}`, requirementId: 'req-1', tone: 'blue' as const, kind: 'generation' as const,
+      title: `e${i}`, body: '', payload: '', createdAt: `2026-01-02T00:00:00.000Z`,
+    }));
+    const validation: GoalValidation = {
+      reqOrder: ['req-1'],
+      requirements: {
+        'req-1': {
+          id: 'req-1', title: 'R', kind: 'note', required: true, rubric: 'r', status: 'review',
+          generation: { kind: 'command', command: 'echo' }, judgment: { kind: 'human' }, evidence, reviews,
+        },
+      },
+      events,
+
+    };
+
+    const compacted = compactGoalValidation(validation);
+    const req = compacted.requirements['req-1']!;
+    expect(req.evidence).toHaveLength(30);
+    expect(req.evidence[0]!.id).toBe('ev-10'); // oldest 10 dropped, newest kept
+    expect(req.evidence[29]!.id).toBe('ev-39');
+    expect(req.reviews).toHaveLength(30);
+    expect(req.reviews[29]!.id).toBe('rv-39');
+    expect(compacted.events).toHaveLength(300);
+    expect(compacted.events[299]!.id).toBe('evt-399');
+  });
+
+  it('returns the same object when already within caps (no needless churn)', () => {
+    const validation: GoalValidation = { reqOrder: [], requirements: {}, events: [] };
+    expect(compactGoalValidation(validation)).toBe(validation);
   });
 });

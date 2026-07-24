@@ -148,6 +148,51 @@ function nextEventId(): string {
 
 // ─── Internal helpers ──────────────────────────────────────────────────────
 
+// On-disk retention caps. The validation record is append-only — every
+// generation run adds an evidence entry (with truncated stdout/stderr), every
+// judgment adds a review, and both add timeline events — and nothing ever
+// pruned them. A goal whose validation commands are re-run repeatedly grew
+// without bound (observed: one goal's validation.requirements = 109 MB across
+// ~1,700 accumulated evidence blobs), which blew past the snapshot frame cap and
+// made every snapshot read+parse that whole file. These caps keep the newest
+// entries (the relevant ones) and are generous enough to preserve a useful trail
+// for goal-detail while bounding the record. Wire projection (build.ts
+// slimGoalValidation) trims further for the at-a-glance snapshot.
+const MAX_EVIDENCE_PER_REQUIREMENT = 30;
+const MAX_REVIEWS_PER_REQUIREMENT = 30;
+const MAX_TIMELINE_EVENTS = 300;
+
+/** Bound one requirement's append-only arrays to their newest entries. */
+function pruneRequirement(r: Requirement): Requirement {
+  const evidence = r.evidence.length > MAX_EVIDENCE_PER_REQUIREMENT
+    ? r.evidence.slice(-MAX_EVIDENCE_PER_REQUIREMENT) : r.evidence;
+  const reviews = r.reviews.length > MAX_REVIEWS_PER_REQUIREMENT
+    ? r.reviews.slice(-MAX_REVIEWS_PER_REQUIREMENT) : r.reviews;
+  if (evidence === r.evidence && reviews === r.reviews) return r;
+  return { ...r, evidence, reviews };
+}
+
+/** Bound the timeline to its newest events. */
+function capTimelineEvents(events: TimelineEvent[]): TimelineEvent[] {
+  return events.length > MAX_TIMELINE_EVENTS ? events.slice(-MAX_TIMELINE_EVENTS) : events;
+}
+
+/** Compact an entire validation record (all requirements + timeline). Applied
+ *  on load (migrateGoalRecord) so an already-bloated goal is bounded the moment
+ *  it is read, and persisted small on its next save. */
+export function compactGoalValidation(validation: GoalValidation): GoalValidation {
+  let changed = false;
+  const requirements: Record<string, Requirement> = {};
+  for (const [id, r] of Object.entries(validation.requirements)) {
+    const pruned = pruneRequirement(r);
+    if (pruned !== r) changed = true;
+    requirements[id] = pruned;
+  }
+  const events = capTimelineEvents(validation.events);
+  if (events !== validation.events) changed = true;
+  return changed ? { ...validation, requirements, events } : validation;
+}
+
 function withRequirement(
   validation: GoalValidation,
   requirementId: string,
@@ -157,7 +202,9 @@ function withRequirement(
   if (!cur) {
     throw new SpacesError(`Unknown requirement: ${requirementId}`, 'USER_ERROR', 1);
   }
-  const requirement = update(cur);
+  // Prune-on-write: every requirement mutation flows through here, so bounding
+  // the result bounds all six evidence/review append sites in one place.
+  const requirement = pruneRequirement(update(cur));
   return {
     validation: {
       ...validation,
@@ -196,7 +243,7 @@ function appendEvent(
     id: nextEventId(),
     createdAt: nowIso(),
   };
-  return { ...validation, events: [...validation.events, event] };
+  return { ...validation, events: capTimelineEvents([...validation.events, event]) };
 }
 
 /**
@@ -1124,7 +1171,10 @@ export function migrateGoalRecord(raw: unknown): GoalRecord {
   const candidate = raw as LegacyGoalRecord;
   if (candidate && (candidate.version === 2) && isNewValidationShape(candidate.validation)) {
     const record = candidate as unknown as GoalRecord;
-    const validation = backfillReviewJudgeTypes(record.validation);
+    // Compact on load so an already-bloated goal (accumulated before prune-on-
+    // write existed) is bounded the moment it is read, and persisted small on
+    // its next save — without needing a separate migration pass.
+    const validation = compactGoalValidation(backfillReviewJudgeTypes(record.validation));
     return validation === record.validation ? record : { ...record, validation };
   }
   const legacy = (candidate.validation ?? {}) as LegacyValidation;
