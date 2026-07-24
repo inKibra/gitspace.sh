@@ -136,6 +136,20 @@ describe('goal validation core', () => {
     const result = attachManualEvidence('demo', goal, v0.requirement.id, { path: sourcePath, name: 'hover' });
     expect(result.evidence.artifactPath).toBeTruthy();
     expect(readFileSync(join(getWorkspaceGoalValidationDir('demo', 'api'), result.evidence.artifactPath!), 'utf-8')).toBe('png-bytes');
+    // Image evidence is a FILE attachment — no inline base64 data-URI previewUrl
+    // (that duplication is what grew a goal record to 100+ MB).
+    expect(result.evidence.previewUrl).toBeUndefined();
+  });
+
+  it('does not inline a large body/data-uri url (caps to a file-attachment pointer)', () => {
+    const v0 = addRequirement(defaultValidation(), {
+      title: 'Note', kind: 'note', rubric: 'note.', generation: { kind: 'manual' }, judgment: { kind: 'human' },
+    });
+    const goal = makeGoal({ id: 'api', title: 'API', phase: 'code', plannedWorkspaceName: 'api', validation: v0.validation });
+    const huge = 'z'.repeat(200 * 1024);
+    const result = attachManualEvidence('demo', goal, v0.requirement.id, { body: huge, name: 'big' });
+    expect(result.evidence.body!.length).toBeLessThan(40 * 1024);
+    expect(result.evidence.body).toContain('attach large evidence as a file');
   });
 
   it('rejects mismatched evidence kinds', () => {

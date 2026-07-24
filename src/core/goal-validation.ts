@@ -321,6 +321,37 @@ function inferMimeType(sourcePath: string, kind: ArtifactKind): string | undefin
   return undefined;
 }
 
+/** Largest inline text body kept in the goal record. Binary/media is NEVER
+ *  inlined — it lives as a file attachment (artifactPath) and is read on demand.
+ *  Inlining full images as base64 data-URI previewUrls is what grew a goal to
+ *  100+ MB and OOM'd the daemon; the file is already stored, so the data-URI was
+ *  a pure, catastrophic duplicate. */
+const EVIDENCE_INLINE_TEXT_MAX = 32 * 1024;
+
+/** Inline content for a stored evidence file: a small text body only. Media (and
+ *  large text) stays on disk at artifactPath — no previewUrl data-URI. Avoids
+ *  even READING a large/binary file into memory. */
+function inlineEvidenceContent(
+  sourcePath: string,
+  mimeType: string | undefined,
+  sizeBytes: number,
+): Pick<Evidence, 'body' | 'previewUrl'> {
+  if (mimeType?.startsWith('text/') && sizeBytes <= EVIDENCE_INLINE_TEXT_MAX) {
+    try { return { body: readFileSync(sourcePath, 'utf-8') }; } catch { /* fall through */ }
+  }
+  return {};
+}
+
+/** Cap an inline text field (body/url) at ingestion. A caller pasting a large
+ *  body or a data-URI url inline (instead of `--path`) would re-bloat the record;
+ *  truncate with a pointer to file attachment. Normal short URLs/notes pass through. */
+function capInlineEvidenceText(value: string | undefined): string | undefined {
+  if (typeof value === 'string' && value.length > EVIDENCE_INLINE_TEXT_MAX) {
+    return `${value.slice(0, EVIDENCE_INLINE_TEXT_MAX)}\n…[${value.length - EVIDENCE_INLINE_TEXT_MAX} more chars stripped — attach large evidence as a file (--path), not inline]`;
+  }
+  return value;
+}
+
 function copyEvidenceFile(
   validationDir: string,
   evidenceId: string,
@@ -337,18 +368,13 @@ function copyEvidenceFile(
   ensureParentDir(targetPath);
   copyFileSync(sourcePath, targetPath);
   const mimeType = inferMimeType(sourcePath, kind);
-  const bytes = readFileSync(sourcePath);
-  const previewUrl = mimeType && (mimeType.startsWith('image/') || mimeType.startsWith('video/'))
-    ? `data:${mimeType};base64,${Buffer.from(bytes).toString('base64')}`
-    : undefined;
-  const body = !previewUrl && mimeType?.startsWith('text/') ? bytes.toString('utf-8') : undefined;
+  const sizeBytes = statSync(sourcePath).size;
   return {
     artifactPath: relativePath,
     mimeType,
-    sizeBytes: statSync(sourcePath).size,
+    sizeBytes,
     displayName,
-    previewUrl,
-    body,
+    ...inlineEvidenceContent(sourcePath, mimeType, sizeBytes),
   };
 }
 
@@ -394,18 +420,13 @@ function storeEvidenceFile(
     },
   });
   const mimeType = inferMimeType(sourcePath, kind);
-  const bytes = readFileSync(sourcePath);
-  const previewUrl = mimeType && (mimeType.startsWith('image/') || mimeType.startsWith('video/'))
-    ? `data:${mimeType};base64,${Buffer.from(bytes).toString('base64')}`
-    : undefined;
-  const body = !previewUrl && mimeType?.startsWith('text/') ? bytes.toString('utf-8') : undefined;
+  const sizeBytes = statSync(sourcePath).size;
   return {
     artifactPath: relativePath,
     mimeType,
-    sizeBytes: statSync(sourcePath).size,
+    sizeBytes,
     displayName,
-    previewUrl,
-    body,
+    ...inlineEvidenceContent(sourcePath, mimeType, sizeBytes),
   };
 }
 
@@ -696,8 +717,8 @@ export function attachManualEvidence(
     meta: deriveEvidenceMeta(input, copied),
     source: 'manual',
     createdAt: nowIso(),
-    body: input.body ?? copied.body,
-    url: input.url,
+    body: capInlineEvidenceText(input.body ?? copied.body),
+    url: capInlineEvidenceText(input.url),
     originalPath: input.path,
     artifactPath: copied.artifactPath,
     mimeType: copied.mimeType ?? (input.path ? inferMimeType(input.path, cur.kind) : undefined),
