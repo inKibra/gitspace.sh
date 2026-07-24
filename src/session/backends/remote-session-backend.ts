@@ -57,6 +57,7 @@ import type {
   DeleteWorkspaceParams,
   SessionBackend,
   TerminateSessionOptions,
+  ArtifactReadRange,
 } from '../backend.js';
 import type { AgentControlInfo, AgentDefinitionInfo, AgentHistoryEntry, AgentSettingItem, AgentSettingSchemaItem, AgentToolInfo, AgentTreeNode } from '../../agents/agent-runtime-types.js';
 import type { BackendEvent } from '../events.js';
@@ -3490,9 +3491,9 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     throw new Error('Unexpected artifact-list response');
   }
 
-  async readWorkspaceArtifact(workspaceId: string, path: string): Promise<{ base64: string; size: number; truncated: boolean }> {
+  async readWorkspaceArtifact(workspaceId: string, path: string, range?: ArtifactReadRange): Promise<{ base64: string; size: number; truncated: boolean }> {
     await this.waitForInitialSnapshot();
-    const tmuxResponse = await this.sendRpcCommand({ type: 'artifact_read', requestId: crypto.randomUUID(), uri: this.artifactUriFor(workspaceId, path) });
+    const tmuxResponse = await this.sendRpcCommand({ type: 'artifact_read', requestId: crypto.randomUUID(), uri: this.artifactUriFor(workspaceId, path), offset: range?.offset, length: range?.length });
     if (tmuxResponse.type === 'artifact-read') return { base64: tmuxResponse.base64, size: tmuxResponse.size, truncated: tmuxResponse.truncated };
     if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
     throw new Error('Unexpected artifact-read response');
@@ -3538,9 +3539,9 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     throw new Error('Unexpected artifact-list response');
   }
 
-  async readProjectArtifact(projectName: string, path: string): Promise<{ base64: string; size: number; truncated: boolean }> {
+  async readProjectArtifact(projectName: string, path: string, range?: ArtifactReadRange): Promise<{ base64: string; size: number; truncated: boolean }> {
     await this.waitForInitialSnapshot();
-    const tmuxResponse = await this.sendRpcCommand({ type: 'artifact_read', requestId: crypto.randomUUID(), uri: formatArtifactUri(projectName, '@base', path) });
+    const tmuxResponse = await this.sendRpcCommand({ type: 'artifact_read', requestId: crypto.randomUUID(), uri: formatArtifactUri(projectName, '@base', path), offset: range?.offset, length: range?.length });
     if (tmuxResponse.type === 'artifact-read') return { base64: tmuxResponse.base64, size: tmuxResponse.size, truncated: tmuxResponse.truncated };
     if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
     throw new Error('Unexpected artifact-read response');

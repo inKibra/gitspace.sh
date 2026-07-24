@@ -4093,10 +4093,25 @@ export async function dispatchCommand(cmd: Command): Promise<Response | null> {
             try {
               const { readArtifactResolving } = await import('../../core/artifacts.js');
               const { projectDir, mountDir, relPath } = await resolveArtifactUriDirs(cmd.uri);
+              // Per-chunk transport cap: a single frame must stay well under the
+              // client's reassembly limit (base64 inflates ~4/3), so large media
+              // is fetched as a sequence of ranged reads (offset/length) and
+              // reassembled into a Blob client-side. An unranged read keeps the
+              // legacy single-shot behaviour (truncates past MAX_READ).
               const MAX_READ = 25 * 1024 * 1024;
               const bytes = await readArtifactResolving(projectDir, mountDir, relPath);
-              const truncated = bytes.length > MAX_READ;
-              res = { type: 'artifact-read', base64: (truncated ? bytes.subarray(0, MAX_READ) : bytes).toString('base64'), size: bytes.length, truncated };
+              const size = bytes.length;
+              if (cmd.offset !== undefined || cmd.length !== undefined) {
+                const offset = Math.max(0, Math.min(cmd.offset ?? 0, size));
+                const length = Math.max(0, Math.min(cmd.length ?? MAX_READ, MAX_READ));
+                const end = Math.min(offset + length, size);
+                const slice = bytes.subarray(offset, end);
+                // `truncated` here means "more bytes remain past this slice".
+                res = { type: 'artifact-read', base64: slice.toString('base64'), size, truncated: end < size };
+              } else {
+                const truncated = size > MAX_READ;
+                res = { type: 'artifact-read', base64: (truncated ? bytes.subarray(0, MAX_READ) : bytes).toString('base64'), size, truncated };
+              }
             } catch (e) {
               res = { type: 'error', message: `Failed to read artifact: ${e instanceof Error ? e.message : String(e)}` };
             }

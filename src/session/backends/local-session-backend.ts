@@ -73,6 +73,7 @@ import type {
   DeleteWorkspaceParams,
   SessionBackend,
   TerminateSessionOptions,
+  ArtifactReadRange,
 } from '../backend.js';
 import type { BackendEvent } from '../events.js';
 import type { NotificationConfig } from '../../notifications/types.js';
@@ -1900,8 +1901,8 @@ export class LocalSessionBackend implements SessionBackend {
     throw new Error('Unexpected artifact-list response');
   }
 
-  async readWorkspaceArtifact(workspaceId: string, path: string): Promise<{ base64: string; size: number; truncated: boolean }> {
-    const tmuxResponse = await this.sendTmuxCommand({ type: 'artifact-read', uri: await this.artifactUriFor(workspaceId, path) });
+  async readWorkspaceArtifact(workspaceId: string, path: string, range?: ArtifactReadRange): Promise<{ base64: string; size: number; truncated: boolean }> {
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'artifact-read', uri: await this.artifactUriFor(workspaceId, path), offset: range?.offset, length: range?.length });
     if (tmuxResponse.type === 'artifact-read') return { base64: tmuxResponse.base64, size: tmuxResponse.size, truncated: tmuxResponse.truncated };
     if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
     throw new Error('Unexpected artifact-read response');
@@ -1942,8 +1943,8 @@ export class LocalSessionBackend implements SessionBackend {
     throw new Error('Unexpected artifact-list response');
   }
 
-  async readProjectArtifact(projectName: string, path: string): Promise<{ base64: string; size: number; truncated: boolean }> {
-    const tmuxResponse = await this.sendTmuxCommand({ type: 'artifact-read', uri: formatArtifactUri(projectName, '@base', path) });
+  async readProjectArtifact(projectName: string, path: string, range?: ArtifactReadRange): Promise<{ base64: string; size: number; truncated: boolean }> {
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'artifact-read', uri: formatArtifactUri(projectName, '@base', path), offset: range?.offset, length: range?.length });
     if (tmuxResponse.type === 'artifact-read') return { base64: tmuxResponse.base64, size: tmuxResponse.size, truncated: tmuxResponse.truncated };
     if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
     throw new Error('Unexpected artifact-read response');

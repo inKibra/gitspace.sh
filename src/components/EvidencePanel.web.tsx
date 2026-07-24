@@ -1,32 +1,81 @@
 /** @jsxImportSource react */
-import { useEffect, useState, type ReactElement } from 'react';
+import { useEffect, useRef, useState, type ReactElement } from 'react';
 import type { Evidence } from '../types/goals.js';
 import { Highlighted } from '../blocks/render/highlight.web.js';
 import { humanSize, langForPath } from './ArtifactPanel.web.js';
 
+/** Raw artifact reader (a bound backend read). Passing a byte range pages
+ *  large media; the result's `truncated` means more bytes remain. */
+export type ArtifactReader = (
+  path: string,
+  range?: { offset: number; length: number },
+) => Promise<{ base64: string; size: number; truncated: boolean } | null>;
+
+/** Per-chunk request size — comfortably under the daemon's 25 MB read cap and
+ *  the client frame-reassembly limit, so each page is one clean frame. */
+const PREVIEW_CHUNK_BYTES = 6 * 1024 * 1024;
+/** Don't materialise a preview past this — a huge video should be downloaded,
+ *  not held in memory as a Blob (and the file-reference row still renders). */
+const PREVIEW_MAX_BYTES = 128 * 1024 * 1024;
+
+function base64ToBytes(b64: string): Uint8Array {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
 /**
  * Fetch a media evidence's bytes ON DEMAND when it has no inline previewUrl
- * (large binary evidence is now stored as a file attachment, not a data-URI —
- * see core/goal-validation.ts). Returns the inline previewUrl as-is if present;
- * otherwise loads the artifact via `loadArtifactBase64(artifactPath)` and builds
- * a data URL. No fetch for non-media or when no loader is wired.
+ * (large binary evidence is stored as a file attachment, not a data-URI — see
+ * core/goal-validation.ts). Returns the inline previewUrl as-is if present;
+ * otherwise pages the artifact over the E2E session channel into a Blob and
+ * hands back an object URL. A Blob URL (unlike a `data:` URI) is seekable, so
+ * `<video>` can actually play mp4/webm; it also survives files larger than a
+ * single frame by fetching in chunks. No fetch for non-media or without a
+ * reader; the object URL is revoked on change/unmount.
  */
-export function useEvidencePreviewUrl(
-  ev: Evidence,
-  loadArtifactBase64?: (path: string) => Promise<string | null>,
-): string | undefined {
+export function useEvidencePreviewUrl(ev: Evidence, readArtifact?: ArtifactReader): string | undefined {
   const [resolved, setResolved] = useState<string | undefined>(ev.previewUrl);
   const isMedia = (ev.mimeType?.startsWith('image/') || ev.mimeType?.startsWith('video/')) ?? false;
+  // Hold the reader in a ref so a fresh arrow identity each render (the usual
+  // call-site pattern) does NOT re-trigger the paging effect / re-download.
+  const readerRef = useRef(readArtifact);
+  readerRef.current = readArtifact;
+  const hasReader = !!readArtifact;
   useEffect(() => {
     if (ev.previewUrl) { setResolved(ev.previewUrl); return; }
-    if (!isMedia || !ev.artifactPath || !loadArtifactBase64) { setResolved(undefined); return; }
+    const readArtifactNow = readerRef.current;
+    if (!isMedia || !ev.artifactPath || !readArtifactNow) { setResolved(undefined); return; }
     let cancelled = false;
+    let objectUrl: string | undefined;
     setResolved(undefined);
-    loadArtifactBase64(ev.artifactPath)
-      .then((base64) => { if (!cancelled && base64) setResolved(`data:${ev.mimeType};base64,${base64}`); })
-      .catch(() => { /* leave unresolved — the file-reference row still renders */ });
-    return () => { cancelled = true; };
-  }, [ev.previewUrl, ev.artifactPath, ev.mimeType, isMedia, loadArtifactBase64]);
+    (async () => {
+      const path = ev.artifactPath!;
+      const chunks: Uint8Array[] = [];
+      let offset = 0;
+      let total = Infinity;
+      // First page reports the full size; keep paging until nothing remains.
+      do {
+        const page = await readArtifactNow(path, { offset, length: PREVIEW_CHUNK_BYTES });
+        if (!page) return; // reader unavailable — leave the file-reference row
+        total = page.size;
+        if (total > PREVIEW_MAX_BYTES) return; // too big to preview inline
+        const bytes = base64ToBytes(page.base64);
+        chunks.push(bytes);
+        offset += bytes.length;
+        if (bytes.length === 0 || !page.truncated) break; // done (or empty guard)
+      } while (offset < total && !cancelled);
+      if (cancelled) return;
+      const blob = new Blob(chunks as BlobPart[], ev.mimeType ? { type: ev.mimeType } : undefined);
+      objectUrl = URL.createObjectURL(blob);
+      setResolved(objectUrl);
+    })().catch(() => { /* leave unresolved — the file-reference row still renders */ });
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [ev.previewUrl, ev.artifactPath, ev.mimeType, isMedia, hasReader]);
   return resolved;
 }
 
@@ -89,18 +138,18 @@ function BodyBlock({ ev }: { ev: Evidence }): ReactElement {
   return <MonoPre text={body} />;
 }
 
-export function EvidencePanel({ evidence, requirementTitle, loadArtifactBase64 }: {
+export function EvidencePanel({ evidence, requirementTitle, readArtifact }: {
   evidence: Evidence;
   requirementTitle?: string;
-  /** Fetch an artifact's base64 by path (for on-demand media preview when the
-   *  evidence has no inline previewUrl). Wired from the pane backend. */
-  loadArtifactBase64?: (path: string) => Promise<string | null>;
+  /** Raw artifact reader (bound backend read) for on-demand media preview when
+   *  the evidence has no inline previewUrl. Wired from the pane backend. */
+  readArtifact?: ArtifactReader;
 }): ReactElement {
   const ev = evidence;
   const kind = displayKindOf(ev);
   const captured = ev.source === 'command';
   const isVideo = ev.mimeType?.startsWith('video/') ?? false;
-  const previewUrl = useEvidencePreviewUrl(ev, loadArtifactBase64);
+  const previewUrl = useEvidencePreviewUrl(ev, readArtifact);
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-[var(--gs-bg)] text-[12px]">

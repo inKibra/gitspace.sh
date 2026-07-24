@@ -811,6 +811,8 @@ export interface ArtifactReadRequest {
   type: 'artifact_read';
   requestId: string;
   uri: string;
+  offset?: number;
+  length?: number;
 }
 
 export interface ArtifactWriteRequest {

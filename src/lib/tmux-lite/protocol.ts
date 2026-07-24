@@ -454,7 +454,7 @@ export type Command =
   | { type: 'agent-tree'; target: AgentWorkspaceTargetPayload; agentSessionId: string }
   | { type: 'agent-navigate-history'; target: AgentWorkspaceTargetPayload; agentSessionId: string; entryId: string; mode?: 'redo' | 'jump' }
   | { type: 'artifact-list'; uriPrefix: string }
-  | { type: 'artifact-read'; uri: string }
+  | { type: 'artifact-read'; uri: string; offset?: number; length?: number }
   | { type: 'artifact-write'; uri: string; contentBase64: string; message?: string; cap?: string }
   | { type: 'project-artifacts-status'; projectName: string }
   | { type: 'project-artifacts-remote-set'; projectName: string; url: string }

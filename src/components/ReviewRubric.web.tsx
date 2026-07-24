@@ -4,7 +4,7 @@ import type { CommandExpectation, Evidence, GoalValidation, Judgment, Requiremen
 import { gateStatusForPhase, gateWaiveInfoForPhase, parseDocSlices } from '../core/goal-gates.js';
 import { renderMarkdownHtml } from './markdown-render.js';
 import { CommandEvidenceOutput } from './CommandEvidenceOutput.web.js';
-import { useEvidencePreviewUrl } from './EvidencePanel.web.js';
+import { useEvidencePreviewUrl, type ArtifactReader } from './EvidencePanel.web.js';
 import { useGoalPhaseInfo, type SendReviewRequestFn } from '../app/react/useGoalPhaseInfo.web.js';
 
 /**
@@ -255,14 +255,14 @@ function AdvancedInChips({ phases }: { phases: string[] }): ReactElement | null 
 }
 
 /** ArtifactPreview-equivalent: render the evidence payload inline (mock ArtifactPreview.tsx). */
-function EvidencePreview({ evidence, loadArtifactBase64 }: {
+function EvidencePreview({ evidence, readArtifact }: {
   evidence: Evidence;
-  loadArtifactBase64?: (path: string) => Promise<string | null>;
+  readArtifact?: ArtifactReader;
 }): ReactElement {
   const mime = evidence.mimeType ?? '';
   // On-demand: media is stored as a file attachment now (no inline data-URI), so
   // fetch its bytes when there's no previewUrl but an artifactPath.
-  const previewUrl = useEvidencePreviewUrl(evidence, loadArtifactBase64);
+  const previewUrl = useEvidencePreviewUrl(evidence, readArtifact);
   if (evidence.command || evidence.stdout !== undefined) {
     return (
       <CommandEvidenceOutput
@@ -327,11 +327,11 @@ function EvidencePreview({ evidence, loadArtifactBase64 }: {
 }
 
 /** Evidence card (mock .rc-ev): header row with kind/name/meta/ref/source + inline artifact preview body. */
-function EvidenceCard({ requirement, evidence, onOpenEvidence, loadArtifactBase64 }: {
+function EvidenceCard({ requirement, evidence, onOpenEvidence, readArtifact }: {
   requirement: Requirement;
   evidence: Evidence;
   onOpenEvidence?: (requirementId: string, evidenceId: string) => void;
-  loadArtifactBase64?: (path: string) => Promise<string | null>;
+  readArtifact?: ArtifactReader;
 }): ReactElement {
   const kind = evidenceKind(evidence, requirement.kind);
   const captured = evidence.source === 'command';
@@ -353,7 +353,7 @@ function EvidenceCard({ requirement, evidence, onOpenEvidence, loadArtifactBase6
         </span>
       </Head>
       <div className="px-[11px] py-[9px]">
-        <EvidencePreview evidence={evidence} loadArtifactBase64={loadArtifactBase64} />
+        <EvidencePreview evidence={evidence} readArtifact={readArtifact} />
       </div>
     </div>
   );
@@ -482,7 +482,7 @@ function MakeJudgement({ requirementId, onRecordHuman, onDone }: {
   );
 }
 
-export function ReviewRubric({ goal, docMarkdown, phaseFilterRequest, onWaiveGate, onRecordHuman, onRunJudgment, onOpenEvidence, sendReviewRequest, projectName, workspaceName, loadArtifactBase64 }: {
+export function ReviewRubric({ goal, docMarkdown, phaseFilterRequest, onWaiveGate, onRecordHuman, onRunJudgment, onOpenEvidence, sendReviewRequest, projectName, workspaceName, readArtifact }: {
   goal: { id: string; title: string; phase?: string; validation: GoalValidation } | null;
   /** Goal-doc markdown — drives slice badges (requirements ⇄ doc join) and
    *  the dangling-slice amber state. Undefined = doc unknown, never amber. */
@@ -503,7 +503,7 @@ export function ReviewRubric({ goal, docMarkdown, phaseFilterRequest, onWaiveGat
   workspaceName?: string;
   /** Fetch an artifact's base64 by path — enables on-demand media evidence
    *  previews now that binary evidence is a file attachment, not a data-URI. */
-  loadArtifactBase64?: (path: string) => Promise<string | null>;
+  readArtifact?: ArtifactReader;
 }): ReactElement {
   const phaseInfo = useGoalPhaseInfo(sendReviewRequest, projectName, workspaceName);
   const [active, setActive] = useState(0);
@@ -853,7 +853,7 @@ export function ReviewRubric({ goal, docMarkdown, phaseFilterRequest, onWaiveGat
                 ) : (
                   <div className="flex flex-col gap-[7px]">
                     {c.r.evidence.map((ev) => (
-                      <EvidenceCard key={ev.id} requirement={c.r} evidence={ev} onOpenEvidence={onOpenEvidence} loadArtifactBase64={loadArtifactBase64} />
+                      <EvidenceCard key={ev.id} requirement={c.r} evidence={ev} onOpenEvidence={onOpenEvidence} readArtifact={readArtifact} />
                     ))}
                   </div>
                 )}

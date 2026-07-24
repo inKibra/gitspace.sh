@@ -28,6 +28,13 @@ import type { ChainStackStatus, GoalChain, GoalRecord, GoalUpdateInput, Workspac
 export type BackendKey = string;
 export type BackendKind = 'local' | 'remote';
 
+/** Byte range for a paged artifact read (large media → Blob). Omitted → the
+ *  legacy single-shot read (server caps and may truncate). */
+export interface ArtifactReadRange {
+  offset: number;
+  length: number;
+}
+
 export interface BackendDescriptor {
   key: BackendKey;
   kind: BackendKind;
@@ -314,8 +321,9 @@ export interface SessionBackend {
   getAgentSessionTree?(workspaceId: string, agentSessionId: string): Promise<AgentTreeNode[]>;
   /** List the workspace's artifacts mount (pointer-aware). */
   listWorkspaceArtifacts?(workspaceId: string): Promise<Array<{ path: string; size: number; pointer: boolean }>>;
-  /** Read one artifact (pointer-resolved) as base64, capped server-side. */
-  readWorkspaceArtifact?(workspaceId: string, path: string): Promise<{ base64: string; size: number; truncated: boolean }>;
+  /** Read one artifact (pointer-resolved) as base64, capped server-side. Pass a
+   *  byte range to page large media into a Blob (`truncated` ⇒ more remains). */
+  readWorkspaceArtifact?(workspaceId: string, path: string, range?: ArtifactReadRange): Promise<{ base64: string; size: number; truncated: boolean }>;
   /** Write an artifact into the workspace mount (commit-on-write). */
   writeWorkspaceArtifact?(workspaceId: string, path: string, contentBase64: string, message?: string): Promise<string>;
   /** List favorited artifacts for a workspace (mount-relative paths). Reads the
@@ -331,8 +339,9 @@ export interface SessionBackend {
   mergeWorkspaceFavorites?(workspaceId: string, paths: string[]): Promise<string[]>;
   /** List the PROJECT's artifacts (base clone's main mount). */
   listProjectArtifacts?(projectName: string): Promise<Array<{ path: string; size: number; pointer: boolean }>>;
-  /** Read one project artifact (pointer-resolved) as base64. */
-  readProjectArtifact?(projectName: string, path: string): Promise<{ base64: string; size: number; truncated: boolean }>;
+  /** Read one project artifact (pointer-resolved) as base64. Pass a byte range
+   *  to page large media into a Blob (`truncated` ⇒ more remains). */
+  readProjectArtifact?(projectName: string, path: string, range?: ArtifactReadRange): Promise<{ base64: string; size: number; truncated: boolean }>;
   /** Write+commit an artifact on the project's MAIN branch (base mount). */
   writeProjectArtifact?(projectName: string, path: string, contentBase64: string, message?: string): Promise<string>;
   /** Artifacts repo status: local bare-repo path, remote url, branches. */

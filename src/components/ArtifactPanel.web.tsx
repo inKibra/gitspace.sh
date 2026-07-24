@@ -51,6 +51,30 @@ export interface ArtifactRead {
   truncated: boolean;
 }
 
+/** Render base64 media through a Blob object URL, not a `data:` URI: browsers
+ *  can seek a blob: URL, so `<video>` actually plays mp4/webm (a data:video URI
+ *  is refused by Safari and unseekable elsewhere). Revokes on change/unmount. */
+function Base64Media({ base64, mime, alt }: { base64: string; mime: string; alt: string }): ReactElement | null {
+  const [url, setUrl] = useState<string | undefined>();
+  useEffect(() => {
+    let objectUrl: string | undefined;
+    try {
+      const bin = atob(base64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      objectUrl = URL.createObjectURL(new Blob([bytes], { type: mime }));
+      setUrl(objectUrl);
+    } catch { setUrl(undefined); }
+    return () => { if (objectUrl) URL.revokeObjectURL(objectUrl); };
+  }, [base64, mime]);
+  if (!url) return null;
+  if (mime.startsWith('video/')) {
+    // eslint-disable-next-line jsx-a11y/media-has-caption
+    return <video src={url} controls className="max-h-full max-w-full border border-[var(--gs-border)]" />;
+  }
+  return <img src={url} alt={alt} className="max-h-full max-w-full border border-[var(--gs-border)]" />;
+}
+
 /** Pure renderer for fetched artifact bytes. */
 export function ArtifactPreviewContent({ path, data }: { path: string; data: ArtifactRead }): ReactElement {
   const mime = mimeFor(path);
@@ -60,11 +84,10 @@ export function ArtifactPreviewContent({ path, data }: { path: string; data: Art
     return <div className="h-full min-h-[420px] w-full"><PdfDocFrame base64={data.base64} title={path} /></div>;
   }
   if (mime?.startsWith('image/')) {
-    return <img src={`data:${mime};base64,${data.base64}`} alt={path} className="max-h-full max-w-full border border-[var(--gs-border)]" />;
+    return <Base64Media base64={data.base64} mime={mime} alt={path} />;
   }
   if (mime?.startsWith('video/')) {
-    // eslint-disable-next-line jsx-a11y/media-has-caption
-    return <video src={`data:${mime};base64,${data.base64}`} controls className="max-h-full max-w-full border border-[var(--gs-border)]" />;
+    return <Base64Media base64={data.base64} mime={mime} alt={path} />;
   }
   let text: string | null = null;
   try { text = decodeBase64Utf8(data.base64); } catch { /* binary */ }

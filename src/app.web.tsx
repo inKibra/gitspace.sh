@@ -3410,8 +3410,8 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
                   await be?.runGoalJudgment?.(workspace.projectName, workspaceGoalForPanels!.id, requirementId);
                 }}
                 onOpenEvidence={(requirementId, evidenceId) => openSingletonPane(wsKey, { kind: 'evidence', requirementId, evidenceId })}
-                loadArtifactBase64={paneBackend?.readWorkspaceArtifact
-                  ? (p) => paneBackend.readWorkspaceArtifact!(workspace.id, p).then((r) => r.base64).catch(() => null)
+                readArtifact={paneBackend?.readWorkspaceArtifact
+                  ? (p, range) => paneBackend.readWorkspaceArtifact!(workspace.id, p, range).catch(() => null)
                   : undefined}
               />
             ),
@@ -3491,8 +3491,8 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
             onClose: closeExtra,
             render: () => (
               ev ? <EvidencePanel evidence={ev} requirementTitle={req?.title}
-                     loadArtifactBase64={paneBackend?.readWorkspaceArtifact
-                       ? (p) => paneBackend.readWorkspaceArtifact!(workspace.id, p).then((r) => r.base64).catch(() => null)
+                     readArtifact={paneBackend?.readWorkspaceArtifact
+                       ? (p, range) => paneBackend.readWorkspaceArtifact!(workspace.id, p, range).catch(() => null)
                        : undefined} />
                  : <div className="flex h-full items-center justify-center text-[12px] text-[var(--gs-text-dim)]">Evidence not found.</div>
             ),

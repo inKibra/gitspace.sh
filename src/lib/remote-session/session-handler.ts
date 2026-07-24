@@ -1958,7 +1958,7 @@ export class RemoteSessionHandler {
           await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
           return;
         }
-        await this.handleTypedCommand(session, msg.requestId, { type: 'artifact-read', uri: msg.uri }, sendResponse);
+        await this.handleTypedCommand(session, msg.requestId, { type: 'artifact-read', uri: msg.uri, offset: msg.offset, length: msg.length }, sendResponse);
         break;
 
       case 'artifact_write':
