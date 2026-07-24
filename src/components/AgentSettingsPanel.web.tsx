@@ -30,6 +30,7 @@ export function AgentSettingsPanel({
   onSetApiKey,
   onOAuthLogin,
   onOAuthRespond,
+  onRemoveAccount,
   onCompact,
   onClose,
 }: {
@@ -45,6 +46,7 @@ export function AgentSettingsPanel({
   onSetApiKey: (provider: string, key: string) => Promise<void>;
   onOAuthLogin: (provider: string) => void;
   onOAuthRespond: (value: string) => void;
+  onRemoveAccount: (provider: string, credentialId: number) => Promise<void>;
   onCompact: () => void;
   onClose: () => void;
 }): ReactElement {
@@ -89,7 +91,7 @@ export function AgentSettingsPanel({
           {tab === 'usage' && <UsageTab control={control} />}
           {tab === 'context' && <ContextTab control={control} onCompact={onCompact} />}
           {tab === 'providers' && (
-            <ProvidersTab providers={providers} loading={loading} oauth={oauth} onOAuthLogin={onOAuthLogin} onOAuthRespond={onOAuthRespond} onSetApiKey={onSetApiKey} />
+            <ProvidersTab providers={providers} loading={loading} oauth={oauth} onOAuthLogin={onOAuthLogin} onOAuthRespond={onOAuthRespond} onSetApiKey={onSetApiKey} onRemoveAccount={onRemoveAccount} />
           )}
           {error && <div className="mt-2 text-[var(--gs-danger)]">⚠ {error}</div>}
         </div>
@@ -421,18 +423,20 @@ function ContextTab({ control, onCompact }: { control?: AgentControlInfo; onComp
   );
 }
 
-function ProvidersTab({ providers, loading, oauth, onOAuthLogin, onOAuthRespond, onSetApiKey }: {
+function ProvidersTab({ providers, loading, oauth, onOAuthLogin, onOAuthRespond, onSetApiKey, onRemoveAccount }: {
   providers: AgentAuthProvider[];
   loading: boolean;
   oauth: ActiveOAuth;
   onOAuthLogin: (p: string) => void;
   onOAuthRespond: (v: string) => void;
   onSetApiKey: (p: string, key: string) => Promise<void>;
+  onRemoveAccount: (provider: string, credentialId: number) => Promise<void>;
 }): ReactElement {
   const [editing, setEditing] = useState<string | null>(null);
   const [keyValue, setKeyValue] = useState('');
   const [promptValue, setPromptValue] = useState('');
   const [saving, setSaving] = useState(false);
+  const [removingId, setRemovingId] = useState<number | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const saveKey = async (provider: string) => {
     if (!keyValue.trim()) return;
@@ -464,10 +468,33 @@ function ProvidersTab({ providers, loading, oauth, onOAuthLogin, onOAuthRespond,
           <div key={p.provider} className="border-b border-[var(--gs-border-muted)] py-1.5 last:border-b-0">
             <div className="flex items-center gap-2">
               <span className="font-[family-name:var(--gs-font-mono)] text-[var(--gs-text)]">{p.provider}</span>
-              {p.hasAuth ? <span className="text-[var(--gs-success)]">✓ signed in</span> : <span className="text-[var(--gs-text-dim)]">not signed in</span>}
-              <button type="button" onClick={() => onOAuthLogin(p.provider)} className="ml-auto text-[var(--gs-accent)] hover:underline">sign in</button>
+              {p.hasAuth
+                ? <span className="text-[var(--gs-success)]">✓ {(p.accounts?.length ?? 0) > 1 ? `${p.accounts!.length} accounts` : 'signed in'}</span>
+                : <span className="text-[var(--gs-text-dim)]">not signed in</span>}
+              <button type="button" onClick={() => onOAuthLogin(p.provider)} className="ml-auto text-[var(--gs-accent)] hover:underline" title="Sign in another account — the SDK keeps them as a pool and rotates on rate limits">{(p.accounts?.length ?? 0) > 0 ? 'add account' : 'sign in'}</button>
               <button type="button" onClick={() => { setEditing(editing === p.provider ? null : p.provider); setKeyValue(''); setErr(null); }} className="text-[var(--gs-accent)] hover:underline">{p.hasAuth ? 'update key' : 'add key'}</button>
             </div>
+            {/* Account pool: each OAuth/API-key credential for this provider,
+                with per-account removal (the SDK auto-rotates across them). */}
+            {(p.accounts?.length ?? 0) > 0 && (
+              <div className="mt-1 flex flex-col gap-0.5 pl-3">
+                {p.accounts!.map((acct) => (
+                  <div key={acct.id} className="flex items-center gap-2 text-[11px]">
+                    <span className="text-[var(--gs-text-ghost)]">{acct.type === 'oauth' ? '◈' : '⚿'}</span>
+                    <span className={`min-w-0 flex-1 truncate font-[family-name:var(--gs-font-mono)] ${acct.disabled ? 'text-[var(--gs-text-ghost)] line-through' : 'text-[var(--gs-text-dim)]'}`} title={acct.disabled ? 'disabled (auth failed) — remove and re-add' : acct.label}>{acct.label}{acct.disabled ? ' — disabled' : ''}</span>
+                    <button
+                      type="button"
+                      disabled={removingId === acct.id}
+                      onClick={() => { setRemovingId(acct.id); void onRemoveAccount(p.provider, acct.id).catch((e) => setErr(e instanceof Error ? e.message : 'Remove failed')).finally(() => setRemovingId(null)); }}
+                      className="flex-shrink-0 text-[var(--gs-text-ghost)] hover:text-[var(--gs-danger)] disabled:opacity-40"
+                      title="Remove this account"
+                    >
+                      {removingId === acct.id ? '…' : '✕'}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
             {editing === p.provider && (
               <div className="mt-2 flex gap-2">
                 <input type="password" autoFocus value={keyValue} onChange={(e) => setKeyValue(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') void saveKey(p.provider); }} placeholder={`${p.provider} API key`} className="flex-1 border border-[var(--gs-border)] bg-[var(--gs-bg)] px-2 py-1 font-[family-name:var(--gs-font-mono)] text-[var(--gs-text)]" />

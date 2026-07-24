@@ -549,9 +549,14 @@ export async function setAgentApprovalMode(
   return defaultPiCoordinator.setApprovalMode(target, agentSessionId, mode);
 }
 
-/** List providers + their auth status. */
-export async function getAgentAuthProviders(): Promise<Array<{ provider: string; hasAuth: boolean }>> {
+/** List providers + their auth status, incl. the per-provider account pool. */
+export async function getAgentAuthProviders(): Promise<Array<{ provider: string; hasAuth: boolean; accounts?: Array<{ id: number; type: string; label: string; disabled: boolean }> }>> {
   return defaultPiCoordinator.getAuthProviders();
+}
+
+/** Remove one account (credential) from a provider's pool by row id. */
+export async function removeAgentProviderAccount(provider: string, credentialId: number): Promise<boolean> {
+  return defaultPiCoordinator.removeProviderAccount(provider, credentialId);
 }
 
 /** Store an API key for a provider. */

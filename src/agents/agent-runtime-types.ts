@@ -79,6 +79,9 @@ export interface AgentModelOption {
 export interface AgentAuthProvider {
   provider: string;
   hasAuth: boolean;
+  /** The provider's account pool (multiple sibling credentials; the SDK
+   *  auto-rotates across them on rate-limit/401). Absent on legacy responses. */
+  accounts?: Array<{ id: number; type: string; label: string; disabled: boolean }>;
 }
 
 /** An event in an in-progress OAuth provider sign-in flow. */

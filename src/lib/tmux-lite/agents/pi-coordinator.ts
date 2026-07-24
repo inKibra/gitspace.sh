@@ -433,18 +433,42 @@ export class PiCoordinator {
   }
 
   /** List known providers (from the model registry) with their auth status. */
-  async getAuthProviders(): Promise<Array<{ provider: string; hasAuth: boolean }>> {
+  async getAuthProviders(): Promise<Array<{ provider: string; hasAuth: boolean; accounts?: Array<{ id: number; type: string; label: string; disabled: boolean }> }>> {
     const [auth, registry] = await Promise.all([createPiAuthStorage(), createPiModelRegistry()]);
     const providers = [...new Set(registry.getAll().map((m) => m.provider))].sort();
     return providers.map((provider) => {
       let hasAuth = false;
+      let accounts: Array<{ id: number; type: string; label: string; disabled: boolean }> = [];
       try {
         hasAuth = auth.hasAuth(provider) || auth.has(provider);
+        // Multi-account pool: the pi SDK holds a LIST of credentials per
+        // provider (sibling accounts) and auto-rotates on rate-limit/401.
+        // Surface each so the UI can show + manage them, not just hasAuth.
+        const stored = auth.listStoredCredentials?.(provider) ?? [];
+        accounts = stored.map((c) => ({
+          id: c.id,
+          type: c.credential.type,
+          label: c.credential.email
+            ?? c.credential.label
+            ?? c.credential.accountId
+            ?? (c.credential.type === 'api_key' ? 'API key' : `account #${c.id}`),
+          disabled: c.disabledCause != null,
+        }));
       } catch {
         /* ignore */
       }
-      return { provider, hasAuth };
+      return { provider, hasAuth, accounts };
     });
+  }
+
+  /** Remove ONE account (credential) from a provider's pool by its row id. */
+  async removeProviderAccount(provider: string, credentialId: number): Promise<boolean> {
+    const auth = await createPiAuthStorage();
+    try {
+      return (await auth.removeCredential?.(provider, credentialId)) ?? false;
+    } catch {
+      return false;
+    }
   }
 
   /** Store an API key for a provider. */

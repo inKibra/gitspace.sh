@@ -3340,12 +3340,20 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     throw new Error('Unexpected set-approval-mode response');
   }
 
-  async getAgentAuthProviders(): Promise<Array<{ provider: string; hasAuth: boolean }>> {
+  async getAgentAuthProviders(): Promise<Array<{ provider: string; hasAuth: boolean; accounts?: Array<{ id: number; type: string; label: string; disabled: boolean }> }>> {
     await this.waitForInitialSnapshot();
     const tmuxResponse = await this.sendRpcCommand({ type: 'get_agent_auth_providers', requestId: crypto.randomUUID() });
     if (tmuxResponse.type === 'agent-auth-providers') return tmuxResponse.providers;
     if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
     throw new Error('Unexpected auth-providers response');
+  }
+
+  async removeAgentProviderAccount(provider: string, credentialId: number): Promise<boolean> {
+    await this.waitForInitialSnapshot();
+    const tmuxResponse = await this.sendRpcCommand({ type: 'remove_agent_provider_account', requestId: crypto.randomUUID(), provider, credentialId });
+    if (tmuxResponse.type === 'agent-remove-account') return tmuxResponse.ok;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected remove-account response');
   }
 
   async setAgentProviderApiKey(provider: string, key: string): Promise<boolean> {

@@ -1768,11 +1768,18 @@ export class LocalSessionBackend implements SessionBackend {
     throw new Error('Unexpected set-approval-mode response');
   }
 
-  async getAgentAuthProviders(): Promise<Array<{ provider: string; hasAuth: boolean }>> {
+  async getAgentAuthProviders(): Promise<Array<{ provider: string; hasAuth: boolean; accounts?: Array<{ id: number; type: string; label: string; disabled: boolean }> }>> {
     const tmuxResponse = await this.sendTmuxCommand({ type: 'agent-auth-providers' });
     if (tmuxResponse.type === 'agent-auth-providers') return tmuxResponse.providers;
     if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
     throw new Error('Unexpected auth-providers response');
+  }
+
+  async removeAgentProviderAccount(provider: string, credentialId: number): Promise<boolean> {
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'agent-remove-account', provider, credentialId });
+    if (tmuxResponse.type === 'agent-remove-account') return tmuxResponse.ok;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected remove-account response');
   }
 
   async setAgentProviderApiKey(provider: string, key: string): Promise<boolean> {

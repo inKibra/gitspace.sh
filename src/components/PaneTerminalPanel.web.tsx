@@ -313,6 +313,13 @@ export function PaneTerminalPanel({
     loadSettingsPanel();
     refreshControl();
   }, [backend, loadSettingsPanel, refreshControl]);
+  const handleRemoveAccount = useCallback(async (provider: string, credentialId: number) => {
+    const fn = backend?.removeAgentProviderAccount;
+    if (!fn) throw new Error('Not supported');
+    await fn.call(backend, provider, credentialId);
+    loadSettingsPanel();
+    refreshControl();
+  }, [backend, loadSettingsPanel, refreshControl]);
   const handleSetSetting = useCallback(async (path: string, value: string | number | boolean | string[]) => {
     const fn = backend?.setAgentSetting;
     if (!fn) throw new Error('Not supported');
@@ -497,6 +504,7 @@ export function PaneTerminalPanel({
           onSetApiKey={handleSetApiKey}
           onOAuthLogin={handleOAuthLogin}
           onOAuthRespond={handleOAuthRespond}
+          onRemoveAccount={handleRemoveAccount}
           onCompact={handleCompact}
           onClose={() => { setSettingsOpen(false); setOauthFlow(null); oauthFlowIdRef.current = null; }}
         />

@@ -75,6 +75,7 @@ import {
   setAgentThinkingLevel,
   setAgentApprovalMode,
   getAgentAuthProviders,
+  removeAgentProviderAccount,
   setAgentProviderApiKey,
   getAgentSettings,
   setAgentSetting,
@@ -3861,6 +3862,17 @@ export async function dispatchCommand(cmd: Command): Promise<Response | null> {
             } catch (e) {
               const errMsg = e instanceof Error ? e.message : String(e);
               res = { type: 'error', message: `Failed to list providers: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-remove-account':
+            try {
+              await getAgentControlReady();
+              const ok = await removeAgentProviderAccount(cmd.provider, cmd.credentialId);
+              res = { type: 'agent-remove-account', ok };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to remove account: ${errMsg}` };
             }
             break;
 

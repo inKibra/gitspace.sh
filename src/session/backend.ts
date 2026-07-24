@@ -280,8 +280,10 @@ export interface SessionBackend {
   setAgentThinkingLevel?(workspaceId: string, agentSessionId: string, level: string): Promise<boolean>;
   /** Set an agent session's tool-approval mode. */
   setAgentApprovalMode?(workspaceId: string, agentSessionId: string, mode: string): Promise<boolean>;
-  /** List providers + their auth status (machine-global). */
-  getAgentAuthProviders?(): Promise<Array<{ provider: string; hasAuth: boolean }>>;
+  /** List providers + their auth status + per-provider account pool (machine-global). */
+  getAgentAuthProviders?(): Promise<Array<{ provider: string; hasAuth: boolean; accounts?: Array<{ id: number; type: string; label: string; disabled: boolean }> }>>;
+  /** Remove one account (credential) from a provider's pool by row id. */
+  removeAgentProviderAccount?(provider: string, credentialId: number): Promise<boolean>;
   /** Store an API key for a provider (machine-global). */
   setAgentProviderApiKey?(provider: string, key: string): Promise<boolean>;
   /** Read the curated agent settings catalog (machine-global). */

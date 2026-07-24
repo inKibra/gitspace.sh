@@ -70,6 +70,16 @@ export interface OmpAuthStorage {
       onPrompt: (prompt: { message: string; placeholder?: string }) => Promise<string>;
     },
   ): Promise<void>;
+  /** Local (no-probe) list of stored credentials — the multi-account pool per
+   *  provider. Each carries the DB row id used to remove a specific account. */
+  listStoredCredentials?(provider?: string): Array<{
+    id: number;
+    provider: string;
+    credential: { type: string; email?: string; accountId?: string; label?: string };
+    disabledCause: string | null;
+  }>;
+  /** Remove ONE stored credential (account) by its row id. */
+  removeCredential?(provider: string, credentialId: number): Promise<boolean>;
 }
 
 // ---------------------------------------------------------------------------
