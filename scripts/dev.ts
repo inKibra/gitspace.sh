@@ -14,7 +14,7 @@
 import { spawn, type Subprocess } from 'bun';
 import { join, basename } from 'path';
 import { mkdirSync, writeFileSync, readFileSync, existsSync, unlinkSync } from 'fs';
-import { createServer, type AddressInfo } from 'net';
+import { createServer, connect, type AddressInfo } from 'net';
 
 
 import { clearSandboxBootstrapMetadata, createSandboxSecretsStore, validateSandboxBootstrap, writeSandboxSecretsFile } from './dev-bootstrap.js';
@@ -189,6 +189,28 @@ function spawnChild(
   return proc;
 }
 
+/** True if something is actively listening on a unix socket (a live daemon),
+ *  distinct from a stale socket file left behind by a dead process. */
+function socketAccepts(path: string, timeoutMs = 500): Promise<boolean> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (v: boolean, sock?: ReturnType<typeof connect>) => {
+      if (settled) return;
+      settled = true;
+      try { sock?.destroy(); } catch { /* ignore */ }
+      resolve(v);
+    };
+    try {
+      const sock = connect(path);
+      sock.once('connect', () => done(true, sock));
+      sock.once('error', () => done(false, sock));
+      setTimeout(() => done(false, sock), timeoutMs);
+    } catch {
+      done(false);
+    }
+  });
+}
+
 async function shutdown(exitCode = 0): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
@@ -209,29 +231,50 @@ async function shutdown(exitCode = 0): Promise<void> {
 
   // Kill the tmux-lite server — it's a grandchild process spawned by serve
   // that survives after serve exits because it's not in the same process group.
+  // Report the ACTUAL outcome of each step: the old code logged "Sent SIGTERM to
+  // pid N" unconditionally and never checked whether N existed or died — so a
+  // stale pidfile (pid recycled/gone) read as a clean shutdown while the real
+  // daemon kept LISTENING on the socket, which is what makes the next launch's
+  // serve-activate 15s-time-out ("daemon wedged?").
+  const alive = (pid: number): boolean => { try { process.kill(pid, 0); return true; } catch { return false; } };
   try {
     const sandboxName = deriveSandboxName();
     const pidFile = `/tmp/tmux-lite-${sandboxName}.pid`;
+    const socketFile = `/tmp/tmux-lite-${sandboxName}.sock`;
     if (existsSync(pidFile)) {
       const pid = parseInt(readFileSync(pidFile, 'utf-8').trim(), 10);
       if (pid && !isNaN(pid)) {
-        try {
-          process.kill(pid, 'SIGTERM');
-          log('dev', `Sent SIGTERM to tmux-lite server (pid ${pid})`);
-          // Give it a moment to shut down cleanly
-          await Bun.sleep(500);
-          try { process.kill(pid, 0); process.kill(pid, 'SIGKILL'); } catch {}
-        } catch {
-          // Already dead
+        if (!alive(pid)) {
+          log('dev', `tmux-lite pidfile pid ${pid} is not running (stale pidfile) — nothing to signal`);
+        } else {
+          try { process.kill(pid, 'SIGTERM'); } catch { /* raced to exit */ }
+          let died = false;
+          for (let i = 0; i < 20; i++) { if (!alive(pid)) { died = true; break; } await Bun.sleep(100); }
+          if (died) {
+            log('dev', `tmux-lite server (pid ${pid}) exited after SIGTERM`);
+          } else {
+            try { process.kill(pid, 'SIGKILL'); } catch { /* raced to exit */ }
+            await Bun.sleep(200);
+            log('dev', alive(pid)
+              ? `⚠ tmux-lite server (pid ${pid}) STILL ALIVE after SIGKILL — kill manually: pkill -9 -f tmux-lite/server`
+              : `tmux-lite server (pid ${pid}) killed with SIGKILL (ignored SIGTERM — was wedged)`);
+          }
         }
       }
-      try { unlinkSync(pidFile); } catch {}
+      try { unlinkSync(pidFile); } catch { /* already gone */ }
     }
-    // Clean up sandbox socket file
-    const socketFile = `/tmp/tmux-lite-${sandboxName}.sock`;
-    try { unlinkSync(socketFile); } catch {}
-  } catch {
-    // Best-effort cleanup
+    // A daemon can outlive its pidfile pid (stale/mismatched pid) yet keep
+    // LISTENING on the socket — the exact state that wedges the next launch.
+    // Probe the socket and report the truth before we exit, so this is visible
+    // in the log instead of surfacing as an opaque timeout next time.
+    if (existsSync(socketFile)) {
+      if (await socketAccepts(socketFile)) {
+        log('dev', `⚠ a tmux-lite daemon is STILL LISTENING on ${socketFile} after cleanup (pid mismatch) — kill it: pkill -9 -f tmux-lite/server`);
+      }
+      try { unlinkSync(socketFile); } catch { /* already gone */ }
+    }
+  } catch (err) {
+    log('dev', `tmux-lite cleanup error: ${err instanceof Error ? err.message : String(err)}`);
   }
 
   process.exit(exitCode);

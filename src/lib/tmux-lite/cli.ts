@@ -274,22 +274,33 @@ export async function isServerRunning(): Promise<boolean> {
  *                    silently kill them; warn and reuse.
  *   - 'unknown'    : can't tell (no current identity, daemon didn't answer, or a
  *                    daemon predating codeVersion) — reuse rather than churn. */
-async function evaluateDaemonFreshness(): Promise<"fresh" | "stale-idle" | "stale-busy" | "unknown"> {
+async function evaluateDaemonFreshness(): Promise<"fresh" | "stale-idle" | "stale-busy" | "wedged" | "unknown"> {
   const expected = getCodeVersion();
-  if (expected === null) return "unknown"; // dev-from-source without a token, etc.
-  let daemonVersion: string | null;
-  let sessions: number;
+  // Query status FIRST (even without a code identity to police): a daemon that
+  // accepts the connection but never answers a trivial `status` has a blocked
+  // event loop — it's wedged, and reusing it makes every later command 15s-time-
+  // out (the "daemon wedged?" failure). A TmuxCliTimeoutError is that signal
+  // (connected, no reply); a connection error means gone/transient, not wedged.
+  let res: Awaited<ReturnType<typeof send>>;
   try {
-    const res = await send({ type: "status" }, { timeoutMs: 5000 });
-    if (res.type !== "status") return "unknown";
-    daemonVersion = res.codeVersion;
-    sessions = res.sessions;
-  } catch {
-    return "unknown"; // transient error — don't recycle on a bad signal
+    res = await send({ type: "status" }, { timeoutMs: 5000 });
+  } catch (err) {
+    if (err instanceof TmuxCliTimeoutError) {
+      // Confirm with one retry so a transient GC/IO pause can't cost a live daemon.
+      try {
+        res = await send({ type: "status" }, { timeoutMs: 5000 });
+      } catch (retryErr) {
+        return retryErr instanceof TmuxCliTimeoutError ? "wedged" : "unknown";
+      }
+    } else {
+      return "unknown"; // transient/connection error — don't recycle on a bad signal
+    }
   }
-  if (daemonVersion == null) return "unknown"; // daemon predates codeVersion reporting
-  if (daemonVersion === expected) return "fresh";
-  return sessions > 0 ? "stale-busy" : "stale-idle";
+  if (res.type !== "status") return "unknown";
+  if (expected === null) return "fresh"; // responsive; no identity to police
+  if (res.codeVersion == null) return "unknown"; // daemon predates codeVersion reporting
+  if (res.codeVersion === expected) return "fresh";
+  return res.sessions > 0 ? "stale-busy" : "stale-idle";
 }
 
 /** Stop the running daemon and wait for it to actually exit, so the next
@@ -336,9 +347,11 @@ export async function ensureServer(): Promise<void> {
   ensureServerPromise = (async () => {
     if (await isServerRunning()) {
       const freshness = await evaluateDaemonFreshness();
-      if (freshness === "stale-idle") {
+      if (freshness === "stale-idle" || freshness === "wedged") {
         console.error(
-          "[tmux-lite] running daemon is on a different code version than the current build — recycling it to load the new code",
+          freshness === "wedged"
+            ? "[tmux-lite] running daemon is not responding (event loop wedged) — force-recycling it"
+            : "[tmux-lite] running daemon is on a different code version than the current build — recycling it to load the new code",
         );
         await recycleStaleServer();
         // fall through to spawn a fresh daemon below
