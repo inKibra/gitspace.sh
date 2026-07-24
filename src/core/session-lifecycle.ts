@@ -543,11 +543,13 @@ export async function createWorkspaceForSession(
     );
     writeFileSync(join(issueArtifactDir, 'issue.md'), markdown, 'utf-8');
   }
-  const boundGoal = bindPlannedGoalForWorkspace(projectName, workspaceName);
-  // New workspaces start in PLAN (author the spec first). A bound planned goal
-  // dictates its own phase; otherwise default to plan (was implicitly 'code'
-  // via the display fallback).
-  setWorkspaceStatus(projectName, workspaceName, boundGoal?.phase ?? 'plan');
+  bindPlannedGoalForWorkspace(projectName, workspaceName);
+  // A brand-new workspace ALWAYS starts in PLAN — creating a workspace from a
+  // planned goal means "start working on the spec," not "jump to code." (The
+  // goal record's own `phase` defaults to code, so adopting it here wrongly
+  // shoved fresh workspaces straight into the code lane.) The reviewer advances
+  // the phase deliberately via the workflow gates.
+  setWorkspaceStatus(projectName, workspaceName, 'plan');
 
   // Loop 2: seed a real goal from the issue (same as CLI addWorkspace) — the
   // github sourceRef links it back so the guide/PR can close the issue.
