@@ -159,6 +159,15 @@ export function buildTerminalRecord(
 /** Reduce a requirement's evidence for the snapshot: keep only the latest
  *  entry per command (manual entries kept individually) and strip the heavy
  *  captured streams — `goal-detail` serves the full trail with output. */
+/** Snapshot projection caps for a goal's validation. A goal can accumulate
+ *  thousands of evidence entries (each with unbounded meta/body) and huge
+ *  rubrics; unslimmed that reached 100+ MB for a single goal and blew past the
+ *  frame reassembly cap (observed: goal validation.requirements = 109 MB). The
+ *  board needs only a bounded projection — goal-detail serves the full trail. */
+const SNAPSHOT_EVIDENCE_PER_REQUIREMENT = 20;
+const SNAPSHOT_EVIDENCE_META_CHARS = 500;
+const SNAPSHOT_RUBRIC_CHARS = 2000;
+
 function slimEvidence(
   evidence: import('../../../types/goals.js').Evidence[],
 ): import('../../../types/goals.js').Evidence[] {
@@ -171,12 +180,20 @@ function slimEvidence(
       latestByKey.set(key, entry);
     }
   }
-  return [...latestByKey.values()].map((entry) => ({
-    ...entry,
-    stdout: undefined,
-    stderr: undefined,
-    body: undefined,
-  }));
+  // Dedup can still leave thousands of unique (manual) entries — hard-cap to the
+  // newest N and strip/cap every heavy string field so a requirement is bounded.
+  return [...latestByKey.values()]
+    .sort((a, b) => (a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0))
+    .slice(0, SNAPSHOT_EVIDENCE_PER_REQUIREMENT)
+    .map((entry) => ({
+      ...entry,
+      stdout: undefined,
+      stderr: undefined,
+      body: undefined,
+      meta: typeof entry.meta === 'string' && entry.meta.length > SNAPSHOT_EVIDENCE_META_CHARS
+        ? entry.meta.slice(0, SNAPSHOT_EVIDENCE_META_CHARS)
+        : entry.meta,
+    }));
 }
 
 function slimGoalValidation(
@@ -190,6 +207,9 @@ function slimGoalValidation(
     // its heavy stdout/stderr/body stripped — both grow with machine uptime.
     requirements[id] = {
       ...requirement,
+      rubric: typeof requirement.rubric === 'string' && requirement.rubric.length > SNAPSHOT_RUBRIC_CHARS
+        ? requirement.rubric.slice(0, SNAPSHOT_RUBRIC_CHARS)
+        : requirement.rubric,
       evidence: slimEvidence(requirement.evidence),
       reviews: [],
     };
@@ -442,48 +462,62 @@ function enforceSnapshotSizeBudget(snapshot: MachineSnapshot): MachineSnapshot {
   if (json.length <= SNAPSHOT_SIZE_BUDGET_BYTES) return snapshot;
 
   const before = json.length;
-  const records = Object.values(snapshot.agentSessionsById);
-  const top = records
-    .map((r) => ({
-      id: r.id.slice(0, 8),
-      bytes: JSON.stringify(r).length,
-      queued: JSON.stringify(r.queuedMessages ?? null).length,
-      todo: JSON.stringify(r.todoPhases ?? null).length,
-      lastMsg: (r.lastMessagePreview ?? '').length,
-    }))
-    .sort((a, b) => b.bytes - a.bytes)
-    .slice(0, 10);
+  const records = Object.values(snapshot.agentSessionsById ?? {});
+  const goals = Object.values(snapshot.goalsById ?? {});
+  // Rank BOTH categories so the log names the real culprit (goal validation was
+  // the 100+ MB offender the agent-only cap kept missing → "STILL OVER").
+  const topAgents = records
+    .map((r) => ({ id: r.id.slice(0, 8), bytes: JSON.stringify(r).length }))
+    .sort((a, b) => b.bytes - a.bytes).slice(0, 5);
+  const topGoals = goals
+    .map((g) => ({ id: g.id.slice(0, 32), bytes: JSON.stringify(g).length }))
+    .sort((a, b) => b.bytes - a.bytes).slice(0, 5);
+
+  // Last-resort validation stripper (source slimGoalValidation should already
+  // bound this; this catches any goal that slips through). Also clears the copy
+  // embedded on a workspace record so it can't re-bloat via that reference.
+  const stripGoalValidation = (goal: MachineGoalRecord | undefined): void => {
+    if (goal?.validation) goal.validation = { reqOrder: [], requirements: {}, events: [], readiness: goal.validation.readiness };
+    if (goal?.doc) goal.doc = { ...goal.doc, bodyMarkdown: '' };
+  };
 
   const applied: string[] = [];
-  const pass = (label: string, fn: (r: MachineAgentSessionRecord) => void): boolean => {
-    for (const r of records) fn(r);
+  const pass = (label: string, fn: () => void): boolean => {
+    fn();
     applied.push(label);
     json = JSON.stringify(snapshot);
     return json.length <= SNAPSHOT_SIZE_BUDGET_BYTES;
   };
 
-  // Order matters: shed the fields most likely to carry raw pasted text first.
+  // Goals first — they were the dominant offender by two orders of magnitude.
   const done =
-    pass('queuedMessages', (r) => {
-      if (!r.queuedMessages) return;
-      r.queuedMessages = {
-        steering: r.queuedMessages.steering.map((m) => m.slice(0, CAP_TEXT_CHARS)),
-        followUp: r.queuedMessages.followUp.map((m) => m.slice(0, CAP_TEXT_CHARS)),
-      };
+    pass('goalValidation', () => {
+      for (const g of goals) stripGoalValidation(g);
+      for (const w of Object.values(snapshot.workspacesById)) stripGoalValidation(w.goal);
     })
-    || pass('todoPhases', (r) => {
-      if (Array.isArray(r.todoPhases) && r.todoPhases.length > CAP_TODO_PHASES) {
-        r.todoPhases = r.todoPhases.slice(0, CAP_TODO_PHASES);
+    || pass('queuedMessages', () => {
+      for (const r of records) {
+        if (!r.queuedMessages) continue;
+        r.queuedMessages = {
+          steering: r.queuedMessages.steering.map((m) => m.slice(0, CAP_TEXT_CHARS)),
+          followUp: r.queuedMessages.followUp.map((m) => m.slice(0, CAP_TEXT_CHARS)),
+        };
       }
     })
-    || pass('lastMessagePreview', (r) => {
-      if (r.lastMessagePreview) r.lastMessagePreview = r.lastMessagePreview.slice(0, CAP_TEXT_CHARS);
+    || pass('todoPhases', () => {
+      for (const r of records) {
+        if (Array.isArray(r.todoPhases) && r.todoPhases.length > CAP_TODO_PHASES) r.todoPhases = r.todoPhases.slice(0, CAP_TODO_PHASES);
+      }
+    })
+    || pass('lastMessagePreview', () => {
+      for (const r of records) { if (r.lastMessagePreview) r.lastMessagePreview = r.lastMessagePreview.slice(0, CAP_TEXT_CHARS); }
     });
 
   console.error(
     `[snapshot-cap] snapshot ${before} bytes exceeded budget ${SNAPSHOT_SIZE_BUDGET_BYTES}; `
     + `trimmed [${applied.join(', ')}] -> ${json.length} bytes${done ? '' : ' (STILL OVER)'}; `
-    + `top contributors: ${top.map((t) => `${t.id}=${t.bytes}b(q${t.queued}/t${t.todo}/m${t.lastMsg})`).join(', ')}`,
+    + `top goals: ${topGoals.map((t) => `${t.id}=${t.bytes}b`).join(', ')}; `
+    + `top agents: ${topAgents.map((t) => `${t.id}=${t.bytes}b`).join(', ')}`,
   );
   return snapshot;
 }
