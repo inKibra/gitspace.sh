@@ -180,19 +180,33 @@ function slimEvidence(
       latestByKey.set(key, entry);
     }
   }
-  // Dedup can still leave thousands of unique (manual) entries — hard-cap to the
-  // newest N and strip/cap every heavy string field so a requirement is bounded.
+  const cap = (s: string | undefined, n: number): string | undefined =>
+    typeof s === 'string' && s.length > n ? s.slice(0, n) : s;
+  // ALLOWLIST projection: emit only bounded fields. DROP the always-large inline
+  // content (body, stdout, stderr) outright and CAP the URL fields — a plain
+  // http(s) URL survives, but an inline data-URI blob (how an iOS goal stored
+  // screenshots — the megabytes a stdout/stderr/body denylist missed, which
+  // OOM'd the daemon via the uncapped delta path) is truncated to a bounded
+  // length. The full evidence is always available via goal-detail.
+  const URL_CAP = 2048;
   return [...latestByKey.values()]
     .sort((a, b) => (a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0))
     .slice(0, SNAPSHOT_EVIDENCE_PER_REQUIREMENT)
     .map((entry) => ({
-      ...entry,
-      stdout: undefined,
-      stderr: undefined,
-      body: undefined,
-      meta: typeof entry.meta === 'string' && entry.meta.length > SNAPSHOT_EVIDENCE_META_CHARS
-        ? entry.meta.slice(0, SNAPSHOT_EVIDENCE_META_CHARS)
-        : entry.meta,
+      id: entry.id,
+      name: cap(entry.name, 200) as string,
+      meta: cap(entry.meta, SNAPSHOT_EVIDENCE_META_CHARS) as string,
+      source: entry.source,
+      createdAt: entry.createdAt,
+      command: cap(entry.command, 500),
+      exitCode: entry.exitCode,
+      mimeType: entry.mimeType,
+      sizeBytes: entry.sizeBytes,
+      displayName: cap(entry.displayName, 200),
+      originalPath: cap(entry.originalPath, 1024),
+      artifactPath: cap(entry.artifactPath, 1024),
+      url: cap(entry.url, URL_CAP),
+      previewUrl: cap(entry.previewUrl, URL_CAP),
     }));
 }
 
