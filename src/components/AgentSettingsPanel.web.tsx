@@ -457,7 +457,7 @@ function ProvidersTab({ providers, loading, oauth, onOAuthLogin, onOAuthRespond,
   const [err, setErr] = useState<string | null>(null);
   const checkUsage = async (provider: string) => {
     setUsageLoading(provider); setErr(null);
-    try { setUsage((prev) => ({ ...prev, [provider]: await onCheckUsage(provider) })); }
+    try { const rows = await onCheckUsage(provider); setUsage((prev) => ({ ...prev, [provider]: rows })); }
     catch (e) { setErr(e instanceof Error ? e.message : 'Usage check failed'); }
     finally { setUsageLoading(null); }
   };
