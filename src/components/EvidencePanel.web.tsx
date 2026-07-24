@@ -1,8 +1,34 @@
 /** @jsxImportSource react */
-import type { ReactElement } from 'react';
+import { useEffect, useState, type ReactElement } from 'react';
 import type { Evidence } from '../types/goals.js';
 import { Highlighted } from '../blocks/render/highlight.web.js';
 import { humanSize, langForPath } from './ArtifactPanel.web.js';
+
+/**
+ * Fetch a media evidence's bytes ON DEMAND when it has no inline previewUrl
+ * (large binary evidence is now stored as a file attachment, not a data-URI —
+ * see core/goal-validation.ts). Returns the inline previewUrl as-is if present;
+ * otherwise loads the artifact via `loadArtifactBase64(artifactPath)` and builds
+ * a data URL. No fetch for non-media or when no loader is wired.
+ */
+export function useEvidencePreviewUrl(
+  ev: Evidence,
+  loadArtifactBase64?: (path: string) => Promise<string | null>,
+): string | undefined {
+  const [resolved, setResolved] = useState<string | undefined>(ev.previewUrl);
+  const isMedia = (ev.mimeType?.startsWith('image/') || ev.mimeType?.startsWith('video/')) ?? false;
+  useEffect(() => {
+    if (ev.previewUrl) { setResolved(ev.previewUrl); return; }
+    if (!isMedia || !ev.artifactPath || !loadArtifactBase64) { setResolved(undefined); return; }
+    let cancelled = false;
+    setResolved(undefined);
+    loadArtifactBase64(ev.artifactPath)
+      .then((base64) => { if (!cancelled && base64) setResolved(`data:${ev.mimeType};base64,${base64}`); })
+      .catch(() => { /* leave unresolved — the file-reference row still renders */ });
+    return () => { cancelled = true; };
+  }, [ev.previewUrl, ev.artifactPath, ev.mimeType, isMedia, loadArtifactBase64]);
+  return resolved;
+}
 
 /**
  * EvidencePanel — dock-pane content for a single Evidence record
@@ -63,14 +89,18 @@ function BodyBlock({ ev }: { ev: Evidence }): ReactElement {
   return <MonoPre text={body} />;
 }
 
-export function EvidencePanel({ evidence, requirementTitle }: {
+export function EvidencePanel({ evidence, requirementTitle, loadArtifactBase64 }: {
   evidence: Evidence;
   requirementTitle?: string;
+  /** Fetch an artifact's base64 by path (for on-demand media preview when the
+   *  evidence has no inline previewUrl). Wired from the pane backend. */
+  loadArtifactBase64?: (path: string) => Promise<string | null>;
 }): ReactElement {
   const ev = evidence;
   const kind = displayKindOf(ev);
   const captured = ev.source === 'command';
   const isVideo = ev.mimeType?.startsWith('video/') ?? false;
+  const previewUrl = useEvidencePreviewUrl(ev, loadArtifactBase64);
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-[var(--gs-bg)] text-[12px]">
@@ -94,13 +124,13 @@ export function EvidencePanel({ evidence, requirementTitle }: {
 
       {/* body — mock .ev-view-b */}
       <div className="min-h-0 flex-1 overflow-auto px-[18px] py-4">
-        {ev.previewUrl && (
+        {previewUrl && (
           <div className="mb-4">
             {isVideo ? (
               // eslint-disable-next-line jsx-a11y/media-has-caption
-              <video src={ev.previewUrl} controls className="max-h-[70vh] max-w-full border border-[var(--gs-border)] shadow-[0_4px_24px_rgba(0,0,0,0.6)]" />
+              <video src={previewUrl} controls className="max-h-[70vh] max-w-full border border-[var(--gs-border)] shadow-[0_4px_24px_rgba(0,0,0,0.6)]" />
             ) : (
-              <img src={ev.previewUrl} alt={ev.name} className="max-h-[70vh] max-w-full border border-[var(--gs-border)] shadow-[0_4px_24px_rgba(0,0,0,0.6)]" />
+              <img src={previewUrl} alt={ev.name} className="max-h-[70vh] max-w-full border border-[var(--gs-border)] shadow-[0_4px_24px_rgba(0,0,0,0.6)]" />
             )}
             <div className="mt-[6px] font-[family-name:var(--gs-font-mono)] text-[10px] text-[var(--gs-text-dim)]">
               {ev.mimeType ?? 'preview'}{ev.sizeBytes !== undefined ? ` · ${humanSize(ev.sizeBytes)}` : ''}
@@ -170,7 +200,7 @@ export function EvidencePanel({ evidence, requirementTitle }: {
                 <div className="flex items-center gap-[9px] border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-[11px] py-[8px] font-[family-name:var(--gs-font-mono)] text-[11.5px] text-[var(--gs-text)]">
                   <span className="text-[var(--gs-text-dim)]">artifact</span>
                   <span className="min-w-0 flex-1 truncate" title={ev.artifactPath}>{ev.artifactPath}</span>
-                  {ev.sizeBytes !== undefined && !ev.previewUrl && (
+                  {ev.sizeBytes !== undefined && !previewUrl && (
                     <span className="flex-shrink-0 text-[10px] text-[var(--gs-text-dim)]">{humanSize(ev.sizeBytes)}</span>
                   )}
                 </div>
@@ -179,7 +209,7 @@ export function EvidencePanel({ evidence, requirementTitle }: {
           </div>
         )}
 
-        {!ev.previewUrl && ev.command === undefined && !ev.body && !ev.stdout && !ev.stderr && !ev.url && !ev.originalPath && !ev.artifactPath && (
+        {!previewUrl && ev.command === undefined && !ev.body && !ev.stdout && !ev.stderr && !ev.url && !ev.originalPath && !ev.artifactPath && (
           <div className="text-[var(--gs-text-dim)]">No inline content for this evidence.</div>
         )}
       </div>
