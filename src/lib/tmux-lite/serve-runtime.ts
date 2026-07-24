@@ -132,7 +132,13 @@ export async function activateServeRuntime(config: ServeRuntimeConfig, deps: Ser
   active = runtime;
 
   try {
+    // Step logging: activation is a chain of awaits, and if any step blocks the
+    // event loop (e.g. serializing an oversized agent-state) serve-activate just
+    // 15s-times-out with no clue where. These lines let the daemon log name the
+    // stuck step (the last one printed) instead of failing opaquely.
+    log('activating: initializing session manager…');
     await runtime.sessionManager.initialize();
+    log('activating: session manager ready; loading agent state…');
 
     // Agent-state bridge (socket-to-self in P1): keep a live snapshot for
     // newly authenticated clients + fan deltas out to connected ones.
@@ -142,7 +148,13 @@ export async function activateServeRuntime(config: ServeRuntimeConfig, deps: Ser
     const watchAgentState = deps.watchAgentState ?? (cliMod.watchAgentState as NonNullable<ServeRuntimeDeps['watchAgentState']>);
     const { applyAgentDeltaToAgentState } = await import('./agent-state-reducer.js');
 
-    currentAgentSnapshot = Object.fromEntries((await getAgentState()).map((w) => [w.workspaceId, w]));
+    const agentStateList = await getAgentState();
+    currentAgentSnapshot = Object.fromEntries(agentStateList.map((w) => [w.workspaceId, w]));
+    // Bounded now (setExternalX caps at ingestion) so this measure is cheap and
+    // confirms the caps held. A large number here would name the next culprit.
+    let sessionCount = 0;
+    for (const w of agentStateList) sessionCount += w.sessions.length;
+    log(`activating: agent state loaded (${agentStateList.length} workspace(s), ${sessionCount} session(s), ~${JSON.stringify(agentStateList).length} bytes); starting relay…`);
 
     // The agent watch is the ONLY conduit for agent deltas to web clients — if
     // it dies and stays dead, every connected client silently stops seeing
