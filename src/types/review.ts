@@ -176,6 +176,7 @@ export type ReviewOperation =
       threadId: string;
       commentId: string;
     }
+  | { op: 'get_review_guide'; projectName: string; workspaceName: string }
   | { op: 'get_review_guide_state'; projectName: string; workspaceName: string }
   | { op: 'set_review_guide_state'; projectName: string; workspaceName: string; state: { readSections: string[]; approval?: { by: string; at: string; headSha: string }; requestedChangesAt?: string } }
   | { op: 'get_changed_files'; projectName: string; workspaceName: string; base?: string }
@@ -242,6 +243,13 @@ export interface ReviewChangedFile {
 /** Results returned from machine to client */
 export type ReviewResult =
   | { op: 'threads'; threads: ReviewThread[] }
+  | {
+      /** The committed narrated guide (review/guide.json), resolved via the
+       *  canonical goal-scoped reader so the UI never has to reconstruct the
+       *  `goals/<goalId>/` path. Null when no guide has been submitted. */
+      op: 'review_guide';
+      guide: import('../core/review-guide.js').ReviewGuide | null;
+    }
   | {
       op: 'review_guide_state';
       state: { readSections: string[]; approval?: { by: string; at: string; headSha: string }; requestedChangesAt?: string };

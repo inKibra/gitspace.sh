@@ -379,15 +379,16 @@ export function ChangeGuidePane({ backend, projectName, workspaceName, workspace
     };
 
     void (async () => {
-      // Guide-mode: narrated review/guide.json from the artifacts branch.
+      // Guide-mode: narrated guide resolved by the daemon via the canonical
+      // goal-scoped reader (goals/<goalId>/review/guide.json). Reading the
+      // mount-root 'review/guide.json' from the client never resolved for a
+      // workspace goal, so the guide silently fell back to the heuristic walk.
       try {
-        if (workspaceId && backend.readWorkspaceArtifact) {
-          const raw = await backend.readWorkspaceArtifact(workspaceId, 'review/guide.json');
-          const guide = JSON.parse(new TextDecoder('utf-8').decode(Uint8Array.from(atob(raw.base64), (c) => c.charCodeAt(0)))) as {
-            sections: Array<{ clusterId: string; title: string; kind: string; explanation: string; exhibits: Array<{ file: string; slow?: boolean }>; asks?: string[]; callouts?: Array<{ tone: 'risk' | 'mechanical' | 'decision'; text: string }>; files?: string[] }>;
-            specEvolution?: string;
-          };
+        if (backend.sendReviewRequest) {
+          const resp = await backend.sendReviewRequest({ op: 'get_review_guide', projectName, workspaceName });
+          const guide = resp.op === 'review_guide' ? resp.guide : null;
           if (!alive) return;
+          if (!guide) throw new Error('no guide');
           secRefs.current = [];
           setGuideMode(true);
           setSpecEvolution(guide.specEvolution ?? null);

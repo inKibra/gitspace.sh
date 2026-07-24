@@ -187,6 +187,15 @@ export async function executeLocalReviewOperation(
       };
     }
 
+    case 'get_review_guide': {
+      // Resolve via the canonical goal-scoped reader (goals/<goalId>/review/
+      // guide.json). The UI previously read the mount-root 'review/guide.json',
+      // which never resolves for a workspace goal, so the Change Guide silently
+      // fell back to the heuristic diff-walk and appeared "not visible".
+      const { readReviewGuide } = await import('./review-guide.js');
+      return { op: 'review_guide', guide: readReviewGuide(operation.projectName, operation.workspaceName) };
+    }
+
     case 'get_review_guide_state': {
       const workspace = await resolveWorkspaceByName(
         operation.projectName,
