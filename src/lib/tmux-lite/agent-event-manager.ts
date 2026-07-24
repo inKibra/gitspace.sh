@@ -69,6 +69,34 @@ export type AgentStateUpdateDelta =
 const LAST_MESSAGE_MAX_CHARS = 120;
 const LAST_MESSAGE_EMIT_INTERVAL_MS = 250;
 
+// Every field below is DISPLAY state that rides inside the agent-state snapshot
+// AND the machine snapshot. Both get JSON.stringify'd whole; a single unbounded
+// field (a pasted megabyte of queued text, a giant tool-error stack) makes that
+// serialization multi-second and BLOCKS the daemon event loop — the "daemon
+// wedged? serve-activate timed out" failure. These are the only ingestion points
+// for that data (no bulk restore writes it), so capping here bounds memory and
+// every downstream serialization at the source. The full text still lives where
+// it's authoritative (the agent's own send queue, the transcript) — this is the
+// at-a-glance mirror, so a preview is all it ever needed.
+const ERROR_MESSAGE_MAX_CHARS = 4000;
+const QUEUED_MESSAGE_MAX_CHARS = 2000;
+const QUEUED_MESSAGE_MAX_COUNT = 20;
+const TODO_PHASES_MAX = 200;
+
+/** Cap an array of message strings for display; logs once if it trimmed a lot. */
+function capMessageList(messages: readonly string[], where: string): string[] {
+  const limited = messages.slice(0, QUEUED_MESSAGE_MAX_COUNT);
+  let trimmedBytes = 0;
+  const capped = limited.map((m) => {
+    if (m.length > QUEUED_MESSAGE_MAX_CHARS) { trimmedBytes += m.length - QUEUED_MESSAGE_MAX_CHARS; return m.slice(0, QUEUED_MESSAGE_MAX_CHARS); }
+    return m;
+  });
+  if (trimmedBytes > 0 || messages.length > QUEUED_MESSAGE_MAX_COUNT) {
+    console.error(`[agent-state-cap] ${where}: queued ${messages.length} msg(s), trimmed ${trimmedBytes} chars + dropped ${Math.max(0, messages.length - QUEUED_MESSAGE_MAX_COUNT)} over-count`);
+  }
+  return capped;
+}
+
 type LastMessageDelta = Extract<AgentStateUpdateDelta, { type: 'agent_last_message' }>;
 type TimerHandle = ReturnType<typeof globalThis.setTimeout>;
 
@@ -309,17 +337,27 @@ export class AgentEventManager {
     // event is a distinct failure, and clients (Retry flow) must see each
     // one — a second identical failure used to emit nothing. The monotonic
     // errorSeq makes consecutive identical messages distinguishable deltas.
-    state.errorMessages[sessionId] = errorMessage;
+    const cappedError = errorMessage.length > ERROR_MESSAGE_MAX_CHARS
+      ? errorMessage.slice(0, ERROR_MESSAGE_MAX_CHARS) + `… [+${errorMessage.length - ERROR_MESSAGE_MAX_CHARS} chars]`
+      : errorMessage;
+    if (cappedError !== errorMessage) {
+      console.error(`[agent-state-cap] ${workspaceId}/${sessionId}: error message ${errorMessage.length} chars capped`);
+    }
+    state.errorMessages[sessionId] = cappedError;
     this.errorSeq += 1;
-    this.emit({ type: 'agent_session_error', workspaceId, sessionId, errorMessage, errorSeq: this.errorSeq });
+    this.emit({ type: 'agent_session_error', workspaceId, sessionId, errorMessage: cappedError, errorSeq: this.errorSeq });
   }
 
   setExternalTodoPhases(workspaceId: string, sessionId: string, phases: TodoPhase[]): void {
     this.markSessionOpen(workspaceId, sessionId);
     const state = this.getOrCreateState(workspaceId);
-    if (jsonEqual(state.todoPhases[sessionId], phases)) return;
-    state.todoPhases[sessionId] = phases;
-    this.emit({ type: 'agent_todo_update', workspaceId, sessionId, phases });
+    const cappedPhases = phases.length > TODO_PHASES_MAX ? phases.slice(0, TODO_PHASES_MAX) : phases;
+    if (cappedPhases !== phases) {
+      console.error(`[agent-state-cap] ${workspaceId}/${sessionId}: ${phases.length} todo phases capped to ${TODO_PHASES_MAX}`);
+    }
+    if (jsonEqual(state.todoPhases[sessionId], cappedPhases)) return;
+    state.todoPhases[sessionId] = cappedPhases;
+    this.emit({ type: 'agent_todo_update', workspaceId, sessionId, phases: cappedPhases });
   }
 
   setExternalModelInfo(workspaceId: string, sessionId: string, modelInfo: AgentModelInfo): void {
@@ -338,8 +376,8 @@ export class AgentEventManager {
       delete state.queuedMessages[sessionId];
     } else {
       state.queuedMessages[sessionId] = {
-        steering: [...queued.steering],
-        followUp: [...queued.followUp],
+        steering: capMessageList(queued.steering, `${workspaceId}/${sessionId} steering`),
+        followUp: capMessageList(queued.followUp, `${workspaceId}/${sessionId} followUp`),
       };
     }
     if (jsonEqual(previousQueued, state.queuedMessages[sessionId])) return;
