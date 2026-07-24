@@ -235,8 +235,14 @@ function AgentsTab({ control, agents, loading, onSet }: { control?: AgentControl
     if (parts.length > 1) return parts.map(nameForRef).join(', ');
     const r = roleFor(spec);
     if (!r) return spec;
-    if (r.role === 'task') return CURRENT_MODEL;
+    // A CONFIGURED role (incl. Subtask) shows its assigned model — always keep the
+    // role name so it's findable in the Agents dropdown. The old code short-
+    // circuited 'task' to "Current model" here, ignoring what you set for Subtask
+    // in the Models tab and dropping the name entirely.
     if (r.model) return `${r.name} — ${r.model}`;
+    // Subtask is special ONLY when UNSET: a subagent then follows the session's
+    // current model (not the Default-role priority chain the other roles use).
+    if (r.role === 'task') return `${r.name} — ${CURRENT_MODEL}`;
     // Unset role: the effective behavior is inherit-the-Default-role first,
     // so show it as following Default rather than the opaque priority chain.
     if (r.role !== 'default' && defaultModel) return `${r.name} — Default — ${defaultModel}`;
