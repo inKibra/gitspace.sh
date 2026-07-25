@@ -1,3 +1,6 @@
+diff --git a/node_modules/@oh-my-pi/pi-coding-agent/.bun-tag-30a8f790368300e0 b/.bun-tag-30a8f790368300e0
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
 diff --git a/node_modules/@oh-my-pi/pi-coding-agent/.bun-tag-59f479ba2c7d156a b/.bun-tag-59f479ba2c7d156a
 new file mode 100644
 index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
@@ -7,9 +10,123 @@ index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2
 diff --git a/node_modules/@oh-my-pi/pi-coding-agent/.bun-tag-a58bfedc695c2580 b/.bun-tag-a58bfedc695c2580
 new file mode 100644
 index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/@oh-my-pi/pi-coding-agent/.bun-tag-c80cd2a30816531 b/.bun-tag-c80cd2a30816531
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
 diff --git a/node_modules/@oh-my-pi/pi-coding-agent/.bun-tag-d0ef8787a917fc3b b/.bun-tag-d0ef8787a917fc3b
 new file mode 100644
 index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/src/config/model-resolver.ts b/src/config/model-resolver.ts
+index 15b0df3760294fc45f168aa2cf40ea96029f9691..f3ebc3827d06bc53d84f9f0f349118bcb3df7214 100644
+--- a/src/config/model-resolver.ts
++++ b/src/config/model-resolver.ts
+@@ -37,7 +37,7 @@ import {
+ 	resolveThinkingLevelForModel,
+ } from "../thinking";
+ import { isAuthenticated, kNoAuth, type ModelRegistry } from "./model-registry";
+-import { MODEL_ROLE_IDS, type ModelRole } from "./model-roles";
++import { getKnownRoleIds, MODEL_ROLE_IDS, type ModelRole } from "./model-roles";
+ import type { Settings } from "./settings";
+ 
+ function isKnownProvider(provider: string): provider is KnownProvider {
+@@ -1796,3 +1796,47 @@ export async function findSlowModel(
+ 	// 3. Fallback to first available (same as default)
+ 	return availableModels[0];
+ }
++
++/**
++ * GITSPACE PATCH — agents address models by ROLE, never by model id.
++ *
++ * Throws when `value` names a concrete model (`openai-codex/gpt-5.5`) rather
++ * than a role (`pi/smol`, optionally with a `:thinking` suffix). Roles are the
++ * single place an operator binds capability→model; a hardcoded model id in an
++ * agent-authored spawn silently opts out of that config, rots when model ids
++ * change (gpt-5.5 → gpt-5.6-luna), and makes spend unattributable to a role.
++ *
++ * Deliberately NOT wired into `resolveAgentModelPatterns` itself: that resolver
++ * also serves human surfaces (the agent dashboard) and agent-definition
++ * frontmatter, where naming a concrete model is legitimate. This guard is for
++ * the agent-facing spawn path only.
++ *
++ * `undefined` is allowed — it means "inherit", which is the desired default.
++ */
++export function assertRoleOnlyModelSelector(value: string | string[] | undefined, settings?: Settings): void {
++	const patterns = normalizeModelPatternList(value);
++	if (patterns.length === 0) return;
++
++	// Every role the operator can see under settings > Models > model roles:
++	// non-hidden built-ins PLUS custom roles introduced via cycleOrder,
++	// modelRoles or modelTags. Deliberately NOT limited to roles that already
++	// have a model bound, nor to the quick-cycle subset — an agent may name any
++	// role the operator has, bound or not.
++	const knownRoles = settings ? getKnownRoleIds(settings) : (MODEL_ROLE_IDS as string[]);
++	const known = new Set(knownRoles);
++
++	const offenders = patterns.filter(pattern => {
++		const { base } = splitThinkingSuffix(pattern, PREFIX_MODEL_ROLE.length, MAX_THINKING_SUFFIX_OPTIONS);
++		const trimmed = base.trim();
++		if (!trimmed.startsWith(PREFIX_MODEL_ROLE)) return true;
++		return !known.has(trimmed.slice(PREFIX_MODEL_ROLE.length));
++	});
++	if (offenders.length === 0) return;
++
++	throw new Error(
++		`model must name a role, not a model id. Got ${offenders.map(o => JSON.stringify(o)).join(", ")}. ` +
++			`Available roles: ${knownRoles.map(role => `pi/${role}`).join(", ")}. ` +
++			`Roles are bound to models in settings, so this stays correct when models change. ` +
++			`Omit \`model\` to inherit the session's model, or use \`agent=<name>\` to pick a named subagent.`,
++	);
++}
+diff --git a/src/eval/agent-bridge.ts b/src/eval/agent-bridge.ts
+index d429634c087c01aa87deca27e2eeb1035de6a735..9bf3448d6015040306675b18ab1023e391ea1920 100644
+--- a/src/eval/agent-bridge.ts
++++ b/src/eval/agent-bridge.ts
+@@ -6,7 +6,7 @@ import * as os from "node:os";
+ import * as path from "node:path";
+ import { prompt, Snowflake } from "@oh-my-pi/pi-utils";
+ import { type } from "arktype";
+-import { resolveAgentModelPatterns } from "../config/model-resolver";
++import { assertRoleOnlyModelSelector, resolveAgentModelPatterns } from "../config/model-resolver";
+ import type { LocalProtocolOptions } from "../internal-urls";
+ import { registerArtifactsDir } from "../internal-urls/registry-helpers";
+ import { MCPManager } from "../mcp/manager";
+@@ -316,6 +316,12 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
+ 	const effectiveAgent = agent;
+ 	const parentActiveModelPattern = options.session.getActiveModelString?.();
+ 	const agentModelOverrides = options.session.settings.get("task.agentModelOverrides");
++	// GITSPACE PATCH: agents address models by ROLE, never by model id.
++	// `agent(model=...)` is the only agent-facing surface that accepts a raw
++	// model (the `task` tool's schema has no model key at all), so a hardcoded
++	// `model='gpt-5.5'` silently opts out of the operator's role config, rots
++	// when model ids change, and makes spend unattributable to a role.
++	assertRoleOnlyModelSelector(parsed.model, options.session.settings);
+ 	const modelOverride = resolveAgentModelPatterns({
+ 		settingsOverride: parsed.model ?? agentModelOverrides[agentName],
+ 		agentModel: effectiveAgent.model,
+diff --git a/src/eval/py/prelude.py b/src/eval/py/prelude.py
+index 663b2a07a85e68afe7e16b3a726550cf66c6bb17..d5faac69b6d35513329e536f2485e35f529384de 100644
+--- a/src/eval/py/prelude.py
++++ b/src/eval/py/prelude.py
+@@ -427,9 +427,16 @@ if "__omp_prelude_loaded__" not in globals():
+         """Run a subagent and return its final output.
+ 
+         `agent` selects the subagent definition (default "task"). Pass
+-        `model` to override that agent's model, `label` for the output artifact
+-        id, and `schema` to request structured JSON output; when `schema` is
+-        supplied the parsed object is returned. Share background by writing a
++        `model` ONLY as a model ROLE — any role listed under settings > Models
++        (`pi/default`, `pi/smol`, `pi/slow`, `pi/plan`, `pi/vision`,
++        `pi/advisor`, ... plus any custom roles). A concrete model id like
++        `gpt-5.5` is REJECTED: roles are where the operator binds capability to
++        a model, so a hardcoded id silently opts out of that config and rots
++        when model ids change. Omit `model` to inherit the session's model, or
++        pass `agent=<name>` to pick a named subagent.
++        Pass `label` for the output artifact id, and `schema` to request
++        structured JSON output; when `schema` is supplied the parsed object is
++        returned. Share background by writing a
+         local:// file and referencing it in the prompt.
+ 
+         Pass `isolated=True` to run the subagent inside an isolation worktree
 diff --git a/src/internal-urls/local-protocol.ts b/src/internal-urls/local-protocol.ts
 index 6a0daafdde71179e2db5d1a19c535cb45cf5a777..765946457d54cde5434b6b2cf2312af80e6867e4 100644
 --- a/src/internal-urls/local-protocol.ts
