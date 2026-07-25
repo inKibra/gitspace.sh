@@ -50,6 +50,7 @@ export interface KanbanGoalItem {
   chainLength: number;
   previousGoalId?: string;
   previousWorkspaceName?: string;
+  previousPhase?: WorkspacePhase;
   blockedReason?: string;
   doc?: import('../../../types/goals.js').GoalDoc;
   validation?: import('../../../types/goals.js').GoalValidation;

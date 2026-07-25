@@ -229,6 +229,9 @@ export interface GoalKanbanItem {
   chainLength: number;
   previousGoalId?: string;
   previousWorkspaceName?: string;
+  /** Effective phase of the previous chain goal (if any). Lets the board tell
+   *  when a planned goal is next-up: its predecessor has shipped. */
+  previousPhase?: GoalPhase;
   blockedReason?: string;
   doc?: GoalDoc;
   validation?: GoalValidation;

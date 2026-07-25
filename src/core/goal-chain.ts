@@ -1310,6 +1310,7 @@ export function listProjectGoalKanbanItems(projectName: string): GoalKanbanItem[
       const blockedReason = previous && !previous.workspaceName
         ? `Previous goal ${previous.title} has no workspace yet`
         : undefined;
+      const previousPhase = previous ? getEffectiveGoalPhase(projectName, previous) : undefined;
       result.push({
         id: goal.id,
         chainId: chain.id,
@@ -1324,6 +1325,7 @@ export function listProjectGoalKanbanItems(projectName: string): GoalKanbanItem[
         chainLength: chain.goalIds.length,
         previousGoalId: previous?.id,
         previousWorkspaceName: previous?.workspaceName ?? previous?.plannedWorkspaceName,
+        previousPhase,
         blockedReason,
         doc: goal.doc,
         validation: {

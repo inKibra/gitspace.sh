@@ -421,11 +421,17 @@ function PlannedGoalCard({ goal, onSelectGoal, onChainFocus, onOpenOrder, relate
   };
   // A planned goal is a spec with no workspace yet — style it as "under
   // construction" (dashed outline + faint diagonal caution stripes), NOT amber,
-  // which reads as an agent asking a question. Blocked stays distinct via a red
-  // dot/edge; a plain planned goal is a muted, quiet placeholder.
+  // which reads as an agent asking a question.
   const blocked = Boolean(goal.blockedReason);
-  const edgeColor = blocked ? 'var(--gs-danger)' : 'var(--gs-text-dim)';
+  // "Ready to proceed" = next-up in the chain: nothing blocks it AND its
+  // predecessor has shipped. These get a striped-GREEN left accent (go). The
+  // left edge no longer encodes blocked-ness in red — the status dot is about
+  // agents, not chain readiness, so a not-yet-ready planned goal is just the
+  // neutral muted placeholder.
+  const canProceed = !blocked && goal.previousPhase === 'ship';
+  const edgeColor = 'var(--gs-text-dim)';
   const CONSTRUCTION_STRIPES = 'repeating-linear-gradient(-45deg, rgba(255,204,102,0.07) 0 7px, transparent 7px 15px)';
+  const READY_STRIPES = 'repeating-linear-gradient(-45deg, var(--gs-success) 0 3px, rgba(0,0,0,0) 3px 8px)';
 
   return (
     <div
@@ -445,16 +451,19 @@ function PlannedGoalCard({ goal, onSelectGoal, onChainFocus, onOpenOrder, relate
       }}
       className={`gs-card-anim order-1 group relative w-full px-3 py-2.5 border border-dashed border-[var(--gs-border)] border-l-2 bg-[var(--gs-bg-surface)] text-left transition-[background-color,border-color,opacity] duration-150 hover:bg-[var(--gs-bg-hover)] hover:border-[var(--gs-border-active)] ${related === false ? 'opacity-40' : related === true ? 'ring-1' : ''}`}
       style={{
-        borderLeftColor: related ? getChainPalette(goal.chainId).fg : edgeColor,
+        borderLeftColor: related ? getChainPalette(goal.chainId).fg : canProceed ? 'transparent' : edgeColor,
         backgroundImage: CONSTRUCTION_STRIPES,
         animation: 'gs-card-in .3s cubic-bezier(0.2,0,0,1) both',
         animationDelay: `${index * 45}ms`,
         ...(related ? { ['--tw-ring-color' as string]: getChainPalette(goal.chainId).fg } : {}),
       }}
-      title={goal.blockedReason ?? `Create workspace for planned goal in ${goal.chainTitle}`}
+      title={goal.blockedReason ?? (canProceed ? `Ready — predecessor shipped. Create workspace in ${goal.chainTitle}` : `Create workspace for planned goal in ${goal.chainTitle}`)}
     >
+      {canProceed && (
+        <span aria-hidden className="pointer-events-none absolute inset-y-0 left-0 w-1.5" style={{ backgroundImage: READY_STRIPES }} title="ready — predecessor shipped" />
+      )}
       <div className="flex items-center gap-2">
-        <span className="h-2 w-2 flex-shrink-0 rounded-full" style={{ background: edgeColor }} title={goal.blockedReason ? 'blocked' : 'planned'} />
+        <span className="h-2 w-2 flex-shrink-0 rounded-full" style={{ background: 'var(--gs-text-ghost)' }} title="planned" />
         <span className="font-mono font-medium text-[12px] truncate">{goal.plannedWorkspaceName ?? goal.title}</span>
         <ChainHandle goal={goal} related={related} />
         <RearrangeHandle onOpenOrder={() => onOpenOrder?.(goal.chainId)} />
