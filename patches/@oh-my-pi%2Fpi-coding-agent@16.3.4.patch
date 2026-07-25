@@ -1,3 +1,6 @@
+diff --git a/node_modules/@oh-my-pi/pi-coding-agent/.bun-tag-104d337b727af34b b/.bun-tag-104d337b727af34b
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
 diff --git a/node_modules/@oh-my-pi/pi-coding-agent/.bun-tag-30a8f790368300e0 b/.bun-tag-30a8f790368300e0
 new file mode 100644
 index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
@@ -78,7 +81,7 @@ index 15b0df3760294fc45f168aa2cf40ea96029f9691..f3ebc3827d06bc53d84f9f0f349118bc
 +	);
 +}
 diff --git a/src/eval/agent-bridge.ts b/src/eval/agent-bridge.ts
-index d429634c087c01aa87deca27e2eeb1035de6a735..9bf3448d6015040306675b18ab1023e391ea1920 100644
+index d429634c087c01aa87deca27e2eeb1035de6a735..b576e674a55a198d79fa0b2ff1389d71d7e664b8 100644
 --- a/src/eval/agent-bridge.ts
 +++ b/src/eval/agent-bridge.ts
 @@ -6,7 +6,7 @@ import * as os from "node:os";
@@ -90,7 +93,17 @@ index d429634c087c01aa87deca27e2eeb1035de6a735..9bf3448d6015040306675b18ab1023e3
  import type { LocalProtocolOptions } from "../internal-urls";
  import { registerArtifactsDir } from "../internal-urls/registry-helpers";
  import { MCPManager } from "../mcp/manager";
-@@ -316,6 +316,12 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
+@@ -291,7 +291,8 @@ function buildSubagentFailureMessage(agentName: string, result: SingleResult): s
+  */
+ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOptions): Promise<EvalAgentResult> {
+ 	const parsed = parseAgentArgs(args);
+-	const agentName = parsed.agent ?? resolveSpawnPolicy(options.session.getSessionSpawns()).defaultAgent;
++	const spawnDefaultAgent = resolveSpawnPolicy(options.session.getSessionSpawns()).defaultAgent;
++	const agentName = parsed.agent ?? spawnDefaultAgent;
+ 	const structured = Object.hasOwn(parsed, "schema");
+ 
+ 	assertNotPlanMode(options.session);
+@@ -316,6 +317,25 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
  	const effectiveAgent = agent;
  	const parentActiveModelPattern = options.session.getActiveModelString?.();
  	const agentModelOverrides = options.session.settings.get("task.agentModelOverrides");
@@ -100,21 +113,40 @@ index d429634c087c01aa87deca27e2eeb1035de6a735..9bf3448d6015040306675b18ab1023e3
 +	// `model='gpt-5.5'` silently opts out of the operator's role config, rots
 +	// when model ids change, and makes spend unattributable to a role.
 +	assertRoleOnlyModelSelector(parsed.model, options.session.settings);
++	// GITSPACE PATCH: pick an agent OR a role — never both. A named agent
++	// carries its own model configuration (frontmatter + task.agentModelOverrides,
++	// both operator-controlled); layering `model=` on top overrides exactly that
++	// config, which is the same hole role-only selection just closed. Naming the
++	// spawn-policy DEFAULT agent stays compatible with `model=`, since that is
++	// the generic worker — "a plain subagent at role X" is a legitimate ask.
++	if (parsed.model !== undefined && agentName !== spawnDefaultAgent) {
++		throw new ToolError(
++			`agent() takes either agent="${agentName}" or model=, not both. ` +
++				`A named agent already carries its own model configuration; passing model= would override it. ` +
++				`Drop model= to use ${agentName}'s configured model, or drop agent= to run the default worker at that role.`,
++		);
++	}
  	const modelOverride = resolveAgentModelPatterns({
  		settingsOverride: parsed.model ?? agentModelOverrides[agentName],
  		agentModel: effectiveAgent.model,
 diff --git a/src/eval/py/prelude.py b/src/eval/py/prelude.py
-index 663b2a07a85e68afe7e16b3a726550cf66c6bb17..d5faac69b6d35513329e536f2485e35f529384de 100644
+index 663b2a07a85e68afe7e16b3a726550cf66c6bb17..5f0a6c1d274a7049ba66cf491cc4db6155473cfb 100644
 --- a/src/eval/py/prelude.py
 +++ b/src/eval/py/prelude.py
-@@ -427,9 +427,16 @@ if "__omp_prelude_loaded__" not in globals():
+@@ -426,10 +426,21 @@ if "__omp_prelude_loaded__" not in globals():
+     def agent(prompt, *, agent="task", model=None, label=None, schema=None, isolated=None, apply=None, merge=None, handle=False):
          """Run a subagent and return its final output.
  
-         `agent` selects the subagent definition (default "task"). Pass
+-        `agent` selects the subagent definition (default "task"). Pass
 -        `model` to override that agent's model, `label` for the output artifact
 -        id, and `schema` to request structured JSON output; when `schema` is
 -        supplied the parsed object is returned. Share background by writing a
-+        `model` ONLY as a model ROLE — any role listed under settings > Models
++        Pass EITHER `agent` OR `model` — not both. `agent` selects a named
++        subagent definition, which already carries its own model configuration;
++        adding `model` would override that config and is rejected. Use `model`
++        alone to run the default worker at a given role.
++
++        `model` is ONLY a model ROLE — any role listed under settings > Models
 +        (`pi/default`, `pi/smol`, `pi/slow`, `pi/plan`, `pi/vision`,
 +        `pi/advisor`, ... plus any custom roles). A concrete model id like
 +        `gpt-5.5` is REJECTED: roles are where the operator binds capability to

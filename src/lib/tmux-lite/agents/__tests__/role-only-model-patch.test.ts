@@ -75,6 +75,23 @@ describe('role-only model selection (patched SDK guard)', () => {
     expect(() => assertRoleOnlyModelSelector(undefined, settingsStub)).not.toThrow();
   });
 
+  it('enforces agent= XOR model= in the eval bridge', async () => {
+    // This rule lives inline in the bridge (it needs a live session + spawn
+    // policy to evaluate), so the canary asserts the guard is still PRESENT in
+    // the shipped source rather than executing it. Source-level on purpose: its
+    // job is catching an upgrade that silently drops the patch.
+    const { readFileSync } = await import('fs');
+    const { fileURLToPath } = await import('url');
+    // import.meta.resolve honours the package export map, which points the
+    // subpath at the real src/*.ts we patched.
+    const bridgePath = fileURLToPath(import.meta.resolve('@oh-my-pi/pi-coding-agent/eval/agent-bridge'));
+    const bridge = readFileSync(bridgePath, 'utf8');
+    expect(bridge).toContain('takes either agent=');
+    // Comparing against the spawn policy's default agent (not a hardcoded
+    // 'task') is what keeps "default worker at role X" legal.
+    expect(bridge).toContain('agentName !== spawnDefaultAgent');
+  });
+
   it('keeps the `task` tool free of a model key (nothing to guard there)', async () => {
     // The task tool takes its model from human-controlled config (settings
     // agentModelOverrides + agent frontmatter), never from the calling agent.
