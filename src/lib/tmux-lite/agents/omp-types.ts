@@ -90,7 +90,26 @@ export interface OmpAuthStorage {
     ok: boolean | null;
     reason?: string;
     report?: {
-      limits?: Array<{ label: string; unit?: string; used?: number; limit?: number; remaining?: number; remainingFraction?: number; resetsAt?: number }>;
+      // The SDK nests amounts under `amount` and reset time under `window` —
+      // reading these off the top level (as an earlier version did) yields all
+      // undefined: label renders but the bar is empty (see checkProviderUsage).
+      limits?: Array<{
+        label: string;
+        status?: 'ok' | 'warning' | 'exhausted' | 'unknown';
+        window?: { label?: string; resetsAt?: number };
+        amount?: {
+          unit?: string;
+          used?: number;
+          limit?: number;
+          remaining?: number;
+          usedFraction?: number;
+          remainingFraction?: number;
+        };
+        notes?: string[];
+      }>;
+      /** Saved/banked rate-limit resets the account can redeem ("extra credit"). */
+      resetCredits?: { availableCount: number; credits?: Array<{ expiresAt?: string; status?: string }> };
+      notes?: string[];
     };
   }>>;
 }

@@ -480,7 +480,8 @@ export class PiCoordinator {
     email?: string;
     ok: boolean | null;
     reason?: string;
-    limits: Array<{ label: string; unit?: string; used?: number; limit?: number; remaining?: number; remainingFraction?: number; resetsAt?: number }>;
+    limits: Array<{ label: string; unit?: string; used?: number; limit?: number; remaining?: number; remainingFraction?: number; resetsAt?: number; status?: string }>;
+    resetCredits?: { availableCount: number };
   }>> {
     const auth = await createPiAuthStorage();
     if (!auth.checkCredentials) return [];
@@ -493,15 +494,27 @@ export class PiCoordinator {
           email: r.email,
           ok: r.ok,
           reason: r.reason,
-          limits: (r.report?.limits ?? []).map((l) => ({
-            label: l.label,
-            unit: l.unit,
-            used: l.used,
-            limit: l.limit,
-            remaining: l.remaining,
-            remainingFraction: l.remainingFraction,
-            resetsAt: l.resetsAt,
-          })),
+          // The SDK nests amounts under `amount` and reset time under `window`.
+          // Derive remainingFraction from whatever the provider populated:
+          // explicit remainingFraction > 1-usedFraction > remaining/limit.
+          limits: (r.report?.limits ?? []).map((l) => {
+            const a = l.amount ?? {};
+            const remainingFraction =
+              a.remainingFraction ??
+              (a.usedFraction !== undefined ? Math.max(0, 1 - a.usedFraction) : undefined) ??
+              (a.remaining !== undefined && a.limit ? a.remaining / a.limit : undefined);
+            return {
+              label: l.label,
+              unit: a.unit,
+              used: a.used,
+              limit: a.limit,
+              remaining: a.remaining,
+              remainingFraction,
+              resetsAt: l.window?.resetsAt,
+              status: l.status,
+            };
+          }),
+          resetCredits: r.report?.resetCredits ? { availableCount: r.report.resetCredits.availableCount } : undefined,
         }));
     } catch {
       return [];

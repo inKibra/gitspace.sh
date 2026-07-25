@@ -425,7 +425,7 @@ function ContextTab({ control, onCompact }: { control?: AgentControlInfo; onComp
   );
 }
 
-type AccountUsage = { id: number; email?: string; ok: boolean | null; reason?: string; limits: Array<{ label: string; unit?: string; used?: number; limit?: number; remaining?: number; remainingFraction?: number; resetsAt?: number }> };
+type AccountUsage = { id: number; email?: string; ok: boolean | null; reason?: string; limits: Array<{ label: string; unit?: string; used?: number; limit?: number; remaining?: number; remainingFraction?: number; resetsAt?: number; status?: string }>; resetCredits?: { availableCount: number } };
 
 /** Fraction of a limit window still available (0..1), from whichever field the
  *  provider reported. Returns null when it can't be derived. */
@@ -540,6 +540,12 @@ function ProvidersTab({ providers, loading, oauth, onOAuthLogin, onOAuthRespond,
                             </div>
                           );
                         })}
+                        {acctUsage.resetCredits && acctUsage.resetCredits.availableCount > 0 && (
+                          <div className="flex items-center gap-1.5 text-[10px] text-[var(--gs-text-dim)]">
+                            <span className="w-16 shrink-0 truncate" title="Saved rate-limit resets you can redeem on demand">credits</span>
+                            <span className="shrink-0 tabular-nums text-[var(--gs-success)]">+{acctUsage.resetCredits.availableCount} banked reset{acctUsage.resetCredits.availableCount === 1 ? '' : 's'}</span>
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
