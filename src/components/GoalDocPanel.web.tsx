@@ -18,7 +18,7 @@ export interface GoalLike {
   id: string;
   title: string;
   phase: WorkspacePhase;
-  status: 'planned' | 'workspace-backed';
+  status: 'planned' | 'workspace-backed' | 'archived';
   chainPosition: number;
   doc?: GoalDoc;
   validation?: GoalValidation;
@@ -28,7 +28,9 @@ export interface GoalLike {
 type ChainNodeState = 'shipped' | 'active' | 'planned';
 
 function nodeState(goal: GoalLike): ChainNodeState {
-  if (goal.phase === 'ship') return 'shipped';
+  // Archived = done (workspace gone), regardless of the phase it froze at — a
+  // past node in the chain, never 'planned'.
+  if (goal.status === 'archived' || goal.phase === 'ship') return 'shipped';
   if (goal.status === 'workspace-backed') return 'active';
   return 'planned';
 }

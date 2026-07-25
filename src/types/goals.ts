@@ -204,7 +204,7 @@ export interface GoalChainSummaryGoal {
   title: string;
   /** Effective phase (planned goals always read as 'plan'). */
   phase: GoalPhase;
-  status: 'planned' | 'workspace-backed';
+  status: 'planned' | 'workspace-backed' | 'archived';
 }
 
 /** A project chain projected for the chain-picker: title + ordered goals with
@@ -224,7 +224,7 @@ export interface GoalKanbanItem {
   phase: GoalPhase;
   plannedWorkspaceName?: string;
   workspaceName?: string;
-  status: 'planned' | 'workspace-backed';
+  status: 'planned' | 'workspace-backed' | 'archived';
   chainPosition: number;
   chainLength: number;
   previousGoalId?: string;

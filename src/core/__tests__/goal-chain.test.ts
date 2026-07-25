@@ -92,9 +92,12 @@ describe('goal-chain storage', () => {
     writePlannedGoal('demo', makeGoal({ id: 'api', title: 'Billing API', phase: 'code', plannedWorkspaceName: 'billing-api' }));
 
     const items = listProjectGoalKanbanItems('demo');
+    // A planned goal is ALWAYS 'plan' — it hasn't started (writePlannedGoal
+    // normalises the phase), so both cards read 'plan' regardless of the phase
+    // the caller passed in.
     expect(items.map((item) => ({ id: item.id, status: item.status, phase: item.phase }))).toEqual([
       { id: 'schema', status: 'planned', phase: 'plan' },
-      { id: 'api', status: 'planned', phase: 'code' },
+      { id: 'api', status: 'planned', phase: 'plan' },
     ]);
     expect(items[1]?.blockedReason).toBe('Previous goal Billing schema has no workspace yet');
   });
@@ -116,7 +119,9 @@ describe('goal-chain storage', () => {
     expect(existsSync(getPlannedGoalPath('demo', 'schema'))).toBe(false);
     expect(existsSync(getWorkspaceGoalPath('demo', 'billing-schema'))).toBe(true);
     expect(readWorkspaceGoal('demo', 'billing-schema')?.id).toBe('schema');
-    expect(getWorkspaceStatus('demo', 'billing-schema')).toBe('review');
+    // Binding a planned goal starts the workspace in 'plan' (author the spec
+    // first) — the planned target phase is never inherited (see 4f76cb5).
+    expect(getWorkspaceStatus('demo', 'billing-schema')).toBe('plan');
   });
 
   it('moves planned validation artifacts dir into workspace storage on bind', () => {
@@ -252,6 +257,9 @@ describe('goal-chain storage', () => {
     bindPlannedGoalForWorkspace('demo', 'base');
     bindPlannedGoalForWorkspace('demo', 'child');
 
+    // Bound workspaces start in 'plan'; advance the ancestor first so the
+    // descendant is allowed to reach 'code' too.
+    setWorkspaceStatusForGoalChain('demo', 'base', 'code');
     setWorkspaceStatusForGoalChain('demo', 'child', 'code');
     expect(getWorkspaceStatus('demo', 'child')).toBe('code');
     expect(() => setWorkspaceStatusForGoalChain('demo', 'child', 'review')).toThrow(/Max allowed phase is code/);
@@ -289,12 +297,22 @@ describe('goal-chain storage', () => {
     // Simulate the worktree (and its goal.json) being destroyed by delete.
     rmSync(join(root, 'demo', 'workspaces', 'billing-schema'), { recursive: true, force: true });
 
-    // The chain link survives and still resolves to the archived record, which
-    // preserves the goal's phase (buildGoalPhaseMap / kanban do not crash).
+    // Archived goals are EXCLUDED from the kanban (active-work board only)...
     const items = listProjectGoalKanbanItems('demo');
-    expect(items.map((item) => item.id)).toEqual(['schema']);
-    expect(items[0]?.phase).toBe('review');
-    expect(items[0]?.title).toBe('Billing schema');
+    expect(items.map((item) => item.id)).toEqual([]);
+
+    // ...but the chain link survives: still resolvable by id (phase frozen at
+    // 'review'), and present in the chain summary marked 'archived' so it stays
+    // openable from the chain view.
+    const resolved = getGoalRecord('demo', 'schema');
+    expect(resolved?.id).toBe('schema');
+    expect(resolved?.phase).toBe('review');
+    expect(resolved?.archivedAt).toBeTruthy();
+
+    const chain = listGoalChainSummaries('demo').find((c) => c.id === 'billing');
+    expect(chain?.goals).toEqual([
+      { id: 'schema', title: 'Billing schema', phase: 'review', status: 'archived' },
+    ]);
   });
 
   it('getGoalRecord falls back to the archived store after the workspace is gone', () => {
@@ -341,6 +359,11 @@ describe('goal-chain storage', () => {
     writePlannedGoal('demo', makeGoal({ id: 'child', title: 'Child', phase: 'review', plannedWorkspaceName: 'child' }));
     bindPlannedGoalForWorkspace('demo', 'base');
     bindPlannedGoalForWorkspace('demo', 'child');
+
+    // Bound workspaces start in 'plan'; advance both to 'review' (ancestor
+    // first) so there is a backward move to cascade.
+    setWorkspaceStatusForGoalChain('demo', 'base', 'review');
+    setWorkspaceStatusForGoalChain('demo', 'child', 'review');
 
     const preview = previewWorkspaceGoalPhaseChange('demo', 'base', 'plan');
     expect(preview.allowed).toBe(true);

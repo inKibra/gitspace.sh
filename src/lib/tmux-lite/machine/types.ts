@@ -93,7 +93,7 @@ export interface MachineGoalRecord {
   phase: WorkspacePhase;
   plannedWorkspaceName?: string;
   workspaceName?: string;
-  status: 'planned' | 'workspace-backed';
+  status: 'planned' | 'workspace-backed' | 'archived';
   chainPosition: number;
   chainLength: number;
   previousGoalId?: string;

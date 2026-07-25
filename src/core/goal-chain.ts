@@ -165,6 +165,10 @@ export function writePlannedGoal(projectName: string, goal: GoalRecord): GoalRec
     createdAt: goal.createdAt || timestamp,
     updatedAt: timestamp,
     workspaceName: undefined,
+    // A planned goal hasn't started: its phase is ALWAYS 'plan'. Storing any
+    // other phase is what let a fresh workspace jump straight into the code lane
+    // (4f76cb5) — normalise at the source so no consumer can read a stale target.
+    phase: 'plan',
   };
   writeJsonFile(getPlannedGoalPath(projectName, goal.id), nextGoal);
   return nextGoal;
@@ -514,10 +518,25 @@ export function resolveWorkspaceGoal(projectName: string, workspaceName: string)
     ?? null;
 }
 
+/**
+ * A goal that has no LIVE workspace exists for exactly two reasons: it is
+ * planned (not started) or archived (finished, worktree gone). `archivedAt` is
+ * the discriminator — an archived record keeps its now-stale `workspaceName`,
+ * so it must be checked FIRST.
+ */
+export function goalLifecycleStatus(goal: GoalRecord): 'planned' | 'workspace-backed' | 'archived' {
+  if (goal.archivedAt) return 'archived';
+  return goal.workspaceName ? 'workspace-backed' : 'planned';
+}
+
 function getEffectiveGoalPhase(projectName: string, goal: GoalRecord): GoalRecord['phase'] {
-  if (!goal.workspaceName) {
-    return 'plan';
-  }
+  // Archived: phase is frozen at the value it shipped with — the workspace is
+  // gone, so `goal.phase` is the only source (and the record keeps a stale
+  // workspaceName, which must not be treated as a live workspace).
+  if (goal.archivedAt) return goal.phase;
+  // Planned (no workspace): always 'plan'. A planned goal never carries a
+  // meaningful non-plan phase (see writePlannedGoal) — it hasn't started.
+  if (!goal.workspaceName) return 'plan';
   return getWorkspaceStatus(projectName, goal.workspaceName) ?? goal.phase;
 }
 
@@ -738,7 +757,7 @@ export function ensureWorkspaceGoalChain(projectName: string, workspaceName: str
 export interface ChainOrderEntry {
   id: string;
   title: string;
-  status: 'planned' | 'workspace-backed';
+  status: 'planned' | 'workspace-backed' | 'archived';
   workspaceName?: string;
   phase: GoalRecord['phase'];
   position: number;
@@ -771,9 +790,9 @@ function describeChainOrder(projectName: string, goalIds: string[], pending?: Go
     entries.push({
       id: goal.id,
       title: goal.title,
-      status: goal.workspaceName ? 'workspace-backed' : 'planned',
+      status: goalLifecycleStatus(goal),
       workspaceName: goal.workspaceName ?? goal.plannedWorkspaceName,
-      phase: goal.phase,
+      phase: getEffectiveGoalPhase(projectName, goal),
       position: index + 1,
     });
   });
@@ -947,7 +966,7 @@ export function listGoalChainSummaries(projectName: string): GoalChainSummary[] 
         id: goal.id,
         title: goal.title,
         phase: getEffectiveGoalPhase(projectName, goal),
-        status: goal.workspaceName ? 'workspace-backed' : 'planned',
+        status: goalLifecycleStatus(goal),
       });
     }
     return { id: chain.id, title: chain.title, goals };
@@ -1282,6 +1301,11 @@ export function listProjectGoalKanbanItems(projectName: string): GoalKanbanItem[
       if (!goal) {
         return;
       }
+      // The kanban is the ACTIVE-work board: planned + workspace-backed goals
+      // only. Archived goals (finished, worktree gone) are excluded here — they
+      // remain in the chain view (listGoalChainSummaries) and stay openable via
+      // getGoalRecord's archived fallback.
+      if (goalLifecycleStatus(goal) === 'archived') return;
       const previous = index > 0 ? chainGoals[index - 1] : undefined;
       const blockedReason = previous && !previous.workspaceName
         ? `Previous goal ${previous.title} has no workspace yet`
@@ -1292,10 +1316,10 @@ export function listProjectGoalKanbanItems(projectName: string): GoalKanbanItem[
         chainTitle: chain.title,
         title: goal.title,
         projectName,
-        phase: goal.phase,
+        phase: getEffectiveGoalPhase(projectName, goal),
         plannedWorkspaceName: goal.plannedWorkspaceName,
         workspaceName: goal.workspaceName,
-        status: goal.workspaceName ? 'workspace-backed' : 'planned',
+        status: goalLifecycleStatus(goal),
         chainPosition: index + 1,
         chainLength: chain.goalIds.length,
         previousGoalId: previous?.id,
