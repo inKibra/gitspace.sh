@@ -41,11 +41,12 @@ const assistant = (provider: string, model: string, input: number, output: numbe
 const modelChange = (model: string, role?: string) =>
   JSON.stringify({ type: 'model_change', id: 'mc', parentId: null, model, ...(role ? { role } : {}) });
 
-const taskResult = (results: unknown[]) =>
+const taskResult = (results: unknown[], timestamp = '2026-07-04T09:00:00.000Z') =>
   JSON.stringify({
     type: 'message',
     id: 'tr',
     parentId: null,
+    timestamp,
     message: { role: 'toolResult', toolName: 'task', details: { results } },
   });
 
@@ -162,6 +163,9 @@ describe('buildSessionUsageReport', () => {
     const rows = rollupByPath((await buildSessionUsageReport(parent))!);
     // The "why is my subscription draining" row: same agent+model, spawned twice.
     expect(rows[0]).toMatchObject({ agent: 'advisor', selection: 'role', model: 'anthropic/claude-fable-5', spawnCount: 2 });
+    // Dated, so a lifetime row can't be mistaken for current activity.
+    expect(rows[0]!.firstAt).toBe(Date.parse('2026-07-04T09:00:00.000Z'));
+    expect(rows[0]!.lastAt).toBe(Date.parse('2026-07-04T09:00:00.000Z'));
     expect(rows[0]!.costUsd).toBeCloseTo(5.0, 6);
     expect(rows[1]).toMatchObject({ agent: 'reviewer', spawnCount: 1 });
   });

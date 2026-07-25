@@ -97,6 +97,8 @@ export interface SpawnRow extends UsageTotals {
   /** Concrete model the selector resolved to. */
   resolvedModel?: string;
   durationMs?: number;
+  /** Epoch ms the spawn's toolResult was recorded (0 when unstamped). */
+  at: number;
   /** How the model was addressed — the provenance this report exists to show. */
   selection: 'role' | 'pinned' | 'inherited';
   /** Child transcript, when it exists on disk. */
@@ -364,6 +366,8 @@ export async function buildSessionUsageReport(
       // `task` spawns: one row per subagent, already carrying its own usage.
       const results = message.details?.results;
       if (message.role === 'toolResult' && Array.isArray(results)) {
+        const spawnParsed = entry.timestamp ? Date.parse(entry.timestamp) : NaN;
+        const spawnAt: number = Number.isFinite(spawnParsed) ? spawnParsed : 0;
         for (const result of results) {
           const id = result.id;
           if (!id) continue;
@@ -375,6 +379,7 @@ export async function buildSessionUsageReport(
             modelOverride: result.modelOverride,
             resolvedModel: result.resolvedModel,
             durationMs: result.durationMs,
+            at: spawnAt,
             selection: classifySelection(result.modelOverride),
             ...emptyTotals(),
           };
@@ -447,6 +452,11 @@ export interface PathRollupRow extends UsageTotals {
   model: string;
   /** How many times this path was spawned — the "tons of advisor spawns" signal. */
   spawnCount: number;
+  /** Epoch ms of the earliest / latest spawn on this path (0 when unstamped).
+   *  These rows are LIFETIME aggregates, so dating them is what separates
+   *  "an agent is burning budget now" from "it did, weeks ago". */
+  firstAt: number;
+  lastAt: number;
 }
 
 /**
@@ -467,10 +477,14 @@ export function rollupByPath(report: SessionUsageReport): PathRollupRow[] {
       const key = `${spawn.agent}|${spawn.selection}|${model}`;
       let row = rows.get(key);
       if (!row) {
-        row = { agent: spawn.agent, selection: spawn.selection, model, spawnCount: 0, ...emptyTotals() };
+        row = { agent: spawn.agent, selection: spawn.selection, model, spawnCount: 0, firstAt: 0, lastAt: 0, ...emptyTotals() };
         rows.set(key, row);
       }
       row.spawnCount += 1;
+      if (spawn.at > 0) {
+        row.firstAt = row.firstAt === 0 ? spawn.at : Math.min(row.firstAt, spawn.at);
+        row.lastAt = Math.max(row.lastAt, spawn.at);
+      }
       const child = spawn.childSessionFile ? childByFile.get(spawn.childSessionFile) : undefined;
       // Prefer the child's own measured totals; fall back to the parent's row.
       mergeTotals(row, child ? child.totals : spawn);

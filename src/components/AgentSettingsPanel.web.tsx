@@ -94,7 +94,7 @@ export function AgentSettingsPanel({
           {tab === 'agent' && <AgentTab control={control} tools={tools} loading={loading} onSet={set} />}
           {tab === 'agents' && <AgentsTab control={control} agents={agents} loading={loading} onSet={set} />}
           {tab === 'settings' && <SettingsTab schema={schema} loading={loading} onSet={set} />}
-          {tab === 'usage' && <UsageTab control={control} onLoadSessionUsage={onLoadSessionUsage} />}
+          {tab === 'usage' && <UsageTab control={control} agents={agents} onLoadSessionUsage={onLoadSessionUsage} />}
           {tab === 'context' && <ContextTab control={control} onCompact={onCompact} />}
           {tab === 'providers' && (
             <ProvidersTab providers={providers} loading={loading} oauth={oauth} onOAuthLogin={onOAuthLogin} onOAuthRespond={onOAuthRespond} onSetApiKey={onSetApiKey} onRemoveAccount={onRemoveAccount} onCheckUsage={onCheckUsage} />
@@ -409,8 +409,9 @@ function UsageFigures({ tokens, costUsd }: { tokens: number; costUsd: number }):
   );
 }
 
-function UsageTab({ control, onLoadSessionUsage }: {
+function UsageTab({ control, agents = [], onLoadSessionUsage }: {
   control?: AgentControlInfo;
+  agents?: AgentDefinitionInfo[];
   onLoadSessionUsage?: () => Promise<AgentSessionUsageReport | null>;
 }): ReactElement {
   const u = control?.usage;
@@ -548,23 +549,48 @@ function UsageTab({ control, onLoadSessionUsage }: {
         </>
       )}
 
-      {report && report.paths.length > 0 && (
-        <>
-          <Grp>By subagent path — agent · how the model was chosen</Grp>
-          {report.paths.map((p) => {
-            const sel = SELECTION_LABEL[p.selection];
-            return (
-              <div key={`${p.agent}|${p.selection}|${p.model}`} className="flex items-center gap-2 py-0.5 text-[11px]">
-                <span className="w-20 shrink-0 truncate text-[var(--gs-text)]" title={p.agent}>{p.agent}</span>
-                <span className={`w-14 shrink-0 ${sel.cls}`}>{sel.text}</span>
-                <span className="min-w-0 flex-1 truncate font-[family-name:var(--gs-font-mono)] text-[var(--gs-text-ghost)]" title={p.model}>{p.model}</span>
-                <span className="w-10 shrink-0 text-right text-[var(--gs-text-ghost)]">×{p.spawnCount}</span>
-                <UsageFigures tokens={p.totalTokens} costUsd={p.costUsd} />
-              </div>
-            );
-          })}
-        </>
-      )}
+      {report && report.paths.length > 0 && (() => {
+        // What each AGENT resolves to right now (override > frontmatter >
+        // session default). These rows are lifetime aggregates, so a model here
+        // is what the agent used AT SPAWN TIME — often not today's config.
+        const currentByAgent = new Map(
+          agents.map((a) => [a.name, a.resolvedModel?.split(':')[0] ?? null]),
+        );
+        const day = (ms: number) =>
+          ms > 0 ? new Date(ms).toLocaleString(undefined, { month: 'short', day: 'numeric' }) : '—';
+        return (
+          <>
+            <Grp>By subagent path — agent · how the model was chosen</Grp>
+            {report.paths.map((p) => {
+              const sel = SELECTION_LABEL[p.selection];
+              const currentForAgent = currentByAgent.get(p.agent);
+              const stale = currentForAgent != null && currentForAgent !== p.model;
+              const when = p.firstAt > 0
+                ? (day(p.firstAt) === day(p.lastAt) ? day(p.firstAt) : `${day(p.firstAt)}–${day(p.lastAt)}`)
+                : '—';
+              return (
+                <div key={`${p.agent}|${p.selection}|${p.model}`} className="flex items-center gap-2 py-0.5 text-[11px]">
+                  <span className="w-16 shrink-0 truncate text-[var(--gs-text-ghost)]" title={p.firstAt > 0 ? `${new Date(p.firstAt).toLocaleString()} → ${new Date(p.lastAt).toLocaleString()}` : 'no timestamp'}>{when}</span>
+                  <span className="w-20 shrink-0 truncate text-[var(--gs-text)]" title={p.agent}>{p.agent}</span>
+                  <span className={`w-14 shrink-0 ${sel.cls}`}>{sel.text}</span>
+                  <span
+                    className={`min-w-0 flex-1 truncate font-[family-name:var(--gs-font-mono)] ${stale ? 'text-[var(--gs-text-ghost)] line-through' : 'text-[var(--gs-text-dim)]'}`}
+                    title={stale ? `${p.model} — "${p.agent}" resolves to ${currentForAgent} now; this is past spend` : p.model}
+                  >
+                    {p.model}
+                  </span>
+                  <span className="w-10 shrink-0 text-right text-[var(--gs-text-ghost)]">×{p.spawnCount}</span>
+                  <UsageFigures tokens={p.totalTokens} costUsd={p.costUsd} />
+                </div>
+              );
+            })}
+            <div className="mt-1 text-[10px] text-[var(--gs-text-ghost)]">
+              Lifetime totals for this session — dates show when the path last ran. Struck-through
+              models are not what that agent resolves to now.
+            </div>
+          </>
+        );
+      })()}
 
       {report && report.warnings.length > 0 && (
         <div className="mt-2 text-[10px] text-[var(--gs-text-ghost)]">{report.warnings.join(' · ')}</div>
