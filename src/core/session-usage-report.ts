@@ -69,6 +69,23 @@ export interface ServiceTierRow extends UsageTotals {
   models: string[];
 }
 
+/**
+ * A contiguous stretch of the session where the (role, model) pair held steady
+ * — the session's usage TIMELINE. The lifetime rollups above deliberately mix
+ * eras: a role that was bound to one model earlier and another later shows both
+ * models and one merged total, which reads as "I'm paying for a model I didn't
+ * select". Segments date the spend so that question is answerable.
+ */
+export interface UsageSegment extends UsageTotals {
+  role: string;
+  provider: string;
+  model: string;
+  tier?: 'fast' | 'standard';
+  /** Epoch ms of the first / last request in this stretch. */
+  startedAt: number;
+  endedAt: number;
+}
+
 /** One subagent spawn recorded in a `task` toolResult. */
 export interface SpawnRow extends UsageTotals {
   id: string;
@@ -96,6 +113,8 @@ export interface SessionUsageReport {
   byRole: RoleRow[];
   /** Fast (priority) vs standard — empty when the session never set a tier. */
   byServiceTier: ServiceTierRow[];
+  /** Chronological (role, model) eras — dates the spend. */
+  segments: UsageSegment[];
   spawns: SpawnRow[];
   children: SessionUsageReport[];
   /** Non-fatal parse problems (unreadable child, malformed line, size cap hit). */
@@ -162,6 +181,8 @@ export function childSessionFileFor(parentFile: string, spawnId: string): string
 
 interface ParsedEntry {
   type?: string;
+  /** ISO timestamp on every entry. */
+  timestamp?: string;
   message?: {
     role?: string;
     provider?: string;
@@ -242,6 +263,9 @@ export async function buildSessionUsageReport(
   const byRole = new Map<string, RoleRow & { modelSet: Set<string> }>();
   const byTier = new Map<'fast' | 'standard', ServiceTierRow & { modelSet: Set<string> }>();
   const spawns: SpawnRow[] = [];
+  const segments: UsageSegment[] = [];
+  // Current (role, model) era — a new one opens whenever either changes.
+  let segment: UsageSegment | null = null;
   // The SDK treats an absent role as 'default'; our own restore/persist writes
   // also land as 'default', so this bucket is "unattributed", not "user chose
   // the default role". Keep the name honest in the UI.
@@ -318,6 +342,22 @@ export async function buildSessionUsageReport(
           tierRow.modelSet.add(modelKey);
           addUsage(tierRow, message.usage);
         }
+
+        // Timeline: extend the open era, or start a new one when the role or
+        // model changed. `at` falls back to the previous stamp so an entry with
+        // no/!parseable timestamp can't produce a NaN range.
+        const parsed = entry.timestamp ? Date.parse(entry.timestamp) : NaN;
+        const at: number = Number.isFinite(parsed) ? parsed : (segment?.endedAt ?? 0);
+        const tierNow: 'fast' | 'standard' | undefined = sawTierEntry
+          ? (currentTier?.[tierFamily({ provider, api: message.api, model })] === 'priority'
+             || (message.usage.premiumRequests ?? 0) > 0 ? 'fast' : 'standard')
+          : undefined;
+        if (!segment || segment.role !== currentRole || segment.provider !== provider || segment.model !== model) {
+          segment = { role: currentRole, provider, model, tier: tierNow, startedAt: at, endedAt: at, ...emptyTotals() };
+          segments.push(segment);
+        }
+        segment.endedAt = at;
+        addUsage(segment, message.usage);
         continue;
       }
 
@@ -392,6 +432,7 @@ export async function buildSessionUsageReport(
     byProviderModel: [...byModel.values()].sort((a, b) => b.costUsd - a.costUsd),
     byRole: roleRows,
     byServiceTier: tierRows,
+    segments,
     spawns,
     children,
     warnings,

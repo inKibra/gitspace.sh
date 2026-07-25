@@ -495,6 +495,43 @@ function UsageTab({ control, onLoadSessionUsage }: {
         </>
       )}
 
+      {report && report.segments.length > 0 && (() => {
+        // What each role points at RIGHT NOW, so a past era can be marked as
+        // "not what this role resolves to today" — the whole reason the
+        // lifetime rollups looked wrong ("I'm not using that model!").
+        const currentByRole = new Map(
+          (control?.roleCatalog ?? []).map((r) => [r.role, r.model?.split(':')[0] ?? null]),
+        );
+        const time = (ms: number) =>
+          ms > 0 ? new Date(ms).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—';
+        return (
+          <>
+            <Grp>Timeline — when each (role · model) era ran</Grp>
+            {report.segments.map((s, i) => {
+              const selector = `${s.provider}/${s.model}`;
+              const currentForRole = currentByRole.get(s.role);
+              // Only claim "was" when we actually know the role's current model.
+              const stale = currentForRole != null && currentForRole !== selector;
+              return (
+                <div key={`${s.role}|${selector}|${s.startedAt}|${i}`} className="flex items-center gap-2 py-0.5 text-[11px]">
+                  <span className="w-28 shrink-0 truncate text-[var(--gs-text-ghost)]" title={`${time(s.startedAt)} → ${time(s.endedAt)}`}>{time(s.startedAt)}</span>
+                  <span className="w-14 shrink-0 truncate text-[var(--gs-text)]" title={s.role}>{s.role}</span>
+                  <span className={`min-w-0 flex-1 truncate font-[family-name:var(--gs-font-mono)] ${stale ? 'text-[var(--gs-text-ghost)] line-through' : 'text-[var(--gs-text-dim)]'}`} title={stale ? `${selector} — not what "${s.role}" resolves to now (${currentForRole})` : selector}>
+                    {selector}
+                  </span>
+                  {s.tier === 'fast' && <span className="shrink-0 text-[var(--gs-warning)]" title="fast (priority) tier">⚡</span>}
+                  <span className="w-10 shrink-0 text-right text-[var(--gs-text-ghost)]">{s.requests}×</span>
+                  <UsageFigures tokens={s.totalTokens} costUsd={s.costUsd} />
+                </div>
+              );
+            })}
+            <div className="mt-1 text-[10px] text-[var(--gs-text-ghost)]">
+              Struck-through models are ones that role no longer resolves to — past spend, not current.
+            </div>
+          </>
+        );
+      })()}
+
       {report && report.byServiceTier.length > 0 && (
         <>
           <Grp>By speed — ⚡ fast (priority) vs standard</Grp>

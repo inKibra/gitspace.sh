@@ -224,6 +224,9 @@ export interface AgentSessionUsageReport {
   byRole: import('../core/session-usage-report.js').RoleRow[];
   /** Fast (priority) vs standard spend — empty when the session never set a tier. */
   byServiceTier: import('../core/session-usage-report.js').ServiceTierRow[];
+  /** Chronological (role, model) eras — dates the spend so lifetime rollups
+   *  that mix eras can be read correctly. */
+  segments: import('../core/session-usage-report.js').UsageSegment[];
   /** agent × selection × model, with spawn counts — "what burned the budget". */
   paths: import('../core/session-usage-report.js').PathRollupRow[];
   /** How many subagent transcripts were folded into totalsDeep. */

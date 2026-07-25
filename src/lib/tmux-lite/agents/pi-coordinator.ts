@@ -809,6 +809,7 @@ export class PiCoordinator {
       byProviderModel: report.byProviderModel,
       byRole: report.byRole,
       byServiceTier: report.byServiceTier,
+      segments: report.segments,
       paths: rollupByPath(report),
       childSessions: countChildren(report),
       warnings: report.warnings,

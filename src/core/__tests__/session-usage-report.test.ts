@@ -185,6 +185,36 @@ describe('buildSessionUsageReport', () => {
     expect((await buildSessionUsageReport(file))!.byServiceTier).toEqual([]);
   });
 
+  it('segments the timeline by (role, model) era so mixed-era spend is datable', async () => {
+    const at = (iso: string, entry: string) => {
+      const e = JSON.parse(entry) as Record<string, unknown>;
+      e.timestamp = iso;
+      return JSON.stringify(e);
+    };
+    const file = writeSession('s', [
+      modelChange('openai-codex/gpt-5.5', 'default'),
+      at('2026-07-01T10:00:00.000Z', assistant('openai-codex', 'gpt-5.5', 100, 10, 1.0)),
+      at('2026-07-01T10:05:00.000Z', assistant('openai-codex', 'gpt-5.5', 100, 10, 1.0)),
+      // Same ROLE, different model later — the lifetime byRole row merges these,
+      // which is exactly the confusion segments exist to resolve.
+      modelChange('anthropic/claude-fable-5', 'default'),
+      at('2026-07-01T11:00:00.000Z', assistant('anthropic', 'claude-fable-5', 100, 10, 5.0)),
+    ]);
+    const report = (await buildSessionUsageReport(file))!;
+    expect(report.segments).toHaveLength(2);
+    expect(report.segments[0]).toMatchObject({ role: 'default', model: 'gpt-5.5', requests: 2 });
+    expect(report.segments[0]!.costUsd).toBeCloseTo(2.0, 6);
+    expect(report.segments[1]).toMatchObject({ role: 'default', model: 'claude-fable-5', requests: 1 });
+    expect(report.segments[1]!.costUsd).toBeCloseTo(5.0, 6);
+    // The era is dated, and ordered.
+    expect(report.segments[0]!.startedAt).toBe(Date.parse('2026-07-01T10:00:00.000Z'));
+    expect(report.segments[0]!.endedAt).toBe(Date.parse('2026-07-01T10:05:00.000Z'));
+    expect(report.segments[1]!.startedAt).toBeGreaterThan(report.segments[0]!.endedAt);
+    // ...while the lifetime role rollup still merges both models into one row.
+    expect(report.byRole).toHaveLength(1);
+    expect(report.byRole[0]!.models).toHaveLength(2);
+  });
+
   it('returns null for a missing transcript and tolerates malformed lines', async () => {
     expect(await buildSessionUsageReport(join(root, 'nope.jsonl'))).toBeNull();
     const file = writeSession('s', ['{ not json', assistant('openai-codex', 'gpt-5', 10, 1, 0.1)]);
