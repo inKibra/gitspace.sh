@@ -1,4 +1,5 @@
 import type { Skill } from '@oh-my-pi/pi-coding-agent/extensibility/skills';
+import type { CredentialHealthResult } from '@oh-my-pi/pi-ai';
 
 export interface OmpAgentSession {
   sessionId: string;
@@ -81,37 +82,11 @@ export interface OmpAuthStorage {
   /** Remove ONE stored credential (account) by its row id. */
   removeCredential?(provider: string, credentialId: number): Promise<boolean>;
   /** Probe each credential's provider usage endpoint (network). Returns per-
-   *  credential health + the subscription's limit windows (remaining/reset). */
-  checkCredentials?(options?: { timeoutMs?: number }): Promise<Array<{
-    id: number;
-    provider: string;
-    email?: string;
-    accountId?: string;
-    ok: boolean | null;
-    reason?: string;
-    report?: {
-      // The SDK nests amounts under `amount` and reset time under `window` —
-      // reading these off the top level (as an earlier version did) yields all
-      // undefined: label renders but the bar is empty (see checkProviderUsage).
-      limits?: Array<{
-        label: string;
-        status?: 'ok' | 'warning' | 'exhausted' | 'unknown';
-        window?: { label?: string; resetsAt?: number };
-        amount?: {
-          unit?: string;
-          used?: number;
-          limit?: number;
-          remaining?: number;
-          usedFraction?: number;
-          remainingFraction?: number;
-        };
-        notes?: string[];
-      }>;
-      /** Saved/banked rate-limit resets the account can redeem ("extra credit"). */
-      resetCredits?: { availableCount: number; credits?: Array<{ expiresAt?: string; status?: string }> };
-      notes?: string[];
-    };
-  }>>;
+   *  credential health + the subscription's limit windows (remaining/reset).
+   *  Typed straight from the SDK (`CredentialHealthResult`) so our mapping in
+   *  pi-coordinator is checked against the real (nested) shape — a hand-rolled
+   *  copy is what silently drifted and blanked the usage bars. */
+  checkCredentials?(options?: { timeoutMs?: number }): Promise<CredentialHealthResult[]>;
 }
 
 // ---------------------------------------------------------------------------
