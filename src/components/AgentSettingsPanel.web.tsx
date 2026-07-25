@@ -1,10 +1,11 @@
 /** @jsxImportSource react */
-import { useMemo, useState, type ReactElement } from 'react';
+import { useEffect, useMemo, useState, type ReactElement } from 'react';
 import type {
   AgentAuthProvider,
   AgentControlInfo,
   AgentDefinitionInfo,
   AgentOAuthEvent,
+  AgentSessionUsageReport,
   AgentSettingSchemaItem,
   AgentToolInfo,
 } from '../agents/agent-runtime-types.js';
@@ -32,6 +33,7 @@ export function AgentSettingsPanel({
   onOAuthRespond,
   onRemoveAccount,
   onCheckUsage,
+  onLoadSessionUsage,
   onCompact,
   onClose,
 }: {
@@ -49,6 +51,8 @@ export function AgentSettingsPanel({
   onOAuthRespond: (value: string) => void;
   onRemoveAccount: (provider: string, credentialId: number) => Promise<void>;
   onCheckUsage: (provider: string) => Promise<AccountUsage[]>;
+  /** Per-session attribution for the Usage tab (reads the transcript). */
+  onLoadSessionUsage?: () => Promise<AgentSessionUsageReport | null>;
   onCompact: () => void;
   onClose: () => void;
 }): ReactElement {
@@ -90,7 +94,7 @@ export function AgentSettingsPanel({
           {tab === 'agent' && <AgentTab control={control} tools={tools} loading={loading} onSet={set} />}
           {tab === 'agents' && <AgentsTab control={control} agents={agents} loading={loading} onSet={set} />}
           {tab === 'settings' && <SettingsTab schema={schema} loading={loading} onSet={set} />}
-          {tab === 'usage' && <UsageTab control={control} />}
+          {tab === 'usage' && <UsageTab control={control} onLoadSessionUsage={onLoadSessionUsage} />}
           {tab === 'context' && <ContextTab control={control} onCompact={onCompact} />}
           {tab === 'providers' && (
             <ProvidersTab providers={providers} loading={loading} oauth={oauth} onOAuthLogin={onOAuthLogin} onOAuthRespond={onOAuthRespond} onSetApiKey={onSetApiKey} onRemoveAccount={onRemoveAccount} onCheckUsage={onCheckUsage} />
@@ -386,23 +390,132 @@ function Bar({ value, max }: { value: number; max: number }): ReactElement {
   );
 }
 
-function UsageTab({ control }: { control?: AgentControlInfo }): ReactElement {
+const usd = (n: number): string => (n >= 0.01 || n === 0 ? `$${n.toFixed(2)}` : `$${n.toFixed(4)}`);
+
+/** How a subagent's model was addressed — the provenance the report exists to show. */
+const SELECTION_LABEL: Record<'role' | 'pinned' | 'inherited', { text: string; cls: string }> = {
+  role: { text: 'role', cls: 'text-[var(--gs-success)]' },
+  pinned: { text: 'pinned', cls: 'text-[var(--gs-warning)]' },
+  inherited: { text: 'inherited', cls: 'text-[var(--gs-text-ghost)]' },
+};
+
+/** Right-aligned tokens + cost, the shared row tail across every breakdown. */
+function UsageFigures({ tokens, costUsd }: { tokens: number; costUsd: number }): ReactElement {
+  return (
+    <>
+      <span className="w-12 shrink-0 text-right font-[family-name:var(--gs-font-mono)] text-[var(--gs-text-dim)]">{k(tokens)}</span>
+      <span className="w-14 shrink-0 text-right font-[family-name:var(--gs-font-mono)] text-[var(--gs-text)]">{usd(costUsd)}</span>
+    </>
+  );
+}
+
+function UsageTab({ control, onLoadSessionUsage }: {
+  control?: AgentControlInfo;
+  onLoadSessionUsage?: () => Promise<AgentSessionUsageReport | null>;
+}): ReactElement {
   const u = control?.usage;
-  if (!u) return <div className="text-[var(--gs-text-dim)]">No usage yet.</div>;
-  const total = u.input + u.output + u.cacheRead + u.cacheWrite;
-  const rows: Array<[string, number]> = [['input', u.input], ['output', u.output], ['cache read', u.cacheRead], ['cache write', u.cacheWrite]];
+  const [report, setReport] = useState<AgentSessionUsageReport | null>(null);
+  const [state, setState] = useState<'idle' | 'loading' | 'error'>('idle');
+
+  // Fetch when the tab mounts (i.e. when the user opens Usage) — it's a local
+  // transcript read, not a network call, so no button needed.
+  useEffect(() => {
+    if (!onLoadSessionUsage) return;
+    let cancelled = false;
+    setState('loading');
+    onLoadSessionUsage()
+      .then((r) => { if (!cancelled) { setReport(r); setState('idle'); } })
+      .catch(() => { if (!cancelled) setState('error'); });
+    return () => { cancelled = true; };
+  }, [onLoadSessionUsage]);
+
+  if (!u && !report) {
+    return <div className="text-[var(--gs-text-dim)]">{state === 'loading' ? 'Loading usage…' : 'No usage yet.'}</div>;
+  }
+
+  const total = u ? u.input + u.output + u.cacheRead + u.cacheWrite : 0;
+  const rows: Array<[string, number]> = u
+    ? [['input', u.input], ['output', u.output], ['cache read', u.cacheRead], ['cache write', u.cacheWrite]]
+    : [];
+  const deep = report?.totalsDeep;
+  const hasSubagents = !!deep && !!report && deep.costUsd > report.totals.costUsd + 1e-9;
+
   return (
     <div>
       <Grp>This session</Grp>
-      <div className="mb-2"><span className="font-[family-name:var(--gs-font-mono)] text-[var(--gs-text)]">${u.cost.toFixed(2)}</span> <span className="text-[var(--gs-text-dim)]">· {k(total)} tokens</span></div>
-      {rows.map(([l, v]) => (
-        <div key={l} className="flex items-center gap-2 py-1">
-          <span className="w-20 text-[var(--gs-text)]">{l}</span>
-          <Bar value={v} max={total} />
-          <span className="w-12 text-right font-[family-name:var(--gs-font-mono)] text-[var(--gs-text-dim)]">{k(v)}</span>
-        </div>
-      ))}
-      {u.premiumRequests > 0 && <div className="mt-2 text-[var(--gs-text-dim)]">premium requests: {u.premiumRequests}</div>}
+      {u && (
+        <>
+          <div className="mb-2">
+            <span className="font-[family-name:var(--gs-font-mono)] text-[var(--gs-text)]">${u.cost.toFixed(2)}</span>
+            <span className="text-[var(--gs-text-dim)]"> · {k(total)} tokens</span>
+            {hasSubagents && (
+              <span className="text-[var(--gs-text-dim)]"> · with subagents <span className="font-[family-name:var(--gs-font-mono)] text-[var(--gs-text)]">{usd(deep!.costUsd)}</span> ({report!.childSessions} sub-session{report!.childSessions === 1 ? '' : 's'})</span>
+            )}
+          </div>
+          {rows.map(([l, v]) => (
+            <div key={l} className="flex items-center gap-2 py-1">
+              <span className="w-20 text-[var(--gs-text)]">{l}</span>
+              <Bar value={v} max={total} />
+              <span className="w-12 text-right font-[family-name:var(--gs-font-mono)] text-[var(--gs-text-dim)]">{k(v)}</span>
+            </div>
+          ))}
+          {u.premiumRequests > 0 && <div className="mt-2 text-[var(--gs-text-dim)]">premium requests: {u.premiumRequests}</div>}
+        </>
+      )}
+
+      {state === 'error' && <div className="mt-3 text-[10px] text-[var(--gs-text-ghost)]">Breakdown unavailable for this session.</div>}
+
+      {report && report.byProviderModel.length > 0 && (
+        <>
+          <Grp>By provider · model</Grp>
+          {report.byProviderModel.map((m) => (
+            <div key={`${m.provider}/${m.model}`} className="flex items-center gap-2 py-0.5 text-[11px]">
+              <span className="min-w-0 flex-1 truncate font-[family-name:var(--gs-font-mono)] text-[var(--gs-text)]" title={`${m.provider}/${m.model}`}>{m.provider}/{m.model}</span>
+              <span className="w-10 shrink-0 text-right text-[var(--gs-text-ghost)]">{m.requests}×</span>
+              <UsageFigures tokens={m.totalTokens} costUsd={m.costUsd} />
+            </div>
+          ))}
+        </>
+      )}
+
+      {report && report.byRole.length > 0 && (
+        <>
+          <Grp>By model role</Grp>
+          {report.byRole.map((r) => (
+            <div key={r.role} className="flex items-center gap-2 py-0.5 text-[11px]">
+              <span className="w-16 shrink-0 truncate text-[var(--gs-text)]" title={r.models.join(', ')}>{r.role}</span>
+              <span className="min-w-0 flex-1 truncate font-[family-name:var(--gs-font-mono)] text-[var(--gs-text-ghost)]">{r.models.join(', ')}</span>
+              <span className="w-10 shrink-0 text-right text-[var(--gs-text-ghost)]">{r.requests}×</span>
+              <UsageFigures tokens={r.totalTokens} costUsd={r.costUsd} />
+            </div>
+          ))}
+          <div className="mt-1 text-[10px] text-[var(--gs-text-ghost)]">
+            “default” also covers explicit model picks and session restores — it is the unattributed bucket.
+          </div>
+        </>
+      )}
+
+      {report && report.paths.length > 0 && (
+        <>
+          <Grp>By subagent path — agent · how the model was chosen</Grp>
+          {report.paths.map((p) => {
+            const sel = SELECTION_LABEL[p.selection];
+            return (
+              <div key={`${p.agent}|${p.selection}|${p.model}`} className="flex items-center gap-2 py-0.5 text-[11px]">
+                <span className="w-20 shrink-0 truncate text-[var(--gs-text)]" title={p.agent}>{p.agent}</span>
+                <span className={`w-14 shrink-0 ${sel.cls}`}>{sel.text}</span>
+                <span className="min-w-0 flex-1 truncate font-[family-name:var(--gs-font-mono)] text-[var(--gs-text-ghost)]" title={p.model}>{p.model}</span>
+                <span className="w-10 shrink-0 text-right text-[var(--gs-text-ghost)]">×{p.spawnCount}</span>
+                <UsageFigures tokens={p.totalTokens} costUsd={p.costUsd} />
+              </div>
+            );
+          })}
+        </>
+      )}
+
+      {report && report.warnings.length > 0 && (
+        <div className="mt-2 text-[10px] text-[var(--gs-text-ghost)]">{report.warnings.join(' · ')}</div>
+      )}
     </div>
   );
 }

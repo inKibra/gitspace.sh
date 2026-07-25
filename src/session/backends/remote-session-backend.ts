@@ -59,7 +59,7 @@ import type {
   TerminateSessionOptions,
   ArtifactReadRange,
 } from '../backend.js';
-import type { AgentControlInfo, AgentDefinitionInfo, AgentHistoryEntry, AgentSettingItem, AgentSettingSchemaItem, AgentToolInfo, AgentTreeNode } from '../../agents/agent-runtime-types.js';
+import type { AgentControlInfo, AgentDefinitionInfo, AgentHistoryEntry, AgentSessionUsageReport, AgentSettingItem, AgentSettingSchemaItem, AgentToolInfo, AgentTreeNode } from '../../agents/agent-runtime-types.js';
 import type { BackendEvent } from '../events.js';
 import type { AgentStateUpdateDelta, WorkspaceAgentState } from '../../lib/tmux-lite/agent-event-manager.js';
 import type { AgentStateSnapshotPush, AgentStateUpdatePush } from '../../lib/remote-session/protocol.js';
@@ -3296,6 +3296,19 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     if (tmuxResponse.type === 'agent-control-info') return tmuxResponse.info;
     if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
     throw new Error('Unexpected agent control-info response');
+  }
+
+  async getAgentSessionUsageReport(workspaceId: string, agentSessionId: string): Promise<AgentSessionUsageReport | null> {
+    await this.waitForInitialSnapshot();
+    const tmuxResponse = await this.sendRpcCommand({
+      type: 'get_agent_session_usage',
+      requestId: crypto.randomUUID(),
+      target: this.getAgentWorkspaceTarget(workspaceId),
+      agentSessionId,
+    });
+    if (tmuxResponse.type === 'agent-session-usage') return tmuxResponse.report;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected agent session-usage response');
   }
 
   async setAgentModel(workspaceId: string, agentSessionId: string, provider: string, modelId: string): Promise<boolean> {

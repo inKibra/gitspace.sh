@@ -71,6 +71,7 @@ import {
   respondToAgentPermission,
   readAgentTranscriptRange,
   getAgentControlInfo,
+  getAgentSessionUsageReport,
   setAgentModel,
   setAgentThinkingLevel,
   setAgentApprovalMode,
@@ -3819,6 +3820,17 @@ export async function dispatchCommand(cmd: Command): Promise<Response | null> {
             } catch (e) {
               const errMsg = e instanceof Error ? e.message : String(e);
               res = { type: 'error', message: `Failed to read control info: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-session-usage':
+            try {
+              await getAgentControlReady();
+              const report = await getAgentSessionUsageReport(cmd.target, cmd.agentSessionId);
+              res = { type: 'agent-session-usage', report };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to build session usage report: ${errMsg}` };
             }
             break;
 

@@ -90,7 +90,7 @@ import {
   type WorkspaceDeleteErrorCode,
 } from '../../types/errors.js';
 import type { TerminalSnapshot } from '../backend.js';
-import type { AgentControlInfo, AgentDefinitionInfo, AgentHistoryEntry, AgentSettingItem, AgentSettingSchemaItem, AgentToolInfo, AgentTreeNode } from '../../agents/agent-runtime-types.js';
+import type { AgentControlInfo, AgentDefinitionInfo, AgentHistoryEntry, AgentSessionUsageReport, AgentSettingItem, AgentSettingSchemaItem, AgentToolInfo, AgentTreeNode } from '../../agents/agent-runtime-types.js';
 import type { AgentStateUpdateDelta, WorkspaceAgentState } from '../../lib/tmux-lite/agent-event-manager.js';
 import type { AgentWorkspaceTargetPayload } from '../../lib/tmux-lite/protocol.js';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
@@ -1743,6 +1743,14 @@ export class LocalSessionBackend implements SessionBackend {
     if (tmuxResponse.type === 'agent-control-info') return tmuxResponse.info;
     if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
     throw new Error('Unexpected agent control-info response');
+  }
+
+  async getAgentSessionUsageReport(workspaceId: string, agentSessionId: string): Promise<AgentSessionUsageReport | null> {
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'agent-session-usage', target, agentSessionId });
+    if (tmuxResponse.type === 'agent-session-usage') return tmuxResponse.report;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected agent session-usage response');
   }
 
   async setAgentModel(workspaceId: string, agentSessionId: string, provider: string, modelId: string): Promise<boolean> {

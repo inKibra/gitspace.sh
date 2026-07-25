@@ -325,6 +325,13 @@ export function PaneTerminalPanel({
     if (!fn) throw new Error('Not supported');
     return fn.call(backend, provider);
   }, [backend]);
+  /** Per-session attribution for the Usage tab — reads the transcript, so it
+   *  works even when the session isn't live. */
+  const handleLoadSessionUsage = useCallback(async () => {
+    const fn = backend?.getAgentSessionUsageReport;
+    if (!fn || !wsId || !agentSessionId) return null;
+    return fn.call(backend, wsId, agentSessionId);
+  }, [backend, wsId, agentSessionId]);
   const handleSetSetting = useCallback(async (path: string, value: string | number | boolean | string[]) => {
     const fn = backend?.setAgentSetting;
     if (!fn) throw new Error('Not supported');
@@ -511,6 +518,7 @@ export function PaneTerminalPanel({
           onOAuthRespond={handleOAuthRespond}
           onRemoveAccount={handleRemoveAccount}
           onCheckUsage={handleCheckUsage}
+          onLoadSessionUsage={handleLoadSessionUsage}
           onCompact={handleCompact}
           onClose={() => { setSettingsOpen(false); setOauthFlow(null); oauthFlowIdRef.current = null; }}
         />

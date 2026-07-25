@@ -625,6 +625,13 @@ export interface GetAgentControlInfoRequest {
   agentSessionId: string;
 }
 
+export interface GetAgentSessionUsageRequest {
+  type: 'get_agent_session_usage';
+  requestId: string;
+  target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
+  agentSessionId: string;
+}
+
 export interface SetAgentModelRequest {
   type: 'set_agent_model';
   requestId: string;
@@ -1335,6 +1342,7 @@ export type ClientToMachineMessage =
   | RespondAgentPermissionRequest
   | GetAgentTranscriptRangeRequest
   | GetAgentControlInfoRequest
+  | GetAgentSessionUsageRequest
   | SetAgentModelRequest
   | SetAgentThinkingLevelRequest
   | SetAgentApprovalModeRequest
@@ -1524,6 +1532,7 @@ export function isBrowseMessage(msg: RemoteSessionMessage): msg is ClientToMachi
     'respond_agent_permission',
     'get_agent_transcript_range',
     'get_agent_control_info',
+    'get_agent_session_usage',
     'set_agent_model',
     'set_agent_thinking_level',
     'set_agent_approval_mode',

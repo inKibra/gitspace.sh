@@ -208,6 +208,27 @@ export interface AgentRoleCatalogItem {
   model: string | null;
 }
 
+/**
+ * Per-session usage ATTRIBUTION (core/session-usage-report.ts), computed from
+ * the session transcript. Complements `AgentControlInfo.usage`, which is a
+ * single flat total: this says which providers/models/roles/subagent paths the
+ * spend actually went to. Type-only import — erased at compile time, so the
+ * core module's `fs` never reaches the web bundle.
+ */
+export interface AgentSessionUsageReport {
+  /** This session alone. */
+  totals: import('../core/session-usage-report.js').UsageTotals;
+  /** This session + every subagent transcript beneath it. */
+  totalsDeep: import('../core/session-usage-report.js').UsageTotals;
+  byProviderModel: import('../core/session-usage-report.js').ProviderModelRow[];
+  byRole: import('../core/session-usage-report.js').RoleRow[];
+  /** agent × selection × model, with spawn counts — "what burned the budget". */
+  paths: import('../core/session-usage-report.js').PathRollupRow[];
+  /** How many subagent transcripts were folded into totalsDeep. */
+  childSessions: number;
+  warnings: string[];
+}
+
 /** Control-surface snapshot for an agent session (usage + model + thinking + approval). */
 export interface AgentControlInfo {
   usage: { input: number; output: number; cacheRead: number; cacheWrite: number; premiumRequests: number; cost: number } | null;

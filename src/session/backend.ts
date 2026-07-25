@@ -282,6 +282,8 @@ export interface SessionBackend {
   /** Control-surface snapshot for an agent session (usage + model switcher). */
   getAgentControlInfo?(workspaceId: string, agentSessionId: string): Promise<AgentControlInfo>;
   /** Switch an agent session's model. */
+  /** Per-session usage attribution (providers/models/roles/subagent paths). */
+  getAgentSessionUsageReport?(workspaceId: string, agentSessionId: string): Promise<import('../agents/agent-runtime-types.js').AgentSessionUsageReport | null>;
   setAgentModel?(workspaceId: string, agentSessionId: string, provider: string, modelId: string): Promise<boolean>;
   /** Set an agent session's thinking/reasoning level. */
   setAgentThinkingLevel?(workspaceId: string, agentSessionId: string, level: string): Promise<boolean>;

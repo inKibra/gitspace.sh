@@ -433,6 +433,7 @@ export type Command =
   | { type: 'agent-list-commands'; target: AgentWorkspaceTargetPayload }
   | { type: 'agent-transcript-range'; target: AgentWorkspaceTargetPayload; agentSessionId: string; before?: string; limit: number }
   | { type: 'agent-control-info'; target: AgentWorkspaceTargetPayload; agentSessionId: string }
+  | { type: 'agent-session-usage'; target: AgentWorkspaceTargetPayload; agentSessionId: string }
   | { type: 'agent-set-model'; target: AgentWorkspaceTargetPayload; agentSessionId: string; provider: string; modelId: string }
   | { type: 'agent-set-thinking-level'; target: AgentWorkspaceTargetPayload; agentSessionId: string; level: string }
   | { type: 'agent-set-approval-mode'; target: AgentWorkspaceTargetPayload; agentSessionId: string; mode: string }
@@ -578,6 +579,7 @@ export type Response =
   | { type: 'agent-commands'; commands: Array<{ name: string; description: string; kind: 'file' | 'custom' | 'extension' }> }
   | { type: 'agent-transcript-range'; blocks: unknown[]; oldestCursor: string | null; hasMore: boolean }
   | { type: 'agent-control-info'; info: import('../../agents/agent-runtime-types.js').AgentControlInfo }
+  | { type: 'agent-session-usage'; report: import('../../agents/agent-runtime-types.js').AgentSessionUsageReport | null }
   | { type: 'agent-set-model'; ok: boolean }
   | { type: 'agent-auth-providers'; providers: Array<{ provider: string; hasAuth: boolean; accounts?: Array<{ id: number; type: string; label: string; disabled: boolean }> }> }
   | { type: 'agent-remove-account'; ok: boolean }

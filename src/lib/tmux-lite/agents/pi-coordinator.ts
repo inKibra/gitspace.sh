@@ -15,7 +15,7 @@ import {
   openPiSessionManager,
   readCycleOrder,
 } from './pi-runtime.js';
-import type { AgentControlInfo, AgentDefinitionInfo, AgentHistoryEntry, AgentOAuthEvent, AgentSettingSchemaItem, AgentToolInfo, AgentTreeNode } from '../../../agents/agent-runtime-types.js';
+import type { AgentControlInfo, AgentDefinitionInfo, AgentHistoryEntry, AgentOAuthEvent, AgentSessionUsageReport, AgentSettingSchemaItem, AgentToolInfo, AgentTreeNode } from '../../../agents/agent-runtime-types.js';
 import { getTranscriptRange } from '../../../blocks/agent/transcript-source.js';
 import { CLAUDE_MODEL_ALIAS_TO_MODEL_ROLE } from '../../../blocks/model-roles.js';
 import type { TranscriptPage, TranscriptSource } from '../../../blocks/agent/transcript-source.js';
@@ -785,6 +785,33 @@ export class PiCoordinator {
   async getSessionTree(target: PiWorkspaceTarget, agentSessionId: string): Promise<AgentTreeNode[]> {
     const host = await this.ensureHost(target, agentSessionId);
     return host.getSessionTree();
+  }
+
+  /**
+   * Per-session usage attribution, read straight off the transcript. NOTE: no
+   * `ensureHost` — this is pure file I/O, so it works for closed/archived
+   * sessions and never spins a worker up just to answer a report.
+   */
+  async getSessionUsageReport(
+    target: PiWorkspaceTarget,
+    agentSessionId: string,
+  ): Promise<AgentSessionUsageReport | null> {
+    const file = findPiSessionFile(target.workspacePath, agentSessionId, this.sessionsRoot);
+    if (!file) return null;
+    const { buildSessionUsageReport, rollupByPath } = await import('../../../core/session-usage-report.js');
+    const report = buildSessionUsageReport(file.path);
+    if (!report) return null;
+    const countChildren = (node: typeof report): number =>
+      node.children.reduce((sum, child) => sum + 1 + countChildren(child), 0);
+    return {
+      totals: report.totals,
+      totalsDeep: report.totalsDeep,
+      byProviderModel: report.byProviderModel,
+      byRole: report.byRole,
+      paths: rollupByPath(report),
+      childSessions: countChildren(report),
+      warnings: report.warnings,
+    };
   }
 
   /** Switch the session's model. Spins up the session if needed. */

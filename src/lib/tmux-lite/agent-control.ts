@@ -521,6 +521,14 @@ export async function getAgentControlInfo(
   return defaultPiCoordinator.getControlInfo(target, agentSessionId);
 }
 
+/** Per-session usage attribution from the transcript (no host spin-up). */
+export async function getAgentSessionUsageReport(
+  target: AgentWorkspaceTarget,
+  agentSessionId: string,
+): Promise<import('../../agents/agent-runtime-types.js').AgentSessionUsageReport | null> {
+  return defaultPiCoordinator.getSessionUsageReport(target, agentSessionId);
+}
+
 /** Switch the session's model. */
 export async function setAgentModel(
   target: AgentWorkspaceTarget,
