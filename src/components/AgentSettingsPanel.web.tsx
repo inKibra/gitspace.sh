@@ -495,6 +495,22 @@ function UsageTab({ control, onLoadSessionUsage }: {
         </>
       )}
 
+      {report && report.byServiceTier.length > 0 && (
+        <>
+          <Grp>By speed — ⚡ fast (priority) vs standard</Grp>
+          {report.byServiceTier.map((t) => (
+            <div key={t.tier} className="flex items-center gap-2 py-0.5 text-[11px]">
+              <span className={`w-16 shrink-0 ${t.tier === 'fast' ? 'font-semibold text-[var(--gs-warning)]' : 'text-[var(--gs-text)]'}`}>
+                {t.tier === 'fast' ? '⚡ fast' : 'standard'}
+              </span>
+              <span className="min-w-0 flex-1 truncate font-[family-name:var(--gs-font-mono)] text-[var(--gs-text-ghost)]">{t.models.join(', ')}</span>
+              <span className="w-10 shrink-0 text-right text-[var(--gs-text-ghost)]">{t.requests}×</span>
+              <UsageFigures tokens={t.totalTokens} costUsd={t.costUsd} />
+            </div>
+          ))}
+        </>
+      )}
+
       {report && report.paths.length > 0 && (
         <>
           <Grp>By subagent path — agent · how the model was chosen</Grp>

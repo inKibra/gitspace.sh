@@ -26,8 +26,9 @@
  * recurses rather than trusting the parent's aggregate.
  */
 
-import { existsSync, readFileSync, statSync } from 'fs';
+import { createReadStream, existsSync } from 'fs';
 import { basename, dirname, join } from 'path';
+import { createInterface } from 'readline';
 
 /** Token + cost totals, summed from any number of requests. */
 export interface UsageTotals {
@@ -56,6 +57,18 @@ export interface RoleRow extends UsageTotals {
   models: string[];
 }
 
+/**
+ * Spend split by service tier — "fast mode" (priority) vs standard. The tier is
+ * per provider FAMILY (`{openai:'priority', anthropic:'standard', …}`), tracked
+ * from `service_tier_change` entries and resolved per request against the
+ * message's own provider/api/model.
+ */
+export interface ServiceTierRow extends UsageTotals {
+  tier: 'fast' | 'standard';
+  /** Models served under this tier. */
+  models: string[];
+}
+
 /** One subagent spawn recorded in a `task` toolResult. */
 export interface SpawnRow extends UsageTotals {
   id: string;
@@ -81,14 +94,14 @@ export interface SessionUsageReport {
   totalsDeep: UsageTotals;
   byProviderModel: ProviderModelRow[];
   byRole: RoleRow[];
+  /** Fast (priority) vs standard — empty when the session never set a tier. */
+  byServiceTier: ServiceTierRow[];
   spawns: SpawnRow[];
   children: SessionUsageReport[];
   /** Non-fatal parse problems (unreadable child, malformed line, size cap hit). */
   warnings: string[];
 }
 
-/** A transcript larger than this is skipped rather than read into memory. */
-const MAX_TRANSCRIPT_BYTES = 256 * 1024 * 1024;
 /** Depth guard for the spawn tree (subagents can spawn subagents). */
 const MAX_DEPTH = 8;
 
@@ -104,6 +117,7 @@ interface RawUsage {
   cacheWrite?: number;
   totalTokens?: number;
   reasoningTokens?: number;
+  premiumRequests?: number;
   cost?: { total?: number };
 }
 
@@ -160,6 +174,34 @@ interface ParsedEntry {
   /** model_change fields */
   model?: string;
   role?: string;
+  /** service_tier_change: per provider-family tier map. */
+  serviceTier?: Record<string, string> | null;
+}
+
+/**
+ * Which service-tier family a request belongs to. Uses the SDK's own resolver
+ * (the authoritative mapping) against the message's real provider/api/model,
+ * falling back to the provider string when the SDK can't classify it.
+ */
+type TierFamilyResolver = (msg: { provider: string; api?: string; model: string }) => string;
+
+async function loadTierFamilyResolver(): Promise<TierFamilyResolver> {
+  try {
+    const mod = (await import('@oh-my-pi/pi-ai')) as {
+      serviceTierFamily?: (m: { provider: string; api?: string; id: string }) => string | undefined;
+    };
+    const fn = mod.serviceTierFamily;
+    if (typeof fn !== 'function') return (m) => m.provider;
+    return (m) => {
+      try {
+        return fn({ provider: m.provider, api: m.api, id: m.model }) ?? m.provider;
+      } catch {
+        return m.provider;
+      }
+    };
+  } catch {
+    return (m) => m.provider;
+  }
 }
 
 interface RawSpawnResult {
@@ -185,113 +227,128 @@ interface RawSpawnResult {
  * order matches the SDK's own append semantics and is right for the common
  * linear case.
  */
-export function buildSessionUsageReport(
+export async function buildSessionUsageReport(
   sessionFile: string,
-  opts: { depth?: number } = {},
-): SessionUsageReport | null {
+  opts: { depth?: number; tierFamily?: TierFamilyResolver } = {},
+): Promise<SessionUsageReport | null> {
   const depth = opts.depth ?? 0;
   const warnings: string[] = [];
   if (!existsSync(sessionFile)) return null;
-  try {
-    if (statSync(sessionFile).size > MAX_TRANSCRIPT_BYTES) {
-      return {
-        sessionFile,
-        totals: emptyTotals(),
-        totalsDeep: emptyTotals(),
-        byProviderModel: [],
-        byRole: [],
-        spawns: [],
-        children: [],
-        warnings: [`transcript exceeds ${MAX_TRANSCRIPT_BYTES} bytes — skipped`],
-      };
-    }
-  } catch {
-    return null;
-  }
-
-  let raw: string;
-  try {
-    raw = readFileSync(sessionFile, 'utf8');
-  } catch (e) {
-    return null;
-  }
+  // Resolved once and threaded into children — the SDK import is not free.
+  const tierFamily = opts.tierFamily ?? (await loadTierFamilyResolver());
 
   const totals = emptyTotals();
   const byModel = new Map<string, ProviderModelRow>();
   const byRole = new Map<string, RoleRow & { modelSet: Set<string> }>();
+  const byTier = new Map<'fast' | 'standard', ServiceTierRow & { modelSet: Set<string> }>();
   const spawns: SpawnRow[] = [];
   // The SDK treats an absent role as 'default'; our own restore/persist writes
   // also land as 'default', so this bucket is "unattributed", not "user chose
   // the default role". Keep the name honest in the UI.
   let currentRole = 'default';
+  // Per provider-FAMILY tier map from service_tier_change ({openai:'priority'}).
+  let currentTier: Record<string, string> | null = null;
+  let sawTierEntry = false;
   let malformed = 0;
 
-  for (const line of raw.split('\n')) {
-    const trimmed = line.trim();
-    // Line 1 is a fixed-width mutable title slot, not JSON.
-    if (!trimmed.startsWith('{')) continue;
-    let entry: ParsedEntry;
-    try {
-      entry = JSON.parse(trimmed) as ParsedEntry;
-    } catch {
-      malformed += 1;
-      continue;
-    }
-
-    if (entry.type === 'model_change') {
-      currentRole = entry.role ?? 'default';
-      continue;
-    }
-
-    const message = entry.message;
-    if (!message) continue;
-
-    if (message.role === 'assistant' && message.usage) {
-      const provider = message.provider ?? 'unknown';
-      const model = message.model ?? 'unknown';
-      addUsage(totals, message.usage);
-
-      const modelKey = `${provider}/${model}`;
-      let modelRow = byModel.get(modelKey);
-      if (!modelRow) {
-        modelRow = { provider, model, api: message.api, ...emptyTotals() };
-        byModel.set(modelKey, modelRow);
+  // Stream: a real transcript can reach hundreds of MB, and slurping it (one
+  // giant string PLUS an array of every line) blew memory and forced a size cap
+  // that skipped exactly the sessions worth reporting on. Line-at-a-time keeps
+  // memory flat regardless of file size, so there is no cap at all now.
+  const rl = createInterface({ input: createReadStream(sessionFile, 'utf8'), crlfDelay: Infinity });
+  try {
+    for await (const line of rl) {
+      const trimmed = line.trim();
+      // Line 1 is a fixed-width mutable title slot, not JSON.
+      if (!trimmed.startsWith('{')) continue;
+      let entry: ParsedEntry;
+      try {
+        entry = JSON.parse(trimmed) as ParsedEntry;
+      } catch {
+        malformed += 1;
+        continue;
       }
-      addUsage(modelRow, message.usage);
 
-      let roleRow = byRole.get(currentRole);
-      if (!roleRow) {
-        roleRow = { role: currentRole, models: [], modelSet: new Set(), ...emptyTotals() };
-        byRole.set(currentRole, roleRow);
+      if (entry.type === 'model_change') {
+        currentRole = entry.role ?? 'default';
+        continue;
       }
-      roleRow.modelSet.add(modelKey);
-      addUsage(roleRow, message.usage);
-      continue;
-    }
 
-    // `task` spawns: one row per subagent, already carrying its own usage.
-    const results = message.details?.results;
-    if (message.role === 'toolResult' && Array.isArray(results)) {
-      for (const result of results) {
-        const id = result.id;
-        if (!id) continue;
-        const row: SpawnRow = {
-          id,
-          agent: result.agent ?? 'unknown',
-          agentSource: result.agentSource,
-          description: result.description,
-          modelOverride: result.modelOverride,
-          resolvedModel: result.resolvedModel,
-          durationMs: result.durationMs,
-          selection: classifySelection(result.modelOverride),
-          ...emptyTotals(),
-        };
-        addUsage(row, result.usage, result.requests ?? 1);
-        const childFile = childSessionFileFor(sessionFile, id);
-        if (existsSync(childFile)) row.childSessionFile = childFile;
-        spawns.push(row);
+      if (entry.type === 'service_tier_change') {
+        currentTier = entry.serviceTier ?? null;
+        sawTierEntry = true;
+        continue;
+      }
+
+      const message = entry.message;
+      if (!message) continue;
+
+      if (message.role === 'assistant' && message.usage) {
+        const provider = message.provider ?? 'unknown';
+        const model = message.model ?? 'unknown';
+        addUsage(totals, message.usage);
+
+        const modelKey = `${provider}/${model}`;
+        let modelRow = byModel.get(modelKey);
+        if (!modelRow) {
+          modelRow = { provider, model, api: message.api, ...emptyTotals() };
+          byModel.set(modelKey, modelRow);
+        }
+        addUsage(modelRow, message.usage);
+
+        let roleRow = byRole.get(currentRole);
+        if (!roleRow) {
+          roleRow = { role: currentRole, models: [], modelSet: new Set(), ...emptyTotals() };
+          byRole.set(currentRole, roleRow);
+        }
+        roleRow.modelSet.add(modelKey);
+        addUsage(roleRow, message.usage);
+
+        // Fast mode = this request's provider family was on 'priority'. A
+        // premiumRequests count is definitive when the provider reports one.
+        if (sawTierEntry) {
+          const family = tierFamily({ provider, api: message.api, model });
+          const isFast = currentTier?.[family] === 'priority' || (message.usage.premiumRequests ?? 0) > 0;
+          const tier: 'fast' | 'standard' = isFast ? 'fast' : 'standard';
+          let tierRow = byTier.get(tier);
+          if (!tierRow) {
+            tierRow = { tier, models: [], modelSet: new Set(), ...emptyTotals() };
+            byTier.set(tier, tierRow);
+          }
+          tierRow.modelSet.add(modelKey);
+          addUsage(tierRow, message.usage);
+        }
+        continue;
+      }
+
+      // `task` spawns: one row per subagent, already carrying its own usage.
+      const results = message.details?.results;
+      if (message.role === 'toolResult' && Array.isArray(results)) {
+        for (const result of results) {
+          const id = result.id;
+          if (!id) continue;
+          const row: SpawnRow = {
+            id,
+            agent: result.agent ?? 'unknown',
+            agentSource: result.agentSource,
+            description: result.description,
+            modelOverride: result.modelOverride,
+            resolvedModel: result.resolvedModel,
+            durationMs: result.durationMs,
+            selection: classifySelection(result.modelOverride),
+            ...emptyTotals(),
+          };
+          addUsage(row, result.usage, result.requests ?? 1);
+          const childFile = childSessionFileFor(sessionFile, id);
+          if (existsSync(childFile)) row.childSessionFile = childFile;
+          spawns.push(row);
+        }
       }
     }
+  } catch {
+    return null; // unreadable mid-stream
+  } finally {
+    rl.close();
   }
 
   if (malformed > 0) warnings.push(`${malformed} malformed transcript line(s) skipped`);
@@ -300,7 +357,7 @@ export function buildSessionUsageReport(
   if (depth < MAX_DEPTH) {
     for (const spawn of spawns) {
       if (!spawn.childSessionFile) continue;
-      const child = buildSessionUsageReport(spawn.childSessionFile, { depth: depth + 1 });
+      const child = await buildSessionUsageReport(spawn.childSessionFile, { depth: depth + 1, tierFamily });
       if (child) children.push(child);
       else warnings.push(`unreadable child transcript: ${spawn.childSessionFile}`);
     }
@@ -324,6 +381,9 @@ export function buildSessionUsageReport(
   const roleRows: RoleRow[] = [...byRole.values()]
     .map(({ modelSet, ...row }) => ({ ...row, models: [...modelSet].sort() }))
     .sort((a, b) => b.costUsd - a.costUsd);
+  const tierRows: ServiceTierRow[] = [...byTier.values()]
+    .map(({ modelSet, ...row }) => ({ ...row, models: [...modelSet].sort() }))
+    .sort((a, b) => b.costUsd - a.costUsd);
 
   return {
     sessionFile,
@@ -331,6 +391,7 @@ export function buildSessionUsageReport(
     totalsDeep,
     byProviderModel: [...byModel.values()].sort((a, b) => b.costUsd - a.costUsd),
     byRole: roleRows,
+    byServiceTier: tierRows,
     spawns,
     children,
     warnings,

@@ -799,15 +799,16 @@ export class PiCoordinator {
     const file = findPiSessionFile(target.workspacePath, agentSessionId, this.sessionsRoot);
     if (!file) return null;
     const { buildSessionUsageReport, rollupByPath } = await import('../../../core/session-usage-report.js');
-    const report = buildSessionUsageReport(file.path);
+    const report = await buildSessionUsageReport(file.path);
     if (!report) return null;
-    const countChildren = (node: typeof report): number =>
+    const countChildren = (node: NonNullable<typeof report>): number =>
       node.children.reduce((sum, child) => sum + 1 + countChildren(child), 0);
     return {
       totals: report.totals,
       totalsDeep: report.totalsDeep,
       byProviderModel: report.byProviderModel,
       byRole: report.byRole,
+      byServiceTier: report.byServiceTier,
       paths: rollupByPath(report),
       childSessions: countChildren(report),
       warnings: report.warnings,
