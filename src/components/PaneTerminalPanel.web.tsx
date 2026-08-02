@@ -342,7 +342,9 @@ export function PaneTerminalPanel({
     }
     const previous = goalMode;
     setGoalModePending(true);
-    setGoalMode((current) => ({ enabled, available: current?.available ?? true }));
+    setGoalMode((current) => enabled
+      ? { enabled: true, available: true }
+      : { enabled: false, available: current?.available ?? true });
     try {
       const updated = await fn.call(backend, wsId!, agentSessionId!, { enabled, ...(enabled && precursor ? { precursor } : {}) });
       if (goalModeSessionKeyRef.current === goalModeSessionKey) setGoalMode(updated);

@@ -3086,7 +3086,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
       // not carry the dialog fold, which is why the header stayed green ("shows
       // yellow in the sidebar and kanban but not at the top of the transcript").
       const paneSnapshotAgents = paneBackendKey
-        ? multi.getBackendState(paneBackendKey)?.snapshot?.agentSessionsById
+        ? multi.getBackendState(paneBackendKey)?.machineSnapshot?.agentSessionsById
         : undefined;
       const panels: import('./components/DockviewWorkspaceShell.web.js').DockviewTerminalPanel[] = workspacePaneEntries.map((pane) => {
         // An agent pane has no terminal session at all — fall back to the agent
@@ -3646,8 +3646,8 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
                 pendingPermissions={runtime?.pendingPermissionCount ?? 0}
                 attachedSessionId={workspaceAttachedSessionIds[0] ?? (attachedHere ? backendAttachedSessionId : null)}
                 attachedAgentSessionId={workspaceAttachedAgentSessionIds[0] ?? (attachedHere ? (attachedBackendState?.attachedAgentSessionId ?? null) : null)}
-                attachedSessionIds={workspaceAttachedSessionIds}
-                attachedAgentSessionIds={workspaceAttachedAgentSessionIds}
+                attachedSessionIds={workspaceAttachedSessionIds.filter((id): id is string => id !== null)}
+                attachedAgentSessionIds={workspaceAttachedAgentSessionIds.filter((id): id is string => id !== null)}
                 pendingAgentAttach={agentAttachPending && pendingAgentAttachTarget?.workspaceId === workspace.id}
                 allWorkspaces={allWorkspaceEntries}
                 workspaceStatusById={workspaceStatusById}
@@ -3795,7 +3795,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
             workspaces={phWorkspaces}
             backend={phBackendKey ? multi.getBackend(phBackendKey) : null}
             backendKey={phBackendKey}
-            agentSessionsById={phBackendKey ? multi.getBackendState(phBackendKey)?.snapshot?.agentSessionsById : undefined}
+            agentSessionsById={phBackendKey ? multi.getBackendState(phBackendKey)?.machineSnapshot?.agentSessionsById : undefined}
             onBack={() => setProjectHomeName(null)}
             onOpenWorkspace={(selectionKey) => {
               setProjectHomeName(null);

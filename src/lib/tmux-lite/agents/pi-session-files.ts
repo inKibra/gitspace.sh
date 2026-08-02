@@ -1,5 +1,5 @@
 import { join, resolve, relative, isAbsolute } from 'node:path';
-import { existsSync, readFileSync, realpathSync, readdirSync, statSync, openSync, readSync, closeSync } from 'node:fs';
+import { existsSync, realpathSync, readdirSync, statSync, openSync, readSync, closeSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { getPiAgentDir } from './pi-runtime.js';
 

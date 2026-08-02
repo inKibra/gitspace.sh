@@ -89,6 +89,7 @@ export function AgentPaneHeader({
   shakeResult?: AgentShakeResult;
   shakePending?: boolean;
   shakeError?: string | null;
+  error?: string | null;
   onShake?: (mode: AgentShakeMode) => void | Promise<void>;
   /** Session is blocked on the user (an ask dialog / pending permission).
    *  Overrides busy→green so the header agrees with the board and the visible

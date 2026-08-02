@@ -1,7 +1,6 @@
 import { parseCommandArgs } from '@oh-my-pi/pi-coding-agent/utils/command-args';
 
 import type { HostUIBridgeEmitter, HostUIDialogRequest, HostUIDialogResponse } from './host-ui-bridge.js';
-import { terminateSession as terminateTmuxSession } from '../cli.js';
 import {
   createPiAuthStorage,
   createPiModelRegistry,
@@ -881,10 +880,7 @@ export class PiCoordinator {
    * later when the user explicitly attaches.
    */
   async createAgentSession(target: PiWorkspaceTarget, title?: string): Promise<PiAgentSessionSummary[]> {
-    let bootedSessionId: string | null = null;
-    const host = await this.bootHost(target, { mode: 'create', title }, () => bootedSessionId);
-    bootedSessionId = host.sessionId;
-    host.setTitle(title);
+    const host = await this.bootHost(target, { mode: 'create', title });
 
     const sessionId = host.sessionId;
     this.hosts.set(sessionId, host);
@@ -1102,10 +1098,9 @@ export class PiCoordinator {
   private async bootHost(
     target: PiWorkspaceTarget,
     boot: SessionHostBoot,
-    getSessionId: () => string | null,
   ): Promise<AgentSessionHost> {
     await this.evictForCapacity();
-    const sinks = this.createHostSinks(target, getSessionId);
+    const sinks = this.createHostSinks(target);
     const enableUI = !!this.hostUIEmitter;
     return this.hostFactory(target, boot, sinks, {
       enableUI,
@@ -1169,7 +1164,7 @@ export class PiCoordinator {
     this.eventHandler?.(target, { type: 'status', sessionId, payload: { type: 'dormant', reason: 'host-stopped' } });
   }
 
-  private createHostSinks(target: PiWorkspaceTarget, getSessionId: () => string | null): SessionHostSinks {
+  private createHostSinks(target: PiWorkspaceTarget): SessionHostSinks {
     return {
       onEvent: (event) => {
         // Busy tracking for the eviction policy: never evict mid-turn. An
@@ -1277,7 +1272,6 @@ export class PiCoordinator {
         const host = await this.bootHost(
           target,
           { mode: 'open', sessionFilePath: match.path },
-          () => agentSessionId,
         );
         if (host.sessionId !== agentSessionId) {
           await host.dispose();
