@@ -50,7 +50,7 @@ function makeContext(backend: SessionBackend): AppClientContext {
     closeAgentSession: async () => [],
     archiveAgentSession: async () => [],
     restoreAgentSession: async () => [],
-    attachAgentSession: async () => undefined,
+    openAgentSession: async () => undefined,
     getAgentSessionPreference: async () => null,
     setAgentSessionPreference: async () => undefined,
   };

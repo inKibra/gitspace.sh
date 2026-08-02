@@ -132,31 +132,4 @@ describe('PiCoordinator session discovery', () => {
     expect(sessions.length).toBe(1);
     expect(sessions[0].id).toBe('coord-test-1');
   });
-  it('tracks PTY ownership independently when one PTY forks to a new session', () => {
-    const coordinator = new PiCoordinator();
-    coordinator.rebindTerminalSession('test:ws', 'pty-a', 'agent-old');
-    coordinator.rebindTerminalSession('test:ws', 'pty-b', 'agent-old');
-
-    const reassignment = coordinator.rebindTerminalSession('test:ws', 'pty-b', 'agent-new');
-
-    expect(reassignment.previousAgentSessionId).toBe('agent-old');
-    expect(reassignment.previousOwnerCount).toBe(1);
-    expect(coordinator.getTerminalBinding('pty-a')).toEqual({ workspaceId: 'test:ws', agentSessionId: 'agent-old' });
-    expect(coordinator.getTerminalBinding('pty-b')).toEqual({ workspaceId: 'test:ws', agentSessionId: 'agent-new' });
-    expect(coordinator.hasTerminalOwners('test:ws', 'agent-old')).toBe(true);
-    expect(coordinator.hasTerminalOwners('test:ws', 'agent-new')).toBe(true);
-  });
-
-  it('reports zero previous owners when the last PTY leaves a session', () => {
-    const coordinator = new PiCoordinator();
-    coordinator.rebindTerminalSession('test:ws', 'pty-a', 'agent-old');
-
-    const reassignment = coordinator.rebindTerminalSession('test:ws', 'pty-a', 'agent-new');
-
-    expect(reassignment.previousAgentSessionId).toBe('agent-old');
-    expect(reassignment.previousOwnerCount).toBe(0);
-    expect(coordinator.hasTerminalOwners('test:ws', 'agent-old')).toBe(false);
-    expect(coordinator.getTerminalBinding('pty-a')).toEqual({ workspaceId: 'test:ws', agentSessionId: 'agent-new' });
-  });
-
 });

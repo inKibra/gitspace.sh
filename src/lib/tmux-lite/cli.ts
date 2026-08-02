@@ -89,8 +89,8 @@ export const LONG_SEND_TIMEOUT_MS = 60_000;
 export const OPERATION_SEND_TIMEOUT_MS = 10 * 60_000;
 
 export interface SendOptions {
-  /** Deadline for the round-trip. Defaults to DEFAULT_SEND_TIMEOUT_MS. */
-  timeoutMs?: number;
+  /** Deadline for the round-trip. Defaults to DEFAULT_SEND_TIMEOUT_MS; null waits for a response or socket close. */
+  timeoutMs?: number | null;
 }
 
 /** Default deadline, overridable via GSSH_TMUX_SEND_TIMEOUT_MS (tests, debugging). */
@@ -491,7 +491,7 @@ export const stopServer = killServer;
 // daemon does not answer within the deadline (default 15s; long operations
 // pass a higher explicit budget). No retries — a wedged daemon must surface.
 export async function send(cmd: Command, options: SendOptions = {}): Promise<Response> {
-  const timeoutMs = options.timeoutMs ?? getDefaultSendTimeoutMs();
+  const timeoutMs = options.timeoutMs === null ? null : options.timeoutMs ?? getDefaultSendTimeoutMs();
   const routerSocket = getRouterSocket();
   const startedAtMs = Date.now();
   return new Promise(async (resolve, reject) => {
@@ -500,16 +500,18 @@ export async function send(cmd: Command, options: SendOptions = {}): Promise<Res
     let socketRef: Awaited<ReturnType<typeof Bun.connect>> | null = null;
     let socketWriter: ReturnType<typeof createBufferedSocketWriter> | null = null;
 
-    const deadline = setTimeout(() => {
-      if (settled) return;
-      traceCliTimeout('cli-command-timeout', {
-        commandType: cmd.type,
-        socketPath: routerSocket,
-        timeoutMs,
-        elapsedMs: Date.now() - startedAtMs,
-      });
-      fail(new TmuxCliTimeoutError(cmd.type, routerSocket, timeoutMs));
-    }, timeoutMs);
+    const deadline = timeoutMs === null
+      ? undefined
+      : setTimeout(() => {
+          if (settled) return;
+          traceCliTimeout('cli-command-timeout', {
+            commandType: cmd.type,
+            socketPath: routerSocket,
+            timeoutMs,
+            elapsedMs: Date.now() - startedAtMs,
+          });
+          fail(new TmuxCliTimeoutError(cmd.type, routerSocket, timeoutMs));
+        }, timeoutMs);
 
     const fail = (err: Error) => {
       if (settled) return;
@@ -1048,39 +1050,6 @@ export async function createSession(
   throw new Error("Unexpected response");
 }
 
-export async function createVirtualSession(
-  name: string,
-  cwd: string,
-  options?: {
-    cols?: number;
-    rows?: number;
-    kind?: import('./protocol.js').SessionKind;
-    hidden?: boolean;
-    metadata?: Record<string, string>;
-  }
-): Promise<Session> {
-  await ensureServer();
-  const res = await send({
-    type: 'new-virtual',
-    name,
-    cwd,
-    cols: options?.cols,
-    rows: options?.rows,
-    kind: options?.kind,
-    hidden: options?.hidden,
-    metadata: options?.metadata,
-  });
-  if (res.type === 'session') return res.session;
-  if (res.type === 'error') throw new Error(res.message);
-  throw new Error('Unexpected response');
-}
-
-export async function resizeVirtualSession(id: string, cols: number, rows: number): Promise<void> {
-  await ensureServer();
-  const res = await send({ type: 'virtual-resize', id, cols, rows });
-  if (res.type === 'error') throw new Error(res.message);
-}
-
 export async function terminateSession(id: string, options: TerminateSessionOptions = {}): Promise<void> {
   await ensureServer();
   const res = await send({ type: "terminate", id, mode: options.mode, graceMs: options.graceMs }, { timeoutMs: LONG_SEND_TIMEOUT_MS });
@@ -1210,14 +1179,17 @@ export async function restoreAgentSession(
   throw new Error('Unexpected response');
 }
 
-export async function attachAgentSession(
+export async function openAgentSession(
   target: AgentWorkspaceTargetPayload,
   agentSessionId: string,
-  options?: { cols?: number; rows?: number },
-): Promise<Session> {
+  options?: { paneId?: string },
+): Promise<{ agentSessionId: string; workspaceId: string; leaseCount: number }> {
   await ensureServer();
-  const res = await send({ type: 'agent-attach', target, agentSessionId, cols: options?.cols, rows: options?.rows }, { timeoutMs: LONG_SEND_TIMEOUT_MS });
-  if (res.type === 'session') return res.session;
+  const res = await send(
+    { type: 'agent-open', target, agentSessionId, paneId: options?.paneId },
+    { timeoutMs: LONG_SEND_TIMEOUT_MS },
+  );
+  if (res.type === 'agent-opened') return res;
   if (res.type === 'error') throw new Error(res.message);
   throw new Error('Unexpected response');
 }

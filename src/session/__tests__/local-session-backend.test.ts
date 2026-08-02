@@ -1796,88 +1796,6 @@ describe('LocalSessionBackend', () => {
     expect(resynced && 'snapshot' in resynced ? resynced.snapshot.snapshotNonce : null).toBe(20);
   });
 
-  it('refreshes machine state before attaching a newly created agent session terminal', async () => {
-    const events: BackendEvent[] = [];
-    const agentTerminalSession = {
-      id: 'tmux-agent-1',
-      name: 'agent:ws-1:abcd1234',
-      socketPath: '/tmp/socket-agent',
-      pid: 999,
-      attached: false,
-      cwd: '/tmp/ws-1',
-      createdAt: 10,
-      kind: 'agent' as const,
-      hidden: true,
-      metadata: { workspaceId: 'alpha:ws-1', agentSessionId: 'agent-ses-1' },
-    };
-    const ensureAgentTerminalSession = mock(async (_target: unknown, _agentSessionId: string) => agentTerminalSession);
-    const workspace = {
-      id: 'ws-1',
-      name: 'ws-1',
-      path: '/tmp/ws-1',
-      projectName: 'alpha',
-      branch: 'main',
-      sessionCount: 0,
-      isStale: false,
-    };
-    const staleSnapshot = await buildSnapshotForDeps({
-      scanWorkspaces: async () => [workspace],
-      listSessions: async () => [],
-    });
-    const refreshedSnapshot = await buildSnapshotForDeps({
-      scanWorkspaces: async () => [workspace],
-      listSessions: async () => [agentTerminalSession],
-    });
-    const snapshots = [staleSnapshot, refreshedSnapshot];
-    const getMachineSnapshot = mock(async () => snapshots.shift() ?? refreshedSnapshot);
-
-    const deps: Partial<LocalSessionBackendDependencies> = {
-      ensureServer: async () => {},
-      getMachineSnapshot,
-      watchMachineEvents: async () => () => {},
-      scanWorkspaces: async () => [workspace],
-      listSessions: async () => [agentTerminalSession],
-      sendTmuxCommand: mock(async (command): Promise<any> => {
-        if (command.type === 'agent-attach') {
-          return { type: 'session' as const, session: await ensureAgentTerminalSession(command.target, command.agentSessionId) };
-        }
-        if (command.type === 'inbox') {
-          return { type: 'inbox' as const, items: [] };
-        }
-        if (command.type === 'notification-config-get') {
-          return { type: 'notification-config' as const, config: notificationConfig };
-        }
-        throw new Error(`Unexpected command: ${command.type}`);
-      }),
-      connectSessionSocket: async (_socketPath, handlers) => ({
-        sendControl: (control) => {
-          if (control.type === 'attach-init') {
-            handlers.onControl({ type: 'attached' });
-          }
-        },
-        sendPty: () => {},
-        close: () => handlers.onClose(),
-      }),
-    };
-    const backend = createBackend(deps);
-    backend.onEvent((event) => events.push(event));
-
-    await backend.connect();
-    await backend.attachAgentSession('alpha:ws-1', 'agent-ses-1');
-
-    expect(getMachineSnapshot).toHaveBeenCalledTimes(2);
-    expect(ensureAgentTerminalSession).toHaveBeenCalledWith(
-      expect.objectContaining({ workspaceId: 'alpha:ws-1', workspacePath: '/tmp/ws-1' }),
-      'agent-ses-1',
-    );
-    expect(events).toContainEqual(
-      expect.objectContaining({
-        type: 'attached',
-        sessionId: 'tmux-agent-1',
-        workspaceId: 'alpha:ws-1',
-      }),
-    );
-  });
   it('rethrows structured service-start conflicts as PortConflictError', async () => {
     const conflict = { port: 3000, protocol: 'http' as const, pid: 1234, command: 'node' };
     const backend = createBackend({
@@ -1911,4 +1829,121 @@ describe('LocalSessionBackend', () => {
     });
   });
 
+  it('round-trips Goal Mode status through the local daemon command boundary', async () => {
+    const workspace = {
+      id: 'ws-1',
+      name: 'ws-1',
+      path: '/tmp/ws-1',
+      projectName: 'alpha',
+      sessionCount: 0,
+    };
+    const backend = createBackend({
+      scanWorkspaces: async () => [workspace],
+      sendTmuxCommand: async (command) => {
+        if (command.type === 'agent-goal-mode') {
+          expect(command).toEqual({
+            type: 'agent-goal-mode',
+            target: {
+              workspaceId: 'alpha:ws-1',
+              workspaceName: 'ws-1',
+              workspacePath: '/tmp/ws-1',
+              projectName: 'alpha',
+            },
+            agentSessionId: 'agent-1',
+          });
+          return { type: 'agent-goal-mode' as const, info: { enabled: false, available: true } };
+        }
+        if (command.type === 'agent-set-goal-mode') {
+          expect(command).toEqual({
+            type: 'agent-set-goal-mode',
+            target: {
+              workspaceId: 'alpha:ws-1',
+              workspaceName: 'ws-1',
+              workspacePath: '/tmp/ws-1',
+              projectName: 'alpha',
+            },
+            agentSessionId: 'agent-1',
+            enabled: true,
+            precursor: 'Finish the validation pass.',
+          });
+          return { type: 'agent-goal-mode' as const, info: { enabled: true, available: true } };
+        }
+        throw new Error(`Unexpected command: ${command.type}`);
+      },
+    });
+
+    expect(await backend.getAgentGoalMode('alpha:ws-1', 'agent-1')).toEqual({
+      enabled: false,
+      available: true,
+    });
+    expect(
+      await backend.setAgentGoalMode('alpha:ws-1', 'agent-1', {
+        enabled: true,
+        precursor: 'Finish the validation pass.',
+      }),
+    ).toEqual({
+      enabled: true,
+      available: true,
+    });
+  });
+  it('maps a Shake request to the local daemon and preserves a successful result without an artifact', async () => {
+    const workspace = {
+      id: 'ws-1',
+      name: 'ws-1',
+      path: '/tmp/ws-1',
+      projectName: 'alpha',
+      sessionCount: 0,
+    };
+    const result = {
+      mode: 'images' as const,
+      toolResultsDropped: 1,
+      blocksDropped: 2,
+      imagesDropped: 3,
+      tokensFreed: 0,
+    };
+    const backend = createBackend({
+      scanWorkspaces: async () => [workspace],
+      sendTmuxCommand: async (command) => {
+        expect(command).toEqual({
+          type: 'agent-shake',
+          target: {
+            workspaceId: 'alpha:ws-1',
+            workspaceName: 'ws-1',
+            workspacePath: '/tmp/ws-1',
+            projectName: 'alpha',
+          },
+          agentSessionId: 'agent-1',
+          mode: 'images',
+        });
+        return { type: 'agent-shake-result' as const, result };
+      },
+    });
+
+    expect(await backend.shakeAgentSession('alpha:ws-1', 'agent-1', 'images')).toEqual(result);
+  });
+
+  it('surfaces a local daemon Shake error response', async () => {
+    const workspace = {
+      id: 'ws-1',
+      name: 'ws-1',
+      path: '/tmp/ws-1',
+      projectName: 'alpha',
+      sessionCount: 0,
+    };
+    const backend = createBackend({
+      scanWorkspaces: async () => [workspace],
+      sendTmuxCommand: async (command) => {
+        expect(command).toMatchObject({
+          type: 'agent-shake',
+          agentSessionId: 'agent-1',
+          mode: 'elide',
+        });
+        return { type: 'error' as const, message: 'Failed to shake context: session is busy' };
+      },
+    });
+
+    await expect(backend.shakeAgentSession('alpha:ws-1', 'agent-1', 'elide')).rejects.toThrow(
+      'Failed to shake context: session is busy',
+    );
+  });
 });

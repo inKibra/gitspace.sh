@@ -25,6 +25,9 @@ export const WORKER_RPC_METHODS = [
   'cycleRole',
   'applyRole',
   'setThinkingLevel',
+  'getGoalMode',
+  'setGoalMode',
+  'shake',
   'setApprovalMode',
   'setSetting',
   'getTools',
@@ -34,15 +37,11 @@ export const WORKER_RPC_METHODS = [
   'readTranscriptRange',
   'listSessionCommands',
   'resolveDialog',
-  'startTerminal',
-  'stopTerminal',
 ] as const;
 export type WorkerRpcMethod = (typeof WORKER_RPC_METHODS)[number];
 
 /** Fire-and-forget AgentSessionHost methods (no result, no ack). */
 export const WORKER_CAST_METHODS = [
-  'injectTerminalInput',
-  'resizeTerminal',
   'setEditorTextFromClient',
   'enableUI',
   'setTitle',
@@ -73,7 +72,6 @@ export type WorkerNotification =
   | { t: 'event'; event: AgentEvent }
   | { t: 'dialog-request'; request: HostUIDialogRequest }
   | { t: 'ui-event'; event: HostUIEvent }
-  | { t: 'terminal-output'; data: string }
   /** Agent invoked the SDK's report tool — route to the daemon's report pipeline. */
   | { t: 'agent-report'; payload: AgentReportPayload };
 

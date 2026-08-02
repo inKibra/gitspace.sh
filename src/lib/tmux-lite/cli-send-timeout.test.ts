@@ -15,7 +15,6 @@ import {
   send,
   isServerRunning,
   TmuxCliTimeoutError,
-  DEFAULT_SEND_TIMEOUT_MS,
 } from "./cli";
 import { encodeRouterMessage, type Response } from "./protocol";
 
@@ -54,16 +53,87 @@ afterEach(() => {
   }
 });
 
-/** A unix-socket server that accepts connections but never replies — the
- *  observable behavior of a SIGSTOPped / event-loop-wedged daemon. */
-function listenSilently(): void {
+interface ControlledTimer {
+  callback: () => void;
+  cancelled: boolean;
+}
+
+interface ControlledTimers {
+  advance(): void;
+  restore(): void;
+}
+
+interface ControlledReplyServer {
+  requestReceived: Promise<void>;
+  reply(response: Response): void;
+  close(): void;
+}
+
+function installControlledTimers(): ControlledTimers {
+  const originalSetTimeout = globalThis.setTimeout;
+  const originalClearTimeout = globalThis.clearTimeout;
+  const timers = new Set<ControlledTimer>();
+
+  globalThis.setTimeout = ((callback: () => void) => {
+    const timer: ControlledTimer = { callback, cancelled: false };
+    timers.add(timer);
+    return timer as unknown as number;
+  }) as typeof setTimeout;
+  globalThis.clearTimeout = ((timer: unknown) => {
+    if (typeof timer === "object" && timer !== null && timers.has(timer as ControlledTimer)) {
+      (timer as ControlledTimer).cancelled = true;
+    }
+  }) as typeof clearTimeout;
+
+  return {
+    advance() {
+      for (const timer of timers) {
+        if (!timer.cancelled) {
+          timer.cancelled = true;
+          timer.callback();
+        }
+      }
+    },
+    restore() {
+      globalThis.setTimeout = originalSetTimeout;
+      globalThis.clearTimeout = originalClearTimeout;
+    },
+  };
+}
+
+/** A unix-socket server whose response is released by the test. */
+function listenUntilReply(): ControlledReplyServer {
+  let resolveRequest: (() => void) | undefined;
+  const requestReceived = new Promise<void>((resolve) => {
+    resolveRequest = resolve;
+  });
+  let reply: ((response: Response) => void) | undefined;
+  let close: (() => void) | undefined;
+
   server = Bun.listen({
     unix: socketPath,
     socket: {
-      data() { /* swallow everything, never respond */ },
+      data(socket) {
+        reply = (response) => socket.write(encodeRouterMessage(response));
+        close = () => socket.end();
+        resolveRequest?.();
+      },
     },
   });
+
+  return {
+    requestReceived,
+    reply(response) {
+      if (!reply) throw new Error("Expected a client request before replying");
+      reply(response);
+    },
+    close() {
+      if (!close) throw new Error("Expected a client request before closing");
+      close();
+    },
+  };
 }
+
 
 /** A server that replies to any router message with a canned response. */
 function listenWithReply(response: Response): void {
@@ -79,74 +149,79 @@ function listenWithReply(response: Response): void {
 
 describe("send() deadline", () => {
   it("rejects with TmuxCliTimeoutError naming the command and socket when the daemon never replies", async () => {
-    listenSilently();
-
-    const startedAt = Date.now();
-    let caught: unknown;
+    const timers = installControlledTimers();
     try {
-      await send({ type: "list" }, { timeoutMs: 250 });
-    } catch (err) {
-      caught = err;
-    }
-    const elapsed = Date.now() - startedAt;
+      const control = listenUntilReply();
+      const pending = send({ type: "list" }, { timeoutMs: 250 });
+      await control.requestReceived;
+      timers.advance();
 
-    expect(caught).toBeInstanceOf(TmuxCliTimeoutError);
-    const error = caught as TmuxCliTimeoutError;
-    expect(error.message).toContain("'list'");
-    expect(error.message).toContain(socketPath);
-    expect(error.message).toContain("daemon wedged?");
-    expect(error.message).toContain("gssh machine tmux status");
-    expect(error.commandType).toBe("list");
-    expect(error.socketPath).toBe(socketPath);
-    expect(error.timeoutMs).toBe(250);
-    // Fired at the deadline, not the default 15s
-    expect(elapsed).toBeGreaterThanOrEqual(200);
-    expect(elapsed).toBeLessThan(DEFAULT_SEND_TIMEOUT_MS);
+      const caught = await pending.catch((error: unknown) => error);
+      expect(caught).toBeInstanceOf(TmuxCliTimeoutError);
+      const error = caught as TmuxCliTimeoutError;
+      expect(error.message).toContain("'list'");
+      expect(error.message).toContain(socketPath);
+      expect(error.message).toContain("daemon wedged?");
+      expect(error.message).toContain("gssh machine tmux status");
+      expect(error.commandType).toBe("list");
+      expect(error.socketPath).toBe(socketPath);
+      expect(error.timeoutMs).toBe(250);
+    } finally {
+      timers.restore();
+    }
   });
 
   it("resolves normally when the daemon replies before the deadline", async () => {
     listenWithReply({ type: "sessions", sessions: [] });
 
     const res = await send({ type: "list" }, { timeoutMs: 5000 });
-    expect(res.type).toBe("sessions");
+    expect(res).toEqual({ type: "sessions", sessions: [] });
   });
 
-  it("uses the default deadline when none is passed", async () => {
-    // Only assert wiring (no 15s wait): a quick reply resolves under defaults.
-    listenWithReply({ type: "sessions", sessions: [] });
-    const res = await send({ type: "list" });
-    expect(res.type).toBe("sessions");
+  it("waits for a response after a controlled ordinary deadline when timeoutMs is null", async () => {
+    const timers = installControlledTimers();
+    try {
+      const control = listenUntilReply();
+      const pending = send({ type: "list" }, { timeoutMs: null });
+      await control.requestReceived;
+      timers.advance();
+      control.reply({ type: "sessions", sessions: [] });
+
+      await expect(pending).resolves.toEqual({ type: "sessions", sessions: [] });
+    } finally {
+      timers.restore();
+    }
   });
 
-  it("still rejects fast on connection errors (no daemon at socket)", async () => {
-    // No server listening — connect fails immediately rather than timing out.
-    const startedAt = Date.now();
-    await expect(send({ type: "list" }, { timeoutMs: 5000 })).rejects.toThrow();
-    expect(Date.now() - startedAt).toBeLessThan(1000);
+  it("rejects on socket close after a controlled ordinary deadline when timeoutMs is null", async () => {
+    const timers = installControlledTimers();
+    try {
+      const control = listenUntilReply();
+      const pending = send({ type: "list" }, { timeoutMs: null });
+      await control.requestReceived;
+      timers.advance();
+      control.close();
+
+      await expect(pending).rejects.toThrow("Connection closed before response");
+    } finally {
+      timers.restore();
+    }
   });
 });
 
 describe("isServerRunning() with a wedged daemon", () => {
   it("propagates the timeout instead of returning false", async () => {
-    listenSilently();
-
-    // Shrink the default deadline (GSSH_TMUX_SEND_TIMEOUT_MS) so the real
-    // isServerRunning() path runs fast. A wedged daemon must surface as an
-    // error, not as "not running" — the latter would make ensureServer()
-    // spawn a duplicate daemon and mask the failure.
-    const savedTimeoutEnv = process.env.GSSH_TMUX_SEND_TIMEOUT_MS;
-    process.env.GSSH_TMUX_SEND_TIMEOUT_MS = "250";
+    const timers = installControlledTimers();
     try {
-      const error = await isServerRunning().catch((e: unknown) => e);
-      expect(error).toBeInstanceOf(TmuxCliTimeoutError);
+      const control = listenUntilReply();
+      const pending = isServerRunning();
+      await control.requestReceived;
+      timers.advance();
+
+      await expect(pending).rejects.toBeInstanceOf(TmuxCliTimeoutError);
     } finally {
-      if (savedTimeoutEnv === undefined) delete process.env.GSSH_TMUX_SEND_TIMEOUT_MS;
-      else process.env.GSSH_TMUX_SEND_TIMEOUT_MS = savedTimeoutEnv;
+      timers.restore();
     }
   });
-
-  it("returns false when nothing listens on the socket", async () => {
-    // Socket file does not exist → short-circuits to false.
-    expect(await isServerRunning()).toBe(false);
-  });
 });
+

@@ -75,7 +75,7 @@ async function openResolvedAgentSession(
   if (!backendResult.ok) {
     return backendResult;
   }
-  if (!backendResult.value.attachAgentSession) {
+  if (!backendResult.value.openAgentSession) {
     return agentSessionFailure({
       code: 'operation-unavailable',
       message: 'Agent attach unavailable',
@@ -89,7 +89,7 @@ async function openResolvedAgentSession(
 
   try {
     // Go through multi (engine) so SET_PENDING_AGENT_ATTACH is dispatched
-    await context.multi.attachAgentSession(
+    await context.multi.openAgentSession(
       { ...args.workspaceRef, agentSessionId: args.agentSessionId },
       args.attachOptions,
     );

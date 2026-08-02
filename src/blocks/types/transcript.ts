@@ -69,16 +69,28 @@ defineBlock({
 
 // ── subagent ──────────────────────────────────────────────────────────────
 export const subagentData = z.object({
+  /** Stable task-result id; used to correlate a completed dispatch. */
+  id: z.string().optional(),
+  /** Human task label, falling back to the dispatch id. */
   label: z.string(),
+  /** Task-agent definition, such as reviewer or explore. */
+  agent: z.string().optional(),
+  /** Origin of the agent definition. */
+  source: z.enum(['bundled', 'user', 'project']).optional(),
+  /** User-facing model-role name, shared with the Models settings UI. */
   model: z.string().optional(),
+  /** Concrete model resolved at spawn time. */
+  resolvedModel: z.string().optional(),
   status: z.enum(['running', 'done', 'blocked', 'queued']),
+  durationMs: z.number().nonnegative().optional(),
+  requests: z.number().nonnegative().optional(),
   lines: z.array(z.string()).default([]),
 });
 export type SubagentData = z.infer<typeof subagentData>;
 defineBlock({
   type: 'subagent',
   tier: 'transcript',
-  description: 'A spawned sub-agent with its model, status, and recent activity lines.',
+  description: 'A dispatched subagent with its agent identity, Models role label, resolved model, status, and recent activity lines.',
   schema: subagentData,
 });
 

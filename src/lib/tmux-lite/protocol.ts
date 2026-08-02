@@ -4,6 +4,7 @@
 
 import { SpacesError } from '../../types/errors.js';
 import { logger } from '../../utils/logger.js';
+import type { AgentGoalModeInfo, AgentShakeMode, AgentShakeResult } from '../../agents/agent-runtime-types.js';
 
 
 /** Protocol version - increment when making breaking changes */
@@ -377,17 +378,6 @@ export type Command =
       metadata?: Record<string, string>;
     }
   | {
-      type: 'new-virtual';
-      name?: string;
-      cwd: string;
-      cols?: number;
-      rows?: number;
-      kind?: SessionKind;
-      hidden?: boolean;
-      metadata?: Record<string, string>;
-    }
-  | { type: 'virtual-resize'; id: string; cols: number; rows: number }
-  | {
       type: 'attach-prepare';
       requestId: string;
       sessionId?: string;
@@ -426,7 +416,16 @@ export type Command =
   | { type: 'agent-close'; target: AgentWorkspaceTargetPayload; agentSessionId: string }
   | { type: 'agent-archive'; target: AgentWorkspaceTargetPayload; agentSessionId: string }
   | { type: 'agent-restore'; target: AgentWorkspaceTargetPayload; agentSessionId: string }
-  | { type: 'agent-attach'; target: AgentWorkspaceTargetPayload; agentSessionId: string; cols?: number; rows?: number }
+  /** Open an agent session for viewing: boots/keeps its host alive so the
+   *  client can render the native transcript. No PTY, no terminal session.
+   *  The lease is scoped by `owner` + `paneId`, so one client can hold several
+   *  panes open. `owner` lets an in-process caller (the remote session handler,
+   *  which has a connection id but no socket) scope its own leases; socket
+   *  clients omit it and the daemon fills in their connection id. */
+  | { type: 'agent-open'; target: AgentWorkspaceTargetPayload; agentSessionId: string; paneId?: string; owner?: string }
+  /** Drop a lease taken by `agent-open`. The host is disposed once its last
+   *  lease goes away (a socket disconnect releases that socket's leases). */
+  | { type: 'agent-release'; agentSessionId: string; paneId?: string; owner?: string }
   | { type: 'agent-prompt'; target: AgentWorkspaceTargetPayload; agentSessionId: string; text: string; images?: AgentPromptImage[]; streamingBehavior?: 'steer' | 'followUp' }
   | { type: 'agent-queue-remove'; target: AgentWorkspaceTargetPayload; agentSessionId: string; kind: 'steering' | 'followUp'; index: number }
   | { type: 'agent-stage-upload'; target: AgentWorkspaceTargetPayload; fileName: string; data: string; mimeType: string }
@@ -436,6 +435,9 @@ export type Command =
   | { type: 'agent-session-usage'; target: AgentWorkspaceTargetPayload; agentSessionId: string }
   | { type: 'agent-set-model'; target: AgentWorkspaceTargetPayload; agentSessionId: string; provider: string; modelId: string }
   | { type: 'agent-set-thinking-level'; target: AgentWorkspaceTargetPayload; agentSessionId: string; level: string }
+  | { type: 'agent-goal-mode'; target: AgentWorkspaceTargetPayload; agentSessionId: string }
+  | { type: 'agent-set-goal-mode'; target: AgentWorkspaceTargetPayload; agentSessionId: string; enabled: boolean; precursor?: string }
+  | { type: 'agent-shake'; target: AgentWorkspaceTargetPayload; agentSessionId: string; mode: AgentShakeMode }
   | { type: 'agent-set-approval-mode'; target: AgentWorkspaceTargetPayload; agentSessionId: string; mode: string }
   | { type: 'agent-auth-providers' }
   | { type: 'agent-remove-account'; provider: string; credentialId: number }
@@ -574,12 +576,15 @@ export type Response =
   | { type: 'machine-watch-started' }
   | { type: 'agent-sessions'; sessions: AgentSessionSummaryPayload[] }
   | { type: 'agent-bool'; ok: boolean }
+  | { type: 'agent-opened'; agentSessionId: string; workspaceId: string; leaseCount: number }
   | { type: 'agent-queued-message'; message: string | null }
   | { type: 'agent-staged'; stagedPath: string }
   | { type: 'agent-commands'; commands: Array<{ name: string; description: string; kind: 'file' | 'custom' | 'extension' }> }
   | { type: 'agent-transcript-range'; blocks: unknown[]; oldestCursor: string | null; hasMore: boolean }
   | { type: 'agent-control-info'; info: import('../../agents/agent-runtime-types.js').AgentControlInfo }
   | { type: 'agent-session-usage'; report: import('../../agents/agent-runtime-types.js').AgentSessionUsageReport | null }
+  | { type: 'agent-goal-mode'; info: AgentGoalModeInfo }
+  | { type: 'agent-shake-result'; result: AgentShakeResult }
   | { type: 'agent-set-model'; ok: boolean }
   | { type: 'agent-auth-providers'; providers: Array<{ provider: string; hasAuth: boolean; accounts?: Array<{ id: number; type: string; label: string; disabled: boolean }> }> }
   | { type: 'agent-remove-account'; ok: boolean }

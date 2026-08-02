@@ -1,11 +1,20 @@
 import { describe, expect, it } from 'bun:test';
 import type { AgentEvent } from '@oh-my-pi/pi-agent-core';
 
-import { validateBlock } from '../../index.js';
+import { validateBlock, type Block } from '../../index.js';
+import { subagentData, toolCallData } from '../../types/transcript.js';
 import { LiveTurn } from '../live-turn.js';
 
 function evt(e: unknown): AgentEvent {
   return e as AgentEvent;
+}
+
+function nestedTaskResultBlocks(blocks: readonly Block[]): Block[] {
+  const task = blocks.find((block) => block.type === 'tool-call');
+  if (!task) throw new Error('Expected a task tool-call block');
+  const data = toolCallData.parse(task.data);
+  if (data.tool !== 'task') throw new Error(`Expected task tool, received ${data.tool}`);
+  return data.result ?? [];
 }
 
 describe('LiveTurn accumulator', () => {
@@ -29,6 +38,55 @@ describe('LiveTurn accumulator', () => {
     const toolAfter = after!.blocks.find((b) => b.type === 'tool-call')!;
     expect((toolAfter.data as { status: string }).status).toBe('done');
     expect((toolAfter.data as { result?: unknown[] }).result?.length).toBe(1);
+  });
+
+  it('preserves completed live task details so every result renders as a subagent card', () => {
+    const turn = new LiveTurn();
+    turn.apply(evt({
+      type: 'message_update',
+      message: {
+        role: 'assistant',
+        content: [{
+          type: 'toolCall',
+          id: 'live-task',
+          name: 'task',
+          arguments: {
+            agent: 'task',
+            context: 'Inspect the migration.',
+            tasks: [{ assignment: 'Find fast-path regressions' }, { assignment: 'Plan the rollout' }],
+          },
+        }],
+      },
+      assistantMessageEvent: {},
+    }));
+
+    const completed = turn.apply(evt({
+      type: 'tool_execution_end',
+      toolCallId: 'live-task',
+      toolName: 'task',
+      result: {
+        content: [{ type: 'text', text: '2 subtasks completed' }],
+        details: {
+          results: [
+            { id: 'fast-check', agent: 'task', description: 'Fast-path check', modelOverride: ['pi/smol'], exitCode: 0, output: 'No regression found.' },
+            { id: 'rollout-plan', agent: 'task', description: 'Rollout plan', modelOverride: ['pi/plan'], exitCode: 0, output: 'Rollout steps prepared.' },
+          ],
+        },
+      },
+      isError: false,
+    }));
+    if (!completed) throw new Error('Expected a live update after task completion');
+
+    const cards = nestedTaskResultBlocks(completed.blocks).filter((block) => block.type === 'subagent');
+    expect(cards).toHaveLength(2);
+    for (const card of cards) expect(validateBlock(card).ok).toBe(true);
+    expect(cards.map((card) => {
+      const data = subagentData.parse(card.data);
+      return { label: data.label, model: data.model, status: data.status };
+    })).toEqual([
+      { label: 'Fast-path check', model: 'Fast', status: 'done' },
+      { label: 'Rollout plan', model: 'Architect', status: 'done' },
+    ]);
   });
 
   it('commits and clears on turn_end', () => {

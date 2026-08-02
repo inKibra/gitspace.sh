@@ -48,7 +48,6 @@ const sinks: SessionHostSinks = {
   onEvent: (event) => send({ t: 'event', event }),
   onDialogRequest: (request) => send({ t: 'dialog-request', request }),
   onUiEvent: (event) => send({ t: 'ui-event', event }),
-  onTerminalOutput: (data) => send({ t: 'terminal-output', data }),
   onAgentReport: (payload) => send({ t: 'agent-report', payload }),
 };
 

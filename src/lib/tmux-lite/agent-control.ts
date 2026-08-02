@@ -1,6 +1,6 @@
 import { defaultPiCoordinator, type PiWorkspaceTarget, type PiAgentSessionSummary } from './agents/pi-coordinator.js';
 import type { TranscriptPage } from '../../blocks/agent/transcript-source.js';
-import type { AgentControlInfo } from '../../agents/agent-runtime-types.js';
+import type { AgentControlInfo, AgentGoalModeInfo, AgentShakeMode, AgentShakeResult } from '../../agents/agent-runtime-types.js';
 import type { HostUIBridgeEmitter, HostUIDialogResponse } from './agents/host-ui-bridge.js';
 import {
   defaultAgentEventManager,
@@ -238,18 +238,6 @@ export function getPendingAgentDialogs(): Array<{ workspaceId: string; sessionId
   return defaultPiCoordinator.getPendingDialogs();
 }
 
-export function rebindPiTerminalSessionOwnership(
-  workspaceId: string,
-  terminalSessionId: string,
-  agentSessionId: string,
-): { previousAgentSessionId?: string; previousOwnerCount: number; nextOwnerCount: number } {
-  return defaultPiCoordinator.rebindTerminalSession(workspaceId, terminalSessionId, agentSessionId);
-}
-
-export function releasePiTerminalSessionOwnership(terminalSessionId: string): void {
-  defaultPiCoordinator.releaseTerminalSession(terminalSessionId);
-}
-
 /**
  * Returns sessions for a workspace from two sources:
  * 1. The AgentEventManager snapshot (non-archived, all starting as closed at startup).
@@ -471,21 +459,40 @@ export async function restoreAgentSession(target: AgentWorkspaceTarget, agentSes
   return getKnownAgentSessions(target);
 }
 
-export async function attachAgentSession(
+/**
+ * Open an agent session for a client pane: mark it open, reconcile the
+ * workspace, and take a viewer LEASE that keeps its host alive while at least
+ * one pane is watching.
+ */
+export async function openAgentSession(
   target: AgentWorkspaceTarget,
   agentSessionId: string,
-  options?: { cols?: number; rows?: number },
-): Promise<import('./protocol.js').Session> {
+  leaseKey: string,
+): Promise<number> {
   await ensureAgentControlInitialized();
   defaultAgentEventManager.registerWorkspace(target.workspaceId, target.workspacePath);
   defaultAgentEventManager.syncKnownSessions(
     target.workspaceId,
     await defaultPiCoordinator.refreshAgentSessions(target),
   );
-  const session = await defaultPiCoordinator.ensureAgentTerminalSession(target, agentSessionId, undefined, options);
+  const leaseCount = await defaultPiCoordinator.openAgentSession(target, agentSessionId, leaseKey);
   defaultAgentEventManager.markSessionOpen(target.workspaceId, agentSessionId);
   void defaultAgentEventManager.reconcileWorkspace(target.workspaceId);
-  return session;
+  return leaseCount;
+}
+
+/** Drop one pane's lease. Returns the owning workspace plus the viewers still
+ *  holding the session open, or null when that lease was already gone. */
+export function releaseAgentSessionLease(
+  agentSessionId: string,
+  leaseKey: string,
+): { workspaceId: string; remaining: number } | null {
+  return defaultPiCoordinator.releaseAgentLease(agentSessionId, leaseKey);
+}
+
+/** A client went away: drop every lease it held. */
+export function releaseAgentSessionLeasesForOwner(ownerPrefix: string): void {
+  defaultPiCoordinator.releaseAgentLeasesForOwner(ownerPrefix);
 }
 
 export async function respondToAgentPermission(
@@ -546,6 +553,32 @@ export async function setAgentThinkingLevel(
   level: string,
 ): Promise<boolean> {
   return defaultPiCoordinator.setThinkingLevel(target, agentSessionId, level);
+}
+
+/** Read session-local Goal Mode without reopening a cold session. */
+export async function getAgentGoalMode(
+  target: AgentWorkspaceTarget,
+  agentSessionId: string,
+): Promise<AgentGoalModeInfo> {
+  return defaultPiCoordinator.getGoalMode(target, agentSessionId);
+}
+
+/** Enable or disable session-local Goal Mode for a workspace-bound goal. */
+export async function setAgentGoalMode(
+  target: AgentWorkspaceTarget,
+  agentSessionId: string,
+  input: { enabled: boolean; precursor?: string },
+): Promise<AgentGoalModeInfo> {
+  return defaultPiCoordinator.setGoalMode(target, agentSessionId, input);
+}
+
+/** Reduce heavy output or images in one live agent session's active context. */
+export async function shakeAgentSession(
+  target: AgentWorkspaceTarget,
+  agentSessionId: string,
+  mode: AgentShakeMode,
+): Promise<AgentShakeResult> {
+  return defaultPiCoordinator.shake(target, agentSessionId, mode);
 }
 
 /** Set the tool-approval mode. */

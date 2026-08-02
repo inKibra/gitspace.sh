@@ -11,7 +11,7 @@ import { AgentPaneHeader } from './AgentPaneHeader.web.js';
 import { AgentSettingsPanel } from './AgentSettingsPanel.web.js';
 import { AgentHistoryPanel } from './AgentHistoryPanel.web.js';
 import type { Block } from '../blocks/index.js';
-import type { AgentAuthProvider, AgentControlInfo, AgentDefinitionInfo, AgentHistoryEntry, AgentModelInfo, AgentOAuthEvent, AgentSettingSchemaItem, AgentToolInfo, AgentTreeNode, SessionStatus } from '../agents/agent-runtime-types.js';
+import type { AgentAuthProvider, AgentControlInfo, AgentDefinitionInfo, AgentGoalModeInfo, AgentHistoryEntry, AgentModelInfo, AgentOAuthEvent, AgentSettingSchemaItem, AgentShakeMode, AgentShakeResult, AgentToolInfo, AgentTreeNode, SessionStatus } from '../agents/agent-runtime-types.js';
 import type { AttachedPaneState } from '../session/types.js';
 import type { BackendKey } from '../session/backend.js';
 import type { RemoteSessionPtyBackend } from '../session/useRemoteSessionClient.js';
@@ -51,6 +51,8 @@ export interface PaneTerminalPanelProps {
   /** Session is blocked on the user (ask dialog / pending permission) — drives
    *  the header dot amber so it agrees with the board and the on-screen dialog. */
   awaitingInput?: boolean;
+  /** The daemon-bound workspace goal. Omitted for @base and unbound workspaces. */
+  goalContext?: { id: string; title: string; phase: string } | null;
 }
 
 export function PaneTerminalPanel({
@@ -71,6 +73,7 @@ export function PaneTerminalPanel({
   onModifiersChange,
   showFloatingControls,
   awaitingInput,
+  goalContext,
 }: PaneTerminalPanelProps) {
   const terminalRef = useRef<SessionTerminalHandle>(null);
 
@@ -105,8 +108,12 @@ export function PaneTerminalPanel({
   }, [backend, pane.paneId]);
 
   const handleDetach = useCallback(() => {
-    void backend?.detachPane?.(pane.paneId).catch(() => undefined);
-  }, [backend, pane.paneId]);
+    // Agent panes have no terminal to detach from: drop the viewer lease.
+    void (pane.agentSessionId
+      ? backend?.closeAgentPane?.(pane.paneId)
+      : backend?.detachPane?.(pane.paneId)
+    )?.catch(() => undefined);
+  }, [backend, pane.paneId, pane.agentSessionId]);
 
   const handleFocus = useCallback(() => {
     terminalRef.current?.focus();
@@ -290,6 +297,67 @@ export function PaneTerminalPanel({
       .catch((e) => setModelError(e instanceof Error ? e.message.replace(/^Failed to set approval mode:\s*/, '') : 'Failed to set approval mode'));
   }, [backend, wsId, agentSessionId, refreshControl]);
 
+  // Goal Mode is intentionally pane/session-local. The backend remains the
+  // authority; this state only renders the current control result and is
+  // discarded whenever the pane represents a different agent session.
+  const [goalMode, setGoalMode] = useState<AgentGoalModeInfo | undefined>(undefined);
+  const [goalModePending, setGoalModePending] = useState(false);
+  const goalContextKey = goalContext ? `${goalContext.id}:${goalContext.phase}` : null;
+  const goalModeSessionKey = wsId && agentSessionId ? `${wsId}:${agentSessionId}` : null;
+  const goalModeSessionKeyRef = useRef<string | null>(null);
+  const refreshGoalMode = useCallback(async () => {
+    if (!goalContextKey || !goalModeSessionKey) return;
+    const fn = backend?.getAgentGoalMode;
+    if (!fn) {
+      if (goalModeSessionKeyRef.current === goalModeSessionKey) {
+        setGoalMode({ enabled: false, available: false, message: 'Goal Mode is not supported by this backend.' });
+      }
+      return;
+    }
+    try {
+      const mode = await fn.call(backend, wsId!, agentSessionId!);
+      if (goalModeSessionKeyRef.current === goalModeSessionKey) setGoalMode(mode);
+    } catch (error) {
+      if (goalModeSessionKeyRef.current === goalModeSessionKey) {
+        setGoalMode({
+          enabled: false,
+          available: false,
+          message: error instanceof Error ? error.message : 'Could not read Goal Mode availability.',
+        });
+      }
+    }
+  }, [backend, goalContextKey, goalModeSessionKey, wsId, agentSessionId]);
+  useEffect(() => {
+    goalModeSessionKeyRef.current = goalModeSessionKey;
+    setGoalMode(undefined);
+    setGoalModePending(false);
+    if (goalContextKey) void refreshGoalMode();
+  }, [goalContextKey, goalModeSessionKey, refreshGoalMode]);
+  const handleSetGoalMode = useCallback(async ({ enabled, precursor }: { enabled: boolean; precursor?: string }) => {
+    if (!goalContextKey || !goalModeSessionKey || goalModeSessionKeyRef.current !== goalModeSessionKey) return;
+    const fn = backend?.setAgentGoalMode;
+    if (!fn) {
+      setGoalMode({ enabled: false, available: false, message: 'Goal Mode is not supported by this backend.' });
+      return;
+    }
+    const previous = goalMode;
+    setGoalModePending(true);
+    setGoalMode((current) => ({ enabled, available: current?.available ?? true }));
+    try {
+      const updated = await fn.call(backend, wsId!, agentSessionId!, { enabled, ...(enabled && precursor ? { precursor } : {}) });
+      if (goalModeSessionKeyRef.current === goalModeSessionKey) setGoalMode(updated);
+    } catch (error) {
+      if (goalModeSessionKeyRef.current === goalModeSessionKey) {
+        setGoalMode({
+          ...(previous ?? { enabled: false, available: true }),
+          message: error instanceof Error ? error.message : 'Could not update Goal Mode.',
+        });
+      }
+    } finally {
+      if (goalModeSessionKeyRef.current === goalModeSessionKey) setGoalModePending(false);
+    }
+  }, [backend, goalContextKey, goalModeSessionKey, wsId, agentSessionId, goalMode]);
+
   // Agent settings panel (settings + provider sign-in)
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [authProviders, setAuthProviders] = useState<AgentAuthProvider[]>([]);
@@ -365,6 +433,48 @@ export function PaneTerminalPanel({
   const [historyTree, setHistoryTree] = useState<AgentTreeNode[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [transcriptRefresh, setTranscriptRefresh] = useState(0);
+  // Shake rewrites persisted session entries. Keep the result pane-local and
+  // refresh only committed transcript history; live streaming blocks stay intact.
+  const [shakeResult, setShakeResult] = useState<AgentShakeResult | undefined>(undefined);
+  const [shakeError, setShakeError] = useState<string | null>(null);
+  const [shakePending, setShakePending] = useState(false);
+  const shakeSessionKey = wsId && agentSessionId
+    ? `${backendKey ?? backend?.descriptor.key ?? 'unknown'}:${wsId}:${agentSessionId}`
+    : null;
+  const shakeSessionKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    shakeSessionKeyRef.current = shakeSessionKey;
+    setShakeResult(undefined);
+    setShakeError(null);
+    setShakePending(false);
+  }, [shakeSessionKey]);
+  const handleShake = useCallback(async (mode: AgentShakeMode) => {
+    if (!shakeSessionKey || shakeSessionKeyRef.current !== shakeSessionKey) return;
+    const fn = backend?.shakeAgentSession;
+    if (!fn) {
+      setShakeError('Shake is not supported by this backend.');
+      return;
+    }
+    setShakePending(true);
+    setShakeError(null);
+    setShakeResult(undefined);
+    try {
+      const result = await fn.call(backend, wsId!, agentSessionId!, mode);
+      if (shakeSessionKeyRef.current !== shakeSessionKey) return;
+      setShakeResult(result);
+      const changed = result.mode === 'images'
+        ? (result.imagesDropped ?? 0) > 0
+        : result.toolResultsDropped + result.blocksDropped > 0;
+      if (changed) setTranscriptRefresh((n) => n + 1);
+      refreshControl();
+    } catch (error) {
+      if (shakeSessionKeyRef.current === shakeSessionKey) {
+        setShakeError(error instanceof Error ? error.message : 'Could not shake this session context.');
+      }
+    } finally {
+      if (shakeSessionKeyRef.current === shakeSessionKey) setShakePending(false);
+    }
+  }, [backend, wsId, agentSessionId, refreshControl, shakeSessionKey]);
   // Text to drop back into the composer after a re-do (bumped nonce re-applies).
   const [composerInjection, setComposerInjection] = useState<{ text: string; nonce: number } | null>(null);
   const treeAvailable = !!backend?.getAgentSessionTree;
@@ -442,6 +552,15 @@ export function PaneTerminalPanel({
             onOpenAuth={openSettings}
             error={modelError}
             awaitingInput={awaitingInput}
+            goal={goalContext}
+            goalMode={goalMode}
+            goalModePending={goalModePending}
+            goalSessionKey={agentSessionId}
+            onSetGoalMode={handleSetGoalMode}
+            shakeResult={shakeResult}
+            shakePending={shakePending}
+            shakeError={shakeError}
+            onShake={pane.viewOnly ? undefined : handleShake}
           />
           <div className="flex-1 min-h-0 bg-[var(--gs-bg)]">
             <AgentTranscript

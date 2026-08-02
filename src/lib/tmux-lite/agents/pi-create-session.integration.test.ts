@@ -80,7 +80,7 @@ describe('Pi session creation integration', () => {
       try {
         await backend.connect();
         const sessions = await backend.createAgentSession('demo:ws-2', 'integration pi session');
-        await backend.attachAgentSession('demo:ws-2', sessions[0].id);
+        await backend.openAgentSession('demo:ws-2', sessions[0].id);
         const agentDir = getPiAgentDir();
         const encodedWorkspaceTwo = encodeSessionDirName(${JSON.stringify(workspaceTwoPath)});
         const encodedWorkspaceOne = encodeSessionDirName(${JSON.stringify(workspaceOnePath)});

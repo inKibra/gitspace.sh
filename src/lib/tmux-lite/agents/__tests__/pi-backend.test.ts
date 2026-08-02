@@ -220,16 +220,16 @@ describe('PiCoordinator', () => {
     expect(sessions).toEqual([]);
   });
 
-  it('ensureAgentTerminalSession fails explicitly when the Pi session file is missing', async () => {
+  it('openAgentSession fails explicitly when the Pi session file is missing', async () => {
     const coordinator = new PiCoordinator(join(tmpdir(), 'pi-missing-sessions'));
     const tmpDir = mkdtempSync(join(tmpdir(), 'pi-coord-test-'));
     await expect(
-      coordinator.ensureAgentTerminalSession({
+      coordinator.openAgentSession({
         workspaceId: 'test:ws',
         workspaceName: 'ws',
         workspacePath: tmpDir,
         projectName: 'test',
-      }, 'missing-session'),
+      }, 'missing-session', 'lease-1'),
     ).rejects.toThrow("Pi session 'missing-session' not found");
   });
 });

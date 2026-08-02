@@ -11,9 +11,6 @@ import { Terminal as XTerminal } from "@xterm/headless";
 import { SerializeAddon } from "@xterm/addon-serialize";
 import { createBufferedSocketWriter } from "../../utils/bun-socket-writer";
 import { installDsrCprResponder } from "./terminal-queries";
-import { VirtualTerminal } from './agents/virtual-terminal.js';
-import { registerVirtualTerminal, removeVirtualTerminal } from './virtual-session-registry.js';
-import { forwardVirtualTerminalOutput } from './virtual-output-forwarder.js';
 import { writeTraceLog } from '../../utils/trace-log.js';
 import { raiseFileDescriptorLimitAtBoot } from '../../utils/rlimit.js';
 import { getCodeVersion } from './code-version.js';
@@ -52,7 +49,9 @@ import {
 import type { ReplayCheckpoint, ReplayEvent, ReplayManifest } from "./replay/types.js";
 import { getReplayMarkdown, getReplaySnapshot, getReplayText } from "./replay/snapshot.js";
 import {
-  attachAgentSession as ensureAgentTerminalSession,
+  openAgentSession,
+  releaseAgentSessionLease,
+  releaseAgentSessionLeasesForOwner,
   archiveAgentSession,
   abortAgentSession,
   interruptAgentSession,
@@ -66,14 +65,15 @@ import {
   promptAgentSession,
   removeQueuedAgentMessage,
   stageUploadFile,
-  rebindPiTerminalSessionOwnership,
-  releasePiTerminalSessionOwnership,
   respondToAgentPermission,
   readAgentTranscriptRange,
   getAgentControlInfo,
   getAgentSessionUsageReport,
   setAgentModel,
   setAgentThinkingLevel,
+  getAgentGoalMode,
+  setAgentGoalMode,
+  shakeAgentSession,
   setAgentApprovalMode,
   getAgentAuthProviders,
   removeAgentProviderAccount,
@@ -268,7 +268,6 @@ interface SessionData {
   serialize: SerializeAddon;
   idleState: IdleDetectionState;
   proc: Bun.Subprocess | null;
-  virtualTerminal: VirtualTerminal | null;
   client: any;
   clientWriter: any;
   ctrlBuffer: Buffer;
@@ -368,7 +367,15 @@ interface RouterSocketState {
   writer: any;
   watchesAgentState: boolean;
   watchesMachineState: boolean;
+  /** Stable id for this connection: the default lease owner for agent panes
+   *  opened over this socket. */
+  leaseOwnerId: string;
+  /** Every lease owner seen on this socket (its own id, plus any explicit
+   *  owner a caller supplied) so a disconnect releases all of them. */
+  leaseOwners: Set<string>;
 }
+
+let routerSocketSeq = 0;
 
 const routerSocketStates = new WeakMap<object, RouterSocketState>();
 const agentStateWatchers = new Set<object>();
@@ -384,7 +391,6 @@ if (process.env.GITSPACE_TRACE?.trim()) {
     }
   }, 1000).unref?.();
 }
-const agentSessionWatchOwners = new Map<string, object>();
 const agentDialogOwners = new Map<string, object>();
 // Dialogs delivered over the agent-state watcher conduit (serve+relay app)
 // rather than to a single same-socket owner. Their response may arrive on any
@@ -395,7 +401,14 @@ const conduitDeliveredDialogs = new Set<string>();
 function getRouterSocketState(socket: object): RouterSocketState {
   let state = routerSocketStates.get(socket);
   if (!state) {
-    state = { buffer: Buffer.alloc(0), writer: null, watchesAgentState: false, watchesMachineState: false };
+    state = {
+      buffer: Buffer.alloc(0),
+      writer: null,
+      watchesAgentState: false,
+      watchesMachineState: false,
+      leaseOwnerId: `sock${++routerSocketSeq}`,
+      leaseOwners: new Set(),
+    };
     routerSocketStates.set(socket, state);
   }
   return state;
@@ -409,23 +422,14 @@ function deleteOwnedEntries(map: Map<string, object>, socket: object): void {
   }
 }
 
-function pickAgentDialogWatcher(sessionId: string): object | null {
-  const owner = agentSessionWatchOwners.get(sessionId);
-  if (!owner) {
-    return null;
-  }
-  if (agentStateWatchers.has(owner)) {
-    return owner;
-  }
-  agentSessionWatchOwners.delete(sessionId);
-  return null;
-}
-
 function clearRouterSocketState(socket: object): void {
   agentStateWatchers.delete(socket);
   machineStateWatchers.delete(socket);
-  deleteOwnedEntries(agentSessionWatchOwners, socket);
   deleteOwnedEntries(agentDialogOwners, socket);
+  const state = routerSocketStates.get(socket);
+  for (const owner of state?.leaseOwners ?? []) {
+    releaseAgentSessionLeasesForOwner(`${owner}:`);
+  }
   routerSocketStates.delete(socket);
 }
 
@@ -793,14 +797,16 @@ async function getAgentControlReady(): Promise<void> {
         // coordinator's live open-dialog set).
         void broadcastMachineSnapshotReplacement().catch(() => {});
         deliverDialogRequest(request, {
-          pickSameSocketOwner: (sessionId) => pickAgentDialogWatcher(sessionId),
+          // Every dialog now rides the agent-state conduit: nothing binds a
+          // dialog to one command socket since agent panes hold leases, not
+          // sockets. Responses are authorized by dialogId from any socket.
+          pickSameSocketOwner: () => null,
           watchers: () => agentStateWatchers,
           send: (socket, req) => sendRouterResponse(socket, { type: 'agent-dialog-request', request: req }),
           setOwner: (dialogId, socket) => agentDialogOwners.set(dialogId, socket),
           markConduitDelivered: (dialogId) => conduitDeliveredDialogs.add(dialogId),
           onSameSocketError: (socket, req) => {
             agentDialogOwners.delete(req.id);
-            agentSessionWatchOwners.delete(req.sessionId);
             clearRouterSocketState(socket);
           },
           onWatcherError: (socket) => clearRouterSocketState(socket),
@@ -1200,7 +1206,6 @@ function cleanupSessionResources(session: SessionData, options: { removeFromMap?
 
   const workspaceId = session.info.metadata?.workspaceId;
   const agentSessionId = session.info.metadata?.agentSessionId;
-  releasePiTerminalSessionOwnership(session.info.id);
   if (workspaceId && agentSessionId && !options.killed) {
     markAgentSessionIdle(workspaceId, agentSessionId);
   }
@@ -1217,19 +1222,6 @@ async function terminateSessionData(session: SessionData, mode: TerminationMode,
     if (session.proc) {
       signalSubprocessTree(session.proc, "SIGKILL");
     }
-    if (session.virtualTerminal) {
-      session.virtualTerminal.stop();
-      removeVirtualTerminal(session.info.id);
-    }
-    cleanupSessionResources(session, { killed: true });
-    disposeSessionTerminal(session);
-    applyTerminalScopedUpdate(session.info.id);
-    return;
-  }
-
-  if (session.virtualTerminal) {
-    session.virtualTerminal.stop();
-    removeVirtualTerminal(session.info.id);
     cleanupSessionResources(session, { killed: true });
     disposeSessionTerminal(session);
     applyTerminalScopedUpdate(session.info.id);
@@ -1312,8 +1304,6 @@ function shutdownServer(options: { markRunningSessionsCrashed?: boolean } = {}):
     }
     try { session.xterm.dispose(); } catch {}
     cleanupSessionResources(session, { removeFromMap: false });
-    if (session.proc) try { signalSubprocessTree(session.proc, 'SIGKILL'); } catch {}
-    if (session.virtualTerminal) removeVirtualTerminal(session.info.id);
   }
   sessions.clear();
 
@@ -2774,7 +2764,6 @@ function createSession(
     serialize,
     idleState,
     proc,
-    virtualTerminal: null,
     client: null,
     clientWriter: null,
     ctrlBuffer: Buffer.alloc(0),
@@ -2804,234 +2793,6 @@ function createSession(
   return info;
 }
 
-/**
- * Create a virtual session backed by VirtualTerminal instead of a PTY child process.
- * The coordinator retrieves the registered VirtualTerminal and boots
- * InteractiveMode in-process against the same xterm-headless state.
- */
-function createVirtualSession(
-  name: string | undefined,
-  cwd: string,
-  options?: {
-    cols?: number;
-    rows?: number;
-    kind?: import('./protocol.js').SessionKind;
-    hidden?: boolean;
-    metadata?: Record<string, string>;
-  }
-): Session {
-  const id = genId();
-  const sessionName = name || `virtual-${id}`;
-  const socketPath = getSessionSocketPath(id);
-  const socketDir = dirname(socketPath);
-  if (!existsSync(socketDir)) {
-    mkdirSync(socketDir, { recursive: true });
-  }
-  safeUnlink(socketPath);
-
-  const { cols, rows } = clampTerminalSize(options?.cols, options?.rows);
-  const xterm = new XTerminal({
-    cols,
-    rows,
-    scrollback: 100,
-    allowProposedApi: true,
-  });
-
-  const serialize = new SerializeAddon();
-  xterm.loadAddon(serialize);
-
-  setupXtermEventHandlers(id, sessionName, xterm);
-
-  const idleState: IdleDetectionState = {
-    lastOutputTime: 0,
-    outputSinceIdle: 0,
-    idleTimer: null,
-  };
-
-  const virtualTerminal = new VirtualTerminal(cols, rows, (data: string) => {
-    idleState.lastOutputTime = Date.now();
-    idleState.outputSinceIdle += data.length;
-
-    const session = sessions.get(id);
-    if (!session) return;
-
-    forwardVirtualTerminalOutput(
-      session,
-      (chunk, callback) => xterm.write(chunk, callback),
-      (chunk) => { writeChunkedPtyToClient(session, chunk); },
-      data,
-    );
-  });
-
-  registerVirtualTerminal(id, virtualTerminal);
-
-  const info: Session = {
-    id,
-    name: sessionName,
-    socketPath,
-    pid: process.pid,
-    attached: false,
-    cwd,
-    createdAt: Date.now(),
-    kind: options?.kind ?? 'agent',
-    hidden: options?.hidden ?? true,
-    metadata: options?.metadata,
-  };
-
-  const startAttach = createStartAttach(sessionName);
-  const socketHandlers = {
-    open(socket: any) {
-      const session = sessions.get(id);
-      if (!session) return socket.end();
-
-      if (session.client) {
-        writeToClient(session, encodeControl({ type: 'kicked' }));
-        session.client.end();
-      }
-
-      session.attaching = true;
-      session.attachPending = true;
-      session.attachDirty = false;
-      session.client = socket;
-      session.clientWriter = createBufferedSocketWriter(socket);
-      session.info.attached = true;
-      session.lastAttached = Date.now();
-      session.ctrlBuffer = Buffer.alloc(0);
-      clearAttachTimer(session);
-      session.attachTimer = setTimeout(() => {
-        if (session.attachPending) {
-          console.log(`[${sessionName}] WARN: attach-init not received after 5s, starting attach anyway`);
-          startAttach(session);
-        }
-      }, 5000);
-    },
-
-    data(socket: any, data: Buffer) {
-      const session = sessions.get(id);
-      if (!session) return;
-      const applyResize = (cols: number, rows: number) => {
-        const nextSize = clampTerminalSize(cols, rows, {
-          cols: session.xterm.cols,
-          rows: session.xterm.rows,
-        });
-        try {
-          virtualTerminal.resize(nextSize.cols, nextSize.rows);
-          session.xterm.resize(nextSize.cols, nextSize.rows);
-        } catch {}
-      };
-
-      let buf = Buffer.from(data);
-      if (session.ctrlBuffer.length > 0) {
-        buf = Buffer.concat([session.ctrlBuffer, buf]);
-      }
-
-      let frames;
-      let remaining;
-      try {
-        const result = parseFrames(buf);
-        frames = result.frames;
-        remaining = result.remaining;
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : 'Frame parse error';
-        console.error(`[${sessionName}] Frame parse error: ${msg}`);
-        socket.end();
-        return;
-      }
-      session.ctrlBuffer = Buffer.from(remaining);
-
-      for (const frame of frames) {
-        if (frame.type === FrameType.CONTROL) {
-          const ctrl = decodeControl(frame.payload) as SessionCtrl;
-          if (ctrl.type === 'resize' || ctrl.type === 'attach-init') {
-            applyResize(ctrl.cols, ctrl.rows);
-            if (session.attaching && session.attachPending) {
-              startAttach(session);
-            }
-          } else if (ctrl.type === 'detach') {
-            writeToClient(session, encodePTY(TERM_RESET));
-            session.client = null;
-            session.clientWriter = null;
-            session.info.attached = false;
-            session.attaching = false;
-            session.attachPending = false;
-            clearAttachTimer(session);
-            session.attachDirty = false;
-            session.lastDetached = Date.now();
-            socket.end();
-            console.log(`[${sessionName}] detached`);
-          }
-        } else if (frame.type === FrameType.PTY) {
-          virtualTerminal.injectInput(Buffer.from(frame.payload).toString('utf-8'));
-          session.lastInteraction = Date.now();
-        }
-      }
-    },
-
-    drain(socket: any) {
-      const session = sessions.get(id);
-      if (session && session.client === socket) flushClient(session);
-    },
-
-    close(socket: any) {
-      const session = sessions.get(id);
-      if (session && session.client === socket) {
-        session.client = null;
-        session.clientWriter = null;
-        session.info.attached = false;
-        session.attaching = false;
-        session.attachPending = false;
-        clearAttachTimer(session);
-        session.attachDirty = false;
-        console.log(`[${sessionName}] disconnected`);
-      }
-    },
-  };
-
-  let listener;
-  try {
-    listener = Bun.listen({
-      unix: socketPath,
-      socket: socketHandlers,
-    });
-  } catch (error) {
-    removeVirtualTerminal(id);
-    try { xterm.dispose(); } catch {}
-    safeUnlink(socketPath);
-    throw error;
-  }
-
-  sessions.set(id, {
-    info,
-    listener,
-    ptyTerminal: null,
-    xterm,
-    serialize,
-    idleState,
-    proc: null,
-    virtualTerminal,
-    client: null,
-    clientWriter: null,
-    ctrlBuffer: Buffer.alloc(0),
-    pendingWrites: 0,
-    attaching: false,
-    attachDirty: false,
-    attachPending: false,
-    attachTimer: null,
-    processTitle: '',
-    terminalTitle: '',
-    unreadAlertCount: 0,
-    lastInteraction: 0,
-    lastDetached: 0,
-    lastAttached: 0,
-    replay: null,
-    replayCheckpointPending: false,
-    cleanupComplete: false,
-    termination: null,
-  });
-
-  console.log(`[${sessionName}] virtual session created`);
-  return info;
-}
 
 // Router server
 /** Request/response command dispatch — the single implementation behind BOTH
@@ -3151,44 +2912,6 @@ export async function dispatchCommand(cmd: Command): Promise<Response | null> {
               const errMsg = e instanceof Error ? e.message : String(e);
               console.error(`[server] createSession failed: ${errMsg}`);
               res = { type: "error", message: `Failed to create session: ${errMsg}` };
-            }
-            break;
-
-          case 'new-virtual':
-            try {
-              const session = createVirtualSession(cmd.name, cmd.cwd, {
-                cols: cmd.cols,
-                rows: cmd.rows,
-                kind: cmd.kind,
-                hidden: cmd.hidden,
-                metadata: cmd.metadata,
-              });
-              applyTerminalScopedUpdate(session.id);
-              res = { type: 'session', session };
-            } catch (e) {
-              const errMsg = e instanceof Error ? e.message : String(e);
-              console.error(`[server] createVirtualSession failed: ${errMsg}`);
-              res = { type: 'error', message: `Failed to create virtual session: ${errMsg}` };
-            }
-            break;
-
-          case 'virtual-resize':
-            try {
-              const session = sessions.get(cmd.id);
-              if (!session || !session.virtualTerminal) {
-                res = { type: 'error', message: `Virtual session not found: ${cmd.id}` };
-                break;
-              }
-              const { cols, rows } = clampTerminalSize(cmd.cols, cmd.rows, {
-                cols: session.xterm.cols,
-                rows: session.xterm.rows,
-              });
-              session.virtualTerminal.resize(cols, rows);
-              session.xterm.resize(cols, rows);
-              res = { type: 'ok' };
-            } catch (e) {
-              const errMsg = e instanceof Error ? e.message : String(e);
-              res = { type: 'error', message: `Failed to resize virtual session: ${errMsg}` };
             }
             break;
 
@@ -3763,6 +3486,32 @@ export async function dispatchCommand(cmd: Command): Promise<Response | null> {
             }
             break;
 
+          case 'agent-open':
+            try {
+              await getAgentControlReady();
+              const leaseKey = `${cmd.owner ?? 'anonymous'}:${cmd.paneId ?? 'default'}`;
+              const leaseCount = await openAgentSession(cmd.target, cmd.agentSessionId, leaseKey);
+              res = {
+                type: 'agent-opened',
+                agentSessionId: cmd.agentSessionId,
+                workspaceId: cmd.target.workspaceId,
+                leaseCount,
+              };
+              applyAgentScopedUpdate(cmd.target.workspaceId);
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to open agent session: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-release': {
+            const leaseKey = `${cmd.owner ?? 'anonymous'}:${cmd.paneId ?? 'default'}`;
+            const released = releaseAgentSessionLease(cmd.agentSessionId, leaseKey);
+            if (released) applyAgentScopedUpdate(released.workspaceId);
+            res = { type: 'ok' };
+            break;
+          }
+
           case 'agent-archive':
             try {
               await getAgentControlReady();
@@ -3853,6 +3602,42 @@ export async function dispatchCommand(cmd: Command): Promise<Response | null> {
             } catch (e) {
               const errMsg = e instanceof Error ? e.message : String(e);
               res = { type: 'error', message: `Failed to set thinking level: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-goal-mode':
+            try {
+              await getAgentControlReady();
+              const info = await getAgentGoalMode(cmd.target, cmd.agentSessionId);
+              res = { type: 'agent-goal-mode', info };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to read Goal Mode: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-set-goal-mode':
+            try {
+              await getAgentControlReady();
+              const info = await setAgentGoalMode(cmd.target, cmd.agentSessionId, {
+                enabled: cmd.enabled,
+                precursor: cmd.precursor,
+              });
+              res = { type: 'agent-goal-mode', info };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to set Goal Mode: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-shake':
+            try {
+              await getAgentControlReady();
+              const result = await shakeAgentSession(cmd.target, cmd.agentSessionId, cmd.mode);
+              res = { type: 'agent-shake-result', result };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to shake context: ${errMsg}` };
             }
             break;
 
@@ -4742,7 +4527,7 @@ routerListener = Bun.listen({
 
       for (const message of decoded.messages) {
         const cmd = message as Command;
-        // Loop-resident commands (agent-attach, agent-dialog-response) also
+        // Loop-resident commands (agent-dialog-response, attach) also
         // carry '@base' targets — normalize here too (idempotent with the
         // dispatchCommand normalization for everything routed through it).
         if ('target' in cmd && cmd.target && typeof cmd.target === 'object' && 'workspaceName' in cmd.target && (cmd.target as { workspaceName?: string }).workspaceName === '@base') {
@@ -4906,24 +4691,6 @@ routerListener = Bun.listen({
             }
             break;
 
-          case 'agent-attach':
-            try {
-              await getAgentControlReady();
-              const session = await ensureAgentTerminalSession(cmd.target, cmd.agentSessionId, { cols: cmd.cols, rows: cmd.rows });
-              agentSessionWatchOwners.set(cmd.agentSessionId, socket);
-              res = { type: 'session', session };
-              applyTerminalScopedUpdate(session.id);
-              // The agent record's linkedTerminalSessionId derives from this
-              // terminal — refresh the workspace's agent records too.
-              if (session.metadata?.workspaceId) {
-                applyAgentScopedUpdate(session.metadata.workspaceId);
-              }
-            } catch (e) {
-              const errMsg = e instanceof Error ? e.message : String(e);
-              res = { type: 'error', message: `Failed to attach agent session: ${errMsg}` };
-            }
-            break;
-
           case 'agent-dialog-response':
             try {
               // Same-socket dialogs (path a) may only be answered by the socket
@@ -4965,8 +4732,19 @@ routerListener = Bun.listen({
             return;
 
           default: {
-            const dispatched = await dispatchCommand(cmd);
-            res = dispatched ?? { type: 'error', message: `Unknown command: ${(cmd as { type?: string }).type}` };
+            // Lease commands are ordinary dispatch cases (so the in-process
+            // remote handler reaches them too), but a socket client gets its
+            // lease scoped to THIS connection and remembered, so a disconnect
+            // releases exactly the panes it held open.
+            let outbound = cmd;
+            if (cmd.type === 'agent-open' || cmd.type === 'agent-release') {
+              const state = getRouterSocketState(socket);
+              const owner = cmd.owner ?? state.leaseOwnerId;
+              state.leaseOwners.add(owner);
+              outbound = { ...cmd, owner };
+            }
+            const dispatched = await dispatchCommand(outbound);
+            res = dispatched ?? { type: 'error', message: `Unknown command: ${cmd.type}` };
           }
         }
 

@@ -7,10 +7,13 @@ import './native-addon-embed.generated.js';
  * GitSpace CLI (gssh) - Main entry point
  *
  * Thin orchestrator that handles:
- * 1. Internal subprocess commands (--internal-tmux-server, --internal-process-runner)
- * 2. TUI launch (no args or only --relay/--ignore-keychain-and-skip-secrets)
- * 3. Workspace session guard (GSSH_SESSION_MODE=workspace)
- * 4. CLI command dispatch via src/cli/index.ts
+ * 1. Internal subprocess commands (--internal-tmux-server, --internal-process-runner,
+ *    --internal-agent-worker, --internal-offload-worker)
+ * 2. Workspace session guard (GSSH_SESSION_MODE=workspace)
+ * 3. CLI command dispatch via src/cli/index.ts
+ *
+ * There is no TUI: the interactive surface is the web app, served by
+ * `gssh machine serve start`.
  */
 
 // ============================================================================

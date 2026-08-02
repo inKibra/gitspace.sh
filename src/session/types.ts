@@ -33,8 +33,11 @@ export interface ScriptRuntimeState {
 
 export interface AttachedPaneState {
   paneId: string;
-  streamId: number;
-  sessionId: string;
+  /** PTY stream this pane reads, or null for a pane with no terminal at all —
+   *  an agent pane renders the native transcript from events. */
+  streamId: number | null;
+  /** Terminal session backing the pane, or null for a stream-less agent pane. */
+  sessionId: string | null;
   sessionName: string | null;
   meta: AttachedSessionMeta | null;
   workspaceId: string | null;
@@ -68,9 +71,9 @@ export interface BackendSessionState {
   attachedSessionName: string | null;
   attachedSessionMeta: AttachedSessionMeta | null;
   attachedWorkspaceId: string | null;
-  /** Set when the attached terminal is an agent session (from attachAgentSession). */
+  /** Set when the default pane is showing an agent session. */
   attachedAgentSessionId: string | null;
-  /** Set when an agent session open/attach is in progress. Cleared on attach or error. */
+  /** Set while an agent session is being opened. Cleared on open or error. */
   pendingAgentAttach: boolean;
   attachedPanes: Record<string, AttachedPaneState>;
 

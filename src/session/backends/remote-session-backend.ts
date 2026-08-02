@@ -59,7 +59,7 @@ import type {
   TerminateSessionOptions,
   ArtifactReadRange,
 } from '../backend.js';
-import type { AgentControlInfo, AgentDefinitionInfo, AgentHistoryEntry, AgentSessionUsageReport, AgentSettingItem, AgentSettingSchemaItem, AgentToolInfo, AgentTreeNode } from '../../agents/agent-runtime-types.js';
+import type { AgentControlInfo, AgentDefinitionInfo, AgentGoalModeInfo, AgentHistoryEntry, AgentSessionUsageReport, AgentSettingItem, AgentSettingSchemaItem, AgentShakeMode, AgentShakeResult, AgentToolInfo, AgentTreeNode } from '../../agents/agent-runtime-types.js';
 import type { BackendEvent } from '../events.js';
 import type { AgentStateUpdateDelta, WorkspaceAgentState } from '../../lib/tmux-lite/agent-event-manager.js';
 import type { AgentStateSnapshotPush, AgentStateUpdatePush } from '../../lib/remote-session/protocol.js';
@@ -451,6 +451,9 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   private attachedAgentSessionId: string | null = null;
   private pendingAttachedAgentSession: { agentSessionId: string; sessionId: string } | null = null;
   private readonly panes = new Map<string, PaneLifecycle>();
+  /** paneId → agentSessionId for lease-opened agent panes. These have no
+   *  PaneLifecycle because they have no stream to route. */
+  private readonly openAgentPanes = new Map<string, string>();
   private nextStreamId = DEFAULT_PANE_STREAM_ID + 1;
   private listenersAttached = false;
   private connectPromise: Promise<void> | null = null;
@@ -517,7 +520,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   private pendingTypedCommands = new Map<string, {
     resolve: (response: TypedCommandResponse) => void;
     reject: (error: Error) => void;
-    timeout: ReturnType<typeof setTimeout>;
+    timeout: NodeJS.Timeout | undefined;
     startedAtMs: number;
   }>();
   private pendingOperationStarts = new Map<string, {
@@ -1056,65 +1059,49 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
   }
 
 
-  private findExistingAgentTerminalSession(workspaceId: string, agentSessionId: string): string | null {
-    const snapshot = this.machineStateClient.getSnapshot();
-    for (const session of Object.values(snapshot.terminalSessionsById)) {
-      if (session.exitCode !== undefined || session.kind !== 'agent') continue;
-      const linkedAgentSessionId = session.linkedAgentSessionId ?? session.metadata?.agentSessionId;
-      const linkedWorkspaceId = session.workspaceId ?? session.metadata?.workspaceId;
-      if (linkedAgentSessionId === agentSessionId && linkedWorkspaceId === workspaceId) {
-        return session.id;
-      }
+  /**
+   * Open an agent session in a pane with no terminal behind it: the daemon
+   * takes a viewer lease and the client renders the native transcript. No PTY
+   * stream is opened, so no rendered bytes cross the relay for a surface that
+   * never draws them.
+   */
+  async openAgentSession(workspaceId: string, agentSessionId: string, options: { paneId?: string } = {}): Promise<void> {
+    await this.waitForInitialSnapshot();
+    const paneId = options.paneId ?? `agent:${agentSessionId}`;
+    const response = await this.sendRpcCommand({
+      type: 'open_agent_session',
+      requestId: crypto.randomUUID(),
+      target: this.getAgentWorkspaceTarget(workspaceId),
+      agentSessionId,
+      paneId,
+    });
+    if (response.type !== 'agent-opened') {
+      if (response.type === 'error') throw new Error(response.message);
+      throw new Error('Unexpected agent open response');
     }
-    return null;
+    this.openAgentPanes.set(paneId, agentSessionId);
+    this.emit({
+      type: 'pane_attached',
+      paneId,
+      streamId: null,
+      sessionId: null,
+      workspaceId,
+      agentSessionId,
+    });
   }
 
-  async attachAgentSession(workspaceId: string, agentSessionId: string, options: { viewOnly?: boolean; cols?: number; rows?: number; paneId?: string } = {}): Promise<void> {
-    await this.waitForInitialSnapshot();
-    const existingTerminalSessionId = this.findExistingAgentTerminalSession(workspaceId, agentSessionId);
-    const paneId = options.paneId ?? DEFAULT_PANE_ID;
-    if (existingTerminalSessionId) {
-      if (paneId === DEFAULT_PANE_ID) {
-        this.pendingAttachedAgentSession = {
-          agentSessionId,
-          sessionId: existingTerminalSessionId,
-        };
-      }
-      try {
-        await this.attachPane({
-          paneId,
-          sessionId: existingTerminalSessionId,
-          workspaceId,
-          agentSessionId,
-          viewOnly: options.viewOnly,
-          cols: options.cols,
-          rows: options.rows,
-        });
-      } catch (error) {
-        this.pendingAttachedAgentSession = null;
-        throw error;
-      }
-      return;
-    }
-    // attachSession() handles detaching from the prior tmux-lite session via
-    // its own fire-and-forget detach path; no need for an extra round-trip here.
-    const response = await this.sendRpcCommand({ type: 'attach_agent_session', requestId: crypto.randomUUID(), target: this.getAgentWorkspaceTarget(workspaceId), agentSessionId, cols: options.cols, rows: options.rows });
-    if (response.type !== 'session') {
-      if (response.type === 'error') throw new Error(response.message);
-      throw new Error('Unexpected agent attach response');
-    }
-    if (paneId === DEFAULT_PANE_ID) {
-      this.pendingAttachedAgentSession = {
-        agentSessionId,
-        sessionId: response.session.id,
-      };
-    }
-    try {
-      await this.attachPane({ paneId, sessionId: response.session.id, workspaceId, agentSessionId, viewOnly: options.viewOnly, cols: options.cols, rows: options.rows });
-    } catch (error) {
-      this.pendingAttachedAgentSession = null;
-      throw error;
-    }
+  async closeAgentPane(paneId: string): Promise<void> {
+    const agentSessionId = this.openAgentPanes.get(paneId);
+    if (!agentSessionId) return;
+    this.openAgentPanes.delete(paneId);
+    this.emit({ type: 'pane_detached', paneId });
+    const response = await this.sendRpcCommand({
+      type: 'release_agent_session',
+      requestId: crypto.randomUUID(),
+      agentSessionId,
+      paneId,
+    });
+    if (response.type === 'error') throw new Error(response.message);
   }
 
   async promptAgentSession(workspaceId: string, agentSessionId: string, text: string, images?: import('../../lib/tmux-lite/protocol.js').AgentPromptImage[], options?: { streamingBehavior?: 'steer' | 'followUp' }): Promise<void> {
@@ -2660,7 +2647,10 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     }
   }
 
-  private async sendRpcCommand(request: ClientToMachineMessage & { requestId: string }): Promise<TypedCommandResponse> {
+  private async sendRpcCommand(
+    request: ClientToMachineMessage & { requestId: string },
+    options: { timeoutMs?: number | null } = {},
+  ): Promise<TypedCommandResponse> {
     if (OPERATION_COMMAND_TYPES.has(request.type)) {
       throw new Error(`Command ${request.type} must use startOperation(), not sendRpcCommand()`);
     }
@@ -2679,18 +2669,20 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
         commandType: request.type,
         pendingCount: this.pendingTypedCommands.size,
       });
-      const timeout = setTimeout(() => {
-        const pending = this.pendingTypedCommands.get(requestId);
-        if (!pending) return;
-        this.pendingTypedCommands.delete(requestId);
-        traceTimeoutEvent('remote-command-timeout', {
-          requestId,
-          commandType: request.type,
-          durationMs: Date.now() - pending.startedAtMs,
-          pendingCount: this.pendingTypedCommands.size,
-        });
-        rejectWithDiagnostics(new Error(`Timed out waiting for command response (${request.type})`));
-      }, DEFAULT_LIFECYCLE_TIMEOUT_MS);
+      const timeout = options.timeoutMs === null
+        ? undefined
+        : setTimeout(() => {
+            const pending = this.pendingTypedCommands.get(requestId);
+            if (!pending) return;
+            this.pendingTypedCommands.delete(requestId);
+            traceTimeoutEvent('remote-command-timeout', {
+              requestId,
+              commandType: request.type,
+              durationMs: Date.now() - pending.startedAtMs,
+              pendingCount: this.pendingTypedCommands.size,
+            });
+            rejectWithDiagnostics(new Error(`Timed out waiting for command response (${request.type})`));
+          }, options.timeoutMs ?? DEFAULT_LIFECYCLE_TIMEOUT_MS);
       this.pendingTypedCommands.set(requestId, { resolve, reject: rejectWithDiagnostics, timeout, startedAtMs });
       void this.sendCommand(request).catch((error) => {
         const pending = this.pendingTypedCommands.get(requestId);
@@ -3296,6 +3288,55 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     if (tmuxResponse.type === 'agent-control-info') return tmuxResponse.info;
     if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
     throw new Error('Unexpected agent control-info response');
+  }
+
+  async getAgentGoalMode(workspaceId: string, agentSessionId: string): Promise<AgentGoalModeInfo> {
+    await this.waitForInitialSnapshot();
+    const response = await this.sendRpcCommand({
+      type: 'get_agent_goal_mode',
+      requestId: crypto.randomUUID(),
+      target: this.getAgentWorkspaceTarget(workspaceId),
+      agentSessionId,
+    });
+    if (response.type === 'agent-goal-mode') return response.info;
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected Goal Mode response');
+  }
+
+  async setAgentGoalMode(
+    workspaceId: string,
+    agentSessionId: string,
+    input: { enabled: boolean; precursor?: string },
+  ): Promise<AgentGoalModeInfo> {
+    await this.waitForInitialSnapshot();
+    const response = await this.sendRpcCommand({
+      type: 'set_agent_goal_mode',
+      requestId: crypto.randomUUID(),
+      target: this.getAgentWorkspaceTarget(workspaceId),
+      agentSessionId,
+      ...input,
+    });
+    if (response.type === 'agent-goal-mode') return response.info;
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected Goal Mode response');
+  }
+
+  async shakeAgentSession(
+    workspaceId: string,
+    agentSessionId: string,
+    mode: AgentShakeMode,
+  ): Promise<AgentShakeResult> {
+    await this.waitForInitialSnapshot();
+    const response = await this.sendRpcCommand({
+      type: 'shake_agent_session',
+      requestId: crypto.randomUUID(),
+      target: this.getAgentWorkspaceTarget(workspaceId),
+      agentSessionId,
+      mode,
+    }, { timeoutMs: null });
+    if (response.type === 'agent-shake-result') return response.result;
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected Shake response');
   }
 
   async getAgentSessionUsageReport(workspaceId: string, agentSessionId: string): Promise<AgentSessionUsageReport | null> {

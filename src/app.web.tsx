@@ -3074,6 +3074,11 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
         );
       terminalMemoryDebugGauge('app.workspacePaneEntries', workspacePaneEntries.length);
       const runtime = workspace.selectionKey ? workspaceRuntime.runtimeByWorkspace[workspace.selectionKey] ?? null : null;
+      const workspaceGoalForPanels = allGoalItems.find((goal) =>
+        goal.backendKey === paneBackendKey &&
+        goal.workspaceName === workspace.name &&
+        goal.projectName === workspace.projectName,
+      ) ?? null;
       // Agent status for the transcript header must come from the SAME
       // authoritative source the sidebar/kanban read — the machine snapshot's
       // agentSessionsById, where open ask-dialogs are folded into
@@ -3084,7 +3089,10 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
         ? multi.getBackendState(paneBackendKey)?.snapshot?.agentSessionsById
         : undefined;
       const panels: import('./components/DockviewWorkspaceShell.web.js').DockviewTerminalPanel[] = workspacePaneEntries.map((pane) => {
-        const shortSessionName = (pane.sessionName ?? pane.sessionId).split(':').pop() ?? pane.sessionId;
+        // An agent pane has no terminal session at all — fall back to the agent
+        // session id so the panel still has a stable short label.
+        const paneLabelSource = pane.sessionName ?? pane.sessionId ?? pane.agentSessionId ?? pane.paneId;
+        const shortSessionName = paneLabelSource.split(':').pop() ?? paneLabelSource;
         const agentSession = pane.agentSessionId
           ? runtime?.agentSessions.find((session) => session.id === pane.agentSessionId)
           : null;
@@ -3120,7 +3128,12 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
           title,
           version: panelVersion,
           running: paneRunning,
-          onClose: () => paneBackend?.detachPane?.(pane.paneId).catch(() => undefined),
+          // An agent pane holds a viewer lease, not a PTY stream — releasing it
+          // is what tells the daemon nobody is watching this session anymore.
+          onClose: () => (pane.agentSessionId
+            ? paneBackend?.closeAgentPane?.(pane.paneId)
+            : paneBackend?.detachPane?.(pane.paneId)
+          )?.catch(() => undefined),
           render: () => (
             <PaneTerminalPanel
               pane={pane}
@@ -3143,6 +3156,11 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
               onModifiersChange={setModifiers}
               showFloatingControls={showInlineFloatingControls}
               awaitingInput={paneAwaitingInput}
+              goalContext={workspaceGoalForPanels ? {
+                id: getPersistedGoalId(workspaceGoalForPanels),
+                title: workspaceGoalForPanels.title,
+                phase: workspaceGoalForPanels.phase,
+              } : null}
             />
           ),
         };
@@ -3168,7 +3186,6 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
       // Repo files + artifacts opened from the RightRail as dock tabs
       // (mock Shell pane kinds 'file' and 'artifact').
       const wsKey = workspace.selectionKey ?? workspace.id;
-      const workspaceGoalForPanels = allGoalItems.find((g) => g.workspaceName === workspace.name && g.projectName === workspace.projectName) ?? null;
       // HUMAN-ONLY phase-gate waive (goal-rubric-workflow interconnect): a UI
       // button by construction — the CLI has no waive flag. Reason required;
       // records a timeline 'gate' event via backend.waiveGoalGate.

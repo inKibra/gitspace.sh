@@ -481,16 +481,26 @@ export class GitSpaceEngine {
     );
   }
 
-  async attachAgentSession(ref: BackendScopedAgentSessionRef, attachOptions?: { viewOnly?: boolean; cols?: number; rows?: number; paneId?: string }): Promise<void> {
+  /**
+   * Open an agent session in a pane. The backend takes a viewer lease on the
+   * daemon and the client renders the native transcript — no terminal is
+   * attached, so no PTY bytes are streamed for a surface that never draws them.
+   */
+  async openAgentSession(ref: BackendScopedAgentSessionRef, options?: { paneId?: string }): Promise<void> {
     this.dispatch({ type: 'SET_PENDING_AGENT_ATTACH', backendKey: ref.backendKey, pending: true });
     try {
       return await this.withRefBackend(ref, (b) =>
-        b.attachAgentSession?.(ref.workspaceId, ref.agentSessionId, attachOptions) ?? Promise.resolve()
+        b.openAgentSession?.(ref.workspaceId, ref.agentSessionId, options) ?? Promise.resolve()
       );
     } catch (error) {
       this.dispatch({ type: 'SET_PENDING_AGENT_ATTACH', backendKey: ref.backendKey, pending: false });
       throw error;
     }
+  }
+
+  /** Release an agent pane's lease and drop the pane. */
+  closeAgentPane(backendKey: BackendKey, paneId: string): Promise<void> {
+    return this.manager.get(backendKey)?.closeAgentPane?.(paneId) ?? Promise.resolve();
   }
 
   promptAgentSession(ref: BackendScopedAgentSessionRef, text: string, images?: import('../../lib/tmux-lite/protocol.js').AgentPromptImage[], options?: { streamingBehavior?: 'steer' | 'followUp' }): Promise<void> {

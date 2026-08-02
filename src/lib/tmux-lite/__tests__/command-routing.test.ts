@@ -62,9 +62,9 @@ function socketCoupledSet(): Set<string> {
   return set;
 }
 
-/** The nine cases that legitimately live in the socket loop: their handlers
- *  bind or stream on the calling socket. Growing this list is a deliberate
- *  act — a new loop-resident case is usually an extraction accident. */
+/** The cases that legitimately live in the socket loop: their handlers bind or
+ *  stream on the calling socket. Growing this list is a deliberate act — a new
+ *  loop-resident case is usually an extraction accident. */
 const KNOWN_CONNECTION_COUPLED = new Set([
   'attach-prepare',
   'attach-cancel',
@@ -72,7 +72,6 @@ const KNOWN_CONNECTION_COUPLED = new Set([
   'agent-watch',
   'machine-watch',
   'workspace-delete',
-  'agent-attach',
   'agent-dialog-response',
   'kill-server',
 ]);
@@ -131,6 +130,6 @@ describe('command routing (dispatch vs socket loop)', () => {
     expect(typed.size).toBeGreaterThan(20);
     expect(dispatchCases.has('agent-prompt')).toBe(true);
     expect(dispatchCases.has('terminate')).toBe(true);
-    expect(socketCoupled.has('agent-attach')).toBe(true);
+    expect(socketCoupled.has('agent-dialog-response')).toBe(true);
   });
 });

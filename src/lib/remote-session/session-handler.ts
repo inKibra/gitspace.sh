@@ -190,11 +190,6 @@ export function filterReplaysForSessionAccess<T extends ReplaySessionAccessTarge
   return replays.filter((replay) => replay.sessionId === grantedSessionId);
 }
 
-function isAgentReplay(replay: { sessionName: string }): boolean {
-  return replay.sessionName.startsWith('agent:');
-}
-
-
 
 
 
@@ -442,20 +437,27 @@ export class RemoteSessionHandler {
     return Buffer.concat([Buffer.from(existing, 'base64'), Buffer.from(chunk, 'base64')]).toString('base64');
   }
 
-  /** Commands whose server handlers bind the CALLING SOCKET (transcript
+  /** Commands whose server handlers bind the CALLING SOCKET (dialog
    *  ownership) — they must keep riding the unix socket even in-process,
-   *  or the daemon answers 'Unknown command' (the exact 'invalid command'
-   *  users see when opening an agent pane). */
-  private static readonly SOCKET_COUPLED_COMMANDS = new Set(['agent-attach', 'agent-dialog-response']);
+   *  or the daemon answers 'Unknown command'. */
+  private static readonly SOCKET_COUPLED_COMMANDS = new Set(['agent-dialog-response']);
 
-  private async sendBoundedTmuxCommand(command: TmuxCommand): Promise<TmuxResponse> {
+  private async sendBoundedTmuxCommand(
+    command: TmuxCommand,
+    timeoutMs: number | null = BOUNDED_RPC_TIMEOUT_MS,
+  ): Promise<TmuxResponse> {
+    if (timeoutMs === null) {
+      return hasInProcessDispatcher() && !RemoteSessionHandler.SOCKET_COUPLED_COMMANDS.has(command.type)
+        ? dispatchInProcess(command)
+        : sendTmuxCommand(command, { timeoutMs: null });
+    }
     let timeout: ReturnType<typeof setTimeout> | null = null;
     try {
       // Daemon-unification P3: the session-handler runs INSIDE the daemon —
       // dispatch directly when the server has registered (always, in the
       // unified topology). Socket-coupled commands keep the socket path so
       // their ownership binding lands on cli's persistent connection, same
-      // as pre-P3. The timeout guard applies to both.
+      // as pre-P3. The timeout guard applies to bounded commands only.
       const useDispatch = hasInProcessDispatcher() && !RemoteSessionHandler.SOCKET_COUPLED_COMMANDS.has(command.type);
       const invoke = useDispatch ? dispatchInProcess(command) : sendTmuxCommand(command);
       return await Promise.race([
@@ -463,7 +465,7 @@ export class RemoteSessionHandler {
         new Promise<TmuxResponse>((resolve) => {
           timeout = setTimeout(() => {
             resolve({ type: 'error', message: `Timed out waiting for command response (${command.type})` });
-          }, BOUNDED_RPC_TIMEOUT_MS);
+          }, timeoutMs);
         }),
       ]);
     } finally {
@@ -1564,17 +1566,32 @@ export class RemoteSessionHandler {
         }, sendResponse);
         break;
 
-      case 'attach_agent_session':
+      case 'open_agent_session':
         if (!canManage(session.accessType)) {
           await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
           return;
         }
         await this.handleTypedCommand(session, msg.requestId, {
-          type: 'agent-attach',
+          type: 'agent-open',
           target: msg.target,
           agentSessionId: msg.agentSessionId,
-          cols: msg.cols,
-          rows: msg.rows,
+          paneId: msg.paneId,
+          // This handler runs inside the daemon and dispatches in-process, so
+          // there is no socket to scope the lease by — the connection is.
+          owner: session.connectionId,
+        }, sendResponse);
+        break;
+
+      case 'release_agent_session':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, {
+          type: 'agent-release',
+          agentSessionId: msg.agentSessionId,
+          paneId: msg.paneId,
+          owner: session.connectionId,
         }, sendResponse);
         break;
 
@@ -1671,6 +1688,45 @@ export class RemoteSessionHandler {
           type: 'agent-control-info',
           target: msg.target,
           agentSessionId: msg.agentSessionId,
+        }, sendResponse);
+        break;
+
+      case 'get_agent_goal_mode':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, {
+          type: 'agent-goal-mode',
+          target: msg.target,
+          agentSessionId: msg.agentSessionId,
+        }, sendResponse);
+        break;
+
+      case 'set_agent_goal_mode':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, {
+          type: 'agent-set-goal-mode',
+          target: msg.target,
+          agentSessionId: msg.agentSessionId,
+          enabled: msg.enabled,
+          precursor: msg.precursor,
+        }, sendResponse);
+        break;
+
+      case 'shake_agent_session':
+        if (!canManage(session.accessType)) {
+          await this.sendError(session, sendResponse, 'PERMISSION_DENIED', 'Requires full access', { requestId: msg.requestId });
+          return;
+        }
+        await this.handleTypedCommand(session, msg.requestId, {
+          type: 'agent-shake',
+          target: msg.target,
+          agentSessionId: msg.agentSessionId,
+          mode: msg.mode,
         }, sendResponse);
         break;
 
@@ -2250,7 +2306,10 @@ export class RemoteSessionHandler {
       // The handler already validated tmux-lite availability during initialize().
       // Avoid ensureServer() here: it performs an unbounded agent-state RPC,
       // which can wedge client responses when tmux-lite is busy.
-      const response = await this.sendBoundedTmuxCommand(tmuxCommand);
+      const response = await this.sendBoundedTmuxCommand(
+        tmuxCommand,
+        tmuxCommand.type === 'agent-shake' ? null : undefined,
+      );
       writeTraceLog('machine-command-tmux-response', {
         requestId,
         commandType: tmuxCommand.type,
@@ -2293,11 +2352,13 @@ export class RemoteSessionHandler {
     includeDismissed: boolean | undefined,
     sendResponse: (data: Uint8Array) => void,
   ): Promise<void> {
+    // Agent sessions no longer record replays, but state dirs written by older
+    // daemons still hold `agent:*` recordings — noise in the replay list.
     const replays = filterReplaysForSessionAccess(
       session.accessType,
       session.grantedSessionId,
       listReplaysOffline({ workspaceId, includeDismissed: includeDismissed ?? false }),
-    ).filter((replay) => !isAgentReplay(replay));
+    ).filter((replay) => !replay.sessionName.startsWith('agent:'));
     await this.sendMessage(session, sendResponse, {
       type: 'replay_list',
       replays,

@@ -15,6 +15,7 @@ interface FakeSocket {
   readyState: number;
   handlers: RemoteSessionSocketHandlers | null;
   sent: string[];
+  onSend?: (data: string) => void;
 }
 
 interface FakeHandshakeState {
@@ -48,6 +49,7 @@ const socketAdapter: RemoteSessionSocketAdapter<FakeSocket> = {
   },
   send: (socket, data) => {
     socket.sent.push(data);
+    socket.onSend?.(data);
   },
   close: () => {},
   getReadyState: (socket) => socket.readyState,
@@ -139,6 +141,28 @@ function decodeRelayDataCommand(codec: RemoteSessionCryptoAdapter, raw: string):
   }
   const decoded = codec.decodeBase64(relay.data);
   return JSON.parse(new TextDecoder().decode(decoded));
+}
+
+interface ShakeAgentSessionRequest {
+  type: 'shake_agent_session';
+  requestId: string;
+  target: unknown;
+  agentSessionId: string;
+  mode: 'elide' | 'images';
+}
+
+function isShakeAgentSessionRequest(value: unknown): value is ShakeAgentSessionRequest {
+  return value !== null
+    && typeof value === 'object'
+    && 'type' in value
+    && value.type === 'shake_agent_session'
+    && 'requestId' in value
+    && typeof value.requestId === 'string'
+    && 'target' in value
+    && 'agentSessionId' in value
+    && typeof value.agentSessionId === 'string'
+    && 'mode' in value
+    && (value.mode === 'elide' || value.mode === 'images');
 }
 
 function makeOperationRecord(
@@ -877,173 +901,6 @@ describe('RemoteSessionBackend', () => {
     expect(latestSnapshot?.workspacesById['alpha:ws-1']?.summary.closedAgentCount).toBe(1);
   });
 
-
-
-  it('forwards workspace context when attaching an agent session terminal', async () => {
-    const socket = createFakeSocket();
-
-    const backend = new RemoteSessionBackend({
-      descriptor: {
-        key: buildRemoteBackendKey('wss://relay.test/ws', 'machine-1'),
-        kind: 'remote',
-        label: 'Machine 1',
-        relayUrl: 'wss://relay.test/ws',
-        machineId: 'machine-1',
-      },
-      socket,
-      socketAdapter,
-      identity,
-      machineId: 'machine-1',
-      deviceCertificate: 'test-device-cert',
-      signer: (message) => ({ ...message, signature: { sig: 'x' } }),
-      crypto: cryptoAdapter,
-      handshake: handshakeAdapter,
-    });
-
-    await connectAndHandshake(backend, socket);
-
-    const machineSnapshot = createEmptyMachineSnapshot() as any;
-    machineSnapshot.workspacesById['alpha:ws-1'] = {
-      id: 'alpha:ws-1',
-      name: 'ws-1',
-      path: '/tmp/alpha/workspaces/ws-1',
-      projectName: 'alpha',
-      branch: 'main',
-      summary: { terminalCount: 0, managedProcessCount: 0, runningProcessCount: 0, idleAgentCount: 0, activeAgentCount: 1 },
-      updatedAt: new Date().toISOString(),
-    };
-    machineSnapshot.workspaceOrder = ['alpha:ws-1'];
-    machineSnapshot.workspaceIdsByProjectId = { alpha: ['alpha:ws-1'] };
-    machineSnapshot.projectsById.alpha = {
-      id: 'alpha',
-      name: 'alpha',
-      path: '/tmp/alpha',
-      repository: 'org/alpha',
-      workspaceIds: ['alpha:ws-1'],
-      workspaceCount: 1,
-    };
-    machineSnapshot.projectOrder = ['alpha'];
-    socket.handlers?.onMessage(makeRelayDataPayload(cryptoAdapter, { type: 'machine_snapshot', snapshot: machineSnapshot }));
-    await Bun.sleep(0);
-
-    const attachPromise = backend.attachAgentSession('alpha:ws-1', 'agent-1');
-    await Bun.sleep(0);
-
-    const tmuxCommand = decodeRelayDataCommand(cryptoAdapter, socket.sent.at(-1) ?? '') as { type: string; requestId: string; command: { type: string } };
-    expect(tmuxCommand.type).toBe('attach_agent_session');
-    expect(tmuxCommand).toMatchObject({ agentSessionId: 'agent-1' });
-
-    socket.handlers?.onMessage(
-      makeRelayDataPayload(cryptoAdapter, {
-        type: 'command_response',
-        requestId: tmuxCommand.requestId,
-        response: {
-          type: 'session',
-          session: { id: 'tmux-agent-1', name: 'agent:ws-1:agent-1', workspaceId: 'alpha:ws-1', attached: false, createdAt: 1 },
-        },
-      })
-    );
-    await Bun.sleep(0);
-
-    const attachCommand = decodeRelayDataCommand(cryptoAdapter, socket.sent.at(-1) ?? '') as Record<string, unknown>;
-    expect(attachCommand).toEqual({
-      type: 'attach_session',
-      streamId: 2,
-      sessionId: 'tmux-agent-1',
-      workspaceId: 'alpha:ws-1',
-      viewOnly: undefined,
-      sessionName: undefined,
-      cols: 80,
-      rows: 24,
-      scriptPolicy: undefined,
-      command: undefined,
-      args: undefined,
-      env: undefined,
-    });
-
-    await attachPromise;
-
-    const tabAttachPromise = backend.attachAgentSession('alpha:ws-1', 'agent-2', { paneId: 'agent-tab' });
-    await Bun.sleep(0);
-
-    const secondTmuxCommand = decodeRelayDataCommand(cryptoAdapter, socket.sent.at(-1) ?? '') as { type: string; requestId: string };
-    expect(secondTmuxCommand.type).toBe('attach_agent_session');
-    socket.handlers?.onMessage(
-      makeRelayDataPayload(cryptoAdapter, {
-        type: 'command_response',
-        requestId: secondTmuxCommand.requestId,
-        response: {
-          type: 'session',
-          session: { id: 'tmux-agent-2', name: 'agent:ws-1:agent-2', workspaceId: 'alpha:ws-1', attached: false, createdAt: 2 },
-        },
-      })
-    );
-    await Bun.sleep(0);
-
-    const secondAttachCommand = decodeRelayDataCommand(cryptoAdapter, socket.sent.at(-1) ?? '') as Record<string, unknown>;
-    expect(secondAttachCommand).toMatchObject({
-      type: 'attach_session',
-      streamId: 3,
-      sessionId: 'tmux-agent-2',
-      workspaceId: 'alpha:ws-1',
-    });
-    await tabAttachPromise;
-  });
-
-  it('reuses an existing agent terminal session from the machine snapshot', async () => {
-    const socket = createFakeSocket();
-    const backend = new RemoteSessionBackend({
-      descriptor: {
-        key: buildRemoteBackendKey('wss://relay.test/ws', 'machine-1'),
-        kind: 'remote',
-        label: 'Machine 1',
-        relayUrl: 'wss://relay.test/ws',
-        machineId: 'machine-1',
-      },
-      socket,
-      socketAdapter,
-      identity,
-      machineId: 'machine-1',
-      deviceCertificate: 'test-device-cert',
-      signer: (message) => ({ ...message, signature: { sig: 'x' } }),
-      crypto: cryptoAdapter,
-      handshake: handshakeAdapter,
-    });
-
-    await connectAndHandshake(backend, socket);
-    const machineSnapshot = createEmptyMachineSnapshot() as any;
-    machineSnapshot.terminalSessionsById['tmux-agent-1'] = {
-      id: 'tmux-agent-1',
-      name: 'agent:ws-1:agent-1',
-      workspaceId: 'alpha:ws-1',
-      cwd: '/tmp/alpha/workspaces/ws-1',
-      socketPath: '/tmp/tmux-agent-1.sock',
-      kind: 'agent',
-      hidden: true,
-      state: 'detached',
-      attached: false,
-      createdAt: 1,
-      linkedAgentSessionId: 'agent-1',
-      metadata: { workspaceId: 'alpha:ws-1', agentSessionId: 'agent-1' },
-    };
-    socket.handlers?.onMessage(makeRelayDataPayload(cryptoAdapter, { type: 'machine_snapshot', snapshot: machineSnapshot }));
-    await Bun.sleep(0);
-
-    const sentBefore = socket.sent.length;
-    const attachPromise = backend.attachAgentSession('alpha:ws-1', 'agent-1');
-    await Bun.sleep(0);
-
-    const attachCommand = decodeRelayDataCommand(cryptoAdapter, socket.sent.at(-1) ?? '') as Record<string, unknown>;
-    expect(socket.sent.length).toBe(sentBefore + 1);
-    expect(attachCommand).toMatchObject({
-      type: 'attach_session',
-      sessionId: 'tmux-agent-1',
-      workspaceId: 'alpha:ws-1',
-    });
-    expect(attachCommand.type).not.toBe('attach_agent_session');
-
-    await attachPromise;
-  });
 
 
   it('applies agent state deltas to the local machine snapshot cache', async () => {
@@ -2531,6 +2388,168 @@ it('does not emit attached until the real attach event arrives and preserves pre
       .at(-1)?.snapshot;
     expect(resynced?.snapshotNonce).toBe(20);
     expect(resynced?.workspacesById['alpha:ws-1']).toBeUndefined();
+  });
+
+  it('maps a Shake RPC through the relay and preserves its structured result', async () => {
+    const socket = createFakeSocket();
+    const backend = createBackend(socket);
+    await connectAndHandshake(backend, socket);
+    let stopObservingSnapshot: () => void = () => {};
+    const workspaceSnapshotApplied = new Promise<void>((resolve) => {
+      stopObservingSnapshot = backend.onEvent((event) => {
+        if (event.type === 'machine_snapshot' && event.snapshot.workspacesById['alpha:ws-1']) {
+          stopObservingSnapshot();
+          resolve();
+        }
+      });
+    });
+    socket.handlers?.onMessage(
+      makeRelayDataPayload(cryptoAdapter, {
+        type: 'machine_snapshot',
+        snapshot: createMachineSnapshotWithWorkspace(),
+      }),
+    );
+    await workspaceSnapshotApplied;
+
+    const shakeRequestSent = new Promise<ShakeAgentSessionRequest>((resolve) => {
+      socket.onSend = (raw) => {
+        const candidate = decodeRelayDataCommand(cryptoAdapter, raw);
+        if (isShakeAgentSessionRequest(candidate)) resolve(candidate);
+      };
+    });
+    const pending = backend.shakeAgentSession('alpha:ws-1', 'agent-1', 'elide');
+    const request = await shakeRequestSent;
+    socket.onSend = undefined;
+    expect(request).toMatchObject({
+      type: 'shake_agent_session',
+      target: {
+        workspaceId: 'alpha:ws-1',
+        workspaceName: 'ws-1',
+        workspacePath: '/tmp/alpha/ws-1',
+        projectName: 'alpha',
+      },
+      agentSessionId: 'agent-1',
+      mode: 'elide',
+    });
+
+    const result = {
+      mode: 'elide' as const,
+      toolResultsDropped: 5,
+      blocksDropped: 2,
+      tokensFreed: 2400,
+      artifactId: 'artifact://elided-source',
+    };
+    socket.handlers?.onMessage(
+      makeRelayDataPayload(cryptoAdapter, {
+        type: 'command_response',
+        requestId: request.requestId,
+        response: { type: 'agent-shake-result', result },
+      }),
+    );
+
+    await expect(pending).resolves.toEqual(result);
+  });
+
+  it('rejects a Shake RPC when the relay returns its correlated error', async () => {
+    const socket = createFakeSocket();
+    const backend = createBackend(socket);
+    await connectAndHandshake(backend, socket);
+    let stopObservingSnapshot: () => void = () => {};
+    const workspaceSnapshotApplied = new Promise<void>((resolve) => {
+      stopObservingSnapshot = backend.onEvent((event) => {
+        if (event.type === 'machine_snapshot' && event.snapshot.workspacesById['alpha:ws-1']) {
+          stopObservingSnapshot();
+          resolve();
+        }
+      });
+    });
+    socket.handlers?.onMessage(
+      makeRelayDataPayload(cryptoAdapter, {
+        type: 'machine_snapshot',
+        snapshot: createMachineSnapshotWithWorkspace(),
+      }),
+    );
+    await workspaceSnapshotApplied;
+
+    const shakeRequestSent = new Promise<ShakeAgentSessionRequest>((resolve) => {
+      socket.onSend = (raw) => {
+        const candidate = decodeRelayDataCommand(cryptoAdapter, raw);
+        if (isShakeAgentSessionRequest(candidate)) resolve(candidate);
+      };
+    });
+    const pending = backend.shakeAgentSession('alpha:ws-1', 'agent-1', 'images');
+    const request = await shakeRequestSent;
+    socket.onSend = undefined;
+    socket.handlers?.onMessage(
+      makeRelayDataPayload(cryptoAdapter, {
+        type: 'error',
+        requestId: request.requestId,
+        message: 'Failed to shake context: session is busy',
+      }),
+    );
+
+    await expect(pending).rejects.toThrow('Failed to shake context: session is busy');
+  });
+
+  it('keeps a remote Shake pending beyond the ordinary typed-RPC deadline until its response arrives', async () => {
+    const socket = createFakeSocket();
+    const backend = createBackend(socket);
+    await connectAndHandshake(backend, socket);
+    let stopObservingSnapshot: () => void = () => {};
+    const workspaceSnapshotApplied = new Promise<void>((resolve) => {
+      stopObservingSnapshot = backend.onEvent((event) => {
+        if (event.type === 'machine_snapshot' && event.snapshot.workspacesById['alpha:ws-1']) {
+          stopObservingSnapshot();
+          resolve();
+        }
+      });
+    });
+    socket.handlers?.onMessage(
+      makeRelayDataPayload(cryptoAdapter, {
+        type: 'machine_snapshot',
+        snapshot: createMachineSnapshotWithWorkspace(),
+      }),
+    );
+    await workspaceSnapshotApplied;
+
+    const shakeRequestSent = new Promise<ShakeAgentSessionRequest>((resolve) => {
+      socket.onSend = (raw) => {
+        const candidate = decodeRelayDataCommand(cryptoAdapter, raw);
+        if (isShakeAgentSessionRequest(candidate)) resolve(candidate);
+      };
+    });
+    jest.useFakeTimers();
+    try {
+      const pending = backend.shakeAgentSession('alpha:ws-1', 'agent-1', 'images');
+      const request = await shakeRequestSent;
+      socket.onSend = undefined;
+      let settled = false;
+      void pending.then(
+        () => { settled = true; },
+        () => { settled = true; },
+      );
+
+      jest.advanceTimersByTime(12_001);
+      await Promise.resolve();
+      expect(settled).toBe(false);
+
+      const result = {
+        mode: 'images' as const,
+        toolResultsDropped: 0,
+        blocksDropped: 0,
+        tokensFreed: 3200,
+      };
+      socket.handlers?.onMessage(
+        makeRelayDataPayload(cryptoAdapter, {
+          type: 'command_response',
+          requestId: request.requestId,
+          response: { type: 'agent-shake-result', result },
+        }),
+      );
+      await expect(pending).resolves.toEqual(result);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
 });

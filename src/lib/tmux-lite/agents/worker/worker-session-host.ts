@@ -9,7 +9,10 @@ import { fileURLToPath } from 'node:url';
 import type { Subprocess } from 'bun';
 import type {
   AgentControlInfo,
+  AgentGoalModeInfo,
   AgentHistoryEntry,
+  AgentShakeMode,
+  AgentShakeResult,
   AgentToolInfo,
   AgentTreeNode,
 } from '../../../../agents/agent-runtime-types.js';
@@ -46,9 +49,6 @@ export function routeWorkerSinkNotification(msg: WorkerNotification, sinks: Sess
       return true;
     case 'ui-event':
       sinks.onUiEvent(msg.event);
-      return true;
-    case 'terminal-output':
-      sinks.onTerminalOutput(msg.data);
       return true;
     case 'agent-report':
       sinks.onAgentReport(msg.payload);
@@ -234,6 +234,18 @@ export class WorkerSessionHost implements AgentSessionHost {
     return this.rpc('setThinkingLevel', [level]) as Promise<boolean>;
   }
 
+  getGoalMode(): Promise<AgentGoalModeInfo> {
+    return this.rpc('getGoalMode', []) as Promise<AgentGoalModeInfo>;
+  }
+
+  setGoalMode(input: { enabled: boolean; objective?: string }): Promise<AgentGoalModeInfo> {
+    return this.rpc('setGoalMode', [input]) as Promise<AgentGoalModeInfo>;
+  }
+
+  shake(mode: AgentShakeMode): Promise<AgentShakeResult> {
+    return this.rpc('shake', [mode]) as Promise<AgentShakeResult>;
+  }
+
   setApprovalMode(mode: string): Promise<boolean> {
     return this.rpc('setApprovalMode', [mode]) as Promise<boolean>;
   }
@@ -287,25 +299,6 @@ export class WorkerSessionHost implements AgentSessionHost {
 
   setTitle(title: string | undefined): void {
     this.cast('setTitle', [title]);
-  }
-
-  // --- interactive terminal --------------------------------------------------
-
-  async startTerminal(cols: number, rows: number): Promise<void> {
-    await this.rpc('startTerminal', [cols, rows]);
-  }
-
-  async stopTerminal(): Promise<void> {
-    if (this.exited) return;
-    await this.rpc('stopTerminal', []);
-  }
-
-  injectTerminalInput(data: string): void {
-    this.cast('injectTerminalInput', [data]);
-  }
-
-  resizeTerminal(cols: number, rows: number): void {
-    this.cast('resizeTerminal', [cols, rows]);
   }
 
   // --- lifecycle -----------------------------------------------------------

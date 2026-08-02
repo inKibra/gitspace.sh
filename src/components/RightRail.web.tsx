@@ -10,6 +10,7 @@ import { toast } from '../lib/sonner.web.js';
 import { deriveNoteLabel } from './note-label.js';
 import { ReviewDiffView, requestFileContext, useReviewThreads, fileViewPatch } from './review-diff-view.web.js';
 import { documentKindFor, HtmlDocFrame, PdfDocFrame } from './document-preview.web.js';
+import { filterRepoTreeEntries } from './repo-tree-search.js';
 
 /**
  * RightRail — the workspace view's persistent right column (mock: RightRail.tsx).
@@ -200,8 +201,9 @@ function RepoMode({ backend, workspaceId, projectName, workspaceName, onOpenFile
   const [commitMsg, setCommitMsg] = useState('');
   const [committing, setCommitting] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
-  /* Search replaces the tree while a query is active; clearing it restores the
-     tree, so the two never compete for the same space. */
+  /* File-name search filters the already-loaded tree immediately. Content
+     search replaces it after an explicit Enter-triggered backend query. */
+  const [searchScope, setSearchScope] = useState<'files' | 'contents'>('files');
   const [query, setQuery] = useState('');
   const [search, setSearch] = useState<{ hits: RepoSearchHit[]; truncated: boolean; query: string } | null>(null);
   const [searching, setSearching] = useState(false);
@@ -249,6 +251,10 @@ function RepoMode({ backend, workspaceId, projectName, workspaceName, onOpenFile
   useEffect(() => { refresh(); }, [refresh]);
 
   const changedSet = useMemo(() => new Set(changed.map((f) => f.filePath)), [changed]);
+  const treeEntries = useMemo(() => {
+    const fileQuery = searchScope === 'files' ? query : '';
+    return filterRepoTreeEntries(entries, changedSet, treeFilter, fileQuery);
+  }, [changedSet, entries, query, searchScope, treeFilter]);
 
   const commit = async (): Promise<void> => {
     if (!backend?.commitWorkspaceChanges || !commitMsg.trim() || committing) return;
@@ -301,18 +307,57 @@ function RepoMode({ backend, workspaceId, projectName, workspaceName, onOpenFile
         </div>
         <div className="flex flex-shrink-0 items-center gap-1.5 border-b border-[var(--gs-border-muted)] px-3 py-1.5 text-[11px]">
           <span className="text-[var(--gs-text-dim)]">⌕</span>
+          <span className="flex flex-shrink-0 border border-[var(--gs-border)] font-[family-name:var(--gs-font-mono)] text-[9px]">
+            {(['files', 'contents'] as const).map((scope) => (
+              <button
+                key={scope}
+                type="button"
+                onClick={() => {
+                  setSearchScope(scope);
+                  setSearch(null);
+                  setSearchError(null);
+                }}
+                className={`px-1.5 py-0.5 uppercase ${
+                  searchScope === scope
+                    ? 'bg-[var(--gs-bg-active)] text-[var(--gs-text)]'
+                    : 'text-[var(--gs-text-dim)] hover:text-[var(--gs-text)]'
+                }`}
+                title={scope === 'files' ? 'Filter filenames and paths' : 'Search file contents'}
+              >
+                {scope}
+              </button>
+            ))}
+          </span>
           <input
             value={query}
-            onChange={(e) => { setQuery(e.target.value); if (!e.target.value.trim()) { setSearch(null); setSearchError(null); } }}
-            onKeyDown={(e) => { if (e.key === 'Enter') void runSearch(query); if (e.key === 'Escape') { setQuery(''); setSearch(null); } }}
-            placeholder="Search file contents…"
-            title="Repo-wide content search — press Enter"
+            onChange={(e) => {
+              const next = e.target.value;
+              setQuery(next);
+              if (!next.trim() || searchScope === 'files') {
+                setSearch(null);
+                setSearchError(null);
+              }
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && searchScope === 'contents') void runSearch(query);
+              if (e.key === 'Escape') {
+                setQuery('');
+                setSearch(null);
+                setSearchError(null);
+              }
+            }}
+            placeholder={searchScope === 'files' ? 'Filter filenames…' : 'Search file contents…'}
+            title={searchScope === 'files' ? 'Filter filenames and paths as you type' : 'Repo-wide content search — press Enter'}
             className="min-w-0 flex-1 border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-1.5 py-0.5 text-[11px] text-[var(--gs-text)] outline-none focus:border-[var(--gs-accent)]"
           />
-          {(search || searching) && (
+          {(query.trim() || search || searching) && (
             <button
               type="button"
-              onClick={() => { setQuery(''); setSearch(null); setSearchError(null); }}
+              onClick={() => {
+                setQuery('');
+                setSearch(null);
+                setSearchError(null);
+              }}
               title="Clear search"
               className="flex-shrink-0 px-1 text-[var(--gs-text-dim)] hover:text-[var(--gs-text)]"
             >
@@ -321,24 +366,21 @@ function RepoMode({ backend, workspaceId, projectName, workspaceName, onOpenFile
           )}
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto pb-1 text-[11.5px]">
-          {searching ? (
+          {searchScope === 'contents' && searching ? (
             <div className="px-3 py-3 text-center text-[var(--gs-text-dim)]">Searching…</div>
-          ) : searchError ? (
+          ) : searchScope === 'contents' && searchError ? (
             <div className="px-3 py-3 text-center text-[var(--gs-danger)]">{searchError}</div>
-          ) : search ? (
+          ) : searchScope === 'contents' && search ? (
             <RepoSearchResults hits={search.hits} truncated={search.truncated} query={search.query} onOpenFile={onOpenFile} />
           ) : loading && entries.length === 0 ? (
             <div className="px-3 py-3 text-center text-[var(--gs-text-dim)]">Loading…</div>
           ) : error ? (
             <div className="px-3 py-3 text-center text-[var(--gs-danger)]">{error}</div>
+          ) : searchScope === 'files' && query.trim() && treeEntries.length === 0 ? (
+            <div className="px-3 py-3 text-center text-[var(--gs-text-dim)]">No matching files</div>
           ) : (
             <PierreRepoTree
-              entries={treeFilter === 'changed'
-                // "Changed" = differs from base right now: committed diffs
-                // (changedSet) OR any working-tree status (modified, staged, or
-                // untracked '?') so on-disk/untracked edits show here too.
-                ? entries.filter((e) => changedSet.has(e.path) || Boolean(e.status))
-                : entries}
+              entries={treeEntries}
               changedSet={changedSet}
               onOpenFile={onOpenFile}
             />

@@ -1,6 +1,6 @@
 /** @jsxImportSource react */
-import { useState, type ReactElement } from 'react';
-import type { AgentControlInfo, AgentModelInfo, SessionStatus } from '../agents/agent-runtime-types.js';
+import { useEffect, useState, type ReactElement } from 'react';
+import type { AgentControlInfo, AgentGoalModeInfo, AgentModelInfo, AgentShakeMode, AgentShakeResult, SessionStatus } from '../agents/agent-runtime-types.js';
 
 function fmtTokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
@@ -8,7 +8,7 @@ function fmtTokens(n: number): string {
   return String(n);
 }
 
-type MenuId = 'model' | 'thinking' | 'settings';
+type MenuId = 'model' | 'thinking' | 'settings' | 'goal' | 'actions';
 
 /** A titled option-picker section inside the ⚙ settings popover. */
 function SettingsPickerSection({
@@ -58,6 +58,15 @@ export function AgentPaneHeader({
   onToggleFast,
   onOpenHistory,
   onOpenAuth,
+  goal,
+  goalMode,
+  goalModePending,
+  goalSessionKey,
+  onSetGoalMode,
+  shakeResult,
+  shakePending,
+  shakeError,
+  onShake,
   error,
   awaitingInput,
 }: {
@@ -71,7 +80,16 @@ export function AgentPaneHeader({
   onToggleFast?: () => void;
   onOpenHistory?: () => void;
   onOpenAuth?: () => void;
-  error?: string | null;
+  goal?: { id: string; title: string; phase: string } | null;
+  goalMode?: AgentGoalModeInfo;
+  goalModePending?: boolean;
+  /** Changes whenever this header begins representing a distinct agent session. */
+  goalSessionKey?: string | null;
+  onSetGoalMode?: (input: { enabled: boolean; precursor?: string }) => void | Promise<void>;
+  shakeResult?: AgentShakeResult;
+  shakePending?: boolean;
+  shakeError?: string | null;
+  onShake?: (mode: AgentShakeMode) => void | Promise<void>;
   /** Session is blocked on the user (an ask dialog / pending permission).
    *  Overrides busy→green so the header agrees with the board and the visible
    *  dialog — a mid-turn ask keeps status.type='busy', so without this the dot
@@ -80,6 +98,11 @@ export function AgentPaneHeader({
 }): ReactElement {
   const [menu, setMenu] = useState<MenuId | null>(null);
   const [modelQuery, setModelQuery] = useState('');
+  const [goalPrecursor, setGoalPrecursor] = useState('');
+  useEffect(() => {
+    setGoalPrecursor('');
+    setMenu((current) => current === 'goal' ? null : current);
+  }, [goalSessionKey]);
   const toggle = (id: MenuId) => {
     setMenu((m) => (m === id ? null : id));
     if (id === 'model') setModelQuery('');
@@ -116,6 +139,11 @@ export function AgentPaneHeader({
   // ":thinking" suffix; match on the base ref.
   const cycleRolesFor = (ref: string): string[] =>
     roles.filter((r) => r.model === ref || (r.model?.startsWith(`${ref}:`) ?? false)).map((r) => r.name);
+  const shakeDropped = shakeResult
+    ? shakeResult.mode === 'images'
+      ? (shakeResult.imagesDropped ?? 0)
+      : shakeResult.toolResultsDropped + shakeResult.blocksDropped
+    : 0;
 
   return (
     <div className="relative flex flex-shrink-0 items-center gap-2 border-b border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-3 py-1.5 text-[11px]">
@@ -284,6 +312,159 @@ export function AgentPaneHeader({
           >
             ⟲
           </button>
+        )}
+
+
+        {onShake && (
+          <span className="relative">
+            <button
+              type="button"
+              onClick={() => toggle('actions')}
+              title="Session actions"
+              className="flex h-6 w-6 items-center justify-center border border-[var(--gs-border)] text-[13px] text-[var(--gs-text-dim)] hover:border-[var(--gs-border-active)] hover:text-[var(--gs-text)]"
+            >
+              ⋯
+            </button>
+            {menu === 'actions' && (
+              <>
+                <div className="fixed inset-0 z-10" onClick={() => setMenu(null)} />
+                <div className="absolute right-0 top-full z-20 mt-1 w-80 border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] p-3 shadow-lg">
+                  <div className="border-b border-[var(--gs-border)] pb-2">
+                    <div className="font-[family-name:var(--gs-font-mono)] text-[10px] uppercase tracking-[0.12em] text-[var(--gs-text-dim)]">Session actions</div>
+                    <div className="mt-1 text-[11px] text-[var(--gs-text)]">Reduce active context</div>
+                    <div className="mt-0.5 text-[10px] leading-relaxed text-[var(--gs-text-dim)]">
+                      Changes the persisted active branch. The agent cannot undo this context reduction.
+                    </div>
+                  </div>
+                  {shakeError ? (
+                    <div className="mt-2 border-l-2 border-[var(--gs-danger)] bg-[var(--gs-bg)] px-2 py-1.5 text-[10px] text-[var(--gs-danger)]">
+                      {shakeError}
+                    </div>
+                  ) : null}
+                  {shakeResult ? (
+                    <div className={`mt-2 border px-2 py-1.5 text-[10px] ${
+                      shakeDropped > 0
+                        ? 'border-[var(--gs-success)] text-[var(--gs-text)]'
+                        : 'border-[var(--gs-border)] text-[var(--gs-text-dim)]'
+                    }`}>
+                      {shakeDropped === 0 ? (
+                        <>Nothing eligible was found.</>
+                      ) : shakeResult.mode === 'images' ? (
+                        <>{shakeResult.imagesDropped ?? 0} image{(shakeResult.imagesDropped ?? 0) === 1 ? '' : 's'} removed. Images cannot be recovered.</>
+                      ) : (
+                        <>
+                          {shakeResult.toolResultsDropped > 0 ? `${shakeResult.toolResultsDropped} tool result${shakeResult.toolResultsDropped === 1 ? '' : 's'}` : ''}
+                          {shakeResult.toolResultsDropped > 0 && shakeResult.blocksDropped > 0 ? ' + ' : ''}
+                          {shakeResult.blocksDropped > 0 ? `${shakeResult.blocksDropped} large block${shakeResult.blocksDropped === 1 ? '' : 's'}` : ''}
+                          {' removed · ~'}{shakeResult.tokensFreed.toLocaleString()} estimated tokens freed.
+                          <div className="mt-0.5 text-[var(--gs-text-dim)]">
+                            {shakeResult.artifactId ? 'Original output was saved as a session artifact.' : 'No recovery artifact was created.'}
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  ) : null}
+                  <button
+                    type="button"
+                    disabled={shakePending}
+                    onClick={() => { void onShake('elide'); }}
+                    className="mt-3 block w-full border border-[var(--gs-border)] px-2 py-1.5 text-left disabled:cursor-not-allowed disabled:opacity-50 hover:border-[var(--gs-border-active)] hover:bg-[var(--gs-bg)]"
+                  >
+                    <span className="block font-[family-name:var(--gs-font-mono)] text-[10px] text-[var(--gs-text)]">Elide heavy output</span>
+                    <span className="mt-0.5 block text-[10px] leading-relaxed text-[var(--gs-text-dim)]">Replace eligible tool results and large fenced/XML blocks. Original output is recoverable only when an artifact is created.</span>
+                  </button>
+                  <button
+                    type="button"
+                    disabled={shakePending}
+                    onClick={() => { void onShake('images'); }}
+                    className="mt-2 block w-full border border-[var(--gs-border)] px-2 py-1.5 text-left disabled:cursor-not-allowed disabled:opacity-50 hover:border-[var(--gs-border-active)] hover:bg-[var(--gs-bg)]"
+                  >
+                    <span className="block font-[family-name:var(--gs-font-mono)] text-[10px] text-[var(--gs-text)]">Drop images</span>
+                    <span className="mt-0.5 block text-[10px] leading-relaxed text-[var(--gs-text-dim)]">Permanently remove image blocks from this active branch.</span>
+                  </button>
+                  {shakePending ? <div className="mt-2 font-[family-name:var(--gs-font-mono)] text-[10px] text-[var(--gs-accent)]">Shaking context…</div> : null}
+                </div>
+              </>
+            )}
+          </span>
+        )}
+        {goal && onSetGoalMode && (
+          <span className="relative">
+            <button
+              type="button"
+              onClick={() => toggle('goal')}
+              title={goalMode?.enabled ? 'Goal Mode enabled' : 'Goal Mode'}
+              className={`flex h-6 items-center justify-center border px-1.5 font-[family-name:var(--gs-font-mono)] text-[10px] uppercase tracking-[0.08em] ${
+                goalMode?.enabled
+                  ? 'border-[var(--gs-accent)] text-[var(--gs-accent)]'
+                  : 'border-[var(--gs-border)] text-[var(--gs-text-dim)] hover:border-[var(--gs-border-active)] hover:text-[var(--gs-text)]'
+              }`}
+            >
+              goal
+            </button>
+            {menu === 'goal' && (
+              <>
+                <div className="fixed inset-0 z-10" onClick={() => setMenu(null)} />
+                <div className="absolute right-0 top-full z-20 mt-1 w-80 border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] p-3 shadow-lg">
+                  <div className="flex items-start justify-between gap-3 border-b border-[var(--gs-border)] pb-2">
+                    <div className="min-w-0">
+                      <div className="font-[family-name:var(--gs-font-mono)] text-[10px] uppercase tracking-[0.12em] text-[var(--gs-text-dim)]">Bound goal · {goal.phase}</div>
+                      <div className="mt-0.5 truncate text-[var(--gs-text)]" title={goal.title}>{goal.title}</div>
+                      <div className="mt-0.5 truncate font-[family-name:var(--gs-font-mono)] text-[10px] text-[var(--gs-text-dim)]" title={goal.id}>{goal.id}</div>
+                    </div>
+                    <span className={`mt-0.5 flex-none border px-1 py-0.5 font-[family-name:var(--gs-font-mono)] text-[9px] uppercase ${
+                      goalMode?.enabled
+                        ? 'border-[var(--gs-accent)] text-[var(--gs-accent)]'
+                        : 'border-[var(--gs-border)] text-[var(--gs-text-dim)]'
+                    }`}>
+                      {goalMode?.enabled ? 'on' : 'off'}
+                    </span>
+                  </div>
+                  <label className="mt-2 block text-[10px] uppercase tracking-[0.08em] text-[var(--gs-text-dim)]" htmlFor={`goal-precursor-${goalSessionKey ?? goal.id}`}>
+                    Precursor <span className="normal-case tracking-normal">(this session only)</span>
+                  </label>
+                  <textarea
+                    id={`goal-precursor-${goalSessionKey ?? goal.id}`}
+                    value={goalPrecursor}
+                    onChange={(event) => setGoalPrecursor(event.target.value)}
+                    disabled={goalMode?.enabled || goalModePending || goalMode?.available === false}
+                    rows={3}
+                    placeholder="Optional context for the agent…"
+                    className="mt-1 block w-full resize-y border border-[var(--gs-border)] bg-[var(--gs-bg)] px-2 py-1.5 font-[family-name:var(--gs-font)] text-[11px] text-[var(--gs-text)] outline-none placeholder:text-[var(--gs-text-ghost)] focus:border-[var(--gs-border-active)] disabled:cursor-not-allowed disabled:opacity-50"
+                  />
+                  {goalMode?.available === false ? (
+                    <div className="mt-2 border-l-2 border-[var(--gs-warning)] bg-[var(--gs-bg)] px-2 py-1.5 text-[10px] text-[var(--gs-warning)]">
+                      {goalMode.message ?? 'Goal Mode is unavailable for this session.'}
+                    </div>
+                  ) : goalMode?.message ? (
+                    <div className="mt-2 text-[10px] text-[var(--gs-danger)]">{goalMode.message}</div>
+                  ) : (
+                    <div className="mt-2 space-y-0.5 font-[family-name:var(--gs-font-mono)] text-[10px] text-[var(--gs-text-dim)]">
+                      <div>space goal show --goal {goal.id} --json</div>
+                      <div>space journal status --json</div>
+                      <div>space workflow validate</div>
+                    </div>
+                  )}
+                  <button
+                    type="button"
+                    disabled={goalModePending || goalMode?.available === false}
+                    onClick={() => {
+                      const enabled = !goalMode?.enabled;
+                      const precursor = goalPrecursor.trim();
+                      void onSetGoalMode({ enabled, ...(enabled && precursor ? { precursor } : {}) });
+                    }}
+                    className={`mt-3 flex h-7 w-full items-center justify-center border font-[family-name:var(--gs-font-mono)] text-[10px] uppercase tracking-[0.1em] disabled:cursor-not-allowed disabled:opacity-50 ${
+                      goalMode?.enabled
+                        ? 'border-[var(--gs-border)] text-[var(--gs-text-dim)] hover:border-[var(--gs-danger)] hover:text-[var(--gs-danger)]'
+                        : 'border-[var(--gs-accent)] text-[var(--gs-accent)] hover:bg-[var(--gs-accent)] hover:text-[var(--gs-text-on-accent)]'
+                    }`}
+                  >
+                    {goalModePending ? 'Updating…' : goalMode?.enabled ? 'Disable Goal Mode' : 'Enable Goal Mode'}
+                  </button>
+                </div>
+              </>
+            )}
+          </span>
         )}
 
         {(onOpenAuth || canCycleRole || onSetApprovalMode) && (

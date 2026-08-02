@@ -26,12 +26,11 @@ const PAYLOAD: AgentReportPayload = {
 };
 
 function spySinks() {
-  const seen: Record<string, unknown[]> = { event: [], dialog: [], ui: [], term: [], report: [] };
+  const seen: Record<string, unknown[]> = { event: [], dialog: [], ui: [], report: [] };
   const sinks: SessionHostSinks = {
     onEvent: (e) => seen.event!.push(e),
     onDialogRequest: (r) => seen.dialog!.push(r),
     onUiEvent: (e) => seen.ui!.push(e),
-    onTerminalOutput: (d) => seen.term!.push(d),
     onAgentReport: (p) => seen.report!.push(p),
   };
   return { sinks, seen };
@@ -96,7 +95,6 @@ describe('agent-report over the worker IPC protocol', () => {
     expect(seen.event).toEqual([]);
     expect(seen.dialog).toEqual([]);
     expect(seen.ui).toEqual([]);
-    expect(seen.term).toEqual([]);
   });
 
   test('other sink pushes still route; boot/RPC messages are not sink traffic', () => {

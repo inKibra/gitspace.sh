@@ -1,13 +1,7 @@
 import { parseCommandArgs } from '@oh-my-pi/pi-coding-agent/utils/command-args';
 
 import type { HostUIBridgeEmitter, HostUIDialogRequest, HostUIDialogResponse } from './host-ui-bridge.js';
-import {
-  terminateSession as terminateTmuxSession,
-  listSessions as listTmuxSessions,
-  createVirtualSession as createTmuxVirtualSession,
-  resizeVirtualSession as resizeTmuxVirtualSession,
-} from '../cli.js';
-import type { Session as TmuxSession } from '../protocol.js';
+import { terminateSession as terminateTmuxSession } from '../cli.js';
 import {
   createPiAuthStorage,
   createPiModelRegistry,
@@ -15,7 +9,7 @@ import {
   openPiSessionManager,
   readCycleOrder,
 } from './pi-runtime.js';
-import type { AgentControlInfo, AgentDefinitionInfo, AgentHistoryEntry, AgentOAuthEvent, AgentSessionUsageReport, AgentSettingSchemaItem, AgentToolInfo, AgentTreeNode } from '../../../agents/agent-runtime-types.js';
+import type { AgentControlInfo, AgentDefinitionInfo, AgentGoalModeInfo, AgentHistoryEntry, AgentOAuthEvent, AgentSessionUsageReport, AgentSettingSchemaItem, AgentShakeMode, AgentShakeResult, AgentToolInfo, AgentTreeNode } from '../../../agents/agent-runtime-types.js';
 import { getTranscriptRange } from '../../../blocks/agent/transcript-source.js';
 import { CLAUDE_MODEL_ALIAS_TO_MODEL_ROLE } from '../../../blocks/model-roles.js';
 import type { TranscriptPage, TranscriptSource } from '../../../blocks/agent/transcript-source.js';
@@ -27,8 +21,6 @@ import {
   shouldDisplayAgentSession,
 } from '../../../agents/session-display.js';
 import type { AgentEvent } from '../../../agents/backend.js';
-import { getVirtualTerminal } from '../virtual-session-registry.js';
-import type { VirtualTerminal } from './virtual-terminal.js';
 import type { AgentSessionHost, SessionHostBoot, SessionHostSinks } from './session-host.js';
 import {
   THINKING_LEVELS,
@@ -37,6 +29,8 @@ import {
 } from './local-session-host.js';
 import { WorkerSessionHost, type WorkerSessionHostConfig } from './worker/worker-session-host.js';
 import { writeTraceLog } from '../../../utils/trace-log.js';
+import { resolveWorkspaceGoal } from '../../../core/goal-chain.js';
+import { getWorkspaceStatus } from '../../../core/workspace-metadata.js';
 
 /**
  * Boots the per-session host. Production always uses {@link WorkerSessionHost}
@@ -60,7 +54,8 @@ function maxAgentHosts(): number {
 }
 
 // Dynamic imports: oh-my-pi has module-level side effects (postmortem signal
-// handlers, provider registration) that conflict with OpenTUI when loaded eagerly.
+// handlers that can call process.exit, provider registration) that must not
+// run just because this module is imported.
 const importSlashCommands = () => import('@oh-my-pi/pi-coding-agent/extensibility/slash-commands');
 const importExecModule = () => import('@oh-my-pi/pi-coding-agent/exec/exec');
 
@@ -116,6 +111,16 @@ export interface PiWorkspaceTarget {
   projectName: string;
 }
 
+function isTargetForLiveSession(
+  expected: PiWorkspaceTarget | undefined,
+  actual: PiWorkspaceTarget,
+): boolean {
+  return expected?.workspaceId === actual.workspaceId
+    && expected.workspaceName === actual.workspaceName
+    && expected.workspacePath === actual.workspacePath
+    && expected.projectName === actual.projectName;
+}
+
 export interface PiAgentSessionSummary {
   id: string;
   workspaceId: string;
@@ -125,28 +130,6 @@ export interface PiAgentSessionSummary {
   archivedAt?: string;
 }
 
-function buildAgentTerminalSessionName(target: PiWorkspaceTarget, agentSessionId: string): string {
-  return `agent:${target.workspaceName}:${agentSessionId.slice(-8)}`;
-}
-
-function isAgentTmuxSession(session: TmuxSession, workspaceId: string, agentSessionId: string): boolean {
-  return session.kind === PI_AGENT_TMUX_SESSION_KIND
-    && session.metadata?.workspaceId === workspaceId
-    && session.metadata?.agentSessionId === agentSessionId;
-}
-
-function isLikelyAgentTmuxSession(session: TmuxSession, target: PiWorkspaceTarget, agentSessionId: string): boolean {
-  return isAgentTmuxSession(session, target.workspaceId, agentSessionId)
-    || (
-      session.kind === PI_AGENT_TMUX_SESSION_KIND
-      && session.name === buildAgentTerminalSessionName(target, agentSessionId)
-    );
-}
-
-interface TerminalSessionBinding {
-  workspaceId: string;
-  agentSessionId: string;
-}
 
 /**
  * PiCoordinator — the daemon-side ROUTER for agent sessions.
@@ -157,16 +140,16 @@ interface TerminalSessionBinding {
  *   - discovers/boots hosts and tracks them by agent session id,
  *   - forwards commands to the owning host,
  *   - fans host events/dialog requests back out to clients,
- *   - manages tmux terminal-session bindings + the daemon-side VirtualTerminal
- *     relay (client input → host, host output → xterm + clients),
  *   - answers "cold" queries (no live host) straight from session files.
  */
 export class PiCoordinator {
   private readonly oauthPrompts = new Map<string, (value: string) => void>();
-  private readonly inflightTerminalSessions = new Map<string, Promise<TmuxSession>>();
   private readonly inflightHosts = new Map<string, Promise<AgentSessionHost>>();
-  private readonly terminalBindings = new Map<string, TerminalSessionBinding>();
-  private readonly terminalSessionIdsByAgentKey = new Map<string, Set<string>>();
+  // Viewer leases: `${workspaceId}:${agentSessionId}` → lease keys, one per open
+  // client pane. This is what "someone is looking at this session" means for a
+  // native (non-terminal) client, and it is the successor to counting bound
+  // tmux sessions. Both are consulted while the terminal path still exists.
+  private readonly agentLeases = new Map<string, Set<string>>();
   private readonly hosts = new Map<string, AgentSessionHost>();
   // Reverse index: agentSessionId → workspaceId, kept in sync with hosts.
   private readonly sessionWorkspaceIds = new Map<string, string>();
@@ -175,9 +158,6 @@ export class PiCoordinator {
   // session whose live worker is gone, so the snapshot returns it to the
   // dormant (not-running) state instead of freezing its last busy/retry/error.
   private readonly sessionTargets = new Map<string, PiWorkspaceTarget>();
-  // Daemon-side VirtualTerminal relays (registry VT per agent session): client
-  // keystrokes route host-ward, host render bytes route xterm/client-ward.
-  private readonly terminalRelays = new Map<string, VirtualTerminal>();
   // dialogId → agentSessionId for routing client dialog responses to the host.
   private readonly dialogSessions = new Map<string, string>();
   // dialogId → the full pending request, retained for the lifetime of the
@@ -424,6 +404,79 @@ export class PiCoordinator {
   async setThinkingLevel(target: PiWorkspaceTarget, agentSessionId: string, level: string): Promise<boolean> {
     const host = await this.ensureHost(target, agentSessionId);
     return host.setThinkingLevel(level);
+  }
+
+  /** Goal Mode belongs only to an already-live host; do not cold-open it. */
+  async getGoalMode(target: PiWorkspaceTarget, agentSessionId: string): Promise<AgentGoalModeInfo> {
+    const host = this.hosts.get(agentSessionId);
+    if (!host) {
+      return {
+        enabled: false,
+        available: false,
+        message: 'Goal Mode is available only while this agent session is active.',
+      };
+    }
+    if (!isTargetForLiveSession(this.sessionTargets.get(agentSessionId), target)) {
+      return {
+        enabled: false,
+        available: false,
+        message: 'This agent session is not bound to the requested workspace.',
+      };
+    }
+    return host.getGoalMode();
+  }
+
+  async setGoalMode(
+    target: PiWorkspaceTarget,
+    agentSessionId: string,
+    input: { enabled: boolean; precursor?: string },
+  ): Promise<AgentGoalModeInfo> {
+    const host = this.hosts.get(agentSessionId);
+    if (!host) {
+      return {
+        enabled: false,
+        available: false,
+        message: 'Goal Mode can only be changed while this agent session is active.',
+      };
+    }
+    if (!isTargetForLiveSession(this.sessionTargets.get(agentSessionId), target)) {
+      return {
+        enabled: false,
+        available: false,
+        message: 'This agent session is not bound to the requested workspace.',
+      };
+    }
+    if (!input.enabled) return host.setGoalMode({ enabled: false });
+
+    const goal = resolveWorkspaceGoal(target.projectName, target.workspaceName);
+    if (!goal || goal.workspaceName !== target.workspaceName || goal.archivedAt) {
+      return {
+        enabled: false,
+        available: true,
+        message: 'Goal Mode requires a GoalRecord bound to this workspace.',
+      };
+    }
+    const phase = getWorkspaceStatus(target.projectName, target.workspaceName) ?? goal.phase;
+    const precursor = input.precursor?.trim();
+    const objective = [
+      `GitSpace Goal ${goal.id}: ${goal.title}`,
+      `Current phase: ${phase}.`,
+      'When uncertain, use `space goal show --goal ' + goal.id + ' --json`, `space journal status --json`, and `space workflow validate`.',
+      precursor,
+    ].filter((part): part is string => Boolean(part)).join('\n\n');
+    return host.setGoalMode({ enabled: true, objective });
+  }
+
+  /** Shake rewrites only an already-live, workspace-bound session. */
+  async shake(target: PiWorkspaceTarget, agentSessionId: string, mode: AgentShakeMode): Promise<AgentShakeResult> {
+    const host = this.hosts.get(agentSessionId);
+    if (!host) {
+      throw new Error('Shake is available only while this agent session is active.');
+    }
+    if (!isTargetForLiveSession(this.sessionTargets.get(agentSessionId), target)) {
+      throw new Error('This agent session is not bound to the requested workspace.');
+    }
+    return host.shake(mode);
   }
 
   /** Set the tool-approval mode (persisted to settings). */
@@ -858,33 +911,16 @@ export class PiCoordinator {
     return mergeCreatedSession(sessions, created);
   }
 
+  /**
+   * Close an agent session: nothing is watching it anymore, so drop every
+   * lease and tear the host down. Returns whether a live host was disposed.
+   */
   async closeAgentSession(target: PiWorkspaceTarget, agentSessionId: string): Promise<boolean> {
-    let killed = false;
-    let foundTerminalSessionId: string | null = null;
-    try {
-      const sessions = await listTmuxSessions();
-      const pty = sessions.find((s) => isLikelyAgentTmuxSession(s, target, agentSessionId))
-        ?? this.findMappedTmuxSession(sessions, target.workspaceId, agentSessionId);
-      if (pty) {
-        foundTerminalSessionId = pty.id;
-        try {
-          await terminateTmuxSession(pty.id);
-          killed = true;
-        } catch {
-          // Kill failed (session already dead?) — still release below
-        }
-      }
-    } catch {
-      // listTmuxSessions failed — still try to dispose the host below
-    }
-    if (foundTerminalSessionId) {
-      this.releaseTerminalSession(foundTerminalSessionId);
-    }
-    // Always dispose the host if no terminal owners remain
-    if (!this.hasTerminalOwners(target.workspaceId, agentSessionId)) {
-      await this.disposeHost(agentSessionId);
-    }
-    return killed;
+    const key = this.getBindingKey(target.workspaceId, agentSessionId);
+    this.agentLeases.delete(key);
+    const hadHost = this.hosts.has(agentSessionId);
+    await this.disposeHost(agentSessionId);
+    return hadHost;
   }
 
   /**
@@ -953,159 +989,89 @@ export class PiCoordinator {
     deleteArchivedSession(target.workspaceId, agentSessionId);
   }
 
-  getTerminalBinding(terminalSessionId: string): TerminalSessionBinding | null {
-    return this.terminalBindings.get(terminalSessionId) ?? null;
-  }
-
-  hasTerminalOwners(workspaceId: string, agentSessionId: string): boolean {
-    return this.getTerminalOwnerCount(workspaceId, agentSessionId) > 0;
-  }
-
-  rebindTerminalSession(
-    workspaceId: string,
-    terminalSessionId: string,
-    nextAgentSessionId: string,
-  ): { previousAgentSessionId?: string; previousOwnerCount: number; nextOwnerCount: number } {
-    const existing = this.terminalBindings.get(terminalSessionId);
-    if (existing && existing.workspaceId !== workspaceId) {
-      throw new Error(
-        `Cannot rebind tmux session '${terminalSessionId}' from workspace '${existing.workspaceId}' to '${workspaceId}'.`,
-      );
-    }
-    const previous = this.unbindTerminalSession(terminalSessionId);
-    const nextOwnerCount = this.bindTerminalSession(workspaceId, terminalSessionId, nextAgentSessionId);
-    const previousOwnerCount = previous ? this.getTerminalOwnerCount(previous.workspaceId, previous.agentSessionId) : 0;
-    if (previous && previousOwnerCount === 0 && previous.agentSessionId !== nextAgentSessionId) {
-      void this.disposeHost(previous.agentSessionId).catch((err) => {
-        console.error(`[pi-coordinator] Failed to dispose agent session ${previous.agentSessionId}:`, err);
-      });
-    }
-    return {
-      previousAgentSessionId: previous?.agentSessionId,
-      previousOwnerCount,
-      nextOwnerCount,
-    };
-  }
-
-  releaseTerminalSession(
-    terminalSessionId: string,
-  ): { workspaceId: string; agentSessionId: string; remainingOwnerCount: number } | null {
-    const binding = this.unbindTerminalSession(terminalSessionId);
-    if (!binding) return null;
-    const remainingOwnerCount = this.getTerminalOwnerCount(binding.workspaceId, binding.agentSessionId);
-    if (remainingOwnerCount === 0) {
-      void this.disposeHost(binding.agentSessionId).catch((err) => {
-        console.error(`[pi-coordinator] Failed to dispose agent session ${binding.agentSessionId}:`, err);
-      });
-    }
-    return {
-      ...binding,
-      remainingOwnerCount,
-    };
+  /** Everything currently keeping a session's host alive. Native panes are the
+   *  only viewers now that agent sessions have no terminal. */
+  hasAgentViewers(workspaceId: string, agentSessionId: string): boolean {
+    return this.getViewerCount(workspaceId, agentSessionId) > 0;
   }
 
   /**
-   * Ensure a tmux-lite virtual terminal session exists for a Pi agent session.
-   * Uses Pi's session ID to find and resume the right JSONL file.
-   * Throws if the session file is not found (prevents silent mismatch).
+   * Open an agent session for a native client pane: boot (or reuse) its host
+   * and record a viewer lease. No tmux session, no PTY, no InteractiveMode —
+   * the client renders the transcript from events and cold file reads.
+   *
+   * `leaseKey` identifies one viewer (connection + pane). Re-opening with the
+   * same key is idempotent.
    */
-  async ensureAgentTerminalSession(
+  async openAgentSession(
     target: PiWorkspaceTarget,
     agentSessionId: string,
-    sessionFile?: PiSessionFileInfo,
-    options?: { cols?: number; rows?: number },
-  ): Promise<TmuxSession> {
-    const key = `${target.workspaceId}:${agentSessionId}`;
-    const inFlight = this.inflightTerminalSessions.get(key);
-    if (inFlight) return inFlight;
-
-    const ensurePromise = this.ensureAgentTerminalSessionInternal(target, agentSessionId, sessionFile, options).finally(() => {
-      this.inflightTerminalSessions.delete(key);
-    });
-    this.inflightTerminalSessions.set(key, ensurePromise);
-    return ensurePromise;
-  }
-
-  private async ensureAgentTerminalSessionInternal(
-    target: PiWorkspaceTarget,
-    agentSessionId: string,
-    sessionFile?: PiSessionFileInfo,
-    options?: { cols?: number; rows?: number },
-  ): Promise<TmuxSession> {
-    const match = sessionFile ?? findPiSessionFile(target.workspacePath, agentSessionId, this.sessionsRoot);
+    leaseKey: string,
+  ): Promise<number> {
+    const match = findPiSessionFile(target.workspacePath, agentSessionId, this.sessionsRoot);
     if (!match) {
       throw new Error(
         `Pi session '${agentSessionId}' not found for workspace '${target.workspaceId}'. ` +
         `The session file may have been deleted or the ID is stale.`,
       );
     }
+    await this.ensureHost(target, agentSessionId, match);
+    const key = this.getBindingKey(target.workspaceId, agentSessionId);
+    let leases = this.agentLeases.get(key);
+    if (!leases) {
+      leases = new Set();
+      this.agentLeases.set(key, leases);
+    }
+    leases.add(leaseKey);
+    return leases.size;
+  }
 
-    const tmuxSessions = await listTmuxSessions();
-    const existing = tmuxSessions.find((s) => isLikelyAgentTmuxSession(s, target, agentSessionId))
-      ?? this.findMappedTmuxSession(tmuxSessions, target.workspaceId, agentSessionId);
-    if (existing) {
-      if (existing.exitCode === undefined) {
-        if (options?.cols && options?.rows) {
-          await resizeTmuxVirtualSession(existing.id, options.cols, options.rows);
-        }
-        this.bindTerminalSession(target.workspaceId, existing.id, agentSessionId);
-        return existing;
+  /**
+   * Drop one viewer lease. The host is disposed once nothing is viewing it,
+   * mirroring what the last terminal detach used to do. Returns the workspace
+   * the session belongs to (so callers can emit a scoped update) and the
+   * viewers that remain, or null when the lease was already gone.
+   */
+  releaseAgentLease(agentSessionId: string, leaseKey: string): { workspaceId: string; remaining: number } | null {
+    const suffix = `:${agentSessionId}`;
+    for (const [key, leases] of this.agentLeases) {
+      if (!key.endsWith(suffix) || !leases.delete(leaseKey)) continue;
+      if (leases.size === 0) this.agentLeases.delete(key);
+      const workspaceId = key.slice(0, -suffix.length);
+      const remaining = this.getViewerCount(workspaceId, agentSessionId);
+      if (remaining === 0) {
+        void this.disposeHost(agentSessionId).catch((err) => {
+          console.error(`[pi-coordinator] Failed to dispose agent session ${agentSessionId}:`, err);
+        });
       }
-      this.releaseTerminalSession(existing.id);
+      return { workspaceId, remaining };
     }
-
-    // A stale interactive mode from a dead terminal — stop it before recreating.
-    await this.hosts.get(agentSessionId)?.stopTerminal();
-
-    return this.createVirtualAgentSession(target, agentSessionId, match, options);
+    return null;
   }
 
-  private async createVirtualAgentSession(
-    target: PiWorkspaceTarget,
-    agentSessionId: string,
-    sessionFile: PiSessionFileInfo,
-    options?: { cols?: number; rows?: number },
-  ): Promise<TmuxSession> {
-    const host = await this.ensureHost(target, agentSessionId, sessionFile);
-    const tmuxSession = await createTmuxVirtualSession(
-      buildAgentTerminalSessionName(target, agentSessionId),
-      target.workspacePath,
-      {
-        cols: options?.cols,
-        rows: options?.rows,
-        kind: PI_AGENT_TMUX_SESSION_KIND,
-        hidden: true,
-        metadata: {
-          workspaceId: target.workspaceId,
-          agentSessionId,
-        },
-      },
-    );
-
-    const virtualTerminal = getVirtualTerminal(tmuxSession.id);
-    if (!virtualTerminal) {
-      await terminateTmuxSession(tmuxSession.id).catch(() => {});
-      throw new Error('VirtualTerminal not found in registry after session creation');
-    }
-
-    try {
-      // Relay wiring: host render bytes → registry VT.write → xterm + client
-      // fan-out; client keystrokes/resizes → registry VT.start handlers → host.
-      this.terminalRelays.set(agentSessionId, virtualTerminal);
-      await host.startTerminal(virtualTerminal.columns, virtualTerminal.rows);
-      virtualTerminal.start(
-        (data) => host.injectTerminalInput(data),
-        () => host.resizeTerminal(virtualTerminal.columns, virtualTerminal.rows),
-      );
-      this.bindTerminalSession(target.workspaceId, tmuxSession.id, agentSessionId);
-      return tmuxSession;
-    } catch (error) {
-      this.terminalRelays.delete(agentSessionId);
-      await terminateTmuxSession(tmuxSession.id).catch(() => {});
-      throw error;
+  /** Release every lease whose key starts with `ownerPrefix` — a disconnecting
+   *  client takes all of its panes with it. */
+  releaseAgentLeasesForOwner(ownerPrefix: string): void {
+    for (const [key, leases] of [...this.agentLeases]) {
+      let changed = false;
+      for (const leaseKey of [...leases]) {
+        if (leaseKey.startsWith(ownerPrefix)) {
+          leases.delete(leaseKey);
+          changed = true;
+        }
+      }
+      if (!changed) continue;
+      if (leases.size === 0) this.agentLeases.delete(key);
+      const separator = key.lastIndexOf(':');
+      const workspaceId = key.slice(0, separator);
+      const agentSessionId = key.slice(separator + 1);
+      if (this.getViewerCount(workspaceId, agentSessionId) === 0) {
+        void this.disposeHost(agentSessionId).catch((err) => {
+          console.error(`[pi-coordinator] Failed to dispose agent session ${agentSessionId}:`, err);
+        });
+      }
     }
   }
-
 
   // -------------------------------------------------------------------------
   // Private helpers
@@ -1125,7 +1091,6 @@ export class PiCoordinator {
     this.hosts.clear();
     this.sessionWorkspaceIds.clear();
     this.sessionTargets.clear();
-    this.terminalRelays.clear();
     this.dialogSessions.clear();
     this.pendingDialogRequests.clear();
   }
@@ -1159,7 +1124,7 @@ export class PiCoordinator {
       .filter((id) => !this.busySessions.has(id))
       .filter((id) => {
         const workspaceId = this.sessionWorkspaceIds.get(id);
-        return !workspaceId || !this.hasTerminalOwners(workspaceId, id);
+        return !workspaceId || this.getViewerCount(workspaceId, id) === 0;
       })
       .sort((a, b) => (this.hostLastUsed.get(a) ?? 0) - (this.hostLastUsed.get(b) ?? 0));
     const evictee = candidates[0];
@@ -1173,26 +1138,12 @@ export class PiCoordinator {
     await this.disposeHost(evictee);
   }
 
-  /** A worker died without being asked to — drop its bookkeeping, close any
-   *  attached terminals (a frozen screen is worse than a closed one), and tell
+  /** A worker died without being asked to — drop its bookkeeping and tell
    *  clients the session is no longer running so it returns to the dormant
    *  (grey) state instead of hanging busy or freezing on its last error. Red is
    *  reserved for a live, currently-erroring session; a worker that is gone is
    *  not running. The next interaction lazily restores it from its file. */
   private handleWorkerExit(target: PiWorkspaceTarget, sessionId: string, detail: string): void {
-    const relay = this.terminalRelays.get(sessionId);
-    if (relay) {
-      relay.stop();
-      this.terminalRelays.delete(sessionId);
-    }
-    const workspaceId = this.sessionWorkspaceIds.get(sessionId);
-    if (workspaceId) {
-      const key = this.getBindingKey(workspaceId, sessionId);
-      for (const terminalId of [...(this.terminalSessionIdsByAgentKey.get(key) ?? [])]) {
-        this.unbindTerminalSession(terminalId);
-        void terminateTmuxSession(terminalId).catch(() => undefined);
-      }
-    }
     this.hosts.delete(sessionId);
     this.sessionWorkspaceIds.delete(sessionId);
     this.sessionTargets.delete(sessionId);
@@ -1238,11 +1189,6 @@ export class PiCoordinator {
       },
       onUiEvent: (event) => {
         this.hostUIEmitter?.emitEvent(event);
-      },
-      onTerminalOutput: (data) => {
-        const sessionId = getSessionId();
-        if (!sessionId) return;
-        this.terminalRelays.get(sessionId)?.write(data);
       },
       onAgentReport: (payload) => {
         // Agent invoked the SDK's report_tool_issue tool — file it through the
@@ -1362,11 +1308,6 @@ export class PiCoordinator {
         this.pendingDialogRequests.delete(dialogId);
       }
     }
-    const relay = this.terminalRelays.get(sessionId);
-    if (relay) {
-      relay.stop();
-      this.terminalRelays.delete(sessionId);
-    }
     const host = this.hosts.get(sessionId);
     this.hostLastUsed.delete(sessionId);
     this.busySessions.delete(sessionId);
@@ -1386,37 +1327,10 @@ export class PiCoordinator {
     return `${workspaceId}:${agentSessionId}`;
   }
 
-  private getTerminalOwnerCount(workspaceId: string, agentSessionId: string): number {
-    return this.terminalSessionIdsByAgentKey.get(this.getBindingKey(workspaceId, agentSessionId))?.size ?? 0;
-  }
-
-  private bindTerminalSession(
-    workspaceId: string,
-    terminalSessionId: string,
-    agentSessionId: string,
-  ): number {
-    const key = this.getBindingKey(workspaceId, agentSessionId);
-    let terminalIds = this.terminalSessionIdsByAgentKey.get(key);
-    if (!terminalIds) {
-      terminalIds = new Set();
-      this.terminalSessionIdsByAgentKey.set(key, terminalIds);
-    }
-    terminalIds.add(terminalSessionId);
-    this.terminalBindings.set(terminalSessionId, { workspaceId, agentSessionId });
-    return terminalIds.size;
-  }
-
-  private unbindTerminalSession(terminalSessionId: string): TerminalSessionBinding | null {
-    const binding = this.terminalBindings.get(terminalSessionId);
-    if (!binding) return null;
-    this.terminalBindings.delete(terminalSessionId);
-    const key = this.getBindingKey(binding.workspaceId, binding.agentSessionId);
-    const terminalIds = this.terminalSessionIdsByAgentKey.get(key);
-    terminalIds?.delete(terminalSessionId);
-    if (terminalIds && terminalIds.size === 0) {
-      this.terminalSessionIdsByAgentKey.delete(key);
-    }
-    return binding;
+  /** Everything currently keeping a session's host alive: one entry per open
+   *  client pane. Disposal and eviction both gate on this. */
+  private getViewerCount(workspaceId: string, agentSessionId: string): number {
+    return this.agentLeases.get(this.getBindingKey(workspaceId, agentSessionId))?.size ?? 0;
   }
 
   private async waitForSessionFile(
@@ -1432,24 +1346,6 @@ export class PiCoordinator {
       await new Promise((resolve) => setTimeout(resolve, SESSION_DISCOVERY_POLL_MS));
     }
     return null;
-  }
-
-  private findMappedTmuxSession(
-    tmuxSessions: TmuxSession[],
-    workspaceId: string,
-    agentSessionId: string,
-  ): TmuxSession | undefined {
-    const key = this.getBindingKey(workspaceId, agentSessionId);
-    const mappedTmuxIds = this.terminalSessionIdsByAgentKey.get(key);
-    if (!mappedTmuxIds || mappedTmuxIds.size === 0) return undefined;
-    for (const mappedTmuxId of [...mappedTmuxIds]) {
-      const match = tmuxSessions.find((s) => s.id === mappedTmuxId);
-      if (match) {
-        return match;
-      }
-      this.releaseTerminalSession(mappedTmuxId);
-    }
-    return undefined;
   }
 
   async runSpaceCommand(target: PiWorkspaceTarget, argsText: string): Promise<string> {

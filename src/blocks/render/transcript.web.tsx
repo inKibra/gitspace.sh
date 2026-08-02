@@ -1,4 +1,5 @@
 import { useState, type ReactElement } from 'react';
+import type { Block } from '../index.js';
 import type { ErrorData, ImageData, MessageData, SubagentData, ThinkingData, ToolCallData } from '../types/transcript.js';
 import { defineRenderer, BlockView } from './registry.web.js';
 import { useBlockHost } from './host.web.js';
@@ -91,12 +92,10 @@ const TOOL_STATUS_CHIP: Record<ToolCallData['status'], string> = {
 };
 // Input/output sections render their blocks directly (no visible section
 // headers) — the border-t alone separates them from the header row.
-function ToolSection({ blocks }: { blocks: readonly unknown[] }): ReactElement {
+function ToolSection({ blocks }: { blocks: readonly Block[] }): ReactElement {
   return (
     <div className="border-t border-[var(--gs-border)] p-2">
-      {blocks.map((b, i) => (
-        <BlockView key={(b as { id?: string }).id ?? i} block={b as Parameters<typeof BlockView>[0]['block']} />
-      ))}
+      {blocks.map((block) => <BlockView key={block.id} block={block} />)}
     </div>
   );
 }
@@ -156,23 +155,42 @@ const SUB_STATUS_DOT: Record<SubagentData['status'], string> = {
   blocked: 'bg-[var(--gs-danger)]',
   queued: 'bg-[var(--gs-text-dim)]',
 };
-defineRenderer<SubagentData>('subagent', ({ data }): ReactElement => (
-  <div className="my-2 border border-[var(--gs-border)] border-l-2 border-l-[var(--gs-purple)] bg-[var(--gs-bg-elevated)]">
-    <div className="flex items-center gap-2 px-2 py-1.5 border-b border-[var(--gs-border)]">
-      <span className={`h-[7px] w-[7px] flex-none rounded-full ${SUB_STATUS_DOT[data.status]}`} />
-      <span className="font-mono text-[12px] text-[var(--gs-text)]">✦ {data.label}</span>
-      {data.model && <span className="font-mono text-[11px] text-[var(--gs-text-dim)]">{data.model}</span>}
-      <span className={`ml-auto ${CHIP_BASE} ${SUB_STATUS_CHIP[data.status]}`}>{data.status}</span>
-    </div>
-    {data.lines.length > 0 && (
-      <div className="px-2 py-1.5">
-        {data.lines.map((l, i) => (
-          <div key={i} className="text-[11px] text-[var(--gs-text-dim)] leading-[1.55]">→ {l}</div>
-        ))}
+function formatDuration(durationMs: number): string {
+  return durationMs >= 10_000 ? `${(durationMs / 1_000).toFixed(1)}s` : `${Math.round(durationMs / 100) / 10}s`;
+}
+
+defineRenderer<SubagentData>('subagent', ({ data }): ReactElement => {
+  const activity = [
+    data.durationMs !== undefined ? formatDuration(data.durationMs) : null,
+    data.requests !== undefined ? `${data.requests} request${data.requests === 1 ? '' : 's'}` : null,
+  ].filter((value): value is string => value !== null);
+
+  return (
+    <div className="my-2 border border-[var(--gs-border)] border-l-2 border-l-[var(--gs-purple)] bg-[var(--gs-bg-elevated)]">
+      <div className="flex items-center gap-2 px-2 py-1.5 border-b border-[var(--gs-border)]">
+        <span className={`h-[7px] w-[7px] flex-none rounded-full ${SUB_STATUS_DOT[data.status]}`} />
+        <span className="min-w-0 truncate font-mono text-[12px] text-[var(--gs-text)]">✦ {data.label}</span>
+        {data.agent && <span className="shrink-0 font-mono text-[10px] text-[var(--gs-accent)]">{data.agent}</span>}
+        {data.source && <span className="shrink-0 text-[9px] uppercase tracking-wide text-[var(--gs-text-ghost)]">{data.source}</span>}
+        <span className={`ml-auto ${CHIP_BASE} ${SUB_STATUS_CHIP[data.status]}`}>{data.status}</span>
       </div>
-    )}
-  </div>
-));
+      {(data.model || data.resolvedModel || activity.length > 0) && (
+        <div className="flex min-w-0 items-center gap-1.5 px-2 py-1 text-[11px]">
+          {data.model && <span className="shrink-0 text-[var(--gs-text)]">{data.model}</span>}
+          {data.resolvedModel && <span className="min-w-0 truncate font-mono text-[var(--gs-text-dim)]" title={data.resolvedModel}>— {data.resolvedModel}</span>}
+          {activity.length > 0 && <span className="ml-auto shrink-0 tabular-nums text-[var(--gs-text-ghost)]">{activity.join(' · ')}</span>}
+        </div>
+      )}
+      {data.lines.length > 0 && (
+        <div className="px-2 py-1.5">
+          {data.lines.map((line, index) => (
+            <div key={index} className="text-[11px] text-[var(--gs-text-dim)] leading-[1.55]">→ {line}</div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+});
 
 // ── error ─────────────────────────────────────────────────────────────────
 defineRenderer<ErrorData>('error', ({ data, block }): ReactElement => {

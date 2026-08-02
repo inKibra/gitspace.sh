@@ -22,7 +22,7 @@ import type { WideEventFilter } from '../types/events.js';
 import type { SessionLinearIssueSummary, WorkspaceSource } from '../types/lifecycle.js';
 import type { ConfirmStepResult, SpacesBundle } from '../types/bundle.js';
 import type { AgentStateUpdateDelta, WorkspaceAgentState } from '../lib/tmux-lite/agent-event-manager.js';
-import type { AgentControlInfo, AgentDefinitionInfo, AgentHistoryEntry, AgentSettingItem, AgentSettingSchemaItem, AgentToolInfo, AgentTreeNode } from '../agents/agent-runtime-types.js';
+import type { AgentControlInfo, AgentDefinitionInfo, AgentGoalModeInfo, AgentHistoryEntry, AgentSettingItem, AgentSettingSchemaItem, AgentShakeMode, AgentShakeResult, AgentToolInfo, AgentTreeNode } from '../agents/agent-runtime-types.js';
 
 import type { ChainStackStatus, GoalChain, GoalRecord, GoalUpdateInput, WorkspacePhaseChangePreview } from '../types/goals.js';
 export type BackendKey = string;
@@ -281,6 +281,16 @@ export interface SessionBackend {
 
   /** Control-surface snapshot for an agent session (usage + model switcher). */
   getAgentControlInfo?(workspaceId: string, agentSessionId: string): Promise<AgentControlInfo>;
+  /** Read session-local OMP Goal Mode status. */
+  getAgentGoalMode?(workspaceId: string, agentSessionId: string): Promise<AgentGoalModeInfo>;
+  /** Enable or disable session-local OMP Goal Mode. */
+  setAgentGoalMode?(
+    workspaceId: string,
+    agentSessionId: string,
+    input: { enabled: boolean; precursor?: string },
+  ): Promise<AgentGoalModeInfo>;
+  /** Remove eligible heavy output or images from this live session's active context. */
+  shakeAgentSession?(workspaceId: string, agentSessionId: string, mode: AgentShakeMode): Promise<AgentShakeResult>;
   /** Switch an agent session's model. */
   /** Per-session usage attribution (providers/models/roles/subagent paths). */
   getAgentSessionUsageReport?(workspaceId: string, agentSessionId: string): Promise<import('../agents/agent-runtime-types.js').AgentSessionUsageReport | null>;
@@ -394,7 +404,13 @@ export interface SessionBackend {
   closeAgentSession?(workspaceId: string, agentSessionId: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closedAt?: string; archivedAt?: string }>>;
   archiveAgentSession?(workspaceId: string, agentSessionId: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closedAt?: string; archivedAt?: string }>>;
   restoreAgentSession?(workspaceId: string, agentSessionId: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closedAt?: string; archivedAt?: string }>>;
-  attachAgentSession?(workspaceId: string, agentSessionId: string, options?: { viewOnly?: boolean; cols?: number; rows?: number; paneId?: string }): Promise<void>;
+  /**
+   * Open an agent session in a pane WITHOUT attaching a terminal: the daemon
+   * takes a viewer lease and the client renders the native transcript.
+   */
+  openAgentSession?(workspaceId: string, agentSessionId: string, options?: { paneId?: string }): Promise<void>;
+  /** Release the lease taken by {@link openAgentSession} and drop the pane. */
+  closeAgentPane?(paneId: string): Promise<void>;
   promptAgentSession?(workspaceId: string, agentSessionId: string, text: string, images?: import('../lib/tmux-lite/protocol.js').AgentPromptImage[], options?: { streamingBehavior?: 'steer' | 'followUp' }): Promise<void>;
   removeAgentQueuedMessage?(workspaceId: string, agentSessionId: string, kind: 'steering' | 'followUp', index: number): Promise<string | null>;
   listAvailableEditors?(workspaceId: string): Promise<WorkspaceEditorOption[]>;

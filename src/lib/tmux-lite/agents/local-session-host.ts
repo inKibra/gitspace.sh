@@ -15,7 +15,10 @@
 import type { AgentEvent } from '../../../agents/backend.js';
 import type {
   AgentControlInfo,
+  AgentGoalModeInfo,
   AgentHistoryEntry,
+  AgentShakeMode,
+  AgentShakeResult,
   AgentToolInfo,
   AgentTreeNode,
   Permission,
@@ -43,8 +46,6 @@ import {
   type CompactionStatusHolder,
 } from './pi-runtime.js';
 import { getManagedSessionBootstrap } from './managed-defaults.js';
-import { VirtualTerminal } from './virtual-terminal.js';
-import { startVirtualInteractiveMode, type VirtualInteractiveModeHandle } from './virtual-interactive-mode.js';
 import {
   extractAgentReportInput,
   type AgentSessionHost,
@@ -53,10 +54,19 @@ import {
   type SessionHostSinks,
   type SessionHostTarget,
 } from './session-host.js';
+import { createExtensionUIContext } from './extension-ui-adapter.js';
+import type { OmpHostUIContext } from './omp-types.js';
 
 // Dynamic import: oh-my-pi has module-level side effects (postmortem signal
-// handlers, provider registration) that conflict with OpenTUI when loaded eagerly.
+// handlers that can call process.exit, provider registration) that must not
+// run just because this module is imported.
 const importSdk = () => import('@oh-my-pi/pi-coding-agent/sdk');
+// The extension runtime's own initializer, shared with the SDK's print/RPC
+// modes. Nothing else installs it: without this call every ExtensionRuntime
+// action method throws ExtensionRuntimeNotInitializedError, so `/space` and
+// every hook are dead. (Interactive mode used to do it as a side effect of
+// booting a terminal — a dependency this host must not have.)
+const importRuntimeInit = () => import('@oh-my-pi/pi-coding-agent/modes/runtime-init');
 
 // OMP's `theme` is an uninitialized module `var` until an interactive/TUI path
 // calls initTheme() (today only startVirtualInteractiveMode does). Several tool
@@ -115,6 +125,7 @@ interface ControlSessionAccessors {
   settings?: { get(path: string): unknown; set(path: string, value: unknown): void };
   toolRegistry?: Map<string, { name?: string; tier?: string }>;
   compact?(instructions?: string): Promise<unknown>;
+  shake?(mode: AgentShakeMode): Promise<AgentShakeResult>;
   getRoleModelCycle?(roleOrder: readonly string[]): { models: Array<{ role: string; model?: { provider?: string; id?: string } }>; currentIndex: number } | undefined;
   applyRoleModel?(entry: unknown): Promise<void>;
   cycleRoleModels?(roleOrder: readonly string[], direction?: 'forward' | 'backward'): Promise<unknown>;
@@ -129,6 +140,41 @@ interface ControlSessionAccessors {
     getUsageStatistics?(): NonNullable<AgentControlInfo['usage']>;
     buildSessionContext?(): { models?: { default?: string } };
   };
+}
+
+/** The lower-level public OMP Goal Mode APIs used for session-local control. */
+interface GoalSessionAccessors {
+  getAllToolNames?(): string[];
+  getActiveToolNames?(): string[];
+  setActiveToolsByName?(toolNames: string[]): Promise<void>;
+  getGoalModeState?(): unknown;
+  goalRuntime?: {
+    createGoal(input: { objective: string }): Promise<unknown>;
+    dropGoal(): Promise<unknown>;
+  };
+  setGoalModeState?(state: undefined): void;
+}
+
+function isGoalModeEnabled(state: unknown): boolean {
+  return typeof state === 'object'
+    && state !== null
+    && 'enabled' in state
+    && state.enabled === true;
+}
+
+function canControlGoalMode(session: GoalSessionAccessors): boolean {
+  return session.getAllToolNames?.().includes('goal') === true
+    && typeof session.getActiveToolNames === 'function'
+    && typeof session.setActiveToolsByName === 'function'
+    && session.goalRuntime !== undefined
+    && typeof session.setGoalModeState === 'function';
+}
+
+async function clearColdGoalMode(session: OmpAgentSession): Promise<void> {
+  const goalSession = session as unknown as GoalSessionAccessors;
+  if (!isGoalModeEnabled(goalSession.getGoalModeState?.())) return;
+  await goalSession.goalRuntime?.dropGoal();
+  goalSession.setGoalModeState?.(undefined);
 }
 
 /** Best-effort plain text from an AgentMessage content (string or content parts). */
@@ -204,15 +250,25 @@ export class LocalSessionHost implements AgentSessionHost {
   private readonly hostUIBridge = new HostUIBridgeState();
   private readonly liveTurn = new LiveTurn();
   private unsubscribe: (() => void) | null = null;
-  private virtualModeHandle: VirtualInteractiveModeHandle | null = null;
-  private terminal: VirtualTerminal | null = null;
   /** A turn is in flight (agent_start seen, agent_end not yet), so a
    *  compaction that finishes mid-turn returns to busy rather than idle. */
   private turnActive = false;
   private uiInstalled = false;
+  /** The live native-surface bridge, or null until a client UI is watching.
+   *  Read through {@link extensionUIContext} on every extension UI call. */
+  private uiDelegate: OmpHostUIContext | null = null;
+  /** Stable façade handed to the extension runner once at boot — the runner
+   *  keeps the reference forever, so late `enableUI()` flips the delegate
+   *  instead of re-initializing (which would re-emit `session_start`). */
+  private readonly extensionUIContext = createExtensionUIContext(() => this.uiDelegate);
   /** Bound to the compaction-status extension so manual/snap `/compact` surfaces
    *  a `compacting` status (the agent event stream only carries auto). */
   private compactionStatus: CompactionStatusHolder | null = null;
+  /** The exact active tools from immediately before this host enabled Goal Mode.
+   * Never persisted: reconnect/reopen/worker restart therefore starts off. */
+  private goalModePreviousTools: string[] | null = null;
+  /** A Shake rewrites persisted active-branch entries; serialize it per host. */
+  private shakeInFlight: Promise<AgentShakeResult> | null = null;
 
   private constructor(args: {
     target: SessionHostTarget;
@@ -247,7 +303,10 @@ export class LocalSessionHost implements AgentSessionHost {
     await ensureOmpThemeInitialized();
     if (boot.mode === 'open') {
       const { session, setToolUIContext, compactionStatus } = await openPiSession(target.workspacePath, boot.sessionFilePath);
-      return new LocalSessionHost({ target, session, setToolUIContext, sinks, config, compactionStatus });
+      await clearColdGoalMode(session);
+      const reopened = new LocalSessionHost({ target, session, setToolUIContext, sinks, config, compactionStatus });
+      await reopened.initializeExtensionRuntime();
+      return reopened;
     }
 
     const { createAgentSession: createPiAgentSessionSdk, discoverSkills } = await importSdk();
@@ -275,19 +334,67 @@ export class LocalSessionHost implements AgentSessionHost {
     }
     await persistInitialPiSessionModel(session);
     await sessionManager.rewriteEntries();
-    return new LocalSessionHost({ target, session, setToolUIContext, sinks, config, compactionStatus: compaction.holder });
+    const host = new LocalSessionHost({ target, session, setToolUIContext, sinks, config, compactionStatus: compaction.holder });
+    await host.initializeExtensionRuntime();
+    return host;
   }
 
   /** Install the host-UI bridge so extension dialogs route to the native surface. */
   enableUI(): void {
     this.uiInstalled = true;
-    this.setToolUIContext(
-      this.hostUIBridge.createContextForSession(this.sessionId, {
-        emitDialogRequest: (request) => this.sinks.onDialogRequest(request),
-        emitEvent: (event) => this.sinks.onUiEvent(event),
-      }),
-      true,
-    );
+    this.uiDelegate = this.hostUIBridge.createContextForSession(this.sessionId, {
+      emitDialogRequest: (request) => this.sinks.onDialogRequest(request),
+      emitEvent: (event) => this.sinks.onUiEvent(event),
+    });
+    this.setToolUIContext(this.uiDelegate, true);
+  }
+
+  /**
+   * Initialize the session's extension runner. MUST run for every host, with or
+   * without a watching UI: extension COMMANDS (`/space`) and hook events are
+   * independent of dialogs, and the runner's action methods throw until this
+   * lands. Failure is logged, never fatal — a session without extensions is
+   * degraded, not broken.
+   */
+  private async initializeExtensionRuntime(): Promise<void> {
+    const runner: unknown = this.session.extensionRunner;
+    // No runner at all: extensions are disabled for this session — nothing to do.
+    if (!runner) return;
+    // A runner without initialize() means the SDK's shape moved (or a test
+    // double). Say so once; do not let a TypeError masquerade as a boot failure.
+    if (typeof runner !== 'object' || !('initialize' in runner) || typeof runner.initialize !== 'function') {
+      console.warn(`[session-host] extension runner has no initialize(); skipping extension runtime for ${this.sessionId}`);
+      return;
+    }
+    try {
+      const { initializeExtensions } = await importRuntimeInit();
+      await initializeExtensions(this.session as unknown as Parameters<typeof initializeExtensions>[0], {
+        uiContext: this.extensionUIContext,
+        reportSendError: (action, error) => {
+          this.sinks.onEvent({ type: 'error', sessionId: this.sessionId, error: `${action}: ${error.message}` });
+        },
+        reportRuntimeError: (error) => {
+          console.error(`[session-host] extension error (${error.extensionPath}):`, error.error);
+        },
+        onShutdown: () => {
+          // Honoring this would strand the coordinator's host map (it still
+          // routes commands here) and strand the worker process. Surface it
+          // instead of pretending it happened.
+          console.warn(`[session-host] extension requested shutdown for ${this.sessionId}; ignoring (unsupported for hosted sessions)`);
+          this.sinks.onUiEvent({
+            type: 'notify',
+            payload: {
+              sessionId: this.sessionId,
+              message: 'An extension requested shutdown. Hosted sessions ignore that request — close the session instead.',
+              notificationType: 'warning',
+            },
+          });
+        },
+      });
+    } catch (err) {
+      const detail = err instanceof Error ? err.message.split('\n')[0] : String(err);
+      console.error(`[session-host] extension runtime init failed for ${this.sessionId}: ${detail}`);
+    }
   }
 
   get uiEnabled(): boolean {
@@ -355,6 +462,26 @@ export class LocalSessionHost implements AgentSessionHost {
     if (!session.compact) return false;
     await session.compact(instructions);
     return true;
+  }
+
+  async shake(mode: AgentShakeMode): Promise<AgentShakeResult> {
+    if (mode !== 'elide' && mode !== 'images') {
+      throw new Error(`Unknown Shake mode "${String(mode)}".`);
+    }
+    const session = this.session as unknown as ControlSessionAccessors;
+    if (typeof session.shake !== 'function') {
+      throw new Error('Shake is unavailable for this agent session.');
+    }
+    if (this.shakeInFlight) {
+      throw new Error('Shake is already in progress for this agent session.');
+    }
+    const operation = Promise.resolve().then(() => session.shake!(mode));
+    this.shakeInFlight = operation;
+    try {
+      return await operation;
+    } finally {
+      if (this.shakeInFlight === operation) this.shakeInFlight = null;
+    }
   }
 
   async removeQueuedMessage(kind: 'steering' | 'followUp', index: number): Promise<string | null> {
@@ -543,6 +670,111 @@ export class LocalSessionHost implements AgentSessionHost {
     if (!session.setThinkingLevel) return false;
     session.setThinkingLevel(level, true);
     return true;
+  }
+
+  async getGoalMode(): Promise<AgentGoalModeInfo> {
+    const goalSession = this.session as unknown as GoalSessionAccessors;
+    if (!canControlGoalMode(goalSession)) {
+      return {
+        enabled: false,
+        available: false,
+        message: 'Goal Mode is unavailable because this session was not created with the OMP goal tool and control APIs.',
+      };
+    }
+    return {
+      enabled: isGoalModeEnabled(goalSession.getGoalModeState?.()),
+      available: true,
+    };
+  }
+
+  async setGoalMode(input: { enabled: boolean; objective?: string }): Promise<AgentGoalModeInfo> {
+    const goalSession = this.session as unknown as GoalSessionAccessors;
+    if (!canControlGoalMode(goalSession)) {
+      return {
+        enabled: false,
+        available: false,
+        message: 'Goal Mode is unavailable because this session was not created with the OMP goal tool and control APIs.',
+      };
+    }
+    const active = (): boolean => isGoalModeEnabled(goalSession.getGoalModeState?.());
+
+    if (input.enabled) {
+      if (active()) return { enabled: true, available: true };
+      const objective = input.objective?.trim();
+      if (!objective) return { enabled: false, available: true, message: 'Goal Mode requires a workspace objective.' };
+
+      // A prior disable can drop Goal Mode before its tool restore fails. Repair
+      // that slate before taking a fresh snapshot for the next enable.
+      if (this.goalModePreviousTools !== null) {
+        try {
+          await goalSession.setActiveToolsByName!(this.goalModePreviousTools);
+          this.goalModePreviousTools = null;
+        } catch (error) {
+          return {
+            enabled: false,
+            available: true,
+            message: `Goal Mode remains off because its previous tool slate could not be restored: ${error instanceof Error ? error.message : String(error)}`,
+          };
+        }
+      }
+
+      const previousTools = [...goalSession.getActiveToolNames!()];
+      let created = false;
+      try {
+        await goalSession.goalRuntime!.createGoal({ objective });
+        created = true;
+        await goalSession.setActiveToolsByName!([...new Set([...previousTools, 'goal'])]);
+        this.goalModePreviousTools = previousTools;
+        return { enabled: true, available: true };
+      } catch (error) {
+        const recoveryErrors: string[] = [];
+        if (created) {
+          try {
+            await goalSession.goalRuntime!.dropGoal();
+          } catch (recoveryError) {
+            recoveryErrors.push(`drop failed: ${recoveryError instanceof Error ? recoveryError.message : String(recoveryError)}`);
+          }
+        }
+        goalSession.setGoalModeState!(undefined);
+        try {
+          await goalSession.setActiveToolsByName!(previousTools);
+        } catch (recoveryError) {
+          recoveryErrors.push(`tool restore failed: ${recoveryError instanceof Error ? recoveryError.message : String(recoveryError)}`);
+        }
+        const stillEnabled = active();
+        this.goalModePreviousTools = stillEnabled ? previousTools : null;
+        const recoverySuffix = recoveryErrors.length > 0 ? ` Recovery incomplete (${recoveryErrors.join('; ')}).` : '';
+        const message = `Failed to enable Goal Mode: ${error instanceof Error ? error.message : String(error)}.${recoverySuffix}`;
+        if (stillEnabled) return { enabled: true, available: true, message };
+        return { enabled: false, available: true, message };
+      }
+    }
+
+    const previousTools = this.goalModePreviousTools;
+    if (active()) {
+      try {
+        await goalSession.goalRuntime!.dropGoal();
+        goalSession.setGoalModeState!(undefined);
+      } catch (error) {
+        const stillEnabled = active();
+        const message = `Failed to disable Goal Mode: ${error instanceof Error ? error.message : String(error)}`;
+        if (stillEnabled) return { enabled: true, available: true, message };
+        return { enabled: false, available: true, message };
+      }
+    }
+    if (previousTools !== null) {
+      try {
+        await goalSession.setActiveToolsByName!(previousTools);
+      } catch (error) {
+        return {
+          enabled: false,
+          available: true,
+          message: `Goal Mode is off, but its previous tool slate could not be restored: ${error instanceof Error ? error.message : String(error)}`,
+        };
+      }
+    }
+    this.goalModePreviousTools = null;
+    return { enabled: false, available: true };
   }
 
   /** Set the tool-approval mode (persisted to settings). */
@@ -760,51 +992,12 @@ export class LocalSessionHost implements AgentSessionHost {
     this.title = title;
   }
 
-  // --- interactive terminal --------------------------------------------------
-
-  async startTerminal(cols: number, rows: number): Promise<void> {
-    if (this.virtualModeHandle) {
-      await this.stopTerminal();
-    }
-    const terminal = new VirtualTerminal(cols, rows, (data) => this.sinks.onTerminalOutput(data));
-    const handle = await startVirtualInteractiveMode(this.session, terminal, {
-      cwd: this.target.workspacePath,
-      agentDir: process.env.PI_CODING_AGENT_DIR,
-    });
-    this.terminal = terminal;
-    this.virtualModeHandle = handle;
-  }
-
-  async stopTerminal(): Promise<void> {
-    const handle = this.virtualModeHandle;
-    if (!handle) return;
-    this.virtualModeHandle = null;
-    this.terminal = null;
-    try {
-      await Promise.race([
-        handle.stop(),
-        new Promise<void>((resolve) => setTimeout(resolve, 5000)),
-      ]);
-    } catch {
-      // Shutdown failed or timed out — caller will continue cleanup/recreate.
-    }
-  }
-
-  injectTerminalInput(data: string): void {
-    this.terminal?.injectInput(data);
-  }
-
-  resizeTerminal(cols: number, rows: number): void {
-    this.terminal?.resize(cols, rows);
-  }
-
   // --- lifecycle -----------------------------------------------------------
 
   async dispose(): Promise<void> {
     this.unsubscribe?.();
     this.unsubscribe = null;
     this.hostUIBridge.rejectAllForSession(this.sessionId, `Agent session disposed: ${this.sessionId}`);
-    await this.stopTerminal();
     // Pi SDK has module-level postmortem signal handlers that can call
     // process.exit() during dispose, which (in-process mode) would kill the
     // entire tmux-lite server and all sessions. Guard against both thrown

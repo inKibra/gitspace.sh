@@ -13,7 +13,11 @@ function concatUint8Array(parts: Uint8Array[]): Uint8Array {
   return combined;
 }
 
-const MAX_REPLAY_BYTES = 256 * 1024;
+/** Bytes retained for a handler that has not mounted yet (or has remounted).
+ *  This ring is the ONLY pre-handler buffer: a pane whose consumer never
+ *  mounts — an agent pane, which renders the native transcript and never
+ *  registers a terminal writer — must not accumulate output without bound. */
+export const MAX_REPLAY_BYTES = 256 * 1024;
 
 export interface ConfirmPaneAttachedOptions {
   sessionId: string;
@@ -36,7 +40,6 @@ export class PaneLifecycle {
   meta: AttachedSessionMeta | null = null;
 
   private outputHandler: ((data: Uint8Array) => void) | null = null;
-  private pendingPtyChunks: Uint8Array[] = [];
   private pendingUtf8Bytes = new Uint8Array(0);
   private replayChunks: Uint8Array[] = [];
   private replayBytes = 0;
@@ -61,15 +64,7 @@ export class PaneLifecycle {
     this.outputHandler = handler;
     terminalMemoryDebugIncrement(handler ? 'pane.outputHandler.set' : 'pane.outputHandler.clear');
     if (!handler) return;
-    if (this.replayChunks.length > 0) {
-      this.replayToHandler();
-      return;
-    }
-    if (this.pendingPtyChunks.length === 0) return;
-    const pending = concatUint8Array(this.pendingPtyChunks);
-    terminalMemoryDebugIncrement('pane.pendingPtyChunks.flush');
-    this.pendingPtyChunks = [];
-    this.pushPtyData(pending);
+    this.replayToHandler();
   }
 
   hasOutputHandler(): boolean {
@@ -79,12 +74,7 @@ export class PaneLifecycle {
 
   pushPtyData(data: Uint8Array): void {
     this.appendReplayChunk(data);
-    if (!this.outputHandler) {
-      this.pendingPtyChunks.push(data);
-      terminalMemoryDebugIncrement('pane.pendingPtyChunks.add');
-      terminalMemoryDebugGauge('pane.pendingPtyChunks.count', this.pendingPtyChunks.length);
-      return;
-    }
+    if (!this.outputHandler) return;
 
     const combined = this.pendingUtf8Bytes.length
       ? concatUint8Array([this.pendingUtf8Bytes, data])
@@ -131,7 +121,6 @@ export class PaneLifecycle {
     this.agentSessionId = null;
     this.viewOnly = false;
     this.meta = null;
-    this.pendingPtyChunks = [];
     this.pendingUtf8Bytes = new Uint8Array(0);
     this.replayChunks = [];
     this.replayBytes = 0;
@@ -141,7 +130,6 @@ export class PaneLifecycle {
   private replayToHandler(): void {
     if (!this.outputHandler || this.replayChunks.length === 0) return;
     const replay = concatUint8Array(this.replayChunks);
-    this.pendingPtyChunks = [];
     this.pendingUtf8Bytes = new Uint8Array(0);
     const boundary = findUtf8Boundary(replay);
     const chunk = replay.slice(0, boundary);

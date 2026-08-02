@@ -217,7 +217,8 @@ export function useMultiBackends(options: UseMultiBackendsOptions = {}) {
   const closeAgentSession = useCallback((ref: BackendScopedAgentSessionRef) => engine.closeAgentSession(ref), [engine]);
   const archiveAgentSession = useCallback((ref: BackendScopedAgentSessionRef) => engine.archiveAgentSession(ref), [engine]);
   const restoreAgentSession = useCallback((ref: BackendScopedAgentSessionRef) => engine.restoreAgentSession(ref), [engine]);
-  const attachAgentSession = useCallback((ref: BackendScopedAgentSessionRef, attachOptions?: { viewOnly?: boolean; cols?: number; rows?: number; paneId?: string }) => engine.attachAgentSession(ref, attachOptions), [engine]);
+  const openAgentSession = useCallback((ref: BackendScopedAgentSessionRef, options?: { paneId?: string }) => engine.openAgentSession(ref, options), [engine]);
+  const closeAgentPane = useCallback((backendKey: BackendKey, paneId: string) => engine.closeAgentPane(backendKey, paneId), [engine]);
   const getAgentSessionPreference = useCallback((ref: BackendScopedWorkspaceRef) => engine.getAgentSessionPreference(ref), [engine]);
   const setAgentSessionPreference = useCallback((ref: BackendScopedWorkspaceRef, sessionId: string) => engine.setAgentSessionPreference(ref, sessionId), [engine]);
 
@@ -283,7 +284,8 @@ export function useMultiBackends(options: UseMultiBackendsOptions = {}) {
     closeAgentSession,
     archiveAgentSession,
     restoreAgentSession,
-    attachAgentSession,
+    openAgentSession,
+    closeAgentPane,
     getAgentSessionPreference,
     setAgentSessionPreference,
 

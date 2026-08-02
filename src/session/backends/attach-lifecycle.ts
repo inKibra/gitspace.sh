@@ -13,7 +13,9 @@ function concatUint8Array(parts: Uint8Array[]): Uint8Array {
   return combined;
 }
 
-const MAX_REPLAY_BYTES = 1024 * 1024;
+/** Bytes retained for an output handler that has not mounted yet. This ring is
+ *  the ONLY pre-handler buffer, so a stream with no consumer stays bounded. */
+export const MAX_REPLAY_BYTES = 1024 * 1024;
 
 export interface BeginAttachOptions {
   workspaceId?: string | null;
@@ -40,7 +42,6 @@ export class AttachLifecycle {
   private attachedWorkspaceId: string | null = null;
   private viewOnly = false;
   private outputHandler: ((data: Uint8Array) => void) | null = null;
-  private pendingPtyChunks: Uint8Array[] = [];
   private pendingUtf8Bytes = new Uint8Array(0);
   private replayChunks: Uint8Array[] = [];
   private replayBytes = 0;
@@ -85,17 +86,7 @@ export class AttachLifecycle {
     if (!handler) {
       return;
     }
-    if (this.replayChunks.length > 0) {
-      this.replayToHandler();
-      return;
-    }
-    if (this.pendingPtyChunks.length === 0) {
-      return;
-    }
-
-    const pending = concatUint8Array(this.pendingPtyChunks);
-    this.pendingPtyChunks = [];
-    this.pushPtyData(pending);
+    this.replayToHandler();
   }
 
   setScriptOutputHandler(handler: ((data: Uint8Array) => void) | null): void {
@@ -187,7 +178,6 @@ export class AttachLifecycle {
   pushPtyData(data: Uint8Array): void {
     this.appendReplayChunk(data);
     if (!this.outputHandler) {
-      this.pendingPtyChunks.push(data);
       return;
     }
 
@@ -241,7 +231,6 @@ export class AttachLifecycle {
   }
 
   private clearPtyBuffer(): void {
-    this.pendingPtyChunks = [];
     this.pendingUtf8Bytes = new Uint8Array(0);
     this.replayChunks = [];
     this.replayBytes = 0;
@@ -257,7 +246,6 @@ export class AttachLifecycle {
       return;
     }
     const replay = concatUint8Array(this.replayChunks);
-    this.pendingPtyChunks = [];
     this.pendingUtf8Bytes = new Uint8Array(0);
     const boundary = findUtf8Boundary(replay);
     const chunk = replay.slice(0, boundary);

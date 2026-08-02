@@ -183,6 +183,41 @@ export interface AgentToolInfo {
   approval: string;
 }
 
+/** Session-local OMP Goal Mode status. It is intentionally never persisted. */
+export type AgentGoalModeInfo =
+  | {
+    enabled: true;
+    /** `enabled` implies the live OMP runtime supports Goal Mode. */
+    available: true;
+    /** Present only when an operation completed with a recoverable warning. */
+    message?: string;
+  }
+  | {
+    enabled: false;
+    /** The live runtime can enable Goal Mode when true. */
+    available: boolean;
+    /** Explicit reason when unavailable or when the last transition was incomplete. */
+    message?: string;
+  };
+
+/** The two deliberate OMP context-reduction operations. */
+export type AgentShakeMode = 'elide' | 'images';
+
+/** Exact outcome of a session-local OMP Shake operation. */
+export interface AgentShakeResult {
+  mode: AgentShakeMode;
+  /** Whole tool-call results removed from the active context. */
+  toolResultsDropped: number;
+  /** Large fenced/XML regions removed from the active context. */
+  blocksDropped: number;
+  /** Image blocks removed by `images`; not reported by `elide`. */
+  imagesDropped?: number;
+  /** Estimated context tokens reclaimed; `images` deliberately reports zero. */
+  tokensFreed: number;
+  /** Recoverable original-output artifact for `elide`, when OMP persisted one. */
+  artifactId?: string;
+}
+
 /** Current context-window usage for a session. */
 export interface AgentContextUsage {
   tokens: number | null;

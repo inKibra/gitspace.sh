@@ -25,6 +25,12 @@ export interface LiveUpdate {
   committed: boolean;
 }
 
+type ToolResultWithDetails = ToolResultMessage & { details?: unknown };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object';
+}
+
 function safeJson(value: unknown): string {
   try {
     return JSON.stringify(value) ?? String(value);
@@ -34,18 +40,31 @@ function safeJson(value: unknown): string {
 }
 
 function toolResultFromEvent(event: Extract<AgentEvent, { type: 'tool_execution_end' }>): ToolResultMessage {
-  const raw = event.result as { content?: unknown } | undefined;
+  const rawResult = event.result;
+  const rawContent = isRecord(rawResult) ? rawResult.content : undefined;
   let content: TextContent[];
-  if (raw && Array.isArray(raw.content)) {
-    const text = (raw.content as Array<{ type?: string; text?: string }>)
-      .filter((c) => c?.type === 'text' && typeof c.text === 'string')
-      .map((c) => c.text as string)
+  if (Array.isArray(rawContent)) {
+    const text = rawContent
+      .filter((item): item is { type: 'text'; text: string } =>
+        isRecord(item) && item.type === 'text' && typeof item.text === 'string',
+      )
+      .map((item) => item.text)
       .join('\n');
-    content = [{ type: 'text', text: text || safeJson(event.result) }];
+    content = [{ type: 'text', text: text || safeJson(rawResult) }];
   } else {
-    content = [{ type: 'text', text: typeof event.result === 'string' ? event.result : safeJson(event.result) }];
+    content = [{ type: 'text', text: typeof rawResult === 'string' ? rawResult : safeJson(rawResult) }];
   }
-  return { role: 'toolResult', toolCallId: event.toolCallId, toolName: event.toolName, content, isError: !!event.isError } as ToolResultMessage;
+
+  const toolResult: ToolResultWithDetails = {
+    role: 'toolResult',
+    toolCallId: event.toolCallId,
+    toolName: event.toolName,
+    content,
+    isError: !!event.isError,
+    timestamp: Date.now(),
+  };
+  if (isRecord(rawResult) && rawResult.details !== undefined) toolResult.details = rawResult.details;
+  return toolResult;
 }
 
 export class LiveTurn {

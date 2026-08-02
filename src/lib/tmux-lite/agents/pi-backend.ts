@@ -17,7 +17,8 @@ import {
 } from './pi-runtime.js';
 import { getManagedSessionBootstrap } from './managed-defaults.js';
 // Dynamic import: oh-my-pi has module-level side effects (postmortem signal
-// handlers, provider registration) that conflict with OpenTUI when loaded eagerly.
+// handlers that can call process.exit, provider registration) that must not
+// run just because this module is imported.
 const importSdk = () => import('@oh-my-pi/pi-coding-agent/sdk');
 import { listPiSessions, findPiSessionFile } from './pi-session-files.js';
 

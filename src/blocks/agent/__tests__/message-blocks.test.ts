@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'bun:test';
-import type { Message } from '@oh-my-pi/pi-ai';
+import type { Message, ToolResultMessage } from '@oh-my-pi/pi-ai';
 
-import { validateBlock } from '../../index.js';
+import { validateBlock, type Block } from '../../index.js';
+import { subagentData, toolCallData } from '../../types/transcript.js';
 import { liveMessageToBlocks, messagesToBlocks } from '../message-blocks.js';
 
 // Minimal well-typed fixtures (only the fields the mapper reads).
@@ -13,6 +14,40 @@ function assistant(content: unknown[], extra: Record<string, unknown> = {}): Mes
 }
 function toolResult(toolCallId: string, text: string, isError = false): Message {
   return { role: 'toolResult', toolCallId, toolName: 'bash', content: [{ type: 'text', text }], isError } as Message;
+}
+
+interface TaskResult {
+  id: string;
+  agent: string;
+  description?: string;
+  modelOverride?: string[];
+  resolvedModel?: string;
+  exitCode: number;
+  output: string;
+}
+
+interface TaskDetails {
+  results: TaskResult[];
+}
+
+function taskToolResult(toolCallId: string, details: TaskDetails): ToolResultMessage<TaskDetails> {
+  return {
+    role: 'toolResult',
+    toolCallId,
+    toolName: 'task',
+    content: [{ type: 'text', text: 'Task complete' }],
+    details,
+    isError: false,
+    timestamp: 0,
+  };
+}
+
+function nestedTaskResultBlocks(blocks: readonly Block[]): Block[] {
+  const task = blocks.find((block) => block.type === 'tool-call');
+  if (!task) throw new Error('Expected a task tool-call block');
+  const data = toolCallData.parse(task.data);
+  if (data.tool !== 'task') throw new Error(`Expected task tool, received ${data.tool}`);
+  return data.result ?? [];
 }
 
 describe('messagesToBlocks', () => {
@@ -123,6 +158,50 @@ describe('messagesToBlocks', () => {
       assistant([{ type: 'toolCall', id: 't2', name: 'task', arguments: { agent: 'general', context: 'ctx', tasks: [{ assignment: 'a' }, { assignment: 'b' }] } }]),
     ]).find((b) => b.type === 'tool-call')!;
     expect((batch.data as { target?: string }).target).toBe('2 subtasks');
+  });
+
+  it('projects every completed batch-task result into a labeled subagent card with user-facing model roles', () => {
+    const blocks = messagesToBlocks([
+      assistant([
+        {
+          type: 'toolCall',
+          id: 'batch-roles',
+          name: 'task',
+          arguments: {
+            agent: 'task',
+            context: 'Audit the release candidate.',
+            tasks: [
+              { assignment: 'Check fast paths' },
+              { assignment: 'Review error handling' },
+              { assignment: 'Design the rollout' },
+              { assignment: 'Verify the current configuration' },
+            ],
+          },
+        },
+      ]),
+      taskToolResult('batch-roles', {
+        results: [
+          { id: 'fast-audit', agent: 'task', description: 'Fast-path audit', modelOverride: ['pi/smol'], exitCode: 0, output: 'Fast paths verified.' },
+          { id: 'failure-review', agent: 'task', description: 'Failure review', modelOverride: ['pi/slow'], exitCode: 0, output: 'Failure paths reviewed.' },
+          { id: 'rollout-design', agent: 'task', description: 'Rollout design', modelOverride: ['pi/plan'], exitCode: 0, output: 'Rollout designed.' },
+          { id: 'session-check', agent: 'task', description: 'Session check', modelOverride: ['pi/task'], exitCode: 0, output: 'Session configuration checked.' },
+        ],
+      }),
+    ]);
+
+    const nested = nestedTaskResultBlocks(blocks);
+    const cards = nested.filter((block) => block.type === 'subagent');
+    expect(cards).toHaveLength(4);
+    for (const card of cards) expect(validateBlock(card).ok).toBe(true);
+    expect(cards.map((card) => {
+      const data = subagentData.parse(card.data);
+      return { label: data.label, model: data.model, status: data.status };
+    })).toEqual([
+      { label: 'Fast-path audit', model: 'Fast', status: 'done' },
+      { label: 'Failure review', model: 'Thinking', status: 'done' },
+      { label: 'Rollout design', model: 'Architect', status: 'done' },
+      { label: 'Session check', model: 'Current model', status: 'done' },
+    ]);
   });
 
   it('surfaces input for the newer builtin tools (ask/github/checkpoint/learn/manage_skill)', () => {

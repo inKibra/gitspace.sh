@@ -4,15 +4,15 @@ This document provides comprehensive information for AI assistants working on th
 
 ## Project Overview
 
-**GitSpace** is a powerful CLI tool for managing GitHub repository workspaces using git worktrees, with secure remote terminal access via an E2E encrypted relay system. It features both a TUI (Terminal User Interface) and web interface for interactive management.
+**GitSpace** is a powerful CLI tool for managing GitHub repository workspaces using git worktrees, with secure remote terminal access via an E2E encrypted relay system. Its interactive surface is the web app.
 
 **Key Capabilities:**
 - Git worktrees for parallel branch development
-- Interactive TUI for workspace management
+- Web app for interactive workspace management
 - **Remote terminal access** via E2E encrypted relay
 - **Identity-based access control** with Ed25519/X25519 keys
 - **X3DH handshake** for forward-secret session encryption
-- Web terminal interface (React + xterm.js)
+- Web terminal interface (React + ghostty-web)
 - Linear issue integration for workspace creation
 - Convention-based custom scripts in `.gitspace/scripts/` (pre, setup, select, remove phases)
 
@@ -50,7 +50,7 @@ This document provides comprehensive information for AI assistants working on th
 
 ```
 src/
-├── index.ts                    # Entry point (TUI or CLI dispatch)
+├── index.ts                    # Entry point (CLI dispatch)
 ├── commands/                   # CLI command implementations (17 files)
 │   ├── add.ts                  # Add projects/workspaces
 │   ├── auth.ts                 # GitHub OAuth for gitspace.sh
@@ -106,39 +106,15 @@ src/
 │   ├── pty-session.ts          # PTY session management
 │   └── types.ts                # ServeOptions, permissions
 ├── shared/                     # Cross-platform components
-│   ├── components/             # Shared UI components (16 files)
+│   ├── components/             # Shared UI components (10 files)
 │   │   ├── MachineList.tsx     # Logic + hooks
-│   │   ├── MachineList.web.tsx # Web rendering
-│   │   ├── MachineList.tui.tsx # TUI rendering
-│   │   ├── SpacesBrowser.tsx   # Workspace browser logic
-│   │   ├── SpacesBrowser.web.tsx
-│   │   ├── SpacesBrowser.tui.tsx
-│   │   ├── Inbox.tsx           # Notification system
-│   │   ├── Inbox.web.tsx
-│   │   ├── Inbox.tui.tsx
-│   │   ├── Flow.tsx            # Modal dialog system
-│   │   ├── Flow.web.tsx
-│   │   ├── Flow.tui.tsx
-│   │   ├── ProjectList.tsx
-│   │   ├── ProjectList.web.tsx
-│   │   └── ProjectList.tui.tsx
+│   │   └── MachineList.web.tsx # Web rendering
 │   ├── providers/              # Machine access abstraction
 │   │   ├── MachineProvider.ts  # Interface definition
 │   │   └── LocalMachineProvider.ts  # Direct tmux-lite access
 │   ├── hooks/
 │   │   └── useUserActivity.ts  # Activity tracking for notifications
 │   └── types.ts                # Shared type definitions
-├── tui/                        # Terminal UI (OpenTUI)
-│   ├── index.ts                # TUI entry point
-│   ├── app.tsx                 # Main TUI application
-│   ├── components/
-│   │   ├── RemoteMachineScreen.tsx # Remote machine browser screen
-│   │   └── RemoteTerminal.tsx  # Embedded session terminal
-│   └── hooks/
-│       ├── useRemoteMachines.ts
-│       ├── useRemoteTerminal.ts
-│       ├── useLocalSession.ts
-│       └── useDaemonStatus.ts
 ├── web/                        # Web application (Vite + React)
 │   └── src/
 │       ├── App.tsx             # Main web app
@@ -178,7 +154,7 @@ src/
 ### Workspace Management
 | Command | Description |
 |---------|-------------|
-| `gssh` | Launch TUI (no args) |
+| `gssh` | Print help (no args) |
 | `gssh project add` | Add a new project from GitHub |
 | `gssh workspace add <name> --project <project-name>` | Create workspace in current project |
 | `gssh workspace context --project <project-name> --workspace <name>` | Show resolved workspace context |
@@ -305,6 +281,10 @@ src/
 5. X3DH handshake establishes session keys
 6. All terminal I/O is E2E encrypted
 
+### Agent Session Panes
+
+An agent pane is opened with `agent-open` and closed with `agent-release` over the local socket, or with `open_agent_session` and `release_agent_session` over the relay. Opening takes a viewer lease on the daemon; releasing drops it. Agent sessions have no attached terminal; the web client renders a native block transcript. The machine daemon and tmux-lite daemon run as one process, with agent SDK sessions in per-session worker child processes.
+
 ### Cryptographic Primitives
 
 | Purpose | Algorithm |
@@ -315,14 +295,13 @@ src/
 | Key derivation | HKDF-SHA256 |
 | Relay authentication | Ed25519 challenge-response |
 
-## TUI/Web Shared Component Pattern
+## Shared Component Pattern
 
-Components are split into three files:
+Components are split into two files:
 - `Component.tsx` - Logic/hooks (React-compatible)
 - `Component.web.tsx` - Web rendering (React DOM)
-- `Component.tui.tsx` - TUI rendering (OpenTUI)
 
-This allows shared business logic with platform-specific rendering.
+This allows shared business logic with web-specific rendering.
 
 ### MachineProvider Abstraction
 
@@ -352,8 +331,8 @@ bun run typecheck
 # Build
 bun run build
 
-# Run TUI
-bun src/index.ts
+# Run the web app (served by the machine daemon)
+bun src/index.ts machine serve start
 
 # Run relay (uses Ed25519 identity from keychain)
 bun src/index.ts relay start
@@ -399,7 +378,6 @@ bun src/index.ts machine serve start --relay ws://localhost:4480/ws
 **Runtime:**
 - `commander` - CLI framework
 - `@inquirer/prompts` - User prompts
-- `@opentui/core` - Terminal UI framework
 - `@linear/sdk` - Linear API client
 - `chalk` - Terminal colors
 - `ws` - WebSocket (relay)
@@ -407,7 +385,6 @@ bun src/index.ts machine serve start --relay ws://localhost:4480/ws
 - `@noble/ciphers` - AES-GCM encryption
 - `@noble/hashes` - HKDF, SHA256
 - `@xterm/headless` - Terminal state tracking
-- `ghostty-opentui` - TUI terminal embedding
 
 **System Commands:**
 - `gh` - GitHub CLI
@@ -424,7 +401,7 @@ bun src/index.ts machine serve start --relay ws://localhost:4480/ws
 | `docs/GETTING-STARTED.md` | Remote access setup guide |
 | `docs/CONNECTION.md` | Connection state management |
 | `docs/REMOTE-DESIGN.md` | E2E encryption design (identity-based) |
-| `docs/UNIFIED_ARCHITECTURE.md` | TUI/Web architecture plan |
+| `docs/UNIFIED_ARCHITECTURE.md` | Unified daemon and agent session architecture |
 | `docs/GATEWAY-WORKER.md` | Cloudflare Worker gateway spec |
 | `docs/ROADMAP.md` | Feature roadmap and vision |
 | `docs/INFRASTRUCTURE.md` | Future VM infrastructure (not implemented) |

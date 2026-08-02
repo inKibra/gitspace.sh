@@ -51,7 +51,7 @@ function makeContext(workspaceRefs: BackendScopedWorkspaceRef[], backendByKey: R
     closeAgentSession: async () => [],
     archiveAgentSession: async () => [],
     restoreAgentSession: async () => [],
-    attachAgentSession: async () => undefined,
+    openAgentSession: async () => undefined,
     getAgentSessionPreference: async () => null,
     setAgentSessionPreference: async () => undefined,
     requestInbox: async () => undefined,

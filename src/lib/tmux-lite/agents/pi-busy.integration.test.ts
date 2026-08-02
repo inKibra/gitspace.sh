@@ -21,7 +21,7 @@ function buildSubprocessPrelude(): string {
     import { mkdirSync, writeFileSync } from 'node:fs';
     import { join } from 'node:path';
     import {
-      attachAgentSession,
+      openAgentSession,
       createAgentSession,
       getAgentState,
       getMachineSnapshot,
@@ -223,7 +223,7 @@ describe('Pi busy state integration', () => {
         await killServer();
         await Bun.sleep(500);
 
-        await attachAgentSession(target, sessionId);
+        await openAgentSession(target, sessionId);
         const beforePrompt = await captureState(sessionId);
         const promptPromise = promptAgentSession(target, sessionId, busyPrompt);
         const final = await waitForBusy(sessionId);

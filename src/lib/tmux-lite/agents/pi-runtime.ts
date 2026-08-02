@@ -11,9 +11,9 @@ import type { OmpAgentSession, OmpAuthStorage, OmpCreateSessionResult, OmpModelR
 import { getManagedSessionBootstrap } from './managed-defaults.js';
 
 // Dynamic imports: oh-my-pi packages have module-level side effects (postmortem
-// signal handlers that call process.exit, provider registration) that conflict
-// with OpenTUI's terminal management. Keep these lazy and narrow so attach does
-// not evaluate the package root barrel (which pulls in far more modules).
+// signal handlers that call process.exit, provider registration) that must not
+// run just because this module is imported. Keep these lazy and narrow so a
+// session open does not evaluate the package root barrel (far more modules).
 const importSdk = () => import('@oh-my-pi/pi-coding-agent/sdk');
 const importSessionManagerModule = () => import('@oh-my-pi/pi-coding-agent/session/session-manager');
 const importModelRegistryModule = () => import('@oh-my-pi/pi-coding-agent/config/model-registry');

@@ -59,6 +59,8 @@ export function useTranscript(opts: {
   const hasMoreRef = useRef(false);
   const anchorRef = useRef<number | null>(null); // scrollHeight captured before a prepend
   const liveLenRef = useRef(0);
+  /** Invalidate every in-flight transcript page when committed history rewrites. */
+  const generationRef = useRef(0);
   modeRef.current = mode;
   hasMoreRef.current = hasMoreOlder;
 
@@ -69,15 +71,21 @@ export function useTranscript(opts: {
 
   // Initial / session-change load: fetch the tail, pin to bottom.
   useEffect(() => {
+    const generation = ++generationRef.current;
     let alive = true;
+    loadingRef.current = false;
+    anchorRef.current = null;
     setCommitted([]);
     setMode('follow');
+    setLoadingOlder(false);
     setNewBelowCount(0);
     setOlderError(null);
+    hasMoreRef.current = false;
+    setHasMoreOlder(false);
     cursorRef.current = undefined;
     fetchRange(undefined, pageSize)
       .then((page) => {
-        if (!alive) return;
+        if (!alive || generation !== generationRef.current) return;
         setCommitted(page.blocks);
         cursorRef.current = page.oldestCursor ?? undefined;
         setHasMoreOlder(page.hasMore);
@@ -86,7 +94,9 @@ export function useTranscript(opts: {
       .catch((err) => {
         // Keep the real error — this hook is a prime 'transcripts refuse to
         // load' report source; a generic string is useless for triage.
-        if (alive) setOlderError(`Failed to load transcript: ${err instanceof Error ? err.message : String(err)}`);
+        if (alive && generation === generationRef.current) {
+          setOlderError(`Failed to load transcript: ${err instanceof Error ? err.message : String(err)}`);
+        }
         console.error('[transcript] initial load failed', err);
       });
     return () => {
@@ -97,20 +107,24 @@ export function useTranscript(opts: {
   const loadOlder = useCallback(async () => {
     const el = containerRef.current;
     if (!el || loadingRef.current || !hasMoreRef.current) return;
+    const generation = generationRef.current;
     loadingRef.current = true;
     setLoadingOlder(true);
     setOlderError(null);
     anchorRef.current = el.scrollHeight; // capture before prepend, restored in layout effect
     try {
       const page = await fetchRange(cursorRef.current, pageSize);
+      if (generation !== generationRef.current) return;
       setCommitted((prev) => [...page.blocks, ...prev]);
       cursorRef.current = page.oldestCursor ?? cursorRef.current;
       setHasMoreOlder(page.hasMore);
     } catch (err) {
+      if (generation !== generationRef.current) return;
       anchorRef.current = null;
       setOlderError(`Failed to load older messages: ${err instanceof Error ? err.message : String(err)}`);
       console.error('[transcript] load-older failed', err);
     } finally {
+      if (generation !== generationRef.current) return;
       loadingRef.current = false;
       setLoadingOlder(false);
     }
@@ -152,12 +166,13 @@ export function useTranscript(opts: {
     const prev = prevLiveRef.current;
     prevLiveRef.current = live;
     if (prev.length === 0 || live.length !== 0) return;
+    const generation = generationRef.current;
     setCommitted((c) => [...c, ...prev]); // sync, pre-paint — no shrink frame
     if (modeRef.current === 'browse') return;
     let alive = true;
     fetchRange(undefined, pageSize)
       .then((page) => {
-        if (!alive) return;
+        if (!alive || generation !== generationRef.current) return;
         // Only adopt the authoritative tail if the user is still following —
         // they may have scrolled up during the fetch.
         if (modeRef.current !== 'follow') return;

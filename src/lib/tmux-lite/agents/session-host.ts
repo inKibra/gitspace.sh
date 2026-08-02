@@ -28,7 +28,10 @@
 import type { AgentEvent } from '../../../agents/backend.js';
 import type {
   AgentControlInfo,
+  AgentGoalModeInfo,
   AgentHistoryEntry,
+  AgentShakeMode,
+  AgentShakeResult,
   AgentToolInfo,
   AgentTreeNode,
 } from '../../../agents/agent-runtime-types.js';
@@ -102,8 +105,6 @@ export interface SessionHostSinks {
   onDialogRequest(request: HostUIDialogRequest): void;
   /** Fire-and-forget host-UI event (status/notify/widget/editor-text/title). */
   onUiEvent(event: HostUIEvent): void;
-  /** Rendered terminal bytes from the session's interactive mode. */
-  onTerminalOutput(data: string): void;
   /** The agent invoked the SDK's report tool — route into the report pipeline. */
   onAgentReport(payload: AgentReportPayload): void;
 }
@@ -157,6 +158,12 @@ export interface AgentSessionHost {
   readTranscriptRange(opts: { before?: string; limit: number }): Promise<TranscriptPage>;
   /** Session-contributed slash commands (skills + extension + custom). */
   listSessionCommands(reservedNames: string[]): Promise<SessionCommandInfo[]>;
+  /** Read the session-local Goal Mode state. Fresh/reopened sessions are off. */
+  getGoalMode(): Promise<AgentGoalModeInfo>;
+  /** Toggle session-local Goal Mode using an already-resolved workspace objective. */
+  setGoalMode(input: { enabled: boolean; objective?: string }): Promise<AgentGoalModeInfo>;
+  /** Destructively reduce active context without disturbing a live turn. */
+  shake(mode: AgentShakeMode): Promise<AgentShakeResult>;
 
   // --- host-UI bridge -----------------------------------------------------
   /** Install the host-UI bridge context so extension dialogs route to
@@ -169,11 +176,4 @@ export interface AgentSessionHost {
   setEditorTextFromClient(text: string): void;
   /** Display title used in message-event payloads. */
   setTitle(title: string | undefined): void;
-
-  // --- interactive terminal ------------------------------------------------
-  /** Boot pi-tui InteractiveMode rendering to onTerminalOutput. */
-  startTerminal(cols: number, rows: number): Promise<void>;
-  stopTerminal(): Promise<void>;
-  injectTerminalInput(data: string): void;
-  resizeTerminal(cols: number, rows: number): void;
 }

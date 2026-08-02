@@ -202,40 +202,6 @@ describe('buildMachineSnapshot', () => {
     });
   });
 
-  it('keeps PTY linkage per terminal when one PTY forks to a new Pi session', () => {
-    const snapshot = buildMachineSnapshot({
-      snapshotNonce: 1,
-      terminalSessions: [
-        makeAgentTerminalSession('pty-a', 'agent-old'),
-        makeAgentTerminalSession('pty-b', 'agent-new'),
-      ],
-      workspaces: [makeWorkspace()],
-      agentStateByWorkspaceId: {
-        'demo:ws-1': {
-          workspaceId: 'demo:ws-1',
-          sessions: [
-            { id: 'agent-old', title: 'Original session' },
-            { id: 'agent-new', title: 'Forked session' },
-          ],
-          statuses: { 'agent-new': { type: 'busy' } },
-          pendingPermissions: {},
-          pendingQuestions: {},
-          lastMessages: {},
-          errorMessages: {},
-          todoPhases: {},
-          modelInfo: {},
-          queuedMessages: {},
-        } satisfies WorkspaceAgentState,
-      },
-    });
-
-    expect(snapshot.terminalSessionsById['pty-a']?.linkedAgentSessionId).toBe('agent-old');
-    expect(snapshot.terminalSessionsById['pty-b']?.linkedAgentSessionId).toBe('agent-new');
-    expect(snapshot.agentSessionsById['agent-old']?.linkedTerminalSessionId).toBe('pty-a');
-    expect(snapshot.agentSessionsById['agent-new']?.linkedTerminalSessionId).toBe('pty-b');
-    expect(snapshot.workspacesById['demo:ws-1']?.agentSessionIds).toEqual(['agent-old', 'agent-new']);
-  });
-
   it('projects planned and workspace-backed goals into the machine snapshot', () => {
     const root = join(tmpdir(), `machine-goals-${Date.now()}-${Math.random().toString(36).slice(2)}`);
     const previousWorkspaceRoot = process.env.GITSPACE_WORKSPACE_ROOT;

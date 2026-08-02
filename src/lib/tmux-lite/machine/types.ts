@@ -173,7 +173,6 @@ export interface MachineTerminalSessionRecord {
   unreadAlertCount?: number;
   processName?: string;
   processInstance?: number;
-  linkedAgentSessionId?: string;
   metadata?: Record<string, string>;
 }
 
@@ -192,7 +191,6 @@ export interface MachineAgentSessionRecord {
   pendingQuestionCount: number;
   errorMessage?: string;
   lastMessagePreview?: string;
-  linkedTerminalSessionId?: string;
   modelInfo?: import('../../../agents/agent-runtime-types.js').AgentModelInfo;
   todoPhases?: import('../../../agents/agent-runtime-types.js').TodoPhase[];
   queuedMessages?: { steering: string[]; followUp: string[] };

@@ -10,6 +10,8 @@
 // Re-export InboxItem from tmux-lite protocol
 export type { InboxItem } from "../tmux-lite/protocol.js";
 import type { PortConflictInfo } from '../processes/port-conflicts.js';
+import type { AgentShakeMode } from '../../agents/agent-runtime-types.js';
+import type { AgentWorkspaceTargetPayload } from '../tmux-lite/protocol.js';
 
 // Re-export agent state types from AgentEventManager
 export type {
@@ -555,13 +557,22 @@ export interface RestoreAgentSessionRequest {
   agentSessionId: string;
 }
 
-export interface AttachAgentSessionRequest {
-  type: 'attach_agent_session';
+/** Open an agent session for a native pane: a viewer lease, no PTY stream. */
+export interface OpenAgentSessionRequest {
+  type: 'open_agent_session';
   requestId: string;
-  target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
+  target: AgentWorkspaceTargetPayload;
   agentSessionId: string;
-  cols?: number;
-  rows?: number;
+  /** Scopes the lease so one client can hold several panes open. */
+  paneId?: string;
+}
+
+/** Drop the lease taken by {@link OpenAgentSessionRequest}. */
+export interface ReleaseAgentSessionRequest {
+  type: 'release_agent_session';
+  requestId: string;
+  agentSessionId: string;
+  paneId?: string;
 }
 
 export interface PromptAgentSessionRequest {
@@ -623,6 +634,30 @@ export interface GetAgentControlInfoRequest {
   requestId: string;
   target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
   agentSessionId: string;
+}
+
+export interface GetAgentGoalModeRequest {
+  type: 'get_agent_goal_mode';
+  requestId: string;
+  target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
+  agentSessionId: string;
+}
+
+export interface SetAgentGoalModeRequest {
+  type: 'set_agent_goal_mode';
+  requestId: string;
+  target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
+  agentSessionId: string;
+  enabled: boolean;
+  precursor?: string;
+}
+
+export interface ShakeAgentSessionRequest {
+  type: 'shake_agent_session';
+  requestId: string;
+  target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
+  agentSessionId: string;
+  mode: AgentShakeMode;
 }
 
 export interface GetAgentSessionUsageRequest {
@@ -1334,7 +1369,8 @@ export type ClientToMachineMessage =
   | CloseAgentSessionRequest
   | ArchiveAgentSessionRequest
   | RestoreAgentSessionRequest
-  | AttachAgentSessionRequest
+  | OpenAgentSessionRequest
+  | ReleaseAgentSessionRequest
   | PromptAgentSessionRequest
   | RemoveAgentQueuedMessageRequest
   | StageAgentUploadRequest
@@ -1342,6 +1378,9 @@ export type ClientToMachineMessage =
   | RespondAgentPermissionRequest
   | GetAgentTranscriptRangeRequest
   | GetAgentControlInfoRequest
+  | GetAgentGoalModeRequest
+  | SetAgentGoalModeRequest
+  | ShakeAgentSessionRequest
   | GetAgentSessionUsageRequest
   | SetAgentModelRequest
   | SetAgentThinkingLevelRequest
@@ -1524,7 +1563,6 @@ export function isBrowseMessage(msg: RemoteSessionMessage): msg is ClientToMachi
     'close_agent_session',
     'archive_agent_session',
     'restore_agent_session',
-    'attach_agent_session',
     'prompt_agent_session',
     'remove_agent_queued_message',
     'stage_agent_upload',
@@ -1532,6 +1570,8 @@ export function isBrowseMessage(msg: RemoteSessionMessage): msg is ClientToMachi
     'respond_agent_permission',
     'get_agent_transcript_range',
     'get_agent_control_info',
+    'get_agent_goal_mode',
+    'set_agent_goal_mode',
     'get_agent_session_usage',
     'set_agent_model',
     'set_agent_thinking_level',

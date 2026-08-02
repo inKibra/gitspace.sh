@@ -90,7 +90,7 @@ import {
   type WorkspaceDeleteErrorCode,
 } from '../../types/errors.js';
 import type { TerminalSnapshot } from '../backend.js';
-import type { AgentControlInfo, AgentDefinitionInfo, AgentHistoryEntry, AgentSessionUsageReport, AgentSettingItem, AgentSettingSchemaItem, AgentToolInfo, AgentTreeNode } from '../../agents/agent-runtime-types.js';
+import type { AgentControlInfo, AgentDefinitionInfo, AgentGoalModeInfo, AgentHistoryEntry, AgentSessionUsageReport, AgentSettingItem, AgentSettingSchemaItem, AgentShakeMode, AgentShakeResult, AgentToolInfo, AgentTreeNode } from '../../agents/agent-runtime-types.js';
 import type { AgentStateUpdateDelta, WorkspaceAgentState } from '../../lib/tmux-lite/agent-event-manager.js';
 import type { AgentWorkspaceTargetPayload } from '../../lib/tmux-lite/protocol.js';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
@@ -268,11 +268,6 @@ async function refreshHostingAfterProcessChange(): Promise<void> {
     // Process start/stop must still succeed even if hosted route publication fails.
   }
 }
-
-function isAgentReplay(replay: { sessionName: string }): boolean {
-  return replay.sessionName.startsWith('agent:');
-}
-
 async function connectSessionSocket(
   socketPath: string,
   handlers: LocalSessionSocketHandlers
@@ -405,6 +400,9 @@ export class LocalSessionBackend implements SessionBackend {
   private connected = false;
   private attachedAgentSessionId: string | null = null;
   private pendingAttachedAgentSession: { agentSessionId: string; sessionId: string } | null = null;
+  /** paneId → agentSessionId for panes opened by lease (no terminal). Needed to
+   *  release the right lease when the pane closes or the backend disconnects. */
+  private readonly openAgentPanes = new Map<string, string>();
   private readonly attachLifecycle = new AttachLifecycle((event) => {
     if (event.type === 'attached' && this.pendingAttachedAgentSession?.sessionId === event.sessionId) {
       this.attachedAgentSessionId = this.pendingAttachedAgentSession.agentSessionId;
@@ -600,7 +598,9 @@ export class LocalSessionBackend implements SessionBackend {
 
   async listReplays(workspaceId?: string, includeDismissed?: boolean): Promise<void> {
     const replays = await this.deps.listReplays({ workspaceId, includeDismissed });
-    this.emit({ type: 'replays', replays: replays.filter((replay) => !isAgentReplay(replay)) });
+    // Agent sessions no longer record replays, but state dirs written by older
+    // daemons still hold `agent:*` recordings — noise in the replay list.
+    this.emit({ type: 'replays', replays: replays.filter((replay) => !replay.sessionName.startsWith('agent:')) });
   }
 
   async createCheckpoint(sessionId: string): Promise<void> {
@@ -1745,6 +1745,38 @@ export class LocalSessionBackend implements SessionBackend {
     throw new Error('Unexpected agent control-info response');
   }
 
+  async getAgentGoalMode(workspaceId: string, agentSessionId: string): Promise<AgentGoalModeInfo> {
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    const response = await this.sendTmuxCommand({ type: 'agent-goal-mode', target, agentSessionId });
+    if (response.type === 'agent-goal-mode') return response.info;
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected Goal Mode response');
+  }
+
+  async setAgentGoalMode(
+    workspaceId: string,
+    agentSessionId: string,
+    input: { enabled: boolean; precursor?: string },
+  ): Promise<AgentGoalModeInfo> {
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    const response = await this.sendTmuxCommand({ type: 'agent-set-goal-mode', target, agentSessionId, ...input });
+    if (response.type === 'agent-goal-mode') return response.info;
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected Goal Mode response');
+  }
+
+  async shakeAgentSession(
+    workspaceId: string,
+    agentSessionId: string,
+    mode: AgentShakeMode,
+  ): Promise<AgentShakeResult> {
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    const response = await this.sendTmuxCommand({ type: 'agent-shake', target, agentSessionId, mode });
+    if (response.type === 'agent-shake-result') return response.result;
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected Shake response');
+  }
+
   async getAgentSessionUsageReport(workspaceId: string, agentSessionId: string): Promise<AgentSessionUsageReport | null> {
     const target = await this.resolveAgentWorkspaceTarget(workspaceId);
     const tmuxResponse = await this.sendTmuxCommand({ type: 'agent-session-usage', target, agentSessionId });
@@ -2156,25 +2188,39 @@ export class LocalSessionBackend implements SessionBackend {
     throw new Error('Unexpected agent restore response');
   }
 
-  async attachAgentSession(workspaceId: string, agentSessionId: string, options: { viewOnly?: boolean; cols?: number; rows?: number } = {}): Promise<void> {
+  /**
+   * Open an agent session in a pane with no terminal behind it. The daemon
+   * takes a viewer lease; the pane record exists purely so the native
+   * transcript has somewhere to render. No PTY stream is opened, so nothing
+   * streams bytes the client would immediately discard.
+   */
+  async openAgentSession(workspaceId: string, agentSessionId: string, options: { paneId?: string } = {}): Promise<void> {
     const target = await this.resolveAgentWorkspaceTarget(workspaceId);
-    const response = await this.sendTmuxCommand({ type: 'agent-attach', target, agentSessionId, cols: options.cols, rows: options.rows });
-    if (response.type !== 'session') {
+    const paneId = options.paneId ?? `agent:${agentSessionId}`;
+    const response = await this.sendTmuxCommand({ type: 'agent-open', target, agentSessionId, paneId });
+    if (response.type !== 'agent-opened') {
       if (response.type === 'error') throw new Error(response.message);
-      throw new Error('Unexpected agent attach response');
+      throw new Error('Unexpected agent open response');
     }
-    this.pendingAttachedAgentSession = {
+    this.openAgentPanes.set(paneId, agentSessionId);
+    await this.refreshMachineSnapshotState();
+    this.emit({
+      type: 'pane_attached',
+      paneId,
+      streamId: null,
+      sessionId: null,
+      workspaceId,
       agentSessionId,
-      sessionId: response.session.id,
-    };
-    try {
-      await this.refreshMachineSnapshotState();
-      await this.attachSession({ sessionId: response.session.id, workspaceId, viewOnly: options.viewOnly, cols: options.cols, rows: options.rows });
-    } catch (error) {
-      this.pendingAttachedAgentSession = null;
-      this.attachedAgentSessionId = null;
-      throw error;
-    }
+    });
+  }
+
+  async closeAgentPane(paneId: string): Promise<void> {
+    const agentSessionId = this.openAgentPanes.get(paneId);
+    if (!agentSessionId) return;
+    this.openAgentPanes.delete(paneId);
+    this.emit({ type: 'pane_detached', paneId });
+    const response = await this.sendTmuxCommand({ type: 'agent-release', agentSessionId, paneId });
+    if (response.type === 'error') throw new Error(response.message);
   }
 
   async promptAgentSession(workspaceId: string, agentSessionId: string, text: string, images?: import('../../lib/tmux-lite/protocol.js').AgentPromptImage[], options?: { streamingBehavior?: 'steer' | 'followUp' }): Promise<void> {

@@ -143,7 +143,6 @@ export function buildTerminalRecord(
     unreadAlertCount: session.unreadAlertCount,
     processName: processIdentity.processName,
     processInstance: processIdentity.processInstance,
-    linkedAgentSessionId: session.metadata?.agentSessionId,
     metadata: session.metadata,
   };
 }
@@ -304,9 +303,6 @@ export function buildAgentSessionRecordsForWorkspace(params: {
         ...(workspace.pendingQuestions[session.id] ?? []).map((q) => q.id),
         ...(pendingDialogIdsBySession?.[session.id] ?? []),
       ];
-      const linkedTerminal = Object.values(terminalSessionsById).find(
-        (terminal) => terminal.workspaceId === workspaceId && terminal.linkedAgentSessionId === session.id,
-      );
       const errorMessage = workspace.errorMessages[session.id]
         ?? (workspace.statuses[session.id]?.type === 'retry' ? 'retrying' : undefined);
       records.push({
@@ -330,7 +326,6 @@ export function buildAgentSessionRecordsForWorkspace(params: {
         pendingQuestionCount: pendingQuestionIds.length,
         errorMessage,
         lastMessagePreview: workspace.lastMessages[session.id],
-        linkedTerminalSessionId: linkedTerminal?.id,
         modelInfo: workspace.modelInfo?.[session.id],
         todoPhases: workspace.todoPhases?.[session.id],
         queuedMessages: workspace.queuedMessages?.[session.id],

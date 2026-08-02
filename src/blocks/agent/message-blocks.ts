@@ -18,6 +18,7 @@ import type {
   ToolResultMessage,
 } from '@oh-my-pi/pi-ai';
 import type { Block } from '../index.js';
+import { agentResolutionLabel } from '../model-roles.js';
 
 // Primary input keys across the 16.3.4 builtin tools, in priority order (most
 // descriptive first, bare operation enums last). Covers read/edit/write (path),
@@ -152,15 +153,28 @@ function toolInputBlocks(call: ToolCall, idBase: string): Block[] {
 
   if (name === 'task') {
     const lines: string[] = [];
+    const agent = stringValue(args.agent);
+    const role = stringValue(args.role);
+    const dispatchId = stringValue(args.id);
+    if (agent) lines.push(`Agent: ${agent}`);
+    if (role) lines.push(`Role: ${role}`);
+    if (dispatchId) lines.push(`Dispatch: ${dispatchId}`);
     if (typeof args.context === 'string' && args.context.trim()) lines.push(args.context.trim());
     if (typeof args.assignment === 'string' && args.assignment.trim()) lines.push(args.assignment.trim());
     if (Array.isArray(args.tasks)) {
       args.tasks.forEach((t, i) => {
-        const rec = (t ?? {}) as Record<string, unknown>;
-        const a = typeof rec.assignment === 'string' ? rec.assignment : '';
-        const d = typeof rec.description === 'string' && rec.description ? ` — ${rec.description}` : '';
-        const line = `${i + 1}. ${a}${d}`.trim();
-        if (line) lines.push(line);
+        if (!isRecord(t)) return;
+        const assignment = stringValue(t.assignment) ?? '';
+        const description = stringValue(t.description);
+        const taskId = stringValue(t.id);
+        const taskRole = stringValue(t.role);
+        const detail = [
+          taskId ? `Dispatch: ${taskId}` : null,
+          taskRole ? `Role: ${taskRole}` : null,
+          t.isolated === true ? 'Isolated workspace' : null,
+        ].filter((value): value is string => value !== null);
+        const line = `${i + 1}. ${assignment}${description ? ` — ${description}` : ''}`.trim();
+        if (line) lines.push(detail.length > 0 ? `${line}\n   ${detail.join(' · ')}` : line);
       });
     }
     const text = lines.join('\n\n').trim();
@@ -201,11 +215,63 @@ function toolInputBlocks(call: ToolCall, idBase: string): Block[] {
   return [];
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object';
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function stringArrayValue(value: unknown): string[] {
+  return Array.isArray(value) ? value.flatMap((entry) => stringValue(entry) ?? []) : [];
+}
+
+function nonNegativeNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+function taskResultBlocks(result: ToolResultMessage, idBase: string): Block[] {
+  const rawResult: unknown = result;
+  if (!isRecord(rawResult) || !isRecord(rawResult.details) || !Array.isArray(rawResult.details.results)) return [];
+
+  return rawResult.details.results.flatMap((entry, index): Block[] => {
+    if (!isRecord(entry)) return [];
+    const id = stringValue(entry.id);
+    const agent = stringValue(entry.agent);
+    const source = stringValue(entry.agentSource);
+    const description = stringValue(entry.description);
+    const overrideModel = stringArrayValue(entry.modelOverride).join(', ') || null;
+    const resolvedModel = stringValue(entry.resolvedModel) ?? null;
+    return [{
+      id: `${idBase}:subagent:${id ?? index}`,
+      type: 'subagent',
+      data: {
+        id,
+        label: description ?? id ?? agent ?? 'Subagent',
+        agent,
+        source: source === 'bundled' || source === 'user' || source === 'project' ? source : undefined,
+        model: agentResolutionLabel({ model: null, overrideModel, resolvedModel }),
+        resolvedModel: resolvedModel ?? undefined,
+        status: result.isError ? 'blocked' : 'done',
+        durationMs: nonNegativeNumber(entry.durationMs),
+        requests: nonNegativeNumber(entry.requests),
+      },
+    }];
+  });
+}
+
 function toolCallBlock(call: ToolCall, result: ToolResultMessage | undefined): Block {
   const id = `tool:${call.id}`;
   const args = call.arguments as Record<string, unknown> | undefined;
   const lang = langFromPath(args?.file_path ?? args?.path ?? args?.filePath ?? args?.notebook_path);
   const input = toolInputBlocks(call, id);
+  const resultBlocks = result
+    ? [
+      ...(call.name === 'task' ? taskResultBlocks(result, id) : []),
+      ...toolResultBlocks(result, id, lang),
+    ]
+    : undefined;
   return {
     id,
     type: 'tool-call',
@@ -214,7 +280,7 @@ function toolCallBlock(call: ToolCall, result: ToolResultMessage | undefined): B
       target: toolTarget(call.arguments),
       status: result ? (result.isError ? 'error' : 'done') : 'running',
       input: input.length > 0 ? input : undefined,
-      result: result ? toolResultBlocks(result, id, lang) : undefined,
+      result: resultBlocks && resultBlocks.length > 0 ? resultBlocks : undefined,
     },
   };
 }

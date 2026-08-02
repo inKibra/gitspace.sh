@@ -1,8 +1,95 @@
 import { describe, expect, it, mock } from 'bun:test';
+import { mkdtempSync, rmSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 
 import { createFrame, openFrame } from '../../tmux-lite/crypto/frames.js';
+import { decodeRouterMessages, encodeRouterMessage, type Command, type Response } from '../../tmux-lite/protocol.js';
 import { parseRemoteMessage, serializeRemoteMessage } from '../protocol.js';
 import { RemoteSessionHandler, canAccessReplayForSession, filterReplaysForSessionAccess, type RemoteClientSession } from '../session-handler.js';
+
+interface ControlledTimer {
+  callback: () => void;
+  cancelled: boolean;
+}
+
+interface ControlledTimers {
+  advance(): void;
+  restore(): void;
+}
+
+interface ControlledReplyServer {
+  requestReceived: Promise<Command>;
+  reply(response: Response): void;
+  stop(): void;
+}
+
+function installControlledTimers(): ControlledTimers {
+  const originalSetTimeout = globalThis.setTimeout;
+  const originalClearTimeout = globalThis.clearTimeout;
+  const timers = new Set<ControlledTimer>();
+
+  globalThis.setTimeout = ((callback: () => void) => {
+    const timer: ControlledTimer = { callback, cancelled: false };
+    timers.add(timer);
+    return timer as unknown as number;
+  }) as typeof setTimeout;
+  globalThis.clearTimeout = ((timer: unknown) => {
+    if (typeof timer === 'object' && timer !== null && timers.has(timer as ControlledTimer)) {
+      (timer as ControlledTimer).cancelled = true;
+    }
+  }) as typeof clearTimeout;
+
+  return {
+    advance() {
+      for (const timer of timers) {
+        if (!timer.cancelled) {
+          timer.cancelled = true;
+          timer.callback();
+        }
+      }
+    },
+    restore() {
+      globalThis.setTimeout = originalSetTimeout;
+      globalThis.clearTimeout = originalClearTimeout;
+    },
+  };
+}
+
+function listenForTmuxReply(socketPath: string): ControlledReplyServer {
+  let resolveRequest: ((command: Command) => void) | undefined;
+  const requestReceived = new Promise<Command>((resolve) => {
+    resolveRequest = resolve;
+  });
+  let reply: ((response: Response) => void) | undefined;
+  let buffer: Buffer<ArrayBufferLike> = Buffer.alloc(0);
+
+  const server = Bun.listen({
+    unix: socketPath,
+    socket: {
+      data(socket, data) {
+        buffer = Buffer.concat([buffer, Buffer.from(data)]);
+        const decoded = decodeRouterMessages(buffer);
+        buffer = decoded.remaining;
+        const command = decoded.messages[0] as Command | undefined;
+        if (!command) return;
+        reply = (response) => socket.write(encodeRouterMessage(response));
+        resolveRequest?.(command);
+      },
+    },
+  });
+
+  return {
+    requestReceived,
+    reply(response) {
+      if (!reply) throw new Error('Expected a tmux command before replying');
+      reply(response);
+    },
+    stop() {
+      server.stop(true);
+    },
+  };
+}
 
 describe('remote replay session access', () => {
   it('allows full access to all replays', () => {
@@ -171,5 +258,95 @@ describe('remote /space command responses', () => {
         },
       },
     });
+  });
+});
+
+describe('remote agent-shake command dispatch', () => {
+  it('uses the unbounded socket fallback and returns the delayed tmux result', async () => {
+    const envKeys = [
+      'TMUX_LITE_SANDBOX',
+      'TMUX_LITE_SOCKET',
+      'TMUX_LITE_SESSION_DIR',
+      'TMUX_LITE_PID_FILE',
+    ] as const;
+    const savedEnv = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]));
+    const testDir = mkdtempSync(join(tmpdir(), 'remote-shake-timeout-'));
+    const socketPath = join(testDir, 'router.sock');
+    const timers = installControlledTimers();
+    let control: ControlledReplyServer | undefined;
+
+    try {
+      delete process.env.TMUX_LITE_SANDBOX;
+      process.env.TMUX_LITE_SOCKET = socketPath;
+      process.env.TMUX_LITE_SESSION_DIR = testDir;
+      process.env.TMUX_LITE_PID_FILE = join(testDir, 'router.pid');
+      control = listenForTmuxReply(socketPath);
+
+      const handler = new RemoteSessionHandler();
+      const sendKey = new Uint8Array(32).fill(17);
+      const receiveKey = new Uint8Array(32).fill(23);
+      const session: RemoteClientSession = {
+        connectionId: 'shake-client',
+        state: 'browsing',
+        accessType: 'full',
+        sessionKeys: {
+          sendKey,
+          receiveKey,
+          sessionId: 'shake-session-keys',
+        },
+      };
+      const request = {
+        type: 'shake_agent_session' as const,
+        requestId: 'shake-request',
+        target: {
+          workspaceId: 'project:workspace',
+          workspaceName: 'workspace',
+          projectName: 'project',
+          workspacePath: '/workspace',
+        },
+        agentSessionId: 'agent-1',
+        mode: 'elide' as const,
+      };
+      const responses: Uint8Array[] = [];
+      const requestFrame = createFrame(0, new TextEncoder().encode(serializeRemoteMessage(request)), receiveKey);
+      const pending = handler.handleMessage(session, requestFrame, (data) => {
+        responses.push(data);
+      });
+
+      await expect(control.requestReceived).resolves.toEqual({
+        type: 'agent-shake',
+        target: request.target,
+        agentSessionId: 'agent-1',
+        mode: 'elide',
+      });
+      timers.advance();
+      const result = {
+        mode: 'elide' as const,
+        toolResultsDropped: 3,
+        blocksDropped: 2,
+        tokensFreed: 120,
+      };
+      control.reply({ type: 'agent-shake-result', result });
+      await pending;
+
+      expect(responses).toHaveLength(1);
+      const responseFrame = openFrame(responses[0], sendKey);
+      expect(responseFrame).not.toBeNull();
+      if (!responseFrame) throw new Error('Expected encrypted command response');
+      expect(parseRemoteMessage(new TextDecoder().decode(responseFrame.data))).toEqual({
+        type: 'command_response',
+        requestId: 'shake-request',
+        response: { type: 'agent-shake-result', result },
+      });
+    } finally {
+      timers.restore();
+      control?.stop();
+      rmSync(testDir, { recursive: true, force: true });
+      for (const key of envKeys) {
+        const value = savedEnv[key];
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
   });
 });
