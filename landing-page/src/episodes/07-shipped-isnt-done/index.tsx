@@ -4,6 +4,8 @@ import { Footer } from "../../components/layout/Footer";
 import FaultyTerminal from "../../components/landing/FaultyTerminal";
 import { Button } from "../../app/components/ui/button";
 import { Github, ArrowRight } from "lucide-react";
+import { ChainKanbanShot } from "../../components/landing/ChainKanbanShot";
+import { ChainBuilder } from "./islands/ChainBuilder";
 import { MorningAfter } from "./islands/MorningAfter";
 import { PromoteRollup } from "./islands/PromoteRollup";
 
@@ -98,13 +100,13 @@ export default function BlogPost() {
           <FaultyTerminal scale={2} gridMul={[2, 1]} digitSize={1.2} timeScale={0.4} pause={false} scanlineIntensity={0.3} glitchAmount={1} flickerAmount={1} noiseAmp={1} chromaticAberration={0} dither={1} curvature={0} tint="#22c55e" mouseReact={false} pageLoadAnimation={false} brightness={0.4} />
         </div>
         <div className="relative z-10 container mx-auto px-4 pt-24 pb-20 max-w-3xl">
-          <div className="text-[13px] font-mono text-green-500/80 mb-5 uppercase tracking-widest">The agent fleet · Nº 07</div>
+          <div className="text-[13px] font-mono text-green-500/80 mb-5 uppercase tracking-widest">The agent fleet · Nº 04</div>
           <h1 className="text-5xl md:text-7xl font-bold tracking-tight leading-[0.95] mb-6">
             Shipped isn’t <span className="text-amber-400">done</span>.
           </h1>
           <p className="text-xl md:text-2xl text-zinc-400 mb-8">
-            Merge is the midpoint of a goal’s life. The dashboard keeps watching after you stop, and the rubric that shipped the goal is the tripwire
-            that reopens it.
+            A chain is the plan over goals: workspaces come and go as execution reaches them, and merge is the midpoint. The record keeps watching
+            after you stop, and the rubric that shipped a goal is the tripwire that reopens it.
           </p>
           <div className="flex items-center gap-3 text-sm text-zinc-500">
             <div className="h-8 w-8 rounded-full bg-green-500/20 border border-green-500/40 flex items-center justify-center text-green-400 font-mono text-xs">BL</div>
@@ -117,6 +119,66 @@ export default function BlogPost() {
 
       {/* article */}
       <article className="container mx-auto px-4 py-16 max-w-3xl">
+        <P>
+          Some features fit in one branch. The ones that matter don’t. A checkout cutover is a schema change, then a backfill job, then the
+          flag flip, then an e2e pass that proves the whole thing. Four goals, one order. The backfill can’t start until the schema lands.
+          The flags mean nothing until the backfill finishes.
+        </P>
+        <P>
+          The tempting move is to throw four agents at it at once. Now you have four branches, each assuming a world the others haven’t
+          built yet. Parallel agents don’t make ordering easier. They make it harder: every agent moves at its own pace, and none of them
+          can see the line.
+        </P>
+        <Quote>The order is part of the plan. It has to live somewhere you and the agents can both read it.</Quote>
+
+        <H2 id="plan">A chain is a plan over goals</H2>
+        <Rule />
+        <P>
+          In gitspace that somewhere is a <strong className="text-white">chain</strong>: an ordered list of goals.{" "}
+          <Code>billing-schema → backfill-job → checkout-flags → checkout-e2e</Code>. Each goal stacks on its ancestor. Each goal climbs
+          the same ladder: <Code>plan → code → review → ship</Code>. And a descendant can never outpace its ancestor: while{" "}
+          <Code>checkout-flags</Code> is still in code, <Code>checkout-e2e</Code> cannot enter review. Blocked goals wait.
+        </P>
+        <P>
+          Here’s the part that takes a minute to sink in: <strong className="text-white">a goal is not a branch</strong>. A goal only
+          holds a workspace while an agent is actively working it. Before that it’s <Code>planned · no workspace yet</Code>: a real goal
+          you can author, order, and attach requirements to, with zero worktrees on disk. After it merges, the workspace gets deleted.
+          The chain keeps the goal; the checkout disappears. At any moment a chain is mostly plan: one or two goals have live workspaces
+          with agents in them, everything behind them is merged and gone, everything ahead is queued and weightless.
+        </P>
+        <Wide caption="Hover or tap a chained card to trace its chain. The strip is workspaces; the board is the plan.">
+          <ChainKanbanShot />
+        </Wide>
+        <P>
+          Trace <Code>checkout-cutover</Code>. <Code>billing-schema</Code> already shipped: its card reads{" "}
+          <Code>merged · workspace removed</Code>, yet it still holds slot 1 of 4 in the lens. <Code>backfill-job</Code> sits in review.{" "}
+          <Code>checkout-flags</Code> holds the only live workspace, agent running. And <Code>checkout-e2e</Code> is queued:{" "}
+          <Code>planned · no workspace yet</Code>, blocked by <Code>checkout-flags</Code>. One chain, four goals, exactly one workspace.
+        </P>
+
+        <H2 id="build">One verb: add-after</H2>
+        <Rule />
+        <P>
+          Planning a chain is one verb. Pick a goal, say what comes after it. Try it below: the seed goal already has an agent on it. Add
+          the next goal after it, then the one after that. Watch the track and the order badges grow, and watch the command each click
+          stands for.
+        </P>
+        <Wide caption="Every click is a real command. The mono log is what you (or an agent) would run.">
+          <ChainBuilder />
+        </Wide>
+        <P>
+          Mark the active goal done and two things happen at once. Its workspace goes away, and the next goal stops being paper: it binds
+          a workspace, branching from its ancestor’s HEAD, and the agent starts. That handoff is the whole point. Finishing a goal is
+          what unblocks the next one. The order isn’t advice, either: try inserting a goal in front of work that has already advanced and
+          the chain refuses. Not a warning. A refusal.
+        </P>
+        <P>
+          And when everything ships, nothing is left running. Every workspace deleted, every branch merged, and the chain still reads top
+          to bottom as what happened, in the order it happened. Which sounds like the end. It’s the midpoint.
+        </P>
+
+        <H2 id="midpoint">The morning after a goal ships</H2>
+        <Rule />
         <P>
           Yesterday <Code>remove-checkout-v2</Code> shipped. The review gate passed, the rubric went green, the workspace’s artifacts branch rolled up
           into <Code>main</Code>, and the board moved on. Every tool you use agrees this goal is over: the card is in the done column, the branch is

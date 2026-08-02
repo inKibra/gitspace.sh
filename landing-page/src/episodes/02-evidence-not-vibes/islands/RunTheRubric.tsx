@@ -21,7 +21,7 @@ const REQS: ReqDef[] = [
     id: "tests",
     title: "Checkout tests pass",
     kind: "test-output",
-    rubric: "Suite completes with 0 failures. Exit code 0.",
+    rubric: "Exercises the real checkout path, not a stub. 0 failures, exit 0.",
     judge: "command",
     runs: [
       {

@@ -11,12 +11,9 @@ const POSTS = [
     date: "July 2026",
     image: "/blog/babysitting-agents-sucks-og.png",
   },
-  { slug: "evidence-not-vibes", kicker: "The agent fleet · Nº 02", title: "Evidence, not vibes.", dek: "“Looks good to me” is not a review when the author is a machine. Rubrics, command judges, and evidence you can replay.", date: "Draft", image: null },
-  { slug: "the-change-guide", kicker: "The agent fleet · Nº 03", title: "The change guide.", dek: "Code review as a build-order story: foundations, wiring, surfaces. The analyzer computes it; the agent narrates it.", date: "Draft", image: null },
-  { slug: "the-workflow-and-the-goal", kicker: "The agent fleet · Nº 04", title: "The workflow and the goal.", dek: "State the goal and the contract derives: requirements, rubrics, workflow nodes, and an honest phase journal.", date: "Draft", image: null },
-  { slug: "the-agent-change", kicker: "The agent fleet · Nº 05", title: "The agent change.", dek: "Blame for the agent age: not who typed the line, but which conceptual change introduced, moved, or refined it.", date: "Draft", image: null },
-  { slug: "goals-ship-in-order", kicker: "The agent fleet · Nº 06", title: "Goals ship in order.", dek: "Chains are the plan over goals. Workspaces come and go as execution reaches them.", date: "Draft", image: null },
-  { slug: "shipped-isnt-done", kicker: "The agent fleet · Nº 07", title: "Shipped isn’t done.", dek: "Merge is the midpoint. Cron refreshes dashboards from rolled-up artifacts; shipped goals reopen on signals.", date: "Draft", image: null },
+  { slug: "evidence-not-vibes", kicker: "The agent fleet · Nº 02", title: "Agents lie about what they shipped.", dek: "The good ones lie best. State the goal and the contract derives; a reviewer hunts fake-green tests; judges rule on runs you can replay.", date: "Draft", image: null },
+  { slug: "the-change-guide", kicker: "The agent fleet · Nº 03", title: "The change guide.", dek: "Code review as a build-order story, and blame for the agent age: which conceptual change put this line here, and what was it trying to do.", date: "Draft", image: null },
+  { slug: "shipped-isnt-done", kicker: "The agent fleet · Nº 04", title: "Shipped isn’t done.", dek: "Chains are the plan over goals; workspaces come and go as execution reaches them. Merge is the midpoint, and shipped goals reopen on signals.", date: "Draft", image: null },
 ];
 
 export default function BlogIndex() {

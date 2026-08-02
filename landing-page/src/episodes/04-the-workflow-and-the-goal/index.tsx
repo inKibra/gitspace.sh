@@ -4,7 +4,8 @@ import { Footer } from "../../components/layout/Footer";
 import FaultyTerminal from "../../components/landing/FaultyTerminal";
 import { Button } from "../../app/components/ui/button";
 import { Github, ArrowRight } from "lucide-react";
-import { DeriveTheContract } from "./islands/DeriveTheContract";
+// island moved to ep02 (its permanent home); this episode is pending cancellation
+import { DeriveTheContract } from "../02-evidence-not-vibes/islands/DeriveTheContract";
 
 /* small typographic helpers ------------------------------------------------ */
 function H2({ children, id }: { children: React.ReactNode; id?: string }) {

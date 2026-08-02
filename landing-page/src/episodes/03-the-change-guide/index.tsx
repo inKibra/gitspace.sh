@@ -5,6 +5,7 @@ import FaultyTerminal from "../../components/landing/FaultyTerminal";
 import { Button } from "../../app/components/ui/button";
 import { Github, ArrowRight } from "lucide-react";
 import { ChangeGuideExplorer } from "./islands/ChangeGuideExplorer";
+import { BlameExplorer } from "./islands/BlameExplorer";
 
 /* small typographic helpers ------------------------------------------------ */
 function H2({ children, id }: { children: React.ReactNode; id?: string }) {
@@ -31,6 +32,84 @@ function Wide({ children, caption }: { children: React.ReactNode; caption?: stri
     <div className="my-10 -mx-4 sm:mx-0">
       <div className="lg:-mx-24">{children}</div>
       {caption && <div className="text-center text-[12px] text-zinc-500 mt-3 font-mono">{caption}</div>}
+    </div>
+  );
+}
+
+/* the three kinds of conceptual change (carried from the agent-change post) -- */
+const KindLegend = () => (
+  <div className="flex flex-wrap gap-x-6 gap-y-2 my-8 text-sm font-mono">
+    {[
+      ["bg-blue-400", "introduced · the idea enters the file"],
+      ["bg-orange-400", "moved · it relocates"],
+      ["bg-purple-400", "refined · reworked in place"],
+    ].map(([c, l]) => (
+      <span key={l} className="flex items-center gap-2 text-zinc-400">
+        <span className={`h-2.5 w-2.5 ${c}`} />
+        {l}
+      </span>
+    ))}
+  </div>
+);
+
+/* static compare: the dead question vs. the live one ------------------------ */
+const BLAME_ROWS = [
+  "const WINDOW_MS = 60_000;",
+  "export function rateLimit(req, res, next) {",
+  '  const limit = planLimits[req.auth?.plan ?? "free"];',
+  "  if (!bucket.take()) {",
+  '    res.setHeader("Retry-After", …);',
+  "    throw new RateLimitError(key, …);",
+];
+
+function WhoVsWhy() {
+  return (
+    <div className="grid md:grid-cols-2 gap-4">
+      <div className="border border-[#1a1a1a] bg-[#050505] overflow-hidden">
+        <div className="px-4 py-2.5 border-b border-[#1a1a1a] flex items-center justify-between gap-2">
+          <span className="text-sm font-medium text-zinc-300">git blame</span>
+          <span className="text-[11px] text-zinc-600 uppercase tracking-wider truncate">who typed this</span>
+        </div>
+        <div className="p-4 font-mono text-[12px] leading-7 overflow-x-auto">
+          {BLAME_ROWS.map((code) => (
+            <div key={code} className="whitespace-pre min-w-max">
+              <span className="text-zinc-600">9f31c2d </span>
+              <span className="text-zinc-400">(agent 2026-06-18) </span>
+              <span className="text-zinc-300">{code}</span>
+            </div>
+          ))}
+        </div>
+        <div className="px-4 py-3 border-t border-[#1a1a1a] text-[12px] text-zinc-500">
+          Six lines. One author, one commit. Nothing learned.
+        </div>
+      </div>
+
+      <div className="border border-[#1a1a1a] bg-[#050505] overflow-hidden">
+        <div className="px-4 py-2.5 border-b border-[#1a1a1a] flex items-center justify-between gap-2">
+          <span className="text-sm font-medium text-zinc-300">agent blame</span>
+          <span className="text-[11px] text-zinc-600 uppercase tracking-wider truncate">which change put it here</span>
+        </div>
+        <div className="p-4 text-[13px] space-y-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="px-1.5 py-0.5 text-[10px] font-mono bg-blue-400/10 text-blue-300">Introduced</span>
+            <span className="text-zinc-200">Token-bucket limiter</span>
+            <span className="font-mono text-[11px] text-zinc-500">goal: Rate-limit the public API</span>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="px-1.5 py-0.5 text-[10px] font-mono bg-orange-400/10 text-orange-300">Moved</span>
+            <span className="text-zinc-200">into shared middleware</span>
+            <span className="font-mono text-[11px] text-zinc-500">phase: extract</span>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="px-1.5 py-0.5 text-[10px] font-mono bg-purple-400/10 text-purple-300">Refined</span>
+            <span className="text-zinc-200">the 429 contract</span>
+            <span className="font-mono text-[11px] text-zinc-500">phase: review-fixes</span>
+          </div>
+        </div>
+        <div className="px-4 py-3 border-t border-[#1a1a1a] text-[12px] text-zinc-500">
+          Same lines. Three concepts, two goals, five journal entries.
+        </div>
+      </div>
     </div>
   );
 }
@@ -178,12 +257,52 @@ export default function BlogPost() {
           not their number.
         </P>
 
+        <H2 id="blame">Six months later, the question inverts</H2>
+        <Rule />
+        <P>
+          The guide answers the question you have at review time: what order do I read this in. Six months later you have the opposite question.
+          You are not holding a change looking for its story. You are holding one line, at 2 a.m., asking why it exists. So you run{" "}
+          <Code>git blame</Code>, and every line comes back the same: <Code>agent · 2026-06-18</Code>. The command works fine. The question it
+          answers is dead. For twenty years “who typed this” was a good proxy for “why,” because the name pointed at a person who remembered.
+          Agents broke the proxy: the typist remembers nothing, and you run forty of them.
+        </P>
+        <Wide caption="The author column has stopped carrying information. The right panel is what the file should say back.">
+          <WhoVsWhy />
+        </Wide>
+        <P>
+          gitspace answers with the <strong className="text-white">conceptual change</strong>: one idea landing in the code. A change has a kind.{" "}
+          <strong className="text-white">Introduced</strong> means the idea entered the file. <strong className="text-white">Moved</strong> means it
+          relocated. <strong className="text-white">Refined</strong> means it got reworked in place. An afternoon of agent work produces several of
+          these, and a squash merge lands them all as one hash.
+        </P>
+        <KindLegend />
+        <P>
+          Click any line below. The panel shows the change that owns it: the kind, the concept, the goal it served, and the intent the agent
+          declared in its phase journal. Then flip <strong className="text-white">x-ray</strong> to tint the whole file by concept, and the code
+          sorts itself into three ideas.
+        </P>
+        <Wide caption="Every quote in the panel was written before the code it explains.">
+          <BlameExplorer />
+        </Wide>
+        <P>
+          Those quotes hold for the same reason the guide’s narration holds. The journal entry goes on record at phase-start, before the first
+          edit, so it cannot be a rationalization. The guide reads that journal forward to order the clusters. Blame reads it backward from a
+          single line. One record, two directions.
+        </P>
+
+        <Quote>Provenance per keystroke is noise. Provenance per concept is memory.</Quote>
+
         <H2 id="close">Fourteen files, four beats</H2>
         <Rule />
         <P>
           The flat file list makes review a chore you defer, and deferred review is how agent code ships unread. A guide makes it something you
           can start: beat 1, then next, next, done. You know where the load-bearing change is, where the sweep is, and which test guards the
           risky part.
+        </P>
+        <P>
+          And the record you built by reviewing this way keeps paying after merge. Review gets a new unit: three concepts, not four hundred
+          changed lines. Debugging gets a witness: the line that throws hands you the goal that wanted it. A new teammate asks the file why it
+          exists, and the file answers.
         </P>
         <P>You’ll be reviewing more agent diffs next quarter, not fewer. Read them in the order they were built.</P>
 

@@ -5,7 +5,8 @@ import FaultyTerminal from "../../components/landing/FaultyTerminal";
 import { Button } from "../../app/components/ui/button";
 import { Github, ArrowRight } from "lucide-react";
 import { ChainKanbanShot } from "../../components/landing/ChainKanbanShot";
-import { ChainBuilder } from "./islands/ChainBuilder";
+// island moved to 07 (the surviving merged post); this episode is pending deletion
+import { ChainBuilder } from "../07-shipped-isnt-done/islands/ChainBuilder";
 
 /* small typographic helpers ------------------------------------------------ */
 function H2({ children, id }: { children: React.ReactNode; id?: string }) {
