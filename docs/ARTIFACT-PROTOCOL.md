@@ -75,7 +75,7 @@ gssh space artifacts share list | share revoke <tokenId>
 gssh space artifacts repair                          # safe pointer-conversion of gated (never-pushed) commits
 ```
 
-`promote` accepts `local://` URIs directly: OMP's `bash-skill-urls` rewriting (`bash-skill-urls.ts:171`, verified at pi-coding-agent 16.3.4) resolves the URI to a real filesystem path before the CLI runs — zero extra plumbing for the agent-facing bridge, with a plain-path fallback for non-bash callers.
+`promote` accepts `local://` URIs directly: OMP's `bash-skill-urls` rewriting resolves the URI to a real filesystem path before the CLI runs — zero extra plumbing for the agent-facing bridge, with a plain-path fallback for non-bash callers. Verified against pi-coding-agent 17.2.4.
 
 ### Enforcement rings (summary)
 
@@ -133,10 +133,10 @@ A shell test harness mirroring the scratchpad experiments runs the hook against:
 
 ## OMP `local://` integration (Q2)
 
-### What the SDK allows (verified in `node_modules/@oh-my-pi/pi-coding-agent` 16.3.4)
+### What the SDK allows (verified in `node_modules/@oh-my-pi/pi-coding-agent` 17.2.4)
 
 - `createAgentSession({ localProtocolOptions: { getArtifactsDir, getSessionId } })` is a sanctioned, published DI hook (`dist/types/sdk.d.ts:175`). The SDK installs it as a process-global override **and** threads it into every tool call's context; subagents inherit it (`task/executor.ts`).
-- The SDK hard-appends `/local` to whatever `getArtifactsDir()` returns (`local-protocol.ts:242-253`). You control the parent directory, not the leaf.
+- GitSpace's patched `local-protocol.ts` maps `local://x` directly under the supplied artifacts mount root; the upstream default leaf behavior must not be restored, or paths diverge from the `space artifacts` CLI.
 - The backend **must be a real directory**: writes/edits/eval/bash resolve `local://x` to a plain path via `resolveLocalUrlToPath` and do ordinary fs I/O (`write.ts:903-934`, `buildEvalUrlRoots`). There is no virtual storage interface, and **no write hook fires** — `LocalProtocolHandler` has no `write()`, and edit/plan internals bypass even a replacement router handler.
 - Plan mode makes the working tree read-only and permits writes **only** inside the local sandbox (`plan-mode-guard.ts:128-155`); the local root must stay freely writable plain fs at all times.
 - Symlink containment: root/parent/target are realpathed; a worktree-mounted root qualifies (root is realpathed first), files symlinking out are refused.

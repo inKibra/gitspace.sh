@@ -28,9 +28,8 @@ rendered through GitSpace's own host-UI dialog pipeline — not the SDK's TUI-on
   error to the model); `tool_result` only **replaces content post-hoc** (after execution; can't collect input there).
 
 ### The lever: patch the SDK (already an established GitSpace mechanism)
-`package.json` → `patchedDependencies` already patches `@oh-my-pi/pi-coding-agent@16.3.4` and
-`@oh-my-pi/pi-agent-core@16.3.4` (see `patches/`), with small surgical additions. We use the same mechanism:
-teach the builtin `ask` to call a new optional `ExtensionUIContext.ask()` when the host provides one,
+`package.json` → `patchedDependencies` pins the OMP packages to 17.2.4. The GitSpace `pi-coding-agent` patch is version-specific and carries the native `askForm` bridge, with small surgical additions. We use the same mechanism:
+teach the builtin `ask` to call a new optional `ExtensionUIContext.askForm()` when the host provides one,
 falling back to today's `select`-loop otherwise. **No tool-registry override, no `hasUI` gating change, no builtin disable.**
 
 ---
@@ -70,8 +69,8 @@ Response (client → server), added to `HostUIDialogResponse`:
 ## Implementation steps
 
 ### 1. SDK patch — route builtin `ask` through the host (the enabling change)
-Patch `@oh-my-pi/pi-coding-agent@16.3.4` (via `bun patch`, add to `patchedDependencies`):
-- Add optional `ask?(questions): Promise<AskResult>` to the `ExtensionUIContext` interface
+Patch `@oh-my-pi/pi-coding-agent@17.2.4` (via `bun patch`, add to `patchedDependencies`):
+- Add optional `askForm?(questions): Promise<AskResult>` to the `ExtensionUIContext` interface
   (`src/extensibility/extensions/types.ts`).
 - In the `ask` tool's `execute` (`src/tools/ask.ts` or wherever `AskTool` lives in the published `src/`):
   if `typeof ctx.ui.ask === 'function'`, call `ctx.ui.ask(questions)` and map its results to the tool result;
@@ -131,7 +130,7 @@ Patch `@oh-my-pi/pi-coding-agent@16.3.4` (via `bun patch`, add to `patchedDepend
   yet) vs present-but-aborting. Doesn't block B (the patch routes through `ctx.ui.ask` regardless), but may reveal a
   separate binding-order fix worth making.
 - Keep the SDK patch tiny and re-check it against future `@oh-my-pi/pi-coding-agent` bumps (patches are version-pinned:
-  `@16.3.4`).
+  `@17.2.4`).
 
 ## Explicitly out of scope (separate effort)
 - **Async job manager.** Proven SDK behavior: a session gets its own manager only if no process-global singleton exists

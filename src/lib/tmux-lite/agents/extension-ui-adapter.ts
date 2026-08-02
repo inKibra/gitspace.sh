@@ -100,6 +100,10 @@ export function createExtensionUIContext(resolve: HostUIContextResolver): Extens
       return () => {};
     },
 
+    // Autocomplete providers require the interactive terminal editor; hosted
+    // sessions expose command completion through the native surface instead.
+    addAutocompleteProvider: () => {},
+
     custom: <T>(): Promise<T> => Promise.reject(
       new Error('Extension custom UI components require a terminal; hosted sessions render the native surface.'),
     ),

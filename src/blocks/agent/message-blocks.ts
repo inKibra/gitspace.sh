@@ -20,7 +20,7 @@ import type {
 import type { Block } from '../index.js';
 import { agentResolutionLabel } from '../model-roles.js';
 
-// Primary input keys across the 16.3.4 builtin tools, in priority order (most
+// Primary input keys across the 17.2.4 builtin tools, in priority order (most
 // descriptive first, bare operation enums last). Covers read/edit/write (path),
 // bash/ssh (command), grep/ast_grep (pattern/pat), eval (code), task (assignment),
 // checkpoint (goal), rewind (report), learn (memory), ssh (host), manage_skill
