@@ -9,7 +9,12 @@
     "render:01": "remotion render src/index.ts ep01-fleet-green ../out/01-fleet-green.mp4 --codec h264",
     "og:01": "remotion still src/index.ts ep01-og ../out/01-og.png",
     "render:01:tok": "remotion render src/index.ts ep01-fleet-green-tok ../out/01-fleet-green-tok.mp4 --codec h264",
-    "gif:01": "ffmpeg -y -ss 2.0 -to 15.0 -i ../out/01-fleet-green.mp4 -vf 'fps=15,scale=960:-1:flags=lanczos,split[s0][s1];[s0]palettegen=max_colors=128[p];[s1][p]paletteuse=dither=bayer' ../out/01-fleet-green.gif"
+    "gif:01": "ffmpeg -y -ss 2.0 -to 15.0 -i ../out/01-fleet-green.mp4 -vf 'fps=15,scale=960:-1:flags=lanczos,split[s0][s1];[s0]palettegen=max_colors=128[p];[s1][p]paletteuse=dither=bayer' ../out/01-fleet-green.gif",
+    "render:02": "remotion render src/index.ts ep02-evidence ../out/02-evidence.mp4 --codec h264",
+    "render:03": "remotion render src/index.ts ep03-change-guide ../out/03-change-guide.mp4 --codec h264",
+    "render:04": "remotion render src/index.ts ep04-shipped-isnt-done ../out/04-shipped-isnt-done.mp4 --codec h264",
+    "render:02v2": "remotion render src/index.ts ep02-evidence-v2 ../out/02-evidence-v2.mp4 --codec h264",
+    "og:02": "remotion still src/index.ts ep02-evidence-og ../out/02-evidence-og.png"
   },
   "dependencies": {
     "@remotion/cli": "^4.0.496",

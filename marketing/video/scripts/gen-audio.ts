@@ -84,16 +84,18 @@ const write = async (name: string, l: Float64Array, r: Float64Array) => {
 // ── pad v2: evolving ethereal bed, 19.4s ────────────────────────────────────
 // Chord journey instead of a static drone: A(add9) → Fmaj7 → C(add9) → home.
 // Sections crossfade; a soft quarter-note pluck arp gives it motion.
+// ep01 grew a 5s dissolve intro and a sand ending, so the bed has to reach
+// 25s (was 19.4s). Same four-chord journey, stretched — not looped.
 {
-  const DUR = 19.4;
+  const DUR = 25.5;
   const [l, r] = buf(DUR);
   const smooth = (x: number) => (x <= 0 ? 0 : x >= 1 ? 1 : x * x * (3 - 2 * x));
   const XF = 1.8; // crossfade seconds between sections
   const SECTIONS = [
-    { t0: 0.0, t1: 5.0, root: 55.0, freqs: [110.0, 164.81, 246.94, 293.66] }, // A add9
-    { t0: 5.0, t1: 9.5, root: 43.65, freqs: [87.31, 130.81, 164.81, 220.0] }, // Fmaj7
-    { t0: 9.5, t1: 14.0, root: 65.41, freqs: [130.81, 196.0, 293.66, 329.63] }, // C add9
-    { t0: 14.0, t1: DUR, root: 55.0, freqs: [110.0, 164.81, 246.94, 293.66] }, // A home
+    { t0: 0.0, t1: 6.5, root: 55.0, freqs: [110.0, 164.81, 246.94, 293.66] }, // A add9
+    { t0: 6.5, t1: 12.5, root: 43.65, freqs: [87.31, 130.81, 164.81, 220.0] }, // Fmaj7
+    { t0: 12.5, t1: 18.5, root: 65.41, freqs: [130.81, 196.0, 293.66, 329.63] }, // C add9
+    { t0: 18.5, t1: DUR, root: 55.0, freqs: [110.0, 164.81, 246.94, 293.66] }, // A home
   ];
   const AMPS = [0.05, 0.045, 0.038, 0.03];
   for (let i = 0; i < l.length; i++) {
@@ -132,6 +134,61 @@ const write = async (name: string, l: Float64Array, r: Float64Array) => {
     bell(l, r, time, f * 2.003, 0.008, 0.15, k % 2 === 0 ? -0.35 : 0.35);
   }
   await write('pad', l, r);
+}
+
+// ── pad-long: 68s bed for the longer ep02 cut (same journey, cycled twice, so
+// it never has to loop — a loop seam is audible). Its own file so ep01's pad
+// (which fades out at ~19s) is untouched. Must stay AHEAD of the composition
+// length or the last seconds play dry. ─────────────────────────────────────
+{
+  const DUR = 68;
+  const [l, r] = buf(DUR);
+  const smooth = (x: number) => (x <= 0 ? 0 : x >= 1 ? 1 : x * x * (3 - 2 * x));
+  const XF = 1.8;
+  const SECTIONS = [
+    { t0: 0, t1: 8.5, root: 55.0, freqs: [110.0, 164.81, 246.94, 293.66] }, // A add9
+    { t0: 8.5, t1: 17, root: 43.65, freqs: [87.31, 130.81, 164.81, 220.0] }, // Fmaj7
+    { t0: 17, t1: 25.5, root: 65.41, freqs: [130.81, 196.0, 293.66, 329.63] }, // C add9
+    { t0: 25.5, t1: 34, root: 55.0, freqs: [110.0, 164.81, 246.94, 293.66] }, // A home
+    { t0: 34, t1: 42.5, root: 55.0, freqs: [110.0, 164.81, 246.94, 293.66] }, // A add9
+    { t0: 42.5, t1: 51, root: 43.65, freqs: [87.31, 130.81, 164.81, 220.0] }, // Fmaj7
+    { t0: 51, t1: 59.5, root: 65.41, freqs: [130.81, 196.0, 293.66, 329.63] }, // C add9
+    { t0: 59.5, t1: DUR, root: 55.0, freqs: [110.0, 164.81, 246.94, 293.66] }, // A home
+  ];
+  const AMPS = [0.05, 0.045, 0.038, 0.03];
+  for (let i = 0; i < l.length; i++) {
+    const t = i / SR;
+    const master = Math.min(1, t / 2.2) * Math.min(1, (DUR - t) / 2.2);
+    let sl = 0;
+    let sr = 0;
+    for (const s of SECTIONS) {
+      const env = smooth((t - s.t0 + XF / 2) / XF) * (1 - smooth((t - s.t1 + XF / 2) / XF));
+      if (env <= 0) continue;
+      for (let j = 0; j < s.freqs.length; j++) {
+        const f = s.freqs[j]!;
+        const trem = 0.75 + 0.25 * Math.sin(TAU * (0.07 + j * 0.02) * t + j * 1.7);
+        sl += Math.sin(TAU * f * 0.9988 * t + j) * AMPS[j]! * trem * env;
+        sr += Math.sin(TAU * f * 1.0012 * t + j) * AMPS[j]! * trem * env;
+      }
+      sl += Math.sin(TAU * s.root * t) * 0.026 * env;
+      sr += Math.sin(TAU * s.root * t) * 0.026 * env;
+      const shim = Math.sin(TAU * s.root * 16 * t) * 0.004 * env * (0.6 + 0.4 * Math.sin(TAU * 0.09 * t));
+      sl += shim;
+      sr += shim;
+    }
+    const beatT = t % 0.5;
+    const pulse = Math.exp(-beatT / 0.03) * Math.sin(TAU * 220 * beatT) * 0.01;
+    l[i] = (sl + pulse) * master;
+    r[i] = (sr + pulse) * master;
+  }
+  for (let k = 0; k * 0.5 + 0.25 < DUR - 0.5; k++) {
+    const time = k * 0.5 + 0.25;
+    const s = SECTIONS.find((x) => time >= x.t0 && time < x.t1) ?? SECTIONS[0]!;
+    const f = s.freqs[k % 4]! * 2;
+    bell(l, r, time, f, 0.032, 0.22, k % 2 === 0 ? -0.35 : 0.35);
+    bell(l, r, time, f * 2.003, 0.008, 0.15, k % 2 === 0 ? -0.35 : 0.35);
+  }
+  await write('pad-long', l, r);
 }
 
 // ── click: tiny tick (press) ────────────────────────────────────────────────

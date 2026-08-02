@@ -19,7 +19,9 @@ export const DocsDetail: React.FC<{ frame: number }> = ({ frame }) => {
   const typing = frame >= TL.clickInput && !sent;
 
   return (
-    <AbsoluteFill style={{ background: T.bg, fontFamily: MONO }}>
+    // transparent: the shader field behind Product shows through the gaps,
+    // the same way the site's hero sits under its content
+    <AbsoluteFill style={{ fontFamily: MONO }}>
       {/* workspace header (global chrome bar sits above as a fixed layer) */}
       <div
         style={{

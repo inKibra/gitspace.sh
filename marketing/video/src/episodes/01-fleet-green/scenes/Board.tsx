@@ -79,7 +79,9 @@ const Card: React.FC<{ m: Member; frame: number; index: number }> = ({ m, frame,
 
 export const Board: React.FC<{ frame: number }> = ({ frame }) => {
   return (
-    <AbsoluteFill style={{ background: T.bg, fontFamily: MONO }}>
+    // transparent: the shader field behind Product shows through the gaps,
+    // the same way the site's hero sits under its content
+    <AbsoluteFill style={{ fontFamily: MONO }}>
       {/* columns (global chrome bar sits above as a fixed layer) */}
       <div
         style={{

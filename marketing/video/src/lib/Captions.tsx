@@ -12,6 +12,8 @@ export interface CapWord {
   w: string;
   at: number; // frame the word pops in
   color?: string;
+  /** Stress. Underlined the way you'd underline a word you lean on saying it. */
+  underline?: boolean;
 }
 
 export interface CapLine {
@@ -37,8 +39,13 @@ const Word: React.FC<{ word: CapWord; frame: number; size: number }> = ({ word, 
         opacity: t,
         transform: `translateY(${(1 - t) * 16}px) scale(${1.22 - 0.22 * t})`,
         textShadow: '0 2px 14px rgba(0,0,0,0.95), 0 0 4px rgba(0,0,0,0.8)',
-        fontWeight: 500,
+        fontWeight: word.underline ? 700 : 500,
         fontSize: size,
+        // the rule sits under the word, not under the whole line, and matches
+        // whatever colour the word is
+        textDecoration: word.underline ? 'underline' : undefined,
+        textDecorationThickness: word.underline ? 2 : undefined,
+        textUnderlineOffset: word.underline ? 6 : undefined,
       }}
     >
       {word.w}

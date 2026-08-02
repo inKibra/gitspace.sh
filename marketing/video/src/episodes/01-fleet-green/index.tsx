@@ -13,7 +13,7 @@ import { loadFont } from '@remotion/google-fonts/JetBrainsMono';
 import voSrc from './vo.wav';
 import { T } from '../../lib/theme';
 import { TL, CLICKS } from './timeline';
-import { DECK } from './timeline';
+import { DECK, INTRO_SHIFT } from './timeline';
 import { FLAGS_CARD_CENTER, DOCS_CARD_CENTER, chipCenterX, CHIP } from './fleet';
 import { Cursor } from '../../lib/ui';
 import { Board } from './scenes/Board';
@@ -21,12 +21,20 @@ import { FlagsDetail } from './scenes/FlagsDetail';
 import { DocsDetail, SEND, INPUT, USER_MSG } from './scenes/DocsDetail';
 import { AskDialog, MODAL_TARGETS } from './scenes/AskDialog';
 import { ChromeBar, type ActiveChip } from './scenes/ChromeBar';
-import { Deck, TAGLINE } from './Deck';
+import { Deck, EndCard, TAGLINE } from './Deck';
 import { KineticCaptions, type CapLine } from '../../lib/Captions';
+import { FaultyTerminalFrame } from '../../lib/FaultyTerminalFrame';
+import { ParticleScrollFrame } from '../../lib/ParticleScrollFrame';
 
 loadFont();
 
-const P = DECK.matchCut; // product-local frame offset (deck intro = 3 beats)
+const P = DECK.matchCut; // product-local frame offset (deck intro = 5 beats)
+/**
+ * The intro grew 60 → 150 frames for the dissolve. The VO is a REAL recording
+ * and the captions below are already retimed to it, so nothing here gets
+ * re-typed: the voice, the captions and the pad ducking all shift by the same
+ * INTRO_SHIFT. A uniform offset preserves sync exactly; retiming would not.
+ */
 
 const ease = Easing.inOut(Easing.cubic);
 const clamp = { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' } as const;
@@ -237,6 +245,16 @@ export const Product: React.FC<{ pf: number; fps: number }> = ({ pf, fps }) => {
         transformOrigin: `${punchAt.x}px ${punchAt.y}px`,
       }}
     >
+      {/* the site's hero field, under everything — the scenes are transparent
+          so it reads through the gaps, exactly as in ep02 */}
+      {/* 0.6, NOT the site's 0.12. Measured: at 0.12 this field peaks at 4-6/255,
+          which is DARKER than the card surfaces (#0a0a0a = 10) it sits behind —
+          invisible in a dark film. The site value works on the web because the
+          hero sits in a lighter page behind bright type. In video it needs ~5x.
+          Landed on 0.22: p95 ~18-20. Above card surface so it reads as texture,
+          low enough that it does not compete with the cards for attention. */}
+      <FaultyTerminalFrame width={1920} height={1080} opacity={0.22} />
+
       {showBoard && (
         <AbsoluteFill
           style={{
@@ -269,6 +287,9 @@ export const Product: React.FC<{ pf: number; fps: number }> = ({ pf, fps }) => {
         </AbsoluteFill>
       )}
 
+      {/* the site's hero field, under everything — same as ep02 */}
+      {/* (placed first so every surface sits on top of it) */}
+
       {/* global chrome bar — fixed above every view, like the product */}
       <ChromeBar frame={pf} active={active} />
 
@@ -284,19 +305,38 @@ export const Product: React.FC<{ pf: number; fps: number }> = ({ pf, fps }) => {
   );
 };
 
+/** Fine, dark grain — the type should erode, not explode. */
+const SAND_OUT = {
+  band: 700,
+  density: 2.2,
+  size: 1.5,
+  spread: 210,
+  gravity: 0.45,
+  drift: 1,
+  swirl: 150,
+  stagger: 0.6,
+  fade: 0.9,
+  settle: 0.3,
+  smoothing: 0,
+  transparent: true,
+} as const;
+
 export const FleetGreen: React.FC = () => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
   const pf = frame - P;
 
   const inDeck = frame < P || frame >= DECK.outStart;
+  const sanding = frame >= DECK.sandStart;
   const product = <Product pf={pf} fps={fps} />;
 
   return (
     <AbsoluteFill style={{ background: T.bg }}>
       {/* ── soundtrack: VO + ethereal pad (ducked under speech) + cues ── */}
-      <Audio src={voSrc} volume={1} />
-      <Audio src={staticFile('audio/pad.wav')} volume={(f) => padDuck(f)} />
+      <Sequence from={INTRO_SHIFT}>
+        <Audio src={voSrc} volume={1} />
+      </Sequence>
+      <Audio src={staticFile('audio/pad.wav')} volume={(f) => padDuck(f - INTRO_SHIFT)} />
       <Audio src={staticFile('audio/riser.wav')} volume={0.8} />
       <Sequence from={DECK.select}>
         <Audio src={staticFile('audio/thunk.wav')} volume={0.8} />
@@ -338,10 +378,29 @@ export const FleetGreen: React.FC = () => {
       ))}
 
       {/* ── one snippet in a deck of snippets ── */}
-      {inDeck ? <Deck frame={frame}>{product}</Deck> : product}
+      {inDeck ? <Deck frame={frame} hideType={sanding}>{product}</Deck> : product}
+
+      {/* ── the ending: everything goes to sand ──
+          The deck sinks to black under the type, and the type itself comes
+          apart and blows away. The deck's own copy is suppressed while this
+          runs; the swap is invisible because the type is fully typed by then
+          and the captured copy just drops the blinking caret. */}
+      {sanding && (
+        <>
+          <AbsoluteFill
+            style={{ background: '#000', opacity: interpolate(frame, [DECK.sandStart, DECK.sandStart + 30], [0, 1], clamp) }}
+          />
+          <ParticleScrollFrame
+            progress={interpolate(frame, [DECK.sandStart, DECK.sandEnd], [1, 0], { ...clamp, easing: Easing.in(Easing.quad) })}
+            options={SAND_OUT}
+          >
+            <EndCard frame={frame} />
+          </ParticleScrollFrame>
+        </>
+      )}
 
       {/* ── VO captions (muted viewers read the voice over) ── */}
-      <KineticCaptions frame={frame} lines={MAIN_CAPTIONS} />
+      <KineticCaptions frame={frame - INTRO_SHIFT} lines={MAIN_CAPTIONS} />
     </AbsoluteFill>
   );
 };

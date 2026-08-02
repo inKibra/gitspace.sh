@@ -41,14 +41,28 @@ export const TL = {
  * Global timeline = deck intro (3 beats) + product (26 beats) + deck outro.
  * Product-local frames (TL above) are offset by DECK.matchCut.
  */
+/**
+ * SERIES FORMAT (matches ep02): a 5s intro where the deck resolves out of dust
+ * as the camera pushes in, and an ending where the closing type comes apart
+ * into sand — that IS the fade to black.
+ *
+ * The intro grew from 60 → 150 frames. The VO is a real recording, so it and
+ * every caption and cue shift by the SAME +90: a uniform offset preserves sync
+ * exactly. See INTRO_SHIFT in index.tsx.
+ */
+export const INTRO_SHIFT = 90;
+
 export const DECK = {
-  select: 40, // hero card glows (thunk)
-  matchCut: b(4), // 60 — product frame 0
-  outStart: b(4) + b(26), // 450 — board shrinks back into its card
-  deckBack: 480, // deck re-racked
-  tagDim: 483,
-  tagType: 492, // "keep your fleet green." types over the deck
-  total: b(38), // 570 — holds through the end of the VO's last line
+  select: 128, // hero card glows near the end of the approach (thunk)
+  matchCut: 150, // product frame 0
+  outStart: 150 + b(26), // 540 — board shrinks back into its card
+  deckBack: 570, // deck re-racked
+  tagDim: 573,
+  tagType: 582, // "keep your fleet green." types over the deck
+  /** the closing type erodes into sand; this is the fade to black */
+  sandStart: 648,
+  sandEnd: 708,
+  total: 720, // 24s — pad.wav is 25.5s
 } as const;
 
 /** Cursor click frames (each gets a click sound + ring). */

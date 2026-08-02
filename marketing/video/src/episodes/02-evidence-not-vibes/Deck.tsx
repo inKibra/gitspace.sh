@@ -3,18 +3,19 @@ import { AbsoluteFill, interpolate, Easing } from 'remotion';
 import { T, MONO } from '../../lib/theme';
 import { typed, Caret } from '../../lib/ui';
 import { DECK } from './timeline';
-import { ParticleRevealFrame } from '../../lib/ParticleRevealFrame';
 
 /**
- * The 3D snippet deck: the product story is one card among many. Intro flies
- * through the deck into the hero card (match-cut at DECK.matchCut); outro
- * shrinks the all-green board back into its card and re-racks the deck.
+ * The 3D snippet deck (reused from ep01): the product story is one card among
+ * many. Intro flies through the deck into the hero "evidence" card (match-cut
+ * at DECK.matchCut); outro shrinks the accepted review board back into its card
+ * and re-racks the deck, then types the tagline and the stinger.
  *
  * Perspective math: hero card sits at z=0 scaled 0.26. A world translateZ of
  * PERSPECTIVE * (1 - 0.26) makes it exactly full-frame → seamless match-cut.
  */
 
-export const TAGLINE = 'keep your fleet green.';
+export const TAGLINE = 'Agents lie.';
+export const STINGER = 'I need proof.';
 
 const PERSPECTIVE = 1600;
 const HERO_SCALE = 0.26;
@@ -40,8 +41,8 @@ const CARDS: DeckCard[] = [
   { title: 'artifacts', variant: 'artifacts', x: 620, y: 280, z: -500, r: -22 },
   { title: 'kanban', variant: 'kanban', x: -240, y: -360, z: -700, r: 10 },
   { title: 'sessions', variant: 'terminal', x: 260, y: 380, z: -760, r: -12 },
-  { title: 'services', variant: 'terminal', x: -880, y: 60, z: -880, r: 26 },
-  { title: 'review', variant: 'modal', x: 890, y: 30, z: -840, r: -26 },
+  { title: 'rubrics', variant: 'modal', x: -880, y: 60, z: -880, r: 26 },
+  { title: 'command judges', variant: 'terminal', x: 890, y: 30, z: -840, r: -26 },
 ];
 
 const BAR = (w: number, c: string, h = 8): React.CSSProperties => ({
@@ -156,35 +157,18 @@ const ease = Easing.inOut(Easing.cubic);
  * velocity never drops to zero mid-move → no hitching): a banking orbital
  * swoop (yaw sweep + lateral arc + roll) that lands gently on the hero card.
  */
-/** Series signature (see ep02): the deck arrives as fine grey dust and
- *  resolves as the camera pushes in. Fine and dense — `size: 1` with a low
- *  threshold reads as dust; bigger grains read as speckle. */
-const DUST_OPTS = {
-  radius: 470,
-  softness: 0.8,
-  size: 1,
-  threshold: 0.1,
-  scatter: 30,
-  drift: 1.2,
-  aberration: 45,
-  bend: 55,
-  background: '#000000',
-} as const;
-
 const world = (frame: number) => {
   if (frame < DECK.matchCut) {
-    // Every axis is MONOTONIC: start wide on the whole deck, browse, and
-    // converge on the hero card in one commitment — no direction reversals.
     const u = interpolate(frame, [0, DECK.matchCut], [0, 1], {
       ...clampOpts,
-      easing: Easing.bezier(0.6, 0, 0.25, 1), // long browse, late commit, soft landing
+      easing: Easing.bezier(0.6, 0, 0.25, 1),
     });
     return {
       tz: -720 + (Z_MATCH + 720) * u,
-      ry: -16 + (-HERO_ROT + 16) * u, // one 23° sweep across the deck
+      ry: -16 + (-HERO_ROT + 16) * u,
       tx: 260 * (1 - u),
       ty: 90 * (1 - u),
-      rz: -2.2 * (1 - u), // starts banked, settles level as we land
+      rz: -2.2 * (1 - u),
     };
   }
   return {
@@ -202,46 +186,13 @@ const world = (frame: number) => {
   };
 };
 
-/**
- * The closing type, lifted OUT of the deck's 3D context so it can also be
- * rendered standalone and fed to a capture-based effect. A subtree inside
- * `transform-style: preserve-3d` is not something html-in-canvas can read.
- *
- * `caret` is off for the captured copy: a blinking caret frozen into sand
- * reads as a glitch.
- */
-export const EndCard: React.FC<{ frame: number; caret?: boolean }> = ({ frame, caret }) => (
-  <AbsoluteFill style={{ alignItems: 'center', justifyContent: 'center', fontFamily: MONO }}>
-    <div style={{ fontSize: 54, color: T.text, height: 70 }}>
-      {typed(TAGLINE, frame, DECK.tagType, 1.35)}
-      {caret && <Caret frame={frame} height={48} />}
-    </div>
-    <div
-      style={{
-        marginTop: 46,
-        fontSize: 19,
-        letterSpacing: '0.2em',
-        color: T.textDim,
-        opacity: interpolate(frame, [DECK.tagType + 20, DECK.tagType + 32], [0, 1], {
-          extrapolateLeft: 'clamp',
-          extrapolateRight: 'clamp',
-        }),
-      }}
-    >
-      GITSPACE · Nº 01
-    </div>
-  </AbsoluteFill>
-);
-
-export const Deck: React.FC<{ frame: number; children: React.ReactNode; hideType?: boolean }> = ({
+export const Deck: React.FC<{ frame: number; children: React.ReactNode }> = ({
   frame,
   children,
-  hideType,
 }) => {
   const { tz, ry, tx, ty, rz } = world(frame);
   const intro = frame < DECK.matchCut;
 
-  // hero card chrome
   const glow = intro
     ? interpolate(frame, [DECK.select, DECK.select + 8], [0, 1], clampOpts)
     : interpolate(frame, [DECK.outStart + 4, DECK.outStart + 14], [1, 0], clampOpts);
@@ -249,28 +200,13 @@ export const Deck: React.FC<{ frame: number; children: React.ReactNode; hideType
     ? interpolate(frame, [DECK.matchCut - 4, DECK.matchCut], [1, 0], clampOpts)
     : interpolate(frame, [DECK.outStart + 2, DECK.outStart + 10], [0, 1], clampOpts);
 
-  // side cards: fade out as we punch past them; return on the way back
   const sideOpacity = (i: number) =>
     intro
       ? interpolate(frame, [4 + i * 3, 14 + i * 3], [0, 1], clampOpts) *
         interpolate(frame, [DECK.matchCut - 16, DECK.matchCut - 4], [1, 0], clampOpts)
       : interpolate(frame, [DECK.outStart + 8 + i * 2, DECK.outStart + 20 + i * 2], [0, 1], clampOpts);
 
-  // Front-loaded on purpose: the cards are SMALLEST early, so the dust has to
-  // resolve while they are still far away. Resolving late reads as smeared.
-  const zoom = intro ? interpolate(frame, [0, DECK.matchCut], [0, 1], clampOpts) : 1;
-  const cardProgress = (i: number) =>
-    intro
-      ? interpolate(zoom, [0.04 + i * 0.01, 0.46 + i * 0.01], [0, 1], clampOpts)
-      : interpolate(frame, [DECK.outStart + 6 + i * 2, DECK.outStart + 32 + i * 2], [0, 1], clampOpts) *
-        interpolate(frame, [DECK.tagType - 6, DECK.tagType + 26], [1, 0], clampOpts);
-
-  // the hero resolves slightly AHEAD of the deck so it is unambiguously crisp
-  // by the match cut
-  const heroProgress = intro ? interpolate(zoom, [0.02, 0.42], [0, 1], clampOpts) : 1;
-
-  const dim = interpolate(frame, [DECK.tagDim, DECK.tagDim + 14], [0, 0.55], clampOpts);
-  const tagFrame = frame - DECK.tagType;
+  const dim = interpolate(frame, [DECK.tagDim, DECK.tagDim + 14], [0, 0.6], clampOpts);
 
   return (
     <AbsoluteFill style={{ background: T.bg, fontFamily: MONO, overflow: 'hidden' }}>
@@ -300,33 +236,24 @@ export const Deck: React.FC<{ frame: number; children: React.ReactNode; hideType
                 overflow: 'hidden',
               }}
             >
-              <ParticleRevealFrame
-                progress={cardProgress(i)}
-                width={Math.round(CARD_W)}
-                height={Math.round(CARD_H)}
-                options={DUST_OPTS}
+              <MiniContent variant={c.variant} frame={frame} />
+              <div
+                style={{
+                  position: 'absolute',
+                  left: 14,
+                  bottom: 10,
+                  fontSize: 13,
+                  letterSpacing: '0.16em',
+                  textTransform: 'uppercase',
+                  color: T.textDim,
+                }}
               >
-                <div style={{ position: 'absolute', inset: 0 }}>
-                  <MiniContent variant={c.variant} frame={frame} />
-                  <div
-                    style={{
-                      position: 'absolute',
-                      left: 14,
-                      bottom: 10,
-                      fontSize: 13,
-                      letterSpacing: '0.16em',
-                      textTransform: 'uppercase',
-                      color: T.textDim,
-                    }}
-                  >
-                    {c.title}
-                  </div>
-                </div>
-              </ParticleRevealFrame>
+                {c.title}
+              </div>
             </div>
           ))}
 
-          {/* hero card: the live product, scaled into a card */}
+          {/* hero card: the live product, scaled into the "evidence" card */}
           <div
             style={{
               position: 'absolute',
@@ -338,41 +265,21 @@ export const Deck: React.FC<{ frame: number; children: React.ReactNode; hideType
               border: `1px solid ${
                 glow > 0.05 ? `rgba(0,255,102,${0.3 + glow * 0.7})` : T.border
               }`,
-              opacity: 1,
               boxShadow: glow > 0.05 ? `0 0 ${glow * 40}px rgba(0,255,102,0.28)` : 'none',
               overflow: 'hidden',
               background: T.bg,
             }}
           >
-            {(() => {
-              const content = (
-                <div style={{ position: 'absolute', inset: 0, overflow: 'hidden' }}>
-                  <div
-                    style={{
-                      width: 1920,
-                      height: 1080,
-                      transform: `scale(${HERO_SCALE})`,
-                      transformOrigin: 'top left',
-                    }}
-                  >
-                    {children}
-                  </div>
-                </div>
-              );
-              // once resolved, render the real DOM so the match cut is exact
-              return heroProgress < 0.999 ? (
-                <ParticleRevealFrame
-                  progress={heroProgress}
-                  width={Math.round(CARD_W)}
-                  height={Math.round(CARD_H)}
-                  options={DUST_OPTS}
-                >
-                  {content}
-                </ParticleRevealFrame>
-              ) : (
-                content
-              );
-            })()}
+            <div
+              style={{
+                width: 1920,
+                height: 1080,
+                transform: `scale(${HERO_SCALE})`,
+                transformOrigin: 'top left',
+              }}
+            >
+              {children}
+            </div>
             <div
               style={{
                 position: 'absolute',
@@ -385,17 +292,42 @@ export const Deck: React.FC<{ frame: number; children: React.ReactNode; hideType
                 opacity: heroBorder,
               }}
             >
-              fleet
+              evidence
             </div>
           </div>
         </div>
       </AbsoluteFill>
 
-      {/* tagline over the re-racked deck */}
+      {/* tagline + stinger over the re-racked deck */}
       {!intro && (
         <>
           <AbsoluteFill style={{ background: `rgba(0,0,0,${dim})` }} />
-          {tagFrame >= 0 && !hideType && <EndCard frame={frame} caret />}
+          {frame >= DECK.tagType && (
+            <AbsoluteFill style={{ alignItems: 'center', justifyContent: 'center' }}>
+              <div style={{ fontSize: 60, color: T.text, height: 78 }}>
+                {typed(TAGLINE, frame, DECK.tagType, 1.35)}
+                {frame < DECK.stingerType && <Caret frame={frame} height={52} />}
+              </div>
+              {/* the stinger — the human's line, in the human's green */}
+              {frame >= DECK.stingerType && (
+                <div style={{ fontSize: 40, color: T.accent, height: 54, marginTop: 30 }}>
+                  {typed(STINGER, frame, DECK.stingerType, 1.35)}
+                  <Caret frame={frame} height={36} />
+                </div>
+              )}
+              <div
+                style={{
+                  marginTop: 46,
+                  fontSize: 19,
+                  letterSpacing: '0.2em',
+                  color: T.textDim,
+                  opacity: interpolate(frame, [DECK.tagType + 20, DECK.tagType + 32], [0, 1], clampOpts),
+                }}
+              >
+                GITSPACE · Nº 02
+              </div>
+            </AbsoluteFill>
+          )}
         </>
       )}
     </AbsoluteFill>
