@@ -1330,6 +1330,18 @@ function shutdownServer(options: { markRunningSessionsCrashed?: boolean } = {}):
       markReplayCrashed(session);
     }
     try { session.xterm.dispose(); } catch {}
+    // Kill the session's process GROUP before releasing daemon-side resources.
+    // cleanupSessionResources only closes the PTY master and sockets; it never
+    // signals session.proc (only terminateSessionData does, and shutdown does
+    // not go through it). An interactive shell happens to exit on the PTY EOF,
+    // which masked this — but a process session's runner never reads the tty,
+    // so it and every service under it were orphaned to PID 1 on every daemon
+    // stop, leaving .gitspace/processes.json services running forever.
+    // Group-signalling reaches the runner's own children; it is synchronous, so
+    // it is safe on the process-exit path too.
+    if (session.proc) {
+      signalSubprocessTree(session.proc, "SIGTERM");
+    }
     cleanupSessionResources(session, { removeFromMap: false });
   }
   sessions.clear();
