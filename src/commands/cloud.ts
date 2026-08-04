@@ -7,12 +7,7 @@ import { promptInput } from '../utils/prompts.js';
 import { readRelayConfig } from '../core/identity.js';
 import { getTrustedRelay, isCloudReachableRelayUrl } from '../core/trusted-relays.js';
 import { loadUserRootIdentity } from '../core/user-identity.js';
-import {
-  queryControlMeta,
-  queryServeStatus,
-  sendAssertOwnerCommand,
-  sendListCloudWorkspacesCommand,
-} from '../serve/daemon.js';
+import { queryDaemonServeStatus } from './serve.js';
 import {
   clearSpritesToken,
   getSpritesToken,
@@ -24,6 +19,7 @@ import {
   createCloudBootstrapToken,
   createCloudUnlockToken,
   getCloudWorkspace,
+  listCloudWorkspaces,
   logCloudEvent,
   markCloudBootstrapVmCreated,
   readControlMeta,
@@ -245,23 +241,27 @@ async function resolveBootstrapBundleSource(): Promise<string> {
 }
 
 export async function cloudStatus(): Promise<void> {
-  const serveStatus = await queryServeStatus();
-  if (!serveStatus) {
+  const serveStatus = await queryDaemonServeStatus();
+  if (!serveStatus?.active) {
     throw new SpacesError(
-      'Serve daemon is not running. Start it with:\n  gssh machine serve start',
+      'Serve is not active in the machine daemon. Start it with:\n  gssh machine serve start',
       'USER_ERROR',
       1
     );
   }
 
-  const controlMeta = await queryControlMeta();
+  // Control metadata and owner checks read the local control DB directly. They
+  // used to round-trip through the standalone serve daemon's control socket,
+  // which no longer exists — and this file already calls the same store helpers
+  // in-process elsewhere.
+  const controlMeta = readControlMeta();
 
   logger.log('');
   logger.bold('Cloud Control Status');
   logger.log('');
-  logger.log(`  Serve PID:     ${serveStatus.pid}`);
-  logger.log(`  Relay:         ${serveStatus.relay.url}`);
-  logger.log(`  Relay status:  ${serveStatus.relay.status}`);
+  logger.log(`  Machine ID:    ${serveStatus.machineId ?? '(unknown)'}`);
+  logger.log(`  Relay:         ${serveStatus.relayUrl ?? '(unknown)'}`);
+  logger.log(`  Relay status:  ${serveStatus.relayStatus ?? '(unknown)'}`);
 
   if (!controlMeta) {
     logger.warning('  Control mode:  unavailable (no control metadata)');
@@ -278,9 +278,14 @@ export async function cloudStatus(): Promise<void> {
 
   const localUserRoot = await loadUserRootIdentity();
   if (localUserRoot) {
-    const ownerAssertion = await sendAssertOwnerCommand(localUserRoot.id);
+    let ownerAccess = 'yes';
+    try {
+      assertControlOwner(localUserRoot.id);
+    } catch (error) {
+      ownerAccess = `no (${error instanceof Error ? error.message : 'not owner'})`;
+    }
     logger.log(`  Local owner root: ${localUserRoot.id}`);
-    logger.log(`  Owner access:    ${ownerAssertion.success ? 'yes' : `no (${ownerAssertion.error ?? 'not owner'})`}`);
+    logger.log(`  Owner access:    ${ownerAccess}`);
   }
 
   logger.log('');
@@ -1085,27 +1090,28 @@ export async function cloudConnect(
 }
 
 export async function cloudList(): Promise<void> {
-  const serveStatus = await queryServeStatus();
-  if (!serveStatus) {
+  const serveStatus = await queryDaemonServeStatus();
+  if (!serveStatus?.active) {
     throw new SpacesError(
-      'Serve daemon is not running. Start it with:\n  gssh machine serve start',
+      'Serve is not active in the machine daemon. Start it with:\n  gssh machine serve start',
       'USER_ERROR',
       1
     );
   }
 
+  // The old control socket handled this by calling assertControlOwner() and
+  // listCloudWorkspaces() on the local control DB. Do exactly that, in process.
   const identityId = await requireLocalIdentityId();
-  const workspacesResult = await sendListCloudWorkspacesCommand(identityId);
-
-  if (!workspacesResult.success) {
+  try {
+    assertControlOwner(identityId);
+  } catch (error) {
     throw new SpacesError(
-      workspacesResult.error ?? 'Failed to list cloud workspaces.',
+      error instanceof Error ? error.message : 'Failed to list cloud workspaces.',
       'USER_ERROR',
       1
     );
   }
-
-  const workspaces = workspacesResult.workspaces ?? [];
+  const workspaces = listCloudWorkspaces();
 
   logger.log('');
   logger.bold('Cloud Workspaces');

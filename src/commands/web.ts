@@ -13,7 +13,7 @@ import { hasRelayWebUiAssets } from '../relay/server.js';
 import { buildLocalRelayUrl, getRelayStatusSnapshot, selectRelaySubdomain } from './relay.js';
 import { readHostConfig, resolveRelaySubdomains } from './host.js';
 import { isCloudflaredInstalled } from '../utils/cloudflared.js';
-import { isServeRunning, queryServeStatus } from '../serve/daemon.js';
+import { queryDaemonServeStatus } from './serve.js';
 import { openBrowserUrl } from '../utils/open-browser.js';
 import { ensureDeviceIdentityPassword, createDeviceIdentityPasswordContext } from './device-identity-password.js';
 import { fetchRelayIdentity } from './connect.js';
@@ -22,7 +22,10 @@ import { ensureServeOwnerBindingForStartup } from './serve.js';
 const DEFAULT_WEB_PORT = 4480;
 const RELAY_START_TIMEOUT_MS = 15_000;
 const HOSTED_RELAY_START_TIMEOUT_MS = 30_000;
-const SERVE_START_TIMEOUT_MS = 120_000;
+// Deliberately below the web integration test's 120s window: when these were
+// equal the test always timed out first, so the command's own diagnostic error
+// could never be observed.
+const SERVE_START_TIMEOUT_MS = 45_000;
 const SHUTDOWN_TIMEOUT_MS = 5_000;
 
 interface WebCommandOptions {
@@ -71,17 +74,23 @@ async function waitForRelayHttpReady(port: number, timeoutMs: number): Promise<v
 
 async function waitForServeReady(expectedRelayUrl: string, timeoutMs: number): Promise<void> {
   const deadline = Date.now() + timeoutMs;
+  let lastSeen = 'daemon not running';
 
   while (Date.now() < deadline) {
-    const status = await queryServeStatus();
-    if (status?.relay.url === expectedRelayUrl && status.relay.status === 'connected') {
+    const status = await queryDaemonServeStatus();
+    if (status?.active && status.relayUrl === expectedRelayUrl && status.relayStatus === 'connected') {
       return;
     }
+    lastSeen = status
+      ? `active=${status.active} relay=${status.relayUrl ?? 'none'} status=${status.relayStatus ?? 'unknown'}`
+      : 'daemon not running';
     await Bun.sleep(200);
   }
 
+  // Report what we actually saw: the previous version polled a status socket
+  // that nothing creates any more and could only ever report a bare timeout.
   throw new SpacesError(
-    `Timed out waiting for machine serve to connect to ${expectedRelayUrl}`,
+    `Timed out waiting for machine serve to connect to ${expectedRelayUrl} (last seen: ${lastSeen})`,
     'SYSTEM_ERROR',
     2,
   );
@@ -455,24 +464,25 @@ export async function startLocalWeb(options: WebCommandOptions = {}): Promise<vo
     relayStartedByThisInvocation = relay.started;
     let enrollment = relay.enrollment;
 
-    // Phase 2: Start or reuse machine serve.
-    if (isServeRunning()) {
-      const status = await queryServeStatus();
-      if (!status) {
-        throw new SpacesError('Serve daemon is running but did not answer its status socket. Stop it and retry.', 'SYSTEM_ERROR', 2);
-      }
-      if (status.relay.url !== relay.relayWsUrl) {
+    // Phase 2: Start or reuse machine serve. Serve is a MODE of the machine
+    // daemon, so "already serving" is a daemon state, not a separate process
+    // with its own pid file — the previous version gated on both and neither
+    // has existed since unification.
+    const existingServe = await queryDaemonServeStatus();
+    if (existingServe?.active) {
+      if (existingServe.relayUrl !== relay.relayWsUrl) {
         throw new SpacesError(
-          `Serve daemon is already running against ${status.relay.url}. Stop it first before using \`gssh web\` with ${relay.relayWsUrl}.`,
+          `The machine daemon is already serving on ${existingServe.relayUrl ?? 'an unknown relay'}. `
+          + `Run \`gssh machine serve stop\` before using \`gssh web\` with ${relay.relayWsUrl}.`,
           'USER_ERROR',
           1,
         );
       }
-      if (status.relay.status !== 'connected') {
-        logger.info('Waiting for existing serve daemon to connect to relay...');
+      if (existingServe.relayStatus !== 'connected') {
+        logger.info('Waiting for the machine daemon to connect to the relay...');
         await waitForServeReady(relay.relayWsUrl, SERVE_START_TIMEOUT_MS);
       }
-      logger.info('Reusing running machine serve daemon');
+      logger.info('Reusing serve in the running machine daemon');
     } else {
       // Pre-verify relay trust and owner binding in the supervisor so the
       // serve child can skip interactive prompts (GITSPACE_SKIP_OWNER_BINDING_CHECK).

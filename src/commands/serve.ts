@@ -50,11 +50,6 @@ import {
 } from '../lib/tmux-lite/crypto/identity.js';
 import { generateEphemeralKeypair, validateX25519PublicKey, x25519SharedSecret } from '../lib/tmux-lite/crypto/keyexchange.js';
 import { open } from '../lib/tmux-lite/crypto/secretbox.js';
-import {
-  isServeRunning,
-  getServePid,
-  cleanupServeFiles,
-} from '../serve/daemon.js';
 import { initializeSecretRuntime } from '../core/secret-runtime.js';
 import { fetchRelayIdentity } from './connect.js';
 import {
@@ -773,24 +768,37 @@ export async function serveStop(): Promise<void> {
     deactivated = res.type === 'serve-status';
   }
 
-  // Legacy: a pre-unification standalone serve daemon may still be running.
-  if (isServeRunning()) {
-    const pid = getServePid();
-    if (pid) {
-      try {
-        process.kill(pid, 'SIGTERM');
-        await Bun.sleep(800);
-        if (isServeRunning()) process.kill(pid, 'SIGKILL');
-      } catch { /* already gone */ }
-    }
-    cleanupServeFiles();
-    logger.success('legacy serve daemon stopped');
-    return;
-  }
-
   logger.success(deactivated
     ? 'serve deactivated (the machine daemon keeps running for local use)'
     : 'serve was not active');
+}
+
+export type DaemonServeStatus = {
+  active: boolean;
+  relayUrl?: string;
+  relayStatus?: string;
+  clients?: number;
+  machineId?: string;
+  startedAt?: number;
+};
+
+/**
+ * Serve status straight from the machine daemon — the only source of truth now
+ * that serve is a MODE of the daemon rather than its own process. The old
+ * standalone daemon answered a `serve.sock` control socket; nothing has created
+ * that socket since unification, so every caller polling it waited forever.
+ *
+ * Returns null when the daemon itself is not running (serve cannot be active
+ * without it). `active: false` means the daemon is up but local-only.
+ *
+ * Dynamic import matches the rest of this file: importing tmux-lite eagerly
+ * pulls the daemon's module graph (and its side effects) into every CLI command.
+ */
+export async function queryDaemonServeStatus(): Promise<DaemonServeStatus | null> {
+  const { isServerRunning, send } = await import('../lib/tmux-lite/cli.js');
+  if (!(await isServerRunning())) return null;
+  const res = await send({ type: 'serve-status' });
+  return res.type === 'serve-status' ? res.status : null;
 }
 
 export async function serveStatus(): Promise<void> {
