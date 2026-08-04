@@ -17,7 +17,6 @@ import { getArchivedSessions } from '../../agents/agent-db.js';
 import { writeAgentLog } from '../../agents/agent-log.js';
 import { normalizeWorkspacePath } from '../../agents/agent-runtime-shared.js';
 import type {
-  ActivityReason,
   AgentModelInfo,
   PendingQuestion,
   Permission,
@@ -74,30 +73,11 @@ export interface WorkspaceAgentState {
  * Reasons are ordered most-immediate first so a UI can render `reasons[0]` as
  * the headline.
  */
-export function computeSessionActivity(state: WorkspaceAgentState, sessionId: string): SessionActivity {
-  const reasons: ActivityReason[] = [];
-  // Every map is optional-chained: this runs inside the snapshot builder, which
-  // is fed states reconstructed from the wire and from test fixtures, not just
-  // fully-populated daemon state. A missing map means "nothing of that kind".
-  const status = state.statuses?.[sessionId];
-  if (status?.type === 'busy') reasons.push({ kind: 'turn' });
-  if (status?.type === 'compacting') reasons.push({ kind: 'compacting' });
-  if (status?.type === 'retry') reasons.push({ kind: 'retry', attempt: status.attempt, next: status.next });
-
-  const questions = state.pendingQuestions?.[sessionId]?.length ?? 0;
-  const permissions = state.pendingPermissions?.[sessionId]?.length ?? 0;
-  if (questions > 0 || permissions > 0) reasons.push({ kind: 'human', questions, permissions });
-
-  const queued = state.queuedMessages?.[sessionId];
-  const steering = queued?.steering.length ?? 0;
-  const followUp = queued?.followUp.length ?? 0;
-  if (steering > 0 || followUp > 0) reasons.push({ kind: 'queued', steering, followUp });
-
-  const subagents = state.subagentCounts?.[sessionId] ?? 0;
-  if (subagents > 0) reasons.push({ kind: 'subagents', count: subagents });
-
-  return { active: reasons.length > 0, reasons };
-}
+// Moved to agents/agent-runtime-types.ts, which has no imports: the browser
+// needs this computation, and reaching it through this module pulls fs/path
+// into the client bundle. Re-exported so daemon-side callers are unchanged.
+export { computeSessionActivity } from '../../agents/agent-runtime-types.js';
+import { computeSessionActivity } from '../../agents/agent-runtime-types.js';
 
 export type AgentStateUpdateDelta =
   | { type: 'agent_state_snapshot'; workspaces: Record<string, WorkspaceAgentState> }

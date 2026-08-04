@@ -5,7 +5,7 @@ import {
   buildWorkspaceDetailStripDisplayItems,
   getVisibleWorkspaceDetailStripWorkspaces,
 } from './strip.js';
-import { formatTime, getAgentSessionDisplayState } from '../../../components/SpacesBrowser.js';
+import { formatTime } from '../../../components/SpacesBrowser.js';
 import { normalizeProcessInstanceCount } from '../../../lib/processes/instances.js';
 import { parseProcessSessionName } from '../../../lib/processes/names.js';
 import { getSessionAlertLabel, getSessionSubtitle } from '../workspace-runtime/derive.js';
@@ -147,7 +147,8 @@ export function useWorkspaceDetailModel(input: WorkspaceDetailModelInput): Works
         id: session.id,
         title: session.title,
         bucket: 'active' as const,
-        state: getAgentSessionDisplayState(session),
+        // Decided once at record build; never re-derived here.
+        state: session.state ?? 'waiting',
         lastActiveLabel: session.lastActivityAt
           ? formatTime(session.lastActivityAt)
           : session.updatedAt

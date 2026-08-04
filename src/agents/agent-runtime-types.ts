@@ -1,3 +1,7 @@
+// Type-only: erased at compile time, so this creates no runtime edge to the
+// event manager (which imports fs/path and must never reach the browser).
+import type { WorkspaceAgentState } from '../lib/tmux-lite/agent-event-manager.js';
+
 /**
  * Shared agent runtime event types.
  *
@@ -38,6 +42,105 @@ export type SessionActivity = {
   active: boolean;
   reasons: ActivityReason[];
 };
+
+/**
+ * The single producer of {@link SessionActivity}.
+ *
+ * Lives here, in a module with no imports, rather than beside the event manager
+ * that owns `WorkspaceAgentState`. The browser needs this computation, and
+ * importing it from `agent-event-manager` pulls that module's `fs`/`path`
+ * dependencies into the client bundle, where Vite's externalization stubs throw
+ * on the import itself and take the app down before React mounts. The
+ * `WorkspaceAgentState` import at the top of this file is type-only, so it is
+ * erased and creates no runtime edge.
+ */
+export function computeSessionActivity(
+  state: WorkspaceAgentState,
+  sessionId: string,
+): SessionActivity {
+  const reasons: ActivityReason[] = [];
+  // Every map is optional-chained: this runs inside the snapshot builder, which
+  // is fed states reconstructed from the wire and from test fixtures, not just
+  // fully-populated daemon state. A missing map means "nothing of that kind".
+  const status = state.statuses?.[sessionId];
+  if (status?.type === 'busy') reasons.push({ kind: 'turn' });
+  if (status?.type === 'compacting') reasons.push({ kind: 'compacting' });
+  if (status?.type === 'retry') reasons.push({ kind: 'retry', attempt: status.attempt, next: status.next });
+
+  const questions = state.pendingQuestions?.[sessionId]?.length ?? 0;
+  const permissions = state.pendingPermissions?.[sessionId]?.length ?? 0;
+  if (questions > 0 || permissions > 0) reasons.push({ kind: 'human', questions, permissions });
+
+  const queued = state.queuedMessages?.[sessionId];
+  const steering = queued?.steering.length ?? 0;
+  const followUp = queued?.followUp.length ?? 0;
+  if (steering > 0 || followUp > 0) reasons.push({ kind: 'queued', steering, followUp });
+
+  const subagents = state.subagentCounts?.[sessionId] ?? 0;
+  if (subagents > 0) reasons.push({ kind: 'subagents', count: subagents });
+
+  return { active: reasons.length > 0, reasons };
+}
+
+/**
+ * Replace the `human` reason with dialog-inclusive counts (or add/drop it), so
+ * the shipped activity matches `pendingQuestionCount`/`pendingPermissionCount`
+ * on the same record.
+ *
+ * Both record builders MUST apply this before {@link determineAgentState}, or
+ * an open dialog shows amber on one transport and green on the other.
+ */
+export function withHumanReason(
+  activity: SessionActivity,
+  questions: number,
+  permissions: number,
+): SessionActivity {
+  const withoutHuman = activity.reasons.filter((reason) => reason.kind !== 'human');
+  const reasons: ActivityReason[] = questions > 0 || permissions > 0
+    ? [...withoutHuman, { kind: 'human', questions, permissions }]
+    : withoutHuman;
+  return { active: reasons.length > 0, reasons };
+}
+
+/**
+ * `state` is a LOSSY RENDERING PROJECTION of {@link computeSessionActivity} —
+ * activity is the truth about what a session owes, this is the coarse label a
+ * card renders. It deliberately does not surface 'queued' or 'subagents': those
+ * mean "owed", not "executing", so they must not paint an agent green. Read
+ * `record.activity` for anything that needs correctness.
+ *
+ * Precedence (first match wins): lifecycle, human, error, execution.
+ *
+ * Shared by BOTH record builders — the daemon's `machine/build.ts` and the
+ * relay client's `remote-session-backend.ts`. They previously each carried
+ * their own ladder, and the client's copy silently lacked the `dormant` branch,
+ * so every session discovered on disk rendered blue ('waiting') to a remote
+ * client while the daemon called it dormant. One ladder, one answer.
+ */
+export function determineAgentState(
+  activity: SessionActivity,
+  lifecycle: { closedAt?: string; dormantSince?: string; archivedAt?: string },
+  errorMessage: string | undefined,
+): AgentSessionRenderState {
+  if (lifecycle.archivedAt) return 'archived';
+  if (lifecycle.closedAt) return 'closed';
+  if (lifecycle.dormantSince) return 'dormant';
+  if (activity.reasons.some((reason) => reason.kind === 'human')) return 'permission-needed';
+  if (errorMessage || activity.reasons.some((reason) => reason.kind === 'retry')) return 'retrying';
+  if (activity.reasons.some((reason) => reason.kind === 'turn' || reason.kind === 'compacting')) return 'running';
+  return 'waiting';
+}
+
+/** Mirrors `MachineAgentSessionRecord['state']`; declared here so this module
+ *  stays import-free and usable from the browser. */
+export type AgentSessionRenderState =
+  | 'closed'
+  | 'dormant'
+  | 'waiting'
+  | 'running'
+  | 'permission-needed'
+  | 'retrying'
+  | 'archived';
 
 /**
  * Project activity back onto a `SessionStatus`.

@@ -1,3 +1,4 @@
+import type { AgentSessionRenderState } from '../../../agents/agent-runtime-types.js';
 import type { AgentSessionInfo, ReplayInfo, SessionInfo, WorkspaceInfo } from '../../../components/SpacesBrowser.js';
 import type {
   WorkspaceDetailStripStatus,
@@ -76,7 +77,7 @@ export interface WorkspaceDetailModel {
     id: string;
     title: string;
     bucket: 'active' | 'closed' | 'archived';
-    state: 'needs-permission' | 'running' | 'waiting' | 'retrying' | 'error' | 'closed' | 'archived';
+    state: AgentSessionRenderState;
     lastActiveLabel?: string;
     modelLabel?: string;
   }>;

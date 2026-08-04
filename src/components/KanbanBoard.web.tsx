@@ -5,6 +5,8 @@
  */
 
 import { useEffect, useLayoutEffect, useMemo, useState } from 'react';
+import { WORKSPACE_EDGE_COLOR } from '../app/shared/status-display.js';
+import type { WorkspaceStatusColor } from '../app/workspaces/workspace-status.js';
 import type { KanbanGoalItem, WorkspaceBoardGroup, KanbanWorkspaceItem } from '../app/shared/board/types.js';
 import { PHASE_LABELS } from '../app/shared/board/types.js';
 import { canShiftGoalInChainOrder } from '../app/shared/board/chain-order.js';
@@ -54,15 +56,10 @@ const PHASE_BLURBS: Record<string, string> = {
   ship: 'Post-merge ops — monitor, deploy, crons, roll-up.',
 };
 
-/** Status-colored card edge/dot — mirrors mock WS_STATUS_COLOR. */
-function statusEdgeColor(primaryColor: string | undefined): string {
-  switch (primaryColor) {
-    case 'green': return 'var(--gs-accent)';
-    case 'orange': return 'var(--gs-warning-bright)';
-    case 'red': return 'var(--gs-danger-hover)';
-    case 'blue': return 'var(--gs-info)';
-    default: return 'var(--gs-text-ghost)';
-  }
+/** Status-colored card edge/dot. The table is shared and exhaustive, so a new
+ *  status colour cannot silently fall through to grey here. */
+function statusEdgeColor(primaryColor: WorkspaceStatusColor | undefined): string {
+  return WORKSPACE_EDGE_COLOR[primaryColor ?? 'dim'];
 }
 
 /** Accepted/total gates from goal validation requirements. Reads the slim

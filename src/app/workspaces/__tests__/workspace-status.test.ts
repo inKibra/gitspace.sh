@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 
-import { deriveWorkspacePrimaryColorFromMachineSummary, deriveWorkspaceStatusSummary } from '../workspace-status.js';
+import { deriveWorkspaceStatusSummary } from '../workspace-status.js';
 import type { WorkspaceStatusInput } from '../workspace-status.js';
 import type { AgentSessionInfo, SessionInfo } from '../../../machine/api/list-types.js';
 
@@ -36,6 +36,7 @@ describe('deriveWorkspaceStatusSummary', () => {
         workspaceId: 'proj:ws',
         title: 'Claude',
         pendingPermissionCount: 1,
+        state: 'permission-needed',
         status: { type: 'busy' },
       },
     ];
@@ -66,6 +67,7 @@ describe('deriveWorkspaceStatusSummary', () => {
         id: 'agent-1',
         workspaceId: 'proj:ws',
         title: 'Claude',
+        state: 'waiting',
         status: { type: 'idle' },
       },
     ];
@@ -84,6 +86,7 @@ describe('deriveWorkspaceStatusSummary', () => {
         id: 'agent-1',
         workspaceId: 'proj:ws',
         title: 'Claude',
+        state: 'retrying',
         status: { type: 'retry', attempt: 2, message: 'provider failed', next: Date.now() + 1000 },
       },
     ]);
@@ -104,6 +107,9 @@ describe('deriveWorkspaceStatusSummary', () => {
         title: 'Claude',
         closedAt: '2026-01-01T00:00:00.000Z',
         errorMessage: 'rate limit exceeded',
+        // The builder stamps 'closed' for a dismissed session regardless of a
+        // lingering error — lifecycle wins over error in determineAgentState.
+        state: 'closed',
         status: { type: 'retry', attempt: 1, message: 'rate limit exceeded', next: Date.now() },
       },
     ]);
@@ -147,6 +153,7 @@ describe('deriveWorkspaceStatusSummary', () => {
         workspaceId: 'proj:ws',
         title: 'Claude',
         pendingQuestionCount: 1,
+        state: 'permission-needed',
         status: { type: 'idle' },
       },
     ]);
@@ -158,7 +165,7 @@ describe('deriveWorkspaceStatusSummary', () => {
   it('greens a compacting agent (active work), like busy', () => {
     const workspace = makeWorkspace({ processes: [] });
     const summary = deriveWorkspaceStatusSummary(workspace, [], [
-      { id: 'agent-1', workspaceId: 'proj:ws', title: 'Claude', status: { type: 'compacting' } },
+      { id: 'agent-1', workspaceId: 'proj:ws', title: 'Claude', state: 'running', status: { type: 'compacting' } },
     ]);
 
     expect(summary.agents.green).toBe(1);
@@ -168,8 +175,8 @@ describe('deriveWorkspaceStatusSummary', () => {
   it('shows green when any agent is busy even if another is idle', () => {
     const workspace = makeWorkspace();
     const summary = deriveWorkspaceStatusSummary(workspace, [], [
-      { id: 'agent-busy', workspaceId: 'proj:ws', title: 'Busy', status: { type: 'busy' } },
-      { id: 'agent-idle', workspaceId: 'proj:ws', title: 'Idle', status: { type: 'idle' } },
+      { id: 'agent-busy', workspaceId: 'proj:ws', title: 'Busy', state: 'running', status: { type: 'busy' } },
+      { id: 'agent-idle', workspaceId: 'proj:ws', title: 'Idle', state: 'waiting', status: { type: 'idle' } },
     ]);
 
     expect(summary.agents.green).toBe(1);
@@ -190,7 +197,7 @@ describe('deriveWorkspaceStatusSummary', () => {
       },
     ];
     const summary = deriveWorkspaceStatusSummary(workspace, sessions, [
-      { id: 'agent-idle', workspaceId: 'proj:ws', title: 'Idle', status: { type: 'idle' } },
+      { id: 'agent-idle', workspaceId: 'proj:ws', title: 'Idle', state: 'waiting', status: { type: 'idle' } },
     ]);
 
     expect(summary.services.green).toBe(1);
@@ -227,26 +234,31 @@ describe('deriveWorkspaceStatusSummary', () => {
     expect(terminalOnly.primaryColor).toBe('dim');
   });
 
-  it('prefers idle agent blue over running process in machine summary', () => {
-    expect(deriveWorkspacePrimaryColorFromMachineSummary({
-      permissionAgentCount: 0,
-      retryingAgentCount: 0,
-      failedProcessCount: 0,
-      failedTerminalCount: 0,
-      waitingAgentCount: 1,
-      runningAgentCount: 0,
-      runningProcessCount: 1,
-    })).toBe('blue');
+  it('keeps a workspace whose only sessions are dormant dim, not blue', () => {
+    // Regression: this rollup used to re-derive state itself and never checked
+    // dormantSince, so every session merely discovered on disk counted as blue.
+    // That painted every workspace blue in the detail strip, the kanban card
+    // edge and the project chips at once, and sorted dormant workspaces above
+    // genuinely running ones. It now counts the state on the record.
+    const workspace = makeWorkspace({ processes: [] });
+    const summary = deriveWorkspaceStatusSummary(workspace, [], [
+      { id: 'a1', workspaceId: 'proj:ws', title: 'Seeded', state: 'dormant', dormantSince: '2026-01-01T00:00:00.000Z' },
+      { id: 'a2', workspaceId: 'proj:ws', title: 'Also seeded', state: 'dormant', dormantSince: '2026-01-01T00:00:00.000Z' },
+    ]);
+
+    expect(summary.agents.blue).toBe(0);
+    expect(summary.primaryColor).toBe('dim');
   });
-  it('keeps running-process-only machine summary dim', () => {
-    expect(deriveWorkspacePrimaryColorFromMachineSummary({
-      permissionAgentCount: 0,
-      retryingAgentCount: 0,
-      failedProcessCount: 0,
-      failedTerminalCount: 0,
-      waitingAgentCount: 0,
-      runningAgentCount: 0,
-      runningProcessCount: 1,
-    })).toBe('dim');
+
+  it('does not turn a workspace red for a noisy LSP error', () => {
+    // determineAgentState maps ANY errorMessage to 'retrying', so the rollup
+    // keeps its own noise filter — an LSP hiccup must not paint the workspace red.
+    const workspace = makeWorkspace({ processes: [] });
+    const summary = deriveWorkspaceStatusSummary(workspace, [], [
+      { id: 'a1', workspaceId: 'proj:ws', title: 'Claude', state: 'retrying', errorMessage: 'lsp server crashed' },
+    ]);
+
+    expect(summary.agents.red).toBe(0);
+    expect(summary.agents.blue).toBe(1);
   });
 });

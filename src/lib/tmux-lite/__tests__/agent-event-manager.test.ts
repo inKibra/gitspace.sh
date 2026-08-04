@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 
 import { AgentEventManager, computeSessionActivity, type AgentStateUpdateDelta, type WorkspaceAgentState } from '../agent-event-manager.js';
+import { determineAgentState, type SessionActivity } from '../../../agents/agent-runtime-types.js';
 
 function createManager() {
   let now = 1_000;
@@ -270,5 +271,37 @@ describe('computeSessionActivity', () => {
     // "nothing of that kind", never throw.
     const sparse = { workspaceId: 'workspace-1', sessions: [] } as unknown as WorkspaceAgentState;
     expect(computeSessionActivity(sparse, 'session-1')).toEqual({ active: false, reasons: [] });
+  });
+});
+
+describe('determineAgentState', () => {
+  const idle: SessionActivity = { active: false, reasons: [] };
+
+  it('reports a session discovered on disk as dormant, not waiting', () => {
+    // The relay client kept its own copy of this ladder without the dormant
+    // branch, so every seeded session rendered blue ('waiting') in the browser
+    // while the daemon called it dormant. Both builders now share this function.
+    expect(determineAgentState(idle, { dormantSince: '2026-01-01T00:00:00Z' }, undefined)).toBe('dormant');
+  });
+
+  it('orders lifecycle ahead of activity', () => {
+    const busy = { active: true, reasons: [{ kind: 'turn' } as const] };
+    expect(determineAgentState(busy, { archivedAt: 'a', closedAt: 'c', dormantSince: 'd' }, undefined)).toBe('archived');
+    expect(determineAgentState(busy, { closedAt: 'c', dormantSince: 'd' }, undefined)).toBe('closed');
+    expect(determineAgentState(busy, { dormantSince: 'd' }, undefined)).toBe('dormant');
+  });
+
+  it('projects activity onto the coarse label once no lifecycle field applies', () => {
+    expect(determineAgentState(idle, {}, undefined)).toBe('waiting');
+    expect(determineAgentState({ active: true, reasons: [{ kind: 'turn' }] }, {}, undefined)).toBe('running');
+    expect(determineAgentState({ active: true, reasons: [{ kind: 'compacting' }] }, {}, undefined)).toBe('running');
+    expect(determineAgentState({ active: true, reasons: [{ kind: 'human', questions: 1, permissions: 0 }] }, {}, undefined)).toBe('permission-needed');
+    expect(determineAgentState(idle, {}, 'boom')).toBe('retrying');
+  });
+
+  it('does not paint an agent as running for work it merely owes', () => {
+    // 'queued' and 'subagents' mean owed, not executing.
+    expect(determineAgentState({ active: true, reasons: [{ kind: 'queued', steering: 1, followUp: 0 }] }, {}, undefined)).toBe('waiting');
+    expect(determineAgentState({ active: true, reasons: [{ kind: 'subagents', count: 3 }] }, {}, undefined)).toBe('waiting');
   });
 });

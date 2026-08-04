@@ -10,7 +10,7 @@
  * Keep these here as a transitional layer; do not add new fields.
  */
 
-import type { AgentModelInfo, SessionActivity, SessionStatus, TodoPhase } from '../../agents/agent-runtime-types.js';
+import type { AgentModelInfo, AgentSessionRenderState, SessionActivity, SessionStatus, TodoPhase } from '../../agents/agent-runtime-types.js';
 
 /** Workspace as returned by list_workspaces / workspace_list */
 export type { WorkspaceInfo } from '../../lib/remote-session/protocol.js';
@@ -28,6 +28,13 @@ export interface AgentSessionInfo {
   /** No live worker, but not dismissed — resumable. See MachineAgentSessionState. */
   dormantSince?: string;
   archivedAt?: string;
+  /**
+   * The ONE decision about what this session is doing, made by
+   * `determineAgentState` at record build. Colour and label are lookups on this
+   * — never re-derive it from `activity`/`status`/`closedAt` in a component, or
+   * you get another ladder that drifts (which is how `dormant` rendered blue).
+   */
+  state?: AgentSessionRenderState;
   status?: SessionStatus;
   /** Canonical activity from the daemon. Read this to decide whether a session
    *  is doing or owing anything; `status` only describes the current turn. */

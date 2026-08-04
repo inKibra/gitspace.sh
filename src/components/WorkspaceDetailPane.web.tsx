@@ -11,6 +11,7 @@
 
 import { useCallback, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react';
 import type { WorkspaceDetailPaneProps } from './WorkspaceDetailPane.js';
+import { AGENT_STATE_DOT_CLASS } from '../app/shared/status-display.js';
 import { getWorkspaceStripColor } from '../app/shared/workspace-detail/strip.js';
 import { useWorkspaceDetailModel } from '../app/shared/workspace-detail/useWorkspaceDetailModel.js';
 import { useTheme, THEMES } from '../lib/theme.web.js';
@@ -264,12 +265,7 @@ function SidebarContent(props: {
         ) : (
           agentRows.filter((row) => row.bucket === 'active').map((row) => {
             const agentState = row.state;
-            const dotColor =
-              agentState === 'needs-permission' ? 'text-[var(--gs-warning-bright)]'
-              : agentState === 'running' ? 'text-[var(--gs-running)]'
-              : agentState === 'waiting' ? 'text-[var(--gs-info)]'
-              : agentState === 'retrying' || agentState === 'error' ? 'text-[var(--gs-danger)]'
-              : 'text-[var(--gs-text-ghost)]';
+            const dotColor = AGENT_STATE_DOT_CLASS[agentState];
             return (
               <div key={row.id} className="flex items-center gap-1">
                 <SidebarItem

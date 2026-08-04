@@ -66,6 +66,7 @@ import {
   DEFAULT_NOTIFICATION_CONFIG,
   getSessionLabel,
 } from "./notifications/index.js";
+import { WORKSPACE_CHIP_COLOR } from './app/shared/status-display.js';
 import { useWorkspaceRuntimeModel } from './app/shared/workspace-runtime/useWorkspaceRuntimeModel.js';
 import { useCommandPaletteOrchestration } from './app/react/index.js';
 import { showWorkspaceEditorSelect } from './app/shared/command-palette/showWorkspaceEditorSelect.js';
@@ -796,8 +797,8 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   const agentSessionsByWorkspace = workspaceRuntime.agentSessionsByWorkspace;
   const allWorkspaceEntries = workspaceRuntime.workspaces;
 
-  /** Global chrome bar (mock topbar + ActivityStrip) — shared by board + shell. */
-  const CHIP_COLOR: Record<string, string> = { green: 'var(--gs-success)', red: 'var(--gs-danger)', orange: 'var(--gs-warning)', blue: 'var(--gs-info)', dim: 'var(--gs-text-ghost)' };
+  /** Global chrome bar (mock topbar + ActivityStrip) — shared by board + shell.
+   *  Chip colours come from the shared exhaustive table. */
   // The top strip is a tab bar of ACTIVE workspaces, not every workspace in
   // every project. Active = a live terminal, an open agent (primaryColor !=
   // 'dim' means an agent session is open/erroring), or the workspace you're
@@ -816,7 +817,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
         key: w.selectionKey ?? w.id,
         name: w.name,
         phase: ((w as { phase?: string }).phase as import('./types/config.js').WorkspacePhase | undefined) ?? 'code',
-        statusColor: CHIP_COLOR[st?.primaryColor ?? 'dim'] ?? 'var(--gs-text-ghost)',
+        statusColor: WORKSPACE_CHIP_COLOR[st?.primaryColor ?? 'dim'],
       };
     });
   const renderChromeBar = (opts: { boardActive?: boolean; activeKey?: string | null; onBoard?: () => void }) => (

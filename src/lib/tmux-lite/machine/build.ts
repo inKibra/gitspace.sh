@@ -2,6 +2,7 @@ import { listProjectSummaries } from '../../../core/project-catalog.js';
 import { listProjectGoalKanbanItems } from '../../../core/goal-chain.js';
 import { countArchivedSessions, getArchivedSessions } from '../../../agents/agent-db.js';
 import { computeSessionActivity, type WorkspaceAgentState } from '../agent-event-manager.js';
+import { determineAgentState, withHumanReason } from '../../../agents/agent-runtime-types.js';
 import type { ActivityReason, SessionActivity } from '../../../agents/agent-runtime-types.js';
 import type { Session, WorkspaceRuntimeRecord } from '../protocol.js';
 import { parseProcessSessionName } from '../../processes/names.js';
@@ -23,39 +24,11 @@ function determineTerminalState(session: Session): MachineTerminalSessionRecord[
   return 'failed';
 }
 
-/**
- * `state` is a LOSSY RENDERING PROJECTION of {@link computeSessionActivity} —
- * activity is the truth about what a session owes, this is the coarse label a
- * card renders. It deliberately does not surface 'queued' or 'subagents': those
- * mean "owed", not "executing", so they must not paint an agent green. Read
- * `record.activity` for anything that needs correctness.
- *
- * Precedence (first match wins): lifecycle, human, error, execution.
- */
-function determineAgentState(
-  activity: SessionActivity,
-  closedAt: string | undefined,
-  dormantSince: string | undefined,
-  errorMessage: string | undefined,
-): MachineAgentSessionRecord['state'] {
-  if (closedAt) return 'closed';
-  if (dormantSince) return 'dormant';
-  if (activity.reasons.some((reason) => reason.kind === 'human')) return 'permission-needed';
-  if (errorMessage || activity.reasons.some((reason) => reason.kind === 'retry')) return 'retrying';
-  if (activity.reasons.some((reason) => reason.kind === 'turn' || reason.kind === 'compacting')) return 'running';
-  return 'waiting';
-}
+// determineAgentState now lives in agents/agent-runtime-types.ts so the relay
+// client shares this exact precedence ladder instead of keeping its own copy.
 
-/** Replace the `human` reason with dialog-inclusive counts (or add/drop it), so
- *  the shipped activity matches `pendingQuestionCount`/`pendingPermissionCount`
- *  on the same record. */
-function withHumanReason(activity: SessionActivity, questions: number, permissions: number): SessionActivity {
-  const withoutHuman = activity.reasons.filter((reason) => reason.kind !== 'human');
-  const reasons: ActivityReason[] = questions > 0 || permissions > 0
-    ? [...withoutHuman, { kind: 'human', questions, permissions }]
-    : withoutHuman;
-  return { active: reasons.length > 0, reasons };
-}
+// withHumanReason also moved to agents/agent-runtime-types.ts — both record
+// builders must fold dialog counts the same way before projecting state.
 
 
 export function resolveWorkspaceIdForTerminal(
@@ -336,7 +309,7 @@ export function buildAgentSessionRecordsForWorkspace(params: {
         workspaceId,
         projectId,
         title: session.title,
-        state: determineAgentState(activity, session.closedAt, session.dormantSince, errorMessage),
+        state: determineAgentState(activity, { closedAt: session.closedAt, dormantSince: session.dormantSince }, errorMessage),
         updatedAt: session.updatedAt,
         closedAt: session.closedAt,
         dormantSince: session.dormantSince,

@@ -49,6 +49,7 @@ function toAgentSessionInfo(agent: MachineAgentSessionRecord): AgentSessionInfo 
     closedAt: agent.closedAt,
     dormantSince: agent.dormantSince,
     archivedAt: agent.archivedAt,
+    state: agent.state,
     status,
     activity: agent.activity,
     pendingPermissionCount: agent.pendingPermissionCount,

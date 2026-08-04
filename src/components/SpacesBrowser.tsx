@@ -13,6 +13,7 @@ import type {
   MachineWorkspacePullRequestRecord,
 } from '../lib/tmux-lite/machine/types.js';
 import type { AgentSessionInfo } from '../machine/api/list-types.js';
+import { AGENT_STATE_LABEL } from '../app/shared/status-display.js';
 import type { WorkspaceRuntimeEntry } from '../app/shared/workspace-runtime/types.js';
 import type { WorkspaceNotesSummary } from '../types/workspace.js';
 import type { RuntimeProcessDefinition, ResolvedProcessPort } from '../types/processes.js';
@@ -70,53 +71,21 @@ export interface SessionInfo {
 }
 
 
-export type AgentSessionDisplayState =
-  | 'closed'
-  | 'needs-permission'
-  | 'error'
-  | 'running'
-  | 'retrying'
-  | 'waiting';
-
-export function getAgentSessionDisplayState(session: AgentSessionInfo): AgentSessionDisplayState {
-  // Dormant renders as 'closed' (grey, not live) exactly as it did when one
-  // field meant both. The record now distinguishes dismissed from resumable, so
-  // a future pass can split the label without touching the daemon.
-  if (session.closedAt || session.dormantSince) {
-    return 'closed';
-  }
-  if ((session.pendingPermissionCount ?? 0) > 0 || (session.pendingQuestionCount ?? 0) > 0) {
-    return 'needs-permission';
-  }
-  if (session.errorMessage) {
-    return 'error';
-  }
-  if (session.status?.type === 'busy' || session.status?.type === 'compacting') {
-    return 'running';
-  }
-  if (session.status?.type === 'retry') {
-    return 'retrying';
-  }
-  return 'waiting';
-}
-
+/**
+ * Status word beside a session title.
+ *
+ * The state itself is decided once at record build (`determineAgentState`) and
+ * read straight off the record — this used to be a fourth precedence ladder over
+ * activity/status/closedAt with its own enum, which is how `dormant` went
+ * missing. Only the permission count needs formatting on top of the label.
+ */
 export function getAgentSessionDisplayLabel(session: AgentSessionInfo): string {
-  const state = getAgentSessionDisplayState(session);
-  switch (state) {
-    case 'closed':
-      return 'closed';
-    case 'needs-permission':
-      return `needs permission${(session.pendingPermissionCount ?? 0) > 1 ? ` (${session.pendingPermissionCount})` : ''}`;
-    case 'error':
-      return 'error';
-    case 'running':
-      return 'running';
-    case 'retrying':
-      return 'retrying';
-    case 'waiting':
-    default:
-      return 'waiting';
+  const state = session.state ?? 'waiting';
+  if (state === 'permission-needed') {
+    const count = session.pendingPermissionCount ?? 0;
+    return `${AGENT_STATE_LABEL[state]}${count > 1 ? ` (${count})` : ''}`;
   }
+  return AGENT_STATE_LABEL[state];
 }
 
 /** Tree item types for flattened list */

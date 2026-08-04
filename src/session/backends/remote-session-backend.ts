@@ -61,7 +61,7 @@ import type {
 } from '../backend.js';
 import type { AgentControlInfo, AgentDefinitionInfo, AgentGoalModeInfo, AgentHistoryEntry, AgentSessionUsageReport, AgentSettingItem, AgentSettingSchemaItem, AgentShakeMode, AgentShakeResult, AgentToolInfo, AgentTreeNode } from '../../agents/agent-runtime-types.js';
 import type { BackendEvent } from '../events.js';
-import { computeSessionActivity } from '../../lib/tmux-lite/agent-event-manager.js';
+import { computeSessionActivity, determineAgentState, withHumanReason } from '../../agents/agent-runtime-types.js';
 import type { AgentStateUpdateDelta, WorkspaceAgentState } from '../../lib/tmux-lite/agent-event-manager.js';
 import type { AgentStateSnapshotPush, AgentStateUpdatePush } from '../../lib/remote-session/protocol.js';
 import { applyAgentDeltaToAgentState } from '../../lib/tmux-lite/agent-state-reducer.js';
@@ -3094,21 +3094,21 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     const status = workspace.statuses[sessionId];
     const errorMessage = workspace.errorMessages[sessionId]
       ?? (status?.type === 'retry' ? status.message : undefined);
-    // Same computation the daemon runs (computeSessionActivity), so a session
-    // cannot read one way locally and another remotely — this branch used to
-    // re-derive state by hand and had already drifted on 'compacting'.
-    const activity = computeSessionActivity(workspace, sessionId);
-    const state: MachineAgentSessionRecord['state'] = session.archivedAt
-      ? 'archived'
-      : session.closedAt
-        ? 'closed'
-        : pendingPermissionIds.length > 0 || pendingQuestionIds.length > 0
-          ? 'permission-needed'
-          : errorMessage || activity.reasons.some((reason) => reason.kind === 'retry')
-            ? 'retrying'
-            : activity.reasons.some((reason) => reason.kind === 'turn' || reason.kind === 'compacting')
-              ? 'running'
-              : 'waiting';
+    // Same computation AND same projection the daemon runs, so a session cannot
+    // read one way locally and another remotely. This branch used to re-derive
+    // state by hand; it had already drifted on 'compacting' and was missing the
+    // 'dormant' branch entirely, so every session discovered on disk rendered
+    // blue ('waiting') over the relay while the daemon called it dormant.
+    const activity = withHumanReason(
+      computeSessionActivity(workspace, sessionId),
+      pendingQuestionIds.length,
+      pendingPermissionIds.length,
+    );
+    const state = determineAgentState(
+      activity,
+      { closedAt: session.closedAt, dormantSince: session.dormantSince, archivedAt: session.archivedAt },
+      errorMessage,
+    );
 
     return {
       id: session.id,
@@ -3118,6 +3118,7 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       state,
       updatedAt: session.updatedAt,
       closedAt: session.closedAt,
+      dormantSince: session.dormantSince,
       archivedAt: session.archivedAt,
       pendingPermissionIds,
       pendingPermissionCount: pendingPermissionIds.length,
