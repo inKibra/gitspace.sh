@@ -181,6 +181,16 @@ describe('remote /space command responses', () => {
       execCommand: async () => ({ stdout: 'event output', stderr: '', code: 0, killed: false }),
     }));
 
+    // /space resolves the target workspace by making workspacePath relative to
+    // the configured workspace root, which otherwise defaults to $HOME/gitspace.
+    // Pin both sides so the test does not silently depend on being run from
+    // inside a real registered workspace (it failed under a pristine HOME).
+    // detectWorkspaceContextFromCwd is pure path math, so nothing needs to exist.
+    const previousWorkspaceRoot = process.env.GITSPACE_WORKSPACE_ROOT;
+    const workspaceRoot = '/tmp/gs-space-cmd-root';
+    process.env.GITSPACE_WORKSPACE_ROOT = workspaceRoot;
+
+    try {
     const handler = new RemoteSessionHandler();
     const sendKey = new Uint8Array(32).fill(7);
     const receiveKey = new Uint8Array(32).fill(11);
@@ -202,25 +212,33 @@ describe('remote /space command responses', () => {
         workspaceId: 'project:workspace',
         workspaceName: 'workspace',
         projectName: 'project',
-        workspacePath: process.cwd(),
+        workspacePath: `${workspaceRoot}/project/workspaces/workspace`,
       },
       argsText: 'events list',
     };
 
     const requestFrame = createFrame(0, new TextEncoder().encode(serializeRemoteMessage(request)), receiveKey);
     const responses: Uint8Array[] = [];
+    // The final operation event arrives on a detached async chain that performs a
+    // dynamic import(), so it cannot be awaited directly. Await that arrival as a
+    // signal rather than yielding a fixed number of microtasks: a module resolve
+    // takes more than a few ticks, and BUN_INSTALL defaults to $HOME/.bun, so the
+    // timing moves with the environment (this failed under a pristine HOME).
+    let signalFinalResponse: () => void = () => {};
+    const record = (frame: Uint8Array): void => {
+      responses.push(frame);
+      if (responses.length >= 3) signalFinalResponse();
+    };
     await handler.onClientEntersBrowsing('client-1', async (msg) => {
-      responses.push(createFrame(0, new TextEncoder().encode(serializeRemoteMessage(msg)), sendKey));
+      record(createFrame(0, new TextEncoder().encode(serializeRemoteMessage(msg)), sendKey));
     });
     responses.length = 0;
 
-    await handler.handleMessage(session, requestFrame, (data) => {
-      responses.push(data);
-    });
-
-    for (let i = 0; i < 5 && responses.length < 3; i += 1) {
-      await Bun.sleep(0);
-    }
+    // Armed only after the browsing preamble is discarded, so those frames cannot
+    // satisfy the wait.
+    const finalResponseArrived = new Promise<void>((resolve) => { signalFinalResponse = resolve; });
+    await handler.handleMessage(session, requestFrame, record);
+    await finalResponseArrived;
     expect(responses.length).toBeGreaterThanOrEqual(2);
     const messages = responses.map((response) => {
       expect(new TextDecoder().decode(response).startsWith('{')).toBe(false);
@@ -258,6 +276,10 @@ describe('remote /space command responses', () => {
         },
       },
     });
+    } finally {
+      if (previousWorkspaceRoot === undefined) delete process.env.GITSPACE_WORKSPACE_ROOT;
+      else process.env.GITSPACE_WORKSPACE_ROOT = previousWorkspaceRoot;
+    }
   });
 });
 
