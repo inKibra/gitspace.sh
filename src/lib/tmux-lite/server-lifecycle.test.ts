@@ -11,9 +11,14 @@ import { join } from "path";
 import { applyTmuxLiteSandboxEnvironment, getTmuxLitePathsForSandbox } from "./protocol";
 import { createSession, killServer, listSessions } from "./cli";
 
-// Use the same paths as --test mode in cli.ts and server.ts
-const TEST_SOCKET = "/tmp/tmux-lite-test.sock";
-const TEST_SESSION_DIR = "/tmp/tmux-lite-test";
+// A per-process sandbox, NOT the global `--test` paths. `--test` is just
+// `--sandbox test` (cli.ts parseCliContext), so it hardcodes /tmp/tmux-lite-test.*
+// and collides with any other --test daemon or leftover stray — which made this
+// file fail under the isolated runner's concurrency while passing alone.
+const SANDBOX = `lifecycle-${process.pid}`;
+const SANDBOX_PATHS = getTmuxLitePathsForSandbox(SANDBOX);
+const TEST_SOCKET = SANDBOX_PATHS.routerSocket;
+const TEST_SESSION_DIR = SANDBOX_PATHS.sessionDir;
 const CLI_SCRIPT = join(import.meta.dir, "cli.ts");
 const TMUX_ENV_KEYS = [
   "TMUX_LITE_SANDBOX",
@@ -48,13 +53,20 @@ function cleanupSandbox(name: string): void {
  * Helper to run CLI commands in test mode
  */
 async function runCli(args: string[]): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  // `--test` resolves to the GLOBAL sandbox named "test" inside the CLI and would
+  // override the env below, so translate it to this file's own sandbox instead.
+  // Call sites keep passing `--test` to stay readable.
+  const sandboxArgs = args.includes('--test')
+    ? [...args.filter((arg) => arg !== '--test'), `--sandbox=${SANDBOX}`]
+    : args;
   const proc = spawn({
-    cmd: ["bun", "run", CLI_SCRIPT, ...args],
+    cmd: ["bun", "run", CLI_SCRIPT, ...sandboxArgs],
     stdout: "pipe",
     stderr: "pipe",
     env: {
       ...process.env,
       TMUX_LITE: "",
+      TMUX_LITE_SANDBOX: SANDBOX,
     },
   });
 
@@ -88,7 +100,9 @@ async function isServerRunning(): Promise<boolean> {
  */
 async function waitFor(
   condition: () => Promise<boolean>,
-  timeoutMs: number = 5000,
+  // 5s was not enough once several test files boot daemons concurrently: the
+  // daemon is a full Bun process importing the tmux-lite graph.
+  timeoutMs: number = 20000,
   intervalMs: number = 100
 ): Promise<boolean> {
   const start = Date.now();

@@ -12,6 +12,10 @@ import { describe, it, expect, beforeEach, afterEach, mock } from 'bun:test';
 import { mkdirSync, writeFileSync, chmodSync, rmSync, existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
+import type { rerunWorkspaceBundleScripts, runWorkspaceScripts } from '../run-workspace-scripts.js';
+// Real file-backed secrets store; the module under test is imported dynamically
+// per test, so this evaluates first and wins the backend selection.
+import { resetSecretsStore } from '../../test/secrets-store.js';
 
 let mockProjectConfig: {
   repository: string;
@@ -21,14 +25,12 @@ let mockProjectConfig: {
   bundleConfirmHistory: Record<string, unknown>;
 };
 
-let mockSecretStore: Record<string, string>;
-
-type RunWorkspaceScriptsFn = typeof import('../run-workspace-scripts').runWorkspaceScripts;
-type RerunWorkspaceBundleScriptsFn = typeof import('../run-workspace-scripts').rerunWorkspaceBundleScripts;
+type RunWorkspaceScriptsFn = typeof runWorkspaceScripts;
+type RerunWorkspaceBundleScriptsFn = typeof rerunWorkspaceBundleScripts;
 type Outcome = Awaited<ReturnType<RunWorkspaceScriptsFn>>;
 
 function setupModuleMocks(): void {
-  mockSecretStore = {};
+  resetSecretsStore();
   mock.module('../../core/config', () => ({
     readProjectConfig: () => mockProjectConfig,
     updateProjectConfig: () => {},
@@ -37,37 +39,6 @@ function setupModuleMocks(): void {
     getProjectDir: () => '/tmp',
     readGlobalConfig: () => ({ currentProject: null }),
     updateGlobalConfig: () => {},
-  }));
-
-  // Mirror the full secrets module surface so this mock never leaks an
-  // incomplete API into other test files sharing bun's global module registry.
-  mock.module('../secrets', () => ({
-    clearSecretsCache: () => {},
-    getProjectSecrets: async (_projectName: string, keys: string[]) => {
-      const out: Record<string, string> = {};
-      for (const key of keys) {
-        if (key in mockSecretStore) out[key] = mockSecretStore[key];
-      }
-      return out;
-    },
-    getProjectSecret: async (_projectName: string, key: string) => (key in mockSecretStore ? mockSecretStore[key] : null),
-    setProjectSecret: async (_projectName: string, key: string, value: string) => { mockSecretStore[key] = value; },
-    deleteProjectSecret: async (_projectName: string, key: string) => {
-      if (!(key in mockSecretStore)) return false;
-      delete mockSecretStore[key];
-      return true;
-    },
-    deleteProjectSecrets: async (_projectName: string, keys: string[]) => { for (const key of keys) delete mockSecretStore[key]; },
-    deleteAllProjectSecrets: async () => { for (const key of Object.keys(mockSecretStore)) delete mockSecretStore[key]; },
-    preloadProjectSecrets: async () => ({}),
-    setSecret: async (key: string, value: string) => { mockSecretStore[key] = value; },
-    getSecret: async (key: string) => (key in mockSecretStore ? mockSecretStore[key] : null),
-    deleteSecret: async (key: string) => {
-      if (!(key in mockSecretStore)) return false;
-      delete mockSecretStore[key];
-      return true;
-    },
-    migrateSecrets: async () => {},
   }));
 
   mock.module('../../core/bundle-refresh', () => ({

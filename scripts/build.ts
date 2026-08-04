@@ -280,7 +280,6 @@ if (isCompiled) {
   // to embed the .node binary as an asset and return its extracted path at
   // runtime. This import MUST stay inside the isCompiled guard because in dev
   // mode Bun cannot ESM-import a Node-API .node file.
-  // @ts-ignore -- .node module resolved by Bun bundler at compile time; no declaration exists in dev
   const { default: addonPath } = await import("../node_modules/@oh-my-pi/pi-natives/native/${filename}");
   const dir = join(os.homedir(), ".omp", "natives", "${version}");
   const target = join(dir, "${filename}");

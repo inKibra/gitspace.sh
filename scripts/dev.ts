@@ -339,9 +339,8 @@ async function main(): Promise<void> {
   const identityDir = join(devStateDir, 'identity');
   const controlDir = join(devStateDir, 'relay-control');
   const relayDir = join(devStateDir, 'relay');
-  const serveDaemonDir = join(runtimeDir, 'serve');
   const traceLogPath = join(runtimeDir, 'gitspace-runtime-trace.jsonl');
-  for (const dir of [identityDir, controlDir, relayDir, serveDaemonDir, runtimeDir]) {
+  for (const dir of [identityDir, controlDir, relayDir, runtimeDir]) {
     mkdirSync(dir, { recursive: true });
   }
 
@@ -497,7 +496,7 @@ async function main(): Promise<void> {
     '--password-stdin',
   ], {
     cwd: ROOT,
-    env: { ...process.env, ...sandboxEnv, GITSPACE_CONTROL_DIR: controlDir, TMUX_LITE_SANDBOX: sandboxName, GITSPACE_SERVE_DAEMON_DIR: serveDaemonDir },
+    env: { ...process.env, ...sandboxEnv, GITSPACE_CONTROL_DIR: controlDir, TMUX_LITE_SANDBOX: sandboxName },
     stdout: 'pipe',
     stderr: 'pipe',
     stdin: 'pipe',
