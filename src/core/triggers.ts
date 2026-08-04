@@ -11,42 +11,16 @@
 import { execFileSync } from 'child_process';
 import { existsSync, readFileSync, readdirSync } from 'fs';
 import { join } from 'path';
-import { z } from 'zod';
 import { artifactsScope, captureArtifacts } from './artifacts.js';
 import { pathInScope } from './artifact-cap.js';
 import { validateTriggerWhen } from './trigger-grammar.js';
 import { parseJsonWith, parseOrThrow } from './schema-parse.js';
 import { SpacesError } from '../types/errors.js';
 
-const triggerRunSchema = z.object({
-  at: z.string(),
-  status: z.enum(['ok', 'fail', 'pending']),
-  note: z.string().optional(),
-  sessionId: z.string().optional(),
-  startCommit: z.string().nullable().optional(),
-});
-
-export const triggerSchema = z.object({
-  id: z.string().min(1),
-  name: z.string().min(1),
-  kind: z.enum(['cron', 'event', 'manual']),
-  when: z.string(),
-  status: z.enum(['ok', 'pending', 'failed', 'idle']),
-  last: z.string(),
-  next: z.string().optional(),
-  cost: z.string().optional(),
-  writes: z.array(z.string()),
-  history: z.array(z.enum(['ok', 'fail', 'pending'])),
-  note: z.string().optional(),
-  scope: z.enum(['workspace', 'project']).optional(),
-  does: z.string().optional(),
-  runs: z.object({ type: z.enum(['command', 'skill', 'workflow']), ref: z.string().optional(), prompt: z.string().optional() }).optional(),
-  reads: z.array(z.string()).optional(),
-  feeds: z.array(z.string()).optional(),
-  runLog: z.array(triggerRunSchema).optional(),
-});
-
-export type TriggerRecord = z.infer<typeof triggerSchema>;
+// Defined in a Node-free module so the browser can share the shape without
+// pulling this file (child_process, fs) into the client bundle.
+export { triggerSchema, type TriggerRecord } from './trigger-schema.js';
+import { triggerSchema, type TriggerRecord } from './trigger-schema.js';
 
 const TRIGGER_DIR = 'triggers';
 

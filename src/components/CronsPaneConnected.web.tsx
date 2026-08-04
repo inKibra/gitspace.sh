@@ -12,7 +12,7 @@ import { decodeBase64Utf8 } from './artifact-kinds.js';
 import { toast } from '../lib/sonner.web.js';
 import type { SessionBackend } from '../session/backend.js';
 import { parseJsonWith } from '../core/schema-parse.js';
-import { triggerSchema, type TriggerRecord } from '../core/triggers.js';
+import { triggerSchema, type TriggerRecord } from '../core/trigger-schema.js';
 export function CronsPaneConnected({ backend, workspaceId }: {
   backend: SessionBackend | null;
   workspaceId: string;
