@@ -10,7 +10,7 @@
  * Keep these here as a transitional layer; do not add new fields.
  */
 
-import type { AgentModelInfo, SessionStatus, TodoPhase } from '../../agents/agent-runtime-types.js';
+import type { AgentModelInfo, SessionActivity, SessionStatus, TodoPhase } from '../../agents/agent-runtime-types.js';
 
 /** Workspace as returned by list_workspaces / workspace_list */
 export type { WorkspaceInfo } from '../../lib/remote-session/protocol.js';
@@ -25,8 +25,13 @@ export interface AgentSessionInfo {
   title: string;
   updatedAt?: string;
   closedAt?: string;
+  /** No live worker, but not dismissed — resumable. See MachineAgentSessionState. */
+  dormantSince?: string;
   archivedAt?: string;
   status?: SessionStatus;
+  /** Canonical activity from the daemon. Read this to decide whether a session
+   *  is doing or owing anything; `status` only describes the current turn. */
+  activity?: SessionActivity;
   pendingPermissionCount?: number;
   pendingQuestionCount?: number;
   errorMessage?: string;

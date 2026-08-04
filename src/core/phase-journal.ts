@@ -24,53 +24,69 @@ import { describeOwedRequirement, gateStatusForPhase, workflowPhaseNames } from 
 import { tryLoadWorkspaceWorkflow } from './goal-workflow.js';
 import { SpacesError } from '../types/errors.js';
 import type { WorkspacePhase } from '../types/config.js';
+import { z } from 'zod';
+import { parseJsonOrThrow, parseWith } from './schema-parse.js';
 
-export interface PhaseStateSnapshot {
-  at: string;
-  stage?: WorkspacePhase;
-  goal?: {
-    id: string;
-    requirements: Record<string, string>;
-    ready: string;
-  };
-  workflow?: Record<string, Record<string, string>>;
-  review?: { threadsOpen: number; humanGatesAwaiting: number };
-  evidenceIds: string[];
-  canon: {
-    artifactsSha?: string;
-    goalDocHash?: string;
-    rubricHash?: string;
-    workflowHash?: string;
-  };
-}
+export const phaseStateSnapshotSchema = z.object({
+  at: z.string(),
+  stage: z.string().optional() as z.ZodType<WorkspacePhase | undefined>,
+  goal: z.object({
+    id: z.string(),
+    requirements: z.record(z.string(), z.string()),
+    ready: z.string(),
+  }).optional(),
+  workflow: z.record(z.string(), z.record(z.string(), z.string())).optional(),
+  review: z.object({ threadsOpen: z.number(), humanGatesAwaiting: z.number() }).optional(),
+  evidenceIds: z.array(z.string()),
+  canon: z.object({
+    artifactsSha: z.string().optional(),
+    goalDocHash: z.string().optional(),
+    rubricHash: z.string().optional(),
+    workflowHash: z.string().optional(),
+  }),
+});
+export type PhaseStateSnapshot = z.infer<typeof phaseStateSnapshotSchema>;
 
-export interface PhaseJournalDelta {
-  requirementsAdvanced: Array<{ id: string; from: string; to: string }>;
-  evidenceAdded: string[];
-  threadsResolved: number;
-  stageChanged: { from?: WorkspacePhase; to?: WorkspacePhase } | null;
-  canonChanged: string[];
-}
+export const phaseJournalDeltaSchema = z.object({
+  requirementsAdvanced: z.array(z.object({ id: z.string(), from: z.string(), to: z.string() })),
+  evidenceAdded: z.array(z.string()),
+  threadsResolved: z.number(),
+  stageChanged: z.object({
+    from: z.string().optional() as z.ZodType<WorkspacePhase | undefined>,
+    to: z.string().optional() as z.ZodType<WorkspacePhase | undefined>,
+  }).nullable(),
+  canonChanged: z.array(z.string()),
+});
+export type PhaseJournalDelta = z.infer<typeof phaseJournalDeltaSchema>;
 
-export interface PhaseJournalEntry {
-  version: 1;
-  phase: string;
-  workflowRef?: string;
-  startedAt: string;
-  endedAt?: string;
-  intent: string;
-  outcome?: string;
-  decisions?: string[];
-  surprises?: string[];
-  commits: { startSha?: string; endSha?: string; autoCommit?: string };
-  filesTouched?: string[];
-  state: { start: PhaseStateSnapshot; end?: PhaseStateSnapshot };
-  delta?: PhaseJournalDelta;
+export const phaseJournalEntrySchema = z.object({
+  version: z.literal(1),
+  phase: z.string(),
+  workflowRef: z.string().optional(),
+  startedAt: z.string(),
+  endedAt: z.string().optional(),
+  intent: z.string(),
+  outcome: z.string().optional(),
+  decisions: z.array(z.string()).optional(),
+  surprises: z.array(z.string()).optional(),
+  commits: z.object({ startSha: z.string().optional(), endSha: z.string().optional(), autoCommit: z.string().optional() }),
+  filesTouched: z.array(z.string()).optional(),
+  state: z.object({ start: phaseStateSnapshotSchema, end: phaseStateSnapshotSchema.optional() }),
+  delta: phaseJournalDeltaSchema.optional(),
   /** Set when the phase was closed via `phase-end --revert` — the gate was
    *  not satisfied and the workflow returns to `to` (typically plan) for
    *  requirement rewrite. The gate stays red. */
-  reverted?: { reason: string; to: string };
-}
+  reverted: z.object({ reason: z.string(), to: z.string() }).optional(),
+});
+export type PhaseJournalEntry = z.infer<typeof phaseJournalEntrySchema>;
+
+/** The subset of a workflow spec this module reads for node statuses. */
+const workflowNodeStatusSchema = z.object({
+  phases: z.array(z.object({
+    name: z.string().optional(),
+    nodes: z.array(z.object({ id: z.string().optional(), status: z.string().optional() })).optional(),
+  })).optional(),
+});
 
 const JOURNAL_DIR = 'journal';
 
@@ -139,7 +155,9 @@ export function snapshotPhaseState(projectName: string, workspaceName: string, n
       try {
         const raw = readFileSync(join(scopeDir, spec), 'utf8');
         workflowHash = hashRubric((workflowHash ?? '') + raw);
-        const parsed = JSON.parse(raw) as { phases?: Array<{ name?: string; nodes?: Array<{ id?: string; status?: string }> }> };
+        const specParse = parseWith(workflowNodeStatusSchema, JSON.parse(raw));
+        if (!specParse.ok) continue; // malformed spec — no node statuses to record
+        const parsed = specParse.data;
         const nodes: Record<string, string> = {};
         for (const phase of parsed.phases ?? []) {
           for (const node of phase.nodes ?? []) {
@@ -201,8 +219,14 @@ function journalEntries(scopeDir: string): string[] {
   return readdirSync(dir).filter((f) => f.endsWith('.json')).sort();
 }
 
+/**
+ * Parse rather than cast: an entry missing `endedAt`/`state` would otherwise be
+ * treated as the open phase and then fail on every field the caller reads.
+ * Callers already skip unreadable entries, so a throw here degrades correctly.
+ */
 function readEntry(scopeDir: string, file: string): PhaseJournalEntry {
-  return JSON.parse(readFileSync(join(scopeDir, JOURNAL_DIR, file), 'utf8')) as PhaseJournalEntry;
+  const path = join(scopeDir, JOURNAL_DIR, file);
+  return parseJsonOrThrow(phaseJournalEntrySchema, readFileSync(path, 'utf8'), `phase journal entry ${file}`);
 }
 
 export function findOpenPhaseEntry(workspaceDir: string): { file: string; entry: PhaseJournalEntry } | null {

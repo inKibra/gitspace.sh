@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import type { Message, ToolResultMessage } from '@oh-my-pi/pi-ai';
 
 import { validateBlock, type Block } from '../../index.js';
-import { subagentData, toolCallData } from '../../types/transcript.js';
+import { subagentData, toolCallData, imageData } from '../../types/transcript.js';
 import { liveMessageToBlocks, messagesToBlocks } from '../message-blocks.js';
 
 // Minimal well-typed fixtures (only the fields the mapper reads).
@@ -48,6 +48,16 @@ function nestedTaskResultBlocks(blocks: readonly Block[]): Block[] {
   const data = toolCallData.parse(task.data);
   if (data.tool !== 'task') throw new Error(`Expected task tool, received ${data.tool}`);
   return data.result ?? [];
+}
+
+function toolData(blocks: readonly Block[], tool: string) {
+  const block = blocks.find((candidate) => candidate.type === 'tool-call' && toolCallData.parse(candidate.data).tool === tool);
+  if (!block) throw new Error(`Expected ${tool} tool-call block`);
+  return toolCallData.parse(block.data);
+}
+
+function richToolResult(toolCallId: string, toolName: string, content: unknown[], details: unknown): ToolResultMessage {
+  return { role: 'toolResult', toolCallId, toolName, content, details, isError: false, timestamp: 0 } as ToolResultMessage;
 }
 
 describe('messagesToBlocks', () => {
@@ -214,6 +224,60 @@ describe('messagesToBlocks', () => {
     expect(target('learn', { memory: 'prefer clean cutover' })).toBe('prefer clean cutover');
     expect(target('manage_skill', { action: 'create', name: 'deploy' })).toBe('deploy');
     expect(target('write', { path: 'a.ts', content: 'x' })).toBe('a.ts'); // path wins over content
+  });
+
+  it('retains every retain item and recall query argument while keeping concise targets', () => {
+    const retainArgs = {
+      items: [
+        { content: 'Preserve the original parser boundary.', context: 'Transcript projection' },
+        { content: 'Keep image content available to callers.', context: 'Tool result rendering' },
+      ],
+    };
+    const recallArgs = {
+      query: 'Search transcript records for the migration note about preserving tool-call arguments and image blocks',
+      limit: 12,
+      context: 'agent session history',
+    };
+    const blocks = messagesToBlocks([assistant([
+      { type: 'toolCall', id: 'retain-args', name: 'retain', arguments: retainArgs },
+      { type: 'toolCall', id: 'recall-args', name: 'recall', arguments: recallArgs },
+    ])]);
+
+    const retain = toolData(blocks, 'retain');
+    expect(retain.args).toEqual(retainArgs);
+    expect(retain.target).toBe('2 items');
+
+    const recall = toolData(blocks, 'recall');
+    expect(recall.args).toEqual(recallArgs);
+    expect(recall.target).toBe('Search transcript records for the migration note about preserving tool-call argu…');
+  });
+
+  it('preserves unknown tool args/details and projects assistant and tool-result images', () => {
+    const args = {
+      command: 'status',
+      payload: { files: ['src/blocks/agent/message-blocks.ts'], includeImages: true },
+      notes: 'first line\nsecond line',
+    };
+    const details = { requestId: 'req-42', metrics: { files: 1, images: 1 } };
+    const blocks = messagesToBlocks([
+      assistant([
+        { type: 'image', mimeType: 'image/jpeg', data: 'ASSISTANT_IMAGE' },
+        { type: 'toolCall', id: 'unknown-args', name: 'mystery_tool', arguments: args },
+      ]),
+      richToolResult('unknown-args', 'mystery_tool', [{ type: 'image', mimeType: 'image/png', data: 'TOOL_IMAGE' }], details),
+    ]);
+
+    const assistantImage = blocks.find((block) => block.type === 'image');
+    if (!assistantImage) throw new Error('Expected assistant image block');
+    expect(imageData.parse(assistantImage.data).src).toBe('data:image/jpeg;base64,ASSISTANT_IMAGE');
+
+    const mystery = toolData(blocks, 'mystery_tool');
+    expect(mystery.target).toBe('status');
+    expect(mystery.args).toEqual(args);
+    expect(mystery.details).toEqual(details);
+    const toolImage = mystery.result?.find((block) => block.type === 'image');
+    if (!toolImage) throw new Error('Expected tool-result image block');
+    expect(imageData.parse(toolImage.data).src).toBe('data:image/png;base64,TOOL_IMAGE');
   });
 
   it('surfaces an assistant error as an error block', () => {

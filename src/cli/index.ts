@@ -12,6 +12,7 @@
  *   gssh cloud setup|status|list|launch|stop|resume|destroy
  *   gssh relay start|machines
  *   gssh web
+ *   gssh gallery [blocks|transcript]
  *   gssh status
  *   gssh space [context|review|process|events|bundle]  (hidden)
  *
@@ -30,6 +31,7 @@ import { registerRelayCommands } from './commands/relay.js';
 import { registerStatusCommand } from './commands/status.js';
 import { registerInviteCommands } from './commands/invite.js';
 import { registerWebCommand } from './commands/web.js';
+import { registerGalleryCommand } from './commands/gallery.js';
 import { registerArtifactsCommands } from './commands/artifacts.js';
 /**
  * Create the CLI program with all commands registered.
@@ -57,6 +59,7 @@ export function createProgram(version: string): Command {
   registerArtifactsCommands(program);
   registerStatusCommand(program);
   registerWebCommand(program);
+  registerGalleryCommand(program);
 
   // Hidden session-only commands
   registerSpaceCommands(program);

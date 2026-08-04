@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { execFileSync } from 'child_process';
-import { mkdirSync, rmSync, writeFileSync } from 'fs';
+import { mkdirSync, rmSync, writeFileSync, readFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { dirname, join } from 'path';
+import { workflowSpecData } from '../../blocks/types/content.js';
 import { gateStatusForPhase, goalGateSummary, parseDocSlices } from '../goal-gates.js';
 import { loadWorkspaceWorkflow, validateWorkspaceWorkflow } from '../goal-workflow.js';
 import { startPhaseJournal, endPhaseJournal, findOpenPhaseEntry } from '../phase-journal.js';
@@ -40,6 +41,29 @@ describe('parseDocSlices', () => {
   it('returns [] for empty or heading-less docs', () => {
     expect(parseDocSlices('')).toEqual([]);
     expect(parseDocSlices('just prose\nno headings')).toEqual([]);
+  });
+});
+
+describe('workflow skill schema drift sentinel', () => {
+  it('validates every fenced JSON example in the workflow section', () => {
+    const skill = readFileSync(join(import.meta.dir, '../../lib/tmux-lite/agents/skills/space-artifacts/SKILL.md'), 'utf8');
+    const start = skill.indexOf('**Workflow spec**');
+    const section = start >= 0 ? skill.slice(start).split('\n## ')[0] : '';
+    const examples = [...section.matchAll(/```json\s*\n([\s\S]*?)```/g)];
+    expect(examples.length).toBeGreaterThan(0);
+    for (const [index, match] of examples.entries()) {
+      const raw = match[1]!;
+      let value: unknown;
+      try {
+        value = JSON.parse(raw);
+      } catch (error) {
+        throw new Error(`Workflow skill example ${index + 1} is not JSON: ${error instanceof Error ? error.message : String(error)}\n${raw}`);
+      }
+      const parsed = workflowSpecData.safeParse(value);
+      if (!parsed.success) {
+        throw new Error(`Workflow skill example ${index + 1} failed schema validation:\n${parsed.error.issues.map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`).join('\n')}\n${raw}`);
+      }
+    }
   });
 });
 
@@ -286,8 +310,8 @@ describe('loadWorkspaceWorkflow / validateWorkspaceWorkflow', () => {
     writeSpec('a.workflow.json', ({
       recipe: 'r',
       phases: [
-        { name: 'build', slices: ['rails', 'missing-slice'], created: [{ name: 'brief', type: 'goal-slice', sliceId: 'validation' }] },
-        { name: 'build' }, // duplicate name → warning
+        { name: 'build', slices: ['rails', 'missing-slice'], inputs: [], nodes: [], outputs: [], created: [{ name: 'brief', type: 'goal-slice', sliceId: 'validation' }] },
+        { name: 'build', inputs: [], nodes: [], outputs: [] }, // duplicate name → warning
       ],
     }));
     const result = validateWorkspaceWorkflow(workspaceDir, makeGoal(defaultValidation()));
@@ -298,12 +322,15 @@ describe('loadWorkspaceWorkflow / validateWorkspaceWorkflow', () => {
     expect(result.warnings.some((w) => w.includes('"rails"'))).toBe(false);
   });
 
-  it('throws on an unparseable spec', () => {
+  it('reports issues for an unparseable spec', () => {
     writeSpec('a.workflow.json', '{nope');
-    expect(() => validateWorkspaceWorkflow(workspaceDir, null)).toThrow(/Unreadable workflow spec/);
+    const result = validateWorkspaceWorkflow(workspaceDir, null);
+    // Unreadable bytes and a wrong-shaped field are both structural issues, but
+    // must stay distinguishable: this one is not JSON at all.
+    expect(result.issues.some((issue) => issue.includes('a.workflow.json'))).toBe(true);
+    expect(result.issues.some((issue) => issue.includes('unreadable JSON'))).toBe(true);
   });
 });
-
 describe('gate-blocked phase-end', () => {
   it('blocks phase-end while an owed requirement is unmet, unblocks after verdict accept', async () => {
     let v = defaultValidation();

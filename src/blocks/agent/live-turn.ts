@@ -13,7 +13,7 @@
  * user's own message) until a refresh.
  */
 import type { AgentEvent } from '@oh-my-pi/pi-agent-core';
-import type { AssistantMessage, Message, TextContent, ToolResultMessage } from '@oh-my-pi/pi-ai';
+import type { AssistantMessage, ImageContent, Message, TextContent, ToolResultMessage } from '@oh-my-pi/pi-ai';
 import type { Block } from '../index.js';
 import { messageToBlocks } from './message-blocks.js';
 
@@ -42,15 +42,12 @@ function safeJson(value: unknown): string {
 function toolResultFromEvent(event: Extract<AgentEvent, { type: 'tool_execution_end' }>): ToolResultMessage {
   const rawResult = event.result;
   const rawContent = isRecord(rawResult) ? rawResult.content : undefined;
-  let content: TextContent[];
+  let content: Array<TextContent | ImageContent>;
   if (Array.isArray(rawContent)) {
-    const text = rawContent
-      .filter((item): item is { type: 'text'; text: string } =>
-        isRecord(item) && item.type === 'text' && typeof item.text === 'string',
-      )
-      .map((item) => item.text)
-      .join('\n');
-    content = [{ type: 'text', text: text || safeJson(rawResult) }];
+    const parts = rawContent.filter((item): item is TextContent | ImageContent =>
+      isRecord(item) && (item.type === 'text' || item.type === 'image'),
+    );
+    content = parts.length > 0 ? parts : [{ type: 'text', text: safeJson(rawResult) }];
   } else {
     content = [{ type: 'text', text: typeof rawResult === 'string' ? rawResult : safeJson(rawResult) }];
   }

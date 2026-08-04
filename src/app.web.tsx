@@ -3528,10 +3528,10 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
                   if (!fn) return [];
                   return (await fn.call(paneBackend, workspace.id)).map((a) => a.path);
                 }}
-                read={(p) => {
+                read={(p, range) => {
                   const fn = paneBackend?.readWorkspaceArtifact;
                   if (!fn) return Promise.reject(new Error('unavailable'));
-                  return fn.call(paneBackend, workspace.id, p);
+                  return fn.call(paneBackend, workspace.id, p, range);
                 }}
                 onShare={() => void shareArtifactToClipboard(paneBackend, workspace.projectName, workspace.name, extra.path)}
               />

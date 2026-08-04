@@ -27,8 +27,22 @@ import {
 import { writeGoalRecord, writePlannedGoal } from '../goal-chain.js';
 import type { GoalValidation } from '../../types/goals.js';
 import type { GoalRecord } from '../../types/goals.js';
+import { requirementSchema } from '../../types/goals.js';
 
 const envKey = 'GITSPACE_WORKSPACE_ROOT';
+describe('space-goal skill schema drift sentinel', () => {
+  it('validates every fenced requirement JSON example', () => {
+    const skill = readFileSync(join(import.meta.dir, '../../lib/tmux-lite/agents/skills/space-goal/SKILL.md'), 'utf8');
+    const start = skill.indexOf('## Vocabulary');
+    const section = start >= 0 ? skill.slice(start).split('\n## ')[0] : '';
+    const examples = [...section.matchAll(/```json\s*\n([\s\S]*?)```/g)];
+    expect(examples.length).toBeGreaterThan(0);
+    for (const [index, match] of examples.entries()) {
+      const result = requirementSchema.safeParse(JSON.parse(match[1]!));
+      expect(result.success, `Requirement skill example ${index + 1} is invalid`).toBe(true);
+    }
+  });
+});
 
 function makeGoal(overrides: Partial<GoalRecord> & Pick<GoalRecord, 'id' | 'title' | 'phase'>): GoalRecord {
   const now = new Date(0).toISOString();

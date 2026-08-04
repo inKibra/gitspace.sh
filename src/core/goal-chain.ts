@@ -20,6 +20,8 @@ import { queueGoalChangeNotify } from './goal-notify.js';
 import { generateId } from '../utils/id.js';
 import { sanitizeForFileSystem } from '../utils/sanitize.js';
 import type { GoalChain, GoalChainState, GoalChainSummary, GoalChainSummaryGoal, GoalKanbanItem, GoalRecord, GoalUpdateInput, WorkspacePhaseCascadeItem, WorkspacePhaseChangePreview } from '../types/goals.js';
+import { goalRecordSchema } from '../types/goals.js';
+import { parseOrThrow } from './schema-parse.js';
 
 const PROJECT_GOAL_STORAGE_DIR = join('.gitspace', 'goals');
 const PROJECT_GOAL_GITIGNORE_ENTRY = '.gitspace/goals/';
@@ -57,11 +59,11 @@ function ensureParentDir(filePath: string): void {
   }
 }
 
-function readJsonFile<T>(filePath: string): T | null {
+function readJsonFile(filePath: string): unknown | null {
   if (!existsSync(filePath)) {
     return null;
   }
-  return JSON.parse(readFileSync(filePath, 'utf-8')) as T;
+  return JSON.parse(readFileSync(filePath, 'utf-8'));
 }
 
 function writeJsonFile(filePath: string, value: unknown): void {
@@ -108,7 +110,7 @@ export function ensureProjectGoalStorageIgnored(projectName: string): void {
 }
 
 export function readGoalChainState(projectName: string): GoalChainState {
-  return readJsonFile<GoalChainState>(getProjectGoalChainStatePath(projectName)) ?? {
+  return (readJsonFile(getProjectGoalChainStatePath(projectName)) as GoalChainState | null) ?? {
     version: 1,
     updatedAt: nowIso(),
     chains: [],
@@ -151,7 +153,7 @@ export function upsertGoalChain(projectName: string, chain: GoalChain): GoalChai
 }
 
 export function readPlannedGoal(projectName: string, goalId: string): GoalRecord | null {
-  const raw = readJsonFile<unknown>(getPlannedGoalPath(projectName, goalId));
+  const raw = readJsonFile(getPlannedGoalPath(projectName, goalId));
   return raw ? migrateGoalRecord(raw) : null;
 }
 
@@ -170,12 +172,13 @@ export function writePlannedGoal(projectName: string, goal: GoalRecord): GoalRec
     // (4f76cb5) — normalise at the source so no consumer can read a stale target.
     phase: 'plan',
   };
-  writeJsonFile(getPlannedGoalPath(projectName, goal.id), nextGoal);
-  return nextGoal;
+  const validatedGoal = parseOrThrow(goalRecordSchema, nextGoal, 'goal record');
+  writeJsonFile(getPlannedGoalPath(projectName, goal.id), validatedGoal);
+  return validatedGoal;
 }
 
 export function readArchivedGoal(projectName: string, goalId: string): GoalRecord | null {
-  const raw = readJsonFile<unknown>(getArchivedGoalPath(projectName, goalId));
+  const raw = readJsonFile(getArchivedGoalPath(projectName, goalId));
   return raw ? migrateGoalRecord(raw) : null;
 }
 
@@ -189,15 +192,10 @@ export function readArchivedGoal(projectName: string, goalId: string): GoalRecor
 export function writeArchivedGoal(projectName: string, goal: GoalRecord): GoalRecord {
   ensureProjectGoalStorageIgnored(projectName);
   const timestamp = nowIso();
-  const nextGoal: GoalRecord = {
-    ...goal,
-    version: 2,
-    projectName,
-    archivedAt: goal.archivedAt || timestamp,
-    updatedAt: timestamp,
-  };
-  writeJsonFile(getArchivedGoalPath(projectName, goal.id), nextGoal);
-  return nextGoal;
+  const nextGoal: GoalRecord = { ...goal, version: 2, projectName, archivedAt: goal.archivedAt || timestamp, updatedAt: timestamp };
+  const validatedGoal = parseOrThrow(goalRecordSchema, nextGoal, 'goal record');
+  writeJsonFile(getArchivedGoalPath(projectName, goal.id), validatedGoal);
+  return validatedGoal;
 }
 
 /**
@@ -266,7 +264,7 @@ export function archiveWorkspaceGoal(projectName: string, workspaceName: string)
 }
 
 export function readWorkspaceGoal(projectName: string, workspaceName: string): GoalRecord | null {
-  const raw = readJsonFile<unknown>(getWorkspaceGoalPath(projectName, workspaceName));
+  const raw = readJsonFile(getWorkspaceGoalPath(projectName, workspaceName));
   return raw ? migrateGoalRecord(raw) : null;
 }
 
@@ -274,16 +272,10 @@ export function writeWorkspaceGoal(projectName: string, workspaceName: string, g
   const timestamp = nowIso();
   const workspaceDir = join(getProjectWorkspacesDir(projectName), workspaceName);
   ensureWorkspaceStorageIgnored(workspaceDir);
-  const nextGoal: GoalRecord = {
-    ...goal,
-    version: 2,
-    projectName,
-    workspaceName,
-    plannedWorkspaceName: goal.plannedWorkspaceName ?? workspaceName,
-    updatedAt: timestamp,
-  };
-  writeJsonFile(getWorkspaceGoalPath(projectName, workspaceName), nextGoal);
-  return nextGoal;
+  const nextGoal: GoalRecord = { ...goal, version: 2, projectName, workspaceName, plannedWorkspaceName: goal.plannedWorkspaceName ?? workspaceName, updatedAt: timestamp };
+  const validatedGoal = parseOrThrow(goalRecordSchema, nextGoal, 'goal record');
+  writeJsonFile(getWorkspaceGoalPath(projectName, workspaceName), validatedGoal);
+  return validatedGoal;
 }
 
 function listJsonFiles(dir: string): string[] {
@@ -299,8 +291,12 @@ export function listPlannedGoals(projectName: string): GoalRecord[] {
   const dir = join(getProjectGoalStorageDir(projectName), PLANNED_GOAL_DIR);
   return listJsonFiles(dir)
     .map((filePath) => {
-      const raw = readJsonFile<unknown>(filePath);
-      return raw ? migrateGoalRecord(raw) : null;
+      try {
+        const raw = readJsonFile(filePath);
+        return raw ? migrateGoalRecord(raw) : null;
+      } catch {
+        return null;
+      }
     })
     .filter((goal): goal is GoalRecord => goal !== null);
 }
@@ -309,8 +305,12 @@ export function listArchivedGoals(projectName: string): GoalRecord[] {
   const dir = join(getProjectGoalStorageDir(projectName), ARCHIVED_GOAL_DIR);
   return listJsonFiles(dir)
     .map((filePath) => {
-      const raw = readJsonFile<unknown>(filePath);
-      return raw ? migrateGoalRecord(raw) : null;
+      try {
+        const raw = readJsonFile(filePath);
+        return raw ? migrateGoalRecord(raw) : null;
+      } catch {
+        return null;
+      }
     })
     .filter((goal): goal is GoalRecord => goal !== null);
 }
@@ -322,7 +322,13 @@ export function listWorkspaceGoals(projectName: string): GoalRecord[] {
   }
   return readdirSync(workspacesDir, { withFileTypes: true })
     .filter((entry) => entry.isDirectory())
-    .map((entry) => readWorkspaceGoal(projectName, entry.name))
+    .map((entry) => {
+      try {
+        return readWorkspaceGoal(projectName, entry.name);
+      } catch {
+        return null;
+      }
+    })
     .filter((goal): goal is GoalRecord => goal !== null);
 }
 
@@ -439,6 +445,8 @@ export function getGoalRecord(projectName: string, goalId: string): GoalRecord |
 }
 
 export function writeGoalRecord(projectName: string, goal: GoalRecord): GoalRecord {
+  const validatedGoal = parseOrThrow(goalRecordSchema, goal, 'goal record');
+  goal = validatedGoal;
   // CLI-write visibility (ticket #3): queue a fire-and-forget daemon notify
   // so watching clients get a scoped delta instead of waiting on a poll.
   queueGoalChangeNotify(projectName);

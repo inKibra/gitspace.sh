@@ -9,7 +9,7 @@ import {
   rmSync,
   statSync,
 } from 'fs';
-import { basename, dirname, extname, join } from 'path';
+import { basename, dirname, join } from 'path';
 import { spawnSync } from 'child_process';
 import { getProjectBaseDir, getProjectDir, getProjectWorkspacesDir } from './config.js';
 import { artifactsScope, captureArtifactsSync } from './artifacts.js';
@@ -19,6 +19,7 @@ import { ensureWorkspaceStorageIgnored, getWorkspaceStorageDir } from './workspa
 import { SpacesError } from '../types/errors.js';
 import { generateId } from '../utils/id.js';
 import { sanitizeForFileSystem } from '../utils/sanitize.js';
+import { extensionToMime } from './media-types.js';
 import type {
   ArtifactKind,
   CommandExpectation,
@@ -33,6 +34,9 @@ import type {
   ReviewTone,
   TimelineEvent,
 } from '../types/goals.js';
+import { validateBlock } from '../blocks/registry.js';
+import { goalRecordSchema } from '../types/goals.js';
+import { parseOrThrow } from './schema-parse.js';
 
 // ─── Paths (binary evidence storage only) ──────────────────────────────────
 
@@ -304,20 +308,13 @@ export function appendPhaseMarkerEvent(
 }
 
 function inferMimeType(sourcePath: string, kind: ArtifactKind): string | undefined {
-  const ext = extname(sourcePath).toLowerCase();
-  if (ext === '.png') return 'image/png';
-  if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg';
-  if (ext === '.gif') return 'image/gif';
-  if (ext === '.webp') return 'image/webp';
-  if (ext === '.svg') return 'image/svg+xml';
-  if (ext === '.webm') return 'video/webm';
-  if (ext === '.mp4') return 'video/mp4';
-  if (ext === '.mov') return 'video/quicktime';
-  if (ext === '.txt') return 'text/plain';
-  if (ext === '.json') return 'application/json';
-  if (ext === '.md') return 'text/markdown';
+  const mime = extensionToMime(sourcePath);
+  if (mime) return mime;
+  // No recognizable extension: fall back to the requirement's declared kind so
+  // downstream surfaces still route the artifact to the right player.
   if (kind === 'screenshot') return 'image/*';
   if (kind === 'video') return 'video/*';
+  if (kind === 'audio') return 'audio/*';
   return undefined;
 }
 
@@ -1173,10 +1170,6 @@ interface LegacyValidation {
   judgmentPlan?: LegacyJudgmentPlan;
   commands?: string[];
 }
-type LegacyGoalRecord = Omit<GoalRecord, 'version' | 'validation'> & {
-  version?: number;
-  validation?: LegacyValidation | GoalValidation;
-};
 
 const LEGACY_KIND_MAP: Record<string, ArtifactKind> = {
   image: 'screenshot',
@@ -1224,18 +1217,14 @@ function backfillReviewJudgeTypes(validation: GoalValidation): GoalValidation {
   }
   return changed ? { ...validation, requirements } : validation;
 }
-
 export function migrateGoalRecord(raw: unknown): GoalRecord {
-  const candidate = raw as LegacyGoalRecord;
-  if (candidate && (candidate.version === 2) && isNewValidationShape(candidate.validation)) {
-    const record = candidate as unknown as GoalRecord;
-    // Compact on load so an already-bloated goal (accumulated before prune-on-
-    // write existed) is bounded the moment it is read, and persisted small on
-    // its next save — without needing a separate migration pass.
-    const validation = compactGoalValidation(backfillReviewJudgeTypes(record.validation));
-    return validation === record.validation ? record : { ...record, validation };
+  const candidate = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {};
+  if (candidate.version === 2 && isNewValidationShape(candidate.validation)) {
+    const validation = compactGoalValidation(backfillReviewJudgeTypes(candidate.validation));
+    const record = validation === candidate.validation ? candidate : { ...candidate, validation };
+    return parseMigratedGoalRecord(record);
   }
-  const legacy = (candidate.validation ?? {}) as LegacyValidation;
+  const legacy = (candidate.validation && typeof candidate.validation === 'object' ? candidate.validation : {}) as LegacyValidation;
   const reqOrder: string[] = [];
   const requirements: Record<string, Requirement> = {};
   for (const lr of legacy.artifactRequirements ?? []) {
@@ -1244,28 +1233,31 @@ export function migrateGoalRecord(raw: unknown): GoalRecord {
     const id = lr.id || nextRequirementId(title);
     reqOrder.push(id);
     requirements[id] = {
-      id,
-      title,
-      kind,
-      required: lr.required !== false,
-      rubric: (lr.description ?? '').trim() || title,
-      status: 'missing',
-      generation: { kind: 'manual' },
-      judgment: { kind: 'human' },
-      evidence: [],
-      reviews: [],
+      id, title, kind, required: lr.required !== false, rubric: (lr.description ?? '').trim() || title,
+      status: 'missing', generation: { kind: 'manual' }, judgment: { kind: 'human' }, evidence: [], reviews: [],
     };
   }
-  const migrated: GoalRecord = {
-    ...(candidate as unknown as GoalRecord),
+  return parseMigratedGoalRecord({
+    ...candidate,
     version: 2,
-    validation: {
-      reqOrder,
-      requirements,
-      events: [],
-    },
-  };
-  return migrated;
+    validation: { reqOrder, requirements, events: [] },
+  });
+}
+
+function parseMigratedGoalRecord(value: unknown): GoalRecord {
+  const record = parseOrThrow(goalRecordSchema, value, 'goal record');
+  // Doc blocks are reported, NOT fatal. They are presentational content with a
+  // loud render-time fallback in BlockView; throwing here would make the list
+  // readers skip the whole goal, so one malformed block would silently remove a
+  // goal from the board — strictly worse than the invalid-block card it
+  // replaces. Report early, keep the record, let the renderer show the detail.
+  for (const [index, block] of (record.doc.blocks ?? []).entries()) {
+    const result = validateBlock(block);
+    if (!result.ok) {
+      console.warn(`[goal-validation] goal ${record.id} doc.blocks.${index} is invalid: ${result.issues.join('; ')}`);
+    }
+  }
+  return record;
 }
 
 // ─── Move binary evidence dir on workspace bind ────────────────────────────

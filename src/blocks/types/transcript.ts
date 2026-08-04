@@ -44,6 +44,10 @@ export const toolCallData = z.object({
    *  nested blocks shown above the result when the call is expanded. */
   input: z.array(blockEnvelope).optional(),
   result: z.array(blockEnvelope).optional(),
+  /** Complete structured tool input, retained for inspection and replay. */
+  args: z.unknown().optional(),
+  /** Complete structured result details, when provided by the tool. */
+  details: z.unknown().optional(),
 });
 export type ToolCallData = z.infer<typeof toolCallData>;
 defineBlock({

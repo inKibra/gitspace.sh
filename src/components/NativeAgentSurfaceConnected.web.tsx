@@ -9,9 +9,10 @@ import type { HostUIDialogResponse } from '../lib/tmux-lite/agents/host-ui-bridg
 export type PromptSubmitMode = 'send' | 'steer' | 'followUp';
 
 /** Prompt lifecycle notification for the hosting pane (optimistic echo + retry). */
+export type PromptImage = { data: string; mimeType: string };
 export type PromptLifecycleEvent =
-  | { phase: 'submitted'; text: string; mode: PromptSubmitMode }
-  | { phase: 'failed'; text: string; mode: PromptSubmitMode; error: string };
+  | { phase: 'submitted'; text: string; mode: PromptSubmitMode; images?: PromptImage[] }
+  | { phase: 'failed'; text: string; mode: PromptSubmitMode; error: string; images?: PromptImage[] };
 
 interface NativeAgentSurfaceConnectedProps {
   backendKey?: string | null;
@@ -72,8 +73,9 @@ export function NativeAgentSurfaceConnected({ backendKey, workspaceId, agentSess
     if (!resolvedBackendKey || !resolvedAgentSessionId || !resolvedWorkspaceId || isSubmitting) return false;
     setIsSubmitting(true);
     // What we actually attempted to send — used for lifecycle events (optimistic
-    // echo + retry) and visible to the catch below (augmentation happens in-try).
+    // echo + visible to the catch below (augmentation happens in-try).
     let attemptedText = text;
+    let attemptedImages: PromptImage[] | undefined;
     try {
       const images = rawImages
         .filter(img => img.dataUrl)
@@ -84,6 +86,7 @@ export function NativeAgentSurfaceConnected({ backendKey, workspaceId, agentSess
           const data = img.dataUrl.slice(commaIdx + 1);
           return { data, mimeType };
         });
+      attemptedImages = images.length > 0 ? images : undefined;
 
       let augmentedText = text;
       const stagedFileNames: string[] = [];
@@ -140,7 +143,7 @@ export function NativeAgentSurfaceConnected({ backendKey, workspaceId, agentSess
       } else if (isSpaceCommand) {
         toast.info('Running workspace command...');
         try {
-          onPromptLifecycle?.({ phase: 'submitted', text: trimmed, mode });
+          onPromptLifecycle?.({ phase: 'submitted', text: trimmed, mode, images: undefined });
           await engine.promptAgentSession(
             { backendKey: resolvedBackendKey, workspaceId: resolvedWorkspaceId, agentSessionId: resolvedAgentSessionId },
             trimmed,
@@ -151,13 +154,13 @@ export function NativeAgentSurfaceConnected({ backendKey, workspaceId, agentSess
         } catch (error) {
           const message = error instanceof Error ? error.message : 'Failed to run workspace command';
           recordRpcFailure('prompt_agent_session', error, { workspaceId: resolvedWorkspaceId, agentSessionId: resolvedAgentSessionId });
-          onPromptLifecycle?.({ phase: 'failed', text: trimmed, mode, error: message });
+          onPromptLifecycle?.({ phase: 'failed', text: trimmed, mode, error: message, images: undefined });
           toast.error(message);
           return false;
         }
       }
 
-      onPromptLifecycle?.({ phase: 'submitted', text: augmentedText, mode });
+      onPromptLifecycle?.({ phase: 'submitted', text: augmentedText, mode, images: images.length > 0 ? images : undefined });
       await engine.promptAgentSession(
         { backendKey: resolvedBackendKey, workspaceId: resolvedWorkspaceId, agentSessionId: resolvedAgentSessionId },
         augmentedText,
@@ -171,7 +174,7 @@ export function NativeAgentSurfaceConnected({ backendKey, workspaceId, agentSess
       console.error('Failed to submit agent prompt', error);
       const message = error instanceof Error ? error.message : 'Failed to send command';
       recordRpcFailure('prompt_agent_session', error, { workspaceId: resolvedWorkspaceId, agentSessionId: resolvedAgentSessionId });
-      onPromptLifecycle?.({ phase: 'failed', text: attemptedText, mode, error: message });
+      onPromptLifecycle?.({ phase: 'failed', text: attemptedText, mode, error: message, images: attemptedImages });
       toast.error(message);
       // Preserve the composer text: submitAndClear keeps the draft when the
       // submitter returns false (a failed send must never eat the message).

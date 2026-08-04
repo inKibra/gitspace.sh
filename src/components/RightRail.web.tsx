@@ -11,6 +11,9 @@ import { deriveNoteLabel } from './note-label.js';
 import { ReviewDiffView, requestFileContext, useReviewThreads, fileViewPatch } from './review-diff-view.web.js';
 import { documentKindFor, HtmlDocFrame, PdfDocFrame } from './document-preview.web.js';
 import { filterRepoTreeEntries } from './repo-tree-search.js';
+import { mediaKindFor } from '../core/media-types.js';
+import { parseWith } from '../core/schema-parse.js';
+import { reportSchema } from '../core/artifact-envelopes.js';
 
 /**
  * RightRail — the workspace view's persistent right column (mock: RightRail.tsx).
@@ -787,9 +790,11 @@ export function RepoFilePanel({ backend, workspaceId, projectName, workspaceName
 function rowMeta(path: string): string {
   const ext = path.includes('.') ? path.slice(path.lastIndexOf('.') + 1).toLowerCase() : '';
   if (ext === 'md') return 'doc';
-  if (['png', 'jpg', 'jpeg', 'gif', 'webp'].includes(ext)) return 'img';
-  if (['webm', 'mp4', 'mov'].includes(ext)) return 'video';
   if (ext === 'json') return 'json';
+  const kind = mediaKindFor(path);
+  if (kind === 'image') return 'img';
+  if (kind === 'video') return 'video';
+  if (kind === 'audio') return 'audio';
   return ext || '';
 }
 
@@ -879,8 +884,10 @@ function ArtifactsMode({ backend, workspaceId, projectName, workspaceName, onOpe
         const parsed = await Promise.all(reportPaths.map(async (e) => {
           try {
             const raw = await backend!.readWorkspaceArtifact!(workspaceId, e.path);
-            const doc = JSON.parse(decodeBase64Utf8(raw.base64)) as { kind?: string; surface?: string; note?: string; rating?: number };
-            return { path: e.path, kind: doc.kind ?? 'praise', surface: doc.surface ?? e.path, note: doc.note ?? '', rating: doc.rating } as ReportRow;
+            const result = parseWith(reportSchema, JSON.parse(decodeBase64Utf8(raw.base64)));
+            if (!result.ok) return null;
+            const doc = result.data;
+            return { path: e.path, kind: doc.kind, surface: doc.surface, note: doc.note, rating: doc.rating } as ReportRow;
           } catch { return null; }
         }));
         if (alive) setReports(parsed.filter((r): r is ReportRow => r !== null));

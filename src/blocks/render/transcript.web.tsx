@@ -4,6 +4,7 @@ import type { ErrorData, ImageData, MessageData, SubagentData, ThinkingData, Too
 import { defineRenderer, BlockView } from './registry.web.js';
 import { useBlockHost } from './host.web.js';
 import { Markdown } from './markdown.web.js';
+import { rendererForTool } from './tool-renderers.web.js';
 import { segmentMagicKeywords } from '../agent/magic-keywords.js';
 
 /** Render text with magic keywords (workflowz / orchestrate / ultrathink) painted
@@ -84,31 +85,21 @@ defineRenderer<ThinkingData>('thinking', ({ data }): ReactElement => {
   );
 });
 
-// ── tool-call (composes nested blocks in its result) ────────────────────────
+// ── tool-call (per-tool presentation with a generic fallback) ───────────────
 const TOOL_STATUS_CHIP: Record<ToolCallData['status'], string> = {
   running: 'bg-[var(--gs-chip-amber-bg)] text-[var(--gs-chip-amber-text)]',
   done: 'bg-[var(--gs-chip-green-bg)] text-[var(--gs-chip-green-text)]',
   error: 'bg-[var(--gs-chip-red-bg)] text-[var(--gs-chip-red-text)]',
 };
-// Input/output sections render their blocks directly (no visible section
-// headers) — the border-t alone separates them from the header row.
-function ToolSection({ blocks }: { blocks: readonly Block[] }): ReactElement {
-  return (
-    <div className="border-t border-[var(--gs-border)] p-2">
-      {blocks.map((block) => <BlockView key={block.id} block={block} />)}
-    </div>
-  );
-}
 
 defineRenderer<ToolCallData>('tool-call', ({ data }): ReactElement => {
-  const input = data.input ?? [];
-  const result = data.result ?? [];
-  const hasOutput = result.length > 0;
-  // Input stays visible so the whole eval code / task assignment is readable.
-  // Only the OUTPUT collapses by default; the active (running) call keeps its
-  // output open so streaming stays visible. The caret toggles output.
+  const hasOutput = data.details !== undefined || (data.result?.length ?? 0) > 0;
+  // Completed output is collapsed to keep dense transcripts scannable; running
+  // output opens for streaming. Expanded payload panes scroll at max-h-72.
   const [outputOpen, setOutputOpen] = useState<boolean | null>(null);
   const showOutput = hasOutput && (outputOpen ?? data.status === 'running');
+  const renderBlocks = (blocks: readonly Block[]) => blocks.map((block) => <BlockView key={block.id} block={block} />);
+  const ToolRenderer = rendererForTool(data.tool);
   return (
     <div className="my-2 border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)]">
       <button
@@ -128,8 +119,8 @@ defineRenderer<ToolCallData>('tool-call', ({ data }): ReactElement => {
           <span className={`${CHIP_BASE} ${TOOL_STATUS_CHIP[data.status]}`}>{data.status}</span>
         </span>
       </button>
-      {input.length > 0 && <ToolSection blocks={input} />}
-      {showOutput && <ToolSection blocks={result} />}
+      <ToolRenderer data={data} renderBlocks={renderBlocks} showInput />
+      {showOutput && <ToolRenderer data={data} renderBlocks={renderBlocks} />}
     </div>
   );
 });

@@ -27,6 +27,23 @@ Use this skill when asked to author, fulfill, or judge a goal's validation contr
 - **Status**: `missing | review | accepted`.
 - **Readiness**: aggregate of required requirement statuses. Reads like `Ready: all required artifacts passed judgment.`
 - **Slice**: a heading-anchored section of the goal doc. Ids are slugified headings, parsed at read time — `space goal doc slices` lists them. `--slice` grounds a requirement in the doc section it proves; dangling ids warn (amber), never fail.
+
+Canonical requirement record shape (used by persistence):
+
+```json
+{
+  "id": "req-checkout",
+  "title": "Checkout screenshot",
+  "kind": "screenshot",
+  "required": true,
+  "rubric": "Cart totals visible",
+  "status": "missing",
+  "generation": { "kind": "manual" },
+  "judgment": { "kind": "human" },
+  "evidence": [],
+  "reviews": []
+}
+```
 - **Phase** (`wfPhase`): the workflow phase that OWES a requirement. Set with `--phase` at authoring (defaults to the open journal phase). The phase's gate blocks `journal phase-end` until every owed required requirement is `accepted`. Unknown phase names warn — the workflow's phase list is canonical.
 
 ## Target another goal in the chain (`--goal`)

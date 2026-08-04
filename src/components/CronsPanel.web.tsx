@@ -12,73 +12,24 @@ import { CRON_WHEN_HELP, describeNextRun, parseCronWhen, validateTriggerWhen } f
  * and the run lifecycle.
  */
 
-/* ── Trigger model (mirrors the mock's trigger card data) ──────────────────── */
+/* ── Canonical trigger model ──────────────────────────────────────────────── */
+import type { TriggerDraft, TriggerRecord } from '../core/triggers.js';
+export type Trigger = TriggerRecord;
+export type TriggerKind = TriggerRecord['kind'];
+export type TriggerStatus = TriggerRecord['status'];
+export type TriggerHistoryEntry = TriggerRecord['history'][number];
 
-export type TriggerKind = 'cron' | 'event' | 'manual';
-export type TriggerStatus = 'ok' | 'pending' | 'failed' | 'idle';
-export type TriggerHistoryEntry = 'ok' | 'fail' | 'pending';
-
-export interface TriggerRun {
-  type: 'skill' | 'workflow' | 'command';
-  ref?: string;
-  /** Per-trigger instruction shown in the inline editor */
-  prompt?: string;
-}
-
-export interface SideEffectGrant {
-  grant: string;
-  needsApproval: boolean;
-}
-
-export interface TriggerSkill {
-  name: string;
-  summary: string;
-  body: string;
-}
-
-export interface Trigger {
-  name: string;
-  kind: TriggerKind;
-  /** Schedule text — cron grammar is 'every N m/h/d' ONLY (see CRON_WHEN_HELP);
-   *  event/manual triggers carry a free-form condition label. */
-  when: string;
-  status: TriggerStatus;
-  /** Last run, e.g. '2h ago' */
-  last: string;
-  /** Next run, e.g. 'in 4h' */
-  next?: string;
-  /** Run cost, e.g. '1.2k tok · $0.03' */
-  cost?: string;
-  /** Artifacts this trigger is ALLOWED to mutate (capability scope) */
-  writes: string[];
-  /** Recent run outcomes, newest last (5-dot spark) */
-  history: TriggerHistoryEntry[];
-  note?: string;
-  /** Richer card data (mock parity) — all optional */
-  id?: string;
-  scope?: 'workspace' | 'project';
-  /** One-line intent */
-  does?: string;
-  /** The work: command / skill / workflow (+ prompt) */
-  runs?: TriggerRun;
-  /** Inputs it consumes */
-  reads?: string[];
-  /** External grants beyond data (PR / email / deploy) */
-  sideEffects?: SideEffectGrant[];
-  /** Dashboards/panels that consume its output */
-  feeds?: string[];
-  /** Expanded skill definition for the editor accordion */
-  skill?: TriggerSkill;
-  /** ISO timestamps of recent runs, newest last (registry runLog). */
-  runLog?: Array<{ at: string; status: 'ok' | 'fail' | 'pending'; note?: string; sessionId?: string }>;
+export interface TriggerIssue {
+  path: string;
+  issues: string[];
 }
 
 export interface CronsPanelProps {
   triggers?: Trigger[];
-  /** Persist a new/edited trigger (registry write — validates the schedule). */
-  onSave?: (trigger: Trigger) => Promise<void> | void;
-  /** Execute a trigger now (spawns an agent run; lifecycle recorded server-side). */
+  triggerIssues?: TriggerIssue[];
+  onSave?: (trigger: TriggerDraft) => Promise<void> | void;
   onRunNow?: (trigger: Trigger) => Promise<void> | void;
+  target?: string;
 }
 
 /* ── Tones ─────────────────────────────────────────────────────────────────── */
@@ -161,17 +112,14 @@ function statusChip(t: Trigger): { tone: ChipTone; label: string } {
   return { tone: STATUS_TONE[t.status], label: t.status };
 }
 
-function TriggerCard({ t, onRunNow, onSave }: { t: Trigger; onRunNow?: (t: Trigger) => Promise<void> | void; onSave?: (t: Trigger) => Promise<void> | void }): ReactElement {
+function TriggerCard({ t, onRunNow, onSave }: { t: Trigger; onRunNow?: (t: Trigger) => Promise<void> | void; onSave?: (t: TriggerDraft) => Promise<void> | void }): ReactElement {
   const [open, setOpen] = useState(false);
-  const [showSkill, setShowSkill] = useState(false);
   // Inline editor state (seeded from the record each time the editor opens).
   const [editWhen, setEditWhen] = useState(t.when);
   const [editPrompt, setEditPrompt] = useState(t.runs?.prompt ?? '');
   const [editWrites, setEditWrites] = useState(t.writes.join(', '));
   const [savingEdit, setSavingEdit] = useState(false);
   const editWhenError = validateTriggerWhen(t.kind, editWhen);
-  const sideEffects = t.sideEffects ?? [];
-  const hasSideFx = sideEffects.length > 0;
   const lastRun = t.runLog?.[t.runLog.length - 1];
   const status = statusChip(t);
   const nextRun = t.kind === 'cron' && t.status !== 'pending' ? describeNextRun(t.when, lastRun?.at ?? null) : null;
@@ -184,9 +132,7 @@ function TriggerCard({ t, onRunNow, onSave }: { t: Trigger; onRunNow?: (t: Trigg
 
   return (
     <div
-      className={`border border-[var(--gs-border)] bg-[var(--gs-bg-surface)] ${
-        hasSideFx ? 'border-l-2 border-l-[var(--gs-warning)]' : ''
-      }`}
+      className="border border-[var(--gs-border)] bg-[var(--gs-bg-surface)]"
     >
       {/* header row */}
       <div className="flex items-center gap-2 border-b border-[var(--gs-border-muted)] px-3 py-[9px]">
@@ -229,16 +175,6 @@ function TriggerCard({ t, onRunNow, onSave }: { t: Trigger; onRunNow?: (t: Trigg
       {/* capability strip */}
       <div className="flex flex-wrap items-center gap-[9px] border-t border-[var(--gs-border-muted)] bg-[#060606] px-3 py-2">
         <span className="text-[10px] uppercase tracking-[0.07em] text-[var(--gs-text-dim)]">capability</span>
-        {hasSideFx ? (
-          sideEffects.map((se) => (
-            <Chip key={se.grant} tone="amber">
-              can {se.grant}
-              {se.needsApproval ? ' · approval' : ''}
-            </Chip>
-          ))
-        ) : (
-          <Chip tone="green">data-only · no side-effects</Chip>
-        )}
         {t.feeds && t.feeds.length > 0 ? (
           <span className="text-[10.5px] text-[var(--gs-text-dim)]">feeds ▸ {t.feeds.join(', ')}</span>
         ) : null}
@@ -258,28 +194,6 @@ function TriggerCard({ t, onRunNow, onSave }: { t: Trigger; onRunNow?: (t: Trigg
             <EditorKicker>
               runs · {t.runs.type}: {t.runs.ref}
             </EditorKicker>
-          ) : null}
-          {t.skill ? (
-            <div className="mb-1 border border-[var(--gs-border-muted)]">
-              <button
-                type="button"
-                onClick={() => setShowSkill((s) => !s)}
-                className="flex w-full cursor-pointer items-center gap-[7px] border-none bg-[#070707] px-2.5 py-[7px] text-left text-[11.5px] text-[var(--gs-text-muted)] hover:text-[var(--gs-text)]"
-              >
-                <span
-                  className={`text-[10.5px] text-[var(--gs-text-dim)] transition-transform duration-[120ms] ${showSkill ? 'rotate-90' : ''}`}
-                >
-                  ▶
-                </span>
-                skill <span className="font-mono">{t.skill.name}</span>{' '}
-                <span className="text-[var(--gs-text-dim)]">— {t.skill.summary}</span>
-              </button>
-              {showSkill ? (
-                <div className="max-h-[300px] overflow-auto whitespace-pre-wrap border-t border-[var(--gs-border-muted)] bg-black px-[13px] py-[11px] text-[12px] leading-[1.6] text-[var(--gs-text-muted)]">
-                  {t.skill.body}
-                </div>
-              ) : null}
-            </div>
           ) : null}
           <EditorKicker>
             prompt <span className="normal-case tracking-normal text-[var(--gs-text-dim)]">— per-trigger instruction</span>
@@ -311,20 +225,6 @@ function TriggerCard({ t, onRunNow, onSave }: { t: Trigger; onRunNow?: (t: Trigg
               onChange={(e) => setEditWrites(e.target.value)}
               placeholder="data/**, reports/*.report.json"
             />
-          </div>
-          <div className="mb-[5px] flex flex-wrap items-center gap-[7px]">
-            <span className="w-[78px] flex-none text-[10px] uppercase tracking-[0.07em] text-[var(--gs-text-dim)]">
-              side-effects
-            </span>
-            {hasSideFx ? (
-              sideEffects.map((se) => (
-                <span key={se.grant} className="inline-flex items-center gap-[5px] border border-[var(--gs-border)] px-2 py-[3px] text-[11px] text-[var(--gs-text)]">
-                  {se.grant}{se.needsApproval ? ' · approval' : ''}
-                </span>
-              ))
-            ) : (
-              <span className="text-[11px] text-[var(--gs-text-dim)]">none — writes data artifacts only</span>
-            )}
           </div>
           {onSave ? (
             <div className="mt-2 flex justify-end gap-2">
@@ -359,7 +259,7 @@ function TriggerCard({ t, onRunNow, onSave }: { t: Trigger; onRunNow?: (t: Trigg
 
 /* ── Pane ──────────────────────────────────────────────────────────────────── */
 
-function NewTriggerForm({ onSave, onClose }: { onSave: (t: Trigger) => Promise<void> | void; onClose: () => void }): ReactElement {
+function NewTriggerForm({ onSave, onClose, target }: { onSave: (t: TriggerDraft) => Promise<void> | void; onClose: () => void; target?: string }): ReactElement {
   const [name, setName] = useState('');
   const [kind, setKind] = useState<TriggerKind>('cron');
   const [when, setWhen] = useState('every 6h');
@@ -403,7 +303,7 @@ function NewTriggerForm({ onSave, onClose }: { onSave: (t: Trigger) => Promise<v
           <span className="text-[10px] text-[var(--gs-text-ghost)]">artifact paths this trigger's runs are allowed to modify · comma-separated globs</span>
         </div>
         <input className={field} placeholder="data/**, reports/*.report.json" value={writes} onChange={(e) => setWrites(e.target.value)} />
-        <div className="mt-1 text-[10px] text-[var(--gs-text-ghost)]">Runs are prompted with this scope today; daemon-side enforcement lands with the artifact protocol.</div>
+        <div className="mt-1 text-[10px] text-[var(--gs-text-ghost)]">Runs are prompted with this scope and enforced by the machine daemon.</div>
       </div>
       <div className="mt-2 flex justify-end gap-2">
         <XsButton onClick={onClose}>Cancel</XsButton>
@@ -419,7 +319,7 @@ function NewTriggerForm({ onSave, onClose }: { onSave: (t: Trigger) => Promise<v
                 writes: writes.split(',').map((x) => x.trim()).filter(Boolean), history: [],
                 does: does.trim() || undefined,
                 runs: { type: 'skill', ref: 'agent-prompt', prompt: prompt.trim() },
-                scope: 'workspace',
+                scope: target?.endsWith(':@base') ? 'project' : 'workspace',
               });
               onClose();
             } finally { setSaving(false); }
@@ -433,41 +333,16 @@ function NewTriggerForm({ onSave, onClose }: { onSave: (t: Trigger) => Promise<v
   );
 }
 
-export function CronsPanel({ triggers = [], onSave, onRunNow }: CronsPanelProps): ReactElement {
+export function CronsPanel({ triggers = [], triggerIssues = [], onSave, onRunNow, target }: CronsPanelProps): ReactElement {
   const [creating, setCreating] = useState(false);
   const armed = triggers.filter((t) => t.kind === 'cron' && parseCronWhen(t.when) !== null).length;
   return (
     <div className="gs-ui flex h-full min-h-0 flex-col bg-[var(--gs-bg)]">
-      {/* bar */}
-      <div className="flex flex-none items-center gap-[11px] border-b border-[var(--gs-border)] bg-[#050505] px-4 py-[11px]">
-        <span className="text-[10px] uppercase tracking-[0.12em] text-[var(--gs-text-dim)]">Crons &amp; triggers</span>
-        <Chip tone={armed > 0 ? 'green' : 'dim'}>{armed > 0 ? `● ${armed} armed · fires from this machine` : 'no cron triggers armed'}</Chip>
-        <span className="ml-auto" />
-        <button
-          type="button"
-          disabled={!onSave}
-          onClick={onSave ? () => setCreating((v) => !v) : undefined}
-          title={onSave ? undefined : "Can't save triggers over this connection — connect to your machine"}
-          className="inline-flex min-h-[28px] cursor-pointer items-center justify-center gap-[5px] border border-[var(--gs-border)] bg-transparent px-2 py-[3px] text-[11px] text-[var(--gs-text-muted)] transition-colors hover:bg-[var(--gs-bg-active)] hover:text-[var(--gs-text)] disabled:cursor-default disabled:opacity-40"
-        >
-          ＋ New trigger</button>
-      </div>
-
-      {/* list */}
+      <div className="flex flex-none items-center gap-[11px] border-b border-[var(--gs-border)] bg-[#050505] px-4 py-[11px]"><span className="text-[10px] uppercase tracking-[0.12em] text-[var(--gs-text-dim)]">Crons &amp; triggers</span><Chip tone={armed > 0 ? 'green' : 'dim'}>{armed > 0 ? `● ${armed} armed · fires from this machine` : 'no cron triggers armed'}</Chip><span className="ml-auto" /><button type="button" disabled={!onSave} onClick={onSave ? () => setCreating((v) => !v) : undefined} className="border border-[var(--gs-border)] px-2 py-1 text-[11px] disabled:opacity-40">＋ New trigger</button></div>
       <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-auto px-4 py-3.5">
-        {creating && onSave && <NewTriggerForm onSave={onSave} onClose={() => setCreating(false)} />}
-        {triggers.length === 0 ? (
-          <div className="flex flex-col gap-1.5">
-            <div className="text-[12.5px] text-[var(--gs-text-muted)]">No triggers yet.</div>
-            <div className="max-w-[520px] text-[11.5px] leading-[1.55] text-[var(--gs-text-dim)]">
-              Triggers are cron, event or manual runs that write data artifacts. Cron triggers fire from this
-              machine&apos;s daemon (checked every minute); runs surface here and as ▸ last-run chips on the data
-              artifacts they refresh.
-            </div>
-          </div>
-        ) : (
-          triggers.map((t, i) => <TriggerCard key={t.id ?? `${t.name}-${i}`} t={t} onRunNow={onRunNow} onSave={onSave} />)
-        )}
+        {creating && onSave && <NewTriggerForm onSave={onSave} onClose={() => setCreating(false)} target={target} />}
+        {triggerIssues.map((issue) => <div key={issue.path} className="border border-[var(--gs-danger)] bg-[var(--gs-bg-surface)] px-3 py-2 text-[11px] text-[var(--gs-danger)]"><div className="font-mono">Invalid trigger: {issue.path}</div>{issue.issues.map((message) => <div key={message}>• {message}</div>)}</div>)}
+        {triggers.length === 0 && triggerIssues.length === 0 ? <div className="text-[12.5px] text-[var(--gs-text-muted)]">No triggers yet.</div> : triggers.map((t, i) => <TriggerCard key={`${t.id}-${i}`} t={t} onRunNow={onRunNow} onSave={onSave} />)}
       </div>
     </div>
   );

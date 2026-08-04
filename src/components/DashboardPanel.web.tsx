@@ -1,6 +1,8 @@
 import { decodeBase64Utf8, encodeBase64Utf8 } from './artifact-kinds.js';
 /** @jsxImportSource react */
 import { useCallback, useEffect, useRef, useState, type ReactElement, type ReactNode } from 'react';
+import { parseJsonWith } from '../core/schema-parse.js';
+import { dashboardSchema, type DashboardDoc, type DashboardPanelDef } from '../core/artifact-envelopes.js';
 import type { ArtifactRead } from './ArtifactPanel.web.js';
 
 /**
@@ -13,32 +15,10 @@ import type { ArtifactRead } from './ArtifactPanel.web.js';
  * (commit-on-write on the workspace's artifacts branch).
  */
 
-export interface DashboardPanelDef {
-  id: string;
-  /** Artifact path of the .gssh.html mini-app. */
-  app: string;
-  title: string;
-  /** Artifact path of the data JSON handed to the app. */
-  data?: string;
-  size?: 'half' | 'full';
-  /** Which level the panel reads from (chip in the frame bar). */
-  scope?: 'workspace' | 'chain';
-  /** Freshness: where the data comes from + when it last updated. */
-  source?: string;
-  updated?: string;
-  stale?: boolean;
-}
-
-export interface DashboardDoc {
-  name?: string;
-  panels: DashboardPanelDef[];
-}
 
 
-
-function parseDashboard(text: string): DashboardDoc {
-  const parsed = JSON.parse(text) as DashboardDoc;
-  return { name: parsed.name, panels: Array.isArray(parsed.panels) ? parsed.panels : [] };
+export function parseDashboard(text: string): { ok: true; data: DashboardDoc } | { ok: false; issues: string[] } {
+  return parseJsonWith(dashboardSchema, text);
 }
 
 function titleFromAppPath(path: string): string {
@@ -138,6 +118,7 @@ export function DashboardPanel({ dashboardPath, scopeLabel, read, write, listApp
   const [apps, setApps] = useState<Record<string, string | null>>({});
   const [datas, setDatas] = useState<Record<string, unknown>>({});
   const [state, setState] = useState<'loading' | 'ready' | 'error'>('loading');
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const [palette, setPalette] = useState<string[] | null>(null);
 
@@ -153,16 +134,18 @@ export function DashboardPanel({ dashboardPath, scopeLabel, read, write, listApp
   useEffect(() => {
     const read = readRef.current;
     let alive = true;
+    setErrorMessage(null);
     setState('loading');
     void (async () => {
       try {
         const raw = await read(dashboardPath);
         const parsed = parseDashboard(decodeBase64Utf8(raw.base64));
+        if (!parsed.ok) throw new Error(`Invalid dashboard: ${parsed.issues.join('; ')}`);
         if (!alive) return;
-        setDoc(parsed);
+        setDoc(parsed.data);
         const appHtml: Record<string, string | null> = {};
         const dataVals: Record<string, unknown> = {};
-        await Promise.all(parsed.panels.map(async (p) => {
+        await Promise.all(parsed.data.panels.map(async (p: DashboardPanelDef) => {
           try { appHtml[p.app] = decodeBase64Utf8((await read(p.app)).base64); } catch { appHtml[p.app] = null; }
           if (p.data) {
             try { dataVals[p.data] = JSON.parse(decodeBase64Utf8((await read(p.data)).base64)); } catch { dataVals[p.data] = null; }
@@ -172,8 +155,11 @@ export function DashboardPanel({ dashboardPath, scopeLabel, read, write, listApp
         setApps(appHtml);
         setDatas(dataVals);
         setState('ready');
-      } catch {
-        if (alive) setState('error');
+      } catch (error) {
+        if (alive) {
+          setErrorMessage(error instanceof Error ? error.message : String(error));
+          setState('error');
+        }
       }
     })();
     return () => { alive = false; };
@@ -281,7 +267,7 @@ export function DashboardPanel({ dashboardPath, scopeLabel, read, write, listApp
         {state === 'loading' ? (
           <div className="px-1 py-2 text-[var(--gs-text-dim)]">Loading dashboard…</div>
         ) : state === 'error' || !doc ? (
-          <div className="px-1 py-2 text-[var(--gs-text-dim)]">Failed to load {dashboardPath}</div>
+          <div className="px-1 py-2 text-[var(--gs-danger)]">{errorMessage ?? `Failed to load ${dashboardPath}`}</div>
         ) : (
           <div className="grid grid-cols-1 content-start gap-3 sm:grid-cols-2">
             {doc.panels.length === 0 && (

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import type { AgentEvent } from '@oh-my-pi/pi-agent-core';
 
 import { validateBlock, type Block } from '../../index.js';
-import { subagentData, toolCallData } from '../../types/transcript.js';
+import { subagentData, toolCallData, imageData } from '../../types/transcript.js';
 import { LiveTurn } from '../live-turn.js';
 
 function evt(e: unknown): AgentEvent {
@@ -15,6 +15,12 @@ function nestedTaskResultBlocks(blocks: readonly Block[]): Block[] {
   const data = toolCallData.parse(task.data);
   if (data.tool !== 'task') throw new Error(`Expected task tool, received ${data.tool}`);
   return data.result ?? [];
+}
+
+function toolData(blocks: readonly Block[], tool: string) {
+  const block = blocks.find((candidate) => candidate.type === 'tool-call' && toolCallData.parse(candidate.data).tool === tool);
+  if (!block) throw new Error(`Expected ${tool} tool-call block`);
+  return toolCallData.parse(block.data);
 }
 
 describe('LiveTurn accumulator', () => {
@@ -136,4 +142,64 @@ describe('LiveTurn accumulator', () => {
     const turn = new LiveTurn();
     expect(turn.apply(evt({ type: 'turn_start' }))).toBeNull();
   });
+  it('preserves live tool args/details and projects assistant and tool-result images', () => {
+    const retainArgs = {
+      items: [
+        { content: 'Retain this complete item.', context: 'Live transcript' },
+        { content: 'Retain the second complete item.', context: 'Live tool call' },
+      ],
+    };
+    const recallArgs = {
+      query: 'Search transcript records for the migration note about preserving tool-call arguments and image blocks',
+      scope: 'session',
+    };
+    const unknownArgs = { command: 'status', options: { includeImages: true }, note: 'live call' };
+    const details = { requestId: 'live-req-7', usage: { images: 1 } };
+    const turn = new LiveTurn();
+    const initial = turn.apply(evt({
+      type: 'message_update',
+      message: {
+        role: 'assistant',
+        content: [
+          { type: 'image', mimeType: 'image/webp', data: 'LIVE_ASSISTANT_IMAGE' },
+          { type: 'toolCall', id: 'live-retain', name: 'retain', arguments: retainArgs },
+          { type: 'toolCall', id: 'live-recall', name: 'recall', arguments: recallArgs },
+          { type: 'toolCall', id: 'live-unknown', name: 'mystery_tool', arguments: unknownArgs },
+        ],
+      },
+      assistantMessageEvent: {},
+    }));
+    if (!initial) throw new Error('Expected initial live update');
+    const initialImage = initial.blocks.find((block) => block.type === 'image');
+    if (!initialImage) throw new Error('Expected live assistant image block');
+    expect(imageData.parse(initialImage.data).src).toBe('data:image/webp;base64,LIVE_ASSISTANT_IMAGE');
+
+    const completed = turn.apply(evt({
+      type: 'tool_execution_end',
+      toolCallId: 'live-unknown',
+      toolName: 'mystery_tool',
+      result: {
+        content: [{ type: 'image', mimeType: 'image/png', data: 'LIVE_TOOL_IMAGE' }],
+        details,
+      },
+      isError: false,
+    }));
+    if (!completed) throw new Error('Expected completed live update');
+
+    const retain = toolData(completed.blocks, 'retain');
+    expect(retain.args).toEqual(retainArgs);
+    expect(retain.target).toBe('2 items');
+    const recall = toolData(completed.blocks, 'recall');
+    expect(recall.args).toEqual(recallArgs);
+    expect(recall.target).toBe('Search transcript records for the migration note about preserving tool-call argu…');
+
+    const mystery = toolData(completed.blocks, 'mystery_tool');
+    expect(mystery.args).toEqual(unknownArgs);
+    expect(mystery.target).toBe('status');
+    expect(mystery.details).toEqual(details);
+    const toolImage = mystery.result?.find((block) => block.type === 'image');
+    if (!toolImage) throw new Error('Expected live tool-result image block');
+    expect(imageData.parse(toolImage.data).src).toBe('data:image/png;base64,LIVE_TOOL_IMAGE');
+  });
+
 });

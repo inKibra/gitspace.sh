@@ -114,12 +114,14 @@ export function useWorkspaceDetailModel(input: WorkspaceDetailModelInput): Works
   );
 
   const activeAgentSessions = useMemo(
-    () => (runtime?.agentSessions ?? agentSessions).filter((session) => !session.archivedAt && !session.closedAt),
+    () => (runtime?.agentSessions ?? agentSessions).filter((session) => !session.archivedAt && !session.closedAt && !session.dormantSince),
     [runtime, agentSessions],
   );
 
   const closedAgentSessions = useMemo(
-    () => (runtime?.agentSessions ?? agentSessions).filter((session) => !!session.closedAt && !session.archivedAt),
+    // Dormant (no worker, not dismissed) shares the closed bucket for now, as it
+    // did when closedAt meant both. The distinction is on the record.
+    () => (runtime?.agentSessions ?? agentSessions).filter((session) => (!!session.closedAt || !!session.dormantSince) && !session.archivedAt),
     [runtime, agentSessions],
   );
 

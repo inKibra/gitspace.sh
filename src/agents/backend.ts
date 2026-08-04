@@ -76,6 +76,16 @@ export type AgentEvent =
       queued: { steering: readonly string[]; followUp: readonly string[] };
     }
   | {
+      /** Live descendant count from the worker's AgentRegistry. A session whose
+       *  children are still working is NOT idle even though its own turn ended,
+       *  and the daemon cannot see the registry — it is process-global inside the
+       *  worker — so the worker has to report it. Pushed on registry change, not
+       *  polled. */
+      type: 'subagents';
+      sessionId: string;
+      count: number;
+    }
+  | {
       type: 'error';
       sessionId: string;
       error: string;

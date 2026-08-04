@@ -13,7 +13,7 @@ import './mini-app.web.js';
 import './goal-blocks.web.js';
 import './workflow.web.js';
 
-export { BlockView, BlockList, defineRenderer, hasRenderer } from './registry.web.js';
+export { BlockView, BlockList, defineRenderer, hasRenderer, listRendererTypes } from './registry.web.js';
 export { Markdown, BLOCK_MD_OPTIONS } from './markdown.web.js';
 export { BlockHostProvider, useBlockHost } from './host.web.js';
 export type { BlockHost, BlockAction } from './host.web.js';

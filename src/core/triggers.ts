@@ -11,31 +11,42 @@
 import { execFileSync } from 'child_process';
 import { existsSync, readFileSync, readdirSync } from 'fs';
 import { join } from 'path';
+import { z } from 'zod';
 import { artifactsScope, captureArtifacts } from './artifacts.js';
 import { pathInScope } from './artifact-cap.js';
 import { validateTriggerWhen } from './trigger-grammar.js';
+import { parseJsonWith, parseOrThrow } from './schema-parse.js';
 import { SpacesError } from '../types/errors.js';
 
-export interface TriggerRecord {
-  id: string;
-  name: string;
-  kind: 'cron' | 'event' | 'manual';
-  when: string;
-  status: 'ok' | 'pending' | 'failed' | 'idle';
-  last: string;
-  next?: string;
-  cost?: string;
-  writes: string[];
-  history: Array<'ok' | 'fail' | 'pending'>;
-  note?: string;
-  scope?: 'workspace' | 'project';
-  does?: string;
-  runs?: { type: 'command' | 'skill' | 'workflow'; ref?: string; prompt?: string };
-  reads?: string[];
-  feeds?: string[];
-  /** ISO timestamps of recent runs, newest last (source for `last`). */
-  runLog?: Array<{ at: string; status: 'ok' | 'fail' | 'pending'; note?: string; sessionId?: string; startCommit?: string }>;
-}
+const triggerRunSchema = z.object({
+  at: z.string(),
+  status: z.enum(['ok', 'fail', 'pending']),
+  note: z.string().optional(),
+  sessionId: z.string().optional(),
+  startCommit: z.string().nullable().optional(),
+});
+
+export const triggerSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  kind: z.enum(['cron', 'event', 'manual']),
+  when: z.string(),
+  status: z.enum(['ok', 'pending', 'failed', 'idle']),
+  last: z.string(),
+  next: z.string().optional(),
+  cost: z.string().optional(),
+  writes: z.array(z.string()),
+  history: z.array(z.enum(['ok', 'fail', 'pending'])),
+  note: z.string().optional(),
+  scope: z.enum(['workspace', 'project']).optional(),
+  does: z.string().optional(),
+  runs: z.object({ type: z.enum(['command', 'skill', 'workflow']), ref: z.string().optional(), prompt: z.string().optional() }).optional(),
+  reads: z.array(z.string()).optional(),
+  feeds: z.array(z.string()).optional(),
+  runLog: z.array(triggerRunSchema).optional(),
+});
+
+export type TriggerRecord = z.infer<typeof triggerSchema>;
 
 const TRIGGER_DIR = 'triggers';
 
@@ -68,44 +79,51 @@ export function triggerSlug(name: string): string {
   return slug;
 }
 
-export function listTriggers(workspaceDir: string): TriggerRecord[] {
+/**
+ * Lift a trigger's `writes` globs from goal-relative to mount-relative.
+ */
+export function listTriggers(workspaceDir: string, onIssue?: (file: string, issues: string[]) => void): TriggerRecord[] {
   const dir = artifactsScope(workspaceDir).abs(TRIGGER_DIR);
   if (!existsSync(dir)) return [];
   const out: TriggerRecord[] = [];
   for (const f of readdirSync(dir).filter((x) => x.endsWith('.trigger.json')).sort()) {
-    try {
-      out.push(JSON.parse(readFileSync(join(dir, f), 'utf8')) as TriggerRecord);
-    } catch { /* skip unreadable */ }
+    const result = parseJsonWith(triggerSchema, readFileSync(join(dir, f), 'utf8'));
+    if (result.ok) out.push(result.data);
+    else onIssue?.(f, result.issues);
   }
   return out;
 }
 
+/**
+ * A trigger as an author supplies it. `id` is slugged from the name and the
+ * run-state fields are seeded by the registry, so a new trigger legitimately
+ * has none of them yet — the UI form and the save RPC both speak this shape.
+ */
+export type TriggerDraft =
+  Omit<TriggerRecord, 'id' | 'status' | 'last' | 'history'>
+  & Partial<Pick<TriggerRecord, 'id' | 'status' | 'last' | 'history'>>;
+
 export async function saveTrigger(
   projectDir: string,
   workspaceDir: string,
-  trigger: Omit<TriggerRecord, 'id' | 'status' | 'last' | 'history'> & Partial<Pick<TriggerRecord, 'id' | 'status' | 'last' | 'history'>>,
+  trigger: TriggerDraft,
 ): Promise<TriggerRecord> {
   const mount = mountDirFor(workspaceDir);
   if (!existsSync(join(mount, '.git'))) {
     throw new SpacesError('Triggers require the artifacts mount (.gitspace/artifacts).', 'USER_ERROR', 1);
   }
-  // An unfireable schedule must be impossible to save (it would sit "armed"
-  // forever with zero feedback).
   const whenError = validateTriggerWhen(trigger.kind, trigger.when);
   if (whenError) throw new SpacesError(`Trigger schedule invalid: ${whenError}`, 'USER_ERROR', 1);
   const id = trigger.id ?? triggerSlug(trigger.name);
-  const record: TriggerRecord = {
-    status: 'idle',
-    last: 'never',
-    history: [],
-    ...trigger,
-    id,
-  };
+  const record = parseOrThrow(triggerSchema, {
+    status: 'idle', last: 'never', history: [], ...trigger, id,
+  }, 'trigger');
   await captureArtifacts(projectDir, mount, [
     { path: `${triggerDirRel(workspaceDir)}/${id}.trigger.json`, content: JSON.stringify(record, null, 2) + '\n' },
   ], { message: `trigger: save ${record.name}`, provenance: { tool: 'triggers' } });
   return record;
 }
+
 
 export async function recordTriggerRun(
   projectDir: string,
@@ -115,20 +133,11 @@ export async function recordTriggerRun(
   now: Date = new Date(),
 ): Promise<TriggerRecord> {
   const mount = mountDirFor(workspaceDir);
-  const path = artifactsScope(workspaceDir).abs(`${TRIGGER_DIR}/${triggerId}.trigger.json`);
-  if (!existsSync(path)) throw new SpacesError(`Unknown trigger: ${triggerId}`, 'USER_ERROR', 1);
-  const record = JSON.parse(readFileSync(path, 'utf8')) as TriggerRecord;
+  const record = listTriggers(workspaceDir).find((candidate) => candidate.id === triggerId);
+  if (!record) throw new SpacesError(`Unreadable trigger: ${triggerId}`, 'USER_ERROR', 1);
   const entry = { at: now.toISOString(), ...run };
-  const next: TriggerRecord = {
-    ...record,
-    status: run.status === 'ok' ? 'ok' : run.status === 'fail' ? 'failed' : 'pending',
-    last: 'just now',
-    history: [...record.history, run.status].slice(-5),
-    runLog: [...(record.runLog ?? []), entry].slice(-20),
-  };
-  await captureArtifacts(projectDir, mount, [
-    { path: `${triggerDirRel(workspaceDir)}/${triggerId}.trigger.json`, content: JSON.stringify(next, null, 2) + '\n' },
-  ], { message: `trigger: run ${record.name} (${run.status})`, provenance: { tool: 'triggers' } });
+  const next: TriggerRecord = { ...record, status: run.status === 'ok' ? 'ok' : run.status === 'fail' ? 'failed' : 'pending', last: 'just now', history: [...record.history, run.status].slice(-5), runLog: [...(record.runLog ?? []), entry].slice(-20) };
+  await captureArtifacts(projectDir, mount, [{ path: `${triggerDirRel(workspaceDir)}/${triggerId}.trigger.json`, content: JSON.stringify(next, null, 2) + '\n' }], { message: `trigger: run ${record.name} (${run.status})`, provenance: { tool: 'triggers' } });
   return next;
 }
 
@@ -250,7 +259,9 @@ export async function completeTriggerRun(
   const pendingEntry = [...(trigger.runLog ?? [])].reverse().find((r) => r.status === 'pending');
   const enforcement = await enforceTriggerWritesPostRun(projectDir, workspaceDir, trigger, {
     sessionId: opts.sessionId,
-    startCommit: pendingEntry?.startCommit,
+    // mountHead() returns null when the mount has no HEAD, and that null is
+    // persisted; enforcement treats "no baseline" as absent, not as a commit.
+    startCommit: pendingEntry?.startCommit ?? undefined,
   });
   if (enforcement.violations.length > 0) {
     await recordTriggerRun(projectDir, workspaceDir, triggerId, {

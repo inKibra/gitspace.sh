@@ -1,5 +1,7 @@
 /** @jsxImportSource react */
 import { useMemo, type ReactElement } from 'react';
+import { parseWith } from '../core/schema-parse.js';
+import { reportSchema, type ReportItem, type ReportKind } from '../core/artifact-envelopes.js';
 import { renderMarkdownHtml } from './markdown-render.js';
 
 /**
@@ -9,28 +11,8 @@ import { renderMarkdownHtml } from './markdown-render.js';
  * header, optional quote block, note as markdown, typed attachment rows.
  */
 
-export type ReportKind = 'praise' | 'good-pattern' | 'frustration' | 'workflow-quirk' | 'gitspace-quirk';
+// Report envelope types and validation live in core/artifact-envelopes.ts.
 
-export interface ReportAttachment {
-  type: string;
-  ref: string;
-  label?: string;
-  /** Frozen copy captured when the report was favorited (beside the report in
-   *  `<report>.attachments/`). The live ref may drift; the snapshot cannot. */
-  snapshotRef?: string;
-}
-
-export interface ReportItem {
-  kind: ReportKind;
-  surface: string;
-  note: string;
-  quote?: string;
-  attachments?: ReportAttachment[];
-}
-
-const REPORT_KINDS: ReadonlySet<string> = new Set<string>([
-  'praise', 'good-pattern', 'frustration', 'workflow-quirk', 'gitspace-quirk',
-]);
 
 /** mock .rep-kind tones: praise blue, good-pattern green, frustration red, workflow-quirk amber, gitspace-quirk violet. */
 const KIND_CHIP: Record<ReportKind, string> = {
@@ -53,31 +35,8 @@ const ATT_ICON: Record<string, string> = {
 
 /** Validate the raw artifact JSON into a ReportItem, or return null when malformed. */
 export function parseReportItem(raw: unknown): ReportItem | null {
-  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null;
-  const r = raw as Record<string, unknown>;
-  if (typeof r.kind !== 'string' || !REPORT_KINDS.has(r.kind)) return null;
-  if (typeof r.surface !== 'string' || typeof r.note !== 'string') return null;
-  if (r.quote !== undefined && typeof r.quote !== 'string') return null;
-  let attachments: ReportAttachment[] | undefined;
-  if (r.attachments !== undefined) {
-    if (!Array.isArray(r.attachments)) return null;
-    attachments = [];
-    for (const a of r.attachments) {
-      if (typeof a !== 'object' || a === null) return null;
-      const at = a as Record<string, unknown>;
-      if (typeof at.type !== 'string' || typeof at.ref !== 'string') return null;
-      if (at.label !== undefined && typeof at.label !== 'string') return null;
-      if (at.snapshotRef !== undefined && typeof at.snapshotRef !== 'string') return null;
-      attachments.push({ type: at.type, ref: at.ref, label: at.label, snapshotRef: at.snapshotRef });
-    }
-  }
-  return {
-    kind: r.kind as ReportKind,
-    surface: r.surface,
-    note: r.note,
-    quote: r.quote,
-    attachments,
-  };
+  const parsed = parseWith(reportSchema, raw);
+  return parsed.ok ? parsed.data : null;
 }
 
 function SectionLabel({ children, className }: { children: string; className?: string }): ReactElement {

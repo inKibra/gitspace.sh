@@ -3,7 +3,9 @@ import { execFileSync } from 'child_process';
 import { dirname, join, resolve } from 'path';
 import { getProjectWorkspacesDir, readProjectConfig, writeProjectConfig } from './config.js';
 import type { WorkspacePhase } from '../types/config.js';
-import type { WorkspaceNote, WorkspaceNotePriority, WorkspaceNotesSummary } from '../types/workspace.js';
+import type { WorkspaceNotesSummary } from '../types/workspace.js';
+import { workspaceNotesFileSchema, type WorkspaceNote, type WorkspaceNotePriority } from '../types/workspace.js';
+import { parseJsonWith, parseOrThrow } from './schema-parse.js';
 import { generateId } from '../utils/id.js';
 
 const WORKSPACE_STORAGE_DIR = join('.gitspace', 'workspace');
@@ -197,10 +199,19 @@ export function setWorkspaceStatus(projectName: string, workspaceName: string, s
   clearLegacyWorkspaceStatus(projectName, workspaceName);
 }
 
+/**
+ * Notes are hand-editable and agent-authored, so a malformed `notes.json` must
+ * not take down every surface that lists notes. Parse, warn with the path and
+ * the field-level issues, and degrade to an empty list.
+ */
 export function listWorkspaceNotes(projectName: string, workspaceName: string): WorkspaceNote[] {
   const wsPath = workspacePath(projectName, workspaceName);
   const filePath = getWorkspaceNotesPath(wsPath, workspaceName);
-  return readJsonFile<WorkspaceNote[]>(filePath) ?? [];
+  if (!existsSync(filePath)) return [];
+  const parsed = parseJsonWith(workspaceNotesFileSchema, readFileSync(filePath, 'utf-8'));
+  if (parsed.ok) return parsed.data;
+  console.warn(`[workspace-metadata] ignoring malformed ${filePath}: ${parsed.issues.join('; ')}`);
+  return [];
 }
 
 function writeWorkspaceNotes(projectName: string, workspaceName: string, notes: WorkspaceNote[]): void {
@@ -208,7 +219,10 @@ function writeWorkspaceNotes(projectName: string, workspaceName: string, notes: 
   ensureWorkspaceStorageIgnored(wsPath);
   const filePath = getWorkspaceNotesPath(wsPath, workspaceName);
   ensureParentDir(filePath);
-  writeFileSync(filePath, JSON.stringify(notes, null, 2), 'utf-8');
+  // Validate before persisting: a note that cannot be read back is worse than
+  // a rejected write, and the author gets the failing field either way.
+  const validated = parseOrThrow(workspaceNotesFileSchema, notes, `workspace notes (${filePath})`);
+  writeFileSync(filePath, JSON.stringify(validated, null, 2), 'utf-8');
 }
 
 export function addWorkspaceNote(

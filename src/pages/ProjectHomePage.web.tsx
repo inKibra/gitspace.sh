@@ -567,12 +567,12 @@ export function ProjectHomePage({
       .catch((e) => setArtifactsError(e instanceof Error ? e.message : 'Failed to load artifacts'));
   }, [backend, projectName, artifactSource, sourceOptions]);
   useEffect(() => { loadArtifacts(); }, [loadArtifacts]);
-  const readArtifactFromSource = useCallback((path: string) => {
+  const readArtifactFromSource = useCallback((path: string, range?: { offset: number; length: number }) => {
     const src = sourceOptions.find((o) => o.value === artifactSource) ?? sourceOptions[0];
     if (src.workspaceId === null) {
-      return backend?.readProjectArtifact ? backend.readProjectArtifact(projectName, path) : Promise.reject(new Error('unavailable'));
+      return backend?.readProjectArtifact ? backend.readProjectArtifact(projectName, path, range) : Promise.reject(new Error('unavailable'));
     }
-    return backend?.readWorkspaceArtifact ? backend.readWorkspaceArtifact(src.workspaceId, path) : Promise.reject(new Error('unavailable'));
+    return backend?.readWorkspaceArtifact ? backend.readWorkspaceArtifact(src.workspaceId, path, range) : Promise.reject(new Error('unavailable'));
   }, [backend, projectName, artifactSource, sourceOptions]);
   // Favorites (shared key with the workspace rail).
   const favKey = `gssh:artifact-favs:${projectName}`;

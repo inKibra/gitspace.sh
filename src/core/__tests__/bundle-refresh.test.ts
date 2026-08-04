@@ -6,6 +6,9 @@ import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
+// Real file-backed secrets store. `bundle-refresh` is imported dynamically inside
+// each test, so this module always evaluates first and wins the backend selection.
+import { resetSecretsStore, secrets } from '../../test/secrets-store.js';
 
 describe('bundle-refresh', () => {
   let testDir: string;
@@ -13,7 +16,6 @@ describe('bundle-refresh', () => {
   let mockProjectConfig: any;
   let mockOnboardingResult: any;
   let capturedOnboardingSteps: any[];
-  let savedSecrets: Record<string, string>;
   let commandAvailability: Record<string, boolean>;
 
   beforeEach(() => {
@@ -38,7 +40,7 @@ describe('bundle-refresh', () => {
     };
 
     capturedOnboardingSteps = [];
-    savedSecrets = {};
+    resetSecretsStore();
     commandAvailability = { bun: true };
 
     mock.module('../config', () => ({
@@ -51,31 +53,6 @@ describe('bundle-refresh', () => {
       getProjectDir: () => testDir,
       readGlobalConfig: () => ({ currentProject: null }),
       updateGlobalConfig: () => {},
-    }));
-
-    mock.module('../../utils/secrets', () => ({
-      setProjectSecret: async (_projectName: string, key: string, value: string) => {
-        savedSecrets[key] = value;
-      },
-      deleteProjectSecret: async (_projectName: string, key: string) => {
-        if (!(key in savedSecrets)) {
-          return false;
-        }
-        delete savedSecrets[key];
-        return true;
-      },
-      getProjectSecret: async (_projectName: string, key: string) => {
-        return savedSecrets[key] ?? null;
-      },
-      getProjectSecrets: async (_projectName: string, keys: string[]) => {
-        const result: Record<string, string> = {};
-        for (const key of keys) {
-          if (savedSecrets[key] !== undefined) {
-            result[key] = savedSecrets[key];
-          }
-        }
-        return result;
-      },
     }));
 
     mock.module('../../utils/deps', () => ({
@@ -291,7 +268,7 @@ describe('bundle-refresh', () => {
       expect(result.completed).toBe(true);
       expect(mockProjectConfig.bundleValues).toEqual({ REGION: 'us-east-1' });
       expect(mockProjectConfig.bundleSecretKeys).toContain('PULUMI_ACCESS_TOKEN');
-      expect(savedSecrets.PULUMI_ACCESS_TOKEN).toBe('pulumi-token-value');
+      expect(await secrets.getProjectSecret('test-project', 'PULUMI_ACCESS_TOKEN')).toBe('pulumi-token-value');
       expect(mockProjectConfig.bundleWorkspaceState.__base__.requiredSecretKeys).toEqual([
         'PULUMI_ACCESS_TOKEN',
       ]);
@@ -418,7 +395,7 @@ describe('bundle-refresh', () => {
 
       expect(ready).toBe(true);
       expect(capturedOnboardingSteps.map((step) => step.id)).toEqual(['pulumi-token']);
-      expect(savedSecrets.PULUMI_ACCESS_TOKEN).toBe('new-pulumi-token');
+      expect(await secrets.getProjectSecret('test-project', 'PULUMI_ACCESS_TOKEN')).toBe('new-pulumi-token');
       expect(mockProjectConfig.bundleSecretKeys).toContain('PULUMI_ACCESS_TOKEN');
     });
 
@@ -448,7 +425,7 @@ describe('bundle-refresh', () => {
       const firstDetect = detectBundleChanges('test-project', workspacePath);
       expect(firstDetect.currentHash).toBeDefined();
 
-      savedSecrets.PULUMI_ACCESS_TOKEN = 'existing-pulumi-token';
+      await secrets.setProjectSecret('test-project', 'PULUMI_ACCESS_TOKEN', 'existing-pulumi-token');
       mockProjectConfig.bundleSecretKeys = ['PULUMI_ACCESS_TOKEN'];
       mockProjectConfig.bundleWorkspaceState = {
         'unchanged-ready-secret': {
@@ -465,7 +442,7 @@ describe('bundle-refresh', () => {
 
       expect(ready).toBe(true);
       expect(capturedOnboardingSteps).toEqual([]);
-      expect(savedSecrets.PULUMI_ACCESS_TOKEN).toBe('existing-pulumi-token');
+      expect(await secrets.getProjectSecret('test-project', 'PULUMI_ACCESS_TOKEN')).toBe('existing-pulumi-token');
     });
 
   });
@@ -580,7 +557,7 @@ describe('bundle-refresh', () => {
 
       expect(mockProjectConfig.bundleValues).toEqual({ REGION: 'us-east-2' });
       expect(mockProjectConfig.bundleSecretKeys).toContain('API_TOKEN');
-      expect(savedSecrets.API_TOKEN).toBe('super-secret');
+      expect(await secrets.getProjectSecret('test-project', 'API_TOKEN')).toBe('super-secret');
       expect(mockProjectConfig.bundleWorkspaceState['feature-apply']).toBeDefined();
       expect(mockProjectConfig.bundleConfirmHistory).toBeDefined();
       expect(Object.keys(mockProjectConfig.bundleConfirmHistory || {}).length).toBe(1);
@@ -607,7 +584,7 @@ describe('bundle-refresh', () => {
       const workspacePath = join(testDir, 'workspaces', 'feature-sentinel');
       mkdirSync(workspacePath, { recursive: true });
 
-      savedSecrets.API_TOKEN = 'existing-secret';
+      await secrets.setProjectSecret('test-project', 'API_TOKEN', 'existing-secret');
 
       const { applyBundleRefreshSubmission } = await import('../bundle-refresh');
       await applyBundleRefreshSubmission('test-project', workspacePath, {
@@ -616,7 +593,7 @@ describe('bundle-refresh', () => {
         confirmResults: {},
       });
 
-      expect(savedSecrets.API_TOKEN).toBe('existing-secret');
+      expect(await secrets.getProjectSecret('test-project', 'API_TOKEN')).toBe('existing-secret');
       expect(mockProjectConfig.bundleSecretKeys).toContain('API_TOKEN');
     });
 
@@ -685,7 +662,7 @@ describe('bundle-refresh', () => {
       const firstDetect = detectBundleChanges('test-project', workspacePath);
       expect(firstDetect.currentHash).toBeDefined();
 
-      savedSecrets.API_TOKEN = 'existing-secret';
+      await secrets.setProjectSecret('test-project', 'API_TOKEN', 'existing-secret');
       mockProjectConfig.bundleSecretKeys = ['API_TOKEN'];
       mockProjectConfig.bundleWorkspaceState = {
         'feature-existing-secret': {
@@ -745,7 +722,7 @@ describe('bundle-refresh', () => {
       const workspacePath = join(testDir, 'workspaces', 'feature-unset-secret');
       mkdirSync(workspacePath, { recursive: true });
 
-      savedSecrets.API_TOKEN = 'existing-secret';
+      await secrets.setProjectSecret('test-project', 'API_TOKEN', 'existing-secret');
       mockProjectConfig.bundleSecretKeys = ['API_TOKEN'];
 
       const { applyBundleConfigSubmission } = await import('../bundle-refresh');
@@ -753,7 +730,7 @@ describe('bundle-refresh', () => {
         secretValues: { API_TOKEN: '' },
       });
 
-      expect(savedSecrets.API_TOKEN).toBeUndefined();
+      expect(await secrets.getProjectSecret('test-project', 'API_TOKEN')).toBeNull();
       expect(mockProjectConfig.bundleSecretKeys ?? []).not.toContain('API_TOKEN');
     });
   });

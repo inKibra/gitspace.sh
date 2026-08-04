@@ -20,6 +20,16 @@ export function hasRenderer(type: string): boolean {
 }
 
 /**
+ * Every block type with a registered web renderer, sorted. Pairs with the
+ * schema registry's `listBlockTypes()` so a gallery — or a test — can assert
+ * the two vocabularies agree instead of discovering a missing renderer at
+ * render time, where it degrades to the unsupported-block fallback.
+ */
+export function listRendererTypes(): string[] {
+  return [...renderers.keys()].sort((a, b) => a.localeCompare(b));
+}
+
+/**
  * Render one block: validate against its schema, then hand typed data to the
  * registered renderer. Anything unrenderable degrades to Markdown (loud, never
  * a silent drop); genuinely invalid data surfaces a loud error with the issues.

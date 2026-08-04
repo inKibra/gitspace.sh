@@ -79,7 +79,10 @@ export type AgentSessionDisplayState =
   | 'waiting';
 
 export function getAgentSessionDisplayState(session: AgentSessionInfo): AgentSessionDisplayState {
-  if (session.closedAt) {
+  // Dormant renders as 'closed' (grey, not live) exactly as it did when one
+  // field meant both. The record now distinguishes dismissed from resumable, so
+  // a future pass can split the label without touching the daemon.
+  if (session.closedAt || session.dormantSince) {
     return 'closed';
   }
   if ((session.pendingPermissionCount ?? 0) > 0 || (session.pendingQuestionCount ?? 0) > 0) {

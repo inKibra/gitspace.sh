@@ -16,6 +16,8 @@
  */
 
 import type { GoalRecord, GoalValidation, Requirement, TimelineEvent } from '../types/goals.js';
+import { workflowSpecData } from '../blocks/types/content.js';
+import { z } from 'zod';
 
 // ─── Doc slices ─────────────────────────────────────────────────────────────
 
@@ -72,19 +74,10 @@ export function parseDocSlices(bodyMarkdown: string): DocSlice[] {
   return slices;
 }
 
-// ─── Workflow spec shape (structural) ───────────────────────────────────────
+// ─── Workflow spec shape (canonical schema) ─────────────────────────────────
 
-/** Minimal shape we rely on from WorkflowSpecData (blocks/types/content.ts).
- *  Parsed structurally so core stays decoupled from zod block schemas. */
-export interface WorkspaceWorkflowSpec {
-  recipe?: string;
-  phases?: Array<{
-    name?: string;
-    /** Slice ids this phase reads from the goal doc (interconnect seam). */
-    slices?: string[];
-    created?: Array<{ name?: string; type?: string; sliceId?: string }>;
-  }>;
-}
+/** Canonical workflow schema type shared with block validation. */
+export type WorkspaceWorkflowSpec = z.infer<typeof workflowSpecData>;
 
 export interface WorkspaceWorkflow {
   /** Path of the spec relative to the artifacts mount. */

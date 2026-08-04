@@ -2,6 +2,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
 import type { CommandExpectation, Evidence, GoalValidation, Judgment, Requirement, Review } from '../types/goals.js';
 import { gateStatusForPhase, gateWaiveInfoForPhase, parseDocSlices } from '../core/goal-gates.js';
+import { mediaKindFor } from '../core/media-types.js';
 import { renderMarkdownHtml } from './markdown-render.js';
 import { CommandEvidenceOutput } from './CommandEvidenceOutput.web.js';
 import { useEvidencePreviewUrl, type ArtifactReader } from './EvidencePanel.web.js';
@@ -70,9 +71,10 @@ function scoreOf(r: Requirement): number | undefined {
 
 function evidenceKind(ev: Evidence, fallback: Requirement['kind']): { label: string; cls: string } {
   if (ev.command || ev.stdout !== undefined) return { label: 'command', cls: 'bg-[var(--gs-chip-green-bg)] text-[var(--gs-chip-green-text)]' };
-  const mime = ev.mimeType ?? '';
-  if (mime.startsWith('image/') || fallback === 'screenshot') return { label: 'screenshot', cls: 'bg-[var(--gs-chip-blue-bg)] text-[var(--gs-chip-blue-text)]' };
-  if (mime.startsWith('video/') || fallback === 'video') return { label: 'video', cls: 'bg-[var(--gs-chip-dim-bg)] text-[var(--gs-purple)]' };
+  const kind = mediaKindFor(ev.mimeType, ev.artifactPath ?? ev.originalPath);
+  if (kind === 'image' || fallback === 'screenshot') return { label: 'screenshot', cls: 'bg-[var(--gs-chip-blue-bg)] text-[var(--gs-chip-blue-text)]' };
+  if (kind === 'video' || fallback === 'video') return { label: 'video', cls: 'bg-[var(--gs-chip-dim-bg)] text-[var(--gs-purple)]' };
+  if (kind === 'audio' || fallback === 'audio') return { label: 'audio', cls: 'bg-[var(--gs-chip-dim-bg)] text-[var(--gs-purple)]' };
   if (ev.url || fallback === 'url') return { label: 'url', cls: 'bg-[var(--gs-chip-blue-bg)] text-[var(--gs-chip-blue-text)]' };
   if (ev.body !== undefined || fallback === 'note') return { label: 'note', cls: 'bg-[var(--gs-chip-dim-bg)] text-[var(--gs-chip-dim-text)]' };
   return { label: fallback === 'test-output' ? 'test-output' : 'file', cls: 'bg-[var(--gs-chip-dim-bg)] text-[var(--gs-chip-dim-text)]' };
@@ -292,7 +294,15 @@ function EvidencePreview({ evidence, readArtifact }: {
       </div>
     );
   }
-  if (mime.startsWith('video/')) {
+  if (mime.startsWith('audio/') && previewUrl) {
+    return (
+      <div>
+        {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
+        <audio className="block w-full max-w-[520px]" src={previewUrl} controls />
+      </div>
+    );
+  }
+  if (mime.startsWith('video/') || mime.startsWith('audio/')) {
     return (
       <div className="flex items-center gap-2.5 border border-[var(--gs-border)] bg-black px-3 py-3.5">
         <span className="text-[16px] text-[var(--gs-purple)]">▶</span>

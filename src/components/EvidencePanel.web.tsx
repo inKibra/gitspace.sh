@@ -3,6 +3,7 @@ import { useEffect, useRef, useState, type ReactElement } from 'react';
 import type { Evidence } from '../types/goals.js';
 import { Highlighted } from '../blocks/render/highlight.web.js';
 import { humanSize, langForPath } from './ArtifactPanel.web.js';
+import { isMedia as isMediaType, mediaKindFor } from '../core/media-types.js';
 
 /** Raw artifact reader (a bound backend read). Passing a byte range pages
  *  large media; the result's `truncated` means more bytes remain. */
@@ -37,7 +38,7 @@ function base64ToBytes(b64: string): Uint8Array {
  */
 export function useEvidencePreviewUrl(ev: Evidence, readArtifact?: ArtifactReader): string | undefined {
   const [resolved, setResolved] = useState<string | undefined>(ev.previewUrl);
-  const isMedia = (ev.mimeType?.startsWith('image/') || ev.mimeType?.startsWith('video/')) ?? false;
+  const isMedia = isMediaType(ev.mimeType, ev.artifactPath ?? ev.originalPath);
   // Hold the reader in a ref so a fresh arrow identity each render (the usual
   // call-site pattern) does NOT re-trigger the paging effect / re-download.
   const readerRef = useRef(readArtifact);
@@ -87,12 +88,14 @@ export function useEvidencePreviewUrl(ev: Evidence, readArtifact?: ArtifactReade
  * + stdout/stderr sections, url/originalPath link rows).
  */
 
-type EvidenceDisplayKind = 'command' | 'screenshot' | 'video' | 'url' | 'note' | 'file';
+type EvidenceDisplayKind = 'command' | 'screenshot' | 'video' | 'audio' | 'url' | 'note' | 'file';
 
 function displayKindOf(ev: Evidence): EvidenceDisplayKind {
   if (ev.command !== undefined) return 'command';
-  if (ev.mimeType?.startsWith('image/')) return 'screenshot';
-  if (ev.mimeType?.startsWith('video/')) return 'video';
+  const kind = mediaKindFor(ev.mimeType, ev.artifactPath ?? ev.originalPath);
+  if (kind === 'image') return 'screenshot';
+  if (kind === 'video') return 'video';
+  if (kind === 'audio') return 'audio';
   if (ev.url) return 'url';
   if (ev.artifactPath || ev.originalPath) return 'file';
   return 'note';
@@ -103,6 +106,7 @@ const KIND_CHIP: Record<EvidenceDisplayKind, string> = {
   command: 'text-[var(--gs-chip-green-text)] bg-[var(--gs-chip-green-bg)]',
   screenshot: 'text-[var(--gs-chip-blue-text)] bg-[var(--gs-chip-blue-bg)]',
   video: 'text-[var(--gs-purple)] bg-[rgba(188,140,255,0.08)]',
+  audio: 'text-[var(--gs-purple)] bg-[rgba(188,140,255,0.08)]',
   url: 'text-[var(--gs-chip-blue-text)] bg-[var(--gs-chip-blue-bg)]',
   note: 'text-[var(--gs-chip-dim-text)] bg-[var(--gs-chip-dim-bg)]',
   file: 'text-[var(--gs-chip-dim-text)] bg-[var(--gs-chip-dim-bg)]',
@@ -148,7 +152,7 @@ export function EvidencePanel({ evidence, requirementTitle, readArtifact }: {
   const ev = evidence;
   const kind = displayKindOf(ev);
   const captured = ev.source === 'command';
-  const isVideo = ev.mimeType?.startsWith('video/') ?? false;
+  const previewKind = mediaKindFor(ev.mimeType, ev.artifactPath ?? ev.originalPath);
   const previewUrl = useEvidencePreviewUrl(ev, readArtifact);
 
   return (
@@ -175,9 +179,12 @@ export function EvidencePanel({ evidence, requirementTitle, readArtifact }: {
       <div className="min-h-0 flex-1 overflow-auto px-[18px] py-4">
         {previewUrl && (
           <div className="mb-4">
-            {isVideo ? (
+            {previewKind === 'video' ? (
               // eslint-disable-next-line jsx-a11y/media-has-caption
               <video src={previewUrl} controls className="max-h-[70vh] max-w-full border border-[var(--gs-border)] shadow-[0_4px_24px_rgba(0,0,0,0.6)]" />
+            ) : previewKind === 'audio' ? (
+              // eslint-disable-next-line jsx-a11y/media-has-caption
+              <audio src={previewUrl} controls className="w-full max-w-[520px]" />
             ) : (
               <img src={previewUrl} alt={ev.name} className="max-h-[70vh] max-w-full border border-[var(--gs-border)] shadow-[0_4px_24px_rgba(0,0,0,0.6)]" />
             )}

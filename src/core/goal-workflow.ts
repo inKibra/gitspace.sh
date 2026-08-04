@@ -19,14 +19,10 @@ import { existsSync, readdirSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { SpacesError } from '../types/errors.js';
 import type { GoalRecord } from '../types/goals.js';
-import {
-  parseDocSlices,
-  workflowPhaseNames,
-  workflowSpecWarnings,
-  type WorkspaceWorkflow,
-  type WorkspaceWorkflowSpec,
-} from './goal-gates.js';
+import { workflowSpecData } from '../blocks/types/content.js';
+import { parseDocSlices, workflowPhaseNames, workflowSpecWarnings, type WorkspaceWorkflow } from './goal-gates.js';
 import { artifactsScope } from './artifacts.js';
+import { parseJsonOrThrow } from './schema-parse.js';
 
 // ─── Workspace workflow (single canonical *.workflow.json) ─────────────────
 
@@ -66,12 +62,7 @@ export function loadWorkspaceWorkflow(workspaceDir: string): WorkspaceWorkflow |
   }
   const path = paths[0]!;
   const abs = join(workflowSearchDirFor(workspaceDir), path);
-  let spec: WorkspaceWorkflowSpec;
-  try {
-    spec = JSON.parse(readFileSync(abs, 'utf8')) as WorkspaceWorkflowSpec;
-  } catch (e) {
-    throw new SpacesError(`Unreadable workflow spec ${path}: ${e instanceof Error ? e.message : String(e)}`, 'USER_ERROR', 1);
-  }
+  const spec = parseJsonOrThrow(workflowSpecData, readFileSync(abs, 'utf8'), `workflow spec ${path}`);
   return { path, spec };
 }
 
@@ -96,41 +87,38 @@ export interface WorkflowValidationResult {
   phases: string[];
   /** Amber state: dangling slice refs, duplicate/empty phase names, … */
   warnings: string[];
+  /** Structural schema issues; these make validation fail. */
+  issues: string[];
   /** Slice ids currently derivable from the goal doc. */
   docSliceIds: string[];
 }
-
 /**
- * Validate the workspace's workflow against the goal doc. Throws
- * (SpacesError) on multiple workflows or parse errors; everything else —
- * dangling slice refs, phase-name oddities — is a WARNING (amber state
- * data), never a hard failure.
+ * Validate the workspace's workflow against the goal doc. Multiple workflows
+ * remain fatal; malformed/schema-invalid specs are returned as structural
+ * issues so CLI JSON can report them field-by-field.
  */
 export function validateWorkspaceWorkflow(
   workspaceDir: string,
   goal: Pick<GoalRecord, 'doc'> | null,
 ): WorkflowValidationResult {
-  const workflow = loadWorkspaceWorkflow(workspaceDir);
   const docSliceIds = parseDocSlices(goal?.doc.bodyMarkdown ?? '').map((s) => s.id);
-  if (!workflow) {
-    return { phases: [], warnings: [], docSliceIds };
+  let workflow: WorkspaceWorkflow | null;
+  try {
+    workflow = loadWorkspaceWorkflow(workspaceDir);
+  } catch (error) {
+    if (error instanceof SpacesError && error.message.startsWith('Multiple workflow specs')) throw error;
+    const path = listWorkflowSpecPaths(workspaceDir)[0];
+    return { path, phases: [], warnings: [], issues: [error instanceof Error ? error.message : String(error)], docSliceIds };
   }
+  if (!workflow) return { phases: [], warnings: [], issues: [], docSliceIds };
   return {
     path: workflow.path,
     phases: workflowPhaseNames(workflow),
     warnings: workflowSpecWarnings(workflow.spec, docSliceIds),
+    issues: [],
     docSliceIds,
   };
 }
-
-// ─── Human-only gate waive (daemon/protocol seam — no CLI flag) ────────────
-
-/**
- * Waive a phase gate. HUMAN-ONLY: reachable through the daemon command
- * 'goal-gate-waive' (the UI waive button) — the CLI deliberately has NO
- * waive flag, so agents cannot waive their own gates. Records a timeline
- * event kind 'gate' carrying the phase, reason, and actor.
- */
 export async function waiveGoalGate(
   projectName: string,
   goalId: string,

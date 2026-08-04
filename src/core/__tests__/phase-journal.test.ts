@@ -3,7 +3,7 @@ import { execFileSync } from 'child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { startPhaseJournal, endPhaseJournal, findOpenPhaseEntry, snapshotPhaseState, computePhaseDelta } from '../phase-journal.js';
+import { startPhaseJournal, endPhaseJournal, findOpenPhaseEntry, listPhaseJournalEntries, snapshotPhaseState, computePhaseDelta } from '../phase-journal.js';
 import { ensureArtifactsRepo, ensureArtifactsMount } from '../artifacts.js';
 import { writeGoalRecord } from '../goal-chain.js';
 import { addRequirement, defaultValidation, recordHumanReview } from '../goal-validation.js';
@@ -106,4 +106,21 @@ describe('phase journal', () => {
     expect(snap.goal?.id ?? null).toBeDefined();
     expect(computePhaseDelta(snap, snap).requirementsAdvanced).toHaveLength(0);
   });
+  it('skips malformed persisted entries instead of treating them as open', async () => {
+    await startPhaseJournal('demo', 'ws1', { phase: 'valid phase', intent: 'record a valid phase' }, new Date(0));
+    await endPhaseJournal('demo', 'ws1', { outcome: 'completed', autoCommit: false }, new Date(1_000));
+
+    const journalDir = join(mount, 'journal');
+    writeFileSync(join(journalDir, '02-malformed.json'), JSON.stringify({
+      version: 1,
+      phase: 'malformed phase',
+      // Required fields such as startedAt, intent, commits, and state are absent.
+    }));
+
+    const entries = listPhaseJournalEntries(workspaceDir);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.phase).toBe('valid phase');
+    expect(findOpenPhaseEntry(workspaceDir)).toBeNull();
+  });
+
 });

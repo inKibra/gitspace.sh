@@ -206,13 +206,35 @@ changes are automatically reverted and the run is marked failed. Runs may
 receive a capability token in their prompt — pass it verbatim to
 `space artifacts commit --cap <token> …` for sanctioned writes.
 
-**Workflow spec** (`x.workflow.json`): `{ recipe, recipePath?, rollup?: [],
-phases: [{ name, inputs: [{name, io: 'source'|'artifact'}], gate?: {type:
-'human'|'orchestration'|'command', label}, loop?, created?: [{name, type,
-from, passedTo}], nodes: [{id, role, kind: 'agent'|'gate'|'tool', model?,
-status?: 'done'|'running'|'pending', reads?, writes?, out?}], outputs:
-[{name, kind, io, required?, status?}] }] }` — keep node statuses truthful;
+**Workflow spec** (`x.workflow.json`): the canonical shape is `{ recipe,
+recipePath?, rollup?: string[], phases }`. Each phase requires `name`,
+`inputs` (each `{ name, io: 'source'|'artifact' }`), `nodes`, and `outputs`;
+it may include `slices: string[]`, `gate: { type:
+'human'|'orchestration'|'command', label: string }`, `loop: string`, and
+`created`. Each created artifact is `{ name, type: 'goal-slice'|'phased-goal'
+|'rubric'|'note'|'evidence'|'arbitrary', from?: string, passedTo?: string,
+sliceId?: string }`. Nodes are `{ id, kind: 'agent'|'gate'|'tool', agent?:
+string, role?: string, modelRole?: string, model?: string, status?:
+'done'|'running'|'pending', gateType?: 'human'|'orchestration'|'command',
+reads?: [{ name, io: 'source'|'artifact' }], writes?: [{ name, io:
+'source'|'artifact' }], out?: string, fanout?: { over: string, instances:
+string[] } }`; outputs are `{ name, kind: string, io: 'source'|'artifact',
+required?: boolean, status?: 'created'|'pending' }`. Keep node statuses truthful;
 the journal records real per-phase history.
+
+```json
+{
+  "recipe": "ship-feature",
+  "phases": [
+    {
+      "name": "build",
+      "inputs": [{ "name": "goal", "io": "source" }],
+      "nodes": [{ "id": "implement", "agent": "task", "kind": "agent", "status": "pending" }],
+      "outputs": [{ "name": "patch", "kind": "code", "io": "artifact", "required": true, "status": "pending" }]
+    }
+  ]
+}
+```
 
 ## Your role: forming artifacts through the stages
 

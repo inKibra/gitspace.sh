@@ -1,12 +1,15 @@
-import { afterAll, beforeAll, describe, expect, it, mock } from 'bun:test';
+import { afterAll, afterEach, beforeAll, describe, expect, it, mock } from 'bun:test';
 import React from 'react';
-import { act, fireEvent, render } from '@testing-library/react';
+import { act, cleanup, fireEvent, render } from '@testing-library/react';
 import { setupTestDom, teardownTestDom } from '../../test/setup-dom.js';
 import { GoalDetailPanel } from '../GoalDetailPanel.web.js';
 import type { KanbanGoalItem } from '../../app/shared/board/types.js';
 import type { GoalValidation, Requirement } from '../../types/goals.js';
 
 beforeAll(() => setupTestDom());
+// Unmount every tree before the DOM goes away; setup-dom's teardown handles the
+// React scheduler macrotask that can still fire after the suite ends.
+afterEach(() => cleanup());
 afterAll(() => teardownTestDom());
 
 function emptyValidation(): GoalValidation {

@@ -1,101 +1,78 @@
+import { z } from 'zod';
+
+export const artifactKindSchema = z.enum(['screenshot', 'video', 'audio', 'test-output', 'note', 'file', 'url']);
+export const generationSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('manual') }),
+  z.object({ kind: z.literal('command'), command: z.string() }),
+]);
+export const commandExpectationSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('exit-zero') }),
+  z.object({ kind: z.literal('stdout-contains'), needle: z.string() }),
+  z.object({ kind: z.literal('stderr-empty') }),
+  z.object({ kind: z.literal('output-matches'), pattern: z.string() }),
+]);
+export const judgmentSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('human') }),
+  z.object({ kind: z.literal('llm'), modelHint: z.string().optional() }),
+  z.object({ kind: z.literal('command'), command: z.string(), expect: commandExpectationSchema }),
+]);
+export const evidenceSchema = z.object({
+  id: z.string(), name: z.string(), meta: z.string(), source: z.enum(['manual', 'command']), createdAt: z.string(),
+  body: z.string().optional(), url: z.string().optional(), originalPath: z.string().optional(), artifactPath: z.string().optional(),
+  mimeType: z.string().optional(), sizeBytes: z.number().optional(), displayName: z.string().optional(), previewUrl: z.string().optional(),
+  command: z.string().optional(), exitCode: z.number().optional(), stdout: z.string().optional(), stderr: z.string().optional(),
+});
+export const reviewSchema = z.object({
+  id: z.string(), tone: z.enum(['green', 'amber', 'red']), who: z.string(), note: z.string(), createdAt: z.string(),
+  createdBy: z.string().optional(), judgeType: z.enum(['human', 'llm', 'command']).optional(), score: z.number().optional(),
+  cites: z.array(z.string()).optional(), rubricHash: z.string().optional(),
+});
+export const requirementSchema = z.object({
+  id: z.string(), title: z.string(), kind: artifactKindSchema, required: z.boolean(), rubric: z.string(),
+  status: z.enum(['missing', 'review', 'accepted']), generation: generationSchema, judgment: judgmentSchema,
+  evidence: z.array(evidenceSchema), reviews: z.array(reviewSchema), wfPhase: z.string().optional(), sliceId: z.string().optional(),
+});
+export const timelineEventSchema = z.object({
+  id: z.string(), requirementId: z.string().nullable(), tone: z.enum(['blue', 'amber', 'green', 'red', 'violet']),
+  kind: z.enum(['contract', 'generation', 'review', 'readiness', 'phase', 'gate']), title: z.string(), body: z.string(), payload: z.string(),
+  createdAt: z.string(), phase: z.string().optional(),
+});
+export const readinessSchema = z.object({
+  status: z.enum(['ready', 'awaiting-review', 'not-ready']), summary: z.string(), detail: z.string(),
+  totals: z.object({ total: z.number(), missing: z.number(), review: z.number(), accepted: z.number() }),
+});
+export const goalValidationSchema = z.object({
+  reqOrder: z.array(z.string()), requirements: z.record(z.string(), requirementSchema), events: z.array(timelineEventSchema), readiness: readinessSchema.optional(),
+});
+export const goalDocSchema = z.object({
+  bodyMarkdown: z.string(), updatedAt: z.string(), updatedBy: z.string().optional(),
+  blocks: z.array(z.object({ id: z.string(), type: z.string(), data: z.unknown() })).optional(), exemplarBlockIds: z.array(z.string()).optional(),
+});
+export const sourceRefSchema = z.object({ type: z.enum(['linear', 'github', 'url', 'manual']), id: z.string().optional(), url: z.string().optional(), title: z.string().optional() });
+export const goalRecordSchema = z.object({
+  version: z.literal(2), id: z.string(), chainId: z.string(), title: z.string(), projectName: z.string(), phase: z.enum(['plan', 'code', 'review', 'ship']),
+  plannedWorkspaceName: z.string().optional(), workspaceName: z.string().optional(), doc: goalDocSchema, validation: goalValidationSchema,
+  sourceRefs: z.array(sourceRefSchema).optional(), createdAt: z.string(), updatedAt: z.string(), archivedAt: z.string().optional(),
+});
 import type { WorkspacePhase } from './config.js';
 
 export type GoalPhase = WorkspacePhase;
 
 // ─── Validation contract ────────────────────────────────────────────────────
 
-export type ArtifactKind = 'screenshot' | 'video' | 'test-output' | 'note' | 'file' | 'url';
-
-export type Generation =
-  | { kind: 'manual' }
-  | { kind: 'command'; command: string };
-
-export type CommandExpectation =
-  | { kind: 'exit-zero' }
-  | { kind: 'stdout-contains'; needle: string }
-  | { kind: 'stderr-empty' }
-  | { kind: 'output-matches'; pattern: string };
-
-export type Judgment =
-  | { kind: 'human' }
-  | { kind: 'llm'; modelHint?: string }
-  /** Command judgment. Same-run marker (gen==judge dedup): when `command`
-   *  equals the generation command (the CLI materializes this when
-   *  `--judge-command` is omitted) — or is absent on hand-edited records —
-   *  `review run` does NOT re-execute; it applies `expect` to the latest
-   *  generation run's captured evidence (core/goal-gates.ts
-   *  isSameRunJudgment). */
-  | { kind: 'command'; command: string; expect: CommandExpectation };
-
+export type ArtifactKind = z.infer<typeof artifactKindSchema>;
+export type Generation = z.infer<typeof generationSchema>;
+export type CommandExpectation = z.infer<typeof commandExpectationSchema>;
+export type Judgment = z.infer<typeof judgmentSchema>;
 export type RequirementStatus = 'missing' | 'review' | 'accepted';
-
 export type EvidenceSource = 'manual' | 'command';
 
-export interface Evidence {
-  id: string;
-  name: string;
-  meta: string;
-  source: EvidenceSource;
-  createdAt: string;
-  body?: string;
-  url?: string;
-  originalPath?: string;
-  artifactPath?: string;
-  mimeType?: string;
-  sizeBytes?: number;
-  displayName?: string;
-  previewUrl?: string;
-  command?: string;
-  exitCode?: number;
-  stdout?: string;
-  stderr?: string;
-}
-
+/** Persisted evidence model; distinct from presentational evidenceData/artifactRef in src/blocks/types/content.ts. */
+export type Evidence = z.infer<typeof evidenceSchema>;
 export type ReviewTone = 'green' | 'amber' | 'red';
-
 export type ReviewJudgeType = 'human' | 'llm' | 'command';
-
-export interface Review {
-  id: string;
-  tone: ReviewTone;
-  who: string;
-  note: string;
-  createdAt: string;
-  createdBy?: string;
-  /** Which judge produced this review. Optional for back-compat. */
-  judgeType?: ReviewJudgeType;
-  /** 0-100 confidence/quality score, when the judge produces one. */
-  score?: number;
-  /** Evidence ids this review examined or produced. */
-  cites?: string[];
-  /** Hash of the requirement's rubric at judgment time (canon pin,
-   *  docs/REVIEW-GUIDE.md). Acceptance is stale when it no longer matches. */
-  rubricHash?: string;
-}
-
-export interface Requirement {
-  id: string;
-  title: string;
-  kind: ArtifactKind;
-  required: boolean;
-  rubric: string;
-  status: RequirementStatus;
-  generation: Generation;
-  judgment: Judgment;
-  evidence: Evidence[];
-  reviews: Review[];
-  /** Journal phase that was OPEN when this requirement was created
-   *  (phase-journal join), or the phase explicitly declared at authoring
-   *  time (`requirement add --phase`). The active workflow's phase list is
-   *  canonical; unknown names warn but are allowed. Requirements with a
-   *  wfPhase are OWED by that phase's gate. Absent on legacy requirements
-   *  and when no phase was open at creation time. */
-  wfPhase?: string;
-  /** Goal-doc slice this requirement grounds itself in (heading-anchored,
-   *  id = slugified heading — see core/goal-workflow.ts parseDocSlices).
-   *  Dangling slice ids are amber validation state, never a hard error. */
-  sliceId?: string;
-}
+export type Review = z.infer<typeof reviewSchema>;
+export type Requirement = z.infer<typeof requirementSchema>;
 
 export type TimelineEventTone = 'blue' | 'amber' | 'green' | 'red' | 'violet';
 export type TimelineEventKind = 'contract' | 'generation' | 'review' | 'readiness' | 'phase' | 'gate';
@@ -130,12 +107,7 @@ export interface Readiness {
   totals: ReadinessTotals;
 }
 
-export interface GoalValidation {
-  reqOrder: string[];
-  requirements: Record<string, Requirement>;
-  events: TimelineEvent[];
-  readiness?: Readiness;
-}
+export type GoalValidation = z.infer<typeof goalValidationSchema>;
 
 export interface GoalDoc {
   bodyMarkdown: string;
@@ -156,28 +128,7 @@ export interface SourceRef {
   title?: string;
 }
 
-export interface GoalRecord {
-  version: 2;
-  id: string;
-  chainId: string;
-  title: string;
-  projectName: string;
-  phase: GoalPhase;
-  plannedWorkspaceName?: string;
-  workspaceName?: string;
-  doc: GoalDoc;
-  validation: GoalValidation;
-  sourceRefs?: SourceRef[];
-  createdAt: string;
-  updatedAt: string;
-  /** Set when the goal's backing workspace was deleted and the record was
-   *  relocated to the project-level archived store
-   *  (`.gitspace/goals/archived/<id>.json`). The record stays resolvable as a
-   *  fallback (see goal-chain.ts listProjectGoalRecords) and keeps its chain
-   *  link. Absent on live workspace-backed and planned goals. Additive:
-   *  existing readers ignore it. */
-  archivedAt?: string;
-}
+export type GoalRecord = z.infer<typeof goalRecordSchema>;
 
 // ─── Chain / kanban / stack ─────────────────────────────────────────────────
 

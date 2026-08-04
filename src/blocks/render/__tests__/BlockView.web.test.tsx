@@ -8,6 +8,9 @@ import '../content.web.js'; // registers markdown/callout/code/code-ref/data-str
 import '../transcript.web.js'; // registers message/thinking/tool-call
 // note: diff.web is intentionally NOT imported — it pulls @pierre/diffs, which
 // resolves only in the web build. Diff rendering is verified there.
+function payload(container: HTMLElement, label: string): HTMLElement | undefined {
+  return Array.from(container.getElementsByTagName('section')).find((element) => element.getAttribute('data-payload') === label);
+}
 
 beforeAll(() => setupTestDom());
 afterAll(() => teardownTestDom());
@@ -48,6 +51,84 @@ describe('web BlockView', () => {
     expect(container.textContent).toContain('bash');
     expect(container.textContent).toContain('ls'); // header target still visible
     expect(container.textContent).not.toContain('hidden body'); // output collapsed
+  });
+  it('uses the bash renderer for structured input and output payloads', () => {
+    const { container } = render(
+      <BlockView
+        block={{
+          id: 't-bash-structured',
+          type: 'tool-call',
+          data: {
+            tool: 'bash',
+            status: 'running',
+            target: 'printf',
+            args: { command: 'printf hi', cwd: '/tmp' },
+            details: { stdout: 'hi', exitCode: 0 },
+          },
+        }}
+      />,
+    );
+
+    const input = payload(container, 'command input');
+    const output = payload(container, 'command output');
+    expect(input).not.toBeNull();
+    expect(output).not.toBeNull();
+    expect(input?.textContent).toContain('structured');
+    expect(output?.textContent).toContain('structured');
+  });
+
+  it('keeps expanded payloads scrollable at the bounded height', () => {
+    const { container } = render(
+      <BlockView
+        block={{
+          id: 't-bash-long',
+          type: 'tool-call',
+          data: { tool: 'bash', status: 'running', details: 'line\n'.repeat(400) },
+        }}
+      />,
+    );
+
+    const output = payload(container, 'command output');
+    expect(output).not.toBeNull();
+    expect(output?.classList.contains('max-h-72')).toBe(true);
+    expect(output?.classList.contains('overflow-y-auto')).toBe(true);
+  });
+
+  it('uses the generic renderer for an unknown tool', () => {
+    const { container } = render(
+      <BlockView
+        block={{
+          id: 't-unknown',
+          type: 'tool-call',
+          data: { tool: 'mystery-tool', status: 'running', args: '--verbose', details: 'generic output' },
+        }}
+      />,
+    );
+
+    expect(container.textContent).toContain('mystery-tool');
+    expect(payload(container, 'input')?.textContent).toContain('--verbose');
+    expect(payload(container, 'output')?.textContent).toContain('generic output');
+  });
+
+  it('renders a tool with no args or details when nested blocks provide its output', () => {
+    const { container } = render(
+      <BlockView
+        block={{
+          id: 't-edit-no-payloads',
+          type: 'tool-call',
+          data: {
+            tool: 'edit',
+            target: 'src/example.ts',
+            status: 'running',
+            result: [{ id: 'edit-result', type: 'markdown', data: { text: 'patch applied' } }],
+          },
+        }}
+      />,
+    );
+
+    expect(container.textContent).toContain('edit');
+    expect(container.textContent).toContain('src/example.ts');
+    expect(container.textContent).toContain('patch applied');
   });
 
   it('keeps input visible on a completed tool-call while output stays collapsed', () => {

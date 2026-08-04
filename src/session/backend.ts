@@ -25,6 +25,7 @@ import type { AgentStateUpdateDelta, WorkspaceAgentState } from '../lib/tmux-lit
 import type { AgentControlInfo, AgentDefinitionInfo, AgentGoalModeInfo, AgentHistoryEntry, AgentSettingItem, AgentSettingSchemaItem, AgentShakeMode, AgentShakeResult, AgentToolInfo, AgentTreeNode } from '../agents/agent-runtime-types.js';
 
 import type { ChainStackStatus, GoalChain, GoalRecord, GoalUpdateInput, WorkspacePhaseChangePreview } from '../types/goals.js';
+import type { TriggerDraft, TriggerRecord } from '../core/triggers.js';
 export type BackendKey = string;
 export type BackendKind = 'local' | 'remote';
 
@@ -373,7 +374,7 @@ export interface SessionBackend {
   /** Revoke a share link by tokenId. */
   revokeArtifactShare?(tokenId: string): Promise<boolean>;
   /** Persist a trigger through the registry (validates the schedule — an unfireable cron `when` is rejected). */
-  saveWorkspaceTrigger?(workspaceId: string, trigger: import('../core/triggers.js').TriggerRecord): Promise<import('../core/triggers.js').TriggerRecord>;
+  saveWorkspaceTrigger?(workspaceId: string, trigger: TriggerDraft): Promise<TriggerRecord>;
   /** Run a trigger now: records pending, spawns + prompts the agent session, records ok/fail server-side. */
   runWorkspaceTriggerNow?(workspaceId: string, triggerId: string): Promise<{ sessionId: string }>;
   /** Full workspace file listing (tracked + untracked, status letters). */

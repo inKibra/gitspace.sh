@@ -121,5 +121,8 @@ describe('smoke: this repository', () => {
     expect(analysis.clusters.filter((c) => c.type === 'core').length).toBeGreaterThanOrEqual(1);
     // deterministic layer must stay cheap even on a ~400-file diff
     expect(elapsed).toBeLessThan(60_000);
-  });
+    // Runner timeout sits ABOVE the assertion above, so a genuine perf
+    // regression fails on `elapsed` with a real number rather than being
+    // killed at bun's 5s default before the assertion is ever reached.
+  }, 120_000);
 });

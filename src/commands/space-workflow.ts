@@ -11,25 +11,26 @@ import type { SpaceCommandContext } from './space-goals.js';
 
 /**
  * Validate THE workflow against the goal doc. Exit nonzero ONLY on
- * structural errors (multiple *.workflow.json, unparseable spec — thrown as
- * SpacesError by the core). Dangling slice refs and phase-name oddities are
- * WARNINGS: amber state data for the UI pass, exit 0.
+ * structural errors (multiple *.workflow.json, invalid JSON/schema). Dangling
+ * slice refs and phase-name oddities are WARNINGS: amber state data for the UI.
  */
 export function validateSpaceWorkflow(ctx: SpaceCommandContext, options: { json?: boolean } = {}): void {
   const workspaceDir = join(getProjectWorkspacesDir(ctx.project), ctx.workspace);
   const goal = resolveWorkspaceGoal(ctx.project, ctx.workspace);
   const result = validateWorkspaceWorkflow(workspaceDir, goal);
   if (options.json) {
-    logger.log(JSON.stringify({ ok: true, ...result }, null, 2));
+    logger.log(JSON.stringify({ ok: result.issues.length === 0, ...result }, null, 2));
     return;
   }
   if (!result.path) {
     logger.log('No workflow spec on the artifacts mount (*.workflow.json) — nothing to validate.');
     return;
   }
-  logger.log(`Workflow: ${result.path}`);
-  logger.log(`Phases: ${result.phases.join(', ') || '(none)'}`);
-  logger.log(`Goal doc slices: ${result.docSliceIds.join(', ') || '(none)'}`);
+  if (result.issues.length > 0) {
+    logger.error('Invalid workflow spec:');
+    for (const issue of result.issues) logger.error(`  ${issue}`);
+    return;
+  }
   if (result.warnings.length === 0) {
     logger.success('Valid — no warnings.');
     return;

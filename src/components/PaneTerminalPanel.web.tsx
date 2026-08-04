@@ -4,13 +4,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AttachedTerminalPaneWeb } from './AttachedTerminalPane.web.js';
 import { applyModifiersToInput, type ModifierState } from './TerminalControls.web.js';
 import type { SessionTerminalHandle } from './SessionTerminal.web.js';
-import { NativeAgentSurfaceConnected, type PromptLifecycleEvent, type PromptSubmitMode } from './NativeAgentSurfaceConnected.web.js';
+import { NativeAgentSurfaceConnected, type PromptImage, type PromptLifecycleEvent, type PromptSubmitMode } from './NativeAgentSurfaceConnected.web.js';
 import { AgentTranscript, type BlockHost } from '../blocks/render/index.web.js';
 import { pendingInteractionBlocks } from '../blocks/agent/transcript-blocks.js';
 import { AgentPaneHeader } from './AgentPaneHeader.web.js';
 import { AgentSettingsPanel } from './AgentSettingsPanel.web.js';
 import { AgentHistoryPanel } from './AgentHistoryPanel.web.js';
 import type { Block } from '../blocks/index.js';
+import { messageData } from '../blocks/types/transcript.js';
 import type { AgentAuthProvider, AgentControlInfo, AgentDefinitionInfo, AgentGoalModeInfo, AgentHistoryEntry, AgentModelInfo, AgentOAuthEvent, AgentSettingSchemaItem, AgentShakeMode, AgentShakeResult, AgentToolInfo, AgentTreeNode, SessionStatus } from '../agents/agent-runtime-types.js';
 import type { AttachedPaneState } from '../session/types.js';
 import type { BackendKey } from '../session/backend.js';
@@ -29,6 +30,7 @@ interface OptimisticPrompt {
   mode: PromptSubmitMode;
   status: 'pending' | 'failed';
   error?: string;
+  images?: PromptImage[];
 }
 
 export interface PaneTerminalPanelProps {
@@ -142,7 +144,7 @@ export function PaneTerminalPanel({
     if (event.phase === 'submitted') {
       lastPromptRef.current = { text: event.text, mode: event.mode };
       optimisticSeq.current += 1;
-      setOptimistic({ id: `optimistic:${optimisticSeq.current}`, text: event.text, mode: event.mode, status: 'pending' });
+      setOptimistic({ id: `optimistic:${optimisticSeq.current}`, text: event.text, mode: event.mode, images: event.images, status: 'pending' });
       return;
     }
     // failed → mark the matching optimistic echo failed (keeps Retry visible).
@@ -194,8 +196,11 @@ export function PaneTerminalPanel({
         if (!o) return o;
         const echoed = delta.blocks.some((b) => {
           if (b.type !== 'message') return false;
-          const d = b.data as { role?: string; text?: string };
-          return d.role === 'user' && d.text === o.text;
+          // Parse rather than cast: this is the one place block data is read
+          // before BlockView validates it at render, and a hand-written shape
+          // here would drift from the canonical message schema silently.
+          const parsed = messageData.safeParse(b.data);
+          return parsed.success && parsed.data.role === 'user' && parsed.data.text === o.text;
         });
         if (echoed) return null;
         if (o.status === 'pending' && delta.committed) return null;
@@ -214,10 +219,15 @@ export function PaneTerminalPanel({
       type: 'message',
       data: { role: 'user', text: optimistic.text, ...(optimistic.status === 'pending' ? { pending: true } : {}) },
     };
+    const images = (optimistic.images ?? []).map((image, i): Block => ({
+      id: `${optimistic.id}:img${i}`,
+      type: 'image',
+      data: { src: `data:${image.mimeType};base64,${image.data}` },
+    }));
     if (optimistic.status === 'failed') {
-      return [message, { id: `${optimistic.id}:error`, type: 'error', data: { text: optimistic.error ?? 'Failed to send message' } }];
+      return [message, ...images, { id: `${optimistic.id}:error`, type: 'error', data: { text: optimistic.error ?? 'Failed to send message' } }];
     }
-    return [message];
+    return [message, ...images];
   }, [optimistic]);
 
   // Pending interactive blocks (permissions / questions / todos) from agent state,

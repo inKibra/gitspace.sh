@@ -281,6 +281,8 @@ function toolCallBlock(call: ToolCall, result: ToolResultMessage | undefined): B
       status: result ? (result.isError ? 'error' : 'done') : 'running',
       input: input.length > 0 ? input : undefined,
       result: resultBlocks && resultBlocks.length > 0 ? resultBlocks : undefined,
+      args: call.arguments,
+      details: result?.details,
     },
   };
 }
@@ -311,7 +313,6 @@ export function messageToBlocks(message: Message, key: string, results: Map<stri
     const flush = (partIndex: number) => {
       const text = buffer.join('').trim();
       if (text) blocks.push({ id: `${key}:t${partIndex}`, type: 'message', data: { role: 'assistant', text } });
-      buffer = [];
     };
     assistant.content.forEach((part, partIndex) => {
       if (part.type === 'text') {
@@ -324,6 +325,9 @@ export function messageToBlocks(message: Message, key: string, results: Map<stri
         flush(partIndex);
         const call = part as ToolCall;
         blocks.push(toolCallBlock(call, results.get(call.id)));
+      } else if (part.type === 'image') {
+        flush(partIndex);
+        blocks.push(...imageBlocks([part as ImageContent], `${key}:a${partIndex}`));
       }
       // redactedThinking / other parts: nothing to render
     });
