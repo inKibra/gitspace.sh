@@ -46,10 +46,12 @@ export type SessionHostFactory = (
   config: WorkerSessionHostConfig,
 ) => Promise<AgentSessionHost>;
 
-/** Max concurrent live agent hosts (worker processes are ~400MB RSS each). */
+/** Ceiling on concurrent live agent hosts — a runaway guard, not a budget. The
+ *  target is a fleet (tens of agents working in parallel on one machine), so
+ *  this is deliberately high; raise it with GITSPACE_MAX_AGENT_WORKERS. */
 function maxAgentHosts(): number {
   const n = Number.parseInt(process.env.GITSPACE_MAX_AGENT_WORKERS ?? '', 10);
-  return Number.isFinite(n) && n >= 1 ? n : 8;
+  return Number.isFinite(n) && n >= 1 ? n : 100;
 }
 
 // Dynamic imports: oh-my-pi has module-level side effects (postmortem signal
@@ -126,6 +128,9 @@ export interface PiAgentSessionSummary {
   title: string;
   updatedAt?: string;
   closedAt?: string;
+  /** No live worker but not dismissed — resumable. Distinct from closedAt so a
+   *  never-activated session is not reported as deliberately closed. */
+  dormantSince?: string;
   archivedAt?: string;
 }
 
@@ -165,9 +170,6 @@ export class PiCoordinator {
   // the agent is still blocked waiting. Same dialogId (never minted anew) so the
   // existing agent-dialog-response path resolves it.
   private readonly pendingDialogRequests = new Map<string, HostUIDialogRequest>();
-  // Worker-bound bookkeeping: LRU + busy tracking for the concurrency cap.
-  private readonly hostLastUsed = new Map<string, number>();
-  private readonly busySessions = new Set<string>();
   private readonly sessionsRoot: string | undefined;
   private eventHandler: ((target: PiWorkspaceTarget, event: AgentEvent) => void) | null = null;
   private hostUIEmitter: HostUIBridgeEmitter | null = null;
@@ -886,7 +888,6 @@ export class PiCoordinator {
     this.hosts.set(sessionId, host);
     this.sessionWorkspaceIds.set(sessionId, target.workspaceId);
     this.sessionTargets.set(sessionId, target);
-    this.hostLastUsed.set(sessionId, Date.now());
 
     const sessionFile = await this.waitForSessionFile(target.workspacePath, sessionId);
     if (!sessionFile) {
@@ -954,11 +955,6 @@ export class PiCoordinator {
       durationMs: Date.now() - traceStartMs,
       textLength: text.length,
     });
-    this.hostLastUsed.set(agentSessionId, Date.now());
-    // Prompt acceptance marks the session busy immediately — agent_start can
-    // lag (model resolve), and the eviction policy must never pick a session
-    // that just took a turn.
-    this.busySessions.add(agentSessionId);
     await host.prompt(text, images, options);
   }
 
@@ -1023,10 +1019,11 @@ export class PiCoordinator {
   }
 
   /**
-   * Drop one viewer lease. The host is disposed once nothing is viewing it,
-   * mirroring what the last terminal detach used to do. Returns the workspace
-   * the session belongs to (so callers can emit a scoped update) and the
-   * viewers that remain, or null when the lease was already gone.
+   * Drop one viewer lease. A lease records ATTENTION, never lifetime: losing
+   * the last viewer means nobody is watching, not that the work should stop.
+   * Returns the workspace the session belongs to (so callers can emit a scoped
+   * update) and the viewers that remain, or null when the lease was already
+   * gone. The host keeps running — see {@link assertHostCapacity}.
    */
   releaseAgentLease(agentSessionId: string, leaseKey: string): { workspaceId: string; remaining: number } | null {
     const suffix = `:${agentSessionId}`;
@@ -1034,38 +1031,20 @@ export class PiCoordinator {
       if (!key.endsWith(suffix) || !leases.delete(leaseKey)) continue;
       if (leases.size === 0) this.agentLeases.delete(key);
       const workspaceId = key.slice(0, -suffix.length);
-      const remaining = this.getViewerCount(workspaceId, agentSessionId);
-      if (remaining === 0) {
-        void this.disposeHost(agentSessionId).catch((err) => {
-          console.error(`[pi-coordinator] Failed to dispose agent session ${agentSessionId}:`, err);
-        });
-      }
-      return { workspaceId, remaining };
+      return { workspaceId, remaining: this.getViewerCount(workspaceId, agentSessionId) };
     }
     return null;
   }
 
   /** Release every lease whose key starts with `ownerPrefix` — a disconnecting
-   *  client takes all of its panes with it. */
+   *  client stops watching everything it was watching. Its sessions keep
+   *  running; a dropped connection is not an instruction to abandon work. */
   releaseAgentLeasesForOwner(ownerPrefix: string): void {
     for (const [key, leases] of [...this.agentLeases]) {
-      let changed = false;
       for (const leaseKey of [...leases]) {
-        if (leaseKey.startsWith(ownerPrefix)) {
-          leases.delete(leaseKey);
-          changed = true;
-        }
+        if (leaseKey.startsWith(ownerPrefix)) leases.delete(leaseKey);
       }
-      if (!changed) continue;
       if (leases.size === 0) this.agentLeases.delete(key);
-      const separator = key.lastIndexOf(':');
-      const workspaceId = key.slice(0, separator);
-      const agentSessionId = key.slice(separator + 1);
-      if (this.getViewerCount(workspaceId, agentSessionId) === 0) {
-        void this.disposeHost(agentSessionId).catch((err) => {
-          console.error(`[pi-coordinator] Failed to dispose agent session ${agentSessionId}:`, err);
-        });
-      }
     }
   }
 
@@ -1099,7 +1078,7 @@ export class PiCoordinator {
     target: PiWorkspaceTarget,
     boot: SessionHostBoot,
   ): Promise<AgentSessionHost> {
-    await this.evictForCapacity();
+    this.assertHostCapacity();
     const sinks = this.createHostSinks(target);
     const enableUI = !!this.hostUIEmitter;
     return this.hostFactory(target, boot, sinks, {
@@ -1108,29 +1087,20 @@ export class PiCoordinator {
     });
   }
 
-  /** Bound live hosts (each worker is a full SDK process, ~400MB RSS). At the
-   *  cap, evict the least-recently-used host that is idle (no turn in flight)
-   *  and has no attached terminal — lazy restore reopens it from its session
-   *  file on next use. If everything is busy/attached, refuse the new boot. */
-  private async evictForCapacity(): Promise<void> {
+  /** Runaway guard, not a reclamation policy. Sessions are durable: a live host
+   *  is never torn down to make room, because "idle" is not observable from the
+   *  outside — a session with no turn in flight may still owe a queued message,
+   *  a pending human answer, or a running subagent, and none of that survives
+   *  disposal. Idle workers cost cold pages, which the OS reclaims losslessly;
+   *  killing them costs commitments. So at the ceiling we refuse the new boot
+   *  and say so, rather than silently destroying someone's work. */
+  private assertHostCapacity(): void {
     const max = maxAgentHosts();
     if (this.hosts.size < max) return;
-    const candidates = [...this.hosts.keys()]
-      .filter((id) => !this.busySessions.has(id))
-      .filter((id) => {
-        const workspaceId = this.sessionWorkspaceIds.get(id);
-        return !workspaceId || this.getViewerCount(workspaceId, id) === 0;
-      })
-      .sort((a, b) => (this.hostLastUsed.get(a) ?? 0) - (this.hostLastUsed.get(b) ?? 0));
-    const evictee = candidates[0];
-    if (!evictee) {
-      throw new Error(
-        `Agent session limit reached (${max} live; all busy or attached). ` +
-        `Close a session or raise GITSPACE_MAX_AGENT_WORKERS.`,
-      );
-    }
-    console.log(`[pi-coordinator] evicting idle agent host ${evictee} (limit ${max})`);
-    await this.disposeHost(evictee);
+    throw new Error(
+      `Agent worker ceiling reached (${this.hosts.size}/${max} live). ` +
+      `Close a session or raise GITSPACE_MAX_AGENT_WORKERS.`,
+    );
   }
 
   /** A worker died without being asked to — drop its bookkeeping and tell
@@ -1142,8 +1112,6 @@ export class PiCoordinator {
     this.hosts.delete(sessionId);
     this.sessionWorkspaceIds.delete(sessionId);
     this.sessionTargets.delete(sessionId);
-    this.hostLastUsed.delete(sessionId);
-    this.busySessions.delete(sessionId);
     for (const [dialogId, dialogSessionId] of this.dialogSessions) {
       if (dialogSessionId === sessionId) {
         this.dialogSessions.delete(dialogId);
@@ -1167,16 +1135,6 @@ export class PiCoordinator {
   private createHostSinks(target: PiWorkspaceTarget): SessionHostSinks {
     return {
       onEvent: (event) => {
-        // Busy tracking for the eviction policy: never evict mid-turn. An
-        // error clears busy (a failed prompt never reaches agent_end); a
-        // retry status that follows re-marks it busy.
-        if (event.type === 'status') {
-          const p = (event as { payload?: { type?: string } }).payload;
-          if (p?.type === 'busy' || p?.type === 'compacting' || p?.type === 'retry') this.busySessions.add(event.sessionId);
-          else if (p?.type === 'idle') this.busySessions.delete(event.sessionId);
-        } else if (event.type === 'error') {
-          this.busySessions.delete(event.sessionId);
-        }
         this.eventHandler?.(target, event);
       },
       onDialogRequest: (request) => {
@@ -1250,7 +1208,6 @@ export class PiCoordinator {
   ): Promise<AgentSessionHost> {
     const existing = this.hosts.get(agentSessionId);
     if (existing) {
-      this.hostLastUsed.set(agentSessionId, Date.now());
       return existing;
     }
 
@@ -1284,7 +1241,6 @@ export class PiCoordinator {
         this.hosts.set(agentSessionId, host);
         this.sessionWorkspaceIds.set(agentSessionId, target.workspaceId);
         this.sessionTargets.set(agentSessionId, target);
-        this.hostLastUsed.set(agentSessionId, Date.now());
         return host;
       } finally {
         this.inflightHosts.delete(agentSessionId);
@@ -1303,8 +1259,6 @@ export class PiCoordinator {
       }
     }
     const host = this.hosts.get(sessionId);
-    this.hostLastUsed.delete(sessionId);
-    this.busySessions.delete(sessionId);
     if (host) {
       // Return the session to the dormant (not-running) state before dropping
       // its bookkeeping — its live worker is going away, so the snapshot must

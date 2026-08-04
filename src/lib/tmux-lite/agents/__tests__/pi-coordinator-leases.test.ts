@@ -91,7 +91,12 @@ afterAll(() => {
 });
 
 describe('PiCoordinator viewer leases', () => {
-  it('keeps a shared host alive until the second lease is released', async () => {
+  // Leases record ATTENTION, never lifetime. Losing the last viewer means
+  // nobody is watching — not that the work should stop. A session with no turn
+  // in flight may still owe a queued message, a pending human answer, or a
+  // running subagent, none of which survive disposal, so releasing a lease must
+  // never dispose a host.
+  it('tracks lease counts exactly and never disposes the host on release', async () => {
     const { coordinator, hosts } = createCoordinator();
     expect(await coordinator.openAgentSession(target, 'session-a', 'sock-a:pane-1')).toBe(1);
     expect(await coordinator.openAgentSession(target, 'session-a', 'sock-b:pane-2')).toBe(2);
@@ -100,9 +105,10 @@ describe('PiCoordinator viewer leases', () => {
     await Promise.resolve();
     expect(hosts.get('session-a')?.disposeCount).toBe(0);
 
+    // Last viewer gone: the count reaches zero, the host keeps running.
     expect(coordinator.releaseAgentLease('session-a', 'sock-b:pane-2')).toEqual({ workspaceId: target.workspaceId, remaining: 0 });
     await Promise.resolve();
-    expect(hosts.get('session-a')?.disposeCount).toBe(1);
+    expect(hosts.get('session-a')?.disposeCount).toBe(0);
   });
 
   it('returns null for an unknown lease without disposing a host', () => {
@@ -126,11 +132,13 @@ describe('PiCoordinator viewer leases', () => {
     expect(hosts.get('session-b')?.disposeCount).toBe(0);
     expect(hosts.get('session-c')?.disposeCount).toBe(0);
 
+    // A disconnecting client stops watching everything it was watching; a
+    // dropped connection is not an instruction to abandon work.
     expect(coordinator.releaseAgentLease('session-b', 'sock2:pane-b')).toEqual({ workspaceId: target.workspaceId, remaining: 0 });
     expect(coordinator.releaseAgentLease('session-c', 'sock2:pane-c')).toEqual({ workspaceId: target.workspaceId, remaining: 0 });
     await Promise.resolve();
-    expect(hosts.get('session-b')?.disposeCount).toBe(1);
-    expect(hosts.get('session-c')?.disposeCount).toBe(1);
+    expect(hosts.get('session-b')?.disposeCount).toBe(0);
+    expect(hosts.get('session-c')?.disposeCount).toBe(0);
   });
 
 

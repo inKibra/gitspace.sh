@@ -136,14 +136,11 @@ process.on('disconnect', () => {
   process.exit(1);
 });
 
-// Belt-and-suspenders for a SIGKILLed/crashed daemon where 'disconnect' never
-// fires: once reparented to init/subreaper, we're an orphan — exit.
-const initialPpid = process.ppid;
-setInterval(() => {
-  if (process.ppid !== initialPpid) {
-    console.error(`[agent-worker] daemon gone (ppid ${initialPpid} -> ${process.ppid}); exiting`);
-    process.exit(1);
-  }
-}, 5000);
+// No ppid polling: 'disconnect' above is fd-driven, so it fires for a daemon
+// that exited gracefully, was SIGTERMed, or was SIGKILLed — measured at ~80ms
+// for SIGKILL. If this worker is blocked in synchronous work the event is
+// QUEUED, not lost, and lands the instant the thread yields. A ppid poll adds
+// nothing: its own callback needs the same event loop, so it cannot run in any
+// situation where 'disconnect' cannot be delivered.
 
 console.log(`[agent-worker] started pid=${process.pid}`);
