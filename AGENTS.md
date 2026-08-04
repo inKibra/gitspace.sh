@@ -325,6 +325,17 @@ interface MachineProvider {
 ### Building and Testing
 
 ```bash
+# Tests — ALWAYS use this for any result you intend to trust.
+# Runs each test file in its own process. Bun's `mock.module` is process-global
+# and `mock.restore()` does not undo it, so a shared process leaks mocks between
+# files: bare `bun test` reported 125 failures and hung, while the same tree run
+# one file per process reported 5. `bun test <one.test.ts>` is fine for a single
+# file; anything wider needs this.
+bun run test
+
+# Single-process run — fast iteration ONLY, results are not trustworthy.
+bun run test:fast
+
 # Type check
 bun run typecheck
 

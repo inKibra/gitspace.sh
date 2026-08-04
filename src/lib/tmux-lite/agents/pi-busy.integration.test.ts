@@ -3,11 +3,21 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { removeTmuxLiteSandbox } from '../protocol.js';
 
 setDefaultTimeout(150_000);
 
 let root = '';
 let workspacePath = '';
+// Single source of truth for the sandbox key: the subprocess prelude applies it
+// and afterEach removes it. Deriving it twice is how the /tmp leak started.
+let sandboxName = '';
+// The OMP agent dir this run is pinned to. Set POSITIVELY in the subprocess env
+// (not merely unset): an inherited absolute PI_CODING_AGENT_DIR outranks HOME,
+// and clearing it only falls back to ~/.omp/agent — also real host state. Either
+// way the sandbox is bypassed and the mock provider is never seen, so the run
+// reads (and can write) the developer's live agent dir.
+let piAgentDir = '';
 
 function writeWorkspaceProjectConfig(projectPath: string): void {
   writeFileSync(
@@ -38,8 +48,10 @@ function buildSubprocessPrelude(): string {
       projectName: 'demo',
     };
 
-    process.env.HOME = ${JSON.stringify(root)};
-    applyTmuxLiteSandboxEnvironment(${JSON.stringify(`pi-busy-${basename(root)}`)});
+    // HOME and PI_CODING_AGENT_DIR arrive via the subprocess env, not an
+    // assignment here: OMP captures the agent dir when pi-utils is imported,
+    // and ESM imports above already ran by the time this line would execute.
+    applyTmuxLiteSandboxEnvironment(${JSON.stringify(sandboxName)});
 
     // Hermetic model backend: the sandbox HOME has no provider credentials, so
     // without one the SDK selects no model and prompt() fails before
@@ -88,14 +100,11 @@ function buildSubprocessPrelude(): string {
         },
       },
     }, null, 2);
-    // OMP reads models.json from the default agent dir (~/.omp/agent) when
-    // PI_CODING_AGENT_DIR wasn't set at pi-utils import time, and from the
-    // GitSpace-managed dir (<workspace-root>/.pi) once it is. Write both so
-    // every daemon/worker process resolves the mock provider.
-    for (const dir of [join(${JSON.stringify(root)}, '.omp', 'agent'), join(${JSON.stringify(root)}, 'gitspace', '.pi')]) {
-      mkdirSync(dir, { recursive: true });
-      writeFileSync(join(dir, 'models.json'), mockModelsConfig);
-    }
+    // models.json goes in the agent dir this run is pinned to via
+    // PI_CODING_AGENT_DIR (set in the subprocess env), so every daemon and
+    // worker process resolves the mock provider from one known location.
+    mkdirSync(${JSON.stringify(piAgentDir)}, { recursive: true });
+    writeFileSync(join(${JSON.stringify(piAgentDir)}, 'models.json'), mockModelsConfig);
     function stopMockModelServer(): void {
       try { mockModelServer.stop(true); } catch {}
     }
@@ -149,6 +158,7 @@ function runIntegrationScript(name: string, scriptBody: string) {
     cwd: root,
     encoding: 'utf8',
     timeout: 180_000,
+    env: { ...process.env, HOME: root, PI_CODING_AGENT_DIR: piAgentDir },
   });
 
   const resultRaw = existsSync(resultFile) ? readFileSync(resultFile, 'utf8') : '';
@@ -169,6 +179,8 @@ function runIntegrationScript(name: string, scriptBody: string) {
 describe('Pi busy state integration', () => {
   beforeEach(() => {
     root = mkdtempSync(join(tmpdir(), 'gitspace-pi-busy-'));
+    sandboxName = `pi-busy-${basename(root)}`;
+    piAgentDir = join(root, 'gitspace', '.pi');
     const projectPath = join(root, 'gitspace', 'demo');
     workspacePath = join(projectPath, 'workspaces', 'ws-1');
     mkdirSync(workspacePath, { recursive: true });
@@ -178,6 +190,7 @@ describe('Pi busy state integration', () => {
 
   afterEach(() => {
     rmSync(root, { recursive: true, force: true });
+    removeTmuxLiteSandbox(sandboxName);
   });
 
   test('marks a live Pi session busy while a prompt is running', async () => {

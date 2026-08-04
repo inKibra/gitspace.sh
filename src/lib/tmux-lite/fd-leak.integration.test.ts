@@ -9,9 +9,9 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
 import { spawn, type Subprocess } from 'bun';
-import { readdirSync, rmSync, unlinkSync } from 'fs';
+import { readdirSync } from 'fs';
 import { join } from 'path';
-import { getTmuxLitePathsForSandbox } from './protocol';
+import { getTmuxLitePathsForSandbox, removeTmuxLiteSandbox } from './protocol';
 
 const isLinux = process.platform === 'linux';
 const SANDBOX = `fdleak-${process.pid}`;
@@ -27,9 +27,7 @@ function applyEnv(): void {
 }
 
 function cleanup(): void {
-  try { unlinkSync(paths.routerSocket); } catch {}
-  try { unlinkSync(paths.pidFile); } catch {}
-  try { rmSync(paths.sessionDir, { recursive: true, force: true }); } catch {}
+  removeTmuxLiteSandbox(SANDBOX);
   delete process.env.TMUX_LITE_SANDBOX;
   delete process.env.TMUX_LITE_SOCKET;
   delete process.env.TMUX_LITE_SESSION_DIR;

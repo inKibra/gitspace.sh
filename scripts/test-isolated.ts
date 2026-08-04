@@ -51,7 +51,13 @@ const failed: string[] = [];
 let done = 0;
 
 async function runOne(file: string): Promise<void> {
-  const proc = Bun.spawn(['bun', 'test', file], { stdout: 'pipe', stderr: 'pipe' });
+  // GSSH_TEST_ISOLATED silences the preload's multi-file pollution warning:
+  // one file per process is exactly the safe case it warns about.
+  const proc = Bun.spawn(['bun', 'test', file], {
+    stdout: 'pipe',
+    stderr: 'pipe',
+    env: { ...process.env, GSSH_TEST_ISOLATED: '1' },
+  });
   const code = await proc.exited;
   done += 1;
   const tag = `[${done}/${files.length}]`;

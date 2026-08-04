@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer, type AddressInfo } from 'node:net';
 import { deriveIdentityId } from '../../lib/tmux-lite/crypto/identity';
+import { getTmuxLitePathsForSandbox, removeTmuxLiteSandbox } from '../../lib/tmux-lite/protocol.js';
 
 interface DevIdentityOutput {
   userRootStored: {
@@ -164,12 +165,11 @@ describe('gssh web integration', () => {
 
     const sandboxName = `web-test-${Date.now()}`;
     const relayStatePath = join(testHome, 'gitspace', '.relay', 'runtime', 'relay-state.json');
-    const servePidPath = join(testHome, '.serve', 'serve.pid');
     let subprocess: Bun.Subprocess | null = null;
 
     try {
       const identityOutput = await generateSandboxIdentity(repoRoot);
-      const { identityDir, controlDir, serveDir, secretsPath } = seedSandboxFiles(testHome, identityOutput);
+      const { identityDir, controlDir, secretsPath } = seedSandboxFiles(testHome, identityOutput);
       const port = await findFreePort();
 
       const env = {
@@ -177,7 +177,6 @@ describe('gssh web integration', () => {
         HOME: testHome,
         GITSPACE_IDENTITY_DIR: identityDir,
         GITSPACE_CONTROL_DIR: controlDir,
-        GITSPACE_SERVE_DAEMON_DIR: serveDir,
         GSSH_ENABLE_TEST_SECRETS_BACKEND: '1',
         GSSH_TEST_RUNTIME: '1',
         GSSH_TEST_SECRETS_FILE: secretsPath,
@@ -244,7 +243,8 @@ describe('gssh web integration', () => {
       await Promise.all([captureStdout, captureStderr]);
       expect(exitCode).toBe(0);
 
-      expect(existsSync(servePidPath)).toBe(false);
+      // serve.pid is gone: serve is a mode of the machine daemon, not a process
+      // with its own pid file, so there is nothing to assert cleanup of.
       expect(existsSync(relayStatePath)).toBe(false);
 
       const combinedOutput = `${stdout}\n${stderr}`;
@@ -256,25 +256,22 @@ describe('gssh web integration', () => {
       if (existsSync(testDir)) {
         rmSync(testDir, { recursive: true, force: true });
       }
-      const tmuxPidPath = `/tmp/tmux-lite-${sandboxName}.pid`;
-      const tmuxSocketPath = `/tmp/tmux-lite-${sandboxName}.sock`;
-      for (const path of [tmuxPidPath, tmuxSocketPath]) {
-        if (existsSync(path)) {
-          try {
-            const pid = path.endsWith('.pid') ? Number.parseInt(readFileSync(path, 'utf-8').trim(), 10) : null;
-            if (pid && Number.isInteger(pid)) {
-              try { process.kill(pid, 'SIGKILL'); } catch {}
-            }
-          } catch {
-            // best effort cleanup only
+      // Kill any daemon the sandbox left behind, then drop all four sandbox
+      // paths through the shared helper. Hand-rolling the path strings here
+      // covered only .pid/.sock and leaked a /tmp/tmux-lite-<sandbox>/ tree
+      // every run — and sandboxName is unique per run, so it never overwrote.
+      const tmuxPaths = getTmuxLitePathsForSandbox(sandboxName);
+      if (existsSync(tmuxPaths.pidFile)) {
+        try {
+          const pid = Number.parseInt(readFileSync(tmuxPaths.pidFile, 'utf-8').trim(), 10);
+          if (Number.isInteger(pid) && pid > 0) {
+            try { process.kill(pid, 'SIGKILL'); } catch {}
           }
-          try {
-            rmSync(path, { force: true });
-          } catch {
-            // ignore cleanup races
-          }
+        } catch {
+          // best effort cleanup only
         }
       }
+      removeTmuxLiteSandbox(sandboxName);
     }
   }, 180_000);
 });

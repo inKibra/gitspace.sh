@@ -2,6 +2,7 @@
  * tmux-lite protocol
  */
 
+import { rmSync } from 'node:fs';
 import { SpacesError } from '../../types/errors.js';
 import { logger } from '../../utils/logger.js';
 import type { AgentGoalModeInfo, AgentShakeMode, AgentShakeResult } from '../../agents/agent-runtime-types.js';
@@ -119,6 +120,30 @@ export function applyTmuxLiteSandboxEnvironment(
     process.env.TMUX_LITE_REPLAY_DIR = paths.replayDir;
   }
   return paths;
+}
+
+/**
+ * Teardown counterpart to {@link applyTmuxLiteSandboxEnvironment}.
+ *
+ * A sandbox is four paths (`protocol.ts` `getTmuxLitePathsForSandbox`), not just
+ * the socket and pid file. Callers that hand-rolled the path strings kept
+ * forgetting `sessionDir`/`replayDir`, which leaked a `/tmp/tmux-lite-<sandbox>/`
+ * tree per test run. Derive the set from the same helper that created it so a
+ * new path can never be added to one side only.
+ *
+ * `replayDir` lives inside `sessionDir`, so the recursive remove covers it; it is
+ * still listed explicitly because a caller may override `TMUX_LITE_REPLAY_DIR`
+ * out of tree. Best-effort by design: teardown must never fail a passing test.
+ */
+export function removeTmuxLiteSandbox(sandbox: string): void {
+  const paths = getTmuxLitePathsForSandbox(sandbox);
+  for (const path of [paths.routerSocket, paths.pidFile, paths.replayDir, paths.sessionDir]) {
+    try {
+      rmSync(path, { recursive: true, force: true });
+    } catch {
+      // Stale sandbox state is not worth failing teardown over.
+    }
+  }
 }
 
 export function getRouterSocket(): string {
