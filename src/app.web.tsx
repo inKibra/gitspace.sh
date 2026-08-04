@@ -1007,6 +1007,14 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
 
   const handleOpenAgentSession = useCallback((workspaceId: string, agentSessionId: string) => {
     const target = { workspaceId, agentSessionId };
+    // Already on screen? Reuse that pane. Opening always minted a fresh paneId,
+    // so clicking a session twice gave you two panes rendering the same
+    // transcript — and every extra pane takes its own viewer lease on the
+    // daemon. Reattaching the existing paneId is idempotent, so this focuses
+    // rather than duplicates.
+    const existingPane = Object.values(attachedBackendState?.attachedPanes ?? {})
+      .find((pane) => pane.agentSessionId === agentSessionId && pane.workspaceId === workspaceId);
+    const paneId = existingPane?.paneId ?? allocatePaneId('agent');
     // Snapshot current commandError so a stale error from a prior operation cannot
     // immediately clear this pending attach before the backend has a chance to respond.
     attachPendingCommandErrorSnapshotRef.current = commandErrorRef.current;
@@ -1015,7 +1023,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
       setAgentAttachPending(true);
       setPendingAgentAttachTarget(target);
     });
-    openAgentSessionAction(workspaceId, agentSessionId, { attachOptions: { ...getWebAgentAttachSize(), paneId: allocatePaneId('agent') } })
+    openAgentSessionAction(workspaceId, agentSessionId, { attachOptions: { ...getWebAgentAttachSize(), paneId } })
       .then((result) => {
         // open() returning null means the call failed before any backend attach was initiated.
         // Clear pending only if no rapid session switch has since overtaken this request.
@@ -1036,7 +1044,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
           setPendingAgentAttachTarget(null);
         }
       });
-  }, [openAgentSessionAction, getWebAgentAttachSize, allocatePaneId]);
+  }, [openAgentSessionAction, getWebAgentAttachSize, allocatePaneId, attachedBackendState]);
 
   const handleKillAgentSession = useCallback(async (workspaceId: string, agentSessionId: string) => {
     await killAgentSessionAction(workspaceId, agentSessionId);
