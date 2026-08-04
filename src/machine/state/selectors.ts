@@ -1,5 +1,5 @@
 import type { WorkspaceAgentState } from '../../lib/tmux-lite/agent-event-manager.js';
-import type { SessionStatus } from '../../agents/agent-runtime-types.js';
+import { sessionStatusFromActivity } from '../../agents/agent-runtime-types.js';
 import type { ProjectInfo, SessionInfo, WorkspaceInfo } from '../../lib/remote-session/protocol.js';
 import type { MachineSnapshot } from '../../lib/tmux-lite/machine/protocol.js';
 import { selectProjects, selectWorkspaces } from './client.js';
@@ -64,10 +64,13 @@ export function machineSnapshotToAgentState(snapshot: MachineSnapshot): Record<s
         title: session.title,
         updatedAt: session.updatedAt,
         closedAt: session.closedAt,
+        dormantSince: session.dormantSince,
       }));
 
     const statuses: WorkspaceAgentState['statuses'] = {};
     const pendingPermissions: WorkspaceAgentState['pendingPermissions'] = {};
+    const subagentCounts: WorkspaceAgentState['subagentCounts'] = {};
+    const pendingQuestions: WorkspaceAgentState['pendingQuestions'] = {};
     const lastMessages: WorkspaceAgentState['lastMessages'] = {};
     const errorMessages: WorkspaceAgentState['errorMessages'] = {};
     const todoPhases: WorkspaceAgentState['todoPhases'] = {};
@@ -77,18 +80,23 @@ export function machineSnapshotToAgentState(snapshot: MachineSnapshot): Record<s
     for (const sessionId of snapshot.agentSessionIdsByWorkspaceId[workspace.id] ?? []) {
       const session = snapshot.agentSessionsById[sessionId];
       if (!session || session.state === 'archived') continue;
-      let status: SessionStatus | undefined;
-      switch (session.state) {
-        case 'running':
-          status = { type: 'busy' };
-          break;
-        case 'retrying':
-          status = { type: 'retry', attempt: 1, message: session.errorMessage ?? 'retrying', next: Date.now() + 1000 };
-          break;
-        case 'waiting':
-        case 'permission-needed':
-          status = { type: 'idle' };
-          break;
+      // Prefer the canonical activity the daemon shipped: `state` is a lossy
+      // projection, so inverting it guessed. Fall back to the state mapping only
+      // for a daemon that predates `activity`.
+      let status = sessionStatusFromActivity(session.activity, session.errorMessage);
+      if (!status) {
+        switch (session.state) {
+          case 'running':
+            status = { type: 'busy' };
+            break;
+          case 'retrying':
+            status = { type: 'retry', attempt: 1, message: session.errorMessage ?? 'retrying', next: Date.now() + 1000 };
+            break;
+          case 'waiting':
+          case 'permission-needed':
+            status = { type: 'idle' };
+            break;
+        }
       }
       if (status) {
         statuses[session.id] = status;
@@ -102,6 +110,19 @@ export function machineSnapshotToAgentState(snapshot: MachineSnapshot): Record<s
           title: 'Permission needed',
           metadata: {},
           time: { created: Date.now() },
+        }));
+      }
+      // Without this, a session blocked on an `ask` round-trips as 'waiting':
+      // its state is permission-needed, but permissions are empty (the block is
+      // a question) and questions used to be hardcoded empty below — so the
+      // "waiting on a human" fact was destroyed by the reconstruction. The
+      // question TEXT is not in the snapshot; identity and count are, which is
+      // what every consumer derives permission-needed from.
+      if (session.pendingQuestionCount > 0) {
+        pendingQuestions[session.id] = session.pendingQuestionIds.map((questionId) => ({
+          id: questionId,
+          sessionID: session.id,
+          questions: [],
         }));
       }
       if (session.lastMessagePreview) {
@@ -119,6 +140,9 @@ export function machineSnapshotToAgentState(snapshot: MachineSnapshot): Record<s
       if (session.queuedMessages && (session.queuedMessages.steering.length > 0 || session.queuedMessages.followUp.length > 0)) {
         queuedMessages[session.id] = session.queuedMessages;
       }
+      if (session.subagentCount && session.subagentCount > 0) {
+        subagentCounts[session.id] = session.subagentCount;
+      }
     }
 
     result[workspace.id] = {
@@ -126,12 +150,13 @@ export function machineSnapshotToAgentState(snapshot: MachineSnapshot): Record<s
       sessions,
       statuses,
       pendingPermissions,
-      pendingQuestions: {},
+      pendingQuestions,
       lastMessages,
       errorMessages,
       todoPhases,
       modelInfo,
       queuedMessages,
+      subagentCounts,
     };
   }
   return result;

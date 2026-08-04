@@ -1,7 +1,8 @@
 import { listProjectSummaries } from '../../../core/project-catalog.js';
 import { listProjectGoalKanbanItems } from '../../../core/goal-chain.js';
 import { countArchivedSessions, getArchivedSessions } from '../../../agents/agent-db.js';
-import type { WorkspaceAgentState } from '../agent-event-manager.js';
+import { computeSessionActivity, type WorkspaceAgentState } from '../agent-event-manager.js';
+import type { ActivityReason, SessionActivity } from '../../../agents/agent-runtime-types.js';
 import type { Session, WorkspaceRuntimeRecord } from '../protocol.js';
 import { parseProcessSessionName } from '../../processes/names.js';
 import type {
@@ -22,22 +23,38 @@ function determineTerminalState(session: Session): MachineTerminalSessionRecord[
   return 'failed';
 }
 
+/**
+ * `state` is a LOSSY RENDERING PROJECTION of {@link computeSessionActivity} —
+ * activity is the truth about what a session owes, this is the coarse label a
+ * card renders. It deliberately does not surface 'queued' or 'subagents': those
+ * mean "owed", not "executing", so they must not paint an agent green. Read
+ * `record.activity` for anything that needs correctness.
+ *
+ * Precedence (first match wins): lifecycle, human, error, execution.
+ */
 function determineAgentState(
-  workspace: WorkspaceAgentState,
-  sessionId: string,
+  activity: SessionActivity,
   closedAt: string | undefined,
+  dormantSince: string | undefined,
   errorMessage: string | undefined,
-  pendingQuestionCount: number,
-  pendingPermissionCount: number,
 ): MachineAgentSessionRecord['state'] {
   if (closedAt) return 'closed';
-  if (pendingPermissionCount > 0 || pendingQuestionCount > 0) return 'permission-needed';
-  const status = workspace.statuses[sessionId];
-  if (status?.type === 'retry' || errorMessage) return 'retrying';
-  // 'compacting' (auto-compaction in progress) is active work, like 'busy' —
-  // it must surface as a running/green-pulse agent on the board, not idle.
-  if (status?.type === 'busy' || status?.type === 'compacting') return 'running';
+  if (dormantSince) return 'dormant';
+  if (activity.reasons.some((reason) => reason.kind === 'human')) return 'permission-needed';
+  if (errorMessage || activity.reasons.some((reason) => reason.kind === 'retry')) return 'retrying';
+  if (activity.reasons.some((reason) => reason.kind === 'turn' || reason.kind === 'compacting')) return 'running';
   return 'waiting';
+}
+
+/** Replace the `human` reason with dialog-inclusive counts (or add/drop it), so
+ *  the shipped activity matches `pendingQuestionCount`/`pendingPermissionCount`
+ *  on the same record. */
+function withHumanReason(activity: SessionActivity, questions: number, permissions: number): SessionActivity {
+  const withoutHuman = activity.reasons.filter((reason) => reason.kind !== 'human');
+  const reasons: ActivityReason[] = questions > 0 || permissions > 0
+    ? [...withoutHuman, { kind: 'human', questions, permissions }]
+    : withoutHuman;
+  return { active: reasons.length > 0, reasons };
 }
 
 
@@ -305,21 +322,24 @@ export function buildAgentSessionRecordsForWorkspace(params: {
       ];
       const errorMessage = workspace.errorMessages[session.id]
         ?? (workspace.statuses[session.id]?.type === 'retry' ? 'retrying' : undefined);
+      // Extension dialog requests are counted in pendingQuestionIds but live
+      // outside WorkspaceAgentState, so computeSessionActivity cannot see them.
+      // Fold the dialog-inclusive counts back in, otherwise a dialog-only block
+      // would ship as `active: false` while pendingQuestionCount says otherwise.
+      const activity = withHumanReason(
+        computeSessionActivity(workspace, session.id),
+        pendingQuestionIds.length,
+        pendingPermissionIds.length,
+      );
       records.push({
         id: session.id,
         workspaceId,
         projectId,
         title: session.title,
-        state: determineAgentState(
-          workspace,
-          session.id,
-          session.closedAt,
-          errorMessage,
-          pendingQuestionIds.length,
-          pendingPermissionIds.length,
-        ),
+        state: determineAgentState(activity, session.closedAt, session.dormantSince, errorMessage),
         updatedAt: session.updatedAt,
         closedAt: session.closedAt,
+        dormantSince: session.dormantSince,
         pendingPermissionIds,
         pendingPermissionCount: pendingPermissionIds.length,
         pendingQuestionIds,
@@ -329,6 +349,8 @@ export function buildAgentSessionRecordsForWorkspace(params: {
         modelInfo: workspace.modelInfo?.[session.id],
         todoPhases: workspace.todoPhases?.[session.id],
         queuedMessages: workspace.queuedMessages?.[session.id],
+        subagentCount: workspace.subagentCounts?.[session.id],
+        activity,
       });
       seen.add(session.id);
     }
@@ -376,7 +398,11 @@ export function computeAgentSummaryCounts(agents: MachineAgentSessionRecord[]): 
       case 'waiting': waitingAgentCount += 1; break;
       case 'permission-needed': permissionAgentCount += 1; break;
       case 'retrying': retryingAgentCount += 1; break;
-      case 'closed': closedAgentCount += 1; break;
+      // 'dormant' counts as closed for SUMMARY purposes: a seeded session used to
+      // be stamped 'closed', so folding it here keeps board counts identical
+      // while the record still carries the real distinction for anything that
+      // wants to render "resumable" differently from "dismissed".
+      case 'closed': case 'dormant': closedAgentCount += 1; break;
       case 'archived': archivedAgentCount += 1; break;
     }
   }

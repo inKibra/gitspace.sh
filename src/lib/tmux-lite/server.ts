@@ -1,5 +1,4 @@
 #!/usr/bin/env bun
-// @ts-nocheck - Uses Bun-specific APIs (Bun.Terminal, etc.)
 /**
  * tmux-lite server - manages all sessions in a single process
  * Uses xterm-headless for proper terminal state tracking
@@ -14,8 +13,8 @@ import { installDsrCprResponder } from "./terminal-queries";
 import { writeTraceLog } from '../../utils/trace-log.js';
 import { raiseFileDescriptorLimitAtBoot } from '../../utils/rlimit.js';
 import { getCodeVersion } from './code-version.js';
-import { getNotificationConfig, updateNotificationConfig, type NotificationConfig } from "../../core/config.js";
-import { DEFAULT_NOTIFICATION_CONFIG } from "../../types/config.js";
+import { getNotificationConfig, updateNotificationConfig } from "../../core/config.js";
+import { DEFAULT_NOTIFICATION_CONFIG, type NotificationConfig } from "../../types/config.js";
 import {
   applyTmuxLiteSandboxEnvironment,
   getRouterSocket,
@@ -46,7 +45,7 @@ import {
   updateReplayManifest,
   writeReplayCheckpoint,
 } from "./replay/store.js";
-import type { ReplayCheckpoint, ReplayEvent, ReplayManifest } from "./replay/types.js";
+import type { ReplayCheckpoint, ReplayEvent, ReplayEventInput, ReplayManifest } from "./replay/types.js";
 import { getReplayMarkdown, getReplaySnapshot, getReplayText } from "./replay/snapshot.js";
 import {
   openAgentSession,
@@ -102,6 +101,7 @@ import {
   listAgentCommands,
   getFileSuggestions,
 } from './agent-control.js';
+import { defaultAgentEventManager, type AgentStateUpdateDelta } from './agent-event-manager.js';
 import { listAvailableEditors, openWorkspaceInEditor } from '../../utils/open-editor.js';
 import { normalizeWorkspacePath } from '../../agents/agent-runtime-shared.js';
 import { getWorkspaceRuntimeSnapshot } from './workspace-runtime.js';
@@ -518,7 +518,7 @@ function clampTerminalSize(
   };
 }
 
-function broadcastAgentStateDelta(delta: import('./agent-event-manager.js').AgentStateUpdateDelta): void {
+function broadcastAgentStateDelta(delta: AgentStateUpdateDelta): void {
   if (delta.type !== 'agent_last_message') {
     writeTraceLog('agent-delta-broadcast', {
       deltaType: delta.type,
@@ -535,8 +535,36 @@ function broadcastAgentStateDelta(delta: import('./agent-event-manager.js').Agen
   }
 }
 
-function shouldBroadcastMachineSnapshotForAgentDelta(delta: import('./agent-event-manager.js').AgentStateUpdateDelta): boolean {
-  return delta.type !== 'agent_last_message';
+/**
+ * Route an agent delta to the cheapest machine-snapshot update that is still
+ * correct.
+ *
+ * Two variants carry no `workspaceId`, so they MUST NOT take the scoped path.
+ * Passing `undefined` through threw inside `computeAgentWorkspaceDeltaEvents`
+ * (`workspaceId.endsWith` on undefined), and `AgentEventManager.emit` swallows
+ * handler throws by design — so the machine snapshot silently went stale until
+ * the 5-minute reconcile timer.
+ */
+function applyMachineSnapshotForAgentDelta(
+  delta: AgentStateUpdateDelta,
+): void {
+  switch (delta.type) {
+    // Preview text only; nothing the machine snapshot renders moves.
+    case 'agent_last_message':
+      return;
+    // Transient sign-in flow state: global, and absent from the snapshot.
+    case 'agent_oauth_event':
+      return;
+    // Every workspace may have changed at once — a full rebuild is the only
+    // correct response, and it is what the scoped path was failing to do.
+    case 'agent_state_snapshot':
+      void broadcastMachineSnapshotReplacement().catch(() => {});
+      return;
+    // Scoped: rebuild only this workspace's agent records in the live model
+    // instead of the O(everything) full snapshot per delta.
+    default:
+      applyAgentScopedUpdate(delta.workspaceId);
+  }
 }
 
 
@@ -780,11 +808,7 @@ async function getAgentControlReady(): Promise<void> {
   if (!agentControlSubscribed) {
     subscribeAgentControl((delta) => {
       broadcastAgentStateDelta(delta);
-      if (shouldBroadcastMachineSnapshotForAgentDelta(delta)) {
-        // Scoped: rebuild only this workspace's agent records in the live
-        // model instead of the O(everything) full snapshot per delta.
-        applyAgentScopedUpdate(delta.workspaceId);
-      }
+      applyMachineSnapshotForAgentDelta(delta);
     });
     agentControlSubscribed = true;
 
@@ -1051,11 +1075,14 @@ async function resolveArtifactUriDirs(uri: string): Promise<{ projectDir: string
   return { projectDir, workspaceDir, mountDir, relPath: parsed.relPath, isBase };
 }
 
-/** Fire `onIdle` once when an agent session completes a run (busy → idle).
- *  Used to close the trigger run lifecycle — before this, nothing ever
- *  recorded `ok` and every cron re-fired on pending-lock expiry instead of
- *  its cadence. Auto-unsubscribes; a session that never goes busy within the
- *  grace window is treated as complete on its first idle after that. */
+/** Fire `onIdle` once when an agent session finishes owing anything. Used to
+ *  close the trigger run lifecycle — before this, nothing ever recorded `ok` and
+ *  every cron re-fired on pending-lock expiry instead of its cadence.
+ *
+ *  Completion is `!activity.active`, NOT `status === 'idle'`: a run whose turn
+ *  ended but which still has subagents working, a queued message, or a pending
+ *  human answer is not finished. Auto-unsubscribes; a session that never goes
+ *  busy within the grace window is treated as complete on its first quiet tick. */
 function watchAgentSessionIdle(
   workspace: { id: string },
   sessionId: string,
@@ -1064,13 +1091,13 @@ function watchAgentSessionIdle(
   let sawBusy = false;
   const startedAt = Date.now();
   const unsubscribe = subscribeAgentControl((delta) => {
-    if (delta.type !== 'agent_session_status' || delta.sessionId !== sessionId || delta.workspaceId !== workspace.id) return;
-    if (delta.status.type === 'busy' || delta.status.type === 'retry' || delta.status.type === 'compacting') {
+    if ('sessionId' in delta && delta.sessionId !== sessionId) return;
+    const activity = defaultAgentEventManager.getSessionActivity(workspace.id, sessionId);
+    if (activity.active) {
       sawBusy = true;
       return;
     }
-    if (delta.status.type !== 'idle') return;
-    // Idle before ever going busy = the prompt hasn't landed yet; give it a
+    // Quiet before ever going busy = the prompt hasn't landed yet; give it a
     // grace window instead of declaring instant success.
     if (!sawBusy && Date.now() - startedAt < 30_000) return;
     unsubscribe();
@@ -1658,7 +1685,7 @@ function syncReplayManifest(
   }
 }
 
-function createReplayEvent(replay: ReplayRuntime, event: Omit<ReplayEvent, "v" | "seq" | "t">): ReplayEvent {
+function createReplayEvent(replay: ReplayRuntime, event: ReplayEventInput): ReplayEvent {
   const base = {
     v: 1 as const,
     seq: replay.nextSeq,
@@ -1683,7 +1710,7 @@ function createReplayEvent(replay: ReplayRuntime, event: Omit<ReplayEvent, "v" |
   }
 }
 
-function recordReplayEvent(session: SessionData, event: Omit<ReplayEvent, "v" | "seq" | "t">): void {
+function recordReplayEvent(session: SessionData, event: ReplayEventInput): void {
   const replay = session.replay;
   if (!replay) {
     return;
@@ -2048,8 +2075,16 @@ function createPtyDataHandler(
   osc133State: Osc133State,
   checkIdle: () => void,
   getProcessTitle: () => string
-): (term: Bun.Terminal, data: Buffer) => void {
-  return (term, data) => {
+): (term: Bun.Terminal, data: Uint8Array) => void {
+  return (term, rawData) => {
+    // Bun types this callback as Uint8Array but delivers a Buffer. The body
+    // below relies on Buffer semantics (`toString('base64')`, decoded
+    // `toString()`) — on a plain Uint8Array those silently yield comma-joined
+    // byte numbers. Normalize at the boundary instead of trusting an undeclared
+    // runtime guarantee; the wrap is a view, not a copy.
+    const data = Buffer.isBuffer(rawData)
+      ? rawData
+      : Buffer.from(rawData.buffer, rawData.byteOffset, rawData.byteLength);
     // Track output for idle detection
     idleState.lastOutputTime = Date.now();
     idleState.outputSinceIdle += data.length;
@@ -2405,12 +2440,16 @@ function createSessionSocketHandlers(
       if (!session) return;
 
       const applyResize = (cols: number, rows: number) => {
+        // Session teardown closes the PTY master and nulls this (see the fd-leak
+        // fix in destroySession). A resize racing teardown has nowhere to go.
+        const ptyTerminal = session.ptyTerminal;
+        if (!ptyTerminal) return;
         const nextSize = clampTerminalSize(cols, rows, {
           cols: session.xterm.cols,
           rows: session.xterm.rows,
         });
         try {
-          session.ptyTerminal.resize(nextSize.cols, nextSize.rows);
+          ptyTerminal.resize(nextSize.cols, nextSize.rows);
           session.xterm.resize(nextSize.cols, nextSize.rows);
           recordReplayEvent(session, { type: "resize", cols: nextSize.cols, rows: nextSize.rows });
           scheduleReplayCheckpoint(session, true);
@@ -2473,22 +2512,28 @@ function createSessionSocketHandlers(
             console.log(`[${sessionName}] detached`);
           }
         } else if (frame.type === FrameType.PTY) {
+          // Input can race session teardown, which closes the PTY master and
+          // nulls ptyTerminal. There is nowhere to write it, so drop this frame
+          // and keep draining the batch — a trailing detach control frame in the
+          // same read must still be handled.
+          const ptyTerminal = session.ptyTerminal;
+          if (!ptyTerminal) continue;
           // Workaround for Bun PTY Ctrl+C line-discipline behavior.
           // Auto mode respects raw-mode apps (ISIG off => pass ETX through).
           // Override with TMUX_LITE_CTRL_C_MODE=signal|byte.
           if (frame.payload.length === 1 && frame.payload[0] === ETX_BYTE) {
-            const shouldSignal = terminalSignalsEnabled(session.ptyTerminal);
+            const shouldSignal = terminalSignalsEnabled(ptyTerminal);
             if (shouldSignal) {
               const signaled = sendInterruptSignal(proc);
               if (!signaled) {
-                session.ptyTerminal.write(frame.payload);
+                ptyTerminal.write(frame.payload);
               }
             } else {
-              session.ptyTerminal.write(frame.payload);
+              ptyTerminal.write(frame.payload);
             }
           } else {
             // Raw PTY input - write to terminal
-            session.ptyTerminal.write(frame.payload);
+            ptyTerminal.write(frame.payload);
           }
           if (RECORD_REPLAY_INPUT) {
             recordReplayEvent(session, {
@@ -2643,7 +2688,12 @@ function createSession(
   });
 
   const serialize = new SerializeAddon();
-  xterm.loadAddon(serialize);
+  // Upstream typing skew, not a defect here: @xterm/addon-serialize declares
+  // itself against @xterm/xterm (the DOM build) while the daemon runs
+  // @xterm/headless. The two ITerminalAddon/Terminal declarations are
+  // structurally distinct types, so the addon is not assignable even though the
+  // runtime surface it uses is identical. Cast at this single seam.
+  xterm.loadAddon(serialize as unknown as Parameters<XTerminal['loadAddon']>[0]);
 
   // Set up xterm event handlers for notifications (bell, title changes)
   const { getProcessTitle } = setupXtermEventHandlers(id, sessionName, xterm);
@@ -4080,6 +4130,7 @@ export async function dispatchCommand(cmd: Command): Promise<Response | null> {
                         pendingPermissions: (w.pendingPermissions?.[s.id] ?? []).length,
                         pendingQuestions: (w.pendingQuestions?.[s.id] ?? []).length,
                         closedAt: s.closedAt,
+                        dormantSince: s.dormantSince,
                         errorMessage: w.errorMessages?.[s.id],
                         lastMessage: w.lastMessages?.[s.id]?.slice(0, 120),
                       });

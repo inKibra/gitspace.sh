@@ -62,6 +62,7 @@ describe('buildMachineSnapshot', () => {
           todoPhases: {},
           modelInfo: {},
           queuedMessages: {},
+          subagentCounts: {},
         } satisfies WorkspaceAgentState,
       },
     });
@@ -69,6 +70,70 @@ describe('buildMachineSnapshot', () => {
     expect(snapshot.agentSessionsById['agent-1']?.state).toBe('waiting');
     expect(snapshot.workspacesById['demo:ws-1']?.summary.runningAgentCount).toBe(0);
     expect(snapshot.workspacesById['demo:ws-1']?.summary.waitingAgentCount).toBe(1);
+  });
+
+  it('projects dormant and closed as distinct states while both count as closed', () => {
+    // dormantSince = no live worker, closedAt = user dismissed. The states must
+    // differ (they used to share one field) but summary counts stay as before, so
+    // boards do not shift when the distinction lands.
+    const snapshot = buildMachineSnapshot({
+      snapshotNonce: 1,
+      terminalSessions: [],
+      workspaces: [makeWorkspace()],
+      agentStateByWorkspaceId: {
+        'demo:ws-1': {
+          workspaceId: 'demo:ws-1',
+          sessions: [
+            { id: 'agent-dormant', title: 'Seeded', dormantSince: '2026-01-01T00:00:00.000Z' },
+            { id: 'agent-closed', title: 'Dismissed', closedAt: '2026-01-01T00:00:00.000Z' },
+          ],
+          statuses: {},
+          pendingPermissions: {},
+          pendingQuestions: {},
+          lastMessages: {},
+          errorMessages: {},
+          todoPhases: {},
+          modelInfo: {},
+          queuedMessages: {},
+          subagentCounts: {},
+        } satisfies WorkspaceAgentState,
+      },
+    });
+
+    expect(snapshot.agentSessionsById['agent-dormant']?.state).toBe('dormant');
+    expect(snapshot.agentSessionsById['agent-closed']?.state).toBe('closed');
+    expect(snapshot.workspacesById['demo:ws-1']?.summary.closedAgentCount).toBe(2);
+    expect(snapshot.workspacesById['demo:ws-1']?.summary.waitingAgentCount).toBe(0);
+  });
+
+  it('ships activity so consumers never re-derive idleness', () => {
+    const snapshot = buildMachineSnapshot({
+      snapshotNonce: 1,
+      terminalSessions: [],
+      workspaces: [makeWorkspace()],
+      agentStateByWorkspaceId: {
+        'demo:ws-1': {
+          workspaceId: 'demo:ws-1',
+          sessions: [{ id: 'agent-1', title: 'Agent 1' }],
+          statuses: { 'agent-1': { type: 'idle' } },
+          pendingPermissions: {},
+          pendingQuestions: {},
+          lastMessages: {},
+          errorMessages: {},
+          todoPhases: {},
+          modelInfo: {},
+          queuedMessages: {},
+          subagentCounts: { 'agent-1': 2 },
+        } satisfies WorkspaceAgentState,
+      },
+    });
+
+    // Turn ended but two children are working: not idle, yet deliberately NOT
+    // painted 'running' either — `state` means executing, `activity` means owed.
+    const record = snapshot.agentSessionsById['agent-1'];
+    expect(record?.activity).toEqual({ active: true, reasons: [{ kind: 'subagents', count: 2 }] });
+    expect(record?.subagentCount).toBe(2);
+    expect(record?.state).toBe('waiting');
   });
   it('caps an oversized snapshot below the reassembly ceiling by trimming heavy fields', () => {
     // A single session with ~30 MiB of queued text would push the snapshot past
@@ -91,6 +156,7 @@ describe('buildMachineSnapshot', () => {
           todoPhases: {},
           modelInfo: {},
           queuedMessages: { 'agent-1': { steering: [huge], followUp: [] } },
+          subagentCounts: {},
         } satisfies WorkspaceAgentState,
       },
     });
@@ -117,6 +183,7 @@ describe('buildMachineSnapshot', () => {
           todoPhases: {},
           modelInfo: {},
           queuedMessages: {},
+          subagentCounts: {},
         } satisfies WorkspaceAgentState,
       },
     });
@@ -159,6 +226,7 @@ describe('buildMachineSnapshot', () => {
           todoPhases: {},
           modelInfo: {},
           queuedMessages: {},
+          subagentCounts: {},
         } satisfies WorkspaceAgentState,
       },
     });
@@ -192,6 +260,7 @@ describe('buildMachineSnapshot', () => {
               followUp: ['summarize the result'],
             },
           },
+          subagentCounts: {},
         } satisfies WorkspaceAgentState,
       },
     });
@@ -392,6 +461,7 @@ describe('buildMachineSnapshot', () => {
       todoPhases: {},
       modelInfo: {},
       queuedMessages: {},
+      subagentCounts: {},
     };
     const live = buildAgentSessionRecordsForWorkspace({
       workspaceId: 'demo:ws-1',
@@ -415,6 +485,7 @@ describe('buildMachineSnapshot', () => {
       todoPhases: {},
       modelInfo: {},
       queuedMessages: {},
+      subagentCounts: {},
     };
     const closed = buildAgentSessionRecordsForWorkspace({
       workspaceId: 'demo:ws-1',

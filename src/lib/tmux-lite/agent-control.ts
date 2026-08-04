@@ -109,12 +109,12 @@ export function ensureAgentControlInitialized(): Promise<void> {
                 next: Number((payload as any).next ?? Date.now()),
               });
             } else if (payload?.type === 'dormant') {
-              // The session's live worker is gone (evicted / no owners / crash):
-              // return it to the dormant, not-running state (same representation
-              // it has at daemon startup) so a card shows grey, not a frozen
-              // busy/retry/error. Red is reserved for a live, currently-erroring
-              // session. The next interaction lazily reboots it via ensureHost.
-              defaultAgentEventManager.markSessionClosed(target.workspaceId, event.sessionId);
+              // The session's live worker is gone (explicit close, boot failure,
+              // or crash). That is DORMANT, not closed: nobody dismissed it, and
+              // the next interaction lazily reboots it from its session file.
+              // Marking it closed here is what made "no worker" indistinguishable
+              // from "user closed it".
+              defaultAgentEventManager.markSessionDormant(target.workspaceId, event.sessionId);
             } else if (payload?.type === 'todo_update' && Array.isArray((payload as any).phases)) {
               defaultAgentEventManager.setExternalTodoPhases(target.workspaceId, event.sessionId, (payload as any).phases);
             } else if (payload?.type === 'model_update') {
@@ -139,6 +139,9 @@ export function ensureAgentControlInitialized(): Promise<void> {
             break;
           case 'queued_messages':
             defaultAgentEventManager.setExternalQueuedMessages(target.workspaceId, event.sessionId, event.queued);
+            break;
+          case 'subagents':
+            defaultAgentEventManager.setExternalSubagentCount(target.workspaceId, event.sessionId, event.count);
             break;
           case 'error':
             defaultAgentEventManager.setExternalError(target.workspaceId, event.sessionId, event.error);
@@ -264,6 +267,7 @@ export async function getKnownAgentSessions(target: AgentWorkspaceTarget): Promi
     title: s.title,
     updatedAt: s.updatedAt,
     closedAt: s.closedAt,
+    dormantSince: s.dormantSince,
   }));
 
   const archived: AgentSessionSummary[] = getArchivedSessions(target.workspaceId).map((a) => ({
@@ -281,8 +285,9 @@ export async function getKnownAgentSessions(target: AgentWorkspaceTarget): Promi
 }
 
 /**
- * Fetches live sessions from Pi session files and merges closedAt from the
- * current snapshot so sessions that haven't been un-closed stay closed.
+ * Fetches live sessions from Pi session files and merges the retirement markers
+ * from the current snapshot so sessions that were never activated stay dormant
+ * and dismissed ones stay closed.
  */
 export async function listLiveAgentSessions(target: AgentWorkspaceTarget): Promise<AgentSessionSummary[]> {
   await ensureAgentControlInitialized();
@@ -293,7 +298,7 @@ export async function listLiveAgentSessions(target: AgentWorkspaceTarget): Promi
   // Sync into event manager so the snapshot stays current
   defaultAgentEventManager.syncKnownSessions(target.workspaceId, liveSessions);
 
-  // Preserve closedAt from snapshot for sessions not yet activated.
+  // Preserve retirement markers from the snapshot for sessions not yet activated.
   const snapshot = defaultAgentEventManager.getSnapshot();
   const snapshotMap = new Map(
     (snapshot[target.workspaceId]?.sessions ?? []).map((s) => [s.id, s]),
@@ -304,6 +309,7 @@ export async function listLiveAgentSessions(target: AgentWorkspaceTarget): Promi
     .map((s) => ({
       ...s,
       closedAt: snapshotMap.get(s.id)?.closedAt,
+      dormantSince: snapshotMap.get(s.id)?.dormantSince,
     }));
 }
 

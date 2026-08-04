@@ -12,6 +12,7 @@ function cloneWorkspaceState(state: WorkspaceAgentState): WorkspaceAgentState {
     todoPhases: { ...state.todoPhases },
     modelInfo: { ...state.modelInfo },
     queuedMessages: { ...state.queuedMessages },
+    subagentCounts: { ...state.subagentCounts },
   };
 }
 
@@ -27,6 +28,7 @@ function createEmptyWorkspaceState(workspaceId: string): WorkspaceAgentState {
     todoPhases: {},
     modelInfo: {},
     queuedMessages: {},
+    subagentCounts: {},
   };
 }
 

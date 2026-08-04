@@ -61,6 +61,7 @@ import type {
 } from '../backend.js';
 import type { AgentControlInfo, AgentDefinitionInfo, AgentGoalModeInfo, AgentHistoryEntry, AgentSessionUsageReport, AgentSettingItem, AgentSettingSchemaItem, AgentShakeMode, AgentShakeResult, AgentToolInfo, AgentTreeNode } from '../../agents/agent-runtime-types.js';
 import type { BackendEvent } from '../events.js';
+import { computeSessionActivity } from '../../lib/tmux-lite/agent-event-manager.js';
 import type { AgentStateUpdateDelta, WorkspaceAgentState } from '../../lib/tmux-lite/agent-event-manager.js';
 import type { AgentStateSnapshotPush, AgentStateUpdatePush } from '../../lib/remote-session/protocol.js';
 import { applyAgentDeltaToAgentState } from '../../lib/tmux-lite/agent-state-reducer.js';
@@ -2619,10 +2620,14 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     const nextSession = {
       ...session,
       closedAt: patch.closedAt !== undefined ? patch.closedAt : session.closedAt,
+      dormantSince: patch.dormantSince !== undefined ? patch.dormantSince : session.dormantSince,
       archivedAt: patch.archivedAt !== undefined ? patch.archivedAt : session.archivedAt,
     };
     if (patch.state === 'closed' && !nextSession.closedAt) {
       nextSession.closedAt = new Date().toISOString();
+    }
+    if (patch.state === 'dormant' && !nextSession.dormantSince) {
+      nextSession.dormantSince = new Date().toISOString();
     }
     if (patch.state === 'archived' && !nextSession.archivedAt) {
       nextSession.archivedAt = new Date().toISOString();
@@ -2635,7 +2640,9 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       nextSession,
       ...workspace.sessions.slice(sessionIndex + 1),
     ];
-    if (patch.state === 'closed' || patch.state === 'archived') {
+    // Any retirement drops the transient per-session state: it describes a live
+    // worker and must not outlive one, or a retired card renders a frozen status.
+    if (patch.state === 'closed' || patch.state === 'dormant' || patch.state === 'archived') {
       delete workspace.statuses[agent.id];
       delete workspace.pendingPermissions[agent.id];
       delete workspace.pendingQuestions[agent.id];
@@ -2644,6 +2651,9 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       delete workspace.todoPhases[agent.id];
       delete workspace.modelInfo[agent.id];
       delete workspace.queuedMessages[agent.id];
+      // Guarded: this cache holds states received over the wire, which may come
+      // from a peer that predates subagentCounts, so the map can be absent.
+      if (workspace.subagentCounts) delete workspace.subagentCounts[agent.id];
     }
   }
 
@@ -3084,15 +3094,19 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     const status = workspace.statuses[sessionId];
     const errorMessage = workspace.errorMessages[sessionId]
       ?? (status?.type === 'retry' ? status.message : undefined);
+    // Same computation the daemon runs (computeSessionActivity), so a session
+    // cannot read one way locally and another remotely — this branch used to
+    // re-derive state by hand and had already drifted on 'compacting'.
+    const activity = computeSessionActivity(workspace, sessionId);
     const state: MachineAgentSessionRecord['state'] = session.archivedAt
       ? 'archived'
       : session.closedAt
         ? 'closed'
         : pendingPermissionIds.length > 0 || pendingQuestionIds.length > 0
           ? 'permission-needed'
-          : status?.type === 'retry' || errorMessage
+          : errorMessage || activity.reasons.some((reason) => reason.kind === 'retry')
             ? 'retrying'
-            : status?.type === 'busy'
+            : activity.reasons.some((reason) => reason.kind === 'turn' || reason.kind === 'compacting')
               ? 'running'
               : 'waiting';
 
@@ -3114,6 +3128,8 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       modelInfo: workspace.modelInfo[sessionId],
       todoPhases: workspace.todoPhases[sessionId],
       queuedMessages: workspace.queuedMessages[sessionId],
+      subagentCount: workspace.subagentCounts?.[sessionId],
+      activity,
     };
   }
 
@@ -3132,7 +3148,9 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
       waitingAgentCount: agents.filter((agent) => agent.state === 'waiting').length,
       permissionAgentCount: agents.filter((agent) => agent.state === 'permission-needed').length,
       retryingAgentCount: agents.filter((agent) => agent.state === 'retrying').length,
-      closedAgentCount: agents.filter((agent) => agent.state === 'closed').length,
+      // Matches summarizeAgents() in machine/build.ts: dormant folds into the
+      // closed bucket so counts stay identical across transports.
+      closedAgentCount: agents.filter((agent) => agent.state === 'closed' || agent.state === 'dormant').length,
       archivedAgentCount: agents.filter((agent) => agent.state === 'archived').length,
     };
     const agentIdsChanged = workspace.agentSessionIds.length !== agentIds.length

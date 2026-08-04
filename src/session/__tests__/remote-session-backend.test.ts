@@ -309,6 +309,45 @@ function createMachineSnapshotWithWorkspace() {
   };
 }
 
+/**
+ * Snapshot that already contains `agent-1`.
+ *
+ * The MACHINE SNAPSHOT is the existence authority for agents
+ * (see syncAgentWorkspaceIntoMachineSnapshot in remote-session-backend.ts): the
+ * agent-state feed only ENRICHES agents the snapshot already carries, it can no
+ * longer add them — that asymmetry is what fixed the "blink in and out" flicker.
+ * So any test exercising enrichment, or closing an agent, must introduce it here
+ * first; a feed-only agent is correctly ignored.
+ */
+function createMachineSnapshotWithAgent(agentSessionId = 'agent-1', title = 'Agent One') {
+  const base = createMachineSnapshotWithWorkspace();
+  const workspace = base.workspacesById['alpha:ws-1']!;
+  return {
+    ...base,
+    agentSessionsById: {
+      [agentSessionId]: {
+        id: agentSessionId,
+        workspaceId: 'alpha:ws-1',
+        projectId: 'alpha',
+        title,
+        state: 'waiting' as const,
+        pendingPermissionIds: [],
+        pendingPermissionCount: 0,
+        pendingQuestionIds: [],
+        pendingQuestionCount: 0,
+      },
+    },
+    agentSessionIdsByWorkspaceId: { 'alpha:ws-1': [agentSessionId] },
+    workspacesById: {
+      'alpha:ws-1': {
+        ...workspace,
+        agentSessionIds: [agentSessionId],
+        summary: { ...workspace.summary, agentCount: 1, waitingAgentCount: 1 },
+      },
+    },
+  };
+}
+
 async function connectAndHandshake(
   backend: RemoteSessionBackend<FakeSocket, FakeHandshakeState, FakeServerHello, FakeServerAuth>,
   socket: FakeSocket
@@ -661,51 +700,7 @@ describe('RemoteSessionBackend', () => {
     socket.handlers?.onMessage(
       makeRelayDataPayload(cryptoAdapter, {
         type: 'machine_snapshot',
-        snapshot: {
-          ...createEmptyMachineSnapshot(),
-          projectsById: {
-            alpha: {
-              id: 'alpha',
-              name: 'alpha',
-              repository: 'org/alpha',
-              isCurrent: true,
-              workspaceIds: ['alpha:ws-1'],
-              workspaceCount: 1,
-            },
-          },
-          projectOrder: ['alpha'],
-          workspacesById: {
-            'alpha:ws-1': {
-              id: 'alpha:ws-1',
-              name: 'ws-1',
-              projectId: 'alpha',
-              projectName: 'alpha',
-              path: '/tmp/alpha/ws-1',
-              terminalSessionIds: [],
-              agentSessionIds: [],
-              processIds: [],
-              replayIds: [],
-              summary: {
-                terminalCount: 0,
-                attachedTerminalCount: 0,
-                runningTerminalCount: 0,
-                failedTerminalCount: 0,
-                agentCount: 0,
-                runningAgentCount: 0,
-                waitingAgentCount: 0,
-                permissionAgentCount: 0,
-                retryingAgentCount: 0,
-                closedAgentCount: 0,
-                archivedAgentCount: 0,
-                configuredProcessCount: 0,
-                runningProcessCount: 0,
-                failedProcessCount: 0,
-              },
-            },
-          },
-          workspaceOrder: ['alpha:ws-1'],
-          workspaceIdsByProjectId: { alpha: ['alpha:ws-1'] },
-        },
+        snapshot: createMachineSnapshotWithAgent(),
       })
     );
     await Bun.sleep(0);
@@ -762,7 +757,7 @@ describe('RemoteSessionBackend', () => {
     await connectAndHandshake(backend, socket);
     socket.handlers?.onMessage(makeRelayDataPayload(cryptoAdapter, {
       type: 'machine_snapshot',
-      snapshot: createMachineSnapshotWithWorkspace(),
+      snapshot: createMachineSnapshotWithAgent(),
     }));
     await Bun.sleep(0);
     socket.handlers?.onMessage(makeRelayDataPayload(cryptoAdapter, {
@@ -843,7 +838,7 @@ describe('RemoteSessionBackend', () => {
     await connectAndHandshake(backend, socket);
     socket.handlers?.onMessage(makeRelayDataPayload(cryptoAdapter, {
       type: 'machine_snapshot',
-      snapshot: createMachineSnapshotWithWorkspace(),
+      snapshot: createMachineSnapshotWithAgent(),
     }));
     socket.handlers?.onMessage(makeRelayDataPayload(cryptoAdapter, {
       type: 'agent_state_snapshot',

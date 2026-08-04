@@ -17,9 +17,11 @@ import { getArchivedSessions } from '../../agents/agent-db.js';
 import { writeAgentLog } from '../../agents/agent-log.js';
 import { normalizeWorkspacePath } from '../../agents/agent-runtime-shared.js';
 import type {
+  ActivityReason,
   AgentModelInfo,
   PendingQuestion,
   Permission,
+  SessionActivity,
   SessionStatus,
   TodoPhase,
 } from '../../agents/agent-runtime-types.js';
@@ -27,7 +29,14 @@ import type {
 export interface AgentSessionSummary {
   id: string;
   title: string;
+  /** The user dismissed this session. Sticky intent — only an explicit reopen
+   *  clears it. */
   closedAt?: string;
+  /** No live worker, but nothing was dismissed: seeded from disk at daemon
+   *  start, or the worker went away. Resumable. Kept separate from `closedAt`
+   *  because one field meaning both made a never-touched session look
+   *  deliberately closed. */
+  dormantSince?: string;
   archivedAt?: string;
   updatedAt?: string;
 }
@@ -46,6 +55,48 @@ export interface WorkspaceAgentState {
   modelInfo: Record<string, AgentModelInfo>;
   /** SDK-backed queued steer/follow-up messages per session for UI display. */
   queuedMessages: Record<string, { steering: string[]; followUp: string[] }>;
+  /** Live subagent count per session, reported by the worker's AgentRegistry.
+   *  The daemon cannot see the registry — it is process-global in the worker. */
+  subagentCounts: Record<string, number>;
+}
+
+/**
+ * THE definition of "is this session doing or owing anything" — the single
+ * producer of activity, pure over `WorkspaceAgentState` so both the daemon and
+ * the snapshot builder call the same code.
+ *
+ * A `SessionStatus` only describes the current LLM turn. Deriving idleness from
+ * it independently is exactly what let `compacting` read as idle in two places
+ * and a human-blocked session read as idle in a third. Anything a session still
+ * OWES counts: a pending human answer, an unconsumed queued message, or
+ * subagents still working — none of which are visible in a status.
+ *
+ * Reasons are ordered most-immediate first so a UI can render `reasons[0]` as
+ * the headline.
+ */
+export function computeSessionActivity(state: WorkspaceAgentState, sessionId: string): SessionActivity {
+  const reasons: ActivityReason[] = [];
+  // Every map is optional-chained: this runs inside the snapshot builder, which
+  // is fed states reconstructed from the wire and from test fixtures, not just
+  // fully-populated daemon state. A missing map means "nothing of that kind".
+  const status = state.statuses?.[sessionId];
+  if (status?.type === 'busy') reasons.push({ kind: 'turn' });
+  if (status?.type === 'compacting') reasons.push({ kind: 'compacting' });
+  if (status?.type === 'retry') reasons.push({ kind: 'retry', attempt: status.attempt, next: status.next });
+
+  const questions = state.pendingQuestions?.[sessionId]?.length ?? 0;
+  const permissions = state.pendingPermissions?.[sessionId]?.length ?? 0;
+  if (questions > 0 || permissions > 0) reasons.push({ kind: 'human', questions, permissions });
+
+  const queued = state.queuedMessages?.[sessionId];
+  const steering = queued?.steering.length ?? 0;
+  const followUp = queued?.followUp.length ?? 0;
+  if (steering > 0 || followUp > 0) reasons.push({ kind: 'queued', steering, followUp });
+
+  const subagents = state.subagentCounts?.[sessionId] ?? 0;
+  if (subagents > 0) reasons.push({ kind: 'subagents', count: subagents });
+
+  return { active: reasons.length > 0, reasons };
 }
 
 export type AgentStateUpdateDelta =
@@ -253,14 +304,34 @@ export class AgentEventManager {
   }
 
 
+  /** The user dismissed this session. Sticky — survives until an explicit open. */
   markSessionClosed(workspaceId: string, sessionId: string): void {
+    this.retireSession(workspaceId, sessionId, 'closed');
+  }
+
+  /** The session has no live worker but nothing was dismissed: seeded from disk,
+   *  or its worker went away. Resumable, and rendered distinctly from 'closed'. */
+  markSessionDormant(workspaceId: string, sessionId: string): void {
+    this.retireSession(workspaceId, sessionId, 'dormant');
+  }
+
+  /** Shared teardown for both retirement kinds: the transient per-session state
+   *  (status, pendings, queued, error) describes a LIVE worker, so it must not
+   *  outlive one — a closed card would otherwise render a frozen busy/error. */
+  private retireSession(workspaceId: string, sessionId: string, kind: 'closed' | 'dormant'): void {
     const state = this.workspaceStates.get(workspaceId);
     if (!state) return;
     const index = state.sessions.findIndex((session) => session.id === sessionId);
     if (index === -1) return;
-    if (state.sessions[index]?.closedAt) return;
+    const existing = state.sessions[index]!;
+    // Already retired this way? Nothing to do. A dormant session may still be
+    // closed afterwards (user dismisses it), but never the reverse.
+    if (kind === 'closed' ? !!existing.closedAt : !!existing.dormantSince || !!existing.closedAt) return;
 
-    state.sessions[index] = { ...state.sessions[index]!, closedAt: new Date().toISOString() };
+    const now = new Date().toISOString();
+    state.sessions[index] = kind === 'closed'
+      ? { ...existing, closedAt: now }
+      : { ...existing, dormantSince: now };
     delete state.statuses[sessionId];
     delete state.pendingPermissions[sessionId];
     delete state.pendingQuestions[sessionId];
@@ -269,6 +340,7 @@ export class AgentEventManager {
     delete state.todoPhases[sessionId];
     delete state.modelInfo[sessionId];
     delete state.queuedMessages[sessionId];
+    delete state.subagentCounts[sessionId];
     this.clearLastMessageThrottle(workspaceId, sessionId);
     this.previousStatuses.delete(`${workspaceId}:${sessionId}`);
     this.emit({ type: 'agent_state_snapshot', workspaces: this.getSnapshot() });
@@ -283,14 +355,15 @@ export class AgentEventManager {
       if (this.ensureSessionEntry(workspaceId, sessionId, sessionId)) {
         const newIndex = state.sessions.findIndex((session) => session.id === sessionId);
         if (newIndex !== -1) {
-          state.sessions[newIndex] = { ...state.sessions[newIndex]!, closedAt: undefined };
+          state.sessions[newIndex] = { ...state.sessions[newIndex]!, closedAt: undefined, dormantSince: undefined };
         }
         this.emit({ type: 'agent_state_snapshot', workspaces: this.getSnapshot() });
       }
       return;
     }
-    if (!state.sessions[index]?.closedAt) return;
-    state.sessions[index] = { ...state.sessions[index]!, closedAt: undefined };
+    const existing = state.sessions[index]!;
+    if (!existing.closedAt && !existing.dormantSince) return;
+    state.sessions[index] = { ...existing, closedAt: undefined, dormantSince: undefined };
     this.emit({ type: 'agent_state_snapshot', workspaces: this.getSnapshot() });
   }
 
@@ -382,6 +455,27 @@ export class AgentEventManager {
     }
     if (jsonEqual(previousQueued, state.queuedMessages[sessionId])) return;
     this.emit({ type: 'agent_state_snapshot', workspaces: this.getSnapshot() });
+  }
+
+  setExternalSubagentCount(workspaceId: string, sessionId: string, count: number): void {
+    this.markSessionOpen(workspaceId, sessionId);
+    const state = this.getOrCreateState(workspaceId);
+    const next = Number.isFinite(count) && count > 0 ? Math.floor(count) : 0;
+    if ((state.subagentCounts[sessionId] ?? 0) === next) return;
+    if (next === 0) {
+      delete state.subagentCounts[sessionId];
+    } else {
+      state.subagentCounts[sessionId] = next;
+    }
+    this.emit({ type: 'agent_state_snapshot', workspaces: this.getSnapshot() });
+  }
+
+  /** Canonical activity for a session in this workspace. Delegates to
+   *  {@link computeSessionActivity} so the daemon and the snapshot builder cannot
+   *  drift apart — there is one implementation, not one per caller. */
+  getSessionActivity(workspaceId: string, sessionId: string): SessionActivity {
+    const state = this.workspaceStates.get(workspaceId);
+    return state ? computeSessionActivity(state, sessionId) : { active: false, reasons: [] };
   }
 
   addPendingQuestion(workspaceId: string, sessionId: string, question: PendingQuestion): void {
@@ -484,11 +578,13 @@ export class AgentEventManager {
     this.unsuppressSession(workspaceId, sessionId);
     const state = this.getOrCreateState(workspaceId);
     const existing = state.sessions.find((session) => session.id === sessionId);
+    // Un-archiving yields a resumable session with no live worker — dormant, not
+    // closed: the user just asked for it back, so it is not dismissed.
     if (existing) {
       const index = state.sessions.indexOf(existing);
-      state.sessions[index] = { ...existing, closedAt: new Date().toISOString(), archivedAt: undefined };
+      state.sessions[index] = { ...existing, dormantSince: new Date().toISOString(), closedAt: undefined, archivedAt: undefined };
     } else {
-      state.sessions.push({ id: sessionId, title, closedAt: new Date().toISOString() });
+      state.sessions.push({ id: sessionId, title, dormantSince: new Date().toISOString() });
     }
     this.emit({ type: 'agent_state_snapshot', workspaces: this.getSnapshot() });
   }
@@ -559,7 +655,9 @@ export class AgentEventManager {
     if (this.suppressedSessionIds.get(workspaceId)?.has(id)) return false;
     const state = this.getOrCreateState(workspaceId);
     if (state.sessions.some((session) => session.id === id)) return false;
-    state.sessions.push({ id, title, closedAt: new Date().toISOString(), updatedAt });
+    // Discovered on disk with no live worker: dormant, never 'closed'. Stamping
+    // closedAt here is what made a never-touched session look dismissed.
+    state.sessions.push({ id, title, dormantSince: new Date().toISOString(), updatedAt });
     return true;
   }
 
@@ -581,6 +679,7 @@ export class AgentEventManager {
         todoPhases: {},
         modelInfo: {},
         queuedMessages: {},
+        subagentCounts: {},
       };
       this.workspaceStates.set(workspaceId, state);
     }

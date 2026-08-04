@@ -27,6 +27,7 @@ import { getTranscriptRange } from '../../../blocks/agent/transcript-source.js';
 import type { TranscriptPage, TranscriptSource } from '../../../blocks/agent/transcript-source.js';
 import { LiveTurn } from '../../../blocks/agent/live-turn.js';
 import type { AgentEvent as SdkAgentEvent } from '@oh-my-pi/pi-agent-core';
+import { AgentRegistry } from '@oh-my-pi/pi-coding-agent/registry/agent-registry';
 import type { AgentPromptImage } from '../protocol.js';
 import { recordEditBreadcrumb, flushEditBreadcrumbs } from './edit-breadcrumbs.js';
 import { writeTraceLog } from '../../../utils/trace-log.js';
@@ -1165,6 +1166,29 @@ export class LocalSessionHost implements AgentSessionHost {
         }
       }),
     );
+
+    // --- Subagent census via the SDK's process-global AgentRegistry ---
+    // Task subagents register in AgentRegistry.global() inside THIS worker
+    // process, so the daemon cannot observe them. Report the live descendant
+    // count so "my turn ended but three children are still working" is not
+    // mistaken for idle. Event-driven via onChange — never polled.
+    //
+    // Counted: kind 'sub' whose status is still live. 'aborted' is terminal, and
+    // 'advisor' refs are observability-only transcripts (never peers), so both
+    // are excluded. 'parked' counts — a parked child is waiting to be woken, and
+    // its parent is waiting on it.
+    const countLiveSubagents = (): number => AgentRegistry.global().list()
+      .filter((ref) => ref.kind === 'sub' && ref.status !== 'aborted')
+      .length;
+    let lastSubagentCount = -1;
+    const publishSubagentCount = (): void => {
+      const count = countLiveSubagents();
+      if (count === lastSubagentCount) return;
+      lastSubagentCount = count;
+      emit({ type: 'subagents', sessionId, count });
+    };
+    publishSubagentCount();
+    unsubscribers.push(AgentRegistry.global().onChange(publishSubagentCount));
 
     // --- Permission events via SDK internal event bus ---
     // The SDK emits permission-gate events on its event bus. Since the agent

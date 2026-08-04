@@ -11,6 +11,58 @@ export type SessionStatus =
   | { type: 'compacting' }
   | { type: 'retry'; attempt: number; message: string; next: number };
 
+/**
+ * Why a session is not idle. "Idle" is only safe to claim when NOTHING is owed:
+ * a session with no turn in flight may still be waiting on a human, holding an
+ * unconsumed queued message, or supervising subagents that are still working.
+ * `SessionStatus` alone cannot express any of those — it only describes the
+ * current LLM turn — which is why several call sites independently concluded
+ * "not busy" meant "idle" and disagreed with each other.
+ */
+export type ActivityReason =
+  | { kind: 'turn' }
+  | { kind: 'compacting' }
+  | { kind: 'retry'; attempt: number; next: number }
+  | { kind: 'human'; questions: number; permissions: number }
+  | { kind: 'queued'; steering: number; followUp: number }
+  | { kind: 'subagents'; count: number };
+
+/**
+ * Canonical activity for one agent session.
+ *
+ * Produced in EXACTLY ONE place (`AgentEventManager.getSessionActivity`) and
+ * carried on the machine snapshot so no consumer re-derives it. `active: false`
+ * with an empty reason list is the only state where a session owes nothing.
+ */
+export type SessionActivity = {
+  active: boolean;
+  reasons: ActivityReason[];
+};
+
+/**
+ * Project activity back onto a `SessionStatus`.
+ *
+ * Several call sites need a status-shaped value but only have a snapshot record.
+ * They used to invert the `state` label by hand, which lost information twice
+ * over: 'running' collapsed `compacting` into `busy`, and 'permission-needed'
+ * became `idle` — so a session blocked on a human read as idle. Deriving from
+ * activity keeps both distinctions. Returns undefined when activity is absent
+ * (a peer predating this field) so callers can fall back.
+ */
+export function sessionStatusFromActivity(
+  activity: SessionActivity | undefined,
+  errorMessage?: string,
+): SessionStatus | undefined {
+  if (!activity) return undefined;
+  if (activity.reasons.some((reason) => reason.kind === 'turn')) return { type: 'busy' };
+  if (activity.reasons.some((reason) => reason.kind === 'compacting')) return { type: 'compacting' };
+  const retry = activity.reasons.find((reason) => reason.kind === 'retry');
+  if (retry?.kind === 'retry') {
+    return { type: 'retry', attempt: retry.attempt, message: errorMessage ?? 'retrying', next: retry.next };
+  }
+  return { type: 'idle' };
+}
+
 export interface Permission {
   id: string;
   type: string;

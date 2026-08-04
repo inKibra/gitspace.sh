@@ -1,8 +1,16 @@
 import type { WorkspacePhase } from '../../../types/config.js';
 import type { WorkspaceNotesSummary } from '../../../types/workspace.js';
+import type { SessionActivity } from '../../../agents/agent-runtime-types.js';
 
 export type MachineAgentSessionState =
+  /** Dismissed by the user. Reopening is an explicit act. */
   | 'closed'
+  /** No live worker, but nothing was dismissed: discovered on disk at daemon
+   *  start, or its worker went away. Resumable — the next interaction reboots it
+   *  from its session file. Distinct from 'closed' because `closedAt` used to
+   *  mean both, so a never-touched session was indistinguishable from a
+   *  deliberately closed one. */
+  | 'dormant'
   | 'waiting'
   | 'running'
   | 'permission-needed'
@@ -184,6 +192,9 @@ export interface MachineAgentSessionRecord {
   state: MachineAgentSessionState;
   updatedAt?: string;
   closedAt?: string;
+  /** Set when the session has no live worker but was not dismissed. Pairs with
+   *  state 'dormant'. */
+  dormantSince?: string;
   archivedAt?: string;
   pendingPermissionIds: string[];
   pendingPermissionCount: number;
@@ -194,6 +205,13 @@ export interface MachineAgentSessionRecord {
   modelInfo?: import('../../../agents/agent-runtime-types.js').AgentModelInfo;
   todoPhases?: import('../../../agents/agent-runtime-types.js').TodoPhase[];
   queuedMessages?: { steering: string[]; followUp: string[] };
+  /** Live subagent count reported by the worker's AgentRegistry. */
+  subagentCount?: number;
+  /** Canonical activity, computed once in the daemon
+   *  (AgentEventManager.getSessionActivity). Consumers MUST read this rather
+   *  than re-deriving idleness from `state` or a status — `state` is a lossy
+   *  projection of it, kept for rendering. */
+  activity?: SessionActivity;
 }
 
 export interface MachineProcessRecord {

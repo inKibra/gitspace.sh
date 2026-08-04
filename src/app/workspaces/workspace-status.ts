@@ -82,12 +82,20 @@ export function deriveWorkspaceStatusSummary(
       agents.orange += 1;
       continue;
     }
-    if (agent.status?.type === 'retry' || isActionableAgentError(agent.errorMessage)) {
+    // Same precedence as determineAgentState() in machine/build.ts. Prefer the
+    // canonical activity; `status` is the fallback for a peer that predates it.
+    const reasons = agent.activity?.reasons;
+    const isRetrying = reasons
+      ? reasons.some((reason) => reason.kind === 'retry')
+      : agent.status?.type === 'retry';
+    if (isRetrying || isActionableAgentError(agent.errorMessage)) {
       agents.red += 1;
       continue;
     }
-    // 'compacting' is active work like 'busy' — green (green-pulse), not idle.
-    if (agent.status?.type === 'busy' || agent.status?.type === 'compacting') {
+    const isExecuting = reasons
+      ? reasons.some((reason) => reason.kind === 'turn' || reason.kind === 'compacting')
+      : agent.status?.type === 'busy' || agent.status?.type === 'compacting';
+    if (isExecuting) {
       agents.green += 1;
       continue;
     }
