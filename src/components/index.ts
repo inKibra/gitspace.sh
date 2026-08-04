@@ -63,21 +63,6 @@ export {
   formatTimeAgo,
 } from './Inbox.js';
 
-// ProjectList
-export type {
-  ProjectInfo,
-  ProjectListItem,
-  UseProjectListProps,
-  UseProjectListReturn,
-} from './ProjectList.js';
-
-export {
-  useProjectList,
-  getProjectDisplayName,
-  getShortRepoName,
-  formatWorkspaceCount,
-} from './ProjectList.js';
-
 // Flow (Modal System)
 export type {
   FlowNone,
