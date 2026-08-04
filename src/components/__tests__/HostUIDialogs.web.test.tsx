@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
 import React from 'react';
-import { render } from '@testing-library/react';
+import { render, type RenderResult } from '@testing-library/react';
 import { setupTestDom, teardownTestDom } from '../../test/setup-dom.js';
 import { HostUIDialogOverlay, HostUIDialogInline } from '../HostUIDialogs.web.js';
 import type { HostUIDialogRequest } from '../../lib/tmux-lite/agents/host-ui-bridge.js';
@@ -70,17 +70,19 @@ describe('HostUIDialogOverlay render safety (BUG A)', () => {
       type: 'ask-form', id: 'dlg-bad', sessionId: 's-bg', title: 'Q',
       questions: [{ id: 'q1', question: 'Which?' /* options MISSING */ }],
     } as unknown as HostUIDialogRequest;
-    let view: ReturnType<typeof render> | null = null;
-    expect(() => { view = render(<HostUIDialogOverlay request={bad} onResponse={() => {}} />); }).not.toThrow();
+    // Held in an object: a `let` assigned only inside the callback stays
+    // narrowed to `null`, so `view?.unmount()` would be typed `never`.
+    const rendered: { view: RenderResult | null } = { view: null };
+    expect(() => { rendered.view = render(<HostUIDialogOverlay request={bad} onResponse={() => {}} />); }).not.toThrow();
     // Unrenderable request is dropped — no dialog shell in the DOM.
     expect(document.body.textContent).not.toContain('Which?');
-    view?.unmount();
+    rendered.view?.unmount();
   });
 
   it('does not throw on a select request whose options are missing', () => {
     const bad = { type: 'select', id: 'dlg-bad2', sessionId: 's-bg', title: 'Nope' } as unknown as HostUIDialogRequest;
-    let view: ReturnType<typeof render> | null = null;
-    expect(() => { view = render(<HostUIDialogOverlay request={bad} onResponse={() => {}} />); }).not.toThrow();
-    view?.unmount();
+    const rendered: { view: RenderResult | null } = { view: null };
+    expect(() => { rendered.view = render(<HostUIDialogOverlay request={bad} onResponse={() => {}} />); }).not.toThrow();
+    rendered.view?.unmount();
   });
 });

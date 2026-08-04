@@ -80,7 +80,9 @@ describe('submitProblemReport last-resort local fallback', () => {
 
   it('falls through relay failure to a local download (never loses the report)', async () => {
     const realFetch = globalThis.fetch;
-    globalThis.fetch = (async () => { throw new Error('relay unreachable'); }) as typeof fetch;
+    // Bun's `typeof fetch` carries a `preconnect` property this stub has no use
+    // for, so the throwing function alone does not structurally satisfy it.
+    globalThis.fetch = (async () => { throw new Error('relay unreachable'); }) as unknown as typeof fetch;
     try {
       const outcome = await reportFromBrokenState('connection failed', {
         relayHttpBase: 'http://127.0.0.1:9/relay',

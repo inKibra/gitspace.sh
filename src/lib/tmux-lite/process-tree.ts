@@ -1,6 +1,9 @@
+// Mirrors the subset of Bun's `Subprocess` this module needs. `kill` must match
+// Bun's own signature (`number | NodeJS.Signals`) — widening it to `string`
+// makes a real Subprocess unassignable to this interface.
 export interface SignalableSubprocess {
   pid: number;
-  kill: (signal?: number | string) => void;
+  kill: (signal?: number | NodeJS.Signals) => void;
 }
 
 export function readProcessGroupId(

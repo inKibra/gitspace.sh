@@ -57,7 +57,7 @@ describe('useTranscript', () => {
         live,
         refreshNonce,
       }),
-      { initialProps: { live: [], refreshNonce: 0 } },
+      { initialProps: { live: [] as readonly Block[], refreshNonce: 0 } },
     );
 
     await act(async () => {

@@ -1,4 +1,3 @@
-// @ts-nocheck - Uses Bun-specific APIs (Bun.Terminal)
 /**
  * PTY session wrapper for remote terminal access
  *
@@ -130,7 +129,9 @@ export interface PTYSessionOptions {
  * ```
  */
 export class PTYSession {
-  private terminal: ReturnType<typeof Bun.Terminal> | null = null;
+  // `Bun.Terminal` is a constructor, so `ReturnType` never applied to it — the
+  // field was an error type and therefore unchecked. It is the instance type.
+  private terminal: Bun.Terminal | null = null;
   private proc: ReturnType<typeof Bun.spawn> | null = null;
   private sendKey: Uint8Array;
   private receiveKey: Uint8Array;

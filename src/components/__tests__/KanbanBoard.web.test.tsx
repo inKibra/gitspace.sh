@@ -3,7 +3,7 @@ import React from 'react';
 import { act, fireEvent, render } from '@testing-library/react';
 import { setupTestDom, teardownTestDom } from '../../test/setup-dom.js';
 import { buildChainConnector, buildVisibleChainConnectors, countConnectorCrossings, KanbanBoardWeb } from '../KanbanBoard.web.js';
-import type { WorkspaceBoardGroup } from '../../app/shared/board/types.js';
+import type { KanbanGoalItem, WorkspaceBoardGroup } from '../../app/shared/board/types.js';
 
 beforeAll(() => setupTestDom());
 afterAll(() => teardownTestDom());
@@ -134,7 +134,9 @@ describe('KanbanBoardWeb planned goals', () => {
   });
 
   it('stages chain reorder in overlay and saves on explicit action', async () => {
-    const onSave = mock(() => undefined);
+    // Typed parameter: an untyped `mock(() => undefined)` records calls as the
+    // empty tuple, so reading `calls[0][0]` below is an index-out-of-range error.
+    const onSave = mock((_goals: KanbanGoalItem[]) => undefined);
     const view = render(
       <KanbanBoardWeb
         groups={makeOverlayGroups()}
@@ -167,7 +169,7 @@ describe('KanbanBoardWeb planned goals', () => {
       fireEvent.click(saveButton);
     });
     expect(onSave).toHaveBeenCalledTimes(1);
-    const reordered = onSave.mock.calls[0][0] as typeof plannedGoal[];
+    const reordered = onSave.mock.calls[0][0];
     expect(reordered.map((goal) => goal.plannedWorkspaceName)).toEqual(['billing-e2e', 'billing-ui']);
   });
 
@@ -240,7 +242,7 @@ describe('KanbanBoardWeb planned goals', () => {
     expect(view.container.textContent).toContain('Billing rollout');
   });
 
-  it('keeps chain metadata hover-only and numbers each position', () => {
+  it('keeps the chain badge visible at rest and numbers each position', () => {
     const view = render(
       <KanbanBoardWeb
         groups={makeGroups()}
@@ -251,9 +253,14 @@ describe('KanbanBoardWeb planned goals', () => {
 
     const chainHandle = Array.from(view.container.getElementsByTagName('*')).find((element) => element.getAttribute('data-chain-anchor') === 'true') as HTMLElement;
     expect(chainHandle).toBeTruthy();
+    // The position lives in the title, never spelled out as card text.
     expect(chainHandle.getAttribute('title')).toBe('Goal chain position 2 of 3');
-    expect(chainHandle.className).toContain('opacity-0');
     expect(view.container.textContent).not.toContain('chain 2/3');
+
+    // The badge no longer hides at rest: KanbanBoard.web.tsx chainHoverClass()
+    // pins it to opacity-100 and dims the whole card instead. Hovering a
+    // related card must not change the badge's own visibility.
+    expect(chainHandle.className).toContain('opacity-100');
 
     const plannedCards = Array.from(view.container.getElementsByTagName('*')).filter((element) => element.getAttribute('role') === 'button') as HTMLElement[];
     const plannedCard = plannedCards.find((element) => element.textContent?.includes('billing-ui')) as HTMLElement;
@@ -264,7 +271,7 @@ describe('KanbanBoardWeb planned goals', () => {
     act(() => {
       fireEvent.mouseLeave(plannedCard);
     });
-    expect(chainHandle.className).toContain('opacity-0');
+    expect(chainHandle.className).toContain('opacity-100');
   });
 
 

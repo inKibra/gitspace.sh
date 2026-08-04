@@ -96,6 +96,21 @@ export type ReplayEvent =
   | ReplayProcessTitleEvent
   | ReplayExitEvent;
 
+/**
+ * A replay event as supplied by a producer, before the store stamps the
+ * envelope fields (`v`, `seq`, `t`).
+ *
+ * This MUST distribute over the union. A bare `Omit<ReplayEvent, ...>` collapses
+ * the seven variants into their common keys only, silently discarding `data`,
+ * `cols`, `label`, `code` and friends — which then look like excess properties
+ * at every construction site.
+ */
+export type ReplayEventInput = ReplayEvent extends infer Variant
+  ? Variant extends ReplayEvent
+    ? Omit<Variant, 'v' | 'seq' | 't'>
+    : never
+  : never;
+
 export interface ReplayCheckpoint {
   version: typeof REPLAY_FORMAT_VERSION;
   checkpointId: string;
