@@ -111,6 +111,19 @@ function scopeFor(projectName: string, workspaceName: string): ArtifactsScope {
   return artifactsScope(join(getProjectWorkspacesDir(projectName), workspaceName));
 }
 
+/**
+ * Where analyze actually wrote the worksheet, for telling the narrator what to
+ * read. Callers MUST use this instead of composing the path themselves: a
+ * workspace that owns a goal writes under `goals/<goal-id>/`, and the mount
+ * root holds a DIFFERENT `review/analysis.json` — the one a goal-less
+ * workspace writes, which arrives in every mount once it rolls up to main.
+ * Guessing the root path therefore yields a real, parseable worksheet for
+ * somebody else's diff rather than an honest ENOENT.
+ */
+export function guideWorksheetPath(projectName: string, workspaceName: string): string {
+  return scopeFor(projectName, workspaceName).abs(WORKSHEET_PATH);
+}
+
 export function readReviewGuide(projectName: string, workspaceName: string): ReviewGuide | null {
   const path = scopeFor(projectName, workspaceName).abs(GUIDE_PATH);
   if (!existsSync(path)) return null;
@@ -234,7 +247,16 @@ export async function submitGuideSections(
   }
   const worksheet = JSON.parse(readFileSync(worksheetPath, 'utf8')) as GuideWorksheet;
   if (input.headSha !== worksheet.headSha) {
-    throw new SpacesError(`Worksheet is for ${worksheet.headSha.slice(0, 7)} but submission targets ${input.headSha.slice(0, 7)} — re-run analyze.`, 'USER_ERROR', 1);
+    // Name the file. "Re-run analyze" alone is a trap: the usual cause is
+    // narrating a different review/analysis.json (the mount-root one belonging
+    // to a goal-less workspace) rather than a genuinely moved HEAD, and analyze
+    // has already been rewriting the correct file every time.
+    throw new SpacesError(
+      `Worksheet at ${worksheetPath} is for ${worksheet.headSha.slice(0, 7)} but submission targets ${input.headSha.slice(0, 7)}. `
+        + 'If HEAD moved, re-run `gssh space guide analyze`; if it did not, you narrated a different worksheet file — narrate that path.',
+      'USER_ERROR',
+      1,
+    );
   }
   const clusterById = new Map(worksheet.clusters.map((c) => [c.id, c]));
   for (const section of input.sections) {

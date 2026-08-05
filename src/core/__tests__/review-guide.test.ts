@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { execFileSync } from 'child_process';
-import { mkdirSync, rmSync, writeFileSync } from 'fs';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join, dirname } from 'path';
-import { buildGuideWorksheet, submitGuideSections, readReviewGuide, type GuideSection } from '../review-guide.js';
-import { ensureArtifactsRepo, ensureArtifactsMount } from '../artifacts.js';
+import { buildGuideWorksheet, submitGuideSections, readReviewGuide, guideWorksheetPath, type GuideSection } from '../review-guide.js';
+import { ensureArtifactsRepo, ensureArtifactsMount, artifactsMountDir } from '../artifacts.js';
 
 let root: string;
 let previousRoot: string | undefined;
@@ -98,8 +98,12 @@ describe('review guide worksheet + submit', () => {
     const ws = await buildGuideWorksheet('demo', 'ws1', 'main');
     const good = ws.clusters.map((c) => sectionFor(c.id, c.files));
 
+    // The mismatch must name the worksheet FILE. Narrating the wrong
+    // review/analysis.json presents identically to a moved HEAD, and an error
+    // that only says "re-run analyze" sends the narrator round a loop that
+    // rewrites a file it is not reading.
     await expect(submitGuideSections('demo', 'ws1', { headSha: 'deadbeef'.repeat(5), sections: good }))
-      .rejects.toThrow(/re-run analyze/);
+      .rejects.toThrow(new RegExp(`Worksheet at ${guideWorksheetPath('demo', 'ws1')} is for \\w+ but submission targets deadbee`));
     await expect(submitGuideSections('demo', 'ws1', { headSha: ws.headSha, sections: [...good, sectionFor('nope00000000', ['x'])] }))
       .rejects.toThrow(/unknown cluster/);
     const badExhibit = [{ ...good[0]!, exhibits: [{ file: 'not/in/cluster.ts' }] }, ...good.slice(1)];
@@ -107,5 +111,32 @@ describe('review guide worksheet + submit', () => {
       .rejects.toThrow(/must stay inside/);
     await expect(submitGuideSections('demo', 'ws1', { headSha: ws.headSha, sections: [] }))
       .rejects.toThrow(/Coverage/);
+  });
+
+  it('a goal-owning workspace advertises its goal-scoped worksheet, not the mount root', async () => {
+    // Reproduction: analyze printed a hardcoded `<mount>/review/analysis.json`
+    // while writing to `goals/<goal-id>/review/analysis.json`. The root path is
+    // not empty — it holds the worksheet a goal-less workspace writes, which
+    // reaches every mount once it rolls up to main. So the narrator read a
+    // real, parseable worksheet for an unrelated diff instead of getting ENOENT,
+    // and re-running analyze changed nothing it could see.
+    const goalDir = join(workspaceDir, '.gitspace', 'workspace', 'ws1');
+    mkdirSync(goalDir, { recursive: true });
+    writeFileSync(join(goalDir, 'goal.json'), JSON.stringify({ id: 'g-42' }));
+
+    const mount = artifactsMountDir(workspaceDir);
+    const decoy = join(mount, 'review', 'analysis.json');
+    mkdirSync(dirname(decoy), { recursive: true });
+    writeFileSync(decoy, JSON.stringify({ headSha: 'dec0yde', baseRef: 'main', clusters: [], cachedSections: 0 }));
+
+    const ws = await buildGuideWorksheet('demo', 'ws1', 'main');
+    const advertised = guideWorksheetPath('demo', 'ws1');
+
+    expect(advertised).toBe(join(mount, 'goals', 'g-42', 'review', 'analysis.json'));
+    expect(JSON.parse(readFileSync(advertised, 'utf8')).headSha).toBe(ws.headSha);
+    // The unrelated worksheet is left exactly as it was — nothing rewrites it,
+    // which is why reading it looked like analyze had ignored --base.
+    expect(JSON.parse(readFileSync(decoy, 'utf8')).headSha).toBe('dec0yde');
+    expect(advertised).not.toBe(decoy);
   });
 });

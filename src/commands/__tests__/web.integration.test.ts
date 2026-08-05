@@ -181,7 +181,9 @@ describe('gssh web integration', () => {
         GSSH_TEST_RUNTIME: '1',
         GSSH_TEST_SECRETS_FILE: secretsPath,
         TMUX_LITE_SANDBOX: sandboxName,
-        BROWSER: 'definitely-not-a-browser',
+        // `none` is honoured by openBrowserUrl; any other value would be treated
+        // as an app name and really launch something on the developer's desktop.
+        BROWSER: 'none',
       } as Record<string, string>;
 
       subprocess = Bun.spawn({

@@ -522,6 +522,13 @@ export async function captureArtifacts(
   const added = files.map((f) => escapeShellArg(f.path)).concat(attributesTouched ? [escapeShellArg('.gitattributes')] : []).join(' ');
   await git(mountDir, `add -- ${added}`);
   const message = opts.message ?? `capture: ${files.map((f) => f.path).join(', ')}`.slice(0, 200);
+  // Re-capturing identical content stages nothing, and `git commit` exits
+  // non-zero on an empty commit — so an idempotent re-run used to surface as a
+  // raw "git failed (commit)". The bytes are already what the caller asked for,
+  // which is success; report the commit that holds them.
+  if (await git(mountDir, 'diff --cached --name-only') === '') {
+    return { commit: await git(mountDir, 'rev-parse HEAD'), pointers };
+  }
   // Capture is authoritative for pointer split + provenance; the managed
   // hooks stand down when this marker is set.
   await git(mountDir, `commit -q -m ${escapeShellArg(message)}`, { id: true, env: { GSSH_ARTIFACTS_CAPTURE: '1' } });

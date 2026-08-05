@@ -4,7 +4,7 @@
  * clusters, and submits; validation and merging happen here, server-side.
  */
 import { readFileSync } from 'fs';
-import { buildGuideWorksheet, submitGuideSections, readReviewGuide, type GuideSection } from '../core/review-guide.js';
+import { buildGuideWorksheet, submitGuideSections, readReviewGuide, guideWorksheetPath, type GuideSection } from '../core/review-guide.js';
 import { logger } from '../utils/logger.js';
 import type { SpaceCommandContext } from './space-goals.js';
 
@@ -17,7 +17,7 @@ export async function guideAnalyze(ctx: SpaceCommandContext, options: { base?: s
   if (options.json) { printJson(worksheet); return; }
   const stale = worksheet.clusters.filter((c) => c.stale);
   logger.success(`Worksheet @ ${worksheet.headSha.slice(0, 7)}: ${worksheet.clusters.length} clusters — ${stale.length} to narrate, ${worksheet.cachedSections} cached.`);
-  logger.log('Worksheet committed to .gitspace/artifacts/review/analysis.json — read it, narrate each stale cluster, then `gssh space guide submit --file <sections.json>`.');
+  logger.log(`Worksheet committed to ${guideWorksheetPath(ctx.project, ctx.workspace)} — read it, narrate each stale cluster, then \`gssh space guide submit --file <sections.json>\`.`);
 }
 
 export async function guideSubmit(ctx: SpaceCommandContext, options: { file: string; json?: boolean }): Promise<void> {
