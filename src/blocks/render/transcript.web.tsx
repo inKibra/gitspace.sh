@@ -208,20 +208,30 @@ defineRenderer<ErrorData>('error', ({ data, block }): ReactElement => {
 // Collapsed by default: dense turns fire several rules, and the rule id plus
 // the first line is enough to scan. The body is the verbatim instruction the
 // agent was given, so it stays available rather than being summarised.
+//
+// An interrupt reads louder than advice on purpose — it means the output you
+// would have seen was aborted and regenerated, which is a different event from
+// a note riding along with a tool result.
 defineRenderer<RuleActivationData>('rule-activation', ({ data }): ReactElement => {
   const [open, setOpen] = useState(false);
   // The collapsed line is plain text, not markdown — drop the inline-code and
   // emphasis markers so the preview doesn't read as raw source.
   const summary = (data.body.split('\n').find((line) => line.trim().length > 0) ?? '').replace(/[`*_]/g, '').trim();
+  const tone = data.interrupted === true
+    ? { border: 'border-[var(--gs-danger)]', bg: 'bg-[rgba(255,51,51,0.06)]', text: 'text-[var(--gs-danger)]', glyph: '⎋', label: 'interrupted' }
+    : { border: 'border-[var(--gs-warning)]', bg: 'bg-[rgba(255,170,0,0.05)]', text: 'text-[var(--gs-warning)]', glyph: '§', label: null };
   return (
-    <div className="my-2 border border-[var(--gs-warning)] bg-[rgba(255,170,0,0.05)]">
+    <div className={`my-2 border ${tone.border} ${tone.bg}`}>
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
         className="flex w-full items-center gap-2 px-2 py-1.5 text-left text-[12px] cursor-pointer"
       >
-        <span className="text-[var(--gs-warning)]">§</span>
-        <span className={`${CHIP_BASE} border-[var(--gs-warning)] text-[var(--gs-warning)]`}>{data.rule}</span>
+        <span className={tone.text}>{tone.glyph}</span>
+        <span className={`${CHIP_BASE} ${tone.border} ${tone.text}`}>{data.rule}</span>
+        {tone.label !== null && (
+          <span className="text-[10px] uppercase tracking-[0.05em] text-[var(--gs-danger)]">{tone.label}</span>
+        )}
         <span className="flex-1 truncate text-[var(--gs-text-secondary)]">{summary}</span>
         <span className="text-[10px] text-[var(--gs-text-dim)]">{open ? '▾' : '▸'}</span>
       </button>

@@ -12,6 +12,7 @@
 import type { ImageContent, Message, TextContent } from '@oh-my-pi/pi-ai';
 import type { Block } from '../index.js';
 import { collectToolResults, messageToBlocks } from './message-blocks.js';
+import { extractRuleActivations } from './system-reminder.js';
 
 /** A session entry, narrowed to the fields the transcript display needs. */
 export interface TranscriptEntry {
@@ -25,6 +26,8 @@ export interface TranscriptEntry {
   shortSummary?: string;
   /** present on `custom_message` entries */
   content?: string | (TextContent | ImageContent)[];
+  /** present on `custom_message` entries — e.g. `ttsr-injection`. */
+  customType?: string;
   display?: boolean;
 }
 
@@ -74,6 +77,17 @@ export function entriesToBlocks(entries: ReadonlyArray<TranscriptEntry>): Block[
     } else if (entry.type === 'compaction') {
       const text = entry.shortSummary ?? (entry.summary ? clip(entry.summary) : 'Earlier context was summarized.');
       blocks.push({ id: entry.id, type: 'callout', data: { tone: 'info', title: 'context compacted', text } });
+    } else if (entry.type === 'custom_message' && entry.customType === 'ttsr-injection' && entry.content) {
+      // Deliberately ahead of the `entry.display` gate. A TTSR interrupt is
+      // persisted with `display: false` because it is a hidden prompt injection,
+      // not agent speech — but "a rule aborted the agent mid-sentence and made
+      // it start over" is precisely what a transcript reader needs to see. We
+      // honour the intent of the flag by rendering it as its own attributed
+      // rule block rather than as a message bubble.
+      const { activations } = extractRuleActivations(customMessageText(entry.content));
+      activations.forEach((activation, i) => {
+        blocks.push({ id: `${entry.id}:rule${i}`, type: 'rule-activation', data: { ...activation } });
+      });
     } else if (entry.type === 'custom_message' && entry.display && entry.content) {
       const text = customMessageText(entry.content);
       if (text) blocks.push({ id: entry.id, type: 'callout', data: { tone: 'info', text } });

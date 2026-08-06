@@ -62,4 +62,30 @@ describe('extractRuleActivations', () => {
     expect(activations).toEqual([]);
     expect(rest).toBe(text);
   });
+
+  it('marks a system-interrupt as interrupted, and a reminder as not', () => {
+    // Verbatim wrapper from a persisted ttsr-injection custom_message. The two
+    // tags are different events: an interrupt means generation was aborted and
+    // retried, a reminder just rides along with a tool result.
+    const { activations } = extractRuleActivations(
+      '<system-interrupt reason="rule_violation" rule="ts-no-return-type" path="builtin-defaults:ts-no-return-type.md">\nYour output was interrupted by a rule.\n</system-interrupt>',
+    );
+
+    expect(activations).toHaveLength(1);
+    expect(activations[0]!.rule).toBe('ts-no-return-type');
+    expect(activations[0]!.interrupted).toBe(true);
+
+    const advisory = extractRuleActivations('<system-reminder rule="a">body</system-reminder>');
+    expect(advisory.activations[0]!.interrupted).toBe(false);
+  });
+
+  it('does not pair mismatched open and close tags', () => {
+    // The two wrappers are distinct; treating </system-interrupt> as a valid
+    // close for <system-reminder> would swallow arbitrary text between them.
+    const text = '<system-reminder rule="a">body</system-interrupt>';
+    const { activations, rest } = extractRuleActivations(text);
+
+    expect(activations).toEqual([]);
+    expect(rest).toBe(text);
+  });
 });

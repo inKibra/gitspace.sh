@@ -112,9 +112,10 @@ defineBlock({
 });
 
 // ── rule-activation ───────────────────────────────────────────────────────
-// A project rule the harness matched against a tool call. Extracted from the
-// `<system-reminder>` the harness injects ahead of the tool's output, so the
-// rule is attributable instead of being escaped XML inside the result body.
+// A TTSR rule (omp://ttsr-injection-lifecycle.md) the harness matched against
+// the agent's output. Extracted from the `<system-reminder>` prepended to a
+// tool result, or the `<system-interrupt>` carried by a hidden ttsr-injection
+// message, so the rule is attributable instead of escaped XML in a result body.
 export const ruleActivationData = z.object({
   /** Rule id, e.g. `ts-no-tiny-functions`. */
   rule: z.string(),
@@ -124,11 +125,15 @@ export const ruleActivationData = z.object({
   path: z.string().optional(),
   /** The instruction text shown to the agent. */
   body: z.string(),
+  /** The rule aborted generation mid-stream and forced a retry, rather than
+   *  riding along with a tool result as advice. Materially worse, so it reads
+   *  differently: the output you would otherwise have seen was discarded. */
+  interrupted: z.boolean().optional(),
 });
 export type RuleActivationData = z.infer<typeof ruleActivationData>;
 defineBlock({
   type: 'rule-activation',
   tier: 'transcript',
-  description: 'A project rule that matched a tool call, with the instruction the agent was given.',
+  description: 'A TTSR rule that matched the agent output, with the instruction given and whether it interrupted generation.',
   schema: ruleActivationData,
 });

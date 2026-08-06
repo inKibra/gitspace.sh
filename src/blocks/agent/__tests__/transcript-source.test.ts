@@ -2,6 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import type { Message } from '@oh-my-pi/pi-ai';
 
 import { validateBlock } from '../../index.js';
+import { ruleActivationData } from '../../types/transcript.js';
 import { entriesToBlocks, getTranscriptRange, type TranscriptEntry, type TranscriptSource } from '../transcript-source.js';
 
 function msgEntry(id: string, parentId: string | null, message: unknown): TranscriptEntry {
@@ -33,6 +34,35 @@ describe('entriesToBlocks', () => {
   it('keys message block ids by entry id (stable across pages)', () => {
     const blocks = entriesToBlocks([ENTRIES[0]]);
     expect(blocks[0].id).toContain('e0');
+  });
+
+  it('surfaces a TTSR interrupt even though it is persisted hidden', () => {
+    // Real shape: an interrupting rule is stored as a custom_message with
+    // customType 'ttsr-injection' and display:false, because it is a hidden
+    // prompt injection rather than agent speech. The display gate therefore
+    // dropped it entirely — so the loudest rule event (generation aborted and
+    // regenerated) was the one thing the transcript never showed.
+    const blocks = entriesToBlocks([{
+      id: 'e9',
+      parentId: null,
+      type: 'custom_message',
+      customType: 'ttsr-injection',
+      display: false,
+      content: '<system-interrupt reason="rule_violation" rule="ts-no-return-type" path="builtin-defaults:ts-no-return-type.md">\nYour output was interrupted by a rule.\n</system-interrupt>',
+    }]);
+
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]!.type).toBe('rule-activation');
+    expect(validateBlock(blocks[0]!).ok).toBe(true);
+    expect(ruleActivationData.parse(blocks[0]!.data).interrupted).toBe(true);
+  });
+
+  it('still hides ordinary display:false custom messages', () => {
+    const blocks = entriesToBlocks([{
+      id: 'e10', parentId: null, type: 'custom_message', customType: 'space-command', display: false, content: 'internal',
+    }]);
+
+    expect(blocks).toEqual([]);
   });
 });
 
