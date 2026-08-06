@@ -1,6 +1,6 @@
 import { useState, type ReactElement } from 'react';
 import type { Block } from '../index.js';
-import type { ErrorData, ImageData, MessageData, SubagentData, ThinkingData, ToolCallData } from '../types/transcript.js';
+import type { ErrorData, ImageData, MessageData, RuleActivationData, SubagentData, ThinkingData, ToolCallData } from '../types/transcript.js';
 import { defineRenderer, BlockView } from './registry.web.js';
 import { useBlockHost } from './host.web.js';
 import { Markdown } from './markdown.web.js';
@@ -199,6 +199,39 @@ defineRenderer<ErrorData>('error', ({ data, block }): ReactElement => {
         >
           Retry
         </button>
+      )}
+    </div>
+  );
+});
+
+// ── rule-activation ───────────────────────────────────────────────────────
+// Collapsed by default: dense turns fire several rules, and the rule id plus
+// the first line is enough to scan. The body is the verbatim instruction the
+// agent was given, so it stays available rather than being summarised.
+defineRenderer<RuleActivationData>('rule-activation', ({ data }): ReactElement => {
+  const [open, setOpen] = useState(false);
+  // The collapsed line is plain text, not markdown — drop the inline-code and
+  // emphasis markers so the preview doesn't read as raw source.
+  const summary = (data.body.split('\n').find((line) => line.trim().length > 0) ?? '').replace(/[`*_]/g, '').trim();
+  return (
+    <div className="my-2 border border-[var(--gs-warning)] bg-[rgba(255,170,0,0.05)]">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center gap-2 px-2 py-1.5 text-left text-[12px] cursor-pointer"
+      >
+        <span className="text-[var(--gs-warning)]">§</span>
+        <span className={`${CHIP_BASE} border-[var(--gs-warning)] text-[var(--gs-warning)]`}>{data.rule}</span>
+        <span className="flex-1 truncate text-[var(--gs-text-secondary)]">{summary}</span>
+        <span className="text-[10px] text-[var(--gs-text-dim)]">{open ? '▾' : '▸'}</span>
+      </button>
+      {open && (
+        <div className="border-t border-[var(--gs-border)] px-2 py-1.5">
+          {data.path !== undefined && (
+            <div className="mb-1 text-[10px] text-[var(--gs-text-dim)]">{data.path}</div>
+          )}
+          <Markdown text={data.body} />
+        </div>
       )}
     </div>
   );

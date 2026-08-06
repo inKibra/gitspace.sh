@@ -2,7 +2,8 @@ import { describe, expect, it } from 'bun:test';
 import type { Message, ToolResultMessage } from '@oh-my-pi/pi-ai';
 
 import { validateBlock, type Block } from '../../index.js';
-import { subagentData, toolCallData, imageData } from '../../types/transcript.js';
+import { subagentData, toolCallData, imageData, ruleActivationData } from '../../types/transcript.js';
+import { codeData } from '../../types/content.js';
 import { liveMessageToBlocks, messagesToBlocks } from '../message-blocks.js';
 
 // Minimal well-typed fixtures (only the fields the mapper reads).
@@ -299,5 +300,39 @@ describe('messagesToBlocks', () => {
     expect(blocks).toHaveLength(1);
     expect(blocks[0].id).toContain('r1');
     expect(validateBlock(blocks[0]).ok).toBe(true);
+  });
+
+  it('surfaces a rule activation as its own block instead of burying it in the output', () => {
+    // Real shape: the harness prepends the reminder as an extra text part on the
+    // toolResult. Joined into the output it renders as escaped XML inside the
+    // collapsed result body, attributed to nobody.
+    const result = {
+      role: 'toolResult',
+      toolCallId: 'tc-rule',
+      toolName: 'edit',
+      isError: false,
+      timestamp: 0,
+      content: [
+        { type: 'text', text: '<system-reminder reason="rule_violation" rule="ts-set-map" path="builtin-defaults:ts-set-map.md">\nUse Record for small, static lookup tables.\n</system-reminder>' },
+        { type: 'text', text: '[a.ts#1234]\n1:const x = 1;' },
+      ],
+    } as unknown as Message;
+    const blocks = messagesToBlocks([
+      assistant([{ type: 'toolCall', id: 'tc-rule', name: 'edit', arguments: { path: 'a.ts' } }]),
+      result,
+    ]);
+
+    const nested = toolCallData.parse(blocks.find((b) => b.type === 'tool-call')!.data).result ?? [];
+    const rule = nested.find((b) => b.type === 'rule-activation');
+    expect(rule).toBeDefined();
+    expect(validateBlock(rule!).ok).toBe(true);
+    expect(ruleActivationData.parse(rule!.data).rule).toBe('ts-set-map');
+
+    // …and the tool's own output is still there, without the XML debris.
+    const out = nested.find((b) => b.type === 'code');
+    expect(out).toBeDefined();
+    const text = codeData.parse(out!.data).text;
+    expect(text).toContain('const x = 1;');
+    expect(text).not.toContain('system-reminder');
   });
 });

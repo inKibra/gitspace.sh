@@ -201,4 +201,29 @@ describe('web BlockView', () => {
     expect(container.textContent).toContain('stopped');
     expect(container.textContent).not.toContain('Retry');
   });
+
+  it('names the rule and reveals the instruction on expand', () => {
+    // The point of the block: before this, the rule id lived inside an escaped
+    // XML attribute in the tool output, so it was neither visible nor scannable.
+    const block = {
+      id: 'r1',
+      type: 'rule-activation',
+      data: {
+        rule: 'ts-set-map',
+        reason: 'rule_violation',
+        path: 'builtin-defaults:ts-set-map.md',
+        body: 'Use Record for small, static lookup tables.\n\nRuntime collection? Set / Map.',
+      },
+    };
+    const { container, getByRole } = render(<BlockView block={block} />);
+
+    expect(container.textContent).toContain('ts-set-map');
+    expect(container.textContent).toContain('Use Record for small, static lookup tables.');
+    // Collapsed: the trailing detail is withheld until asked for.
+    expect(container.textContent).not.toContain('Runtime collection?');
+
+    fireEvent.click(getByRole('button'));
+    expect(container.textContent).toContain('Runtime collection?');
+    expect(container.textContent).toContain('builtin-defaults:ts-set-map.md');
+  });
 });

@@ -19,6 +19,7 @@ import type {
 } from '@oh-my-pi/pi-ai';
 import type { Block } from '../index.js';
 import { agentResolutionLabel } from '../model-roles.js';
+import { extractRuleActivations } from './system-reminder.js';
 
 // Primary input keys across the 17.2.4 builtin tools, in priority order (most
 // descriptive first, bare operation enums last). Covers read/edit/write (path),
@@ -101,13 +102,20 @@ function langFromPath(path: unknown): string | undefined {
   return EXT_LANG[ext];
 }
 
-/** A tool result's content → nested blocks (text → code, image → image). */
+/** A tool result's content → nested blocks (text → code, image → image).
+ *  Rule activations are lifted out of the text first: the harness injects them
+ *  as an extra text part ahead of the real output, and joining them in buries
+ *  the rule as escaped XML inside the collapsed result body. */
 function toolResultBlocks(result: ToolResultMessage, idBase: string, lang?: string): Block[] {
   const blocks: Block[] = [];
-  const text = result.content
+  const joined = result.content
     .filter((part): part is TextContent => part.type === 'text')
     .map((part) => part.text)
     .join('\n');
+  const { activations, rest: text } = extractRuleActivations(joined);
+  activations.forEach((activation, i) => {
+    blocks.push({ id: `${idBase}:rule${i}`, type: 'rule-activation', data: { ...activation } });
+  });
   if (text.trim()) blocks.push({ id: `${idBase}:out`, type: 'code', data: lang ? { text, lang } : { text } });
   result.content
     .filter((part): part is ImageContent => part.type === 'image')

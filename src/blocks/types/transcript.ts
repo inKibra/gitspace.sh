@@ -110,3 +110,25 @@ defineBlock({
   description: 'A turn-level error or aborted notice; non-aborted errors offer a retry.',
   schema: errorData,
 });
+
+// ── rule-activation ───────────────────────────────────────────────────────
+// A project rule the harness matched against a tool call. Extracted from the
+// `<system-reminder>` the harness injects ahead of the tool's output, so the
+// rule is attributable instead of being escaped XML inside the result body.
+export const ruleActivationData = z.object({
+  /** Rule id, e.g. `ts-no-tiny-functions`. */
+  rule: z.string(),
+  /** Why it fired, e.g. `rule_violation`. */
+  reason: z.string().optional(),
+  /** Where the rule is defined. */
+  path: z.string().optional(),
+  /** The instruction text shown to the agent. */
+  body: z.string(),
+});
+export type RuleActivationData = z.infer<typeof ruleActivationData>;
+defineBlock({
+  type: 'rule-activation',
+  tier: 'transcript',
+  description: 'A project rule that matched a tool call, with the instruction the agent was given.',
+  schema: ruleActivationData,
+});
