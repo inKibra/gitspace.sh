@@ -14,6 +14,7 @@ import { getProjectDir, getProjectWorkspacesDir, readProjectConfig } from './con
 import { analyzeReviewDiff, type ReviewAnalysis, type ReviewCluster } from './review-analysis.js';
 import { artifactsScope, captureArtifacts, type ArtifactsScope } from './artifacts.js';
 import { readWorkspaceGoal } from './goal-chain.js';
+import { normalizeGuideAsks } from './guide-normalize.js';
 import { SpacesError } from '../types/errors.js';
 import type { GoalRecord } from '../types/goals.js';
 
@@ -124,11 +125,18 @@ export function guideWorksheetPath(projectName: string, workspaceName: string): 
   return scopeFor(projectName, workspaceName).abs(WORKSHEET_PATH);
 }
 
+// `asks` normalization is shared with the share viewer, which fetches
+// review/guide.json as raw artifact bytes instead of going through this read.
+
 export function readReviewGuide(projectName: string, workspaceName: string): ReviewGuide | null {
   const path = scopeFor(projectName, workspaceName).abs(GUIDE_PATH);
   if (!existsSync(path)) return null;
   try {
-    return JSON.parse(readFileSync(path, 'utf8')) as ReviewGuide;
+    const guide = JSON.parse(readFileSync(path, 'utf8')) as ReviewGuide;
+    return {
+      ...guide,
+      sections: (guide.sections ?? []).map((section) => ({ ...section, asks: normalizeGuideAsks(section.asks) })),
+    };
   } catch {
     return null;
   }
@@ -265,6 +273,19 @@ export async function submitGuideSections(
     }
     if (!section.title?.trim() || !section.explanation?.trim()) {
       throw new SpacesError(`Section for ${section.clusterId} is missing title or explanation.`, 'USER_ERROR', 1);
+    }
+    // `asks` is a plain string list while the sibling `callouts` is
+    // `{tone, text}` — narrators mirror the object shape into asks, which used
+    // to persist happily and then crash the reviewer's guide pane on render.
+    // Reject at the boundary where agent-authored JSON enters.
+    const badAsk = (section.asks ?? []).find((ask) => typeof ask !== 'string');
+    if (badAsk !== undefined) {
+      throw new SpacesError(
+        `Section ${section.clusterId} has a non-string entry in "asks" (${JSON.stringify(badAsk)}). `
+          + 'asks is a list of plain strings — ["Should X stay?"]; only callouts take {tone, text}.',
+        'USER_ERROR',
+        1,
+      );
     }
     const files = new Set(clusterById.get(section.clusterId)!.files);
     for (const exhibit of section.exhibits ?? []) {

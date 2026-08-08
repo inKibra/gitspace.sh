@@ -12,6 +12,7 @@ import { useMemo, type ReactElement } from 'react';
 import type { ArtifactRead } from './ArtifactPanel.web.js';
 import { renderMarkdownHtml } from './markdown-render.js';
 import { decodeBase64Utf8 } from './artifact-kinds.js';
+import { normalizeGuideAsks } from '../core/guide-normalize.js';
 
 interface GuideDoc {
   version: number;
@@ -98,12 +99,17 @@ export function GuideShareView({ data }: {
                 <div className="mt-1 text-[10px] text-[var(--gs-text-ghost)]">Diff bodies aren't included in shares — the exhibit list names the files to read in the repo.</div>
               </div>
             )}
-            {(s.asks?.length ?? 0) > 0 && (
-              <div className="mt-3">
-                <div className="mb-1 text-[10px] uppercase tracking-[0.1em] text-[var(--gs-text-muted)]">Asks</div>
-                {s.asks!.map((a, j) => <div key={j} className="py-[2px] text-[12px] text-[var(--gs-text)]">? {a}</div>)}
-              </div>
-            )}
+            {/* Raw artifact bytes: this view fetches review/guide.json directly
+                rather than through readReviewGuide, so it normalizes here too. */}
+            {(() => {
+              const asks = normalizeGuideAsks(s.asks) ?? [];
+              return asks.length > 0 ? (
+                <div className="mt-3">
+                  <div className="mb-1 text-[10px] uppercase tracking-[0.1em] text-[var(--gs-text-muted)]">Asks</div>
+                  {asks.map((a, j) => <div key={j} className="py-[2px] text-[12px] text-[var(--gs-text)]">? {a}</div>)}
+                </div>
+              ) : null;
+            })()}
           </section>
         ))}
       </div>

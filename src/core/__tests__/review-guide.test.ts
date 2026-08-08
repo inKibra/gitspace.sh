@@ -73,6 +73,36 @@ describe('review guide worksheet + submit', () => {
     expect(readReviewGuide('demo', 'ws1')?.headSha).toBe(ws.headSha);
   });
 
+  it('rejects an object entry in asks at submit', async () => {
+    // Observed in the wild: a narrator mirrored the sibling `callouts` shape
+    // ({tone, text}) into `asks`, which is a plain string list. It validated,
+    // persisted, and then React threw "Objects are not valid as a React child"
+    // out of the guide pane — white-screening the entire app via the
+    // ErrorBoundary rather than degrading one section.
+    const ws = await buildGuideWorksheet('demo', 'ws1', 'main');
+    const sections = ws.clusters.map((c) => sectionFor(c.id, c.files));
+    sections[0] = { ...sections[0]!, asks: [{ text: 'Is the CI job worth it?' } as unknown as string] };
+
+    await expect(submitGuideSections('demo', 'ws1', { headSha: ws.headSha, sections }))
+      .rejects.toThrow(/non-string entry in "asks"/);
+  });
+
+  it('heals an already-committed guide whose asks carry objects', async () => {
+    // Submit now refuses this shape, but guides written before it do exist on
+    // artifact branches; reading one must not hand the renderer an object.
+    const ws = await buildGuideWorksheet('demo', 'ws1', 'main');
+    await submitGuideSections('demo', 'ws1', { headSha: ws.headSha, sections: ws.clusters.map((c) => sectionFor(c.id, c.files)) });
+
+    const guidePath = join(workspaceDir, '.gitspace', 'artifacts', 'review', 'guide.json');
+    const raw = JSON.parse(readFileSync(guidePath, 'utf8'));
+    raw.sections[0].asks = [{ text: 'Is the CI job worth it?' }, 'plain string', { nope: 1 }, 42];
+    writeFileSync(guidePath, JSON.stringify(raw));
+
+    const healed = readReviewGuide('demo', 'ws1');
+    expect(healed?.sections[0]?.asks).toEqual(['Is the CI job worth it?', 'plain string']);
+    for (const ask of healed?.sections[0]?.asks ?? []) expect(typeof ask).toBe('string');
+  });
+
   it('unchanged clusters carry cached prose; only new clusters need narration', async () => {
     const ws1 = await buildGuideWorksheet('demo', 'ws1', 'main');
     await submitGuideSections('demo', 'ws1', { headSha: ws1.headSha, sections: ws1.clusters.map((c) => sectionFor(c.id, c.files)) });
