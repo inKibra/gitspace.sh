@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, type ReactNode } from 'react';
 import { DockviewReact, type DockviewReadyEvent, type IDockviewHeaderActionsProps, type IDockviewPanelHeaderProps, type IDockviewPanelProps } from 'dockview-react';
 import { terminalMemoryDebugDecrement, terminalMemoryDebugGauge, terminalMemoryDebugIncrement } from '../utils/terminal-memory-debug.js';
+import { ErrorBoundary } from './ErrorBoundary.web.js';
 
 export interface DockviewTerminalPanel {
   id: string;
@@ -25,7 +26,18 @@ function DockPanel(props: IDockviewPanelProps<PanelParams>) {
   // A restored layout can mount a panel one tick before syncPanels installs
   // its live params (functions don't survive toJSON) — render nothing then.
   const { render } = props.params;
-  return <div className="h-full min-h-0 bg-[var(--gs-bg)] overflow-hidden flex flex-col">{render ? render() : null}</div>;
+  // Every dock tile renders through here, so one boundary bounds them all.
+  // React unwinds to the NEAREST boundary: without this the only one is at the
+  // root, and a throw in a single pane (e.g. one malformed guide `ask`) replaces
+  // the entire workspace — terminals and agent sessions included — with the
+  // recovery panel.
+  return (
+    <div className="h-full min-h-0 bg-[var(--gs-bg)] overflow-hidden flex flex-col">
+      <ErrorBoundary surface={`pane:${props.api.id}`} variant="pane">
+        {render ? render() : null}
+      </ErrorBoundary>
+    </div>
+  );
 }
 
 function DockTab(props: IDockviewPanelHeaderProps<PanelParams>) {

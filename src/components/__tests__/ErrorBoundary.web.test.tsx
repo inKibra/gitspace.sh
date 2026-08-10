@@ -98,4 +98,53 @@ describe('ErrorBoundary report-a-problem', () => {
 
     view.unmount();
   });
+
+  it('pane variant isolates the crash: siblings keep rendering, and Retry recovers', async () => {
+    // Dynamic (as above): the report transport must be mocked before the
+    // boundary module binds it, and a static import would hoist past mock.module.
+    const { ErrorBoundary } = await import('../ErrorBoundary.web.js');
+
+    // Two sibling panes, each with its own boundary — the DockPanel shape.
+    // Before per-pane boundaries the nearest boundary was the app root, so one
+    // bad pane replaced the whole workspace (terminals and agent sessions with
+    // it). This is the property that must hold.
+    let explode = true;
+    function Flaky(): React.ReactElement {
+      if (explode) throw new Error('pane-kaboom');
+      return <div>guide recovered</div>;
+    }
+
+    const view = render(
+      <div>
+        <ErrorBoundary surface="pane:guide" variant="pane"><Flaky /></ErrorBoundary>
+        <ErrorBoundary surface="pane:terminal" variant="pane"><div>terminal alive</div></ErrorBoundary>
+      </div>,
+    );
+
+    // The sibling survived — the whole point.
+    expect(view.container.textContent).toContain('terminal alive');
+    // The dead pane names itself and does NOT claim the app stopped.
+    expect(view.container.textContent).toContain('pane:guide');
+    expect(view.container.textContent).toContain('pane-kaboom');
+    expect(view.container.textContent).not.toContain('stopped rendering');
+
+    // Retry, not Reload: a reload would cost every other pane.
+    expect(view.queryByTestId('eb-reload-button')).toBeNull();
+    const retry = view.getByTestId('eb-retry-button');
+
+    explode = false;
+    await act(async () => { fireEvent.click(retry); });
+    expect(view.container.textContent).toContain('guide recovered');
+    expect(view.container.textContent).toContain('terminal alive');
+  });
+
+  it('page variant still owns the viewport and offers Reload', async () => {
+    const { ErrorBoundary } = await import('../ErrorBoundary.web.js');
+
+    const view = render(<ErrorBoundary surface="app"><Boom /></ErrorBoundary>);
+
+    expect(view.container.textContent).toContain('stopped rendering');
+    expect(view.queryByTestId('eb-retry-button')).toBeNull();
+    expect(view.getByTestId('eb-reload-button')).toBeDefined();
+  });
 });

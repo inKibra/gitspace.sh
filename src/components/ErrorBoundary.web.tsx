@@ -25,6 +25,14 @@ interface Props {
   surface?: string;
   /** Optional project context to attach to a report (usually unavailable here). */
   projectName?: string;
+  /**
+   * `page` (default) owns the viewport — the last line of defense.
+   * `pane` fills its container instead, and offers Retry rather than Reload:
+   * one dead dock tile must not cost the user every other pane, their
+   * terminals and their agent sessions. React unwinds to the NEAREST boundary,
+   * so mounting this per panel is what bounds the blast radius.
+   */
+  variant?: 'page' | 'pane';
 }
 interface State {
   error: Error | null;
@@ -82,19 +90,34 @@ export class ErrorBoundary extends Component<Props, State> {
     }
   };
 
+  /** Clear the error so the subtree remounts. Pane-only: a page-level crash has
+   *  no intact shell to return to, so that variant still offers Reload. */
+  private handleRetry = (): void => {
+    try { this.setState({ error: null, reportPhase: 'idle', reportMsg: '', note: '' }); } catch { /* ignore */ }
+  };
+
   render(): ReactNode {
     const { error, reportPhase, reportMsg, note } = this.state;
     if (!error) return this.props.children;
     const sending = reportPhase === 'sending';
     const done = reportPhase === 'done';
+    const pane = this.props.variant === 'pane';
     return (
       <div style={{
-        minHeight: '100vh', display: 'flex', flexDirection: 'column',
-        alignItems: 'center', justifyContent: 'center', gap: 12, padding: 24,
+        // A pane fills its tile; the page variant owns the viewport. `100vh`
+        // inside a dock panel would blow the layout out of its container.
+        ...(pane ? { height: '100%', overflow: 'auto' } : { minHeight: '100vh' }),
+        display: 'flex', flexDirection: 'column',
+        alignItems: 'center', justifyContent: 'center', gap: pane ? 8 : 12, padding: pane ? 12 : 24,
         background: '#050505', color: '#ddd',
         fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', textAlign: 'center',
       }}>
-        <div style={{ fontSize: 15, color: '#fff' }}>GitSpace hit an error and stopped rendering.</div>
+        <div style={{ fontSize: pane ? 12.5 : 15, color: '#fff' }}>
+          {pane
+            // Name the surface and scope the claim: the app is still running.
+            ? `This panel${this.props.surface ? ` (${this.props.surface})` : ''} hit an error. The rest of GitSpace is still running.`
+            : 'GitSpace hit an error and stopped rendering.'}
+        </div>
         <div style={{ fontSize: 12, color: '#9a9a9a', maxWidth: 560, wordBreak: 'break-word' }}>{error.message}</div>
 
         {done ? (
@@ -130,13 +153,14 @@ export class ErrorBoundary extends Component<Props, State> {
               </button>
               <button
                 type="button"
-                onClick={() => window.location.reload()}
+                data-testid={pane ? 'eb-retry-button' : 'eb-reload-button'}
+                onClick={pane ? this.handleRetry : () => window.location.reload()}
                 style={{
                   padding: '5px 12px', fontSize: 12, cursor: 'pointer',
                   background: 'transparent', color: '#ddd', border: '1px solid #333',
                 }}
               >
-                Reload
+                {pane ? 'Retry' : 'Reload'}
               </button>
             </div>
             {reportPhase === 'failed' && (
@@ -146,7 +170,9 @@ export class ErrorBoundary extends Component<Props, State> {
         )}
 
         <div style={{ fontSize: 10, color: '#555', maxWidth: 560 }}>
-          The error was recorded. Report it before reloading — a reload clears the recent-error log.
+          {pane
+            ? 'The error was recorded. Report it before retrying — the report carries the recent-error log.'
+            : 'The error was recorded. Report it before reloading — a reload clears the recent-error log.'}
         </div>
       </div>
     );
