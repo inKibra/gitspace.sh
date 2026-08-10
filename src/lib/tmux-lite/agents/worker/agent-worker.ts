@@ -12,6 +12,12 @@
  * to this process instead of racing across sessions in the daemon.
  */
 
+// MUST be the first import: it populates PI_DOCS_EMBED, which the SDK captures
+// at module scope the first time its docs-index is evaluated. Without it every
+// agent we spawn gets a throwing `omp://` and cannot read the documentation of
+// the harness it is running inside. See core/pi-docs-embed.ts.
+import '../../../../core/pi-docs-embed-install.js';
+
 import type { LocalSessionHost } from '../local-session-host.js';
 import type { SessionHostSinks } from '../session-host.js';
 import { raiseFileDescriptorLimitAtBoot } from '../../../../utils/rlimit.js';
