@@ -1,5 +1,5 @@
 /** @jsxImportSource react */
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactElement } from 'react';
 import { useFileTree, FileTree } from '@pierre/trees/react';
 import type { GitStatusEntry } from '@pierre/trees';
 import type { SessionBackend } from '../session/backend.js';
@@ -24,6 +24,25 @@ import { reportSchema } from '../core/artifact-envelopes.js';
 
 const RAIL_CLOSED_KEY = 'gssh:workspace-right-rail-closed';
 const RAIL_MODE_KEY = 'gssh:workspace-right-rail-mode';
+const RAIL_WIDTH_KEY = 'gssh:workspace-right-rail-width';
+const DEFAULT_RAIL_WIDTH = 320;
+const MIN_RAIL_WIDTH = 240;
+const MAX_RAIL_WIDTH = 640;
+
+/** Stored rail width, clamped. An unset key reads back as `null`, and
+ *  `Number(null)` is a finite `0` — so the absent case must be rejected
+ *  before clamping or every fresh client silently starts at MIN. */
+function readStoredRailWidth(): number {
+  try {
+    const raw = window.localStorage.getItem(RAIL_WIDTH_KEY);
+    if (raw === null) return DEFAULT_RAIL_WIDTH;
+    const value = Number(raw);
+    if (!Number.isFinite(value) || value <= 0) return DEFAULT_RAIL_WIDTH;
+    return Math.min(MAX_RAIL_WIDTH, Math.max(MIN_RAIL_WIDTH, value));
+  } catch {
+    return DEFAULT_RAIL_WIDTH;
+  }
+}
 
 /** The repo file tree, backed by @pierre/trees (the mock's stated backing). */
 function PierreRepoTree({ entries, changedSet, onOpenFile }: {
@@ -143,6 +162,26 @@ export function RightRail({
   });
   useEffect(() => { try { window.localStorage.setItem(RAIL_CLOSED_KEY, closed ? '1' : '0'); } catch { /* */ } }, [closed]);
   useEffect(() => { try { window.localStorage.setItem(RAIL_MODE_KEY, mode); } catch { /* */ } }, [mode]);
+  const [width, setWidth] = useState(readStoredRailWidth);
+  useEffect(() => { try { window.localStorage.setItem(RAIL_WIDTH_KEY, String(width)); } catch { /* */ } }, [width]);
+
+  /** The handle sits on the rail's LEFT edge, so dragging left (negative
+   *  delta) must widen it — hence `initialWidth - delta`, mirrored from the
+   *  workspace sidebar's handle, which sits on its right and adds. */
+  const handleResizeStart = useCallback((event: ReactMouseEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const initialClientX = event.clientX;
+    const initialWidth = width;
+    const handleMove = (moveEvent: MouseEvent) => {
+      setWidth(Math.min(MAX_RAIL_WIDTH, Math.max(MIN_RAIL_WIDTH, initialWidth - (moveEvent.clientX - initialClientX))));
+    };
+    const handleUp = () => {
+      window.removeEventListener('mousemove', handleMove);
+      window.removeEventListener('mouseup', handleUp);
+    };
+    window.addEventListener('mousemove', handleMove);
+    window.addEventListener('mouseup', handleUp);
+  }, [width]);
 
   if (closed) {
     return (
@@ -159,7 +198,13 @@ export function RightRail({
   }
 
   return (
-    <aside className="gs-ui flex h-full w-[320px] flex-shrink-0 flex-col border-l border-[var(--gs-border-muted)] bg-[var(--gs-bg)]">
+    <>
+      <div
+        className="hidden sm:block w-1.5 flex-shrink-0 cursor-col-resize border-l border-r border-[var(--gs-border-muted)] bg-[var(--gs-bg)] hover:bg-[var(--gs-bg-active)]"
+        onMouseDown={handleResizeStart}
+        title="Resize rail"
+      />
+      <aside className="gs-ui flex h-full flex-shrink-0 flex-col border-l border-[var(--gs-border-muted)] bg-[var(--gs-bg)]" style={{ width }}>
       <div className="relative flex flex-shrink-0 border-b border-[var(--gs-border)]">
         {(['repo', 'artifacts'] as const).map((m) => (
           <button
@@ -176,7 +221,8 @@ export function RightRail({
       {mode === 'repo'
         ? <RepoMode backend={backend} workspaceId={workspaceId} projectName={projectName} workspaceName={workspaceName} onOpenFile={onOpenFile} reviewing={phase === 'review'} />
         : <ArtifactsMode backend={backend} workspaceId={workspaceId} projectName={projectName} workspaceName={workspaceName} onOpenArtifact={onOpenArtifact} onOpenDashboard={onOpenDashboard} onOpenNote={onOpenNote} onOpenEvents={onOpenEvents} goalEvidence={goalEvidence} onOpenEvidence={onOpenEvidence} onOpenReport={onOpenReport} onOpenGoalPane={onOpenGoalPane} onOpenRubricPane={onOpenRubricPane} onOpenWorkflowPane={onOpenWorkflowPane} goalSummary={goalSummary} />}
-    </aside>
+      </aside>
+    </>
   );
 }
 

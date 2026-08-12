@@ -94,7 +94,7 @@ function SidebarItem({
       type={onClick ? 'button' : undefined}
       onClick={onClick}
       className={
-        'w-full flex items-center gap-[9px] px-[13px] py-[5px] text-[12px] text-left transition-colors duration-100 ' +
+        'w-full min-w-0 flex items-center gap-[9px] px-[13px] py-[5px] text-[12px] text-left transition-colors duration-100 ' +
         (highlight
           ? 'bg-[var(--gs-highlight-bg)] text-[var(--gs-text)] shadow-[inset_2px_0_0_var(--gs-info)]'
           : active
