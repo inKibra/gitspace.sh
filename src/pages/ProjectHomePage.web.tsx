@@ -14,6 +14,8 @@
 import { useCallback, useEffect, useMemo, useState, type ReactElement } from 'react';
 import type { DockviewApi } from 'dockview-react';
 import type { BackendKey, SessionBackend } from '../session/backend.js';
+import { AGENT_STATE_DOT_CLASS } from '../app/shared/status-display.js';
+import type { AgentSessionRenderState } from '../agents/agent-runtime-types.js';
 import { NotePanel } from '../components/NotePanel.web.js';
 import { MarkdownPreview } from '../components/MarkdownPreview.web.js';
 import { CronsPaneConnected } from '../components/CronsPaneConnected.web.js';
@@ -452,7 +454,7 @@ export function ProjectHomePage({
   /** Live agent-session states (keyed by session id) from the machine snapshot,
    *  used to color the project-agent thread rows (amber when a thread is blocked
    *  on a question, green-pulse while working, etc.). */
-  agentSessionsById?: Record<string, { state?: string }>;
+  agentSessionsById?: Record<string, { state?: AgentSessionRenderState }>;
   onBack: () => void;
   onOpenWorkspace: (workspaceId: string) => void;
   onOpenGoal: (goal: KanbanGoalItem) => void;
@@ -1112,12 +1114,10 @@ export function ProjectHomePage({
               })
             : agentThreads.map((th) => {
                 const st = agentSessionsById?.[th.id]?.state;
-                // Same status palette as workspace-agent rows (WorkspaceDetailPane).
-                const iconColor =
-                  st === 'permission-needed' ? 'text-[var(--gs-warning-bright)]'
-                  : st === 'running' ? 'text-[var(--gs-running)]'
-                  : st === 'retrying' ? 'text-[var(--gs-danger)]'
-                  : null;
+                // The shared table, not a re-map: the inline version omitted
+                // `waiting`, so a waiting project agent rendered identically to
+                // a closed one.
+                const iconColor = st ? AGENT_STATE_DOT_CLASS[st] ?? null : null;
                 const tab = `agent:${th.id}`;
                 const on = active === tab;
                 return (

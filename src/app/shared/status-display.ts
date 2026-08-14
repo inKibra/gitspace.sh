@@ -82,3 +82,19 @@ export const AGENT_STATE_LABEL: Record<AgentSessionRenderState, string> = {
   dormant: 'dormant',
   archived: 'archived',
 };
+
+/** A goal's position in its chain, as rendered. Distinct from agent state: a
+ *  chain node is about the goal's progress, not about a session's activity. */
+export type ChainNodeState = 'shipped' | 'active' | 'planned';
+
+/**
+ * Tone for a chain node's label/glyph. Shared because the goal-chain rail and
+ * the goal doc's chain both render the same three states, and had drifted into
+ * two byte-identical private copies — which is exactly how they stop being
+ * identical. Literal class strings, per the note above.
+ */
+export const CHAIN_NODE_TONE_CLASS: Record<ChainNodeState, string> = {
+  shipped: 'text-[var(--gs-success)]',
+  active: 'text-[var(--gs-accent)]',
+  planned: 'text-[var(--gs-text-dim)]',
+};

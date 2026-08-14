@@ -3,8 +3,10 @@ import type { Block } from '../index.js';
 import type { ToolCallData } from '../types/transcript.js';
 import { Highlighted } from './highlight.web.js';
 
-/** Keep each expanded payload at a readable height; scrolling here prevents a busy transcript becoming a wall of output. */
-export const TOOL_PAYLOAD_CLASS = 'max-h-72 overflow-y-auto overscroll-contain border-t border-[var(--gs-border)] p-2';
+/** Keep each expanded payload at a readable height; scrolling here prevents a busy transcript becoming a wall of output.
+ *  No `overscroll-contain`: it stops scroll chaining, so a wheel gesture that
+ *  reaches a payload's end dies there instead of continuing the transcript. */
+export const TOOL_PAYLOAD_CLASS = 'max-h-72 overflow-y-auto border-t border-[var(--gs-border)] p-2';
 
 type RenderBlocks = (blocks: readonly Block[]) => ReactNode;
 export type ToolRenderer = (props: { data: ToolCallData; renderBlocks: RenderBlocks; showInput?: boolean }) => ReactElement;

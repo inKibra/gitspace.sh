@@ -3,6 +3,7 @@ import { useEffect, useRef, useState, type ReactElement } from 'react';
 import type { WorkspacePhase } from '../types/config.js';
 import { STAGE_CAPS, STAGE_ORDER, stageColorVar } from '../app/shared/workspace-detail/stage-caps.js';
 import type { KanbanGoalItem } from '../app/shared/board/types.js';
+import { CHAIN_NODE_TONE_CLASS } from '../app/shared/status-display.js';
 
 /**
  * Workspace sidebar chrome (mock: Sidebar.tsx header/modecaps/chainstack):
@@ -111,22 +112,21 @@ export function chainNodesFromGoals(goals: KanbanGoalItem[], currentWorkspaceNam
     });
 }
 
-export function ChainStack({ title, nodes, currentGoalId, onSwitchWorkspace }: {
+export function ChainStack({ title, nodes, currentGoalId, onSwitchWorkspace, onOpenGoal }: {
   title: string;
   nodes: ChainStackNode[];
   currentGoalId?: string;
   onSwitchWorkspace?: (selectionKey: string) => void;
+  /** A chain node with no workspace yet (a planned goal) has nothing to switch
+   *  to, and used to swallow the click silently. Open its goal instead. */
+  onOpenGoal?: (goalId: string) => void;
 }): ReactElement {
   const DOT: Record<ChainStackNode['status'], string> = {
     shipped: 'border-[var(--gs-success)] bg-[var(--gs-success)]',
     active: 'border-[var(--gs-accent)] bg-[var(--gs-accent)] shadow-[0_0_8px_var(--gs-accent)]',
     planned: 'border-[var(--gs-border-active)] bg-[var(--gs-bg)]',
   };
-  const PHASE_TONE: Record<ChainStackNode['status'], string> = {
-    shipped: 'text-[var(--gs-success)]',
-    active: 'text-[var(--gs-accent)]',
-    planned: 'text-[var(--gs-text-dim)]',
-  };
+  const PHASE_TONE = CHAIN_NODE_TONE_CLASS;
   return (
     <div className="mb-3">
       <div className="mb-1 px-[13px] pt-[11px] text-[10.5px] uppercase tracking-[.12em] text-[var(--gs-text-muted)]">Chain · {title}</div>
@@ -134,11 +134,16 @@ export function ChainStack({ title, nodes, currentGoalId, onSwitchWorkspace }: {
         {nodes.map((nd, i) => {
           const isCurrent = nd.goalId === currentGoalId;
           const navigable = !!nd.workspaceSelectionKey && !isCurrent && !!onSwitchWorkspace;
+          const openable = !navigable && !isCurrent && !!onOpenGoal;
           return (
             <div
               key={nd.goalId}
-              onClick={() => { if (navigable) onSwitchWorkspace!(nd.workspaceSelectionKey!); }}
-              className={`flex gap-[9px] px-[13px] py-[3px] ${navigable ? 'cursor-pointer hover:bg-[var(--gs-bg-hover)]' : ''}`}
+              title={navigable ? undefined : openable ? 'No workspace yet — open the goal' : undefined}
+              onClick={() => {
+                if (navigable) onSwitchWorkspace!(nd.workspaceSelectionKey!);
+                else if (openable) onOpenGoal!(nd.goalId);
+              }}
+              className={`flex gap-[9px] px-[13px] py-[3px] ${navigable || openable ? 'cursor-pointer hover:bg-[var(--gs-bg-hover)]' : ''}`}
             >
               <span className="relative flex w-[10px] flex-shrink-0 justify-center">
                 <span className={`mt-[3px] h-[9px] w-[9px] flex-shrink-0 rounded-full border-2 ${DOT[isCurrent ? 'active' : nd.status]}`} />

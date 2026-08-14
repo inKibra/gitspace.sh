@@ -437,6 +437,10 @@ function SidebarContent(props: {
           nodes={chainNodesFromGoals(chainGoals, workspace.name)}
           currentGoalId={currentChainGoalId}
           onSwitchWorkspace={onSwitchChainWorkspace ? (key) => act(() => onSwitchChainWorkspace(key)) : undefined}
+          onOpenGoal={onOpenGoalDetail ? (goalId) => {
+            const item = chainGoals.find((g) => g.id === goalId);
+            if (item) act(() => void onOpenGoalDetail(item));
+          } : undefined}
         />
       )}
 

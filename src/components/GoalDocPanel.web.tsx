@@ -5,6 +5,7 @@ import { BlockView } from '../blocks/render/registry.web.js';
 import { slugifySliceId } from '../core/goal-gates.js';
 import type { GoalDoc, GoalValidation, Requirement } from '../types/goals.js';
 import type { WorkspacePhase } from '../types/config.js';
+import { CHAIN_NODE_TONE_CLASS, type ChainNodeState as SharedChainNodeState } from '../app/shared/status-display.js';
 
 /**
  * GoalDocPanel — the '◇ Goal' workspace dock pane (mock: GoalDoc.tsx).
@@ -25,7 +26,7 @@ export interface GoalLike {
   workspaceName?: string;
 }
 
-type ChainNodeState = 'shipped' | 'active' | 'planned';
+type ChainNodeState = SharedChainNodeState;
 
 function nodeState(goal: GoalLike): ChainNodeState {
   // Archived = done (workspace gone), regardless of the phase it froze at — a
@@ -35,11 +36,7 @@ function nodeState(goal: GoalLike): ChainNodeState {
   return 'planned';
 }
 
-const NODE_ICON_TONE: Record<ChainNodeState, string> = {
-  shipped: 'text-[var(--gs-success)]',
-  active: 'text-[var(--gs-accent)]',
-  planned: 'text-[var(--gs-text-dim)]',
-};
+const NODE_ICON_TONE = CHAIN_NODE_TONE_CLASS;
 
 function reqStatusDot(status: Requirement['status']): string {
   if (status === 'accepted') return 'bg-[var(--gs-success)]';
