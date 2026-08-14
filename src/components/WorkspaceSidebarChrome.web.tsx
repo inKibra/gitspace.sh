@@ -97,18 +97,38 @@ export interface ChainStackNode {
 }
 
 /**
+ * The workspace a chain node points at, resolved by the caller.
+ *
+ * Key and status come back together deliberately. They are two facts about the
+ * same workspace, and resolving them separately is what broke this twice: the
+ * dots looked up a goal key against a workspace-keyed map (always missed, always
+ * grey), and navigation passed that same goal key to the workspace selector
+ * (never matched, so the click deselected instead of navigating).
+ */
+export interface ChainNodeWorkspace {
+  /** The WORKSPACE's selection key — backend-scoped, not `<backend>:goal:<id>`. */
+  selectionKey: string;
+  statusColor?: WorkspaceStatusColor;
+}
+
+/**
  * Chain nodes for the rail.
  *
- * `statusColorOf` resolves a goal's workspace status the same way the workspace
- * strip does. Without it every workspace-backed goal was drawn 'active', i.e.
- * accent-green — so green meant nothing more than "this goal has a workspace",
- * while the same workspace showed its real status (red/amber/blue) two panels
- * away. A goal with no workspace has no status to report and stays 'planned'.
+ * `resolveWorkspace` maps a goal to its workspace. A node is navigable only when
+ * that resolves: a goal naming a workspace this client cannot see (other backend,
+ * filtered out) must not produce a key, because an unresolvable key reaching the
+ * board selector clears the selection and ejects you from the workspace you were
+ * looking at.
+ *
+ * A goal with no workspace has no status to report and stays 'planned'; without
+ * this, every workspace-backed goal drew 'active' accent-green, so green meant
+ * only "this goal has a workspace" while the same workspace showed its real
+ * status two panels away.
  */
 export function chainNodesFromGoals(
   goals: KanbanGoalItem[],
   currentWorkspaceName: string,
-  statusColorOf?: (goal: KanbanGoalItem) => WorkspaceStatusColor | undefined,
+  resolveWorkspace?: (goal: KanbanGoalItem) => ChainNodeWorkspace | undefined,
 ): ChainStackNode[] {
   return [...goals]
     .sort((a, b) => a.chainPosition - b.chainPosition)
@@ -118,14 +138,18 @@ export function chainNodesFromGoals(
       const status: ChainStackNode['status'] = isCurrent ? 'active' : shipped ? 'shipped' : g.status === 'planned' ? 'planned' : 'active';
       const reqs = g.validation ? Object.values(g.validation.requirements ?? {}) : [];
       const passed = reqs.filter((r) => r.status === 'accepted').length;
+      // One resolve per goal: the dot's status and the click target are the same
+      // workspace, so they cannot drift apart.
+      const ws = g.workspaceName ? resolveWorkspace?.(g) : undefined;
       return {
         goalId: g.id,
         title: g.title,
         phase: g.phase,
         status: isCurrent ? 'active' : status,
-        workspaceSelectionKey: g.workspaceName && !isCurrent ? g.selectionKey : undefined,
+        // The current node is never a navigation target — you are already there.
+        workspaceSelectionKey: isCurrent ? undefined : ws?.selectionKey,
         ready: reqs.length > 0 ? { passed, total: reqs.length } : undefined,
-        statusColor: g.workspaceName ? statusColorOf?.(g) : undefined,
+        statusColor: ws?.statusColor,
       };
     });
 }

@@ -919,30 +919,45 @@ export function ProjectHomePage({
         <div className="text-xs text-[var(--gs-text-dim)]">No goal chains yet — plan one from the board.</div>
       ) : (
         chains.map((c) => {
-          const curGoal = c.goals.find((g) => g.workspaceName);
-          const ws = curGoal ? workspaces.find((w) => w.workspace.name === curGoal.workspaceName) : undefined;
+          // Where the chain row itself goes: the goal you are most likely to mean,
+          // which is the LAST workspace-backed goal in chain order — the front of
+          // the work. `goals.find(g => g.workspaceName)` returned whichever came
+          // first in array order, so a chain whose early goals had shipped sent
+          // you back to a finished workspace.
+          const ordered = [...c.goals].sort((a, b) => a.chainPosition - b.chainPosition);
+          const workspaceOf = (g: KanbanGoalItem) =>
+            g.workspaceName ? workspaces.find((w) => w.workspace.name === g.workspaceName && w.workspace.projectName === g.projectName) : undefined;
+          const curGoal = [...ordered].reverse().find((g) => workspaceOf(g));
+          const ws = curGoal ? workspaceOf(curGoal) : undefined;
           return (
             <div
               key={c.chainId}
               onClick={() => {
                 if (ws) onOpenWorkspace(ws.workspace.selectionKey);
-                else if (c.goals[0]) onOpenGoal(c.goals[0]);
+                else if (ordered[0]) onOpenGoal(ordered[0]);
               }}
               className="mb-[5px] flex cursor-pointer items-center gap-2.5 border border-[var(--gs-border-muted)] px-[9px] py-[7px] transition-colors last:mb-0 hover:border-[var(--gs-border-active)] hover:bg-[var(--gs-bg-hover)]"
             >
               <span className="text-[12.5px] text-[var(--gs-text)]">{c.title}</span>
               <span className="ml-1.5 inline-flex gap-1">
-                {c.goals.map((g) => {
+                {ordered.map((g) => {
                   // Its own workspace's status, resolved from the runtime entry
                   // that already carries it — the same value the strip shows.
-                  const dotWs = g.workspaceName ? workspaces.find((w) => w.workspace.name === g.workspaceName) : undefined;
+                  const dotWs = workspaceOf(g);
                   const dot = goalDotProps(g, dotWs?.stripStatus.primaryColor);
                   const statusWord = dotWs?.statusSummary.primaryColor ?? 'no workspace';
+                  // Each dot is its OWN node: clicking one went wherever the row
+                  // went, so aiming at a specific goal landed you somewhere else.
                   return (
                     <span
                       key={g.id}
                       title={`${g.title} · ${g.status === 'planned' ? 'planned' : g.phase} · ${statusWord}`}
-                      className={dot.className}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (dotWs) onOpenWorkspace(dotWs.workspace.selectionKey);
+                        else onOpenGoal(g);
+                      }}
+                      className={`${dot.className} cursor-pointer`}
                       style={dot.style}
                     />
                   );

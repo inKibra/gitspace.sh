@@ -83,7 +83,12 @@ export function useKanbanViewController(args: UseKanbanViewControllerArgs) {
         return;
       }
       const workspace = workspaces.find((item) => item.selectionKey === workspaceKey);
-      args.onSelectRef(workspace ? { backendKey: workspace.backendKey, workspaceId: workspace.id } : null);
+      // Only `null` deselects. A key that resolves to nothing is a caller bug or
+      // a workspace this client cannot see; clearing the selection there turns a
+      // failed navigation into an eviction from the workspace you were in — which
+      // is how chain clicks appeared to "sometimes" work. Stay put instead.
+      if (!workspace) return;
+      args.onSelectRef({ backendKey: workspace.backendKey, workspaceId: workspace.id });
     },
     setPhase,
   };

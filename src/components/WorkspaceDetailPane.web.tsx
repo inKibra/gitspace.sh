@@ -443,12 +443,15 @@ function SidebarContent(props: {
         <ChainStack
           title={chainTitle}
           nodes={chainNodesFromGoals(chainGoals, workspace.name, (g) => {
-            // Match the WORKSPACE, not the goal: stripStatusById is keyed by the
-            // workspace's selectionKey, while a goal's is `<backend>:goal:<id>`.
-            // Looking up the goal key always missed and fell back to 'dim', so
-            // every dot rendered grey no matter what the workspace was doing.
+            // Resolve the WORKSPACE the goal is backed by, and report it once.
+            // A goal's own key is `<backend>:goal:<id>` and matches nothing here:
+            // stripStatusById is keyed by the workspace's selectionKey (so the
+            // dot fell back to grey), and passing it to the board selector
+            // resolved to no workspace (so the click deselected instead of
+            // navigating). No match means no key: better inert than ejected.
             const ws = allWorkspaces.find((w) => w.name === g.workspaceName && w.projectName === g.projectName);
-            return ws ? getWorkspaceStripColor(ws, workspaceStatusById) : undefined;
+            if (!ws?.selectionKey) return undefined;
+            return { selectionKey: ws.selectionKey, statusColor: getWorkspaceStripColor(ws, workspaceStatusById) };
           })}
           currentGoalId={currentChainGoalId}
           onSwitchWorkspace={onSwitchChainWorkspace ? (key) => act(() => onSwitchChainWorkspace(key)) : undefined}
