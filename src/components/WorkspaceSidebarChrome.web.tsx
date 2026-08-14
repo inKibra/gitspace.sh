@@ -108,7 +108,7 @@ export interface ChainStackNode {
 export function chainNodesFromGoals(
   goals: KanbanGoalItem[],
   currentWorkspaceName: string,
-  statusColorOf?: (goal: KanbanGoalItem) => WorkspaceStatusColor,
+  statusColorOf?: (goal: KanbanGoalItem) => WorkspaceStatusColor | undefined,
 ): ChainStackNode[] {
   return [...goals]
     .sort((a, b) => a.chainPosition - b.chainPosition)

@@ -687,6 +687,7 @@ const ALIGN_CONNECTOR_CLASS: Record<string, string> = {
 function StacksLanes({
   chains,
   workspaceByGoalId,
+  workspaceStatusById,
   selectedWorkspaceId,
   onSelectWorkspace,
   onSelectPlannedGoal,
@@ -694,6 +695,8 @@ function StacksLanes({
 }: {
   chains: Array<{ chainId: string; title: string; count: number; goals: KanbanGoalItem[] }>;
   workspaceByGoalId: Map<string, KanbanWorkspaceItem>;
+  /** Keyed by workspace selectionKey — the chain dot's only colour source. */
+  workspaceStatusById: Record<string, WorkspaceStatusSummary>;
   selectedWorkspaceId: string | null;
   onSelectWorkspace: (workspaceKey: string | null) => void;
   onSelectPlannedGoal?: (goal: KanbanGoalItem) => void;
@@ -719,8 +722,13 @@ function StacksLanes({
             {chain.goals.map((goal, index) => {
               const workspace = workspaceByGoalId.get(goal.id);
               const here = Boolean(workspace && workspace.selectionKey === selectedWorkspaceId);
-              const status = goal.status === 'planned' ? 'planned' : goal.phase === 'ship' ? 'shipped' : 'active';
-              const dotColor = status === 'shipped' ? 'var(--gs-success)' : status === 'active' ? 'var(--gs-accent)' : 'var(--gs-text-dim)';
+              // The dot is the WORKSPACE's status, same as a board card's dot.
+              // It used to be accent green for anything workspace-backed and not
+              // shipped, so a lane lit up identically whether its workspaces were
+              // healthy, failing, or waiting on a question.
+              const dotColor = workspace
+                ? statusEdgeColor(workspaceStatusById[workspace.selectionKey]?.primaryColor)
+                : 'var(--gs-text-dim)';
               const align = alignFor(goal);
               const next = chain.goals[index + 1];
               return (
@@ -935,6 +943,7 @@ export function KanbanBoardWeb({
           <StacksLanes
             chains={chainSummaries}
             workspaceByGoalId={workspaceByGoalId}
+            workspaceStatusById={workspaceStatusById}
             selectedWorkspaceId={selectedWorkspaceId}
             onSelectWorkspace={onSelectWorkspace}
             onSelectPlannedGoal={onSelectPlannedGoal}

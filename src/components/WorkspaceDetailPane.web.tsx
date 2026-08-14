@@ -213,6 +213,9 @@ function SidebarContent(props: {
   /** Same status map the workspace strip uses, so a chain node's dot reports the
    *  workspace's real status instead of merely "it has a workspace". */
   workspaceStatusById?: WorkspaceDetailPaneProps['workspaceStatusById'];
+  /** Needed to map a chain goal to its workspace: the status map is keyed by the
+   *  workspace's selectionKey, which a goal does not carry. */
+  allWorkspaces?: WorkspaceDetailPaneProps['allWorkspaces'];
   chainTitle?: string;
   currentChainGoalId?: string;
   onSwitchChainWorkspace?: WorkspaceDetailPaneProps['onSwitchChainWorkspace'];
@@ -227,7 +230,7 @@ function SidebarContent(props: {
     onAttachSession, onStopAgentTurn, onCloseAgentSession, onArchiveAgentSession, onRestoreAgentSession,
     onCreateAgentSession, onStopProcess, onDeleteSession, onDeleteWorkspace, onOpenGitHubPullRequest, onOpenReview,
     onRequestStatusChange, onOpenNotes, onOpenEvents, onOpenGoalDoc, onOpenChangeGuide, onOpenRubric, onOpenWorkflow, onOpenCrons, onCreateDashboard,
-    dashboards, onOpenDashboard, chainGoals, chainTitle, currentChainGoalId, onSwitchChainWorkspace, workspaceStatusById = {},
+    dashboards, onOpenDashboard, chainGoals, chainTitle, currentChainGoalId, onSwitchChainWorkspace, workspaceStatusById = {}, allWorkspaces = [],
     agentSessionCount, pendingPermissions, pullRequest, onDismiss,
     goal, onOpenGoalDetail,
   } = props;
@@ -439,10 +442,14 @@ function SidebarContent(props: {
       {chainGoals && chainGoals.length > 1 && chainTitle && (
         <ChainStack
           title={chainTitle}
-          nodes={chainNodesFromGoals(chainGoals, workspace.name, (g) => getWorkspaceStripColor(
-            { id: g.selectionKey, name: g.workspaceName ?? '', projectName: g.projectName, selectionKey: g.selectionKey },
-            workspaceStatusById,
-          ))}
+          nodes={chainNodesFromGoals(chainGoals, workspace.name, (g) => {
+            // Match the WORKSPACE, not the goal: stripStatusById is keyed by the
+            // workspace's selectionKey, while a goal's is `<backend>:goal:<id>`.
+            // Looking up the goal key always missed and fell back to 'dim', so
+            // every dot rendered grey no matter what the workspace was doing.
+            const ws = allWorkspaces.find((w) => w.name === g.workspaceName && w.projectName === g.projectName);
+            return ws ? getWorkspaceStripColor(ws, workspaceStatusById) : undefined;
+          })}
           currentGoalId={currentChainGoalId}
           onSwitchWorkspace={onSwitchChainWorkspace ? (key) => act(() => onSwitchChainWorkspace(key)) : undefined}
           onOpenGoal={onOpenGoalDetail ? (goalId) => {
@@ -783,6 +790,7 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
                 onOpenDashboard={props.onOpenDashboard}
                 chainGoals={props.chainGoals}
                 workspaceStatusById={props.workspaceStatusById}
+                allWorkspaces={props.allWorkspaces}
                 chainTitle={props.chainTitle}
                 currentChainGoalId={props.currentChainGoalId}
                 onSwitchChainWorkspace={props.onSwitchChainWorkspace}
@@ -896,6 +904,7 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
                   onOpenDashboard={props.onOpenDashboard}
                   chainGoals={props.chainGoals}
                   workspaceStatusById={props.workspaceStatusById}
+                  allWorkspaces={props.allWorkspaces}
                   chainTitle={props.chainTitle}
                   currentChainGoalId={props.currentChainGoalId}
                   onSwitchChainWorkspace={props.onSwitchChainWorkspace}
