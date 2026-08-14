@@ -65,57 +65,63 @@ export function GlobalChromeBar({ projects, currentProjectName, workspaces, acti
   return (
     <div className="gs-ui flex h-[42px] flex-shrink-0 items-center gap-3.5 border-b border-[var(--gs-border)] bg-[#050505] px-4">
       <button type="button" onClick={onBoard} className="text-[13px] font-semibold tracking-[.01em] text-[var(--gs-text)]">GitSpace</button>
-      {/* activity strip — project switcher + workspace chips */}
-      <div className="ml-1.5 flex min-w-0 flex-1 items-stretch self-stretch overflow-x-auto">
-        {/* The switcher stands where the board chip used to. It carries two
-         *  actions on purpose: the NAME enters the project, the caret scopes the
-         *  strip to it. A single control cannot do both, and a native <select>
-         *  can do neither — it has no clickable label. */}
-        {hasProjects && (
-          <div ref={menuRef} className="relative flex items-stretch border-l border-[var(--gs-border)]">
-            <button
-              type="button"
-              title={currentProjectName ? `Open ${currentProjectName}` : 'Pick a project'}
-              onClick={() => {
-                if (currentProjectName && onEnterProject) onEnterProject(currentProjectName);
-                else setMenuOpen((v) => !v);
-              }}
-              className={`flex items-center gap-1.5 whitespace-nowrap pl-[11px] pr-1.5 text-[11.5px] transition-colors ${projectActive ? 'bg-[var(--gs-bg-active)] text-[var(--gs-text)]' : 'text-[var(--gs-text-muted)] hover:bg-[var(--gs-bg-hover)] hover:text-[var(--gs-text)]'}`}
-            >
-              ⊞ {currentProjectName ?? 'all projects'}
-            </button>
-            <button
-              type="button"
-              aria-label="Switch project"
-              aria-expanded={menuOpen}
-              onClick={() => setMenuOpen((v) => !v)}
-              className={`flex items-center pr-[9px] text-[9px] transition-colors ${projectActive ? 'bg-[var(--gs-bg-active)] text-[var(--gs-text-muted)]' : 'text-[var(--gs-text-dim)] hover:bg-[var(--gs-bg-hover)] hover:text-[var(--gs-text)]'}`}
-            >
-              ▾
-            </button>
-            {menuOpen && (
-              <div className="absolute left-0 top-full z-50 min-w-[200px] border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] py-1 shadow-lg">
+      {/* The switcher stands where the board chip used to, but OUTSIDE the chip
+       *  scroller below: that scroller is `overflow-x-auto`, which establishes a
+       *  clipping context, so a dropdown rendered inside it is cut off at the
+       *  42px bar and appears not to open at all. `ml-1.5` keeps it flush where
+       *  the strip starts.
+       *
+       *  Two actions on purpose: the NAME enters the project, the caret scopes
+       *  the strip to it. A native <select> can do neither — it has no clickable
+       *  label. */}
+      {hasProjects && (
+        <div ref={menuRef} className="relative ml-1.5 flex items-stretch self-stretch border-l border-[var(--gs-border)]">
+          <button
+            type="button"
+            title={currentProjectName ? `Open ${currentProjectName}` : 'Pick a project'}
+            onClick={() => {
+              if (currentProjectName && onEnterProject) onEnterProject(currentProjectName);
+              else setMenuOpen((v) => !v);
+            }}
+            className={`flex items-center gap-1.5 whitespace-nowrap pl-[11px] pr-1.5 text-[11.5px] transition-colors ${projectActive ? 'bg-[var(--gs-bg-active)] text-[var(--gs-text)]' : 'text-[var(--gs-text-muted)] hover:bg-[var(--gs-bg-hover)] hover:text-[var(--gs-text)]'}`}
+          >
+            ⊞ {currentProjectName ?? 'all projects'}
+          </button>
+          <button
+            type="button"
+            aria-label="Switch project"
+            aria-expanded={menuOpen}
+            onClick={() => setMenuOpen((v) => !v)}
+            className={`flex items-center pr-[9px] text-[9px] transition-colors ${projectActive ? 'bg-[var(--gs-bg-active)] text-[var(--gs-text-muted)]' : 'text-[var(--gs-text-dim)] hover:bg-[var(--gs-bg-hover)] hover:text-[var(--gs-text)]'}`}
+          >
+            ▾
+          </button>
+          {menuOpen && (
+            <div className="absolute left-0 top-full z-50 min-w-[200px] border border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] py-1 shadow-lg">
+              <button
+                type="button"
+                onClick={() => { setMenuOpen(false); onFilterProject?.(null); }}
+                className={`block w-full px-3 py-1 text-left text-[11.5px] hover:bg-[var(--gs-bg-hover)] ${currentProjectName ? 'text-[var(--gs-text-muted)]' : 'text-[var(--gs-text)]'}`}
+              >
+                all projects
+              </button>
+              {projects.map((p) => (
                 <button
+                  key={p.name}
                   type="button"
-                  onClick={() => { setMenuOpen(false); onFilterProject?.(null); }}
-                  className={`block w-full px-3 py-1 text-left text-[11.5px] hover:bg-[var(--gs-bg-hover)] ${currentProjectName ? 'text-[var(--gs-text-muted)]' : 'text-[var(--gs-text)]'}`}
+                  onClick={() => { setMenuOpen(false); onFilterProject?.(p.name); }}
+                  className={`block w-full px-3 py-1 text-left text-[11.5px] hover:bg-[var(--gs-bg-hover)] ${p.name === currentProjectName ? 'text-[var(--gs-text)]' : 'text-[var(--gs-text-muted)]'}`}
                 >
-                  all projects
+                  {p.name}
                 </button>
-                {projects.map((p) => (
-                  <button
-                    key={p.name}
-                    type="button"
-                    onClick={() => { setMenuOpen(false); onFilterProject?.(p.name); }}
-                    className={`block w-full px-3 py-1 text-left text-[11.5px] hover:bg-[var(--gs-bg-hover)] ${p.name === currentProjectName ? 'text-[var(--gs-text)]' : 'text-[var(--gs-text-muted)]'}`}
-                  >
-                    {p.name}
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+      {/* Chip scroller. Kept separate from the switcher above because
+       *  `overflow-x-auto` clips absolutely positioned children. */}
+      <div className="flex min-w-0 flex-1 items-stretch self-stretch overflow-x-auto">
         {workspaces.map((w) => (
           <button
             key={w.key}

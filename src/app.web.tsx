@@ -829,7 +829,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
         statusColor: WORKSPACE_CHIP_COLOR[st?.primaryColor ?? 'dim'],
       };
     });
-  const renderChromeBar = (opts: { projectActive?: boolean; activeKey?: string | null; onBoard?: () => void; currentProjectName?: string | null }) => (
+  const renderChromeBar = (opts: { projectActive?: boolean; activeKey?: string | null; onBoard?: () => void; currentProjectName?: string | null; onEnterProject?: (name: string) => void }) => (
     <>
       <GlobalChromeBar
         projects={allProjects}
@@ -840,7 +840,14 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
         activeKey={opts.activeKey}
         projectActive={opts.projectActive}
         onBoard={opts.onBoard ?? (() => {})}
-        onEnterProject={(name) => { setChipProjectFilter(name); setProjectHomeName(name); }}
+        onEnterProject={(name) => {
+          setChipProjectFilter(name);
+          // The detail branch returns before the project-home branch, so a
+          // surface that is showing a workspace must yield first or setting the
+          // project name changes nothing on screen.
+          if (opts.onEnterProject) opts.onEnterProject(name);
+          else setProjectHomeName(name);
+        }}
         onFilterProject={(name) => setChipProjectFilter(name)}
         onSelectWorkspace={(key) => handleBoardSelectWorkspace(key)}
         inboxCount={backendInboxUnreadCount}
@@ -3788,7 +3795,20 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
     if (currentDetailWorkspace && !showBoardWhileDetailMounted) {
       return (
         <div className="flex h-screen min-h-0 flex-col">
-          {renderChromeBar({ activeKey: currentDetailWorkspace.selectionKey ?? null, currentProjectName: currentDetailWorkspace.projectName, onBoard: () => { void handleBackToBoard(); } })}
+          {renderChromeBar({
+            activeKey: currentDetailWorkspace.selectionKey ?? null,
+            currentProjectName: currentDetailWorkspace.projectName,
+            onBoard: () => { void handleBackToBoard(); },
+            // Same yield handleBackToBoard performs: the detail page stays
+            // mounted (its dock layout is preserved) but stops claiming the
+            // screen, so the project-home branch below can render.
+            onEnterProject: (name) => {
+              snapshotCurrentDetailLayout();
+              hideScriptTerminal();
+              setShowBoardWhileDetailMounted(true);
+              setProjectHomeName(name);
+            },
+          })}
           <div className="min-h-0 flex-1">
             {renderDetailPages(currentDetailWorkspace.selectionKey ?? null)}
           </div>

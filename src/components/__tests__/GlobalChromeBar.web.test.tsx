@@ -120,6 +120,27 @@ describe('GlobalChromeBar project switcher', () => {
     expect(buttons(container).some((b) => b.textContent?.trim() === 'gitspace.sh')).toBe(false);
   });
 
+  it('renders the menu outside any scrolling ancestor, or it is invisibly clipped', () => {
+    // The bug this pins: the switcher first shipped INSIDE the chip scroller,
+    // which is `overflow-x-auto`. That establishes a clipping context, so the
+    // dropdown was cut off at the 42px bar and the menu appeared not to open at
+    // all. Nothing above caught it — happy-dom performs no layout, so every
+    // behavioural assertion passed while the control was unusable. This checks
+    // the one thing a layout-free DOM still knows: the ancestor chain.
+    const { container } = render(
+      <GlobalChromeBar projects={PROJECTS} currentProjectName="core" workspaces={CHIPS}
+        onBoard={() => undefined} onEnterProject={() => undefined} onFilterProject={() => undefined}
+        onSelectWorkspace={() => undefined} />,
+    );
+    openMenu(container);
+    const menuItem = buttons(container).find((b) => b.textContent?.trim() === 'mercury-turbo');
+    if (!menuItem) throw new Error('expected the menu to be open');
+
+    for (let node = menuItem.parentElement; node && node !== container; node = node.parentElement) {
+      expect(node.className).not.toMatch(/overflow-(x-|y-)?(auto|scroll|hidden)/);
+    }
+  });
+
   it('renders no switcher when the backend has no projects', () => {
     const { container } = render(
       <GlobalChromeBar projects={[]} workspaces={CHIPS}
