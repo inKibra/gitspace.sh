@@ -1,5 +1,6 @@
 import type { AgentSessionInfo, SessionInfo, WorkspaceInfo } from '../../../components/SpacesBrowser.js';
 import type { WorkspaceStatusSummary } from '../../workspaces/workspace-status.js';
+import type { WorkspacePhase } from '../../../types/config.js';
 
 export interface WorkspaceRuntimeSessionRow {
   id: string;
@@ -25,7 +26,10 @@ export interface WorkspaceRuntimeProcessRow {
 export interface WorkspaceRuntimeWorkspaceInfo extends WorkspaceInfo {
   backendKey: string;
   machineLabel: string;
-  phase?: string;
+  /** The kanban phase, as the machine snapshot reports it. Typed as the real
+   *  union, not `string`: consumers were casting it back, which is how a chip
+   *  ended up asserting a shape nothing had verified. */
+  phase?: WorkspacePhase;
   selectionKey: string;
 }
 

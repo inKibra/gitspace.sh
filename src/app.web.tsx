@@ -147,6 +147,10 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   const [eventsWorkspacePath, setEventsWorkspacePath] = useState<string | null>(null);
   const [eventsWorkspaceLabel, setEventsWorkspaceLabel] = useState<string>('');
   const [projectHomeName, setProjectHomeName] = useState<string | null>(null);
+  /** Project the chrome bar is scoped to (`null` = every project, which is what
+   *  the cross-project board shows). Opening a workspace or a project surface
+   *  adopts that project, so the switcher always names where you actually are. */
+  const [chipProjectFilter, setChipProjectFilter] = useState<string | null>(null);
   /** Repo files + artifacts opened as dock tabs, keyed by workspace selectionKey. */
   type DockExtraPane = ({ kind: 'file' } & RepoFileOpen) | { kind: 'artifact'; path: string } | { kind: 'dashboard'; path: string } | { kind: 'note'; noteId: string | null; title: string; nonce?: number } | { kind: 'goal' } | { kind: 'guide' } | { kind: 'rubric' } | { kind: 'evidence'; requirementId: string; evidenceId: string } | { kind: 'report'; path: string } | { kind: 'workflow' } | { kind: 'crons' } | { kind: 'eventlog' };
   const [dockExtraPanes, setDockExtraPanes] = useState<Record<string, DockExtraPane[]>>({});
@@ -809,26 +813,35 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
       const st = workspaceRuntime.workspaceStatusById[key];
       const hasActivity = (w.sessionCount ?? 0) > 0 || (st?.primaryColor != null && st.primaryColor !== 'dim');
       const isCurrent = key === workspaceBoardState.selectedWorkspaceId || key === attachedWorkspaceSelectionKey;
-      return hasActivity || isCurrent;
+      if (!hasActivity && !isCurrent) return false;
+      // Scoped to a project: show only its workspaces, except the one you are
+      // looking at — dropping that would make your own tab vanish.
+      if (chipProjectFilter && w.projectName !== chipProjectFilter && !isCurrent) return false;
+      return true;
     })
     .map((w) => {
       const st = workspaceRuntime.workspaceStatusById[w.selectionKey ?? w.id];
       return {
         key: w.selectionKey ?? w.id,
         name: w.name,
-        phase: ((w as { phase?: string }).phase as import('./types/config.js').WorkspacePhase | undefined) ?? 'code',
+        projectName: w.projectName,
+        phase: w.phase ?? 'code',
         statusColor: WORKSPACE_CHIP_COLOR[st?.primaryColor ?? 'dim'],
       };
     });
-  const renderChromeBar = (opts: { boardActive?: boolean; activeKey?: string | null; onBoard?: () => void }) => (
+  const renderChromeBar = (opts: { projectActive?: boolean; activeKey?: string | null; onBoard?: () => void; currentProjectName?: string | null }) => (
     <>
       <GlobalChromeBar
-        projectName={allProjects.length === 1 ? allProjects[0]?.name : undefined}
+        projects={allProjects}
+        // What you are looking at wins over a stale menu choice, so the label
+        // can never disagree with the surface.
+        currentProjectName={opts.currentProjectName ?? chipProjectFilter}
         workspaces={chromeChips}
         activeKey={opts.activeKey}
-        boardActive={opts.boardActive}
+        projectActive={opts.projectActive}
         onBoard={opts.onBoard ?? (() => {})}
-        onProject={allProjects.length > 0 ? () => setProjectHomeName(allProjects[0]!.name) : undefined}
+        onEnterProject={(name) => { setChipProjectFilter(name); setProjectHomeName(name); }}
+        onFilterProject={(name) => setChipProjectFilter(name)}
         onSelectWorkspace={(key) => handleBoardSelectWorkspace(key)}
         inboxCount={backendInboxUnreadCount}
         onOpenInbox={() => { void inboxActions.requestInbox(); setShowInbox(true); }}
@@ -3775,7 +3788,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
     if (currentDetailWorkspace && !showBoardWhileDetailMounted) {
       return (
         <div className="flex h-screen min-h-0 flex-col">
-          {renderChromeBar({ activeKey: currentDetailWorkspace.selectionKey ?? null, onBoard: () => { void handleBackToBoard(); } })}
+          {renderChromeBar({ activeKey: currentDetailWorkspace.selectionKey ?? null, currentProjectName: currentDetailWorkspace.projectName, onBoard: () => { void handleBackToBoard(); } })}
           <div className="min-h-0 flex-1">
             {renderDetailPages(currentDetailWorkspace.selectionKey ?? null)}
           </div>
@@ -3796,7 +3809,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
       const phBackendKey = phWorkspaces[0]?.workspace.backendKey ?? phGoals[0]?.backendKey ?? getTargetBackendKey();
       return (
         <div className="flex h-screen min-h-0 flex-col">
-          {renderChromeBar({ onBoard: () => setProjectHomeName(null) })}
+          {renderChromeBar({ currentProjectName: projectHomeName, projectActive: true, onBoard: () => setProjectHomeName(null) })}
           <div className="min-h-0 flex-1 overflow-hidden">
           <ProjectHomePage
             projectName={projectHomeName}
@@ -3841,7 +3854,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
     // ── Board page (full-screen kanban, no workspace selected) ─────────────
     return (
       <div className="flex h-screen min-h-0 flex-col">
-        {renderChromeBar({ boardActive: true })}
+        {renderChromeBar({})}
         <div className="min-h-0 flex-1 overflow-hidden">
         <BoardPage
           embedded
