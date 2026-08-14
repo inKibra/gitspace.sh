@@ -57,8 +57,10 @@ function SidebarSection({ title, extra, children }: { title: string; extra?: Rea
   );
 }
 
-/** Mock .litem — glyph column + label + right tag, inset accent bar when active. */
-function SidebarItem({
+/** Mock .litem — glyph column + label + right tag, inset accent bar when active.
+ *  Exported so other sidebars render agent rows with THIS, rather than
+ *  re-implementing the row and drifting on glyph, dot and busy pulse. */
+export function SidebarItem({
   icon,
   iconClass,
   dotColor,

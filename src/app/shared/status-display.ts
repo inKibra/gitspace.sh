@@ -84,14 +84,22 @@ export const AGENT_STATE_LABEL: Record<AgentSessionRenderState, string> = {
 };
 
 /**
- * Glyph for an agent-session row.
+ * The chain-node dot.
  *
- * One constant because a project agent and a workspace agent are the same
- * thing — an agent session — and they had drifted to different symbols (`✦` vs
- * `▸`) for no reason a reader could recover, which reads as a status difference
- * that does not exist.
+ * RULE: a lit dot beside a chain node means the WORKSPACE STATUS of the goal's
+ * workspace — the same colour that workspace shows in the strip, the chips and
+ * the kanban edge. There is no second meaning. Every surface that draws one
+ * (the workspace rail, the project overview's chain strip, anywhere later) fills
+ * it from {@link WORKSPACE_CHIP_COLOR}.
+ *
+ * A goal with no workspace has no status to report and draws the hollow variant.
+ * Phase, "has a workspace", and "is the current node" are NOT dot colours: they
+ * were, and a lit green dot ended up meaning nothing more than "a workspace
+ * exists" while that workspace was red two panels away.
  */
-export const AGENT_ROW_GLYPH = '▸';
+export const CHAIN_NODE_DOT_BASE = 'flex-none rounded-full border-2';
+/** No workspace yet → nothing to report. */
+export const CHAIN_NODE_DOT_EMPTY = 'border-[var(--gs-border-active)] bg-[var(--gs-bg)]';
 
 /** A goal's position in its chain, as rendered. Distinct from agent state: a
  *  chain node is about the goal's progress, not about a session's activity. */

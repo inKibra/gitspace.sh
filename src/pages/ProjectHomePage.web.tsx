@@ -14,7 +14,9 @@
 import { useCallback, useEffect, useMemo, useState, type ReactElement } from 'react';
 import type { DockviewApi } from 'dockview-react';
 import type { BackendKey, SessionBackend } from '../session/backend.js';
-import { AGENT_STATE_DOT_CLASS, AGENT_ROW_GLYPH } from '../app/shared/status-display.js';
+import { AGENT_STATE_DOT_CLASS, CHAIN_NODE_DOT_BASE, CHAIN_NODE_DOT_EMPTY, WORKSPACE_CHIP_COLOR } from '../app/shared/status-display.js';
+import type { WorkspaceStatusColor } from '../app/workspaces/workspace-status.js';
+import { SidebarItem } from '../components/WorkspaceDetailPane.web.js';
 import type { AgentSessionRenderState } from '../agents/agent-runtime-types.js';
 import { NotePanel } from '../components/NotePanel.web.js';
 import { MarkdownPreview } from '../components/MarkdownPreview.web.js';
@@ -413,12 +415,19 @@ function Stars({ value, onChange }: { value: number; onChange: (n: number) => vo
   );
 }
 
-/** per-goal status dot on chain rows (mock: .cs-dot) */
-function goalDotClass(g: KanbanGoalItem): string {
-  const base = 'h-2 w-2 flex-none rounded-full border-2';
-  if (g.status === 'planned') return `${base} border-[var(--gs-border-active)] bg-[var(--gs-bg)]`;
-  if (g.phase === 'ship') return `${base} border-[var(--gs-success)] bg-[var(--gs-success)]`;
-  return `${base} border-[var(--gs-accent)] bg-[var(--gs-accent)] shadow-[0_0_8px_var(--gs-accent)]`;
+/**
+ * A chain node's dot. Colour is the WORKSPACE STATUS of the goal's workspace —
+ * never phase, never "it has a workspace". Previously any workspace-backed goal
+ * that was not shipped got accent green with a glow, so the strip lit up
+ * identically for a healthy workspace and one that was failing or waiting on a
+ * question. `statusColor` is undefined when the goal has no workspace.
+ */
+function goalDotProps(g: KanbanGoalItem, statusColor?: WorkspaceStatusColor): { className: string; style?: { borderColor: string; background: string } } {
+  if (g.status === 'planned' || !statusColor) {
+    return { className: `h-2 w-2 ${CHAIN_NODE_DOT_BASE} ${CHAIN_NODE_DOT_EMPTY}` };
+  }
+  const value = WORKSPACE_CHIP_COLOR[statusColor];
+  return { className: `h-2 w-2 ${CHAIN_NODE_DOT_BASE}`, style: { borderColor: value, background: value } };
 }
 
 const FIXED_TAB_LABEL: Record<string, string> = {
@@ -817,7 +826,7 @@ export function ProjectHomePage({
     if (isArtTab(t)) return `◇ ${t.slice(4).split('/').pop() ?? t.slice(4)}`;
     if (t.startsWith('report:')) return `⚑ ${t.slice(7).split('/').pop() ?? 'report'}`;
     if (t.startsWith('note:')) return '✎ note';
-    if (t.startsWith('agent:')) return `${AGENT_ROW_GLYPH} ${agentThreads.find((x) => `agent:${x.id}` === t)?.title || 'thread'}`;
+    if (t.startsWith('agent:')) return `● ${agentThreads.find((x) => `agent:${x.id}` === t)?.title || 'thread'}`;
     return FIXED_TAB_LABEL[t] ?? t;
   };
 
@@ -923,9 +932,21 @@ export function ProjectHomePage({
             >
               <span className="text-[12.5px] text-[var(--gs-text)]">{c.title}</span>
               <span className="ml-1.5 inline-flex gap-1">
-                {c.goals.map((g) => (
-                  <span key={g.id} title={`${g.title} · ${g.status === 'planned' ? 'planned' : g.phase}`} className={goalDotClass(g)} />
-                ))}
+                {c.goals.map((g) => {
+                  // Its own workspace's status, resolved from the runtime entry
+                  // that already carries it — the same value the strip shows.
+                  const dotWs = g.workspaceName ? workspaces.find((w) => w.workspace.name === g.workspaceName) : undefined;
+                  const dot = goalDotProps(g, dotWs?.stripStatus.primaryColor);
+                  const statusWord = dotWs?.statusSummary.primaryColor ?? 'no workspace';
+                  return (
+                    <span
+                      key={g.id}
+                      title={`${g.title} · ${g.status === 'planned' ? 'planned' : g.phase} · ${statusWord}`}
+                      className={dot.className}
+                      style={dot.style}
+                    />
+                  );
+                })}
               </span>
               <span className="ml-auto text-[10.5px] text-[var(--gs-text-dim)]">{c.goals.length} goal{c.goals.length === 1 ? '' : 's'}</span>
             </div>
@@ -947,7 +968,15 @@ export function ProjectHomePage({
             onClick={() => onOpenWorkspace(w.workspace.selectionKey)}
             className="flex cursor-pointer items-center gap-[9px] px-[9px] py-1.5 hover:bg-[var(--gs-bg-hover)]"
           >
-            {w.agentSessionCount > 0 && <span className="h-[7px] w-[7px] flex-none animate-pulse rounded-full bg-[var(--gs-accent)]" />}
+            {/* Same rule: the lit dot is the workspace's status. It pulsed accent
+                green whenever an agent was running, which said "running" over the
+                top of a workspace that might be failing or waiting to be asked. */}
+            {w.agentSessionCount > 0 && (
+              <span
+                className="h-[7px] w-[7px] flex-none animate-pulse rounded-full"
+                style={{ background: WORKSPACE_CHIP_COLOR[w.stripStatus.primaryColor] }}
+              />
+            )}
             <span className="font-[family-name:var(--gs-font)] text-[12px] text-[var(--gs-text)]">{w.workspace.name}</span>
             {w.workspace.phase && <span className={`${CHIP} bg-[var(--gs-chip-dim-bg)] text-[var(--gs-text-dim)]`}>{w.workspace.phase}</span>}
             <span className="ml-auto text-[10.5px] text-[var(--gs-text-dim)]">
@@ -1122,18 +1151,18 @@ export function ProjectHomePage({
                 const on = active === tab;
                 return (
                   <div key={`agent-${th.id}`} className="group flex items-center">
-                    <button
-                      type="button"
+                    {/* The SAME component workspace agent rows use, so the glyph
+                     *  (a ● dot from `dotColor`), the busy pulse, the active bar
+                     *  and the spacing cannot drift between the two sidebars.
+                     *  This row used to be hand-rolled markup, which is how it
+                     *  ended up with a different symbol. */}
+                    <SidebarItem
+                      dotColor={iconColor ?? 'text-[var(--gs-text-dim)]'}
+                      label={th.title || 'thread'}
+                      busy={st === 'running'}
+                      active={on}
                       onClick={() => openTab(tab)}
-                      className={`flex min-w-0 flex-1 items-center gap-[9px] px-[13px] py-[5px] text-left text-[12px] transition-colors ${
-                        on
-                          ? 'bg-[var(--gs-bg-active)] text-[var(--gs-text)] shadow-[inset_2px_0_0_var(--gs-accent)]'
-                          : 'text-[var(--gs-text-muted)] hover:bg-[var(--gs-bg-hover)] hover:text-[var(--gs-text)]'
-                      }`}
-                    >
-                      <span className={`w-[14px] flex-none text-center ${iconColor ?? (on ? 'text-[var(--gs-accent)]' : 'text-[var(--gs-text-dim)]')} ${st === 'running' ? 'animate-pulse' : ''}`}>{AGENT_ROW_GLYPH}</span>
-                      <span className="min-w-0 flex-1 truncate">{th.title || 'thread'}</span>
-                    </button>
+                    />
                     {backend?.closeAgentSession && (
                       <button
                         type="button"
