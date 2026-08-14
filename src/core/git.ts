@@ -541,6 +541,36 @@ export async function getWorkspaceChangedFiles(
 }
 
 /**
+ * The pre-rename path of `filePath` between `<baseRef>` and HEAD, or null.
+ *
+ * Rename detection needs BOTH sides present in the diff. A caller that opened a
+ * file from the repo tree — rather than from the changed-file list, which
+ * carries `prevFilePath` — cannot know the old path, and `git diff -- <newPath>`
+ * then reports `new file mode` with every line an addition: the whole file
+ * instead of the handful of lines that changed. Resolving it here means no
+ * caller has to know, and none can get it wrong.
+ *
+ * `--diff-filter=R` keeps the output to rename records, so this stays cheap
+ * even on a large branch.
+ */
+async function resolveRenameSource(
+  workspacePath: string,
+  baseRef: string,
+  filePath: string,
+): Promise<string | null> {
+  try {
+    const { stdout } = await execAsync(
+      `git diff --name-status -z --find-renames -M --diff-filter=R ${escapeShellArg(baseRef)}...HEAD`,
+      { cwd: workspacePath, maxBuffer: 10 * 1024 * 1024 }
+    );
+    return parseChangedFilesFromNameStatusZ(stdout).find((f) => f.filePath === filePath)?.prevFilePath ?? null;
+  } catch {
+    // Best-effort: without it the diff is merely as wrong as it was before.
+    return null;
+  }
+}
+
+/**
  * Get diff for a single file path in workspace vs base branch.
  */
 export async function getWorkspaceFileDiff(
@@ -556,8 +586,10 @@ export async function getWorkspaceFileDiff(
     const headBranch = headOutput.trim();
 
     const baseRef = await resolveComparableBaseRef(workspacePath, baseBranch);
-    const pathSpec = prevFilePath
-      ? `${escapeShellArg(prevFilePath)} ${escapeShellArg(filePath)}`
+    // Both sides must be in the pathspec or rename detection cannot pair them.
+    const oldPath = prevFilePath ?? await resolveRenameSource(workspacePath, baseRef, filePath);
+    const pathSpec = oldPath
+      ? `${escapeShellArg(oldPath)} ${escapeShellArg(filePath)}`
       : escapeShellArg(filePath);
 
     const { stdout } = await execAsync(
@@ -595,7 +627,9 @@ export async function getWorkspaceFileVersions(
     const baseRef = await resolveComparableBaseRef(workspacePath, baseBranch);
     const mergeBaseCommit = await resolveMergeBaseCommit(workspacePath, baseRef);
 
-    const oldPath = prevFilePath ?? filePath;
+    // Reading the NEW path at the merge base finds nothing for a rename, which
+    // leaves the old side empty and renders the file as wholly added.
+    const oldPath = prevFilePath ?? await resolveRenameSource(workspacePath, baseRef, filePath) ?? filePath;
     const [oldContents, newContents] = await Promise.all([
       readFileAtRevision(workspacePath, mergeBaseCommit, oldPath),
       readFileAtRevision(workspacePath, 'HEAD', filePath),
