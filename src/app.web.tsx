@@ -72,6 +72,8 @@ import { useCommandPaletteOrchestration } from './app/react/index.js';
 import { showWorkspaceEditorSelect } from './app/shared/command-palette/showWorkspaceEditorSelect.js';
 import { showReplayHistorySelect } from './app/shared/workspace-detail/showReplayHistorySelect.js';
 import { showWorkspaceStatusSelect } from './app/shared/command-palette/workspace-status.js';
+import type { WorkspaceStatusColor } from './app/workspaces/workspace-status.js';
+import { getWorkspaceStripColor } from './app/shared/workspace-detail/strip.js';
 import type { WorkspaceDetailReplayRow } from './app/shared/workspace-detail/types.js';
 
 // Multi-backend layer (browser-side)
@@ -3344,6 +3346,10 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
               chainGoalsForPane.length > 0 && workspaceGoalForPanels
                 ? <GoalDocDockPane
                     goals={chainGoalsForPane}
+                    statusColorOf={(g) => {
+                      const ws = allWorkspaceEntries.find((w) => w.name === g.workspaceName && w.projectName === g.projectName);
+                      return ws ? getWorkspaceStripColor(ws, workspaceStatusById) : undefined;
+                    }}
                     initialGoalId={workspaceGoalForPanels.id}
                     onRequestGoalDetail={fetchGoalDetail}
                     hasGoalDetail={hasGoalDetail}
@@ -4122,7 +4128,9 @@ function ReportPaneLoader({ path, read, list, onOpenAttachment }: {
   return <ReportPanel report={report} onOpenAttachment={onOpenAttachment} resolveRef={resolveRef} />;
 }
 
-function GoalDocDockPane({ goals, initialGoalId, onToggleExemplar, onOpenWorkflow, scrollToSlice, onRequestGoalDetail, hasGoalDetail }: {
+function GoalDocDockPane({ goals, initialGoalId, onToggleExemplar, onOpenWorkflow, scrollToSlice, onRequestGoalDetail, hasGoalDetail, statusColorOf }: {
+  /** Chain-node status colour, resolved by the caller that holds the runtime. */
+  statusColorOf?: (goal: { workspaceName?: string; projectName?: string }) => WorkspaceStatusColor | undefined;
   goals: import("./app/shared/board/types.js").KanbanGoalItem[];
   initialGoalId: string;
   onToggleExemplar?: (goalId: string, blockId: string) => void;
@@ -4139,7 +4147,7 @@ function GoalDocDockPane({ goals, initialGoalId, onToggleExemplar, onOpenWorkflo
   useEffect(() => {
     if (currentGoal) onRequestGoalDetail?.(currentGoal);
   }, [currentGoal?.id, currentGoal?.updatedAt, onRequestGoalDetail]); // eslint-disable-line react-hooks/exhaustive-deps
-  return <GoalDocPanel goals={goals} currentGoalId={goalId} onSelectGoal={setGoalId} onToggleExemplar={onToggleExemplar} onOpenWorkflow={onOpenWorkflow} scrollToSlice={scrollToSlice} docLoading={currentGoal ? !(hasGoalDetail?.(currentGoal) ?? true) : false} />;
+  return <GoalDocPanel goals={goals} currentGoalId={goalId} onSelectGoal={setGoalId} statusColorOf={statusColorOf} onToggleExemplar={onToggleExemplar} onOpenWorkflow={onOpenWorkflow} scrollToSlice={scrollToSlice} docLoading={currentGoal ? !(hasGoalDetail?.(currentGoal) ?? true) : false} />;
 }
 
 export default function App() {

@@ -5,7 +5,8 @@ import { BlockView } from '../blocks/render/registry.web.js';
 import { slugifySliceId } from '../core/goal-gates.js';
 import type { GoalDoc, GoalValidation, Requirement } from '../types/goals.js';
 import type { WorkspacePhase } from '../types/config.js';
-import { CHAIN_NODE_TONE_CLASS, type ChainNodeState as SharedChainNodeState } from '../app/shared/status-display.js';
+import { CHAIN_NODE_TONE_CLASS, WORKSPACE_CHIP_COLOR, type ChainNodeState as SharedChainNodeState } from '../app/shared/status-display.js';
+import type { WorkspaceStatusColor } from '../app/workspaces/workspace-status.js';
 
 /**
  * GoalDocPanel — the '◇ Goal' workspace dock pane (mock: GoalDoc.tsx).
@@ -61,8 +62,12 @@ function RequirementRow({ requirement }: { requirement: Requirement }): ReactEle
   );
 }
 
-export function GoalDocPanel({ goals, currentGoalId, onSelectGoal, onToggleExemplar, onOpenWorkflow, scrollToSlice, docLoading }: {
+export function GoalDocPanel({ goals, currentGoalId, onSelectGoal, onToggleExemplar, onOpenWorkflow, scrollToSlice, docLoading, statusColorOf }: {
   goals: GoalLike[];
+  /** A chain node's workspace status — the only thing a lit chain affordance
+   *  means anywhere else, so this glyph obeys the same rule. Undefined for a
+   *  goal with no workspace, which then falls back to the phase tone. */
+  statusColorOf?: (goal: GoalLike) => WorkspaceStatusColor | undefined;
   currentGoalId: string;
   onSelectGoal: (goalId: string) => void;
   /** The doc/validation detail for `currentGoalId` has not arrived yet (ticket
@@ -201,7 +206,15 @@ export function GoalDocPanel({ goals, currentGoalId, onSelectGoal, onToggleExemp
                     : 'border-[var(--gs-border)] text-[var(--gs-text-muted)] hover:text-[var(--gs-text)]'
                 }`}
               >
-                <span className={NODE_ICON_TONE[state]}>⛓</span>
+                {/* Same rule as every other chain affordance: lit = that
+                    workspace's status. Falls back to the phase tone only when
+                    the goal has no workspace to report on. */}
+                {(() => {
+                  const color = statusColorOf?.(g);
+                  return color
+                    ? <span style={{ color: WORKSPACE_CHIP_COLOR[color] }}>⛓</span>
+                    : <span className={NODE_ICON_TONE[state]}>⛓</span>;
+                })()}
                 <span className="text-[10.5px] text-[var(--gs-text-dim)] font-[family-name:var(--gs-font-mono)] [font-variant-numeric:tabular-nums]">
                   {i + 1}
                 </span>
