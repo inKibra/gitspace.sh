@@ -24,6 +24,7 @@ import type {
   Permission,
 } from '../../../agents/agent-runtime-types.js';
 import { getTranscriptRange } from '../../../blocks/agent/transcript-source.js';
+import { resolveTranscriptImageData } from './transcript-image-resolver.js';
 import type { TranscriptPage, TranscriptSource } from '../../../blocks/agent/transcript-source.js';
 import { LiveTurn } from '../../../blocks/agent/live-turn.js';
 import type { AgentEvent as SdkAgentEvent } from '@oh-my-pi/pi-agent-core';
@@ -936,7 +937,7 @@ export class LocalSessionHost implements AgentSessionHost {
   async readTranscriptRange(opts: { before?: string; limit: number }): Promise<TranscriptPage> {
     const session = this.session as unknown as ControlSessionAccessors;
     if (!session.sessionManager) return { blocks: [], oldestCursor: null, hasMore: false };
-    return getTranscriptRange(session.sessionManager as unknown as TranscriptSource, opts);
+    return getTranscriptRange(session.sessionManager as unknown as TranscriptSource, { ...opts, resolveImageData: resolveTranscriptImageData });
   }
 
   /** Commands contributed by the live session: skills, extension, custom. */

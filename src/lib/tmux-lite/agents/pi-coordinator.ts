@@ -10,6 +10,7 @@ import {
 } from './pi-runtime.js';
 import type { AgentControlInfo, AgentDefinitionInfo, AgentGoalModeInfo, AgentHistoryEntry, AgentOAuthEvent, AgentSessionUsageReport, AgentSettingSchemaItem, AgentShakeMode, AgentShakeResult, AgentToolInfo, AgentTreeNode } from '../../../agents/agent-runtime-types.js';
 import { getTranscriptRange } from '../../../blocks/agent/transcript-source.js';
+import { resolveTranscriptImageData } from './transcript-image-resolver.js';
 import { CLAUDE_MODEL_ALIAS_TO_MODEL_ROLE } from '../../../blocks/model-roles.js';
 import type { TranscriptPage, TranscriptSource } from '../../../blocks/agent/transcript-source.js';
 import { executeSpaceCommand } from './extensions/space-command.js';
@@ -276,7 +277,7 @@ export class PiCoordinator {
     const file = findPiSessionFile(target.workspacePath, agentSessionId, this.sessionsRoot);
     if (!file) return { blocks: [], oldestCursor: null, hasMore: false };
     const manager = await openPiSessionManager(file.path);
-    return getTranscriptRange(manager as unknown as TranscriptSource, opts);
+    return getTranscriptRange(manager as unknown as TranscriptSource, { ...opts, resolveImageData: resolveTranscriptImageData });
   }
 
   /** Control-surface snapshot: usage, current model, and the model switcher list.

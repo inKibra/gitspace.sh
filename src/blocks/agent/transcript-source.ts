@@ -97,12 +97,58 @@ export function entriesToBlocks(entries: ReadonlyArray<TranscriptEntry>): Block[
 }
 
 /**
+ * Replace blob-referenced image payloads with inline data.
+ *
+ * The SDK persists an image part as `{ type:'image', data:'blob:sha256:<hex>',
+ * mimeType }` — the bytes live in the session blob store, not the entry. The
+ * block builder splices `data` straight into `data:<mime>;base64,<data>`, so an
+ * unresolved ref produced `data:image/png;base64,blob:sha256:…`, which is not a
+ * valid URL: the <img> silently rendered nothing, and no image had EVER appeared
+ * in the transcript. Tests missed it because their fixtures use literals that
+ * merely look like base64.
+ *
+ * The resolver is injected because this module is shared with the browser, which
+ * has no filesystem: server callers pass a blob-store-backed function, the web
+ * passes none. Entries are copied, never mutated — they belong to the live
+ * session, and inflating them would keep every viewed image resident.
+ */
+function withResolvedImages(entries: TranscriptEntry[], resolve: (data: string) => string): TranscriptEntry[] {
+  const fixParts = (parts: (TextContent | ImageContent)[]): (TextContent | ImageContent)[] | null => {
+    let changed = false;
+    const next = parts.map((part) => {
+      if (part.type !== 'image') return part;
+      const resolved = resolve(part.data);
+      if (resolved === part.data) return part;
+      changed = true;
+      return { ...part, data: resolved };
+    });
+    return changed ? next : null;
+  };
+  return entries.map((entry) => {
+    let next = entry;
+    if (Array.isArray(entry.content)) {
+      const fixed = fixParts(entry.content);
+      if (fixed) next = { ...next, content: fixed };
+    }
+    const content = entry.message?.content;
+    if (Array.isArray(content)) {
+      const fixed = fixParts(content as (TextContent | ImageContent)[]);
+      if (fixed) next = { ...next, message: { ...entry.message, content: fixed } as Message };
+    }
+    return next;
+  });
+}
+
+/**
  * Read one page of the transcript. `before` omitted → the newest page (tail);
  * `before` = a prior `oldestCursor` → the next older page. Pages are bounded by
  * entry count (`limit`), so the cursor advances even when some entries render no
  * blocks.
  */
-export function getTranscriptRange(source: TranscriptSource, opts: { before?: string; limit: number }): TranscriptPage {
+export function getTranscriptRange(
+  source: TranscriptSource,
+  opts: { before?: string; limit: number; resolveImageData?: (data: string) => string },
+): TranscriptPage {
   const limit = Math.max(1, opts.limit);
 
   let startId: string | null;
@@ -127,7 +173,8 @@ export function getTranscriptRange(source: TranscriptSource, opts: { before?: st
   }
 
   const oldest = collected[collected.length - 1];
-  const ordered = [...collected].reverse(); // oldest → newest for display
+  const reversed = [...collected].reverse(); // oldest → newest for display
+  const ordered = opts.resolveImageData ? withResolvedImages(reversed, opts.resolveImageData) : reversed;
   return {
     blocks: entriesToBlocks(ordered),
     oldestCursor: oldest.id,
