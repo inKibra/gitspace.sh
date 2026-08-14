@@ -26,6 +26,13 @@ export interface OmpAgentSession {
    * so nothing about asking for one appears in the history.
    */
   runEphemeralTurn?(args: { promptText: string; signal?: AbortSignal; dedupeReply?: boolean }): Promise<{ replyText: string }>;
+  /** Pi's resolved settings. Only the paths we read are declared, so an upstream
+   *  schema change cannot silently widen what we depend on. */
+  readonly settings?: {
+    /** The SDK's `SettingValue<P>` resolves to `unknown` for these paths, so the
+     *  caller narrows. Restricted to the paths we read on purpose. */
+    get(path: 'recap.enabled' | 'recap.idleSeconds'): unknown;
+  };
   extensionRunner?: {
     getRegisteredCommands(reserved?: Set<string>): Array<{ name: string; description?: string }>;
   };

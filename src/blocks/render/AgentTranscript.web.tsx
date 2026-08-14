@@ -17,6 +17,7 @@ export function AgentTranscript({
   fetchRange,
   live,
   pending = EMPTY,
+  tail = EMPTY,
   host,
   busy = false,
   pageSize,
@@ -27,6 +28,11 @@ export function AgentTranscript({
   /** Pending interactive blocks (permissions / questions / todos) — shown at the
    *  foot, not folded into history; resolve through the host. */
   pending?: readonly Block[];
+  /** Transient orientation (the idle recap) — always the LAST thing on screen and
+   *  deliberately NOT part of `live`: `live` emptying is what tells the transcript
+   *  a turn finished and to fold it into history, so parking a long-lived block
+   *  there would stop that from ever happening. */
+  tail?: readonly Block[];
   host: BlockHost;
   busy?: boolean;
   pageSize?: number;
@@ -44,8 +50,9 @@ export function AgentTranscript({
   const committedBlocks = uniq(t.committed);
   const liveBlocks = uniq(live);
   const pendingBlocks = uniq(pending);
+  const tailBlocks = uniq(tail);
 
-  const empty = committedBlocks.length === 0 && liveBlocks.length === 0 && pendingBlocks.length === 0;
+  const empty = committedBlocks.length === 0 && liveBlocks.length === 0 && pendingBlocks.length === 0 && tailBlocks.length === 0;
 
   return (
     <BlockHostProvider host={host}>
@@ -77,6 +84,7 @@ export function AgentTranscript({
           )}
 
           {pendingBlocks.length > 0 && <BlockList blocks={pendingBlocks} />}
+          {tailBlocks.length > 0 && <BlockList blocks={tailBlocks} />}
         </div>
 
         {t.mode === 'browse' && t.newBelowCount > 0 && (

@@ -1065,8 +1065,8 @@ export class LocalSessionHost implements AgentSessionHost {
     '</recap>',
   ].join('\n');
 
-  /** Matches Pi's default (`recap.idleSeconds`), clamped the way Pi clamps it. */
-  private static readonly RECAP_IDLE_MS = 240_000;
+  /** Pi's default when the setting is absent (`recap.idleSeconds`). */
+  private static readonly RECAP_IDLE_SECONDS_DEFAULT = 240;
   /** Pi truncates the reply to its RECAP width before showing it. */
   private static readonly RECAP_MAX_CHARS = 280;
 
@@ -1084,10 +1084,25 @@ export class LocalSessionHost implements AgentSessionHost {
   private scheduleRecap(emit: (event: AgentEvent) => void): void {
     this.cancelRecap(emit);
     if (typeof this.session.runEphemeralTurn !== 'function') return;
+    // Read Pi's own settings rather than inventing a second knob: someone who
+    // turned the recap off, or moved it to 60s, meant it for the recap — not just
+    // for the TUI's copy of it. A settings read must never break event binding,
+    // which is what calls this, so fall back to Pi's defaults.
+    let seconds = LocalSessionHost.RECAP_IDLE_SECONDS_DEFAULT;
+    try {
+      const settings = this.session.settings;
+      if (settings) {
+        if (settings.get('recap.enabled') === false) return;
+        const configured = settings.get('recap.idleSeconds');
+        if (typeof configured === 'number' && Number.isFinite(configured)) seconds = configured;
+      }
+    } catch {
+      seconds = LocalSessionHost.RECAP_IDLE_SECONDS_DEFAULT;
+    }
     this.recapTimer = setTimeout(() => {
       this.recapTimer = null;
       void this.runRecap(emit);
-    }, LocalSessionHost.RECAP_IDLE_MS);
+    }, Math.max(1, seconds) * 1000);
     this.recapTimer.unref?.();
   }
 
@@ -1166,6 +1181,7 @@ export class LocalSessionHost implements AgentSessionHost {
           case 'auto_compaction_end':
             // Return to busy if a turn is still running (auto-compaction happens
             // mid-turn); otherwise idle (a manual /compact while idle).
+            if (!this.turnActive) this.scheduleRecap(emit);
             emit({
               type: 'status',
               sessionId,
@@ -1243,6 +1259,12 @@ export class LocalSessionHost implements AgentSessionHost {
         }
       }),
     );
+
+    // An already-idle session is the common case: you open a pane on work that
+    // finished long ago. Arming only on `agent_end` meant the recap could not
+    // appear until you sent a message and its turn completed — the opposite of
+    // "you stepped away and came back".
+    if (!this.turnActive) this.scheduleRecap(emit);
 
     // --- Subagent census via the SDK's process-global AgentRegistry ---
     // Task subagents register in AgentRegistry.global() inside THIS worker

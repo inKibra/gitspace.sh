@@ -133,6 +133,11 @@ export function PaneTerminalPanel({
     },
     [backend, wsId, agentSessionId],
   );
+  // Idle recap: transient orientation at the tail of the transcript. Never
+  // persisted (the server does not write it either), so it is component state
+  // and a reload correctly loses it — a recap of a conversation you have since
+  // continued would misdescribe it.
+  const [recap, setRecap] = useState<string | null>(null);
   // Last prompt the user attempted for THIS pane (kept even after a successful
   // send + composer clear) so the transcript's Retry can re-send it, plus the
   // optimistic echo the transcript renders while the server echo is in flight.
@@ -145,6 +150,10 @@ export function PaneTerminalPanel({
       lastPromptRef.current = { text: event.text, mode: event.mode };
       optimisticSeq.current += 1;
       setOptimistic({ id: `optimistic:${optimisticSeq.current}`, text: event.text, mode: event.mode, images: event.images, status: 'pending' });
+      // Drop the recap here rather than waiting for the server's `agent_start`:
+      // that round trip is exactly the window in which a recap of where things
+      // stood sits underneath the message that just moved them on.
+      setRecap(null);
       return;
     }
     // failed → mark the matching optimistic echo failed (keeps Retry visible).
@@ -159,6 +168,7 @@ export function PaneTerminalPanel({
   useEffect(() => {
     setOptimistic(null);
     setRetrySignal(null);
+    setRecap(null);
     lastPromptRef.current = null;
   }, [wsId, agentSessionId]);
 
@@ -210,11 +220,6 @@ export function PaneTerminalPanel({
     return unsub;
   }, [backend, wsId, agentSessionId]);
 
-  // Idle recap: transient orientation at the tail of the transcript. Never
-  // persisted (the server does not write it either), so it is component state
-  // and a reload correctly loses it — a recap of a conversation you have since
-  // continued would misdescribe it.
-  const [recap, setRecap] = useState<string | null>(null);
   useEffect(() => {
     if (!backend?.subscribeAgentState || !wsId || !agentSessionId) return;
     const unsub = backend.subscribeAgentState((delta) => {
@@ -224,8 +229,9 @@ export function PaneTerminalPanel({
     return unsub;
   }, [backend, wsId, agentSessionId]);
 
-  // Sits after the live turn so it reads as the last thing on screen. Withdrawn
-  // by the server the moment a turn starts, so it cannot linger over new output.
+  // Goes in the transcript's `tail` slot, after the live turn AND after the
+  // optimistic echo, so it is always the last thing on screen. It used to ride
+  // along in `live`, which put it above a message you had just sent.
   const recapBlocks = useMemo<Block[]>(
     () => (recap === null ? NO_LIVE : [{ id: 'recap:idle', type: 'recap', data: { text: recap } }]),
     [recap],
@@ -598,8 +604,9 @@ export function PaneTerminalPanel({
           <div className="flex-1 min-h-0 bg-[var(--gs-bg)]">
             <AgentTranscript
               fetchRange={fetchTranscriptRange}
-              live={recapBlocks.length > 0 ? [...liveBlocks, ...recapBlocks] : liveBlocks}
+              live={liveBlocks}
               pending={optimisticBlocks.length > 0 ? [...pendingBlocks, ...optimisticBlocks] : pendingBlocks}
+              tail={recapBlocks}
               host={transcriptHost}
               pageSize={30}
               refreshNonce={transcriptRefresh}
