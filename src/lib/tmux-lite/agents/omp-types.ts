@@ -19,6 +19,13 @@ export interface OmpAgentSession {
   abort(): Promise<void>;
   getQueuedMessages?(): { steering: readonly string[]; followUp: readonly string[] };
   removeQueuedMessage?(kind: 'steering' | 'followUp', index: number): string | undefined;
+  /**
+   * Run a prompt against the session's context WITHOUT recording it in the
+   * transcript (the SDK's `/btw` and `/omfg` share this pipeline). Used for the
+   * idle recap, which is a view over the conversation rather than part of it —
+   * so nothing about asking for one appears in the history.
+   */
+  runEphemeralTurn?(args: { promptText: string; signal?: AbortSignal; dedupeReply?: boolean }): Promise<{ replyText: string }>;
   extensionRunner?: {
     getRegisteredCommands(reserved?: Set<string>): Array<{ name: string; description?: string }>;
   };

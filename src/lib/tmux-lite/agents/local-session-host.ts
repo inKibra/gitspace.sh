@@ -1039,6 +1039,78 @@ export class LocalSessionHost implements AgentSessionHost {
     return false;
   }
 
+  /**
+   * Idle recap — Pi's `recap`, surfaced in the web transcript.
+   *
+   * Pi's own implementation is TUI-only: after `recap.idleSeconds` of quiet it
+   * runs an ephemeral turn and prints the reply as a dim status line. Nothing is
+   * persisted and nothing is emitted, so there is nothing to forward — the trigger
+   * and the prompt are reproduced here, and the reply is emitted as a transient
+   * event instead of drawn on a terminal.
+   *
+   * Ephemeral is the load-bearing part: the turn never enters the transcript, so
+   * asking "where do things stand" cannot pollute the history it summarises, and
+   * a stale recap can be withdrawn rather than lived with.
+   */
+  private recapTimer: NodeJS.Timeout | null = null;
+  private recapShown = false;
+
+  /** Pi's wording, kept close to the original so the reply reads the same. */
+  private static readonly RECAP_PROMPT = [
+    '<recap>',
+    'The user stepped away and is coming back. Recap in under 40 words, 1-2 plain',
+    'sentences, no markdown. Lead with the overall goal and current task, then the',
+    'one next action. Skip root-cause narrative, fix internals, secondary to-dos,',
+    'and em-dash tangents.',
+    '</recap>',
+  ].join('\n');
+
+  /** Matches Pi's default (`recap.idleSeconds`), clamped the way Pi clamps it. */
+  private static readonly RECAP_IDLE_MS = 240_000;
+  /** Pi truncates the reply to its RECAP width before showing it. */
+  private static readonly RECAP_MAX_CHARS = 280;
+
+  private cancelRecap(emit: (event: AgentEvent) => void): void {
+    if (this.recapTimer) {
+      clearTimeout(this.recapTimer);
+      this.recapTimer = null;
+    }
+    if (this.recapShown) {
+      this.recapShown = false;
+      emit({ type: 'recap', sessionId: this.sessionId, text: null });
+    }
+  }
+
+  private scheduleRecap(emit: (event: AgentEvent) => void): void {
+    this.cancelRecap(emit);
+    if (typeof this.session.runEphemeralTurn !== 'function') return;
+    this.recapTimer = setTimeout(() => {
+      this.recapTimer = null;
+      void this.runRecap(emit);
+    }, LocalSessionHost.RECAP_IDLE_MS);
+    this.recapTimer.unref?.();
+  }
+
+  private async runRecap(emit: (event: AgentEvent) => void): Promise<void> {
+    // A turn may have started between the timer firing and this running.
+    if (this.turnActive || typeof this.session.runEphemeralTurn !== 'function') return;
+    try {
+      const { replyText } = await this.session.runEphemeralTurn({
+        promptText: LocalSessionHost.RECAP_PROMPT,
+        dedupeReply: true,
+      });
+      // Still idle? A recap that lands after the next turn started is worse than
+      // none, because it describes a state the reader has already left.
+      if (this.turnActive) return;
+      const text = replyText.trim().slice(0, LocalSessionHost.RECAP_MAX_CHARS).trim();
+      if (!text) return;
+      this.recapShown = true;
+      emit({ type: 'recap', sessionId: this.sessionId, text });
+    } catch {
+      // Orientation is a nicety; a failed recap must never surface as an error.
+    }
+  }
+
   private bindSessionEvents(): void {
     const sessionId = this.sessionId;
     const emit = (event: AgentEvent): void => this.sinks.onEvent(event);
@@ -1070,6 +1142,9 @@ export class LocalSessionHost implements AgentSessionHost {
 
           case 'agent_start':
             this.turnActive = true;
+            // Any activity withdraws a shown recap: it described a state that
+            // has just moved on.
+            this.cancelRecap(emit);
             emit({ type: 'status', sessionId, payload: { type: 'busy', event: piEvent } });
             return;
 
@@ -1079,6 +1154,7 @@ export class LocalSessionHost implements AgentSessionHost {
             void import('../../../core/config.js')
               .then(({ getProjectDir }) => flushEditBreadcrumbs(this.target.workspacePath, getProjectDir(this.target.projectName)))
               .catch(() => undefined);
+            this.scheduleRecap(emit);
             emit({ type: 'status', sessionId, payload: { type: 'idle', event: piEvent } });
             return;
           }

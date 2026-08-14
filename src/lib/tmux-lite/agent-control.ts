@@ -137,6 +137,9 @@ export function ensureAgentControlInitialized(): Promise<void> {
           case 'transcript_live':
             defaultAgentEventManager.emitTranscriptLive(target.workspaceId, event.sessionId, event.blocks, event.committed);
             break;
+          case 'recap':
+            defaultAgentEventManager.emitRecap(target.workspaceId, event.sessionId, event.text);
+            break;
           case 'queued_messages':
             defaultAgentEventManager.setExternalQueuedMessages(target.workspaceId, event.sessionId, event.queued);
             break;

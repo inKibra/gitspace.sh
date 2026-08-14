@@ -210,6 +210,27 @@ export function PaneTerminalPanel({
     return unsub;
   }, [backend, wsId, agentSessionId]);
 
+  // Idle recap: transient orientation at the tail of the transcript. Never
+  // persisted (the server does not write it either), so it is component state
+  // and a reload correctly loses it — a recap of a conversation you have since
+  // continued would misdescribe it.
+  const [recap, setRecap] = useState<string | null>(null);
+  useEffect(() => {
+    if (!backend?.subscribeAgentState || !wsId || !agentSessionId) return;
+    const unsub = backend.subscribeAgentState((delta) => {
+      if (delta.type !== 'agent_recap' || delta.workspaceId !== wsId || delta.sessionId !== agentSessionId) return;
+      setRecap(delta.text);
+    });
+    return unsub;
+  }, [backend, wsId, agentSessionId]);
+
+  // Sits after the live turn so it reads as the last thing on screen. Withdrawn
+  // by the server the moment a turn starts, so it cannot linger over new output.
+  const recapBlocks = useMemo<Block[]>(
+    () => (recap === null ? NO_LIVE : [{ id: 'recap:idle', type: 'recap', data: { text: recap } }]),
+    [recap],
+  );
+
   // Optimistic echo → transcript blocks (a pending/dim user message; plus an
   // error block with a working Retry when the prompt failed).
   const optimisticBlocks = useMemo<Block[]>(() => {
@@ -577,7 +598,7 @@ export function PaneTerminalPanel({
           <div className="flex-1 min-h-0 bg-[var(--gs-bg)]">
             <AgentTranscript
               fetchRange={fetchTranscriptRange}
-              live={liveBlocks}
+              live={recapBlocks.length > 0 ? [...liveBlocks, ...recapBlocks] : liveBlocks}
               pending={optimisticBlocks.length > 0 ? [...pendingBlocks, ...optimisticBlocks] : pendingBlocks}
               host={transcriptHost}
               pageSize={30}

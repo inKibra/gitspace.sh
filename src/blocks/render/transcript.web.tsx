@@ -1,6 +1,6 @@
 import { useState, type ReactElement } from 'react';
 import type { Block } from '../index.js';
-import type { ErrorData, ImageData, MessageData, RuleActivationData, SubagentData, ThinkingData, ToolCallData } from '../types/transcript.js';
+import type { ErrorData, ImageData, MessageData, RecapData, RuleActivationData, SubagentData, ThinkingData, ToolCallData } from '../types/transcript.js';
 import { defineRenderer, BlockView } from './registry.web.js';
 import { useBlockHost } from './host.web.js';
 import { Markdown } from './markdown.web.js';
@@ -246,3 +246,15 @@ defineRenderer<RuleActivationData>('rule-activation', ({ data }): ReactElement =
     </div>
   );
 });
+
+// ── recap ─────────────────────────────────────────────────────────────────
+//
+// Deliberately quiet: dim and italic, no border, no chip. It is orientation
+// after you have been away, not an event in the conversation — anything louder
+// would read as the agent having said something.
+defineRenderer<RecapData>('recap', ({ data }): ReactElement => (
+  <div className="my-2 flex items-start gap-1.5 px-1 text-[12px] italic text-[var(--gs-text-dim)]">
+    <span aria-hidden className="not-italic text-[var(--gs-text-ghost)]">※</span>
+    <span>{data.text}</span>
+  </div>
+));

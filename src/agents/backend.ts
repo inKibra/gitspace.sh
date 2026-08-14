@@ -1,3 +1,5 @@
+import type { Block } from '../blocks/index.js';
+
 export type AgentBackendId = string;
 
 export interface AgentWorkspaceTarget {
@@ -93,8 +95,15 @@ export type AgentEvent =
   | {
       type: 'transcript_live';
       sessionId: string;
-      blocks: import('../blocks/index.js').Block[];
+      blocks: Block[];
       committed: boolean;
+    }
+  | {
+      /** Idle recap (Pi's `recap`): transient orientation shown at the tail of
+       *  the transcript. `text: null` withdraws it. Never persisted. */
+      type: 'recap';
+      sessionId: string;
+      text: string | null;
     };
 
 export interface AgentSessionHandle {

@@ -137,3 +137,23 @@ defineBlock({
   description: 'A TTSR rule that matched the agent output, with the instruction given and whether it interrupted generation.',
   schema: ruleActivationData,
 });
+
+// ── recap ───────────────────────────────────────────────────────────────────
+//
+// The agent's own answer to "where do things stand" after the session has sat
+// idle — Pi's `recap` feature. It is a VIEW over the conversation, not part of
+// it: produced by an ephemeral turn, never written to the session, and shown
+// only at the tail of the transcript while it is current. Reload and it is gone,
+// which is correct — a recap of a conversation you have since continued would be
+// a lie.
+export const recapData = z.object({
+  /** ~40 words, 1-2 plain sentences, no markdown (the model is asked for that). */
+  text: z.string(),
+});
+export type RecapData = z.infer<typeof recapData>;
+defineBlock({
+  type: 'recap',
+  tier: 'transcript',
+  description: 'Idle recap: where things stand and the next action, generated on demand and never persisted.',
+  schema: recapData,
+});

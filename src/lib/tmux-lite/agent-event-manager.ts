@@ -18,12 +18,14 @@ import { writeAgentLog } from '../../agents/agent-log.js';
 import { normalizeWorkspacePath } from '../../agents/agent-runtime-shared.js';
 import type {
   AgentModelInfo,
+  AgentOAuthEvent,
   PendingQuestion,
   Permission,
   SessionActivity,
   SessionStatus,
   TodoPhase,
 } from '../../agents/agent-runtime-types.js';
+import type { Block } from '../../blocks/index.js';
 
 export interface AgentSessionSummary {
   id: string;
@@ -93,8 +95,11 @@ export type AgentStateUpdateDelta =
   | { type: 'agent_session_deleted'; workspaceId: string; sessionId: string }
   | { type: 'agent_todo_update'; workspaceId: string; sessionId: string; phases: TodoPhase[] }
   | { type: 'agent_model_update'; workspaceId: string; sessionId: string; modelInfo: AgentModelInfo }
-  | { type: 'agent_transcript_live'; workspaceId: string; sessionId: string; blocks: import('../../blocks/index.js').Block[]; committed: boolean }
-  | { type: 'agent_oauth_event'; event: import('../../agents/agent-runtime-types.js').AgentOAuthEvent };
+  | { type: 'agent_transcript_live'; workspaceId: string; sessionId: string; blocks: Block[]; committed: boolean }
+  /** Idle recap: a transient, NEVER-persisted line shown at the tail of the
+   *  transcript. `text: null` withdraws it (the session went busy again). */
+  | { type: 'agent_recap'; workspaceId: string; sessionId: string; text: string | null }
+  | { type: 'agent_oauth_event'; event: AgentOAuthEvent };
 
 
 const LAST_MESSAGE_MAX_CHARS = 120;
@@ -362,12 +367,19 @@ export class AgentEventManager {
   }
 
   /** Broadcast the live transcript suffix for a session (transient — not stored). */
-  emitTranscriptLive(workspaceId: string, sessionId: string, blocks: import('../../blocks/index.js').Block[], committed: boolean): void {
+  emitTranscriptLive(workspaceId: string, sessionId: string, blocks: Block[], committed: boolean): void {
     this.emit({ type: 'agent_transcript_live', workspaceId, sessionId, blocks, committed });
   }
 
+  /** Broadcast (or withdraw, with `null`) the idle recap. Transient by design:
+   *  it is a view over the conversation, not a part of it, so it is never
+   *  written to the session and never survives a reload. */
+  emitRecap(workspaceId: string, sessionId: string, text: string | null): void {
+    this.emit({ type: 'agent_recap', workspaceId, sessionId, text });
+  }
+
   /** Broadcast an OAuth sign-in flow event (transient). */
-  emitOAuthEvent(event: import('../../agents/agent-runtime-types.js').AgentOAuthEvent): void {
+  emitOAuthEvent(event: AgentOAuthEvent): void {
     this.emit({ type: 'agent_oauth_event', event });
   }
 
