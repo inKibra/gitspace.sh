@@ -153,6 +153,9 @@ import {
   deleteProjectForSession,
 } from '../../core/session-lifecycle.js';
 import { deleteWorkspaceCore } from '../../core/workspace.js';
+// Static, not `await import`: this module is leaf-level (fs + path only), so it
+// adds no cycle risk the deferred imports around it exist to avoid.
+import { inspectArtifactsMount, describeMountIntegrity } from '../../core/artifacts-mount-integrity.js';
 import {
   getBundleRefreshPlan as getBundleRefreshPlanCore,
   applyBundleRefreshSubmission,
@@ -908,7 +911,7 @@ void getAgentControlReady().catch((error) => {
     syncing = true;
     void (async () => {
       try {
-        const { getArtifactsRemote, gcSessionScratch, artifactsMountDir } = await import('../../core/artifacts.js');
+        const { getArtifactsRemote, gcSessionScratch, artifactsMountDir, artifactPaths } = await import('../../core/artifacts.js');
         const { getProjectDir, getProjectBaseDir } = await import('../../core/config.js');
         const scanned = await scanWorkspaces();
         const projects = [...new Set(scanned.map((w) => w.projectName))];
@@ -928,6 +931,28 @@ void getAgentControlReady().catch((error) => {
             if (removed > 0) console.error(`[artifacts] gc: removed ${removed} stale session scratch dir(s) under ${dir}`);
           }
         } catch { /* gc is best-effort */ }
+        // Mount integrity: a cross-wired mount misdirects every write through
+        // it (a project-scope capture lands on a workspace branch) and makes
+        // mountHead() report the wrong baseline, so write-scope enforcement can
+        // revert legitimate work. `git worktree list` cannot see it — it reads
+        // registrations, not the mounts' own .git files — so this sweep is the
+        // only place it becomes visible without a human going looking.
+        try {
+          for (const projectName of projects) {
+            const repoDir = artifactPaths(getProjectDir(projectName)).repoDir;
+            const dirs = scanned.filter((w) => w.projectName === projectName).map((w) => w.path);
+            try {
+              dirs.push(getProjectBaseDir(projectName));
+            } catch { /* project without a base checkout */ }
+            for (const dir of dirs) {
+              const mount = artifactsMountDir(dir);
+              const info = inspectArtifactsMount(repoDir, mount);
+              if (info.status === 'cross-wired') {
+                console.error(`[artifacts] MOUNT CROSS-WIRED — writes here would go to another branch: ${describeMountIntegrity(mount, info)}`);
+              }
+            }
+          }
+        } catch { /* integrity reporting is advisory — never break the tick */ }
         for (const projectName of projects) {
           try {
             const projectDir = getProjectDir(projectName);

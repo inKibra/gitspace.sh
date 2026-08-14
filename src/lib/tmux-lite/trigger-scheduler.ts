@@ -12,6 +12,8 @@
 import { completeTriggerRun, listTriggers, mountHead, recordTriggerRun, type TriggerRecord, type TriggerRunEnforcement } from '../../core/triggers.js';
 import { parseCronWhen } from '../../core/trigger-grammar.js';
 import { getProjectDir } from '../../core/config.js';
+import { artifactPaths, artifactsMountDir } from '../../core/artifacts.js';
+import { inspectArtifactsMount, describeMountIntegrity } from '../../core/artifacts-mount-integrity.js';
 
 export { parseCronWhen };
 
@@ -103,6 +105,17 @@ export async function tickTriggerScheduler(
   for (const { workspace, trigger, prompt } of due) {
     try {
       const projectDir = getProjectDir(workspace.projectName);
+      // A cross-wired mount misdirects the whole run: the pending record's
+      // startCommit comes from mountHead(), which reads the stranger's branch,
+      // so post-run enforcement would diff against a bogus baseline and could
+      // revert the run's legitimate writes as out-of-scope. Skip loudly instead
+      // of firing into that.
+      const integrity = inspectArtifactsMount(artifactPaths(projectDir).repoDir, artifactsMountDir(workspace.path));
+      if (integrity.status === 'cross-wired') {
+        deps.log?.(`trigger ${trigger.name} skipped: ${describeMountIntegrity(artifactsMountDir(workspace.path), integrity)}`);
+        await recordTriggerRun(projectDir, workspace.path, trigger.id, { status: 'fail', note: 'artifacts mount is cross-wired — run skipped' }, now);
+        continue;
+      }
       // Record pending FIRST (with the run-window start) so a crash mid-fire
       // can't rapid-fire on restart and the post-run diff has its baseline.
       await recordTriggerRun(projectDir, workspace.path, trigger.id, { status: 'pending', note: 'scheduled fire', startCommit: mountHead(workspace.path) ?? undefined }, now);

@@ -25,7 +25,14 @@ import {
 import { toggleFavorite } from '../artifacts-favorites.js';
 
 let projectDir: string;
-const wsDir = (name: string): string => join(projectDir, 'workspaces', name);
+/** A real workspace is a directory on disk, and `ensureArtifactsMount` now
+ *  refuses to mount into one that does not exist (that is what used to
+ *  resurrect deleted workspaces as ghosts), so the fixture must create it. */
+const wsDir = (name: string): string => {
+  const dir = join(projectDir, 'workspaces', name);
+  mkdirSync(dir, { recursive: true });
+  return dir;
+};
 const g = (cwd: string, args: string): string =>
   execSync(`git -C ${JSON.stringify(cwd)} ${args}`, { encoding: 'utf8' }).trim();
 

@@ -18,11 +18,12 @@
 import { exec, execFileSync, execSync, spawnSync } from 'child_process';
 import { promisify } from 'util';
 import { createHash } from 'crypto';
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync, appendFileSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync, appendFileSync } from 'fs';
 import { basename, dirname, join } from 'path';
 import { SpacesError } from '../types/errors.js';
 import { pathInScope, localScratchRel, AMBIENT_WRITE_SCOPES } from './artifact-cap.js';
 import { escapeShellArg } from '../utils/shell-escape.js';
+import { inspectArtifactsMount, describeMountIntegrity, canonicalPath } from './artifacts-mount-integrity.js';
 
 const execAsync = promisify(exec);
 
@@ -204,13 +205,48 @@ export async function ensureArtifactsRepo(projectDir: string): Promise<string> {
   if (existsSync(join(repoDir, 'HEAD'))) {
     installArtifactHooks(projectDir);
     ensureSessionsExcluded(repoDir);
+    ensureAttributesUnionMerge(repoDir);
     return repoDir;
   }
   await initBareArtifactsRepo(repoDir);
   await seedRootCommit(repoDir);
   installArtifactHooks(projectDir);
   ensureSessionsExcluded(repoDir);
+  ensureAttributesUnionMerge(repoDir);
   return repoDir;
+}
+
+/**
+ * `.gitattributes` merges by union.
+ *
+ * The file is generated per branch and append-only: `ensureLfsAttributes` and
+ * the pre-commit hook each create it from nothing and add one line per pointer
+ * path. So no branch inherits it until someone rolls up, and the first roll-up
+ * puts it on main as a NEW file. Every other branch whose merge base predates
+ * that then hits `CONFLICT (add/add)` — on a file whose two sides never
+ * disagree about a line, only about which subset they hold. Roll-up reported
+ * "curate manually" and asked a human to hand-resolve a set union.
+ *
+ * Union is correct precisely because the content is an order-independent line
+ * set, and duplicates are harmless (git takes the last matching pattern, and
+ * `ensureLfsAttributes` dedupes on the next write). It is NOT a general-purpose
+ * conflict silencer — scoped to this one path deliberately.
+ *
+ * Lives in the bare repo's `info/attributes`, not in the committed
+ * `.gitattributes`: a file that declares its own merge driver is unreliable
+ * during a merge of that very file. `info/attributes` sits in the common dir,
+ * so every worktree and the object-DB roll-up (`git merge-tree` runs in the
+ * bare repo) pick it up. Unversioned, hence re-asserted on every touch.
+ */
+function ensureAttributesUnionMerge(repoDir: string): void {
+  try {
+    const attrPath = join(repoDir, 'info', 'attributes');
+    const line = '.gitattributes merge=union';
+    const current = existsSync(attrPath) ? readFileSync(attrPath, 'utf8') : '';
+    if (current.split('\n').includes(line)) return;
+    mkdirSync(dirname(attrPath), { recursive: true });
+    appendFileSync(attrPath, `${current.endsWith('\n') || current === '' ? '' : '\n'}${line}\n`);
+  } catch { /* best-effort: a missing driver costs a manual curate, not data */ }
 }
 
 /** Session scratch (local:// roots at <mount>/.sessions/<sid>) is addressable
@@ -377,26 +413,108 @@ async function ensureCodeRepoExcludes(dirInsideCodeRepo: string): Promise<void> 
   }
 }
 
+/** In-flight mounts, keyed by mount dir. `ensureArtifactsMount` was
+ *  check-then-act with no lock, and two concurrent calls for the SAME mount is
+ *  how the cross-wire in artifacts-mount-integrity.ts is manufactured: both
+ *  pass the `existsSync` check, both run `worktree add`, one loses the
+ *  registration race but writes the mount's `.git` file last. Serialising per
+ *  path closes that window inside this process. Two PROCESSES (a CLI beside the
+ *  daemon) still race — that needs a lock in the repo, and the integrity check
+ *  is what catches it after the fact. */
+const mountsInFlight = new Map<string, Promise<string>>();
+
 /**
  * Ensure `branch` exists (off main) and is mounted at
  * `<workspaceDir>/.gitspace/artifacts`. Pass `branch = 'main'` for the base
- * clone's mount. Idempotent.
+ * clone's mount. Idempotent, and serialised per mount path.
  */
 export async function ensureArtifactsMount(projectDir: string, workspaceDir: string, branch: string): Promise<string> {
+  const mountDir = artifactsMountDir(workspaceDir);
+  const inFlight = mountsInFlight.get(mountDir);
+  if (inFlight) return await inFlight;
+  const run = mountArtifacts(projectDir, workspaceDir, branch, mountDir);
+  mountsInFlight.set(mountDir, run);
+  try {
+    return await run;
+  } finally {
+    mountsInFlight.delete(mountDir);
+  }
+}
+
+async function mountArtifacts(projectDir: string, workspaceDir: string, branch: string, mountDir: string): Promise<string> {
+  // A mount may only be created INSIDE an existing workspace. Without this,
+  // `mkdirSync(recursive)` below happily conjures `workspaces/<deleted-name>/`
+  // out of nothing, the scanner then reports a workspace, and a removed
+  // workspace reappears as a ghost — repeatedly, since each artifact touch
+  // rebuilds it. The artifacts BRANCH is meant to outlive the workspace; the
+  // DIRECTORY is not.
+  if (!existsSync(workspaceDir)) {
+    throw new SpacesError(
+      `Refusing to mount artifacts for a workspace that does not exist: ${workspaceDir}. `
+        + 'Its artifacts branch (if any) is still on the artifacts repo and can be rolled up or abandoned by name.',
+      'USER_ERROR',
+      1,
+    );
+  }
   const repoDir = await ensureArtifactsRepo(projectDir);
   if (branch !== MAIN_BRANCH && !(await branchExists(repoDir, branch))) {
     await git(repoDir, `branch ${escapeShellArg(branch)} ${MAIN_BRANCH}`);
   }
-  const mountDir = artifactsMountDir(workspaceDir);
-  if (!existsSync(join(mountDir, '.git'))) {
-    mkdirSync(dirname(mountDir), { recursive: true });
-    // A manually-deleted mount leaves a stale worktree registration that
-    // makes 'worktree add' refuse the same path — prune first, always.
-    await git(repoDir, 'worktree prune');
-    await git(repoDir, `worktree add ${escapeShellArg(mountDir)} ${escapeShellArg(branch)}`);
-  } else {
-    await reconcileMountBranch(mountDir, branch);
+  const integrity = inspectArtifactsMount(repoDir, mountDir);
+  if (integrity.status === 'cross-wired') {
+    // Never auto-repair: the registration belongs to a live worktree, so
+    // rewriting either side is a data-loss decision for a human to make.
+    throw new SpacesError(
+      `Artifacts mount is cross-wired — ${describeMountIntegrity(mountDir, integrity)}. `
+        + 'Repoint this mount at its own registration and run `git worktree repair` before writing here.',
+      'USER_ERROR',
+      1,
+    );
   }
+  if (integrity.status === 'ok') {
+    await reconcileMountBranch(mountDir, branch);
+    await ensureCodeRepoExcludes(workspaceDir);
+    return mountDir;
+  }
+  // 'absent' or 'dangling'.
+  //
+  // Targeted cleanup, NOT `worktree prune`: a blanket prune frees every stale
+  // registration name, and the next `worktree add` for an unrelated workspace
+  // gets handed one — which is precisely how a dangling pointer here becomes a
+  // live pointer into someone else's worktree. Only drop registrations that
+  // claim THIS mount.
+  for (const id of integrity.orphanedRegistrations) {
+    rmSync(join(repoDir, 'worktrees', id), { recursive: true, force: true });
+  }
+  // Refuse rather than force when the branch is genuinely live somewhere else:
+  // a second checkout of one branch is the other half of a cross-wire.
+  const holder = await worktreeFor(repoDir, branch);
+  if (holder && canonicalPath(holder) !== canonicalPath(mountDir)) {
+    throw new SpacesError(
+      `Artifacts branch ${branch} is already checked out at ${holder}, so it cannot also be mounted at ${mountDir}. `
+        + 'Resolve that worktree first — forcing a second checkout of one branch is how two trees end up sharing an index.',
+      'USER_ERROR',
+      1,
+    );
+  }
+  // `worktree add` requires the path to be absent or an empty directory, and
+  // `--force` does NOT relax that (it only overrides registration and
+  // branch-checkout checks). A stranded checkout is therefore in the way.
+  //
+  // Move it aside rather than delete it: its files are a checkout of this same
+  // branch, so anything COMMITTED is already safe in the object DB, but
+  // uncommitted edits are not — and with no registration, git in that directory
+  // cannot reach them either. They are bytes the user may still want, so they
+  // are preserved under a named sibling instead of being destroyed by a repair.
+  if (existsSync(mountDir) && readdirSync(mountDir).length > 0) {
+    const stranded = `${mountDir}.stranded-${Date.now()}`;
+    renameSync(mountDir, stranded);
+    console.warn(
+      `[artifacts] ${describeMountIntegrity(mountDir, integrity)}; moved the stranded checkout to ${stranded} and re-mounted`,
+    );
+  }
+  mkdirSync(dirname(mountDir), { recursive: true });
+  await git(repoDir, `worktree add ${escapeShellArg(mountDir)} ${escapeShellArg(branch)}`);
   await ensureCodeRepoExcludes(workspaceDir);
   return mountDir;
 }
@@ -502,6 +620,30 @@ function assertSafeRelPath(rel: string): void {
   }
 }
 
+/**
+ * Refuse to write through a mount whose pointers disagree.
+ *
+ * On a cross-wired mount every write is silently misdirected: the commit lands
+ * on whatever branch the stranger's registration has checked out (a project
+ * agent's project-scope capture goes onto a workspace branch), `mountHead()`
+ * reads a baseline from that branch so post-run write-scope enforcement diffs
+ * against a bogus commit and can revert legitimate work as out-of-scope, and
+ * roll-up onto main cannot be trusted. Two writers also share one index.
+ *
+ * Cheap enough to run per write — pure filesystem reads, no git subprocess.
+ */
+export function assertMountWritable(projectDir: string, mountDir: string): void {
+  const { repoDir } = artifactPaths(projectDir);
+  const info = inspectArtifactsMount(repoDir, mountDir);
+  if (info.status !== 'cross-wired') return;
+  throw new SpacesError(
+    `Refusing to write artifacts through a cross-wired mount — ${describeMountIntegrity(mountDir, info)}. `
+      + 'Repoint this mount at its own registration and run `git worktree repair` first; writing now would commit to another branch.',
+    'USER_ERROR',
+    1,
+  );
+}
+
 /** Write files into a mount and commit them on its branch (one commit).
  *  Files at/over the pointer threshold are stored in the blob store and
  *  committed as LFS pointers (with matching .gitattributes lines, so external
@@ -513,6 +655,7 @@ export async function captureArtifacts(
   opts: { message?: string; provenance?: CaptureProvenance; pointerThresholdBytes?: number; allowedWrites?: string[] } = {},
 ): Promise<CaptureResult> {
   if (files.length === 0) throw new SpacesError('captureArtifacts: no files given', 'USER_ERROR', 1);
+  assertMountWritable(projectDir, mountDir);
   assertWritesInScope(files, opts.allowedWrites);
   const { blobsDir } = artifactPaths(projectDir);
   const threshold = opts.pointerThresholdBytes ?? DEFAULT_POINTER_THRESHOLD_BYTES;
@@ -598,6 +741,7 @@ export function captureArtifactsSync(
   opts: { message?: string; provenance?: CaptureProvenance; pointerThresholdBytes?: number; allowedWrites?: string[] } = {},
 ): CaptureResult {
   if (files.length === 0) throw new SpacesError('captureArtifacts: no files given', 'USER_ERROR', 1);
+  assertMountWritable(projectDir, mountDir);
   assertWritesInScope(files, opts.allowedWrites);
   const { blobsDir } = artifactPaths(projectDir);
   const threshold = opts.pointerThresholdBytes ?? DEFAULT_POINTER_THRESHOLD_BYTES;
