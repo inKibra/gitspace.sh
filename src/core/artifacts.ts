@@ -1370,9 +1370,21 @@ export async function rollupArtifacts(
 /** Clean up stale worktree registrations after a workspace dir was deleted
  *  out from under its mount (workspace removal deletes the whole tree). The
  *  branch survives for a later roll-up. Best-effort no-op without a repo. */
-export async function pruneArtifactMounts(projectDir: string): Promise<void> {
+export async function pruneArtifactMounts(projectDir: string, removedWorkspaceDir?: string): Promise<void> {
   const { repoDir } = artifactPaths(projectDir);
   if (!existsSync(join(repoDir, 'HEAD'))) return;
+  if (removedWorkspaceDir) {
+    // Targeted: drop only the registrations that claimed the mount which just
+    // went away. A blanket `worktree prune` frees EVERY stale registration name,
+    // and `git worktree add` hands the next caller a recycled one — which is how
+    // a dangling mount pointer silently becomes a live pointer into a stranger's
+    // worktree (see artifacts-mount-integrity.ts).
+    const mountDir = artifactsMountDir(removedWorkspaceDir);
+    for (const id of inspectArtifactsMount(repoDir, mountDir).orphanedRegistrations) {
+      rmSync(join(repoDir, 'worktrees', id), { recursive: true, force: true });
+    }
+    return;
+  }
   await git(repoDir, 'worktree prune').catch(() => undefined);
 }
 

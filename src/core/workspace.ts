@@ -254,7 +254,7 @@ export async function deleteWorkspaceCore(
   // later roll-up (merge into main) or explicit abandon. Best-effort.
   try {
     const { pruneArtifactMounts } = await import('./artifacts.js');
-    await pruneArtifactMounts(getProjectDir(projectName));
+    await pruneArtifactMounts(getProjectDir(projectName), workspacePath);
   } catch {
     /* additive cleanup only */
   }
