@@ -83,6 +83,16 @@ export const AGENT_STATE_LABEL: Record<AgentSessionRenderState, string> = {
   archived: 'archived',
 };
 
+/**
+ * Glyph for an agent-session row.
+ *
+ * One constant because a project agent and a workspace agent are the same
+ * thing — an agent session — and they had drifted to different symbols (`✦` vs
+ * `▸`) for no reason a reader could recover, which reads as a status difference
+ * that does not exist.
+ */
+export const AGENT_ROW_GLYPH = '▸';
+
 /** A goal's position in its chain, as rendered. Distinct from agent state: a
  *  chain node is about the goal's progress, not about a session's activity. */
 export type ChainNodeState = 'shipped' | 'active' | 'planned';

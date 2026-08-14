@@ -3,7 +3,8 @@ import { useEffect, useRef, useState, type ReactElement } from 'react';
 import type { WorkspacePhase } from '../types/config.js';
 import { STAGE_CAPS, STAGE_ORDER, stageColorVar } from '../app/shared/workspace-detail/stage-caps.js';
 import type { KanbanGoalItem } from '../app/shared/board/types.js';
-import { CHAIN_NODE_TONE_CLASS } from '../app/shared/status-display.js';
+import { CHAIN_NODE_TONE_CLASS, WORKSPACE_CHIP_COLOR } from '../app/shared/status-display.js';
+import type { WorkspaceStatusColor } from '../app/workspaces/workspace-status.js';
 
 /**
  * Workspace sidebar chrome (mock: Sidebar.tsx header/modecaps/chainstack):
@@ -90,9 +91,25 @@ export interface ChainStackNode {
   status: 'shipped' | 'active' | 'planned';
   workspaceSelectionKey?: string;
   ready?: { passed: number; total: number };
+  /** The node's workspace status, when it HAS a workspace. The dot uses this so
+   *  a chain node reports the same thing the strip and the chips do. */
+  statusColor?: WorkspaceStatusColor;
 }
 
-export function chainNodesFromGoals(goals: KanbanGoalItem[], currentWorkspaceName: string): ChainStackNode[] {
+/**
+ * Chain nodes for the rail.
+ *
+ * `statusColorOf` resolves a goal's workspace status the same way the workspace
+ * strip does. Without it every workspace-backed goal was drawn 'active', i.e.
+ * accent-green — so green meant nothing more than "this goal has a workspace",
+ * while the same workspace showed its real status (red/amber/blue) two panels
+ * away. A goal with no workspace has no status to report and stays 'planned'.
+ */
+export function chainNodesFromGoals(
+  goals: KanbanGoalItem[],
+  currentWorkspaceName: string,
+  statusColorOf?: (goal: KanbanGoalItem) => WorkspaceStatusColor,
+): ChainStackNode[] {
   return [...goals]
     .sort((a, b) => a.chainPosition - b.chainPosition)
     .map((g) => {
@@ -100,7 +117,7 @@ export function chainNodesFromGoals(goals: KanbanGoalItem[], currentWorkspaceNam
       const shipped = g.phase === 'ship' && !isCurrent && g.status === 'workspace-backed';
       const status: ChainStackNode['status'] = isCurrent ? 'active' : shipped ? 'shipped' : g.status === 'planned' ? 'planned' : 'active';
       const reqs = g.validation ? Object.values(g.validation.requirements ?? {}) : [];
-      const passed = reqs.filter((r) => (r as { status?: string }).status === 'accepted').length;
+      const passed = reqs.filter((r) => r.status === 'accepted').length;
       return {
         goalId: g.id,
         title: g.title,
@@ -108,6 +125,7 @@ export function chainNodesFromGoals(goals: KanbanGoalItem[], currentWorkspaceNam
         status: isCurrent ? 'active' : status,
         workspaceSelectionKey: g.workspaceName && !isCurrent ? g.selectionKey : undefined,
         ready: reqs.length > 0 ? { passed, total: reqs.length } : undefined,
+        statusColor: g.workspaceName ? statusColorOf?.(g) : undefined,
       };
     });
 }
@@ -121,9 +139,11 @@ export function ChainStack({ title, nodes, currentGoalId, onSwitchWorkspace, onO
    *  to, and used to swallow the click silently. Open its goal instead. */
   onOpenGoal?: (goalId: string) => void;
 }): ReactElement {
+  // Fallback only: a node with no workspace has no status to report, and the
+  // current node is marked by the `here` badge and its own emphasis.
   const DOT: Record<ChainStackNode['status'], string> = {
     shipped: 'border-[var(--gs-success)] bg-[var(--gs-success)]',
-    active: 'border-[var(--gs-accent)] bg-[var(--gs-accent)] shadow-[0_0_8px_var(--gs-accent)]',
+    active: 'border-[var(--gs-border-active)] bg-[var(--gs-bg)]',
     planned: 'border-[var(--gs-border-active)] bg-[var(--gs-bg)]',
   };
   const PHASE_TONE = CHAIN_NODE_TONE_CLASS;
@@ -146,7 +166,13 @@ export function ChainStack({ title, nodes, currentGoalId, onSwitchWorkspace, onO
               className={`flex gap-[9px] px-[13px] py-[3px] ${navigable || openable ? 'cursor-pointer hover:bg-[var(--gs-bg-hover)]' : ''}`}
             >
               <span className="relative flex w-[10px] flex-shrink-0 justify-center">
-                <span className={`mt-[3px] h-[9px] w-[9px] flex-shrink-0 rounded-full border-2 ${DOT[isCurrent ? 'active' : nd.status]}`} />
+                {/* A workspace-backed node shows the SAME colour the strip and
+                    the chips show for that workspace. Previously every such node
+                    was accent-green, so green only ever meant "has a workspace"
+                    while the workspace itself might be red or amber elsewhere. */}
+                {nd.statusColor
+                  ? <span className="mt-[3px] h-[9px] w-[9px] flex-shrink-0 rounded-full border-2" style={{ borderColor: WORKSPACE_CHIP_COLOR[nd.statusColor], background: WORKSPACE_CHIP_COLOR[nd.statusColor] }} />
+                  : <span className={`mt-[3px] h-[9px] w-[9px] flex-shrink-0 rounded-full border-2 ${DOT[isCurrent ? 'active' : nd.status]}`} />}
                 {i < nodes.length - 1 && <span className="absolute bottom-[-7px] top-[14px] w-px bg-[var(--gs-border)]" />}
               </span>
               <span className="min-w-0 flex-1">

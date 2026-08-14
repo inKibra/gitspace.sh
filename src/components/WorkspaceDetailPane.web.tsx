@@ -208,6 +208,9 @@ function SidebarContent(props: {
   dashboards?: WorkspaceDetailPaneProps['dashboards'];
   onOpenDashboard?: WorkspaceDetailPaneProps['onOpenDashboard'];
   chainGoals?: WorkspaceDetailPaneProps['chainGoals'];
+  /** Same status map the workspace strip uses, so a chain node's dot reports the
+   *  workspace's real status instead of merely "it has a workspace". */
+  workspaceStatusById?: WorkspaceDetailPaneProps['workspaceStatusById'];
   chainTitle?: string;
   currentChainGoalId?: string;
   onSwitchChainWorkspace?: WorkspaceDetailPaneProps['onSwitchChainWorkspace'];
@@ -222,7 +225,7 @@ function SidebarContent(props: {
     onAttachSession, onStopAgentTurn, onCloseAgentSession, onArchiveAgentSession, onRestoreAgentSession,
     onCreateAgentSession, onStopProcess, onDeleteSession, onDeleteWorkspace, onOpenGitHubPullRequest, onOpenReview,
     onRequestStatusChange, onOpenNotes, onOpenEvents, onOpenGoalDoc, onOpenChangeGuide, onOpenRubric, onOpenWorkflow, onOpenCrons, onCreateDashboard,
-    dashboards, onOpenDashboard, chainGoals, chainTitle, currentChainGoalId, onSwitchChainWorkspace,
+    dashboards, onOpenDashboard, chainGoals, chainTitle, currentChainGoalId, onSwitchChainWorkspace, workspaceStatusById = {},
     agentSessionCount, pendingPermissions, pullRequest, onDismiss,
     goal, onOpenGoalDetail,
   } = props;
@@ -434,7 +437,10 @@ function SidebarContent(props: {
       {chainGoals && chainGoals.length > 1 && chainTitle && (
         <ChainStack
           title={chainTitle}
-          nodes={chainNodesFromGoals(chainGoals, workspace.name)}
+          nodes={chainNodesFromGoals(chainGoals, workspace.name, (g) => getWorkspaceStripColor(
+            { id: g.selectionKey, name: g.workspaceName ?? '', projectName: g.projectName, selectionKey: g.selectionKey },
+            workspaceStatusById,
+          ))}
           currentGoalId={currentChainGoalId}
           onSwitchWorkspace={onSwitchChainWorkspace ? (key) => act(() => onSwitchChainWorkspace(key)) : undefined}
           onOpenGoal={onOpenGoalDetail ? (goalId) => {
@@ -774,6 +780,7 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
                 dashboards={props.dashboards}
                 onOpenDashboard={props.onOpenDashboard}
                 chainGoals={props.chainGoals}
+                workspaceStatusById={props.workspaceStatusById}
                 chainTitle={props.chainTitle}
                 currentChainGoalId={props.currentChainGoalId}
                 onSwitchChainWorkspace={props.onSwitchChainWorkspace}
@@ -886,6 +893,7 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
                   dashboards={props.dashboards}
                   onOpenDashboard={props.onOpenDashboard}
                   chainGoals={props.chainGoals}
+                  workspaceStatusById={props.workspaceStatusById}
                   chainTitle={props.chainTitle}
                   currentChainGoalId={props.currentChainGoalId}
                   onSwitchChainWorkspace={props.onSwitchChainWorkspace}

@@ -14,7 +14,7 @@
 import { useCallback, useEffect, useMemo, useState, type ReactElement } from 'react';
 import type { DockviewApi } from 'dockview-react';
 import type { BackendKey, SessionBackend } from '../session/backend.js';
-import { AGENT_STATE_DOT_CLASS } from '../app/shared/status-display.js';
+import { AGENT_STATE_DOT_CLASS, AGENT_ROW_GLYPH } from '../app/shared/status-display.js';
 import type { AgentSessionRenderState } from '../agents/agent-runtime-types.js';
 import { NotePanel } from '../components/NotePanel.web.js';
 import { MarkdownPreview } from '../components/MarkdownPreview.web.js';
@@ -817,7 +817,7 @@ export function ProjectHomePage({
     if (isArtTab(t)) return `◇ ${t.slice(4).split('/').pop() ?? t.slice(4)}`;
     if (t.startsWith('report:')) return `⚑ ${t.slice(7).split('/').pop() ?? 'report'}`;
     if (t.startsWith('note:')) return '✎ note';
-    if (t.startsWith('agent:')) return `✦ ${agentThreads.find((x) => `agent:${x.id}` === t)?.title || 'thread'}`;
+    if (t.startsWith('agent:')) return `${AGENT_ROW_GLYPH} ${agentThreads.find((x) => `agent:${x.id}` === t)?.title || 'thread'}`;
     return FIXED_TAB_LABEL[t] ?? t;
   };
 
@@ -1131,7 +1131,7 @@ export function ProjectHomePage({
                           : 'text-[var(--gs-text-muted)] hover:bg-[var(--gs-bg-hover)] hover:text-[var(--gs-text)]'
                       }`}
                     >
-                      <span className={`w-[14px] flex-none text-center ${iconColor ?? (on ? 'text-[var(--gs-accent)]' : 'text-[var(--gs-text-dim)]')} ${st === 'running' ? 'animate-pulse' : ''}`}>✦</span>
+                      <span className={`w-[14px] flex-none text-center ${iconColor ?? (on ? 'text-[var(--gs-accent)]' : 'text-[var(--gs-text-dim)]')} ${st === 'running' ? 'animate-pulse' : ''}`}>{AGENT_ROW_GLYPH}</span>
                       <span className="min-w-0 flex-1 truncate">{th.title || 'thread'}</span>
                     </button>
                     {backend?.closeAgentSession && (
