@@ -174,7 +174,13 @@ function FileDiffBlock({ backend, projectName, workspaceName, file, onOpenFile, 
         type="button"
         onClick={() => onOpenFile?.(file.path)}
         title={onOpenFile ? `Open ${file.path}` : file.path}
-        className="flex w-full items-center gap-2 border-b border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-2.5 py-[5px] text-left font-[family-name:var(--gs-font-mono)] text-[10.5px] text-[var(--gs-text-muted)] hover:text-[var(--gs-text)]"
+        /* Pins directly below the section's sticky block. The offset is that
+           block's measured height (published as --gs-guide-sticky-top on the
+           section), not a constant: it changes when the notes collapse or the
+           title wraps. z-20 keeps it under the section header, which owns the
+           top of the viewport. */
+        style={{ top: 'var(--gs-guide-sticky-top, 0px)' }}
+        className="sticky z-20 flex w-full items-center gap-2 border-b border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-2.5 py-[5px] text-left font-[family-name:var(--gs-font-mono)] text-[10.5px] text-[var(--gs-text-muted)] hover:text-[var(--gs-text)]"
       >
         {/* The narrator's attention mark. Without it every exhibit looks equally
             urgent, which is the diff browser the guide is meant to replace. */}
@@ -294,6 +300,28 @@ export function ChangeGuidePane({ backend, projectName, workspaceName, workspace
   }, []);
   /** Restore runs once per pane identity per mount. */
   const restoredRef = useRef<string | null>(null);
+
+  /**
+   * Height of each section's sticky block, published onto the section as
+   * `--gs-guide-sticky-top` so the per-file diff headers can pin directly below
+   * it. Measured rather than hardcoded: the block's height changes when the
+   * notes collapse, when the title wraps, and between guide and heuristic mode.
+   */
+  const stickyRefs = useRef<Array<HTMLElement | null>>([]);
+  useEffect(() => {
+    const publish = (el: HTMLElement): void => {
+      el.closest('section')?.style.setProperty('--gs-guide-sticky-top', `${Math.round(el.offsetHeight)}px`);
+    };
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries) publish(entry.target as HTMLElement);
+    });
+    for (const el of stickyRefs.current) {
+      if (!el) continue;
+      publish(el);
+      observer.observe(el);
+    }
+    return () => observer.disconnect();
+  });
 
   useEffect(() => {
     let alive = true;
@@ -821,7 +849,7 @@ export function ChangeGuidePane({ backend, projectName, workspaceName, workspace
                   One wrapper rather than two sticky siblings: stacking them would
                   need a hardcoded `top` offset equal to the header's height, which
                   is wrong the moment the header wraps. */}
-              <div className="sticky top-0 z-30">
+              <div ref={(el) => { stickyRefs.current[i] = el; }} className="sticky top-0 z-30">
                 <div
                   /* Opaque by construction: the done state is a translucent tint,
                      which over a sticky element would let the diff show through.
