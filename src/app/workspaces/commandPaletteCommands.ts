@@ -8,6 +8,10 @@ export const COMMAND_PALETTE_COMMAND_DEFS = [
   { id: 'add-workspace', label: 'Add Workspace', shortcut: '⌘⇧N' },
   { id: 'set-status', label: 'Set Workspace Status', shortcut: '' },
   { id: 'delete-repo', label: 'Delete Repo', shortcut: '' },
+  // Sits directly above Delete on purpose: deleting a workspace now deletes its
+  // artifacts branch, so the way to keep that work has to be within reach of the
+  // action that destroys it.
+  { id: 'rollup-workspace', label: 'Roll Up Workspace Artifacts', shortcut: '' },
   { id: 'delete-workspace', label: 'Delete Workspace', shortcut: '' },
   { id: 'delete-workspace-skip-scripts', label: 'Delete Workspace (Skip Scripts)', shortcut: '' },
   { id: 'edit-bundle-config', label: 'Edit Bundle Config', shortcut: '' },

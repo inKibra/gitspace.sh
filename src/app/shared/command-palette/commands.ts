@@ -9,6 +9,7 @@ type SharedCommandResult<T extends CommandPaletteWorkspaceLike> =
   | { kind: 'missing-project' }
   | { kind: 'missing-workspace' }
   | { kind: 'set-status'; workspace: T }
+  | { kind: 'rollup-workspace'; workspace: T }
   | { kind: 'delete-workspace'; workspace: T }
   | { kind: 'delete-workspace-skip-scripts'; workspace: T }
   | { kind: 'edit-bundle-config'; workspace: T }
@@ -34,6 +35,8 @@ export function resolveSharedCommand<T extends CommandPaletteWorkspaceLike>(
       return projectName ? { kind: 'delete-repo', projectName } : { kind: 'missing-project' };
     case 'set-status':
       return workspace ? { kind: 'set-status', workspace } : { kind: 'missing-workspace' };
+    case 'rollup-workspace':
+      return workspace ? { kind: 'rollup-workspace', workspace } : { kind: 'missing-workspace' };
     case 'delete-workspace':
       return workspace ? { kind: 'delete-workspace', workspace } : { kind: 'missing-workspace' };
     case 'delete-workspace-skip-scripts':

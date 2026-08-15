@@ -20,6 +20,8 @@ export interface UseCommandPaletteOrchestrationOptions<T extends WorkspaceInfo &
   onAddRepo: () => void;
   onAddWorkspace: () => void;
   onSetWorkspacePhase: (workspace: T, phase: WorkspacePhase) => void;
+  /** Optional: absent when the connection cannot roll up artifacts. */
+  onRollupWorkspace?: (workspace: T) => void | Promise<void>;
   onDeleteWorkspace: (workspace: T) => void;
   onDeleteWorkspaceSkipScripts: (workspace: T) => void;
   onEditBundleConfig: (workspace: T) => void | Promise<void>;
@@ -62,6 +64,7 @@ export function useCommandPaletteOrchestration<T extends WorkspaceInfo & Command
           onSelectPhase: (phase) => options.onSetWorkspacePhase(workspace, phase),
         });
       },
+      onRollupWorkspace: options.onRollupWorkspace,
       onDeleteWorkspace: options.onDeleteWorkspace,
       onDeleteWorkspaceSkipScripts: options.onDeleteWorkspaceSkipScripts,
       onEditBundleConfig: options.onEditBundleConfig,

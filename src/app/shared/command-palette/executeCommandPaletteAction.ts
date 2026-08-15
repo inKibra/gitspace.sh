@@ -25,6 +25,8 @@ interface ExecuteCommandPaletteActionArgs<T extends WorkspaceInfo & CommandPalet
   onAddRepo: () => void;
   onAddWorkspace: () => void;
   onSetStatus: (workspace: T) => void;
+  /** Optional: only surfaces where a backend can actually roll up. */
+  onRollupWorkspace?: (workspace: T) => void | Promise<void>;
   onDeleteWorkspace: (workspace: T) => void;
   onDeleteWorkspaceSkipScripts: (workspace: T) => void;
   onEditBundleConfig: (workspace: T) => void | Promise<void>;
@@ -53,6 +55,7 @@ export function executeCommandPaletteAction<T extends WorkspaceInfo & CommandPal
     onAddRepo,
     onAddWorkspace,
     onSetStatus,
+    onRollupWorkspace,
     onDeleteWorkspace,
     onDeleteWorkspaceSkipScripts,
     onEditBundleConfig,
@@ -130,6 +133,13 @@ export function executeCommandPaletteAction<T extends WorkspaceInfo & CommandPal
       return;
     case 'set-status':
       onSetStatus(sharedCommand.workspace);
+      return;
+    case 'rollup-workspace':
+      if (!onRollupWorkspace) {
+        showMessage({ title: 'Roll-up unavailable', message: 'This connection cannot roll up artifacts.', variant: 'error' });
+        return;
+      }
+      void onRollupWorkspace(sharedCommand.workspace);
       return;
     case 'delete-workspace':
       onDeleteWorkspace(sharedCommand.workspace);

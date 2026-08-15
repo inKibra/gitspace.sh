@@ -2482,6 +2482,16 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
       workspaceBoardState.setPhase(workspace.selectionKey ?? workspace.id, phase);
       flow.close();
     },
+    // Reuses the same guarded roll-up the project page uses — gate checks,
+    // confirmations and all. A second, laxer path next to Delete would be the
+    // worst place to have one.
+    onRollupWorkspace: async (workspace) => {
+      const be = multi.getBackend(getWorkspaceRef(workspace.id).backendKey);
+      const goal = allGoalItems.find((g) => g.workspaceName === workspace.name && g.projectName === workspace.projectName) ?? null;
+      const rolled = await rollupWorkspaceGuarded(be, workspace.projectName, workspace.name, goal);
+      if (rolled) toast.success(`Rolled up ${workspace.name} artifacts into main.`);
+      flow.close();
+    },
     onDeleteWorkspace: handleDeleteWorkspace,
     onDeleteWorkspaceSkipScripts: handleDeleteWorkspaceSkipScripts,
     onEditBundleConfig: async (workspace) => {
