@@ -331,12 +331,24 @@ export class LocalSessionHost implements AgentSessionHost {
       throw new Error('Unexpected createAgentSession result shape — SDK version may be incompatible');
     }
     localProtocol.bind(session.sessionId);
-    if (boot.title) {
-      await sessionManager.setSessionName(boot.title);
-    }
+    // Deliberately NOT setSessionName(boot.title).
+    //
+    // Pi generates a title from the first message, but only when the session has
+    // no name yet: `generateTitle(...).then(u => { if (u && !this.sessionName) … })`.
+    // Seeding a boot title here won the race every time, so the generated title
+    // was computed and thrown away and every project agent stayed called
+    // "project agent". The boot string is a DISPLAY label instead (see
+    // `host.title`), replaced the moment Pi produces a real one.
     await persistInitialPiSessionModel(session);
     await sessionManager.rewriteEntries();
     const host = new LocalSessionHost({ target, session, setToolUIContext, sinks, config, compactionStatus: compaction.holder });
+    if (boot.title) host.setTitle(boot.title);
+    // Adopt Pi's generated name when it lands. The callback carries no value, so
+    // read it back off the manager.
+    sessionManager.onSessionNameChanged?.(() => {
+      const generated = sessionManager.getSessionName?.();
+      if (generated) host.setTitle(generated);
+    });
     await host.initializeExtensionRuntime();
     return host;
   }
@@ -990,8 +1002,28 @@ export class LocalSessionHost implements AgentSessionHost {
     this.hostUIBridge.setEditorTextFromClient(this.sessionId, text);
   }
 
+  /**
+   * Rename from the client. Recorded with source `user`, which Pi treats as
+   * final: `if (this.#g === "user" && i === "auto") return false`, so a user's
+   * name is never overwritten by a later generated one.
+   */
+  async rename(name: string): Promise<void> {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    // Local label first so the UI reflects it even if the SDK call is absent
+    // on this version — a rename must never look like it did nothing.
+    this.title = trimmed;
+    await this.session.setSessionName?.(trimmed, 'user');
+  }
+
   setTitle(title: string | undefined): void {
     this.title = title;
+  }
+
+  /** The session's display title: the boot label until Pi generates a real name,
+   *  then the generated one, then whatever the user renamed it to. */
+  get displayTitle(): string | undefined {
+    return this.title;
   }
 
   // --- lifecycle -----------------------------------------------------------

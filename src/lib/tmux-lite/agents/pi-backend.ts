@@ -137,9 +137,10 @@ export class PiBackend implements AgentBackend {
     });
     const { session } = result;
     localProtocol.bind(session.sessionId);
-    if (input.title) {
-      await sessionManager.setSessionName(input.title);
-    }
+    // Deliberately NOT setSessionName(input.title) — Pi's title generation only
+    // runs when the session has no name, so seeding one here threw the generated
+    // title away. `input.title` remains the summary's display label below until
+    // Pi produces a real one.
     await persistInitialPiSessionModel(session);
     await sessionManager.rewriteEntries();
 

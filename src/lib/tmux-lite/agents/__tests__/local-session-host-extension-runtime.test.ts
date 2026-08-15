@@ -43,6 +43,10 @@ mock.module('../pi-runtime.js', () => ({
   createPiModelRegistry: mock(async () => ({ find: () => undefined, list: () => [] })),
   createPiSessionManager: mock(async () => ({ agentDir: '/tmp/pi-agent', sessionManager: {} })),
   getManagedPiExtensionPaths: mock(() => []),
+  // Needed by transcript-image-resolver, which local-session-host pulls in to
+  // resolve blob-referenced images. A partial module mock breaks the whole
+  // import graph, not just the member nothing here calls.
+  getPiAgentDir: mock(() => '/tmp/pi-agent'),
   getPiSettings: mock(async () => null),
   openPiSession: mock(async () => ({
     session,

@@ -26,6 +26,9 @@ export interface OmpAgentSession {
    * so nothing about asking for one appears in the history.
    */
   runEphemeralTurn?(args: { promptText: string; signal?: AbortSignal; dedupeReply?: boolean }): Promise<{ replyText: string }>;
+  /** Rename the session. Source `user` is final — Pi will not overwrite it with
+   *  a generated title. Present on AgentSession as well as the session manager. */
+  setSessionName?(name: string, source?: 'auto' | 'user'): Promise<boolean | void>;
   /** Pi's resolved settings. Only the paths we read are declared, so an upstream
    *  schema change cannot silently widen what we depend on. */
   readonly settings?: {
@@ -53,7 +56,15 @@ export interface OmpSessionContext {
 
 export interface OmpSessionManagerInstance {
   buildSessionContext(): OmpSessionContext;
-  setSessionName(name: string): Promise<void>;
+  /**
+   * `source` defaults to `auto` in the SDK. A name set with `user` is final —
+   * Pi refuses to overwrite it with a generated one. We previously narrowed this
+   * signature to `(name)`, which silently dropped the distinction.
+   */
+  setSessionName(name: string, source?: 'auto' | 'user'): Promise<boolean | void>;
+  /** Change notification — carries no value; read it back with getSessionName. */
+  onSessionNameChanged?(cb: () => void): () => void;
+  getSessionName?(): string | undefined;
   rewriteEntries(): Promise<void>;
 }
 
