@@ -586,6 +586,18 @@ export function ChangeGuidePane({ backend, projectName, workspaceName, workspace
     });
   }, [persistRead, steps]);
 
+  /** Collapsed note blocks, by section key. Sections are open by default and
+   *  this only records the exceptions, so a new section never starts hidden. */
+  const [notesCollapsed, setNotesCollapsed] = useState<Set<string>>(new Set());
+  const toggleNotes = useCallback((key: string): void => {
+    setNotesCollapsed((c) => {
+      const next = new Set(c);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }, []);
+
   const total = steps.length;
   const completed = done.size;
   const allDone = total > 0 && completed === total;
@@ -785,6 +797,11 @@ export function ChangeGuidePane({ backend, projectName, workspaceName, workspace
         )}
         {steps.map((s, i) => {
           const isDone = done.has(i);
+          // Notes = everything the narrator wrote about this step. Open by
+          // default: the whole point is reading the code with the reason for it
+          // still on screen.
+          const hasNotes = Boolean(s.explanationMd) || (s.callouts ?? []).length > 0 || (s.asks ?? []).length > 0;
+          const notesOpen = !notesCollapsed.has(stepKey(s));
           return (
             <section
               key={s.n}
@@ -792,43 +809,81 @@ export function ChangeGuidePane({ backend, projectName, workspaceName, workspace
               data-guide-anchor={`s${i}`}
               className={`mb-[18px] scroll-mt-[6px] border ${isDone ? 'border-[rgba(0,255,102,0.3)]' : 'border-[var(--gs-border)]'}`}
             >
-              <div className={`flex items-center gap-2.5 border-b border-[var(--gs-border)] px-[11px] py-[9px] ${isDone ? 'bg-[rgba(0,255,102,0.05)]' : 'bg-[var(--gs-bg-elevated)]'}`}>
-                <span
-                  className={`flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full border font-[family-name:var(--gs-font-mono)] text-[10px] tabular-nums ${
-                    isDone ? 'border-[var(--gs-success)] text-[var(--gs-success)]' : 'border-[var(--gs-border-active)] text-[var(--gs-text-muted)]'
-                  }`}
+              {/* Header + narrative pin together as ONE sticky block.
+
+                  In guide mode the left panel deliberately holds no prose — it
+                  says "narrative and diffs on the right" — so the explanation
+                  lives in this scrolling column, which made it something you
+                  scroll PAST to reach the code it explains. By the time you were
+                  reading a diff, the reason for it was off-screen, along with the
+                  Mark complete button.
+
+                  One wrapper rather than two sticky siblings: stacking them would
+                  need a hardcoded `top` offset equal to the header's height, which
+                  is wrong the moment the header wraps. */}
+              <div className="sticky top-0 z-30">
+                <div
+                  /* Opaque by construction: the done state is a translucent tint,
+                     which over a sticky element would let the diff show through.
+                     Composited over the surface colour so it stays theme-correct. */
+                  style={{ background: isDone ? 'linear-gradient(rgba(0,255,102,0.05),rgba(0,255,102,0.05)), var(--gs-bg-elevated)' : 'var(--gs-bg-elevated)' }}
+                  className="flex items-center gap-2.5 border-b border-[var(--gs-border)] px-[11px] py-[9px]"
                 >
-                  {isDone ? '✓' : s.n}
-                </span>
-                <span className="min-w-0 truncate text-[13px] font-medium text-[var(--gs-text)]">{s.title}</span>
-                <span className="ml-auto flex-shrink-0 text-[10px] uppercase tracking-[0.06em] text-[var(--gs-text-dim)]">{s.kind}</span>
-                <button
-                  type="button"
-                  onClick={() => toggleDone(i)}
-                  className={`flex-shrink-0 whitespace-nowrap px-2 py-0.5 text-[10.5px] transition-transform duration-[120ms] active:scale-[.96] ${
-                    isDone
-                      ? 'border border-[var(--gs-success)] bg-[var(--gs-success)] text-[var(--gs-text-on-accent)]'
-                      : 'border border-[var(--gs-border-active)] text-[var(--gs-text-muted)] hover:border-[var(--gs-text-muted)] hover:text-[var(--gs-text)]'
-                  }`}
-                >
-                  {isDone ? '✓ Complete' : 'Mark complete'}
-                </button>
+                  <span
+                    className={`flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full border font-[family-name:var(--gs-font-mono)] text-[10px] tabular-nums ${
+                      isDone ? 'border-[var(--gs-success)] text-[var(--gs-success)]' : 'border-[var(--gs-border-active)] text-[var(--gs-text-muted)]'
+                    }`}
+                  >
+                    {isDone ? '✓' : s.n}
+                  </span>
+                  <span className="min-w-0 truncate text-[13px] font-medium text-[var(--gs-text)]">{s.title}</span>
+                  <span className="ml-auto flex-shrink-0 text-[10px] uppercase tracking-[0.06em] text-[var(--gs-text-dim)]">{s.kind}</span>
+                  {hasNotes && (
+                    <button
+                      type="button"
+                      onClick={() => toggleNotes(stepKey(s))}
+                      title={notesOpen ? 'Collapse the notes for this step' : 'Keep the notes on screen while you read the diffs'}
+                      className="flex-shrink-0 whitespace-nowrap border border-[var(--gs-border-active)] px-1.5 py-0.5 text-[10.5px] text-[var(--gs-text-muted)] transition-colors duration-[120ms] hover:border-[var(--gs-text-muted)] hover:text-[var(--gs-text)]"
+                    >
+                      {notesOpen ? '▾ notes' : '▸ notes'}
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => toggleDone(i)}
+                    className={`flex-shrink-0 whitespace-nowrap px-2 py-0.5 text-[10.5px] transition-transform duration-[120ms] active:scale-[.96] ${
+                      isDone
+                        ? 'border border-[var(--gs-success)] bg-[var(--gs-success)] text-[var(--gs-text-on-accent)]'
+                        : 'border border-[var(--gs-border-active)] text-[var(--gs-text-muted)] hover:border-[var(--gs-text-muted)] hover:text-[var(--gs-text)]'
+                    }`}
+                  >
+                    {isDone ? '✓ Complete' : 'Mark complete'}
+                  </button>
+                </div>
+                {/* Capped and scrollable: an explanation can run several
+                    paragraphs, and pinning all of it would eat the viewport it is
+                    supposed to help you read. */}
+                {hasNotes && notesOpen && (
+                  <div className="max-h-[32vh] overflow-y-auto border-b border-[var(--gs-border)] bg-[var(--gs-bg)] px-[11px] py-2.5">
+                    <div className="flex flex-col gap-2.5">
+                      {s.explanationMd && (
+                        <div className="gs-block-md text-[12.5px] leading-[1.55] text-[var(--gs-text)]" dangerouslySetInnerHTML={{ __html: renderMarkdownHtml(s.explanationMd) }} />
+                      )}
+                      {(s.callouts ?? []).map((c, ci) => (
+                        <div key={ci} className={`border-l-2 px-2 py-1 text-[11px] ${c.tone === 'risk' ? 'border-[var(--gs-danger)] text-[var(--gs-danger)]' : c.tone === 'decision' ? 'border-[var(--gs-info)] text-[var(--gs-text-muted)]' : 'border-[var(--gs-border-active)] text-[var(--gs-text-dim)]'}`}>
+                          <span className="mr-1 uppercase text-[9.5px] tracking-[0.1em]">{c.tone}</span>{c.text}
+                        </div>
+                      ))}
+                      {(s.asks ?? []).map((a, ai) => (
+                        <div key={ai} className="border border-[rgba(188,140,255,.3)] px-2 py-1 text-[11px] text-[#bc8cff]">
+                          <span className="mr-1">?</span>{a}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
               <div className="flex flex-col gap-2.5 p-[11px]">
-                {/* Guide prose lives IN the story flow (moved up from the left panel). */}
-                {s.explanationMd && (
-                  <div className="gs-block-md text-[12.5px] leading-[1.55] text-[var(--gs-text)]" dangerouslySetInnerHTML={{ __html: renderMarkdownHtml(s.explanationMd) }} />
-                )}
-                {(s.callouts ?? []).map((c, ci) => (
-                  <div key={ci} className={`border-l-2 px-2 py-1 text-[11px] ${c.tone === 'risk' ? 'border-[var(--gs-danger)] text-[var(--gs-danger)]' : c.tone === 'decision' ? 'border-[var(--gs-info)] text-[var(--gs-text-muted)]' : 'border-[var(--gs-border-active)] text-[var(--gs-text-dim)]'}`}>
-                    <span className="mr-1 uppercase text-[9.5px] tracking-[0.1em]">{c.tone}</span>{c.text}
-                  </div>
-                ))}
-                {(s.asks ?? []).map((a, ai) => (
-                  <div key={ai} className="border border-[rgba(188,140,255,.3)] px-2 py-1 text-[11px] text-[#bc8cff]">
-                    <span className="mr-1">?</span>{a}
-                  </div>
-                ))}
                 {/* Full file manifest with line stats; exhibits render diffs below. */}
                 {(s.allFiles ?? []).length > 0 && (
                   <div className="border border-[var(--gs-border)]">
