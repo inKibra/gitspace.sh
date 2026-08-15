@@ -2283,35 +2283,66 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
     });
   }, [activeBackendKey, attachedBackendKey, attachedBackendState?.attachedSessionId, flow, getSessionRef, multi, selectedBackendKey]);
 
-  const handleDeleteWorkspace = useCallback((workspace: WorkspaceInfo) => {
+  /** Commits on the workspace's artifacts branch that main does not have.
+   *  Removal drops that branch, so this is what the confirmation stands to
+   *  lose. Best-effort: a status failure must not block deleting. */
+  const unmergedArtifactsFor = useCallback(async (workspace: WorkspaceInfo): Promise<number> => {
+    // Resolve the backend the workspace actually lives on: a remote workspace's
+    // artifacts are on its own machine, not whichever backend is active here.
+    const be = multi.getBackend(getWorkspaceRef(workspace.id).backendKey);
+    if (!be?.getProjectArtifactsStatus) return 0;
+    try {
+      const status = await be.getProjectArtifactsStatus(workspace.projectName);
+      return status.unmergedByBranch?.[workspace.name] ?? 0;
+    } catch {
+      return 0;
+    }
+  }, [multi, getWorkspaceRef]);
+  /** Delete is destructive to artifacts now, so the warning has to name both
+   *  costs: the sessions it kills and the artifact commits it drops. */
+  const deleteWarning = (sessionCount: number, unmerged: number): string | undefined => {
+    const parts: string[] = [];
+    if (sessionCount > 0) parts.push(`This will kill ${sessionCount} active session(s)!`);
+    if (unmerged > 0) {
+      parts.push(
+        `Its artifacts branch has ${unmerged} commit${unmerged === 1 ? '' : 's'} not rolled up into main — deleting the workspace deletes them. Roll up first if you want to keep that work.`,
+      );
+    }
+    return parts.length > 0 ? parts.join(' ') : undefined;
+  };
+
+  const handleDeleteWorkspace = useCallback(async (workspace: WorkspaceInfo) => {
     const sessionCount = workspace.sessionCount || 0;
+    const unmerged = await unmergedArtifactsFor(workspace);
     flow.showConfirmTyped({
       title: 'Delete Workspace',
-      message: `Are you sure you want to delete workspace "${workspace.name}"? Its goal, if any, is archived (still viewable and linked in its chain) — not lost.`,
+      message: `Are you sure you want to delete workspace "${workspace.name}"? Its goal, if any, is archived (still viewable and linked in its chain) — not lost. Its artifacts branch IS deleted.`,
       confirmText: workspace.name,
-      warning: sessionCount > 0 ? `This will kill ${sessionCount} active session(s)!` : undefined,
+      warning: deleteWarning(sessionCount, unmerged),
       onConfirm: async () => {
         const ref = getWorkspaceRef(workspace.id);
         await deleteWorkspaceWithPrompt({ ref, workspaceName: workspace.name });
       },
     });
-  }, [deleteWorkspaceWithPrompt, flow, getWorkspaceRef]);
+  }, [deleteWorkspaceWithPrompt, flow, getWorkspaceRef, unmergedArtifactsFor]);
 
-  const handleDeleteWorkspaceSkipScripts = useCallback((workspace: WorkspaceInfo) => {
+  const handleDeleteWorkspaceSkipScripts = useCallback(async (workspace: WorkspaceInfo) => {
     const sessionCount = workspace.sessionCount || 0;
+    const unmerged = await unmergedArtifactsFor(workspace);
+    const artifactWarning = deleteWarning(sessionCount, unmerged);
     flow.showConfirmTyped({
       title: 'Delete Workspace (Skip Scripts)',
-      message: `Delete workspace \"${workspace.name}\" without running cleanup scripts? Its goal, if any, is archived (still viewable and linked in its chain) — not lost.`,
+      message: `Delete workspace "${workspace.name}" without running cleanup scripts? Its goal, if any, is archived (still viewable and linked in its chain) — not lost. Its artifacts branch IS deleted.`,
       confirmText: workspace.name,
-      warning: sessionCount > 0
-        ? `This will kill ${sessionCount} active session(s) and skip cleanup scripts.`
-        : 'This skips cleanup scripts.',
+      // This path deletes exactly as hard as the other one, so it carries the
+      // same artifact warning — plus the fact that cleanup is skipped.
+      warning: [artifactWarning, 'This skips cleanup scripts.'].filter(Boolean).join(' '),
       onConfirm: async () => {
         const ref = getWorkspaceRef(workspace.id);
         await deleteWorkspaceSkipScriptsWithPrompt({ ref, workspaceName: workspace.name });
       },
     });
-  }, [deleteWorkspaceSkipScriptsWithPrompt, flow, getWorkspaceRef]);
+  }, [deleteWorkspaceSkipScriptsWithPrompt, flow, getWorkspaceRef, unmergedArtifactsFor]);
   const handleOpenReview = useCallback((workspaceId: string) => {
     const workspace = filteredWorkspaces.find((item) => item.id === workspaceId);
     if (!workspace) {

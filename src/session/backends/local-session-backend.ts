@@ -74,6 +74,7 @@ import type {
   SessionBackend,
   TerminateSessionOptions,
   ArtifactReadRange,
+  ProjectArtifactsStatus,
 } from '../backend.js';
 import type { BackendEvent } from '../events.js';
 import type { NotificationConfig } from '../../notifications/types.js';
@@ -1997,9 +1998,9 @@ export class LocalSessionBackend implements SessionBackend {
     throw new Error('Unexpected artifact-write response');
   }
 
-  async getProjectArtifactsStatus(projectName: string): Promise<{ repoPath: string; remote: string | null; branches: string[]; pointerCommitted?: boolean }> {
+  async getProjectArtifactsStatus(projectName: string): Promise<ProjectArtifactsStatus> {
     const r = await this.sendTmuxCommand({ type: 'project-artifacts-status', projectName });
-    if (r.type === 'project-artifacts-status') return { repoPath: r.repoPath, remote: r.remote, branches: r.branches, pointerCommitted: r.pointerCommitted };
+    if (r.type === 'project-artifacts-status') return { repoPath: r.repoPath, remote: r.remote, branches: r.branches, pointerCommitted: r.pointerCommitted, unmergedByBranch: r.unmergedByBranch };
     if (r.type === 'error') throw new Error(r.message);
     throw new Error('Unexpected project-artifacts-status response');
   }

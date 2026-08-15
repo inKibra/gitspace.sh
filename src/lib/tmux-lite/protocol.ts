@@ -623,7 +623,16 @@ export type Response =
   | { type: 'artifact-list'; entries: import('../../core/artifacts.js').ArtifactListEntry[] }
   | { type: 'artifact-read'; base64: string; size: number; truncated: boolean }
   | { type: 'artifact-write'; commit: string }
-  | { type: 'project-artifacts-status'; repoPath: string; remote: string | null; branches: string[]; pointerCommitted?: boolean }
+  | {
+      type: 'project-artifacts-status';
+      repoPath: string;
+      remote: string | null;
+      branches: string[];
+      pointerCommitted?: boolean;
+      /** Per branch: commits main does not have. Deleting a workspace drops its
+       *  artifacts branch, so the confirmation needs this to say what is lost. */
+      unmergedByBranch?: Record<string, number>;
+    }
   | { type: 'project-artifacts-sync'; pushed: boolean; fastForwarded: boolean }
   | { type: 'project-artifacts-provision'; slug: string; url: string; created: boolean; blobsUploaded: number; collaboratorsCopied: number }
   | { type: 'serve-status'; status: { active: boolean; relayUrl?: string; relayStatus?: string; clients?: number; machineId?: string; startedAt?: number } }

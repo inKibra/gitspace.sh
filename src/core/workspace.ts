@@ -249,12 +249,20 @@ export async function deleteWorkspaceCore(
     }
   }
 
-  // Artifacts FS: the workspace's artifacts mount died with the directory —
-  // prune the stale worktree registration. The artifacts BRANCH survives for a
-  // later roll-up (merge into main) or explicit abandon. Best-effort.
+  // Artifacts FS: delete means delete. The mount died with the directory, so
+  // prune its stale worktree registration, then drop the artifacts BRANCH too.
+  //
+  // It used to survive for a later roll-up, which sounds safe and isn't: nothing
+  // surfaced those orphaned branches anywhere, so "kept for later" meant kept
+  // forever and findable by nobody. Roll up before deleting if you want the work
+  // — the delete confirmation warns when the branch holds commits main lacks.
+  // Best-effort: an artifacts failure must never strand a half-removed workspace.
+  // Imported lazily on purpose (as above): artifacts.ts pulls the git/LFS stack,
+  // which must stay out of workspace.ts's static load graph.
   try {
-    const { pruneArtifactMounts } = await import('./artifacts.js');
+    const { pruneArtifactMounts, abandonArtifacts } = await import('./artifacts.js');
     await pruneArtifactMounts(getProjectDir(projectName), workspacePath);
+    await abandonArtifacts(getProjectDir(projectName), workspaceName);
   } catch {
     /* additive cleanup only */
   }

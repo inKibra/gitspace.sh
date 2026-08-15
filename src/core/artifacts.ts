@@ -1565,6 +1565,23 @@ export async function repairArtifacts(projectDir: string, mountDir: string): Pro
   return { repaired: squashedCount, commit };
 }
 
+/**
+ * Commits on `branch` that `main` does not have — i.e. artifact work that would
+ * be lost by dropping the branch.
+ *
+ * Deleting a workspace now deletes its artifacts branch, so this is what the
+ * confirmation needs in order to warn honestly rather than in the abstract.
+ * A missing branch is 0, not an error: nothing to lose is the common case.
+ */
+export async function unmergedArtifactCommits(projectDir: string, branch: string): Promise<number> {
+  const { repoDir } = artifactPaths(projectDir);
+  if (branch === MAIN_BRANCH) return 0;
+  if (!(await branchExists(repoDir, branch))) return 0;
+  const out = await git(repoDir, `rev-list --count ${escapeShellArg(branch)} --not ${MAIN_BRANCH}`).catch(() => '0');
+  const n = Number(out.trim());
+  return Number.isFinite(n) ? n : 0;
+}
+
 /** Drop a workspace's artifacts branch (and its mount) without merging. */
 export async function abandonArtifacts(projectDir: string, branch: string): Promise<void> {
   const { repoDir } = artifactPaths(projectDir);

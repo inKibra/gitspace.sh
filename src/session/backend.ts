@@ -128,6 +128,18 @@ export interface TerminateSessionOptions {
   graceMs?: number;
 }
 
+/** Artifacts repo status for a project. */
+export interface ProjectArtifactsStatus {
+  repoPath: string;
+  remote: string | null;
+  branches: string[];
+  pointerCommitted?: boolean;
+  /** Per branch: commits `main` does not have. Deleting a workspace drops its
+   *  artifacts branch, so the confirmation reads this to warn with a number
+   *  instead of in the abstract. Absent from older machines. */
+  unmergedByBranch?: Record<string, number>;
+}
+
 /**
  * Canonical backend contract used by shared session engine.
  */
@@ -358,7 +370,7 @@ export interface SessionBackend {
   /** Write+commit an artifact on the project's MAIN branch (base mount). */
   writeProjectArtifact?(projectName: string, path: string, contentBase64: string, message?: string): Promise<string>;
   /** Artifacts repo status: local bare-repo path, remote url, branches. */
-  getProjectArtifactsStatus?(projectName: string): Promise<{ repoPath: string; remote: string | null; branches: string[]; pointerCommitted?: boolean }>;
+  getProjectArtifactsStatus?(projectName: string): Promise<ProjectArtifactsStatus>;
   /** Connect a BYO remote (writes the committed pointer) and sync. */
   setProjectArtifactsRemote?(projectName: string, url: string): Promise<{ pushed: boolean; fastForwarded: boolean }>;
   /** Fetch + ff main + push --all against the configured remote. */

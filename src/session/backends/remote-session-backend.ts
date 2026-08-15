@@ -58,6 +58,7 @@ import type {
   SessionBackend,
   TerminateSessionOptions,
   ArtifactReadRange,
+  ProjectArtifactsStatus,
 } from '../backend.js';
 import type { AgentControlInfo, AgentDefinitionInfo, AgentGoalModeInfo, AgentHistoryEntry, AgentSessionUsageReport, AgentSettingItem, AgentSettingSchemaItem, AgentShakeMode, AgentShakeResult, AgentToolInfo, AgentTreeNode } from '../../agents/agent-runtime-types.js';
 import type { BackendEvent } from '../events.js';
@@ -3628,10 +3629,10 @@ export class RemoteSessionBackend<TSocket, THandshakeState, TServerHello, TServe
     throw new Error('Unexpected artifact-write response');
   }
 
-  async getProjectArtifactsStatus(projectName: string): Promise<{ repoPath: string; remote: string | null; branches: string[]; pointerCommitted?: boolean }> {
+  async getProjectArtifactsStatus(projectName: string): Promise<ProjectArtifactsStatus> {
     await this.waitForInitialSnapshot();
     const r = await this.sendRpcCommand({ type: 'project_artifacts_status', requestId: crypto.randomUUID(), projectName });
-    if (r.type === 'project-artifacts-status') return { repoPath: r.repoPath, remote: r.remote, branches: r.branches, pointerCommitted: r.pointerCommitted };
+    if (r.type === 'project-artifacts-status') return { repoPath: r.repoPath, remote: r.remote, branches: r.branches, pointerCommitted: r.pointerCommitted, unmergedByBranch: r.unmergedByBranch };
     if (r.type === 'error') throw new Error(r.message);
     throw new Error('Unexpected project-artifacts-status response');
   }

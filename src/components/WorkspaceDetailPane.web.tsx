@@ -25,11 +25,19 @@ const DEFAULT_SIDEBAR_WIDTH = 240;
 const MIN_SIDEBAR_WIDTH = 180;
 const MAX_SIDEBAR_WIDTH = 420;
 
+/** Stored sidebar width, clamped. An unset key reads back as `null`, and
+ *  `Number(null)` is a finite `0` — so the absent case must be rejected before
+ *  clamping. It wasn't, so 0 clamped up to MIN and every fresh client started at
+ *  180px instead of 240px, which also made `DEFAULT_SIDEBAR_WIDTH` unreachable.
+ *  Matches `readStoredRailWidth` in RightRail.web.tsx, which got this right. */
 function readStoredSidebarWidth(): number {
   if (typeof window === 'undefined') return DEFAULT_SIDEBAR_WIDTH;
   try {
-    const value = Number(window.localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY));
-    return Number.isFinite(value) ? Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, value)) : DEFAULT_SIDEBAR_WIDTH;
+    const raw = window.localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY);
+    if (raw === null) return DEFAULT_SIDEBAR_WIDTH;
+    const value = Number(raw);
+    if (!Number.isFinite(value) || value <= 0) return DEFAULT_SIDEBAR_WIDTH;
+    return Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, value));
   } catch {
     return DEFAULT_SIDEBAR_WIDTH;
   }

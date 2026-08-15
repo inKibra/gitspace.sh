@@ -1,12 +1,17 @@
 /**
  * What workspace removal leaves behind.
  *
- * Removal must take the directory AND the artifacts registration that claimed
- * it, while the artifacts BRANCH survives for a later roll-up (deliberate —
- * `core/workspace.ts` says so). Getting this half-right is what produced ghost
- * rows in the board's code lane.
+ * `pruneArtifactMounts` takes the registration that claimed the removed mount
+ * and nothing else — in particular it does NOT touch branches. Dropping the
+ * workspace's artifacts branch is `abandonArtifacts`, which `removeWorkspace`
+ * calls separately (see artifacts-abandon.test.ts). Keeping the two apart is
+ * deliberate: prune also runs on paths that are merely stale, where deleting a
+ * branch would be data loss.
  *
- * It must also not free a NEIGHBOUR's stale registration name. A blanket
+ * Getting registration cleanup half-right is what produced ghost rows in the
+ * board's code lane.
+ *
+ * Removal must also not free a NEIGHBOUR's stale registration name. A blanket
  * `git worktree prune` does exactly that, and `worktree add` then hands the
  * recycled name to the next caller — the step that turns a dangling mount
  * pointer into a live pointer into someone else's worktree.
@@ -49,7 +54,7 @@ afterEach(() => {
 });
 
 describe('pruneArtifactMounts after a workspace directory is removed', () => {
-  it('drops the registration that claimed the removed mount, and keeps the branch', async () => {
+  it('drops the registration that claimed the removed mount, and leaves branches alone', async () => {
     const projectDir = join(root, 'proj');
     const wsDir = await makeMountedWorkspace(projectDir, 'feat-a');
     const repoDir = join(projectDir, REPO);
@@ -64,7 +69,8 @@ describe('pruneArtifactMounts after a workspace directory is removed', () => {
     // Nothing left claiming it.
     expect(existsSync(join(repoDir, 'worktrees', id))).toBe(false);
     expect(inspectArtifactsMount(repoDir, mount).orphanedRegistrations).toEqual([]);
-    // The branch outlives the workspace on purpose — it may still be rolled up.
+    // Prune is registration-only. Dropping the branch is abandonArtifacts' job,
+    // called by removeWorkspace — see artifacts-abandon.test.ts.
     expect(g(repoDir, ['branch', '--list', 'feat-a'])).toContain('feat-a');
   });
 

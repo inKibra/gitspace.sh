@@ -4330,7 +4330,16 @@ export async function dispatchCommand(cmd: Command): Promise<Response | null> {
                   pointerCommitted = dirty === '' && tracked !== '';
                 } catch { /* base missing / not a git repo */ }
               }
-              res = { type: 'project-artifacts-status', repoPath: repoDir, remote, branches, pointerCommitted };
+              // Per-branch unmerged counts: the delete confirmation reads these to
+              // say what dropping a workspace's artifacts branch would actually
+              // cost. One rev-list per branch, on a status call that is not hot.
+              const unmergedByBranch: Record<string, number> = {};
+              const { unmergedArtifactCommits } = await import('../../core/artifacts.js');
+              for (const b of branches) {
+                if (b === 'main') continue;
+                unmergedByBranch[b] = await unmergedArtifactCommits(projectDir, b).catch(() => 0);
+              }
+              res = { type: 'project-artifacts-status', repoPath: repoDir, remote, branches, pointerCommitted, unmergedByBranch };
             } catch (e) {
               res = { type: 'error', message: `Failed to read artifacts status: ${e instanceof Error ? e.message : String(e)}` };
             }
