@@ -1,3 +1,5 @@
+import type { ReviewGuide } from '../core/review-guide.js';
+
 /**
  * Review system types
  *
@@ -248,7 +250,13 @@ export type ReviewResult =
        *  canonical goal-scoped reader so the UI never has to reconstruct the
        *  `goals/<goalId>/` path. Null when no guide has been submitted. */
       op: 'review_guide';
-      guide: import('../core/review-guide.js').ReviewGuide | null;
+      guide: ReviewGuide | null;
+      /** Workspace HEAD at read time. The guide is a cache keyed by `headSha`
+       *  (docs/REVIEW-GUIDE.md), so a reader needs both to know what it holds. */
+      headSha?: string;
+      /** `guide.headSha` no longer matches HEAD: the narrative describes an
+       *  earlier diff. Serving that silently is how a guide starts lying. */
+      stale?: boolean;
     }
   | {
       op: 'review_guide_state';

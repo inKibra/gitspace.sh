@@ -24,6 +24,7 @@ import {
   getWorkspaceFileDiff,
   getWorkspaceFileVersions,
 } from './git.js';
+import { readHeadSha } from './review-analysis.js';
 import { importGitHubReview, pushGitHubReview } from './github-review.js';
 import { readProjectConfig } from './config.js';
 import { scanWorkspaces } from '../lib/remote-session/workspace-scanner.js';
@@ -193,7 +194,23 @@ export async function executeLocalReviewOperation(
       // which never resolves for a workspace goal, so the Change Guide silently
       // fell back to the heuristic diff-walk and appeared "not visible".
       const { readReviewGuide } = await import('./review-guide.js');
-      return { op: 'review_guide', guide: readReviewGuide(operation.projectName, operation.workspaceName) };
+      const guide = readReviewGuide(operation.projectName, operation.workspaceName);
+      // The guide is a cache keyed by headSha (docs/REVIEW-GUIDE.md): resolve
+      // HEAD here so the reader can tell a current narrative from one written
+      // against an earlier diff. A failed rev-parse means "cannot tell", which
+      // must read as not-stale — flagging every guide on a git hiccup is worse
+      // than missing one.
+      let headSha: string | undefined;
+      try {
+        const workspace = await resolveWorkspaceByName(operation.projectName, operation.workspaceName, scan);
+        headSha = readHeadSha(workspace.path);
+      } catch { headSha = undefined; }
+      return {
+        op: 'review_guide',
+        guide,
+        ...(headSha ? { headSha } : {}),
+        ...(guide && headSha ? { stale: guide.headSha !== headSha } : {}),
+      };
     }
 
     case 'get_review_guide_state': {

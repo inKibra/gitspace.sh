@@ -21,46 +21,12 @@ import {
  * guide source (e.g. a persisted walkthrough artifact) without touching the rendering.
  */
 
-/* ── Walkthrough step model + derivation ───────────────────────────────────── */
-
-export interface WalkStepFile {
-  path: string;
-  prevPath?: string;
-  changeType: ReviewChangedFile['changeType'];
-}
-
-export interface WalkStepComment {
-  who: string;
-  tone: 'pass' | 'fail' | 'info' | 'warn';
-  text: string;
-}
-
-export interface WalkStep {
-  n: number;
-  /** Short uppercase phase label (e.g. 'core', 'docs', 'tests') */
-  kind: string;
-  title: string;
-  /** Narrative: what this phase of the change is */
-  what: string;
-  /** Narrative: why it matters for the reviewer */
-  why: string;
-  files: WalkStepFile[];
-  /** Optional reviewer comment thread closing the section (mock: ReviewStage .thread). */
-  comment?: WalkStepComment;
-  /** Guide-mode: stable section id (read-state persists under it). */
-  sectionId?: string;
-  /** Guide-mode: markdown explanation (rendered over `why` plain text). */
-  explanationMd?: string;
-  /** Guide-mode: narrator questions for the reviewer. */
-  asks?: string[];
-  /** Guide-mode: attention callouts. */
-  callouts?: Array<{ tone: 'risk' | 'mechanical' | 'decision'; text: string }>;
-  /** Guide-mode: full member file list (exhibits are the subset with diffs shown). */
-  allFiles?: string[];
-}
-
-const ROOT_GROUP = '(root)';
-
+/* ── Walkthrough step model + derivation ───────────────────────────────────────
+   Lives in change-guide-steps.ts: this module imports the web-only diff
+   renderer, so anything beside it cannot be reached from a Node test. */
+export type { WalkStepFile, WalkStepComment, WalkStep } from './change-guide-steps.js';
+import { buildWalkSteps, walkStepsFromGuide, type WalkStep, type WalkStepComment, type WalkStepFile } from './change-guide-steps.js';
+export { buildWalkSteps, walkStepsFromGuide };
 /* ── View state that outlives an unmount ───────────────────────────────────────
    Losing your place in the guide has two distinct causes, measured in the
    running app rather than assumed:
@@ -102,63 +68,6 @@ const THREAD_TONE: Record<WalkStepComment['tone'], string> = {
   warn: 'text-[var(--gs-warning)]',
 };
 
-function topLevelDir(path: string): string {
-  const idx = path.indexOf('/');
-  return idx === -1 ? ROOT_GROUP : path.slice(0, idx);
-}
-
-function kindForGroup(dir: string): string {
-  const d = dir.toLowerCase();
-  if (dir === ROOT_GROUP) return 'config';
-  if (d === 'docs' || d === 'doc') return 'docs';
-  if (d === 'test' || d === 'tests' || d === '__tests__' || d === 'e2e') return 'tests';
-  if (d === 'web' || d === 'app' || d === 'ui') return 'surface';
-  if (d === 'src' || d === 'lib' || d === 'core') return 'core';
-  if (d === 'scripts' || d === 'tools' || d === 'bin') return 'tooling';
-  return 'change';
-}
-
-const CHANGE_WORD: Record<ReviewChangedFile['changeType'], string> = {
-  new: 'added',
-  deleted: 'deleted',
-  renamed: 'renamed',
-  copied: 'copied',
-  modified: 'modified',
-};
-
-/**
- * Heuristic guide: group changed files into phases by top-level directory.
- * Replaceable by an agent-authored WalkStep[] source later — keep the shape stable.
- */
-export function buildWalkSteps(files: ReviewChangedFile[]): WalkStep[] {
-  const groups = new Map<string, WalkStepFile[]>();
-  for (const f of files) {
-    const dir = topLevelDir(f.filePath);
-    const list = groups.get(dir) ?? [];
-    list.push({ path: f.filePath, prevPath: f.prevFilePath, changeType: f.changeType });
-    groups.set(dir, list);
-  }
-  const dirs = [...groups.keys()].sort((a, b) => {
-    if (a === ROOT_GROUP) return 1;
-    if (b === ROOT_GROUP) return -1;
-    return a.localeCompare(b);
-  });
-  return dirs.map((dir, i) => {
-    const stepFiles = [...(groups.get(dir) ?? [])].sort((a, b) => a.path.localeCompare(b.path));
-    const counts = new Map<string, number>();
-    for (const f of stepFiles) counts.set(CHANGE_WORD[f.changeType], (counts.get(CHANGE_WORD[f.changeType]) ?? 0) + 1);
-    const breakdown = [...counts.entries()].map(([word, n]) => `${n} ${word}`).join(', ');
-    const surface = dir === ROOT_GROUP ? 'the repository root' : `${dir}/`;
-    return {
-      n: i + 1,
-      kind: kindForGroup(dir),
-      title: dir === ROOT_GROUP ? 'Repository root' : `${dir}/`,
-      what: `${stepFiles.length} file${stepFiles.length === 1 ? '' : 's'} changed under ${surface} — ${breakdown}.`,
-      why: `These files share the ${surface} surface and land together as one phase of the change; review them as a unit before moving on.`,
-      files: stepFiles,
-    };
-  });
-}
 
 /* ── Line-anchored review threads ──────────────────────────────────────────────
    The thread chrome, the composer and the hover '+' affordance all live in the
@@ -267,13 +176,27 @@ function FileDiffBlock({ backend, projectName, workspaceName, file, onOpenFile, 
         title={onOpenFile ? `Open ${file.path}` : file.path}
         className="flex w-full items-center gap-2 border-b border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-2.5 py-[5px] text-left font-[family-name:var(--gs-font-mono)] text-[10.5px] text-[var(--gs-text-muted)] hover:text-[var(--gs-text)]"
       >
+        {/* The narrator's attention mark. Without it every exhibit looks equally
+            urgent, which is the diff browser the guide is meant to replace. */}
+        {file.slow && (
+          <span title="Slow read — the narrator flagged this one as needing judgment" className="flex-shrink-0 border border-[rgba(255,204,0,.35)] px-1 text-[9.5px] uppercase tracking-[0.08em] text-[var(--gs-warning)]">slow</span>
+        )}
         <span className="min-w-0 flex-1 truncate">
           {file.path}
           {file.changeType !== 'modified' && (
-            <span className="ml-2 lowercase text-[var(--gs-text-dim)]">({file.changeType})</span>
+            <span className="ml-2 lowercase text-[var(--gs-text-dim)]">
+              ({file.changeType}{file.changeType === 'renamed' && file.prevPath ? ` from ${file.prevPath}` : ''})
+            </span>
           )}
         </span>
       </button>
+      {/* Why the narrator put this file in front of you — dropped entirely until
+          now, which left a curated exhibit indistinguishable from a bare path. */}
+      {file.note && (
+        <div className="border-b border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-2.5 py-[5px] text-[11px] leading-[1.45] text-[var(--gs-text-muted)]">
+          {file.note}
+        </div>
+      )}
       <div ref={bodyRef} className="overflow-x-auto">
         {visible && !nearView && !pinned && state === 'ready' ? (
           <div style={{ height: heightRef.current ?? 120 }} aria-hidden="true" />
@@ -334,12 +257,22 @@ export function ChangeGuidePane({ backend, projectName, workspaceName, workspace
   const [done, setDone] = useState<Set<number>>(new Set());
   const [reloadTick, setReloadTick] = useState(0);
   const [guideMode, setGuideMode] = useState(false);
+  /** The narrative was written against an earlier HEAD. The guide is a cache
+   *  (docs/REVIEW-GUIDE.md); showing a stale one as current is how it lies. */
+  const [guideStale, setGuideStale] = useState(false);
+  /** Workspace HEAD as of the guide read. Stamped into the approval record so an
+   *  approval names the commit it approved. */
+  const [headSha, setHeadSha] = useState('');
   const [specEvolution, setSpecEvolution] = useState<string | null>(null);
   /** ONE get_threads per workspace feeds both the Approve gate and the
    *  line-anchored inline threads in every file diff. Shared with the file-tab
    *  surface so a comment left in either place is the same thread. */
   const { threads, actions: threadActions } = useReviewThreads(backend, projectName, workspaceName);
-  const [fileStats, setFileStats] = useState<Map<string, { additions?: number; deletions?: number; changeType: string }>>(new Map());
+  /* Per-file facts from git's name-status, keyed by path. This is the AUTHORITY
+     for changeType and rename source: a guide exhibit names a file, not how it
+     changed, and the mapping used to stamp every exhibit 'modified' — so an
+     added or renamed file was described wrongly in its own header. */
+  const [fileStats, setFileStats] = useState<Map<string, { additions?: number; deletions?: number; changeType: ReviewChangedFile['changeType']; prevPath?: string }>>(new Map());
   const scrollRef = useRef<HTMLDivElement>(null);
   const secRefs = useRef<Array<HTMLElement | null>>([]);
 
@@ -388,23 +321,15 @@ export function ChangeGuidePane({ backend, projectName, workspaceName, workspace
           const resp = await backend.sendReviewRequest({ op: 'get_review_guide', projectName, workspaceName });
           const guide = resp.op === 'review_guide' ? resp.guide : null;
           if (!alive) return;
+          // Before the no-guide bail: HEAD comes back either way, and the
+          // heuristic walk still records approvals against it.
+          if (resp.op === 'review_guide' && resp.headSha) setHeadSha(resp.headSha);
           if (!guide) throw new Error('no guide');
           secRefs.current = [];
           setGuideMode(true);
+          setGuideStale(resp.op === 'review_guide' && resp.stale === true);
           setSpecEvolution(guide.specEvolution ?? null);
-          setSteps(guide.sections.map((section, i) => ({
-            n: i + 1,
-            kind: section.kind,
-            title: section.title,
-            what: '',
-            why: section.explanation,
-            explanationMd: section.explanation,
-            files: section.exhibits.map((e) => ({ path: e.file, changeType: 'modified' as const })),
-            sectionId: section.clusterId,
-            asks: section.asks,
-            callouts: section.callouts,
-            allFiles: section.files,
-          })));
+          setSteps(walkStepsFromGuide(guide));
           setLoadState('ready');
           // persisted read-state keyed by section id
           const st = await backend.sendReviewRequest!({ op: 'get_review_guide_state', projectName, workspaceName });
@@ -418,11 +343,11 @@ export function ChangeGuidePane({ backend, projectName, workspaceName, workspace
       await loadHeuristic().catch(() => { if (alive) setLoadState('error'); });
     })();
 
-    // Per-file +/- stats for the section manifests.
+    // Per-file facts for the manifests AND for each exhibit's real change type.
     void backend.sendReviewRequest({ op: 'get_changed_files', projectName, workspaceName })
       .then((r) => {
         if (!alive || r.op !== 'changed_files') return;
-        setFileStats(new Map(r.files.map((f) => [f.filePath, { additions: f.additions, deletions: f.deletions, changeType: f.changeType }])));
+        setFileStats(new Map(r.files.map((f) => [f.filePath, { additions: f.additions, deletions: f.deletions, changeType: f.changeType, prevPath: f.prevFilePath }])));
       })
       .catch(() => undefined);
 
@@ -785,14 +710,24 @@ export function ChangeGuidePane({ backend, projectName, workspaceName, workspace
           >
             ☰ Review rubric
           </button>
-          {!guideMode && onGenerateGuide && (
+          {/* A stale guide could not be regenerated from here: the button hid the
+              moment a guide existed, so a narrative written against an older HEAD
+              was a dead end. The guide is a cache keyed by headSha — regenerating
+              it is the documented response to HEAD moving. */}
+          {(!guideMode || guideStale) && onGenerateGuide && (
             <button
               type="button"
               onClick={onGenerateGuide}
-              title="Spawn a narrator session that writes review/guide.json for this diff"
-              className="border border-[var(--gs-border)] px-2 py-[3px] text-[11px] text-[var(--gs-text-muted)] transition-colors duration-[120ms] hover:bg-[var(--gs-bg-active)] hover:text-[var(--gs-text)] active:scale-[.96]"
+              title={guideStale
+                ? 'This guide was written against an earlier commit — spawn a narrator to re-narrate the changed clusters'
+                : 'Spawn a narrator session that writes review/guide.json for this diff'}
+              className={`border px-2 py-[3px] text-[11px] transition-colors duration-[120ms] active:scale-[.96] ${
+                guideStale
+                  ? 'border-[#4a3a1f] text-[var(--gs-warning)] hover:bg-[rgba(255,204,0,.08)]'
+                  : 'border-[var(--gs-border)] text-[var(--gs-text-muted)] hover:bg-[var(--gs-bg-active)] hover:text-[var(--gs-text)]'
+              }`}
             >
-              ✦ Generate guide
+              {guideStale ? '✦ Regenerate guide' : '✦ Generate guide'}
             </button>
           )}
           {onRequestChanges && (threadsOpen > 0 || humanGatePending > 0) && (
@@ -817,9 +752,13 @@ export function ChangeGuidePane({ backend, projectName, workspaceName, workspace
             onClick={() => {
               if (!allDone || humanGatePending > 0 || threadsOpen > 0) return;
               // Record the approval durably, then let the shell advance the stage.
+              // headSha was hardcoded '' here, so every approval recorded that it
+              // approved nothing in particular — docs/REVIEW-GUIDE.md requires
+              // {by, at, headSha} precisely so an approval can be checked against
+              // what was actually reviewed.
               void backend?.sendReviewRequest?.({
                 op: 'set_review_guide_state', projectName, workspaceName,
-                state: { readSections: steps.filter((_, i) => done.has(i)).map((st) => st.sectionId ?? String(st.n)), approval: { by: 'human', at: new Date().toISOString(), headSha: '' } },
+                state: { readSections: steps.filter((_, i) => done.has(i)).map((st) => st.sectionId ?? String(st.n)), approval: { by: 'human', at: new Date().toISOString(), headSha } },
               }).catch(() => undefined);
               onApprove?.();
             }}
@@ -837,6 +776,13 @@ export function ChangeGuidePane({ backend, projectName, workspaceName, workspace
 
       {/* RIGHT — scrolling walkthrough sections */}
       <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto px-[18px] py-4">
+        {guideStale && (
+          <div className="mb-3 border border-[#4a3a1f] bg-[rgba(255,204,0,.06)] px-2.5 py-2 text-[11.5px] leading-[1.5] text-[var(--gs-warning)]">
+            This guide was written against an earlier commit. Sections still describe
+            the diff as it was then, and the exhibits below are the current diff — so
+            the two can disagree. Regenerate to re-narrate the clusters that moved.
+          </div>
+        )}
         {steps.map((s, i) => {
           const isDone = done.has(i);
           return (
@@ -913,40 +859,45 @@ export function ChangeGuidePane({ backend, projectName, workspaceName, workspace
                     </div>
                   </div>
                 )}
-                {s.files.map((f) => (
-                  <FileDiffBlock
-                    key={f.path}
-                    backend={backend}
-                    projectName={projectName}
-                    workspaceName={workspaceName}
-                    file={f}
-                    onOpenFile={onOpenFile}
-                    threads={threads}
-                    actions={threadActions}
-                    anchorKey={`f${i}:${f.path}`}
-                    gateOpened={openedGatesRef.current.has(f.path)}
-                    onGateOpen={noteGateOpen}
-                    contextOpened={expandedPathsRef.current.has(f.path)}
-                    onContextOpen={noteContextOpen}
-                  />
-                ))}
+                {s.files.length === 0 && guideMode && (
+                  <div className="border border-dashed border-[var(--gs-border)] px-2.5 py-2 text-[11px] text-[var(--gs-text-dim)]">
+                    No exhibits in this step — the narrator described it without singling out a file to read.
+                  </div>
+                )}
+                {s.files.map((f) => {
+                  // git's name-status wins over the guide's provisional 'modified':
+                  // it knows an add from a rename, and it carries the rename source
+                  // that makes a renamed exhibit diff as a rename instead of a
+                  // whole new file.
+                  const git = fileStats.get(f.path);
+                  const file = git ? { ...f, changeType: git.changeType, prevPath: git.prevPath ?? f.prevPath } : f;
+                  return (
+                    <FileDiffBlock
+                      key={f.path}
+                      backend={backend}
+                      projectName={projectName}
+                      workspaceName={workspaceName}
+                      file={file}
+                      onOpenFile={onOpenFile}
+                      threads={threads}
+                      actions={threadActions}
+                      anchorKey={`f${i}:${f.path}`}
+                      gateOpened={openedGatesRef.current.has(f.path)}
+                      onGateOpen={noteGateOpen}
+                      contextOpened={expandedPathsRef.current.has(f.path)}
+                      onContextOpen={noteContextOpen}
+                    />
+                  );
+                })}
                 {s.comment && (
                   <div className="border-l-2 border-[var(--gs-border-active)] bg-[#050505] px-[11px] py-2 text-[11.5px]">
                     <div className={`text-[10.5px] ${THREAD_TONE[s.comment.tone]}`}>◆ {s.comment.who}</div>
                     <div className="mt-[3px] text-[var(--gs-text-muted)]">{s.comment.text}</div>
-                    {s.comment.tone === 'fail' && (
-                      <div className="mt-2.5 flex w-fit gap-px border border-[var(--gs-border)] bg-[var(--gs-border)]">
-                        <button type="button" className="bg-[var(--gs-accent)] px-3 py-1.5 text-[11px] text-[var(--gs-text-on-accent)] transition-colors duration-[100ms] hover:bg-[var(--gs-accent-hover)]">
-                          ✦ Send to agent → fix
-                        </button>
-                        <button type="button" className="bg-[#000] px-3 py-1.5 text-[11px] text-[var(--gs-text-muted)] transition-colors duration-[100ms] hover:bg-[var(--gs-bg-elevated)] hover:text-[var(--gs-text)]">
-                          Comment
-                        </button>
-                        <button type="button" className="bg-[#000] px-3 py-1.5 text-[11px] text-[var(--gs-text-muted)] transition-colors duration-[100ms] hover:bg-[var(--gs-bg-elevated)] hover:text-[var(--gs-danger)]">
-                          Dismiss
-                        </button>
-                      </div>
-                    )}
+                    {/* The mock had a Send-to-agent / Comment / Dismiss trio here.
+                        None were ever wired, and no generated guide supplies
+                        `comment` at all — three buttons that did nothing is worse
+                        than none. Real routing lives in Request changes, which
+                        composes the open threads into one prompt. */}
                   </div>
                 )}
               </div>
