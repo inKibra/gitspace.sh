@@ -139,85 +139,6 @@ function WorkspaceCombo({ value, options, onChange }: {
   );
 }
 
-/**
- * GOAL FILTER: a client-only sibling of the source WorkspaceCombo. It does NOT
- * change the artifact source — it focuses one already-loaded rolled-up goal
- * within `main`. Same look as WorkspaceCombo (chain-grouped dropdown) plus an
- * "All goals" sentinel and a dimmed goal-id secondary on each row.
- */
-/** The goal SECTION HEADER doubles as the goal picker: the title you're reading
- *  IS the control. One goal is shown at a time; clicking the header (when >1
- *  goal is rolled up) drops a chain-grouped menu to switch which one. No "all
- *  goals" — the view is always one goal + the Project section. */
-function GoalHeaderPicker({ goalId, title, rating, options, onChange }: {
-  goalId: string;
-  title: string;
-  rating?: number;
-  options: Array<{ value: string; label: string; chain: string }>;
-  onChange: (value: string) => void;
-}): ReactElement {
-  const [open, setOpen] = useState(false);
-  const [q, setQ] = useState('');
-  const switchable = options.length > 1;
-  const ql = q.trim().toLowerCase();
-  const filtered = options.filter((o) => `${o.chain} ${o.label} ${o.value}`.toLowerCase().includes(ql));
-  const chains = [...new Set(filtered.map((o) => o.chain))];
-  return (
-    <div className="relative border-b border-[var(--gs-border-muted)]">
-      <button
-        type="button"
-        disabled={!switchable}
-        onClick={() => { setOpen((o) => !o); setQ(''); }}
-        title={switchable ? `goals/${goalId}/ — click to switch goal` : `goals/${goalId}/`}
-        className={`flex w-full items-baseline gap-1.5 px-3 pb-[5px] pt-[11px] text-left ${switchable ? 'hover:bg-[var(--gs-bg-hover)]' : ''}`}
-      >
-        <span className="min-w-0 truncate text-[11.5px] font-medium text-[var(--gs-text)]">{title}</span>
-        {rating !== undefined && (
-          <span title={`rated ${rating}/5 at roll-up`} className="flex-none text-[10px] tracking-[.08em] text-[var(--gs-warning)]">
-            {'★'.repeat(Math.max(1, Math.min(5, Math.round(rating))))}
-          </span>
-        )}
-        <span className="ml-auto flex min-w-0 items-baseline gap-1">
-          <span className="min-w-0 flex-shrink truncate font-[family-name:var(--gs-font)] text-[9.5px] text-[var(--gs-text-ghost)]">{goalId}</span>
-          {switchable && <span className="flex-none text-[10px] text-[var(--gs-text-dim)]">▾</span>}
-        </span>
-      </button>
-      {open && switchable && (
-        <div className="absolute inset-x-2 top-[34px] z-30 max-h-[280px] overflow-auto border border-[var(--gs-border-active)] bg-[var(--gs-bg-overlay)] shadow-[0_8px_24px_rgba(0,0,0,.6)]">
-          {/* Type-to-search over the rolled-up goals. Autofocus anchors the
-              picker's focus here — its blur (deferred so an option mousedown
-              lands first) is what closes the menu. */}
-          <input
-            autoFocus
-            value={q}
-            placeholder="search goals…"
-            onChange={(e) => setQ(e.target.value)}
-            onBlur={() => setTimeout(() => setOpen(false), 130)}
-            onKeyDown={(e) => { if (e.key === 'Escape') setOpen(false); }}
-            className="sticky top-0 w-full border-b border-[var(--gs-border)] bg-[var(--gs-bg-elevated)] px-[9px] py-1.5 font-[family-name:var(--gs-font)] text-[11px] text-[var(--gs-text)] outline-none placeholder:text-[var(--gs-text-ghost)]"
-          />
-          {chains.map((chain) => (
-            <div key={chain}>
-              <div className="px-[9px] pb-[3px] pt-[7px] text-[10px] uppercase tracking-[.1em] text-[var(--gs-text-dim)]">{chain}</div>
-              {filtered.filter((o) => o.chain === chain).map((o) => (
-                <button
-                  key={o.value}
-                  type="button"
-                  onMouseDown={() => { onChange(o.value); setOpen(false); }}
-                  className={`flex w-full items-baseline gap-2 px-[9px] py-1.5 text-left font-[family-name:var(--gs-font)] text-[11px] ${o.value === goalId ? 'bg-[var(--gs-bg-active)] text-[var(--gs-text)]' : 'text-[var(--gs-text-muted)] hover:bg-[var(--gs-bg-hover)]'}`}
-                >
-                  <span className="min-w-0 flex-1 truncate">{o.label}</span>
-                  <span className="flex-none font-[family-name:var(--gs-font)] text-[9.5px] text-[var(--gs-text-ghost)]">{o.value}</span>
-                </button>
-              ))}
-            </div>
-          ))}
-          {filtered.length === 0 && <div className="px-[9px] py-2 text-[11px] text-[var(--gs-text-dim)]">no matches</div>}
-        </div>
-      )}
-    </div>
-  );
-}
 
 /** CONFIG → Artifacts repo: wizard — sharing is OPTIONAL; local always works. */
 function ArtifactsRepoTab({ projectName, backend }: { projectName: string; backend: SessionBackend | null }): ReactElement {
@@ -1252,43 +1173,27 @@ export function ProjectHomePage({
             <button type="button" onClick={() => setRailView('fav')} className={`flex-1 py-[7px] text-[11px] ${railView === 'fav' ? 'bg-[var(--gs-bg-elevated)] text-[var(--gs-text)] shadow-[inset_0_-2px_0_var(--gs-accent)]' : 'text-[var(--gs-text-muted)]'}`}>★ Favorites <span className="text-[var(--gs-text-ghost)]">{favs.size > 0 ? favs.size : ''}</span></button>
           </div>
           <div className="min-h-0 flex-1 overflow-y-auto py-1.5">
-          {(() => {
-            const picker = goalPickerActive
-              ? {
-                  selectedGoalId: selectedGoal,
-                  onSelectGoal: setSelectedGoal,
-                  titles: goalMeta.titles,
-                  ratings: goalMeta.ratings,
-                  options: goalPickerOptions,
-                  renderHeader: ({ goalId, title, rating }: { goalId: string; title: string; rating: number | undefined }) => (
-                    <GoalHeaderPicker
-                      goalId={goalId}
-                      title={title}
-                      rating={rating}
-                      options={goalPickerOptions}
-                      onChange={setSelectedGoal}
-                    />
-                  ),
-                }
-              : undefined;
-            return (
-              <ProjectArtifactsRail
-                entries={artifacts}
-                error={artifactsError}
-                view={railView}
-                favorites={favs}
-                onOpen={(e, kind) => openTab(
-                  kind === 'dashboard'
-                    ? `dash:${e.path}`
-                    : kind === 'report' && e.path.endsWith('.report.json') ? `report:${e.path}` : `art:${e.path}`,
-                )}
-                onShare={(path) => { void shareArtifact(path); }}
-                onToggleFavorite={toggleFav}
-                picker={picker}
-                emptyHint="Roll up a workspace to promote artifacts to main."
-              />
-            );
-          })()}
+          <ProjectArtifactsRail
+            entries={artifacts}
+            error={artifactsError}
+            view={railView}
+            favorites={favs}
+            onOpen={(e, kind) => openTab(
+              kind === 'dashboard'
+                ? `dash:${e.path}`
+                : kind === 'report' && e.path.endsWith('.report.json') ? `report:${e.path}` : `art:${e.path}`,
+            )}
+            onShare={(path) => { void shareArtifact(path); }}
+            onToggleFavorite={toggleFav}
+            picker={goalPickerActive ? {
+              selectedGoalId: selectedGoal,
+              onSelectGoal: setSelectedGoal,
+              titles: goalMeta.titles,
+              ratings: goalMeta.ratings,
+              options: goalPickerOptions,
+            } : undefined}
+            emptyHint="Roll up a workspace to promote artifacts to main."
+          />
           </div>
         </div>
 
