@@ -1,9 +1,9 @@
 /**
  * Worker→daemon routing of agent-originated reports, protocol level.
  *
- * Covers: extraction of the SDK's report_tool_issue invocation from the
- * session event stream, the WorkerNotification wire shape, and the
- * daemon-side dispatch of an 'agent-report' push to the onAgentReport sink.
+ * Covers the WorkerNotification wire shape and the daemon-side dispatch of an
+ * 'agent-report' push to the onAgentReport sink. Extraction of the report from
+ * the session event stream lives in agent-report-extract.test.ts.
  */
 import { describe, expect, test } from 'bun:test';
 import {
@@ -35,49 +35,6 @@ function spySinks() {
   };
   return { sinks, seen };
 }
-
-describe('extractAgentReportInput', () => {
-  test('extracts tool + report from a report_tool_issue tool_execution_end event', () => {
-    const extracted = extractAgentReportInput({
-      type: 'tool_execution_end',
-      toolName: 'report_tool_issue',
-      toolCallId: 'call_9',
-      input: { tool: 'bash', report: 'exit code swallowed' },
-    });
-    expect(extracted).toEqual({ toolCallId: 'call_9', tool: 'bash', report: 'exit code swallowed' });
-  });
-
-  test('accepts snake_case event field names (tool_name / tool_call_id)', () => {
-    const extracted = extractAgentReportInput({
-      type: 'tool_result',
-      tool_name: 'report_tool_issue',
-      tool_call_id: 'call_10',
-      input: { tool: 'read', report: 'offset ignored' },
-    });
-    expect(extracted).toEqual({ toolCallId: 'call_10', tool: 'read', report: 'offset ignored' });
-  });
-
-  test('ignores other tools', () => {
-    expect(
-      extractAgentReportInput({ toolName: 'bash', toolCallId: 'c', input: { tool: 'bash', report: 'x' } }),
-    ).toBeNull();
-  });
-
-  test('ignores empty/missing report text and malformed input', () => {
-    expect(extractAgentReportInput({ toolName: 'report_tool_issue', input: { tool: 'bash', report: '  ' } })).toBeNull();
-    expect(extractAgentReportInput({ toolName: 'report_tool_issue', input: 'nope' })).toBeNull();
-    expect(extractAgentReportInput({ toolName: 'report_tool_issue' })).toBeNull();
-  });
-
-  test('falls back to tool "unknown" when the tool param is absent', () => {
-    const extracted = extractAgentReportInput({
-      toolName: 'report_tool_issue',
-      toolCallId: 'c1',
-      input: { report: 'something odd' },
-    });
-    expect(extracted?.tool).toBe('unknown');
-  });
-});
 
 describe('agent-report over the worker IPC protocol', () => {
   test('wire shape passes the notification guard', () => {

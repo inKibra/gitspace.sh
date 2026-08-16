@@ -74,24 +74,66 @@ export interface AgentReportPayload {
 }
 
 /**
- * Pure extraction of a `report_tool_issue` invocation from an SDK session
- * event (`tool_execution_end` / `tool_result`). Returns null for any other
- * tool or an empty report. Exported for protocol-level unit tests.
+ * The device an agent writes to in order to report unexpected tool behaviour.
+ *
+ * Kept as a literal rather than imported from OMP so this module stays
+ * types-only at runtime; `__tests__/agent-report-extract.test.ts` asserts the
+ * literal still agrees with OMP's own `isReportIssueToolCall`, so a rename
+ * upstream fails a test here instead of silently dropping every report.
+ */
+const REPORT_ISSUE_DEVICE_PATH = 'xd://report_issue';
+
+/**
+ * Split a report body the way OMP's device does: first line as the tool name
+ * when there is a second line, otherwise `<tool>: <description>`.
+ */
+function parseReportBody(text: string): { tool: string; report: string } | null {
+  const body = text.trim();
+  if (!body) return null;
+  const newline = body.indexOf('\n');
+  if (newline >= 0) {
+    const tool = body.slice(0, newline).trim();
+    const report = body.slice(newline + 1).trim();
+    if (tool && report) return { tool, report };
+  }
+  const colon = body.indexOf(':');
+  if (colon > 0) {
+    const tool = body.slice(0, colon).trim();
+    const report = body.slice(colon + 1).trim();
+    if (tool && report) return { tool, report };
+  }
+  return null;
+}
+
+/**
+ * Pure extraction of a report-device write from an SDK session event
+ * (`tool_execution_end` / `tool_result`). Returns null for anything else.
+ * Exported for protocol-level unit tests.
+ *
+ * This watches a `write` to `xd://report_issue`, NOT a tool named
+ * `report_tool_issue`. That tool existed in OMP 16; 17 turned it into a device
+ * dispatched from inside `write`, so the old match never fired again and every
+ * agent report was silently dropped — OMP no-ops its own recording without
+ * consent, and GitSpace never saw the event.
  */
 export function extractAgentReportInput(
   piEvent: Record<string, unknown>,
 ): { toolCallId: string; tool: string; report: string } | null {
   const toolName = piEvent.toolName ?? piEvent.tool_name;
-  if (toolName !== 'report_tool_issue') return null;
+  if (toolName !== 'write') return null;
   const input = piEvent.input;
   if (typeof input !== 'object' || input === null || Array.isArray(input)) return null;
   const record = input as Record<string, unknown>;
-  const report = typeof record.report === 'string' ? record.report.trim() : '';
-  if (!report) return null;
+  const path = typeof record.path === 'string'
+    ? record.path
+    : typeof record.file_path === 'string' ? record.file_path : undefined;
+  if (path !== REPORT_ISSUE_DEVICE_PATH && path !== `${REPORT_ISSUE_DEVICE_PATH}/`) return null;
+  const parsed = typeof record.content === 'string' ? parseReportBody(record.content) : null;
+  if (!parsed) return null;
   return {
     toolCallId: String(piEvent.toolCallId ?? piEvent.tool_call_id ?? ''),
-    tool: typeof record.tool === 'string' && record.tool.length > 0 ? record.tool : 'unknown',
-    report,
+    tool: parsed.tool,
+    report: parsed.report,
   };
 }
 
