@@ -69,6 +69,25 @@ export function useTranscript(opts: {
     if (el) el.scrollTop = el.scrollHeight;
   };
 
+  /**
+   * Is the user mid-selection inside the transcript?
+   *
+   * Autoscroll fires on any IDENTITY change of `committed`/`live`, not just a
+   * content change — and a `transcript_live` delta hands over a fresh array each
+   * time, so a session that looks settled can still re-emit. Scrolling to the
+   * bottom under a live selection doesn't clear it, it drags it out of view,
+   * which is what made copying out of the transcript unreliable.
+   *
+   * A collapsed selection is just a caret and must not block anything.
+   */
+  const hasActiveSelection = (): boolean => {
+    const el = containerRef.current;
+    if (!el) return false;
+    const selection = el.ownerDocument.defaultView?.getSelection();
+    if (!selection || selection.isCollapsed || selection.rangeCount === 0) return false;
+    return el.contains(selection.getRangeAt(0).commonAncestorContainer);
+  };
+
   // Initial / session-change load: fetch the tail, pin to bottom.
   useEffect(() => {
     const generation = ++generationRef.current;
@@ -141,7 +160,9 @@ export function useTranscript(opts: {
 
   // Autoscroll while following (initial load + streaming live suffix).
   useLayoutEffect(() => {
-    if (modeRef.current === 'follow') scrollToBottom();
+    // Explicit user actions (jump-to-latest, initial load) still scroll; only the
+    // automatic follow does not fight a selection.
+    if (modeRef.current === 'follow' && !hasActiveSelection()) scrollToBottom();
   }, [committed, live]);
 
   // While browsing, count live growth for the jump-to-latest pill.
@@ -179,7 +200,7 @@ export function useTranscript(opts: {
         setCommitted(page.blocks);
         cursorRef.current = page.oldestCursor ?? undefined;
         setHasMoreOlder(page.hasMore);
-        requestAnimationFrame(scrollToBottom);
+        if (!hasActiveSelection()) requestAnimationFrame(scrollToBottom);
       })
       .catch((err) => { console.error('[transcript] live refetch failed', err); });
     return () => {
