@@ -21,9 +21,15 @@ import { reportSchema } from '../core/artifact-envelopes.js';
  * Artifacts mode: the workspace's artifacts mount, click → full viewer.
  * Collapsed state persists; the rail renders a thin reopen strip when closed.
  */
+import { ProjectArtifactsRail, type ProjectArtifactEntry } from './ProjectArtifactsRail.web.js';
 
 const RAIL_CLOSED_KEY = 'gssh:workspace-right-rail-closed';
 const RAIL_MODE_KEY = 'gssh:workspace-right-rail-mode';
+/** Rail tabs, in display order. `project` shows the PROJECT's artifacts (the
+ *  artifacts repo's main branch) using the same component project home renders,
+ *  so the two surfaces cannot drift apart. */
+const RAIL_MODES = ['repo', 'artifacts', 'project'] as const;
+type RailMode = (typeof RAIL_MODES)[number];
 const RAIL_WIDTH_KEY = 'gssh:workspace-right-rail-width';
 const DEFAULT_RAIL_WIDTH = 320;
 const MIN_RAIL_WIDTH = 240;
@@ -157,8 +163,13 @@ export function RightRail({
   const [closed, setClosed] = useState(() => {
     try { return window.localStorage.getItem(RAIL_CLOSED_KEY) === '1'; } catch { return false; }
   });
-  const [mode, setMode] = useState<'repo' | 'artifacts'>(() => {
-    try { return window.localStorage.getItem(RAIL_MODE_KEY) === 'artifacts' ? 'artifacts' : 'repo'; } catch { return 'repo'; }
+  /** An unknown stored value must fall back to 'repo' rather than selecting a
+   *  mode that no longer exists. */
+  const [mode, setMode] = useState<RailMode>(() => {
+    try {
+      const stored = window.localStorage.getItem(RAIL_MODE_KEY);
+      return RAIL_MODES.find((m) => m === stored) ?? 'repo';
+    } catch { return 'repo'; }
   });
   useEffect(() => { try { window.localStorage.setItem(RAIL_CLOSED_KEY, closed ? '1' : '0'); } catch { /* */ } }, [closed]);
   useEffect(() => { try { window.localStorage.setItem(RAIL_MODE_KEY, mode); } catch { /* */ } }, [mode]);
@@ -206,7 +217,7 @@ export function RightRail({
       />
       <aside className="gs-ui flex h-full flex-shrink-0 flex-col border-l border-[var(--gs-border-muted)] bg-[var(--gs-bg)]" style={{ width }}>
       <div className="relative flex flex-shrink-0 border-b border-[var(--gs-border)]">
-        {(['repo', 'artifacts'] as const).map((m) => (
+        {RAIL_MODES.map((m) => (
           <button
             key={m}
             type="button"
@@ -220,11 +231,67 @@ export function RightRail({
       </div>
       {mode === 'repo'
         ? <RepoMode backend={backend} workspaceId={workspaceId} projectName={projectName} workspaceName={workspaceName} onOpenFile={onOpenFile} reviewing={phase === 'review'} />
-        : <ArtifactsMode backend={backend} workspaceId={workspaceId} projectName={projectName} workspaceName={workspaceName} onOpenArtifact={onOpenArtifact} onOpenDashboard={onOpenDashboard} onOpenNote={onOpenNote} onOpenEvents={onOpenEvents} goalEvidence={goalEvidence} onOpenEvidence={onOpenEvidence} onOpenReport={onOpenReport} onOpenGoalPane={onOpenGoalPane} onOpenRubricPane={onOpenRubricPane} onOpenWorkflowPane={onOpenWorkflowPane} goalSummary={goalSummary} />}
+        : mode === 'project'
+          ? <ProjectMode backend={backend} projectName={projectName} onOpenArtifact={onOpenArtifact} onOpenDashboard={onOpenDashboard} />
+          : <ArtifactsMode backend={backend} workspaceId={workspaceId} projectName={projectName} workspaceName={workspaceName} onOpenArtifact={onOpenArtifact} onOpenDashboard={onOpenDashboard} onOpenNote={onOpenNote} onOpenEvents={onOpenEvents} goalEvidence={goalEvidence} onOpenEvidence={onOpenEvidence} onOpenReport={onOpenReport} onOpenGoalPane={onOpenGoalPane} onOpenRubricPane={onOpenRubricPane} onOpenWorkflowPane={onOpenWorkflowPane} goalSummary={goalSummary} />}
       </aside>
     </>
   );
 }
+
+/* ── Project artifacts mode ─────────────────────────────────────────────────
+   The PROJECT's artifacts (main branch, mounted at the base clone), rendered by
+   the same component project home uses. No source selector: the workspace's own
+   artifacts are the neighbouring tab, so a picker here would only offer the
+   thing you already have.
+
+   Read-only by omission — no ★ and no ↗ are passed, so the shared row renders
+   neither. A workspace must not curate the project's published record from
+   here; that belongs on the project page. Opening routes through
+   `onOpenArtifact`, which lands on the same ArtifactPanel dock tab as
+   everywhere else. */
+
+function ProjectMode({ backend, projectName, onOpenArtifact, onOpenDashboard }: {
+  backend: SessionBackend | null;
+  projectName: string;
+  onOpenArtifact: (path: string) => void;
+  onOpenDashboard: (path: string) => void;
+}): ReactElement {
+  const [entries, setEntries] = useState<ProjectArtifactEntry[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const list = backend?.listProjectArtifacts;
+    if (!list) {
+      setError('Project artifacts are unavailable on this connection.');
+      return;
+    }
+    let alive = true;
+    setError(null);
+    list.call(backend, projectName)
+      .then((rows) => { if (alive) setEntries(rows); })
+      .catch((e) => { if (alive) setError(e instanceof Error ? e.message : 'Could not load project artifacts.'); });
+    return () => { alive = false; };
+  }, [backend, projectName]);
+
+  if (error) return <div className="px-3 py-3 text-[11px] text-[var(--gs-danger)]">{error}</div>;
+  if (!entries) return <div className="px-3 py-3 text-[11px] text-[var(--gs-text-dim)]">Loading project artifacts…</div>;
+
+  return (
+    <div className="min-h-0 flex-1 overflow-y-auto py-1.5">
+      <ProjectArtifactsRail
+        entries={entries}
+        view="sel"
+        favorites={NO_FAVORITES}
+        onOpen={(entry, kind) => (kind === 'dashboard' ? onOpenDashboard(entry.path) : onOpenArtifact(entry.path))}
+        emptyHint="Roll up a workspace to promote artifacts to main."
+      />
+    </div>
+  );
+}
+
+/** Stable empty set — a new Set() per render would churn the shared row. */
+const NO_FAVORITES: ReadonlySet<string> = new Set();
 
 /* ── Repo mode ─────────────────────────────────────────────────────────────── */
 

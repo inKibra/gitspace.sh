@@ -30,8 +30,9 @@ import { ReportPanel } from '../components/ReportPanel.web.js';
 import type { KanbanGoalItem } from '../app/shared/board/types.js';
 import type { WorkspaceRuntimeEntry } from '../app/shared/workspace-runtime/types.js';
 import { ArtifactPanel } from '../components/ArtifactPanel.web.js';
+import { ProjectArtifactsRail } from '../components/ProjectArtifactsRail.web.js';
 import { DashboardPanel } from '../components/DashboardPanel.web.js';
-import { KIND_ICON, KIND_LABEL, KIND_ORDER, classifyArtifact, goalPrefixOf, resolveAttachmentRef, toGoalRelative, type ArtifactKind, decodeBase64Utf8, encodeBase64Utf8 } from '../components/artifact-kinds.js';
+import { KIND_ORDER, classifyArtifact, goalPrefixOf, resolveAttachmentRef, toGoalRelative, type ArtifactKind, decodeBase64Utf8, encodeBase64Utf8 } from '../components/artifact-kinds.js';
 import { sanitizeForFileSystem } from '../utils/sanitize.js';
 
 function ProjectReportTab({ path, read, knownPaths, onOpenAttachment }: {
@@ -792,7 +793,6 @@ export function ProjectHomePage({
     })();
     return () => { alive = false; };
   }, [artifacts, readArtifactFromSource]);
-  const favEntries = useMemo(() => artifacts.filter((e) => favs.has(e.path)), [artifacts, favs]);
   const dashboards = useMemo(() => artifacts.filter((e) => classifyArtifact(e.path) === 'dashboard'), [artifacts]);
 
   // One goal at a time: the rolled-up goal folders (root/Project excluded) and
@@ -800,7 +800,6 @@ export function ProjectHomePage({
   // label = the title goalSections derived; chain best-effort from the board
   // goal record (goal folder id === board goal id, both from makeGoalId).
   const realGoalSections = useMemo(() => goalSections.filter((s) => s.goalId !== ''), [goalSections]);
-  const projectSection = useMemo(() => goalSections.find((s) => s.goalId === '') ?? null, [goalSections]);
   const goalPickerOptions = useMemo(
     () => realGoalSections.map((s) => ({
       value: s.goalId,
@@ -864,41 +863,6 @@ export function ProjectHomePage({
     await shareArtifactToClipboard(backend, projectName, workspaceSegment, path);
   };
 
-  const railRow = (e: ArtifactEntry, sub?: string, displayName?: string): ReactElement => {
-    const kind = classifyArtifact(e.path);
-    const name = displayName ?? (e.path.split('/').pop() ?? e.path);
-    return (
-      <div
-        key={`${sub ?? ''}:${e.path}`}
-        onClick={() => openTab(kind === 'dashboard' ? `dash:${e.path}` : kind === 'report' && e.path.endsWith('.report.json') ? `report:${e.path}` : `art:${e.path}`)}
-        title={e.path}
-        className="flex w-full cursor-pointer items-center gap-2 px-3 py-1 text-[11.5px] text-[var(--gs-text-muted)] hover:bg-[var(--gs-bg-hover)] hover:text-[var(--gs-text)]"
-      >
-        <span className="w-4 flex-shrink-0 text-center text-[var(--gs-text-ghost)]">{KIND_ICON[kind]}</span>
-        <span className="min-w-0 flex-1 truncate">
-          {name}
-          {sub && <span className="text-[10px] text-[var(--gs-text-dim)]"> · {sub}</span>}
-        </span>
-        {e.pointer && <span className="flex-shrink-0 rounded-full border border-[#2a2413] px-1 text-[9px] text-[var(--gs-warning)]">lfs</span>}
-        <button
-          type="button"
-          onClick={(ev) => { ev.stopPropagation(); void shareArtifact(e.path); }}
-          title="Share — copy a public link to this artifact (requires serve)"
-          className="flex-shrink-0 px-0.5 text-[12px] text-[var(--gs-text-dim)] hover:text-[var(--gs-accent)]"
-        >
-          ↗
-        </button>
-        <button
-          type="button"
-          onClick={(ev) => { ev.stopPropagation(); toggleFav(e.path); }}
-          title="favorite"
-          className={`flex-shrink-0 px-0.5 text-[12px] ${favs.has(e.path) ? 'text-[var(--gs-warning)]' : 'text-[var(--gs-text-ghost)] hover:text-[var(--gs-text-muted)]'}`}
-        >
-          ★
-        </button>
-      </div>
-    );
-  };
 
   // Overview card shell (mock: .ph-card / .ph-card-h).
   const card = (title: string, sub: string | null, right: ReactElement, body: ReactElement): ReactElement => (
@@ -1288,71 +1252,43 @@ export function ProjectHomePage({
             <button type="button" onClick={() => setRailView('fav')} className={`flex-1 py-[7px] text-[11px] ${railView === 'fav' ? 'bg-[var(--gs-bg-elevated)] text-[var(--gs-text)] shadow-[inset_0_-2px_0_var(--gs-accent)]' : 'text-[var(--gs-text-muted)]'}`}>★ Favorites <span className="text-[var(--gs-text-ghost)]">{favs.size > 0 ? favs.size : ''}</span></button>
           </div>
           <div className="min-h-0 flex-1 overflow-y-auto py-1.5">
-          {artifactsError ? (
-            <div className="px-3 py-3 text-[11px] text-[var(--gs-danger)]">{artifactsError}</div>
-          ) : (railView === 'fav' ? (
-            favEntries.length === 0
-              ? <div className="px-3 py-[18px] text-[12px] text-[var(--gs-text-dim)]">No favorites yet — ★ an artifact to pin it across the project.</div>
-              : favEntries.map((e) => railRow(e))
-          ) : goalSections.length === 0 ? (
-            <div className="px-3 py-[18px] text-[12px] text-[var(--gs-text-dim)]">
-              No artifacts in this source yet.
-              <div className="mt-1 text-[10px] text-[var(--gs-text-ghost)]">Roll up a workspace to promote artifacts to main.</div>
-            </div>
-          ) : goalPickerActive ? (
-            // On main: exactly ONE rolled-up goal (its header IS the picker) +
-            // the Project section below. No stacked "all goals".
-            (() => {
-              const sec = realGoalSections.find((s) => s.goalId === selectedGoal) ?? realGoalSections[0];
-              return (
-                <>
-                  {sec && (
-                    <div key={sec.goalId}>
-                      <GoalHeaderPicker
-                        goalId={sec.goalId}
-                        title={goalMeta.titles[sec.goalId] ?? sec.goalId}
-                        rating={goalMeta.ratings[sec.goalId]}
-                        options={goalPickerOptions}
-                        onChange={setSelectedGoal}
-                      />
-                      {sec.kindGroups.map(([kind, files]) => (
-                        <div key={kind}>
-                          <div className="px-3 pb-[3px] pt-[9px] text-[10.5px] uppercase tracking-[.12em] text-[var(--gs-text-dim)]">{KIND_LABEL[kind]}</div>
-                          {files.map((e) => railRow(e, undefined, toGoalRelative(e.path)))}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                  {projectSection && (
-                    <div key="·project">
-                      <div className="mt-1.5 flex items-baseline border-b border-[var(--gs-border-muted)] px-3 pb-[5px] pt-[11px]">
-                        <span className="text-[11.5px] font-medium text-[var(--gs-text)]" title="project-root artifacts">Project</span>
-                      </div>
-                      {projectSection.kindGroups.map(([kind, files]) => (
-                        <div key={kind}>
-                          <div className="px-3 pb-[3px] pt-[9px] text-[10.5px] uppercase tracking-[.12em] text-[var(--gs-text-dim)]">{KIND_LABEL[kind]}</div>
-                          {files.map((e) => railRow(e))}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </>
-              );
-            })()
-          ) : (
-            // Non-main source (a live workspace) or a purely flat listing: keep
-            // the plain kind-grouped look, no goal picker.
-            goalSections.map((sec) => (
-              <div key={sec.goalId || '·project'}>
-                {sec.kindGroups.map(([kind, files]) => (
-                  <div key={kind}>
-                    <div className="px-3 pb-[3px] pt-[9px] text-[10.5px] uppercase tracking-[.12em] text-[var(--gs-text-dim)]">{KIND_LABEL[kind]}</div>
-                    {files.map((e) => railRow(e, undefined, sec.goalId === '' ? undefined : toGoalRelative(e.path)))}
-                  </div>
-                ))}
-              </div>
-            ))
-          ))}
+          {(() => {
+            const picker = goalPickerActive
+              ? {
+                  selectedGoalId: selectedGoal,
+                  onSelectGoal: setSelectedGoal,
+                  titles: goalMeta.titles,
+                  ratings: goalMeta.ratings,
+                  options: goalPickerOptions,
+                  renderHeader: ({ goalId, title, rating }: { goalId: string; title: string; rating: number | undefined }) => (
+                    <GoalHeaderPicker
+                      goalId={goalId}
+                      title={title}
+                      rating={rating}
+                      options={goalPickerOptions}
+                      onChange={setSelectedGoal}
+                    />
+                  ),
+                }
+              : undefined;
+            return (
+              <ProjectArtifactsRail
+                entries={artifacts}
+                error={artifactsError}
+                view={railView}
+                favorites={favs}
+                onOpen={(e, kind) => openTab(
+                  kind === 'dashboard'
+                    ? `dash:${e.path}`
+                    : kind === 'report' && e.path.endsWith('.report.json') ? `report:${e.path}` : `art:${e.path}`,
+                )}
+                onShare={(path) => { void shareArtifact(path); }}
+                onToggleFavorite={toggleFav}
+                picker={picker}
+                emptyHint="Roll up a workspace to promote artifacts to main."
+              />
+            );
+          })()}
           </div>
         </div>
 
