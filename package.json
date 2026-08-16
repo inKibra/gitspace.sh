@@ -17,7 +17,7 @@
     "check:lockfile-sync": "bun scripts/check-lockfile-sync.ts",
     "gen:version": "bun scripts/gen-version.ts",
     "typecheck": "bun scripts/gen-version.ts && tsgo --noEmit -p tsconfig.json && cd web && bunx tsc -b && bunx tsc -p tsconfig.webtests.json --noEmit",
-    "test": "bun scripts/gen-version.ts && bun scripts/test-isolated.ts src",
+    "test": "bun scripts/gen-version.ts && bun scripts/gen-cloud-bootstrap.ts && bun scripts/test-isolated.ts src",
     "test:fast": "bun test",
     "lint": "eslint src/",
     "build:web": "cd web && bun install && bun run build",

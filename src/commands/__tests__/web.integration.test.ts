@@ -134,7 +134,11 @@ async function waitForMatch(getText: () => string, pattern: RegExp, timeoutMs: n
     }
     await Bun.sleep(100);
   }
-  throw new Error(`Timed out waiting for output matching ${pattern}`);
+  // Include what the subprocess actually said. Without this the failure is just
+  // "timed out", which is unactionable on a machine you cannot log into — the
+  // exact position this test left CI in.
+  const seen = getText().trim();
+  throw new Error(`Timed out waiting for output matching ${pattern}\n--- captured output ---\n${seen || '<nothing>'}`);
 }
 
 async function stopProcess(subprocess: Bun.Subprocess, timeoutMs = 15_000): Promise<number> {
