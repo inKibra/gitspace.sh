@@ -75,6 +75,12 @@ jobs:
       - name: Install cloudflared
         run: brew install cloudflared
 
+      # web.integration drives `gssh web`, which refuses to start without built
+      # assets ("Web UI assets not found"). Developers have web/dist lying
+      # around; a clean runner does not.
+      - name: Build web assets
+        run: bun run build:web
+
       # scripts/test-isolated.ts runs each file in its own process: mock.module
       # is process-global and mock.restore() does not undo it, so a bare
       # `bun test` is not a trustworthy signal.
