@@ -1,6 +1,7 @@
 /** @jsxImportSource react */
-import { useState, type ReactElement } from 'react';
-import { KIND_ICON, KIND_LABEL, KIND_ORDER, classifyArtifact, goalPrefixOf, toGoalRelative, type ArtifactKind } from './artifact-kinds.js';
+import { useEffect, useMemo, useState, type ReactElement } from 'react';
+import { sanitizeForFileSystem } from '../utils/sanitize.js';
+import { KIND_ICON, KIND_LABEL, KIND_ORDER, classifyArtifact, decodeBase64Utf8, goalPrefixOf, toGoalRelative, type ArtifactKind } from './artifact-kinds.js';
 
 /**
  * The project artifacts rail — one component, two homes.
@@ -93,6 +94,79 @@ export function GoalHeaderPicker({ goalId, title, rating, options, onChange }: {
       )}
     </div>
   );
+}
+
+/**
+ * Everything the goal picker needs, derived from the artifact listing itself.
+ *
+ * Titles come from each `goals/<id>/goal.md`'s first `# ` heading; ratings from
+ * `reports/rollup-*.report.json`, matched back to a goal id by the sanitized
+ * surface name plus its 8-hex suffix. Both are reads, which is why this is a
+ * hook and not a pure helper — and why it lives here rather than in a page: the
+ * workspace rail needs the same picker, and it was missing it purely because
+ * this derivation was stranded in ProjectHomePage.
+ */
+export function useProjectGoalPicker(args: {
+  entries: ProjectArtifactEntry[];
+  readArtifact?: (path: string) => Promise<{ base64: string }>;
+  /** Chain label for an option, when the surface knows one. */
+  chainOf?: (goalId: string) => string | undefined;
+}): ProjectArtifactsGoalPicker | undefined {
+  const { entries, readArtifact, chainOf } = args;
+  const [titles, setTitles] = useState<Record<string, string>>({});
+  const [ratings, setRatings] = useState<Record<string, number>>({});
+  const [selectedGoalId, setSelectedGoalId] = useState<string | null>(null);
+
+  const goalIds = useMemo(() => {
+    const prefixes = entries.map((e) => goalPrefixOf(e.path)).filter(Boolean);
+    return [...new Set(prefixes)].map((p) => p.slice('goals/'.length, -1));
+  }, [entries]);
+  const idKey = goalIds.join('|');
+
+  useEffect(() => {
+    if (!readArtifact || goalIds.length === 0) return;
+    let alive = true;
+    const paths = new Set(entries.map((e) => e.path));
+    void (async () => {
+      const nextTitles: Record<string, string> = {};
+      await Promise.allSettled(goalIds.map(async (id) => {
+        if (!paths.has(`goals/${id}/goal.md`)) return;
+        const r = await readArtifact(`goals/${id}/goal.md`);
+        const heading = /^#\s+(.+)$/m.exec(decodeBase64Utf8(r.base64));
+        if (heading) nextTitles[id] = heading[1].trim();
+      }));
+      const nextRatings: Record<string, number> = {};
+      const reportPaths = entries.map((e) => e.path).filter((p) => /^reports\/rollup-.+\.report\.json$/.test(p));
+      await Promise.allSettled(reportPaths.map(async (p) => {
+        const r = await readArtifact(p);
+        const rep: unknown = JSON.parse(decodeBase64Utf8(r.base64));
+        if (typeof rep !== 'object' || rep === null) return;
+        const surface = 'surface' in rep ? rep.surface : undefined;
+        const rating = 'rating' in rep ? rep.rating : undefined;
+        if (typeof surface !== 'string' || typeof rating !== 'number') return;
+        const stem = sanitizeForFileSystem(surface);
+        for (const id of goalIds) {
+          if (id.startsWith(`${stem}-`) && /^[0-9a-f]{8}$/.test(id.slice(stem.length + 1))) nextRatings[id] = rating;
+        }
+      }));
+      if (!alive) return;
+      setTitles(nextTitles);
+      setRatings(nextRatings);
+    })();
+    return () => { alive = false; };
+    // `idKey` stands in for goalIds: a fresh array each render would re-read on
+    // every paint, and these are network reads.
+  }, [idKey, readArtifact, entries, goalIds]);
+
+  const options = useMemo(
+    () => goalIds.map((id) => ({ value: id, label: titles[id] ?? id, chain: chainOf?.(id) ?? 'goals' })),
+    [goalIds, titles, chainOf],
+  );
+
+  // A goal that vanished from the listing must not stay selected.
+  const selected = selectedGoalId && goalIds.includes(selectedGoalId) ? selectedGoalId : goalIds[0] ?? null;
+  if (goalIds.length === 0) return undefined;
+  return { selectedGoalId: selected, onSelectGoal: setSelectedGoalId, titles, ratings, options };
 }
 
 export interface ProjectArtifactEntry {

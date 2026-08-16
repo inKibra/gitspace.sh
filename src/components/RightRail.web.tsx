@@ -21,7 +21,7 @@ import { reportSchema } from '../core/artifact-envelopes.js';
  * Artifacts mode: the workspace's artifacts mount, click → full viewer.
  * Collapsed state persists; the rail renders a thin reopen strip when closed.
  */
-import { ProjectArtifactsRail, type ProjectArtifactEntry } from './ProjectArtifactsRail.web.js';
+import { ProjectArtifactsRail, useProjectGoalPicker, type ProjectArtifactEntry } from './ProjectArtifactsRail.web.js';
 
 const RAIL_CLOSED_KEY = 'gssh:workspace-right-rail-closed';
 const RAIL_MODE_KEY = 'gssh:workspace-right-rail-mode';
@@ -274,6 +274,17 @@ function ProjectMode({ backend, projectName, onOpenArtifact, onOpenDashboard }: 
     return () => { alive = false; };
   }, [backend, projectName]);
 
+  // Same picker the project page has — titles and ratings are derived from the
+  // listing, so this only needs a read function. Hooks run before the early
+  // returns below; an empty listing yields no picker.
+  const readArtifact = useCallback(
+    (path: string) => (backend?.readProjectArtifact
+      ? backend.readProjectArtifact(projectName, path)
+      : Promise.reject(new Error('unavailable'))),
+    [backend, projectName],
+  );
+  const picker = useProjectGoalPicker({ entries: entries ?? NO_ENTRIES, readArtifact });
+
   if (error) return <div className="px-3 py-3 text-[11px] text-[var(--gs-danger)]">{error}</div>;
   if (!entries) return <div className="px-3 py-3 text-[11px] text-[var(--gs-text-dim)]">Loading project artifacts…</div>;
 
@@ -284,11 +295,15 @@ function ProjectMode({ backend, projectName, onOpenArtifact, onOpenDashboard }: 
         view="sel"
         favorites={NO_FAVORITES}
         onOpen={(entry, kind) => (kind === 'dashboard' ? onOpenDashboard(entry.path) : onOpenArtifact(entry.path))}
+        picker={picker}
         emptyHint="Roll up a workspace to promote artifacts to main."
       />
     </div>
   );
 }
+
+/** Stable empty listing — a new [] per render would re-run the meta reads. */
+const NO_ENTRIES: ProjectArtifactEntry[] = [];
 
 /** Stable empty set — a new Set() per render would churn the shared row. */
 const NO_FAVORITES: ReadonlySet<string> = new Set();

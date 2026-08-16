@@ -30,10 +30,9 @@ import { ReportPanel } from '../components/ReportPanel.web.js';
 import type { KanbanGoalItem } from '../app/shared/board/types.js';
 import type { WorkspaceRuntimeEntry } from '../app/shared/workspace-runtime/types.js';
 import { ArtifactPanel } from '../components/ArtifactPanel.web.js';
-import { ProjectArtifactsRail } from '../components/ProjectArtifactsRail.web.js';
+import { ProjectArtifactsRail, useProjectGoalPicker } from '../components/ProjectArtifactsRail.web.js';
 import { DashboardPanel } from '../components/DashboardPanel.web.js';
 import { KIND_ORDER, classifyArtifact, goalPrefixOf, resolveAttachmentRef, toGoalRelative, type ArtifactKind, decodeBase64Utf8, encodeBase64Utf8 } from '../components/artifact-kinds.js';
-import { sanitizeForFileSystem } from '../utils/sanitize.js';
 
 function ProjectReportTab({ path, read, knownPaths, onOpenAttachment }: {
   path: string;
@@ -524,7 +523,6 @@ export function ProjectHomePage({
   // goal the rail shows on `main` (its header is the picker). Never changes the
   // source. Default/repair to a present goal happens below once goalSections is
   // known; a selection still valid on the current source is preserved.
-  const [selectedGoal, setSelectedGoal] = useState<string>('');
 
   // Recently shipped roll-up flow (mock: rolled/rating/stars).
   const shipped = shippedWorkspaces ?? [];
@@ -686,59 +684,18 @@ export function ProjectHomePage({
   // goal ids are sanitizeForFileSystem(workspace) + '-' + 8 hex, so a prefix
   // match recovers the link. Title-seeded goals won't match — rating is
   // best-effort, absent is fine (deliberately no separate mapping store).
-  const [goalMeta, setGoalMeta] = useState<{ titles: Record<string, string>; ratings: Record<string, number> }>({ titles: {}, ratings: {} });
-  useEffect(() => {
-    let alive = true;
-    void (async () => {
-      const titles: Record<string, string> = {};
-      const ratings: Record<string, number> = {};
-      const paths = new Set(artifacts.map((e) => e.path));
-      const ids = [...new Set(artifacts.map((e) => goalPrefixOf(e.path)).filter(Boolean))].map((p) => p.slice('goals/'.length, -1));
-      await Promise.allSettled(ids.map(async (id) => {
-        if (!paths.has(`goals/${id}/goal.md`)) return;
-        const r = await readArtifactFromSource(`goals/${id}/goal.md`);
-        const heading = /^#\s+(.+)$/m.exec(decodeBase64Utf8(r.base64));
-        if (heading) titles[id] = heading[1].trim();
-      }));
-      const reportPaths = artifacts.map((e) => e.path).filter((p) => /^reports\/rollup-.+\.report\.json$/.test(p));
-      await Promise.allSettled(reportPaths.map(async (p) => {
-        const r = await readArtifactFromSource(p);
-        const rep = JSON.parse(decodeBase64Utf8(r.base64)) as { surface?: unknown; rating?: unknown };
-        if (typeof rep.surface !== 'string' || typeof rep.rating !== 'number') return;
-        const stem = sanitizeForFileSystem(rep.surface);
-        for (const id of ids) {
-          if (id.startsWith(`${stem}-`) && /^[0-9a-f]{8}$/.test(id.slice(stem.length + 1))) ratings[id] = rep.rating;
-        }
-      }));
-      if (alive) setGoalMeta({ titles, ratings });
-    })();
-    return () => { alive = false; };
-  }, [artifacts, readArtifactFromSource]);
+  // Picker data comes from the SHARED hook the workspace rail uses, so the two
+  // surfaces cannot derive goal titles/ratings differently.
+  const sharedGoalPicker = useProjectGoalPicker({
+    entries: artifacts,
+    readArtifact: readArtifactFromSource,
+    chainOf: (id) => goals.find((g) => g.id === id)?.chainTitle,
+  });
   const dashboards = useMemo(() => artifacts.filter((e) => classifyArtifact(e.path) === 'dashboard'), [artifacts]);
 
-  // One goal at a time: the rolled-up goal folders (root/Project excluded) and
-  // the lone Project section, split out. Picker options — one per REAL goal;
-  // label = the title goalSections derived; chain best-effort from the board
-  // goal record (goal folder id === board goal id, both from makeGoalId).
+  // One goal at a time on `main` only; other sources keep the stacked listing.
   const realGoalSections = useMemo(() => goalSections.filter((s) => s.goalId !== ''), [goalSections]);
-  const goalPickerOptions = useMemo(
-    () => realGoalSections.map((s) => ({
-      value: s.goalId,
-      label: goalMeta.titles[s.goalId] ?? s.goalId,
-      chain: goals.find((g) => g.id === s.goalId)?.chainTitle ?? 'goals',
-    })),
-    [realGoalSections, goalMeta, goals],
-  );
-  // Header-as-picker is active on `main` when there's at least one rolled-up
-  // goal; then the rail shows exactly ONE goal + Project (no stacked "all").
   const goalPickerActive = artifactSource === 'main' && realGoalSections.length >= 1;
-  // Default/repair the selection to a present goal (first — no cheap recency
-  // signal in the listing, so first-in-sort, not truly most-recent).
-  useEffect(() => {
-    if (!goalPickerActive) return;
-    const ids = realGoalSections.map((s) => s.goalId);
-    if (!ids.includes(selectedGoal)) setSelectedGoal(ids[0]);
-  }, [goalPickerActive, realGoalSections, selectedGoal]);
 
   const dashName = (path: string): string => (path.split('/').pop() ?? path).replace('.dashboard.json', '');
   const tabLabel = (t: string): string => {
@@ -1185,13 +1142,7 @@ export function ProjectHomePage({
             )}
             onShare={(path) => { void shareArtifact(path); }}
             onToggleFavorite={toggleFav}
-            picker={goalPickerActive ? {
-              selectedGoalId: selectedGoal,
-              onSelectGoal: setSelectedGoal,
-              titles: goalMeta.titles,
-              ratings: goalMeta.ratings,
-              options: goalPickerOptions,
-            } : undefined}
+            picker={goalPickerActive ? sharedGoalPicker : undefined}
             emptyHint="Roll up a workspace to promote artifacts to main."
           />
           </div>
