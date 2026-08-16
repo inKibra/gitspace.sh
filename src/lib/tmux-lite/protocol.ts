@@ -5,7 +5,7 @@
 import { rmSync } from 'node:fs';
 import { SpacesError } from '../../types/errors.js';
 import { logger } from '../../utils/logger.js';
-import type { AgentGoalModeInfo, AgentShakeMode, AgentShakeResult } from '../../agents/agent-runtime-types.js';
+import type { AgentCompactResult, AgentGoalModeInfo, AgentShakeMode, AgentShakeResult } from '../../agents/agent-runtime-types.js';
 
 
 /** Protocol version - increment when making breaking changes */
@@ -610,6 +610,7 @@ export type Response =
   | { type: 'agent-session-usage'; report: import('../../agents/agent-runtime-types.js').AgentSessionUsageReport | null }
   | { type: 'agent-goal-mode'; info: AgentGoalModeInfo }
   | { type: 'agent-shake-result'; result: AgentShakeResult }
+  | { type: 'agent-compact-result'; result: AgentCompactResult }
   | { type: 'agent-set-model'; ok: boolean }
   | { type: 'agent-auth-providers'; providers: Array<{ provider: string; hasAuth: boolean; accounts?: Array<{ id: number; type: string; label: string; disabled: boolean }> }> }
   | { type: 'agent-remove-account'; ok: boolean }

@@ -8,7 +8,7 @@ import {
   openPiSessionManager,
   readCycleOrder,
 } from './pi-runtime.js';
-import type { AgentControlInfo, AgentDefinitionInfo, AgentGoalModeInfo, AgentHistoryEntry, AgentOAuthEvent, AgentSessionUsageReport, AgentSettingSchemaItem, AgentShakeMode, AgentShakeResult, AgentToolInfo, AgentTreeNode } from '../../../agents/agent-runtime-types.js';
+import type { AgentCompactResult, AgentControlInfo, AgentDefinitionInfo, AgentGoalModeInfo, AgentHistoryEntry, AgentOAuthEvent, AgentSessionUsageReport, AgentSettingSchemaItem, AgentShakeMode, AgentShakeResult, AgentToolInfo, AgentTreeNode } from '../../../agents/agent-runtime-types.js';
 import { getTranscriptRange } from '../../../blocks/agent/transcript-source.js';
 import { resolveTranscriptImageData } from './transcript-image-resolver.js';
 import { CLAUDE_MODEL_ALIAS_TO_MODEL_ROLE } from '../../../blocks/model-roles.js';
@@ -814,7 +814,7 @@ export class PiCoordinator {
   }
 
   /** Compact the session context. */
-  async compactSession(target: PiWorkspaceTarget, agentSessionId: string): Promise<boolean> {
+  async compactSession(target: PiWorkspaceTarget, agentSessionId: string): Promise<AgentCompactResult> {
     const host = await this.ensureHost(target, agentSessionId);
     return host.compact();
   }

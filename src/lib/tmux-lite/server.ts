@@ -3864,8 +3864,8 @@ export async function dispatchCommand(cmd: Command): Promise<Response | null> {
           case 'agent-compact':
             try {
               await getAgentControlReady();
-              const ok = await compactAgentSession(cmd.target, cmd.agentSessionId);
-              res = { type: 'agent-bool', ok };
+              const result = await compactAgentSession(cmd.target, cmd.agentSessionId);
+              res = { type: 'agent-compact-result', result };
             } catch (e) {
               const errMsg = e instanceof Error ? e.message : String(e);
               res = { type: 'error', message: `Failed to compact: ${errMsg}` };

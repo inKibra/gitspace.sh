@@ -1,6 +1,6 @@
 import { defaultPiCoordinator, type PiWorkspaceTarget, type PiAgentSessionSummary } from './agents/pi-coordinator.js';
 import type { TranscriptPage } from '../../blocks/agent/transcript-source.js';
-import type { AgentControlInfo, AgentGoalModeInfo, AgentShakeMode, AgentShakeResult } from '../../agents/agent-runtime-types.js';
+import type { AgentCompactResult, AgentControlInfo, AgentGoalModeInfo, AgentShakeMode, AgentShakeResult } from '../../agents/agent-runtime-types.js';
 import type { HostUIBridgeEmitter, HostUIDialogResponse } from './agents/host-ui-bridge.js';
 import {
   defaultAgentEventManager,
@@ -657,7 +657,7 @@ export async function listAgentDefinitions(target: AgentWorkspaceTarget): Promis
 }
 
 /** Compact a session's context. */
-export async function compactAgentSession(target: AgentWorkspaceTarget, agentSessionId: string): Promise<boolean> {
+export async function compactAgentSession(target: AgentWorkspaceTarget, agentSessionId: string): Promise<AgentCompactResult> {
   return defaultPiCoordinator.compactSession(target, agentSessionId);
 }
 

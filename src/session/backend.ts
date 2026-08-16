@@ -22,7 +22,7 @@ import type { WideEventFilter } from '../types/events.js';
 import type { SessionLinearIssueSummary, WorkspaceSource } from '../types/lifecycle.js';
 import type { ConfirmStepResult, SpacesBundle } from '../types/bundle.js';
 import type { AgentStateUpdateDelta, WorkspaceAgentState } from '../lib/tmux-lite/agent-event-manager.js';
-import type { AgentControlInfo, AgentDefinitionInfo, AgentGoalModeInfo, AgentHistoryEntry, AgentSettingItem, AgentSettingSchemaItem, AgentShakeMode, AgentShakeResult, AgentToolInfo, AgentTreeNode } from '../agents/agent-runtime-types.js';
+import type { AgentControlInfo, AgentCompactResult, AgentDefinitionInfo, AgentGoalModeInfo, AgentHistoryEntry, AgentSettingItem, AgentSettingSchemaItem, AgentShakeMode, AgentShakeResult, AgentToolInfo, AgentTreeNode } from '../agents/agent-runtime-types.js';
 
 import type { ChainStackStatus, GoalChain, GoalRecord, GoalUpdateInput, WorkspacePhaseChangePreview } from '../types/goals.js';
 import type { TriggerDraft, TriggerRecord } from '../core/triggers.js';
@@ -335,7 +335,7 @@ export interface SessionBackend {
   /** Discovered subagent definitions for a workspace (AGENTS settings section). */
   listAgentDefinitions?(workspaceId: string): Promise<AgentDefinitionInfo[]>;
   /** Compact a session's context. */
-  compactAgentSession?(workspaceId: string, agentSessionId: string): Promise<boolean>;
+  compactAgentSession?(workspaceId: string, agentSessionId: string): Promise<AgentCompactResult>;
   /** Cycle the active model through configured roles. */
   cycleAgentRole?(workspaceId: string, agentSessionId: string, direction: 'forward' | 'backward'): Promise<boolean>;
   /** Apply a specific role's model to the session. */

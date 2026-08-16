@@ -28,6 +28,7 @@
 import type { AgentEvent } from '../../../agents/backend.js';
 import type {
   AgentControlInfo,
+  AgentCompactResult,
   AgentGoalModeInfo,
   AgentHistoryEntry,
   AgentShakeMode,
@@ -136,7 +137,7 @@ export interface AgentSessionHost {
   /** Interrupt the current turn (SDK abort). Session stays alive. */
   interrupt(): Promise<boolean>;
   /** Start compaction. Resolves on acceptance; completion flows via events. */
-  compact(instructions?: string): Promise<boolean>;
+  compact(instructions?: string): Promise<AgentCompactResult>;
   removeQueuedMessage(kind: 'steering' | 'followUp', index: number): Promise<string | null>;
 
   // --- control surface ----------------------------------------------------

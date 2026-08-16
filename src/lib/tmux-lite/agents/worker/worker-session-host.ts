@@ -8,6 +8,7 @@
 import { fileURLToPath } from 'node:url';
 import type { Subprocess } from 'bun';
 import type {
+  AgentCompactResult,
   AgentControlInfo,
   AgentGoalModeInfo,
   AgentHistoryEntry,
@@ -204,8 +205,8 @@ export class WorkerSessionHost implements AgentSessionHost {
     return this.rpc('interrupt', []) as Promise<boolean>;
   }
 
-  compact(instructions?: string): Promise<boolean> {
-    return this.rpc('compact', [instructions], COMPACT_TIMEOUT_MS) as Promise<boolean>;
+  compact(instructions?: string): Promise<AgentCompactResult> {
+    return this.rpc('compact', [instructions], COMPACT_TIMEOUT_MS) as Promise<AgentCompactResult>;
   }
 
   removeQueuedMessage(kind: 'steering' | 'followUp', index: number): Promise<string | null> {

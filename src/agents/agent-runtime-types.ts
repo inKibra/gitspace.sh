@@ -373,6 +373,12 @@ export interface AgentShakeResult {
   artifactId?: string;
 }
 
+/** Exact outcome of a session-local OMP compaction request. */
+export interface AgentCompactResult {
+  /** Whether the SDK accepted and ran the compaction request. */
+  ran: boolean;
+}
+
 /** Current context-window usage for a session. */
 export interface AgentContextUsage {
   tokens: number | null;

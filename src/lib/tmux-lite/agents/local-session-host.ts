@@ -14,6 +14,7 @@
 
 import type { AgentEvent } from '../../../agents/backend.js';
 import type {
+  AgentCompactResult,
   AgentControlInfo,
   AgentGoalModeInfo,
   AgentHistoryEntry,
@@ -471,11 +472,10 @@ export class LocalSessionHost implements AgentSessionHost {
     }
   }
 
-  async compact(instructions?: string): Promise<boolean> {
-    const session = this.session as unknown as ControlSessionAccessors;
-    if (!session.compact) return false;
-    await session.compact(instructions);
-    return true;
+  async compact(instructions?: string): Promise<AgentCompactResult> {
+    if (typeof this.session.compact !== 'function') return { ran: false };
+    await this.session.compact(instructions);
+    return { ran: true };
   }
 
   async shake(mode: AgentShakeMode): Promise<AgentShakeResult> {

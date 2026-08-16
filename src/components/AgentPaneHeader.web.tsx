@@ -1,6 +1,6 @@
 /** @jsxImportSource react */
 import { useEffect, useState, type ReactElement } from 'react';
-import type { AgentControlInfo, AgentGoalModeInfo, AgentModelInfo, AgentShakeMode, AgentShakeResult, SessionStatus } from '../agents/agent-runtime-types.js';
+import type { AgentCompactResult, AgentControlInfo, AgentGoalModeInfo, AgentModelInfo, AgentShakeMode, AgentShakeResult, SessionStatus } from '../agents/agent-runtime-types.js';
 
 function fmtTokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
@@ -63,6 +63,10 @@ export function AgentPaneHeader({
   goalModePending,
   goalSessionKey,
   onSetGoalMode,
+  compactResult,
+  compactPending,
+  compactError,
+  onCompact,
   shakeResult,
   shakePending,
   shakeError,
@@ -86,6 +90,10 @@ export function AgentPaneHeader({
   /** Changes whenever this header begins representing a distinct agent session. */
   goalSessionKey?: string | null;
   onSetGoalMode?: (input: { enabled: boolean; precursor?: string }) => void | Promise<void>;
+  compactResult?: AgentCompactResult;
+  compactPending?: boolean;
+  compactError?: string | null;
+  onCompact?: () => void | Promise<void>;
   shakeResult?: AgentShakeResult;
   shakePending?: boolean;
   shakeError?: string | null;
@@ -316,7 +324,7 @@ export function AgentPaneHeader({
         )}
 
 
-        {onShake && (
+        {(onShake || onCompact) && (
           <span className="relative">
             <button
               type="button"
@@ -368,7 +376,7 @@ export function AgentPaneHeader({
                   <button
                     type="button"
                     disabled={shakePending}
-                    onClick={() => { void onShake('elide'); }}
+                    onClick={() => { void onShake?.('elide'); }}
                     className="mt-3 block w-full border border-[var(--gs-border)] px-2 py-1.5 text-left disabled:cursor-not-allowed disabled:opacity-50 hover:border-[var(--gs-border-active)] hover:bg-[var(--gs-bg)]"
                   >
                     <span className="block font-[family-name:var(--gs-font-mono)] text-[10px] text-[var(--gs-text)]">Elide heavy output</span>
@@ -377,12 +385,34 @@ export function AgentPaneHeader({
                   <button
                     type="button"
                     disabled={shakePending}
-                    onClick={() => { void onShake('images'); }}
+                    onClick={() => { void onShake?.('images'); }}
                     className="mt-2 block w-full border border-[var(--gs-border)] px-2 py-1.5 text-left disabled:cursor-not-allowed disabled:opacity-50 hover:border-[var(--gs-border-active)] hover:bg-[var(--gs-bg)]"
                   >
                     <span className="block font-[family-name:var(--gs-font-mono)] text-[10px] text-[var(--gs-text)]">Drop images</span>
                     <span className="mt-0.5 block text-[10px] leading-relaxed text-[var(--gs-text-dim)]">Permanently remove image blocks from this active branch.</span>
                   </button>
+                  {compactError ? (
+                    <div className="mt-2 border-l-2 border-[var(--gs-danger)] bg-[var(--gs-bg)] px-2 py-1.5 text-[10px] text-[var(--gs-danger)]">
+                      {compactError}
+                    </div>
+                  ) : null}
+                  {compactResult?.ran ? (
+                    <div className="mt-2 border border-[var(--gs-success)] px-2 py-1.5 text-[10px] text-[var(--gs-text)]">
+                      Context compacted successfully.
+                    </div>
+                  ) : null}
+                  {onCompact ? (
+                    <button
+                      type="button"
+                      disabled={compactPending || shakePending}
+                      onClick={() => { void onCompact(); }}
+                      className="mt-2 block w-full border border-[var(--gs-border)] px-2 py-1.5 text-left disabled:cursor-not-allowed disabled:opacity-50 hover:border-[var(--gs-border-active)] hover:bg-[var(--gs-bg)]"
+                    >
+                      <span className="block font-[family-name:var(--gs-font-mono)] text-[10px] text-[var(--gs-text)]">Compact now</span>
+                      <span className="mt-0.5 block text-[10px] leading-relaxed text-[var(--gs-text-dim)]">Summarize this session context to make room for the next turn.</span>
+                    </button>
+                  ) : null}
+                  {compactPending ? <div className="mt-2 font-[family-name:var(--gs-font-mono)] text-[10px] text-[var(--gs-accent)]">Compacting…</div> : null}
                   {shakePending ? <div className="mt-2 font-[family-name:var(--gs-font-mono)] text-[10px] text-[var(--gs-accent)]">Shaking context…</div> : null}
                 </div>
               </>

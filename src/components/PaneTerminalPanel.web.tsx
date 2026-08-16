@@ -12,7 +12,7 @@ import { AgentSettingsPanel } from './AgentSettingsPanel.web.js';
 import { AgentHistoryPanel } from './AgentHistoryPanel.web.js';
 import type { Block } from '../blocks/index.js';
 import { messageData } from '../blocks/types/transcript.js';
-import type { AgentAuthProvider, AgentControlInfo, AgentDefinitionInfo, AgentGoalModeInfo, AgentHistoryEntry, AgentModelInfo, AgentOAuthEvent, AgentSettingSchemaItem, AgentShakeMode, AgentShakeResult, AgentToolInfo, AgentTreeNode, SessionStatus } from '../agents/agent-runtime-types.js';
+import type { AgentAuthProvider, AgentCompactResult, AgentControlInfo, AgentDefinitionInfo, AgentGoalModeInfo, AgentHistoryEntry, AgentModelInfo, AgentOAuthEvent, AgentSettingSchemaItem, AgentShakeMode, AgentShakeResult, AgentToolInfo, AgentTreeNode, SessionStatus } from '../agents/agent-runtime-types.js';
 import type { AttachedPaneState } from '../session/types.js';
 import type { BackendKey } from '../session/backend.js';
 import type { RemoteSessionPtyBackend } from '../session/useRemoteSessionClient.js';
@@ -446,11 +446,6 @@ export function PaneTerminalPanel({
     loadSettingsPanel();
     refreshControl();
   }, [backend, loadSettingsPanel, refreshControl]);
-  const handleCompact = useCallback(() => {
-    const fn = backend?.compactAgentSession;
-    if (!fn || !wsId || !agentSessionId) return;
-    void fn.call(backend, wsId, agentSessionId).then(() => refreshControl()).catch(() => undefined);
-  }, [backend, wsId, agentSessionId, refreshControl]);
   const handleCycleRole = useCallback(() => {
     const fn = backend?.cycleAgentRole;
     if (!fn || !wsId || !agentSessionId) return;
@@ -481,12 +476,42 @@ export function PaneTerminalPanel({
     ? `${backendKey ?? backend?.descriptor.key ?? 'unknown'}:${wsId}:${agentSessionId}`
     : null;
   const shakeSessionKeyRef = useRef<string | null>(null);
+  const [compactResult, setCompactResult] = useState<AgentCompactResult | undefined>(undefined);
+  const [compactError, setCompactError] = useState<string | null>(null);
+  const [compactPending, setCompactPending] = useState(false);
   useEffect(() => {
     shakeSessionKeyRef.current = shakeSessionKey;
     setShakeResult(undefined);
     setShakeError(null);
     setShakePending(false);
+    setCompactResult(undefined);
+    setCompactError(null);
+    setCompactPending(false);
   }, [shakeSessionKey]);
+  const handleCompact = useCallback(async () => {
+    if (!shakeSessionKey || shakeSessionKeyRef.current !== shakeSessionKey) return;
+    const fn = backend?.compactAgentSession;
+    if (!fn) {
+      setCompactError('Compaction is not supported by this backend.');
+      return;
+    }
+    setCompactPending(true);
+    setCompactError(null);
+    setCompactResult(undefined);
+    try {
+      const result = await fn.call(backend, wsId!, agentSessionId!);
+      if (shakeSessionKeyRef.current !== shakeSessionKey) return;
+      setCompactResult(result);
+      if (result.ran) setTranscriptRefresh((n) => n + 1);
+      refreshControl();
+    } catch (error) {
+      if (shakeSessionKeyRef.current === shakeSessionKey) {
+        setCompactError(error instanceof Error ? error.message : 'Could not compact this session context.');
+      }
+    } finally {
+      if (shakeSessionKeyRef.current === shakeSessionKey) setCompactPending(false);
+    }
+  }, [backend, wsId, agentSessionId, refreshControl, shakeSessionKey]);
   const handleShake = useCallback(async (mode: AgentShakeMode) => {
     if (!shakeSessionKey || shakeSessionKeyRef.current !== shakeSessionKey) return;
     const fn = backend?.shakeAgentSession;
@@ -573,8 +598,8 @@ export function PaneTerminalPanel({
   // Agent panes show the native block transcript (replacing the xterm view);
   // shell panes keep the terminal.
   const isAgentPane = !!(pane.agentSessionId && pane.workspaceId);
-
   return (
+
     <div className="h-full min-h-0 flex flex-col overflow-hidden">
       {isAgentPane ? (
         <>
@@ -600,6 +625,10 @@ export function PaneTerminalPanel({
             shakePending={shakePending}
             shakeError={shakeError}
             onShake={pane.viewOnly ? undefined : handleShake}
+            compactResult={compactResult}
+            compactPending={compactPending}
+            compactError={compactError}
+            onCompact={pane.viewOnly ? undefined : handleCompact}
           />
           <div className="flex-1 min-h-0 bg-[var(--gs-bg)]">
             <AgentTranscript
