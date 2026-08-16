@@ -83,7 +83,77 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function ensureManagedPiConfigDefaults(agentDir: string): void {
+/**
+ * GitSpace's opinionated defaults for a managed Pi config, as dotted paths.
+ *
+ * These are SEEDS, not policy: each one is written only when the user has not
+ * set it (see {@link seedIfUnset}). Enforcing them on every start would stomp
+ * whatever the settings panel wrote, which is worse than having no defaults.
+ *
+ * Deliberately absent: thinking level, model roles, `cycleOrder`'s siblings,
+ * and provider tiers. Those are an operator's own account preferences, not a
+ * product default we should be choosing on anyone's behalf.
+ */
+const MANAGED_PI_DEFAULTS: ReadonlyArray<readonly [path: string, value: unknown]> = [
+  ['contextPromotion.enabled', false],
+  // Model quick-cycle starts on the DEFAULT model, not smol — OMP's baked
+  // order is [smol, default, slow], which makes the first ⟲ press downgrade.
+  ['cycleOrder', ['default', 'smol', 'slow']],
+  // Inject the SDK's report-issue device so agents can report unexpected tool
+  // behavior; GitSpace routes those invocations into its own report-a-problem
+  // pipeline (origin 'agent'; see problem-report.ts).
+  ['dev.autoqa', true],
+  // ...but OMP's OWN upstream push (qa.omp.sh) stays off. Denial suppresses
+  // recording, never injection (see isAutoQaEnabled), so our interception is
+  // unaffected. Stated explicitly rather than relying on the implicit
+  // default-deny that headless hosts get from registering no consent handler.
+  ['dev.autoqaConsent', 'denied'],
+  ['ttsr.repeatMode', 'after-gap'],
+  ['compaction.strategy', 'context-full'],
+  ['display.shimmer', 'disabled'],
+  ['astGrep.enabled', true],
+  // Capability switches, on deliberately: an agent that cannot reach GitHub is
+  // crippled in a GitHub product.
+  ['generate_image.enabled', true],
+  ['checkpoint.enabled', true],
+  ['github.enabled', true],
+  ['todo.remindersMax', 1],
+  ['task.isolation.commits', 'ai'],
+  ['memory.backend', 'mnemopi'],
+];
+
+/** Whether two values are the same JSON shape — the test for "already set". */
+function sameShape(a: unknown, b: unknown): boolean {
+  if (Array.isArray(b)) return Array.isArray(a);
+  return typeof a === typeof b && !Array.isArray(a);
+}
+
+/**
+ * Write `value` at a dotted `path` when nothing of that shape is there yet.
+ * Returns whether it wrote. A value of the wrong shape counts as unset, so a
+ * hand-corrupted config repairs itself instead of failing downstream.
+ */
+function seedIfUnset(settings: Record<string, unknown>, path: string, value: unknown): boolean {
+  const keys = path.split('.');
+  const leaf = keys.pop();
+  if (leaf === undefined) return false;
+  let node = settings;
+  for (const key of keys) {
+    const next = node[key];
+    if (!isRecord(next)) {
+      const created: Record<string, unknown> = {};
+      node[key] = created;
+      node = created;
+      continue;
+    }
+    node = next;
+  }
+  if (sameShape(node[leaf], value)) return false;
+  node[leaf] = value;
+  return true;
+}
+
+export function ensureManagedPiConfigDefaults(agentDir: string): void {
   const configPath = join(agentDir, 'config.yml');
   let settings: Record<string, unknown> = {};
 
@@ -102,34 +172,8 @@ function ensureManagedPiConfigDefaults(agentDir: string): void {
 
   // Each default applies independently — only when the user hasn't set it.
   let changed = false;
-
-  const contextPromotion = isRecord(settings.contextPromotion)
-    ? { ...settings.contextPromotion }
-    : {};
-  if (typeof contextPromotion.enabled !== 'boolean') {
-    contextPromotion.enabled = false;
-    settings.contextPromotion = contextPromotion;
-    changed = true;
-  }
-
-  // Model quick-cycle starts on the DEFAULT model, not smol — OMP's baked
-  // order is [smol, default, slow], which makes the first ⟲ press downgrade.
-  if (!Array.isArray(settings.cycleOrder)) {
-    settings.cycleOrder = ['default', 'smol', 'slow'];
-    changed = true;
-  }
-
-  // Inject the SDK's report_tool_issue tool so agents can report unexpected
-  // tool behavior. GitSpace routes those invocations into its own
-  // report-a-problem pipeline (origin 'agent'; see problem-report.ts).
-  // The SDK's OWN upstream push (qa.omp.sh) stays off: it requires
-  // dev.autoqa.consent === 'granted', and headless GitSpace hosts register no
-  // consent handler, so the SDK's default-deny applies.
-  const dev = isRecord(settings.dev) ? { ...settings.dev } : {};
-  if (typeof dev.autoqa !== 'boolean') {
-    dev.autoqa = true;
-    settings.dev = dev;
-    changed = true;
+  for (const [path, value] of MANAGED_PI_DEFAULTS) {
+    if (seedIfUnset(settings, path, value)) changed = true;
   }
 
   if (!changed) return;
