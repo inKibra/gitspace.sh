@@ -169,6 +169,10 @@ function getNativeAddonFilename(target: TargetKey): string {
  * Generate a bootstrap module that embeds the pi-natives .node addon into the
  * compiled binary via Bun's `import ... with { type: "file" }` mechanism.
  *
+ * The addon lives in the per-platform package (@oh-my-pi/pi-natives-<target>);
+ * OMP 17 split it out of @oh-my-pi/pi-natives/native/, which is why the build
+ * stopped resolving it after the upgrade.
+ *
  * At runtime (inside a compiled binary), this module extracts the embedded .node
  * file to ~/.omp/natives/<version>/ before pi-natives initializes, so the loader
  * finds it on its first candidate check.
@@ -202,7 +206,7 @@ if (isCompiled) {
   // to embed the .node binary as an asset and return its extracted path at
   // runtime. This import MUST stay inside the isCompiled guard because in dev
   // mode Bun cannot ESM-import a Node-API .node file.
-  const { default: addonPath } = await import("../node_modules/@oh-my-pi/pi-natives/native/${filename}");
+  const { default: addonPath } = await import("../node_modules/@oh-my-pi/pi-natives-${target}/${filename}");
   const dir = join(os.homedir(), ".omp", "natives", "${version}");
   const target = join(dir, "${filename}");
   if (!existsSync(target)) {
@@ -234,6 +238,11 @@ async function compile(target?: TargetKey) {
     "bun", "build",
     "--compile",
     "--minify",
+    // OMP's legacy-pi-compat conditionally imports a package that is not
+    // installed and is not meant to be; it cannot be bundled. External keeps
+    // the dynamic import unresolved at runtime, which is the state the legacy
+    // path already expects.
+    "--external", "omp-legacy-pi-modules",
     `--outfile=${outFile}`,
     targetFlag,
     join(ROOT, "src/index.ts"),
