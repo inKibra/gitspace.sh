@@ -20,7 +20,7 @@
     "test": "bun scripts/gen-version.ts && bun scripts/gen-cloud-bootstrap.ts && bun scripts/test-isolated.ts src",
     "test:fast": "bun test",
     "lint": "eslint src/",
-    "build:web": "cd web && bun install && bun run build",
+    "build:web": "bun scripts/gen-version.ts && cd web && bun install && bun run build",
     "build": "bun scripts/build.ts",
     "build:all": "bun scripts/build.ts --all",
     "build:npm": "bun scripts/build.ts --npm",
