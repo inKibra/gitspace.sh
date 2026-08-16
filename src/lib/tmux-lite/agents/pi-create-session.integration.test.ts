@@ -155,6 +155,11 @@ describe('Pi session creation integration', () => {
     expect(result?.targetCount).toBeGreaterThan(0);
     expect(result?.currentCount).toBe(0);
     expect(result?.targetSessionIds).toEqual((result?.created as Array<{ id: string }>).map((session) => session.id));
-    expect(result?.targetTitles).toEqual(['integration pi session']);
+    // Pi owns session naming (see LocalSessionHost.boot): the string passed to
+    // createAgentSession is a display label, not a stored name, so the session
+    // file carries no title until Pi's own generator produces one. A title here
+    // would mean boot-time naming crept back — and Pi's generator only runs
+    // when no name is set, so it would then never fire.
+    expect(result?.targetTitles).toEqual([null]);
   });
 });
