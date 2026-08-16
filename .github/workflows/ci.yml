@@ -68,6 +68,13 @@ jobs:
       - name: Install
         run: bun install --frozen-lockfile
 
+      # cloudflared is a real runtime dependency, not a test fixture: `machine
+      # serve start` launches a tunnel through it, and three suites
+      # (cloud-launch, hosting/supervisor, web.integration) drive that path.
+      # Developers have it via Homebrew, so its absence only ever showed up here.
+      - name: Install cloudflared
+        run: brew install cloudflared
+
       # scripts/test-isolated.ts runs each file in its own process: mock.module
       # is process-global and mock.restore() does not undo it, so a bare
       # `bun test` is not a trustworthy signal.

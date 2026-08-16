@@ -109,11 +109,29 @@ describe('analyzeReviewDiff', () => {
   });
 });
 
+/**
+ * Smoke test over THIS repository's real diff. It needs the base ref to exist,
+ * which a shallow CI checkout does not provide — and deepening the clone just
+ * to satisfy it would buy a test whose thresholds (>100 files) describe the
+ * current branch rather than any contract, so it would break the moment this
+ * merges. It runs where the ref is there, and declares itself skipped where it
+ * is not, rather than failing on an absent precondition.
+ */
+function baseRefExists(ref: string): boolean {
+  try {
+    execFileSync('git', ['rev-parse', '--verify', `${ref}^{commit}`], { cwd: process.cwd(), stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 describe('smoke: this repository', () => {
-  it('analyzes the real multi-pane diff with full coverage in bounded time', () => {
+  const BASE = 'develop';
+  it.skipIf(!baseRefExists(BASE))('analyzes the real multi-pane diff with full coverage in bounded time', () => {
     const here = process.cwd();
     const started = Date.now();
-    const analysis = analyzeReviewDiff(here, 'develop');
+    const analysis = analyzeReviewDiff(here, BASE);
     const elapsed = Date.now() - started;
     expect(analysis.covered).toBe(true);
     expect(analysis.files.length).toBeGreaterThan(100);
