@@ -26,6 +26,12 @@ function makePlan(overrides: Partial<BundleRefreshPlan> = {}): BundleRefreshPlan
   }
 }
 
+
+function makeBundleRefreshRequiredError(): Error & { code?: string } {
+  const error = new Error('refresh required') as Error & { code?: string }
+  error.code = 'BUNDLE_REFRESH_REQUIRED'
+  return error
+}
 describe('useBundleRefreshAttachFlow', () => {
   it('does not silently retry attach when plan reports no changes', async () => {
     const confirmCalls: Array<any> = []
@@ -47,6 +53,7 @@ describe('useBundleRefreshAttachFlow', () => {
           showConfirm: (opts) => {
             confirmCalls.push(opts)
           },
+          showSelect: () => {},
           showWizard: () => {},
           close: () => {},
         },
@@ -77,6 +84,41 @@ describe('useBundleRefreshAttachFlow', () => {
     expect(result.current.recoverableParams).toMatchObject({
       workspaceId: TEST_REF.workspaceId,
     })
+  })
+
+  it('bypasses bundle refresh prompts for existing session attaches with workspace scope', async () => {
+    const attachSession = mock(async () => {
+      throw makeBundleRefreshRequiredError()
+    })
+    const getPlan = mock(async () => makePlan())
+    const showSelect = mock(() => {})
+
+    const { result } = renderHook(() =>
+      useBundleRefreshAttachFlow({
+        flow: {
+          showLoading: () => {},
+          showMessage: () => {},
+          showConfirm: () => {},
+          showSelect,
+          showWizard: () => {},
+          close: () => {},
+        },
+        commandError: null,
+        attachSession,
+        getBundleRefreshPlan: getPlan,
+        applyBundleRefresh: async () => {},
+      })
+    )
+
+    await expect(result.current.attachSessionWithBundleRefresh(TEST_REF, {
+      sessionId: 'existing-session',
+      workspaceId: TEST_REF.workspaceId,
+    })).rejects.toThrow('refresh required')
+
+    expect(attachSession).toHaveBeenCalledTimes(1)
+    expect(getPlan).not.toHaveBeenCalled()
+    expect(showSelect).not.toHaveBeenCalled()
+    expect(result.current.recoverableParams).toBeNull()
   })
 
   it('applies refresh plan and retries attach after confirmation', async () => {
@@ -119,8 +161,9 @@ describe('useBundleRefreshAttachFlow', () => {
         flow: {
           showLoading: () => {},
           showMessage: () => {},
-          showConfirm: (opts) => {
-            void opts.onConfirm()
+          showConfirm: () => {},
+          showSelect: (opts) => {
+            void opts.onSelect(opts.options[0]!.value, 0)
           },
           showWizard: (opts) => {
             void opts.onComplete({ 'region-step': 'us-east-1' })
@@ -177,8 +220,9 @@ describe('useBundleRefreshAttachFlow', () => {
         flow: {
           showLoading: () => {},
           showMessage: () => {},
-          showConfirm: (opts) => {
-            void opts.onConfirm()
+          showConfirm: () => {},
+          showSelect: (opts) => {
+            void opts.onSelect(opts.options[0]!.value, 0)
           },
           showWizard: (opts) => {
             const validation = opts.steps[0]?.validation
@@ -243,8 +287,9 @@ describe('useBundleRefreshAttachFlow', () => {
         flow: {
           showLoading: () => {},
           showMessage: () => {},
-          showConfirm: (opts) => {
-            void opts.onConfirm()
+          showConfirm: () => {},
+          showSelect: (opts) => {
+            void opts.onSelect(opts.options[0]!.value, 0)
           },
           showWizard: (opts) => {
             void opts.onComplete({ 'token-step': '   ' })
@@ -309,8 +354,9 @@ describe('useBundleRefreshAttachFlow', () => {
         flow: {
           showLoading: () => {},
           showMessage: () => {},
-          showConfirm: (opts) => {
-            void opts.onConfirm()
+          showConfirm: () => {},
+          showSelect: (opts) => {
+            void opts.onSelect(opts.options[0]!.value, 0)
           },
           showWizard: (opts) => {
             void opts.onComplete({ 'pulumi-secret': 'token-value' })
@@ -334,6 +380,125 @@ describe('useBundleRefreshAttachFlow', () => {
     expect(applySubmissionCalls[0]?.secretValues).toEqual({ PULUMI_ACCESS_TOKEN: 'token-value' })
   })
 
+  it('attaches anyway from the bundle refresh prompt by skipping scripts', async () => {
+    const attachParamsSeen: Array<{ scriptPolicy?: 'auto' | 'skip' }> = []
+    const attachSession = mock(async (params: { scriptPolicy?: 'auto' | 'skip' }) => {
+      attachParamsSeen.push({ scriptPolicy: params.scriptPolicy })
+      if (!params.scriptPolicy || params.scriptPolicy === 'auto') {
+        const error = new Error('refresh required') as Error & { code?: string }
+        error.code = 'BUNDLE_REFRESH_REQUIRED'
+        throw error
+      }
+    })
+    const applyBundleRefresh = mock(async () => {})
+    const getPlan = mock(async () =>
+      makePlan({
+        hasChanged: false,
+        details: 'Missing required secrets: PULUMI_ACCESS_TOKEN.',
+        steps: [
+          {
+            id: 'pulumi-secret',
+            type: 'secret',
+            title: 'Pulumi token',
+            description: 'Required token',
+            configKey: 'PULUMI_ACCESS_TOKEN',
+            required: true,
+          },
+        ],
+      })
+    )
+
+    const { result } = renderHook(() =>
+      useBundleRefreshAttachFlow({
+        flow: {
+          showLoading: () => {},
+          showMessage: () => {},
+          showConfirm: () => {},
+          showSelect: (opts) => {
+            void opts.onSelect(opts.options[1]!.value, 1)
+          },
+          showWizard: () => {},
+          close: () => {},
+        },
+        commandError: null,
+        attachSession,
+        getBundleRefreshPlan: getPlan,
+        applyBundleRefresh,
+      })
+    )
+
+    let attached = false
+    await act(async () => {
+      attached = await result.current.attachSessionWithBundleRefresh(TEST_REF, {
+        workspaceId: TEST_REF.workspaceId,
+        scriptPolicy: 'auto',
+      })
+    })
+
+    expect(attached).toBe(true)
+    expect(attachParamsSeen).toEqual([{ scriptPolicy: 'auto' }, { scriptPolicy: 'skip' }])
+    expect(applyBundleRefresh).not.toHaveBeenCalled()
+    expect(result.current.recoverableParams).toBeNull()
+  })
+
+  it('cancels from the bundle refresh prompt and keeps attach-anyway recovery params', async () => {
+    const attachSession = mock(async () => {
+      const error = new Error('refresh required') as Error & { code?: string }
+      error.code = 'BUNDLE_REFRESH_REQUIRED'
+      throw error
+    })
+    const applyBundleRefresh = mock(async () => {})
+    const getPlan = mock(async () =>
+      makePlan({
+        hasChanged: false,
+        details: 'Missing required secrets: PULUMI_ACCESS_TOKEN.',
+        steps: [
+          {
+            id: 'pulumi-secret',
+            type: 'secret',
+            title: 'Pulumi token',
+            description: 'Required token',
+            configKey: 'PULUMI_ACCESS_TOKEN',
+            required: true,
+          },
+        ],
+      })
+    )
+
+    const { result } = renderHook(() =>
+      useBundleRefreshAttachFlow({
+        flow: {
+          showLoading: () => {},
+          showMessage: () => {},
+          showConfirm: () => {},
+          showSelect: (opts) => {
+            opts.onCancel?.()
+          },
+          showWizard: () => {},
+          close: () => {},
+        },
+        commandError: null,
+        attachSession,
+        getBundleRefreshPlan: getPlan,
+        applyBundleRefresh,
+      })
+    )
+
+    let attached = true
+    await act(async () => {
+      attached = await result.current.attachSessionWithBundleRefresh(TEST_REF, {
+        workspaceId: TEST_REF.workspaceId,
+      })
+    })
+
+    expect(attached).toBe(false)
+    expect(attachSession).toHaveBeenCalledTimes(1)
+    expect(applyBundleRefresh).not.toHaveBeenCalled()
+    expect(result.current.recoverableParams).toMatchObject({
+      workspaceId: TEST_REF.workspaceId,
+    })
+  })
+
   it('bypasses bundle refresh handling when retrying with scriptPolicy skip', async () => {
     const showMessage = mock(() => {})
     const showConfirm = mock(() => {})
@@ -345,6 +510,7 @@ describe('useBundleRefreshAttachFlow', () => {
           showLoading: () => {},
           showMessage,
           showConfirm,
+          showSelect: () => {},
           showWizard: () => {},
           close: () => {},
         },
@@ -393,6 +559,7 @@ describe('useBundleRefreshAttachFlow', () => {
             messageCalls.push(opts)
           },
           showConfirm: () => {},
+          showSelect: () => {},
           showWizard: () => {},
           close: () => {},
         },
@@ -442,6 +609,7 @@ describe('useBundleRefreshAttachFlow', () => {
           showLoading: () => {},
           showMessage: () => {},
           showConfirm: () => {},
+          showSelect: () => {},
           showWizard: () => {},
           close: () => {},
         },
@@ -479,6 +647,7 @@ describe('useBundleRefreshAttachFlow', () => {
               messageCalls.push(opts)
             },
             showConfirm: () => {},
+            showSelect: () => {},
             showWizard: () => {},
             close: () => {},
           },

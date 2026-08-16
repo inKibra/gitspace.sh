@@ -1,5 +1,4 @@
 #!/usr/bin/env bun
-// @ts-nocheck - Uses Bun-specific APIs (Bun.Terminal, etc.)
 /**
  * tmux-lite server - manages all sessions in a single process
  * Uses xterm-headless for proper terminal state tracking
@@ -11,10 +10,11 @@ import { Terminal as XTerminal } from "@xterm/headless";
 import { SerializeAddon } from "@xterm/addon-serialize";
 import { createBufferedSocketWriter } from "../../utils/bun-socket-writer";
 import { installDsrCprResponder } from "./terminal-queries";
-import { VirtualTerminal } from './agents/virtual-terminal.js';
-import { registerVirtualTerminal, removeVirtualTerminal } from './virtual-session-registry.js';
-import { getNotificationConfig, updateNotificationConfig, type NotificationConfig } from "../../core/config.js";
-import { DEFAULT_NOTIFICATION_CONFIG } from "../../types/config.js";
+import { writeTraceLog } from '../../utils/trace-log.js';
+import { raiseFileDescriptorLimitAtBoot } from '../../utils/rlimit.js';
+import { getCodeVersion } from './code-version.js';
+import { getNotificationConfig, updateNotificationConfig } from "../../core/config.js";
+import { DEFAULT_NOTIFICATION_CONFIG, type NotificationConfig } from "../../types/config.js";
 import {
   applyTmuxLiteSandboxEnvironment,
   getRouterSocket,
@@ -45,10 +45,12 @@ import {
   updateReplayManifest,
   writeReplayCheckpoint,
 } from "./replay/store.js";
-import type { ReplayCheckpoint, ReplayEvent, ReplayManifest } from "./replay/types.js";
+import type { ReplayCheckpoint, ReplayEvent, ReplayEventInput, ReplayManifest } from "./replay/types.js";
 import { getReplayMarkdown, getReplaySnapshot, getReplayText } from "./replay/snapshot.js";
 import {
-  attachAgentSession as ensureAgentTerminalSession,
+  openAgentSession,
+  releaseAgentSessionLease,
+  releaseAgentSessionLeasesForOwner,
   archiveAgentSession,
   abortAgentSession,
   interruptAgentSession,
@@ -56,36 +58,85 @@ import {
   createAgentSession,
   ensureAgentControlInitialized,
   getAgentControlSnapshot,
+  shutdownAgentHosts,
   getKnownAgentSessions,
   listLiveAgentSessions,
   promptAgentSession,
+  removeQueuedAgentMessage,
   stageUploadFile,
-  rebindPiTerminalSessionOwnership,
-  releasePiTerminalSessionOwnership,
   respondToAgentPermission,
+  readAgentTranscriptRange,
+  getAgentControlInfo,
+  getAgentSessionUsageReport,
+  setAgentModel,
+  setAgentThinkingLevel,
+  getAgentGoalMode,
+  setAgentGoalMode,
+  shakeAgentSession,
+  setAgentApprovalMode,
+  getAgentAuthProviders,
+  removeAgentProviderAccount,
+  checkAgentProviderUsage,
+  setAgentProviderApiKey,
+  getAgentSettings,
+  setAgentSetting,
+  getAgentSettingsSchema,
+  getAgentTools,
+  listAgentDefinitions,
+  compactAgentSession,
+  cycleAgentRole,
+  applyAgentModelRole,
+  getAgentHistory,
+  getAgentSessionTree,
+  navigateAgentHistory,
+  startAgentOAuthLogin,
+  respondAgentOAuthPrompt,
   restoreAgentSession,
   subscribeAgentControl,
   syncKnownWorkspaces,
   markAgentSessionIdle,
   setAgentHostUIEmitter,
   resolveAgentDialogResponse,
+  getPendingAgentDialogs,
   listAgentCommands,
   getFileSuggestions,
 } from './agent-control.js';
+import { defaultAgentEventManager, type AgentStateUpdateDelta } from './agent-event-manager.js';
+import { listAvailableEditors, openWorkspaceInEditor } from '../../utils/open-editor.js';
 import { normalizeWorkspacePath } from '../../agents/agent-runtime-shared.js';
 import { getWorkspaceRuntimeSnapshot } from './workspace-runtime.js';
-import { setWorkspaceStatus } from '../../core/workspace-metadata.js';
-import { buildMachineSnapshot } from './machine/build.js';
-import type { MachineSnapshot } from './machine/protocol.js';
-import { subscribeWorkspacePmUpdates } from './machine/pm-links.js';
+import { setInProcessSessionSource } from '../processes/ports.js';
+import { addWorkspaceNote, listWorkspaceNotes, removeWorkspaceNote, updateWorkspaceNote } from '../../core/workspace-metadata.js';
+import { addGoalNearWorkspace, addPlannedGoalToChain, applyWorkspaceGoalPhaseChange, getGoalRecord, findGoalRecord, listGoalChainSummaries, moveGoalInChain, previewWorkspaceGoalPhaseChange, resolveGoalDocBody, updateGoalRecord } from '../../core/goal-chain.js';
+import { computeReadiness } from '../../app/shared/goal-validation/readiness.js';
+import { getSpaceStackStatus } from '../../commands/space-goals.js';
+import { compactBloatedGoalRecordsOnDisk } from '../../core/goal-chain.js';
+import { buildMachineSnapshot, buildGoalRecordsForProject } from './machine/build.js';
+import type { MachineEvent, MachineSnapshot } from './machine/protocol.js';
+import { applyMachineEventToSnapshot } from './machine/snapshot-patch.js';
+import {
+  computeAgentWorkspaceDeltaEvents,
+  computePmDeltaEvents,
+  computeProjectGoalsDeltaEvents,
+  computeTerminalDeltaEvents,
+} from './machine/live-model.js';
+import { subscribeWorkspacePmUpdates, getWorkspacePmSnapshot } from './machine/pm-links.js';
+import { suppressGoalChangeNotify } from '../../core/goal-notify.js';
 import { scanWorkspaces } from '../remote-session/workspace-scanner.js';
+import { startTriggerScheduler } from './trigger-scheduler.js';
+import { setCommandDispatcher } from './command-dispatch.js';
+import { deliverDialogRequest, isDialogResponseAuthorized } from './agent-dialog-delivery.js';
+import { formatArtifactUri, mintArtifactCap, verifyArtifactCap, capAllows, parseArtifactUri } from '../../core/artifact-cap.js';
+import { triggerWriteScopes as triggerWriteScopesSync } from '../../core/triggers.js';
+import { getOrCreateArtifactCapKeypair } from '../../core/artifact-cap-key.js';
 import { matchesWorkspaceId, toCanonicalWorkspaceId } from '../../utils/workspace-id.js';
 import { getProcessSpecs, startProcessInstance, stopProcessInstance } from '../processes/manager.js';
 import { signalSubprocessTree } from './process-tree.js';
-import { PortConflictError } from '../processes/ports.js';
+import { PortConflictError } from '../processes/port-conflicts.js';
 import { attachWorkspaceSession } from '../../session/attach-workspace-session.js';
 import { prepareWorkspaceForSession } from '../../core/workspace-lifecycle.js';
-import { executeLocalReviewOperation } from '../../core/review-executor.js';
+import type { executeLocalReviewOperation } from '../../core/review-executor.js';
+import { runOffloaded, shutdownOffloadWorker } from './offload/offload-client.js';
 import { readWorkspaceSnapshots, readWideEvents } from '../events/reader.js';
 import { loadSavedEventFilters } from '../events/filters.js';
 import { listProcessEventsDirs, resolveWorkspaceRef } from '../events/paths.js';
@@ -102,6 +153,9 @@ import {
   deleteProjectForSession,
 } from '../../core/session-lifecycle.js';
 import { deleteWorkspaceCore } from '../../core/workspace.js';
+// Static, not `await import`: this module is leaf-level (fs + path only), so it
+// adds no cycle risk the deferred imports around it exist to avoid.
+import { inspectArtifactsMount, describeMountIntegrity } from '../../core/artifacts-mount-integrity.js';
 import {
   getBundleRefreshPlan as getBundleRefreshPlanCore,
   applyBundleRefreshSubmission,
@@ -122,14 +176,34 @@ if (rawArgs.includes("--test")) {
   applyTmuxLiteSandboxEnvironment("test", { preserveExplicit: true });
 }
 
+// Raise the open-fd limit before we start spawning PTYs, agent workers, and
+// their bash-tool children. The raised soft limit is inherited by every child
+// we fork, so this one call protects the whole session tree. Best-effort.
+raiseFileDescriptorLimitAtBoot("tmux-lite-daemon");
+
 const ROUTER_SOCKET = getRouterSocket();
 const PID_FILE = getPidFile();
 const SERVER_START_TIME = Date.now();
+// Frozen at boot: the code identity this daemon is actually running. The CLI
+// compares it against the current value to recycle a daemon on stale code.
+const BOOT_CODE_VERSION = getCodeVersion();
 const RECORD_REPLAY_INPUT = process.env.TMUX_LITE_REPLAY_RECORD_INPUT === "1";
 const REPLAY_CHECKPOINT_MIN_INTERVAL_MS = 2000;
 const REPLAY_CHECKPOINT_BYTE_INTERVAL = 128 * 1024;
 const REPLAY_CHECKPOINT_OUTPUT_EVENT_INTERVAL = 256;
 const pendingAttachControllers = new Map<string, AbortController>();
+const DEFAULT_TERMINATION_GRACE_MS = 5000;
+const MAX_TERMINATION_GRACE_MS = 8000;
+
+type TerminationMode = "graceful" | "force";
+
+interface TerminationState {
+  promise: Promise<void>;
+  resolve: () => void;
+  timer: ReturnType<typeof setTimeout> | null;
+  force: boolean;
+}
+
 
 // Load notification config (with fallback to defaults)
 let notificationConfig: NotificationConfig;
@@ -197,7 +271,6 @@ interface SessionData {
   serialize: SerializeAddon;
   idleState: IdleDetectionState;
   proc: Bun.Subprocess | null;
-  virtualTerminal: VirtualTerminal | null;
   client: any;
   clientWriter: any;
   ctrlBuffer: Buffer;
@@ -217,6 +290,8 @@ interface SessionData {
   lastAttached: number;  // Timestamp of last attach (for grace period)
   replay: ReplayRuntime | null;
   replayCheckpointPending: boolean;
+  cleanupComplete: boolean;
+  termination: TerminationState | null;
 }
 
 const sessions = new Map<string, SessionData>();
@@ -224,6 +299,18 @@ const inbox: InboxItem[] = [];
 let routerListener: any = null;
 let shuttingDown = false;
 let machineSnapshotNonce = 0;
+/** Live in-memory machine model (ticket #3). Mutation sites apply scoped
+ *  deltas to this model and stream them to watchers; the full rebuild is
+ *  demoted to connect/resync + a slow reconciliation cadence. */
+let liveMachineSnapshot: MachineSnapshot | null = null;
+/** Runtime workspace records captured by the last full build — reused by the
+ *  scoped PM update (fingerprints for the pm cache) without re-scanning. */
+let lastWorkspaceRuntimeRecords: import('./protocol.js').WorkspaceRuntimeRecord[] = [];
+let machineSnapshotBuildsInFlight = 0;
+
+// The daemon's own goal writes are already covered by scoped updates in the
+// command handlers — don't loop a goal-changed notify back to ourselves.
+suppressGoalChangeNotify();
 
 function stopListener(listener: any): void {
   if (!listener || typeof listener.stop !== "function") {
@@ -283,18 +370,48 @@ interface RouterSocketState {
   writer: any;
   watchesAgentState: boolean;
   watchesMachineState: boolean;
+  /** Stable id for this connection: the default lease owner for agent panes
+   *  opened over this socket. */
+  leaseOwnerId: string;
+  /** Every lease owner seen on this socket (its own id, plus any explicit
+   *  owner a caller supplied) so a disconnect releases all of them. */
+  leaseOwners: Set<string>;
 }
+
+let routerSocketSeq = 0;
 
 const routerSocketStates = new WeakMap<object, RouterSocketState>();
 const agentStateWatchers = new Set<object>();
 const machineStateWatchers = new Set<object>();
-const agentSessionWatchOwners = new Map<string, object>();
+let traceLastTick = Date.now();
+if (process.env.GITSPACE_TRACE?.trim()) {
+  setInterval(() => {
+    const now = Date.now();
+    const lagMs = now - traceLastTick - 1000;
+    traceLastTick = now;
+    if (lagMs > 100) {
+      writeTraceLog('event-loop-lag', { lagMs });
+    }
+  }, 1000).unref?.();
+}
 const agentDialogOwners = new Map<string, object>();
+// Dialogs delivered over the agent-state watcher conduit (serve+relay app)
+// rather than to a single same-socket owner. Their response may arrive on any
+// command socket (the app answers over a fresh RPC), so they resolve by
+// dialogId regardless of the delivering socket. First valid response wins.
+const conduitDeliveredDialogs = new Set<string>();
 
 function getRouterSocketState(socket: object): RouterSocketState {
   let state = routerSocketStates.get(socket);
   if (!state) {
-    state = { buffer: Buffer.alloc(0), writer: null, watchesAgentState: false, watchesMachineState: false };
+    state = {
+      buffer: Buffer.alloc(0),
+      writer: null,
+      watchesAgentState: false,
+      watchesMachineState: false,
+      leaseOwnerId: `sock${++routerSocketSeq}`,
+      leaseOwners: new Set(),
+    };
     routerSocketStates.set(socket, state);
   }
   return state;
@@ -308,30 +425,72 @@ function deleteOwnedEntries(map: Map<string, object>, socket: object): void {
   }
 }
 
-function pickAgentDialogWatcher(sessionId: string): object | null {
-  const owner = agentSessionWatchOwners.get(sessionId);
-  if (!owner) {
-    return null;
-  }
-  if (agentStateWatchers.has(owner)) {
-    return owner;
-  }
-  agentSessionWatchOwners.delete(sessionId);
-  return null;
-}
-
 function clearRouterSocketState(socket: object): void {
   agentStateWatchers.delete(socket);
   machineStateWatchers.delete(socket);
-  deleteOwnedEntries(agentSessionWatchOwners, socket);
   deleteOwnedEntries(agentDialogOwners, socket);
+  const state = routerSocketStates.get(socket);
+  for (const owner of state?.leaseOwners ?? []) {
+    releaseAgentSessionLeasesForOwner(`${owner}:`);
+  }
   routerSocketStates.delete(socket);
+}
+
+/** Log a size breakdown for any oversized router response. Fires only for large
+ *  responses (rare), so it's safe to leave on: drilling into the single biggest
+ *  child at each level, it names the exact section → record → field that's fat
+ *  (e.g. `agentSessionsById → <id> → lastMessagePreview`). Ship these logs from a
+ *  machine that hits the size to pinpoint the producer. */
+const ROUTER_RESPONSE_WARN_BYTES = 8 * 1024 * 1024;
+function summarizeLargeRouterResponse(response: Response, totalBytes: number): string {
+  const type = (response as { type?: string }).type ?? 'unknown';
+  const lines = [`[router-size] LARGE response type=${type} total=${(totalBytes / 1024 / 1024).toFixed(2)}MB`];
+  const visit = (obj: unknown, path: string, depth: number): void => {
+    if (depth > 4 || !obj || typeof obj !== 'object') return;
+    const sized = Object.entries(obj as Record<string, unknown>)
+      .map(([k, v]) => [k, Buffer.byteLength(JSON.stringify(v ?? null))] as [string, number])
+      .filter(([, sz]) => sz > 128 * 1024)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 5);
+    for (const [k, sz] of sized) {
+      const child = (obj as Record<string, unknown>)[k];
+      const n = child && typeof child === 'object' ? Object.keys(child).length : undefined;
+      lines.push(`${'  '.repeat(depth + 1)}${path}${k}: ${(sz / 1024 / 1024).toFixed(2)}MB${n !== undefined ? ` (${n} entries)` : ''}`);
+    }
+    if (sized[0]) visit((obj as Record<string, unknown>)[sized[0][0]], `${path}${sized[0][0]}.`, depth + 1);
+  };
+  try { visit(response, '', 0); } catch { /* diagnostic must never throw */ }
+  return lines.join('\n');
 }
 
 function sendRouterResponse(socket: any, response: Response): void {
   const socketState = getRouterSocketState(socket);
-  if (socketState.writer) socketState.writer.write(encodeRouterMessage(response));
-  else socket.write(encodeRouterMessage(response));
+  let frame: Buffer;
+  try {
+    frame = encodeRouterMessage(response);
+    if (frame.length > ROUTER_RESPONSE_WARN_BYTES) {
+      console.error(summarizeLargeRouterResponse(response, frame.length));
+    }
+  } catch (err) {
+    // An oversize response (e.g. a huge machine snapshot exceeding
+    // MAX_ROUTER_MESSAGE_SIZE) must NEVER crash the daemon — encodeRouterMessage
+    // throws, and this runs inside the socket 'data' handler where an uncaught
+    // throw takes the whole process down (machine flips offline, clients see
+    // "Disconnected"). Degrade to a compact error the client can surface, and log
+    // a breakdown so the producer can be pinpointed from the daemon log.
+    const message = err instanceof Error ? err.message : String(err);
+    let approxBytes = 0;
+    try { approxBytes = Buffer.byteLength(JSON.stringify(response)); } catch { /* ignore */ }
+    console.error(`[tmux-lite] router response dropped (${(response as { type?: string }).type}): ${message}`);
+    console.error(summarizeLargeRouterResponse(response, approxBytes));
+    try {
+      frame = encodeRouterMessage({ type: 'error', message: `Response too large to send: ${message}` });
+    } catch {
+      return; // even the error frame failed — give up rather than crash
+    }
+  }
+  if (socketState.writer) socketState.writer.write(frame);
+  else socket.write(frame);
 }
 
 const MIN_TERMINAL_COLS = 20;
@@ -362,7 +521,14 @@ function clampTerminalSize(
   };
 }
 
-function broadcastAgentStateDelta(delta: import('./agent-event-manager.js').AgentStateUpdateDelta): void {
+function broadcastAgentStateDelta(delta: AgentStateUpdateDelta): void {
+  if (delta.type !== 'agent_last_message') {
+    writeTraceLog('agent-delta-broadcast', {
+      deltaType: delta.type,
+      agentWatchers: agentStateWatchers.size,
+      machineWatchers: machineStateWatchers.size,
+    });
+  }
   for (const socket of agentStateWatchers) {
     try {
       sendRouterResponse(socket, { type: 'agent-state-update', delta });
@@ -372,32 +538,117 @@ function broadcastAgentStateDelta(delta: import('./agent-event-manager.js').Agen
   }
 }
 
-async function buildCurrentMachineSnapshot(options: { bumpNonce?: boolean } = {}): Promise<MachineSnapshot> {
-  await syncKnownWorkspaces();
-  try {
-    await getAgentControlReady();
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    console.warn(`[server] machine snapshot proceeding without agent runtime: ${message}`);
+/**
+ * Route an agent delta to the cheapest machine-snapshot update that is still
+ * correct.
+ *
+ * Two variants carry no `workspaceId`, so they MUST NOT take the scoped path.
+ * Passing `undefined` through threw inside `computeAgentWorkspaceDeltaEvents`
+ * (`workspaceId.endsWith` on undefined), and `AgentEventManager.emit` swallows
+ * handler throws by design — so the machine snapshot silently went stale until
+ * the 5-minute reconcile timer.
+ */
+function applyMachineSnapshotForAgentDelta(
+  delta: AgentStateUpdateDelta,
+): void {
+  switch (delta.type) {
+    // Preview text only; nothing the machine snapshot renders moves.
+    case 'agent_last_message':
+      return;
+    // Transient sign-in flow state: global, and absent from the snapshot.
+    case 'agent_oauth_event':
+      return;
+    // Every workspace may have changed at once — a full rebuild is the only
+    // correct response, and it is what the scoped path was failing to do.
+    case 'agent_state_snapshot':
+      void broadcastMachineSnapshotReplacement().catch(() => {});
+      return;
+    // Scoped: rebuild only this workspace's agent records in the live model
+    // instead of the O(everything) full snapshot per delta.
+    default:
+      applyAgentScopedUpdate(delta.workspaceId);
   }
-  if (options.bumpNonce || machineSnapshotNonce === 0) {
-    machineSnapshotNonce += 1;
-  }
-  const workspaceSnapshot = await getWorkspaceRuntimeSnapshot({
-    sessions: Array.from(sessions.values()).map(getSessionInfo),
-    agentStateByWorkspaceId: getAgentControlSnapshot(),
-  });
-  return buildMachineSnapshot({
-    snapshotNonce: machineSnapshotNonce,
-    terminalSessions: Array.from(sessions.values()).map(getSessionInfo),
-    workspaces: workspaceSnapshot,
-    agentStateByWorkspaceId: getAgentControlSnapshot(),
-  });
 }
 
-async function broadcastMachineSnapshotReplacement(): Promise<void> {
+
+async function buildCurrentMachineSnapshot(): Promise<MachineSnapshot> {
+  const traceStartMs = Date.now();
+  machineSnapshotBuildsInFlight += 1;
+  try {
+    await syncKnownWorkspaces();
+    try {
+      await getAgentControlReady();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`[server] machine snapshot proceeding without agent runtime: ${message}`);
+    }
+    if (machineSnapshotNonce === 0) {
+      machineSnapshotNonce = 1;
+    }
+    writeTraceLog('machine-snapshot-build-start', {
+      nextNonce: machineSnapshotNonce,
+      sessions: sessions.size,
+      machineWatchers: machineStateWatchers.size,
+    });
+    const workspaceSnapshot = await getWorkspaceRuntimeSnapshot({
+      sessions: Array.from(sessions.values()).map(getSessionInfo),
+      agentStateByWorkspaceId: getAgentControlSnapshot(),
+    });
+    lastWorkspaceRuntimeRecords = workspaceSnapshot;
+    // Live "ask" dialogs (workspaceId -> sessionId -> dialogIds) read straight
+    // from the coordinator, so a session blocked on a user dialog shows amber.
+    const pendingDialogIdsByWorkspace: Record<string, Record<string, string[]>> = {};
+    for (const { workspaceId, sessionId, dialogId } of getPendingAgentDialogs()) {
+      const bySession = (pendingDialogIdsByWorkspace[workspaceId] ??= {});
+      (bySession[sessionId] ??= []).push(dialogId);
+    }
+    const snapshot = buildMachineSnapshot({
+      snapshotNonce: machineSnapshotNonce,
+      terminalSessions: Array.from(sessions.values()).map(getSessionInfo),
+      workspaces: workspaceSnapshot,
+      agentStateByWorkspaceId: getAgentControlSnapshot(),
+      pendingDialogIdsByWorkspace,
+    });
+    liveMachineSnapshot = snapshot;
+    writeTraceLog('machine-snapshot-build-end', {
+      snapshotNonce: snapshot.snapshotNonce,
+      durationMs: Date.now() - traceStartMs,
+      sessions: sessions.size,
+      workspaceCount: snapshot.workspaceOrder.length,
+      machineWatchers: machineStateWatchers.size,
+    });
+    return snapshot;
+  } finally {
+    machineSnapshotBuildsInFlight -= 1;
+  }
+}
+
+/** Serve the live model while watchers keep it maintained; rebuild when the
+ *  model is absent or could have gone stale (no watcher = structural changes
+ *  skip their full-rebuild broadcasts). */
+async function getCurrentMachineSnapshot(): Promise<MachineSnapshot> {
+  if (liveMachineSnapshot && machineStateWatchers.size > 0) return liveMachineSnapshot;
+  return buildCurrentMachineSnapshot();
+}
+
+let machineSnapshotBroadcastPromise: Promise<void> | null = null;
+let machineSnapshotBroadcastQueued = false;
+
+
+async function broadcastMachineSnapshotReplacementOnce(): Promise<void> {
+  const traceStartMs = Date.now();
   if (machineStateWatchers.size === 0) return;
-  const snapshot = await buildCurrentMachineSnapshot({ bumpNonce: true });
+  const snapshot = await buildCurrentMachineSnapshot();
+  // Stamp the nonce AFTER the build completes so it stays ahead of any
+  // scoped deltas emitted while the build was in flight.
+  machineSnapshotNonce += 1;
+  snapshot.snapshotNonce = machineSnapshotNonce;
+  liveMachineSnapshot = snapshot;
+  writeTraceLog('machine-snapshot-broadcast-start', {
+    snapshotNonce: snapshot.snapshotNonce,
+    buildAndQueueDelayMs: Date.now() - traceStartMs,
+    watchers: machineStateWatchers.size,
+  });
   for (const socket of machineStateWatchers) {
     try {
       sendRouterResponse(socket, {
@@ -412,7 +663,145 @@ async function broadcastMachineSnapshotReplacement(): Promise<void> {
       machineStateWatchers.delete(socket);
     }
   }
+  writeTraceLog('machine-snapshot-broadcast-end', {
+    snapshotNonce: snapshot.snapshotNonce,
+    durationMs: Date.now() - traceStartMs,
+    watchers: machineStateWatchers.size,
+  });
 }
+
+async function broadcastMachineSnapshotReplacement(): Promise<void> {
+  if (machineStateWatchers.size === 0) return;
+  if (machineSnapshotBroadcastPromise) {
+    machineSnapshotBroadcastQueued = true;
+    return machineSnapshotBroadcastPromise;
+  }
+  machineSnapshotBroadcastPromise = (async () => {
+    try {
+      do {
+        machineSnapshotBroadcastQueued = false;
+        await broadcastMachineSnapshotReplacementOnce();
+      } while (machineSnapshotBroadcastQueued && machineStateWatchers.size > 0);
+    } finally {
+      machineSnapshotBroadcastPromise = null;
+    }
+  })();
+  return machineSnapshotBroadcastPromise;
+}
+
+// ─── Scoped machine deltas (ticket #3) ──────────────────────────────────────
+
+/**
+ * Compute scoped delta events against the live model, stamp each with the
+ * next nonce, apply them to the model via the same transform clients use,
+ * and stream them to machine watchers.
+ *
+ * Falls back to the full-rebuild path when a rebuild is racing us (the
+ * rebuild re-reads all sources, so the mutation is captured either way).
+ */
+function emitScopedMachineEvents(compute: (snapshot: MachineSnapshot) => MachineEvent[]): void {
+  if (!liveMachineSnapshot) {
+    // No consumer has ever materialized the model — nothing to maintain.
+    return;
+  }
+  if (machineSnapshotBroadcastPromise || machineSnapshotBuildsInFlight > 0) {
+    machineSnapshotBroadcastQueued = true;
+    if (!machineSnapshotBroadcastPromise) {
+      void broadcastMachineSnapshotReplacement().catch(() => {});
+    }
+    return;
+  }
+  let events: MachineEvent[];
+  try {
+    events = compute(liveMachineSnapshot);
+  } catch (error) {
+    writeTraceLog('machine-delta-compute-error', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    void broadcastMachineSnapshotReplacement().catch(() => {});
+    return;
+  }
+  if (events.length === 0) return;
+
+  for (const event of events) {
+    machineSnapshotNonce += 1;
+    (event as { snapshotNonce: number }).snapshotNonce = machineSnapshotNonce;
+    liveMachineSnapshot = applyMachineEventToSnapshot(liveMachineSnapshot, event);
+  }
+  liveMachineSnapshot = { ...liveMachineSnapshot, snapshotNonce: machineSnapshotNonce };
+
+  if (machineStateWatchers.size === 0) return;
+  let deltaBytes = 0;
+  try {
+    deltaBytes = JSON.stringify(events).length;
+  } catch { /* trace-only */ }
+  writeTraceLog('machine-delta-broadcast', {
+    eventTypes: events.map((event) => event.type),
+    snapshotNonce: machineSnapshotNonce,
+    deltaBytes,
+    watchers: machineStateWatchers.size,
+  });
+  for (const socket of machineStateWatchers) {
+    try {
+      for (const event of events) {
+        sendRouterResponse(socket, { type: 'machine-event', event });
+      }
+    } catch {
+      machineStateWatchers.delete(socket);
+    }
+  }
+}
+
+/** One terminal session changed (created / exited / removed). */
+function applyTerminalScopedUpdate(sessionId: string): void {
+  emitScopedMachineEvents((snapshot) => {
+    const data = sessions.get(sessionId);
+    return computeTerminalDeltaEvents(snapshot, sessionId, data ? getSessionInfo(data) : null);
+  });
+}
+
+/** One workspace's agent-session state changed (agent-event-manager delta). */
+function applyAgentScopedUpdate(workspaceId: string): void {
+  // Fold this workspace's open ask-dialogs into the scoped delta exactly as the
+  // full snapshot build does — otherwise the delta rebuilds agent records with
+  // pendingQuestionCount=0 and clobbers the amber (permission-needed) on every
+  // agent-state change while a question is on screen.
+  const pendingDialogIdsBySession: Record<string, string[]> = {};
+  for (const { workspaceId: wid, sessionId, dialogId } of getPendingAgentDialogs()) {
+    if (wid !== workspaceId) continue;
+    (pendingDialogIdsBySession[sessionId] ??= []).push(dialogId);
+  }
+  emitScopedMachineEvents((snapshot) =>
+    computeAgentWorkspaceDeltaEvents(snapshot, workspaceId, getAgentControlSnapshot()[workspaceId], pendingDialogIdsBySession));
+}
+
+/** One project's goal state changed (goal command or CLI goal-changed notify). */
+function applyGoalScopedUpdate(projectName: string): void {
+  emitScopedMachineEvents((snapshot) =>
+    computeProjectGoalsDeltaEvents(snapshot, projectName, buildGoalRecordsForProject(projectName)));
+}
+
+/** PR/Linear sync state moved for some workspace(s). */
+function applyPmScopedUpdate(): void {
+  if (lastWorkspaceRuntimeRecords.length === 0) {
+    void broadcastMachineSnapshotReplacement().catch(() => {});
+    return;
+  }
+  emitScopedMachineEvents((snapshot) =>
+    computePmDeltaEvents(snapshot, getWorkspacePmSnapshot(lastWorkspaceRuntimeRecords)));
+}
+
+/** The full rebuild is demoted to a slow reconciliation cadence — it trues up
+ *  anything a scoped delta could not see and re-exercises the resync path. */
+const MACHINE_SNAPSHOT_RECONCILE_INTERVAL_MS = 5 * 60_000;
+const machineSnapshotReconcileTimer = setInterval(() => {
+  if (machineStateWatchers.size === 0) return;
+  writeTraceLog('machine-snapshot-reconcile', { watchers: machineStateWatchers.size });
+  void broadcastMachineSnapshotReplacement().catch(() => {});
+}, MACHINE_SNAPSHOT_RECONCILE_INTERVAL_MS);
+// The daemon's socket listeners own process lifetime — the reconcile cadence
+// must never be what keeps a process (e.g. a test import) alive.
+machineSnapshotReconcileTimer.unref?.();
 
 let agentControlSubscribed = false;
 let workspacePmSubscribed = false;
@@ -422,9 +811,7 @@ async function getAgentControlReady(): Promise<void> {
   if (!agentControlSubscribed) {
     subscribeAgentControl((delta) => {
       broadcastAgentStateDelta(delta);
-      void broadcastMachineSnapshotReplacement().catch(() => {
-        // non-fatal
-      });
+      applyMachineSnapshotForAgentDelta(delta);
     });
     agentControlSubscribed = true;
 
@@ -432,19 +819,25 @@ async function getAgentControlReady(): Promise<void> {
     // and UI events are broadcast to all watching clients.
     setAgentHostUIEmitter({
       emitDialogRequest(request) {
-        const socket = pickAgentDialogWatcher(request.sessionId);
-        if (!socket) {
-          throw new Error(`No watching client for session ${request.sessionId}`);
-        }
-        try {
-          agentDialogOwners.set(request.id, socket);
-          sendRouterResponse(socket, { type: 'agent-dialog-request', request });
-        } catch (error) {
-          agentDialogOwners.delete(request.id);
-          agentSessionWatchOwners.delete(request.sessionId);
-          clearRouterSocketState(socket);
-          throw error instanceof Error ? error : new Error(String(error));
-        }
+        // A new "ask" dialog now blocks this session on the user — rebuild the
+        // snapshot so the session flips amber promptly (the build reads the
+        // coordinator's live open-dialog set).
+        void broadcastMachineSnapshotReplacement().catch(() => {});
+        deliverDialogRequest(request, {
+          // Every dialog now rides the agent-state conduit: nothing binds a
+          // dialog to one command socket since agent panes hold leases, not
+          // sockets. Responses are authorized by dialogId from any socket.
+          pickSameSocketOwner: () => null,
+          watchers: () => agentStateWatchers,
+          send: (socket, req) => sendRouterResponse(socket, { type: 'agent-dialog-request', request: req }),
+          setOwner: (dialogId, socket) => agentDialogOwners.set(dialogId, socket),
+          markConduitDelivered: (dialogId) => conduitDeliveredDialogs.add(dialogId),
+          onSameSocketError: (socket, req) => {
+            agentDialogOwners.delete(req.id);
+            clearRouterSocketState(socket);
+          },
+          onWatcherError: (socket) => clearRouterSocketState(socket),
+        });
       },
       emitEvent(event) {
         for (const socket of agentStateWatchers) {
@@ -466,9 +859,7 @@ function ensureWorkspacePmSubscribed(): void {
     return;
   }
   subscribeWorkspacePmUpdates(() => {
-    void broadcastMachineSnapshotReplacement().catch(() => {
-      // non-fatal
-    });
+    applyPmScopedUpdate();
   });
   workspacePmSubscribed = true;
 }
@@ -480,10 +871,267 @@ async function resolveWorkspaceIdForRuntimePath(workspacePath: string): Promise<
   return match ? toCanonicalWorkspaceId(match) : null;
 }
 
+// Startup self-heal — run SYNCHRONOUSLY before agent-control init, the first
+// snapshot build, or any serve-activate is dispatched: a goal record bloated
+// with inline data-URI evidence (100+ MB) OOMs the daemon on snapshot/goal-detail
+// serialization and exceeds the client's frame reassembly cap. Stat-first, so a
+// healthy install pays only cheap stats; an oversized goal is backed up in full
+// and rewritten small in place. Best-effort — never blocks startup on failure.
+try {
+  const result = compactBloatedGoalRecordsOnDisk(Date.now());
+  if (result.compacted > 0) {
+    console.error(`[goal-compact] repaired ${result.compacted} bloated goal record(s), freed ~${(result.freedBytes / 1e6).toFixed(1)}MB`);
+    for (const line of result.details) console.error(`[goal-compact]   ${line}`);
+  } else {
+    for (const line of result.details) console.error(`[goal-compact] ${line}`);
+  }
+} catch (error) {
+  console.error(`[goal-compact] startup compaction failed: ${error instanceof Error ? error.message : String(error)}`);
+}
+
 void getAgentControlReady().catch((error) => {
   const message = error instanceof Error ? error.message : String(error);
   console.error(`[server] failed to initialize agent control: ${message}`);
 });
+
+// Artifacts auto-sync: every 5 minutes, projects with a configured remote
+// push branches + upload missing blobs (BYO = branches only). Single-writer
+// branches make this conflict-free; failures are quiet (offline is normal).
+{
+  let syncing = false;
+  // De-dup gate-refusal inbox items per (project, branch, offender set) —
+  // the tick repeats every 5 minutes but the user needs telling once.
+  const notifiedGateRefusals = new Set<string>();
+  // Sync failures were fully silent (offline is normal, so one failure stays
+  // quiet) — but PERSISTENT failure means auth/access is broken and the user
+  // believes they're sharing when they aren't. Notify once after 3 in a row.
+  const syncFailStreak = new Map<string, { count: number; notified: boolean }>();
+  const t = setInterval(() => {
+    if (syncing) return;
+    syncing = true;
+    void (async () => {
+      try {
+        const { getArtifactsRemote, gcSessionScratch, artifactsMountDir, artifactPaths } = await import('../../core/artifacts.js');
+        const { getProjectDir, getProjectBaseDir } = await import('../../core/config.js');
+        const scanned = await scanWorkspaces();
+        const projects = [...new Set(scanned.map((w) => w.projectName))];
+        // Session-scratch GC (local:// roots): the SDK has none; drop scratch
+        // for sessions that are gone AND idle past retention.
+        try {
+          const liveIds = new Set<string>();
+          for (const ws of Object.values(getAgentControlSnapshot())) {
+            for (const sess of ws.sessions ?? []) liveIds.add(sess.id);
+          }
+          const dirs = [
+            ...scanned.map((w) => w.path),
+            ...projects.map((name) => { try { return getProjectBaseDir(name); } catch { return null; } }).filter((d): d is string => !!d),
+          ];
+          for (const dir of dirs) {
+            const removed = gcSessionScratch(artifactsMountDir(dir), liveIds);
+            if (removed > 0) console.error(`[artifacts] gc: removed ${removed} stale session scratch dir(s) under ${dir}`);
+          }
+        } catch { /* gc is best-effort */ }
+        // Mount integrity: a cross-wired mount misdirects every write through
+        // it (a project-scope capture lands on a workspace branch) and makes
+        // mountHead() report the wrong baseline, so write-scope enforcement can
+        // revert legitimate work. `git worktree list` cannot see it — it reads
+        // registrations, not the mounts' own .git files — so this sweep is the
+        // only place it becomes visible without a human going looking.
+        try {
+          for (const projectName of projects) {
+            const repoDir = artifactPaths(getProjectDir(projectName)).repoDir;
+            const dirs = scanned.filter((w) => w.projectName === projectName).map((w) => w.path);
+            try {
+              dirs.push(getProjectBaseDir(projectName));
+            } catch { /* project without a base checkout */ }
+            for (const dir of dirs) {
+              const mount = artifactsMountDir(dir);
+              const info = inspectArtifactsMount(repoDir, mount);
+              if (info.status === 'cross-wired') {
+                console.error(`[artifacts] MOUNT CROSS-WIRED — writes here would go to another branch: ${describeMountIntegrity(mount, info)}`);
+              }
+            }
+          }
+        } catch { /* integrity reporting is advisory — never break the tick */ }
+        for (const projectName of projects) {
+          try {
+            const projectDir = getProjectDir(projectName);
+            if (!(await getArtifactsRemote(projectDir))) continue;
+            let r;
+            try {
+              // Runs in the offload child — git/LFS network I/O off the loop.
+              r = await runOffloaded<Awaited<ReturnType<typeof import('../../core/artifacts-github.js').syncGithubArtifacts>>>(
+                'artifacts-sync',
+                { projectDir },
+              );
+              syncFailStreak.delete(projectName);
+            } catch (e) {
+              const streak = syncFailStreak.get(projectName) ?? { count: 0, notified: false };
+              streak.count += 1;
+              if (streak.count >= 3 && !streak.notified) {
+                streak.notified = true;
+                const msg = e instanceof Error ? e.message.split('\n')[0] : String(e);
+                console.error(`[artifacts] sync for ${projectName} failing persistently: ${msg}`);
+                addInboxItem(createInboxNotification(
+                  `artifacts:${projectName}:sync`,
+                  `artifacts · ${projectName}`,
+                  'osc',
+                  `Artifacts sync has failed ${streak.count} times in a row (${msg}). Sharing is stalled — check access (GitHub: gh auth login), then run \`gssh artifacts sync\`.`,
+                ));
+              }
+              syncFailStreak.set(projectName, streak);
+              continue;
+            }
+            if (r.pushed || r.blobsUploaded) console.error(`[artifacts] synced ${projectName}${r.blobsUploaded ? ` (+${r.blobsUploaded} blobs)` : ''}`);
+            // Publish-gate refusals must be LOUD: a silently stalled
+            // single-writer branch is the top agent-confusion risk.
+            for (const refusal of r.refused ?? []) {
+              const key = `${projectName}:${refusal.branch}:${refusal.offenders.map((o) => o.path).sort().join(',')}`;
+              if (notifiedGateRefusals.has(key)) continue;
+              notifiedGateRefusals.add(key);
+              const files = refusal.offenders.map((o) => `${o.path} (${(o.size / (1024 * 1024)).toFixed(1)} MB)`).join(', ');
+              console.error(`[artifacts] push REFUSED for ${projectName}/${refusal.branch}: raw large files ${files}`);
+              addInboxItem(createInboxNotification(
+                `artifacts:${projectName}:${refusal.branch}`,
+                `artifacts · ${projectName}`,
+                'osc',
+                `Push of artifacts branch '${refusal.branch}' refused: ${files} committed raw (not as LFS pointers). Run \`gssh space artifacts repair\` in that workspace — sync resumes automatically.`,
+              ));
+            }
+          } catch { /* offline / auth — retry next tick */ }
+        }
+      } catch { /* scan failed */ }
+      syncing = false;
+    })();
+  }, 5 * 60_000);
+  t.unref?.();
+}
+
+// Trigger scheduler (triggers M2): this machine fires cron triggers for the
+// workspaces it hosts. Runs are ordinary agent sessions, visible in the UI.
+startTriggerScheduler(
+  async () => {
+    const workspaces = (await scanWorkspaces()).map((w) => ({ id: w.id, name: w.name, path: w.path, projectName: w.projectName }));
+    // Project-scope triggers: each project's BASE clone (main artifacts mount)
+    // is a pseudo-workspace — its triggers/ fire here too, run by @base agents.
+    try {
+      const { getProjectBaseDir } = await import('../../core/config.js');
+      const { existsSync } = await import('fs');
+      for (const projectName of [...new Set(workspaces.map((w) => w.projectName))]) {
+        try {
+          const base = getProjectBaseDir(projectName);
+          if (existsSync(base)) workspaces.push({ id: `${projectName}:@base`, name: '@base', path: base, projectName });
+        } catch { /* skip */ }
+      }
+    } catch { /* workspace-only */ }
+    return workspaces;
+  },
+  {
+    log: (message) => console.error(`[triggers] ${message}`),
+    runAgent: async (workspace, title, prompt) => {
+      try {
+        await getAgentControlReady();
+        const target = { workspaceId: workspace.id, workspaceName: workspace.name, workspacePath: workspace.path, projectName: workspace.projectName };
+        const sessions = await createAgentSession(target, title);
+        const created = sessions.find((x) => x.title === title) ?? sessions[sessions.length - 1];
+        if (!created) return null;
+        for (let attempt = 0; attempt < 4; attempt++) {
+          if (attempt > 0) await new Promise((r) => setTimeout(r, 2000 * attempt));
+          try {
+            await promptAgentSession(target, created.id, prompt);
+            return created.id;
+          } catch { /* discovery race — retry */ }
+        }
+        return null;
+      } catch {
+        return null;
+      }
+    },
+    watchSessionIdle: watchAgentSessionIdle,
+    mintCap: (workspace, trigger) => {
+      try {
+        // A trigger's `writes` are goal-relative; artifact:// caps are
+        // mount-relative. Lift before minting (docs/ARTIFACTS-FS.md).
+        const scope = triggerWriteScopesSync(workspace.path, trigger.writes ?? []);
+        if (scope.length === 0) return null;
+        return mintArtifactCap({
+          sub: { kind: 'trigger', id: trigger.id },
+          verbs: ['write'],
+          scope: scope.map((g) => formatArtifactUri(workspace.projectName, workspace.name, g)),
+          machineId: 'local',
+          expiresAt: Date.now() + 6 * 60 * 60_000,
+        }, getOrCreateArtifactCapKeypair().secretKey);
+      } catch (e) {
+        console.error(`[triggers] cap mint failed: ${e instanceof Error ? e.message : e}`);
+        return null;
+      }
+    },
+    notifyViolations: (workspace, trigger, enforcement) => {
+      addInboxItem(createInboxNotification(
+        `trigger:${workspace.projectName}:${trigger.id}`,
+        `trigger · ${trigger.name}`,
+        'osc',
+        `Run wrote outside its scope — reverted: ${enforcement.violations.join(', ')}. The run is marked failed; widen the trigger's 'writes' globs if these paths are intended.`,
+      ));
+    },
+  },
+);
+
+
+/** Resolve an artifact:// URI to on-disk dirs, lazily mounting. The '@base'
+ *  workspace segment is the project base clone's main mount — this one
+ *  segment replaces the whole former project-artifacts-* RPC family. */
+async function resolveArtifactUriDirs(uri: string): Promise<{ projectDir: string; workspaceDir: string; mountDir: string; relPath: string; isBase: boolean }> {
+  const { parseArtifactUri } = await import('../../core/artifact-cap.js');
+  const { artifactsMountDir, ensureArtifactsMount } = await import('../../core/artifacts.js');
+  const { getProjectBaseDir, getProjectDir } = await import('../../core/config.js');
+  const { existsSync } = await import('fs');
+  const { join } = await import('path');
+  const parsed = parseArtifactUri(uri);
+  const isBase = parsed.workspace === '@base';
+  const projectDir = getProjectDir(parsed.project);
+  const workspaceDir = isBase ? getProjectBaseDir(parsed.project) : join(projectDir, 'workspaces', parsed.workspace);
+  const mountDir = artifactsMountDir(workspaceDir);
+  if (!existsSync(join(mountDir, '.git'))) {
+    try {
+      await ensureArtifactsMount(projectDir, workspaceDir, isBase ? 'main' : parsed.workspace);
+    } catch { /* unmountable — lists read empty; writes fail loudly below */ }
+  }
+  return { projectDir, workspaceDir, mountDir, relPath: parsed.relPath, isBase };
+}
+
+/** Fire `onIdle` once when an agent session finishes owing anything. Used to
+ *  close the trigger run lifecycle — before this, nothing ever recorded `ok` and
+ *  every cron re-fired on pending-lock expiry instead of its cadence.
+ *
+ *  Completion is `!activity.active`, NOT `status === 'idle'`: a run whose turn
+ *  ended but which still has subagents working, a queued message, or a pending
+ *  human answer is not finished. Auto-unsubscribes; a session that never goes
+ *  busy within the grace window is treated as complete on its first quiet tick. */
+function watchAgentSessionIdle(
+  workspace: { id: string },
+  sessionId: string,
+  onIdle: () => void,
+): void {
+  let sawBusy = false;
+  const startedAt = Date.now();
+  const unsubscribe = subscribeAgentControl((delta) => {
+    if ('sessionId' in delta && delta.sessionId !== sessionId) return;
+    const activity = defaultAgentEventManager.getSessionActivity(workspace.id, sessionId);
+    if (activity.active) {
+      sawBusy = true;
+      return;
+    }
+    // Quiet before ever going busy = the prompt hasn't landed yet; give it a
+    // grace window instead of declaring instant success.
+    if (!sawBusy && Date.now() - startedAt < 30_000) return;
+    unsubscribe();
+    onIdle();
+  });
+  // Safety: never leak the subscription past a reasonable run ceiling.
+  const t = setTimeout(() => unsubscribe(), 6 * 60 * 60_000);
+  (t as { unref?: () => void }).unref?.();
+}
 
 ensureWorkspacePmSubscribed();
 
@@ -498,6 +1146,13 @@ function getSessionInfo(s: SessionData): Session {
     unreadAlertCount: s.unreadAlertCount || undefined,
   };
 }
+
+// Let port-conflict resolution read this server's live sessions directly
+// instead of round-tripping through the server socket. Without this, a machine
+// snapshot built inside a command handler that resolves a workspace port would
+// send a `list` command back to this (single-threaded, busy) server and
+// deadlock. See setInProcessSessionSource in ../processes/ports.ts.
+setInProcessSessionSource(() => Array.from(sessions.values()).map(getSessionInfo));
 
 function getUnreadInboxCountForSession(sessionId: string): number {
   let count = 0;
@@ -569,7 +1224,13 @@ function clearIdleTimer(session: SessionData): void {
   }
 }
 
-function cleanupSessionResources(session: SessionData, options: { removeFromMap?: boolean } = {}): void {
+function cleanupSessionResources(session: SessionData, options: { removeFromMap?: boolean; killed?: boolean } = {}): void {
+  if (session.cleanupComplete) {
+    return;
+  }
+  session.cleanupComplete = true;
+  resolveTermination(session.termination);
+  session.termination = null;
   clearIdleTimer(session);
   session.idleState.outputSinceIdle = 0;
   clearAttachTimer(session);
@@ -583,6 +1244,13 @@ function cleanupSessionResources(session: SessionData, options: { removeFromMap?
     session.client = null;
   }
   stopListener(session.listener);
+  // Close the PTY master fd. Bun.Terminal holds /dev/ptmx (plus its pts slave)
+  // and does NOT release it when the child proc dies — without this, every
+  // create+terminate cycle leaks ~4 fds and the daemon eventually hits EBADF.
+  if (session.ptyTerminal) {
+    try { session.ptyTerminal.close(); } catch {}
+    session.ptyTerminal = null;
+  }
   safeUnlink(session.info.socketPath);
   if (options.removeFromMap !== false) {
     sessions.delete(session.info.id);
@@ -590,11 +1258,91 @@ function cleanupSessionResources(session: SessionData, options: { removeFromMap?
 
   const workspaceId = session.info.metadata?.workspaceId;
   const agentSessionId = session.info.metadata?.agentSessionId;
-  releasePiTerminalSessionOwnership(session.info.id);
-  if (workspaceId && agentSessionId) {
+  if (workspaceId && agentSessionId && !options.killed) {
     markAgentSessionIdle(workspaceId, agentSessionId);
   }
 }
+
+async function terminateSessionData(session: SessionData, mode: TerminationMode, graceMs: number): Promise<void> {
+  if (session.cleanupComplete) {
+    return;
+  }
+
+  if (mode === "force") {
+    resolveTermination(session.termination);
+    session.termination = null;
+    if (session.proc) {
+      signalSubprocessTree(session.proc, "SIGKILL");
+    }
+    cleanupSessionResources(session, { killed: true });
+    disposeSessionTerminal(session);
+    applyTerminalScopedUpdate(session.info.id);
+    return;
+  }
+
+  if (!session.proc) {
+    cleanupSessionResources(session, { killed: true });
+    disposeSessionTerminal(session);
+    applyTerminalScopedUpdate(session.info.id);
+    return;
+  }
+
+  if (session.termination) {
+    return session.termination.promise;
+  }
+
+  let resolve!: () => void;
+  const promise = new Promise<void>((r) => {
+    resolve = r;
+  });
+  const termination: TerminationState = {
+    promise,
+    resolve,
+    timer: null,
+    force: false,
+  };
+  session.termination = termination;
+
+  signalSubprocessTree(session.proc, "SIGTERM");
+  termination.timer = setTimeout(() => {
+    if (session.cleanupComplete) {
+      return;
+    }
+    termination.force = true;
+    if (session.proc) {
+      signalSubprocessTree(session.proc, "SIGKILL");
+    }
+    cleanupSessionResources(session, { killed: true });
+    disposeSessionTerminal(session);
+    applyTerminalScopedUpdate(session.info.id);
+  }, graceMs);
+
+  return promise;
+}
+function resolveTerminationMode(mode: unknown): TerminationMode | null {
+  if (mode === undefined || mode === null) return "graceful";
+  return mode === "graceful" || mode === "force" ? mode : null;
+}
+
+function resolveTerminationGraceMs(value: unknown): number | null {
+  if (value === undefined || value === null) return DEFAULT_TERMINATION_GRACE_MS;
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return null;
+  return Math.min(Math.floor(value), MAX_TERMINATION_GRACE_MS);
+}
+
+function resolveTermination(state: TerminationState | null): void {
+  if (!state) return;
+  if (state.timer) {
+    clearTimeout(state.timer);
+    state.timer = null;
+  }
+  state.resolve();
+}
+
+function disposeSessionTerminal(session: SessionData): void {
+  try { session.xterm.dispose(); } catch {}
+}
+
 
 function shutdownServer(options: { markRunningSessionsCrashed?: boolean } = {}): void {
   if (shuttingDown) {
@@ -607,11 +1355,27 @@ function shutdownServer(options: { markRunningSessionsCrashed?: boolean } = {}):
       markReplayCrashed(session);
     }
     try { session.xterm.dispose(); } catch {}
+    // Kill the session's process GROUP before releasing daemon-side resources.
+    // cleanupSessionResources only closes the PTY master and sockets; it never
+    // signals session.proc (only terminateSessionData does, and shutdown does
+    // not go through it). An interactive shell happens to exit on the PTY EOF,
+    // which masked this — but a process session's runner never reads the tty,
+    // so it and every service under it were orphaned to PID 1 on every daemon
+    // stop, leaving .gitspace/processes.json services running forever.
+    // Group-signalling reaches the runner's own children; it is synchronous, so
+    // it is safe on the process-exit path too.
+    if (session.proc) {
+      signalSubprocessTree(session.proc, "SIGTERM");
+    }
     cleanupSessionResources(session, { removeFromMap: false });
-    if (session.proc) try { signalSubprocessTree(session.proc, 'SIGKILL'); } catch {}
-    if (session.virtualTerminal) removeVirtualTerminal(session.info.id);
   }
   sessions.clear();
+
+  // Agent worker children die with the daemon (shutdown msg + SIGTERM; their
+  // SDK postmortem handlers run cleanup). SIGKILLed daemons are covered by the
+  // workers' IPC-disconnect + ppid watchdogs instead.
+  try { shutdownAgentHosts(); } catch {}
+  try { shutdownOffloadWorker(); } catch {}
 
   stopListener(routerListener);
   safeUnlink(PID_FILE);
@@ -958,7 +1722,7 @@ function syncReplayManifest(
   }
 }
 
-function createReplayEvent(replay: ReplayRuntime, event: Omit<ReplayEvent, "v" | "seq" | "t">): ReplayEvent {
+function createReplayEvent(replay: ReplayRuntime, event: ReplayEventInput): ReplayEvent {
   const base = {
     v: 1 as const,
     seq: replay.nextSeq,
@@ -983,7 +1747,7 @@ function createReplayEvent(replay: ReplayRuntime, event: Omit<ReplayEvent, "v" |
   }
 }
 
-function recordReplayEvent(session: SessionData, event: Omit<ReplayEvent, "v" | "seq" | "t">): void {
+function recordReplayEvent(session: SessionData, event: ReplayEventInput): void {
   const replay = session.replay;
   if (!replay) {
     return;
@@ -1348,8 +2112,16 @@ function createPtyDataHandler(
   osc133State: Osc133State,
   checkIdle: () => void,
   getProcessTitle: () => string
-): (term: Bun.Terminal, data: Buffer) => void {
-  return (term, data) => {
+): (term: Bun.Terminal, data: Uint8Array) => void {
+  return (term, rawData) => {
+    // Bun types this callback as Uint8Array but delivers a Buffer. The body
+    // below relies on Buffer semantics (`toString('base64')`, decoded
+    // `toString()`) — on a plain Uint8Array those silently yield comma-joined
+    // byte numbers. Normalize at the boundary instead of trusting an undeclared
+    // runtime guarantee; the wrap is a view, not a copy.
+    const data = Buffer.isBuffer(rawData)
+      ? rawData
+      : Buffer.from(rawData.buffer, rawData.byteOffset, rawData.byteLength);
     // Track output for idle detection
     idleState.lastOutputTime = Date.now();
     idleState.outputSinceIdle += data.length;
@@ -1521,7 +2293,7 @@ function handleProcessExit(
 
     xterm.dispose();
     cleanupSessionResources(session);
-    void broadcastMachineSnapshotReplacement().catch(() => {});
+    applyTerminalScopedUpdate(session.info.id);
     console.log(`[${sessionName}] exited (${code})`);
   };
 }
@@ -1629,8 +2401,6 @@ function createStartAttach(sessionName: string): (session: SessionData) => void 
       sendSerializedState(session, sessionName);
       sendCursorState(session);
 
-      writeToClient(session, encodeControl({ type: "attach-ready", cols: session.xterm.cols, rows: session.xterm.rows }));
-
       const attachStart = Date.now();
       const finalizeAttach = () => {
         if (session.pendingWrites > 0 && Date.now() - attachStart < 500) {
@@ -1707,12 +2477,16 @@ function createSessionSocketHandlers(
       if (!session) return;
 
       const applyResize = (cols: number, rows: number) => {
+        // Session teardown closes the PTY master and nulls this (see the fd-leak
+        // fix in destroySession). A resize racing teardown has nowhere to go.
+        const ptyTerminal = session.ptyTerminal;
+        if (!ptyTerminal) return;
         const nextSize = clampTerminalSize(cols, rows, {
           cols: session.xterm.cols,
           rows: session.xterm.rows,
         });
         try {
-          session.ptyTerminal.resize(nextSize.cols, nextSize.rows);
+          ptyTerminal.resize(nextSize.cols, nextSize.rows);
           session.xterm.resize(nextSize.cols, nextSize.rows);
           recordReplayEvent(session, { type: "resize", cols: nextSize.cols, rows: nextSize.rows });
           scheduleReplayCheckpoint(session, true);
@@ -1775,22 +2549,28 @@ function createSessionSocketHandlers(
             console.log(`[${sessionName}] detached`);
           }
         } else if (frame.type === FrameType.PTY) {
+          // Input can race session teardown, which closes the PTY master and
+          // nulls ptyTerminal. There is nowhere to write it, so drop this frame
+          // and keep draining the batch — a trailing detach control frame in the
+          // same read must still be handled.
+          const ptyTerminal = session.ptyTerminal;
+          if (!ptyTerminal) continue;
           // Workaround for Bun PTY Ctrl+C line-discipline behavior.
           // Auto mode respects raw-mode apps (ISIG off => pass ETX through).
           // Override with TMUX_LITE_CTRL_C_MODE=signal|byte.
           if (frame.payload.length === 1 && frame.payload[0] === ETX_BYTE) {
-            const shouldSignal = terminalSignalsEnabled(session.ptyTerminal);
+            const shouldSignal = terminalSignalsEnabled(ptyTerminal);
             if (shouldSignal) {
               const signaled = sendInterruptSignal(proc);
               if (!signaled) {
-                session.ptyTerminal.write(frame.payload);
+                ptyTerminal.write(frame.payload);
               }
             } else {
-              session.ptyTerminal.write(frame.payload);
+              ptyTerminal.write(frame.payload);
             }
           } else {
             // Raw PTY input - write to terminal
-            session.ptyTerminal.write(frame.payload);
+            ptyTerminal.write(frame.payload);
           }
           if (RECORD_REPLAY_INPUT) {
             recordReplayEvent(session, {
@@ -1892,11 +2672,14 @@ function cleanupFailedSessionCreation(
   proc: Bun.Subprocess,
   xterm: XTerminal,
   disposeDsr: () => void,
-  socketPath: string
+  socketPath: string,
+  ptyTerminal?: Bun.Terminal | null
 ): void {
   try { disposeDsr(); } catch {}
   try { signalSubprocessTree(proc, 'SIGKILL'); } catch {}
   try { xterm.dispose(); } catch {}
+  // Release the PTY master fd on the failed-startup path too.
+  if (ptyTerminal) { try { ptyTerminal.close(); } catch {} }
   safeUnlink(socketPath);
   console.warn(`[${sessionName}] cleaned up failed session startup`);
 }
@@ -1942,7 +2725,12 @@ function createSession(
   });
 
   const serialize = new SerializeAddon();
-  xterm.loadAddon(serialize);
+  // Upstream typing skew, not a defect here: @xterm/addon-serialize declares
+  // itself against @xterm/xterm (the DOM build) while the daemon runs
+  // @xterm/headless. The two ITerminalAddon/Terminal declarations are
+  // structurally distinct types, so the addon is not assignable even though the
+  // runtime surface it uses is identical. Cast at this single seam.
+  xterm.loadAddon(serialize as unknown as Parameters<XTerminal['loadAddon']>[0]);
 
   // Set up xterm event handlers for notifications (bell, title changes)
   const { getProcessTitle } = setupXtermEventHandlers(id, sessionName, xterm);
@@ -1998,10 +2786,13 @@ function createSession(
     ...(options?.env ?? {}),
   };
 
+  const isolateProcessGroup = options?.metadata?.role === 'process';
+
   const proc = Bun.spawn(spawnCmd, {
     terminal: ptyTerminal,
     cwd,
     env: spawnEnv,
+    detached: isolateProcessGroup,
   });
 
   const shellInitScript = getShellInitScript(shell, hooks);
@@ -2047,7 +2838,7 @@ function createSession(
       socket: socketHandlers,
     });
   } catch (error) {
-    cleanupFailedSessionCreation(sessionName, proc, xterm, disposeDsr, socketPath);
+    cleanupFailedSessionCreation(sessionName, proc, xterm, disposeDsr, socketPath, ptyTerminal);
     throw error;
   }
 
@@ -2060,7 +2851,6 @@ function createSession(
     serialize,
     idleState,
     proc,
-    virtualTerminal: null,
     client: null,
     clientWriter: null,
     ctrlBuffer: Buffer.alloc(0),
@@ -2077,6 +2867,8 @@ function createSession(
     lastAttached: 0,
     replay,
     replayCheckpointPending: false,
+    cleanupComplete: false,
+    termination: null,
   });
 
   const session = sessions.get(id);
@@ -2088,275 +2880,29 @@ function createSession(
   return info;
 }
 
-/**
- * Create a virtual session backed by VirtualTerminal instead of a PTY child process.
- * The coordinator retrieves the registered VirtualTerminal and boots
- * InteractiveMode in-process against the same xterm-headless state.
- */
-function createVirtualSession(
-  name: string | undefined,
-  cwd: string,
-  options?: {
-    cols?: number;
-    rows?: number;
-    kind?: import('./protocol.js').SessionKind;
-    hidden?: boolean;
-    metadata?: Record<string, string>;
-  }
-): Session {
-  const id = genId();
-  const sessionName = name || `virtual-${id}`;
-  const socketPath = getSessionSocketPath(id);
-  const socketDir = dirname(socketPath);
-  if (!existsSync(socketDir)) {
-    mkdirSync(socketDir, { recursive: true });
-  }
-  safeUnlink(socketPath);
-
-  const { cols, rows } = clampTerminalSize(options?.cols, options?.rows);
-  const xterm = new XTerminal({
-    cols,
-    rows,
-    scrollback: 100,
-    allowProposedApi: true,
-  });
-
-  const serialize = new SerializeAddon();
-  xterm.loadAddon(serialize);
-
-  setupXtermEventHandlers(id, sessionName, xterm);
-
-  const idleState: IdleDetectionState = {
-    lastOutputTime: 0,
-    outputSinceIdle: 0,
-    idleTimer: null,
-  };
-
-  const virtualTerminal = new VirtualTerminal(cols, rows, (data: string) => {
-    idleState.lastOutputTime = Date.now();
-    idleState.outputSinceIdle += data.length;
-
-    const session = sessions.get(id);
-    if (!session) return;
-
-    session.pendingWrites++;
-    xterm.write(data, () => {
-      session.pendingWrites--;
-      if (session.attaching) {
-        session.attachDirty = true;
-        return;
-      }
-      writeChunkedPtyToClient(session, data);
-    });
-  });
-
-  registerVirtualTerminal(id, virtualTerminal);
-
-  const info: Session = {
-    id,
-    name: sessionName,
-    socketPath,
-    pid: process.pid,
-    attached: false,
-    cwd,
-    createdAt: Date.now(),
-    kind: options?.kind ?? 'agent',
-    hidden: options?.hidden ?? true,
-    metadata: options?.metadata,
-  };
-
-  const startAttach = createStartAttach(sessionName);
-  const socketHandlers = {
-    open(socket: any) {
-      const session = sessions.get(id);
-      if (!session) return socket.end();
-
-      if (session.client) {
-        writeToClient(session, encodeControl({ type: 'kicked' }));
-        session.client.end();
-      }
-
-      session.attaching = true;
-      session.attachPending = true;
-      session.attachDirty = false;
-      session.client = socket;
-      session.clientWriter = createBufferedSocketWriter(socket);
-      session.info.attached = true;
-      session.lastAttached = Date.now();
-      session.ctrlBuffer = Buffer.alloc(0);
-      clearAttachTimer(session);
-      session.attachTimer = setTimeout(() => {
-        if (session.attachPending) {
-          console.log(`[${sessionName}] WARN: attach-init not received after 5s, starting attach anyway`);
-          startAttach(session);
-        }
-      }, 5000);
-    },
-
-    data(socket: any, data: Buffer) {
-      const session = sessions.get(id);
-      if (!session) return;
-
-      const applyResize = (cols: number, rows: number) => {
-        const nextSize = clampTerminalSize(cols, rows, {
-          cols: session.xterm.cols,
-          rows: session.xterm.rows,
-        });
-        try {
-          virtualTerminal.resize(nextSize.cols, nextSize.rows);
-          session.xterm.resize(nextSize.cols, nextSize.rows);
-        } catch {}
-      };
-
-      let buf = Buffer.from(data);
-      if (session.ctrlBuffer.length > 0) {
-        buf = Buffer.concat([session.ctrlBuffer, buf]);
-      }
-
-      let frames;
-      let remaining;
-      try {
-        const result = parseFrames(buf);
-        frames = result.frames;
-        remaining = result.remaining;
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : 'Frame parse error';
-        console.error(`[${sessionName}] Frame parse error: ${msg}`);
-        socket.end();
-        return;
-      }
-      session.ctrlBuffer = Buffer.from(remaining);
-
-      for (const frame of frames) {
-        if (frame.type === FrameType.CONTROL) {
-          const ctrl = decodeControl(frame.payload) as SessionCtrl;
-          if (ctrl.type === 'resize' || ctrl.type === 'attach-init') {
-            applyResize(ctrl.cols, ctrl.rows);
-            if (session.attaching && session.attachPending) {
-              startAttach(session);
-            }
-          } else if (ctrl.type === 'detach') {
-            writeToClient(session, encodePTY(TERM_RESET));
-            session.client = null;
-            session.clientWriter = null;
-            session.info.attached = false;
-            session.attaching = false;
-            session.attachPending = false;
-            clearAttachTimer(session);
-            session.attachDirty = false;
-            session.lastDetached = Date.now();
-            socket.end();
-            console.log(`[${sessionName}] detached`);
-          }
-        } else if (frame.type === FrameType.PTY) {
-          virtualTerminal.injectInput(Buffer.from(frame.payload).toString('utf-8'));
-          session.lastInteraction = Date.now();
-        }
-      }
-    },
-
-    drain(socket: any) {
-      const session = sessions.get(id);
-      if (session && session.client === socket) flushClient(session);
-    },
-
-    close(socket: any) {
-      const session = sessions.get(id);
-      if (session && session.client === socket) {
-        session.client = null;
-        session.clientWriter = null;
-        session.info.attached = false;
-        session.attaching = false;
-        session.attachPending = false;
-        clearAttachTimer(session);
-        session.attachDirty = false;
-        console.log(`[${sessionName}] disconnected`);
-      }
-    },
-  };
-
-  let listener;
-  try {
-    listener = Bun.listen({
-      unix: socketPath,
-      socket: socketHandlers,
-    });
-  } catch (error) {
-    removeVirtualTerminal(id);
-    try { xterm.dispose(); } catch {}
-    safeUnlink(socketPath);
-    throw error;
-  }
-
-  sessions.set(id, {
-    info,
-    listener,
-    ptyTerminal: null,
-    xterm,
-    serialize,
-    idleState,
-    proc: null,
-    virtualTerminal,
-    client: null,
-    clientWriter: null,
-    ctrlBuffer: Buffer.alloc(0),
-    pendingWrites: 0,
-    attaching: false,
-    attachDirty: false,
-    attachPending: false,
-    attachTimer: null,
-    processTitle: '',
-    terminalTitle: '',
-    unreadAlertCount: 0,
-    lastInteraction: 0,
-    lastDetached: 0,
-    lastAttached: 0,
-    replay: null,
-    replayCheckpointPending: false,
-  });
-
-  console.log(`[${sessionName}] virtual session created`);
-  return info;
-}
 
 // Router server
-routerListener = Bun.listen({
-  unix: ROUTER_SOCKET,
-  socket: {
-    open(socket) {
-      const socketState = getRouterSocketState(socket);
-      socketState.writer = createBufferedSocketWriter(socket as any);
-    },
-    close(socket) {
-      clearRouterSocketState(socket);
-    },
-
-    async data(socket, data) {
-      const socketState = getRouterSocketState(socket);
-      const combined = Buffer.concat([socketState.buffer, Buffer.from(data)]);
-      let decoded;
-
-      try {
-        decoded = decodeRouterMessages(combined);
-      } catch (err) {
-        const message = err instanceof Error ? err.message : "Invalid request";
-        if (socketState.writer) socketState.writer.write(encodeRouterMessage({ type: "error", message }));
-        else socket.write(encodeRouterMessage({ type: "error", message }));
-        socketState.buffer = Buffer.alloc(0);
-        return;
-      }
-
-      socketState.buffer = decoded.remaining;
-
-      for (const message of decoded.messages) {
-        const cmd = message as Command;
-        let res: Response;
-        const writeResponse = (response: Response) => {
-          if (socketState.writer) socketState.writer.write(encodeRouterMessage(response));
-          else socket.write(encodeRouterMessage(response));
-        };
-
-        switch (cmd.type) {
+/** Request/response command dispatch — the single implementation behind BOTH
+ *  transports: the unix socket handler AND (daemon-unification P3) the
+ *  in-process remote session-handler, which previously round-tripped every
+ *  typed command through the socket to itself. Connection-coupled commands
+ *  (attach/watch/delete streams, kill-server) stay in the socket handler
+ *  and are unreachable here (dispatch returns their error via default).
+ */
+export async function dispatchCommand(cmd: Command): Promise<Response | null> {
+  // Project agents: '<project>:@base' pseudo-workspace targets resolve to
+  // the project BASE clone (main artifacts mount) — normalize here so
+  // every handler on either transport sees a real path.
+  if ('target' in cmd && cmd.target && typeof cmd.target === 'object' && 'workspaceName' in cmd.target && (cmd.target as { workspaceName?: string }).workspaceName === '@base') {
+    try {
+      const { getProjectBaseDir } = await import('../../core/config.js');
+      const t = cmd.target as { workspaceId: string; workspaceName: string; workspacePath: string; projectName: string };
+      t.workspacePath = getProjectBaseDir(t.projectName);
+      t.workspaceId = `${t.projectName}:@base`;
+    } catch { /* leave as-is; handler will error */ }
+  }
+  let res: Response | null = null;
+  switch (cmd.type) {
           case "list":
             res = {
               type: "sessions",
@@ -2447,7 +2993,7 @@ routerListener = Bun.listen({
                 recordReplay: cmd.recordReplay,
                 metadata: cmd.metadata,
               });
-              void broadcastMachineSnapshotReplacement().catch(() => {});
+              applyTerminalScopedUpdate(session.id);
               res = { type: "session", session };
             } catch (e) {
               const errMsg = e instanceof Error ? e.message : String(e);
@@ -2455,150 +3001,6 @@ routerListener = Bun.listen({
               res = { type: "error", message: `Failed to create session: ${errMsg}` };
             }
             break;
-
-          case 'new-virtual':
-            try {
-              const session = createVirtualSession(cmd.name, cmd.cwd, {
-                cols: cmd.cols,
-                rows: cmd.rows,
-                kind: cmd.kind,
-                hidden: cmd.hidden,
-                metadata: cmd.metadata,
-              });
-              void broadcastMachineSnapshotReplacement().catch(() => {});
-              res = { type: 'session', session };
-            } catch (e) {
-              const errMsg = e instanceof Error ? e.message : String(e);
-              console.error(`[server] createVirtualSession failed: ${errMsg}`);
-              res = { type: 'error', message: `Failed to create virtual session: ${errMsg}` };
-            }
-            break;
-
-          case 'virtual-resize':
-            try {
-              const session = sessions.get(cmd.id);
-              if (!session || !session.virtualTerminal) {
-                res = { type: 'error', message: `Virtual session not found: ${cmd.id}` };
-                break;
-              }
-              const { cols, rows } = clampTerminalSize(cmd.cols, cmd.rows, {
-                cols: session.xterm.cols,
-                rows: session.xterm.rows,
-              });
-              session.virtualTerminal.resize(cols, rows);
-              session.xterm.resize(cols, rows);
-              res = { type: 'ok' };
-            } catch (e) {
-              const errMsg = e instanceof Error ? e.message : String(e);
-              res = { type: 'error', message: `Failed to resize virtual session: ${errMsg}` };
-            }
-            break;
-
-          case 'attach-prepare':
-            try {
-              let targetSession: Session;
-              let workspaceId: string | undefined;
-              if (cmd.sessionId) {
-                const s = sessions.get(cmd.sessionId);
-                if (!s) {
-                  res = { type: 'error', message: `Session ${cmd.sessionId} not found` };
-                  break;
-                }
-                targetSession = getSessionInfo(s);
-              } else if (cmd.workspaceId) {
-                let currentPhase: 'pre' | 'setup' | 'select' = 'pre';
-                const prepared = await attachWorkspaceSession({
-                  scanWorkspaces,
-                  listSessions: async () => Array.from(sessions.values()).map((session) => ({ name: session.info.name })),
-                  createSession: async (name, cwd, options) => createSession(name, cwd, options),
-                  prepareWorkspaceForSession: async (args) => prepareWorkspaceForSession(args),
-                }, {
-                  workspaceId: cmd.workspaceId,
-                  sessionName: cmd.sessionName,
-                  command: cmd.command,
-                  args: cmd.args,
-                  env: cmd.env,
-                  scriptPolicy: cmd.scriptPolicy,
-                  onAbortController: (controller) => {
-                    if (controller) {
-                      pendingAttachControllers.set(cmd.requestId, controller);
-                    } else {
-                      pendingAttachControllers.delete(cmd.requestId);
-                    }
-                  },
-                  onOutput: (data, phase) => {
-                    currentPhase = phase;
-                    writeResponse({ type: 'attach-script-output', requestId: cmd.requestId, phase, data: Buffer.from(data).toString('base64') });
-                  },
-                  onPhaseStart: (phase) => {
-                    currentPhase = phase;
-                    const banner = Buffer.from(`\r\n==> ${phase} scripts...\r\n`);
-                    writeResponse({ type: 'attach-script-output', requestId: cmd.requestId, phase, data: banner.toString('base64') });
-                  },
-                });
-                if (!cmd.command) {
-                  writeResponse({ type: 'attach-script-output', requestId: cmd.requestId, phase: currentPhase, data: '', done: true });
-                }
-                targetSession = prepared.session;
-                workspaceId = prepared.workspace.id;
-              } else {
-                res = { type: 'error', message: 'attach-prepare requires sessionId or workspaceId' };
-                break;
-              }
-              void broadcastMachineSnapshotReplacement().catch(() => {});
-              writeResponse({ type: 'attach-prepared', requestId: cmd.requestId, session: targetSession, workspaceId, viewOnly: cmd.viewOnly });
-              continue;
-            } catch (e) {
-              pendingAttachControllers.delete(cmd.requestId);
-              const typedError = e instanceof Error ? e as Error & { code?: string } : undefined;
-              const message = `Failed to prepare attach: ${typedError?.message ?? String(e)}`;
-              res = typedError?.code
-                ? { type: 'error', message, code: typedError.code }
-                : { type: 'error', message };
-            }
-            break;
-
-          case 'attach-cancel': {
-            const controller = pendingAttachControllers.get(cmd.requestId);
-            if (controller) {
-              controller.abort();
-              pendingAttachControllers.delete(cmd.requestId);
-            }
-            res = { type: 'ok' };
-            break;
-          }
-
-          case "attach": {
-            const s = sessions.get(cmd.id);
-            if (!s) {
-              res = { type: "error", message: `Session ${cmd.id} not found` };
-            } else if (s.info.attached && !cmd.force) {
-              res = { type: "already-attached", session: getSessionInfo(s) };
-            } else {
-              res = { type: "session", session: getSessionInfo(s) };
-            }
-            break;
-          }
-
-          case "kill": {
-            const s = sessions.get(cmd.id);
-            if (!s) {
-              res = { type: "error", message: `Session ${cmd.id} not found` };
-            } else {
-              if (s.proc) {
-                signalSubprocessTree(s.proc, 'SIGKILL');
-              }
-              if (s.virtualTerminal) {
-                s.virtualTerminal.stop();
-                removeVirtualTerminal(s.info.id);
-              }
-              cleanupSessionResources(s);
-              try { s.xterm.dispose(); } catch {}
-              void broadcastMachineSnapshotReplacement().catch(() => {});
-              res = { type: "ok" };
-            }
-            break;
-          }
 
           case 'agent-state':
             try {
@@ -2610,21 +3012,9 @@ routerListener = Bun.listen({
             }
             break;
 
-          case 'agent-watch':
-            try {
-              await getAgentControlReady();
-              socketState.watchesAgentState = true;
-              agentStateWatchers.add(socket);
-              res = { type: 'agent-watch-started' };
-            } catch (e) {
-              const errMsg = e instanceof Error ? e.message : String(e);
-              res = { type: 'error', message: `Failed to start agent watch: ${errMsg}` };
-            }
-            break;
-
           case 'machine-snapshot':
             try {
-              const snapshot = await buildCurrentMachineSnapshot();
+              const snapshot = await getCurrentMachineSnapshot();
               res = { type: 'machine-snapshot', snapshot };
             } catch (e) {
               const errMsg = e instanceof Error ? e.message : String(e);
@@ -2632,28 +3022,40 @@ routerListener = Bun.listen({
             }
             break;
 
-          case 'machine-watch':
+          case 'machine-resync':
+            // Client-detected nonce gap (or explicit reconciliation): force a
+            // full rebuild from sources so the caller gets trued-up state.
             try {
               const snapshot = await buildCurrentMachineSnapshot();
-              socketState.watchesMachineState = true;
-              machineStateWatchers.add(socket);
-              writeResponse({ type: 'machine-snapshot', snapshot });
-              res = { type: 'machine-watch-started' };
+              writeTraceLog('machine-resync', { snapshotNonce: snapshot.snapshotNonce });
+              res = { type: 'machine-snapshot', snapshot };
             } catch (e) {
               const errMsg = e instanceof Error ? e.message : String(e);
-              res = { type: 'error', message: `Failed to start machine watch: ${errMsg}` };
+              res = { type: 'error', message: `Failed to resync machine snapshot: ${errMsg}` };
             }
             break;
 
-
-          case 'agent-prompt':
+          case 'goal-changed':
+            // Fire-and-forget notify from the space CLI after a goal.json
+            // write — re-read that project's goals and emit scoped deltas.
             try {
-              await getAgentControlReady();
-              await promptAgentSession(cmd.target, cmd.agentSessionId, cmd.text, cmd.images, { streamingBehavior: cmd.streamingBehavior });
+              writeTraceLog('goal-changed-notify', { projectName: cmd.projectName, workspaceName: cmd.workspaceName });
+              applyGoalScopedUpdate(cmd.projectName);
               res = { type: 'ok' };
             } catch (e) {
               const errMsg = e instanceof Error ? e.message : String(e);
-              res = { type: 'error', message: `Failed to prompt agent session: ${errMsg}` };
+              res = { type: 'error', message: `Failed to apply goal change: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-queue-remove':
+            try {
+              await getAgentControlReady();
+              const message = await removeQueuedAgentMessage(cmd.target, cmd.agentSessionId, cmd.kind, cmd.index);
+              res = { type: 'agent-queued-message', message };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to remove queued agent message: ${errMsg}` };
             }
             break;
 
@@ -2670,10 +3072,20 @@ routerListener = Bun.listen({
             break;
 
 
+
+          case 'workspace-phase-preview':
+            try {
+              res = { type: 'workspace-phase-preview', preview: previewWorkspaceGoalPhaseChange(cmd.projectName, cmd.workspaceName, cmd.phase) };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to preview workspace phase: ${errMsg}` };
+            }
+            break;
+
           case 'workspace-set-phase':
             try {
-              setWorkspaceStatus(cmd.projectName, cmd.workspaceName, cmd.phase);
-              void broadcastMachineSnapshotReplacement().catch(() => {});
+              applyWorkspaceGoalPhaseChange(cmd.projectName, cmd.workspaceName, cmd.phase, { cascade: cmd.cascade });
+              applyGoalScopedUpdate(cmd.projectName);
               res = { type: 'ok' };
             } catch (e) {
               const errMsg = e instanceof Error ? e.message : String(e);
@@ -2722,6 +3134,17 @@ routerListener = Bun.listen({
               }
               const errMsg = e instanceof Error ? e.message : String(e);
               res = { type: 'error', message: `Failed to start service: ${errMsg}` };
+            }
+            break;
+
+          case 'service-resolve-port-conflict':
+            try {
+              const { resolvePortConflict } = await import('../processes/ports.js');
+              await resolvePortConflict(cmd.conflict);
+              res = { type: 'ok' };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to resolve port conflict: ${errMsg}` };
             }
             break;
 
@@ -2776,6 +3199,7 @@ routerListener = Bun.listen({
           case 'project-create':
             try {
               const result = await createProjectForSession(cmd);
+              void broadcastMachineSnapshotReplacement().catch(() => {});
               res = { type: 'project-created', ...result };
             } catch (e) {
               res = { type: 'error', message: e instanceof Error ? e.message : String(e) };
@@ -2793,6 +3217,7 @@ routerListener = Bun.listen({
           case 'project-finalize':
             try {
               const result = await finalizePreparedProjectForSession(cmd);
+              void broadcastMachineSnapshotReplacement().catch(() => {});
               res = { type: 'project-created', ...result };
             } catch (e) {
               res = { type: 'error', message: e instanceof Error ? e.message : String(e) };
@@ -2811,6 +3236,7 @@ routerListener = Bun.listen({
           case 'workspace-create':
             try {
               res = { type: 'workspace-created', ...(await createWorkspaceForSession(cmd)) };
+              void broadcastMachineSnapshotReplacement().catch(() => {});
             } catch (e) {
               res = { type: 'error', message: e instanceof Error ? e.message : String(e) };
             }
@@ -2819,41 +3245,141 @@ routerListener = Bun.listen({
           case 'project-delete':
             try {
               await deleteProjectForSession({ projectName: cmd.projectName });
+              void broadcastMachineSnapshotReplacement().catch(() => {});
               res = { type: 'project-deleted', projectName: cmd.projectName };
             } catch (e) {
               res = { type: 'error', message: e instanceof Error ? e.message : String(e) };
             }
             break;
 
-          case 'workspace-delete':
+          case 'workspace-notes-list':
             try {
-              const normalizedWorkspaceId = cmd.workspaceId.startsWith(`${cmd.projectName}:`)
-                ? cmd.workspaceId.slice(cmd.projectName.length + 1)
-                : cmd.workspaceId;
-              const canonicalWorkspaceId = `${cmd.projectName}:${normalizedWorkspaceId}`;
-              const result = await deleteWorkspaceCore(cmd.projectName, normalizedWorkspaceId, {
-                nonInteractive: true,
-                removeScriptPolicy: cmd.scriptPolicy === 'skip' ? 'skip' : 'enforce',
-                onScriptOutput: (data) => {
-                  writeResponse({ type: 'workspace-delete-output', requestId: cmd.requestId, data: data.toString('base64') });
-                },
-              });
-              if (!result.success) {
-                const message = result.error ?? `Failed to delete workspace ${normalizedWorkspaceId}`;
-                writeResponse({ type: 'workspace-delete-output', requestId: cmd.requestId, data: '', done: true, error: message });
-                res = { type: 'error', message };
-                break;
-              }
-              writeResponse({ type: 'workspace-delete-output', requestId: cmd.requestId, data: '', done: true });
-              void broadcastMachineSnapshotReplacement().catch(() => {});
-              res = { type: 'workspace-deleted', requestId: cmd.requestId, workspaceId: canonicalWorkspaceId };
+              res = { type: 'workspace-notes', notes: listWorkspaceNotes(cmd.projectName, cmd.workspaceName) };
             } catch (e) {
-              const errMsg = e instanceof Error ? e.message : String(e);
-              writeResponse({ type: 'workspace-delete-output', requestId: cmd.requestId, data: '', done: true, error: errMsg });
-              res = { type: 'error', message: errMsg };
+              res = { type: 'error', message: e instanceof Error ? e.message : String(e) };
             }
             break;
 
+          case 'workspace-note-add':
+            try {
+              res = { type: 'workspace-note', note: addWorkspaceNote(cmd.projectName, cmd.workspaceName, { body: cmd.body, kind: 'note' }) };
+              void broadcastMachineSnapshotReplacement().catch(() => {});
+            } catch (e) {
+              res = { type: 'error', message: e instanceof Error ? e.message : String(e) };
+            }
+            break;
+
+          case 'workspace-note-update':
+            try {
+              res = { type: 'workspace-note', note: updateWorkspaceNote(cmd.projectName, cmd.workspaceName, cmd.noteId, { body: cmd.body, kind: 'note' }) };
+              void broadcastMachineSnapshotReplacement().catch(() => {});
+            } catch (e) {
+              res = { type: 'error', message: e instanceof Error ? e.message : String(e) };
+            }
+            break;
+
+          case 'workspace-note-remove':
+            try {
+              const removed = removeWorkspaceNote(cmd.projectName, cmd.workspaceName, cmd.noteId);
+              if (!removed) {
+                res = { type: 'error', message: `Workspace note not found: ${cmd.noteId}` };
+                break;
+              }
+              void broadcastMachineSnapshotReplacement().catch(() => {});
+              res = { type: 'ok' };
+            } catch (e) {
+              res = { type: 'error', message: e instanceof Error ? e.message : String(e) };
+            }
+            break;
+
+          case 'goal-update':
+            try {
+              res = { type: 'goal', goal: updateGoalRecord(cmd.projectName, cmd.goalId, cmd.updates) };
+              applyGoalScopedUpdate(cmd.projectName);
+            } catch (e) {
+              res = { type: 'error', message: e instanceof Error ? e.message : String(e) };
+            }
+            break;
+
+          case 'goal-add-near-workspace':
+            try {
+              res = { type: 'goal', goal: addGoalNearWorkspace(cmd.projectName, cmd.workspaceName, cmd.title, cmd.position) };
+              applyGoalScopedUpdate(cmd.projectName);
+            } catch (e) {
+              res = { type: 'error', message: e instanceof Error ? e.message : String(e) };
+            }
+            break;
+
+          case 'goal-chains-list':
+            try {
+              res = { type: 'goal-chains', chains: listGoalChainSummaries(cmd.projectName) };
+            } catch (e) {
+              res = { type: 'error', message: e instanceof Error ? e.message : String(e) };
+            }
+            break;
+
+          case 'goal-add-planned':
+            try {
+              const result = addPlannedGoalToChain(cmd.projectName, cmd.input);
+              res = { type: 'goal', goal: result.goal as import('../../types/goals.js').GoalRecord };
+              applyGoalScopedUpdate(cmd.projectName);
+            } catch (e) {
+              res = { type: 'error', message: e instanceof Error ? e.message : String(e) };
+            }
+            break;
+
+          case 'goal-reorder':
+            try {
+              res = { type: 'goal-chain', chain: moveGoalInChain(cmd.projectName, cmd.sourceToken, cmd.targetToken, cmd.position) };
+              applyGoalScopedUpdate(cmd.projectName);
+            } catch (e) {
+              res = { type: 'error', message: e instanceof Error ? e.message : String(e) };
+            }
+            break;
+
+          case 'goal-stack-status':
+            try {
+              res = { type: 'goal-stack-status', status: getSpaceStackStatus({ project: cmd.projectName, workspace: cmd.workspaceName }) };
+            } catch (e) {
+              res = { type: 'error', message: e instanceof Error ? e.message : String(e) };
+            }
+            break;
+
+          case 'goal-detail':
+            // Cold detail fetch (ticket #42): the snapshot carries a slim goal
+            // projection; this serves the full doc + validation (with computed
+            // readiness) for one goal on demand.
+            try {
+              const goal = getGoalRecord(cmd.projectName, cmd.goalId) ?? findGoalRecord(cmd.projectName, cmd.goalId);
+              if (!goal) {
+                res = { type: 'error', message: `Goal not found: ${cmd.goalId}` };
+                break;
+              }
+              // Prefer the rich goals/<id>/goal.md (live workspace mount, then
+              // rolled-up artifacts main) over the record's stub doc; fall back
+              // to the record's embedded doc last. Survives workspace deletion.
+              res = {
+                type: 'goal-detail',
+                doc: { ...(goal.doc ?? { updatedAt: goal.updatedAt }), bodyMarkdown: resolveGoalDocBody(cmd.projectName, goal) },
+                validation: { ...goal.validation, readiness: computeReadiness(goal.validation) },
+              };
+            } catch (e) {
+              res = { type: 'error', message: e instanceof Error ? e.message : String(e) };
+            }
+            break;
+
+          case 'goal-gate-waive':
+            // Human-only escape hatch for computed phase gates: the CLI has
+            // no waive flag, so this daemon command (a UI button) is the only
+            // path. Records a 'gate' timeline event with reason + actor.
+            try {
+              const { waiveGoalGate } = await import('../../core/goal-workflow.js');
+              res = { type: 'goal', goal: await waiveGoalGate(cmd.projectName, cmd.goalId, cmd.phase, cmd.reason, 'human/ui') };
+              applyGoalScopedUpdate(cmd.projectName);
+            } catch (e) {
+              res = { type: 'error', message: e instanceof Error ? e.message : String(e) };
+            }
+            break;
           case 'bundle-refresh-plan':
             try {
               const workspaceRef = resolveWorkspaceRef(cmd.workspaceId.includes(':') ? cmd.workspaceId : cmd.workspaceId);
@@ -2915,7 +3441,12 @@ routerListener = Bun.listen({
 
           case 'review-request':
             try {
-              const result = await executeLocalReviewOperation(cmd.operation, scanWorkspaces, { allowPrompt: false });
+              // Review ops (GitHub import/push, big diffs) run in the offload
+              // child so their network/git I/O never stalls the daemon loop.
+              const result = await runOffloaded<Awaited<ReturnType<typeof executeLocalReviewOperation>>>(
+                'review',
+                { operation: cmd.operation },
+              );
               res = { type: 'review-response', requestId: cmd.requestId, result };
             } catch (e) {
               const errMsg = e instanceof Error ? e.message : String(e);
@@ -3042,6 +3573,32 @@ routerListener = Bun.listen({
             }
             break;
 
+          case 'agent-open':
+            try {
+              await getAgentControlReady();
+              const leaseKey = `${cmd.owner ?? 'anonymous'}:${cmd.paneId ?? 'default'}`;
+              const leaseCount = await openAgentSession(cmd.target, cmd.agentSessionId, leaseKey);
+              res = {
+                type: 'agent-opened',
+                agentSessionId: cmd.agentSessionId,
+                workspaceId: cmd.target.workspaceId,
+                leaseCount,
+              };
+              applyAgentScopedUpdate(cmd.target.workspaceId);
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to open agent session: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-release': {
+            const leaseKey = `${cmd.owner ?? 'anonymous'}:${cmd.paneId ?? 'default'}`;
+            const released = releaseAgentSessionLease(cmd.agentSessionId, leaseKey);
+            if (released) applyAgentScopedUpdate(released.workspaceId);
+            res = { type: 'ok' };
+            break;
+          }
+
           case 'agent-archive':
             try {
               await getAgentControlReady();
@@ -3064,20 +3621,6 @@ routerListener = Bun.listen({
             }
             break;
 
-          case 'agent-attach':
-            try {
-              await getAgentControlReady();
-              const session = await ensureAgentTerminalSession(cmd.target, cmd.agentSessionId, { cols: cmd.cols, rows: cmd.rows });
-              deleteOwnedEntries(agentSessionWatchOwners, socket);
-              agentSessionWatchOwners.set(cmd.agentSessionId, socket);
-              res = { type: 'session', session };
-              void broadcastMachineSnapshotReplacement().catch(() => {});
-            } catch (e) {
-              const errMsg = e instanceof Error ? e.message : String(e);
-              res = { type: 'error', message: `Failed to attach agent session: ${errMsg}` };
-            }
-            break;
-
           case 'agent-permission':
             try {
               await getAgentControlReady();
@@ -3094,23 +3637,293 @@ routerListener = Bun.listen({
             }
             break;
 
-          case 'agent-dialog-response':
+          case 'agent-transcript-range':
             try {
-              const owner = agentDialogOwners.get(cmd.dialogId);
-              if (!owner || owner !== socket) {
-                res = { type: 'agent-bool', ok: false };
-                break;
-              }
-              const resolved = resolveAgentDialogResponse({
-                type: cmd.dialogType,
-                id: cmd.dialogId,
-                value: cmd.value as any,
-              });
-              agentDialogOwners.delete(cmd.dialogId);
-              res = { type: 'agent-bool', ok: resolved };
+              await getAgentControlReady();
+              const page = await readAgentTranscriptRange(cmd.target, cmd.agentSessionId, { before: cmd.before, limit: cmd.limit });
+              res = { type: 'agent-transcript-range', blocks: page.blocks, oldestCursor: page.oldestCursor, hasMore: page.hasMore };
             } catch (e) {
               const errMsg = e instanceof Error ? e.message : String(e);
-              res = { type: 'error', message: `Failed to resolve dialog: ${errMsg}` };
+              res = { type: 'error', message: `Failed to read transcript: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-control-info':
+            try {
+              await getAgentControlReady();
+              const info = await getAgentControlInfo(cmd.target, cmd.agentSessionId);
+              res = { type: 'agent-control-info', info };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to read control info: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-session-usage':
+            try {
+              await getAgentControlReady();
+              const report = await getAgentSessionUsageReport(cmd.target, cmd.agentSessionId);
+              res = { type: 'agent-session-usage', report };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to build session usage report: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-set-model':
+            try {
+              await getAgentControlReady();
+              const ok = await setAgentModel(cmd.target, cmd.agentSessionId, cmd.provider, cmd.modelId);
+              res = { type: 'agent-set-model', ok };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to set model: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-set-thinking-level':
+            try {
+              await getAgentControlReady();
+              const ok = await setAgentThinkingLevel(cmd.target, cmd.agentSessionId, cmd.level);
+              res = { type: 'agent-bool', ok };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to set thinking level: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-goal-mode':
+            try {
+              await getAgentControlReady();
+              const info = await getAgentGoalMode(cmd.target, cmd.agentSessionId);
+              res = { type: 'agent-goal-mode', info };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to read Goal Mode: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-set-goal-mode':
+            try {
+              await getAgentControlReady();
+              const info = await setAgentGoalMode(cmd.target, cmd.agentSessionId, {
+                enabled: cmd.enabled,
+                precursor: cmd.precursor,
+              });
+              res = { type: 'agent-goal-mode', info };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to set Goal Mode: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-shake':
+            try {
+              await getAgentControlReady();
+              const result = await shakeAgentSession(cmd.target, cmd.agentSessionId, cmd.mode);
+              res = { type: 'agent-shake-result', result };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to shake context: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-set-approval-mode':
+            try {
+              await getAgentControlReady();
+              const ok = await setAgentApprovalMode(cmd.target, cmd.agentSessionId, cmd.mode);
+              res = { type: 'agent-bool', ok };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to set approval mode: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-auth-providers':
+            try {
+              await getAgentControlReady();
+              const providers = await getAgentAuthProviders();
+              res = { type: 'agent-auth-providers', providers };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to list providers: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-remove-account':
+            try {
+              await getAgentControlReady();
+              const ok = await removeAgentProviderAccount(cmd.provider, cmd.credentialId);
+              res = { type: 'agent-remove-account', ok };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to remove account: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-provider-usage':
+            try {
+              await getAgentControlReady();
+              const accounts = await checkAgentProviderUsage(cmd.provider);
+              res = { type: 'agent-provider-usage', accounts };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to check usage: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-set-api-key':
+            try {
+              await getAgentControlReady();
+              const ok = await setAgentProviderApiKey(cmd.provider, cmd.key);
+              res = { type: 'agent-bool', ok };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to save API key: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-get-settings':
+            try {
+              await getAgentControlReady();
+              const settings = await getAgentSettings();
+              res = { type: 'agent-settings', settings };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to read settings: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-set-setting':
+            try {
+              await getAgentControlReady();
+              const ok = await setAgentSetting(cmd.path, cmd.value);
+              res = { type: 'agent-bool', ok };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to set setting: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-oauth-login':
+            // Fire-and-forget: the flow's auth/prompt/done events arrive via
+            // agent-state deltas. Respond immediately that it started.
+            try {
+              await getAgentControlReady();
+              void startAgentOAuthLogin(cmd.provider, cmd.flowId);
+              res = { type: 'agent-bool', ok: true };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to start sign-in: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-oauth-respond':
+            try {
+              const ok = respondAgentOAuthPrompt(cmd.flowId, cmd.value);
+              res = { type: 'agent-bool', ok };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to respond: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-settings-schema':
+            try {
+              await getAgentControlReady();
+              const schema = await getAgentSettingsSchema();
+              res = { type: 'agent-settings-schema', schema };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to read settings schema: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-tools':
+            try {
+              await getAgentControlReady();
+              const tools = await getAgentTools(cmd.target, cmd.agentSessionId);
+              res = { type: 'agent-tools', tools };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to list tools: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-list-agents':
+            try {
+              await getAgentControlReady();
+              const agents = await listAgentDefinitions(cmd.target);
+              res = { type: 'agent-list-agents', agents };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to list agents: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-compact':
+            try {
+              await getAgentControlReady();
+              const result = await compactAgentSession(cmd.target, cmd.agentSessionId);
+              res = { type: 'agent-compact-result', result };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to compact: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-cycle-role':
+            try {
+              await getAgentControlReady();
+              const ok = await cycleAgentRole(cmd.target, cmd.agentSessionId, cmd.direction);
+              res = { type: 'agent-bool', ok };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to cycle role: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-apply-role':
+            try {
+              await getAgentControlReady();
+              const ok = await applyAgentModelRole(cmd.target, cmd.agentSessionId, cmd.role);
+              res = { type: 'agent-bool', ok };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to apply role: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-history':
+            try {
+              await getAgentControlReady();
+              const entries = await getAgentHistory(cmd.target, cmd.agentSessionId);
+              res = { type: 'agent-history', entries };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to read history: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-navigate-history':
+            try {
+              await getAgentControlReady();
+              const result = await navigateAgentHistory(cmd.target, cmd.agentSessionId, cmd.entryId, cmd.mode);
+              res = { type: 'agent-navigate', ok: result.ok, editorText: result.editorText };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to rewind: ${errMsg}` };
+            }
+            break;
+
+          case 'agent-tree':
+            try {
+              await getAgentControlReady();
+              const nodes = await getAgentSessionTree(cmd.target, cmd.agentSessionId);
+              res = { type: 'agent-tree', nodes };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to read tree: ${errMsg}` };
             }
             break;
 
@@ -3125,6 +3938,517 @@ routerListener = Bun.listen({
             }
             break;
 
+          case 'workspace-editors-list':
+            try {
+              const editors = await listAvailableEditors();
+              res = { type: 'workspace-editors', editors };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to list editors: ${errMsg}` };
+            }
+            break;
+
+
+          case 'artifact-list':
+            try {
+              const { listArtifactFiles, artifactsScope } = await import('../../core/artifacts.js');
+              const { workspaceDir, mountDir, isBase } = await resolveArtifactUriDirs(cmd.uriPrefix);
+              // A WORKSPACE must never show OTHER goals inherited from main (its
+              // branch is off main, so the mount physically carries goals/<other>/).
+              //   - @base/project listing: whole mount (the project-home view SHOULD
+              //     show all rolled-up goals grouped by goal).
+              //   - workspace WITH a resolvable goal: scope to goals/<its-id>/.
+              //   - workspace WITHOUT a resolvable goal (rootRel===''): drop every
+              //     goals/** so no OTHER goal leaks — root-level artifacts only.
+              //     (Without this, the null-goal case fell back to the whole mount.)
+              const { rootRel } = artifactsScope(workspaceDir);
+              const entries = isBase
+                ? listArtifactFiles(mountDir)
+                : rootRel
+                  ? listArtifactFiles(mountDir, rootRel)
+                  : listArtifactFiles(mountDir).filter((e) => !e.path.startsWith('goals/'));
+              res = { type: 'artifact-list', entries };
+            } catch (e) {
+              res = { type: 'error', message: `Failed to list artifacts: ${e instanceof Error ? e.message : String(e)}` };
+            }
+            break;
+
+          case 'artifact-read':
+            try {
+              const { readArtifactResolving } = await import('../../core/artifacts.js');
+              const { projectDir, mountDir, relPath } = await resolveArtifactUriDirs(cmd.uri);
+              // Per-chunk transport cap: a single frame must stay well under the
+              // client's reassembly limit (base64 inflates ~4/3), so large media
+              // is fetched as a sequence of ranged reads (offset/length) and
+              // reassembled into a Blob client-side. An unranged read keeps the
+              // legacy single-shot behaviour (truncates past MAX_READ).
+              const MAX_READ = 25 * 1024 * 1024;
+              const bytes = await readArtifactResolving(projectDir, mountDir, relPath);
+              const size = bytes.length;
+              if (cmd.offset !== undefined || cmd.length !== undefined) {
+                const offset = Math.max(0, Math.min(cmd.offset ?? 0, size));
+                const length = Math.max(0, Math.min(cmd.length ?? MAX_READ, MAX_READ));
+                const end = Math.min(offset + length, size);
+                const slice = bytes.subarray(offset, end);
+                // `truncated` here means "more bytes remain past this slice".
+                res = { type: 'artifact-read', base64: slice.toString('base64'), size, truncated: end < size };
+              } else {
+                const truncated = size > MAX_READ;
+                res = { type: 'artifact-read', base64: (truncated ? bytes.subarray(0, MAX_READ) : bytes).toString('base64'), size, truncated };
+              }
+            } catch (e) {
+              res = { type: 'error', message: `Failed to read artifact: ${e instanceof Error ? e.message : String(e)}` };
+            }
+            break;
+
+          case 'artifact-write':
+            try {
+              const { captureArtifacts, artifactsScope, assertGoalScopeWrite } = await import('../../core/artifacts.js');
+              const { projectDir, workspaceDir, mountDir, relPath } = await resolveArtifactUriDirs(cmd.uri);
+              if (!relPath) { res = { type: 'error', message: 'artifact-write needs a file path in the URI' }; break; }
+              // Guard: `goals/**` is roll-up-only. artifact:// paths are
+              // mount-relative, so a UI or agent browsing @base (whose scope
+              // IS the tree root) could otherwise write straight into another
+              // workspace's goal folder and break its next roll-up merge.
+              assertGoalScopeWrite(artifactsScope(workspaceDir), [relPath]);
+              // A presented capability is VERIFIED (fail closed) and its scope
+              // enforced; provenance comes from the verified subject. Cap-less
+              // writes (the UI) keep web-ui provenance and no extra scope.
+              let capSub: { kind: string; id?: string } | undefined;
+              let allowedWrites: string[] | undefined;
+              if (cmd.cap) {
+                const verified = verifyArtifactCap(cmd.cap, { publicKey: getOrCreateArtifactCapKeypair().publicKey });
+                const parsedUri = parseArtifactUri(cmd.uri);
+                if (!capAllows(verified, 'write', parsedUri)) {
+                  res = { type: 'error', message: `Capability does not permit writing ${cmd.uri}` };
+                  break;
+                }
+                capSub = verified.sub;
+                allowedWrites = verified.scope.map((u) => { try { return parseArtifactUri(u).relPath || '**'; } catch { return '(invalid)'; } });
+              }
+              const provenance = capSub
+                ? { tool: capSub.kind, ...(capSub.kind === 'session' ? { session: capSub.id } : {}), ...(capSub.kind === 'trigger' ? { trigger: capSub.id } : {}) }
+                : { tool: 'web-ui' };
+              const result = await captureArtifacts(projectDir, mountDir, [{ path: relPath, content: Buffer.from(cmd.contentBase64, 'base64') }], { message: cmd.message, provenance, allowedWrites });
+              res = { type: 'artifact-write', commit: result.commit };
+            } catch (e) {
+              res = { type: 'error', message: `Failed to write artifact: ${e instanceof Error ? e.message : String(e)}` };
+            }
+            break;
+
+          case 'favorites-list':
+            try {
+              const { readFavoritesMountRel } = await import('../../core/artifacts-favorites.js');
+              const { artifactsScope } = await import('../../core/artifacts.js');
+              const { workspaceDir } = await resolveArtifactUriDirs(cmd.uriPrefix);
+              res = { type: 'favorites', favorites: readFavoritesMountRel(artifactsScope(workspaceDir)) };
+            } catch (e) {
+              res = { type: 'error', message: `Failed to list favorites: ${e instanceof Error ? e.message : String(e)}` };
+            }
+            break;
+
+          case 'favorites-toggle':
+            try {
+              const { toggleFavorite } = await import('../../core/artifacts-favorites.js');
+              const { artifactsScope } = await import('../../core/artifacts.js');
+              const { projectDir, workspaceDir, relPath } = await resolveArtifactUriDirs(cmd.uri);
+              if (!relPath) { res = { type: 'error', message: 'favorites-toggle needs a file path in the URI' }; break; }
+              const result = await toggleFavorite(projectDir, artifactsScope(workspaceDir), relPath);
+              res = {
+                type: 'favorites',
+                favorites: result.favorites,
+                ...(result.snapshotSkipped.length > 0 ? { snapshotSkipped: result.snapshotSkipped } : {}),
+              };
+            } catch (e) {
+              res = { type: 'error', message: `Failed to toggle favorite: ${e instanceof Error ? e.message : String(e)}` };
+            }
+            break;
+
+          case 'favorites-merge':
+            try {
+              const { mergeFavorites } = await import('../../core/artifacts-favorites.js');
+              const { artifactsScope } = await import('../../core/artifacts.js');
+              const { projectDir, workspaceDir } = await resolveArtifactUriDirs(cmd.uriPrefix);
+              const favorites = await mergeFavorites(projectDir, artifactsScope(workspaceDir), cmd.paths, { verifyExists: true });
+              res = { type: 'favorites', favorites };
+            } catch (e) {
+              res = { type: 'error', message: `Failed to reconcile favorites: ${e instanceof Error ? e.message : String(e)}` };
+            }
+            break;
+
+          case 'serve-activate':
+            try {
+              const { activateServeRuntime } = await import('./serve-runtime.js');
+              const c = cmd.config;
+              const b64 = (v: string): Uint8Array => Uint8Array.from(Buffer.from(v, 'base64'));
+              const status = await activateServeRuntime({
+                relayUrl: c.relayUrl,
+                relayPubkey: c.relayPubkey,
+                machineId: c.machineId,
+                ownerUserRootId: c.ownerUserRootId,
+                identity: {
+                  id: c.identity.id,
+                  label: c.identity.label,
+                  createdAt: c.identity.createdAt,
+                  signing: { publicKey: b64(c.identity.signingPublicKey), secretKey: b64(c.identity.signingSecretKey) },
+                  keyExchange: { publicKey: b64(c.identity.keyExchangePublicKey), privateKey: b64(c.identity.keyExchangeSecretKey) },
+                },
+                publicIdentity: c.publicIdentity,
+                bootstrapToken: c.bootstrapToken,
+                registerPermit: c.registerPermit,
+                enrollmentToken: c.enrollmentToken,
+                deviceCertificate: c.deviceCertificate,
+              });
+              res = { type: 'serve-status', status };
+            } catch (e) {
+              res = { type: 'error', message: `serve activation failed: ${e instanceof Error ? e.message : String(e)}` };
+            }
+            break;
+
+          case 'serve-deactivate':
+            try {
+              const { deactivateServeRuntime } = await import('./serve-runtime.js');
+              res = { type: 'serve-status', status: await deactivateServeRuntime() };
+            } catch (e) {
+              res = { type: 'error', message: `serve deactivation failed: ${e instanceof Error ? e.message : String(e)}` };
+            }
+            break;
+
+          case 'serve-status':
+            try {
+              const { getServeRuntimeStatus } = await import('./serve-runtime.js');
+              res = { type: 'serve-status', status: getServeRuntimeStatus() };
+            } catch (e) {
+              res = { type: 'error', message: `serve status failed: ${e instanceof Error ? e.message : String(e)}` };
+            }
+            break;
+
+          case 'project-artifacts-rollup':
+            try {
+              const { rollupArtifacts } = await import('../../core/artifacts.js');
+              const { getProjectDir } = await import('../../core/config.js');
+              // The publish gate inside rollupArtifacts refuses raw large
+              // blobs; its error names the repair command.
+              const r = await rollupArtifacts(getProjectDir(cmd.projectName), cmd.workspace, { removeBranch: cmd.removeBranch });
+              res = { type: 'project-artifacts-rollup', mergeCommit: r.mergeCommit };
+            } catch (e) {
+              res = { type: 'error', message: `Roll-up failed: ${e instanceof Error ? e.message : String(e)}` };
+            }
+            break;
+
+          case 'report-problem':
+            try {
+              // Local write (the reversible sink + fallback) + GitHub issue to
+              // the GitSpace repo — a report is a problem WITH GitSpace, so it
+              // goes where GitSpace is fixed (not the user's project). Issue
+              // failure degrades to local-only inside fileProblemReport.
+              // Agent-originated reports (origin 'agent') ride the same routine
+              // via fileAgentReport (pi-coordinator onAgentReport sink).
+              const { fileProblemReport } = await import('./problem-report.js');
+              let clientBundle: unknown = {};
+              try { clientBundle = JSON.parse(cmd.clientBundleJson); } catch { clientBundle = { parseError: 'client bundle was not valid JSON' }; }
+              // Authoritative agent-status dump: per-session raw status.type +
+              // pending permission/question counts (from the AgentEventManager)
+              // AND the coordinator's open dialogs. A status bug like "asking a
+              // question but the pane shows green" is exactly a mismatch between
+              // these (status=busy, but a dialog is open) — capturing it makes
+              // the report self-diagnosable against the DOM snapshot.
+              const serverAgentState = (() => {
+                try {
+                  const snap = getAgentControlSnapshot();
+                  const sessions: unknown[] = [];
+                  for (const [workspaceId, w] of Object.entries(snap)) {
+                    for (const s of w.sessions ?? []) {
+                      sessions.push({
+                        workspaceId,
+                        sessionId: s.id,
+                        title: s.title,
+                        status: w.statuses?.[s.id]?.type ?? 'idle',
+                        pendingPermissions: (w.pendingPermissions?.[s.id] ?? []).length,
+                        pendingQuestions: (w.pendingQuestions?.[s.id] ?? []).length,
+                        closedAt: s.closedAt,
+                        dormantSince: s.dormantSince,
+                        errorMessage: w.errorMessages?.[s.id],
+                        lastMessage: w.lastMessages?.[s.id]?.slice(0, 120),
+                      });
+                    }
+                  }
+                  return { sessions, pendingDialogs: getPendingAgentDialogs() };
+                } catch (e) {
+                  return { error: e instanceof Error ? e.message : String(e) };
+                }
+              })();
+              const filed = await fileProblemReport(cmd.note, clientBundle, Date.now(), { serverAgentState });
+              res = { type: 'report-problem', path: filed.path, issueUrl: filed.issueUrl, issueNumber: filed.issueNumber };
+            } catch (e) {
+              res = { type: 'error', message: `Failed to write problem report: ${e instanceof Error ? e.message : String(e)}` };
+            }
+            break;
+
+          case 'artifact-share-mint':
+            try {
+              const { mintShareLink } = await import('./artifact-share.js');
+              const { readHostConfig } = await import('../../commands/host.js');
+              const hostConfig = readHostConfig();
+              const hostedDomain = hostConfig?.subdomain ? `${hostConfig.subdomain}.gitspace.sh` : null;
+              const r = await mintShareLink({ uri: cmd.uri, ttlMs: cmd.ttlMs, maxUses: cmd.maxUses, live: cmd.live, hostedDomain });
+              res = { type: 'artifact-share-mint', url: r.url, tokenId: r.tokenId, expiresAt: r.expiresAt };
+            } catch (e) {
+              res = { type: 'error', message: `Failed to mint share link: ${e instanceof Error ? e.message : String(e)}` };
+            }
+            break;
+
+          case 'artifact-share-revoke':
+            try {
+              const { revokeShareLink } = await import('./artifact-share.js');
+              res = { type: 'artifact-share-revoke', revoked: revokeShareLink(cmd.tokenId) };
+            } catch (e) {
+              res = { type: 'error', message: `Failed to revoke share link: ${e instanceof Error ? e.message : String(e)}` };
+            }
+            break;
+
+          case 'artifact-share-list':
+            try {
+              const { listShareLinks } = await import('./artifact-share.js');
+              res = { type: 'artifact-share-list', shares: listShareLinks() };
+            } catch (e) {
+              res = { type: 'error', message: `Failed to list share links: ${e instanceof Error ? e.message : String(e)}` };
+            }
+            break;
+
+          case 'trigger-save':
+            try {
+              const { saveTrigger } = await import('../../core/triggers.js');
+              const { ensureArtifactsMount, artifactsMountDir } = await import('../../core/artifacts.js');
+              const { getProjectDir } = await import('../../core/config.js');
+              const { existsSync: ex } = await import('fs');
+              const { join: j } = await import('path');
+              const projectDir = getProjectDir(cmd.target.projectName);
+              if (!ex(j(artifactsMountDir(cmd.target.workspacePath), '.git'))) {
+                await ensureArtifactsMount(projectDir, cmd.target.workspacePath, cmd.target.workspaceName === '@base' ? 'main' : cmd.target.workspaceName);
+              }
+              const record = await saveTrigger(projectDir, cmd.target.workspacePath, cmd.trigger);
+              res = { type: 'trigger-save', trigger: record };
+            } catch (e) {
+              res = { type: 'error', message: `Failed to save trigger: ${e instanceof Error ? e.message : String(e)}` };
+            }
+            break;
+
+          case 'trigger-run-now':
+            try {
+              await getAgentControlReady();
+              const { listTriggers, recordTriggerRun } = await import('../../core/triggers.js');
+              const { buildTriggerPrompt } = await import('./trigger-scheduler.js');
+              const { getProjectDir } = await import('../../core/config.js');
+              const projectDir = getProjectDir(cmd.target.projectName);
+              const trigger = listTriggers(cmd.target.workspacePath).find((t) => t.id === cmd.triggerId);
+              if (!trigger) { res = { type: 'error', message: `Unknown trigger: ${cmd.triggerId}` }; break; }
+              let capToken: string | undefined;
+              try {
+                const scope = triggerWriteScopesSync(cmd.target.workspacePath, trigger.writes ?? []);
+                if (scope.length > 0) {
+                  capToken = mintArtifactCap({
+                    sub: { kind: 'trigger', id: trigger.id },
+                    verbs: ['write'],
+                    scope: scope.map((g) => formatArtifactUri(cmd.target.projectName, cmd.target.workspaceName, g)),
+                    machineId: 'local',
+                    expiresAt: Date.now() + 6 * 60 * 60_000,
+                  }, getOrCreateArtifactCapKeypair().secretKey);
+                }
+              } catch { /* cap optional */ }
+              const prompt = buildTriggerPrompt(trigger, { capToken });
+              if (!prompt) { res = { type: 'error', message: `Trigger ${trigger.name} has no prompt to run.` }; break; }
+              // Same lifecycle as scheduled fires: pending → spawn → enforce+ok on idle.
+              const { mountHead } = await import('../../core/triggers.js');
+              await recordTriggerRun(projectDir, cmd.target.workspacePath, trigger.id, { status: 'pending', note: 'manual run', startCommit: mountHead(cmd.target.workspacePath) ?? undefined });
+              const before = new Set((await getKnownAgentSessions(cmd.target)).map((s) => s.id));
+              const sessions = await createAgentSession(cmd.target, `trigger: ${trigger.name}`);
+              const created = sessions.find((s) => !before.has(s.id)) ?? sessions[sessions.length - 1];
+              if (!created) {
+                await recordTriggerRun(projectDir, cmd.target.workspacePath, trigger.id, { status: 'fail', note: 'agent session failed to start' });
+                res = { type: 'error', message: 'Agent session failed to start.' };
+                break;
+              }
+              let prompted = false;
+              for (let attempt = 0; attempt < 4 && !prompted; attempt++) {
+                if (attempt > 0) await new Promise((r) => setTimeout(r, 2000 * attempt));
+                try { await promptAgentSession(cmd.target, created.id, prompt); prompted = true; } catch { /* discovery race */ }
+              }
+              if (!prompted) {
+                await recordTriggerRun(projectDir, cmd.target.workspacePath, trigger.id, { status: 'fail', note: 'prompt delivery failed', sessionId: created.id });
+                res = { type: 'error', message: 'Run session created but the prompt failed — open it and prompt manually.' };
+                break;
+              }
+              watchAgentSessionIdle({ id: cmd.target.workspaceId }, created.id, () => {
+                void (async () => {
+                  const { completeTriggerRun } = await import('../../core/triggers.js');
+                  const outcome = await completeTriggerRun(projectDir, cmd.target.workspacePath, trigger.id, { sessionId: created.id });
+                  if (outcome.enforcement.violations.length > 0) {
+                    addInboxItem(createInboxNotification(
+                      `trigger:${cmd.target.projectName}:${trigger.id}`,
+                      `trigger · ${trigger.name}`,
+                      'osc',
+                      `Run wrote outside its scope — reverted: ${outcome.enforcement.violations.join(', ')}. The run is marked failed.`,
+                    ));
+                  }
+                })().catch(() => undefined);
+              });
+              res = { type: 'trigger-run-now', sessionId: created.id };
+            } catch (e) {
+              res = { type: 'error', message: `Failed to run trigger: ${e instanceof Error ? e.message : String(e)}` };
+            }
+            break;
+
+
+
+
+
+          case 'project-artifacts-status':
+            try {
+              const { artifactPaths, getArtifactsRemote, ensureArtifactsRepo } = await import('../../core/artifacts.js');
+              const { getProjectDir } = await import('../../core/config.js');
+              const { execFileSync } = await import('child_process');
+              const projectDir = getProjectDir(cmd.projectName);
+              await ensureArtifactsRepo(projectDir);
+              const { repoDir } = artifactPaths(projectDir);
+              const remote = await getArtifactsRemote(projectDir);
+              let branches: string[] = [];
+              try {
+                branches = execFileSync('git', ['-C', repoDir, 'branch', '--format=%(refname:short)'], { encoding: 'utf8' })
+                  .split('\n').map((x) => x.trim()).filter(Boolean);
+              } catch { /* fresh repo */ }
+              // Teammates adopt via the COMMITTED pointer; a staged-but-
+              // uncommitted .gitspace/artifacts.json means sharing is not yet
+              // reaching anyone else — the wizard surfaces the remaining step.
+              let pointerCommitted: boolean | undefined;
+              if (remote) {
+                try {
+                  const { getProjectBaseDir } = await import('../../core/config.js');
+                  const base = getProjectBaseDir(cmd.projectName);
+                  const dirty = execFileSync('git', ['-C', base, 'status', '--porcelain', '--', '.gitspace/artifacts.json'], { encoding: 'utf8' }).trim();
+                  const tracked = execFileSync('git', ['-C', base, 'ls-files', '--', '.gitspace/artifacts.json'], { encoding: 'utf8' }).trim();
+                  pointerCommitted = dirty === '' && tracked !== '';
+                } catch { /* base missing / not a git repo */ }
+              }
+              // Per-branch unmerged counts: the delete confirmation reads these to
+              // say what dropping a workspace's artifacts branch would actually
+              // cost. One rev-list per branch, on a status call that is not hot.
+              const unmergedByBranch: Record<string, number> = {};
+              const { unmergedArtifactCommits } = await import('../../core/artifacts.js');
+              for (const b of branches) {
+                if (b === 'main') continue;
+                unmergedByBranch[b] = await unmergedArtifactCommits(projectDir, b).catch(() => 0);
+              }
+              res = { type: 'project-artifacts-status', repoPath: repoDir, remote, branches, pointerCommitted, unmergedByBranch };
+            } catch (e) {
+              res = { type: 'error', message: `Failed to read artifacts status: ${e instanceof Error ? e.message : String(e)}` };
+            }
+            break;
+
+          case 'project-artifacts-remote-set':
+            try {
+              const { setArtifactsRemote, syncArtifacts, writeArtifactsPointerConfig } = await import('../../core/artifacts.js');
+              const { getProjectBaseDir, getProjectDir } = await import('../../core/config.js');
+              const projectDir = getProjectDir(cmd.projectName);
+              await setArtifactsRemote(projectDir, cmd.url);
+              // Commit the pointer into the CODE repo so collaborators inherit it.
+              try { await writeArtifactsPointerConfig(getProjectBaseDir(cmd.projectName), { remote: cmd.url }); } catch { /* base missing */ }
+              const sync = await syncArtifacts(projectDir);
+              res = { type: 'project-artifacts-sync', pushed: sync.pushed, fastForwarded: sync.fastForwarded };
+            } catch (e) {
+              res = { type: 'error', message: `Failed to connect artifacts remote: ${e instanceof Error ? e.message : String(e)}` };
+            }
+            break;
+
+          case 'project-artifacts-provision':
+            try {
+              const { provisionGithubArtifacts } = await import('../../core/artifacts-github.js');
+              const { getProjectBaseDir, getProjectDir } = await import('../../core/config.js');
+              const r = await provisionGithubArtifacts(cmd.projectName, getProjectDir(cmd.projectName), getProjectBaseDir(cmd.projectName));
+              res = { type: 'project-artifacts-provision', slug: r.slug, url: r.url, created: r.created, blobsUploaded: r.blobsUploaded, collaboratorsCopied: r.collaboratorsCopied };
+            } catch (e) {
+              res = { type: 'error', message: `Provisioning failed: ${e instanceof Error ? e.message : String(e)}` };
+            }
+            break;
+
+          case 'project-artifacts-sync':
+            try {
+              const { syncArtifacts, getArtifactsRemote } = await import('../../core/artifacts.js');
+              const { slugFromRemote, uploadMissingBlobs } = await import('../../core/artifacts-github.js');
+              const { getProjectDir } = await import('../../core/config.js');
+              const projectDir = getProjectDir(cmd.projectName);
+              const sync = await syncArtifacts(projectDir);
+              // GitHub remotes also move large-file blobs (GitHub LFS batch API).
+              const slug = slugFromRemote(await getArtifactsRemote(projectDir));
+              if (slug) await uploadMissingBlobs(projectDir, slug);
+              res = { type: 'project-artifacts-sync', pushed: sync.pushed, fastForwarded: sync.fastForwarded };
+            } catch (e) {
+              res = { type: 'error', message: `Failed to sync artifacts: ${e instanceof Error ? e.message : String(e)}` };
+            }
+            break;
+
+
+          case 'repo-tree':
+            try {
+              const { listRepoFiles } = await import('../../core/git.js');
+              res = { type: 'repo-tree', entries: await listRepoFiles(cmd.target.workspacePath) };
+            } catch (e) {
+              res = { type: 'error', message: `Failed to list repo files: ${e instanceof Error ? e.message : String(e)}` };
+            }
+            break;
+
+          case 'repo-read':
+            try {
+              const { readRepoFile } = await import('../../core/git.js');
+              const MAX_READ = 8 * 1024 * 1024;
+              const bytes = readRepoFile(cmd.target.workspacePath, cmd.path);
+              if (bytes === null) {
+                res = { type: 'repo-read', base64: null, size: 0, truncated: false };
+              } else {
+                const truncated = bytes.length > MAX_READ;
+                res = {
+                  type: 'repo-read',
+                  base64: (truncated ? bytes.subarray(0, MAX_READ) : bytes).toString('base64'),
+                  size: bytes.length,
+                  truncated,
+                };
+              }
+            } catch (e) {
+              res = { type: 'error', message: `Failed to read file: ${e instanceof Error ? e.message : String(e)}` };
+            }
+            break;
+
+          case 'repo-commit':
+            try {
+              const { commitAllChanges } = await import('../../core/git.js');
+              const commit = await commitAllChanges(cmd.target.workspacePath, cmd.message);
+              res = { type: 'repo-commit', commit };
+            } catch (e) {
+              res = { type: 'error', message: `Failed to commit: ${e instanceof Error ? e.message : String(e)}` };
+            }
+            break;
+
+          case 'repo-search':
+            try {
+              const { searchRepoContent } = await import('../../core/git.js');
+              const found = await searchRepoContent(cmd.target.workspacePath, cmd.query, { caseSensitive: cmd.caseSensitive });
+              res = { type: 'repo-search', hits: found.hits, truncated: found.truncated };
+            } catch (e) {
+              res = { type: 'error', message: `Failed to search repo: ${e instanceof Error ? e.message : String(e)}` };
+            }
+            break;
+
+          case 'workspace-editor-open':
+            try {
+              const result = await openWorkspaceInEditor(cmd.editorId, cmd.target.workspacePath);
+              res = result.ok ? { type: 'ok' } : { type: 'error', message: result.message };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to open editor: ${errMsg}` };
+            }
+            break;
+
+
           case 'agent-file-suggestions':
             try {
               await getAgentControlReady();
@@ -3135,18 +4459,6 @@ routerListener = Bun.listen({
               res = { type: 'error', message: `Failed to get file suggestions: ${errMsg}` };
             }
             break;
-
-          case "kill-server":
-            console.log("Shutting down...");
-            res = { type: "ok" };
-            if (socketState.writer) socketState.writer.write(encodeRouterMessage(res));
-            else socket.write(encodeRouterMessage(res));
-            // Clean up socket file after sending response, before exit
-            setTimeout(() => {
-              shutdownServer();
-              process.exit(0);
-            }, 100);
-            return;
 
           case "inbox":
             res = { type: "inbox", items: [...inbox] };
@@ -3194,6 +4506,9 @@ routerListener = Bun.listen({
               type: "version",
               version: PACKAGE_VERSION,
               protocol: PROTOCOL_VERSION,
+              // The code identity this daemon booted with; the CLI compares it to
+              // the current value to recycle a daemon on stale code.
+              codeVersion: BOOT_CODE_VERSION,
             };
             break;
 
@@ -3208,15 +4523,335 @@ routerListener = Bun.listen({
               uptime: Math.floor((Date.now() - SERVER_START_TIME) / 1000),
               sessions: sessionList.length,
               attached: attachedCount,
+              codeVersion: BOOT_CODE_VERSION,
             };
+            break;
+          }
+
+          case "terminate": {
+            const s = sessions.get(cmd.id);
+            if (!s) {
+              res = { type: "error", message: `Session ${cmd.id} not found` };
+            } else {
+              const mode = resolveTerminationMode(cmd.mode);
+              const graceMs = resolveTerminationGraceMs(cmd.graceMs);
+              if (!mode) {
+                res = { type: "error", message: "Invalid terminate mode" };
+              } else if (graceMs === null) {
+                res = { type: "error", message: "Invalid terminate graceMs" };
+              } else {
+                await terminateSessionData(s, mode, graceMs);
+                res = { type: "ok" };
+              }
+            }
+            break;
+          }
+
+          case 'agent-prompt': {
+            const traceStartMs = Date.now();
+            writeTraceLog('tmux-agent-prompt-start', {
+              agentSessionId: cmd.agentSessionId,
+              workspaceId: cmd.target.workspaceId,
+              textLength: cmd.text.length,
+              imageCount: cmd.images?.length ?? 0,
+            });
+            try {
+              await getAgentControlReady();
+              writeTraceLog('tmux-agent-prompt-control-ready', {
+                agentSessionId: cmd.agentSessionId,
+                workspaceId: cmd.target.workspaceId,
+                durationMs: Date.now() - traceStartMs,
+              });
+              // ok here means the turn was accepted. Turn progress and completion are surfaced via existing agent events, not via this response.
+              await promptAgentSession(cmd.target, cmd.agentSessionId, cmd.text, cmd.images, { streamingBehavior: cmd.streamingBehavior });
+              writeTraceLog('tmux-agent-prompt-accepted', {
+                agentSessionId: cmd.agentSessionId,
+                workspaceId: cmd.target.workspaceId,
+                durationMs: Date.now() - traceStartMs,
+              });
+              res = { type: 'ok' };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to prompt agent session: ${errMsg}` };
+              writeTraceLog('tmux-agent-prompt-error', {
+                agentSessionId: cmd.agentSessionId,
+                workspaceId: cmd.target.workspaceId,
+                durationMs: Date.now() - traceStartMs,
+                error: errMsg,
+              });
+            }
             break;
           }
 
           default:
             res = { type: "error", message: "Unknown command" };
+  }
+  return res;
+}
+
+// Daemon-unification P3: the in-process session-handler dispatches typed
+// commands directly — no socket round trip to ourselves.
+setCommandDispatcher(dispatchCommand);
+console.error('[dispatch] in-process command dispatcher registered');
+
+routerListener = Bun.listen({
+  unix: ROUTER_SOCKET,
+  socket: {
+    open(socket) {
+      const socketState = getRouterSocketState(socket);
+      socketState.writer = createBufferedSocketWriter(socket as any);
+    },
+    close(socket) {
+      clearRouterSocketState(socket);
+    },
+
+    async data(socket, data) {
+      const socketState = getRouterSocketState(socket);
+      const combined = Buffer.concat([socketState.buffer, Buffer.from(data)]);
+      let decoded;
+
+      try {
+        decoded = decodeRouterMessages(combined);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Invalid request";
+        if (socketState.writer) socketState.writer.write(encodeRouterMessage({ type: "error", message }));
+        else socket.write(encodeRouterMessage({ type: "error", message }));
+        socketState.buffer = Buffer.alloc(0);
+        return;
+      }
+
+      socketState.buffer = decoded.remaining;
+
+      for (const message of decoded.messages) {
+        const cmd = message as Command;
+        // Loop-resident commands (agent-dialog-response, attach) also
+        // carry '@base' targets — normalize here too (idempotent with the
+        // dispatchCommand normalization for everything routed through it).
+        if ('target' in cmd && cmd.target && typeof cmd.target === 'object' && 'workspaceName' in cmd.target && (cmd.target as { workspaceName?: string }).workspaceName === '@base') {
+          try {
+            const { getProjectBaseDir } = await import('../../core/config.js');
+            const t = cmd.target as { workspaceId: string; workspaceName: string; workspacePath: string; projectName: string };
+            t.workspacePath = getProjectBaseDir(t.projectName);
+            t.workspaceId = `${t.projectName}:@base`;
+          } catch { /* leave as-is; handler will error */ }
+        }
+        const commandTraceStartMs = Date.now();
+        writeTraceLog('tmux-command-start', {
+          commandType: cmd.type,
+          requestId: 'requestId' in cmd ? cmd.requestId : undefined,
+        });
+        let res: Response;
+        const writeResponse = (response: Response) => {
+          if (socketState.writer) socketState.writer.write(encodeRouterMessage(response));
+          else socket.write(encodeRouterMessage(response));
+        };
+
+        switch (cmd.type) {
+          case 'attach-prepare':
+            try {
+              let targetSession: Session;
+              let workspaceId: string | undefined;
+              if (cmd.sessionId) {
+                const s = sessions.get(cmd.sessionId);
+                if (!s) {
+                  res = { type: 'error', message: `Session ${cmd.sessionId} not found` };
+                  break;
+                }
+                targetSession = getSessionInfo(s);
+              } else if (cmd.workspaceId) {
+                let currentPhase: 'pre' | 'setup' | 'select' = 'pre';
+                const prepared = await attachWorkspaceSession({
+                  scanWorkspaces,
+                  listSessions: async () => Array.from(sessions.values()).map((session) => ({ name: session.info.name })),
+                  createSession: async (name, cwd, options) => createSession(name, cwd, options),
+                  prepareWorkspaceForSession: async (args) => prepareWorkspaceForSession(args),
+                }, {
+                  workspaceId: cmd.workspaceId,
+                  sessionName: cmd.sessionName,
+                  command: cmd.command,
+                  args: cmd.args,
+                  env: cmd.env,
+                  scriptPolicy: cmd.scriptPolicy,
+                  onAbortController: (controller) => {
+                    if (controller) {
+                      pendingAttachControllers.set(cmd.requestId, controller);
+                    } else {
+                      pendingAttachControllers.delete(cmd.requestId);
+                    }
+                  },
+                  onOutput: (data, phase) => {
+                    currentPhase = phase;
+                    writeResponse({ type: 'attach-script-output', requestId: cmd.requestId, phase, data: Buffer.from(data).toString('base64') });
+                  },
+                  onPhaseStart: (phase) => {
+                    currentPhase = phase;
+                    const banner = Buffer.from(`\r\n==> ${phase} scripts...\r\n`);
+                    writeResponse({ type: 'attach-script-output', requestId: cmd.requestId, phase, data: banner.toString('base64') });
+                  },
+                });
+                if (!cmd.command) {
+                  writeResponse({ type: 'attach-script-output', requestId: cmd.requestId, phase: currentPhase, data: '', done: true });
+                }
+                targetSession = prepared.session;
+                workspaceId = prepared.workspace.id;
+              } else {
+                res = { type: 'error', message: 'attach-prepare requires sessionId or workspaceId' };
+                break;
+              }
+              applyTerminalScopedUpdate(targetSession.id);
+              writeResponse({ type: 'attach-prepared', requestId: cmd.requestId, session: targetSession, workspaceId, viewOnly: cmd.viewOnly });
+              continue;
+            } catch (e) {
+              pendingAttachControllers.delete(cmd.requestId);
+              const typedError = e instanceof Error ? e as Error & { code?: string } : undefined;
+              const message = `Failed to prepare attach: ${typedError?.message ?? String(e)}`;
+              res = typedError?.code
+                ? { type: 'error', message, code: typedError.code }
+                : { type: 'error', message };
+            }
+            break;
+
+          case 'attach-cancel': {
+            const controller = pendingAttachControllers.get(cmd.requestId);
+            if (controller) {
+              controller.abort();
+              pendingAttachControllers.delete(cmd.requestId);
+            }
+            res = { type: 'ok' };
+            break;
+          }
+
+          case "attach": {
+            const s = sessions.get(cmd.id);
+            if (!s) {
+              res = { type: "error", message: `Session ${cmd.id} not found` };
+            } else if (s.info.attached && !cmd.force) {
+              res = { type: "already-attached", session: getSessionInfo(s) };
+            } else {
+              res = { type: "session", session: getSessionInfo(s) };
+            }
+            break;
+          }
+
+          case 'agent-watch':
+            try {
+              await getAgentControlReady();
+              socketState.watchesAgentState = true;
+              agentStateWatchers.add(socket);
+              res = { type: 'agent-watch-started' };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to start agent watch: ${errMsg}` };
+            }
+            break;
+
+          case 'machine-watch':
+            try {
+              const snapshot = await getCurrentMachineSnapshot();
+              socketState.watchesMachineState = true;
+              machineStateWatchers.add(socket);
+              writeResponse({ type: 'machine-snapshot', snapshot });
+              res = { type: 'machine-watch-started' };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to start machine watch: ${errMsg}` };
+            }
+            break;
+
+
+          case 'workspace-delete':
+            try {
+              const normalizedWorkspaceId = cmd.workspaceId.startsWith(`${cmd.projectName}:`)
+                ? cmd.workspaceId.slice(cmd.projectName.length + 1)
+                : cmd.workspaceId;
+              const canonicalWorkspaceId = `${cmd.projectName}:${normalizedWorkspaceId}`;
+              const result = await deleteWorkspaceCore(cmd.projectName, normalizedWorkspaceId, {
+                nonInteractive: true,
+                removeScriptPolicy: cmd.scriptPolicy === 'skip' ? 'skip' : 'enforce',
+                onScriptOutput: (data) => {
+                  writeResponse({ type: 'workspace-delete-output', requestId: cmd.requestId, data: data.toString('base64') });
+                },
+              });
+              if (!result.success) {
+                const message = result.error ?? `Failed to delete workspace ${normalizedWorkspaceId}`;
+                writeResponse({ type: 'workspace-delete-output', requestId: cmd.requestId, data: '', done: true, error: message });
+                res = { type: 'error', message, code: result.errorCode };
+                break;
+              }
+              writeResponse({ type: 'workspace-delete-output', requestId: cmd.requestId, data: '', done: true });
+              void broadcastMachineSnapshotReplacement().catch(() => {});
+              res = { type: 'workspace-deleted', requestId: cmd.requestId, workspaceId: canonicalWorkspaceId };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              writeResponse({ type: 'workspace-delete-output', requestId: cmd.requestId, data: '', done: true, error: errMsg });
+              res = { type: 'error', message: errMsg };
+            }
+            break;
+
+          case 'agent-dialog-response':
+            try {
+              // Same-socket dialogs (path a) may only be answered by the socket
+              // they were delivered to. Conduit-delivered dialogs (path b, the
+              // serve+relay app) resolve by dialogId from any command socket.
+              if (!isDialogResponseAuthorized(cmd.dialogId, socket, agentDialogOwners, conduitDeliveredDialogs)) {
+                res = { type: 'agent-bool', ok: false };
+                break;
+              }
+              const resolved = await resolveAgentDialogResponse({
+                type: cmd.dialogType,
+                id: cmd.dialogId,
+                value: cmd.value as any,
+              });
+              // First valid response wins; drop the tracking so late/duplicate
+              // responses find no pending dialog and no-op (ok:false).
+              agentDialogOwners.delete(cmd.dialogId);
+              conduitDeliveredDialogs.delete(cmd.dialogId);
+              // Dialog answered -> the coordinator's open-dialog set shrank;
+              // rebuild so the session clears amber promptly.
+              if (resolved) void broadcastMachineSnapshotReplacement().catch(() => {});
+              res = { type: 'agent-bool', ok: resolved };
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              res = { type: 'error', message: `Failed to resolve dialog: ${errMsg}` };
+            }
+            break;
+
+          case "kill-server":
+            console.log("Shutting down...");
+            res = { type: "ok" };
+            if (socketState.writer) socketState.writer.write(encodeRouterMessage(res));
+            else socket.write(encodeRouterMessage(res));
+            // Clean up socket file after sending response, before exit
+            setTimeout(() => {
+              shutdownServer();
+              process.exit(0);
+            }, 100);
+            return;
+
+          default: {
+            // Lease commands are ordinary dispatch cases (so the in-process
+            // remote handler reaches them too), but a socket client gets its
+            // lease scoped to THIS connection and remembered, so a disconnect
+            // releases exactly the panes it held open.
+            let outbound = cmd;
+            if (cmd.type === 'agent-open' || cmd.type === 'agent-release') {
+              const state = getRouterSocketState(socket);
+              const owner = cmd.owner ?? state.leaseOwnerId;
+              state.leaseOwners.add(owner);
+              outbound = { ...cmd, owner };
+            }
+            const dispatched = await dispatchCommand(outbound);
+            res = dispatched ?? { type: 'error', message: `Unknown command: ${cmd.type}` };
+          }
         }
 
         sendRouterResponse(socket, res);
+        writeTraceLog('tmux-command-response', {
+          commandType: cmd.type,
+          requestId: 'requestId' in cmd ? cmd.requestId : undefined,
+          responseType: res.type,
+          durationMs: Date.now() - commandTraceStartMs,
+        });
         if (res.type === 'agent-watch-started') {
           try {
             sendRouterResponse(socket, { type: 'agent-state', workspaces: Object.values(getAgentControlSnapshot()) });
@@ -3224,7 +4859,7 @@ routerListener = Bun.listen({
         }
         if (res.type === 'machine-watch-started') {
           try {
-            const snapshot = await buildCurrentMachineSnapshot();
+            const snapshot = await getCurrentMachineSnapshot();
             sendRouterResponse(socket, { type: 'machine-snapshot', snapshot });
           } catch {}
         }

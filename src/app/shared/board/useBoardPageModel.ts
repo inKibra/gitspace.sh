@@ -12,6 +12,8 @@ export interface UseBoardPageModelArgs {
   mode?: 'browsing' | 'attached' | 'idle' | null;
   activeBackendKey?: string | null;
   activeBackendHasSnapshot?: boolean;
+  /** Snapshot load failure (e.g. initial snapshot timed out) — see BackendSessionState.snapshotError. */
+  activeBackendSnapshotError?: string | null;
 }
 
 export function useBoardPageModel(args: UseBoardPageModelArgs) {
@@ -47,11 +49,17 @@ export function useBoardPageModel(args: UseBoardPageModelArgs) {
     args.activeBackendKey != null &&
     args.activeBackendHasSnapshot === false;
 
+  // While the board would otherwise spin, surface a snapshot load failure so
+  // the UI can render a real error state (reason + retry) instead of an
+  // infinite "Loading worktrees..." spinner.
+  const loadError = loading ? (args.activeBackendSnapshotError ?? null) : null;
+
   return {
     boardState,
     handleSelectWorkspace,
     worktreeCount,
     loading,
+    loadError,
     selectedWorkspaceProjectName,
   };
 }

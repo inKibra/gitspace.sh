@@ -1,7 +1,31 @@
 import { join, resolve, relative, isAbsolute } from 'node:path';
-import { existsSync, readFileSync, realpathSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, realpathSync, readdirSync, statSync, openSync, readSync, closeSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { getPiAgentDir } from './pi-runtime.js';
+
+/**
+ * Max bytes read from the HEAD of a session JSONL when listing sessions. The
+ * only fields listing needs — the session header, the leading title record, and
+ * the first user message — all live at the very top of the file. Reading the
+ * whole transcript (readFileSync) to list a session meant startup seeding of a
+ * workspace with many large transcripts froze the daemon event loop for
+ * seconds (serve-activate 15s-timeout / "daemon wedged"). 256 KiB is far more
+ * than enough for the header + first messages while bounding per-session cost.
+ */
+const SESSION_LIST_HEAD_BYTES = 256 * 1024;
+
+/** Read up to `maxBytes` from the start of a file (never the whole thing). A
+ *  final truncated line is tolerated by callers (they trim + try/catch lines). */
+function readFileHead(filePath: string, maxBytes: number): string {
+  const fd = openSync(filePath, 'r');
+  try {
+    const buf = Buffer.allocUnsafe(maxBytes);
+    const bytesRead = readSync(fd, buf, 0, maxBytes, 0);
+    return buf.toString('utf-8', 0, bytesRead);
+  } finally {
+    closeSync(fd);
+  }
+}
 
 export interface PiSessionFileInfo {
   id: string;
@@ -131,26 +155,55 @@ function listSessionFiles(sessionDir: string): string[] {
   }
 }
 
-function parseSessionHeader(content: string): SessionHeader | null {
-  const firstLineEnd = content.indexOf('\n');
-  const firstLine = (firstLineEnd === -1 ? content : content.slice(0, firstLineEnd)).trimEnd();
-  if (!firstLine) return null;
+// The `session` header is usually the first line, but newer omp session files
+// may prepend a fixed-width, in-place-updatable `title` record (so the title can
+// be rewritten without rewriting the whole file), which pushes the header down.
+// Scan the first few leading records for it.
+const MAX_HEADER_SCAN_LINES = 8;
 
-  try {
-    const header = JSON.parse(firstLine) as SessionHeader;
-    if (header.type !== 'session' || typeof header.id !== 'string') {
-      return null;
+function parseSessionHeader(content: string): SessionHeader | null {
+  let lineStart = 0;
+  for (let i = 0; i < MAX_HEADER_SCAN_LINES && lineStart < content.length; i++) {
+    const lineEnd = content.indexOf('\n', lineStart);
+    const line = (lineEnd === -1 ? content.slice(lineStart) : content.slice(lineStart, lineEnd)).trim();
+    if (line) {
+      try {
+        const header = JSON.parse(line) as SessionHeader;
+        if (header.type === 'session' && typeof header.id === 'string') {
+          return header;
+        }
+      } catch {
+        // not JSON or not the header record — keep scanning
+      }
     }
-    return header;
-  } catch {
-    return null;
+    if (lineEnd === -1) break;
+    lineStart = lineEnd + 1;
   }
+  return null;
+}
+
+/** Freshest title from a leading in-place-updatable `title` record, if present. */
+function parseLeadingTitle(content: string): string | undefined {
+  const end = content.indexOf('\n');
+  const line = (end === -1 ? content : content.slice(0, end)).trim();
+  if (!line) return undefined;
+  try {
+    const rec = JSON.parse(line) as { type?: string; title?: unknown };
+    if (rec.type === 'title' && typeof rec.title === 'string') {
+      const trimmed = rec.title.trim();
+      return trimmed.length > 0 ? trimmed : undefined;
+    }
+  } catch {
+    // not a title record
+  }
+  return undefined;
 }
 
 function parseSessionIdFromFile(filePath: string): string | null {
   let content: string;
   try {
-    content = readFileSync(filePath, 'utf-8');
+    // The header is the first line — the head is all we need.
+    content = readFileHead(filePath, SESSION_LIST_HEAD_BYTES);
   } catch {
     return null;
   }
@@ -163,7 +216,12 @@ function parseSessionIdFromFile(filePath: string): string | null {
 function parseSessionInfoFromFile(filePath: string): PiSessionFileInfo | null {
   let content: string;
   try {
-    content = readFileSync(filePath, 'utf-8');
+    // Head-only: header, leading title, and first user message live at the top.
+    // messageCount below therefore counts messages WITHIN the head (approximate
+    // for very long transcripts) — it is display-only and not used to drive any
+    // behaviour, so an approximate count on huge files is an acceptable trade
+    // for not reading the entire transcript just to list it.
+    content = readFileHead(filePath, SESSION_LIST_HEAD_BYTES);
   } catch {
     return null;
   }
@@ -211,6 +269,12 @@ function parseSessionInfoFromFile(filePath: string): PiSessionFileInfo | null {
     stat = statSync(filePath);
   } catch {
     return null;
+  }
+
+  // A leading in-place-updatable `title` record is the freshest title; prefer it.
+  const leadingTitle = parseLeadingTitle(content);
+  if (leadingTitle) {
+    title = leadingTitle;
   }
 
   return {

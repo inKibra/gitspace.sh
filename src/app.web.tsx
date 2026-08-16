@@ -1,20 +1,26 @@
 /** @jsxImportSource react */
-import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo, type ReactNode } from "react";
 import { flushSync } from "react-dom";
 import type { SessionTerminalHandle } from "./components/SessionTerminal.web";
 import { ReplayTerminalWeb } from './components/ReplayTerminal.web';
 import { ScriptTerminal } from "./components/ScriptTerminal.web";
+import { WorkspaceRemovalTaskBar } from './components/WorkspaceRemovalTaskBar.web.js';
 import {
   applyModifiersToInput,
   type ModifierState,
 } from "./components/TerminalControls.web";
 import { AttachedTerminalPaneWeb } from './components/AttachedTerminalPane.web.js';
+import { getAgentSessionDisplayTitle } from './agents/session-display.js';
+import { DockviewWorkspaceShell } from './components/DockviewWorkspaceShell.web.js';
+import { PaneTerminalPanel } from './components/PaneTerminalPanel.web.js';
+import { GoalDetailPanel } from './components/GoalDetailPanel.web.js';
 import { IdentityGate } from "./components/IdentityGate.web";
 import type { Identity } from "./types/identity";
 import { useVisualViewport } from "./hooks/useVisualViewport.web";
 import { browserPreferencesService } from "./lib/preferences-service.web";
 import { Toaster, toast } from "./lib/sonner.web";
 import { ReviewPage } from './pages/ReviewPage.web.js';
+import { terminalMemoryDebugGauge, terminalMemoryDebugIncrement } from './utils/terminal-memory-debug.js';
 
 // Shared components and hooks
 import {
@@ -27,22 +33,47 @@ import {
 import { BoardPage } from "./pages/BoardPage.web.js";
 import { WorkspaceDetailPage } from "./pages/WorkspaceDetailPage.web.js";
 import { FlowWeb } from "./components/Flow.web.js";
+import { ArtifactPanel } from "./components/ArtifactPanel.web.js";
+import { DashboardPanel } from "./components/DashboardPanel.web.js";
+import { NotePanel } from "./components/NotePanel.web.js";
+import { GoalDocPanel } from "./components/GoalDocPanel.web.js";
+import { ChangeGuidePane } from "./components/ChangeGuide.web.js";
+import { ReviewRubric } from "./components/ReviewRubric.web.js";
+import { EvidencePanel } from "./components/EvidencePanel.web.js";
+import { ReportPanel } from "./components/ReportPanel.web.js";
+import { WorkflowPanel } from "./components/WorkflowPanel.web.js";
+import { CronsPaneConnected } from "./components/CronsPaneConnected.web.js";
+import { decodeBase64Utf8, encodeBase64Utf8, resolveAttachmentRef } from "./components/artifact-kinds.js";
+import { GlobalChromeBar, type ChromeWorkspaceChip } from "./components/GlobalChromeBar.web.js";
+import { GlobalTaskbar } from "./components/GlobalTaskbar.web.js";
+import { RightRail, RepoFilePanel, type RepoFileOpen } from "./components/RightRail.web.js";
+import { ProjectHomePage } from "./pages/ProjectHomePage.web.js";
 import { useInboxPage } from './app/react/index.js';
 import { InboxWeb } from "./components/Inbox.web.js";
+import { ReportProblemDialog } from "./components/ReportProblemDialog.web.js";
+import { relayHttpBase } from "./lib/relay-http.web.js";
+import { isTouchDevice, hasCoarsePointer } from "./utils/device.web.js";
+import { shareArtifactToClipboard } from "./components/share-artifact.web.js";
 import { useEvents, toWideEventItem, type WideEventItem } from "./components/Events.js";
 import { EventsWeb } from "./components/Events.web.js";
 import type { WideEventFilter } from "./types/events.js";
 import type { WorkspacePhase } from './types/config.js';
+import type { ChainStackStatus, GoalChainSummary, GoalDoc, GoalValidation } from './types/goals.js';
+import type { AddPlannedGoalPosition } from './core/goal-chain.js';
 import {
   useNotifications,
   type ToastNotification,
   DEFAULT_NOTIFICATION_CONFIG,
   getSessionLabel,
 } from "./notifications/index.js";
+import { WORKSPACE_CHIP_COLOR } from './app/shared/status-display.js';
 import { useWorkspaceRuntimeModel } from './app/shared/workspace-runtime/useWorkspaceRuntimeModel.js';
 import { useCommandPaletteOrchestration } from './app/react/index.js';
+import { showWorkspaceEditorSelect } from './app/shared/command-palette/showWorkspaceEditorSelect.js';
 import { showReplayHistorySelect } from './app/shared/workspace-detail/showReplayHistorySelect.js';
 import { showWorkspaceStatusSelect } from './app/shared/command-palette/workspace-status.js';
+import type { WorkspaceStatusColor } from './app/workspaces/workspace-status.js';
+import { getWorkspaceStripColor } from './app/shared/workspace-detail/strip.js';
 import type { WorkspaceDetailReplayRow } from './app/shared/workspace-detail/types.js';
 
 // Multi-backend layer (browser-side)
@@ -52,14 +83,18 @@ import {
   toBackendScopedWorkspaceKey,
 } from './machine/multi/types.js';
 import { useBoardPageModel } from './app/shared/board/useBoardPageModel.js';
+import { computeReadiness } from './app/shared/goal-validation/readiness.js';
+import { goalGateSummary } from './core/goal-gates.js';
 import { getShiftArrowPhaseChange } from './app/shared/board/phase-movement.js';
 import { selectBackendSnapshot } from './machine/multi/selectors.js';
+import type { KanbanGoalItem, WorkspaceBoardGroup } from './app/shared/board/types.js';
 import type { BackendKey } from './session/backend.js';
 import type { RemoteSessionPtyBackend } from './session/useRemoteSessionClient.js';
 import { useAgentSessionActions, useWorkspaceLifecycleActions, useProcessActions, useInboxActions, useBundleRefreshAttachFlow, useBundleConfigFlow, useReplayReviewActions, useSessionActions, useLifecycleActions, useAttachActions, usePreferencesAdapter, useUserActivity, buildEditProcessesCommand, useWorkspaceController } from './app/react/index.js';
+import { useWorkspaceRemovalTasks, workspaceOperationsToRemovalTasks } from './app/react/useWorkspaceRemovalTasks.js';
+import { useWorkspaceCreationTasks, workspaceOperationsToCreationTasks } from './app/react/useWorkspaceCreationTasks.js';
 
 import { browserPlatform } from './sdk/platforms/browser.web.js';
-import { NativeAgentSurfaceConnected } from './components/NativeAgentSurfaceConnected.web.js';
 import type { RelayDescriptor } from './relay-client/index.js';
 
 // Replay helper
@@ -78,6 +113,10 @@ const DELETE_ERROR_CODES = new Set([
   'RESOURCE_NOT_FOUND',
   'NOT_FOUND',
 ]);
+
+function toGoalCacheKey(backendKey: string, projectName: string, goalId: string): string {
+  return `${backendKey}:${projectName}:${goalId}`;
+}
 
 const SCRIPT_ERROR_CODES = new Set([
   'SCRIPT_CANCELLED',
@@ -99,13 +138,64 @@ type AppInnerProps = {
 function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   const [view, setView] = useState<View>("terminal");
   const [showInbox, setShowInbox] = useState(false);
+  const [showReportProblem, setShowReportProblem] = useState(false);
   const [showScriptTerminal, setShowScriptTerminal] = useState(false);
   const [scriptWorkspaceName, setScriptWorkspaceName] = useState('workspace');
-  const [showMobileControls] = useState(false);
+  // The mobile terminal control kit (Ctrl/Esc/Tab/arrows/DPad) — on by default
+  // for touch/coarse-pointer devices, where the OS keyboard has no such keys.
+  const [showMobileControls] = useState(() => isTouchDevice() || hasCoarsePointer());
   const [inputMode, setInputMode] = useState(false);
   const [showEvents, setShowEvents] = useState(false);
   const [eventsWorkspacePath, setEventsWorkspacePath] = useState<string | null>(null);
   const [eventsWorkspaceLabel, setEventsWorkspaceLabel] = useState<string>('');
+  const [projectHomeName, setProjectHomeName] = useState<string | null>(null);
+  /** Project the chrome bar is scoped to (`null` = every project, which is what
+   *  the cross-project board shows). Opening a workspace or a project surface
+   *  adopts that project, so the switcher always names where you actually are. */
+  const [chipProjectFilter, setChipProjectFilter] = useState<string | null>(null);
+  /** Repo files + artifacts opened as dock tabs, keyed by workspace selectionKey. */
+  type DockExtraPane = ({ kind: 'file' } & RepoFileOpen) | { kind: 'artifact'; path: string } | { kind: 'dashboard'; path: string } | { kind: 'note'; noteId: string | null; title: string; nonce?: number } | { kind: 'goal' } | { kind: 'guide' } | { kind: 'rubric' } | { kind: 'evidence'; requirementId: string; evidenceId: string } | { kind: 'report'; path: string } | { kind: 'workflow' } | { kind: 'crons' } | { kind: 'eventlog' };
+  const [dockExtraPanes, setDockExtraPanes] = useState<Record<string, DockExtraPane[]>>({});
+  const [dockFocusRequests, setDockFocusRequests] = useState<Record<string, { id: string; nonce: number }>>({});
+  /** Goal-rubric-workflow interconnect chip routing (keyed by wsKey): the
+   *  goal pane scrolls to a doc slice heading; the rubric pane opens
+   *  filtered to a workflow phase's owed requirements. Nonces re-fire on
+   *  repeat clicks while the singleton panes stay open. */
+  const [goalSliceRequests, setGoalSliceRequests] = useState<Record<string, { sliceId: string; nonce: number }>>({});
+  const [rubricPhaseRequests, setRubricPhaseRequests] = useState<Record<string, { phase: string; nonce: number }>>({});
+  // Identity of a dock pane. Path-based kinds (file/artifact/dashboard/report)
+  // are identified by their path, so DIFFERENT paths open as SEPARATE tabs;
+  // only the SAME path (or a true singleton like goal/guide) dedupes/refocuses.
+  const paneIdentity = useCallback((pane: DockExtraPane): string =>
+    pane.kind === 'file' ? `file:${pane.path}`
+      : pane.kind === 'artifact' ? `artifact:${pane.path}`
+      : pane.kind === 'dashboard' ? `dashboard:${pane.path}`
+      : pane.kind === 'report' ? `report:${pane.path}`
+      : pane.kind === 'note' ? `note:${pane.noteId ?? `new-${pane.nonce ?? 0}`}`
+      : pane.kind === 'evidence' ? `evidence:${pane.evidenceId}`
+      : pane.kind, []);
+  const openSingletonPane = useCallback((wsKey: string, pane: DockExtraPane) => {
+    const panelId = paneIdentity(pane);
+    setDockExtraPanes((prev) => {
+      const cur = prev[wsKey] ?? [];
+      // Dedupe by identity, not kind — two artifacts/files at different paths
+      // are distinct tabs; only a repeat of the same identity is suppressed.
+      if (cur.some((x) => paneIdentity(x) === panelId)) return prev;
+      return { ...prev, [wsKey]: [...cur, pane] };
+    });
+    // Focus whether newly added or already open (repeat clicks surface the pane).
+    setDockFocusRequests((prev) => ({ ...prev, [wsKey]: { id: panelId, nonce: (prev[wsKey]?.nonce ?? 0) + 1 } }));
+  }, [paneIdentity]);
+  /** Workflow slice chip → goal doc pane scrolled to the slice heading. */
+  const openGoalPaneAtSlice = useCallback((wsKey: string, sliceId: string) => {
+    setGoalSliceRequests((prev) => ({ ...prev, [wsKey]: { sliceId, nonce: (prev[wsKey]?.nonce ?? 0) + 1 } }));
+    openSingletonPane(wsKey, { kind: 'goal' });
+  }, [openSingletonPane]);
+  /** Workflow gate/rubric chip → rubric pane filtered to the phase's owed requirements. */
+  const openRubricPaneForPhase = useCallback((wsKey: string, phase: string) => {
+    setRubricPhaseRequests((prev) => ({ ...prev, [wsKey]: { phase, nonce: (prev[wsKey]?.nonce ?? 0) + 1 } }));
+    openSingletonPane(wsKey, { kind: 'rubric' });
+  }, [openSingletonPane]);
   const [pendingProcessEditWorkspaceId, setPendingProcessEditWorkspaceId] = useState<string | null>(null);
   const [modifiers, setModifiers] = useState<ModifierState>({
     ctrl: false,
@@ -130,14 +220,23 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   const lastScriptWorkspaceIdRef = useRef<string | null>(null);
   const lastScriptWorkspaceRef = useRef<BackendScopedWorkspaceRef | null>(null);
   const suppressDeleteScriptFailureModalRef = useRef(false);
+  const activeDeleteTaskIdRef = useRef<string | null>(null);
+  const activeScriptWorkspaceIdRef = useRef<string | null>(null);
+  const activeScriptTaskIdRef = useRef<string | null>(null);
+  const dockviewLayoutsRef = useRef<Record<string, unknown>>({});
+  const cachedTerminalPanelsRef = useRef<Record<string, Array<{ id: string; title: string; render: () => ReactNode }>>>({});
+  const dockviewApiByWorkspaceRef = useRef<Record<string, { toJSON: () => unknown } | null>>({});
+  const scriptRunInFlightRef = useRef<Set<string>>(new Set());
 
   // Review workspace/project state
+  const [showBoardWhileDetailMounted, setShowBoardWhileDetailMounted] = useState(false);
   const [reviewWorkspace, setReviewWorkspace] = useState<{
     projectName: string;
     workspaceId: string;
     backendKey: BackendKey | null;
     workspaceLabel?: string;
   } | null>(null);
+
 
   const { engine: multi, state: multiMachineState } = useGitSpace();
 
@@ -160,6 +259,20 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   const attachedBackendState = attachedBackendKey ? multi.getBackendState(attachedBackendKey) : null;
   const terminalStatus = activeBackendState?.status ?? 'disconnected';
   const reviewTerminalStatus = reviewBackendState?.status ?? 'disconnected';
+  // The connect screen's actions (Retry / Report a problem) used to render only
+  // for status 'error'. But the state users actually get stuck in is
+  // 'disconnected' ("waiting for relay...") or an endless 'connecting' — and
+  // both showed pulsing dots with NO affordance at all, so there was no way to
+  // report the very failure worth reporting. Reveal the actions once we are
+  // plainly not making progress. Declared here (not in the connect-screen
+  // branch) because that branch sits below early returns.
+  const [connectStalled, setConnectStalled] = useState(false);
+  useEffect(() => {
+    if (terminalStatus === 'connected') { setConnectStalled(false); return; }
+    setConnectStalled(false);
+    const t = setTimeout(() => setConnectStalled(true), 8000);
+    return () => clearTimeout(t);
+  }, [terminalStatus]);
   const terminalMode = attachedBackendState?.mode ?? (activeBackendState?.mode ?? 'browsing');
   const attachedSessionName = attachedBackendState?.attachedSessionName ?? null;
   const attachedSessionMeta = attachedBackendState?.attachedSessionMeta ?? null;
@@ -167,6 +280,107 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   // Always-current ref so callbacks can read commandError without it in their dep array.
   const commandErrorRef = useRef(commandError);
   commandErrorRef.current = commandError;
+  const workspaceRemovalTasks = useWorkspaceRemovalTasks();
+  const workspaceCreationTasks = useWorkspaceCreationTasks();
+  const dismissedWorkspaceTaskStorageKey = 'gitspace.dismissedWorkspaceTaskIds';
+  const readDismissedWorkspaceTaskIds = (): Set<string> => {
+    try {
+      const raw = globalThis.localStorage?.getItem(dismissedWorkspaceTaskStorageKey);
+      const parsed = raw ? JSON.parse(raw) : [];
+      return new Set(Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : []);
+    } catch {
+      return new Set();
+    }
+  };
+  const writeDismissedWorkspaceTaskIds = (ids: Set<string>): void => {
+    try {
+      globalThis.localStorage?.setItem(dismissedWorkspaceTaskStorageKey, JSON.stringify([...ids]));
+    } catch {
+      // Ignore storage failures; in-memory dismissal still applies.
+    }
+  };
+  const [dismissedWorkspaceTaskIds, setDismissedWorkspaceTaskIds] = useState<Set<string>>(readDismissedWorkspaceTaskIds);
+  const [selectedWorkspaceTaskId, setSelectedWorkspaceTaskId] = useState<string | null>(null);
+  const machineWorkspaceTasks = useMemo(() => {
+    const tasks: ReturnType<typeof workspaceOperationsToRemovalTasks> = [];
+    for (const backendKey of multiMachineState.backendOrder) {
+      const state = multi.getBackendState(backendKey);
+      tasks.push(...workspaceOperationsToRemovalTasks(state?.operations ?? {}, backendKey)
+        .filter((task) => !dismissedWorkspaceTaskIds.has(task.id)));
+    }
+    return tasks;
+  }, [multi, multiMachineState, dismissedWorkspaceTaskIds]);
+  const machineWorkspaceCreationTasks = useMemo(() => {
+    const tasks: ReturnType<typeof workspaceOperationsToCreationTasks> = [];
+    for (const backendKey of multiMachineState.backendOrder) {
+      const state = multi.getBackendState(backendKey);
+      tasks.push(...workspaceOperationsToCreationTasks(state?.operations ?? {}));
+    }
+    return tasks;
+  }, [multi, multiMachineState]);
+  const taskBarTasks = useMemo(() => {
+    const operationTaskIds = new Set(machineWorkspaceTasks.map((task) => task.id));
+    const operationWorkspaceKeys = new Set(machineWorkspaceTasks.map((task) => `${task.operationKind}:${toBackendScopedWorkspaceKey(task.ref)}`));
+    return [
+      ...machineWorkspaceTasks,
+      ...workspaceRemovalTasks.tasks.filter((task) => {
+        if (operationTaskIds.has(task.id)) return false;
+        const inferredKind = task.phase === 'remove' || task.phase === 'git-worktree-remove' || task.phase === 'cleanup-leftovers'
+          ? 'workspace.delete'
+          : 'workspace.scripts';
+        return !operationWorkspaceKeys.has(`${inferredKind}:${toBackendScopedWorkspaceKey(task.ref)}`);
+      }),
+    ];
+  }, [machineWorkspaceTasks, workspaceRemovalTasks.tasks]);
+
+  useEffect(() => {
+    setSelectedWorkspaceTaskId((current) => {
+      if (current && taskBarTasks.some((task) => task.id === current)) return current;
+      return taskBarTasks.find((task) => task.status === 'running' || task.status === 'queued')?.id ?? taskBarTasks[0]?.id ?? null;
+    });
+  }, [taskBarTasks]);
+  const handleDismissWorkspaceTask = useCallback((taskId: string) => {
+    const task = taskBarTasks.find((candidate) => candidate.id === taskId);
+    const backend = task?.operationKind ? multi.getBackend(task.ref.backendKey) : null;
+    if (backend?.dismissOperation) {
+      void backend.dismissOperation(taskId).catch((error) => {
+        toast.error(error instanceof Error ? error.message : 'Failed to dismiss operation');
+      });
+    }
+    workspaceRemovalTasks.dismissTask(taskId);
+    setDismissedWorkspaceTaskIds((current) => {
+      if (current.has(taskId)) return current;
+      const next = new Set(current);
+      next.add(taskId);
+      writeDismissedWorkspaceTaskIds(next);
+      return next;
+    });
+    setSelectedWorkspaceTaskId((current) => {
+      if (current !== taskId) return current;
+      const remaining = taskBarTasks.filter((candidate) => candidate.id !== taskId);
+      return remaining.find((candidate) => candidate.status === 'running' || candidate.status === 'queued')?.id ?? remaining[0]?.id ?? null;
+    });
+  }, [multi, taskBarTasks, workspaceRemovalTasks.dismissTask]);
+  const deletingWorkspaceTasksByKey = useMemo(() => {
+    const result: Record<string, { status: string; progressLabel?: string }> = {};
+    for (const [key, task] of Object.entries(workspaceRemovalTasks.tasksByWorkspaceKey)) {
+      if (task.operationKind && task.operationKind !== 'workspace.delete') continue;
+      if (task.phase !== 'remove' && task.phase !== 'git-worktree-remove' && task.phase !== 'cleanup-leftovers') continue;
+      result[key] = { status: task.status, progressLabel: task.progressLabel };
+    }
+    for (const task of machineWorkspaceTasks) {
+      if (task.operationKind !== 'workspace.delete') continue;
+      result[toBackendScopedWorkspaceKey(task.ref)] = { status: task.status, progressLabel: task.progressLabel };
+    }
+    return result;
+  }, [machineWorkspaceTasks, workspaceRemovalTasks.tasksByWorkspaceKey]);
+  const creatingWorkspaceTasksById = useMemo(() => {
+    const result = { ...workspaceCreationTasks.tasksByWorkspaceId };
+    for (const task of machineWorkspaceCreationTasks) {
+      result[task.workspaceId] = task;
+    }
+    return result;
+  }, [machineWorkspaceCreationTasks, workspaceCreationTasks.tasksByWorkspaceId]);
   const scriptState = attachedBackendState?.scriptState ?? activeBackendState?.scriptState ?? null;
   const notificationConfig = activeBackendState?.notificationConfig ?? null;
 
@@ -174,6 +388,46 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
 
   const ptyBackendRef = useRef<RemoteSessionPtyBackend | null>(null);
   const writeCallbackRef = useRef<((data: Uint8Array) => void) | null>(null);
+  const scriptWriteCallbackRef = useRef<((data: Uint8Array) => void) | null>(null);
+  const nextPaneIdRef = useRef(1);
+
+  useEffect(() => {
+    if (scriptState) {
+      const isRemove = scriptState.phase === 'remove';
+      const phaseLabel = scriptState.phase === 'setup'
+        ? 'setup'
+        : scriptState.phase === 'select'
+          ? 'select'
+          : scriptState.phase === 'pre'
+            ? 'prepare'
+            : 'workspace';
+      workspaceRemovalTasks.updatePhase(
+        scriptState.workspaceId,
+        scriptState.phase,
+        scriptState.isRunning
+          ? isRemove ? 'Running cleanup scripts...' : `Running ${phaseLabel} scripts...`
+          : isRemove ? 'Cleanup scripts finished' : `${phaseLabel[0]?.toUpperCase() ?? 'Workspace'}${phaseLabel.slice(1)} scripts finished`,
+      );
+      if (scriptState.error) {
+        const taskId = scriptState.phase === 'remove' ? activeDeleteTaskIdRef.current : activeScriptTaskIdRef.current;
+        if (taskId) workspaceRemovalTasks.completeFailure(taskId, scriptState.error, scriptState.exitCode);
+      }
+      return;
+    }
+    if (activeScriptTaskIdRef.current && activeScriptWorkspaceIdRef.current) {
+      workspaceRemovalTasks.completeSuccess(activeScriptTaskIdRef.current, 'Workspace scripts finished');
+      activeScriptTaskIdRef.current = null;
+      activeScriptWorkspaceIdRef.current = null;
+    }
+  }, [scriptState, workspaceRemovalTasks.updatePhase, workspaceRemovalTasks.completeFailure, workspaceRemovalTasks.completeSuccess]);
+
+  const buildScriptOutputHandler = useCallback((fn: ((data: Uint8Array) => void) | null) => {
+    if (!fn && !workspaceRemovalTasks.activeTask) return null;
+    return (data: Uint8Array) => {
+      workspaceRemovalTasks.appendOutput(undefined, data);
+      fn?.(data);
+    };
+  }, [workspaceRemovalTasks.activeTask, workspaceRemovalTasks.appendOutput]);
   useEffect(() => {
     const key = attachedBackendKey ?? activeBackendKey;
     if (!key) return;
@@ -195,6 +449,16 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
     ptyBackendRef.current?.setPtyOutputHandler?.(fn);
   }, []);
 
+  const setScriptWriteCallback = useCallback((fn: ((data: Uint8Array) => void) | null) => {
+    scriptWriteCallbackRef.current = fn;
+    ptyBackendRef.current?.setScriptOutputHandler?.(buildScriptOutputHandler(fn));
+  }, [buildScriptOutputHandler]);
+
+  const allocatePaneId = useCallback((prefix: string) => {
+    nextPaneIdRef.current += 1;
+    return `${prefix}-${Date.now().toString(36)}-${nextPaneIdRef.current.toString(36)}`;
+  }, []);
+
   // Re-attach write callback when backend changes
   useEffect(() => {
     const key = attachedBackendKey ?? activeBackendKey;
@@ -202,7 +466,8 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
     const b = multi.getBackend(key) as RemoteSessionPtyBackend | null;
     ptyBackendRef.current = b;
     b?.setPtyOutputHandler?.(writeCallbackRef.current);
-  }, [attachedBackendKey, activeBackendKey, multi]);
+    b?.setScriptOutputHandler?.(buildScriptOutputHandler(scriptWriteCallbackRef.current));
+  }, [attachedBackendKey, activeBackendKey, multi, buildScriptOutputHandler]);
 
   // ─── Flow / Modal system ───────────────────────────────────────────────────
   const flow = useFlow({
@@ -238,9 +503,10 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   const workspaceController = useWorkspaceController({ state: multiMachineState });
   const {
     boardState: workspaceBoardState,
-    handleSelectWorkspace: handleBoardSelectWorkspace,
+    handleSelectWorkspace: rawHandleBoardSelectWorkspace,
     worktreeCount,
     loading: boardLoading,
+    loadError: boardLoadError,
     selectedWorkspaceProjectName,
   } = useBoardPageModel({
     state: multiMachineState,
@@ -254,8 +520,110 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
     mode: terminalMode,
     activeBackendKey,
     activeBackendHasSnapshot: activeBackendState?.machineSnapshot != null,
+    activeBackendSnapshotError: activeBackendState?.snapshotError ?? null,
   });
   const workspaceRuntime = useWorkspaceRuntimeModel(multiMachineState);
+
+  const [goalEdgeStatusByKey, setGoalEdgeStatusByKey] = useState<Record<string, { status: ChainStackStatus['edges'][number]['status']; message?: string }>>({});
+  const applyGoalEdgeStatus = useCallback((goal: KanbanGoalItem): KanbanGoalItem => {
+    const persistedGoalId = goal.id.startsWith(`${goal.projectName}:`) ? goal.id.slice(goal.projectName.length + 1) : goal.id;
+    const edgeStatus = goalEdgeStatusByKey[toGoalCacheKey(goal.backendKey, goal.projectName, persistedGoalId)];
+    if (!edgeStatus) {
+      return goal;
+    }
+    return {
+      ...goal,
+      stackStatus: edgeStatus.status,
+      stackStatusMessage: edgeStatus.message,
+      blockedReason: edgeStatus.status === 'aligned' ? goal.blockedReason : (edgeStatus.message ?? edgeStatus.status),
+    };
+  }, [goalEdgeStatusByKey]);
+  const boardGroupsWithGoalStatus = useMemo<WorkspaceBoardGroup[]>(() => (
+    workspaceBoardState.groups.map((group) => ({
+      ...group,
+      plannedGoals: group.plannedGoals?.map(applyGoalEdgeStatus),
+      workspaces: group.workspaces.map((workspace) => {
+        if (!workspace.goal) {
+          return workspace;
+        }
+        return {
+          ...workspace,
+          goal: applyGoalEdgeStatus({
+            ...workspace.goal,
+            selectionKey: `${workspace.backendKey}:goal:${workspace.goal.id}`,
+            backendKey: workspace.backendKey,
+            machineLabel: workspace.machineLabel,
+            isRemote: workspace.isRemote,
+          }),
+        };
+      }),
+    }))
+  ), [applyGoalEdgeStatus, workspaceBoardState.groups]);
+  // Cold goal-detail cache (ticket #42): the connect snapshot ships a slim goal
+  // projection (no evidence output / reviews / timeline / doc body). Detail
+  // views need the full record, so we lazy-fetch it via `getGoalDetail` and
+  // overlay it here — every consumer of `allGoalItems` (detail panel, rubric,
+  // goal-doc/workflow panes, evidence panes) transparently sees full data once
+  // the fetch lands, keyed by the goal's `updatedAt` so edits invalidate it.
+  const [goalDetailCache, setGoalDetailCache] = useState<Record<string, { updatedAt?: string; doc: GoalDoc; validation: GoalValidation }>>({});
+  const enrichGoalWithDetail = useCallback((goal: KanbanGoalItem): KanbanGoalItem => {
+    const detail = goalDetailCache[goal.id];
+    if (!detail || detail.updatedAt !== goal.updatedAt) return goal;
+    return { ...goal, doc: detail.doc, validation: detail.validation };
+  }, [goalDetailCache]);
+  const allGoalItems = useMemo(() => {
+    const planned = boardGroupsWithGoalStatus.flatMap((group) => group.plannedGoals ?? []);
+    const backed = boardGroupsWithGoalStatus.flatMap((group) =>
+      group.workspaces
+        .map((workspace) => workspace.goal ? {
+          ...workspace.goal,
+          selectionKey: `${workspace.backendKey}:goal:${workspace.goal.id}`,
+          backendKey: workspace.backendKey,
+          machineLabel: workspace.machineLabel,
+          isRemote: workspace.isRemote,
+        } : null)
+        .filter((goal): goal is KanbanGoalItem => Boolean(goal)),
+    );
+    return [...planned, ...backed].map(enrichGoalWithDetail);
+  }, [boardGroupsWithGoalStatus, enrichGoalWithDetail]);
+  const [selectedGoalKey, setSelectedGoalKey] = useState<string | null>(null);
+  const [goalDetailMessage, setGoalDetailMessage] = useState<string | null>(null);
+  const [goalStackStatus, setGoalStackStatus] = useState<ChainStackStatus | null>(null);
+  const [goalSaving, setGoalSaving] = useState(false);
+  const [boardGoalOrderMessage, setBoardGoalOrderMessage] = useState<string | null>(null);
+  const mergeGoalValidation = useCallback((goal: KanbanGoalItem): KanbanGoalItem => {
+    if (!goal.validation) return goal;
+    return { ...goal, validation: { ...goal.validation, readiness: computeReadiness(goal.validation) } };
+  }, []);
+  const selectedGoal = useMemo(
+    () => selectedGoalKey ? (() => {
+      const goal = allGoalItems.find((item) => item.selectionKey === selectedGoalKey) ?? null;
+      return goal ? mergeGoalValidation(goal) : null;
+    })() : null,
+    [allGoalItems, mergeGoalValidation, selectedGoalKey],
+  );
+  const selectedGoalChainGoals = useMemo(
+    () => selectedGoal
+      ? allGoalItems.filter((goal) => goal.backendKey === selectedGoal.backendKey && goal.projectName === selectedGoal.projectName && goal.chainId === selectedGoal.chainId)
+      : [],
+    [allGoalItems, selectedGoal],
+  );
+
+  const handleBoardSelectWorkspace = useCallback((workspaceKey: string | null) => {
+    if (workspaceKey === null) {
+      if (showBoardWhileDetailMounted && workspaceController.selectedRef) {
+        setShowBoardWhileDetailMounted(false);
+        return;
+      }
+      rawHandleBoardSelectWorkspace(null);
+      return;
+    }
+    setSelectedGoalKey(null);
+    setGoalDetailMessage(null);
+    setGoalStackStatus(null);
+    setShowBoardWhileDetailMounted(false);
+    rawHandleBoardSelectWorkspace(workspaceKey);
+  }, [rawHandleBoardSelectWorkspace, showBoardWhileDetailMounted, workspaceController.selectedRef]);
 
   // ─── Session / replay data (from the selected backend) ──────────────────────
   const selectedBackendKey = workspaceController.selectedRef?.backendKey ?? activeBackendKey;
@@ -328,22 +696,24 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
 
     if (preferredBackendKey) {
       const preferredState = multi.getBackendState(preferredBackendKey);
-      if (preferredState?.sessions?.some((session) => session.id === sessionId)) {
-        return { backendKey: preferredBackendKey, sessionId };
+      const preferredSession = preferredState?.sessions?.find((session) => session.id === sessionId);
+      if (preferredSession) {
+        return { backendKey: preferredBackendKey, sessionId, workspaceId: preferredSession.workspaceId };
       }
     }
 
-    let match: BackendKey | null = null;
+    let match: { backendKey: BackendKey; workspaceId?: string } | null = null;
 
     for (const backendKey of candidateKeys) {
       if (backendKey === preferredBackendKey) continue;
       const state = multi.getBackendState(backendKey);
-      if (state?.sessions?.some((session) => session.id === sessionId)) {
+      const session = state?.sessions?.find((candidate) => candidate.id === sessionId);
+      if (session) {
         if (match !== null) {
           return null;
         }
 
-        match = backendKey;
+        match = { backendKey, workspaceId: session.workspaceId };
       }
     }
 
@@ -351,15 +721,17 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
       return null;
     }
 
-    return { backendKey: match, sessionId };
+    return { backendKey: match.backendKey, sessionId, workspaceId: match.workspaceId };
   }, [activeBackendKey, attachedBackendKey, multi, multiMachineState.backendOrder, selectedBackendKey]);
 
 
   // ─── Selected workspace detail ───────────────────────────────────────────────
   const selectedRef = workspaceController.selectedRef;
   const backendAttachedWorkspaceId = attachedBackendState?.attachedWorkspaceId ?? null;
-  const attachedWorkspaceSelectionKey = attachedBackendKey && backendAttachedWorkspaceId
-    ? toBackendScopedWorkspaceKey({ backendKey: attachedBackendKey, workspaceId: backendAttachedWorkspaceId })
+  const attachedPaneWorkspaceId = Object.values(attachedBackendState?.attachedPanes ?? {}).find((pane) => pane.workspaceId)?.workspaceId ?? null;
+  const effectiveAttachedWorkspaceId = attachedPaneWorkspaceId ?? backendAttachedWorkspaceId;
+  const attachedWorkspaceSelectionKey = attachedBackendKey && effectiveAttachedWorkspaceId
+    ? toBackendScopedWorkspaceKey({ backendKey: attachedBackendKey, workspaceId: effectiveAttachedWorkspaceId })
     : null;
   const selectedWorkspaceForDetail = useMemo(
     () => selectedRef
@@ -367,6 +739,17 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
       : null,
     [filteredWorkspaces, selectedRef],
   );
+
+  const DETAIL_VIEW_CACHE_LIMIT = 3;
+  const [detailWorkspaceCacheKeys, setDetailWorkspaceCacheKeys] = useState<string[]>([]);
+
+  useEffect(() => {
+    if (!selectedWorkspaceForDetail?.selectionKey) return;
+    setDetailWorkspaceCacheKeys((current) => [
+      selectedWorkspaceForDetail.selectionKey,
+      ...current.filter((key) => key !== selectedWorkspaceForDetail.selectionKey),
+    ].slice(0, DETAIL_VIEW_CACHE_LIMIT));
+  }, [selectedWorkspaceForDetail?.selectionKey]);
 
   useEffect(() => {
     if (!selectedWorkspaceForDetail || flow.isOpen) return;
@@ -398,21 +781,11 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   useEffect(() => {
     if (!attachedWorkspaceSelectionKey) return;
     if (terminalMode !== 'attached') return;
+    if (selectedRef) return;
     if (workspaceBoardState.selectedWorkspaceId === attachedWorkspaceSelectionKey) return;
     handleBoardSelectWorkspace(attachedWorkspaceSelectionKey);
-  }, [attachedWorkspaceSelectionKey, handleBoardSelectWorkspace, terminalMode, workspaceBoardState.selectedWorkspaceId]);
+  }, [attachedWorkspaceSelectionKey, handleBoardSelectWorkspace, selectedRef, terminalMode, workspaceBoardState.selectedWorkspaceId]);
 
-  const detailSessions = useMemo(
-    () => selectedRef ? backendSessions.filter((session) => session.workspaceId === selectedRef.workspaceId) : [],
-    [backendSessions, selectedRef],
-  );
-
-  const detailReplays = useMemo(
-    () => selectedRef
-      ? filteredReplays.filter((replay) => replay.workspaceId === selectedRef.workspaceId)
-      : [],
-    [filteredReplays, selectedRef],
-  );
 
   useEffect(() => {
     if (!selectedRef || terminalStatus !== 'connected') return;
@@ -429,7 +802,152 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   // ─── Agent session data ────────────────────────────────────────────────────
   const agentSessionsByWorkspace = workspaceRuntime.agentSessionsByWorkspace;
   const allWorkspaceEntries = workspaceRuntime.workspaces;
+
+  /** Global chrome bar (mock topbar + ActivityStrip) — shared by board + shell.
+   *  Chip colours come from the shared exhaustive table. */
+  // The top strip is a tab bar of ACTIVE workspaces, not every workspace in
+  // every project. Active = a live terminal, an open agent (primaryColor !=
+  // 'dim' means an agent session is open/erroring), or the workspace you're
+  // currently viewing (so your current tab never disappears).
+  const chromeChips: ChromeWorkspaceChip[] = workspaceRuntime.workspaces
+    .filter((w) => {
+      const key = w.selectionKey ?? w.id;
+      const st = workspaceRuntime.workspaceStatusById[key];
+      const hasActivity = (w.sessionCount ?? 0) > 0 || (st?.primaryColor != null && st.primaryColor !== 'dim');
+      const isCurrent = key === workspaceBoardState.selectedWorkspaceId || key === attachedWorkspaceSelectionKey;
+      if (!hasActivity && !isCurrent) return false;
+      // Scoped to a project: show only its workspaces, except the one you are
+      // looking at — dropping that would make your own tab vanish.
+      if (chipProjectFilter && w.projectName !== chipProjectFilter && !isCurrent) return false;
+      return true;
+    })
+    .map((w) => {
+      const st = workspaceRuntime.workspaceStatusById[w.selectionKey ?? w.id];
+      return {
+        key: w.selectionKey ?? w.id,
+        name: w.name,
+        projectName: w.projectName,
+        phase: w.phase ?? 'code',
+        statusColor: WORKSPACE_CHIP_COLOR[st?.primaryColor ?? 'dim'],
+      };
+    });
+  const renderChromeBar = (opts: { projectActive?: boolean; activeKey?: string | null; onBoard?: () => void; currentProjectName?: string | null; onEnterProject?: (name: string) => void }) => (
+    <>
+      <GlobalChromeBar
+        projects={allProjects}
+        // What you are looking at wins over a stale menu choice, so the label
+        // can never disagree with the surface.
+        currentProjectName={opts.currentProjectName ?? chipProjectFilter}
+        workspaces={chromeChips}
+        activeKey={opts.activeKey}
+        projectActive={opts.projectActive}
+        onBoard={opts.onBoard ?? (() => {})}
+        onEnterProject={(name) => {
+          setChipProjectFilter(name);
+          // The detail branch returns before the project-home branch, so a
+          // surface that is showing a workspace must yield first or setting the
+          // project name changes nothing on screen.
+          if (opts.onEnterProject) opts.onEnterProject(name);
+          else setProjectHomeName(name);
+        }}
+        onFilterProject={(name) => setChipProjectFilter(name)}
+        onSelectWorkspace={(key) => handleBoardSelectWorkspace(key)}
+        inboxCount={backendInboxUnreadCount}
+        onOpenInbox={() => { void inboxActions.requestInbox(); setShowInbox(true); }}
+        onOpenPalette={() => commandPalette.toggle()}
+        onReportProblem={() => setShowReportProblem(true)}
+      />
+      {showReportProblem && (
+        <ReportProblemDialog
+          onClose={() => setShowReportProblem(false)}
+          relayHttpBase={relayHttpBase()}
+          projectName={projectHomeName ?? (allProjects.length === 1 ? allProjects[0]?.name : undefined)}
+          report={(() => {
+            const b = activeBackendKey ? multi.getBackend(activeBackendKey) : null;
+            return b?.reportProblem ? (note, bundle, opts) => b.reportProblem!(note, bundle, opts) : undefined;
+          })()}
+          onStartFix={(() => {
+            // Loop 2: the issue was filed to the GitSpace repo, so the fix
+            // workspace goes in the local project that tracks it (repo name =
+            // last segment of the report slug), falling back to the current one.
+            const gsProject = allProjects.find((p) => p.name === 'gitspace.sh')?.name
+              ?? projectHomeName ?? (allProjects.length === 1 ? allProjects[0]?.name : undefined);
+            if (!activeBackendKey || !gsProject) return undefined;
+            return async (issueNumber: number) => {
+              await multi.createWorkspace(activeBackendKey as BackendKey, { projectName: gsProject, workspaceName: '', githubIssueNumber: issueNumber });
+              await multi.listWorkspaces();
+              toast.success(`Fix workspace created for #${issueNumber}`);
+            };
+          })()}
+        />
+      )}
+    </>
+  );
+
+
+  // Workspaces open clean — no auto-seeded doc tabs. The goal/workflow/guide
+  // panes open on demand from the sidebar (they were previously auto-opened for
+  // mock parity, which cluttered every fresh workspace).
+
+
+  /** *.dashboard.json artifacts for the selected workspace (sidebar Dashboards group). */
+  const [wsDashboards, setWsDashboards] = useState<Record<string, Array<{ path: string; name: string; panels: number }>>>({});
+  useEffect(() => {
+    const key = workspaceBoardState.selectedWorkspaceId;
+    if (!key) return;
+    const entry = workspaceRuntime.workspaces.find((w) => w.selectionKey === key || w.id === key);
+    if (!entry) return;
+    const be = multi.getBackend(entry.backendKey);
+    if (!be?.listWorkspaceArtifacts) return;
+    let alive = true;
+    void (async () => {
+      try {
+        const arts = await be.listWorkspaceArtifacts!(entry.id);
+        const dashes = arts.filter((a) => a.path.endsWith('.dashboard.json'));
+        const detailed = await Promise.all(dashes.map(async (d) => {
+          let name = (d.path.split('/').pop() ?? d.path).replace('.dashboard.json', '');
+          let panels = 0;
+          try {
+            const raw = await be.readWorkspaceArtifact!(entry.id, d.path);
+            const doc = JSON.parse(decodeBase64Utf8(raw.base64)) as { name?: string; panels?: unknown[] };
+            if (doc.name) name = doc.name;
+            panels = Array.isArray(doc.panels) ? doc.panels.length : 0;
+          } catch { /* count stays 0 */ }
+          return { path: d.path, name, panels };
+        }));
+        if (alive) setWsDashboards((prev) => ({ ...prev, [key]: detailed }));
+      } catch { /* additive */ }
+    })();
+    return () => { alive = false; };
+  }, [workspaceBoardState.selectedWorkspaceId, workspaceRuntime.workspaces, multi]);
+
   const workspaceStatusById = workspaceRuntime.stripStatusById;
+
+  const workspaceBySelectionKey = useMemo(() => {
+    const entries = new Map<string, WorkspaceInfo>();
+    for (const workspace of allWorkspaceEntries) {
+      if (workspace.selectionKey) {
+        entries.set(workspace.selectionKey, workspace);
+      }
+    }
+    return entries;
+  }, [allWorkspaceEntries]);
+
+  const backendKeyFromSelectionKey = useCallback((selectionKey: string): BackendKey => {
+    return JSON.parse(selectionKey)[0] as BackendKey;
+  }, []);
+
+
+
+  const attachedWorkspaceForDetail = useMemo(
+    () => attachedWorkspaceSelectionKey ? (workspaceBySelectionKey.get(attachedWorkspaceSelectionKey) ?? null) : null,
+    [attachedWorkspaceSelectionKey, workspaceBySelectionKey],
+  );
+
+  const currentDetailWorkspace = selectedWorkspaceForDetail ?? attachedWorkspaceForDetail;
+  useEffect(() => {
+    setDetailWorkspaceCacheKeys((current) => current.filter((key) => workspaceBySelectionKey.has(key)).slice(0, DETAIL_VIEW_CACHE_LIMIT));
+  }, [workspaceBySelectionKey]);
 
 
   // ─── Notifications & preferences ──────────────────────────────────────────
@@ -460,7 +978,8 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   const {
     open: openAgentSessionAction,
     createAndOpen: createAgentSessionAction,
-    abort: abortAgentSessionAction,
+    kill: killAgentSessionAction,
+    stopAgentTurn: stopAgentTurnAction,
     close: closeAgentSessionAction,
     archive: archiveAgentSessionAction,
     restore: restoreAgentSessionAction,
@@ -481,12 +1000,13 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   const pendingAgentAttachTargetRef = useRef<{ workspaceId: string; agentSessionId: string } | null>(null);
   // Clear pending only when the requested target actually attaches, or a *fresh* error arrives.
   useEffect(() => {
-    const attachedAgentSessionId = attachedBackendState?.attachedAgentSessionId ?? null;
-    const attachedWorkspaceId = attachedBackendState?.attachedWorkspaceId ?? null;
+    const attachedPanes = Object.values(attachedBackendState?.attachedPanes ?? {});
     const targetReached = !!pendingAgentAttachTarget
       && terminalMode === 'attached'
-      && attachedAgentSessionId === pendingAgentAttachTarget.agentSessionId
-      && attachedWorkspaceId === pendingAgentAttachTarget.workspaceId;
+      && attachedPanes.some((pane) =>
+        pane.agentSessionId === pendingAgentAttachTarget.agentSessionId
+        && pane.workspaceId === pendingAgentAttachTarget.workspaceId
+      );
     // Ignore commandError that already existed when this attach was requested.
     const isFreshError = commandError != null && commandError !== attachPendingCommandErrorSnapshotRef.current;
     if (agentAttachPending && (targetReached || isFreshError)) {
@@ -509,6 +1029,14 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
 
   const handleOpenAgentSession = useCallback((workspaceId: string, agentSessionId: string) => {
     const target = { workspaceId, agentSessionId };
+    // Already on screen? Reuse that pane. Opening always minted a fresh paneId,
+    // so clicking a session twice gave you two panes rendering the same
+    // transcript — and every extra pane takes its own viewer lease on the
+    // daemon. Reattaching the existing paneId is idempotent, so this focuses
+    // rather than duplicates.
+    const existingPane = Object.values(attachedBackendState?.attachedPanes ?? {})
+      .find((pane) => pane.agentSessionId === agentSessionId && pane.workspaceId === workspaceId);
+    const paneId = existingPane?.paneId ?? allocatePaneId('agent');
     // Snapshot current commandError so a stale error from a prior operation cannot
     // immediately clear this pending attach before the backend has a chance to respond.
     attachPendingCommandErrorSnapshotRef.current = commandErrorRef.current;
@@ -517,7 +1045,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
       setAgentAttachPending(true);
       setPendingAgentAttachTarget(target);
     });
-    openAgentSessionAction(workspaceId, agentSessionId, { attachOptions: getWebAgentAttachSize() })
+    openAgentSessionAction(workspaceId, agentSessionId, { attachOptions: { ...getWebAgentAttachSize(), paneId } })
       .then((result) => {
         // open() returning null means the call failed before any backend attach was initiated.
         // Clear pending only if no rapid session switch has since overtaken this request.
@@ -538,11 +1066,15 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
           setPendingAgentAttachTarget(null);
         }
       });
-  }, [openAgentSessionAction, getWebAgentAttachSize]);
+  }, [openAgentSessionAction, getWebAgentAttachSize, allocatePaneId, attachedBackendState]);
 
-  const handleAbortAgentSession = useCallback(async (workspaceId: string, agentSessionId: string) => {
-    await abortAgentSessionAction(workspaceId, agentSessionId);
-  }, [abortAgentSessionAction]);
+  const handleKillAgentSession = useCallback(async (workspaceId: string, agentSessionId: string) => {
+    await killAgentSessionAction(workspaceId, agentSessionId);
+  }, [killAgentSessionAction]);
+
+  const handleStopAgentTurn = useCallback(async (workspaceId: string, agentSessionId: string) => {
+    await stopAgentTurnAction(workspaceId, agentSessionId);
+  }, [stopAgentTurnAction]);
 
   const handleCloseAgentSession = useCallback(async (workspaceId: string, agentSessionId: string) => {
     await closeAgentSessionAction(workspaceId, agentSessionId);
@@ -550,7 +1082,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
 
   const handleCreateAgentSession = useCallback((workspaceId: string) => {
     createAgentSessionAction(workspaceId, {
-      attachOptions: getWebAgentAttachSize(),
+      attachOptions: { ...getWebAgentAttachSize(), paneId: allocatePaneId('agent') },
       beforeOpen: () => {
         setIsViewOnlySession(false);
         attachPendingCommandErrorSnapshotRef.current = commandErrorRef.current;
@@ -571,7 +1103,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
         setPendingAgentAttachTarget(null);
       },
     });
-  }, [createAgentSessionAction, getWebAgentAttachSize]);
+  }, [createAgentSessionAction, getWebAgentAttachSize, allocatePaneId]);
 
   const handleArchiveAgentSession = useCallback(async (workspaceId: string, agentSessionId: string) => {
     await archiveAgentSessionAction(workspaceId, agentSessionId);
@@ -652,9 +1184,12 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
       if (params.workspaceId && !params.command) {
         lastScriptWorkspaceIdRef.current = params.workspaceId;
         lastScriptWorkspaceRef.current = workspaceRef ?? null;
-        setShowInbox(false);
         setScriptWorkspaceName(params.workspaceId.split(':').slice(-1)[0] ?? params.workspaceId);
-        setShowScriptTerminal(true);
+        activeScriptTaskIdRef.current = workspaceRemovalTasks.startLifecycleTask({
+          ref: workspaceRef ?? getWorkspaceRef(params.workspaceId),
+          workspaceName: params.workspaceId.split(':').slice(-1)[0] ?? params.workspaceId,
+        });
+        setShowScriptTerminal(false);
       } else {
         lastScriptWorkspaceIdRef.current = null;
         lastScriptWorkspaceRef.current = null;
@@ -666,7 +1201,17 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
         setShowScriptTerminal(false);
         lastScriptWorkspaceIdRef.current = null;
         lastScriptWorkspaceRef.current = null;
+        const taskId = activeScriptTaskIdRef.current;
+        if (taskId) workspaceRemovalTasks.completeFailure(taskId, 'Workspace scripts cancelled.');
+        activeScriptTaskIdRef.current = null;
       }
+    },
+    onAttachSuccess: ({ target }) => {
+      if (target !== 'workspace') return;
+      const taskId = activeScriptTaskIdRef.current;
+      if (taskId) workspaceRemovalTasks.completeSuccess(taskId, 'Workspace scripts complete');
+      activeScriptTaskIdRef.current = null;
+      setShowScriptTerminal(false);
     },
     onAttachError: ({ target, message }) => {
       const isWorkspaceScriptFailure = message.startsWith('Workspace scripts failed during');
@@ -676,6 +1221,11 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
         lastScriptWorkspaceIdRef.current = null;
         lastScriptWorkspaceRef.current = null;
       }
+      if (target === 'workspace') {
+        const taskId = activeScriptTaskIdRef.current;
+        if (taskId) workspaceRemovalTasks.completeFromError(taskId, message);
+        activeScriptTaskIdRef.current = null;
+      }
       flow.showMessage({
         title: isWorkspaceScriptFailure ? 'Workspace Script Failed' : 'Session Failed',
         message,
@@ -684,18 +1234,27 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
     },
   });
 
-  const { deleteWorkspaceWithPrompt } = useWorkspaceLifecycleActions({
+  const { deleteWorkspaceWithPrompt, deleteWorkspaceSkipScriptsWithPrompt } = useWorkspaceLifecycleActions({
     client: workspaceLifecycleClient,
     flow,
-    onBeforeDelete: ({ target }) => {
+    onBeforeDelete: ({ target, params }) => {
       suppressDeleteScriptFailureModalRef.current = true;
-      setShowInbox(false);
-      setScriptWorkspaceName(target.workspaceName);
-      setShowScriptTerminal(true);
+      activeDeleteTaskIdRef.current = workspaceRemovalTasks.startTask(target);
+      workspaceRemovalTasks.updatePhase(
+        target.ref.workspaceId,
+        params.scriptPolicy === 'skip' ? 'git-worktree-remove' : 'remove',
+        params.scriptPolicy === 'skip' ? 'Removing workspace directory without cleanup scripts...' : 'Running cleanup scripts...'
+      );
+      if (workspaceBoardState.selectedWorkspaceId === toBackendScopedWorkspaceKey(target.ref)) {
+        workspaceBoardState.setSelectedWorkspaceId(null);
+      }
+      workspaceController.clearSelectedRef();
     },
     onDeleteSuccess: async ({ target }) => {
       suppressDeleteScriptFailureModalRef.current = false;
-      setShowScriptTerminal(false);
+      const taskId = activeDeleteTaskIdRef.current;
+      if (taskId) workspaceRemovalTasks.completeSuccess(taskId);
+      activeDeleteTaskIdRef.current = null;
       if (workspaceBoardState.selectedWorkspaceId === toBackendScopedWorkspaceKey(target.ref)) {
         workspaceBoardState.setSelectedWorkspaceId(null);
       }
@@ -703,26 +1262,696 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
     },
     onDeleteCancelled: async () => {
       suppressDeleteScriptFailureModalRef.current = false;
-      setShowScriptTerminal(false);
+      const taskId = activeDeleteTaskIdRef.current;
+      if (taskId) workspaceRemovalTasks.completeFailure(taskId, 'Workspace removal cancelled.');
+      activeDeleteTaskIdRef.current = null;
     },
     onDeleteError: async ({ message }) => {
       suppressDeleteScriptFailureModalRef.current = false;
-      setShowScriptTerminal(false);
+      const taskId = activeDeleteTaskIdRef.current;
+      if (taskId) workspaceRemovalTasks.completeFromError(taskId, message);
+      activeDeleteTaskIdRef.current = null;
       flow.showMessage({ title: 'Delete Failed', message, variant: 'error' });
     },
   });
+
+
+  // Chain-centric goal creation — no workspaces involved. Pick (or create) a
+  // CHAIN, name the goal, and place it only at positions the phase constraint
+  // allows (a new goal is 'plan', so it can never sit before a goal already
+  // past 'plan'). The workspace-free path for the create menu's Goal option.
+  const openCreateGoalFlow = useCallback((projectName?: string | null) => {
+    const backendKey = getTargetBackendKey();
+    const projectNames = allProjects.map((project) => project.name);
+    if (projectNames.length === 0) {
+      flow.showMessage({
+        title: 'New goal',
+        message: 'Create a project first, then add goals to a chain.',
+        variant: 'info',
+      });
+      return;
+    }
+
+    const showError = (error: unknown) => {
+      flow.showMessage({
+        title: 'Create Goal Failed',
+        message: error instanceof Error ? error.message : String(error),
+        variant: 'error',
+      });
+    };
+
+    // Insert-index k is legal iff every goal at or after k is still 'plan'
+    // (mirrors the core guard exactly — the UI never offers a rejected slot).
+    const showPositionPicker = (project: string, chain: GoalChainSummary, goalTitle: string) => {
+      const goals = chain.goals;
+      const legalAt = (k: number) => goals.slice(k).every((goal) => goal.phase === 'plan');
+      const options: Array<{ label: string; description?: string; value: AddPlannedGoalPosition }> = [];
+      if (goals.length === 0) {
+        options.push({ label: 'First goal', description: 'This chain is empty', value: { kind: 'tail' } });
+      } else {
+        if (legalAt(0)) {
+          options.push({ label: 'Start of chain', description: `Before ${goals[0]!.title}`, value: { kind: 'index', index: 0 } });
+        }
+        for (let k = 1; k < goals.length; k += 1) {
+          if (legalAt(k)) {
+            options.push({
+              label: `After ${goals[k - 1]!.title}`,
+              description: `Before ${goals[k]!.title}`,
+              value: { kind: 'anchor', anchor: goals[k - 1]!.id, side: 'after' },
+            });
+          }
+        }
+        // Tail is always legal (nothing sits after it).
+        options.push({ label: 'End of chain', description: `After ${goals[goals.length - 1]!.title}`, value: { kind: 'tail' } });
+      }
+
+      flow.showSelect<AddPlannedGoalPosition>({
+        title: 'Goal position',
+        message: `Chain: ${chain.title}`,
+        options,
+        onSelect: async (position) => {
+          try {
+            await multi.addPlannedGoalToChain(backendKey, project, { title: goalTitle, chainId: chain.id, position });
+            flow.close();
+            toast.success(`Added goal "${goalTitle}"`);
+          } catch (error) {
+            showError(error);
+          }
+        },
+      });
+    };
+
+    const promptGoalForExistingChain = (project: string, chain: GoalChainSummary) => {
+      flow.showInput({
+        title: 'New goal',
+        label: 'Goal title',
+        placeholder: 'e.g. Add invoice PDF export',
+        onSubmit: (title) => {
+          const trimmed = title.trim();
+          if (!trimmed) return;
+          showPositionPicker(project, chain, trimmed);
+        },
+      });
+    };
+
+    const promptNewChain = (project: string) => {
+      flow.showInput({
+        title: 'New chain',
+        label: 'Chain title',
+        placeholder: 'e.g. Billing revamp',
+        onSubmit: (chainTitle) => {
+          const trimmedChain = chainTitle.trim();
+          if (!trimmedChain) return;
+          flow.showInput({
+            title: 'First goal',
+            label: 'Goal title',
+            placeholder: 'e.g. Design billing schema',
+            onSubmit: async (goalTitle) => {
+              const trimmedGoal = goalTitle.trim();
+              if (!trimmedGoal) return;
+              try {
+                await multi.addPlannedGoalToChain(backendKey, project, { title: trimmedGoal, newChainTitle: trimmedChain });
+                flow.close();
+                toast.success(`Created chain "${trimmedChain}" with goal "${trimmedGoal}"`);
+              } catch (error) {
+                showError(error);
+              }
+            },
+          });
+        },
+      });
+    };
+
+    const showChainPicker = (project: string, chains: GoalChainSummary[]) => {
+      flow.showSelect<string>({
+        title: 'Select chain',
+        message: `Project: ${project}`,
+        searchable: chains.length > 6,
+        options: [
+          { label: '＋ New chain', description: 'Start a new chain with this goal as its first', value: '__new_chain__' },
+          ...chains.map((chain) => ({
+            label: chain.title,
+            description: `${chain.goals.length} goal${chain.goals.length === 1 ? '' : 's'}`,
+            value: chain.id,
+          })),
+        ],
+        onSelect: (value) => {
+          if (value === '__new_chain__') {
+            promptNewChain(project);
+            return;
+          }
+          const chain = chains.find((item) => item.id === value);
+          if (!chain) return;
+          promptGoalForExistingChain(project, chain);
+        },
+      });
+    };
+
+    const startForProject = (project: string) => {
+      flow.showLoading({ title: 'New goal', message: `Loading chains for ${project}…` });
+      void (async () => {
+        try {
+          const chains = await multi.listGoalChains(backendKey, project);
+          showChainPicker(project, chains);
+        } catch (error) {
+          showError(error);
+        }
+      })();
+    };
+
+    if (projectName) {
+      startForProject(projectName);
+      return;
+    }
+    if (projectNames.length === 1) {
+      startForProject(projectNames[0]!);
+      return;
+    }
+    flow.showSelect<string>({
+      title: 'Select project',
+      searchable: projectNames.length > 6,
+      options: projectNames.map((name) => ({ label: name, value: name })),
+      onSelect: (name) => startForProject(name),
+    });
+  }, [allProjects, flow, multi, getTargetBackendKey]);
 
   const lifecycleController = useLifecycleActions({
     client: sessionClient,
     backendKey: getTargetBackendKey(),
     flow,
     getProjectNames: () => allProjects.map((p) => p.name),
-    refreshProjects: () => undefined,
-    refreshWorkspaces: () => undefined,
-    refreshSessions: () => undefined,
-    onProjectCreated: () => undefined,
-    onWorkspaceCreated: () => undefined,
+	    refreshProjects: () => multi.listProjects(),
+	    refreshWorkspaces: () => multi.listWorkspaces(),
+	    refreshSessions: () => multi.listSessions(),
+	    openCreateGoalFlow,
+	    onProjectCreated: () => undefined,
+	    onWorkspaceCreating: ({ workspaceName, projectName }) => {
+	      workspaceCreationTasks.startTask({ projectName, workspaceName, phase: 'code', progressLabel: 'Creating workspace...' });
+	    },
+	    onWorkspaceCreated: ({ workspaceId }) => {
+	      workspaceCreationTasks.completeTaskByWorkspaceId(workspaceId);
+	    },
+	    onWorkspaceCreateFailed: ({ workspaceId }, _error) => {
+	      workspaceCreationTasks.failTaskByWorkspaceId(workspaceId, 'Creation failed');
+	    },
   });
+
+  const handleCreatePlannedGoalWorkspace = useCallback(async (goal: KanbanGoalItem) => {
+    const workspaceName = goal.plannedWorkspaceName ?? goal.title;
+    const taskId = workspaceCreationTasks.startTask({
+      projectName: goal.projectName,
+      workspaceName,
+      phase: goal.phase,
+      progressLabel: goal.previousWorkspaceName
+        ? `Creating from ${goal.previousWorkspaceName}...`
+        : 'Creating workspace...',
+    });
+    try {
+      await multi.createWorkspace(goal.backendKey as BackendKey, {
+        projectName: goal.projectName,
+        workspaceName,
+        branchName: workspaceName,
+        parentWorkspaceName: goal.previousWorkspaceName,
+      });
+      await multi.listWorkspaces();
+      await multi.listSessions();
+      workspaceCreationTasks.completeTaskByWorkspaceId(`${goal.projectName}:${workspaceName}`);
+      toast.success(`Created workspace ${workspaceName}`);
+    } catch (error) {
+      workspaceCreationTasks.failTask(taskId, error instanceof Error ? error.message : String(error));
+      flow.showMessage({
+        title: 'Create Workspace Failed',
+        message: error instanceof Error ? error.message : String(error),
+        variant: 'error',
+      });
+    }
+  }, [flow, multi, workspaceCreationTasks]);
+
+  const getPersistedGoalId = useCallback((goal: KanbanGoalItem) => {
+    const prefix = `${goal.projectName}:`;
+    return goal.id.startsWith(prefix) ? goal.id.slice(prefix.length) : goal.id;
+  }, []);
+
+  const getGoalMoveToken = useCallback((goal: KanbanGoalItem) => (
+    goal.workspaceName ?? goal.plannedWorkspaceName ?? getPersistedGoalId(goal)
+  ), [getPersistedGoalId]);
+
+  const handleSelectPlannedGoal = useCallback((goal: KanbanGoalItem) => {
+    setSelectedGoalKey(goal.selectionKey);
+    setGoalDetailMessage(null);
+    setGoalStackStatus(null);
+  }, []);
+
+  const showGoalChainsCommand = useCallback(() => {
+    const chains = Array.from(
+      allGoalItems.reduce((map, goal) => {
+        const existing = map.get(goal.chainId);
+        const goals = [...(existing?.goals ?? []), goal].sort((a, b) => a.chainPosition - b.chainPosition);
+        map.set(goal.chainId, {
+          chainId: goal.chainId,
+          title: goal.chainTitle,
+          goals,
+        });
+        return map;
+      }, new Map<string, { chainId: string; title: string; goals: KanbanGoalItem[] }>()),
+      ([, value]) => value,
+    );
+
+    if (chains.length === 0) {
+      flow.showMessage({
+        title: 'Goal Chains',
+        message: 'No goal chains are planned in this project yet.',
+        variant: 'info',
+      });
+      return;
+    }
+
+    flow.showSelect<string>({
+      title: 'Goal Chains',
+      searchable: true,
+      options: chains.map((chain) => ({
+        label: chain.title,
+        description: `${chain.goals.length} goal${chain.goals.length === 1 ? '' : 's'} · ${chain.goals.map((goal) => goal.workspaceName ?? goal.plannedWorkspaceName ?? goal.title).join(' → ')}`,
+        value: chain.chainId,
+      })),
+      onSelect: (chainId) => {
+        const firstGoal = chains.find((chain) => chain.chainId === chainId)?.goals[0];
+        if (firstGoal) {
+          handleSelectPlannedGoal(firstGoal);
+        }
+        flow.close();
+      },
+    });
+  }, [allGoalItems, flow, handleSelectPlannedGoal]);
+
+  const resolveGoalCommandWorkspace = useCallback((goal: KanbanGoalItem) => {
+    if (goal.workspaceName) {
+      return allWorkspaceEntries.find((workspace) =>
+        workspace.backendKey === goal.backendKey &&
+        workspace.projectName === goal.projectName &&
+        workspace.name === goal.workspaceName,
+      ) ?? null;
+    }
+    if (selectedWorkspaceForDetail && selectedWorkspaceForDetail.backendKey === goal.backendKey && selectedWorkspaceForDetail.projectName === goal.projectName) {
+      return selectedWorkspaceForDetail;
+    }
+    return allWorkspaceEntries.find((workspace) =>
+      workspace.backendKey === goal.backendKey &&
+      workspace.projectName === goal.projectName,
+    ) ?? null;
+  }, [allWorkspaceEntries, selectedWorkspaceForDetail]);
+
+
+  const getGoalMutationBackend = useCallback((goal: KanbanGoalItem) => {
+    const workspace = resolveGoalCommandWorkspace(goal);
+    const backendKey =
+      (workspace?.backendKey as BackendKey | undefined) ??
+      (goal.backendKey as BackendKey | undefined) ??
+      activeBackendKey ??
+      multiMachineState.backendOrder[0] ??
+      multi.localBackendKey;
+    return { backend: multi.getBackend(backendKey), workspace };
+  }, [activeBackendKey, multi, multiMachineState.backendOrder, resolveGoalCommandWorkspace]);
+
+  // Lazy goal-detail fetch (ticket #42): pull the full doc + validation for a
+  // goal into `goalDetailCache` when a detail view opens. Deduped per goal id +
+  // updatedAt so an edited goal refetches but an open pane does not thrash.
+  const goalDetailInFlightRef = useRef<Set<string>>(new Set());
+  const fetchGoalDetail = useCallback((goal: KanbanGoalItem | null | undefined) => {
+    if (!goal) return;
+    const cached = goalDetailCache[goal.id];
+    if (cached && cached.updatedAt === goal.updatedAt) return;
+    const inflightKey = `${goal.id}@${goal.updatedAt ?? ''}`;
+    if (goalDetailInFlightRef.current.has(inflightKey)) return;
+    const { backend } = getGoalMutationBackend(goal);
+    if (!backend?.getGoalDetail) return;
+    goalDetailInFlightRef.current.add(inflightKey);
+    void backend.getGoalDetail(goal.projectName, getPersistedGoalId(goal))
+      .then((detail) => {
+        setGoalDetailCache((prev) => ({ ...prev, [goal.id]: { updatedAt: goal.updatedAt, doc: detail.doc, validation: detail.validation } }));
+      })
+      .catch(() => undefined)
+      .finally(() => { goalDetailInFlightRef.current.delete(inflightKey); });
+  }, [goalDetailCache, getGoalMutationBackend, getPersistedGoalId]);
+  const hasGoalDetail = useCallback(
+    (goal: KanbanGoalItem) => goalDetailCache[goal.id]?.updatedAt === goal.updatedAt,
+    [goalDetailCache],
+  );
+  const selectedGoalHasDetail = Boolean(selectedGoal && hasGoalDetail(selectedGoal));
+
+  // Fetch full detail when the goal detail panel opens.
+  useEffect(() => {
+    fetchGoalDetail(selectedGoal);
+  }, [selectedGoal?.id, selectedGoal?.updatedAt, fetchGoalDetail]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Fetch full detail for the goal bound to the visible workspace pane so its
+  // goal-doc / workflow / rubric / evidence surfaces render real content.
+  useEffect(() => {
+    if (!currentDetailWorkspace) return;
+    const wsGoal = allGoalItems.find((g) =>
+      g.workspaceName === currentDetailWorkspace.name && g.projectName === currentDetailWorkspace.projectName);
+    fetchGoalDetail(wsGoal);
+  }, [currentDetailWorkspace?.selectionKey, allGoalItems, fetchGoalDetail]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Gate-aware roll-up guard ──────────────────────────────────────────────
+  // Rolling up merges a workspace's artifacts branch into main — the closest
+  // thing to irreversible in this model. Before merging, resolve the shipped
+  // workspace's goal and surface its gate/readiness state. GREEN (every
+  // required requirement accepted or its phase waived) → a light confirm.
+  // NON-GREEN → a danger confirm that names the actual unmet requirements and
+  // states plainly that unmet gates are being overridden. Warn-and-confirm,
+  // never a hard block: the human has waive authority. Returns true iff the
+  // roll-up ran (false = user cancelled); rejects only if the roll-up itself
+  // failed, so the caller's catch surfaces the real error.
+  const rollupWorkspaceGuarded = useCallback(async (
+    backend: import('./session/backend.js').SessionBackend | null,
+    projectName: string,
+    workspaceName: string,
+    goal: KanbanGoalItem | null,
+  ): Promise<boolean> => {
+    if (!backend?.rollupProjectArtifacts) throw new Error('Roll-up unavailable on this connection.');
+    const runRollup = () => backend.rollupProjectArtifacts!(projectName, workspaceName);
+
+    // Resolve the shipped workspace's goal FRESH validation. Project home's
+    // snapshot may be slimmed, so refetch via getGoalDetail (ticket #49)
+    // rather than trusting the possibly-absent goal.validation on the item.
+    let validation: import('./types/goals.js').GoalValidation | null = goal?.validation ?? null;
+    let fetchFailed = false;
+    if (goal && backend.getGoalDetail) {
+      try {
+        const detail = await backend.getGoalDetail(projectName, getPersistedGoalId(goal));
+        validation = detail.validation;
+      } catch {
+        fetchFailed = true;
+      }
+    }
+    const summary = validation ? goalGateSummary({ validation }) : null;
+
+    const confirmRollup = (opts: { title: string; message: string; variant: 'info' | 'danger'; confirmLabel: string }) =>
+      new Promise<boolean>((resolve, reject) => {
+        flow.showConfirm({
+          title: opts.title,
+          message: opts.message,
+          variant: opts.variant,
+          confirmLabel: opts.confirmLabel,
+          cancelLabel: 'Cancel',
+          onConfirm: async () => {
+            try { await runRollup(); resolve(true); }
+            catch (e) { reject(e instanceof Error ? e : new Error(String(e))); }
+          },
+          onCancel: () => resolve(false),
+        });
+      });
+
+    // GREEN: proceed with a light, non-nagging confirm.
+    if (summary?.green) {
+      const note = summary.requiredTotal > 0
+        ? `All ${summary.requiredTotal} required requirement${summary.requiredTotal === 1 ? '' : 's'} accepted or waived.`
+        : 'No required requirements declared.';
+      return confirmRollup({
+        title: `Roll up “${workspaceName}”`,
+        message: `${note}\n\nRolling up merges this workspace's artifacts branch into main. Continue?`,
+        variant: 'info',
+        confirmLabel: 'Roll up',
+      });
+    }
+
+    // NON-GREEN: name the actual blockers and require explicit override.
+    let blockers: string;
+    if (summary) {
+      blockers = summary.unmet
+        .map((u) => `  • ${u.requirement.title} — ${u.phase ? `${u.phase} phase` : 'no phase'} · ${u.requirement.status}`)
+        .join('\n');
+    } else if (goal) {
+      blockers = fetchFailed
+        ? '  • Could not load this goal\'s validation — gate state is unverified.'
+        : '  • This goal has no validation contract.';
+    } else {
+      blockers = '  • No goal is bound to this workspace — gate state is unverified.';
+    }
+    const count = summary ? summary.unmet.length : 1;
+    return confirmRollup({
+      title: `Roll up “${workspaceName}” anyway?`,
+      message:
+        `Rolling up merges this workspace's artifacts branch into main — the closest thing to irreversible here.\n\n`
+        + `${count} required gate${count === 1 ? '' : 's'} ${count === 1 ? 'is' : 'are'} NOT satisfied:\n${blockers}\n\n`
+        + `Proceeding overrides ${count === 1 ? 'this unmet gate' : 'these unmet gates'} on your authority.`,
+      variant: 'danger',
+      confirmLabel: 'Roll up anyway',
+    });
+  }, [getPersistedGoalId, flow]);
+
+  const handleSaveGoalDoc = useCallback(async (goal: KanbanGoalItem, bodyMarkdown: string) => {
+    setGoalSaving(true);
+    try {
+      const updated = await multi.updateGoal(goal.backendKey as BackendKey, goal.projectName, getPersistedGoalId(goal), {
+        doc: {
+          ...(goal.doc ?? { updatedAt: new Date().toISOString(), bodyMarkdown: '' }),
+          bodyMarkdown,
+          updatedAt: new Date().toISOString(),
+        },
+      });
+      setGoalDetailMessage(`Saved goal doc: ${updated.title}`);
+      await multi.listWorkspaces();
+    } catch (error) {
+      flow.showMessage({
+        title: 'Save Goal Failed',
+        message: error instanceof Error ? error.message : String(error),
+        variant: 'error',
+      });
+    } finally {
+      setGoalSaving(false);
+    }
+  }, [flow, getPersistedGoalId, multi]);
+  // Validation contract mutations
+
+  const handleAddGoalRequirement = useCallback(async (goal: KanbanGoalItem, input: Parameters<NonNullable<import('./session/backend.js').SessionBackend['addGoalRequirement']>>[2]) => {
+    setGoalSaving(true);
+    try {
+      const { backend } = getGoalMutationBackend(goal);
+      if (!backend?.addGoalRequirement) throw new Error('This backend does not support declaring requirements.');
+      const requirement = await backend.addGoalRequirement(goal.projectName, getPersistedGoalId(goal), input);
+      await multi.listWorkspaces();
+      setGoalDetailMessage(`Added requirement: ${requirement.title}`);
+    } catch (error) {
+      flow.showMessage({ title: 'Add Requirement Failed', message: error instanceof Error ? error.message : String(error), variant: 'error' });
+    } finally {
+      setGoalSaving(false);
+    }
+  }, [flow, getGoalMutationBackend, getPersistedGoalId, multi]);
+
+  const handleUpdateGoalRequirement = useCallback(async (goal: KanbanGoalItem, requirementId: string, patch: Parameters<NonNullable<import('./session/backend.js').SessionBackend['updateGoalRequirement']>>[3]) => {
+    setGoalSaving(true);
+    try {
+      const { backend } = getGoalMutationBackend(goal);
+      if (!backend?.updateGoalRequirement) throw new Error('This backend does not support editing requirements.');
+      const requirement = await backend.updateGoalRequirement(goal.projectName, getPersistedGoalId(goal), requirementId, patch);
+      await multi.listWorkspaces();
+      setGoalDetailMessage(`Updated requirement: ${requirement.title}`);
+    } catch (error) {
+      flow.showMessage({ title: 'Update Requirement Failed', message: error instanceof Error ? error.message : String(error), variant: 'error' });
+    } finally {
+      setGoalSaving(false);
+    }
+  }, [flow, getGoalMutationBackend, getPersistedGoalId, multi]);
+
+  const handleRemoveGoalRequirement = useCallback(async (goal: KanbanGoalItem, requirementId: string) => {
+    setGoalSaving(true);
+    try {
+      const { backend } = getGoalMutationBackend(goal);
+      if (!backend?.removeGoalRequirement || !backend?.addGoalRequirement) {
+        throw new Error('This backend does not support removing requirements.');
+      }
+      const snapshot = goal.validation?.requirements?.[requirementId];
+      await backend.removeGoalRequirement(goal.projectName, getPersistedGoalId(goal), requirementId);
+      await multi.listWorkspaces();
+      setGoalDetailMessage('Requirement removed.');
+      if (snapshot) {
+        toast('Requirement removed', {
+          duration: 8000,
+          action: {
+            label: 'Undo',
+            onClick: () => {
+              void (async () => {
+                try {
+                  await backend.addGoalRequirement!(goal.projectName, getPersistedGoalId(goal), {
+                    title: snapshot.title,
+                    kind: snapshot.kind,
+                    rubric: snapshot.rubric,
+                    required: snapshot.required,
+                    generation: snapshot.generation,
+                    judgment: snapshot.judgment,
+                  });
+                  await multi.listWorkspaces();
+                  setGoalDetailMessage(`Restored requirement: ${snapshot.title}`);
+                } catch (error) {
+                  toast.error(error instanceof Error ? error.message : String(error));
+                }
+              })();
+            },
+          },
+        });
+      }
+    } catch (error) {
+      flow.showMessage({ title: 'Remove Requirement Failed', message: error instanceof Error ? error.message : String(error), variant: 'error' });
+    } finally {
+      setGoalSaving(false);
+    }
+  }, [flow, getGoalMutationBackend, getPersistedGoalId, multi]);
+
+  const handleReorderGoalRequirement = useCallback(async (goal: KanbanGoalItem, requirementId: string, position: number) => {
+    setGoalSaving(true);
+    try {
+      const { backend } = getGoalMutationBackend(goal);
+      if (!backend?.reorderGoalRequirement) throw new Error('This backend does not support reordering requirements.');
+      await backend.reorderGoalRequirement(goal.projectName, getPersistedGoalId(goal), requirementId, position);
+      await multi.listWorkspaces();
+    } catch (error) {
+      flow.showMessage({ title: 'Reorder Failed', message: error instanceof Error ? error.message : String(error), variant: 'error' });
+    } finally {
+      setGoalSaving(false);
+    }
+  }, [flow, getGoalMutationBackend, getPersistedGoalId, multi]);
+
+  const handleReopenGoalRequirement = useCallback(async (goal: KanbanGoalItem, requirementId: string) => {
+    setGoalSaving(true);
+    try {
+      const { backend } = getGoalMutationBackend(goal);
+      if (!backend?.reopenGoalRequirement) throw new Error('This backend does not support reopening requirements.');
+      const requirement = await backend.reopenGoalRequirement(goal.projectName, getPersistedGoalId(goal), requirementId);
+      await multi.listWorkspaces();
+      setGoalDetailMessage(`Reopened for review: ${requirement.title}`);
+    } catch (error) {
+      flow.showMessage({ title: 'Reopen Failed', message: error instanceof Error ? error.message : String(error), variant: 'error' });
+    } finally {
+      setGoalSaving(false);
+    }
+  }, [flow, getGoalMutationBackend, getPersistedGoalId, multi]);
+
+  const handleAttachGoalEvidence = useCallback(async (goal: KanbanGoalItem, requirementId: string, input: Parameters<NonNullable<import('./session/backend.js').SessionBackend['attachGoalEvidence']>>[3]) => {
+    setGoalSaving(true);
+    try {
+      const { backend } = getGoalMutationBackend(goal);
+      if (!backend?.attachGoalEvidence) throw new Error('This backend does not support attaching evidence.');
+      const evidence = await backend.attachGoalEvidence(goal.projectName, getPersistedGoalId(goal), requirementId, input);
+      await multi.listWorkspaces();
+      setGoalDetailMessage(`Attached evidence: ${evidence.name}`);
+    } catch (error) {
+      flow.showMessage({ title: 'Attach Evidence Failed', message: error instanceof Error ? error.message : String(error), variant: 'error' });
+    } finally {
+      setGoalSaving(false);
+    }
+  }, [flow, getGoalMutationBackend, getPersistedGoalId, multi]);
+
+  const handleRunGoalGeneration = useCallback(async (goal: KanbanGoalItem, requirementId: string) => {
+    setGoalSaving(true);
+    try {
+      const { backend } = getGoalMutationBackend(goal);
+      if (!backend?.runGoalGeneration) throw new Error('This backend does not support running generation commands.');
+      const result = await backend.runGoalGeneration(goal.projectName, getPersistedGoalId(goal), requirementId);
+      await multi.listWorkspaces();
+      setGoalDetailMessage(`Generation produced ${result.evidence.name}${result.autoAccepted ? ' (auto-accepted)' : ''}.`);
+    } catch (error) {
+      flow.showMessage({ title: 'Run Generation Failed', message: error instanceof Error ? error.message : String(error), variant: 'error' });
+    } finally {
+      setGoalSaving(false);
+    }
+  }, [flow, getGoalMutationBackend, getPersistedGoalId, multi]);
+
+
+
+  const handleSaveChainOrder = useCallback(async (draftGoals: KanbanGoalItem[]) => {
+    if (draftGoals.length < 2) return;
+    const backendKey = draftGoals[0].backendKey as BackendKey;
+    const projectName = draftGoals[0].projectName;
+    const currentGoals = allGoalItems
+      .filter((goal) => goal.backendKey === draftGoals[0].backendKey && goal.projectName === projectName && goal.chainId === draftGoals[0].chainId)
+      .sort((a, b) => a.chainPosition - b.chainPosition);
+    const currentOrder = currentGoals.map(getGoalMoveToken);
+    const desiredOrder = draftGoals.map(getGoalMoveToken);
+
+    try {
+      for (let index = 0; index < desiredOrder.length; index += 1) {
+        if (currentOrder[index] === desiredOrder[index]) continue;
+        const sourceToken = desiredOrder[index];
+        const sourceIndex = currentOrder.indexOf(sourceToken);
+        const targetToken = currentOrder[index];
+        if (sourceIndex < 0 || !targetToken) continue;
+        await multi.moveGoalInChain(backendKey, projectName, sourceToken, targetToken, 'before');
+        currentOrder.splice(sourceIndex, 1);
+        currentOrder.splice(index, 0, sourceToken);
+      }
+      setBoardGoalOrderMessage('Goal order saved; git stack unchanged. Run stack status when ready.');
+      setGoalDetailMessage('Goal order saved; git stack unchanged. Run stack status when ready.');
+      await multi.listWorkspaces();
+    } catch (error) {
+      flow.showMessage({
+        title: 'Save Goal Order Failed',
+        message: error instanceof Error ? error.message : String(error),
+        variant: 'error',
+      });
+      throw error;
+    }
+  }, [allGoalItems, flow, getGoalMoveToken, multi]);
+  const handleRunGoalJudgment = useCallback(async (goal: KanbanGoalItem, requirementId: string) => {
+    setGoalSaving(true);
+    try {
+      const { backend } = getGoalMutationBackend(goal);
+      if (!backend?.runGoalJudgment) throw new Error('This backend does not support running judgments.');
+      const result = await backend.runGoalJudgment(goal.projectName, getPersistedGoalId(goal), requirementId);
+      await multi.listWorkspaces();
+      setGoalDetailMessage(`Judgment recorded: ${result.review.tone === 'green' ? 'passed' : result.review.tone === 'amber' ? 'needs changes' : 'failed'}.`);
+    } catch (error) {
+      flow.showMessage({ title: 'Run Judgment Failed', message: error instanceof Error ? error.message : String(error), variant: 'error' });
+    } finally {
+      setGoalSaving(false);
+    }
+  }, [flow, getGoalMutationBackend, getPersistedGoalId, multi]);
+
+  const handleRecordGoalHumanReview = useCallback(async (goal: KanbanGoalItem, requirementId: string, decision: 'pass' | 'changes' | 'fail', note: string) => {
+    setGoalSaving(true);
+    try {
+      const { backend } = getGoalMutationBackend(goal);
+      if (!backend?.recordGoalHumanReview) throw new Error('This backend does not support recording reviews.');
+      const review = await backend.recordGoalHumanReview(goal.projectName, getPersistedGoalId(goal), requirementId, decision, note);
+      await multi.listWorkspaces();
+      setGoalDetailMessage(`Review recorded: ${review.tone === 'green' ? 'passed' : review.tone === 'amber' ? 'needs changes' : 'failed'}.`);
+    } catch (error) {
+      flow.showMessage({ title: 'Record Review Failed', message: error instanceof Error ? error.message : String(error), variant: 'error' });
+    } finally {
+      setGoalSaving(false);
+    }
+  }, [flow, getGoalMutationBackend, getPersistedGoalId, multi]);
+
+
+  const handleRefreshGoalStackStatus = useCallback(async (goal: KanbanGoalItem) => {
+    const workspaceName = goal.workspaceName ?? goal.plannedWorkspaceName;
+    if (!workspaceName) {
+      setGoalDetailMessage('Goal has no workspace name to validate.');
+      return;
+    }
+    try {
+      const status = await multi.getGoalStackStatus(goal.backendKey as BackendKey, goal.projectName, workspaceName);
+      setGoalStackStatus(status);
+      setGoalEdgeStatusByKey((current) => {
+        const next = { ...current };
+        for (const edge of status.edges) {
+          next[toGoalCacheKey(goal.backendKey, goal.projectName, edge.childGoalId)] = {
+            status: edge.status,
+            message: edge.message,
+          };
+        }
+        return next;
+      });
+      setGoalDetailMessage(null);
+    } catch (error) {
+      flow.showMessage({
+        title: 'Stack Status Failed',
+        message: error instanceof Error ? error.message : String(error),
+        variant: 'error',
+      });
+    }
+  }, [flow, multi]);
+
 
   // ─── Parse review deep-link on load ───────────────────────────────────────
 
@@ -764,12 +1993,16 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
 
   useEffect(() => {
     if (scriptState?.isRunning) {
-      setShowScriptTerminal(true);
+      setShowScriptTerminal(false);
     }
     if (terminalMode === 'attached' || terminalStatus !== 'connected') {
       setShowScriptTerminal(false);
     }
-  }, [terminalMode, scriptState?.isRunning, terminalStatus]);
+  }, [terminalMode, scriptState?.isRunning, scriptState?.phase, terminalStatus]);
+
+
+
+
 
   // ─── Process edit validation ───────────────────────────────────────────────
 
@@ -862,11 +2095,13 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
 
   const handleAttachSession = useCallback(async (params: { sessionId?: string; workspaceId?: string; viewOnly?: boolean }) => {
     setIsViewOnlySession(params.viewOnly ?? false);
+    const paneId = allocatePaneId(params.sessionId ? 'session' : 'workspace');
     await attachController.attachFromSelection({
       ...params,
       backendKey: params.sessionId ? (selectedBackendKey ?? attachedBackendKey ?? activeBackendKey ?? undefined) : undefined,
+      paneId,
     });
-  }, [activeBackendKey, attachController, attachedBackendKey, selectedBackendKey]);
+  }, [activeBackendKey, attachController, attachedBackendKey, selectedBackendKey, allocatePaneId]);
 
   // ─── Process actions ───────────────────────────────────────────────────────
 
@@ -1024,7 +2259,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   }, [flow, handleOpenReplay]);
 
   const handleOpenHelp = useCallback(() => flow.showHelp(getDefaultShortcuts()), [flow]);
-  const handleOpenCreateMenu = useCallback(() => lifecycleController.openCreateMenu(selectedWorkspaceProjectName), [lifecycleController, selectedWorkspaceProjectName]);
+  const handleOpenCreateMenu = useCallback(() => lifecycleController.openCreateMenu(), [lifecycleController]);
   const handleDeleteProject = useCallback((projectName: string) => {
     lifecycleController.openDeleteProjectFlow(projectName);
   }, [lifecycleController]);
@@ -1043,25 +2278,71 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
         if (attachedBackendState?.attachedSessionId === sessionId && attachedBackendKey === sessionRef.backendKey) {
           void multi.detachSession({ backendKey: sessionRef.backendKey, workspaceId: '' });
         }
-        void multi.killSession(sessionRef);
+        void multi.terminateSession(sessionRef);
       },
     });
   }, [activeBackendKey, attachedBackendKey, attachedBackendState?.attachedSessionId, flow, getSessionRef, multi, selectedBackendKey]);
 
-  const handleDeleteWorkspace = useCallback((workspace: WorkspaceInfo) => {
+  /** Commits on the workspace's artifacts branch that main does not have.
+   *  Removal drops that branch, so this is what the confirmation stands to
+   *  lose. Best-effort: a status failure must not block deleting. */
+  const unmergedArtifactsFor = useCallback(async (workspace: WorkspaceInfo): Promise<number> => {
+    // Resolve the backend the workspace actually lives on: a remote workspace's
+    // artifacts are on its own machine, not whichever backend is active here.
+    const be = multi.getBackend(getWorkspaceRef(workspace.id).backendKey);
+    if (!be?.getProjectArtifactsStatus) return 0;
+    try {
+      const status = await be.getProjectArtifactsStatus(workspace.projectName);
+      return status.unmergedByBranch?.[workspace.name] ?? 0;
+    } catch {
+      return 0;
+    }
+  }, [multi, getWorkspaceRef]);
+  /** Delete is destructive to artifacts now, so the warning has to name both
+   *  costs: the sessions it kills and the artifact commits it drops. */
+  const deleteWarning = (sessionCount: number, unmerged: number): string | undefined => {
+    const parts: string[] = [];
+    if (sessionCount > 0) parts.push(`This will kill ${sessionCount} active session(s)!`);
+    if (unmerged > 0) {
+      parts.push(
+        `Its artifacts branch has ${unmerged} commit${unmerged === 1 ? '' : 's'} not rolled up into main — deleting the workspace deletes them. Roll up first if you want to keep that work.`,
+      );
+    }
+    return parts.length > 0 ? parts.join(' ') : undefined;
+  };
+
+  const handleDeleteWorkspace = useCallback(async (workspace: WorkspaceInfo) => {
     const sessionCount = workspace.sessionCount || 0;
+    const unmerged = await unmergedArtifactsFor(workspace);
     flow.showConfirmTyped({
       title: 'Delete Workspace',
-      message: `Are you sure you want to delete workspace "${workspace.name}"?`,
+      message: `Are you sure you want to delete workspace "${workspace.name}"? Its goal, if any, is archived (still viewable and linked in its chain) — not lost. Its artifacts branch IS deleted.`,
       confirmText: workspace.name,
-      warning: sessionCount > 0 ? `This will kill ${sessionCount} active session(s)!` : undefined,
+      warning: deleteWarning(sessionCount, unmerged),
       onConfirm: async () => {
         const ref = getWorkspaceRef(workspace.id);
         await deleteWorkspaceWithPrompt({ ref, workspaceName: workspace.name });
       },
     });
-  }, [deleteWorkspaceWithPrompt, flow, getWorkspaceRef]);
+  }, [deleteWorkspaceWithPrompt, flow, getWorkspaceRef, unmergedArtifactsFor]);
 
+  const handleDeleteWorkspaceSkipScripts = useCallback(async (workspace: WorkspaceInfo) => {
+    const sessionCount = workspace.sessionCount || 0;
+    const unmerged = await unmergedArtifactsFor(workspace);
+    const artifactWarning = deleteWarning(sessionCount, unmerged);
+    flow.showConfirmTyped({
+      title: 'Delete Workspace (Skip Scripts)',
+      message: `Delete workspace "${workspace.name}" without running cleanup scripts? Its goal, if any, is archived (still viewable and linked in its chain) — not lost. Its artifacts branch IS deleted.`,
+      confirmText: workspace.name,
+      // This path deletes exactly as hard as the other one, so it carries the
+      // same artifact warning — plus the fact that cleanup is skipped.
+      warning: [artifactWarning, 'This skips cleanup scripts.'].filter(Boolean).join(' '),
+      onConfirm: async () => {
+        const ref = getWorkspaceRef(workspace.id);
+        await deleteWorkspaceSkipScriptsWithPrompt({ ref, workspaceName: workspace.name });
+      },
+    });
+  }, [deleteWorkspaceSkipScriptsWithPrompt, flow, getWorkspaceRef, unmergedArtifactsFor]);
   const handleOpenReview = useCallback((workspaceId: string) => {
     const workspace = filteredWorkspaces.find((item) => item.id === workspaceId);
     if (!workspace) {
@@ -1088,6 +2369,98 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   }, [filteredWorkspaces]);
 
   // ─── Command palette ───────────────────────────────────────────────────────
+  const runWorkspaceBundleScripts = useCallback(async (
+    workspace: WorkspaceInfo & { selectionKey?: string },
+    options?: { announceSuccess?: boolean; mode?: 'open' | 'rerun'; selection?: 'setup' | 'select' | 'setup-select' }
+  ): Promise<boolean> => {
+    if (!workspace.selectionKey) {
+      toast.error('Workspace selection is unavailable.');
+      return false;
+    }
+    const selectionKey = workspace.selectionKey;
+    if (scriptRunInFlightRef.current.has(selectionKey)) {
+      return false;
+    }
+    const backendKey = backendKeyFromSelectionKey(selectionKey);
+    const backend = multi.getBackend(backendKey);
+    if (!backend) {
+      toast.error(options?.mode === 'rerun' ? 'This backend does not support workspace script commands.' : 'Workspace open scripts are not supported for this backend.');
+      return false;
+    }
+    const selection = options?.selection ?? 'setup-select';
+    if (options?.mode === 'rerun') {
+      const canRerun = selection === 'setup-select' ? Boolean(backend.rerunWorkspaceScripts) : Boolean(backend.runWorkspaceScriptSelection);
+      if (!canRerun) {
+        toast.error('This backend does not support the selected workspace script command.');
+        return false;
+      }
+    } else if (!backend.runWorkspaceOpenScripts) {
+      // Passive open on a backend without open-script support is a silent no-op —
+      // never fall back to an explicit rerun, and never show a task/toast/modal.
+      return false;
+    }
+    scriptRunInFlightRef.current.add(selectionKey);
+    const ref = { backendKey, workspaceId: workspace.id };
+    const taskId = workspaceRemovalTasks.startLifecycleTask({ ref, workspaceName: workspace.name }, options?.mode === 'rerun' ? (options.selection === 'select' ? 'select' : 'setup') : 'select');
+    activeScriptTaskIdRef.current = taskId;
+    activeScriptWorkspaceIdRef.current = workspace.id;
+    try {
+      if (options?.mode === 'rerun') {
+        if (selection === 'setup-select') {
+          await backend.rerunWorkspaceScripts?.(workspace.projectName, workspace.id);
+        } else {
+          await backend.runWorkspaceScriptSelection?.(workspace.projectName, workspace.id, selection);
+        }
+      } else {
+        // Passive open: run only the intentional open-scripts path (no rerun fallback).
+        await backend.runWorkspaceOpenScripts?.(workspace.projectName, workspace.id);
+      }
+      if (activeScriptTaskIdRef.current === taskId) {
+        workspaceRemovalTasks.completeSuccess(taskId, 'Workspace scripts complete');
+        activeScriptTaskIdRef.current = null;
+        activeScriptWorkspaceIdRef.current = null;
+      }
+      await multi.listWorkspaces();
+      if (options?.announceSuccess !== false) {
+        const ranLabel = selection === 'setup' ? 'setup scripts' : selection === 'select' ? 'select scripts' : 'setup and select scripts';
+        toast.success(`Ran ${ranLabel} for ${workspace.name}.`);
+      }
+      return true;
+    } catch (error) {
+      if (activeScriptTaskIdRef.current === taskId) {
+        workspaceRemovalTasks.completeFromError(taskId, error instanceof Error ? error.message : String(error));
+        activeScriptTaskIdRef.current = null;
+        activeScriptWorkspaceIdRef.current = null;
+      }
+      toast.error(error instanceof Error ? error.message : 'Failed to rerun bundle scripts');
+      return false;
+    } finally {
+      scriptRunInFlightRef.current.delete(selectionKey);
+    }
+  }, [backendKeyFromSelectionKey, multi, workspaceRemovalTasks]);
+
+  const handleRerunBundleScripts = useCallback(async (workspace: WorkspaceInfo & { selectionKey?: string }) => {
+    flow.showSelect<'setup' | 'select' | 'setup-select'>({
+      title: 'Run Workspace Scripts',
+      options: [
+        { label: 'Setup scripts', description: 'Explicitly rerun setup only.', value: 'setup' },
+        { label: 'Select scripts', description: 'Run the scripts used whenever this workspace is opened.', value: 'select' },
+        { label: 'Setup, then select', description: 'Rerun the full setup/select sequence.', value: 'setup-select' },
+      ],
+      onSelect: async (selection) => {
+        flow.close();
+        await runWorkspaceBundleScripts(workspace, { announceSuccess: true, mode: 'rerun', selection });
+      },
+    });
+  }, [flow, runWorkspaceBundleScripts]);
+
+  // NOTE: passive Workspace Detail top-strip A -> B switching must NOT run
+  // scripts. Viewing/selecting an already-open workspace is not the same as
+  // activating it, so there is deliberately no effect here that runs open
+  // scripts on visible-detail change. Lifecycle scripts run only on real session
+  // attach (backend side) or via explicit "Run Workspace Scripts".
+
+
   const { commandPalette } = useCommandPaletteOrchestration({
     selectedBoardWorkspaceId: workspaceBoardState.selectedWorkspaceId,
     selectedDetailWorkspaceId: selectedRef?.workspaceId ?? selectedWorkspaceForDetail?.id ?? null,
@@ -1104,14 +2477,44 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
       window.open(url, '_blank', 'noopener,noreferrer');
     },
     onAddRepo: () => lifecycleController.openCreateProjectFlow(),
-    onAddWorkspace: () => lifecycleController.openCreateMenu(null),
+    onAddWorkspace: () => lifecycleController.openCreateMenu(),
     onSetWorkspacePhase: (workspace, phase) => {
       workspaceBoardState.setPhase(workspace.selectionKey ?? workspace.id, phase);
       flow.close();
     },
+    // Reuses the same guarded roll-up the project page uses — gate checks,
+    // confirmations and all. A second, laxer path next to Delete would be the
+    // worst place to have one.
+    onRollupWorkspace: async (workspace) => {
+      const be = multi.getBackend(getWorkspaceRef(workspace.id).backendKey);
+      const goal = allGoalItems.find((g) => g.workspaceName === workspace.name && g.projectName === workspace.projectName) ?? null;
+      const rolled = await rollupWorkspaceGuarded(be, workspace.projectName, workspace.name, goal);
+      if (rolled) toast.success(`Rolled up ${workspace.name} artifacts into main.`);
+      flow.close();
+    },
     onDeleteWorkspace: handleDeleteWorkspace,
+    onDeleteWorkspaceSkipScripts: handleDeleteWorkspaceSkipScripts,
     onEditBundleConfig: async (workspace) => {
       await handleManageBundleConfig({ workspaceId: workspace.id });
+    },
+    onRefreshBundle: async (workspace) => {
+      const ref = getWorkspaceRef(workspace.id);
+      const refreshed = await bundleRefreshAttach.refreshBundle(ref);
+      if (refreshed) {
+        multi.listWorkspaces();
+        multi.listSessions();
+      }
+    },
+    onRerunBundleScripts: handleRerunBundleScripts,
+    onAddNote: async (workspace) => {
+      // Notes are dock tabs now (mock NoteView): open the workspace + a composer tab.
+      const key = workspace.selectionKey ?? workspace.id;
+      handleBoardSelectWorkspace(key);
+      setDockExtraPanes((prev) => ({ ...prev, [key]: [...(prev[key] ?? []), { kind: 'note', noteId: null, title: 'New note', nonce: Date.now() }] }));
+    },
+    onListNotes: async (workspace) => {
+      // Notes live in the workspace rail (Artifacts mode) — open the workspace.
+      handleBoardSelectWorkspace(workspace.selectionKey ?? workspace.id);
     },
     onEditProcessConfig: async (workspace) => {
       await handleEditProcesses({ workspaceId: workspace.id });
@@ -1119,6 +2522,25 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
     onDeleteRepo: handleDeleteProject,
     onOpenGitHubPr: (workspace) => handleOpenGitHubPullRequest(workspace.id),
     onOpenReview: (workspace) => handleOpenReview(workspace.id),
+    onOpenEditor: async (workspace) => {
+      const ref = getWorkspaceRef(workspace.id);
+      await showWorkspaceEditorSelect({
+        workspace,
+        showSelect: (config) => flow.showSelect<string>(config),
+        showMessage: ({ message, variant }) => {
+          if (variant === 'error') toast.error(message);
+          else if (variant === 'warning') toast.warning(message);
+          else if (variant === 'success') toast.success(message);
+          else toast.info(message);
+        },
+        listAvailableEditors: () => multi.listAvailableEditors(ref),
+        openInEditor: async (editorId) => {
+          await multi.openWorkspaceInEditor(ref, editorId);
+          toast.success(`Opening ${workspace.name} in editor...`);
+        },
+      });
+    },
+    onShowGoalChains: showGoalChainsCommand,
   });
 
   const inboxActions = useInboxActions({
@@ -1128,9 +2550,6 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
       toast.error(message);
     },
   });
-
-
-  // ─── Inbox ─────────────────────────────────────────────────────────────────
 
   const { inboxProps, handleInboxCommand } = useInboxPage({
     items: backendInbox,
@@ -1145,7 +2564,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
         toast.error(`Could not resolve session backend for ${sessionId}.`);
         return;
       }
-      await attachController.attachFromSelection({ sessionId, backendKey: sessionRef.backendKey });
+      await attachController.attachFromSelection({ sessionId, workspaceId: sessionRef.workspaceId, backendKey: sessionRef.backendKey });
     },
     onClose: () => setShowInbox(false),
   });
@@ -1207,6 +2626,11 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
     return () => clearInterval(interval);
   }, [showEvents, eventsWorkspacePath, eventsProps.activeFilterName, backendSavedEventFilters, filteredWorkspaces, getWorkspaceRef, multi.requestEvents]);
 
+  // Rubric/evidence live refresh: agent-side CLI goal writes now reach the
+  // daemon via the fire-and-forget `goal-changed` notify, which emits a
+  // scoped machine delta to every watching client — no poll needed
+  // (ticket #3; the 5s listWorkspaces stopgap lived here).
+
   // ─── Activity tracking for notifications ──────────────────────────────────
 
   const holdWhenIdleMs = activeNotificationConfig.toast.holdWhenIdleMs ?? 15000;
@@ -1233,7 +2657,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
             toast.error(`Could not resolve session backend for ${notification.title ?? notification.sessionId}.`);
             return;
           }
-          void attachController.attachFromSelection({ sessionId: notification.sessionId, backendKey: sessionRef.backendKey });
+          void attachController.attachFromSelection({ sessionId: notification.sessionId, workspaceId: sessionRef.workspaceId, backendKey: sessionRef.backendKey });
         },
       },
     });
@@ -1249,7 +2673,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
         toast.error(`Could not resolve session backend for ${sessionId}.`);
         return;
       }
-      void attachController.attachFromSelection({ sessionId, backendKey: sessionRef.backendKey });
+      void attachController.attachFromSelection({ sessionId, workspaceId: sessionRef.workspaceId, backendKey: sessionRef.backendKey });
     },
     onMarkRead: async (itemId) => {
       await inboxActions.markInboxRead(itemId);
@@ -1414,9 +2838,30 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
             workspaceName={reviewWorkspace.workspaceId}
             workspaceLabel={reviewWorkspace.workspaceLabel}
             sendReviewRequest={reviewSendRequest}
+            onSendToAgent={async (thread) => {
+              // Route the finding into the workspace's active agent session.
+              const backendKey = reviewWorkspace.backendKey;
+              const be = backendKey ? multi.getBackend(backendKey) : null;
+              const st = backendKey ? multiMachineState.byBackend[backendKey] : null;
+              const wsId = `${reviewWorkspace.projectName}:${reviewWorkspace.workspaceId}`;
+              const agentId = Object.entries(st?.snapshot?.agentSessionsById ?? {})
+                .find(([, sess]) => (sess as { workspaceId?: string; state?: string }).workspaceId === wsId
+                  && (sess as { state?: string }).state !== 'closed')?.[0];
+              if (!be?.promptAgentSession || !agentId) {
+                toast.error('No active agent session to route this finding to.');
+                return;
+              }
+              const target = thread.target;
+              const loc = target.kind === 'workspace' ? 'workspace-wide'
+                : target.kind === 'file' ? target.file
+                : `${(target as { file: string }).file}`;
+              const body = thread.comments.map((c) => c.body).join('\n\n');
+              await be.promptAgentSession(wsId, agentId, `Review finding (${loc}) — please fix:\n\n${body}`, undefined, { streamingBehavior: 'followUp' });
+              toast.success('Finding routed to the agent.');
+            }}
             onBack={() => { setView('terminal'); setReviewWorkspace(null); }}
           />
-          <Toaster theme="dark" position="top-right" richColors />
+          <Toaster theme="dark" position="bottom-right" richColors />
         </>
       );
     }
@@ -1439,7 +2884,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
             </button>
           </div>
         </div>
-        <Toaster theme="dark" position="top-right" richColors />
+        <Toaster theme="dark" position="bottom-right" richColors />
       </>
     );
   }
@@ -1465,7 +2910,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
             </div>
           </div>
           <FlowWeb flow={flow} />
-          <Toaster theme="dark" position="top-right" richColors />
+          <Toaster theme="dark" position="bottom-right" richColors />
         </>
       );
     }
@@ -1486,7 +2931,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
           onCleanup={() => cancelReplayRequests(replayBackendKey)}
         />
         <FlowWeb flow={flow} />
-        <Toaster theme="dark" position="top-right" richColors />
+        <Toaster theme="dark" position="bottom-right" richColors />
       </>
     );
   }
@@ -1503,12 +2948,13 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
     return (
       <>
         <ScriptTerminal
+          key={lastScriptWorkspaceIdRef.current ?? 'none'}
           phase={scriptState?.phase ?? 'pre'}
           workspaceName={scriptWorkspaceName}
           isRunning={isRunning}
           error={scriptState?.error}
           exitCode={scriptState?.exitCode}
-          setWriteCallback={setWriteCallback}
+          setWriteCallback={setScriptWriteCallback}
           canAttachAnyway={attachController.canAttachAnyway}
           onAttachAnyway={async () => {
             await attachController.attachAnyway();
@@ -1525,7 +2971,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
           }}
         />
         {!isRunning && <FlowWeb flow={flow} />}
-        <Toaster theme="dark" position="top-right" richColors />
+        <Toaster theme="dark" position="bottom-right" richColors />
       </>
     );
   }
@@ -1535,14 +2981,14 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   if (
     view === "terminal" &&
     terminalStatus === "connected" &&
-    (terminalMode === "browsing" || (terminalMode === "attached" && (selectedWorkspaceForDetail || backendAttachedWorkspaceId)))
+    (terminalMode === "browsing" || (terminalMode === "attached" && currentDetailWorkspace))
   ) {
     if (showInbox) {
       return (
         <>
           <InboxWeb {...inboxProps} />
           <FlowWeb flow={flow} />
-          <Toaster theme="dark" position="top-right" richColors />
+          <Toaster theme="dark" position="bottom-right" richColors />
         </>
       );
     }
@@ -1552,16 +2998,18 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
         <>
           <EventsWeb {...eventsProps} workspaceLabel={eventsWorkspaceLabel} />
           <FlowWeb flow={flow} />
-          <Toaster theme="dark" position="top-right" richColors />
+          <Toaster theme="dark" position="bottom-right" richColors />
         </>
       );
     }
+
 
     // Shared overlays (rendered in both board and detail views)
     const overlays = (
       <>
         <FlowWeb flow={flow} />
-        <Toaster theme="dark" position="top-right" richColors />
+        <Toaster theme="dark" position="bottom-right" richColors />
+
         {commandPalette.isOpen && (
           <div
             className="gs-overlay-root"
@@ -1611,39 +3059,43 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
             </div>
           </div>
         )}
+        {selectedGoal && (
+          <GoalDetailPanel
+            goal={selectedGoal}
+            chainGoals={selectedGoalChainGoals}
+            stackStatus={goalStackStatus}
+            message={goalDetailMessage}
+            saving={goalSaving}
+            detailLoading={!selectedGoalHasDetail}
+            onClose={() => setSelectedGoalKey(null)}
+            onSaveDoc={handleSaveGoalDoc}
+            onCreateWorkspace={handleCreatePlannedGoalWorkspace}
+            onSaveChainOrder={handleSaveChainOrder}
+            onRefreshStackStatus={handleRefreshGoalStackStatus}
+            onAddRequirement={handleAddGoalRequirement}
+            onUpdateRequirement={handleUpdateGoalRequirement}
+            onRemoveRequirement={handleRemoveGoalRequirement}
+            onReorderRequirement={handleReorderGoalRequirement}
+            onReopenRequirement={handleReopenGoalRequirement}
+            onAttachEvidence={handleAttachGoalEvidence}
+            onRunGeneration={handleRunGoalGeneration}
+            onRunJudgment={handleRunGoalJudgment}
+            onRecordHumanReview={handleRecordGoalHumanReview}
+            sendReviewRequest={selectedGoal.workspaceName
+              ? (op) => {
+                  const { backend } = getGoalMutationBackend(selectedGoal);
+                  if (!backend?.sendReviewRequest) return Promise.reject(new Error('Review requests unavailable on this backend.'));
+                  return backend.sendReviewRequest(op);
+                }
+              : undefined}
+          />
+        )}
       </>
     );
 
-    const inlineAttachedRef: BackendScopedWorkspaceRef = {
-      backendKey: attachedBackendKey ?? selectedBackendKey ?? activeBackendKey ?? 'local',
-      workspaceId: '',
-    };
-
-    const handleInlineSendData = (data: string) => {
-      if (data === PAGE_UP && terminalRef.current?.pageUp()) return;
-      if (data === PAGE_DOWN && terminalRef.current?.pageDown()) return;
-      if (isViewOnlySession) return;
-      sendPty(new TextEncoder().encode(data));
-    };
-
-    const handleInlineKeyboardData = (data: Uint8Array) => {
-      if (isViewOnlySession) return;
-      const hasModifiers = modifiers.ctrl || modifiers.shift || modifiers.alt;
-      if (hasModifiers) {
-        const modified = applyModifiersToInput(data, modifiers);
-        sendPty(modified);
-        setModifiers({ ctrl: false, shift: false, alt: false });
-      } else {
-        sendPty(data);
-      }
-    };
-
-    const handleInlineFocusTerminal = () => terminalRef.current?.focus();
     const toggleInlineInputMode = () => {
       const newInputMode = !inputMode;
       setInputMode(newInputMode);
-      if (newInputMode) terminalRef.current?.focus();
-      else terminalRef.current?.blur();
     };
 
     const showInlineFloatingControls = showMobileControls && !keyboardVisible;
@@ -1653,161 +3105,828 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
       return 'flex-1 min-h-0 terminal-with-floating-controls';
     })();
 
-    // Only show inline terminal when the attached session belongs to the
-    // currently selected workspace (or no workspace tracking is available).
-    const attachedMatchesSelected = !backendAttachedWorkspaceId
-      || !selectedRef
-      || selectedRef.workspaceId === backendAttachedWorkspaceId;
-    const attachedAgentSessionId = attachedBackendState?.attachedAgentSessionId ?? null;
-    const switchingAgentSession = !!pendingAgentAttachTarget
-      && agentAttachPending
-      && (attachedAgentSessionId !== pendingAgentAttachTarget.agentSessionId
-        || backendAttachedWorkspaceId !== pendingAgentAttachTarget.workspaceId);
-    const inlineTerminalOutlet = switchingAgentSession ? (
-      <div className="flex-1 flex items-center justify-center bg-[var(--gs-bg)]">
-        <div className="text-sm text-[var(--gs-text-muted)]" style={{ animation: 'pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite' }}>Attaching agent session…</div>
-      </div>
-    ) : (terminalMode === 'attached' && attachedMatchesSelected) ? (
-      <div className="flex-1 min-h-0 flex flex-col">
-        <AttachedTerminalPaneWeb
-          key={attachedTerminalInstanceKey}
-          rootClassName="flex-1 min-h-0 flex flex-col bg-[var(--gs-bg)] overflow-hidden"
-          headerClassName="flex-shrink-0 px-3 py-2 border-b border-[var(--gs-border-muted)] bg-[var(--gs-bg-elevated)] flex items-center justify-between gap-2"
-          sessionName={attachedSessionName}
-          processTitle={attachedSessionMeta?.processTitle ?? null}
-          terminalTitle={attachedSessionMeta?.terminalTitle ?? null}
-          lastAlertLabel={attachedSessionMeta?.lastAlertKind
-            ? `${attachedSessionMeta.lastAlertKind}${attachedSessionMeta.unreadAlertCount ? ` (${attachedSessionMeta.unreadAlertCount})` : ''}`
-            : null}
-          showConnectedLabel={true}
-          showMobileControls={showMobileControls}
-          inputMode={inputMode}
-          keyboardVisible={keyboardVisible}
-          onToggleInputMode={toggleInlineInputMode}
-          inputButtonClassName={`px-2 py-1 text-xs rounded transition-all ${
-            inputMode
-              ? 'bg-[var(--gs-accent)] text-[var(--gs-text-on-accent)] font-medium'
-              : 'bg-[var(--gs-btn-secondary-bg)] text-[var(--gs-text)] hover:bg-[var(--gs-border)]'
-          }`}
-          onDetach={() => multi.detachSession(inlineAttachedRef)}
-          detachButtonClassName="px-2 py-1 text-xs rounded border border-[var(--gs-border)] text-[var(--gs-text)] hover:bg-[var(--gs-border)]"
-          terminalContainerClassName={inlineTerminalContainerClass}
-          terminalRef={terminalRef}
-          onData={handleInlineKeyboardData}
-          setWriteCallback={setWriteCallback}
-          onResize={resizePty}
-          onActivity={handleTerminalActivity}
-          readOnly={isViewOnlySession}
-          allowTapFocus={inputMode || !showMobileControls}
-          allowTouchScroll={!inputMode}
-          onSendData={handleInlineSendData}
-          onFocusTerminal={handleInlineFocusTerminal}
-          modifiers={modifiers}
-          onModifiersChange={setModifiers}
-          showFloatingControls={showInlineFloatingControls}
-        />
-        <NativeAgentSurfaceConnected backendKey={attachedBackendKey ?? activeBackendKey ?? undefined} />
-      </div>
-    ) : agentAttachPending ? (
-      <div className="flex-1 flex items-center justify-center bg-[var(--gs-bg)]">
-        <div className="text-sm text-[var(--gs-text-muted)]" style={{ animation: 'pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite' }}>Attaching agent session…</div>
-      </div>
-    ) : null;
+    const paneBackendKey = attachedBackendKey ?? activeBackendKey ?? selectedBackendKey ?? null;
+    const paneBackend = paneBackendKey ? (paneBackendKey ? multi.getBackend(paneBackendKey) : null as RemoteSessionPtyBackend | null) : null;
+    const snapshotCurrentDetailLayout = () => {
+      const selectionKey = currentDetailWorkspace?.selectionKey;
+      if (!selectionKey) return;
+      const api = dockviewApiByWorkspaceRef.current[selectionKey];
+      if (!api) return;
+      dockviewLayoutsRef.current[selectionKey] = api.toJSON();
+    };
+
     const handleSelectWorkspaceFromDetail = async (workspaceSelectionKey: string) => {
-      if (workspaceSelectionKey === selectedWorkspaceForDetail?.selectionKey) return;
-      if (terminalMode === 'attached' && attachedBackendKey) {
-        try {
-          await multi.detachSession({ backendKey: attachedBackendKey, workspaceId: '' });
-        } catch (error) {
-          toast.error(error instanceof Error ? error.message : 'Failed to detach session');
-          return;
-        }
-      }
+      if (workspaceSelectionKey === currentDetailWorkspace?.selectionKey) return;
+      snapshotCurrentDetailLayout();
+      hideScriptTerminal();
+      setShowBoardWhileDetailMounted(false);
       handleBoardSelectWorkspace(workspaceSelectionKey);
     };
 
-    const handleBackToBoard = async () => {
-      if (terminalMode === 'attached' && attachedBackendKey) {
-        try {
-          await multi.detachSession({ backendKey: attachedBackendKey, workspaceId: '' });
-        } catch (error) {
-          toast.error(error instanceof Error ? error.message : 'Failed to detach session');
-          return;
-        }
-      }
 
-      handleBoardSelectWorkspace(null);
+    const hideScriptTerminal = () => {
+      setShowScriptTerminal(false);
+      lastScriptWorkspaceIdRef.current = null;
+      lastScriptWorkspaceRef.current = null;
     };
 
-    // ── Workspace detail page (full-screen, replaces board) ────────────────
-    if (selectedWorkspaceForDetail) {
-      return (
-        <>
-          <WorkspaceDetailPage
-            workspace={selectedWorkspaceForDetail}
-            sessions={detailSessions}
-            replays={detailReplays}
-            agentSessions={selectedWorkspaceForDetail ? (workspaceRuntime.runtimeByWorkspace[selectedWorkspaceForDetail.selectionKey]?.agentSessions ?? []) : []}
-            agentSessionCount={selectedWorkspaceForDetail ? (workspaceRuntime.runtimeByWorkspace[selectedWorkspaceForDetail.selectionKey]?.agentSessionCount ?? 0) : 0}
-            pendingPermissions={selectedWorkspaceForDetail ? (workspaceRuntime.runtimeByWorkspace[selectedWorkspaceForDetail.selectionKey]?.pendingPermissionCount ?? 0) : 0}
-            attachedSessionId={backendAttachedSessionId}
-            attachedAgentSessionId={attachedBackendState?.attachedAgentSessionId ?? null}
-            pendingAgentAttach={agentAttachPending}
-            allWorkspaces={allWorkspaceEntries}
-            workspaceStatusById={workspaceStatusById}
-            runtime={selectedWorkspaceForDetail ? (workspaceRuntime.runtimeByWorkspace[selectedWorkspaceForDetail.selectionKey] ?? null) : null}
-            onSelectWorkspace={handleSelectWorkspaceFromDetail}
-            onOpenAgentSession={handleOpenAgentSession}
-            onCreateAgentSession={handleCreateAgentSession}
-            onAbortAgentSession={handleAbortAgentSession}
-            onCloseAgentSession={handleCloseAgentSession}
-            onArchiveAgentSession={handleArchiveAgentSession}
-            onRestoreAgentSession={handleRestoreAgentSession}
-             onAttachSession={handleAttachSession}
-             onOpenReplay={handleOpenReplay}
-             onOpenReplayHistory={handleOpenReplayHistory}
-             onStartProcess={(params) => processActions.handleStartProcess(params)}
-            onStartProcessAttach={(params) => processActions.handleStartProcessAttach(params)}
-            onStopProcess={(params) => processActions.handleStopProcess(params)}
-            onEditProcesses={handleEditProcesses}
-            onManageBundleConfig={handleManageBundleConfig}
-            onOpenGitHubPullRequest={handleOpenGitHubPullRequest}
-            onOpenReview={handleOpenReview}
-            onRequestStatusChange={() => {
-              showWorkspaceStatusSelect({
-                showSelect: (config) => flow.showSelect<WorkspacePhase>(config),
-                onSelectPhase: (phase) => {
-                  workspaceBoardState.setPhase(selectedWorkspaceForDetail.selectionKey, phase);
-                  flow.close();
-                },
+    const handleBackToBoard = async () => {
+      snapshotCurrentDetailLayout();
+      hideScriptTerminal();
+      setShowBoardWhileDetailMounted(true);
+    };
+
+    const buildTerminalPanelsForWorkspace = (workspace: WorkspaceInfo) => {
+      terminalMemoryDebugIncrement('app.buildTerminalPanels');
+      const workspacePaneEntries = Object.values(attachedBackendState?.attachedPanes ?? {})
+        .filter((pane) =>
+          pane.workspaceId
+            ? pane.workspaceId === workspace.id
+            : attachedWorkspaceSelectionKey === workspace.selectionKey,
+        );
+      terminalMemoryDebugGauge('app.workspacePaneEntries', workspacePaneEntries.length);
+      const runtime = workspace.selectionKey ? workspaceRuntime.runtimeByWorkspace[workspace.selectionKey] ?? null : null;
+      const workspaceGoalForPanels = allGoalItems.find((goal) =>
+        goal.backendKey === paneBackendKey &&
+        goal.workspaceName === workspace.name &&
+        goal.projectName === workspace.projectName,
+      ) ?? null;
+      // Agent status for the transcript header must come from the SAME
+      // authoritative source the sidebar/kanban read — the machine snapshot's
+      // agentSessionsById, where open ask-dialogs are folded into
+      // 'permission-needed'. runtime.agentSessions is a separate copy that does
+      // not carry the dialog fold, which is why the header stayed green ("shows
+      // yellow in the sidebar and kanban but not at the top of the transcript").
+      const paneSnapshotAgents = paneBackendKey
+        ? multi.getBackendState(paneBackendKey)?.machineSnapshot?.agentSessionsById
+        : undefined;
+      const panels: import('./components/DockviewWorkspaceShell.web.js').DockviewTerminalPanel[] = workspacePaneEntries.map((pane) => {
+        // An agent pane has no terminal session at all — fall back to the agent
+        // session id so the panel still has a stable short label.
+        const paneLabelSource = pane.sessionName ?? pane.sessionId ?? pane.agentSessionId ?? pane.paneId;
+        const shortSessionName = paneLabelSource.split(':').pop() ?? paneLabelSource;
+        const agentSession = pane.agentSessionId
+          ? runtime?.agentSessions.find((session) => session.id === pane.agentSessionId)
+          : null;
+        const snapshotAgentState = pane.agentSessionId
+          ? (paneSnapshotAgents?.[pane.agentSessionId]?.state as string | undefined)
+          : undefined;
+        const paneRunning = snapshotAgentState === 'running';
+        const paneAwaitingInput = snapshotAgentState === 'permission-needed';
+        const title = agentSession
+          ? getAgentSessionDisplayTitle({ id: agentSession.id, title: agentSession.title })
+          : pane.agentSessionId
+            ? 'Agent'
+            : shortSessionName.slice(0, 18);
+        const panelVersion = [
+          pane.paneId,
+          pane.sessionId,
+          pane.sessionName ?? '',
+          pane.workspaceId ?? '',
+          pane.agentSessionId ?? '',
+          title,
+          String(showMobileControls),
+          inputMode,
+          String(keyboardVisible),
+          String(showInlineFloatingControls),
+          // Encode the FULL agent state so any transition (e.g.
+          // running→permission-needed) bumps the version and the dock panel
+          // actually re-renders — 'running'-only missed the amber transition.
+          snapshotAgentState ?? '',
+        ].join('|');
+        terminalMemoryDebugIncrement('app.terminalPanelDescriptor.created');
+        return {
+          id: pane.paneId,
+          title,
+          version: panelVersion,
+          running: paneRunning,
+          // An agent pane holds a viewer lease, not a PTY stream — releasing it
+          // is what tells the daemon nobody is watching this session anymore.
+          onClose: () => (pane.agentSessionId
+            ? paneBackend?.closeAgentPane?.(pane.paneId)
+            : paneBackend?.detachPane?.(pane.paneId)
+          )?.catch(() => undefined),
+          render: () => (
+            <PaneTerminalPanel
+              pane={pane}
+              backend={paneBackend}
+              backendKey={paneBackendKey}
+              showMobileControls={showMobileControls}
+              inputMode={inputMode}
+              keyboardVisible={keyboardVisible}
+              onToggleInputMode={toggleInlineInputMode}
+              inputButtonClassName={`px-2 py-1 text-xs rounded transition-all ${
+                inputMode
+                  ? 'bg-[var(--gs-accent)] text-[var(--gs-text-on-accent)] font-medium'
+                  : 'bg-[var(--gs-btn-secondary-bg)] text-[var(--gs-text)] hover:bg-[var(--gs-border)]'
+              }`}
+              terminalContainerClassName={inlineTerminalContainerClass}
+              onActivity={handleTerminalActivity}
+              allowTapFocus={inputMode || !showMobileControls}
+              allowTouchScroll={!inputMode}
+              modifiers={modifiers}
+              onModifiersChange={setModifiers}
+              showFloatingControls={showInlineFloatingControls}
+              awaitingInput={paneAwaitingInput}
+              goalContext={workspaceGoalForPanels ? {
+                id: getPersistedGoalId(workspaceGoalForPanels),
+                title: workspaceGoalForPanels.title,
+                phase: workspaceGoalForPanels.phase,
+              } : null}
+            />
+          ),
+        };
+      });
+      if (
+        agentAttachPending &&
+        pendingAgentAttachTarget &&
+        pendingAgentAttachTarget.workspaceId === workspace.id &&
+        !panels.some((panel) => panel.id === `pending:${pendingAgentAttachTarget.agentSessionId}`)
+      ) {
+        terminalMemoryDebugIncrement('app.terminalPanelDescriptor.pendingCreated');
+        panels.push({
+          id: `pending:${pendingAgentAttachTarget.agentSessionId}`,
+          title: 'Attaching…',
+          version: `pending:${pendingAgentAttachTarget.agentSessionId}`,
+          render: () => (
+            <div className="flex-1 flex items-center justify-center bg-[var(--gs-bg)]">
+              <div className="text-sm text-[var(--gs-text-muted)]" style={{ animation: 'pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite' }}>Attaching agent session…</div>
+            </div>
+          ),
+        });
+      }
+      // Repo files + artifacts opened from the RightRail as dock tabs
+      // (mock Shell pane kinds 'file' and 'artifact').
+      const wsKey = workspace.selectionKey ?? workspace.id;
+      // HUMAN-ONLY phase-gate waive (goal-rubric-workflow interconnect): a UI
+      // button by construction — the CLI has no waive flag. Reason required;
+      // records a timeline 'gate' event via backend.waiveGoalGate.
+      const waiveGateForWorkspace = (phase: string): void => {
+        const goalItem = workspaceGoalForPanels;
+        if (!goalItem) { toast.error('No goal bound to this workspace.'); return; }
+        flow.showInput({
+          title: `Waive gate · ${phase}`,
+          label: 'Reason (recorded on the goal timeline)',
+          placeholder: 'Why this gate is being waived…',
+          validation: (value) => (value.trim() ? null : 'A reason is required to waive a gate.'),
+          onSubmit: async (reason) => {
+            flow.close();
+            try {
+              const be = paneBackendKey ? multi.getBackend(paneBackendKey) : null;
+              if (!be?.waiveGoalGate) throw new Error('Gate waive unavailable on this backend.');
+              await be.waiveGoalGate(workspace.projectName, getPersistedGoalId(goalItem), phase, reason.trim());
+              toast.success(`Gate waived — ${phase}.`);
+            } catch (error) {
+              flow.showMessage({
+                title: 'Waive Gate Failed',
+                message: error instanceof Error ? error.message : String(error),
+                variant: 'error',
               });
-            }}
-            onOpenEvents={(workspaceId) => {
-              const w = filteredWorkspaces.find((x) => x.id === workspaceId);
-              if (w) {
-                setEventsWorkspacePath(w.path);
-                setEventsWorkspaceLabel(w.name);
-                setShowEvents(true);
-                void multi.requestEvents(getWorkspaceRef(workspaceId, w.backendKey as BackendKey));
-              }
-            }}
-            onDeleteSession={handleDeleteSession}
-            onClose={() => {
-              void handleBackToBoard();
-            }}
-          >
-            {inlineTerminalOutlet}
-          </WorkspaceDetailPage>
+            }
+          },
+        });
+      };
+      const dockPaneKey = (x: DockExtraPane): string =>
+        x.kind === 'note' ? `note:${x.noteId ?? ''}:${x.nonce ?? ''}`
+        : x.kind === 'evidence' ? `ev:${x.evidenceId}`
+        : 'path' in x ? `${x.kind}:${x.path}`
+        : x.kind;
+      for (const extra of dockExtraPanes[wsKey] ?? []) {
+        const name = extra.kind === 'note' ? extra.title : ('path' in extra ? (extra.path.split('/').pop() ?? extra.path) : extra.kind);
+        const closeExtra = () => setDockExtraPanes((prev) => ({
+          ...prev,
+          [wsKey]: (prev[wsKey] ?? []).filter((x) => dockPaneKey(x) !== dockPaneKey(extra)),
+        }));
+        if (extra.kind === 'file') {
+          panels.push({
+            id: `file:${extra.path}`,
+            title: `${extra.changed ? '± ' : '▤ '}${name}`,
+            version: `file|${extra.path}|${extra.changed}|${extra.prevPath ?? ''}|${extra.line ?? ''}`,
+            onClose: closeExtra,
+            render: () => (
+              <RepoFilePanel
+                backend={paneBackend}
+                workspaceId={workspace.id}
+                projectName={workspace.projectName}
+                workspaceName={workspace.name}
+                path={extra.path}
+                changed={extra.changed}
+                prevPath={extra.prevPath}
+                line={extra.line}
+              />
+            ),
+          });
+        } else if (extra.kind === 'dashboard') {
+          panels.push({
+            id: `dashboard:${extra.path}`,
+            title: `▦ ${name.replace('.dashboard.json', '')}`,
+            version: `dashboard|${extra.path}`,
+            onClose: closeExtra,
+            render: () => (
+              <DashboardPanel
+                listApps={async () => {
+                  const fn = paneBackend?.listWorkspaceArtifacts;
+                  if (!fn) return [];
+                  const arts = await fn.call(paneBackend, workspace.id);
+                  return arts.map((a) => a.path).filter((x) => x.endsWith('.gssh.html'));
+                }}
+                dashboardPath={extra.path}
+                scopeLabel={workspace.name}
+                read={(p) => {
+                  const fn = paneBackend?.readWorkspaceArtifact;
+                  if (!fn) return Promise.reject(new Error('unavailable'));
+                  return fn.call(paneBackend, workspace.id, p);
+                }}
+                write={(p, contentBase64, message) => {
+                  const fn = paneBackend?.writeWorkspaceArtifact;
+                  if (!fn) return Promise.reject(new Error('unavailable'));
+                  return fn.call(paneBackend, workspace.id, p, contentBase64, message);
+                }}
+              />
+            ),
+          });
+        } else if (extra.kind === 'note') {
+          panels.push({
+            id: `note:${extra.noteId ?? `new-${extra.nonce ?? 0}`}`,
+            title: `✎ ${extra.title.slice(0, 18)}`,
+            version: `note|${extra.noteId ?? extra.nonce ?? ''}`,
+            onClose: () => setDockExtraPanes((prev) => ({
+              ...prev,
+              [wsKey]: (prev[wsKey] ?? []).filter((x) => !(x.kind === 'note' && x.noteId === extra.noteId && x.nonce === extra.nonce)),
+            })),
+            render: () => (
+              <NotePanel
+                backend={paneBackend}
+                projectName={workspace.projectName}
+                workspaceName={workspace.name}
+                noteId={extra.noteId}
+                onCreated={(note) => setDockExtraPanes((prev) => ({
+                  ...prev,
+                  [wsKey]: (prev[wsKey] ?? []).map((x) =>
+                    x.kind === 'note' && x.noteId === null && x.nonce === extra.nonce
+                      ? { kind: 'note' as const, noteId: note.id, title: note.body.split('\n')[0]?.replace(/^#+\s*/, '').slice(0, 40) || 'note', nonce: extra.nonce }
+                      : x),
+                }))}
+                onDeleted={closeExtra}
+              />
+            ),
+          });
+        } else if (extra.kind === 'goal') {
+          const chainGoalsForPane = workspaceGoalForPanels?.chainId
+            ? allGoalItems.filter((g) => g.chainId === workspaceGoalForPanels.chainId)
+            : (workspaceGoalForPanels ? [workspaceGoalForPanels] : []);
+          panels.push({
+            id: 'goal',
+            title: '◇ Goal',
+            // `detail:` tracks which chain goals have their lazy-fetched doc in
+            // hand — without it the pane never repaints when `goal-detail`
+            // resolves for a goal owned by another workspace (ticket #49).
+            version: `goal|${workspaceGoalForPanels?.id ?? ''}|${chainGoalsForPane.length}|${workspaceGoalForPanels?.updatedAt ?? ''}|${(workspaceGoalForPanels?.doc?.exemplarBlockIds ?? []).length}|slice:${goalSliceRequests[wsKey]?.nonce ?? 0}|detail:${chainGoalsForPane.filter(hasGoalDetail).map((g) => g.id).join(',')}`,
+            onClose: closeExtra,
+            render: () => (
+              chainGoalsForPane.length > 0 && workspaceGoalForPanels
+                ? <GoalDocDockPane
+                    goals={chainGoalsForPane}
+                    statusColorOf={(g) => {
+                      const ws = allWorkspaceEntries.find((w) => w.name === g.workspaceName && w.projectName === g.projectName);
+                      return ws ? getWorkspaceStripColor(ws, workspaceStatusById) : undefined;
+                    }}
+                    initialGoalId={workspaceGoalForPanels.id}
+                    onRequestGoalDetail={fetchGoalDetail}
+                    hasGoalDetail={hasGoalDetail}
+                    scrollToSlice={goalSliceRequests[wsKey] ?? null}
+                    onOpenWorkflow={() => openSingletonPane(wsKey, { kind: 'workflow' })}
+                    onToggleExemplar={async (goalId, blockId) => {
+                      const be = paneBackendKey ? multi.getBackend(paneBackendKey) : null;
+                      const g = allGoalItems.find((x) => x.id === goalId);
+                      if (!be?.updateGoal || !g?.doc) return;
+                      const cur = new Set(g.doc.exemplarBlockIds ?? []);
+                      if (cur.has(blockId)) cur.delete(blockId); else cur.add(blockId);
+                      await be.updateGoal(g.projectName, getPersistedGoalId(g), { doc: { ...g.doc, exemplarBlockIds: [...cur], updatedAt: new Date().toISOString() } });
+                    }}
+                  />
+                : <div className="flex h-full items-center justify-center text-[12px] text-[var(--gs-text-dim)]">No goal bound to this workspace.</div>
+            ),
+          });
+        } else if (extra.kind === 'guide') {
+          panels.push({
+            id: 'guide',
+            title: '⛓ Change Guide',
+            version: `guide|${workspace.id}`,
+            onClose: closeExtra,
+            render: () => (
+              <ChangeGuidePane
+                backend={paneBackend}
+                projectName={workspace.projectName}
+                workspaceName={workspace.name}
+                workspaceId={workspace.id}
+                onOpenFile={(path) => openSingletonPane(wsKey, { kind: 'file', path, changed: true })}
+                onOpenRubric={() => openSingletonPane(wsKey, { kind: 'rubric' })}
+                onApprove={() => {
+                  workspaceBoardState.setPhase(wsKey, 'ship');
+                  toast.success('Approved — workspace advanced to ship.');
+                }}
+                onRequestChanges={async (prompt) => {
+                  // The review loop (docs/REVIEW-GUIDE.md): findings → workspace
+                  // agent, stage back to code; diffs refresh as the agent commits.
+                  const be = paneBackendKey ? multi.getBackend(paneBackendKey) : null;
+                  const st = paneBackendKey ? multiMachineState.byBackend[paneBackendKey] : null;
+                  const agentId = Object.entries(st?.snapshot?.agentSessionsById ?? {})
+                    .find(([, sess]) => (sess as { workspaceId?: string; state?: string }).workspaceId === workspace.id
+                      && (sess as { state?: string }).state !== 'closed')?.[0];
+                  if (!be?.promptAgentSession || !agentId) {
+                    toast.error('No active agent session to route the findings to.');
+                    return;
+                  }
+                  await be.promptAgentSession(workspace.id, agentId, prompt, undefined, { streamingBehavior: 'followUp' });
+                  workspaceBoardState.setPhase(wsKey, 'code');
+                  toast.success('Changes requested — findings routed to the agent, stage back to code.');
+                }}
+                onGenerateGuide={async () => {
+                  const be = paneBackendKey ? multi.getBackend(paneBackendKey) : null;
+                  if (!be?.createAgentSession || !be.promptAgentSession) {
+                    toast.error('Agent sessions unavailable on this backend.');
+                    return;
+                  }
+                  try {
+                    const sessions = await be.createAgentSession(workspace.id, 'review guide narrator');
+                    const created = sessions.find((x) => x.title === 'review guide narrator') ?? sessions[sessions.length - 1];
+                    if (!created) { toast.error('Failed to create the narrator session.'); return; }
+                    // Fresh sessions need discovery before they accept prompts — retry briefly.
+                    const kickoff = 'Use the review-guide-narrator skill to generate the review guide for this workspace. Follow the skill exactly: analyze, narrate stale clusters in order, submit, fix validation errors until the submit succeeds.';
+                    let sent = false;
+                    for (let attempt = 0; attempt < 4 && !sent; attempt++) {
+                      if (attempt > 0) await new Promise((r) => setTimeout(r, 2000 * attempt));
+                      try {
+                        await be.promptAgentSession(workspace.id, created.id, kickoff);
+                        sent = true;
+                      } catch { /* retry */ }
+                    }
+                    if (!sent) { toast.error('Narrator session created but the kickoff prompt failed — open it and prompt manually.'); return; }
+                    toast.success('Narrator session started — the guide will appear when it submits.');
+                  } catch (err) {
+                    toast.error(err instanceof Error ? err.message : 'Failed to start the narrator.');
+                  }
+                }}
+                humanGatePending={workspaceGoalForPanels?.validation
+                  ? Object.values(workspaceGoalForPanels.validation.requirements ?? {}).filter((r) =>
+                      r.required !== false
+                      && r.judgment?.kind === 'human'
+                      && r.status !== 'accepted'
+                      && !(r.reviews ?? []).some((rv) => (rv as { who?: string }).who === 'human')).length
+                  : 0}
+              />
+            ),
+          });
+        } else if (extra.kind === 'rubric') {
+          panels.push({
+            id: 'rubric',
+            title: '☰ Review rubric',
+            version: `rubric|${workspaceGoalForPanels?.id ?? ''}|${workspaceGoalForPanels?.updatedAt ?? ''}|pf:${rubricPhaseRequests[wsKey]?.nonce ?? 0}`,
+            onClose: closeExtra,
+            render: () => (
+              <ReviewRubric
+                goal={workspaceGoalForPanels?.validation ? { id: workspaceGoalForPanels.id, title: workspaceGoalForPanels.title, phase: workspaceGoalForPanels.phase, validation: workspaceGoalForPanels.validation } : null}
+                docMarkdown={workspaceGoalForPanels?.doc?.bodyMarkdown ?? null}
+                phaseFilterRequest={rubricPhaseRequests[wsKey] ?? null}
+                onWaiveGate={waiveGateForWorkspace}
+                sendReviewRequest={paneBackend?.sendReviewRequest ? (op) => paneBackend.sendReviewRequest(op) : undefined}
+                projectName={workspace.projectName}
+                workspaceName={workspace.name}
+                onRecordHuman={async (requirementId, decision, note, score) => {
+                  const be = paneBackendKey ? multi.getBackend(paneBackendKey) : null;
+                  const mapped = decision === 'pass' ? 'pass' : decision === 'partial' ? 'changes' : 'fail';
+                  await be?.recordGoalHumanReview?.(workspace.projectName, workspaceGoalForPanels!.id, requirementId, mapped, note, score);
+                }}
+                onRunJudgment={async (requirementId) => {
+                  const be = paneBackendKey ? multi.getBackend(paneBackendKey) : null;
+                  await be?.runGoalJudgment?.(workspace.projectName, workspaceGoalForPanels!.id, requirementId);
+                }}
+                onOpenEvidence={(requirementId, evidenceId) => openSingletonPane(wsKey, { kind: 'evidence', requirementId, evidenceId })}
+                readArtifact={paneBackend?.readWorkspaceArtifact
+                  ? (p, range) => paneBackend.readWorkspaceArtifact!(workspace.id, p, range).catch(() => null)
+                  : undefined}
+              />
+            ),
+          });
+        } else if (extra.kind === 'workflow') {
+          panels.push({
+            id: 'workflow',
+            title: '⟜ Workflow',
+            version: `workflow|${workspace.id}|${workspaceGoalForPanels?.id ?? ''}|${workspaceGoalForPanels?.updatedAt ?? ''}`,
+            onClose: closeExtra,
+            render: () => (
+              <WorkflowPanel
+                backend={paneBackend}
+                workspaceId={workspace.id}
+                goal={workspaceGoalForPanels ? {
+                  id: workspaceGoalForPanels.id,
+                  validation: workspaceGoalForPanels.validation ?? null,
+                  docMarkdown: workspaceGoalForPanels.doc?.bodyMarkdown ?? null,
+                } : null}
+                onOpenArtifact={(path) => openSingletonPane(wsKey, { kind: 'artifact', path })}
+                onOpenRubric={() => openSingletonPane(wsKey, { kind: 'rubric' })}
+                onOpenGoal={() => openSingletonPane(wsKey, { kind: 'goal' })}
+                onOpenGoalSlice={(sliceId) => openGoalPaneAtSlice(wsKey, sliceId)}
+                onOpenRubricPhase={(phase) => openRubricPaneForPhase(wsKey, phase)}
+                onWaiveGate={waiveGateForWorkspace}
+              />
+            ),
+          });
+        } else if (extra.kind === 'eventlog') {
+          panels.push({
+            id: 'eventlog',
+            title: '⚑ Event logs',
+            version: `eventlog|${eventsItems.length}`,
+            onClose: closeExtra,
+            render: () => <EventsWeb {...eventsProps} workspaceLabel={workspace.name} embedded />,
+          });
+        } else if (extra.kind === 'crons') {
+          panels.push({
+            id: 'crons',
+            title: '◷ Crons & triggers',
+            version: 'crons',
+            onClose: closeExtra,
+            render: () => (
+              <CronsPaneConnected backend={paneBackend} workspaceId={workspace.id} />
+            ),
+          });
+        } else if (extra.kind === 'report') {
+          panels.push({
+            id: `report:${extra.path}`,
+            title: '⚑ Report',
+            version: `report|${extra.path}`,
+            onClose: closeExtra,
+            render: () => (
+              <ReportPaneLoader
+                path={extra.path}
+                read={(p2) => {
+                  const fn = paneBackend?.readWorkspaceArtifact;
+                  if (!fn) return Promise.reject(new Error('unavailable'));
+                  return fn.call(paneBackend, workspace.id, p2);
+                }}
+                list={async () => {
+                  const fn = paneBackend?.listWorkspaceArtifacts;
+                  if (!fn) return [];
+                  return (await fn.call(paneBackend, workspace.id)).map((a) => a.path);
+                }}
+                onOpenAttachment={(resolved) => openSingletonPane(wsKey, { kind: 'artifact', path: resolved })}
+              />
+            ),
+          });
+        } else if (extra.kind === 'evidence') {
+          const req = workspaceGoalForPanels?.validation?.requirements?.[extra.requirementId];
+          const ev = req?.evidence?.find((e) => e.id === extra.evidenceId);
+          panels.push({
+            id: `evidence:${extra.evidenceId}`,
+            title: `▸ ${(ev?.name ?? 'evidence').slice(0, 20)}`,
+            version: `evidence|${extra.evidenceId}`,
+            onClose: closeExtra,
+            render: () => (
+              ev ? <EvidencePanel evidence={ev} requirementTitle={req?.title}
+                     readArtifact={paneBackend?.readWorkspaceArtifact
+                       ? (p, range) => paneBackend.readWorkspaceArtifact!(workspace.id, p, range).catch(() => null)
+                       : undefined} />
+                 : <div className="flex h-full items-center justify-center text-[12px] text-[var(--gs-text-dim)]">Evidence not found.</div>
+            ),
+          });
+        } else {
+          panels.push({
+            id: `artifact:${extra.path}`,
+            title: `◇ ${name}`,
+            version: `artifact|${extra.path}`,
+            onClose: closeExtra,
+            render: () => (
+              <ArtifactPanel
+                path={extra.path}
+                listArtifacts={async () => {
+                  const fn = paneBackend?.listWorkspaceArtifacts;
+                  if (!fn) return [];
+                  return (await fn.call(paneBackend, workspace.id)).map((a) => a.path);
+                }}
+                read={(p, range) => {
+                  const fn = paneBackend?.readWorkspaceArtifact;
+                  if (!fn) return Promise.reject(new Error('unavailable'));
+                  return fn.call(paneBackend, workspace.id, p, range);
+                }}
+                onShare={() => void shareArtifactToClipboard(paneBackend, workspace.projectName, workspace.name, extra.path)}
+              />
+            ),
+          });
+        }
+      }
+      if (panels.length > 0) {
+        cachedTerminalPanelsRef.current[workspace.selectionKey ?? workspace.id] = panels;
+        terminalMemoryDebugGauge('app.cachedTerminalPanelCount', panels.length);
+      }
+      return panels;
+    };
+
+    const backendKeyFromSelectionKey = (selectionKey: string): BackendKey =>
+      JSON.parse(selectionKey)[0] as BackendKey;
+
+
+    const renderDetailPages = (visibleSelectionKey: string | null) => {
+      terminalMemoryDebugIncrement('app.renderDetailPages');
+      terminalMemoryDebugGauge('app.detailWorkspaceCacheKeys', detailWorkspaceCacheKeys.length);
+      return detailWorkspaceCacheKeys
+        .map((selectionKey) => ({ selectionKey, workspace: workspaceBySelectionKey.get(selectionKey) }))
+        .filter((entry): entry is { selectionKey: string; workspace: WorkspaceInfo } => Boolean(entry.workspace))
+        .map(({ selectionKey, workspace }) => {
+          const runtime = workspaceRuntime.runtimeByWorkspace[selectionKey] ?? null;
+          const workspaceSessions = runtime?.sessions ?? [];
+          const workspaceReplays = filteredReplays.filter((replay) => replay.workspaceId === workspace.id);
+          const livePanelsForWorkspace = buildTerminalPanelsForWorkspace(workspace);
+          const terminalPanelsForWorkspace = livePanelsForWorkspace.length > 0
+            ? livePanelsForWorkspace
+            : (cachedTerminalPanelsRef.current[selectionKey] ?? []);
+          const workspaceAttachedPanes = Object.values(attachedBackendState?.attachedPanes ?? {})
+            .filter((pane) => pane.workspaceId === workspace.id || (!pane.workspaceId && attachedWorkspaceSelectionKey === selectionKey));
+          const workspaceAttachedSessionIds = workspaceAttachedPanes.map((pane) => pane.sessionId);
+          const workspaceAttachedAgentSessionIds = workspaceAttachedPanes
+            .map((pane) => pane.agentSessionId)
+            .filter((id): id is string => Boolean(id));
+          const isActive = visibleSelectionKey === selectionKey;
+          const attachedHere = workspaceAttachedPanes.length > 0 || attachedWorkspaceSelectionKey === selectionKey;
+          const workspaceBackendKey = backendKeyFromSelectionKey(selectionKey);
+          const workspaceGoal = allGoalItems.find((goal) =>
+            goal.backendKey === workspaceBackendKey &&
+            goal.projectName === workspace.projectName &&
+            goal.workspaceName === workspace.name
+          ) ?? null;
+
+          return (
+            <div
+              key={selectionKey}
+              className={isActive ? 'h-full w-full min-h-0 overflow-hidden' : 'fixed left-[-200vw] top-0 w-screen h-screen invisible pointer-events-none overflow-hidden'}
+              aria-hidden={isActive ? undefined : true}
+            >
+              <WorkspaceDetailPage
+                workspace={workspace}
+                rightRail={
+                  <RightRail
+                    backend={multi.getBackend(workspaceBackendKey)}
+                    workspaceId={workspace.id}
+                    projectName={workspace.projectName}
+                    workspaceName={workspace.name}
+                    onOpenFile={(file) => {
+                      const key = workspace.selectionKey ?? workspace.id;
+                      // Update-in-place keeps changed/prevPath fresh, then focus.
+                      setDockExtraPanes((prev) => {
+                        const cur = prev[key] ?? [];
+                        const entry = { kind: 'file' as const, ...file };
+                        const next = cur.some((x) => x.kind === 'file' && x.path === file.path)
+                          ? cur.map((x) => (x.kind === 'file' && x.path === file.path ? entry : x))
+                          : [...cur, entry];
+                        return { ...prev, [key]: next };
+                      });
+                      setDockFocusRequests((prev) => ({ ...prev, [key]: { id: `file:${file.path}`, nonce: (prev[key]?.nonce ?? 0) + 1 } }));
+                    }}
+                    onOpenArtifact={(path) => openSingletonPane(workspace.selectionKey ?? workspace.id, { kind: 'artifact', path })}
+                    onOpenDashboard={(path) => openSingletonPane(workspace.selectionKey ?? workspace.id, { kind: 'dashboard', path })}
+                    phase={((workspace as { phase?: string }).phase as import('./types/config.js').WorkspacePhase | undefined) ?? 'code'}
+                    onOpenEvents={() => {
+                      setEventsWorkspacePath(workspace.path);
+                      setEventsWorkspaceLabel(workspace.name);
+                      openSingletonPane(workspace.selectionKey ?? workspace.id, { kind: 'eventlog' });
+                      void multi.requestEvents(getWorkspaceRef(workspace.id, workspaceBackendKey));
+                    }}
+                    goalEvidence={workspaceGoal?.validation ? Object.values(workspaceGoal.validation.requirements ?? {}).flatMap((r) => (r.evidence ?? []).map((e) => ({ requirementId: r.id, evidenceId: e.id, name: e.name, requirementTitle: r.title }))) : []}
+                    onOpenEvidence={(requirementId, evidenceId) => openSingletonPane(workspace.selectionKey ?? workspace.id, { kind: 'evidence', requirementId, evidenceId })}
+                    onOpenReport={(path) => openSingletonPane(workspace.selectionKey ?? workspace.id, { kind: 'report', path })}
+                    onOpenGoalPane={() => openSingletonPane(workspace.selectionKey ?? workspace.id, { kind: 'goal' })}
+                    onOpenRubricPane={() => openSingletonPane(workspace.selectionKey ?? workspace.id, { kind: 'rubric' })}
+                    onOpenWorkflowPane={() => openSingletonPane(workspace.selectionKey ?? workspace.id, { kind: 'workflow' })}
+                    goalSummary={workspaceGoal ? {
+                      chainTitle: workspaceGoal.chainTitle,
+                      chainLength: workspaceGoal.chainLength,
+                      chainPosition: workspaceGoal.chainPosition,
+                      reqCount: workspaceGoal.validation ? Object.keys(workspaceGoal.validation.requirements ?? {}).length : 0,
+                    } : undefined}
+                    onOpenNote={(noteId, title) => {
+                      const key = workspace.selectionKey ?? workspace.id;
+                      const nonce = Date.now();
+                      setDockExtraPanes((prev) => {
+                        const cur = prev[key] ?? [];
+                        if (noteId !== null && cur.some((x) => x.kind === 'note' && x.noteId === noteId)) return prev;
+                        return { ...prev, [key]: [...cur, { kind: 'note', noteId, title, nonce }] };
+                      });
+                      setDockFocusRequests((prev) => ({ ...prev, [key]: { id: `note:${noteId ?? `new-${nonce}`}`, nonce: (prev[key]?.nonce ?? 0) + 1 } }));
+                    }}
+                  />
+                }
+                sessions={workspaceSessions}
+                replays={workspaceReplays}
+                agentSessions={runtime?.agentSessions ?? []}
+                agentSessionCount={runtime?.agentSessionCount ?? 0}
+                pendingPermissions={runtime?.pendingPermissionCount ?? 0}
+                attachedSessionId={workspaceAttachedSessionIds[0] ?? (attachedHere ? backendAttachedSessionId : null)}
+                attachedAgentSessionId={workspaceAttachedAgentSessionIds[0] ?? (attachedHere ? (attachedBackendState?.attachedAgentSessionId ?? null) : null)}
+                attachedSessionIds={workspaceAttachedSessionIds.filter((id): id is string => id !== null)}
+                attachedAgentSessionIds={workspaceAttachedAgentSessionIds.filter((id): id is string => id !== null)}
+                pendingAgentAttach={agentAttachPending && pendingAgentAttachTarget?.workspaceId === workspace.id}
+                allWorkspaces={allWorkspaceEntries}
+                workspaceStatusById={workspaceStatusById}
+                runtime={runtime}
+                goal={workspaceGoal}
+                onOpenGoalDetail={handleSelectPlannedGoal}
+                phase={((workspace as { phase?: string }).phase as import('./types/config.js').WorkspacePhase | undefined) ?? 'code'}
+                onSwitchStage={(phase) => workspaceBoardState.setPhase(workspace.selectionKey ?? workspace.id, phase)}
+                onOpenGoalDoc={() => openSingletonPane(workspace.selectionKey ?? workspace.id, { kind: 'goal' })}
+                onOpenChangeGuide={() => openSingletonPane(workspace.selectionKey ?? workspace.id, { kind: 'guide' })}
+                onOpenRubric={() => openSingletonPane(workspace.selectionKey ?? workspace.id, { kind: 'rubric' })}
+                onOpenWorkflow={() => openSingletonPane(workspace.selectionKey ?? workspace.id, { kind: 'workflow' })}
+                onOpenCrons={() => openSingletonPane(workspace.selectionKey ?? workspace.id, { kind: 'crons' })}
+                onCreateDashboard={() => {
+                  flow.showInput({
+                    title: 'New dashboard',
+                    label: 'Dashboard name (becomes <name>.dashboard.json on the artifacts branch)',
+                    placeholder: 'ops',
+                    onSubmit: (name) => {
+                      const slug = name.trim().toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '');
+                      if (!slug) return;
+                      const be = multi.getBackend(backendKeyFromSelectionKey(workspace.selectionKey ?? workspace.id));
+                      const doc = { name: slug, panels: [] };
+                      void be?.writeWorkspaceArtifact?.(workspace.id, `${slug}.dashboard.json`, encodeBase64Utf8(JSON.stringify(doc, null, 2)), `dashboard: create ${slug}`)
+                        .then(() => {
+                          openSingletonPane(workspace.selectionKey ?? workspace.id, { kind: 'dashboard', path: `${slug}.dashboard.json` });
+                          toast.success(`Dashboard ${slug} created.`);
+                        })
+                        .catch((err) => toast.error(err instanceof Error ? err.message : 'Failed to create dashboard.'));
+                    },
+                  });
+                }}
+                dashboards={wsDashboards[workspace.selectionKey ?? workspace.id] ?? []}
+                onOpenDashboard={(path) => openSingletonPane(workspace.selectionKey ?? workspace.id, { kind: 'dashboard', path })}
+                chainGoals={workspaceGoal?.chainId ? allGoalItems.filter((g) => g.chainId === workspaceGoal.chainId) : undefined}
+                chainTitle={workspaceGoal?.chainTitle}
+                currentChainGoalId={workspaceGoal?.id}
+                onSwitchChainWorkspace={handleSelectWorkspaceFromDetail}
+                onSelectWorkspace={handleSelectWorkspaceFromDetail}
+                onOpenAgentSession={handleOpenAgentSession}
+                onCreateAgentSession={handleCreateAgentSession}
+                onKillAgentSession={handleKillAgentSession}
+                onStopAgentTurn={handleStopAgentTurn}
+                onCloseAgentSession={handleCloseAgentSession}
+                onArchiveAgentSession={handleArchiveAgentSession}
+                onRestoreAgentSession={handleRestoreAgentSession}
+                onAttachSession={handleAttachSession}
+                onOpenReplay={handleOpenReplay}
+                onOpenReplayHistory={handleOpenReplayHistory}
+                onStartProcess={(params) => processActions.handleStartProcess(params)}
+                onStartProcessAttach={(params) => processActions.handleStartProcessAttach(params)}
+                onStopProcess={(params) => processActions.handleStopProcess(params)}
+                onEditProcesses={handleEditProcesses}
+                onManageBundleConfig={handleManageBundleConfig}
+                onOpenGitHubPullRequest={handleOpenGitHubPullRequest}
+                onOpenReview={handleOpenReview}
+                onRequestStatusChange={() => {
+                  showWorkspaceStatusSelect({
+                    showSelect: (config) => flow.showSelect<WorkspacePhase>(config),
+                    onSelectPhase: (phase) => {
+                      workspaceBoardState.setPhase(selectionKey, phase);
+                      flow.close();
+                    },
+                  });
+                }}
+                onOpenNotes={() => {
+                  const key = workspace.selectionKey ?? workspace.id;
+                  setDockExtraPanes((prev) => ({ ...prev, [key]: [...(prev[key] ?? []), { kind: 'note', noteId: null, title: 'New note', nonce: Date.now() }] }));
+                }}
+                onOpenEvents={(workspaceId) => {
+                  setEventsWorkspacePath(workspace.path);
+                  setEventsWorkspaceLabel(workspace.name);
+                  openSingletonPane(workspace.selectionKey ?? workspace.id, { kind: 'eventlog' });
+                  void multi.requestEvents(getWorkspaceRef(workspaceId, workspaceBackendKey));
+                }}
+                onDeleteSession={handleDeleteSession}
+                onDeleteWorkspace={handleDeleteWorkspace}
+                onClose={() => {
+                  void handleBackToBoard();
+                }}
+                bottomContent={isActive ? (
+                  <WorkspaceRemovalTaskBar
+                    tasks={taskBarTasks}
+                    selectedTaskId={selectedWorkspaceTaskId}
+                    onSelectTask={setSelectedWorkspaceTaskId}
+                    onDismiss={handleDismissWorkspaceTask}
+                    placement="inline"
+                  />
+                ) : null}
+              >
+                {terminalPanelsForWorkspace.length > 0 ? (
+                  <DockviewWorkspaceShell
+                    key={selectionKey}
+                    backendKey={workspaceBackendKey}
+                    workspaceId={workspace.id}
+                    panels={terminalPanelsForWorkspace}
+                    initialLayout={dockviewLayoutsRef.current[selectionKey]}
+                    onLayoutChange={(layout) => {
+                      dockviewLayoutsRef.current[selectionKey] = layout;
+                    }}
+                    isActive={isActive}
+                    focusRequest={dockFocusRequests[selectionKey] ?? null}
+                  />
+                ) : (
+                  <div className="flex-1 flex items-center justify-center text-sm text-[var(--gs-text-muted)]">
+                    No active session
+                  </div>
+                )}
+              </WorkspaceDetailPage>
+            </div>
+          );
+        });
+    };
+
+    // ── Workspace detail page cache (active page + hidden keep-alive pages) ─────
+    if (currentDetailWorkspace && !showBoardWhileDetailMounted) {
+      return (
+        <div className="flex h-screen min-h-0 flex-col">
+          {renderChromeBar({
+            activeKey: currentDetailWorkspace.selectionKey ?? null,
+            currentProjectName: currentDetailWorkspace.projectName,
+            onBoard: () => { void handleBackToBoard(); },
+            // Same yield handleBackToBoard performs: the detail page stays
+            // mounted (its dock layout is preserved) but stops claiming the
+            // screen, so the project-home branch below can render.
+            onEnterProject: (name) => {
+              snapshotCurrentDetailLayout();
+              hideScriptTerminal();
+              setShowBoardWhileDetailMounted(true);
+              setProjectHomeName(name);
+            },
+          })}
+          <div className="min-h-0 flex-1">
+            {renderDetailPages(currentDetailWorkspace.selectionKey ?? null)}
+          </div>
+          <GlobalTaskbar tasks={taskBarTasks} onDismiss={(id) => workspaceRemovalTasks.dismissTask(id)} />
           {overlays}
-        </>
+        </div>
+      );
+    }
+
+    // ── Project home (full-screen project view, under the global chrome) ────
+    if (projectHomeName) {
+      /* wrapped below */
+      const phGoals = allGoalItems.filter((g) => g.projectName === projectHomeName);
+      const phWorkspaces = allWorkspaceEntries
+        .filter((w) => w.projectName === projectHomeName)
+        .map((w) => workspaceRuntime.runtimeByWorkspace[w.selectionKey] ?? workspaceRuntime.runtimeByWorkspace[w.id])
+        .filter((e): e is NonNullable<typeof e> => !!e);
+      const phBackendKey = phWorkspaces[0]?.workspace.backendKey ?? phGoals[0]?.backendKey ?? getTargetBackendKey();
+      return (
+        <div className="flex h-screen min-h-0 flex-col">
+          {renderChromeBar({ currentProjectName: projectHomeName, projectActive: true, onBoard: () => setProjectHomeName(null) })}
+          <div className="min-h-0 flex-1 overflow-hidden">
+          <ProjectHomePage
+            projectName={projectHomeName}
+            goals={phGoals}
+            workspaces={phWorkspaces}
+            backend={phBackendKey ? multi.getBackend(phBackendKey) : null}
+            backendKey={phBackendKey}
+            agentSessionsById={phBackendKey ? multi.getBackendState(phBackendKey)?.machineSnapshot?.agentSessionsById : undefined}
+            onBack={() => setProjectHomeName(null)}
+            onOpenWorkspace={(selectionKey) => {
+              setProjectHomeName(null);
+              handleBoardSelectWorkspace(selectionKey);
+            }}
+            onOpenGoal={(goal) => {
+              setProjectHomeName(null);
+              handleSelectPlannedGoal(goal);
+            }}
+            shippedWorkspaces={phWorkspaces
+              .filter((w) => ((w.workspace as { phase?: string }).phase ?? 'code') === 'ship')
+              .map((w) => ({
+                name: w.workspace.name,
+                chain: phGoals.find((g) => g.workspaceName === w.workspace.name)?.chainTitle ?? 'workspaces',
+              }))}
+            onRollup={async (workspaceName) => {
+              const be = phBackendKey ? multi.getBackend(phBackendKey) : null;
+              const goal = phGoals.find((g) => g.workspaceName === workspaceName) ?? null;
+              return rollupWorkspaceGuarded(be, projectHomeName, workspaceName, goal);
+            }}
+            onDeleteWorkspace={(workspaceName) => {
+              const ws = phWorkspaces.find((w) => w.workspace.name === workspaceName)?.workspace;
+              if (ws) handleDeleteWorkspace(ws);
+            }}
+          />
+          </div>
+          <GlobalTaskbar tasks={taskBarTasks} onDismiss={(id) => workspaceRemovalTasks.dismissTask(id)} />
+          <FlowWeb flow={flow} />
+          <Toaster theme="dark" position="bottom-right" richColors />
+        </div>
       );
     }
 
     // ── Board page (full-screen kanban, no workspace selected) ─────────────
     return (
-      <>
+      <div className="flex h-screen min-h-0 flex-col">
+        {renderChromeBar({})}
+        <div className="min-h-0 flex-1 overflow-hidden">
         <BoardPage
-          groups={workspaceBoardState.groups}
+          embedded
+          catalogProjects={allProjects}
+          groups={boardGroupsWithGoalStatus}
           selectedWorkspaceId={workspaceBoardState.selectedWorkspaceId}
           onSelectWorkspace={handleBoardSelectWorkspace}
           onPhaseChange={workspaceBoardState.setPhase}
@@ -1817,14 +3936,45 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
           onOpenInbox={() => { void inboxActions.requestInbox(); setShowInbox(true); }}
           onOpenHelp={handleOpenHelp}
           onOpenCreateMenu={handleOpenCreateMenu}
+          onOpenProjectHome={(projectName) => {
+            // Project cards enter their own home directly (mock); the ⌂ header
+            // affordance (no name) falls back to the selector.
+            if (projectName) { setProjectHomeName(projectName); return; }
+            const names = allProjects.map((project) => project.name);
+            if (names.length === 0) return;
+            if (names.length === 1) { setProjectHomeName(names[0]); return; }
+            flow.showSelect({
+              title: 'Project home',
+              options: names.map((n) => ({ label: n, value: n })),
+              onSelect: (n) => { flow.close(); setProjectHomeName(n); },
+            });
+          }}
           onOpenCommandPalette={() => commandPalette.toggle()}
           onRefresh={() => { multi.listWorkspaces(); multi.listProjects(); }}
           onDisconnect={() => window.location.reload()}
+          deletingWorkspaceIds={deletingWorkspaceTasksByKey}
+          creatingWorkspaceIds={creatingWorkspaceTasksById}
+          onCreatePlannedGoalWorkspace={handleCreatePlannedGoalWorkspace}
+          onSelectPlannedGoal={handleSelectPlannedGoal}
+          onSaveChainOrder={handleSaveChainOrder}
+          boardMessage={boardGoalOrderMessage}
           loading={boardLoading}
           loadingLabel="Loading worktrees..."
+          loadingError={boardLoadError}
+          onReportProblem={() => setShowReportProblem(true)}
+          onRetryLoad={() => {
+            if (!activeBackendKey) return;
+            void multi.retryBackend(activeBackendKey).catch((error: unknown) => {
+              const message = error instanceof Error ? error.message : String(error);
+              toast.error(`Reconnect failed: ${message}`);
+            });
+          }}
         />
+        {renderDetailPages(null)}
+        </div>
+        <GlobalTaskbar tasks={taskBarTasks} onDismiss={(id) => workspaceRemovalTasks.dismissTask(id)} />
         {overlays}
-      </>
+      </div>
     );
   }
 
@@ -1918,7 +4068,7 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
           onModifiersChange={setModifiers}
           showFloatingControls={showFloatingControls}
         />
-        <Toaster theme="dark" position="top-right" richColors />
+        <Toaster theme="dark" position="bottom-right" richColors />
       </>
     );
   }
@@ -1933,6 +4083,9 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
   }[terminalStatus] ?? "Loading...";
 
   const isError = terminalStatus === "error";
+  // 'disconnected' is not 'error', but it is just as stuck — and a connect that
+  // never resolves is the most report-worthy failure of all.
+  const showConnectActions = isError || terminalStatus === "disconnected" || connectStalled;
 
   return (
     <>
@@ -1940,6 +4093,9 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
         <div className="text-center">
           <h1 className="text-xl font-bold text-[var(--gs-text)] mb-4">GitSpace</h1>
           <div className="text-sm text-[var(--gs-text-muted)] mb-4">{statusMessage}</div>
+          {isError && activeBackendState?.error && (
+            <div className="max-w-md mx-auto text-xs text-[var(--gs-danger)] mb-2">{activeBackendState.error}</div>
+          )}
           {!isError && (
             <div className="flex gap-1 justify-center">
               {[0, 1, 2].map((i) => (
@@ -1947,27 +4103,100 @@ function AppInner({ resolvedIdentity, setResolvedIdentity }: AppInnerProps) {
               ))}
             </div>
           )}
-          {isError && (
-            <button
-              onClick={() => window.location.reload()}
-              className="mt-4 px-6 py-3 text-base bg-[var(--gs-btn-secondary-bg)] hover:bg-[var(--gs-border)] active:bg-[var(--gs-bg-elevated)] rounded-lg text-[var(--gs-text)] min-h-[48px] border border-[var(--gs-border)]"   
-            >
-              Retry
-            </button>
+          {showConnectActions && (
+            <div className="mt-4 flex flex-col items-center gap-2">
+              <button
+                onClick={() => window.location.reload()}
+                className="px-6 py-3 text-base bg-[var(--gs-btn-secondary-bg)] hover:bg-[var(--gs-border)] active:bg-[var(--gs-bg-elevated)] rounded-lg text-[var(--gs-text)] min-h-[48px] border border-[var(--gs-border)]"
+              >
+                Retry
+              </button>
+              {/* The app tree is alive here (just no backend), so reuse the full
+                  dialog — but with NO backend RPC (report undefined), so it goes
+                  straight to the relay → local fallback. */}
+              <button
+                onClick={() => setShowReportProblem(true)}
+                className="px-4 py-2 text-sm text-[var(--gs-text-dim)] hover:text-[var(--gs-text)] underline"
+              >
+                Report a problem
+              </button>
+            </div>
           )}
         </div>
       </div>
-      <Toaster theme="dark" position="top-right" richColors />
+      {showReportProblem && (
+        <ReportProblemDialog
+          onClose={() => setShowReportProblem(false)}
+          relayHttpBase={relayHttpBase()}
+          projectName={projectHomeName ?? (allProjects.length === 1 ? allProjects[0]?.name : undefined)}
+          report={undefined}
+        />
+      )}
+      <Toaster theme="dark" position="bottom-right" richColors />
     </>
   );
 }
 
 // ─── Outer shell ────────────────────────────────────────────────────────────
 
+function ReportPaneLoader({ path, read, list, onOpenAttachment }: {
+  path: string;
+  read: (p: string) => Promise<{ base64: string }>;
+  /** Artifact listing (mount-relative paths) — the existence oracle for
+   *  attachment-ref resolution. Optional: without it refs resolve
+   *  optimistically to the anchored candidate. */
+  list?: () => Promise<string[]>;
+  /** Receives the RESOLVED mount-relative artifact path. */
+  onOpenAttachment?: (path: string) => void;
+}) {
+  const [report, setReport] = useState<unknown>(undefined);
+  const [err, setErr] = useState(false);
+  const [known, setKnown] = useState<Set<string> | null>(null);
+  useEffect(() => {
+    let alive = true;
+    read(path).then((r) => { if (alive) setReport(JSON.parse(decodeBase64Utf8(r.base64))); }).catch(() => { if (alive) setErr(true); });
+    if (list) list().then((paths) => { if (alive) setKnown(new Set(paths)); }).catch(() => { /* fall back to optimistic resolution */ });
+    return () => { alive = false; };
+  }, [path, read, list]);
+  // Attachment refs are anchored to THE REPORT'S OWN goals/<id>/ prefix — never
+  // to the viewing workspace's goal (resolveAttachmentRef, artifact-kinds.ts).
+  const resolveRef = useCallback(
+    (ref: string) => (known ? resolveAttachmentRef(path, ref, (p) => known.has(p)) : resolveAttachmentRef(path, ref)),
+    [path, known],
+  );
+  if (err) return <div className="flex h-full items-center justify-center text-[12px] text-[var(--gs-danger)]">Failed to load report.</div>;
+  if (report === undefined) return <div className="flex h-full items-center justify-center text-[12px] text-[var(--gs-text-dim)]">Loading…</div>;
+  return <ReportPanel report={report} onOpenAttachment={onOpenAttachment} resolveRef={resolveRef} />;
+}
+
+function GoalDocDockPane({ goals, initialGoalId, onToggleExemplar, onOpenWorkflow, scrollToSlice, onRequestGoalDetail, hasGoalDetail, statusColorOf }: {
+  /** Chain-node status colour, resolved by the caller that holds the runtime. */
+  statusColorOf?: (goal: { workspaceName?: string; projectName?: string }) => WorkspaceStatusColor | undefined;
+  goals: import("./app/shared/board/types.js").KanbanGoalItem[];
+  initialGoalId: string;
+  onToggleExemplar?: (goalId: string, blockId: string) => void;
+  onOpenWorkflow?: () => void;
+  scrollToSlice?: { sliceId: string; nonce: number } | null;
+  /** Lazy-fetch the doc/validation for whichever chain goal the pane navigates
+   *  to (ticket #49). The chain spans other workspaces' goals, whose detail the
+   *  selected-goal / visible-workspace effects never request. */
+  onRequestGoalDetail?: (goal: import("./app/shared/board/types.js").KanbanGoalItem) => void;
+  hasGoalDetail?: (goal: import("./app/shared/board/types.js").KanbanGoalItem) => boolean;
+}) {
+  const [goalId, setGoalId] = useState(initialGoalId);
+  const currentGoal = goals.find((g) => g.id === goalId);
+  useEffect(() => {
+    if (currentGoal) onRequestGoalDetail?.(currentGoal);
+  }, [currentGoal?.id, currentGoal?.updatedAt, onRequestGoalDetail]); // eslint-disable-line react-hooks/exhaustive-deps
+  return <GoalDocPanel goals={goals} currentGoalId={goalId} onSelectGoal={setGoalId} statusColorOf={statusColorOf} onToggleExemplar={onToggleExemplar} onOpenWorkflow={onOpenWorkflow} scrollToSlice={scrollToSlice} docLoading={currentGoal ? !(hasGoalDetail?.(currentGoal) ?? true) : false} />;
+}
+
 export default function App() {
   const [resolvedIdentity, setResolvedIdentity] = useState<Identity | null>(null);
   const relayDescriptor = useMemo<RelayDescriptor | null>(() => {
     if (!resolvedIdentity) return null;
+    const explicitRelayUrl = import.meta.env.VITE_RELAY_URL;
+    if (explicitRelayUrl) return { url: explicitRelayUrl, source: 'local' };
     const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
     return { url: `${wsProtocol}//${location.host}/ws`, source: 'local' };
   }, [resolvedIdentity]);

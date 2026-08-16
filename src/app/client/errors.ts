@@ -8,7 +8,8 @@ export type AgentSessionCommandErrorCode =
   | 'operation-unavailable'
   | 'create-failed'
   | 'attach-failed'
-  | 'abort-failed'
+  | 'kill-failed'
+  | 'stop-turn-failed'
   | 'close-failed'
   | 'archive-failed'
   | 'restore-failed';

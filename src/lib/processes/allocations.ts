@@ -9,9 +9,11 @@ import type {
   RuntimeProcessDefinition,
 } from '../../types/processes.js';
 import { resolveWorkspaceRef } from '../events/paths.js';
+import { toWorkspaceId } from '../../utils/workspace-id.js';
 import { normalizeProcessInstanceCount } from './instances.js';
 import { getProcessControlDir } from './control.js';
-import { inspectListeningProcess, normalizeProcessPortProtocol, resolveManagedSession } from './ports.js';
+import { inspectListeningProcess, resolveManagedSession } from './ports.js';
+import { normalizeProcessPortProtocol } from './port-conflicts.js';
 
 const PORT_ALLOCATION_VERSION = 1;
 const MIN_ALLOCATED_PORT = 17000;
@@ -127,7 +129,14 @@ async function allocationBelongsToRunningSpec(
   instance: number,
   port: number,
 ): Promise<boolean> {
-  const workspaceId = getWorkspaceRuntimeId(workspacePath);
+  // Match the canonical, project-qualified workspace id the process runner
+  // records in its session metadata (`toWorkspaceId(project, workspace)`, see
+  // startProcessInstance). Using the bare/name-derived id here is what caused
+  // long-named workspaces to never match, since the session name is truncated.
+  const ref = resolveWorkspaceRef(workspacePath);
+  const workspaceId = ref
+    ? toWorkspaceId(ref.projectName, ref.workspaceId)
+    : getWorkspaceRuntimeId(workspacePath);
   const listeners = inspectListeningProcess(port);
   if (listeners.length === 0) {
     return false;
@@ -248,6 +257,13 @@ async function resolveDeclaredPortAllocation(
   };
 }
 
+/**
+ * Allocate (and persist) runtime ports for a process instance. This MUTATES
+ * `ports.json` and may reallocate — it is the *start* path only (runner and
+ * `startProcessInstance`). Reporting/routing paths must use
+ * {@link readAllocatedProcessPorts} instead, so they can never move the port
+ * of a running process.
+ */
 export async function resolveProcessRuntimePorts(
   workspacePath: string,
   spec: ProcessInstanceSpec,
@@ -265,18 +281,47 @@ export async function resolveProcessRuntimePorts(
   return resolvedPorts;
 }
 
-export async function resolveRuntimeProcesses(
+/**
+ * Pure read of the persisted port allocations for a process instance. Unlike
+ * {@link resolveProcessRuntimePorts} this NEVER allocates, probes (lsof),
+ * reconciles, or writes — it just reports what start-time allocation recorded.
+ * Reporting and routing paths (`space service list`, machine snapshot, hosting
+ * routes) use this so they can never move a running process's port. Ports with
+ * no recorded allocation (never started) are omitted.
+ */
+export function readAllocatedProcessPorts(
+  workspacePath: string,
+  spec: ProcessInstanceSpec,
+): ResolvedProcessPort[] {
+  const state = readProcessPortAllocationState(workspacePath);
+  const resolved: ResolvedProcessPort[] = [];
+  for (const port of spec.definition.ports ?? []) {
+    const existing = state.allocations[getPortAllocationKey(spec.name, spec.instance, port.name)];
+    if (!existing) continue;
+    resolved.push({
+      instance: spec.instance,
+      name: port.name,
+      protocol: normalizeProcessPortProtocol(port.protocol),
+      port: existing.port,
+    });
+  }
+  return resolved;
+}
+
+/**
+ * Read-only runtime process/port report for snapshots. Never allocates,
+ * reconciles, or writes — it reflects the persisted allocation only.
+ */
+export function resolveRuntimeProcesses(
   workspacePath: string,
   config: ProcessesConfig,
-): Promise<RuntimeProcessDefinition[]> {
-  reconcileProcessPortAllocations(workspacePath, config);
-
-  return Promise.all(config.processes.map(async (process) => {
+): RuntimeProcessDefinition[] {
+  return config.processes.map((process) => {
     const ports: ResolvedProcessPort[] = [];
     const instanceCount = normalizeProcessInstanceCount(process.instances);
 
     for (let instance = 1; instance <= instanceCount; instance += 1) {
-      ports.push(...await resolveProcessRuntimePorts(workspacePath, {
+      ports.push(...readAllocatedProcessPorts(workspacePath, {
         name: process.name,
         instance,
         definition: process,
@@ -288,5 +333,5 @@ export async function resolveRuntimeProcesses(
       instances: process.instances,
       ports,
     } satisfies RuntimeProcessDefinition;
-  }));
+  });
 }

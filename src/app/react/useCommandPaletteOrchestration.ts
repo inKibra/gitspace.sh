@@ -20,12 +20,21 @@ export interface UseCommandPaletteOrchestrationOptions<T extends WorkspaceInfo &
   onAddRepo: () => void;
   onAddWorkspace: () => void;
   onSetWorkspacePhase: (workspace: T, phase: WorkspacePhase) => void;
+  /** Optional: absent when the connection cannot roll up artifacts. */
+  onRollupWorkspace?: (workspace: T) => void | Promise<void>;
   onDeleteWorkspace: (workspace: T) => void;
+  onDeleteWorkspaceSkipScripts: (workspace: T) => void;
   onEditBundleConfig: (workspace: T) => void | Promise<void>;
+  onRefreshBundle: (workspace: T) => void | Promise<void>;
+  onRerunBundleScripts: (workspace: T) => void | Promise<void>;
+  onAddNote: (workspace: T) => void | Promise<void>;
+  onListNotes: (workspace: T) => void | Promise<void>;
   onEditProcessConfig: (workspace: T) => void | Promise<void>;
   onDeleteRepo: (projectName: string) => void;
   onOpenGitHubPr?: (workspace: T) => void | Promise<void>;
   onOpenReview?: (workspace: T) => void | Promise<void>;
+  onOpenEditor?: (workspace: T) => void | Promise<void>;
+  onShowGoalChains?: () => void | Promise<void>;
 }
 
 export function useCommandPaletteOrchestration<T extends WorkspaceInfo & CommandPaletteWorkspaceLike>(options: UseCommandPaletteOrchestrationOptions<T>) {
@@ -55,12 +64,20 @@ export function useCommandPaletteOrchestration<T extends WorkspaceInfo & Command
           onSelectPhase: (phase) => options.onSetWorkspacePhase(workspace, phase),
         });
       },
+      onRollupWorkspace: options.onRollupWorkspace,
       onDeleteWorkspace: options.onDeleteWorkspace,
+      onDeleteWorkspaceSkipScripts: options.onDeleteWorkspaceSkipScripts,
       onEditBundleConfig: options.onEditBundleConfig,
+      onRefreshBundle: options.onRefreshBundle,
+      onRerunBundleScripts: options.onRerunBundleScripts,
+      onAddNote: options.onAddNote,
+      onListNotes: options.onListNotes,
       onEditProcessConfig: options.onEditProcessConfig,
       onDeleteRepo: options.onDeleteRepo,
       onOpenGitHubPr: options.onOpenGitHubPr,
       onOpenReview: options.onOpenReview,
+      onOpenEditor: options.onOpenEditor,
+      onShowGoalChains: options.onShowGoalChains,
     });
   }, [options, selectedProjectName, selectedWorkspace]);
 

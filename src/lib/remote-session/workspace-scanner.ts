@@ -5,6 +5,7 @@
  */
 
 import { readdir, stat, readFile } from 'fs/promises';
+import { existsSync } from 'fs';
 import { join } from 'path';
 import type { WorkspaceInfo } from './protocol';
 import type { WorkspacePhase } from '../../types/config.js';
@@ -69,6 +70,8 @@ async function scanProjectWorkspaces(
       if (!entry.isDirectory()) continue;
 
       const workspacePath = join(workspacesDir, entry.name);
+      // Remnant directories are filtered in getWorkspaceInfo, which every entry
+      // point goes through.
       let status: WorkspacePhase | undefined;
       try {
         status = getWorkspaceStatus(projectName, entry.name);
@@ -103,6 +106,14 @@ async function getWorkspaceInfo(
   try {
     const stats = await stat(workspacePath);
     if (!stats.isDirectory()) return null;
+    // A workspace IS a code worktree, so it always has a `.git`. A bare
+    // directory here is a remnant — most often one holding nothing but
+    // `.gitspace/artifacts`, whose branch outlives the workspace by design.
+    // Treating it as a workspace resurrected removed ones as ghost rows in the
+    // board's code lane (no branch, no phase, so they fell to the default).
+    // Checked here rather than in the scan loop so the by-name lookup cannot
+    // hand back a ghost either.
+    if (!existsSync(join(workspacePath, '.git'))) return null;
 
     // Try to get git branch
     const branch = await getGitBranch(workspacePath);

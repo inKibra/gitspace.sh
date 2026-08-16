@@ -60,3 +60,15 @@ gitspace.lock
 .gitspace/workspace/
 
 .gitspace/.processes/
+.gitspace/dev/
+playwright-report/
+test-results/
+
+# Agent session transcripts dumped into the repo root
+omp-session-*.html
+
+# Subagent scratch space ('/Users/bradleat/gitspace/.pi/sessions/-gitspace-gitspace.sh-workspaces-gitspace-pi-agent-blame/2026-08-03T04-46-56-676Z_019fc5f2-44a4-7000-a969-0a313c28d33b/local' URIs)
+local/
+
+# Artifacts repo working state (artifacts live in <repo>-artifacts)
+.gitspace/artifacts/

@@ -610,11 +610,15 @@ function shouldIncludeSecretStep(
     return true;
   }
 
+  if (Object.prototype.hasOwnProperty.call(existingSecrets, key)) {
+    return false;
+  }
+
   if (diff?.secretsAdded.includes(key)) {
     return true;
   }
 
-  return !Object.prototype.hasOwnProperty.call(existingSecrets, key);
+  return true;
 }
 
 function makeStepDescription(step: OnboardingStep): string {
@@ -685,6 +689,11 @@ async function resolveConfirmResult(
 
   return {};
 }
+
+function hasRequiredRefreshSteps(plan: BundleRefreshPlan): boolean {
+  return plan.steps.some((step) => step.required !== false);
+}
+
 
 export async function getBundleRefreshPlan(
   projectName: string,
@@ -1130,7 +1139,10 @@ export async function refreshBundle(
   const bundle = changes.currentBundle!;
   const bundleHash = changes.currentHash!;
 
-  if (!changes.hasChanged && !options.force) {
+
+  const plan = workspacePath ? await getBundleRefreshPlan(projectName, workspacePath) : undefined;
+
+  if (!changes.hasChanged && !options.force && (!plan || !hasRequiredRefreshSteps(plan))) {
     // Keep per-scope state and merged key list fresh.
     syncBundleWorkspaceState(projectName, workspacePath);
     result.refreshed = false;
@@ -1139,6 +1151,11 @@ export async function refreshBundle(
   }
 
   if (options.nonInteractive) {
+    if (!changes.hasChanged && plan && hasRequiredRefreshSteps(plan)) {
+      result.error = `Bundle content is unchanged but required bundle configuration is incomplete.\n${plan.details}`;
+      return result;
+    }
+
     // Still sync metadata so required key lists merge across workspaces.
     syncBundleWorkspaceState(projectName, workspacePath);
     logger.info('Bundle has changed but running in non-interactive mode, skipping refresh');
@@ -1152,10 +1169,16 @@ export async function refreshBundle(
   const configuredSecretKeys = config.bundleSecretKeys || [];
   const confirmHistory = config.bundleConfirmHistory || {};
   const steps = bundle.onboarding || [];
+  const plannedStepIds = plan ? new Set(plan.steps.map((step) => step.id)) : undefined;
+
 
   // Only prompt for confirm/check steps when the fingerprint changed or is new.
   const stepsToRun: OnboardingStep[] = [];
   for (const step of steps) {
+    if (plannedStepIds && !plannedStepIds.has(step.id)) {
+      continue;
+    }
+
     if (step.type !== 'confirm') {
       stepsToRun.push(step);
       continue;
@@ -1285,9 +1308,21 @@ export async function checkAndRefreshBundle(
   }
 
   if (!changes.hasChanged) {
-    // Keep merged requirements fresh even when no prompts are needed.
-    syncBundleWorkspaceState(projectName, workspacePath);
-    return true;
+    const plan = await getBundleRefreshPlan(projectName, workspacePath);
+    if (!hasRequiredRefreshSteps(plan)) {
+      // Keep merged requirements fresh even when no prompts are needed.
+      syncBundleWorkspaceState(projectName, workspacePath);
+      return true;
+    }
+
+    logger.info('Bundle content is unchanged but required bundle configuration is incomplete');
+    const result = await refreshBundle(projectName, workspacePath);
+    if (result.error) {
+      logger.warning(`Bundle refresh failed: ${result.error}`);
+      return false;
+    }
+
+    return result.completed;
   }
 
   logger.info('Bundle configuration has changed for this workspace');

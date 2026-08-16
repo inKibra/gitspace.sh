@@ -3,10 +3,19 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { removeTmuxLiteSandbox } from '../protocol.js';
 
 let root = '';
 let workspaceOnePath = '';
 let workspaceTwoPath = '';
+// Single source of truth for the sandbox key: the subprocess applies it and
+// afterEach removes it. Deriving it twice is how the /tmp leak started.
+let sandboxName = '';
+// The OMP agent dir this run is pinned to. Set POSITIVELY in the subprocess env
+// (not merely unset): an inherited absolute PI_CODING_AGENT_DIR outranks HOME,
+// and clearing it only falls back to ~/.omp/agent — also real host state. Either
+// way the run reads (and can write) the developer's live agent dir.
+let piAgentDir = '';
 
 function writeWorkspaceProjectConfig(projectPath: string): void {
   writeFileSync(
@@ -21,6 +30,8 @@ setDefaultTimeout(30_000);
 describe('Pi session creation integration', () => {
   beforeEach(() => {
     root = mkdtempSync(join(tmpdir(), 'gitspace-pi-create-'));
+    sandboxName = `pi-create-${basename(root)}`;
+    piAgentDir = join(root, 'gitspace', '.pi');
     const projectPath = join(root, 'gitspace', 'demo');
     workspaceOnePath = join(projectPath, 'workspaces', 'ws-1');
     workspaceTwoPath = join(projectPath, 'workspaces', 'ws-2');
@@ -33,12 +44,12 @@ describe('Pi session creation integration', () => {
 
   afterEach(() => {
     rmSync(root, { recursive: true, force: true });
+    removeTmuxLiteSandbox(sandboxName);
   });
 
   test('creates a Pi session file for a non-current workspace under the expected managed root', async () => {
     const resultFile = join(root, 'pi-create-result.json');
     const scriptFile = join(root, 'run-pi-create-test.ts');
-    const sandboxName = `pi-create-${basename(root)}`;
     const script = `
       import { mkdirSync, writeFileSync } from 'node:fs';
       import { join } from 'node:path';
@@ -48,7 +59,9 @@ describe('Pi session creation integration', () => {
       import { encodeSessionDirName, listPiSessions } from '${import.meta.dir.replace('/src/lib/tmux-lite/agents', '/src/lib/tmux-lite/agents/pi-session-files.ts')}';
       import { getPiAgentDir } from '${import.meta.dir.replace('/src/lib/tmux-lite/agents', '/src/lib/tmux-lite/agents/pi-runtime.ts')}';
 
-      process.env.HOME = ${JSON.stringify(root)};
+      // HOME and PI_CODING_AGENT_DIR arrive via the subprocess env, not an
+      // assignment here: OMP captures the agent dir when pi-utils is imported,
+      // and the ESM imports above already ran by the time this line would run.
       applyTmuxLiteSandboxEnvironment(${JSON.stringify(sandboxName)});
       process.chdir(${JSON.stringify(workspaceOnePath)});
 
@@ -80,7 +93,7 @@ describe('Pi session creation integration', () => {
       try {
         await backend.connect();
         const sessions = await backend.createAgentSession('demo:ws-2', 'integration pi session');
-        await backend.attachAgentSession('demo:ws-2', sessions[0].id);
+        await backend.openAgentSession('demo:ws-2', sessions[0].id);
         const agentDir = getPiAgentDir();
         const encodedWorkspaceTwo = encodeSessionDirName(${JSON.stringify(workspaceTwoPath)});
         const encodedWorkspaceOne = encodeSessionDirName(${JSON.stringify(workspaceOnePath)});
@@ -122,6 +135,7 @@ describe('Pi session creation integration', () => {
       cwd: root,
       encoding: 'utf8',
       timeout: 120_000,
+      env: { ...process.env, HOME: root, PI_CODING_AGENT_DIR: piAgentDir },
     });
 
     const resultRaw = existsSync(resultFile) ? readFileSync(resultFile, 'utf8') : '';
@@ -141,6 +155,11 @@ describe('Pi session creation integration', () => {
     expect(result?.targetCount).toBeGreaterThan(0);
     expect(result?.currentCount).toBe(0);
     expect(result?.targetSessionIds).toEqual((result?.created as Array<{ id: string }>).map((session) => session.id));
-    expect(result?.targetTitles).toEqual(['integration pi session']);
+    // Pi owns session naming (see LocalSessionHost.boot): the string passed to
+    // createAgentSession is a display label, not a stored name, so the session
+    // file carries no title until Pi's own generator produces one. A title here
+    // would mean boot-time naming crept back — and Pi's generator only runs
+    // when no name is set, so it would then never fire.
+    expect(result?.targetTitles).toEqual([null]);
   });
 });

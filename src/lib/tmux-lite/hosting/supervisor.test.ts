@@ -26,6 +26,7 @@ let hostConfig: {
   }>;
 } | null = null;
 let gitspaceDir: string;
+let previousWorkspaceRootEnv: string | undefined;
 
 const originalBunSleep = Bun.sleep;
 const sleepMock = mock(async () => undefined);
@@ -44,7 +45,7 @@ const mockLoadProcessesConfig = mock(() => ({
     ports: [{ protocol: 'http', name: 'app' }],
   }],
 }));
-const mockResolveProcessRuntimePorts = mock(async () => [
+const mockReadAllocatedProcessPorts = mock(() => [
   { instance: 1, port: 7777, protocol: 'http' as const, name: 'app' },
 ]);
 const mockSyncServeRouteHostnames = mock(async ({ hostnames }: { rootSubdomain: string; hostnames: string[] }) => ({
@@ -104,7 +105,7 @@ mock.module('../../processes/config.js', () => ({
 }));
 mock.module('../../processes/allocations.js', () => ({
   reconcileProcessPortAllocations: mock(() => undefined),
-  resolveProcessRuntimePorts: mockResolveProcessRuntimePorts,
+  readAllocatedProcessPorts: mockReadAllocatedProcessPorts,
 }));
 
 mock.module('../../../utils/logger.js', () => ({
@@ -123,6 +124,10 @@ const { refreshTmuxHosting, getTmuxHostingRuntimeStatus } = await import('./supe
 describe('tmux hosting supervisor', () => {
   beforeEach(() => {
     gitspaceDir = mkdtempSync(join(tmpdir(), 'tmux-hosting-supervisor-'));
+    // supervisor.ts resolves its runtime dir via getWorkspaceRoot() (core/paths.js),
+    // which honors this env override — keep the test writing into the temp dir.
+    previousWorkspaceRootEnv = process.env.GITSPACE_WORKSPACE_ROOT;
+    process.env.GITSPACE_WORKSPACE_ROOT = gitspaceDir;
     hostingState = null;
     hostConfig = null;
     sleepMock.mockClear();
@@ -132,7 +137,7 @@ describe('tmux hosting supervisor', () => {
     mockIsServerRunning.mockReset();
     mockResolveWorkspaceRef.mockReset();
     mockLoadProcessesConfig.mockReset();
-    mockResolveProcessRuntimePorts.mockReset();
+    mockReadAllocatedProcessPorts.mockReset();
     mockSyncServeRouteHostnames.mockReset();
 
     Bun.sleep = sleepMock as typeof Bun.sleep;
@@ -146,7 +151,7 @@ describe('tmux hosting supervisor', () => {
         ports: [{ protocol: 'http', name: 'app' }],
       }],
     });
-    mockResolveProcessRuntimePorts.mockResolvedValue([
+    mockReadAllocatedProcessPorts.mockReturnValue([
       { instance: 1, port: 7777, protocol: 'http', name: 'app' },
     ]);
     mockSyncServeRouteHostnames.mockResolvedValue({
@@ -165,6 +170,11 @@ describe('tmux hosting supervisor', () => {
       }
     }
     Bun.sleep = originalBunSleep;
+    if (previousWorkspaceRootEnv === undefined) {
+      delete process.env.GITSPACE_WORKSPACE_ROOT;
+    } else {
+      process.env.GITSPACE_WORKSPACE_ROOT = previousWorkspaceRootEnv;
+    }
     rmSync(gitspaceDir, { recursive: true, force: true });
   });
 

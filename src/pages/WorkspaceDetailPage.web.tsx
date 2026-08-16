@@ -14,12 +14,18 @@ import type { WorkspaceDetailPaneProps } from '../components/WorkspaceDetailPane
 export type WorkspaceDetailPageProps = WorkspaceDetailPaneProps & {
   /** Terminal outlet rendered in the main content area. */
   children?: ReactNode;
+  /** Layout-owned footer below the workspace detail pane. */
+  bottomContent?: ReactNode;
+  /** The right rail (repo/artifacts) — composed by the app shell. */
+  rightRail?: ReactNode;
 };
 
-export function WorkspaceDetailPage({ children, ...props }: WorkspaceDetailPageProps) {
+export function WorkspaceDetailPage({ children, bottomContent, rightRail, ...props }: WorkspaceDetailPageProps) {
   return (
-    <div className="h-screen w-screen flex flex-col bg-[var(--gs-bg)]">
-      <WorkspaceDetailPaneWeb {...props}>
+    // Fill the container (the workspace layer below the 42px chrome bar) — NOT
+    // h-screen, which would overflow by the chrome height and clip the bottom.
+    <div className="h-full w-full flex flex-col bg-[var(--gs-bg)]">
+      <WorkspaceDetailPaneWeb {...props} bottomContent={bottomContent} rightRail={rightRail}>
         {children}
       </WorkspaceDetailPaneWeb>
     </div>

@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>GitSpace — Agent Strip in context</title>
+<style>
+  :root {
+    --gs-font: 'Geist Mono', 'JetBrains Mono', 'SF Mono', monaco, 'Cascadia Code', monospace;
+    --gs-bg: #000000;
+    --gs-bg-elevated: #080808;
+    --gs-bg-active: #0a0a0a;
+    --gs-border: #1a1a1a;
+    --gs-border-muted: #111111;
+    --gs-text: #d4d4d4;
+    --gs-text-muted: #777777;
+    --gs-text-ghost: #282828;
+    --gs-accent: #00ff66;
+    --gs-info: #4488ff;
+    --gs-warning-bright: #ffcc00;
+    --sk: #141414;        /* skeleton fill */
+    --sk-strong: #1d1d1d; /* brighter skeleton (e.g. active title) */
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { background: #000; font-family: var(--gs-font); -webkit-font-smoothing: antialiased; color: var(--gs-text); }
+
+  /* Capture stage */
+  #stage {
+    width: 1920px; height: 1080px; background: #000;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 26px; overflow: hidden;
+  }
+
+  /* ── Faux app window ── */
+  #win {
+    width: 1760px; height: 900px;
+    background: #000;
+    border: 1px solid var(--gs-border);
+    border-radius: 10px;
+    overflow: hidden;
+    display: flex; flex-direction: column;
+    box-shadow: 0 24px 80px rgba(0,0,0,0.6);
+  }
+  .titlebar {
+    flex-shrink: 0; height: 38px; display: flex; align-items: center; gap: 8px;
+    padding: 0 14px; border-bottom: 1px solid var(--gs-border-muted); background: var(--gs-bg-elevated);
+  }
+  .light { width: 11px; height: 11px; border-radius: 50%; background: #2a2a2a; }
+  .titlebar .title { margin-left: 12px; font-size: 12px; color: var(--gs-text-ghost); }
+
+  /* ── THE HERO: pill strip (full fidelity) ── */
+  #strip {
+    flex-shrink: 0;
+    display: flex; align-items: center; gap: 2px;
+    border-bottom: 1px solid var(--gs-border-muted);
+    background: var(--gs-bg);
+    padding: 9px 12px;
+    position: relative; z-index: 2;
+  }
+  .project-label { font-size: 15px; color: var(--gs-text-ghost); padding: 0 9px 0 4px; flex-shrink: 0; white-space: nowrap; }
+  .pill {
+    display: flex; align-items: center; gap: 7px;
+    padding: 7px 11px; border-radius: 4px; font-size: 15px;
+    color: var(--gs-text-muted); white-space: nowrap; flex-shrink: 0; overflow: hidden;
+    transform-origin: center;
+  }
+  .pill.current { background: var(--gs-bg-active); color: var(--gs-text); }
+  .dot  { font-size: 16px; line-height: 1; }
+  .bolt { color: var(--gs-warning-bright); overflow: hidden; }
+  /* soft halo so the live strip reads as the focal point */
+  #striprow { position: relative; flex-shrink: 0; }
+  #striprow::after {
+    content: ''; position: absolute; left: 0; right: 0; top: -6px; height: 64px;
+    background: radial-gradient(ellipse 60% 100% at 38% 50%, rgba(0,255,102,0.05), transparent 70%);
+    pointer-events: none;
+  }
+
+  /* ── Header (skeleton) ── */
+  .header {
+    flex-shrink: 0; height: 48px; display: flex; align-items: center; gap: 12px;
+    padding: 0 14px; border-bottom: 1px solid var(--gs-border); background: var(--gs-bg-elevated);
+  }
+  .sk { background: var(--sk); border-radius: 3px; }
+  .sk.strong { background: var(--sk-strong); }
+  .chev { color: var(--gs-text-ghost); font-size: 14px; }
+
+  /* ── Body ── */
+  .body { flex: 1; display: flex; min-height: 0; }
+  .sidebar {
+    width: 280px; flex-shrink: 0; border-right: 1px solid var(--gs-border-muted);
+    background: #000; padding: 14px 14px; display: flex; flex-direction: column; gap: 14px;
+  }
+  .panel-label { font-size: 10px; letter-spacing: .12em; text-transform: uppercase; color: var(--gs-text-ghost); }
+  .agent-row { display: flex; align-items: center; gap: 10px; }
+  .agent-row .rdot { width: 8px; height: 8px; border-radius: 50%; background: #242424; flex-shrink: 0; }
+  .agent-row .lines { flex: 1; display: flex; flex-direction: column; gap: 6px; }
+
+  .main { flex: 1; display: flex; flex-direction: column; min-width: 0; background: #000; }
+  .term { flex: 1; padding: 18px 20px; display: flex; flex-direction: column; gap: 11px; overflow: hidden; }
+  .composer {
+    flex-shrink: 0; margin: 0 16px 16px; height: 64px; border: 1px solid var(--gs-border);
+    border-radius: 6px; background: #060606; display: flex; align-items: center; gap: 12px; padding: 0 14px;
+  }
+
+  /* ── Lower-third caption (sits in the black margin under the window) ── */
+  #caption { height: 24px; font-size: 18px; letter-spacing: .02em; color: var(--gs-text-muted); text-align: center; }
+</style>
+</head>
+<body>
+  <div id="stage">
+    <div id="win">
+      <div class="titlebar">
+        <span class="light"></span><span class="light"></span><span class="light"></span>
+        <span class="title">gitspace — mobile-nav</span>
+      </div>
+
+      <!-- HERO -->
+      <div id="striprow"><div id="strip"></div></div>
+
+      <!-- Header skeleton -->
+      <div class="header">
+        <span class="chev">←</span>
+        <div class="sk" style="width:54px;height:11px"></div>
+        <div class="sk strong" style="width:140px;height:13px"></div>
+        <div class="sk" style="width:60px;height:18px;border-radius:3px"></div>
+        <div style="flex:1"></div>
+        <div class="sk" style="width:90px;height:13px"></div>
+      </div>
+
+      <!-- Body skeleton -->
+      <div class="body">
+        <div class="sidebar">
+          <div class="panel-label">Workspace Panel</div>
+          <div id="agentrows"></div>
+          <div style="flex:1"></div>
+          <div class="sk" style="width:100%;height:30px;border-radius:4px"></div>
+        </div>
+        <div class="main">
+          <div class="term" id="term"></div>
+          <div class="composer">
+            <div class="sk" style="width:42%;height:12px"></div>
+            <div style="flex:1"></div>
+            <div class="sk strong" style="width:54px;height:30px;border-radius:4px"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div id="caption"></div>
+  </div>
+
+<script>
+/* ── Shared strip engine (deterministic; window.__seek drives every frame) ── */
+const COLORS = { green:'#00ff66', blue:'#4488ff', orange:'#ffcc00', dim:'#282828' };
+const clamp01 = (x) => (x < 0 ? 0 : x > 1 ? 1 : x);
+const easeOut = (t) => 1 - Math.pow(1 - t, 3);
+const hexRgb  = (h) => [1,3,5].map((i)=>parseInt(h.slice(i,i+2),16));
+const RGB = { green: hexRgb(COLORS.green), blue: hexRgb(COLORS.blue), orange: hexRgb(COLORS.orange) };
+const lerp = (a,b,t) => a + (b-a)*t;
+const mix  = (c1,c2,t) => `rgb(${Math.round(lerp(c1[0],c2[0],t))},${Math.round(lerp(c1[1],c2[1],t))},${Math.round(lerp(c1[2],c2[2],t))})`;
+const FADE = 340, REMOVE = 420, POP = 240;
+
+const PILLS = [
+  { name: 'auth-refactor',     status: 'green'  },
+  { name: 'billing-webhooks',  status: 'orange', resolveAt: 1100, to: 'green' },
+  { name: 'search-index',      status: 'blue',   resolveAt: 2600, to: 'green' },
+  { name: 'mobile-nav',        status: 'green', current: true },
+  { name: 'rate-limiter',      status: 'orange', resolveAt: 1800, to: 'green' },
+  { name: 'staging-deploy',    status: 'blue',   removeAt: 3400 },
+  { name: 'csv-export',        status: 'green'  },
+];
+const CAPTIONS = [
+  { t: 0,    text: 'One bar, every agent across your workspaces.' },
+  { t: 1100, text: 'Amber = an agent is waiting on you   →   approve' },
+  { t: 2600, text: 'Blue = an idle slot   →   put it to work, or close it' },
+  { t: 4200, text: 'Fleet green. Fully utilized, fully attended.', green: true },
+];
+const DURATION = 5800;
+window.__duration = DURATION;
+
+const strip = document.getElementById('strip');
+const caption = document.getElementById('caption');
+const label = document.createElement('span');
+label.className = 'project-label'; label.textContent = 'gitspace:';
+strip.appendChild(label);
+
+const nodes = PILLS.map(p => {
+  const el = document.createElement('div');
+  el.className = 'pill' + (p.current ? ' current' : '');
+  const dot = document.createElement('span'); dot.className = 'dot'; dot.textContent = '●';
+  const name = document.createElement('span'); name.textContent = p.name;
+  const bolt = document.createElement('span'); bolt.className = 'bolt'; bolt.textContent = '⚡';
+  el.append(dot, name, bolt);
+  strip.appendChild(el);
+  return { el, dot, bolt, p, natural: 0 };
+});
+nodes.forEach(n => { n.natural = n.el.offsetWidth; n.el.style.maxWidth = n.natural + 'px'; });
+
+/* ── Static skeleton fills (built once) ── */
+const agentrows = document.getElementById('agentrows');
+const rowWidths = [[68,40],[55,46],[72,38],[50,44],[63,42]];
+rowWidths.forEach(([a,b], i) => {
+  const row = document.createElement('div'); row.className = 'agent-row'; row.style.marginBottom = '14px';
+  const rdot = document.createElement('span'); rdot.className = 'rdot';
+  const lines = document.createElement('div'); lines.className = 'lines';
+  const l1 = document.createElement('div'); l1.className = 'sk'; l1.style.cssText = `width:${a}%;height:10px`;
+  const l2 = document.createElement('div'); l2.className = 'sk'; l2.style.cssText = `width:${b}%;height:8px;opacity:.7`;
+  lines.append(l1, l2); row.append(rdot, lines); agentrows.appendChild(row);
+});
+const term = document.getElementById('term');
+const termWidths = [44, 62, 30, 71, 52, 38, 66, 26, 58, 48];
+termWidths.forEach((w, i) => {
+  const ln = document.createElement('div'); ln.className = 'sk';
+  ln.style.cssText = `width:${w}%;height:10px;opacity:${i % 3 === 0 ? .55 : .32}`;
+  term.appendChild(ln);
+});
+
+/* ── Per-frame render: only the strip + caption move ── */
+function render(T) {
+  let greenFloor = 1;
+  for (const n of nodes) {
+    const { p } = n;
+    const prog = p.resolveAt != null ? easeOut(clamp01((T - p.resolveAt) / FADE)) : 0;
+    n.dot.style.color = mix(RGB[p.status], RGB[p.to || p.status], prog);
+    const endsGreen = (p.to || p.status) === 'green';
+    const greenFactor = endsGreen ? (p.resolveAt != null ? prog : 1) : 0;
+    n.dot.style.textShadow = greenFactor > 0 ? `0 0 7px rgba(0,255,102,${0.6 * greenFactor})` : 'none';
+    const boltVis = p.status === 'orange' ? (1 - prog) : 0;
+    n.bolt.style.opacity = boltVis; n.bolt.style.maxWidth = (20 * boltVis) + 'px';
+    const rp = p.removeAt != null ? easeOut(clamp01((T - p.removeAt) / REMOVE)) : 0;
+    let pop = 0;
+    if (p.resolveAt != null) { const d = T - p.resolveAt; if (d >= 0 && d < POP) pop = Math.sin((d / POP) * Math.PI); }
+    n.el.style.opacity = 1 - rp;
+    n.el.style.maxWidth = (n.natural * (1 - rp)) + 'px';
+    n.el.style.paddingLeft = n.el.style.paddingRight = (11 * (1 - rp)) + 'px';
+    n.el.style.transform = `scale(${(1 - 0.15 * rp) * (1 + 0.12 * pop)})`;
+    greenFloor = Math.min(greenFloor, Math.max(greenFactor, rp));
+  }
+  const g = easeOut(greenFloor);
+  strip.style.boxShadow = g > 0 ? `0 0 ${26 * g}px rgba(0,255,102,${0.18 * g})` : 'none';
+
+  let cap = CAPTIONS[0];
+  for (const c of CAPTIONS) if (T >= c.t) cap = c;
+  caption.textContent = cap.text;
+  if (cap.green) { caption.style.color = mix(hexRgb('777777'), RGB.green, g); caption.style.textShadow = `0 0 8px rgba(0,255,102,${0.25 * g})`; }
+  else { caption.style.color = '#777777'; caption.style.textShadow = 'none'; }
+}
+
+window.__seek = (ms) => render(((ms % DURATION) + DURATION) % DURATION);
+let auto = true;
+const _seek = window.__seek;
+window.__seek = (ms) => { auto = false; _seek(ms); };
+let start = null;
+function loop(ts) { if (auto) { if (start == null) start = ts; _seek(ts - start); } requestAnimationFrame(loop); }
+requestAnimationFrame(loop);
+render(0);
+</script>
+</body>
+</html>

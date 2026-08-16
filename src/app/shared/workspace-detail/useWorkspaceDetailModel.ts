@@ -5,7 +5,7 @@ import {
   buildWorkspaceDetailStripDisplayItems,
   getVisibleWorkspaceDetailStripWorkspaces,
 } from './strip.js';
-import { formatTime, getAgentSessionDisplayState } from '../../../components/SpacesBrowser.js';
+import { formatTime } from '../../../components/SpacesBrowser.js';
 import { normalizeProcessInstanceCount } from '../../../lib/processes/instances.js';
 import { parseProcessSessionName } from '../../../lib/processes/names.js';
 import { getSessionAlertLabel, getSessionSubtitle } from '../workspace-runtime/derive.js';
@@ -114,12 +114,14 @@ export function useWorkspaceDetailModel(input: WorkspaceDetailModelInput): Works
   );
 
   const activeAgentSessions = useMemo(
-    () => (runtime?.agentSessions ?? agentSessions).filter((session) => !session.archivedAt && !session.closedAt),
+    () => (runtime?.agentSessions ?? agentSessions).filter((session) => !session.archivedAt && !session.closedAt && !session.dormantSince),
     [runtime, agentSessions],
   );
 
   const closedAgentSessions = useMemo(
-    () => (runtime?.agentSessions ?? agentSessions).filter((session) => !!session.closedAt && !session.archivedAt),
+    // Dormant (no worker, not dismissed) shares the closed bucket for now, as it
+    // did when closedAt meant both. The distinction is on the record.
+    () => (runtime?.agentSessions ?? agentSessions).filter((session) => (!!session.closedAt || !!session.dormantSince) && !session.archivedAt),
     [runtime, agentSessions],
   );
 
@@ -145,7 +147,8 @@ export function useWorkspaceDetailModel(input: WorkspaceDetailModelInput): Works
         id: session.id,
         title: session.title,
         bucket: 'active' as const,
-        state: getAgentSessionDisplayState(session),
+        // Decided once at record build; never re-derived here.
+        state: session.state ?? 'waiting',
         lastActiveLabel: session.lastActivityAt
           ? formatTime(session.lastActivityAt)
           : session.updatedAt
@@ -373,7 +376,7 @@ export function useWorkspaceDetailModel(input: WorkspaceDetailModelInput): Works
     selectWorkspace: (workspaceSelectionKey: string) => {
       void actions.onSelectWorkspace?.(workspaceSelectionKey);
     },
-    attachSession: (sessionId: string) => actions.onAttachSession?.({ sessionId }),
+    attachSession: (sessionId: string) => actions.onAttachSession?.({ sessionId, workspaceId: workspace.id }),
     createSession: () => actions.onAttachSession?.({ workspaceId: workspace.id }),
     deleteSession: (sessionId: string, sessionName: string) => {
       actions.onDeleteSession?.(sessionId, sessionName);
@@ -410,7 +413,8 @@ export function useWorkspaceDetailModel(input: WorkspaceDetailModelInput): Works
     },
     openAgentSession: (agentSessionId: string) => actions.onOpenAgentSession?.(workspace.id, agentSessionId),
     createAgentSession: () => actions.onCreateAgentSession?.(workspace.id),
-    abortAgentSession: (agentSessionId: string) => actions.onAbortAgentSession?.(workspace.id, agentSessionId),
+    killAgentSession: (agentSessionId: string) => actions.onKillAgentSession?.(workspace.id, agentSessionId),
+    stopAgentTurn: (agentSessionId: string) => actions.onStopAgentTurn?.(workspace.id, agentSessionId),
     closeAgentSession: (agentSessionId: string) => actions.onCloseAgentSession?.(workspace.id, agentSessionId),
     archiveAgentSession: (agentSessionId: string) => actions.onArchiveAgentSession?.(workspace.id, agentSessionId),
     restoreAgentSession: (agentSessionId: string) => actions.onRestoreAgentSession?.(workspace.id, agentSessionId),
@@ -439,6 +443,7 @@ export function useWorkspaceDetailModel(input: WorkspaceDetailModelInput): Works
     notesSummary,
     visibleTodoRows,
     visibleRecentNoteRows,
+    processConfigError: workspace.processConfigError,
     serviceRows,
     pmRows,
     footerActions,

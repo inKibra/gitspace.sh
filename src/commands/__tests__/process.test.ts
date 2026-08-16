@@ -7,8 +7,9 @@ import { SpacesError } from '../../types/errors.js';
 import { buildProcessHostname } from '../../utils/hostnames.js';
 import type { ProcessInstanceSpec } from '../../types/processes.js';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { getProcessPortAllocationPath } from '../../lib/processes/allocations.js';
 
 // ============================================================================
 // Mocks
@@ -22,7 +23,7 @@ mock.module('../../lib/tmux-lite/cli.js', () => ({
   listSessions: mockListSessions,
   listSessionsFromRunningServer: mockListSessions,
   createSession: mock(() => Promise.resolve({ id: 'sess-1', name: 'test' })),
-  killSession: mock(() => Promise.resolve()),
+  terminateSession: mock(() => Promise.resolve()),
   isProcessRunning: mock(() => false),
   isServerRunning: mock(() => Promise.resolve(true)),
 }));
@@ -35,13 +36,6 @@ const mockListProcessSessions = mock<
   () => Promise<Array<{ sessionId: string; processName: string; instance: number; name: string; workspacePath: string }>>
 >(() => Promise.resolve([]));
 const mockOpenBrowserUrl = mock(() => Promise.resolve({ ok: true as const }));
-const mockReadTmuxHostingState = mock<() => { baseHost?: string; machineName?: string; enabled: boolean; updatedAt: number } | null>(() => null);
-const mockResolveProcessRuntimePorts = mock(() => Promise.resolve([] as Array<{ instance: number; name: string; port: number; protocol?: 'http' | 'tcp' }>));
-const mockResolveHostedServiceUrl = mock((args: { baseHost?: string; machineName?: string; workspaceId: string; processName: string; instance: number; portLabel: string; protocol: 'http' | 'tcp' }) => {
-  return args.protocol === 'http' && args.baseHost
-    ? `http://${buildProcessHostname('gitspace.sh', 'brad', args.workspaceId, args.processName, args.instance, args.portLabel, args.machineName)}`
-    : undefined;
-});
 
 mock.module('../../lib/processes/manager.js', () => ({
   getProcessSpecs: mockGetProcessSpecs,
@@ -54,24 +48,99 @@ mock.module('../../utils/open-browser.js', () => ({
   openBrowserUrl: mockOpenBrowserUrl,
 }));
 
-mock.module('../../lib/tmux-lite/hosting/state.js', () => ({
-  readTmuxHostingState: mockReadTmuxHostingState,
-  writeTmuxHostingState: mock(() => ({ enabled: true, updatedAt: Date.now() })),
-  resolveTmuxHostingState: mock(() => ({ enabled: false, updatedAt: Date.now() })),
-  clearTmuxHostingState: mock(() => undefined),
-}));
-
-mock.module('../../lib/tmux-lite/hosting/routes.js', () => ({
-  resolveHostedServiceUrl: mockResolveHostedServiceUrl,
-}));
-
-mock.module('../../lib/processes/allocations.js', () => ({
-  reconcileProcessPortAllocations: mock(() => undefined),
-  resolveProcessRuntimePorts: mockResolveProcessRuntimePorts,
-}));
-
 // Import after mocking
 const { listProcesses, startProcess, stopProcess, attachProcess, openProcess } = await import('../process.js');
+
+// Real hosting chain. `getWorkspaceRoot()`, `getSpacesDir()` and
+// `getTmuxLitePaths()` all read env at CALL time, so pointing them at a temp root
+// exercises host.json parsing, the hosting-state file and the registered-route
+// gate inside `resolveHostedServiceUrl`. The previous fake reimplemented that
+// function and skipped all three checks, so it asserted URLs production would
+// never produce.
+const gitspaceRoot = mkdtempSync(join(tmpdir(), 'gssh-process-root-'));
+process.env.GITSPACE_WORKSPACE_ROOT = gitspaceRoot;
+process.env.TMUX_LITE_SESSION_DIR = join(gitspaceRoot, 'sessions');
+
+const HOSTING_SUBDOMAIN = 'brad';
+const HOSTING_DOMAIN = 'gitspace.sh';
+const HOSTING_MACHINE = 'macbook';
+
+function hostedHostname(workspaceId: string, processName: string, instance: number, portLabel: string): string {
+  return buildProcessHostname(HOSTING_DOMAIN, HOSTING_SUBDOMAIN, workspaceId, processName, instance, portLabel, HOSTING_MACHINE);
+}
+
+function createWorkspace(name: string): string {
+  const workspacePath = join(gitspaceRoot, 'project', 'workspaces', name);
+  mkdirSync(workspacePath, { recursive: true });
+  return workspacePath;
+}
+
+/** Persist what a start would have allocated; reporting reads this and never allocates. */
+function writeAllocatedPorts(
+  workspacePath: string,
+  processName: string,
+  instance: number,
+  ports: Array<{ name: string; port: number; protocol: 'http' | 'tcp' }>,
+): void {
+  const allocationPath = getProcessPortAllocationPath(workspacePath);
+  mkdirSync(dirname(allocationPath), { recursive: true });
+  writeFileSync(allocationPath, JSON.stringify({
+    version: 1,
+    allocations: Object.fromEntries(ports.map((port) => [
+      `${processName}:${instance}:${port.name}`,
+      { port: port.port, protocol: port.protocol, updatedAt: Date.now() },
+    ])),
+  }), 'utf-8');
+}
+
+/** Register hosting so `resolveHostedServiceUrl` can resolve a remote URL. */
+function enableHosting(
+  routes: Array<{ workspaceId: string; processName: string; instance: number; portLabel: string }>,
+): void {
+  writeFileSync(join(gitspaceRoot, 'host.json'), JSON.stringify({
+    subdomain: HOSTING_SUBDOMAIN,
+    subdomains: [HOSTING_SUBDOMAIN],
+    serveNamespaces: { [HOSTING_SUBDOMAIN]: { domain: HOSTING_DOMAIN } },
+    createdAt: Date.now(),
+  }), 'utf-8');
+
+  const sessionDir = join(gitspaceRoot, 'sessions');
+  mkdirSync(sessionDir, { recursive: true });
+  writeFileSync(join(sessionDir, '.gitspace-hosting.json'), JSON.stringify({
+    baseHost: `${HOSTING_SUBDOMAIN}.${HOSTING_DOMAIN}`,
+    machineName: HOSTING_MACHINE,
+    enabled: true,
+    updatedAt: Date.now(),
+  }), 'utf-8');
+
+  const routesDir = join(gitspaceRoot, '.tmux-hosting');
+  mkdirSync(routesDir, { recursive: true });
+  writeFileSync(join(routesDir, 'hosted-routes.json'), JSON.stringify(
+    routes.map((route) => ({
+      hostname: hostedHostname(route.workspaceId, route.processName, route.instance, route.portLabel),
+      service: `${route.processName}:${route.instance}:${route.portLabel}`,
+    })),
+  ), 'utf-8');
+}
+
+/** Drop every hosting artefact so only localhost URLs remain resolvable. */
+function disableHosting(): void {
+  rmSync(join(gitspaceRoot, 'host.json'), { force: true });
+  rmSync(join(gitspaceRoot, 'sessions', '.gitspace-hosting.json'), { force: true });
+  rmSync(join(gitspaceRoot, '.tmux-hosting'), { recursive: true, force: true });
+}
+
+async function captureStdout(run: () => Promise<void>): Promise<string> {
+  const lines: string[] = [];
+  const original = console.log;
+  console.log = (...args: unknown[]) => { lines.push(args.map(String).join(' ')); };
+  try {
+    await run();
+  } finally {
+    console.log = original;
+  }
+  return lines.join('\n');
+}
 
 // ============================================================================
 // startProcess
@@ -278,26 +347,25 @@ describe('attachProcess', () => {
 });
 
 // ============================================================================
-// listProcesses (no error paths, just smoke test)
+// listProcesses
 // ============================================================================
 
 describe('listProcesses', () => {
   beforeEach(() => {
     mockGetProcessSpecs.mockReset();
     mockListProcessSessions.mockReset();
-    mockReadTmuxHostingState.mockReset();
-    mockResolveProcessRuntimePorts.mockReset();
+    disableHosting();
   });
 
   it('should not throw when no processes are configured', async () => {
     mockGetProcessSpecs.mockImplementation(() => []);
     mockListProcessSessions.mockImplementation(() => Promise.resolve([]));
 
-    // Should not throw
     await listProcesses({});
   });
 
-  it('should include local and remote urls for configured ports', async () => {
+  it('reports the localhost url and the hosted url for routed http ports', async () => {
+    const workspacePath = createWorkspace('demo');
     mockGetProcessSpecs.mockImplementation(() => [{
       name: 'web',
       instance: 1,
@@ -311,13 +379,33 @@ describe('listProcesses', () => {
       },
     }]);
     mockListProcessSessions.mockImplementation(() => Promise.resolve([]));
-    mockReadTmuxHostingState.mockImplementation(() => ({ baseHost: 'brad.gitspace.sh', machineName: 'macbook', enabled: true, updatedAt: Date.now() }));
-    mockResolveProcessRuntimePorts.mockResolvedValue([
-      { instance: 1, name: 'app', port: 3000, protocol: 'http' },
-      { instance: 1, name: 'tcp-admin', port: 7000, protocol: 'tcp' },
+    writeAllocatedPorts(workspacePath, 'web', 1, [
+      { name: 'app', port: 3000, protocol: 'http' },
+      { name: 'tcp-admin', port: 7000, protocol: 'tcp' },
     ]);
+    enableHosting([{ workspaceId: 'demo', processName: 'web', instance: 1, portLabel: 'app' }]);
 
-    await listProcesses({ workspace: '/tmp/project/workspaces/demo' });
+    const output = await captureStdout(() => listProcesses({ workspace: workspacePath }));
+
+    expect(output).toContain('local:  http://localhost:3000');
+    expect(output).toContain(`remote: http://${hostedHostname('demo', 'web', 1, 'app')}`);
+    // tcp gets no hosted route, so it stays local-only.
+    expect(output).toContain('local:  tcp://localhost:7000');
+    expect(output).toContain('remote: not configured');
+  });
+
+  it('reports ports as unallocated when the process has never started', async () => {
+    const workspacePath = createWorkspace('never-started');
+    mockGetProcessSpecs.mockImplementation(() => [{
+      name: 'web',
+      instance: 1,
+      definition: { name: 'web', command: 'npm start', ports: [{ name: 'app', protocol: 'http' }] },
+    }]);
+    mockListProcessSessions.mockImplementation(() => Promise.resolve([]));
+
+    const output = await captureStdout(() => listProcesses({ workspace: workspacePath }));
+
+    expect(output).toContain('ports not allocated yet');
   });
 });
 
@@ -325,32 +413,27 @@ describe('openProcess', () => {
   beforeEach(() => {
     mockGetProcessSpecs.mockReset();
     mockOpenBrowserUrl.mockReset();
-    mockReadTmuxHostingState.mockReset();
-    mockResolveProcessRuntimePorts.mockReset();
     mockOpenBrowserUrl.mockResolvedValue({ ok: true });
-    mockResolveHostedServiceUrl.mockReset();
-    mockResolveHostedServiceUrl.mockImplementation((args) => args.protocol === 'http' && args.baseHost
-      ? `http://${buildProcessHostname('gitspace.sh', 'brad', args.workspaceId, args.processName, args.instance, args.portLabel, args.machineName)}`
-      : undefined);
+    disableHosting();
   });
 
   it('opens hosted url by default when available', async () => {
+    const workspacePath = createWorkspace('demo');
     mockGetProcessSpecs.mockImplementation(() => [{
       name: 'web',
       instance: 1,
       definition: { name: 'web', command: 'npm start', ports: [{ name: 'app', protocol: 'http' }] },
     }]);
-    mockReadTmuxHostingState.mockImplementation(() => ({ baseHost: 'brad.gitspace.sh', machineName: 'macbook', enabled: true, updatedAt: Date.now() }));
-    mockResolveProcessRuntimePorts.mockResolvedValue([
-      { instance: 1, name: 'app', port: 3000, protocol: 'http' },
-    ]);
+    writeAllocatedPorts(workspacePath, 'web', 1, [{ name: 'app', port: 3000, protocol: 'http' }]);
+    enableHosting([{ workspaceId: 'demo', processName: 'web', instance: 1, portLabel: 'app' }]);
 
-    await openProcess({ workspace: '/tmp/project/workspaces/demo', name: 'web' });
+    await openProcess({ workspace: workspacePath, name: 'web' });
 
-    expect(mockOpenBrowserUrl).toHaveBeenCalledWith(`http://${buildProcessHostname('gitspace.sh', 'brad', 'demo', 'web', 1, 'app', 'macbook')}`);
+    expect(mockOpenBrowserUrl).toHaveBeenCalledWith(`http://${hostedHostname('demo', 'web', 1, 'app')}`);
   });
 
   it('opens all configured http ports and skips tcp ports with --all', async () => {
+    const workspacePath = createWorkspace('demo');
     mockGetProcessSpecs.mockImplementation(() => [{
       name: 'web',
       instance: 1,
@@ -364,32 +447,49 @@ describe('openProcess', () => {
         ],
       },
     }]);
-    mockReadTmuxHostingState.mockImplementation(() => ({ baseHost: 'brad.gitspace.sh', machineName: 'macbook', enabled: true, updatedAt: Date.now() }));
-    mockResolveProcessRuntimePorts.mockResolvedValue([
-      { instance: 1, name: 'app', port: 3000, protocol: 'http' },
-      { instance: 1, name: 'admin', port: 3001, protocol: 'http' },
-      { instance: 1, name: 'tcp-admin', port: 7000, protocol: 'tcp' },
+    writeAllocatedPorts(workspacePath, 'web', 1, [
+      { name: 'app', port: 3000, protocol: 'http' },
+      { name: 'admin', port: 3001, protocol: 'http' },
+      { name: 'tcp-admin', port: 7000, protocol: 'tcp' },
+    ]);
+    enableHosting([
+      { workspaceId: 'demo', processName: 'web', instance: 1, portLabel: 'app' },
+      { workspaceId: 'demo', processName: 'web', instance: 1, portLabel: 'admin' },
     ]);
 
-    await openProcess({ workspace: '/tmp/project/workspaces/demo', name: 'web', all: true });
+    await openProcess({ workspace: workspacePath, name: 'web', all: true });
 
     expect(mockOpenBrowserUrl).toHaveBeenCalledTimes(2);
-    expect(mockOpenBrowserUrl).toHaveBeenNthCalledWith(1, `http://${buildProcessHostname('gitspace.sh', 'brad', 'demo', 'web', 1, 'app', 'macbook')}`);
-    expect(mockOpenBrowserUrl).toHaveBeenNthCalledWith(2, `http://${buildProcessHostname('gitspace.sh', 'brad', 'demo', 'web', 1, 'admin', 'macbook')}`);
+    expect(mockOpenBrowserUrl).toHaveBeenNthCalledWith(1, `http://${hostedHostname('demo', 'web', 1, 'app')}`);
+    expect(mockOpenBrowserUrl).toHaveBeenNthCalledWith(2, `http://${hostedHostname('demo', 'web', 1, 'admin')}`);
   });
 
-  it('falls back to localhost when no hosted url exists', async () => {
+  it('falls back to localhost when hosting is not configured', async () => {
+    const workspacePath = createWorkspace('demo');
     mockGetProcessSpecs.mockImplementation(() => [{
       name: 'web',
       instance: 1,
       definition: { name: 'web', command: 'npm start', ports: [{ name: 'app', protocol: 'http' }] },
     }]);
-    mockReadTmuxHostingState.mockImplementation(() => null);
-    mockResolveProcessRuntimePorts.mockResolvedValue([
-      { instance: 1, name: 'app', port: 3000, protocol: 'http' },
-    ]);
+    writeAllocatedPorts(workspacePath, 'web', 1, [{ name: 'app', port: 3000, protocol: 'http' }]);
 
-    await openProcess({ workspace: '/tmp/project/workspaces/demo', name: 'web' });
+    await openProcess({ workspace: workspacePath, name: 'web' });
+
+    expect(mockOpenBrowserUrl).toHaveBeenCalledWith('http://localhost:3000');
+  });
+
+  it('falls back to localhost when hosting is up but this hostname has no registered route', async () => {
+    const workspacePath = createWorkspace('demo');
+    mockGetProcessSpecs.mockImplementation(() => [{
+      name: 'web',
+      instance: 1,
+      definition: { name: 'web', command: 'npm start', ports: [{ name: 'app', protocol: 'http' }] },
+    }]);
+    writeAllocatedPorts(workspacePath, 'web', 1, [{ name: 'app', port: 3000, protocol: 'http' }]);
+    // Hosting is enabled, but only for a different workspace — no route matches.
+    enableHosting([{ workspaceId: 'other', processName: 'web', instance: 1, portLabel: 'app' }]);
+
+    await openProcess({ workspace: workspacePath, name: 'web' });
 
     expect(mockOpenBrowserUrl).toHaveBeenCalledWith('http://localhost:3000');
   });

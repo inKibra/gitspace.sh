@@ -38,6 +38,13 @@ export function setupTestDom(): () => void {
     g.document = saved.document;
     g.navigator = saved.navigator;
     domWindow.close();
+    // React's scheduler can still have a macrotask queued when a suite ends.
+    // When it fires, react-dom reads `window.event` — and if we just restored
+    // `window` to undefined that throws AFTER every assertion passed, failing
+    // the process with no failing test. Which file gets hit depends on timing,
+    // so leave an inert stand-in rather than a hole. Test files run in their
+    // own process (scripts/test-isolated.ts), so this lives microseconds.
+    if (g.window === undefined) g.window = { event: undefined };
     if (activeCleanup === cleanup) activeCleanup = null;
   };
   activeCleanup = cleanup;

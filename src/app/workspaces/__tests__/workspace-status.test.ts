@@ -36,6 +36,7 @@ describe('deriveWorkspaceStatusSummary', () => {
         workspaceId: 'proj:ws',
         title: 'Claude',
         pendingPermissionCount: 1,
+        state: 'permission-needed',
         status: { type: 'busy' },
       },
     ];
@@ -66,6 +67,7 @@ describe('deriveWorkspaceStatusSummary', () => {
         id: 'agent-1',
         workspaceId: 'proj:ws',
         title: 'Claude',
+        state: 'waiting',
         status: { type: 'idle' },
       },
     ];
@@ -84,12 +86,36 @@ describe('deriveWorkspaceStatusSummary', () => {
         id: 'agent-1',
         workspaceId: 'proj:ws',
         title: 'Claude',
+        state: 'retrying',
         status: { type: 'retry', attempt: 2, message: 'provider failed', next: Date.now() + 1000 },
       },
     ]);
 
     expect(summary.agents.red).toBe(1);
     expect(summary.primaryColor).toBe('red');
+  });
+
+  it('keeps a not-running (closed/dormant) agent grey, never red — even with a stale error', () => {
+    // Red is reserved for a live, currently-erroring session. A session whose
+    // worker is gone is returned to the dormant (closed) state; a lingering
+    // error on it must not colour the workspace red.
+    const workspace = makeWorkspace({ processes: [] });
+    const summary = deriveWorkspaceStatusSummary(workspace, [], [
+      {
+        id: 'agent-1',
+        workspaceId: 'proj:ws',
+        title: 'Claude',
+        closedAt: '2026-01-01T00:00:00.000Z',
+        errorMessage: 'rate limit exceeded',
+        // The builder stamps 'closed' for a dismissed session regardless of a
+        // lingering error — lifecycle wins over error in determineAgentState.
+        state: 'closed',
+        status: { type: 'retry', attempt: 1, message: 'rate limit exceeded', next: Date.now() },
+      },
+    ]);
+
+    expect(summary.agents.red).toBe(0);
+    expect(summary.primaryColor).toBe('dim');
   });
 
   it('does not count managed process sessions as terminals', () => {
@@ -127,6 +153,7 @@ describe('deriveWorkspaceStatusSummary', () => {
         workspaceId: 'proj:ws',
         title: 'Claude',
         pendingQuestionCount: 1,
+        state: 'permission-needed',
         status: { type: 'idle' },
       },
     ]);
@@ -135,15 +162,103 @@ describe('deriveWorkspaceStatusSummary', () => {
     expect(summary.primaryColor).toBe('orange');
   });
 
+  it('greens a compacting agent (active work), like busy', () => {
+    const workspace = makeWorkspace({ processes: [] });
+    const summary = deriveWorkspaceStatusSummary(workspace, [], [
+      { id: 'agent-1', workspaceId: 'proj:ws', title: 'Claude', state: 'running', status: { type: 'compacting' } },
+    ]);
+
+    expect(summary.agents.green).toBe(1);
+    expect(summary.primaryColor).toBe('green');
+  });
+
   it('shows green when any agent is busy even if another is idle', () => {
     const workspace = makeWorkspace();
     const summary = deriveWorkspaceStatusSummary(workspace, [], [
-      { id: 'agent-busy', workspaceId: 'proj:ws', title: 'Busy', status: { type: 'busy' } },
-      { id: 'agent-idle', workspaceId: 'proj:ws', title: 'Idle', status: { type: 'idle' } },
+      { id: 'agent-busy', workspaceId: 'proj:ws', title: 'Busy', state: 'running', status: { type: 'busy' } },
+      { id: 'agent-idle', workspaceId: 'proj:ws', title: 'Idle', state: 'waiting', status: { type: 'idle' } },
     ]);
 
     expect(summary.agents.green).toBe(1);
     expect(summary.agents.blue).toBe(1);
     expect(summary.primaryColor).toBe('green');
+  });
+  it('prefers idle agent blue over running service green', () => {
+    const workspace = makeWorkspace();
+    const sessions: SessionInfo[] = [
+      {
+        id: 'proc-1',
+        name: 'proj:ws:web#1',
+        workspaceId: 'proj:ws',
+        attached: false,
+        createdAt: 1,
+        processName: 'web',
+        processInstance: 1,
+      },
+    ];
+    const summary = deriveWorkspaceStatusSummary(workspace, sessions, [
+      { id: 'agent-idle', workspaceId: 'proj:ws', title: 'Idle', state: 'waiting', status: { type: 'idle' } },
+    ]);
+
+    expect(summary.services.green).toBe(1);
+    expect(summary.agents.blue).toBe(1);
+    expect(summary.primaryColor).toBe('blue');
+  });
+
+  it('keeps service-only and terminal-only activity dim', () => {
+    const workspace = makeWorkspace();
+    const serviceOnly = deriveWorkspaceStatusSummary(workspace, [
+      {
+        id: 'proc-1',
+        name: 'proj:ws:web#1',
+        workspaceId: 'proj:ws',
+        attached: false,
+        createdAt: 1,
+        processName: 'web',
+        processInstance: 1,
+      },
+    ], []);
+    const terminalOnly = deriveWorkspaceStatusSummary(makeWorkspace({ processes: [] }), [
+      {
+        id: 'shell-1',
+        name: 'proj:ws:shell',
+        workspaceId: 'proj:ws',
+        attached: true,
+        createdAt: 1,
+      },
+    ], []);
+
+    expect(serviceOnly.services.green).toBe(1);
+    expect(serviceOnly.primaryColor).toBe('dim');
+    expect(terminalOnly.terminals.green).toBe(1);
+    expect(terminalOnly.primaryColor).toBe('dim');
+  });
+
+  it('keeps a workspace whose only sessions are dormant dim, not blue', () => {
+    // Regression: this rollup used to re-derive state itself and never checked
+    // dormantSince, so every session merely discovered on disk counted as blue.
+    // That painted every workspace blue in the detail strip, the kanban card
+    // edge and the project chips at once, and sorted dormant workspaces above
+    // genuinely running ones. It now counts the state on the record.
+    const workspace = makeWorkspace({ processes: [] });
+    const summary = deriveWorkspaceStatusSummary(workspace, [], [
+      { id: 'a1', workspaceId: 'proj:ws', title: 'Seeded', state: 'dormant', dormantSince: '2026-01-01T00:00:00.000Z' },
+      { id: 'a2', workspaceId: 'proj:ws', title: 'Also seeded', state: 'dormant', dormantSince: '2026-01-01T00:00:00.000Z' },
+    ]);
+
+    expect(summary.agents.blue).toBe(0);
+    expect(summary.primaryColor).toBe('dim');
+  });
+
+  it('does not turn a workspace red for a noisy LSP error', () => {
+    // determineAgentState maps ANY errorMessage to 'retrying', so the rollup
+    // keeps its own noise filter — an LSP hiccup must not paint the workspace red.
+    const workspace = makeWorkspace({ processes: [] });
+    const summary = deriveWorkspaceStatusSummary(workspace, [], [
+      { id: 'a1', workspaceId: 'proj:ws', title: 'Claude', state: 'retrying', errorMessage: 'lsp server crashed' },
+    ]);
+
+    expect(summary.agents.red).toBe(0);
+    expect(summary.agents.blue).toBe(1);
   });
 });

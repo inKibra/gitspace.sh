@@ -47,85 +47,15 @@ import type {
 } from '../lib/tmux-lite/replay/index.js';
 import type { BackendEvent } from './events.js';
 import { SpacesError } from '../types/errors.js';
+import { backendEventToActions } from './backend-event-actions.js';
 
 function dispatchBackendEvent(
   dispatch: React.Dispatch<import('./types.js').SessionEngineAction>,
   backendKey: BackendKey,
   event: BackendEvent
 ): void {
-  switch (event.type) {
-    case 'status':
-      dispatch({ type: 'SET_BACKEND_STATUS', backendKey, status: event.status, error: event.error ?? null });
-      break;
-    case 'projects':
-      dispatch({ type: 'SET_PROJECTS', backendKey, projects: event.projects });
-      break;
-    case 'workspaces':
-      dispatch({ type: 'SET_WORKSPACES', backendKey, workspaces: event.workspaces });
-      if (event.savedEventFilters) {
-        dispatch({ type: 'SET_SAVED_EVENT_FILTERS', backendKey, filters: event.savedEventFilters });
-      }
-      break;
-    case 'sessions':
-      dispatch({ type: 'SET_SESSIONS', backendKey, sessions: event.sessions });
-      break;
-    case 'replays':
-      dispatch({ type: 'SET_REPLAYS', backendKey, replays: event.replays });
-      break;
-    case 'inbox':
-      dispatch({ type: 'SET_INBOX', backendKey, items: event.items, unreadCount: event.unreadCount });
-      break;
-    case 'notification_config':
-      dispatch({ type: 'SET_NOTIFICATION_CONFIG', backendKey, config: event.config });
-      break;
-    case 'attached':
-      dispatch({
-        type: 'SET_ATTACHED_SESSION',
-        backendKey,
-        sessionId: event.sessionId,
-        sessionName: event.sessionName ?? null,
-        meta: {
-          sessionName: event.sessionName ?? null,
-        },
-        workspaceId: event.workspaceId ?? null,
-        agentSessionId: event.agentSessionId ?? null,
-      });
-      break;
-    case 'session_meta':
-      dispatch({ type: 'SET_ATTACHED_SESSION_META', backendKey, meta: event.meta });
-      break;
-    case 'detached':
-      dispatch({ type: 'SET_ATTACHED_SESSION', backendKey, sessionId: null });
-      break;
-    case 'session_exited':
-      dispatch({ type: 'SET_ATTACHED_SESSION', backendKey, sessionId: null, preserveContextOnExit: true });
-      break;
-    case 'command_error':
-      dispatch({ type: 'SET_COMMAND_ERROR', backendKey, commandError: { code: event.code, message: event.message } });
-      break;
-    case 'error':
-      dispatch({ type: 'SET_BACKEND_STATUS', backendKey, status: 'error', error: event.message });
-      break;
-    case 'script_output':
-      dispatch({
-        type: 'SET_SCRIPT_STATE',
-        backendKey,
-        scriptState: event.done && !event.error
-          ? null
-          : { phase: event.phase, isRunning: !event.done, error: event.error, exitCode: event.exitCode },
-      });
-      break;
-    case 'events':
-      dispatch({ type: 'SET_EVENTS', backendKey, events: event.events, liveEventIds: event.liveEventIds });
-      if (event.savedEventFilters) {
-        dispatch({ type: 'SET_SAVED_EVENT_FILTERS', backendKey, filters: event.savedEventFilters });
-      }
-      break;
-    case 'machine_snapshot':
-      dispatch({ type: 'SET_MACHINE_SNAPSHOT', backendKey, snapshot: event.snapshot });
-      break;
-    default:
-      break;
+  for (const action of backendEventToActions(backendKey, event)) {
+    dispatch(action);
   }
 }
 
@@ -172,6 +102,8 @@ export function useSessionEngine() {
 
   const disconnectBackend = useCallback(async (backendKey: BackendKey): Promise<void> => {
     await getManager().disconnect(backendKey);
+    dispatch({ type: 'SET_ATTACHED_SESSION', backendKey, sessionId: null });
+    dispatch({ type: 'SET_SCRIPT_STATE', backendKey, scriptState: null });
     dispatch({ type: 'SET_BACKEND_STATUS', backendKey, status: 'disconnected' });
   }, [getManager]);
 
@@ -236,6 +168,16 @@ export function useSessionEngine() {
   const deleteProject = useCallback((backendKey: BackendKey, projectName: string, params?: DeleteProjectParams) =>
     withBackend(backendKey, async (b) => { await b.deleteProject(projectName, params); await b.listProjects(); await b.listWorkspaces(); }), []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const attachPane = useCallback((backendKey: BackendKey, params: import('./backend.js').AttachPaneParams) =>
+    withBackend(backendKey, (b) => b.attachPane?.(params) ?? b.attachSession(params)), []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const detachPane = useCallback((backendKey: BackendKey, paneId: string) =>
+    withBackend(backendKey, (b) => b.detachPane?.(paneId) ?? b.detachSession()), []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const detachAllPanes = useCallback((backendKey: BackendKey) =>
+    withBackend(backendKey, (b) => b.detachAllPanes?.() ?? b.detachSession()), []); // eslint-disable-line react-hooks/exhaustive-deps
+
+
   const attachSession = useCallback((backendKey: BackendKey, params: AttachSessionParams) =>
     withBackend(backendKey, (b) => b.attachSession(params)), []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -249,8 +191,8 @@ export function useSessionEngine() {
     managerRef.current?.get(backendKey)?.cancelPendingReplayRequests?.();
   }, []);
 
-  const killSession = useCallback((backendKey: BackendKey, sessionId: string) =>
-    withBackend(backendKey, (b) => b.killSession(sessionId)), []); // eslint-disable-line react-hooks/exhaustive-deps
+  const terminateSession = useCallback((backendKey: BackendKey, sessionId: string) =>
+    withBackend(backendKey, (b) => b.terminateSession(sessionId)), []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const deleteWorkspace = useCallback((backendKey: BackendKey, projectName: string, workspaceId: string, params?: DeleteWorkspaceParams) =>
     withBackend(backendKey, (b) => b.deleteWorkspace(projectName, workspaceId, params)), []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -330,6 +272,13 @@ export function useSessionEngine() {
   const undismissReplay = useCallback((backendKey: BackendKey, replayId: string) =>
     withBackend(backendKey, (b) => b.undismissReplay?.(replayId) ?? Promise.resolve()), []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const runSpaceCommand = useCallback((backendKey: BackendKey, workspaceId: string, argsText: string) =>
+    withBackend(backendKey, (b) => {
+      if (!b.runSpaceCommand) {
+        throw new SpacesError(`Backend does not support workspace-scoped commands: ${backendKey}`, 'SYSTEM_ERROR', 2);
+      }
+      return b.runSpaceCommand(workspaceId, argsText);
+    }), []); // eslint-disable-line react-hooks/exhaustive-deps
   const activeBackendState = useMemo(() => {
     if (!state.activeBackendKey) return null;
     return state.backends[state.activeBackendKey] ?? null;
@@ -360,11 +309,14 @@ export function useSessionEngine() {
     cancelProjectCreation,
     createWorkspace,
     deleteProject,
+    attachPane,
+    detachPane,
+    detachAllPanes,
     attachSession,
     detachSession,
     cancelPendingScripts,
     cancelPendingReplayRequests,
-    killSession,
+    terminateSession,
     deleteWorkspace,
     getBundleRefreshPlan,
     applyBundleRefresh,
@@ -386,6 +338,7 @@ export function useSessionEngine() {
     getReplayTimeline,
     dismissReplay,
     undismissReplay,
+    runSpaceCommand,
   };
 }
 

@@ -1,0 +1,405 @@
+diff --git a/node_modules/@oh-my-pi/pi-coding-agent/.bun-tag-104d337b727af34b b/.bun-tag-104d337b727af34b
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/@oh-my-pi/pi-coding-agent/.bun-tag-30a8f790368300e0 b/.bun-tag-30a8f790368300e0
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/@oh-my-pi/pi-coding-agent/.bun-tag-59f479ba2c7d156a b/.bun-tag-59f479ba2c7d156a
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/@oh-my-pi/pi-coding-agent/.bun-tag-81e5c3c5177b724 b/.bun-tag-81e5c3c5177b724
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/@oh-my-pi/pi-coding-agent/.bun-tag-a58bfedc695c2580 b/.bun-tag-a58bfedc695c2580
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/@oh-my-pi/pi-coding-agent/.bun-tag-c80cd2a30816531 b/.bun-tag-c80cd2a30816531
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/@oh-my-pi/pi-coding-agent/.bun-tag-d0ef8787a917fc3b b/.bun-tag-d0ef8787a917fc3b
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/src/config/model-resolver.ts b/src/config/model-resolver.ts
+index 15b0df3760294fc45f168aa2cf40ea96029f9691..f3ebc3827d06bc53d84f9f0f349118bcb3df7214 100644
+--- a/src/config/model-resolver.ts
++++ b/src/config/model-resolver.ts
+@@ -37,7 +37,7 @@ import {
+ 	resolveThinkingLevelForModel,
+ } from "../thinking";
+ import { isAuthenticated, kNoAuth, type ModelRegistry } from "./model-registry";
+-import { MODEL_ROLE_IDS, type ModelRole } from "./model-roles";
++import { getKnownRoleIds, MODEL_ROLE_IDS, type ModelRole } from "./model-roles";
+ import type { Settings } from "./settings";
+ 
+ function isKnownProvider(provider: string): provider is KnownProvider {
+@@ -1796,3 +1796,47 @@ export async function findSlowModel(
+ 	// 3. Fallback to first available (same as default)
+ 	return availableModels[0];
+ }
++
++/**
++ * GITSPACE PATCH — agents address models by ROLE, never by model id.
++ *
++ * Throws when `value` names a concrete model (`openai-codex/gpt-5.5`) rather
++ * than a role (`pi/smol`, optionally with a `:thinking` suffix). Roles are the
++ * single place an operator binds capability→model; a hardcoded model id in an
++ * agent-authored spawn silently opts out of that config, rots when model ids
++ * change (gpt-5.5 → gpt-5.6-luna), and makes spend unattributable to a role.
++ *
++ * Deliberately NOT wired into `resolveAgentModelPatterns` itself: that resolver
++ * also serves human surfaces (the agent dashboard) and agent-definition
++ * frontmatter, where naming a concrete model is legitimate. This guard is for
++ * the agent-facing spawn path only.
++ *
++ * `undefined` is allowed — it means "inherit", which is the desired default.
++ */
++export function assertRoleOnlyModelSelector(value: string | string[] | undefined, settings?: Settings): void {
++	const patterns = normalizeModelPatternList(value);
++	if (patterns.length === 0) return;
++
++	// Every role the operator can see under settings > Models > model roles:
++	// non-hidden built-ins PLUS custom roles introduced via cycleOrder,
++	// modelRoles or modelTags. Deliberately NOT limited to roles that already
++	// have a model bound, nor to the quick-cycle subset — an agent may name any
++	// role the operator has, bound or not.
++	const knownRoles = settings ? getKnownRoleIds(settings) : (MODEL_ROLE_IDS as string[]);
++	const known = new Set(knownRoles);
++
++	const offenders = patterns.filter(pattern => {
++		const { base } = splitThinkingSuffix(pattern, PREFIX_MODEL_ROLE.length, MAX_THINKING_SUFFIX_OPTIONS);
++		const trimmed = base.trim();
++		if (!trimmed.startsWith(PREFIX_MODEL_ROLE)) return true;
++		return !known.has(trimmed.slice(PREFIX_MODEL_ROLE.length));
++	});
++	if (offenders.length === 0) return;
++
++	throw new Error(
++		`model must name a role, not a model id. Got ${offenders.map(o => JSON.stringify(o)).join(", ")}. ` +
++			`Available roles: ${knownRoles.map(role => `pi/${role}`).join(", ")}. ` +
++			`Roles are bound to models in settings, so this stays correct when models change. ` +
++			`Omit \`model\` to inherit the session's model, or use \`agent=<name>\` to pick a named subagent.`,
++	);
++}
+diff --git a/src/eval/agent-bridge.ts b/src/eval/agent-bridge.ts
+index d429634c087c01aa87deca27e2eeb1035de6a735..b576e674a55a198d79fa0b2ff1389d71d7e664b8 100644
+--- a/src/eval/agent-bridge.ts
++++ b/src/eval/agent-bridge.ts
+@@ -6,7 +6,7 @@ import * as os from "node:os";
+ import * as path from "node:path";
+ import { prompt, Snowflake } from "@oh-my-pi/pi-utils";
+ import { type } from "arktype";
+-import { resolveAgentModelPatterns } from "../config/model-resolver";
++import { assertRoleOnlyModelSelector, resolveAgentModelPatterns } from "../config/model-resolver";
+ import type { LocalProtocolOptions } from "../internal-urls";
+ import { registerArtifactsDir } from "../internal-urls/registry-helpers";
+ import { MCPManager } from "../mcp/manager";
+@@ -291,7 +291,8 @@ function buildSubagentFailureMessage(agentName: string, result: SingleResult): s
+  */
+ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOptions): Promise<EvalAgentResult> {
+ 	const parsed = parseAgentArgs(args);
+-	const agentName = parsed.agent ?? resolveSpawnPolicy(options.session.getSessionSpawns()).defaultAgent;
++	const spawnDefaultAgent = resolveSpawnPolicy(options.session.getSessionSpawns()).defaultAgent;
++	const agentName = parsed.agent ?? spawnDefaultAgent;
+ 	const structured = Object.hasOwn(parsed, "schema");
+ 
+ 	assertNotPlanMode(options.session);
+@@ -316,6 +317,25 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
+ 	const effectiveAgent = agent;
+ 	const parentActiveModelPattern = options.session.getActiveModelString?.();
+ 	const agentModelOverrides = options.session.settings.get("task.agentModelOverrides");
++	// GITSPACE PATCH: agents address models by ROLE, never by model id.
++	// `agent(model=...)` is the only agent-facing surface that accepts a raw
++	// model (the `task` tool's schema has no model key at all), so a hardcoded
++	// `model='gpt-5.5'` silently opts out of the operator's role config, rots
++	// when model ids change, and makes spend unattributable to a role.
++	assertRoleOnlyModelSelector(parsed.model, options.session.settings);
++	// GITSPACE PATCH: pick an agent OR a role — never both. A named agent
++	// carries its own model configuration (frontmatter + task.agentModelOverrides,
++	// both operator-controlled); layering `model=` on top overrides exactly that
++	// config, which is the same hole role-only selection just closed. Naming the
++	// spawn-policy DEFAULT agent stays compatible with `model=`, since that is
++	// the generic worker — "a plain subagent at role X" is a legitimate ask.
++	if (parsed.model !== undefined && agentName !== spawnDefaultAgent) {
++		throw new ToolError(
++			`agent() takes either agent="${agentName}" or model=, not both. ` +
++				`A named agent already carries its own model configuration; passing model= would override it. ` +
++				`Drop model= to use ${agentName}'s configured model, or drop agent= to run the default worker at that role.`,
++		);
++	}
+ 	const modelOverride = resolveAgentModelPatterns({
+ 		settingsOverride: parsed.model ?? agentModelOverrides[agentName],
+ 		agentModel: effectiveAgent.model,
+diff --git a/src/eval/py/prelude.py b/src/eval/py/prelude.py
+index 663b2a07a85e68afe7e16b3a726550cf66c6bb17..5f0a6c1d274a7049ba66cf491cc4db6155473cfb 100644
+--- a/src/eval/py/prelude.py
++++ b/src/eval/py/prelude.py
+@@ -426,10 +426,21 @@ if "__omp_prelude_loaded__" not in globals():
+     def agent(prompt, *, agent="task", model=None, label=None, schema=None, isolated=None, apply=None, merge=None, handle=False):
+         """Run a subagent and return its final output.
+ 
+-        `agent` selects the subagent definition (default "task"). Pass
+-        `model` to override that agent's model, `label` for the output artifact
+-        id, and `schema` to request structured JSON output; when `schema` is
+-        supplied the parsed object is returned. Share background by writing a
++        Pass EITHER `agent` OR `model` — not both. `agent` selects a named
++        subagent definition, which already carries its own model configuration;
++        adding `model` would override that config and is rejected. Use `model`
++        alone to run the default worker at a given role.
++
++        `model` is ONLY a model ROLE — any role listed under settings > Models
++        (`pi/default`, `pi/smol`, `pi/slow`, `pi/plan`, `pi/vision`,
++        `pi/advisor`, ... plus any custom roles). A concrete model id like
++        `gpt-5.5` is REJECTED: roles are where the operator binds capability to
++        a model, so a hardcoded id silently opts out of that config and rots
++        when model ids change. Omit `model` to inherit the session's model, or
++        pass `agent=<name>` to pick a named subagent.
++        Pass `label` for the output artifact id, and `schema` to request
++        structured JSON output; when `schema` is supplied the parsed object is
++        returned. Share background by writing a
+         local:// file and referencing it in the prompt.
+ 
+         Pass `isolated=True` to run the subagent inside an isolation worktree
+diff --git a/src/internal-urls/local-protocol.ts b/src/internal-urls/local-protocol.ts
+index 6a0daafdde71179e2db5d1a19c535cb45cf5a777..765946457d54cde5434b6b2cf2312af80e6867e4 100644
+--- a/src/internal-urls/local-protocol.ts
++++ b/src/internal-urls/local-protocol.ts
+@@ -242,7 +242,10 @@ function extractRelativePath(url: InternalUrl): string {
+ export function resolveLocalRoot(options: LocalProtocolOptions, platform: NodeJS.Platform = process.platform): string {
+ 	const artifactsDir = options.getArtifactsDir?.();
+ 	if (artifactsDir) {
+-		const candidate = path.resolve(artifactsDir, "local");
++		// GitSpace patch: local:// maps to the artifacts mount ROOT (no "local"
++		// subdir) so local://x === <workspace>/.gitspace/artifacts/x, matching the
++		// `space artifacts` CLI. getArtifactsDir already returns the mount.
++		const candidate = path.resolve(artifactsDir);
+ 		if (platform === "win32" && candidate.length >= WINDOWS_LOCAL_ROOT_MAX_CHARS) {
+ 			return shortLocalRoot(options);
+ 		}
+diff --git a/src/sdk.ts b/src/sdk.ts
+index af74e4bb017677cfeae3d4039283b32b9323944b..c6b5c009db7d0f7e2b0b0977697932a54052fcf7 100644
+--- a/src/sdk.ts
++++ b/src/sdk.ts
+@@ -2693,6 +2693,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
+ 		// parent's manager via `options.mcpManager` and MUST NOT disconnect it.
+ 		const ownedMcpManager = options.mcpManager ? undefined : mcpManager;
+ 		session = new AgentSession({
++			// GitSpace patch: thread the host's local:// mapping into the session
++			// itself, not just the tool session, so plan-reference / plan-mode /
++			// image-vision resolution uses the same root as every tool.
++			localProtocolOptions,
+ 			advisorWatchdogPrompt,
+ 			advisorContextPrompt,
+ 			advisorSharedInstructions: discoveredAdvisors.sharedInstructions,
+diff --git a/src/session/agent-session.ts b/src/session/agent-session.ts
+index f271f21bfa2fed3ce70cd3d7ac1a5fa594a58dd7..1dbd0df5bbdcc11d821b64d48b3bd1769aac3a85 100644
+--- a/src/session/agent-session.ts
++++ b/src/session/agent-session.ts
+@@ -645,6 +645,15 @@ export interface AgentSessionConfig {
+ 	agent: Agent;
+ 	sessionManager: SessionManager;
+ 	settings: Settings;
++	/**
++	 * GitSpace patch: the `local://` root mapping supplied by the embedding host
++	 * via `createAgentSession({ localProtocolOptions })`. Without this the
++	 * session's own `local://` resolution (plan-reference re-injection, plan-mode
++	 * message, image vision fallback) silently used the SessionManager's private
++	 * `.pi/sessions/<...>` dir while every tool used the host's dir — so a plan
++	 * written to `local://<slug>-plan.md` was never found again.
++	 */
++	localProtocolOptions?: LocalProtocolOptions;
+ 	/** Whether the caller explicitly requested yolo/auto-approve behavior for this session. */
+ 	autoApprove?: boolean;
+ 	/** Models to cycle through with Ctrl+P (from --models flag) */
+@@ -1500,6 +1509,8 @@ export class AgentSession {
+ 	readonly agent: Agent;
+ 	readonly sessionManager: SessionManager;
+ 	readonly settings: Settings;
++	/** GitSpace patch: host-supplied `local://` mapping; see AgentSessionConfig. */
++	readonly hostLocalProtocolOptions?: LocalProtocolOptions;
+ 	readonly yieldQueue: YieldQueue;
+ 	fileSnapshotStore?: InMemorySnapshotStore;
+ 	#autoApprove: boolean;
+@@ -1983,6 +1994,7 @@ export class AgentSession {
+ 	constructor(config: AgentSessionConfig) {
+ 		this.agent = config.agent;
+ 		this.sessionManager = config.sessionManager;
++		this.hostLocalProtocolOptions = config.localProtocolOptions;
+ 		this.settings = config.settings;
+ 		this.#autoApprove = config.autoApprove === true;
+ 		// Power assertions are taken per turn (see #beginInFlight); nothing acquired here.
+@@ -5021,10 +5033,16 @@ export class AgentSession {
+ 	}
+ 
+ 	#localProtocolOptions(): LocalProtocolOptions {
+-		return {
+-			getArtifactsDir: () => this.sessionManager.getArtifactsDir(),
+-			getSessionId: () => this.sessionManager.getSessionId(),
+-		};
++		// GitSpace patch: prefer the host-supplied mapping (the same object every
++		// tool, subagent, and eval bridge resolves `local://` against) so the
++		// session's own resolution can never drift to a different root. Falls back
++		// to the SessionManager pair for plain SDK consumers that pass nothing.
++		return (
++			this.hostLocalProtocolOptions ?? {
++				getArtifactsDir: () => this.sessionManager.getArtifactsDir(),
++				getSessionId: () => this.sessionManager.getSessionId(),
++			}
++		);
+ 	}
+ 
+ 	#maybeAbortStreamingEdit(event: AgentEvent): void {
+@@ -8206,6 +8224,23 @@ export class AgentSession {
+ 		};
+ 	}
+ 
++	/** Remove a queued user message by visible kind + index (GitSpace patch).
++	 *  Maps the display index (user-visible messages, matching getQueuedMessages)
++	 *  to the raw queue index and removes it via the agent. */
++	removeQueuedMessage(kind: "steering" | "followUp", index: number): string | undefined {
++		const queue = kind === "steering" ? this.agent.peekSteeringQueue() : this.agent.peekFollowUpQueue();
++		const userIndices: number[] = [];
++		queue.forEach((m, i) => {
++			if (isUserQueuedMessage(m)) userIndices.push(i);
++		});
++		const rawIndex = userIndices[index];
++		if (rawIndex === undefined) return undefined;
++		const removed = queue[rawIndex];
++		if (kind === "steering") this.agent.removeSteer(rawIndex);
++		else this.agent.removeFollowUp(rawIndex);
++		return removed ? queueChipText(removed) : undefined;
++	}
++
+ 	/**
+ 	 * Pop the last queued message (steering first, then follow-up).
+ 	 * Used by dequeue keybinding to restore messages to editor one at a time.
+diff --git a/src/session/blob-store.ts b/src/session/blob-store.ts
+index 5eaa3e7845563a217cc4504e2c80cf4f82abb1a0..a4cfd9738e77b912df4435450144755da539aa5c 100644
+--- a/src/session/blob-store.ts
++++ b/src/session/blob-store.ts
+@@ -190,6 +190,20 @@ export function isImageDataUrl(data: string): boolean {
+ 	return data.startsWith("data:image/") && data.includes(";base64,");
+ }
+ 
++/**
++ * GitSpace patch: structurally-valid placeholder for an image whose backing blob
++ * is missing (evicted / resolved against a different blobs dir). A 1x1 fully
++ * transparent PNG. Previously the resolvers returned the raw `blob:sha256:...`
++ * reference on a miss, which downstream was spliced into an `image_url` /
++ * `data:` URL as if it were base64 — producing an "invalid image_url / invalid
++ * base64" provider 400 that permanently bricked the session until manually
++ * cleared. Returning a real (empty) image keeps the payload valid so the request
++ * always succeeds; the model simply sees a blank image instead of a hard error.
++ */
++const MISSING_IMAGE_PLACEHOLDER_BASE64 =
++	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
++const MISSING_IMAGE_PLACEHOLDER_DATA_URL = `data:image/png;base64,${MISSING_IMAGE_PLACEHOLDER_BASE64}`;
++
+ /**
+  * Externalize a provider image data URL to the blob store, returning a blob reference.
+  * The full data URL string is preserved so transport-native history can be reconstructed on resume.
+@@ -242,8 +256,10 @@ export async function resolveImageDataUrl(blobStore: BlobStore, data: string): P
+ 
+ 	const buffer = await blobStore.get(hash);
+ 	if (!buffer) {
+-		logger.warn("Blob not found for persisted image data URL", { hash });
+-		return data;
++		// GitSpace patch: degrade to a valid transparent-PNG data URL instead of
++		// returning the unresolved ref (which becomes an invalid image_url → 400).
++		logger.warn("Blob not found for persisted image data URL; using placeholder", { hash });
++		return MISSING_IMAGE_PLACEHOLDER_DATA_URL;
+ 	}
+ 	return buffer.toString("utf8");
+ }
+@@ -259,8 +275,10 @@ export async function resolveImageData(blobStore: BlobStore, data: string): Prom
+ 
+ 	const buffer = await blobStore.get(hash);
+ 	if (!buffer) {
+-		logger.warn("Blob not found for image reference", { hash });
+-		return data; // Return the ref as-is; downstream will see invalid base64 but won't crash
++		// GitSpace patch: return valid transparent-PNG base64 instead of the raw
++		// ref, so the restored image block never carries invalid base64.
++		logger.warn("Blob not found for image reference; using placeholder", { hash });
++		return MISSING_IMAGE_PLACEHOLDER_BASE64;
+ 	}
+ 	return buffer.toString("base64");
+ }
+@@ -272,8 +290,10 @@ export function resolveImageDataSync(blobStore: BlobStore, data: string): string
+ 
+ 	const buffer = blobStore.getSync(hash);
+ 	if (!buffer) {
+-		logger.warn("Blob not found for image reference", { hash });
+-		return data;
++		// GitSpace patch: return valid transparent-PNG base64 instead of the raw
++		// ref, so the restored image block never carries invalid base64.
++		logger.warn("Blob not found for image reference; using placeholder", { hash });
++		return MISSING_IMAGE_PLACEHOLDER_BASE64;
+ 	}
+ 	return buffer.toString("base64");
+ }
+diff --git a/src/tools/ask.ts b/src/tools/ask.ts
+index 42de7f930d631cebfb7503620a4cdc409b889865..226a619dbfaca39becf60d6f61a9bd891c478172 100644
+--- a/src/tools/ask.ts
++++ b/src/tools/ask.ts
+@@ -843,6 +843,62 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
+ 			return { content: [{ type: "text" as const, text: responseText }], details };
+ 		}
+ 
++		// GitSpace patch: when the host UI exposes a native multi-question form
++		// (`askForm`), present all 2+ questions in ONE dialog instead of the
++		// sequential per-question `select` flow below. Single questions keep the
++		// plain `select` path above; surfaces without `askForm` (e.g. the Pi TUI)
++		// fall through to the sequential loop.
++		type AskFormQuestion = {
++			id: string;
++			question: string;
++			options: Array<{ label: string; description?: string }>;
++			multiple: boolean;
++			recommended?: number;
++		};
++		type AskFormAnswer = { id: string; selectedOptions: string[]; customInput?: string };
++		const askForm = (context.ui as { askForm?: (title: string, questions: AskFormQuestion[]) => Promise<AskFormAnswer[] | undefined> }).askForm;
++		if (typeof askForm === "function") {
++			const formQuestions: AskFormQuestion[] = params.questions.map(q => ({
++				id: q.id,
++				question: q.question,
++				options: q.options.map(o => ({
++					label: o.label,
++					...(o.description?.trim() ? { description: o.description.trim() } : {}),
++				})),
++				multiple: q.multi ?? false,
++				...(q.recommended !== undefined ? { recommended: q.recommended } : {}),
++			}));
++			const runForm = () => askForm.call(context.ui, "Agent questions", formQuestions);
++			let answers: AskFormAnswer[] | undefined;
++			try {
++				answers = signal ? await untilAborted(signal, runForm) : await runForm();
++			} catch (error) {
++				if (error instanceof Error && error.name === "AbortError") {
++					throw new ToolAbortError("Ask input was cancelled");
++				}
++				throw error;
++			}
++			if (answers === undefined) {
++				context.abort();
++				throw new ToolAbortError("Ask tool was cancelled by the user");
++			}
++			const answerById = new Map(answers.map(a => [a.id, a]));
++			const results: QuestionResult[] = params.questions.map(q => {
++				const answer = answerById.get(q.id);
++				return {
++					id: q.id,
++					question: q.question,
++					options: q.options.map(o => o.label),
++					multi: q.multi ?? false,
++					selectedOptions: answer?.selectedOptions ?? [],
++					customInput: answer?.customInput,
++				};
++			});
++			const details: AskToolDetails = { results };
++			const responseText = `User answers:\n${results.map(formatQuestionResult).join("\n")}`;
++			return { content: [{ type: "text" as const, text: responseText }], details };
++		}
++
+ 		const resultsByIndex: Array<QuestionResult | undefined> = Array.from({ length: params.questions.length });
+ 		let questionIndex = 0;
+ 		while (questionIndex < params.questions.length) {

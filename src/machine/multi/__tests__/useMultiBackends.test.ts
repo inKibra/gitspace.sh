@@ -52,7 +52,7 @@ function makeMockBackend(label = 'test-local'): {
     deleteProject: async () => {},
     attachSession: async () => {},
     detachSession: async () => {},
-    killSession: async () => {},
+    terminateSession: async () => {},
     deleteWorkspace: async () => {},
     onEvent: (_handler: unknown) => () => {},
   } as unknown as SessionBackend;
@@ -133,7 +133,12 @@ describe('useMultiBackends — factory callback stability', () => {
     unmount();
   });
 
-  it('DOES register a new backend when enabled changes from false to true', async () => {
+  // `enabled` gates RELAY and IDENTITY only (useMultiBackends.ts:140-141,161-162);
+  // `createLocalBackend` is passed to the engine unconditionally (:132). The local
+  // backend is the machine you are already on, so there is nothing to enable or
+  // disable about it — "disabled" means no networking, not no backend. These two
+  // tests previously asserted the older, broader meaning.
+  it('registers the local backend regardless of enabled, since enabled gates only relay/identity', async () => {
     const mockInfo = makeMockBackend();
     const factoryCallCount = { n: 0 };
     const factory = () => { factoryCallCount.n++; return mockInfo.backend; };
@@ -144,17 +149,20 @@ describe('useMultiBackends — factory callback stability', () => {
     );
 
     await act(async () => {});
-    expect(factoryCallCount.n).toBe(0); // not called while disabled
+    expect(factoryCallCount.n).toBe(1);
+    expect(mockInfo.connectCount()).toBe(1);
 
+    // Enabling adds relay/identity to the engine config; the already-registered
+    // local backend is not rebuilt or reconnected.
     rerender({ enabled: true });
     await act(async () => {});
 
-    expect(factoryCallCount.n).toBe(1); // called once after enabling
+    expect(factoryCallCount.n).toBe(1);
     expect(mockInfo.connectCount()).toBe(1);
     unmount();
   });
 
-  it('disconnects and unregisters when enabled changes from true to false', async () => {
+  it('keeps the local backend connected when enabled flips to false', async () => {
     const mockInfo = makeMockBackend();
     const factory = () => mockInfo.backend;
 
@@ -169,8 +177,9 @@ describe('useMultiBackends — factory callback stability', () => {
     rerender({ enabled: false });
     await act(async () => {});
 
-    // Cleanup runs — backend should have been unregistered (disconnect called)
-    expect(mockInfo.disconnectCount()).toBeGreaterThanOrEqual(1);
+    // Only relay/identity are dropped from the engine config — the local machine
+    // stays reachable, so nothing disconnects until unmount.
+    expect(mockInfo.disconnectCount()).toBe(0);
     unmount();
   });
 

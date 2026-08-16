@@ -1,5 +1,5 @@
 import type { Session, WorkspaceRuntimeRecord } from './protocol.js';
-import type { WorkspaceAgentState } from './agent-event-manager.js';
+import { computeSessionActivity, type WorkspaceAgentState } from './agent-event-manager.js';
 import { scanWorkspaces } from '../remote-session/workspace-scanner.js';
 import { loadProcessesConfigWithDiagnostics } from '../processes/config.js';
 import { resolveRuntimeProcesses } from '../processes/allocations.js';
@@ -48,7 +48,9 @@ function summarizeWorkspaceAgents(
   agentState: WorkspaceAgentState | undefined,
 ) {
   // Counts derived from the in-memory snapshot and the archived sessions db.
-  const closedCount = (agentState?.sessions ?? []).filter((s) => !!s.closedAt).length;
+  // Dormant and closed both mean "no live worker" for counting purposes, which is
+  // what this bucket has always represented (seeded sessions were stamped closed).
+  const closedCount = (agentState?.sessions ?? []).filter((s) => !!s.closedAt || !!s.dormantSince).length;
   const archivedCount = getArchivedSessions(workspaceId).length;
 
   if (!agentState) {
@@ -68,20 +70,21 @@ function summarizeWorkspaceAgents(
   let errorCount = 0;
   let needsPermissionCount = 0;
 
+  // Buckets follow the same precedence as determineAgentState() in
+  // machine/build.ts, both driven by computeSessionActivity — this used to be an
+  // independent reading of `statuses` and drifted (it missed 'compacting').
   for (const session of agentState.sessions) {
-    if (session.closedAt) continue;
-    const status = agentState.statuses[session.id];
-    const pending = agentState.pendingPermissions[session.id] ?? [];
-    const pendingQ = agentState.pendingQuestions[session.id] ?? [];
-    if (pending.length > 0 || pendingQ.length > 0) {
+    if (session.closedAt || session.dormantSince) continue;
+    const activity = computeSessionActivity(agentState, session.id);
+    if (activity.reasons.some((reason) => reason.kind === 'human')) {
       needsPermissionCount += 1;
       continue;
     }
-    if (status?.type === 'retry') {
+    if (activity.reasons.some((reason) => reason.kind === 'retry')) {
       errorCount += 1;
       continue;
     }
-    if (status?.type === 'busy') {
+    if (activity.reasons.some((reason) => reason.kind === 'turn' || reason.kind === 'compacting')) {
       busyCount += 1;
       continue;
     }
@@ -109,7 +112,9 @@ export async function getWorkspaceRuntimeSnapshot(params: {
   return Promise.all(workspaces.map(async (workspace) => {
     const workspaceId = toCanonicalWorkspaceId(workspace);
     const processConfig = loadProcessesConfigWithDiagnostics(workspace.path);
-    const processes = await resolveRuntimeProcesses(workspace.path, processConfig.config);
+    // Read-only: report persisted allocations only. A snapshot never allocates
+    // or writes, so it can't move a running process's port (nor block on lsof).
+    const processes = resolveRuntimeProcesses(workspace.path, processConfig.config);
     const terminals = summarizeWorkspaceTerminals(workspace.path, sessions);
     const agents = summarizeWorkspaceAgents(workspaceId, agentStateByWorkspaceId[workspaceId]);
     const processSummary = summarizeWorkspaceProcesses(sessions, workspaceId, workspace.id, workspace.path, processes.length);

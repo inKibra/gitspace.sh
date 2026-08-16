@@ -13,7 +13,7 @@ import {
 } from '../lib/processes/manager.js';
 import { loadProcessesConfig, getProcessDefinition } from '../lib/processes/config.js';
 import { normalizeProcessInstanceCount } from '../lib/processes/instances.js';
-import { resolveProcessRuntimePorts } from '../lib/processes/allocations.js';
+import { readAllocatedProcessPorts } from '../lib/processes/allocations.js';
 import { openBrowserUrl } from '../utils/open-browser.js';
 import { refreshTmuxHosting } from '../lib/tmux-lite/hosting/supervisor.js';
 import {
@@ -46,7 +46,7 @@ async function getSpecEndpoints(
   workspaceId: string,
   hosting: HostingRouteState,
 ): Promise<ServiceEndpoint[]> {
-  const ports = await resolveProcessRuntimePorts(workspacePath, spec);
+  const ports = readAllocatedProcessPorts(workspacePath, spec);
   return buildServiceEndpoints({
     workspaceId,
     processName: spec.name,
@@ -120,7 +120,10 @@ export async function listProcesses(options: ProcessCommandOptions): Promise<voi
     logger.log(`${spec.name}#${spec.instance} ${status}`);
     const endpoints = await getSpecEndpoints(workspacePath, spec, workspaceId, hosting);
     if (endpoints.length === 0) {
-      logger.log('  no ports configured');
+      // Ports are allocated at start; a configured-but-never-started process
+      // legitimately has none yet. Reporting no longer allocates on read.
+      const hasConfiguredPorts = (spec.definition.ports ?? []).length > 0;
+      logger.log(hasConfiguredPorts ? '  ports not allocated yet (start the service)' : '  no ports configured');
       continue;
     }
     for (const endpoint of endpoints) {

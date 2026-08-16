@@ -1,3 +1,4 @@
+@import 'dockview-react/dist/styles/dockview.css';
 @import "tailwindcss";
 @source "./*.{ts,tsx,html}";
 @source "../src/**/*.{ts,tsx}";
@@ -14,6 +15,9 @@
 
 /* ── Fonts ────────────────────────────────────────────────────────────────── */
 
+@font-face { font-family: 'Geist Sans'; src: url('https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/Geist-Regular.woff2') format('woff2'); font-weight: 400; font-display: swap; }
+@font-face { font-family: 'Geist Sans'; src: url('https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/Geist-Medium.woff2') format('woff2'); font-weight: 500; font-display: swap; }
+@font-face { font-family: 'Geist Sans'; src: url('https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/Geist-SemiBold.woff2') format('woff2'); font-weight: 600; font-display: swap; }
 @font-face { font-family: 'Geist Mono'; src: url('https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-mono/GeistMono-Regular.woff2') format('woff2'); font-weight: 400; font-display: swap; }
 @font-face { font-family: 'Geist Mono'; src: url('https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-mono/GeistMono-Medium.woff2') format('woff2'); font-weight: 500; font-display: swap; }
 
@@ -48,16 +52,20 @@
   --gs-border-muted: #111111;
   --gs-border-active: #444444;
 
-  /* Text */
-  --gs-text: #d4d4d4;
-  --gs-text-secondary: #b1bac4;
-  --gs-text-muted: #777777;
-  --gs-text-dim: #444444;
+  /* Text — muted/dim lifted toward white for readability (grey was too grey) */
+  --gs-text: #e6e6e6;
+  --gs-text-secondary: #c6cdd5;
+  --gs-text-muted: #9c9c9c;
+  --gs-text-dim: #6a6a6a;
   --gs-text-ghost: #282828;
   --gs-text-on-accent: #000000;
 
   /* Accent */
   --gs-accent: #00ff66;
+  --gs-stage-plan: #5b9bff;
+  --gs-stage-code: #00ff66;
+  --gs-stage-review: #ffcc00;
+  --gs-stage-ship: #bc8cff;
   --gs-accent-hover: #00cc52;
   --gs-accent-subtle: rgba(0, 255, 102, 0.04);
   --gs-accent-glow: 0 0 8px rgba(0, 255, 102, 0.25);
@@ -171,6 +179,10 @@
   --gs-text-on-accent: #000000;
 
   --gs-accent: #e8c840;
+  --gs-stage-plan: #5b9bff;
+  --gs-stage-code: #00ff66;
+  --gs-stage-review: #ffcc00;
+  --gs-stage-ship: #bc8cff;
   --gs-accent-hover: #c8a830;
   --gs-accent-subtle: rgba(232, 200, 64, 0.03);
   --gs-accent-glow: 0 0 8px rgba(232, 200, 64, 0.2);
@@ -271,6 +283,10 @@
   --gs-text-on-accent: #000000;
 
   --gs-accent: #ffffff;
+  --gs-stage-plan: #5b9bff;
+  --gs-stage-code: #00ff66;
+  --gs-stage-review: #ffcc00;
+  --gs-stage-ship: #bc8cff;
   --gs-accent-hover: #cccccc;
   --gs-accent-subtle: rgba(255, 255, 255, 0.03);
   --gs-accent-glow: none;
@@ -371,6 +387,10 @@
   --gs-text-on-accent: #000000;
 
   --gs-accent: #ffffff;
+  --gs-stage-plan: #5b9bff;
+  --gs-stage-code: #00ff66;
+  --gs-stage-review: #ffcc00;
+  --gs-stage-ship: #bc8cff;
   --gs-accent-hover: #cccccc;
   --gs-accent-subtle: rgba(255, 255, 255, 0.02);
   --gs-accent-glow: none;
@@ -471,6 +491,10 @@
   --gs-text-on-accent: #000000;
 
   --gs-accent: #f050a0;
+  --gs-stage-plan: #5b9bff;
+  --gs-stage-code: #00ff66;
+  --gs-stage-review: #ffcc00;
+  --gs-stage-ship: #bc8cff;
   --gs-accent-hover: #d04888;
   --gs-accent-subtle: rgba(240, 80, 160, 0.04);
   --gs-accent-glow: 0 0 8px rgba(240, 80, 160, 0.2);
@@ -571,6 +595,10 @@
   --gs-text-on-accent: #000000;
 
   --gs-accent: #d8c060;
+  --gs-stage-plan: #5b9bff;
+  --gs-stage-code: #00ff66;
+  --gs-stage-review: #ffcc00;
+  --gs-stage-ship: #bc8cff;
   --gs-accent-hover: #b8a048;
   --gs-accent-subtle: rgba(216, 192, 96, 0.03);
   --gs-accent-glow: 0 0 6px rgba(232, 200, 64, 0.15);
@@ -671,6 +699,10 @@
   --gs-text-on-accent: #ffffff;
 
   --gs-accent: #00aa44;
+  --gs-stage-plan: #5b9bff;
+  --gs-stage-code: #00ff66;
+  --gs-stage-review: #ffcc00;
+  --gs-stage-ship: #bc8cff;
   --gs-accent-hover: #008836;
   --gs-accent-subtle: rgba(0, 170, 68, 0.04);
   --gs-accent-glow: 0 0 6px rgba(0, 170, 68, 0.15);
@@ -773,6 +805,10 @@
 
   /* "accent" is black (inversion-based selection) */
   --gs-accent: #1a1816;
+  --gs-stage-plan: #5b9bff;
+  --gs-stage-code: #00ff66;
+  --gs-stage-review: #ffcc00;
+  --gs-stage-ship: #bc8cff;
   --gs-accent-hover: #333028;
   --gs-accent-subtle: rgba(26, 24, 22, 0.04);
   --gs-accent-glow: none;
@@ -851,7 +887,14 @@ body {
   min-height: 100dvh;
   background-color: var(--gs-bg);
   color: var(--gs-text);
-  font-family: var(--gs-font);
+  /* Mock parity (LOCKED): UI chrome is sans (--gs-ui); mono is opt-in via
+     .font-mono/code/pre/kbd and explicit font classes. Do not revert. */
+  font-family: var(--gs-ui);
+  font-size: 13px;
+  line-height: 1.5;
+  letter-spacing: -0.003em;
+  text-rendering: optimizeLegibility;
+  font-feature-settings: "cv01", "ss03";
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   overscroll-behavior: none;
@@ -881,6 +924,23 @@ html {
   border-left: 1px solid var(--gs-border);
   border-right: 1px solid var(--gs-border);
   overflow: hidden;
+}
+
+/* Inline (in-chat) agent dialog: sits above the composer in normal flow so the
+   transcript stays readable above it. Reshapes the modal card to full pane
+   width / natural height, and bounds its own height so a long question scrolls
+   internally instead of shoving the composer off-screen. */
+.gs-agent-dialog-inline {
+  border-top: 1px solid var(--gs-border-muted);
+  max-height: 55vh;
+  overflow-y: auto;
+}
+.gs-agent-dialog-inline .gs-shell-card {
+  width: 100%;
+  min-height: auto;
+  max-height: none;
+  border-left: none;
+  border-right: none;
 }
 
 .gs-shell-card::before {
@@ -1352,6 +1412,9 @@ html {
 .ios-pwa { min-height: 100vh; min-height: -webkit-fill-available; }
 .touch-device .terminal-key { min-height: 36px; min-width: 36px; }
 .coarse-pointer .terminal-key { min-height: 40px; min-width: 40px; }
+/* Chrome-bar actions (⚠ report / ⚑ inbox / ⌘K) are tiny icon buttons — give
+   them a real tap target on touch without disturbing the dense desktop mock. */
+.touch-device .gs-chrome-actions button { min-height: 36px; min-width: 36px; display: inline-flex; align-items: center; justify-content: center; }
 
 .terminal-with-controls { padding-bottom: calc(52px + var(--keyboard-inset, 0px)); }
 .terminal-with-floating-controls { padding-bottom: calc(120px + env(safe-area-inset-bottom, 0px)); }
@@ -1388,6 +1451,9 @@ html {
 /* ── Legacy compat (remove once all components migrated) ─────────────────── */
 
 :root {
+  /* Mock parity: UI chrome font (sidebar, rails, buttons) — mono stays for identifiers/code. */
+  --gs-ui: 'Geist Sans', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+
   --color-bg: var(--gs-bg);
   --color-bg-elevated: var(--gs-bg-elevated);
   --color-bg-surface: var(--gs-bg-surface);
@@ -1411,3 +1477,140 @@ html {
   --color-text-main: var(--gs-text);
   --color-blue: var(--gs-accent);
 }
+
+/* ── @pierre/trees themed to gitspace tokens (RightRail repo tree) ──────────
+   The trees stylesheet resolves --trees-*-override → --trees-theme-* → default;
+   custom properties inherit through the shadow boundary. */
+.gs-pierre-tree {
+  --trees-bg-override: transparent;
+  --trees-fg-override: var(--gs-text);
+  --trees-fg-muted-override: var(--gs-text-dim);
+  --trees-font-family-override: var(--gs-font);
+  --trees-font-size-override: 12px;
+  --trees-border-radius-override: 2px;
+  --trees-accent-override: var(--gs-accent);
+  --trees-selected-bg-override: var(--gs-bg-active);
+  --trees-selected-fg-override: var(--gs-text);
+  --trees-selected-focused-border-color-override: var(--gs-accent);
+  --trees-theme-list-hover-bg: var(--gs-bg-active);
+  --trees-theme-sidebar-bg: transparent;
+  --trees-theme-sidebar-fg: var(--gs-text-muted);
+  --trees-theme-sidebar-border: var(--gs-border-muted);
+  --trees-indent-guide-bg-override: var(--gs-border-muted);
+  --trees-focus-ring-color-override: var(--gs-accent);
+  --trees-scrollbar-thumb-override: var(--gs-border);
+  --trees-input-bg-override: var(--gs-bg-elevated);
+  --trees-search-bg-override: var(--gs-bg-elevated);
+  --trees-search-fg-override: var(--gs-text);
+  /* Mock .tnode indents 14px per depth — the compact default (8px × density)
+     muddies nesting at 12px mono. */
+  --trees-level-gap-override: 14px;
+  /* Mock .gd status-letter column: 14px, right-aligned per-file M/A/D/U. */
+  --trees-git-lane-width-override: 14px;
+  --trees-git-modified-color-override: var(--gs-warning);
+  --trees-git-added-color-override: var(--gs-success);
+  --trees-git-deleted-color-override: var(--gs-danger);
+  --trees-git-renamed-color-override: var(--gs-info);
+  /* Mock tones untracked (U) green like added (.gd.u/.gd.a → --gs-success). */
+  --trees-git-untracked-color-override: var(--gs-success);
+  --trees-git-ignored-color-override: var(--gs-text-ghost);
+  height: 100%;
+}
+
+/* Mock parity: sans UI chrome (mock body font). */
+.gs-ui { font-family: var(--gs-ui); letter-spacing: -0.003em; }
+.font-mono, code, pre, kbd, samp { font-family: var(--gs-font); }
+
+/* ── Goal doc pane (.gs-goal-doc — GoalDocPanel.web.tsx body) ──────────────
+   Mock parity: the goal doc hosts the prominent `.md-doc` markdown variant
+   (mock styles.css:1002-1013) and the kicker-style callout (styles.css:71-74).
+   Scoped overrides on top of the shared block renderers; unlayered so they win
+   over Tailwind utility classes. */
+.gs-goal-doc .gs-block-md h2 { font-size: 14px; font-weight: 600; color: var(--gs-text); margin: 20px 0 8px; padding-bottom: 6px; border-bottom: 1px solid var(--gs-border); }
+.gs-goal-doc .gs-block-md h2:first-child { margin-top: 0; }
+.gs-goal-doc .gs-block-md h3 { font-size: 12.5px; font-weight: 600; color: var(--gs-text); margin: 14px 0 5px; }
+.gs-goal-doc .gs-block-md p { font-size: 13px; line-height: 1.7; color: var(--gs-text-muted); margin: 0 0 11px; }
+.gs-goal-doc .gs-block-md ul, .gs-goal-doc .gs-block-md ol { font-size: 13px; line-height: 1.7; color: var(--gs-text-muted); margin: 0 0 11px; }
+.gs-goal-doc .gs-block-md li { margin: 4px 0; }
+.gs-goal-doc .gs-block-md li::marker { color: var(--gs-accent); }
+.gs-goal-doc .gs-block-md :not(pre) > code { font-size: 12px; background: #000; border: 1px solid var(--gs-border); color: var(--gs-accent); padding: 0 4px; }
+.gs-goal-doc .gs-block-md strong { color: var(--gs-text); }
+
+/* Callout inside the goal doc → mock .callout: full 1px border + 2px tone
+   left border on plain bg, with a 10px uppercase kicker title (the
+   'GAMEABILITY CONTRACT' look). Selector hooks the callout renderer's
+   utility classes (content.web.tsx) — border-l-2 + bg-elevated is unique to
+   the callout root among block renderers. */
+.gs-goal-doc div.border-l-2.bg-\[var\(--gs-bg-elevated\)\] { border-width: 1px 1px 1px 2px; border-style: solid; border-color: var(--gs-border); background: var(--gs-bg); padding: 10px 13px; }
+.gs-goal-doc div.border-l-2.bg-\[var\(--gs-bg-elevated\)\].border-\[var\(--gs-info\)\] { border-left-color: var(--gs-info); }
+.gs-goal-doc div.border-l-2.bg-\[var\(--gs-bg-elevated\)\].border-\[var\(--gs-warning\)\] { border-left-color: var(--gs-warning); }
+.gs-goal-doc div.border-l-2.bg-\[var\(--gs-bg-elevated\)\].border-\[var\(--gs-success\)\] { border-left-color: var(--gs-success); }
+.gs-goal-doc div.border-l-2.bg-\[var\(--gs-bg-elevated\)\].border-\[var\(--gs-danger\)\] { border-left-color: var(--gs-danger); }
+.gs-goal-doc div.border-l-2.bg-\[var\(--gs-bg-elevated\)\] > div.font-semibold { font-size: 10px; font-weight: 400; text-transform: uppercase; letter-spacing: 0.1em; color: var(--gs-text-dim); margin-bottom: 4px; }
+
+/* Mock parity item 6: toast stack — dark surface, tone-colored 3px left bars
+   (mock .toast.success/.error/.info), sans body. Applies to the sonner stack. */
+[data-sonner-toast] {
+  background: var(--gs-bg-overlay) !important;
+  border: 1px solid var(--gs-border-active) !important;
+  border-left-width: 3px !important;
+  border-radius: 0 !important;
+  color: var(--gs-text) !important;
+  font-family: var(--gs-ui) !important;
+  font-size: 12.5px !important;
+}
+[data-sonner-toast][data-type='success'] { border-left-color: var(--gs-success) !important; }
+[data-sonner-toast][data-type='error'] { border-left-color: var(--gs-danger) !important; }
+[data-sonner-toast][data-type='info'], [data-sonner-toast][data-type='default'] { border-left-color: var(--gs-info) !important; }
+[data-sonner-toast][data-type='warning'] { border-left-color: var(--gs-warning) !important; }
+[data-sonner-toast] [data-description] { color: var(--gs-text-dim) !important; }
+
+/* Mock parity: active dock tab gets the accent inset underline (mock .tab.active). */
+.dockview-theme-dark .dv-tab.dv-active-tab,
+.dockview-theme-abyss .dv-tab.dv-active-tab {
+  background: var(--gs-bg);
+  box-shadow: inset 0 -2px 0 var(--gs-accent);
+}
+
+/* ── .gs-block-md: the app-wide markdown document theme ─────────────────────
+   Professional doc typography over --gs-* tokens; used by notes, goal docs,
+   guides, artifact previews, report bodies. */
+.gs-block-md { font-family: var(--gs-ui); font-size: 13px; line-height: 1.65; color: var(--gs-text); }
+.gs-block-md > :first-child { margin-top: 0; }
+.gs-block-md h1 { font-size: 19px; font-weight: 600; letter-spacing: -0.012em; margin: 26px 0 10px; padding-bottom: 8px; border-bottom: 1px solid var(--gs-border); }
+.gs-block-md h2 { font-size: 15.5px; font-weight: 600; letter-spacing: -0.008em; margin: 22px 0 8px; padding-bottom: 6px; border-bottom: 1px solid var(--gs-border-muted); }
+.gs-block-md h3 { font-size: 13.5px; font-weight: 600; margin: 16px 0 6px; }
+.gs-block-md h4, .gs-block-md h5, .gs-block-md h6 { font-size: 12.5px; font-weight: 600; color: var(--gs-text-muted); margin: 12px 0 4px; text-transform: uppercase; letter-spacing: 0.04em; }
+.gs-block-md p { margin: 0 0 10px; color: var(--gs-text-muted); }
+.gs-block-md strong { color: var(--gs-text); font-weight: 600; }
+.gs-block-md a { color: var(--gs-info); text-decoration: none; border-bottom: 1px solid rgba(91, 155, 255, 0.3); }
+.gs-block-md a:hover { border-bottom-color: var(--gs-info); }
+.gs-block-md ul, .gs-block-md ol { margin: 0 0 10px; padding-left: 22px; color: var(--gs-text-muted); }
+.gs-block-md li { margin: 3px 0; }
+.gs-block-md li::marker { color: var(--gs-accent); }
+.gs-block-md ol > li::marker { color: var(--gs-text-dim); font-variant-numeric: tabular-nums; }
+.gs-block-md blockquote { margin: 0 0 10px; padding: 6px 12px; border-left: 2px solid var(--gs-border-active); color: var(--gs-text-dim); background: var(--gs-bg-elevated); }
+.gs-block-md blockquote p:last-child { margin-bottom: 0; }
+.gs-block-md hr { border: 0; border-top: 1px solid var(--gs-border); margin: 18px 0; }
+.gs-block-md code { font-family: var(--gs-font); font-size: 11.5px; background: #000; border: 1px solid var(--gs-border-muted); border-radius: 3px; padding: 1px 5px; color: var(--gs-accent); }
+.gs-block-md pre { margin: 0 0 12px; padding: 10px 12px; background: #000; border: 1px solid var(--gs-border); overflow-x: auto; }
+.gs-block-md pre code { background: none; border: 0; padding: 0; color: var(--gs-text); font-size: 12px; line-height: 1.6; }
+.gs-block-md table { border-collapse: collapse; margin: 0 0 12px; width: 100%; font-size: 12px; }
+.gs-block-md th { text-align: left; font-weight: 600; color: var(--gs-text); background: var(--gs-bg-elevated); border: 1px solid var(--gs-border); padding: 5px 10px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; }
+.gs-block-md td { border: 1px solid var(--gs-border-muted); padding: 5px 10px; color: var(--gs-text-muted); vertical-align: top; }
+.gs-block-md tr:hover td { background: var(--gs-bg-hover); }
+.gs-block-md img { max-width: 100%; border: 1px solid var(--gs-border); }
+
+/* Markdown previews (MarkdownPreview.web): document theme at row scale. */
+.gs-md-preview { font-size: 12px; line-height: 1.45; color: var(--gs-text-muted); }
+.gs-md-preview h1, .gs-md-preview h2, .gs-md-preview h3, .gs-md-preview h4 {
+  font-size: 12.5px; margin: 0 0 2px; padding: 0; border: 0; color: var(--gs-text);
+}
+.gs-md-preview p { margin: 0 0 3px; }
+.gs-md-preview ul, .gs-md-preview ol { margin: 0 0 3px; padding-left: 16px; }
+.gs-md-preview pre { margin: 2px 0; padding: 3px 6px; font-size: 11px; }
+.gs-md-preview blockquote { margin: 2px 0; padding: 0 0 0 8px; }
+.gs-md-preview table { margin: 2px 0; font-size: 11px; }
+.gs-md-preview hr { margin: 3px 0; }
+.gs-md-preview code { background: #111; border: 1px solid var(--gs-border); padding: 0 3px; border-radius: 2px; font-size: 11px; }
+.gs-md-preview strong { color: var(--gs-text); }

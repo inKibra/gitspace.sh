@@ -1,0 +1,1553 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agent Blame — Conversational Memory for Code</title>
+<style>
+  @font-face { font-family:'Geist Mono'; src:url('https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-mono/GeistMono-Regular.woff2') format('woff2'); font-weight:400; font-display:swap; }
+  @font-face { font-family:'Geist Mono'; src:url('https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-mono/GeistMono-Medium.woff2') format('woff2'); font-weight:500; font-display:swap; }
+  @font-face { font-family:'Geist Sans'; src:url('https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/Geist-Regular.woff2') format('woff2'); font-weight:400; font-display:swap; }
+  @font-face { font-family:'Geist Sans'; src:url('https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/Geist-Medium.woff2') format('woff2'); font-weight:500; font-display:swap; }
+  @font-face { font-family:'Geist Sans'; src:url('https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/Geist-SemiBold.woff2') format('woff2'); font-weight:600; font-display:swap; }
+
+  :root {
+    --bg: #0a0a0c;
+    --bg-raised: #111116;
+    --bg-elevated: #18181f;
+    --bg-hover: #1e1e28;
+    --border: #2a2a35;
+    --border-subtle: #1a1a24;
+    --text: #e8e6e3;
+    --text-dim: #8a8892;
+    --text-muted: #5a5866;
+    --accent: #c4f56e;
+    --accent-dim: #7a9a3a;
+    --accent-glow: rgba(196, 245, 110, 0.08);
+    --red: #f56e6e;
+    --red-dim: rgba(245, 110, 110, 0.15);
+    --blue: #6eb4f5;
+    --blue-dim: rgba(110, 180, 245, 0.15);
+    --orange: #f5b06e;
+    --orange-dim: rgba(245, 176, 110, 0.15);
+    --purple: #b06ef5;
+    --purple-dim: rgba(176, 110, 245, 0.15);
+    --serif: 'Geist Sans', -apple-system, sans-serif;
+    --mono: 'Geist Mono', 'SF Mono', Consolas, monospace;
+    --sans: 'Geist Sans', -apple-system, sans-serif;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  html { scroll-behavior: smooth; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 16px;
+    line-height: 1.7;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  ::selection {
+    background: var(--accent);
+    color: var(--bg);
+  }
+
+  /* ── Hero ── */
+  .hero {
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    padding: 80px 60px;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .hero::before {
+    content: '';
+    position: absolute;
+    top: -200px;
+    right: -200px;
+    width: 800px;
+    height: 800px;
+    background: radial-gradient(circle, var(--accent-glow) 0%, transparent 70%);
+    pointer-events: none;
+  }
+
+  .hero-eyebrow {
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 32px;
+    opacity: 0;
+    animation: fadeUp 0.6s ease forwards 0.2s;
+  }
+
+  .hero h1 {
+    font-family: var(--serif);
+    font-size: clamp(48px, 7vw, 96px);
+    line-height: 1.05;
+    font-weight: 400;
+    max-width: 900px;
+    opacity: 0;
+    animation: fadeUp 0.8s ease forwards 0.4s;
+  }
+
+  .hero h1 em {
+    font-style: italic;
+    color: var(--accent);
+  }
+
+  .hero-sub {
+    font-size: 18px;
+    color: var(--text-dim);
+    max-width: 600px;
+    margin-top: 32px;
+    opacity: 0;
+    animation: fadeUp 0.8s ease forwards 0.6s;
+  }
+
+  .hero-scroll {
+    position: absolute;
+    bottom: 40px;
+    left: 60px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-muted);
+    letter-spacing: 2px;
+    opacity: 0;
+    animation: fadeUp 0.6s ease forwards 1s;
+  }
+
+  .hero-scroll::after {
+    content: '';
+    display: block;
+    width: 1px;
+    height: 40px;
+    background: var(--text-muted);
+    margin-top: 12px;
+    animation: pulse 2s ease infinite;
+  }
+
+  /* ── Sections ── */
+  .section {
+    padding: 100px 60px;
+    max-width: 1200px;
+    margin: 0 auto;
+  }
+
+  .section-label {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 16px;
+  }
+
+  .section h2 {
+    font-family: var(--serif);
+    font-size: clamp(32px, 4vw, 52px);
+    font-weight: 400;
+    line-height: 1.15;
+    margin-bottom: 24px;
+  }
+
+  .section h3 {
+    font-family: var(--sans);
+    font-size: 20px;
+    font-weight: 500;
+    margin-top: 48px;
+    margin-bottom: 16px;
+    color: var(--text);
+  }
+
+  .section p {
+    color: var(--text-dim);
+    max-width: 680px;
+    margin-bottom: 20px;
+  }
+
+  .section p strong {
+    color: var(--text);
+    font-weight: 500;
+  }
+
+  .divider {
+    height: 1px;
+    background: var(--border-subtle);
+    max-width: 1200px;
+    margin: 0 auto;
+  }
+
+  /* ── Problem Statement ── */
+  .compare-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 24px;
+    margin: 40px 0;
+  }
+
+  .compare-card {
+    background: var(--bg-raised);
+    border: 1px solid var(--border-subtle);
+    border-radius: 12px;
+    padding: 32px;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .compare-card.old { border-color: rgba(245, 110, 110, 0.2); }
+  .compare-card.new { border-color: rgba(196, 245, 110, 0.2); }
+
+  .compare-card .tag {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    margin-bottom: 16px;
+  }
+
+  .compare-card.old .tag { color: var(--red); }
+  .compare-card.new .tag { color: var(--accent); }
+
+  .compare-card pre {
+    font-family: var(--mono);
+    font-size: 13px;
+    line-height: 1.8;
+    color: var(--text-dim);
+    white-space: pre-wrap;
+  }
+
+  .compare-card pre .highlight { color: var(--text); }
+  .compare-card.new pre .highlight { color: var(--accent); }
+  .compare-card.old pre .highlight { color: var(--red); }
+
+  /* ── Interactive Timeline ── */
+  .timeline-container {
+    margin: 48px 0;
+    position: relative;
+  }
+
+  .timeline-track {
+    position: absolute;
+    left: 24px;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    background: var(--border);
+  }
+
+  .timeline-track .fill {
+    width: 100%;
+    background: var(--accent);
+    transition: height 0.6s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  .timeline-event {
+    position: relative;
+    padding-left: 64px;
+    padding-bottom: 48px;
+    cursor: pointer;
+  }
+
+  .timeline-dot {
+    position: absolute;
+    left: 16px;
+    top: 4px;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: var(--bg);
+    border: 2px solid var(--border);
+    transition: all 0.3s ease;
+    z-index: 1;
+  }
+
+  .timeline-event.active .timeline-dot {
+    border-color: var(--accent);
+    background: var(--accent);
+    box-shadow: 0 0 16px var(--accent-glow);
+  }
+
+  .timeline-event.active .timeline-dot::after {
+    content: '';
+    position: absolute;
+    inset: -6px;
+    border-radius: 50%;
+    border: 1px solid rgba(196, 245, 110, 0.3);
+    animation: ringPulse 2s ease infinite;
+  }
+
+  .timeline-event-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 8px;
+  }
+
+  .timeline-event-header .change-tag {
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 3px 10px;
+    border-radius: 4px;
+    font-weight: 500;
+  }
+
+  /* coloured by the KIND of conceptual change, not by which agent */
+  .kind-introduce { background: var(--blue-dim); color: var(--blue); }
+  .kind-move { background: var(--orange-dim); color: var(--orange); }
+  .kind-refine { background: var(--purple-dim); color: var(--purple); }
+
+  .timeline-event-header .tool-tag {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--text-muted);
+    letter-spacing: 1px;
+  }
+
+  .timeline-event-title {
+    font-weight: 500;
+    font-size: 15px;
+    margin-bottom: 4px;
+    transition: color 0.2s;
+  }
+
+  .timeline-event.active .timeline-event-title {
+    color: var(--accent);
+  }
+
+  .timeline-event-desc {
+    font-size: 13px;
+    color: var(--text-muted);
+  }
+
+  .timeline-detail {
+    margin-top: 16px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-subtle);
+    border-radius: 10px;
+    overflow: hidden;
+    max-height: 0;
+    opacity: 0;
+    transition: max-height 0.5s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.3s ease, margin 0.3s ease;
+  }
+
+  .timeline-event.active .timeline-detail {
+    max-height: 600px;
+    opacity: 1;
+  }
+
+  .timeline-detail-inner {
+    padding: 24px;
+  }
+
+  .timeline-detail h4 {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin-bottom: 12px;
+  }
+
+  .diff-view {
+    font-family: var(--mono);
+    font-size: 12px;
+    line-height: 1.9;
+    border-radius: 8px;
+    overflow: hidden;
+    background: var(--bg);
+    border: 1px solid var(--border-subtle);
+  }
+
+  .diff-line {
+    padding: 0 16px;
+    white-space: pre;
+    border-left: 3px solid transparent;
+  }
+
+  .diff-line.add {
+    background: rgba(196, 245, 110, 0.06);
+    border-left-color: var(--accent-dim);
+    color: var(--accent);
+  }
+
+  .diff-line.remove {
+    background: rgba(245, 110, 110, 0.06);
+    border-left-color: rgba(245, 110, 110, 0.4);
+    color: var(--red);
+  }
+
+  .diff-line.context { color: var(--text-muted); }
+
+  .diff-line .ln {
+    display: inline-block;
+    width: 32px;
+    color: var(--text-muted);
+    opacity: 0.4;
+    user-select: none;
+  }
+
+  .record-fields {
+    display: grid;
+    grid-template-columns: 120px 1fr;
+    gap: 6px 16px;
+    font-size: 13px;
+    margin-top: 16px;
+  }
+
+  .record-fields .field-key {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-muted);
+    text-align: right;
+  }
+
+  .record-fields .field-val {
+    color: var(--text-dim);
+    font-family: var(--mono);
+    font-size: 11px;
+  }
+
+  .record-fields .field-val.accent { color: var(--accent); }
+
+  /* ── Lineage Graph ── */
+  .lineage-container {
+    margin: 48px 0;
+    background: var(--bg-raised);
+    border: 1px solid var(--border-subtle);
+    border-radius: 16px;
+    padding: 40px;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .lineage-svg {
+    width: 100%;
+    height: 320px;
+  }
+
+  .lineage-node {
+    cursor: pointer;
+    transition: transform 0.2s ease;
+  }
+
+  .lineage-node:hover { transform: scale(1.05); }
+
+  .lineage-edge {
+    stroke-dasharray: 6 4;
+    animation: dashFlow 1.5s linear infinite;
+  }
+
+  .lineage-label-box {
+    rx: 8;
+    fill: var(--bg-elevated);
+    stroke-width: 1.5;
+    transition: all 0.2s ease;
+  }
+
+  .lineage-node:hover .lineage-label-box {
+    filter: brightness(1.2);
+  }
+
+  .lineage-legend {
+    display: flex;
+    gap: 24px;
+    margin-top: 24px;
+    flex-wrap: wrap;
+  }
+
+  .lineage-legend-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+
+  .lineage-legend-item .swatch {
+    width: 12px;
+    height: 12px;
+    border-radius: 3px;
+  }
+
+  /* ── Blame Demo ── */
+  .blame-demo {
+    margin: 48px 0;
+    background: var(--bg-raised);
+    border: 1px solid var(--border-subtle);
+    border-radius: 16px;
+    overflow: hidden;
+  }
+
+  .blame-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 20px;
+    background: var(--bg-elevated);
+    border-bottom: 1px solid var(--border-subtle);
+    font-family: var(--mono);
+    font-size: 12px;
+  }
+
+  .blame-toolbar .dots {
+    display: flex;
+    gap: 6px;
+    margin-right: 8px;
+  }
+
+  .blame-toolbar .dots span {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--border);
+  }
+
+  .blame-toolbar .filepath { color: var(--text-muted); }
+  .blame-toolbar .filepath strong { color: var(--text-dim); }
+
+  .blame-code {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    font-family: var(--mono);
+    font-size: 13px;
+    line-height: 2;
+  }
+
+  .blame-gutter {
+    padding: 16px 0;
+    border-right: 1px solid var(--border-subtle);
+    user-select: none;
+  }
+
+  .blame-gutter-line {
+    padding: 0 16px;
+    text-align: right;
+    color: var(--text-muted);
+    opacity: 0.3;
+    font-size: 11px;
+  }
+
+  .blame-source {
+    padding: 16px 0;
+  }
+
+  .blame-source-line {
+    padding: 0 20px;
+    cursor: pointer;
+    transition: background 0.15s ease;
+    position: relative;
+  }
+
+  .blame-source-line:hover {
+    background: var(--bg-hover);
+  }
+
+  .blame-source-line.selected {
+    background: var(--accent-glow);
+  }
+
+  .blame-source-line .code-kw { color: var(--purple); }
+  .blame-source-line .code-fn { color: var(--blue); }
+  .blame-source-line .code-str { color: var(--accent); }
+  .blame-source-line .code-cm { color: var(--text-muted); font-style: italic; }
+  .blame-source-line .code-op { color: var(--text-muted); }
+  .blame-source-line .code-type { color: var(--orange); }
+
+  .blame-panel {
+    border-top: 1px solid var(--border-subtle);
+    background: var(--bg-elevated);
+    padding: 28px;
+    min-height: 120px;
+    transition: opacity 0.3s ease;
+  }
+
+  .blame-panel.empty {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .blame-panel.empty p {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+
+  .blame-chain {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+  }
+
+  .blame-chain-item {
+    display: grid;
+    grid-template-columns: 8px 1fr;
+    gap: 16px;
+    padding: 12px 0;
+    opacity: 0;
+    animation: fadeUp 0.3s ease forwards;
+  }
+
+  .blame-chain-item:not(:last-child) {
+    border-bottom: 1px solid var(--border-subtle);
+  }
+
+  .blame-chain-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    margin-top: 6px;
+  }
+
+  .blame-chain-content {
+    font-size: 13px;
+  }
+
+  .blame-chain-content .chain-summary {
+    color: var(--text);
+    margin-bottom: 4px;
+  }
+
+  .blame-chain-content .chain-meta {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--text-muted);
+    display: flex;
+    gap: 16px;
+  }
+
+  .blame-chain-content .chain-confidence {
+    font-family: var(--mono);
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 3px;
+    display: inline-block;
+    margin-left: 8px;
+  }
+
+  .conf-high { background: rgba(196, 245, 110, 0.1); color: var(--accent); }
+  .conf-medium { background: rgba(245, 176, 110, 0.1); color: var(--orange); }
+
+  /* ── Pipeline Diagram ── */
+  .pipeline {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 2px;
+    margin: 48px 0;
+    background: var(--border-subtle);
+    border-radius: 12px;
+    overflow: hidden;
+  }
+
+  .pipeline-stage {
+    background: var(--bg-raised);
+    padding: 32px 24px;
+    text-align: center;
+    cursor: pointer;
+    transition: background 0.2s ease;
+    position: relative;
+  }
+
+  .pipeline-stage:hover {
+    background: var(--bg-elevated);
+  }
+
+  .pipeline-stage.active {
+    background: var(--bg-elevated);
+  }
+
+  .pipeline-stage.active::after {
+    content: '';
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: 2px;
+    background: var(--accent);
+  }
+
+  .pipeline-stage .stage-num {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-bottom: 8px;
+  }
+
+  .pipeline-stage .stage-title {
+    font-weight: 500;
+    font-size: 14px;
+    margin-bottom: 4px;
+  }
+
+  .pipeline-stage.active .stage-title {
+    color: var(--accent);
+  }
+
+  .pipeline-stage .stage-desc {
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+
+  .pipeline-detail {
+    margin-top: 2px;
+    background: var(--bg-raised);
+    border: 1px solid var(--border-subtle);
+    border-radius: 12px;
+    padding: 32px;
+    min-height: 200px;
+  }
+
+  .pipeline-detail .detail-title {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 16px;
+  }
+
+  .pipeline-detail pre {
+    font-family: var(--mono);
+    font-size: 12px;
+    line-height: 1.8;
+    color: var(--text-dim);
+    background: var(--bg);
+    border: 1px solid var(--border-subtle);
+    border-radius: 8px;
+    padding: 20px;
+    overflow-x: auto;
+  }
+
+  .pipeline-detail pre .key { color: var(--blue); }
+  .pipeline-detail pre .str { color: var(--accent); }
+  .pipeline-detail pre .num { color: var(--orange); }
+  .pipeline-detail pre .bool { color: var(--purple); }
+  .pipeline-detail pre .comment { color: var(--text-muted); font-style: italic; }
+
+  /* ── Summary Memo Diagram ── */
+  .memo-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 20px;
+    margin: 48px 0;
+  }
+
+  .memo-card {
+    background: var(--bg-raised);
+    border: 1px solid var(--border-subtle);
+    border-radius: 12px;
+    padding: 28px;
+    transition: border-color 0.2s ease;
+  }
+
+  .memo-card:hover {
+    border-color: var(--border);
+  }
+
+  .memo-card .memo-level {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    margin-bottom: 12px;
+  }
+
+  .memo-card:nth-child(1) .memo-level { color: var(--blue); }
+  .memo-card:nth-child(2) .memo-level { color: var(--orange); }
+  .memo-card:nth-child(3) .memo-level { color: var(--purple); }
+
+  .memo-card .memo-title {
+    font-weight: 500;
+    font-size: 16px;
+    margin-bottom: 8px;
+  }
+
+  .memo-card .memo-desc {
+    font-size: 13px;
+    color: var(--text-muted);
+    margin-bottom: 16px;
+  }
+
+  .memo-card .memo-key {
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 8px 12px;
+    background: var(--bg);
+    border-radius: 6px;
+    color: var(--text-dim);
+    word-break: break-all;
+  }
+
+  .memo-card .memo-key span { color: var(--accent); }
+
+  .memo-card .memo-example {
+    margin-top: 12px;
+    font-size: 13px;
+    color: var(--text-dim);
+    padding: 12px;
+    background: var(--bg);
+    border-radius: 6px;
+    font-style: italic;
+  }
+
+  /* ── Callout ── */
+  .callout {
+    border-left: 3px solid var(--accent);
+    padding: 20px 24px;
+    background: var(--accent-glow);
+    border-radius: 0 8px 8px 0;
+    margin: 32px 0;
+  }
+
+  .callout p {
+    color: var(--text);
+    font-size: 15px;
+    max-width: 100%;
+  }
+
+  .callout p strong { color: var(--accent); }
+
+  /* ── Footer ── */
+  .footer {
+    padding: 80px 60px;
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 13px;
+    border-top: 1px solid var(--border-subtle);
+  }
+
+  .footer .footer-mark {
+    font-family: var(--serif);
+    font-size: 24px;
+    color: var(--accent);
+    margin-bottom: 12px;
+  }
+
+  /* ── Animations ── */
+  @keyframes fadeUp {
+    from { opacity: 0; transform: translateY(16px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 0.3; }
+    50% { opacity: 1; }
+  }
+
+  @keyframes ringPulse {
+    0% { transform: scale(1); opacity: 0.6; }
+    100% { transform: scale(1.8); opacity: 0; }
+  }
+
+  @keyframes dashFlow {
+    to { stroke-dashoffset: -20; }
+  }
+
+  /* ── Responsive ── */
+  @media (max-width: 900px) {
+    .hero { padding: 60px 28px; }
+    .section { padding: 60px 28px; }
+    .compare-grid { grid-template-columns: 1fr; }
+    .pipeline { grid-template-columns: repeat(2, 1fr); }
+    .memo-grid { grid-template-columns: 1fr; }
+    .hero-scroll { left: 28px; }
+    .footer { padding: 60px 28px; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ═══════════════ HERO ═══════════════ -->
+<header class="hero">
+  <div class="hero-eyebrow">GitSpace / Agent Provenance</div>
+  <h1>What if <em>git blame</em> could explain the conversation behind the code?</h1>
+  <p class="hero-sub">
+    Agent Blame is a system for recording why code exists — not just who committed it.
+    It captures conversational context from AI coding agents at edit time, preserves it across squash merges, and lets your team query the full reasoning chain behind any line.
+  </p>
+  <div class="hero-scroll">SCROLL</div>
+</header>
+
+<div class="divider"></div>
+
+<!-- ═══════════════ THE PROBLEM ═══════════════ -->
+<section class="section">
+  <div class="section-label">The Problem</div>
+  <h2>git blame tells you who. It cannot tell you why.</h2>
+  <p>
+    When AI agents write code, the reasoning lives in the conversation — the user's request,
+    the agent's plan, the intermediate refactors. But once the branch is squashed and merged,
+    all of that evaporates. You get one commit hash and a message.
+  </p>
+
+  <div class="compare-grid">
+    <div class="compare-card old">
+      <div class="tag">Today: git blame</div>
+      <pre><span class="highlight">abc123f</span>  (agent-bot  2026-03-27)  <span class="highlight">export function validateUser(user) {</span>
+abc123f  (agent-bot  2026-03-27)    if (!user.email) {
+abc123f  (agent-bot  2026-03-27)      throw new AuthError("missing email");
+abc123f  (agent-bot  2026-03-27)    }
+abc123f  (agent-bot  2026-03-27)  }</pre>
+    </div>
+
+    <div class="compare-card new">
+      <div class="tag">Agent Blame</div>
+      <pre><span class="highlight">Introduced</span>  signup validation
+          why: "user asked for safer signup handling"
+
+<span class="highlight">Extracted</span>   into a shared helper
+          why: "duplicated across two endpoints"
+
+<span class="highlight">Moved</span>       to shared/auth/validation.ts
+          why: "refactoring auth module boundaries"
+
+One agent, three conceptual changes — landed in <span class="highlight">abc123f</span></pre>
+    </div>
+  </div>
+
+  <div class="callout">
+    <p>
+      <strong>The key insight:</strong> the unit of provenance is not the commit — and it is not the agent.
+      It is the <strong>conceptual change</strong>: each time an agent meaningfully transforms the code —
+      introduces, moves, refines, supersedes. Many changes may land in a single commit, but the
+      reasoning chain only exists in the pre-commit history.
+    </p>
+  </div>
+</section>
+
+<div class="divider"></div>
+
+<!-- ═══════════════ INTERACTIVE TIMELINE ═══════════════ -->
+<section class="section">
+  <div class="section-label">How It Works</div>
+  <h2>Every conceptual change is an event. Click to inspect.</h2>
+  <p>
+    The system hooks into every mutating tool call — edit, write, bash — and captures
+    what changed, how the code looked before and after, and references to the
+    surrounding conversation. Click each event below.
+  </p>
+
+  <div class="timeline-container" id="timeline">
+    <div class="timeline-track"><div class="fill" id="timeline-fill"></div></div>
+
+    <!-- Event 1 -->
+    <div class="timeline-event active" data-event="0" onclick="selectEvent(0)">
+      <div class="timeline-dot"></div>
+      <div class="timeline-event-header">
+        <span class="change-tag kind-introduce">Introduced</span>
+        <span class="tool-tag">edit &middot; 14:32:01</span>
+      </div>
+      <div class="timeline-event-title">Signup validation</div>
+      <div class="timeline-event-desc">Added validateUser() to signup handler</div>
+      <div class="timeline-detail">
+        <div class="timeline-detail-inner">
+          <h4>Observed Diff</h4>
+          <div class="diff-view">
+            <div class="diff-line context"><span class="ln">18</span> export async function handleSignup(req) {</div>
+            <div class="diff-line add"><span class="ln">19</span>+  validateUser(req.body);</div>
+            <div class="diff-line context"><span class="ln">20</span>   const user = await createUser(req.body);</div>
+            <div class="diff-line context"><span class="ln">  </span> ...</div>
+            <div class="diff-line add"><span class="ln">42</span>+function validateUser(user) {</div>
+            <div class="diff-line add"><span class="ln">43</span>+  if (!user.email) {</div>
+            <div class="diff-line add"><span class="ln">44</span>+    throw new Error("missing email");</div>
+            <div class="diff-line add"><span class="ln">45</span>+  }</div>
+            <div class="diff-line add"><span class="ln">46</span>+}</div>
+          </div>
+          <div class="record-fields">
+            <span class="field-key">eventId</span><span class="field-val accent">evt_a1b2c3</span>
+            <span class="field-key">changeType</span><span class="field-val">add</span>
+            <span class="field-key">patchId</span><span class="field-val">f7a2e9c1...</span>
+            <span class="field-key">lineage</span><span class="field-val accent">introduces (no ancestor)</span>
+            <span class="field-key">contextRef</span><span class="field-val">msg_user_0041 &rarr; "make signup safer"</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Event 2 -->
+    <div class="timeline-event" data-event="1" onclick="selectEvent(1)">
+      <div class="timeline-dot"></div>
+      <div class="timeline-event-header">
+        <span class="change-tag kind-move">Moved</span>
+        <span class="tool-tag">edit &middot; 14:38:22</span>
+      </div>
+      <div class="timeline-event-title">Extracted into shared helper</div>
+      <div class="timeline-event-desc">Moved validation into shared/validation.ts</div>
+      <div class="timeline-detail">
+        <div class="timeline-detail-inner">
+          <h4>Observed Diff</h4>
+          <div class="diff-view">
+            <div class="diff-line context"><span class="ln">  </span> // signup.ts</div>
+            <div class="diff-line remove"><span class="ln">42</span>-function validateUser(user) {</div>
+            <div class="diff-line remove"><span class="ln">43</span>-  if (!user.email) {</div>
+            <div class="diff-line remove"><span class="ln">44</span>-    throw new Error("missing email");</div>
+            <div class="diff-line remove"><span class="ln">45</span>-  }</div>
+            <div class="diff-line remove"><span class="ln">46</span>-}</div>
+            <div class="diff-line context"><span class="ln">  </span> </div>
+            <div class="diff-line context"><span class="ln">  </span> // shared/validation.ts (new file)</div>
+            <div class="diff-line add"><span class="ln"> 1</span>+export function validateUser(user) {</div>
+            <div class="diff-line add"><span class="ln"> 2</span>+  if (!user.email) {</div>
+            <div class="diff-line add"><span class="ln"> 3</span>+    throw new AuthError("missing email");</div>
+            <div class="diff-line add"><span class="ln"> 4</span>+  }</div>
+            <div class="diff-line add"><span class="ln"> 5</span>+}</div>
+          </div>
+          <div class="record-fields">
+            <span class="field-key">eventId</span><span class="field-val accent">evt_d4e5f6</span>
+            <span class="field-key">changeType</span><span class="field-val">move</span>
+            <span class="field-key">patchId</span><span class="field-val">3b19ca77...</span>
+            <span class="field-key">lineage</span><span class="field-val accent">moves evt_a1b2c3 &bull; confidence: high</span>
+            <span class="field-key">basis</span><span class="field-val">exact pre-image text match</span>
+            <span class="field-key">contextRef</span><span class="field-val">msg_user_0058 &rarr; "deduplicate validation"</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Event 3 -->
+    <div class="timeline-event" data-event="2" onclick="selectEvent(2)">
+      <div class="timeline-dot"></div>
+      <div class="timeline-event-header">
+        <span class="change-tag kind-refine">Refined</span>
+        <span class="tool-tag">edit &middot; 15:04:11</span>
+      </div>
+      <div class="timeline-event-title">Hardened error handling</div>
+      <div class="timeline-event-desc">Replaced generic Error with typed AuthError</div>
+      <div class="timeline-detail">
+        <div class="timeline-detail-inner">
+          <h4>Observed Diff</h4>
+          <div class="diff-view">
+            <div class="diff-line context"><span class="ln">1</span> export function validateUser(user) {</div>
+            <div class="diff-line context"><span class="ln">2</span>   if (!user.email) {</div>
+            <div class="diff-line remove"><span class="ln">3</span>-    throw new AuthError("missing email");</div>
+            <div class="diff-line add"><span class="ln">3</span>+    throw new AuthValidationError("email", user);</div>
+            <div class="diff-line context"><span class="ln">4</span>   }</div>
+            <div class="diff-line add"><span class="ln">5</span>+  if (!user.password || user.password.length &lt; 8) {</div>
+            <div class="diff-line add"><span class="ln">6</span>+    throw new AuthValidationError("password", user);</div>
+            <div class="diff-line add"><span class="ln">7</span>+  }</div>
+            <div class="diff-line context"><span class="ln">8</span> }</div>
+          </div>
+          <div class="record-fields">
+            <span class="field-key">eventId</span><span class="field-val accent">evt_g7h8i9</span>
+            <span class="field-key">changeType</span><span class="field-val">modify</span>
+            <span class="field-key">patchId</span><span class="field-val">91e4f02a...</span>
+            <span class="field-key">lineage</span><span class="field-val accent">refines evt_d4e5f6 &bull; confidence: high</span>
+            <span class="field-key">basis</span><span class="field-val">same file + overlapping anchors + partial text continuity</span>
+            <span class="field-key">contextRef</span><span class="field-val">msg_user_0072 &rarr; "harden auth errors"</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Event 4: Commit -->
+    <div class="timeline-event" data-event="3" onclick="selectEvent(3)">
+      <div class="timeline-dot"></div>
+      <div class="timeline-event-header">
+        <span class="change-tag" style="background:var(--accent-glow);color:var(--accent)">commit</span>
+        <span class="tool-tag">squash merge &middot; 15:12:00</span>
+      </div>
+      <div class="timeline-event-title">Landed as commit abc123f</div>
+      <div class="timeline-event-desc">Provenance bundle published into tree</div>
+      <div class="timeline-detail">
+        <div class="timeline-detail-inner">
+          <h4>Commit Provenance Bundle</h4>
+          <div class="record-fields">
+            <span class="field-key">commit</span><span class="field-val accent">abc123f</span>
+            <span class="field-key">landed</span><span class="field-val">evt_a1b2c3, evt_d4e5f6, evt_g7h8i9</span>
+            <span class="field-key">files</span><span class="field-val">shared/validation.ts, signup.ts</span>
+            <span class="field-key">chains</span><span class="field-val accent">1 chain &bull; 3 events &bull; 3 effects</span>
+            <span class="field-key">published to</span><span class="field-val">.gitspace/agent-blame/commits/abc123f.json</span>
+          </div>
+          <p style="margin-top:20px;font-size:13px;color:var(--text-muted)">
+            The provenance bundle travels with the commit tree. Squash merges preserve it
+            because it is regular committed content, not metadata attached to a commit SHA.
+          </p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="divider"></div>
+
+<!-- ═══════════════ LINEAGE GRAPH ═══════════════ -->
+<section class="section">
+  <div class="section-label">Lineage</div>
+  <h2>How the system knows "introduced", "moved", and "refactored"</h2>
+  <p>
+    It compares pre-image and post-image states around each tool call. Classification comes from
+    matching new hunks against prior recorded effects using text overlap, anchor context, blob hashes,
+    and path heuristics. Not magic — evidence-based scoring.
+  </p>
+
+  <div class="lineage-container">
+    <svg class="lineage-svg" viewBox="0 0 1000 300" fill="none">
+      <!-- Edges -->
+      <path d="M 220 90 C 300 90, 340 150, 420 150" class="lineage-edge" stroke="#6eb4f5" stroke-width="2" opacity="0.5"/>
+      <path d="M 620 150 C 700 150, 740 210, 820 210" class="lineage-edge" stroke="#b06ef5" stroke-width="2" opacity="0.5"/>
+
+      <!-- Edge labels -->
+      <text x="310" y="105" fill="#6eb4f5" font-family="Geist Mono, monospace" font-size="10" opacity="0.7">moves</text>
+      <text x="700" y="170" fill="#b06ef5" font-family="Geist Mono, monospace" font-size="10" opacity="0.7">refines</text>
+
+      <!-- Confidence badges -->
+      <rect x="280" y="112" width="80" height="16" rx="4" fill="rgba(196, 245, 110, 0.1)" stroke="none"/>
+      <text x="296" y="123" fill="#c4f56e" font-family="Geist Mono, monospace" font-size="9">HIGH CONF</text>
+
+      <rect x="675" y="173" width="80" height="16" rx="4" fill="rgba(196, 245, 110, 0.1)" stroke="none"/>
+      <text x="691" y="184" fill="#c4f56e" font-family="Geist Mono, monospace" font-size="9">HIGH CONF</text>
+
+      <!-- Node A -->
+      <g class="lineage-node" onclick="showLineageDetail('a')">
+        <rect class="lineage-label-box" x="40" y="56" width="180" height="68" stroke="#6eb4f5"/>
+        <text x="60" y="78" fill="#6eb4f5" font-family="JetBrains Mono, monospace" font-size="10" font-weight="600">INTRODUCES</text>
+        <text x="60" y="96" fill="#e8e6e3" font-family="DM Sans, sans-serif" font-size="13">Introduced validation</text>
+        <text x="60" y="112" fill="#5a5866" font-family="JetBrains Mono, monospace" font-size="10">signup.ts:42-46</text>
+      </g>
+
+      <!-- Node B -->
+      <g class="lineage-node" onclick="showLineageDetail('b')">
+        <rect class="lineage-label-box" x="420" y="116" width="200" height="68" stroke="#f5b06e"/>
+        <text x="440" y="138" fill="#f5b06e" font-family="JetBrains Mono, monospace" font-size="10" font-weight="600">MOVES</text>
+        <text x="440" y="156" fill="#e8e6e3" font-family="DM Sans, sans-serif" font-size="13">Extracted to shared helper</text>
+        <text x="440" y="172" fill="#5a5866" font-family="JetBrains Mono, monospace" font-size="10">shared/validation.ts:1-5</text>
+      </g>
+
+      <!-- Node C -->
+      <g class="lineage-node" onclick="showLineageDetail('c')">
+        <rect class="lineage-label-box" x="720" y="176" width="220" height="68" stroke="#b06ef5"/>
+        <text x="740" y="198" fill="#b06ef5" font-family="JetBrains Mono, monospace" font-size="10" font-weight="600">REFINES</text>
+        <text x="740" y="216" fill="#e8e6e3" font-family="DM Sans, sans-serif" font-size="13">Hardened error handling</text>
+        <text x="740" y="232" fill="#5a5866" font-family="JetBrains Mono, monospace" font-size="10">shared/validation.ts:1-8</text>
+      </g>
+    </svg>
+
+    <div class="lineage-legend">
+      <div class="lineage-legend-item"><div class="swatch" style="background:var(--blue)"></div> introduces</div>
+      <div class="lineage-legend-item"><div class="swatch" style="background:var(--orange)"></div> moves</div>
+      <div class="lineage-legend-item"><div class="swatch" style="background:var(--purple)"></div> refines</div>
+      <div class="lineage-legend-item"><div class="swatch" style="background:var(--red)"></div> supersedes</div>
+      <div class="lineage-legend-item"><div class="swatch" style="background:var(--text-muted)"></div> tentative</div>
+    </div>
+  </div>
+
+  <h3>How classification actually works</h3>
+  <p>
+    For each new hunk effect, the system searches prior recorded effects and scores candidates.
+    The result is a confidence-weighted lineage edge — or no edge at all.
+  </p>
+
+  <div class="compare-grid" style="margin-top:32px">
+    <div class="compare-card" style="border-color: rgba(110, 180, 245, 0.2);">
+      <div class="tag" style="color: var(--blue);">Strong signal &rarr; link</div>
+      <pre><span class="highlight">Exact text match</span>
+  removed fragment == earlier added fragment
+  &rarr; high confidence move or supersede
+
+<span class="highlight">Same anchors + partial overlap</span>
+  same file region, some tokens survive
+  &rarr; high confidence refine
+
+<span class="highlight">Path rename + similar text</span>
+  file moved, content mostly preserved
+  &rarr; medium-high confidence move</pre>
+    </div>
+    <div class="compare-card" style="border-color: rgba(245, 110, 110, 0.2);">
+      <div class="tag" style="color: var(--red);">Weak signal &rarr; break</div>
+      <pre><span class="highlight">Generic code shape only</span>
+  common patterns match many origins
+  &rarr; no edge
+
+<span class="highlight">Low token overlap + different anchors</span>
+  different region, different intent
+  &rarr; no edge
+
+<span class="highlight">Many equally plausible ancestors</span>
+  ambiguous origin
+  &rarr; no edge (or tentative only)</pre>
+    </div>
+  </div>
+</section>
+
+<div class="divider"></div>
+
+<!-- ═══════════════ BLAME DEMO ═══════════════ -->
+<section class="section">
+  <div class="section-label">Try It</div>
+  <h2>Click a line. See the reasoning chain.</h2>
+  <p>
+    This simulates what <code style="font-family:var(--mono);color:var(--accent);background:var(--bg-elevated);padding:2px 8px;border-radius:4px;">gssh blame</code> would show.
+    Click any line to reveal the full conversational provenance chain.
+  </p>
+
+  <div class="blame-demo">
+    <div class="blame-toolbar">
+      <div class="dots"><span></span><span></span><span></span></div>
+      <div class="filepath"><strong>shared/auth/validation.ts</strong> &middot; main &middot; abc123f</div>
+    </div>
+
+    <div class="blame-code">
+      <div class="blame-gutter" id="blame-gutter"></div>
+      <div class="blame-source" id="blame-source"></div>
+    </div>
+
+    <div class="blame-panel" id="blame-panel">
+      <p style="font-family:var(--mono);font-size:12px;color:var(--text-muted);text-align:center;">
+        &uarr; Click a line above to see its conversational provenance chain
+      </p>
+    </div>
+  </div>
+</section>
+
+<div class="divider"></div>
+
+<!-- ═══════════════ COMMIT PIPELINE ═══════════════ -->
+<section class="section">
+  <div class="section-label">Publication</div>
+  <h2>How provenance travels with the commit</h2>
+  <p>
+    Pre-commit records are local. To share provenance with the team, a commit promotion step
+    freezes landed effects into a provenance bundle that becomes part of the committed tree.
+    Click each stage.
+  </p>
+
+  <div class="pipeline" id="pipeline">
+    <div class="pipeline-stage active" onclick="selectStage(0)" data-stage="0">
+      <div class="stage-num">01</div>
+      <div class="stage-title">Live Capture</div>
+      <div class="stage-desc">Local event ledger</div>
+    </div>
+    <div class="pipeline-stage" onclick="selectStage(1)" data-stage="1">
+      <div class="stage-num">02</div>
+      <div class="stage-title">Commit Promotion</div>
+      <div class="stage-desc">Match staged hunks</div>
+    </div>
+    <div class="pipeline-stage" onclick="selectStage(2)" data-stage="2">
+      <div class="stage-num">03</div>
+      <div class="stage-title">Bundle &amp; Publish</div>
+      <div class="stage-desc">Write to tree</div>
+    </div>
+    <div class="pipeline-stage" onclick="selectStage(3)" data-stage="3">
+      <div class="stage-num">04</div>
+      <div class="stage-title">Team Query</div>
+      <div class="stage-desc">gssh blame</div>
+    </div>
+  </div>
+
+  <div class="pipeline-detail" id="pipeline-detail"></div>
+</section>
+
+<div class="divider"></div>
+
+<!-- ═══════════════ SUMMARY MEMOIZATION ═══════════════ -->
+<section class="section">
+  <div class="section-label">Efficiency</div>
+  <h2>How summaries are cached, not regenerated</h2>
+  <p>
+    Because events and lineage edges are immutable, large parts of the provenance graph are stable.
+    Summaries are cached by content hash, composed incrementally, and only regenerated when new
+    events extend a chain.
+  </p>
+
+  <div class="memo-grid">
+    <div class="memo-card">
+      <div class="memo-level">Level 1</div>
+      <div class="memo-title">Event Summary</div>
+      <div class="memo-desc">One summary per mutation event. Computed once, cached forever.</div>
+      <div class="memo-key">cache[<span>hash(event_payload)</span>]</div>
+      <div class="memo-example">"Added signup validation after user requested safer signup handling."</div>
+    </div>
+
+    <div class="memo-card">
+      <div class="memo-level">Level 2</div>
+      <div class="memo-title">Chain Summary</div>
+      <div class="memo-desc">One summary per lineage subgraph. Composed from event summaries.</div>
+      <div class="memo-key">cache[<span>hash(node_ids + edge_ids)</span>]</div>
+      <div class="memo-example">"Introduced signup validation, extracted into shared helper, then hardened error handling with typed errors."</div>
+    </div>
+
+    <div class="memo-card">
+      <div class="memo-level">Level 3</div>
+      <div class="memo-title">Query Explanation</div>
+      <div class="memo-desc">Built on demand from cached summaries. Uses AI only for compression.</div>
+      <div class="memo-key">cache[<span>chain_hash + anchor</span>]</div>
+      <div class="memo-example">"This validation exists because signup needed hardening; the logic was extracted into a shared module and later given typed error handling."</div>
+    </div>
+  </div>
+
+  <div class="callout">
+    <p>
+      <strong>When a new event extends a chain:</strong> only the new tail needs summarization.
+      The existing chain summary stays valid. Composition is deterministic when possible;
+      AI is only invoked for compression or conflict resolution.
+    </p>
+  </div>
+</section>
+
+<div class="divider"></div>
+
+<!-- ═══════════════ FOOTER ═══════════════ -->
+<footer class="footer">
+  <div class="footer-mark">ab</div>
+  <p>Agent Blame &middot; Conversational memory for code &middot; GitSpace</p>
+</footer>
+
+<!-- ═══════════════ SCRIPTS ═══════════════ -->
+<script>
+// ── Timeline ──
+function selectEvent(index) {
+  document.querySelectorAll('.timeline-event').forEach((el, i) => {
+    el.classList.toggle('active', i === index);
+  });
+  const fill = document.getElementById('timeline-fill');
+  const pct = ((index + 1) / 4) * 100;
+  fill.style.height = pct + '%';
+}
+
+// ── Blame Demo ──
+const blameLines = [
+  { code: '<span class="code-kw">import</span> { <span class="code-type">AuthValidationError</span> } <span class="code-kw">from</span> <span class="code-str">"./errors"</span>;', chain: null },
+  { code: '', chain: null },
+  { code: '<span class="code-kw">export function</span> <span class="code-fn">validateUser</span>(user) {', chain: 'full' },
+  { code: '  <span class="code-kw">if</span> (!user.email) {', chain: 'full' },
+  { code: '    <span class="code-kw">throw new</span> <span class="code-type">AuthValidationError</span>(<span class="code-str">"email"</span>, user);', chain: 'full' },
+  { code: '  }', chain: 'full' },
+  { code: '  <span class="code-kw">if</span> (!user.password <span class="code-op">||</span> user.password.length <span class="code-op">&lt;</span> <span class="code-str">8</span>) {', chain: 'password' },
+  { code: '    <span class="code-kw">throw new</span> <span class="code-type">AuthValidationError</span>(<span class="code-str">"password"</span>, user);', chain: 'password' },
+  { code: '  }', chain: 'password' },
+  { code: '}', chain: 'full' },
+];
+
+const chains = {
+  full: [
+    { dot: '#6eb4f5', summary: 'Introduced signup validation', meta: 'evt_a1b2c3 &middot; 14:32', conf: 'high', kind: 'introduces' },
+    { dot: '#f5b06e', summary: 'Extracted to shared/validation.ts', meta: 'evt_d4e5f6 &middot; 14:38', conf: 'high', kind: 'moves' },
+    { dot: '#b06ef5', summary: 'Hardened with typed AuthValidationError', meta: 'evt_g7h8i9 &middot; 15:04', conf: 'high', kind: 'refines' },
+  ],
+  password: [
+    { dot: '#b06ef5', summary: 'Added password length validation', meta: 'evt_g7h8i9 &middot; 15:04', conf: 'high', kind: 'introduces' },
+  ],
+};
+
+function initBlame() {
+  const gutter = document.getElementById('blame-gutter');
+  const source = document.getElementById('blame-source');
+
+  blameLines.forEach((line, i) => {
+    const gl = document.createElement('div');
+    gl.className = 'blame-gutter-line';
+    gl.textContent = i + 1;
+    gutter.appendChild(gl);
+
+    const sl = document.createElement('div');
+    sl.className = 'blame-source-line';
+    sl.innerHTML = line.code || '&nbsp;';
+    sl.dataset.line = i;
+    sl.onclick = () => selectBlameLine(i);
+    source.appendChild(sl);
+  });
+}
+
+function selectBlameLine(index) {
+  const line = blameLines[index];
+  const chainKey = line.chain;
+
+  document.querySelectorAll('.blame-source-line').forEach(el => el.classList.remove('selected'));
+
+  if (!chainKey) {
+    document.getElementById('blame-panel').innerHTML =
+      '<p style="font-family:var(--mono);font-size:12px;color:var(--text-muted);text-align:center;">No provenance recorded for this line (import / whitespace)</p>';
+    return;
+  }
+
+  // highlight related lines
+  blameLines.forEach((l, i) => {
+    if (l.chain === chainKey) {
+      document.querySelectorAll('.blame-source-line')[i].classList.add('selected');
+    }
+  });
+
+  const chain = chains[chainKey];
+  const panel = document.getElementById('blame-panel');
+
+  let html = '<div class="blame-chain">';
+  chain.forEach((item, i) => {
+    html += `
+      <div class="blame-chain-item" style="animation-delay:${i * 0.1}s">
+        <div class="blame-chain-dot" style="background:${item.dot}"></div>
+        <div class="blame-chain-content">
+          <div class="chain-summary">
+            ${item.summary}
+            <span class="chain-confidence conf-${item.conf}">${item.kind}</span>
+          </div>
+          <div class="chain-meta">
+            <span>${item.meta}</span>
+            <span>confidence: ${item.conf}</span>
+          </div>
+        </div>
+      </div>`;
+  });
+  html += '</div>';
+  panel.innerHTML = html;
+}
+
+initBlame();
+
+// ── Pipeline ──
+const pipelineDetails = [
+  {
+    title: 'Live Capture — While Agents Code',
+    content: `<p style="color:var(--text-dim);margin-bottom:16px;">
+      The Pi extension hooks into every mutating tool call. Before each call, it snapshots
+      candidate file states. After each call, it computes exact changed hunks and writes
+      immutable records to a local append-only ledger.
+    </p>
+    <pre><span class="comment">// Local ledger (untracked, append-only)</span>
+<span class="comment">// .gitspace/agent-blame/live.jsonl</span>
+
+{ <span class="key">"type"</span>: <span class="str">"MutationEvent"</span>,
+  <span class="key">"eventId"</span>: <span class="str">"evt_a1b2c3"</span>,
+  <span class="key">"sessionId"</span>: <span class="str">"ses_xyz"</span>,
+  <span class="key">"actor"</span>: <span class="str">"agent"</span>,
+  <span class="key">"toolName"</span>: <span class="str">"edit"</span>,
+  <span class="key">"timestamp"</span>: <span class="num">1711540321000</span>,
+  <span class="key">"summary"</span>: <span class="str">"Added signup validation"</span>,
+  <span class="key">"contextRefs"</span>: [<span class="str">"msg_user_0041"</span>],
+  <span class="key">"effects"</span>: [
+    { <span class="key">"effectId"</span>: <span class="str">"eff_001"</span>,
+      <span class="key">"path"</span>: <span class="str">"signup.ts"</span>,
+      <span class="key">"changeType"</span>: <span class="str">"add"</span>,
+      <span class="key">"stablePatchId"</span>: <span class="str">"f7a2e9c1..."</span>,
+      <span class="key">"postBlobHash"</span>: <span class="str">"a3f8c1..."</span> }
+  ] }</pre>`
+  },
+  {
+    title: 'Commit Promotion — Matching Staged Hunks',
+    content: `<p style="color:var(--text-dim);margin-bottom:16px;">
+      When the user runs <code style="font-family:var(--mono);color:var(--accent)">git commit</code>,
+      a pre-commit or post-commit hook matches the staged diff against live ledger effects.
+      Each staged hunk is matched by blob hash, patch fingerprint, and path.
+    </p>
+    <pre><span class="comment">// Commit promotion algorithm</span>
+
+<span class="comment">// 1. Compute staged hunks</span>
+staged_hunks = git_diff_cached()
+
+<span class="comment">// 2. For each staged hunk, find matching effects</span>
+<span class="key">for</span> hunk <span class="key">in</span> staged_hunks:
+  candidates = ledger.search(
+    path = hunk.path,
+    blob_hash = hunk.post_blob,
+    patch_id = hunk.stable_patch_id
+  )
+  best = rank_by_confidence(candidates)
+  landings.append({
+    <span class="key">"effectId"</span>: best.effect_id,
+    <span class="key">"commitSha"</span>: COMMIT_SHA,
+    <span class="key">"finalPath"</span>: hunk.path,
+    <span class="key">"finalSpan"</span>: hunk.new_span
+  })
+
+<span class="comment">// 3. Mark matched events as "landed"</span>
+ledger.mark_landed(landings)</pre>`
+  },
+  {
+    title: 'Bundle & Publish — Into the Tree',
+    content: `<p style="color:var(--text-dim);margin-bottom:16px;">
+      Landed provenance is written as content-addressed objects in the commit tree.
+      Because these are regular committed files, they survive squash merges and
+      are available to teammates on <code style="font-family:var(--mono);color:var(--accent)">git pull</code>.
+    </p>
+    <pre><span class="comment">// Published tree structure</span>
+
+.gitspace/agent-blame/
+  objects/
+    <span class="str">evt_a1b2c3.json</span>    <span class="comment"># immutable event</span>
+    <span class="str">evt_d4e5f6.json</span>    <span class="comment"># immutable event</span>
+    <span class="str">evt_g7h8i9.json</span>    <span class="comment"># immutable event</span>
+  commits/
+    <span class="str">abc123f.json</span>       <span class="comment"># commit manifest</span>
+  summaries/
+    <span class="str">s_f7a2e9.json</span>      <span class="comment"># cached chain summary</span>
+  lineage/
+    <span class="str">edges.jsonl</span>        <span class="comment"># lineage edges</span>
+
+<span class="comment">// Content-addressed: Git deduplicates naturally</span>
+<span class="comment">// Same summary reused across commits</span>
+<span class="comment">// Same event never duplicated</span></pre>`
+  },
+  {
+    title: 'Team Query — gssh blame',
+    content: `<p style="color:var(--text-dim);margin-bottom:16px;">
+      Any teammate can run blame against published provenance. The tool reads committed
+      artifacts for merged code and the local live ledger for uncommitted work.
+      It resolves current lines to effect chains and renders the conversational history.
+    </p>
+    <pre><span class="comment">$ gssh blame shared/auth/validation.ts:3-5</span>
+
+<span class="str">shared/auth/validation.ts</span> lines 3-5
+
+<span class="key">Current code:</span>
+  <span class="num">3</span> |   if (!user.email) {
+  <span class="num">4</span> |     throw new AuthValidationError("email", user);
+  <span class="num">5</span> |   }
+
+<span class="key">Provenance chain:</span>
+  <span class="str">●</span> <span class="key">Introduced</span>
+    "Added signup validation"
+    context: user requested safer signup handling
+    event: evt_a1b2c3 &middot; session: ses_xyz
+
+  <span class="str">●</span> <span class="key">Moved</span>  (confidence: high)
+    "Extracted to shared helper"
+    context: deduplicating validation across endpoints
+    event: evt_d4e5f6 &middot; session: ses_abc
+
+  <span class="str">●</span> <span class="key">Refined</span>  (confidence: high)
+    "Hardened with typed AuthValidationError"
+    context: hardening auth error boundaries
+    event: evt_g7h8i9 &middot; session: ses_def
+
+  Landed in commit <span class="str">abc123f</span> via squash merge</pre>`
+  }
+];
+
+function selectStage(index) {
+  document.querySelectorAll('.pipeline-stage').forEach((el, i) => {
+    el.classList.toggle('active', i === index);
+  });
+  const detail = document.getElementById('pipeline-detail');
+  const d = pipelineDetails[index];
+  detail.innerHTML = `<div class="detail-title">${d.title}</div>${d.content}`;
+}
+
+selectStage(0);
+
+// ── Scroll animations ──
+const observer = new IntersectionObserver((entries) => {
+  entries.forEach(entry => {
+    if (entry.isIntersecting) {
+      entry.target.style.opacity = '1';
+      entry.target.style.transform = 'translateY(0)';
+    }
+  });
+}, { threshold: 0.1 });
+
+document.querySelectorAll('.section').forEach(el => {
+  el.style.opacity = '0';
+  el.style.transform = 'translateY(30px)';
+  el.style.transition = 'opacity 0.6s ease, transform 0.6s ease';
+  observer.observe(el);
+});
+</script>
+
+</body>
+</html>

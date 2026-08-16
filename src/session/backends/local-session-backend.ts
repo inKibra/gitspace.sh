@@ -1,3 +1,4 @@
+import type { WorkspaceEditorId, WorkspaceEditorOption } from '../../utils/open-editor.js';
 import type {
   Session as TmuxSession,
   InboxItem,
@@ -12,8 +13,9 @@ import {
   prepareAttachSession,
   ensureServer,
   getMachineSnapshot,
+  resyncMachineSnapshot,
   createSession,
-  killSession,
+  terminateSession,
   createCheckpoint,
   getReplayMarkdown,
   send,
@@ -46,9 +48,12 @@ import {
   FrameType,
 } from '../../lib/tmux-lite/protocol.js';
 import { listProjectSummaries } from '../../core/project-catalog.js';
+import { readProjectConfig } from '../../core/config.js';
+import { findGoalRecord, writeGoalRecord } from '../../core/goal-chain.js';
 import { scanWorkspaces } from '../../lib/remote-session/workspace-scanner.js';
 import { deleteWorkspaceCore } from '../../core/workspace.js';
-import { prepareWorkspaceForSession } from '../../core/workspace-lifecycle.js';
+import { prepareWorkspaceForSession, rerunWorkspaceScriptsForSession } from '../../core/workspace-lifecycle.js';
+import { addRequirement, attachManualEvidence, recordHumanReview, removeRequirement, reopenRequirement, reorderRequirement, runGenerationCommand, runJudgmentCommand, runLlmJudgment, updateRequirement, type AddRequirementInput, type AttachEvidenceInput, type HumanReviewDecision, type UpdateRequirementInput } from '../../core/goal-validation.js';
 import { getWorkspaceRoot } from '../../core/paths.js';
 import { createBufferedSocketWriter } from '../../utils/bun-socket-writer.js';
 import { AttachLifecycle } from './attach-lifecycle.js';
@@ -67,6 +72,9 @@ import type {
   DeleteProjectParams,
   DeleteWorkspaceParams,
   SessionBackend,
+  TerminateSessionOptions,
+  ArtifactReadRange,
+  ProjectArtifactsStatus,
 } from '../backend.js';
 import type { BackendEvent } from '../events.js';
 import type { NotificationConfig } from '../../notifications/types.js';
@@ -76,18 +84,23 @@ import type { ReviewOperation, ReviewResult } from '../../types/review.js';
 import type { WideEventFilter } from '../../types/events.js';
 import type { SessionLinearIssueSummary } from '../../types/lifecycle.js';
 import { parseProcessSessionName } from '../../lib/processes/names.js';
+import type { PortConflictInfo } from '../../lib/processes/port-conflicts.js';
 import {
   SpacesError,
   WorkspaceDeleteError,
   type WorkspaceDeleteErrorCode,
 } from '../../types/errors.js';
 import type { TerminalSnapshot } from '../backend.js';
+import type { AgentCompactResult, AgentControlInfo, AgentDefinitionInfo, AgentGoalModeInfo, AgentHistoryEntry, AgentSessionUsageReport, AgentSettingItem, AgentSettingSchemaItem, AgentShakeMode, AgentShakeResult, AgentToolInfo, AgentTreeNode } from '../../agents/agent-runtime-types.js';
 import type { AgentStateUpdateDelta, WorkspaceAgentState } from '../../lib/tmux-lite/agent-event-manager.js';
 import type { AgentWorkspaceTargetPayload } from '../../lib/tmux-lite/protocol.js';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { ReviewRequestError } from '../../types/errors.js';
 import { throwServiceStartError } from './service-start-error.js';
+import { executeSpaceCommand } from '../../lib/tmux-lite/agents/extensions/space-command.js';
+import { formatArtifactUri } from '../../core/artifact-cap.js';
+
 
 export interface LocalSessionBackendDependencies {
   listSessions: typeof listSessions;
@@ -95,7 +108,7 @@ export interface LocalSessionBackendDependencies {
   ensureServer: typeof ensureServer;
   sendTmuxCommand: (command: TmuxCommand) => Promise<TmuxResponse>;
   createSession: typeof createSession;
-  killSession: typeof killSession;
+  terminateSession: typeof terminateSession;
   createCheckpoint: typeof createCheckpoint;
   prepareAttachSession: typeof prepareAttachSession;
   cancelPrepareAttachSession: typeof cancelPrepareAttachSession;
@@ -106,6 +119,9 @@ export interface LocalSessionBackendDependencies {
   getReplayFrame: typeof getReplayFrameOffline;
   getReplayTimeline: typeof getReplayTimelineOffline;
   getMachineSnapshot: typeof getMachineSnapshot;
+  /** Forced full-rebuild fetch for nonce-gap recovery. Falls back to
+   *  getMachineSnapshot when absent. */
+  resyncMachineSnapshot?: typeof getMachineSnapshot;
   watchMachineEvents: typeof watchMachineEvents;
   dismissReplay: typeof dismissReplayOffline;
   undismissReplay: typeof undismissReplayOffline;
@@ -113,6 +129,7 @@ export interface LocalSessionBackendDependencies {
   scanWorkspaces: typeof scanWorkspaces;
   deleteWorkspaceCore: typeof deleteWorkspaceCore;
   prepareWorkspaceForSession: typeof prepareWorkspaceForSession;
+  rerunWorkspaceScriptsForSession: typeof rerunWorkspaceScriptsForSession;
   connectSessionSocket: (
     socketPath: string,
     handlers: LocalSessionSocketHandlers
@@ -204,6 +221,7 @@ function toWorkspaceDeleteErrorCode(error: unknown): WorkspaceDeleteErrorCode | 
     code === 'REMOVE_SCRIPT_FAILED' ||
     code === 'WORKSPACE_NOT_FOUND' ||
     code === 'WORKTREE_REMOVE_FAILED' ||
+    code === 'PRESERVED_LEFTOVERS' ||
     code === 'DELETE_FAILED'
   ) {
     return code;
@@ -251,11 +269,6 @@ async function refreshHostingAfterProcessChange(): Promise<void> {
     // Process start/stop must still succeed even if hosted route publication fails.
   }
 }
-
-function isAgentReplay(replay: { sessionName: string }): boolean {
-  return replay.sessionName.startsWith('agent:');
-}
-
 async function connectSessionSocket(
   socketPath: string,
   handlers: LocalSessionSocketHandlers
@@ -355,7 +368,7 @@ function buildDeps(
       return send(command);
     },
     createSession,
-    killSession,
+    terminateSession,
     createCheckpoint,
     prepareAttachSession,
     cancelPrepareAttachSession,
@@ -366,6 +379,7 @@ function buildDeps(
     getReplayFrame: getReplayFrameOffline,
     getReplayTimeline: getReplayTimelineOffline,
     getMachineSnapshot,
+    resyncMachineSnapshot,
     watchMachineEvents,
     dismissReplay: dismissReplayOffline,
     undismissReplay: undismissReplayOffline,
@@ -373,6 +387,7 @@ function buildDeps(
     scanWorkspaces,
     deleteWorkspaceCore,
     prepareWorkspaceForSession,
+    rerunWorkspaceScriptsForSession,
     connectSessionSocket,
     ...overrides,
   };
@@ -386,6 +401,9 @@ export class LocalSessionBackend implements SessionBackend {
   private connected = false;
   private attachedAgentSessionId: string | null = null;
   private pendingAttachedAgentSession: { agentSessionId: string; sessionId: string } | null = null;
+  /** paneId → agentSessionId for panes opened by lease (no terminal). Needed to
+   *  release the right lease when the pane closes or the backend disconnects. */
+  private readonly openAgentPanes = new Map<string, string>();
   private readonly attachLifecycle = new AttachLifecycle((event) => {
     if (event.type === 'attached' && this.pendingAttachedAgentSession?.sessionId === event.sessionId) {
       this.attachedAgentSessionId = this.pendingAttachedAgentSession.agentSessionId;
@@ -411,6 +429,28 @@ export class LocalSessionBackend implements SessionBackend {
   private readonly agentStateHandlers = new Set<(delta: AgentStateUpdateDelta) => void>();
   private stopAgentWatch: (() => void) | null = null;
   private readonly machineStateClient = new MachineStateClient();
+  private machineResyncInFlight: Promise<void> | null = null;
+
+  /** Nonce-gap recovery: fetch a forced full rebuild and replace the model.
+   *  Single-flight — a burst of gapped events triggers one resync. */
+  private requestMachineResync(): void {
+    if (this.machineResyncInFlight) return;
+    this.machineResyncInFlight = (async () => {
+      try {
+        const resync = this.deps.resyncMachineSnapshot ?? this.deps.getMachineSnapshot;
+        const snapshot = await resync();
+        this.machineStateClient.replaceSnapshot(snapshot);
+        this.agentStateCache = machineSnapshotToAgentState(snapshot);
+        this.broadcastAgentSnapshot();
+        this.emitDerivedMachineState();
+      } catch {
+        // Recoverable: the next snapshot-replaced (5-min reconciliation) or
+        // reconnect trues the model up.
+      } finally {
+        this.machineResyncInFlight = null;
+      }
+    })();
+  }
 
   constructor(options: LocalSessionBackendOptions = {}) {
     this.descriptor = options.descriptor ?? DEFAULT_DESCRIPTOR;
@@ -428,6 +468,10 @@ export class LocalSessionBackend implements SessionBackend {
     this.attachLifecycle.setOutputHandler(handler);
   }
 
+  setScriptOutputHandler(handler: ((data: Uint8Array) => void) | null): void {
+    this.attachLifecycle.setScriptOutputHandler(handler);
+  }
+
   async connect(): Promise<void> {
     await this.deps.ensureServer();
     try {
@@ -443,6 +487,16 @@ export class LocalSessionBackend implements SessionBackend {
           this.emitDerivedMachineState();
         },
         onEvent: (event) => {
+          // Contiguity check: every scoped delta carries the next nonce. A
+          // gap (dropped event, daemon restart) means our model diverged —
+          // request a forced resync instead of applying onto bad state.
+          if (event.type !== 'snapshot-replaced') {
+            const expected = this.machineStateClient.getSnapshot().snapshotNonce + 1;
+            if (event.snapshotNonce !== expected) {
+              this.requestMachineResync();
+              return;
+            }
+          }
           const machineSnapshot = this.machineStateClient.applyEvent(event);
           this.agentStateCache = machineSnapshotToAgentState(machineSnapshot);
           this.broadcastAgentSnapshot();
@@ -485,7 +539,7 @@ export class LocalSessionBackend implements SessionBackend {
   }
 
   async listProjects(): Promise<void> {
-    const projects = machineSnapshotToProjects(this.machineStateClient.getSnapshot());
+    const projects = machineSnapshotToProjects(await this.refreshMachineSnapshotState());
     this.emit({ type: 'projects', projects });
   }
 
@@ -511,16 +565,25 @@ export class LocalSessionBackend implements SessionBackend {
   }
 
   async listWorkspaces(): Promise<void> {
-    const mappedWorkspaces = machineSnapshotToWorkspaces(this.machineStateClient.getSnapshot());
-
+    const mappedWorkspaces = machineSnapshotToWorkspaces(await this.refreshMachineSnapshotState());
     this.emit({
       type: 'workspaces',
       workspaces: mappedWorkspaces,
     });
   }
 
-  async setWorkspaceStatus(projectName: string, workspaceName: string, phase: import('../../types/config.js').WorkspacePhase): Promise<void> {
-    const response = await this.sendTmuxCommand({ type: 'workspace-set-phase', projectName, workspaceName, phase });
+
+  async previewWorkspaceStatusChange(projectName: string, workspaceName: string, phase: import('../../types/config.js').WorkspacePhase): Promise<import('../../types/goals.js').WorkspacePhaseChangePreview> {
+    const response = await this.sendTmuxCommand({ type: 'workspace-phase-preview', projectName, workspaceName, phase });
+    if (response.type === 'workspace-phase-preview') {
+      return response.preview;
+    }
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected workspace phase preview response');
+  }
+
+  async setWorkspaceStatus(projectName: string, workspaceName: string, phase: import('../../types/config.js').WorkspacePhase, options?: { cascade?: boolean }): Promise<void> {
+    const response = await this.sendTmuxCommand({ type: 'workspace-set-phase', projectName, workspaceName, phase, cascade: options?.cascade });
     if (response.type === 'ok') {
       await this.listWorkspaces();
       return;
@@ -530,13 +593,15 @@ export class LocalSessionBackend implements SessionBackend {
   }
 
   async listSessions(workspaceId?: string): Promise<void> {
-    const filtered = machineSnapshotToSessions(this.machineStateClient.getSnapshot(), workspaceId);
+    const filtered = machineSnapshotToSessions(await this.refreshMachineSnapshotState(), workspaceId);
     this.emit({ type: 'sessions', sessions: filtered });
   }
 
   async listReplays(workspaceId?: string, includeDismissed?: boolean): Promise<void> {
     const replays = await this.deps.listReplays({ workspaceId, includeDismissed });
-    this.emit({ type: 'replays', replays: replays.filter((replay) => !isAgentReplay(replay)) });
+    // Agent sessions no longer record replays, but state dirs written by older
+    // daemons still hold `agent:*` recordings — noise in the replay list.
+    this.emit({ type: 'replays', replays: replays.filter((replay) => !replay.sessionName.startsWith('agent:')) });
   }
 
   async createCheckpoint(sessionId: string): Promise<void> {
@@ -737,8 +802,9 @@ export class LocalSessionBackend implements SessionBackend {
           },
           onScriptOutput: (event) => {
             currentPhase = event.phase;
-            this.emitPtyData(Buffer.from(event.data, 'base64'));
-            this.emit({ type: 'script_output', phase: event.phase, data: Buffer.from(event.data, 'base64'), done: event.done, error: event.error });
+            const data = Buffer.from(event.data, 'base64');
+            this.attachLifecycle.pushScriptData(data);
+            this.emit({ type: 'script_output', phase: event.phase, data, done: event.done, error: event.error, workspaceId: params.workspaceId });
           },
         });
         targetSession = prepared.session;
@@ -808,11 +874,11 @@ export class LocalSessionBackend implements SessionBackend {
     socket.sendControl({ type: 'resize', cols, rows });
   }
 
-  async killSession(sessionId: string): Promise<void> {
-    const response = await this.sendTmuxCommand({ type: 'kill', id: sessionId });
+  async terminateSession(sessionId: string, options: TerminateSessionOptions = {}): Promise<void> {
+    const response = await this.sendTmuxCommand({ type: 'terminate', id: sessionId, mode: options.mode, graceMs: options.graceMs });
     if (response.type === 'ok') return;
     if (response.type === 'error') throw new Error(response.message);
-    throw new Error('Unexpected kill session response');
+    throw new Error('Unexpected terminate session response');
   }
 
   async deleteWorkspace(
@@ -828,8 +894,8 @@ export class LocalSessionBackend implements SessionBackend {
         scriptPolicy: params.scriptPolicy,
         onScriptOutput: (event) => {
           const data = Buffer.from(event.data, 'base64');
-          this.emitPtyData(data);
-          this.emit({ type: 'script_output', phase: 'remove', data, done: event.done, error: event.error });
+          this.attachLifecycle.pushScriptData(data);
+          this.emit({ type: 'script_output', phase: 'remove', data, done: event.done, error: event.error, workspaceId: resolvedWorkspaceId });
         },
       });
     } catch (error) {
@@ -843,6 +909,291 @@ export class LocalSessionBackend implements SessionBackend {
     }
   }
 
+  async rerunWorkspaceScripts(projectName: string, workspaceId: string): Promise<void> {
+    const workspaceRef = await this.resolveWorkspace(projectName, workspaceId);
+    let currentPhase: import('../../types/script-phase.js').WorkspaceScriptPhase = 'setup';
+    const result = await this.deps.rerunWorkspaceScriptsForSession({
+      projectName,
+      workspacePath: workspaceRef.path,
+      workspaceName: workspaceRef.id,
+      repository: readProjectConfig(projectName).repository,
+      interactiveScripts: false,
+      onOutput: (data) => {
+        this.attachLifecycle.pushScriptData(data);
+        this.emit({ type: 'script_output', phase: currentPhase, data: new Uint8Array(data), workspaceId: workspaceRef.id });
+      },
+      onPhaseStart: (phase) => {
+        currentPhase = phase;
+        this.emit({
+          type: 'script_output',
+          phase,
+          data: new Uint8Array(0),
+          done: false,
+          workspaceId: workspaceRef.id,
+        });
+      },
+      selection: 'setup-select',
+    });
+    if (!result.success) {
+      this.emit({ type: 'command_error', code: `${result.phase.toUpperCase()}_SCRIPT_FAILED`, message: result.error });
+      throw new Error(result.error);
+    }
+    this.emit({ type: 'script_output', phase: currentPhase, data: new Uint8Array(0), done: true, workspaceId: workspaceRef.id });
+  }
+
+  async runWorkspaceScriptSelection(projectName: string, workspaceId: string, selection: 'setup' | 'select' | 'setup-select'): Promise<void> {
+    const workspaceRef = await this.resolveWorkspace(projectName, workspaceId);
+    let currentPhase: import('../../types/script-phase.js').WorkspaceScriptPhase = selection === 'select' ? 'select' : 'setup';
+    const result = await this.deps.rerunWorkspaceScriptsForSession({
+      projectName,
+      workspacePath: workspaceRef.path,
+      workspaceName: workspaceRef.id,
+      repository: readProjectConfig(projectName).repository,
+      interactiveScripts: false,
+      onOutput: (data) => {
+        this.attachLifecycle.pushScriptData(data);
+        this.emit({ type: 'script_output', phase: currentPhase, data: new Uint8Array(data), workspaceId: workspaceRef.id });
+      },
+      onPhaseStart: (phase) => {
+        currentPhase = phase;
+        this.emit({
+          type: 'script_output',
+          phase,
+          data: new Uint8Array(0),
+          done: false,
+          workspaceId: workspaceRef.id,
+        });
+      },
+      selection,
+    });
+    if (!result.success) {
+      this.emit({ type: 'command_error', code: `${result.phase.toUpperCase()}_SCRIPT_FAILED`, message: result.error });
+      throw new Error(result.error);
+    }
+    this.emit({ type: 'script_output', phase: currentPhase, data: new Uint8Array(0), done: true, workspaceId: workspaceRef.id });
+  }
+
+  async runWorkspaceOpenScripts(projectName: string, workspaceId: string): Promise<void> {
+    const workspaceRef = await this.resolveWorkspace(projectName, workspaceId);
+    let currentPhase: import('../../types/script-phase.js').WorkspaceScriptPhase = 'select';
+    const result = await this.deps.prepareWorkspaceForSession({
+      projectName,
+      workspacePath: workspaceRef.path,
+      workspaceName: workspaceRef.id,
+      repository: readProjectConfig(projectName).repository,
+      interactiveScripts: false,
+      onOutput: (data) => {
+        this.attachLifecycle.pushScriptData(data);
+        this.emit({ type: 'script_output', phase: currentPhase, data: new Uint8Array(data), workspaceId: workspaceRef.id });
+      },
+      onPhaseStart: (phase) => {
+        currentPhase = phase;
+        this.emit({
+          type: 'script_output',
+          phase,
+          data: new Uint8Array(0),
+          done: false,
+          workspaceId: workspaceRef.id,
+        });
+      },
+    });
+    if (!result.success) {
+      this.emit({ type: 'command_error', code: `${result.phase.toUpperCase()}_SCRIPT_FAILED`, message: result.error });
+      throw new Error(result.error);
+    }
+    this.emit({ type: 'script_output', phase: currentPhase, data: new Uint8Array(0), done: true, workspaceId: workspaceRef.id });
+  }
+  async listWorkspaceNotes(projectName: string, workspaceName: string): Promise<import('../../types/workspace.js').WorkspaceNote[]> {
+    const response = await this.sendTmuxCommand({ type: 'workspace-notes-list', projectName, workspaceName });
+    if (response.type === 'workspace-notes') return response.notes;
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected workspace notes response');
+  }
+
+  async addWorkspaceNote(projectName: string, workspaceName: string, body: string): Promise<import('../../types/workspace.js').WorkspaceNote> {
+    const response = await this.sendTmuxCommand({ type: 'workspace-note-add', projectName, workspaceName, body });
+    if (response.type === 'workspace-note') {
+      await this.listWorkspaces();
+      return response.note;
+    }
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected workspace note add response');
+  }
+
+  async updateWorkspaceNote(projectName: string, workspaceName: string, noteId: string, body: string): Promise<import('../../types/workspace.js').WorkspaceNote> {
+    const response = await this.sendTmuxCommand({ type: 'workspace-note-update', projectName, workspaceName, noteId, body });
+    if (response.type === 'workspace-note') {
+      await this.listWorkspaces();
+      return response.note;
+    }
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected workspace note update response');
+  }
+
+  async removeWorkspaceNote(projectName: string, workspaceName: string, noteId: string): Promise<void> {
+    const response = await this.sendTmuxCommand({ type: 'workspace-note-remove', projectName, workspaceName, noteId });
+    if (response.type === 'ok') {
+      await this.listWorkspaces();
+      return;
+    }
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected workspace note remove response');
+  }
+
+  async addGoalNearWorkspace(projectName: string, workspaceName: string, title: string, position: 'before' | 'after'): Promise<import('../../types/goals.js').GoalRecord> {
+    const response = await this.sendTmuxCommand({ type: 'goal-add-near-workspace', projectName, workspaceName, title, position });
+    if (response.type === 'goal') {
+      await this.listWorkspaces();
+      return response.goal;
+    }
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected goal add response');
+  }
+
+  async updateGoal(projectName: string, goalId: string, updates: import('../../types/goals.js').GoalUpdateInput): Promise<import('../../types/goals.js').GoalRecord> {
+    const response = await this.sendTmuxCommand({ type: 'goal-update', projectName, goalId, updates });
+    if (response.type === 'goal') {
+      await this.listWorkspaces();
+      return response.goal;
+    }
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected goal update response');
+  }
+
+  async getGoalDetail(projectName: string, goalId: string): Promise<{ doc: import('../../types/goals.js').GoalDoc; validation: import('../../types/goals.js').GoalValidation }> {
+    const response = await this.sendTmuxCommand({ type: 'goal-detail', projectName, goalId });
+    if (response.type === 'goal-detail') return { doc: response.doc, validation: response.validation };
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected goal detail response');
+  }
+
+  async listGoalChains(projectName: string): Promise<import('../../types/goals.js').GoalChainSummary[]> {
+    const response = await this.sendTmuxCommand({ type: 'goal-chains-list', projectName });
+    if (response.type === 'goal-chains') return response.chains;
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected goal chains list response');
+  }
+
+  async addPlannedGoalToChain(projectName: string, input: import('../../core/goal-chain.js').AddPlannedGoalToChainInput): Promise<import('../../types/goals.js').GoalRecord> {
+    const response = await this.sendTmuxCommand({ type: 'goal-add-planned', projectName, input });
+    if (response.type === 'goal') {
+      await this.listWorkspaces();
+      return response.goal;
+    }
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected planned goal add response');
+  }
+
+  async moveGoalInChain(projectName: string, sourceToken: string, targetToken: string, position: 'before' | 'after'): Promise<import('../../types/goals.js').GoalChain> {
+    const response = await this.sendTmuxCommand({ type: 'goal-reorder', projectName, sourceToken, targetToken, position });
+    if (response.type === 'goal-chain') {
+      await this.listWorkspaces();
+      return response.chain;
+    }
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected goal reorder response');
+  }
+
+  async getGoalStackStatus(projectName: string, workspaceName: string): Promise<import('../../types/goals.js').ChainStackStatus> {
+    const response = await this.sendTmuxCommand({ type: 'goal-stack-status', projectName, workspaceName });
+    if (response.type === 'goal-stack-status') return response.status;
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected goal stack status response');
+  }
+
+  async waiveGoalGate(projectName: string, goalId: string, phase: string, reason: string): Promise<import('../../types/goals.js').GoalRecord> {
+    const response = await this.sendTmuxCommand({ type: 'goal-gate-waive', projectName, goalId, phase, reason });
+    if (response.type === 'goal') {
+      await this.listWorkspaces();
+      return response.goal;
+    }
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected goal gate waive response');
+  }
+
+  async addGoalRequirement(projectName: string, goalId: string, input: AddRequirementInput): Promise<import('../../types/goals.js').Requirement> {
+    const goal = findGoalRecord(projectName, goalId);
+    if (!goal) throw new Error(`Goal not found: ${goalId}`);
+    const { validation, requirement } = addRequirement(goal.validation, input, goal);
+    writeGoalRecord(projectName, { ...goal, validation });
+    await this.listWorkspaces();
+    return requirement;
+  }
+
+  async updateGoalRequirement(projectName: string, goalId: string, requirementId: string, patch: UpdateRequirementInput): Promise<import('../../types/goals.js').Requirement> {
+    const goal = findGoalRecord(projectName, goalId);
+    if (!goal) throw new Error(`Goal not found: ${goalId}`);
+    const { validation, requirement } = updateRequirement(goal.validation, requirementId, patch, goal);
+    writeGoalRecord(projectName, { ...goal, validation });
+    await this.listWorkspaces();
+    return requirement;
+  }
+
+  async removeGoalRequirement(projectName: string, goalId: string, requirementId: string): Promise<void> {
+    const goal = findGoalRecord(projectName, goalId);
+    if (!goal) throw new Error(`Goal not found: ${goalId}`);
+    const validation = removeRequirement(goal.validation, requirementId, goal);
+    writeGoalRecord(projectName, { ...goal, validation });
+    await this.listWorkspaces();
+  }
+
+  async reorderGoalRequirement(projectName: string, goalId: string, requirementId: string, position: number): Promise<void> {
+    const goal = findGoalRecord(projectName, goalId);
+    if (!goal) throw new Error(`Goal not found: ${goalId}`);
+    const validation = reorderRequirement(goal.validation, requirementId, position);
+    writeGoalRecord(projectName, { ...goal, validation });
+    await this.listWorkspaces();
+  }
+
+  async reopenGoalRequirement(projectName: string, goalId: string, requirementId: string): Promise<import('../../types/goals.js').Requirement> {
+    const goal = findGoalRecord(projectName, goalId);
+    if (!goal) throw new Error(`Goal not found: ${goalId}`);
+    const result = reopenRequirement(goal, requirementId);
+    writeGoalRecord(projectName, result.goal);
+    await this.listWorkspaces();
+    return result.requirement;
+  }
+
+  async attachGoalEvidence(projectName: string, goalId: string, requirementId: string, input: AttachEvidenceInput): Promise<import('../../types/goals.js').Evidence> {
+    const goal = findGoalRecord(projectName, goalId);
+    if (!goal) throw new Error(`Goal not found: ${goalId}`);
+    const result = attachManualEvidence(projectName, goal, requirementId, input);
+    writeGoalRecord(projectName, result.goal);
+    await this.listWorkspaces();
+    return result.evidence;
+  }
+
+  async runGoalGeneration(projectName: string, goalId: string, requirementId: string): Promise<{ requirement: import('../../types/goals.js').Requirement; evidence: import('../../types/goals.js').Evidence; autoAccepted: boolean }> {
+    const goal = findGoalRecord(projectName, goalId);
+    if (!goal) throw new Error(`Goal not found: ${goalId}`);
+    const result = runGenerationCommand(projectName, goal, requirementId);
+    writeGoalRecord(projectName, result.goal);
+    await this.listWorkspaces();
+    return { requirement: result.requirement, evidence: result.evidence, autoAccepted: result.autoAccepted };
+  }
+
+  async runGoalJudgment(projectName: string, goalId: string, requirementId: string): Promise<{ requirement: import('../../types/goals.js').Requirement; review: import('../../types/goals.js').Review }> {
+    const goal = findGoalRecord(projectName, goalId);
+    if (!goal) throw new Error(`Goal not found: ${goalId}`);
+    const requirement = goal.validation.requirements[requirementId];
+    if (!requirement) throw new Error(`Unknown requirement: ${requirementId}`);
+    let result;
+    if (requirement.judgment.kind === 'command') result = runJudgmentCommand(projectName, goal, requirementId);
+    else if (requirement.judgment.kind === 'llm') result = runLlmJudgment(goal, requirementId);
+    else throw new Error('Human judgment is not run; use recordGoalHumanReview.');
+    writeGoalRecord(projectName, result.goal);
+    await this.listWorkspaces();
+    return { requirement: result.requirement, review: result.review };
+  }
+
+  async recordGoalHumanReview(projectName: string, goalId: string, requirementId: string, decision: HumanReviewDecision, note: string, score?: number, createdBy?: string): Promise<import('../../types/goals.js').Review> {
+    const goal = findGoalRecord(projectName, goalId);
+    if (!goal) throw new Error(`Goal not found: ${goalId}`);
+    const result = recordHumanReview(goal, requirementId, decision, note, score, createdBy);
+    writeGoalRecord(projectName, result.goal);
+    await this.listWorkspaces();
+    return result.review;
+  }
   async getBundleRefreshPlan(projectName: string, workspaceId: string): Promise<BundleRefreshPlan> {
     const response = await this.sendTmuxCommand({ type: 'bundle-refresh-plan', projectName, workspaceId });
     if (response.type === 'bundle-refresh-plan') return response.plan;
@@ -1018,6 +1369,16 @@ export class LocalSessionBackend implements SessionBackend {
     }
     if (response.type === 'error') throwServiceStartError(response);
     throw new Error('Unexpected tmux service start response');
+  }
+
+  async resolvePortConflict(conflict: PortConflictInfo): Promise<void> {
+    const response = await this.sendTmuxCommand({
+      type: 'service-resolve-port-conflict',
+      conflict,
+    });
+    if (response.type === 'ok') return;
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected port conflict resolution response');
   }
 
   async stopProcess(workspaceId: string, processName: string): Promise<void> {
@@ -1265,6 +1626,12 @@ export class LocalSessionBackend implements SessionBackend {
   }
 
   private async resolveAgentWorkspaceTarget(workspaceId: string): Promise<AgentWorkspaceTargetPayload> {
+    // Project agents: '<project>:@base' is a pseudo-workspace homed at the
+    // project base clone; the server normalizes the real path.
+    if (workspaceId.endsWith(':@base')) {
+      const projectName = workspaceId.slice(0, -':@base'.length);
+      return { workspaceId, workspaceName: '@base', workspacePath: '', projectName };
+    }
     const workspaces = await this.deps.scanWorkspaces();
     const workspace = workspaces.find((item) => matchesWorkspaceId(item, workspaceId));
     if (!workspace) {
@@ -1350,6 +1717,399 @@ export class LocalSessionBackend implements SessionBackend {
     throw new Error('Unexpected agent permission response');
   }
 
+  async getAgentTranscriptRange(
+    workspaceId: string,
+    agentSessionId: string,
+    before: string | undefined,
+    limit: number,
+  ): Promise<{ blocks: unknown[]; oldestCursor: string | null; hasMore: boolean }> {
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    const tmuxResponse = await this.sendTmuxCommand({
+      type: 'agent-transcript-range',
+      target,
+      agentSessionId,
+      before,
+      limit,
+    });
+    if (tmuxResponse.type === 'agent-transcript-range') {
+      return { blocks: tmuxResponse.blocks, oldestCursor: tmuxResponse.oldestCursor, hasMore: tmuxResponse.hasMore };
+    }
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected agent transcript response');
+  }
+
+  async getAgentControlInfo(workspaceId: string, agentSessionId: string): Promise<AgentControlInfo> {
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'agent-control-info', target, agentSessionId });
+    if (tmuxResponse.type === 'agent-control-info') return tmuxResponse.info;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected agent control-info response');
+  }
+
+  async getAgentGoalMode(workspaceId: string, agentSessionId: string): Promise<AgentGoalModeInfo> {
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    const response = await this.sendTmuxCommand({ type: 'agent-goal-mode', target, agentSessionId });
+    if (response.type === 'agent-goal-mode') return response.info;
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected Goal Mode response');
+  }
+
+  async setAgentGoalMode(
+    workspaceId: string,
+    agentSessionId: string,
+    input: { enabled: boolean; precursor?: string },
+  ): Promise<AgentGoalModeInfo> {
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    const response = await this.sendTmuxCommand({ type: 'agent-set-goal-mode', target, agentSessionId, ...input });
+    if (response.type === 'agent-goal-mode') return response.info;
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected Goal Mode response');
+  }
+
+  async shakeAgentSession(
+    workspaceId: string,
+    agentSessionId: string,
+    mode: AgentShakeMode,
+  ): Promise<AgentShakeResult> {
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    const response = await this.sendTmuxCommand({ type: 'agent-shake', target, agentSessionId, mode });
+    if (response.type === 'agent-shake-result') return response.result;
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected Shake response');
+  }
+
+  async getAgentSessionUsageReport(workspaceId: string, agentSessionId: string): Promise<AgentSessionUsageReport | null> {
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'agent-session-usage', target, agentSessionId });
+    if (tmuxResponse.type === 'agent-session-usage') return tmuxResponse.report;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected agent session-usage response');
+  }
+
+  async setAgentModel(workspaceId: string, agentSessionId: string, provider: string, modelId: string): Promise<boolean> {
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'agent-set-model', target, agentSessionId, provider, modelId });
+    if (tmuxResponse.type === 'agent-set-model') return tmuxResponse.ok;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected agent set-model response');
+  }
+
+  async setAgentThinkingLevel(workspaceId: string, agentSessionId: string, level: string): Promise<boolean> {
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'agent-set-thinking-level', target, agentSessionId, level });
+    if (tmuxResponse.type === 'agent-bool') return tmuxResponse.ok;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected set-thinking-level response');
+  }
+
+  async setAgentApprovalMode(workspaceId: string, agentSessionId: string, mode: string): Promise<boolean> {
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'agent-set-approval-mode', target, agentSessionId, mode });
+    if (tmuxResponse.type === 'agent-bool') return tmuxResponse.ok;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected set-approval-mode response');
+  }
+
+  async getAgentAuthProviders(): Promise<Array<{ provider: string; hasAuth: boolean; accounts?: Array<{ id: number; type: string; label: string; disabled: boolean }> }>> {
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'agent-auth-providers' });
+    if (tmuxResponse.type === 'agent-auth-providers') return tmuxResponse.providers;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected auth-providers response');
+  }
+
+  async removeAgentProviderAccount(provider: string, credentialId: number): Promise<boolean> {
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'agent-remove-account', provider, credentialId });
+    if (tmuxResponse.type === 'agent-remove-account') return tmuxResponse.ok;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected remove-account response');
+  }
+
+  async checkAgentProviderUsage(provider: string): Promise<Array<{ id: number; email?: string; ok: boolean | null; reason?: string; limits: Array<{ label: string; unit?: string; used?: number; limit?: number; remaining?: number; remainingFraction?: number; resetsAt?: number; status?: string }>; resetCredits?: { availableCount: number } }>> {
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'agent-provider-usage', provider });
+    if (tmuxResponse.type === 'agent-provider-usage') return tmuxResponse.accounts;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected provider-usage response');
+  }
+
+  async setAgentProviderApiKey(provider: string, key: string): Promise<boolean> {
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'agent-set-api-key', provider, key });
+    if (tmuxResponse.type === 'agent-bool') return tmuxResponse.ok;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected set-api-key response');
+  }
+
+  async getAgentSettings(): Promise<AgentSettingItem[]> {
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'agent-get-settings' });
+    if (tmuxResponse.type === 'agent-settings') return tmuxResponse.settings;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected settings response');
+  }
+
+  async setAgentSetting(path: string, value: string | number | boolean | string[]): Promise<boolean> {
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'agent-set-setting', path, value });
+    if (tmuxResponse.type === 'agent-bool') return tmuxResponse.ok;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected set-setting response');
+  }
+
+  async startAgentOAuthLogin(provider: string, flowId: string): Promise<boolean> {
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'agent-oauth-login', provider, flowId });
+    if (tmuxResponse.type === 'agent-bool') return tmuxResponse.ok;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected oauth-login response');
+  }
+
+  async respondAgentOAuthPrompt(flowId: string, value: string): Promise<boolean> {
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'agent-oauth-respond', flowId, value });
+    if (tmuxResponse.type === 'agent-bool') return tmuxResponse.ok;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected oauth-respond response');
+  }
+
+  async getAgentSettingsSchema(): Promise<AgentSettingSchemaItem[]> {
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'agent-settings-schema' });
+    if (tmuxResponse.type === 'agent-settings-schema') return tmuxResponse.schema;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected settings-schema response');
+  }
+
+  async getAgentTools(workspaceId: string, agentSessionId: string): Promise<AgentToolInfo[]> {
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'agent-tools', target, agentSessionId });
+    if (tmuxResponse.type === 'agent-tools') return tmuxResponse.tools;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected tools response');
+  }
+
+  async listAgentDefinitions(workspaceId: string): Promise<AgentDefinitionInfo[]> {
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'agent-list-agents', target });
+    if (tmuxResponse.type === 'agent-list-agents') return tmuxResponse.agents;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected list-agents response');
+  }
+
+  async compactAgentSession(workspaceId: string, agentSessionId: string): Promise<AgentCompactResult> {
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'agent-compact', target, agentSessionId });
+    if (tmuxResponse.type === 'agent-compact-result') return tmuxResponse.result;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected compact response');
+  }
+
+  async cycleAgentRole(workspaceId: string, agentSessionId: string, direction: 'forward' | 'backward'): Promise<boolean> {
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'agent-cycle-role', target, agentSessionId, direction });
+    if (tmuxResponse.type === 'agent-bool') return tmuxResponse.ok;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected cycle-role response');
+  }
+
+  async applyAgentModelRole(workspaceId: string, agentSessionId: string, role: string): Promise<boolean> {
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'agent-apply-role', target, agentSessionId, role });
+    if (tmuxResponse.type === 'agent-bool') return tmuxResponse.ok;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected apply-role response');
+  }
+
+  async getAgentHistory(workspaceId: string, agentSessionId: string): Promise<AgentHistoryEntry[]> {
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'agent-history', target, agentSessionId });
+    if (tmuxResponse.type === 'agent-history') return tmuxResponse.entries;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected history response');
+  }
+
+  async getAgentSessionTree(workspaceId: string, agentSessionId: string): Promise<AgentTreeNode[]> {
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'agent-tree', target, agentSessionId });
+    if (tmuxResponse.type === 'agent-tree') return tmuxResponse.nodes;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected tree response');
+  }
+
+  /** artifact:// URI for a workspace target (project methods use '@base'). */
+  private async artifactUriFor(workspaceId: string, relPath = ''): Promise<string> {
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    return formatArtifactUri(target.projectName, target.workspaceName, relPath);
+  }
+
+  async listWorkspaceArtifacts(workspaceId: string): Promise<Array<{ path: string; size: number; pointer: boolean }>> {
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'artifact-list', uriPrefix: await this.artifactUriFor(workspaceId) });
+    if (tmuxResponse.type === 'artifact-list') return tmuxResponse.entries;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected artifact-list response');
+  }
+
+  async readWorkspaceArtifact(workspaceId: string, path: string, range?: ArtifactReadRange): Promise<{ base64: string; size: number; truncated: boolean }> {
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'artifact-read', uri: await this.artifactUriFor(workspaceId, path), offset: range?.offset, length: range?.length });
+    if (tmuxResponse.type === 'artifact-read') return { base64: tmuxResponse.base64, size: tmuxResponse.size, truncated: tmuxResponse.truncated };
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected artifact-read response');
+  }
+
+  async writeWorkspaceArtifact(workspaceId: string, path: string, contentBase64: string, message?: string): Promise<string> {
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'artifact-write', uri: await this.artifactUriFor(workspaceId, path), contentBase64, message });
+    if (tmuxResponse.type === 'artifact-write') return tmuxResponse.commit;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected artifact-write response');
+  }
+
+  async listWorkspaceFavorites(workspaceId: string): Promise<string[]> {
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'favorites-list', uriPrefix: await this.artifactUriFor(workspaceId) });
+    if (tmuxResponse.type === 'favorites') return tmuxResponse.favorites;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected favorites-list response');
+  }
+
+  async toggleWorkspaceFavorite(workspaceId: string, path: string): Promise<{ favorites: string[]; snapshotSkipped?: string[] }> {
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'favorites-toggle', uri: await this.artifactUriFor(workspaceId, path) });
+    if (tmuxResponse.type === 'favorites') return { favorites: tmuxResponse.favorites, snapshotSkipped: tmuxResponse.snapshotSkipped };
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected favorites-toggle response');
+  }
+
+  async mergeWorkspaceFavorites(workspaceId: string, paths: string[]): Promise<string[]> {
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'favorites-merge', uriPrefix: await this.artifactUriFor(workspaceId), paths });
+    if (tmuxResponse.type === 'favorites') return tmuxResponse.favorites;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected favorites-merge response');
+  }
+
+  async listProjectArtifacts(projectName: string): Promise<Array<{ path: string; size: number; pointer: boolean }>> {
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'artifact-list', uriPrefix: formatArtifactUri(projectName, '@base') });
+    if (tmuxResponse.type === 'artifact-list') return tmuxResponse.entries;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected artifact-list response');
+  }
+
+  async readProjectArtifact(projectName: string, path: string, range?: ArtifactReadRange): Promise<{ base64: string; size: number; truncated: boolean }> {
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'artifact-read', uri: formatArtifactUri(projectName, '@base', path), offset: range?.offset, length: range?.length });
+    if (tmuxResponse.type === 'artifact-read') return { base64: tmuxResponse.base64, size: tmuxResponse.size, truncated: tmuxResponse.truncated };
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected artifact-read response');
+  }
+
+  async writeProjectArtifact(projectName: string, path: string, contentBase64: string, message?: string): Promise<string> {
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'artifact-write', uri: formatArtifactUri(projectName, '@base', path), contentBase64, message });
+    if (tmuxResponse.type === 'artifact-write') return tmuxResponse.commit;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected artifact-write response');
+  }
+
+  async getProjectArtifactsStatus(projectName: string): Promise<ProjectArtifactsStatus> {
+    const r = await this.sendTmuxCommand({ type: 'project-artifacts-status', projectName });
+    if (r.type === 'project-artifacts-status') return { repoPath: r.repoPath, remote: r.remote, branches: r.branches, pointerCommitted: r.pointerCommitted, unmergedByBranch: r.unmergedByBranch };
+    if (r.type === 'error') throw new Error(r.message);
+    throw new Error('Unexpected project-artifacts-status response');
+  }
+
+  async setProjectArtifactsRemote(projectName: string, url: string): Promise<{ pushed: boolean; fastForwarded: boolean }> {
+    const r = await this.sendTmuxCommand({ type: 'project-artifacts-remote-set', projectName, url });
+    if (r.type === 'project-artifacts-sync') return { pushed: r.pushed, fastForwarded: r.fastForwarded };
+    if (r.type === 'error') throw new Error(r.message);
+    throw new Error('Unexpected project-artifacts-remote-set response');
+  }
+
+  async reportProblem(note: string, clientBundle: unknown, opts: { fileIssue?: boolean; projectName?: string } = {}): Promise<{ path: string; issueUrl?: string; issueNumber?: number }> {
+    const r = await this.sendTmuxCommand({ type: 'report-problem', note, clientBundleJson: JSON.stringify(clientBundle), fileIssue: opts.fileIssue, projectName: opts.projectName });
+    if (r.type === 'report-problem') return { path: r.path, issueUrl: r.issueUrl, issueNumber: r.issueNumber };
+    if (r.type === 'error') throw new Error(r.message);
+    throw new Error('Unexpected report-problem response');
+  }
+
+  async rollupProjectArtifacts(projectName: string, workspace: string, opts: { removeBranch?: boolean } = {}): Promise<{ mergeCommit: string }> {
+    const r = await this.sendTmuxCommand({ type: 'project-artifacts-rollup', projectName, workspace, removeBranch: opts.removeBranch });
+    if (r.type === 'project-artifacts-rollup') return { mergeCommit: r.mergeCommit };
+    if (r.type === 'error') throw new Error(r.message);
+    throw new Error('Unexpected rollup response');
+  }
+
+  async mintArtifactShare(uri: string, opts: { ttlMs?: number; maxUses?: number } = {}): Promise<{ url: string; tokenId: string; expiresAt: number }> {
+    const r = await this.sendTmuxCommand({ type: 'artifact-share-mint', uri, ttlMs: opts.ttlMs, maxUses: opts.maxUses });
+    if (r.type === 'artifact-share-mint') return { url: r.url, tokenId: r.tokenId, expiresAt: r.expiresAt };
+    if (r.type === 'error') throw new Error(r.message);
+    throw new Error('Unexpected artifact-share-mint response');
+  }
+
+  async revokeArtifactShare(tokenId: string): Promise<boolean> {
+    const r = await this.sendTmuxCommand({ type: 'artifact-share-revoke', tokenId });
+    if (r.type === 'artifact-share-revoke') return r.revoked;
+    if (r.type === 'error') throw new Error(r.message);
+    throw new Error('Unexpected artifact-share-revoke response');
+  }
+
+  async saveWorkspaceTrigger(workspaceId: string, trigger: import('../../core/triggers.js').TriggerRecord): Promise<import('../../core/triggers.js').TriggerRecord> {
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    const r = await this.sendTmuxCommand({ type: 'trigger-save', target, trigger });
+    if (r.type === 'trigger-save') return r.trigger;
+    if (r.type === 'error') throw new Error(r.message);
+    throw new Error('Unexpected trigger-save response');
+  }
+
+  async runWorkspaceTriggerNow(workspaceId: string, triggerId: string): Promise<{ sessionId: string }> {
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    const r = await this.sendTmuxCommand({ type: 'trigger-run-now', target, triggerId });
+    if (r.type === 'trigger-run-now') return { sessionId: r.sessionId };
+    if (r.type === 'error') throw new Error(r.message);
+    throw new Error('Unexpected trigger-run-now response');
+  }
+
+  async provisionProjectArtifacts(projectName: string): Promise<{ slug: string; url: string; created: boolean; blobsUploaded: number; collaboratorsCopied: number }> {
+    const r = await this.sendTmuxCommand({ type: 'project-artifacts-provision', projectName });
+    if (r.type === 'project-artifacts-provision') return { slug: r.slug, url: r.url, created: r.created, blobsUploaded: r.blobsUploaded, collaboratorsCopied: r.collaboratorsCopied };
+    if (r.type === 'error') throw new Error(r.message);
+    throw new Error('Unexpected provision response');
+  }
+
+  async syncProjectArtifacts(projectName: string): Promise<{ pushed: boolean; fastForwarded: boolean }> {
+    const r = await this.sendTmuxCommand({ type: 'project-artifacts-sync', projectName });
+    if (r.type === 'project-artifacts-sync') return { pushed: r.pushed, fastForwarded: r.fastForwarded };
+    if (r.type === 'error') throw new Error(r.message);
+    throw new Error('Unexpected project-artifacts-sync response');
+  }
+
+  async listRepoFiles(workspaceId: string): Promise<Array<{ path: string; status?: string }>> {
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'repo-tree', target });
+    if (tmuxResponse.type === 'repo-tree') return tmuxResponse.entries;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected repo-tree response');
+  }
+
+  async readRepoFile(workspaceId: string, path: string): Promise<{ base64: string | null; size: number; truncated: boolean }> {
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'repo-read', target, path });
+    if (tmuxResponse.type === 'repo-read') return { base64: tmuxResponse.base64, size: tmuxResponse.size, truncated: tmuxResponse.truncated };
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected repo-read response');
+  }
+
+  async searchRepoContent(workspaceId: string, query: string, options?: { caseSensitive?: boolean }): Promise<{ hits: Array<{ path: string; line: number; text: string }>; truncated: boolean }> {
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'repo-search', target, query, caseSensitive: options?.caseSensitive });
+    if (tmuxResponse.type === 'repo-search') return { hits: tmuxResponse.hits, truncated: tmuxResponse.truncated };
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected repo-search response');
+  }
+
+  async commitWorkspaceChanges(workspaceId: string, message: string): Promise<string | null> {
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'repo-commit', target, message });
+    if (tmuxResponse.type === 'repo-commit') return tmuxResponse.commit;
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected repo-commit response');
+  }
+
+  async navigateAgentHistory(workspaceId: string, agentSessionId: string, entryId: string, mode: 'redo' | 'jump' = 'redo'): Promise<{ ok: boolean; editorText?: string }> {
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    const tmuxResponse = await this.sendTmuxCommand({ type: 'agent-navigate-history', target, agentSessionId, entryId, mode });
+    if (tmuxResponse.type === 'agent-navigate') return { ok: tmuxResponse.ok, editorText: tmuxResponse.editorText };
+    if (tmuxResponse.type === 'error') throw new Error(tmuxResponse.message);
+    throw new Error('Unexpected navigate-history response');
+  }
+
   async getKnownAgentSessions(workspaceId: string): Promise<Array<{ id: string; title: string; updatedAt?: string; closedAt?: string; archivedAt?: string }>> {
     return machineSnapshotToKnownAgentSessions(this.machineStateClient.getSnapshot(), workspaceId, { includeArchived: true });
   }
@@ -1429,25 +2189,39 @@ export class LocalSessionBackend implements SessionBackend {
     throw new Error('Unexpected agent restore response');
   }
 
-  async attachAgentSession(workspaceId: string, agentSessionId: string, options: { viewOnly?: boolean; cols?: number; rows?: number } = {}): Promise<void> {
+  /**
+   * Open an agent session in a pane with no terminal behind it. The daemon
+   * takes a viewer lease; the pane record exists purely so the native
+   * transcript has somewhere to render. No PTY stream is opened, so nothing
+   * streams bytes the client would immediately discard.
+   */
+  async openAgentSession(workspaceId: string, agentSessionId: string, options: { paneId?: string } = {}): Promise<void> {
     const target = await this.resolveAgentWorkspaceTarget(workspaceId);
-    const response = await this.sendTmuxCommand({ type: 'agent-attach', target, agentSessionId, cols: options.cols, rows: options.rows });
-    if (response.type !== 'session') {
+    const paneId = options.paneId ?? `agent:${agentSessionId}`;
+    const response = await this.sendTmuxCommand({ type: 'agent-open', target, agentSessionId, paneId });
+    if (response.type !== 'agent-opened') {
       if (response.type === 'error') throw new Error(response.message);
-      throw new Error('Unexpected agent attach response');
+      throw new Error('Unexpected agent open response');
     }
-    this.pendingAttachedAgentSession = {
+    this.openAgentPanes.set(paneId, agentSessionId);
+    await this.refreshMachineSnapshotState();
+    this.emit({
+      type: 'pane_attached',
+      paneId,
+      streamId: null,
+      sessionId: null,
+      workspaceId,
       agentSessionId,
-      sessionId: response.session.id,
-    };
-    try {
-      await this.refreshMachineSnapshotState();
-      await this.attachSession({ sessionId: response.session.id, workspaceId, viewOnly: options.viewOnly, cols: options.cols, rows: options.rows });
-    } catch (error) {
-      this.pendingAttachedAgentSession = null;
-      this.attachedAgentSessionId = null;
-      throw error;
-    }
+    });
+  }
+
+  async closeAgentPane(paneId: string): Promise<void> {
+    const agentSessionId = this.openAgentPanes.get(paneId);
+    if (!agentSessionId) return;
+    this.openAgentPanes.delete(paneId);
+    this.emit({ type: 'pane_detached', paneId });
+    const response = await this.sendTmuxCommand({ type: 'agent-release', agentSessionId, paneId });
+    if (response.type === 'error') throw new Error(response.message);
   }
 
   async promptAgentSession(workspaceId: string, agentSessionId: string, text: string, images?: import('../../lib/tmux-lite/protocol.js').AgentPromptImage[], options?: { streamingBehavior?: 'steer' | 'followUp' }): Promise<void> {
@@ -1458,6 +2232,17 @@ export class LocalSessionBackend implements SessionBackend {
     throw new Error(`Unexpected prompt response: ${response.type}`);
   }
 
+  async removeAgentQueuedMessage(workspaceId: string, agentSessionId: string, kind: 'steering' | 'followUp', index: number): Promise<string | null> {
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    const response = await this.sendTmuxCommand({ type: 'agent-queue-remove', target, agentSessionId, kind, index });
+    if (response.type === 'agent-queued-message') {
+      await this.refreshMachineSnapshotState();
+      return response.message;
+    }
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error(`Unexpected queued message response: ${response.type}`);
+  }
+
   async stageUpload(workspaceId: string, fileName: string, data: string, mimeType: string): Promise<{ stagedPath: string }> {
     const target = await this.resolveAgentWorkspaceTarget(workspaceId);
     const response = await this.sendTmuxCommand({ type: 'agent-stage-upload', target, fileName, data, mimeType });
@@ -1466,7 +2251,7 @@ export class LocalSessionBackend implements SessionBackend {
     throw new Error('Unexpected stage upload response');
   }
 
-  async sendDialogResponse(dialogId: string, dialogType: 'select' | 'confirm' | 'input' | 'editor', value: string | boolean | undefined): Promise<void> {
+  async sendDialogResponse(dialogId: string, dialogType: import('../../lib/tmux-lite/agents/host-ui-bridge.js').HostUIDialogResponseType, value: import('../../lib/tmux-lite/agents/host-ui-bridge.js').HostUIDialogResponseValue): Promise<void> {
     const response = await this.sendTmuxCommand({ type: 'agent-dialog-response', dialogId, dialogType, value });
     if (response.type === 'agent-bool') {
       if (response.ok) return;
@@ -1524,6 +2309,41 @@ export class LocalSessionBackend implements SessionBackend {
     if (response.type === 'agent-commands') return response.commands;
     if (response.type === 'error') throw new Error(response.message);
     throw new Error('Unexpected list commands response');
+  }
+
+  async listAvailableEditors(workspaceId: string): Promise<WorkspaceEditorOption[]> {
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    const response = await this.sendTmuxCommand({ type: 'workspace-editors-list', target });
+    if (response.type === 'workspace-editors') return response.editors;
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected editor listing response');
+  }
+
+  async openWorkspaceInEditor(workspaceId: string, editorId: WorkspaceEditorId): Promise<void> {
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    const response = await this.sendTmuxCommand({ type: 'workspace-editor-open', target, editorId });
+    if (response.type === 'ok') return;
+    if (response.type === 'error') throw new Error(response.message);
+    throw new Error('Unexpected open editor response');
+  }
+
+  async runSpaceCommand(workspaceId: string, argsText: string): Promise<string> {
+    const target = await this.resolveAgentWorkspaceTarget(workspaceId);
+    const [{ parseCommandArgs }, { execCommand }] = await Promise.all([
+      import('@oh-my-pi/pi-coding-agent/utils/command-args'),
+      import('@oh-my-pi/pi-coding-agent/exec/exec'),
+    ]);
+    const args = parseCommandArgs(argsText);
+    return executeSpaceCommand(
+      {
+        exec: async (command, commandArgs, options) => {
+          const result = await execCommand(command, commandArgs, options?.cwd ?? target.workspacePath, options);
+          return { stdout: result.stdout, stderr: result.stderr, code: result.code, killed: result.killed ?? false };
+        },
+      },
+      { cwd: target.workspacePath },
+      args,
+    );
   }
 
   async getFileSuggestions(workspaceId: string, prefix: string, limit?: number): Promise<Array<{ path: string; isDirectory: boolean }>> {

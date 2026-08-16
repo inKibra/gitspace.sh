@@ -1,5 +1,18 @@
 import { builtinModules } from 'node:module'
 import { readFileSync } from 'node:fs'
+import net from 'node:net'
+
+// Bun-compat: vite's WS proxy teardown calls socket.destroySoon(), which
+// Bun's net.Socket lacks — the whole dev supervisor died on certain client
+// disconnects (took the stack down three times in one day). There is no real
+// `node` on some dev machines (Bun shims `node` to itself), so polyfill here
+// where the dev-server process is guaranteed to load it. No-op under real node.
+const socketProto = net.Socket.prototype as unknown as { destroySoon?: (this: net.Socket) => void }
+if (!socketProto.destroySoon) {
+  socketProto.destroySoon = function destroySoon(this: net.Socket) {
+    this.end()
+  }
+}
 
 import { defineConfig, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
@@ -118,7 +131,7 @@ function stubServerModules(): Plugin {
 // Gathered by tracing imports from the seven violations above.
 const stubExportNames = [
   // tmux-lite/cli.ts
-  'killSession', 'listSessionsFromRunningServer', 'isServerRunning',
+  'listSessionsFromRunningServer', 'isServerRunning',
   'listSessions', 'createSession', 'send', 'isProcessRunning',
   'ensureServer', 'getStatus', 'getAgentState', 'watchAgentState',
   'killServer', 'createVirtualSession',
@@ -205,9 +218,13 @@ export default defineConfig({
       'react-dom': path.resolve(__dirname, 'node_modules/react-dom'),
       'ghostty-web': path.resolve(__dirname, 'node_modules/ghostty-web'),
       'sonner': path.resolve(__dirname, 'node_modules/sonner'),
-      // @pierre/diffs is installed in web/node_modules; alias so src/ imports resolve
+      // @pierre/diffs + @pierre/trees are installed in web/node_modules; alias so src/ imports resolve
       '@pierre/diffs/react': path.resolve(__dirname, 'node_modules/@pierre/diffs/dist/react/index.js'),
       '@pierre/diffs': path.resolve(__dirname, 'node_modules/@pierre/diffs/dist/index.js'),
+      '@pierre/trees/react': path.resolve(__dirname, 'node_modules/@pierre/trees/dist/react/index.js'),
+      '@pierre/trees': path.resolve(__dirname, 'node_modules/@pierre/trees/dist/index.js'),
+      // mermaid is installed in web/node_modules; alias so src/ imports resolve
+      'mermaid': path.resolve(__dirname, 'node_modules/mermaid/dist/mermaid.core.mjs'),
     },
   },
   server: {

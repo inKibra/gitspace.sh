@@ -1,0 +1,105 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# A newer push supersedes an in-flight run for the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: Static checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+
+      # dependency-cruiser declares engines ^20.12 || ^22 || >=24 and refuses to
+      # run on 23.x, so the Node version here is load-bearing, not incidental.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install
+        run: bun install --frozen-lockfile
+
+      # web/ is a separate package (the root has no workspaces) and `typecheck`
+      # runs `tsc -b` inside it, so it needs its own dependency tree.
+      - name: Install (web)
+        run: bun install --frozen-lockfile
+        working-directory: web
+
+      # Covers the root project, the web app, and the web tests project.
+      - name: Typecheck
+        run: bun run typecheck
+
+      # Fails if any source file is in no tsconfig program or carries
+      # @ts-nocheck — the blind spot that hid 36 errors and two live bugs.
+      - name: Typecheck coverage
+        run: bun run typecheck:coverage
+
+      - name: Lockfile sync
+        run: bun run check:lockfile-sync
+
+      - name: Architecture boundaries
+        run: bun run check:arch
+
+  test:
+    name: Tests
+    # macOS on purpose. The suite drives real PTYs (Bun.Terminal, /dev/ptmx) and
+    # Bun.secrets/keychain, and fd-leak.integration.test.ts guards a limit that
+    # is "acute on macOS where the default soft NOFILE limit is 256". A Linux
+    # container tier for the integration suites is tracked in #121.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Install
+        run: bun install --frozen-lockfile
+
+      # cloudflared is a real runtime dependency, not a test fixture: `machine
+      # serve start` launches a tunnel through it, and three suites
+      # (cloud-launch, hosting/supervisor, web.integration) drive that path.
+      # Developers have it via Homebrew, so its absence only ever showed up here.
+      - name: Install cloudflared
+        run: brew install cloudflared
+
+      # web.integration drives `gssh web`, which refuses to start without built
+      # assets ("Web UI assets not found"). Developers have web/dist lying
+      # around; a clean runner does not.
+      - name: Build web assets
+        run: bun run build:web
+
+      # scripts/test-isolated.ts runs each file in its own process: mock.module
+      # is process-global and mock.restore() does not undo it, so a bare
+      # `bun test` is not a trustworthy signal.
+      - name: Test
+        run: bun run test
+
+      # The suite must not leave daemons, process runners or services behind.
+      # Orphans reparent to PID 1 and would otherwise accumulate silently; a
+      # full lifecycle harness is tracked in #121.
+      - name: Assert no leaked processes
+        if: always()
+        run: |
+          # `ps -Ao ... | grep` rather than pgrep: macOS pgrep has no -a, and
+          # joining pids for `ps -p` is needlessly fragile. This form prints the
+          # offending processes directly.
+          leaked=$(ps -Ao pid=,ppid=,command= | grep -E 'internal-process-runner|tmux-lite/server\.ts' | grep -v grep || true)
+          if [ -n "$leaked" ]; then
+            echo "::error::Test run leaked processes"
+            echo "$leaked"
+            exit 1
+          fi
+          echo "No leaked processes."

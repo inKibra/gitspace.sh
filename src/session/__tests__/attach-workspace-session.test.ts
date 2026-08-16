@@ -1,5 +1,6 @@
 import { describe, expect, it, mock } from 'bun:test';
 import { attachWorkspaceSession } from '../attach-workspace-session.js';
+import { buildWorkspaceSessionEnv } from '../workspace-shell-hooks.js';
 
 describe('attachWorkspaceSession command sessions', () => {
   it('injects workspace session env vars for direct command attaches', async () => {
@@ -43,9 +44,10 @@ describe('attachWorkspaceSession command sessions', () => {
         command: 'gssh',
         args: ['space', 'commit'],
         env: {
-          GSSH_SESSION_MODE: 'workspace',
-          GSSH_SPACE_PROJECT: 'acme',
-          GSSH_SPACE_WORKSPACE: 'feature-1',
+          // Mirrors buildWorkspaceSessionEnv: GITSPACE_WORKSPACE_ROOT propagates
+          // the resolved workspace root into the session. Computed, not
+          // hardcoded, because it follows HOME/GITSPACE_WORKSPACE_ROOT.
+          ...buildWorkspaceSessionEnv('acme', 'feature-1'),
           EXTRA_FLAG: '1',
         },
       },

@@ -10,10 +10,10 @@
  */
 
 import { HandshakeHandler, type HandshakeMessage, type EstablishedSession } from "../lib/tmux-lite/handshake-handler.js";
-import { createFrame, openFrame, MASTER_STREAM_ID } from "../lib/tmux-lite/crypto/frames.js";
+import { createFrame, openFrame } from "../lib/tmux-lite/crypto/frames.js";
 import { encodeControl, encodePTY, parseFrames, decodeControl, FrameType, type SessionEvent } from "../lib/tmux-lite/protocol.js";
 import { RemoteSessionHandler, type RemoteClientSession } from "../lib/remote-session/index.js";
-import { STREAM_ID, canWrite, canManage, type ServeOptions, type ClientSession, type ServeEventHandler, type HandshakeMessageEnvelope } from "./types.js";
+import { STREAM_ID, canWrite, canManage, type ServeOptions, type ClientSession, type AttachedPane, type ServeEventHandler, type HandshakeMessageEnvelope } from "./types.js";
 import { createBufferedSocketWriter } from "../utils/bun-socket-writer.js";
 import { serializeRemoteMessage } from "../lib/remote-session/protocol.js";
 import type { AgentStateUpdateDelta, WorkspaceAgentState } from "../lib/tmux-lite/agent-event-manager.js";
@@ -53,12 +53,10 @@ export class ClientSessionManager {
   private sessions: Map<string, ClientSession> = new Map();
   private handshakeHandler: HandshakeHandler;
   private remoteSessionHandler: RemoteSessionHandler;
-  private options: ServeOptions;
   private eventHandler: ServeEventHandler | null = null;
   private readonly inboundMessageQueues = new Map<string, Promise<Uint8Array | null>>();
 
   constructor(options: ServeOptions) {
-    this.options = options;
     this.handshakeHandler = new HandshakeHandler({
       identity: options.identity,
       handshakeTimeoutMs: options.handshakeTimeoutMs,
@@ -67,12 +65,12 @@ export class ClientSessionManager {
     this.remoteSessionHandler = new RemoteSessionHandler();
   }
 
-  private writeToTmuxSocket(session: ClientSession, frame: Buffer): void {
-    if (session.tmuxSocketWriter) {
-      session.tmuxSocketWriter.write(frame);
+  private writeToTmuxSocket(pane: AttachedPane, frame: Buffer): void {
+    if (pane.tmuxSocketWriter) {
+      pane.tmuxSocketWriter.write(frame);
       return;
     }
-    session.tmuxSocket?.write(frame);
+    pane.tmuxSocket?.write(frame);
   }
 
   private registerBrowsingPushes(connectionId: string, sessionKeys: SessionKeys): void {
@@ -125,7 +123,7 @@ export class ClientSessionManager {
   get establishedSessionCount(): number {
     let count = 0;
     for (const session of this.sessions.values()) {
-      if (session.state === "browsing" || session.state === "attached") count++;
+      if (session.state === "browsing") count++;
     }
     return count;
   }
@@ -153,6 +151,7 @@ export class ClientSessionManager {
       connectionId,
       state: "handshaking",
       handshakeStartedAt: Date.now(),
+      attachedPanes: new Map(),
     };
     this.sessions.set(connectionId, session);
 
@@ -172,6 +171,11 @@ export class ClientSessionManager {
     connectionId: string,
     data: Uint8Array
   ): Promise<Uint8Array | null> {
+    const session = this.sessions.get(connectionId);
+    if (session && session.state !== "handshaking") {
+      return this.handleMessageNow(connectionId, data);
+    }
+
     const previous = this.inboundMessageQueues.get(connectionId) ?? Promise.resolve<Uint8Array | null>(null);
     const next = previous
       .catch(() => null)
@@ -204,13 +208,7 @@ export class ClientSessionManager {
     }
 
     if (session.state === "browsing") {
-      // Handle browse commands (list_workspaces, list_sessions, attach_session, etc.)
-      return this.handleBrowseMessage(connectionId, session, data);
-    }
-
-    if (session.state === "attached" && session.tmuxSocket) {
-      // Decrypt and route to tmux-lite session based on stream ID
-      return this.handleAttachedMessage(connectionId, session, data);
+      return this.handleEncryptedSessionMessage(connectionId, session, data);
     }
 
     // Invalid state
@@ -218,76 +216,53 @@ export class ClientSessionManager {
     return null;
   }
 
-  private returnAttachedSessionToBrowsing(
-    connectionId: string,
-    session: ClientSession,
-    options: {
-      socket?: ClientSession['tmuxSocket'];
-      writer?: ClientSession['tmuxSocketWriter'];
-      sendDetachControl?: boolean;
-    } = {},
-  ): void {
-    const socket = options.socket ?? session.tmuxSocket;
-    const writer = options.writer ?? session.tmuxSocketWriter;
-    session.tmuxSocket = undefined;
-    session.tmuxSocketWriter = undefined;
-    session.state = 'browsing';
-    session.attachedSessionId = undefined;
-    session.attachedSessionName = undefined;
-    session.viewOnly = undefined;
-    session.sessionSocketPath = undefined;
-    session.initialCols = undefined;
-    session.initialRows = undefined;
-    session.waitingForResize = undefined;
-    session.frameBuffer = undefined;
-
-    if (socket) {
+  private detachPane(session: ClientSession, pane: AttachedPane, options: { sendDetachControl?: boolean } = {}): void {
+    session.attachedPanes.delete(pane.streamId);
+    pane.tmuxSocketWriter?.clear();
+    if (pane.tmuxSocket) {
       try {
         if (options.sendDetachControl) {
           const frame = encodeControl({ type: 'detach' });
-          if (writer) writer.write(frame);
-          else socket.write(frame);
+          if (pane.tmuxSocketWriter) pane.tmuxSocketWriter.write(frame);
+          else pane.tmuxSocket.write(frame);
         }
-        socket.end();
+        pane.tmuxSocket.end();
       } catch {
-        // Socket may already be closed
+        // Socket may already be closed.
       }
     }
+    pane.tmuxSocket = null;
+    pane.tmuxSocketWriter = null;
+    pane.frameBuffer = Buffer.alloc(0);
+  }
 
-    if (session.sessionKeys) {
-      this.registerBrowsingPushes(connectionId, session.sessionKeys);
+  private detachAllPanes(session: ClientSession, options: { sendDetachControl?: boolean } = {}): void {
+    for (const pane of [...session.attachedPanes.values()]) {
+      this.detachPane(session, pane, options);
     }
   }
 
 
-  /**
-   * Handle message in attached state - route to tmux-lite session based on stream ID
-   */
-  private async handleAttachedMessage(
+  private async handleEncryptedSessionMessage(
     connectionId: string,
     session: ClientSession,
     data: Uint8Array
   ): Promise<Uint8Array | null> {
-    if (!session.sessionKeys || !session.tmuxSocket) {
-      console.error("[session-manager] handleAttachedMessage: missing sessionKeys or tmuxSocket");
+    if (!session.sessionKeys) {
+      console.error("[session-manager] handleEncryptedSessionMessage: missing sessionKeys");
       return null;
     }
 
     try {
-      // Decrypt the frame
       const result = openFrame(data, session.sessionKeys.receiveKey);
       if (!result) {
-        console.error("[session-manager] Failed to decrypt attached frame");
+        console.error("[session-manager] Failed to decrypt session frame");
         return null;
       }
 
-      // Debug: console.log(`[session-manager] Attached message: streamId=${result.streamId}, dataLen=${result.data.length}`);
-
       if (result.streamId === STREAM_ID.CONTROL) {
-        // Control message - parse and route appropriately
         const msg = JSON.parse(new TextDecoder().decode(result.data));
 
-        // Explicit commands allowed while attached (agent interaction)
         const ATTACHED_COMMAND_TYPES = new Set([
           'prompt_agent_session',
           'abort_agent_session',
@@ -305,65 +280,51 @@ export class ClientSessionManager {
           return null;
         }
 
-        if (msg.type === "detach") {
-          // Handle detach specially - close tmux socket and send response to client
-          // while keeping the authenticated connection in browsing mode.
-          const socket = session.tmuxSocket;
-          const writer = session.tmuxSocketWriter;
-          this.returnAttachedSessionToBrowsing(connectionId, session, {
-            socket,
-            writer,
-            sendDetachControl: true,
-          });
-
-          // Send detached response to client
-          const detachedMsg = JSON.stringify({ type: "detached" });
-          const detachedData = new TextEncoder().encode(detachedMsg);
-          const frame = createFrame(STREAM_ID.DATA, detachedData, session.sessionKeys.sendKey);
-          console.log("[session-manager] Sent detached response, returning to browsing mode");
-          return frame;
+        if (msg.type === 'detach_all') {
+          this.detachAllPanes(session, { sendDetachControl: true });
+          return null;
         }
 
-        // First-resize gate: defer attach-init until client sends actual dimensions
-        if (msg.type === 'resize' && session.waitingForResize) {
-          // First resize — send attach-init with actual dimensions
-          console.log(`[session-manager] First resize: ${msg.cols}x${msg.rows} - sending attach-init`);
-          session.waitingForResize = false;
-          this.writeToTmuxSocket(session, encodeControl({ type: 'attach-init', cols: msg.cols, rows: msg.rows, clientType: 'web' }));
-          return null; // attach-init handles the resize
+        if (msg.type === 'detach') {
+          const pane = session.attachedPanes.get(msg.streamId);
+          if (!pane) return null;
+          this.detachPane(session, pane, { sendDetachControl: true });
+          const detachedData = new TextEncoder().encode(JSON.stringify({ type: 'detached', streamId: msg.streamId }));
+          return createFrame(STREAM_ID.DATA, detachedData, session.sessionKeys.sendKey);
         }
 
-        // Browse-mode commands sent while attached (e.g. review, inbox,
-        // workspace ops from the web sidebar). Route through the session
-        // handler instead of forwarding to the tmux-lite session socket.
+        if (msg.type === 'resize') {
+          const pane = session.attachedPanes.get(msg.streamId);
+          if (pane) {
+            this.writeToTmuxSocket(pane, encodeControl({ type: 'resize', cols: msg.cols, rows: msg.rows }));
+          }
+          return null;
+        }
+
+        if (msg.type === 'attach_session') {
+          return this.handleBrowseMessage(connectionId, session, data);
+        }
+
+
         if (msg.requestId && typeof msg.type === 'string') {
           return this.handleBrowseMessage(connectionId, session, data);
         }
 
-        // Forward PTY control messages (resize, attach-init) directly to
-        // tmux-lite. Only genuine SessionCtrl messages reach here.
-        this.writeToTmuxSocket(session, encodeControl(msg));
-      } else {
-        // Raw PTY input (STREAM_ID.DATA) - send directly to socket
-        // Security: Check write permission before forwarding input
-        if (session.viewOnly || !canWrite(session.accessType)) {
-          console.warn(`[session-manager] Read-only client ${connectionId} attempted PTY write - denied`);
-          return null; // Silently drop input from read-only clients
-        }
-
-        // Only forward if we've sent attach-init (waitingForResize is false)
-        if (session.waitingForResize) {
-          console.warn('[session-manager] Ignoring PTY data before attach-init');
-          return null;
-        }
-
-        // Wrap PTY data in a frame for the framed protocol
-        this.writeToTmuxSocket(session, encodePTY(result.data));
+        return null;
       }
 
+      const pane = session.attachedPanes.get(result.streamId);
+      if (!pane) {
+        return null;
+      }
+      if (pane.viewOnly || !canWrite(session.accessType)) {
+        console.warn(`[session-manager] Read-only client ${connectionId} attempted PTY write - denied`);
+        return null;
+      }
+      this.writeToTmuxSocket(pane, encodePTY(result.data));
       return null;
     } catch (e) {
-      console.error("[session-manager] Error handling attached message:", e);
+      console.error("[session-manager] Error handling encrypted session message:", e);
       return null;
     }
   }
@@ -376,7 +337,7 @@ export class ClientSessionManager {
     session: ClientSession,
     msg: { type: string; requestId: string; [key: string]: unknown },
   ): Promise<{ type: 'command_response'; requestId: string; response: TmuxResponse } | null> {
-    if (session.viewOnly || !canManage(session.accessType)) {
+    if (!canManage(session.accessType)) {
       return { type: 'command_response', requestId: msg.requestId, response: { type: 'error', message: 'Permission denied' } };
     }
     try {
@@ -464,19 +425,28 @@ export class ClientSessionManager {
     // Handle the message through RemoteSessionHandler
     await this.remoteSessionHandler.handleMessage(remoteSession, data, sendResponse);
 
-    // Check if we're now attached (after attach_session command)
-    // Keep machine snapshot pushes active so sidebar state stays live.
     if (remoteSession.state === "attached" && remoteSession.attachedSessionId) {
-      session.state = "attached";
-      session.attachedSessionId = remoteSession.attachedSessionId;
-      session.attachedSessionName = remoteSession.attachedSessionName;
-      session.viewOnly = remoteSession.viewOnly ?? false;
-      session.sessionSocketPath = remoteSession.sessionSocketPath;
-      session.initialCols = remoteSession.initialCols;
-      session.initialRows = remoteSession.initialRows;
-
-      // Connect to tmux-lite session socket for PTY I/O
-      await this.attachToTmuxLiteSession(connectionId, session);
+      if (remoteSession.streamId === undefined || !remoteSession.sessionSocketPath) {
+        throw new Error('attach_session resolved without streamId or socket path');
+      }
+      const existingPane = session.attachedPanes.get(remoteSession.streamId);
+      if (existingPane) {
+        this.detachPane(session, existingPane, { sendDetachControl: true });
+      }
+      const pane: AttachedPane = {
+        streamId: remoteSession.streamId,
+        sessionId: remoteSession.attachedSessionId,
+        sessionName: remoteSession.attachedSessionName ?? remoteSession.attachedSessionId,
+        tmuxSocket: null,
+        tmuxSocketWriter: null,
+        sessionSocketPath: remoteSession.sessionSocketPath,
+        initialCols: remoteSession.initialCols ?? 80,
+        initialRows: remoteSession.initialRows ?? 24,
+        viewOnly: remoteSession.viewOnly ?? false,
+        frameBuffer: Buffer.alloc(0),
+      };
+      session.attachedPanes.set(pane.streamId, pane);
+      await this.attachToTmuxLiteSession(connectionId, session, pane);
     }
 
     return responseData;
@@ -553,7 +523,7 @@ export class ClientSessionManager {
   ): Uint8Array | null {
     // Update session state - enter browsing mode (not spawning PTY yet)
     session.state = "browsing";
-    session.viewOnly = undefined;
+    session.attachedPanes.clear();
     session.sessionKeys = established.sessionKeys;
     session.accessType = established.accessType;
     session.sessionId = established.sessionId;
@@ -585,31 +555,26 @@ export class ClientSessionManager {
    * Attach to a tmux-lite session socket for PTY I/O
    * This is the proper way to connect - through the existing tmux-lite session
    */
-  private async attachToTmuxLiteSession(connectionId: string, session: ClientSession): Promise<void> {
-    if (!session.sessionKeys || !session.sessionSocketPath) {
-      console.error("[session-manager] Cannot attach: missing session keys or socket path");
+  private async attachToTmuxLiteSession(connectionId: string, session: ClientSession, pane: AttachedPane): Promise<void> {
+    if (!session.sessionKeys) {
+      console.error("[session-manager] Cannot attach: missing session keys");
       return;
     }
 
     const sendToClient = this.createSendCallback(connectionId);
 
     try {
-      // Connect to tmux-lite session socket
       const socket = await Bun.connect({
-        unix: session.sessionSocketPath,
+        unix: pane.sessionSocketPath,
         socket: {
           drain: () => {
-            session.tmuxSocketWriter?.flush();
+            pane.tmuxSocketWriter?.flush();
           },
           data: (sock, data) => {
             if (!session.sessionKeys) return;
-            if (session.tmuxSocket !== sock) return;
+            if (pane.tmuxSocket !== sock) return;
 
-            // Accumulate in frame buffer (for handling partial frames)
-            const prev = session.frameBuffer || Buffer.alloc(0);
-            const buf = Buffer.concat([prev, Buffer.from(data)]);
-
-            // Parse frames from the accumulated buffer
+            const buf = Buffer.concat([pane.frameBuffer, Buffer.from(data)]);
             let frames;
             let remaining;
             try {
@@ -617,101 +582,111 @@ export class ClientSessionManager {
               frames = result.frames;
               remaining = result.remaining;
             } catch (err) {
-              // Protocol error - likely desync or corrupted data
               const msg = err instanceof Error ? err.message : 'Frame parse error';
               console.error(`[session-manager] Frame parse error: ${msg}`);
               this.handleDisconnect(connectionId, `Frame parse error: ${msg}`);
               return;
             }
-            // Copy remaining bytes - subarray references can become invalid when Bun reuses buffers
-            session.frameBuffer = Buffer.from(remaining);
+            pane.frameBuffer = Buffer.from(remaining);
 
             for (const frame of frames) {
               if (frame.type === FrameType.CONTROL) {
-                // Decode and handle control events
                 const event = decodeControl(frame.payload) as SessionEvent;
 
                 if (event.type === "exited") {
                   console.log(`[session-manager] Session exited: ${event.code}`);
-                  const exitedSessionId = session.attachedSessionId;
-                  this.returnAttachedSessionToBrowsing(connectionId, session);
-
-                  if (exitedSessionId) {
-                    const exitMsg = JSON.stringify({ type: "session_exited", sessionId: exitedSessionId, exitCode: event.code });
-                    const exitData = new TextEncoder().encode(exitMsg);
-                    const encFrame = createFrame(STREAM_ID.DATA, exitData, session.sessionKeys.sendKey);
-                    sendToClient(Buffer.from(encFrame));
-                  }
+                  this.detachPane(session, pane);
+                  const exitMsg = JSON.stringify({
+                    type: "session_exited",
+                    sessionId: pane.sessionId,
+                    streamId: pane.streamId,
+                    exitCode: event.code,
+                  });
+                  const exitData = new TextEncoder().encode(exitMsg);
+                  const encFrame = createFrame(STREAM_ID.DATA, exitData, session.sessionKeys.sendKey);
+                  sendToClient(Buffer.from(encFrame));
                   return;
-                } else if (event.type === "kicked") {
+                }
+
+                if (event.type === "kicked") {
                   console.log("[session-manager] Session kicked");
-                  this.returnAttachedSessionToBrowsing(connectionId, session);
-                  const detachedMsg = JSON.stringify({ type: "detached" });
+                  this.detachPane(session, pane);
+                  const detachedMsg = JSON.stringify({ type: "detached", streamId: pane.streamId });
                   const detachedData = new TextEncoder().encode(detachedMsg);
                   const encFrame = createFrame(STREAM_ID.DATA, detachedData, session.sessionKeys.sendKey);
                   sendToClient(Buffer.from(encFrame));
                   return;
-                } else if (event.type === "wide_event") {
+                }
+
+                if (event.type === "wide_event") {
                   const eventMsg = JSON.stringify({ type: "wide_event", event: event.event });
                   const eventData = new TextEncoder().encode(eventMsg);
                   const encFrame = createFrame(STREAM_ID.DATA, eventData, session.sessionKeys.sendKey);
                   sendToClient(Buffer.from(encFrame));
-                } else if (event.type === 'session-meta') {
-                  const metaMsg = JSON.stringify(event);
+                  continue;
+                }
+
+                if (event.type === 'session-meta') {
+                  const metaMsg = JSON.stringify({ ...event, streamId: pane.streamId });
                   const metaData = new TextEncoder().encode(metaMsg);
                   const encFrame = createFrame(STREAM_ID.DATA, metaData, session.sessionKeys.sendKey);
                   sendToClient(Buffer.from(encFrame));
-                } else if (event.type === 'attached' && session.attachedSessionId) {
+                  continue;
+                }
+
+                if (event.type === 'attached') {
                   const attachedMsg = JSON.stringify({
                     type: 'attached',
-                    sessionId: session.attachedSessionId,
-                    sessionName: session.attachedSessionName,
+                    streamId: pane.streamId,
+                    sessionId: pane.sessionId,
+                    sessionName: pane.sessionName,
+                    viewOnly: pane.viewOnly,
                   });
                   const attachedData = new TextEncoder().encode(attachedMsg);
                   const encFrame = createFrame(STREAM_ID.DATA, attachedData, session.sessionKeys.sendKey);
                   sendToClient(Buffer.from(encFrame));
                 }
               } else if (frame.type === FrameType.PTY) {
-                // Forward PTY data to web client
-                const encFrame = createFrame(STREAM_ID.DATA, frame.payload, session.sessionKeys.sendKey);
+                const encFrame = createFrame(pane.streamId, frame.payload, session.sessionKeys.sendKey);
                 sendToClient(Buffer.from(encFrame));
               }
             }
           },
 
           close: () => {
-            // Check if this was a voluntary detach (tmuxSocket already cleared)
-            // vs an unexpected close on the currently attached socket.
-            if (session.tmuxSocket === socket) {
-              console.log("[session-manager] tmux-lite socket closed unexpectedly");
-              this.handleDisconnect(connectionId, "Session closed");
-            } else {
-              console.log("[session-manager] tmux-lite socket closed (stale/detached)");
+            if (pane.tmuxSocket === socket) {
+              console.log("[session-manager] tmux-lite pane socket closed unexpectedly");
+              this.detachPane(session, pane);
+              const detachedMsg = JSON.stringify({ type: "detached", streamId: pane.streamId });
+              const detachedData = new TextEncoder().encode(detachedMsg);
+              const encFrame = createFrame(STREAM_ID.DATA, detachedData, session.sessionKeys!.sendKey);
+              sendToClient(Buffer.from(encFrame));
             }
           },
 
           error: (sock, e) => {
-            // Detached or replaced sockets can still surface late write/close
-            // errors. Only log and tear down the session if this exact socket is active.
-            if (session.tmuxSocket === sock) {
+            if (pane.tmuxSocket === sock) {
               logger.error(`[session-manager] tmux-lite socket error for ${connectionId}: ${e.message}`);
-              this.handleDisconnect(connectionId, e.message);
+              this.detachPane(session, pane);
             }
           },
         }
       });
 
-      // Store socket reference
-      session.tmuxSocket = socket;
-      session.tmuxSocketWriter = createBufferedSocketWriter(socket);
-
-      // Don't send attach-init yet — wait for the first resize from client
-      // This ensures tmux-lite receives the actual terminal dimensions
-      session.waitingForResize = true;
-      console.log(`[session-manager] Connected to tmux-lite session: ${session.sessionSocketPath} (waiting for resize)`);
+      pane.tmuxSocket = socket;
+      pane.tmuxSocketWriter = createBufferedSocketWriter(socket);
+      this.writeToTmuxSocket(pane, encodeControl({
+        type: 'attach-init',
+        cols: pane.initialCols,
+        rows: pane.initialRows,
+        clientType: 'web',
+      }));
+      console.log(`[session-manager] Connected to tmux-lite session: ${pane.sessionSocketPath} stream=${pane.streamId} (sent attach-init ${pane.initialCols}x${pane.initialRows})`);
     } catch (e) {
       console.error("[session-manager] Failed to connect to tmux-lite session:", e);
-      this.handleDisconnect(connectionId, "Failed to connect to session");
+      this.detachPane(session, pane);
+      const msg = e instanceof Error ? e.message : String(e);
+      throw new Error(`Failed to connect to session: ${msg}`);
     }
   }
 
@@ -750,19 +725,7 @@ export class ClientSessionManager {
     const session = this.sessions.get(connectionId);
     if (!session) return;
 
-    // Close tmux-lite socket if active
-    if (session.tmuxSocket) {
-      try {
-        // Send detach message before closing (using framed protocol)
-        this.writeToTmuxSocket(session, encodeControl({ type: "detach" }));
-        session.tmuxSocket.end();
-      } catch {
-        // Socket may already be closed
-      }
-      session.tmuxSocket = undefined;
-      session.tmuxSocketWriter = undefined;
-      session.frameBuffer = undefined;
-    }
+    this.detachAllPanes(session, { sendDetachControl: true });
 
     // Cleanup handshake state
     this.handshakeHandler.cleanup(connectionId);
@@ -809,8 +772,7 @@ export class ClientSessionManager {
     const promises: Promise<void>[] = [];
 
     for (const [connectionId, session] of this.sessions) {
-      if (!session.sessionKeys) continue;
-      if (session.state !== 'browsing' && session.state !== 'attached') continue;
+      if (!session.sessionKeys || session.state !== 'browsing') continue;
       promises.push(
         (async () => {
           try {
@@ -837,7 +799,7 @@ export class ClientSessionManager {
     const promises: Promise<void>[] = [];
 
     for (const [connectionId, session] of this.sessions) {
-      if ((session.state !== 'browsing' && session.state !== 'attached') || !session.sessionKeys) continue;
+      if (session.state !== 'browsing' || !session.sessionKeys) continue;
       promises.push(
         (async () => {
           try {

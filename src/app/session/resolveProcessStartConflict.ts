@@ -1,4 +1,4 @@
-import { PortConflictError, resolvePortConflict } from '../../lib/processes/ports.js';
+import { PortConflictError, type PortConflictInfo } from '../../lib/processes/port-conflicts.js';
 
 export class ProcessStartCancelledError extends Error {
   constructor() {
@@ -26,6 +26,7 @@ export function isPortConflictError(error: unknown): error is PortConflictError 
 export async function promptToResolveProcessStartConflict(args: {
   error: PortConflictError;
   showConfirm: ShowConfirmLike;
+  resolveConflict: (conflict: PortConflictInfo) => Promise<void>;
 }): Promise<boolean> {
   const conflict = args.error.conflicts[0];
   if (!conflict) {
@@ -46,7 +47,7 @@ export async function promptToResolveProcessStartConflict(args: {
       confirmLabel,
       cancelLabel: 'Cancel',
       onConfirm: async () => {
-        await resolvePortConflict(conflict);
+        await args.resolveConflict(conflict);
         resolve(true);
       },
       onCancel: () => {

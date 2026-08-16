@@ -8,7 +8,7 @@ import { killServer } from '../../lib/tmux-lite/cli.js';
 import { rmSync } from 'node:fs';
 import type { MachineSnapshot } from '../../lib/tmux-lite/machine/protocol.js';
 import type { Session as TmuxSession, WorkspaceRuntimeRecord } from '../../lib/tmux-lite/protocol.js';
-import { PortConflictError } from '../../lib/processes/ports.js';
+import { PortConflictError } from '../../lib/processes/port-conflicts.js';
 const notificationConfig: NotificationConfig = {
   enabled: true,
   minCommandDurationMs: 1000,
@@ -222,6 +222,7 @@ async function buildSnapshotForDeps(deps: Partial<LocalSessionBackendDependencie
       name: session.name,
       workspaceId: workspace?.id,
       projectId: workspace?.projectName,
+      socketPath: session.socketPath,
       cwd: session.cwd,
       kind: (isAgentSession ? 'agent' : 'shell') as 'agent' | 'shell',
       hidden: session.hidden ?? false,
@@ -339,7 +340,7 @@ function createBackend(
             done: false,
           });
         },
-      }) ?? Promise.resolve({ success: true }));
+      }) ?? Promise.resolve({ success: true, kind: 'skipped-current' as const }));
       if (!prep.success) {
         const phase = prep.phase ?? 'setup';
         const code = phase === 'pre' ? 'PRE_SCRIPT_FAILED' : phase === 'select' ? 'SELECT_SCRIPT_FAILED' : 'SETUP_SCRIPT_FAILED';
@@ -433,7 +434,7 @@ describe('LocalSessionBackend', () => {
         options.onOutput?.(Buffer.from('setup-output'));
         options.onPhaseStart?.('select');
         options.onOutput?.(Buffer.from('select-output'));
-        return { success: true };
+        return { success: true, kind: 'skipped-current' as const };
       },
       getInbox: async () => [
         {
@@ -448,7 +449,7 @@ describe('LocalSessionBackend', () => {
       ],
       clearInbox: async () => {},
       markInboxRead: async () => {},
-      killSession: async () => {},
+      terminateSession: async () => {},
       deleteWorkspaceCore: async () => ({
         success: true,
         workspaceName: 'ws-1',
@@ -569,6 +570,8 @@ describe('LocalSessionBackend', () => {
       phase: 'select',
       data: new Uint8Array(0),
       done: true,
+      error: undefined,
+      workspaceId: 'ws-1',
     });
 
     expect(createdSessions).toEqual([
@@ -645,11 +648,11 @@ describe('LocalSessionBackend', () => {
       createSession: async () => {
         throw new Error('not used in this test');
       },
-      prepareWorkspaceForSession: async () => ({ success: true }),
+      prepareWorkspaceForSession: async () => ({ success: true, kind: 'skipped-current' as const }),
       getInbox: async () => [],
       clearInbox: async () => {},
       markInboxRead: async () => {},
-      killSession: async () => {},
+      terminateSession: async () => {},
       deleteWorkspaceCore: async () => ({
         success: true,
         workspaceName: 'ws-1',
@@ -731,11 +734,11 @@ describe('LocalSessionBackend', () => {
       createSession: async () => {
         throw new Error('not used in this test');
       },
-      prepareWorkspaceForSession: async () => ({ success: true }),
+      prepareWorkspaceForSession: async () => ({ success: true, kind: 'skipped-current' as const }),
       getInbox: async () => [],
       clearInbox: async () => {},
       markInboxRead: async () => {},
-      killSession: async () => {},
+      terminateSession: async () => {},
       deleteWorkspaceCore: async () => ({
         success: true,
         workspaceName: 'ws-1',
@@ -812,11 +815,11 @@ describe('LocalSessionBackend', () => {
       createSession: async () => {
         throw new Error('not used in this test');
       },
-      prepareWorkspaceForSession: async () => ({ success: true }),
+      prepareWorkspaceForSession: async () => ({ success: true, kind: 'skipped-current' as const }),
       getInbox: async () => [],
       clearInbox: async () => {},
       markInboxRead: async () => {},
-      killSession: async () => {},
+      terminateSession: async () => {},
       deleteWorkspaceCore: async () => ({
         success: true,
         workspaceName: 'ws-1',
@@ -860,7 +863,7 @@ describe('LocalSessionBackend', () => {
     socketHandlers?.onPtyData(new TextEncoder().encode('after-restore'));
 
     expect(callbackOneOutput).toEqual(['before-clear']);
-    expect(callbackTwoOutput).toEqual(['while-cleared', 'after-restore']);
+    expect(callbackTwoOutput).toEqual(['before-clearwhile-cleared', 'after-restore']);
   });
 
   it('handles attach/detach/reattach sequencing without losing attach snapshot output', async () => {
@@ -900,11 +903,11 @@ describe('LocalSessionBackend', () => {
       createSession: async () => {
         throw new Error('not used in this test');
       },
-      prepareWorkspaceForSession: async () => ({ success: true }),
+      prepareWorkspaceForSession: async () => ({ success: true, kind: 'skipped-current' as const }),
       getInbox: async () => [],
       clearInbox: async () => {},
       markInboxRead: async () => {},
-      killSession: async () => {},
+      terminateSession: async () => {},
       deleteWorkspaceCore: async () => ({
         success: true,
         workspaceName: 'ws-1',
@@ -1001,11 +1004,11 @@ describe('LocalSessionBackend', () => {
       createSession: async () => {
         throw new Error('not used in this test');
       },
-      prepareWorkspaceForSession: async () => ({ success: true }),
+      prepareWorkspaceForSession: async () => ({ success: true, kind: 'skipped-current' as const }),
       getInbox: async () => [],
       clearInbox: async () => {},
       markInboxRead: async () => {},
-      killSession: async () => {},
+      terminateSession: async () => {},
       deleteWorkspaceCore: async () => ({
         success: true,
         workspaceName: 'ws-1',
@@ -1088,11 +1091,11 @@ describe('LocalSessionBackend', () => {
       createSession: async () => {
         throw new Error('not used in this test');
       },
-      prepareWorkspaceForSession: async () => ({ success: true }),
+      prepareWorkspaceForSession: async () => ({ success: true, kind: 'skipped-current' as const }),
       getInbox: async () => [],
       clearInbox: async () => {},
       markInboxRead: async () => {},
-      killSession: async () => {},
+      terminateSession: async () => {},
       deleteWorkspaceCore: async () => ({
         success: true,
         workspaceName: 'ws-1',
@@ -1160,11 +1163,11 @@ describe('LocalSessionBackend', () => {
       createSession: async () => {
         throw new Error('not used in this test');
       },
-      prepareWorkspaceForSession: async () => ({ success: true }),
+      prepareWorkspaceForSession: async () => ({ success: true, kind: 'skipped-current' as const }),
       getInbox: async () => [],
       clearInbox: async () => {},
       markInboxRead: async () => {},
-      killSession: async () => {},
+      terminateSession: async () => {},
       deleteWorkspaceCore: async () => ({
         success: true,
         workspaceName: 'ws-1',
@@ -1221,11 +1224,11 @@ describe('LocalSessionBackend', () => {
       createSession: async () => {
         throw new Error('not used in this test');
       },
-      prepareWorkspaceForSession: async () => ({ success: true }),
+      prepareWorkspaceForSession: async () => ({ success: true, kind: 'skipped-current' as const }),
       getInbox: async () => [],
       clearInbox: async () => {},
       markInboxRead: async () => {},
-      killSession: async () => {},
+      terminateSession: async () => {},
       deleteWorkspaceCore: async () => ({
         success: true,
         workspaceName: 'ws-1',
@@ -1291,13 +1294,14 @@ describe('LocalSessionBackend', () => {
       },
       prepareWorkspaceForSession: async () => ({
         success: false,
+        kind: 'failed' as const,
         phase: 'setup',
         error: 'install failed',
       }),
       getInbox: async () => [],
       clearInbox: async () => {},
       markInboxRead: async () => {},
-      killSession: async () => {},
+      terminateSession: async () => {},
       deleteWorkspaceCore: async () => ({
         success: true,
         workspaceName: 'ws-1',
@@ -1351,12 +1355,12 @@ describe('LocalSessionBackend', () => {
       }),
       prepareWorkspaceForSession: async () => {
         prepareCalls += 1;
-        return { success: true };
+        return { success: true, kind: 'skipped-current' as const };
       },
       getInbox: async () => [],
       clearInbox: async () => {},
       markInboxRead: async () => {},
-      killSession: async () => {},
+      terminateSession: async () => {},
       deleteWorkspaceCore: async () => ({
         success: true,
         workspaceName: 'ws-1',
@@ -1415,6 +1419,8 @@ describe('LocalSessionBackend', () => {
       phase: 'remove',
       data: new Uint8Array(0),
       done: true,
+      error: undefined,
+      workspaceId: 'ws-1',
     });
   });
 
@@ -1471,6 +1477,7 @@ describe('LocalSessionBackend', () => {
       data: new Uint8Array(0),
       done: true,
       error: 'Remove scripts failed: cleanup failed',
+      workspaceId: 'ws-1',
     });
   });
 
@@ -1695,21 +1702,8 @@ describe('LocalSessionBackend', () => {
     });
   });
 
-  it('refreshes machine state before attaching a newly created agent session terminal', async () => {
+  it('refreshes machine state before listing workspaces', async () => {
     const events: BackendEvent[] = [];
-    const agentTerminalSession = {
-      id: 'tmux-agent-1',
-      name: 'agent:ws-1:abcd1234',
-      socketPath: '/tmp/socket-agent',
-      pid: 999,
-      attached: false,
-      cwd: '/tmp/ws-1',
-      createdAt: 10,
-      kind: 'agent' as const,
-      hidden: true,
-      metadata: { workspaceId: 'alpha:ws-1', agentSessionId: 'agent-ses-1' },
-    };
-    const ensureAgentTerminalSession = mock(async (_target: unknown, _agentSessionId: string) => agentTerminalSession);
     const workspace = {
       id: 'ws-1',
       name: 'ws-1',
@@ -1720,63 +1714,88 @@ describe('LocalSessionBackend', () => {
       isStale: false,
     };
     const staleSnapshot = await buildSnapshotForDeps({
-      scanWorkspaces: async () => [workspace],
+      scanWorkspaces: async () => [],
       listSessions: async () => [],
     });
     const refreshedSnapshot = await buildSnapshotForDeps({
       scanWorkspaces: async () => [workspace],
-      listSessions: async () => [agentTerminalSession],
+      listSessions: async () => [],
     });
     const snapshots = [staleSnapshot, refreshedSnapshot];
     const getMachineSnapshot = mock(async () => snapshots.shift() ?? refreshedSnapshot);
-
-    const deps: Partial<LocalSessionBackendDependencies> = {
-      ensureServer: async () => {},
+    const backend = createBackend({
       getMachineSnapshot,
       watchMachineEvents: async () => () => {},
-      scanWorkspaces: async () => [workspace],
-      listSessions: async () => [agentTerminalSession],
-      sendTmuxCommand: mock(async (command): Promise<any> => {
-        if (command.type === 'agent-attach') {
-          return { type: 'session' as const, session: await ensureAgentTerminalSession(command.target, command.agentSessionId) };
-        }
-        if (command.type === 'inbox') {
-          return { type: 'inbox' as const, items: [] };
-        }
-        if (command.type === 'notification-config-get') {
-          return { type: 'notification-config' as const, config: notificationConfig };
-        }
-        throw new Error(`Unexpected command: ${command.type}`);
-      }),
-      connectSessionSocket: async (_socketPath, handlers) => ({
-        sendControl: (control) => {
-          if (control.type === 'attach-init') {
-            handlers.onControl({ type: 'attached' });
-          }
-        },
-        sendPty: () => {},
-        close: () => handlers.onClose(),
-      }),
-    };
-    const backend = createBackend(deps);
+    });
     backend.onEvent((event) => events.push(event));
-
     await backend.connect();
-    await backend.attachAgentSession('alpha:ws-1', 'agent-ses-1');
-
-    expect(getMachineSnapshot).toHaveBeenCalledTimes(2);
-    expect(ensureAgentTerminalSession).toHaveBeenCalledWith(
-      expect.objectContaining({ workspaceId: 'alpha:ws-1', workspacePath: '/tmp/ws-1' }),
-      'agent-ses-1',
-    );
-    expect(events).toContainEqual(
-      expect.objectContaining({
-        type: 'attached',
-        sessionId: 'tmux-agent-1',
-        workspaceId: 'alpha:ws-1',
-      }),
-    );
+    await backend.listWorkspaces();
+    expect(events).toContainEqual({
+      type: 'workspaces',
+      workspaces: [expect.objectContaining({ id: 'alpha:ws-1' })],
+    });
   });
+
+  it('applies contiguous machine deltas and resyncs on a nonce gap', async () => {
+    const events: BackendEvent[] = [];
+    const workspace = {
+      id: 'ws-1',
+      name: 'ws-1',
+      path: '/tmp/ws-1',
+      projectName: 'alpha',
+      branch: 'main',
+      sessionCount: 0,
+      isStale: false,
+    };
+    const baseSnapshot = await buildSnapshotForDeps({
+      scanWorkspaces: async () => [workspace],
+      listSessions: async () => [],
+    });
+    baseSnapshot.snapshotNonce = 10;
+    const resyncSnapshot = { ...baseSnapshot, snapshotNonce: 20 };
+    const resyncMachineSnapshot = mock(async () => resyncSnapshot);
+    let watchHandlers: {
+      onEvent?: (event: import('../../lib/tmux-lite/machine/protocol.js').MachineEvent) => void;
+    } = {};
+    const backend = createBackend({
+      getMachineSnapshot: mock(async () => baseSnapshot),
+      resyncMachineSnapshot,
+      watchMachineEvents: async (handlers) => {
+        watchHandlers = handlers;
+        return () => {};
+      },
+    });
+    backend.onEvent((event) => events.push(event));
+    await backend.connect();
+
+    // Contiguous delta (nonce 11) applies to the model.
+    const terminalRecord = {
+      id: 'shell-live',
+      name: 'shell-live',
+      socketPath: '/tmp/shell-live.sock',
+      cwd: '/tmp/ws-1',
+      kind: 'shell' as const,
+      hidden: false,
+      state: 'running' as const,
+      attached: false,
+      createdAt: 1,
+    };
+    watchHandlers.onEvent!({ type: 'terminal-session-upserted', snapshotNonce: 11, session: { ...terminalRecord, workspaceId: 'alpha:ws-1', projectId: 'alpha' } });
+    expect(resyncMachineSnapshot).toHaveBeenCalledTimes(0);
+    const applied = events.filter((event) => event.type === 'machine_snapshot').at(-1);
+    expect(applied && 'snapshot' in applied ? applied.snapshot.snapshotNonce : null).toBe(11);
+    expect(applied && 'snapshot' in applied ? applied.snapshot.terminalSessionsById['shell-live'] : undefined).toBeDefined();
+
+    // Gap (nonce 15 while we sit at 11) → the backend requests a resync and
+    // replaces its model with the forced rebuild.
+    watchHandlers.onEvent!({ type: 'terminal-session-removed', snapshotNonce: 15, sessionId: 'shell-live', workspaceId: 'alpha:ws-1' });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(resyncMachineSnapshot).toHaveBeenCalledTimes(1);
+    const resynced = events.filter((event) => event.type === 'machine_snapshot').at(-1);
+    expect(resynced && 'snapshot' in resynced ? resynced.snapshot.snapshotNonce : null).toBe(20);
+  });
+
   it('rethrows structured service-start conflicts as PortConflictError', async () => {
     const conflict = { port: 3000, protocol: 'http' as const, pid: 1234, command: 'node' };
     const backend = createBackend({
@@ -1810,4 +1829,121 @@ describe('LocalSessionBackend', () => {
     });
   });
 
+  it('round-trips Goal Mode status through the local daemon command boundary', async () => {
+    const workspace = {
+      id: 'ws-1',
+      name: 'ws-1',
+      path: '/tmp/ws-1',
+      projectName: 'alpha',
+      sessionCount: 0,
+    };
+    const backend = createBackend({
+      scanWorkspaces: async () => [workspace],
+      sendTmuxCommand: async (command) => {
+        if (command.type === 'agent-goal-mode') {
+          expect(command).toEqual({
+            type: 'agent-goal-mode',
+            target: {
+              workspaceId: 'alpha:ws-1',
+              workspaceName: 'ws-1',
+              workspacePath: '/tmp/ws-1',
+              projectName: 'alpha',
+            },
+            agentSessionId: 'agent-1',
+          });
+          return { type: 'agent-goal-mode' as const, info: { enabled: false, available: true } };
+        }
+        if (command.type === 'agent-set-goal-mode') {
+          expect(command).toEqual({
+            type: 'agent-set-goal-mode',
+            target: {
+              workspaceId: 'alpha:ws-1',
+              workspaceName: 'ws-1',
+              workspacePath: '/tmp/ws-1',
+              projectName: 'alpha',
+            },
+            agentSessionId: 'agent-1',
+            enabled: true,
+            precursor: 'Finish the validation pass.',
+          });
+          return { type: 'agent-goal-mode' as const, info: { enabled: true, available: true } };
+        }
+        throw new Error(`Unexpected command: ${command.type}`);
+      },
+    });
+
+    expect(await backend.getAgentGoalMode('alpha:ws-1', 'agent-1')).toEqual({
+      enabled: false,
+      available: true,
+    });
+    expect(
+      await backend.setAgentGoalMode('alpha:ws-1', 'agent-1', {
+        enabled: true,
+        precursor: 'Finish the validation pass.',
+      }),
+    ).toEqual({
+      enabled: true,
+      available: true,
+    });
+  });
+  it('maps a Shake request to the local daemon and preserves a successful result without an artifact', async () => {
+    const workspace = {
+      id: 'ws-1',
+      name: 'ws-1',
+      path: '/tmp/ws-1',
+      projectName: 'alpha',
+      sessionCount: 0,
+    };
+    const result = {
+      mode: 'images' as const,
+      toolResultsDropped: 1,
+      blocksDropped: 2,
+      imagesDropped: 3,
+      tokensFreed: 0,
+    };
+    const backend = createBackend({
+      scanWorkspaces: async () => [workspace],
+      sendTmuxCommand: async (command) => {
+        expect(command).toEqual({
+          type: 'agent-shake',
+          target: {
+            workspaceId: 'alpha:ws-1',
+            workspaceName: 'ws-1',
+            workspacePath: '/tmp/ws-1',
+            projectName: 'alpha',
+          },
+          agentSessionId: 'agent-1',
+          mode: 'images',
+        });
+        return { type: 'agent-shake-result' as const, result };
+      },
+    });
+
+    expect(await backend.shakeAgentSession('alpha:ws-1', 'agent-1', 'images')).toEqual(result);
+  });
+
+  it('surfaces a local daemon Shake error response', async () => {
+    const workspace = {
+      id: 'ws-1',
+      name: 'ws-1',
+      path: '/tmp/ws-1',
+      projectName: 'alpha',
+      sessionCount: 0,
+    };
+    const backend = createBackend({
+      scanWorkspaces: async () => [workspace],
+      sendTmuxCommand: async (command) => {
+        expect(command).toMatchObject({
+          type: 'agent-shake',
+          agentSessionId: 'agent-1',
+          mode: 'elide',
+        });
+        return { type: 'error' as const, message: 'Failed to shake context: session is busy' };
+      },
+    });
+
+    await expect(backend.shakeAgentSession('alpha:ws-1', 'agent-1', 'elide')).rejects.toThrow(
+      'Failed to shake context: session is busy',
+    );
+  });
 });

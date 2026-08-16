@@ -11,12 +11,14 @@ import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import type { OnboardingStep, SpacesBundle } from '../../types/bundle';
+// Real file-backed secrets store; modules under test are imported dynamically
+// per test, so this evaluates first and wins the backend selection.
+import { resetSecretsStore, secrets } from '../../test/secrets-store.js';
 
 let testDir: string;
 let baseDir: string;
 let workspacesDir: string;
 let mockProjectConfig: any;
-let secretStore: Record<string, string>;
 let onboardingQueue: Array<any>;
 let capturedOnboardingBatches: OnboardingStep[][];
 let mockRemoveWorktreeError: string | null;
@@ -62,34 +64,7 @@ function setupModuleMocks(): void {
   mock.module('../../lib/tmux-lite/cli', () => ({
     isServerRunning: async () => false,
     listSessions: async () => [],
-    killSession: async () => {},
-  }));
-
-  mock.module('../secrets', () => ({
-    setProjectSecret: async (_projectName: string, key: string, value: string) => {
-      secretStore[key] = value;
-    },
-    getProjectSecret: async (_projectName: string, key: string) => {
-      return key in secretStore ? secretStore[key] : null;
-    },
-    getProjectSecrets: async (_projectName: string, keys: string[]) => {
-      const out: Record<string, string> = {};
-      for (const key of keys) {
-        if (key in secretStore) {
-          out[key] = secretStore[key];
-        }
-      }
-      return out;
-    },
-    preloadProjectSecrets: async (_projectName: string, keys: string[]) => {
-      const out: Record<string, string> = {};
-      for (const key of keys) {
-        if (key in secretStore) {
-          out[key] = secretStore[key];
-        }
-      }
-      return out;
-    },
+    terminateSession: async () => {},
   }));
 
   mock.module('../onboarding', () => ({
@@ -206,7 +181,7 @@ describe('workspace setup integration', () => {
       bundleConfirmHistory: undefined,
     };
 
-    secretStore = {};
+    resetSecretsStore();
     onboardingQueue = [];
     capturedOnboardingBatches = [];
     mockRemoveWorktreeError = null;
@@ -235,7 +210,7 @@ describe('workspace setup integration', () => {
     mock.restore();
   });
 
-  it('runs pre+setup on first open, then select on later opens with bundle env', async () => {
+  it('runs pre+setup+select on first open, then skips while fingerprints are unchanged', async () => {
     const { refreshBundle } = await loadBundleRefreshModule();
     const { runWorkspaceScripts } = await loadRunWorkspaceScriptsModule();
 
@@ -287,7 +262,7 @@ describe('workspace setup integration', () => {
     expect(refresh.completed).toBe(true);
     expect(mockProjectConfig.bundleValues).toEqual({ REGION: 'us-east-1' });
     expect(mockProjectConfig.bundleSecretKeys).toEqual(['PULUMI_ACCESS_TOKEN']);
-    expect(secretStore.PULUMI_ACCESS_TOKEN).toBe('token-1');
+    expect(await secrets.getProjectSecret('test-project', 'PULUMI_ACCESS_TOKEN')).toBe('token-1');
     expect(mockProjectConfig.bundleWorkspaceState[workspaceName].requiredInputKeys).toEqual(['REGION']);
     expect(mockProjectConfig.bundleWorkspaceState[workspaceName].requiredSecretKeys).toEqual([
       'PULUMI_ACCESS_TOKEN',
@@ -300,7 +275,8 @@ describe('workspace setup integration', () => {
       repository: 'owner/repo',
       interactive: false,
     });
-    expect(firstOpen.success).toBe(true);
+    // `pre` runs inside the setup branch but only `setup` is recorded in phasesRun.
+    expect(firstOpen).toEqual({ kind: 'ran', phasesRun: ['setup', 'select'] });
 
     const secondOpen = await runWorkspaceScripts({
       projectName: 'test-project',
@@ -309,7 +285,7 @@ describe('workspace setup integration', () => {
       repository: 'owner/repo',
       interactive: false,
     });
-    expect(secondOpen.success).toBe(true);
+    expect(secondOpen.kind).toBe('skipped-current');
 
     const lines = (await Bun.file(outputFile).text()).trim().split('\n');
     expect(lines[0]).toBe('pre:us-east-1:token-1::');
@@ -406,7 +382,7 @@ describe('workspace setup integration', () => {
       repository: 'owner/repo',
       interactive: false,
     });
-    expect(run.success).toBe(true);
+    expect(run.kind).toBe('ran');
 
     const firstLine = (await Bun.file(outputFile).text()).trim().split('\n')[0];
     expect(firstLine).toBe('pre:us-west-2:pulumi-a:enabled:npm-b');
@@ -414,6 +390,12 @@ describe('workspace setup integration', () => {
 
   it('re-checks confirm/check steps only when fingerprint changes', async () => {
     const { refreshBundle } = await loadBundleRefreshModule();
+
+    // The real `checkCommandExists` runs here — this suite deliberately does not
+    // fake `utils/deps`. A real tool name would auto-pass the confirm step on any
+    // machine that has it installed (this previously checked for `pulumi`, which
+    // is common), masking the fingerprint logic the test exists to cover.
+    const absentCheckCommand = 'gitspace-nonexistent-check-command';
 
     const workspaceName = 'ws-confirm';
     const workspacePath = join(workspacesDir, workspaceName);
@@ -424,11 +406,11 @@ describe('workspace setup integration', () => {
       name: 'Confirm Bundle',
       onboarding: [
         {
-          id: 'check-pulumi',
+          id: 'check-missing-tool',
           type: 'confirm',
-          title: 'Pulumi CLI',
-          description: 'Pulumi required',
-          checkCommand: 'pulumi',
+          title: 'Missing Tool',
+          description: 'Tool required',
+          checkCommand: absentCheckCommand,
         },
       ],
     };
@@ -439,14 +421,14 @@ describe('workspace setup integration', () => {
       inputValues: {},
       secretValues: {},
       confirmResults: {
-        'check-pulumi': { status: 'passed', checkCommand: 'pulumi' },
+        'check-missing-tool': { status: 'passed', checkCommand: absentCheckCommand },
       },
     });
 
     const first = await refreshBundle('test-project', workspacePath);
     expect(first.completed).toBe(true);
     expect(capturedOnboardingBatches[0]).toHaveLength(1);
-    expect(capturedOnboardingBatches[0][0].id).toBe('check-pulumi');
+    expect(capturedOnboardingBatches[0][0].id).toBe('check-missing-tool');
 
     onboardingQueue.push({
       completed: true,
@@ -464,7 +446,7 @@ describe('workspace setup integration', () => {
       onboarding: [
         {
           ...bundleV1.onboarding![0],
-          description: 'Pulumi required and must be in PATH',
+          description: 'Tool required and must be in PATH',
         },
       ],
     };
@@ -475,14 +457,14 @@ describe('workspace setup integration', () => {
       inputValues: {},
       secretValues: {},
       confirmResults: {
-        'check-pulumi': { status: 'passed', checkCommand: 'pulumi' },
+        'check-missing-tool': { status: 'passed', checkCommand: absentCheckCommand },
       },
     });
 
     const third = await refreshBundle('test-project', workspacePath);
     expect(third.completed).toBe(true);
     expect(capturedOnboardingBatches[2]).toHaveLength(1);
-    expect(capturedOnboardingBatches[2][0].id).toBe('check-pulumi');
+    expect(capturedOnboardingBatches[2][0].id).toBe('check-missing-tool');
   });
 
   it('passes bundle env to remove scripts and prunes workspace bundle state', async () => {

@@ -1,20 +1,51 @@
 import { delimiter, join } from 'node:path';
-import { chmodSync, mkdirSync, existsSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { YAML } from 'bun';
 import { fileURLToPath } from 'node:url';
 import { getWorkspaceRoot } from '../../../core/paths.js';
 import type { AgentWorkspaceTarget } from '../../../agents/backend.js';
 import { resolveWorkspaceSessionLauncherArgs } from '../../../session/workspace-shell-hooks.js';
 import { escapeShellArg } from '../../../utils/shell-escape.js';
-import type { OmpAgentSession, OmpCreateSessionResult } from './omp-types.js';
+import { artifactsScope } from '../../../core/artifacts.js';
+import type { OmpAgentSession, OmpAuthStorage, OmpCreateSessionResult, OmpModelRegistry } from './omp-types.js';
+import { getManagedSessionBootstrap } from './managed-defaults.js';
 
 // Dynamic imports: oh-my-pi packages have module-level side effects (postmortem
-// signal handlers that call process.exit, provider registration) that conflict
-// with OpenTUI's terminal management. Keep these lazy and narrow so attach does
-// not evaluate the package root barrel (which pulls in far more modules).
+// signal handlers that call process.exit, provider registration) that must not
+// run just because this module is imported. Keep these lazy and narrow so a
+// session open does not evaluate the package root barrel (far more modules).
 const importSdk = () => import('@oh-my-pi/pi-coding-agent/sdk');
 const importSessionManagerModule = () => import('@oh-my-pi/pi-coding-agent/session/session-manager');
 const importModelRegistryModule = () => import('@oh-my-pi/pi-coding-agent/config/model-registry');
-const importPiAi = () => import('@oh-my-pi/pi-ai');
+const importInternalUrlRegistryHelpers = () =>
+  import('@oh-my-pi/pi-coding-agent/internal-urls/registry-helpers');
+
+/**
+ * Make a session's artifacts directory visible to the `artifact://` and
+ * `agent://` protocol handlers.
+ *
+ * Those handlers enumerate dirs via `artifactsDirsFromRegistry()`, which walks
+ * `AgentRegistry.global()`. A reopened session now registers in that global
+ * registry (same as the fresh-create path), so its dir is discoverable there
+ * and this call is a redundant belt-and-suspenders. It is retained because it
+ * is cheap, harmless (dedup collapses the duplicate dir), and guarantees
+ * `artifact://<id>` resolution during the async gap between `SessionManager.open`
+ * and the SDK's `attachSession(global)` — and against any future SDK change
+ * that stops registering reopened sessions globally. `registerArtifactsDir` is
+ * the SDK's supported side channel for exactly this.
+ */
+async function registerSessionArtifactsDir(artifactsDir: string | null | undefined): Promise<void> {
+  if (!artifactsDir) return;
+  try {
+    const { registerArtifactsDir } = (await importInternalUrlRegistryHelpers()) as unknown as {
+      registerArtifactsDir: (dir: string) => () => void;
+    };
+    registerArtifactsDir(artifactsDir);
+  } catch (err) {
+    console.error('[pi-runtime] failed to register artifacts dir for artifact:// resolution:', err);
+  }
+}
+
 /**
  * Pi agent directory, scoped under the configured workspace root.
  *
@@ -48,22 +79,138 @@ function prependPathEntry(pathEntry: string, currentPath: string | undefined): s
     : pathEntry;
 }
 
-function ensureManagedPiBinScripts(): string {
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * GitSpace's opinionated defaults for a managed Pi config, as dotted paths.
+ *
+ * These are SEEDS, not policy: each one is written only when the user has not
+ * set it (see {@link seedIfUnset}). Enforcing them on every start would stomp
+ * whatever the settings panel wrote, which is worse than having no defaults.
+ *
+ * Deliberately absent: thinking level, model roles, `cycleOrder`'s siblings,
+ * and provider tiers. Those are an operator's own account preferences, not a
+ * product default we should be choosing on anyone's behalf.
+ */
+const MANAGED_PI_DEFAULTS: ReadonlyArray<readonly [path: string, value: unknown]> = [
+  ['contextPromotion.enabled', false],
+  // Model quick-cycle starts on the DEFAULT model, not smol — OMP's baked
+  // order is [smol, default, slow], which makes the first ⟲ press downgrade.
+  ['cycleOrder', ['default', 'smol', 'slow']],
+  // Inject the SDK's report-issue device so agents can report unexpected tool
+  // behavior; GitSpace routes those invocations into its own report-a-problem
+  // pipeline (origin 'agent'; see problem-report.ts).
+  ['dev.autoqa', true],
+  // ...but OMP's OWN upstream push (qa.omp.sh) stays off. Denial suppresses
+  // recording, never injection (see isAutoQaEnabled), so our interception is
+  // unaffected. Stated explicitly rather than relying on the implicit
+  // default-deny that headless hosts get from registering no consent handler.
+  ['dev.autoqaConsent', 'denied'],
+  ['ttsr.repeatMode', 'after-gap'],
+  ['compaction.strategy', 'context-full'],
+  ['display.shimmer', 'disabled'],
+  ['astGrep.enabled', true],
+  // Capability switches, on deliberately: an agent that cannot reach GitHub is
+  // crippled in a GitHub product.
+  ['generate_image.enabled', true],
+  ['checkpoint.enabled', true],
+  ['github.enabled', true],
+  ['todo.remindersMax', 1],
+  ['task.isolation.commits', 'ai'],
+  ['memory.backend', 'mnemopi'],
+];
+
+/** Whether two values are the same JSON shape — the test for "already set". */
+function sameShape(a: unknown, b: unknown): boolean {
+  if (Array.isArray(b)) return Array.isArray(a);
+  return typeof a === typeof b && !Array.isArray(a);
+}
+
+/**
+ * Write `value` at a dotted `path` when nothing of that shape is there yet.
+ * Returns whether it wrote. A value of the wrong shape counts as unset, so a
+ * hand-corrupted config repairs itself instead of failing downstream.
+ */
+function seedIfUnset(settings: Record<string, unknown>, path: string, value: unknown): boolean {
+  const keys = path.split('.');
+  const leaf = keys.pop();
+  if (leaf === undefined) return false;
+  let node = settings;
+  for (const key of keys) {
+    const next = node[key];
+    if (!isRecord(next)) {
+      const created: Record<string, unknown> = {};
+      node[key] = created;
+      node = created;
+      continue;
+    }
+    node = next;
+  }
+  if (sameShape(node[leaf], value)) return false;
+  node[leaf] = value;
+  return true;
+}
+
+export function ensureManagedPiConfigDefaults(agentDir: string): void {
+  const configPath = join(agentDir, 'config.yml');
+  let settings: Record<string, unknown> = {};
+
+  if (existsSync(configPath)) {
+    try {
+      const parsed = YAML.parse(readFileSync(configPath, 'utf8'));
+      if (!isRecord(parsed)) {
+        return;
+      }
+      settings = parsed;
+    } catch (error) {
+      console.warn(`[pi-runtime] Failed to read managed Pi config defaults from ${configPath}:`, error);
+      return;
+    }
+  }
+
+  // Each default applies independently — only when the user hasn't set it.
+  let changed = false;
+  for (const [path, value] of MANAGED_PI_DEFAULTS) {
+    if (seedIfUnset(settings, path, value)) changed = true;
+  }
+
+  if (!changed) return;
+  try {
+    writeFileSync(configPath, YAML.stringify(settings, null, 2), { mode: 0o600 });
+  } catch (error) {
+    console.warn(`[pi-runtime] Failed to write managed Pi config defaults to ${configPath}:`, error);
+  }
+}
+
+export function ensureManagedPiBinScripts(launcherArgs: string[] = resolveWorkspaceSessionLauncherArgs()): string {
   const binDir = getManagedPiBinDir();
   if (!existsSync(binDir)) {
     mkdirSync(binDir, { recursive: true, mode: 0o700 });
   }
 
-  const launcherCommand = buildShellCommand([...resolveWorkspaceSessionLauncherArgs(), 'space']);
+  const spaceLauncherCommand = buildShellCommand([...launcherArgs, 'space']);
   const spaceScriptPath = join(binDir, 'space');
-  writeFileSync(spaceScriptPath, `#!/bin/sh\nexec ${launcherCommand} "$@"\n`, { mode: 0o755 });
+  writeFileSync(spaceScriptPath, `#!/bin/sh\nexec ${spaceLauncherCommand} "$@"\n`, { mode: 0o755 });
   chmodSync(spaceScriptPath, 0o755);
+
+  const gsshScriptPath = join(binDir, 'gssh');
+  const isSourceLauncher = launcherArgs.length >= 2 && launcherArgs[1]?.endsWith('/src/index.ts');
+  if (isSourceLauncher) {
+    const gsshLauncherCommand = buildShellCommand(launcherArgs);
+    writeFileSync(gsshScriptPath, `#!/bin/sh\nexec ${gsshLauncherCommand} "$@"\n`, { mode: 0o755 });
+    chmodSync(gsshScriptPath, 0o755);
+  } else if (existsSync(gsshScriptPath)) {
+    unlinkSync(gsshScriptPath);
+  }
 
   return binDir;
 }
 
 function buildManagedPiEnvironment(): Record<string, string> {
   const agentDir = ensurePiAgentDir();
+  ensureManagedPiConfigDefaults(agentDir);
   const binDir = ensureManagedPiBinScripts();
   return {
     PI_CODING_AGENT_DIR: agentDir,
@@ -128,14 +275,160 @@ export async function createPiSessionManager(cwd: string) {
 }
 
 /**
+ * Open an existing Pi session file read-only (loads its entry tree) so callers
+ * can read the transcript via getLeafId()/getEntry(). The returned manager is
+ * the SDK's own structure — read it and let it go; do not retain a second copy.
+ */
+export async function openPiSessionManager(sessionFilePath: string) {
+  const { SessionManager } = await importSessionManagerModule();
+  applyManagedPiEnvironment();
+  return SessionManager.open(sessionFilePath);
+}
+
+/**
+ * A refreshed model registry for the current managed agent dir — used by the
+ * control seam to list available models and resolve a switch target.
+ */
+export async function createPiModelRegistry(): Promise<OmpModelRegistry> {
+  const { discoverAuthStorage } = await importSdk();
+  const { ModelRegistry } = await importModelRegistryModule();
+  const env = applyManagedPiEnvironment();
+  const authStorage = await discoverAuthStorage(env.PI_CODING_AGENT_DIR);
+  const registry = new ModelRegistry(authStorage) as unknown as OmpModelRegistry;
+  await registry.refresh('online-if-uncached');
+  return registry;
+}
+
+/** The auth storage for the managed agent dir — list/add provider credentials. */
+export async function createPiAuthStorage(): Promise<OmpAuthStorage> {
+  const { discoverAuthStorage } = await importSdk();
+  const env = applyManagedPiEnvironment();
+  return (await discoverAuthStorage(env.PI_CODING_AGENT_DIR)) as unknown as OmpAuthStorage;
+}
+
+/**
+ * The global settings singleton for the managed agent dir.
+ *
+ * Initialized on demand: in worker mode the daemon never creates in-process
+ * SDK sessions, so nothing else ever calls Settings.init() here — but the
+ * daemon still serves global settings reads/writes (settings panel, role
+ * models) with zero live sessions. Mirrors openPiSession's env setup so the
+ * singleton binds to <workspace-root>/.pi/config.yml, not ~/.omp/agent/.
+ */
+export async function getPiSettings(): Promise<{ get(path: string): unknown; set(path: string, value: unknown): void } | null> {
+  const mod = (await import('@oh-my-pi/pi-coding-agent/config/settings')) as unknown as {
+    Settings?: { init(options?: { cwd?: string; agentDir?: string }): Promise<unknown> };
+    isSettingsInitialized?: () => boolean;
+    settings?: { get(path: string): unknown; set(path: string, value: unknown): void };
+  };
+  if (mod.isSettingsInitialized && !mod.isSettingsInitialized()) {
+    const env = applyManagedPiEnvironment();
+    if (!mod.Settings?.init) return null;
+    try {
+      await mod.Settings.init({ cwd: getWorkspaceRoot(), agentDir: env.PI_CODING_AGENT_DIR });
+    } catch (error) {
+      console.warn('[pi-runtime] Failed to initialize Pi settings singleton:', error);
+      return null;
+    }
+  }
+  return mod.settings ?? null;
+}
+
+/**
+ * The user's quick-cycle role order (`cycleOrder` setting) — the roles the
+ * role cycle visits, in order. Returns null when settings are unavailable or
+ * the value is malformed/empty (callers fall back to MODEL_ROLE_IDS).
+ */
+export function readCycleOrder(settings: { get(path: string): unknown } | null | undefined): string[] | null {
+  try {
+    const v = settings?.get('cycleOrder');
+    if (Array.isArray(v) && v.length > 0 && v.every((x) => typeof x === 'string')) {
+      return v as string[];
+    }
+  } catch {
+    /* settings unavailable */
+  }
+  return null;
+}
+
+
+/**
+ * local:// unification (docs/ARTIFACT-PROTOCOL.md Q2): root each session's
+ * local scratch at <artifacts mount>/.sessions/<sessionId> — addressable and
+ * shareable, but git-ignored (bare repo info/exclude) so it never enters
+ * branch history, rollups, or the pre-commit hook. The session id is only
+ * known AFTER createAgentSession returns, so callers bind it immediately
+ * after; the SDK resolves these lazily per tool call.
+ */
+export function makeLocalProtocolOptions(cwd: string): {
+  options: { getArtifactsDir: () => string | null; getSessionId: () => string | null };
+  bind: (sessionId: string) => void;
+} {
+  let sessionId: string | null = null;
+  return {
+    options: {
+      // local:// means "the root I own" (docs/ARTIFACTS-FS.md) — NOT a fixed
+      // path. A workspace/goal session binds to its own goal folder
+      // (local://x → <mount>/goals/<goal-id>/x); a project session (the base
+      // clone, which mounts main and owns no goal) binds to the tree root.
+      // That binding is what keeps every workspace's writes inside a disjoint
+      // subtree, which is what makes roll-up conflict-free. The SDK's forced
+      // '/local' suffix is removed via bun patch (patches/@oh-my-pi…).
+      // Resolved per call, not once: a workspace's goal record may be created
+      // after the session starts, and the binding must follow it.
+      getArtifactsDir: () => {
+        const { rootDir } = artifactsScope(cwd);
+        // The goal folder is created lazily — the SDK expects the dir to exist
+        // before it resolves a local:// write into it.
+        try { mkdirSync(rootDir, { recursive: true }); } catch { /* mount absent */ }
+        return rootDir;
+      },
+      getSessionId: () => sessionId,
+    },
+    bind: (id: string) => { sessionId = id; },
+  };
+}
+
+/** Callbacks driven by the compaction-status extension; bound to a session
+ *  host's status sink after the session is created. */
+export interface CompactionStatusHolder {
+  onStart: (() => void) | null;
+  onEnd: (() => void) | null;
+}
+
+/**
+ * Inline SDK extension that observes the session-level compaction hooks
+ * (`session_before_compact` / `session_compact`). These are emitted via the SDK
+ * extension runner — NOT the agent event stream (which only carries the AUTO
+ * `auto_compaction_start/end` variants) — so they are the only signal a manual
+ * `/compact` (incl. `snapcompact`) produces. Handlers observe only (return
+ * nothing), so they never modify or cancel a compaction (the SDK only acts on a
+ * returned `.compaction`). The returned holder is bound to the session host's
+ * status sink after `createAgentSession` returns.
+ */
+export function createCompactionStatusExtension(): {
+  // Typed loosely at the SDK boundary (matches this file's other SDK casts): the
+  // strict ExtensionFactory/ExtensionAPI types carry per-event `on` overloads
+  // that a generic registrar can't satisfy structurally.
+  extension: (pi: any) => void;
+  holder: CompactionStatusHolder;
+} {
+  const holder: CompactionStatusHolder = { onStart: null, onEnd: null };
+  const extension = (pi: any): void => {
+    pi.on('session_before_compact', () => { holder.onStart?.(); });
+    pi.on('session_compact', () => { holder.onEnd?.(); });
+  };
+  return { extension, holder };
+}
+
+/**
  * Re-open an existing Pi session file in-process so GitSpace can subscribe to live SDK events
  * again after a tmux-lite restart.
  */
 export async function openPiSession(cwd: string, sessionFilePath: string) {
   const { SessionManager } = await importSessionManagerModule();
-  const { createAgentSession, discoverAuthStorage } = await importSdk();
+  const { createAgentSession, discoverAuthStorage, discoverSkills } = await importSdk();
   const { ModelRegistry } = await importModelRegistryModule();
-  const { getBundledModel } = await importPiAi();
   const env = applyManagedPiEnvironment();
   const sessionManager = await SessionManager.open(sessionFilePath);
   const sessionContext = sessionManager.buildSessionContext();
@@ -150,18 +443,15 @@ export async function openPiSession(cwd: string, sessionFilePath: string) {
     if (slashIndex > 0) {
       const provider = storedModel.slice(0, slashIndex);
       const modelId = storedModel.slice(slashIndex + 1);
+      // 16.x: the model registry resolves bundled models directly (getBundledModel removed).
       restoredModel = modelRegistry.find(provider, modelId) ?? undefined;
-      if (!restoredModel) {
-        try {
-          restoredModel = getBundledModel(provider as Parameters<typeof getBundledModel>[0], modelId);
-        } catch (err) {
-          console.warn(`[pi-runtime] Failed to restore bundled model ${storedModel}:`, err);
-          restoredModel = undefined;
-        }
-      }
     }
   }
 
+  const managedBootstrap = await getManagedSessionBootstrap(cwd, env.PI_CODING_AGENT_DIR, discoverSkills);
+
+  const localProtocol = makeLocalProtocolOptions(cwd);
+  const compaction = createCompactionStatusExtension();
   const result = await createAgentSession({
     agentDir: env.PI_CODING_AGENT_DIR,
     sessionManager,
@@ -170,12 +460,25 @@ export async function openPiSession(cwd: string, sessionFilePath: string) {
     modelRegistry,
     model: restoredModel,
     additionalExtensionPaths: getManagedPiExtensionPaths(),
+    extensions: [compaction.extension],
+    skills: managedBootstrap.skills,
     hasUI: true,
+    localProtocolOptions: localProtocol.options,
+    // No agentRegistry override: use the SDK's process-global AgentRegistry, the
+    // same as the fresh-create path (local-session-host.ts). Under mandatory
+    // per-session workers each session already owns its process, so the global
+    // registry contains exactly this session's tree — a per-workspace scoped
+    // registry bought no cross-session isolation (directed IRC send/wait/inbox
+    // resolve via IrcBus.global()/AgentRegistry.global() regardless) and only
+    // broke same-workspace main<->subagent IRC on reopen, since task subagents
+    // always register in the global registry.
   });
   const { session, setToolUIContext } = result as unknown as OmpCreateSessionResult;
   if (!session?.sessionId) {
     throw new Error('Unexpected createAgentSession result shape — SDK version may be incompatible');
   }
+  localProtocol.bind(session.sessionId);
+  await registerSessionArtifactsDir(sessionManager.getArtifactsDir?.());
   if (restoredModel && !session.model) {
     await session.setModel(restoredModel);
   }
@@ -184,6 +487,7 @@ export async function openPiSession(cwd: string, sessionFilePath: string) {
     sessionManager,
     session,
     setToolUIContext,
+    compactionStatus: compaction.holder,
   };
 }
 

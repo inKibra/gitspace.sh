@@ -10,6 +10,7 @@ type SelectCall<T> = {
   title: string
   onSelect: (value: T) => void | Promise<void>
   searchable?: boolean
+  options?: Array<{ label: string; value: T }>
 }
 
 type InputCall = {
@@ -21,6 +22,52 @@ async function flushMicrotasks(): Promise<void> {
   await Promise.resolve()
   await Promise.resolve()
 }
+
+
+describe('useLifecycleController create menu', () => {
+  it('shows goal creation when a goal flow is registered', () => {
+    const showSelectCalls: Array<SelectCall<'workspace' | 'goal' | 'project'>> = []
+    const openCreateGoalFlow = mock(() => {})
+
+    const { result } = renderHook(() =>
+      useLifecycleController({
+        flow: {
+          showLoading: () => {},
+          showSelect: (opts) => {
+            showSelectCalls.push({
+              title: opts.title,
+              options: opts.options as Array<{ label: string; value: 'workspace' | 'goal' | 'project' }>,
+              onSelect: opts.onSelect as (value: 'workspace' | 'goal' | 'project') => void,
+            })
+          },
+          showInput: () => {},
+          showWizard: () => {},
+          showConfirmTyped: () => {},
+          showMessage: () => {},
+          close: () => {},
+        },
+        listGithubRepos: async () => [],
+        listRemoteBranches: async () => [],
+        listLinearIssues: async () => [],
+        createProject: async () => {},
+        createWorkspace: async () => {},
+        deleteProject: async () => {},
+        openCreateGoalFlow,
+        getProjectNames: () => ['acme'],
+        refreshProjects: async () => {},
+        refreshWorkspaces: async () => {},
+      })
+    )
+
+    result.current.openCreateMenu()
+
+    expect(showSelectCalls[0]?.title).toBe('Create')
+    expect(showSelectCalls[0]?.options?.map((option) => option.label)).toEqual(['Workspace', 'Goal', 'Project'])
+
+    showSelectCalls[0]!.onSelect('goal')
+    expect(openCreateGoalFlow).toHaveBeenCalledWith('acme')
+  })
+})
 
 describe('useLifecycleController project flow', () => {
   it('creates a project from manual git remote input', async () => {
@@ -345,6 +392,47 @@ describe('useLifecycleController workspace source flow', () => {
       attachments: [],
     }
   }
+
+  it('asks for a project when creating a workspace from the generic create menu', async () => {
+    const showSelectCalls: Array<SelectCall<string>> = []
+
+    const { result } = renderHook(() =>
+      useLifecycleController({
+        flow: {
+          showLoading: () => {},
+          showSelect: (opts) => {
+            showSelectCalls.push({
+              title: opts.title,
+              onSelect: opts.onSelect as (value: string) => void | Promise<void>,
+              searchable: opts.searchable,
+            })
+          },
+          showWizard: () => {},
+          showInput: () => {},
+          showConfirmTyped: () => {},
+          showMessage: () => {},
+          close: () => {},
+        },
+        listGithubRepos: async () => [],
+        listRemoteBranches: async () => [],
+        listLinearIssues: async () => [],
+        createProject: async () => {},
+        createWorkspace: async () => {},
+        deleteProject: async () => {},
+        getProjectNames: () => ['acme', 'web'],
+        refreshProjects: async () => {},
+        refreshWorkspaces: async () => {},
+      })
+    )
+
+    result.current.openCreateMenu()
+    expect(showSelectCalls[0]?.title).toBe('Create')
+
+    await showSelectCalls[0]!.onSelect('workspace')
+
+    expect(showSelectCalls[1]?.title).toBe('Select Project')
+    expect(showSelectCalls[1]?.searchable).toBeUndefined()
+  })
 
   it('opens searchable branch picker for workspace creation', async () => {
     const showSelectCalls: Array<SelectCall<string>> = []

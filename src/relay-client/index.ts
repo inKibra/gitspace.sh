@@ -1,6 +1,6 @@
 /**
  * Relay connection descriptor — "which relay to connect to."
- * Passed from CLI/index.ts → launchTUI → useMultiBackends to enable auto-discovery.
+ * Passed from the CLI into useMultiBackends to enable auto-discovery.
  * Distinct from RelayEnrollment (persisted machine-side enrollment in relay.json)
  * and RelayServerConfig (relay server startup config).
  */

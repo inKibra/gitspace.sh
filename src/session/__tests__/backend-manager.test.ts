@@ -59,7 +59,7 @@ class FakeBackend implements SessionBackend {
   async deleteProject(_projectName: string, _params?: DeleteProjectParams): Promise<void> {}
   async attachSession(_params: AttachSessionParams): Promise<void> {}
   async detachSession(): Promise<void> {}
-  async killSession(_sessionId: string): Promise<void> {}
+  async terminateSession(_sessionId: string): Promise<void> {}
   async deleteWorkspace(
     _projectName: string,
     _workspaceId: string,

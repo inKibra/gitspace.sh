@@ -45,20 +45,23 @@ export interface UseLifecycleControllerOptions {
   cancelProjectCreation?: (projectName: string) => Promise<void>;
   createWorkspace: (params: CreateWorkspaceParams) => Promise<void>;
   deleteProject: (projectName: string, params?: DeleteProjectParams) => Promise<void>;
+  openCreateGoalFlow?: (projectName?: string | null) => void;
   getProjectNames: () => string[];
   refreshProjects: () => void | Promise<void>;
   refreshWorkspaces: () => void | Promise<void>;
   refreshSessions?: () => void | Promise<void>;
-  onProjectCreated?: (details: ProjectCreatedDetails) => void | Promise<void>;
-  onWorkspaceCreated?: (details: WorkspaceCreatedDetails) => void | Promise<void>;
-  showCreateWorkspaceSuccessMessage?: boolean;
+	  onProjectCreated?: (details: ProjectCreatedDetails) => void | Promise<void>;
+	  onWorkspaceCreating?: (details: WorkspaceCreatedDetails) => void | Promise<void>;
+	  onWorkspaceCreated?: (details: WorkspaceCreatedDetails) => void | Promise<void>;
+	  onWorkspaceCreateFailed?: (details: WorkspaceCreatedDetails, error: unknown) => void | Promise<void>;
+	  showCreateWorkspaceSuccessMessage?: boolean;
 }
 
 export interface UseLifecycleControllerResult {
   openCreateProjectFlow: () => void;
   openCreateWorkspaceFlow: (projectName?: string | null) => void;
   openDeleteProjectFlow: (projectName: string) => void;
-  openCreateMenu: (projectName?: string | null) => void;
+  openCreateMenu: () => void;
 }
 
 function toErrorMessage(error: unknown, fallback: string): string {
@@ -192,13 +195,16 @@ export function useLifecycleController(
     cancelProjectCreation,
     createWorkspace,
     deleteProject,
+    openCreateGoalFlow,
     getProjectNames,
     refreshProjects,
     refreshWorkspaces,
     refreshSessions,
-    onProjectCreated,
-    onWorkspaceCreated,
-    showCreateWorkspaceSuccessMessage = true,
+	    onProjectCreated,
+	    onWorkspaceCreating,
+	    onWorkspaceCreated,
+	    onWorkspaceCreateFailed,
+	    showCreateWorkspaceSuccessMessage = true,
   } = options;
 
   const refreshAll = useCallback(async () => {
@@ -209,49 +215,49 @@ export function useLifecycleController(
     }
   }, [refreshProjects, refreshSessions, refreshWorkspaces]);
 
-  const createWorkspaceWithFeedback = useCallback(async (
-    params: CreateWorkspaceParams,
-    workspaceSource?: WorkspaceSource
-  ) => {
-    flow.showLoading({
-      title: 'Creating Workspace',
-      message: `Creating ${params.workspaceName}...`,
-    });
+	  const createWorkspaceWithFeedback = useCallback(async (
+	    params: CreateWorkspaceParams,
+	    workspaceSource?: WorkspaceSource
+	  ) => {
+	    const details: WorkspaceCreatedDetails = {
+	      projectName: params.projectName,
+	      workspaceName: params.workspaceName,
+	      workspaceId: `${params.projectName}:${params.workspaceName}`,
+	      branchName: params.branchName,
+	      workspaceSource,
+	    };
+	    await onWorkspaceCreating?.(details);
+    flow.close();
 
-    try {
-      await createWorkspace(params);
-      await refreshAll();
-      await onWorkspaceCreated?.({
-        projectName: params.projectName,
-        workspaceName: params.workspaceName,
-        workspaceId: `${params.projectName}:${params.workspaceName}`,
-        branchName: params.branchName,
-        workspaceSource,
-      });
+	    try {
+	      await createWorkspace(params);
+	      await refreshAll();
+	      await onWorkspaceCreated?.(details);
 
-      if (showCreateWorkspaceSuccessMessage) {
-        flow.showMessage({
-          title: 'Workspace Created',
-          message: `Created workspace "${params.workspaceName}" in ${params.projectName}.`,
-          variant: 'success',
-        });
-      } else {
-        flow.close();
-      }
-    } catch (error) {
-      flow.showMessage({
-        title: 'Create Workspace Failed',
-        message: toErrorMessage(error, 'Failed to create workspace'),
-        variant: 'error',
-      });
-    }
-  }, [
-    createWorkspace,
-    flow,
-    onWorkspaceCreated,
-    refreshAll,
-    showCreateWorkspaceSuccessMessage,
-  ]);
+	      if (showCreateWorkspaceSuccessMessage) {
+	        flow.showMessage({
+	          title: 'Workspace Created',
+	          message: `Created workspace "${params.workspaceName}" in ${params.projectName}.`,
+	          variant: 'success',
+	        });
+	      }
+	    } catch (error) {
+	      await onWorkspaceCreateFailed?.(details, error);
+	      flow.showMessage({
+	        title: 'Create Workspace Failed',
+	        message: toErrorMessage(error, 'Failed to create workspace'),
+	        variant: 'error',
+	      });
+	    }
+	  }, [
+	    createWorkspace,
+	    flow,
+	    onWorkspaceCreating,
+	    onWorkspaceCreated,
+	    onWorkspaceCreateFailed,
+	    refreshAll,
+	    showCreateWorkspaceSuccessMessage,
+	  ]);
 
   const openCreateProjectFlow = useCallback(() => {
     const completeProjectCreation = async (projectName: string, repo: string) => {
@@ -429,9 +435,42 @@ export function useLifecycleController(
       });
     };
 
+    const openScratchPrompt = () => {
+      flow.showInput({
+        title: 'New Project Name',
+        label: 'Project name (created locally — publish to a remote later):',
+        placeholder: 'my-new-project',
+        validation: (value) => {
+          if (!value.trim()) return 'Project name is required';
+          const sanitized = sanitizeForFileSystem(value.trim());
+          if (!sanitized) return 'Project name must contain at least one letter or number';
+          return null;
+        },
+        onSubmit: async (value) => {
+          const projectName = value.trim();
+          flow.showLoading({ title: 'Creating Project', message: `Initializing ${projectName}...` });
+          try {
+            await createProject({ repository: '', projectName, scratch: true });
+            await completeProjectCreation(projectName, 'local');
+          } catch (error) {
+            flow.showMessage({
+              title: 'Create Project Failed',
+              message: toErrorMessage(error, 'Failed to create project'),
+              variant: 'error',
+            });
+          }
+        },
+      });
+    };
+
     flow.showSelect({
       title: 'Create Project From',
       options: [
+        {
+          label: 'Start from scratch',
+          description: 'New local repo — no GitHub required, publish later',
+          value: 'scratch' as const,
+        },
         {
           label: 'Git Remote URL',
           description: 'Enter a remote URL directly',
@@ -444,6 +483,10 @@ export function useLifecycleController(
         },
       ],
       onSelect: (source) => {
+        if (source === 'scratch') {
+          openScratchPrompt();
+          return;
+        }
         if (source === 'manual') {
           openManualRepoPrompt();
           return;
@@ -746,28 +789,37 @@ export function useLifecycleController(
     });
   }, [deleteProject, flow, refreshAll]);
 
-  const openCreateMenu = useCallback((projectName?: string | null) => {
+  const openCreateMenu = useCallback(() => {
     const projects = getProjectNames();
     if (projects.length === 0) {
       openCreateProjectFlow();
       return;
     }
 
+    const options = [
+      { label: 'Workspace', description: 'Create a new workspace', value: 'workspace' as const },
+      ...(openCreateGoalFlow
+        ? [{ label: 'Goal', description: 'Add a goal to a chain (new or existing)', value: 'goal' as const }]
+        : []),
+      { label: 'Project', description: 'Clone a repo — or start from scratch', value: 'project' as const },
+    ];
+
     flow.showSelect({
       title: 'Create',
-      options: [
-        { label: 'Workspace', description: 'Create a new workspace', value: 'workspace' as const },
-        { label: 'Project', description: 'Clone a git repository', value: 'project' as const },
-      ],
+      options,
       onSelect: (value) => {
+        if (value === 'goal') {
+          openCreateGoalFlow?.(projects.length === 1 ? projects[0] : null);
+          return;
+        }
         if (value === 'workspace') {
-          openCreateWorkspaceFlow(projectName);
+          openCreateWorkspaceFlow(null);
           return;
         }
         openCreateProjectFlow();
       },
     });
-  }, [flow, getProjectNames, openCreateProjectFlow, openCreateWorkspaceFlow]);
+  }, [flow, getProjectNames, openCreateGoalFlow, openCreateProjectFlow, openCreateWorkspaceFlow]);
 
   return {
     openCreateProjectFlow,

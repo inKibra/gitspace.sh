@@ -3,10 +3,16 @@
  *
  * Consolidates the logic for running pre/setup/select scripts with
  * proper error handling and phase identification.
+ *
+ * The automatic (open/attach) path is idempotent: setup and select each run at
+ * most once per input fingerprint and are not retried after an unchanged
+ * failure. Explicit rerun (rerunWorkspaceBundleScripts) always runs the
+ * requested phases and updates the persisted lock state.
  */
 
 import { join } from 'path';
 import {
+  buildPhaseScriptManifest,
   discoverScripts,
   runScriptsInTerminal,
   type RunScriptsOptions,
@@ -15,8 +21,9 @@ import {
 import {
   buildBundleStepFingerprints,
   buildSetupState,
+  computeSelectFingerprint,
+  computeSetupFingerprint,
   createEmptyWorkspaceLockState,
-  fingerprintValue,
   getBundleStepKey,
   readWorkspaceLockState,
   type WorkspaceLockState,
@@ -24,9 +31,9 @@ import {
 } from './workspace-state';
 import { readProjectConfig } from '../core/config';
 import { detectBundleChanges } from '../core/bundle-refresh';
-import { getProjectSecrets } from './secrets';
+import { clearSecretsCache, getProjectSecrets } from './secrets';
 import { logger } from './logger';
-import type { ConfirmStepResult, OnboardingStep, SpacesBundle } from '../types/bundle.js';
+import type { ConfirmStepResult, SpacesBundle } from '../types/bundle.js';
 import type { WorkspaceScriptPhase } from '../types/script-phase';
 
 export type ScriptPhase = WorkspaceScriptPhase;
@@ -55,47 +62,57 @@ export interface RunWorkspaceScriptsOptions {
   signal?: AbortSignal;
 }
 
+/**
+ * Discriminated result of the automatic lifecycle path.
+ *
+ * - `ran`: one or more phases actually executed (see `phasesRun`).
+ * - `skipped-current`: everything was already current — nothing ran. Passive UI
+ *   must NOT create a task/toast for this.
+ * - `blocked-previous-failure`: a phase failed on a prior run with the same
+ *   fingerprint, so it was not retried automatically. Passive UI must NOT create
+ *   a task/toast; surface intentionally if needed.
+ * - `failed`: a phase ran and failed this time.
+ */
+export type ScriptLifecycleOutcome =
+  | { kind: 'ran'; phasesRun: ScriptPhase[] }
+  | { kind: 'skipped-current' }
+  | { kind: 'blocked-previous-failure'; blockedPhase: ScriptPhase; error?: string }
+  | { kind: 'failed'; phase: ScriptPhase; error: string; cancelled?: boolean };
+
 export type RunWorkspaceScriptsResult =
   | { success: true }
   | { success: false; phase: ScriptPhase; error: string; cancelled?: boolean };
 
-/**
- * Run workspace scripts based on setup state.
- *
- * - If setup has already been run: runs select scripts only
- * - If first time: runs pre scripts, then setup scripts, then marks setup complete
- *
- * Returns success or failure with the specific phase that failed.
- */
-export async function runWorkspaceScripts(
-  options: RunWorkspaceScriptsOptions
-): Promise<RunWorkspaceScriptsResult> {
-  const {
-    projectName,
-    workspacePath,
-    workspaceName,
-    repository,
-    noSetup = false,
-    interactive = false,
-    onOutput,
-    onPhaseStart,
-    scriptPolicy = 'auto',
-    signal,
-  } = options;
+function phaseDir(workspacePath: string, phase: ScriptPhase): string {
+  return join(workspacePath, '.gitspace', 'scripts', phase);
+}
+
+interface LifecycleInputs {
+  currentBundle: SpacesBundle | undefined;
+  bundleHash: string | undefined;
+  stepFingerprints: Record<string, string>;
+  bundleValues: Record<string, string>;
+  bundleSecrets: Record<string, string>;
+  confirmResults: Record<string, ConfirmStepResult>;
+  preManifest: string;
+  setupManifest: string;
+  selectManifest: string;
+  scriptOptions: RunScriptsOptions;
+}
+
+/** Load bundle/config/secret/manifest inputs shared by auto + rerun paths. */
+async function loadLifecycleInputs(
+  options: Pick<RunWorkspaceScriptsOptions, 'projectName' | 'workspacePath' | 'interactive' | 'onOutput' | 'signal'>,
+): Promise<{ inputs: LifecycleInputs } | { parseError: string }> {
+  const { projectName, workspacePath, interactive = false, onOutput, signal } = options;
 
   const changes = detectBundleChanges(projectName, workspacePath);
   if (changes.parseError) {
-    return {
-      success: false,
-      phase: 'pre',
-      error: changes.parseError,
-    };
+    return { parseError: changes.parseError };
   }
 
   const currentBundle = changes.currentBundle;
   const bundleHash = changes.currentHash;
-
-  // Read project config for bundle values and secrets
   const config = readProjectConfig(projectName);
 
   const bundleSecretKeys = new Set(config.bundleSecretKeys || []);
@@ -105,140 +122,269 @@ export async function runWorkspaceScripts(
     }
   }
 
+  // Bundle config updates can be applied by the tmux-lite server while workspace
+  // script operations run in the machine daemon. The secrets module has a
+  // process-local cache, so refresh before script env construction.
+  clearSecretsCache();
+
   const bundleSecrets = bundleSecretKeys.size > 0
     ? await getProjectSecrets(projectName, [...bundleSecretKeys])
     : {};
 
-  // Build script options
-  const scriptOptions: RunScriptsOptions = {
-    bundleValues: config.bundleValues,
-    bundleSecrets,
-    nonInteractive: !interactive,
-    onOutput,
-    signal,
+  const stepFingerprints = currentBundle ? buildBundleStepFingerprints(currentBundle) : {};
+  const confirmResults = resolveCurrentConfirmResults(
+    currentBundle,
+    stepFingerprints,
+    config.bundleConfirmHistory || {},
+  );
+
+  return {
+    inputs: {
+      currentBundle,
+      bundleHash,
+      stepFingerprints,
+      bundleValues: config.bundleValues || {},
+      bundleSecrets,
+      confirmResults,
+      preManifest: buildPhaseScriptManifest(phaseDir(workspacePath, 'pre')),
+      setupManifest: buildPhaseScriptManifest(phaseDir(workspacePath, 'setup')),
+      selectManifest: buildPhaseScriptManifest(phaseDir(workspacePath, 'select')),
+      scriptOptions: {
+        bundleValues: config.bundleValues,
+        bundleSecrets,
+        nonInteractive: !interactive,
+        onOutput,
+        signal,
+      },
+    },
   };
+}
+
+function setupFingerprintOptions(inputs: LifecycleInputs) {
+  return {
+    bundle: inputs.currentBundle,
+    bundleHash: inputs.bundleHash,
+    stepFingerprints: inputs.stepFingerprints,
+    bundleValues: inputs.bundleValues,
+    bundleSecrets: inputs.bundleSecrets,
+    confirmResults: inputs.confirmResults,
+    preManifest: inputs.preManifest,
+    setupManifest: inputs.setupManifest,
+  };
+}
+
+/**
+ * Automatic lifecycle path (workspace open / session attach).
+ *
+ * Idempotent and driven by persisted lock fingerprints: setup and select each
+ * run at most once per fingerprint, and are not auto-retried after an unchanged
+ * failure. Returns a discriminated {@link ScriptLifecycleOutcome}.
+ */
+export async function runWorkspaceScripts(
+  options: RunWorkspaceScriptsOptions,
+): Promise<ScriptLifecycleOutcome> {
+  const {
+    workspacePath,
+    workspaceName,
+    repository,
+    noSetup = false,
+    onPhaseStart,
+    scriptPolicy = 'auto',
+  } = options;
 
   if (scriptPolicy === 'skip') {
-    return { success: true };
+    return { kind: 'skipped-current' };
   }
 
-  const existingLock = readWorkspaceLockState(workspacePath) || createEmptyWorkspaceLockState();
-  const stepFingerprints = currentBundle ? buildBundleStepFingerprints(currentBundle) : {};
+  const loaded = await loadLifecycleInputs(options);
+  if ('parseError' in loaded) {
+    return { kind: 'failed', phase: 'setup', error: loaded.parseError };
+  }
+  const inputs = loaded.inputs;
+  const { scriptOptions } = inputs;
 
-  const setupNeeded = !noSetup && shouldRunSetup({
-    lock: existingLock,
-    bundle: currentBundle,
-    bundleHash,
-    stepFingerprints,
-    bundleValues: config.bundleValues || {},
-    bundleSecrets,
-    confirmHistory: config.bundleConfirmHistory || {},
-  });
+  let lockState: WorkspaceLockState = readWorkspaceLockState(workspacePath) || createEmptyWorkspaceLockState();
+  const currentSetupFingerprint = computeSetupFingerprint(setupFingerprintOptions(inputs));
+  const phasesRun: ScriptPhase[] = [];
 
-  let lockState: WorkspaceLockState = {
-    ...existingLock,
-  };
+  // ---- Setup phase (idempotent) ----------------------------------------
+  if (!noSetup) {
+    const setupCurrent = lockState.setup.setupFingerprint === currentSetupFingerprint;
+    if (setupCurrent && lockState.setup.status === 'success') {
+      // up to date — skip
+    } else if (setupCurrent && lockState.setup.status === 'failed') {
+      return { kind: 'blocked-previous-failure', blockedPhase: 'setup', error: lockState.setup.error };
+    } else {
+      let preSucceeded = false;
+      try {
+        onPhaseStart?.('pre');
+        const preDir = phaseDir(workspacePath, 'pre');
+        if (discoverScripts(preDir).length > 0) {
+          logger.warning('Bundle script phase "pre" is deprecated. Move scripts into ordered setup scripts.');
+        }
+        await runScriptsInTerminal(preDir, workspacePath, workspaceName, repository, scriptOptions);
+        preSucceeded = true;
 
-  if (setupNeeded) {
-    const preScriptsDir = join(workspacePath, '.gitspace', 'scripts', 'pre');
-    const preScripts = discoverScripts(preScriptsDir);
-    if (preScripts.length > 0) {
-      logger.warning('Bundle script phase "pre" is deprecated. Move scripts into ordered setup scripts.');
+        onPhaseStart?.('setup');
+        await runScriptsInTerminal(phaseDir(workspacePath, 'setup'), workspacePath, workspaceName, repository, scriptOptions);
+
+        lockState = {
+          ...lockState,
+          bundle: inputs.bundleHash ? { bundleHash: inputs.bundleHash, stepFingerprints: inputs.stepFingerprints } : lockState.bundle,
+          setup: buildSetupState(setupFingerprintOptions(inputs)),
+        };
+        writeWorkspaceLockState(workspacePath, lockState);
+        phasesRun.push('setup');
+      } catch (error) {
+        const phase: ScriptPhase = preSucceeded ? 'setup' : 'pre';
+        const message = error instanceof Error ? error.message : String(error);
+        const cancelled = isScriptExecutionCancelledError(error);
+        // Persist the attempted fingerprint on failure so an unchanged failure is
+        // detected and not auto-retried.
+        lockState = {
+          ...lockState,
+          bundle: inputs.bundleHash ? { bundleHash: inputs.bundleHash, stepFingerprints: inputs.stepFingerprints } : lockState.bundle,
+          setup: {
+            ...lockState.setup,
+            status: 'failed',
+            ranAt: new Date().toISOString(),
+            error: message,
+            setupFingerprint: currentSetupFingerprint,
+          },
+        };
+        writeWorkspaceLockState(workspacePath, lockState);
+        return { kind: 'failed', phase, error: message, cancelled };
+      }
     }
+  }
 
-    let preScriptsSucceeded = false;
+  // Select depends on setup: if setup was required and is not currently
+  // successful, do not run select.
+  const setupStatusForSelect = noSetup ? undefined : lockState.setup.status;
+  if (!noSetup && lockState.setup.status !== 'success') {
+    return { kind: 'blocked-previous-failure', blockedPhase: 'setup', error: lockState.setup.error };
+  }
+
+  // ---- Select phase (idempotent) ---------------------------------------
+  const currentSelectFingerprint = computeSelectFingerprint({
+    selectManifest: inputs.selectManifest,
+    setupFingerprint: currentSetupFingerprint,
+    setupStatus: setupStatusForSelect,
+  });
+  const selectCurrent = lockState.select.selectFingerprint === currentSelectFingerprint;
+  if (selectCurrent && lockState.select.status === 'success') {
+    // up to date — skip
+  } else if (selectCurrent && lockState.select.status === 'failed') {
+    return { kind: 'blocked-previous-failure', blockedPhase: 'select', error: lockState.select.error };
+  } else {
     try {
-      onPhaseStart?.('pre');
-      await runScriptsInTerminal(preScriptsDir, workspacePath, workspaceName, repository, scriptOptions);
-      preScriptsSucceeded = true;
-
-      onPhaseStart?.('setup');
-      const setupScriptsDir = join(workspacePath, '.gitspace', 'scripts', 'setup');
-      await runScriptsInTerminal(setupScriptsDir, workspacePath, workspaceName, repository, scriptOptions);
-
-      const confirmResults = resolveCurrentConfirmResults(
-        currentBundle,
-        stepFingerprints,
-        config.bundleConfirmHistory || {}
-      );
-
+      onPhaseStart?.('select');
+      await runScriptsInTerminal(phaseDir(workspacePath, 'select'), workspacePath, workspaceName, repository, scriptOptions);
       lockState = {
         ...lockState,
-        bundle: bundleHash
-          ? {
-              bundleHash,
-              stepFingerprints,
-            }
-          : lockState.bundle,
-        setup: buildSetupState({
-          bundle: currentBundle,
-          bundleHash,
-          stepFingerprints,
-          bundleValues: config.bundleValues || {},
-          bundleSecrets,
-          confirmResults,
-        }),
+        select: { status: 'success', ranAt: new Date().toISOString(), selectFingerprint: currentSelectFingerprint },
       };
       writeWorkspaceLockState(workspacePath, lockState);
+      phasesRun.push('select');
     } catch (error) {
-      const phase: ScriptPhase = preScriptsSucceeded ? 'setup' : 'pre';
       const message = error instanceof Error ? error.message : String(error);
       const cancelled = isScriptExecutionCancelledError(error);
       lockState = {
         ...lockState,
-        bundle: bundleHash
-          ? {
-              bundleHash,
-              stepFingerprints,
-            }
-          : lockState.bundle,
-        setup: {
-          ...lockState.setup,
-          status: 'failed',
-          ranAt: new Date().toISOString(),
-          error: message,
-        },
+        select: { status: 'failed', ranAt: new Date().toISOString(), error: message, selectFingerprint: currentSelectFingerprint },
       };
       writeWorkspaceLockState(workspacePath, lockState);
-      return { success: false, phase, error: message, cancelled };
+      return { kind: 'failed', phase: 'select', error: message, cancelled };
     }
   }
 
+  return phasesRun.length > 0 ? { kind: 'ran', phasesRun } : { kind: 'skipped-current' };
+}
 
-  // Always run select scripts on terminal attach (new session path).
-  const selectScriptsDir = join(workspacePath, '.gitspace', 'scripts', 'select');
+export type WorkspaceScriptRunSelection = 'setup' | 'select' | 'setup-select';
+
+/**
+ * Explicit rerun (user command). Always runs the requested phases regardless of
+ * lock state, then updates the lock so future automatic opens observe the
+ * outcome. Returns success/failure (callers surface errors directly).
+ */
+export async function rerunWorkspaceBundleScripts(
+  options: Omit<RunWorkspaceScriptsOptions, 'noSetup' | 'scriptPolicy'> & {
+    selection?: WorkspaceScriptRunSelection;
+  },
+): Promise<RunWorkspaceScriptsResult> {
+  const {
+    workspacePath,
+    workspaceName,
+    repository,
+    onPhaseStart,
+    selection = 'setup-select',
+  } = options;
+
+  const loaded = await loadLifecycleInputs(options);
+  if ('parseError' in loaded) {
+    return { success: false, phase: 'setup', error: loaded.parseError };
+  }
+  const inputs = loaded.inputs;
+  const { scriptOptions } = inputs;
+
+  const lockState = readWorkspaceLockState(workspacePath) || createEmptyWorkspaceLockState();
+  const currentSetupFingerprint = computeSetupFingerprint(setupFingerprintOptions(inputs));
+
+  if (selection === 'setup' || selection === 'setup-select') {
+    try {
+      onPhaseStart?.('setup');
+      await runScriptsInTerminal(phaseDir(workspacePath, 'setup'), workspacePath, workspaceName, repository, scriptOptions);
+      lockState.bundle = inputs.bundleHash ? { bundleHash: inputs.bundleHash, stepFingerprints: inputs.stepFingerprints } : lockState.bundle;
+      lockState.setup = buildSetupState(setupFingerprintOptions(inputs));
+      writeWorkspaceLockState(workspacePath, lockState);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      lockState.setup = {
+        ...lockState.setup,
+        status: 'failed',
+        ranAt: new Date().toISOString(),
+        error: message,
+        setupFingerprint: currentSetupFingerprint,
+      };
+      writeWorkspaceLockState(workspacePath, lockState);
+      return { success: false, phase: 'setup', error: message, cancelled: isScriptExecutionCancelledError(error) };
+    }
+  }
+
+  if (selection === 'setup') {
+    return { success: true };
+  }
+
+  const currentSelectFingerprint = computeSelectFingerprint({
+    selectManifest: inputs.selectManifest,
+    setupFingerprint: currentSetupFingerprint,
+    setupStatus: lockState.setup.status,
+  });
   try {
     onPhaseStart?.('select');
-    await runScriptsInTerminal(selectScriptsDir, workspacePath, workspaceName, repository, scriptOptions);
-    lockState = {
-      ...lockState,
-      select: {
-        status: 'success',
-        ranAt: new Date().toISOString(),
-      },
-    };
+    await runScriptsInTerminal(phaseDir(workspacePath, 'select'), workspacePath, workspaceName, repository, scriptOptions);
+    lockState.select = { status: 'success', ranAt: new Date().toISOString(), selectFingerprint: currentSelectFingerprint };
     writeWorkspaceLockState(workspacePath, lockState);
     return { success: true };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    const cancelled = isScriptExecutionCancelledError(error);
-    lockState = {
-      ...lockState,
-      select: {
-        status: 'failed',
-        ranAt: new Date().toISOString(),
-        error: message,
-      },
+    lockState.select = {
+      ...lockState.select,
+      status: 'failed',
+      ranAt: new Date().toISOString(),
+      error: message,
+      selectFingerprint: currentSelectFingerprint,
     };
     writeWorkspaceLockState(workspacePath, lockState);
-    return { success: false, phase: 'select', error: message, cancelled };
+    return { success: false, phase: 'select', error: message, cancelled: isScriptExecutionCancelledError(error) };
   }
 }
 
 function resolveCurrentConfirmResults(
   bundle: SpacesBundle | undefined,
   stepFingerprints: Record<string, string>,
-  confirmHistory: Record<string, { status: ConfirmStepResult['status'] }>
+  confirmHistory: Record<string, { status: ConfirmStepResult['status'] }>,
 ): Record<string, ConfirmStepResult> {
   const results: Record<string, ConfirmStepResult> = {};
   if (!bundle) {
@@ -268,100 +414,4 @@ function resolveCurrentConfirmResults(
   }
 
   return results;
-}
-
-interface SetupDecisionOptions {
-  lock: WorkspaceLockState;
-  bundle: SpacesBundle | undefined;
-  bundleHash: string | undefined;
-  stepFingerprints: Record<string, string>;
-  bundleValues: Record<string, string>;
-  bundleSecrets: Record<string, string>;
-  confirmHistory: Record<string, { status: ConfirmStepResult['status'] }>;
-}
-
-function shouldRunSetup(options: SetupDecisionOptions): boolean {
-  const {
-    lock,
-    bundle,
-    bundleHash,
-    stepFingerprints,
-    bundleValues,
-    bundleSecrets,
-    confirmHistory,
-  } = options;
-
-  if (lock.setup.status !== 'success') {
-    return true;
-  }
-
-  if (!bundle) {
-    return false;
-  }
-
-  const previousBundle = lock.bundle;
-  if (!previousBundle || !bundleHash) {
-    return true;
-  }
-
-  const relevantSteps = getRelevantSetupSteps(bundle.onboarding || [], lock.setup.usedOptionalSteps);
-
-  for (const step of relevantSteps) {
-    const key = getBundleStepKey(step);
-    const currentStepFingerprint = stepFingerprints[key];
-    if (!currentStepFingerprint || previousBundle.stepFingerprints[key] !== currentStepFingerprint) {
-      return true;
-    }
-
-    if (step.type === 'input') {
-      const value = bundleValues[step.configKey] ?? '';
-      const currentValueFingerprint = fingerprintValue(value);
-      if (lock.setup.inputFingerprints[step.configKey] !== currentValueFingerprint) {
-        return true;
-      }
-      continue;
-    }
-
-    if (step.type === 'secret') {
-      const value = bundleSecrets[step.configKey] ?? '';
-      const currentSecretFingerprint = fingerprintValue(value);
-      if (lock.setup.secretFingerprints[step.configKey] !== currentSecretFingerprint) {
-        return true;
-      }
-      continue;
-    }
-
-    if (step.type === 'confirm') {
-      const previous = lock.setup.confirmsUsed[key];
-      if (!previous) {
-        continue;
-      }
-      const history = confirmHistory[currentStepFingerprint];
-      const currentStatus = history?.status;
-      if (previous.status !== currentStatus || previous.fingerprint !== currentStepFingerprint) {
-        return true;
-      }
-    }
-  }
-
-  return false;
-}
-
-function getRelevantSetupSteps(
-  steps: OnboardingStep[],
-  usedOptionalSteps: Record<string, true>
-): OnboardingStep[] {
-  return steps.filter((step) => {
-    const required = step.required !== false;
-    if (required) {
-      return step.type === 'input' || step.type === 'select' || step.type === 'secret' || step.type === 'confirm';
-    }
-
-    const key = getBundleStepKey(step);
-    if (!usedOptionalSteps[key]) {
-      return false;
-    }
-
-    return step.type === 'input' || step.type === 'select' || step.type === 'secret' || step.type === 'confirm';
-  });
 }

@@ -1,8 +1,16 @@
 import type { WorkspacePhase } from '../../../types/config.js';
 import type { WorkspaceNotesSummary } from '../../../types/workspace.js';
+import type { SessionActivity } from '../../../agents/agent-runtime-types.js';
 
 export type MachineAgentSessionState =
+  /** Dismissed by the user. Reopening is an explicit act. */
   | 'closed'
+  /** No live worker, but nothing was dismissed: discovered on disk at daemon
+   *  start, or its worker went away. Resumable — the next interaction reboots it
+   *  from its session file. Distinct from 'closed' because `closedAt` used to
+   *  mean both, so a never-touched session was indistinguishable from a
+   *  deliberately closed one. */
+  | 'dormant'
   | 'waiting'
   | 'running'
   | 'permission-needed'
@@ -84,6 +92,31 @@ export interface MachineWorkspaceLinearRecord {
   stateName?: string;
 }
 
+export interface MachineGoalRecord {
+  id: string;
+  chainId: string;
+  chainTitle: string;
+  title: string;
+  projectName: string;
+  phase: WorkspacePhase;
+  plannedWorkspaceName?: string;
+  workspaceName?: string;
+  status: 'planned' | 'workspace-backed' | 'archived';
+  chainPosition: number;
+  chainLength: number;
+  previousGoalId?: string;
+  previousWorkspaceName?: string;
+  previousPhase?: WorkspacePhase;
+  blockedReason?: string;
+  doc?: import('../../../types/goals.js').GoalDoc;
+  validation?: import('../../../types/goals.js').GoalValidation;
+  sourceRefs?: import('../../../types/goals.js').SourceRef[];
+  updatedAt?: string;
+  stackStatus?: import('../../../types/goals.js').ChainStackEdgeStatus['status'];
+  stackStatusMessage?: string;
+}
+
+
 export interface MachineWorkspaceRecord {
   id: string;
   name: string;
@@ -99,6 +132,7 @@ export interface MachineWorkspaceRecord {
   notesSummary?: WorkspaceNotesSummary;
   pullRequest?: MachineWorkspacePullRequestRecord;
   linear?: MachineWorkspaceLinearRecord;
+  goal?: MachineGoalRecord;
   terminalSessionIds: string[];
   agentSessionIds: string[];
   processIds: string[];
@@ -115,6 +149,10 @@ export interface MachineWorkspaceRecord {
     retryingAgentCount: number;
     closedAgentCount: number;
     archivedAgentCount: number;
+    /** Archived sessions beyond the newest few carried inline in the snapshot
+     *  (ticket #42). `archivedAgentCount + archivedMoreCount` is the true total;
+     *  the extras are fetched on demand via the agent-sessions RPC. */
+    archivedMoreCount?: number;
     configuredProcessCount: number;
     runningProcessCount: number;
     failedProcessCount: number;
@@ -127,6 +165,8 @@ export interface MachineTerminalSessionRecord {
   workspaceId?: string;
   projectId?: string;
   cwd: string;
+  /** Unix socket path for tmux-lite session attach. Populated from Session.socketPath in build.ts. */
+  socketPath: string;
   kind: 'shell' | 'process' | 'agent';
   hidden: boolean;
   state: MachineTerminalSessionState;
@@ -141,7 +181,6 @@ export interface MachineTerminalSessionRecord {
   unreadAlertCount?: number;
   processName?: string;
   processInstance?: number;
-  linkedAgentSessionId?: string;
   metadata?: Record<string, string>;
 }
 
@@ -153,6 +192,9 @@ export interface MachineAgentSessionRecord {
   state: MachineAgentSessionState;
   updatedAt?: string;
   closedAt?: string;
+  /** Set when the session has no live worker but was not dismissed. Pairs with
+   *  state 'dormant'. */
+  dormantSince?: string;
   archivedAt?: string;
   pendingPermissionIds: string[];
   pendingPermissionCount: number;
@@ -160,10 +202,16 @@ export interface MachineAgentSessionRecord {
   pendingQuestionCount: number;
   errorMessage?: string;
   lastMessagePreview?: string;
-  linkedTerminalSessionId?: string;
   modelInfo?: import('../../../agents/agent-runtime-types.js').AgentModelInfo;
   todoPhases?: import('../../../agents/agent-runtime-types.js').TodoPhase[];
   queuedMessages?: { steering: string[]; followUp: string[] };
+  /** Live subagent count reported by the worker's AgentRegistry. */
+  subagentCount?: number;
+  /** Canonical activity, computed once in the daemon
+   *  (AgentEventManager.getSessionActivity). Consumers MUST read this rather
+   *  than re-deriving idleness from `state` or a status — `state` is a lossy
+   *  projection of it, kept for rendering. */
+  activity?: SessionActivity;
 }
 
 export interface MachineProcessRecord {
@@ -211,6 +259,9 @@ export interface MachineSnapshot {
   workspacesById: Record<string, MachineWorkspaceRecord>;
   workspaceOrder: string[];
   workspaceIdsByProjectId: Record<string, string[]>;
+  goalsById?: Record<string, MachineGoalRecord>;
+  goalOrder?: string[];
+  goalIdsByProjectId?: Record<string, string[]>;
   terminalSessionsById: Record<string, MachineTerminalSessionRecord>;
   terminalSessionIdsByWorkspaceId: Record<string, string[]>;
   agentSessionsById: Record<string, MachineAgentSessionRecord>;
@@ -230,4 +281,29 @@ export type MachineEvent =
   | { type: 'terminal-session-upserted'; snapshotNonce: number; session: MachineTerminalSessionRecord }
   | { type: 'terminal-session-removed'; snapshotNonce: number; sessionId: string; workspaceId?: string }
   | { type: 'agent-session-upserted'; snapshotNonce: number; session: MachineAgentSessionRecord }
-  | { type: 'agent-session-removed'; snapshotNonce: number; sessionId: string; workspaceId: string };
+  | { type: 'agent-session-removed'; snapshotNonce: number; sessionId: string; workspaceId: string }
+  | { type: 'process-upserted'; snapshotNonce: number; process: MachineProcessRecord }
+  | { type: 'process-removed'; snapshotNonce: number; processId: string; workspaceId: string }
+  /** Scoped goal refresh: replaces ALL goals belonging to one project.
+   *  goalOrder is project-scoped (ordering within the project). */
+  | {
+      type: 'project-goals-replaced';
+      snapshotNonce: number;
+      projectId: string;
+      goalsById: Record<string, MachineGoalRecord>;
+      goalOrder: string[];
+    }
+  /** Slim workspace refresh for session-derived fields (id lists + summary
+   *  counts) — avoids re-shipping the whole record (embedded goal docs are
+   *  heavy) on every terminal/agent lifecycle event. No-op if the workspace
+   *  record is unknown (both sides apply the same transform, so it is
+   *  unknown on both). */
+  | {
+      type: 'workspace-derived-replaced';
+      snapshotNonce: number;
+      workspaceId: string;
+      terminalSessionIds: string[];
+      agentSessionIds: string[];
+      processIds: string[];
+      summary: MachineWorkspaceRecord['summary'];
+    };

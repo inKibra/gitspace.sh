@@ -109,18 +109,34 @@ export interface ArchivedSession {
   archivedAt: string;
 }
 
-export function getArchivedSessions(workspaceId: string): ArchivedSession[] {
+/**
+ * Archived sessions for a workspace, newest first (by archived_at DESC).
+ * Pass `limit` to cap the result — the connect snapshot ships only the newest
+ * few per workspace (ticket #42) so it cannot grow unbounded with uptime; the
+ * full list is still available via the agent-sessions RPC.
+ */
+export function getArchivedSessions(workspaceId: string, limit?: number): ArchivedSession[] {
   const rows = getDb()
     .query(
-      'SELECT workspace_id, session_id, title, archived_at FROM archived_sessions WHERE workspace_id = ?',
+      `SELECT workspace_id, session_id, title, archived_at FROM archived_sessions
+       WHERE workspace_id = ? ORDER BY archived_at DESC${limit !== undefined ? ' LIMIT ?' : ''}`,
     )
-    .all(workspaceId) as { workspace_id: string; session_id: string; title: string; archived_at: string }[];
+    .all(...(limit !== undefined ? [workspaceId, limit] : [workspaceId])) as { workspace_id: string; session_id: string; title: string; archived_at: string }[];
   return rows.map((r) => ({
     workspaceId: r.workspace_id,
     sessionId: r.session_id,
     title: r.title,
     archivedAt: r.archived_at,
   }));
+}
+
+/** Total archived-session count for a workspace (drives the 'N more' affordance
+ *  when the snapshot caps the inline archived list). */
+export function countArchivedSessions(workspaceId: string): number {
+  const row = getDb()
+    .query('SELECT COUNT(*) AS n FROM archived_sessions WHERE workspace_id = ?')
+    .get(workspaceId) as { n: number } | undefined;
+  return row?.n ?? 0;
 }
 
 export function getAllArchivedSessions(): ArchivedSession[] {

@@ -22,6 +22,8 @@ export interface ReviewPageProps {
   workspaceLabel?: string;
   machineName?: string;
   sendReviewRequest: (operation: ReviewOperation) => Promise<ReviewResult>;
+  /** Route a finding to the workspace agent (mock: 'Send to agent → fix'). */
+  onSendToAgent?: (thread: import('../types/review.js').ReviewThread) => Promise<void> | void;
   onBack: () => void;
 }
 
@@ -31,6 +33,7 @@ export function ReviewPage({
   workspaceLabel,
   machineName,
   sendReviewRequest,
+  onSendToAgent,
   onBack,
 }: ReviewPageProps) {
   const { review, statusInfo } = useReviewPageModel({ sendReviewRequest, projectName, workspaceName });
@@ -489,6 +492,7 @@ export function ReviewPage({
 
               <div style={{ flex: 1, overflow: 'hidden', borderLeft: '1px solid var(--gs-border)' }}>
               <ThreadPanel
+                onSendToAgent={onSendToAgent}
                 threads={threads}
                 currentFilePath={currentFilePath}
                 hunkFocus={currentHunkFocus}

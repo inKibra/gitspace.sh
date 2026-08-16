@@ -2,9 +2,10 @@
  * Git and worktree operations
  */
 
-import { exec } from 'child_process';
+import { exec, execFile } from 'child_process';
 import { promisify } from 'util';
-import { existsSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
+import { join } from 'path';
 import { SpacesError } from '../types/errors.js';
 import { logger } from '../utils/logger.js';
 import { escapeShellArg } from '../utils/shell-escape.js';
@@ -12,6 +13,8 @@ import type { WorktreeInfo } from '../types/workspace.js';
 import type { ReviewChangedFile } from '../types/review.js';
 
 const execAsync = promisify(exec);
+/** argv form — REQUIRED wherever user input becomes a command argument. */
+const execFileAsync = promisify(execFile);
 
 const BASE_REF_CACHE_TTL_MS = 60_000;
 const BASE_REF_CACHE_MAX_ENTRIES = 256;
@@ -239,10 +242,18 @@ export async function createWorktree(
     } else {
       // Branch doesn't exist, create new from base
       // Use --no-track to avoid setting upstream to baseBranch (user should push -u to set correct upstream)
+      // Prefer origin/<base>; fall back to the local base branch for repos with
+      // no remote (from-scratch projects created by `gssh project create`).
+      let startPoint = `origin/${baseBranch}`;
+      try {
+        await execAsync(`git rev-parse --verify --quiet ${escapeShellArg(startPoint)}`, { cwd: repoPath });
+      } catch {
+        startPoint = baseBranch;
+      }
       onProgress?.(`Creating new branch ${branchName}...`);
-      logger.debug(`Creating new branch from ${baseBranch}: ${branchName}`);
+      logger.debug(`Creating new branch from ${startPoint}: ${branchName}`);
       await execAsync(
-        `git worktree add -b ${escapeShellArg(branchName)} ${escapeShellArg(workspacePath)} ${escapeShellArg(`origin/${baseBranch}`)} --no-track`,
+        `git worktree add -b ${escapeShellArg(branchName)} ${escapeShellArg(workspacePath)} ${escapeShellArg(startPoint)} --no-track`,
         { cwd: repoPath }
       );
     }
@@ -457,6 +468,23 @@ export async function getWorkspaceDiff(
 }
 
 /**
+ * The repo's actual local branches, most-recently-committed first — for the
+ * "diff vs" selector, so it offers real branches (including sibling workspaces /
+ * chain branches, which ARE local branches) instead of hardcoded main/develop.
+ */
+export async function listLocalBranches(workspacePath: string): Promise<string[]> {
+  try {
+    const { stdout } = await execAsync(
+      "git for-each-ref --sort=-committerdate --format='%(refname:short)' refs/heads",
+      { cwd: workspacePath, maxBuffer: 4 * 1024 * 1024 },
+    );
+    return stdout.split('\n').map((s) => s.trim().replace(/^'|'$/g, '')).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+/**
  * List changed files in a workspace branch vs base branch.
  */
 export async function getWorkspaceChangedFiles(
@@ -475,8 +503,31 @@ export async function getWorkspaceChangedFiles(
       { cwd: workspacePath, maxBuffer: 10 * 1024 * 1024 }
     );
 
+    // Line counts per file (absent for binary files, '-' in numstat).
+    const counts = new Map<string, { additions: number; deletions: number }>();
+    try {
+      const { stdout: numstat } = await execAsync(
+        `git diff --numstat -z --find-renames -M ${escapeShellArg(baseRef)}...HEAD`,
+        { cwd: workspacePath, maxBuffer: 10 * 1024 * 1024 }
+      );
+      // -z numstat records: "adds\tdels\tpath\0" or for renames "adds\tdels\0old\0new\0"
+      const parts = numstat.split('\0');
+      for (let i = 0; i < parts.length; i++) {
+        const rec = parts[i];
+        if (!rec) continue;
+        const m = rec.match(/^(\d+|-)\t(\d+|-)\t?(.*)$/);
+        if (!m) continue;
+        let path = m[3];
+        if (!path) { path = parts[i + 2] ?? parts[i + 1] ?? ''; i += 2; }
+        if (path && m[1] !== '-') counts.set(path, { additions: Number(m[1]), deletions: Number(m[2]) });
+      }
+    } catch { /* counts are decorative */ }
+
     return {
-      files: parseChangedFilesFromNameStatusZ(stdout),
+      files: parseChangedFilesFromNameStatusZ(stdout).map((f) => {
+        const c = counts.get(f.filePath);
+        return c ? { ...f, additions: c.additions, deletions: c.deletions } : f;
+      }),
       baseBranch,
       headBranch,
     };
@@ -486,6 +537,36 @@ export async function getWorkspaceChangedFiles(
       'SYSTEM_ERROR',
       2
     );
+  }
+}
+
+/**
+ * The pre-rename path of `filePath` between `<baseRef>` and HEAD, or null.
+ *
+ * Rename detection needs BOTH sides present in the diff. A caller that opened a
+ * file from the repo tree — rather than from the changed-file list, which
+ * carries `prevFilePath` — cannot know the old path, and `git diff -- <newPath>`
+ * then reports `new file mode` with every line an addition: the whole file
+ * instead of the handful of lines that changed. Resolving it here means no
+ * caller has to know, and none can get it wrong.
+ *
+ * `--diff-filter=R` keeps the output to rename records, so this stays cheap
+ * even on a large branch.
+ */
+async function resolveRenameSource(
+  workspacePath: string,
+  baseRef: string,
+  filePath: string,
+): Promise<string | null> {
+  try {
+    const { stdout } = await execAsync(
+      `git diff --name-status -z --find-renames -M --diff-filter=R ${escapeShellArg(baseRef)}...HEAD`,
+      { cwd: workspacePath, maxBuffer: 10 * 1024 * 1024 }
+    );
+    return parseChangedFilesFromNameStatusZ(stdout).find((f) => f.filePath === filePath)?.prevFilePath ?? null;
+  } catch {
+    // Best-effort: without it the diff is merely as wrong as it was before.
+    return null;
   }
 }
 
@@ -505,8 +586,10 @@ export async function getWorkspaceFileDiff(
     const headBranch = headOutput.trim();
 
     const baseRef = await resolveComparableBaseRef(workspacePath, baseBranch);
-    const pathSpec = prevFilePath
-      ? `${escapeShellArg(prevFilePath)} ${escapeShellArg(filePath)}`
+    // Both sides must be in the pathspec or rename detection cannot pair them.
+    const oldPath = prevFilePath ?? await resolveRenameSource(workspacePath, baseRef, filePath);
+    const pathSpec = oldPath
+      ? `${escapeShellArg(oldPath)} ${escapeShellArg(filePath)}`
       : escapeShellArg(filePath);
 
     const { stdout } = await execAsync(
@@ -544,7 +627,9 @@ export async function getWorkspaceFileVersions(
     const baseRef = await resolveComparableBaseRef(workspacePath, baseBranch);
     const mergeBaseCommit = await resolveMergeBaseCommit(workspacePath, baseRef);
 
-    const oldPath = prevFilePath ?? filePath;
+    // Reading the NEW path at the merge base finds nothing for a rename, which
+    // leaves the old side empty and renders the file as wholly added.
+    const oldPath = prevFilePath ?? await resolveRenameSource(workspacePath, baseRef, filePath) ?? filePath;
     const [oldContents, newContents] = await Promise.all([
       readFileAtRevision(workspacePath, mergeBaseCommit, oldPath),
       readFileAtRevision(workspacePath, 'HEAD', filePath),
@@ -622,6 +707,25 @@ export async function getWorkspaceFileContextRange(
   }
 }
 
+/**
+ * Does this ref want the `origin/` prefix tried first?
+ *
+ * For a bare branch name it does: `origin/develop` is the shared truth, while a
+ * local `develop` may be months stale. But the repo view lets a reviewer name
+ * ANY ref, and for those the prefix is actively wrong — `origin/HEAD` exists in
+ * most clones and points at the remote's DEFAULT branch, so asking to diff vs
+ * HEAD silently returned the diff vs develop instead. Same trap for a sha
+ * (`origin/<sha>` is meaningless) and for an already-qualified ref.
+ */
+function prefersOriginPrefix(ref: string): boolean {
+  if (ref === 'HEAD' || ref.startsWith('HEAD~') || ref.startsWith('HEAD^')) return false;
+  // Already qualified: origin/x, upstream/x, refs/tags/x.
+  if (ref.includes('/')) return false;
+  // A commit sha names one commit; no remote-tracking equivalent exists.
+  if (/^[0-9a-f]{7,40}$/i.test(ref)) return false;
+  return true;
+}
+
 async function resolveComparableBaseRef(
   workspacePath: string,
   baseBranch: string
@@ -642,16 +746,21 @@ async function resolveComparableBaseRef(
 
   const resolvePromise = (async () => {
     // Best effort fetch. Keep short timeout to avoid hanging review requests.
-    try {
-      await execAsync(`git fetch origin ${escapeShellArg(baseBranch)} --quiet`, {
-        cwd: workspacePath,
-        timeout: 8000,
-      });
-    } catch {
-      logger.debug(`Could not fetch origin/${baseBranch}, using local refs`);
+    // Only for branch names — fetching a sha or HEAD just burns the timeout.
+    if (prefersOriginPrefix(baseBranch)) {
+      try {
+        await execAsync(`git fetch origin ${escapeShellArg(baseBranch)} --quiet`, {
+          cwd: workspacePath,
+          timeout: 8000,
+        });
+      } catch {
+        logger.debug(`Could not fetch origin/${baseBranch}, using local refs`);
+      }
     }
 
-    const candidates = [`origin/${baseBranch}`, baseBranch];
+    const candidates = prefersOriginPrefix(baseBranch)
+      ? [`origin/${baseBranch}`, baseBranch]
+      : [baseBranch];
     for (const candidate of candidates) {
       try {
         await execAsync(`git rev-parse --verify ${escapeShellArg(candidate)}`, {
@@ -836,4 +945,131 @@ export async function listWorktrees(repoPath: string): Promise<string[]> {
       2
     );
   }
+}
+
+/** A repo file entry for the RightRail tree: path + porcelain status letter
+ *  (M/A/D/R/?/…) when the file differs from HEAD/index. */
+export interface RepoFileEntry {
+  path: string;
+  status?: string;
+}
+
+/** List all files in a worktree (tracked + untracked, gitignore respected)
+ *  with working-tree status letters merged in. */
+export async function listRepoFiles(workspacePath: string): Promise<RepoFileEntry[]> {
+  const { stdout: tracked } = await execAsync('git ls-files -z', { cwd: workspacePath, maxBuffer: 32 * 1024 * 1024 });
+  const { stdout: untracked } = await execAsync('git ls-files -z --others --exclude-standard', {
+    cwd: workspacePath,
+    maxBuffer: 32 * 1024 * 1024,
+  });
+  const { stdout: statusOut } = await execAsync('git status --porcelain -z', {
+    cwd: workspacePath,
+    maxBuffer: 32 * 1024 * 1024,
+  });
+  const status = new Map<string, string>();
+  for (const rec of statusOut.split('\0')) {
+    if (rec.length < 4) continue;
+    const letters = rec.slice(0, 2).trim() || 'M';
+    // rename records are "XY new\0old" — the split already isolates the new path
+    status.set(rec.slice(3), letters[0] === 'R' ? 'R' : letters[0]);
+  }
+  const paths = new Set<string>();
+  for (const chunk of [tracked, untracked]) {
+    for (const p of chunk.split('\0')) {
+      if (p) paths.add(p);
+    }
+  }
+  return [...paths]
+    .sort((a, b) => a.localeCompare(b))
+    .map((path) => (status.has(path) ? { path, status: status.get(path) } : { path }));
+}
+
+/** Read a file inside a worktree (path-jailed). Returns null when missing. */
+export function readRepoFile(workspacePath: string, relPath: string): Buffer | null {
+  if (!relPath || relPath.startsWith('/') || relPath.split('/').some((s) => s === '' || s === '.' || s === '..')) {
+    throw new SpacesError(`Unsafe repo path: ${relPath}`, 'USER_ERROR', 1);
+  }
+  const abs = join(workspacePath, relPath);
+  if (!existsSync(abs)) return null;
+  return readFileSync(abs);
+}
+
+export interface RepoSearchHit {
+  path: string;
+  /** 1-based line number, so the hit opens the viewer AT the line. */
+  line: number;
+  /** The matching line's text, clipped — this is preview chrome, not content. */
+  text: string;
+}
+
+export interface RepoSearchResult {
+  hits: RepoSearchHit[];
+  /** True when the cap was hit, so the UI can say "showing first N". */
+  truncated: boolean;
+}
+
+/**
+ * Repo-wide content search, backing the repo view's search box.
+ *
+ * `git grep` rather than a walk: it already honours .gitignore, skips binaries
+ * (-I) and is fast on a large tree. --untracked so a file the agent just wrote
+ * is findable before it is staged.
+ *
+ * The query is USER INPUT and goes through execFile argv — never a shell string.
+ * `-F` keeps it a literal, so a query full of regex metacharacters searches for
+ * those characters instead of exploding.
+ */
+export async function searchRepoContent(
+  workspacePath: string,
+  query: string,
+  options: { maxHits?: number; caseSensitive?: boolean } = {},
+): Promise<RepoSearchResult> {
+  const needle = query.trim();
+  if (!needle) return { hits: [], truncated: false };
+  const maxHits = options.maxHits ?? 300;
+
+  const args = [
+    'grep', '-z', '-n', '-I', '--no-color', '--untracked', '-F',
+    ...(options.caseSensitive ? [] : ['-i']),
+    // Per-file cap keeps one generated file from consuming the whole budget.
+    '-m', '20',
+    '-e', needle, '--', '.',
+  ];
+
+  let stdout = '';
+  try {
+    ({ stdout } = await execFileAsync('git', args, { cwd: workspacePath, maxBuffer: 32 * 1024 * 1024 }));
+  } catch (error) {
+    // git grep exits 1 for "no matches" — that is a normal empty result, not a
+    // failure. Anything else is real.
+    const code = (error as { code?: number }).code;
+    if (code === 1) return { hits: [], truncated: false };
+    throw error;
+  }
+
+  const hits: RepoSearchHit[] = [];
+  let truncated = false;
+  for (const record of stdout.split('\n')) {
+    if (!record) continue;
+    const [path, lineText, ...rest] = record.split('\0');
+    if (!path || !lineText) continue;
+    const line = Number.parseInt(lineText, 10);
+    if (!Number.isFinite(line)) continue;
+    if (hits.length >= maxHits) { truncated = true; break; }
+    hits.push({ path, line, text: rest.join('\0').slice(0, 400) });
+  }
+  return { hits, truncated };
+}
+
+/** Stage everything and commit. Returns the commit sha (null when nothing to commit). */
+export async function commitAllChanges(workspacePath: string, message: string): Promise<string | null> {
+  if (!message.trim()) {
+    throw new SpacesError('Commit message is required', 'USER_ERROR', 1);
+  }
+  await execAsync('git add -A', { cwd: workspacePath });
+  const { stdout: staged } = await execAsync('git diff --cached --name-only', { cwd: workspacePath, maxBuffer: 8 * 1024 * 1024 });
+  if (!staged.trim()) return null;
+  await execAsync(`git commit -q -m ${escapeShellArg(message.trim())}`, { cwd: workspacePath });
+  const { stdout } = await execAsync('git rev-parse HEAD', { cwd: workspacePath });
+  return stdout.trim();
 }

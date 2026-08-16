@@ -6,6 +6,14 @@ import {
 } from './session-terminal-page-navigation.js';
 import { isIOSDevice } from '../utils/device.web.js';
 
+import {
+  terminalMemoryDebugDecrement,
+  terminalMemoryDebugGauge,
+  terminalMemoryDebugIncrement,
+  terminalMemoryDebugMax,
+} from '../utils/terminal-memory-debug.js';
+
+const WEB_TERMINAL_SCROLLBACK = 50_000;
 interface Props {
   onData: (data: Uint8Array) => void;
   setWriteCallback: (fn: ((data: Uint8Array) => void) | null) => void;
@@ -46,6 +54,158 @@ interface TerminalViewportLike {
 const SCROLL_THRESHOLD = 10; // pixels before we consider it a scroll vs tap
 const SCROLL_ACCUMULATOR_THRESHOLD = 30; // pixels of accumulated delta before sending scroll
 const TAP_MOVE_THRESHOLD = 10; // max movement to still count as a tap
+
+
+const MAX_TERMINAL_WRITE_BYTES = 16_384;
+const MAX_TERMINAL_DRAIN_BYTES = 64 * 1024;
+const MAX_TERMINAL_DRAIN_MS = 8;
+const MIN_TERMINAL_WRITE_BYTES = 512;
+
+function writeTerminalSlice(term: GhosttyTerminal, slice: Uint8Array): boolean {
+  try {
+    term.write(slice);
+    return true;
+  } catch (error) {
+    terminalMemoryDebugIncrement('terminal.write.failed');
+    terminalMemoryDebugMax('terminal.write.failed.maxSliceBytes', slice.byteLength);
+    if (slice.byteLength > MIN_TERMINAL_WRITE_BYTES) {
+      const midpoint = findUtf8SafeEnd(slice, 0, Math.floor(slice.byteLength / 2));
+      if (midpoint > 0 && midpoint < slice.byteLength) {
+        terminalMemoryDebugIncrement('terminal.write.retrySplit');
+        const firstOk = writeTerminalSlice(term, slice.subarray(0, midpoint));
+        const secondOk = writeTerminalSlice(term, slice.subarray(midpoint));
+        return firstOk && secondOk;
+      }
+    }
+    console.error('[session-terminal:web] dropping terminal write slice after term.write failed', {
+      sliceLength: slice.byteLength,
+      viewportY: term.viewportY,
+      cols: term.cols,
+      rows: term.rows,
+      error,
+    });
+    terminalMemoryDebugIncrement('terminal.write.droppedSlice');
+    terminalMemoryDebugIncrement('terminal.write.droppedBytes', slice.byteLength);
+    return false;
+  }
+}
+
+function findUtf8SafeEnd(chunk: Uint8Array, offset: number, maxEnd: number): number {
+  let end = maxEnd;
+  if (end < chunk.length) {
+    let safeEnd = end;
+    while (safeEnd > offset && (chunk[safeEnd]! & 0xC0) === 0x80) {
+      safeEnd--;
+    }
+    if (safeEnd > offset) {
+      end = safeEnd;
+    }
+  }
+  return end;
+}
+
+function createTerminalWritePump(term: GhosttyTerminal, onFatalWriteError: () => void): {
+  enqueue(data: Uint8Array): void;
+  dispose(): void;
+} {
+  const queue: Uint8Array[] = [];
+  let scheduled = false;
+  let disposed = false;
+  let frameId: number | null = null;
+
+  let queuedBytes = 0;
+  let fatal = false;
+
+  const markFatal = () => {
+    if (fatal) return;
+    fatal = true;
+    disposed = true;
+    queue.length = 0;
+    queuedBytes = 0;
+    terminalMemoryDebugIncrement('terminal.writePump.fatal');
+    terminalMemoryDebugGauge('terminal.writePump.queueChunks', 0);
+    terminalMemoryDebugGauge('terminal.writePump.queuedBytes', 0);
+    if (frameId !== null) {
+      cancelAnimationFrame(frameId);
+      frameId = null;
+    }
+    onFatalWriteError();
+  };
+  const schedule = () => {
+    if (scheduled || disposed) return;
+    scheduled = true;
+    frameId = requestAnimationFrame(drain);
+  };
+
+  const drain = () => {
+    frameId = null;
+    scheduled = false;
+    if (disposed || fatal) return;
+    const startedAt = performance.now();
+    terminalMemoryDebugIncrement('terminal.writePump.drain');
+    terminalMemoryDebugGauge('terminal.writePump.queueChunks', queue.length);
+    terminalMemoryDebugGauge('terminal.writePump.queuedBytes', queuedBytes);
+    let bytesWritten = 0;
+
+    while (queue.length > 0) {
+      const chunk = queue[0]!;
+      let offset = 0;
+
+      while (offset < chunk.length) {
+        const budgetRemaining = Math.max(1, MAX_TERMINAL_DRAIN_BYTES - bytesWritten);
+        const maxEnd = Math.min(offset + MAX_TERMINAL_WRITE_BYTES, offset + budgetRemaining, chunk.length);
+        let end = findUtf8SafeEnd(chunk, offset, maxEnd);
+        if (end <= offset) {
+          terminalMemoryDebugIncrement('terminal.writePump.invalidUtf8Boundary');
+          end = Math.min(offset + 1, chunk.length);
+        }
+
+        const slice = chunk.subarray(offset, end);
+        if (!writeTerminalSlice(term, slice)) {
+          markFatal();
+          return;
+        }
+        bytesWritten += end - offset;
+        offset = end;
+
+        if (bytesWritten >= MAX_TERMINAL_DRAIN_BYTES || performance.now() - startedAt >= MAX_TERMINAL_DRAIN_MS) {
+          if (offset < chunk.length) {
+            queuedBytes -= offset;
+            queue[0] = chunk.subarray(offset);
+          } else {
+            queue.shift();
+          }
+          schedule();
+          return;
+        }
+      }
+
+      queue.shift();
+      queuedBytes -= chunk.length;
+    }
+  };
+
+  return {
+    enqueue(data: Uint8Array) {
+      if (disposed || fatal || data.byteLength === 0) return;
+      queue.push(new Uint8Array(data));
+      queuedBytes += data.byteLength;
+      terminalMemoryDebugIncrement('terminal.writePump.enqueue');
+      terminalMemoryDebugMax('terminal.writePump.maxQueuedBytes', queuedBytes);
+      terminalMemoryDebugMax('terminal.writePump.maxQueueChunks', queue.length);
+      schedule();
+    },
+    dispose() {
+      disposed = true;
+      queue.length = 0;
+      queuedBytes = 0;
+      if (frameId !== null) {
+        cancelAnimationFrame(frameId);
+        frameId = null;
+      }
+    },
+  };
+}
 
 function configureMobileHelperTextarea(textarea: HTMLTextAreaElement): void {
   textarea.setAttribute('autocorrect', 'on');
@@ -153,6 +313,11 @@ export const SessionTerminal = forwardRef<SessionTerminalHandle, Props>(function
     if (!terminal) {
       return;
     }
+    // viewportY is the live scroll position. With our wheel intercept in place,
+    // every scroll path (scrollLines / scrollToLine / scrollToBottom / scrollbar
+    // drag) keeps viewportY integer, so a strict === 0 check is reliable.
+    // targetViewportY is only updated by smoothScrollTo — which we bypass, so
+    // it stays stale at 0 forever and would falsely report "at bottom".
     followOutputRef.current = (terminal.viewportY ?? 0) === 0;
   }, []);
 
@@ -194,6 +359,7 @@ export const SessionTerminal = forwardRef<SessionTerminalHandle, Props>(function
   useEffect(() => {
     if (!containerRef.current || initializedRef.current) return;
     initializedRef.current = true;
+    terminalMemoryDebugIncrement('terminal.mountEffect');
     let disposed = false;
     let teardown: (() => void) | null = null;
 
@@ -210,9 +376,13 @@ export const SessionTerminal = forwardRef<SessionTerminalHandle, Props>(function
         const cs = getComputedStyle(document.documentElement);
         const v = (name: string) => cs.getPropertyValue(name).trim();
 
+        terminalMemoryDebugIncrement('terminal.created');
+        terminalMemoryDebugIncrement('terminal.activeInstances');
         const term = new GhosttyTerminal({
+          scrollback: WEB_TERMINAL_SCROLLBACK,
           fontSize: 14,
-          fontFamily: "'JetBrains Mono', 'SF Mono', Monaco, monospace",
+          // Follow the theme's mono (Geist Mono / Space Mono / …) instead of a hardcoded face.
+          fontFamily: `${v('--gs-font') || "'JetBrains Mono'"}, monospace`,
           theme: {
             background: v('--gs-terminal-bg'),
             foreground: v('--gs-terminal-fg'),
@@ -240,6 +410,7 @@ export const SessionTerminal = forwardRef<SessionTerminalHandle, Props>(function
         });
 
         term.open(container);
+        terminalMemoryDebugIncrement('terminal.opened');
         terminalRef.current = term;
 
         const fitAddon = new FitAddon();
@@ -440,6 +611,47 @@ export const SessionTerminal = forwardRef<SessionTerminalHandle, Props>(function
           syncFollowOutputState();
         };
 
+        // Pixel-mode wheel events (trackpad, Magic Mouse, etc.) produce
+        // fractional deltaY/rowHeight line deltas. ghostty-web's internal
+        // handler passes that fractional value straight to smoothScrollTo,
+        // which leaves viewportY fractional at rest. The renderer's row-index
+        // arithmetic uses Math.floor(viewportY) while its scrollback/viewport
+        // branch uses raw viewportY, so one screen row per frame resolves to
+        // a null scrollback line and is skipped entirely — pixels from the
+        // previous paint persist (the 'ghost row' we see on empty lines).
+        //
+        // We intercept pixel-mode wheel events on document in capture phase
+        // (earlier than ghostty-web's own capture listener on the element),
+        // accumulate fractional pixel deltas into whole rows, and call
+        // scrollLines() which always keeps viewportY integer.
+        let wheelAccumPx = 0;
+        const handleWheelCapture = (event: WheelEvent) => {
+          if (!container.contains(event.target as Node)) return;
+          if (event.deltaMode !== 0) return;    // line/page mode is already integer
+          if (event.deltaY === 0) return;
+          // In alt-screen mode ghostty-web translates wheel to arrow keys for
+          // apps like vim/less. Leave that path alone.
+          if ((term as { wasmTerm?: { isAlternateScreen?: () => boolean } }).wasmTerm?.isAlternateScreen?.()) return;
+
+          event.preventDefault();
+          event.stopPropagation();
+
+          const metrics = (term as { renderer?: { getMetrics?: () => { height: number } } }).renderer?.getMetrics?.();
+          const rowHeight = metrics?.height ?? 20;
+          wheelAccumPx += event.deltaY;
+          const lines = Math.trunc(wheelAccumPx / rowHeight);
+          wheelAccumPx -= lines * rowHeight;
+          if (lines !== 0) {
+            // scrollLines: positive = scroll content up (reveal newer output).
+            // event.deltaY > 0 means wheel scrolled down = scroll content up.
+            term.scrollLines(lines);
+          }
+          syncFollowOutputState();
+        };
+
+        // Keep the existing element-scoped handler purely for follow-state
+        // tracking. Its pixel-mode path is a no-op because our capture
+        // interceptor has already preventDefault'd and stopPropagation'd.
         const handleWheel = () => {
           syncFollowOutputState();
         };
@@ -448,6 +660,7 @@ export const SessionTerminal = forwardRef<SessionTerminalHandle, Props>(function
         container.addEventListener('touchmove', handleTouchMove, { passive: false });
         container.addEventListener('touchend', handleTouchEnd, { passive: true });
         container.addEventListener('wheel', handleWheel, { passive: true });
+        document.addEventListener('wheel', handleWheelCapture, { passive: false, capture: true });
 
         // Ghostty-web's writeInternal() unconditionally calls scrollToBottom()
         // on every write when viewportY !== 0. This makes it impossible to
@@ -468,58 +681,26 @@ export const SessionTerminal = forwardRef<SessionTerminalHandle, Props>(function
           syncFollowOutputState();
         });
 
+        const writePump = createTerminalWritePump(term, () => {
+          setWriteCallbackRef.current(null);
+          terminalMemoryDebugIncrement('terminal.writeCallback.clear.fatal');
+        });
+        terminalMemoryDebugIncrement('terminal.writeCallback.register');
         setWriteCallbackRef.current((data: Uint8Array) => {
-          const chunk = new Uint8Array(data);
-
-          if (chunk.byteLength === 0) {
-            return;
-          }
-
-          // Feed large payloads in bounded slices. A single >100KB write can
-          // exceed the WASM linear memory budget allocated for the render
-          // viewport, causing an out-of-bounds trap.
-          const MAX_WRITE_BYTES = 16384;
-          let offset = 0;
-
-          while (offset < chunk.length) {
-            let end = Math.min(offset + MAX_WRITE_BYTES, chunk.length);
-            if (end < chunk.length) {
-              let safeEnd = end;
-              while (safeEnd > offset && (chunk[safeEnd]! & 0xC0) === 0x80) {
-                safeEnd--;
-              }
-              if (safeEnd > offset) {
-                end = safeEnd;
-              }
-            }
-
-            try {
-              term.write(chunk.subarray(offset, end));
-            } catch (error) {
-              console.error('[session-terminal:web] term.write failed', {
-                sliceLength: end - offset,
-                totalLength: chunk.length,
-                offset,
-                viewportY: term.viewportY,
-                cols: term.cols,
-                rows: term.rows,
-                error,
-              });
-              throw error;
-            }
-
-            offset = end;
-          }
+          writePump.enqueue(data);
         });
 
         const handleResize = () => {
+        terminalMemoryDebugIncrement('terminal.resize');
           fitAddon.fit();
+          terminalMemoryDebugIncrement('terminal.fit');
           if (term.cols && term.rows && onResizeRef.current) {
             onResizeRef.current(term.cols, term.rows);
           }
         };
 
         const observer = new ResizeObserver(() => {
+          terminalMemoryDebugIncrement('terminal.resizeObserver');
           handleResize();
         });
         observer.observe(container);
@@ -535,6 +716,8 @@ export const SessionTerminal = forwardRef<SessionTerminalHandle, Props>(function
         }
 
         teardown = () => {
+          terminalMemoryDebugIncrement('terminal.disposed');
+          terminalMemoryDebugDecrement('terminal.activeInstances');
           container.removeEventListener('keydown', handleKeyDown, true);
           if (helperTextarea) {
             helperTextarea.removeEventListener('focus', handleHelperFocus);
@@ -547,11 +730,14 @@ export const SessionTerminal = forwardRef<SessionTerminalHandle, Props>(function
           container.removeEventListener('touchmove', handleTouchMove);
           container.removeEventListener('touchend', handleTouchEnd);
           container.removeEventListener('wheel', handleWheel);
+          document.removeEventListener('wheel', handleWheelCapture, { capture: true });
+          writePump.dispose();
           scrollDisposable.dispose();
           observer.disconnect();
           term.dispose();
           terminalRef.current = null;
           setWriteCallbackRef.current(null);
+          terminalMemoryDebugIncrement('terminal.writeCallback.clear');
         };
       })
       .catch(() => {
@@ -566,6 +752,7 @@ export const SessionTerminal = forwardRef<SessionTerminalHandle, Props>(function
         teardown();
       } else {
         setWriteCallbackRef.current(null);
+        terminalMemoryDebugIncrement('terminal.writeCallback.clear.beforeReady');
       }
     };
   }, [syncFollowOutputState, tryConsumePageNavigation]);

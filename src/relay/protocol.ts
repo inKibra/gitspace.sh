@@ -473,7 +473,38 @@ export type RelayToClientMessage =
   | ErrorMessage;
 
 /** All protocol messages */
+
+/** Relay→machine: fetch the bytes behind a share link (artifact-share.ts).
+ *  Deliberately NOT E2E — share links exist to serve unauthenticated
+ *  browsers; the relay is trusted with exactly the shared bytes, per link. */
+export interface ShareReadMessage {
+  type: 'share_read';
+  requestId: string;
+  token: string;
+  /** Renderer dependency fetch (validated against the cap scope machine-side). */
+  subPath?: string;
+}
+
+/** Machine→relay: one chunk of a share read (final chunk sets done; errors
+ *  set error and done). First chunk carries the response metadata. */
+export interface ShareReadChunkMessage {
+  type: 'share_read_chunk';
+  requestId: string;
+  seq: number;
+  dataBase64?: string;
+  done?: boolean;
+  error?: string;
+  contentType?: string;
+  disposition?: string;
+  fileName?: string;
+  relPath?: string;
+  pinnedCommit?: string;
+  expiresAt?: number;
+}
+
 export type ProtocolMessage =
+  | ShareReadMessage
+  | ShareReadChunkMessage
   | MachineToRelayMessage
   | ClientToRelayMessage
   | RelayToMachineMessage
@@ -520,10 +551,64 @@ const MAX_ID_LENGTH = 256;
 const MAX_LABEL_LENGTH = 256;
 
 /**
- * Maximum total message size (1MB)
- * Security: Prevents DoS via huge allocations
+ * Maximum total message size (16MB).
+ * Security: bounds per-message allocations (DoS). Sized for real traffic:
+ * E2E-encrypted machine snapshots grow with workspace count — an 18-workspace
+ * machine already produced a 1.65MB data frame, which the previous 1MB cap
+ * silently rejected as "Invalid message format" (browser stuck on
+ * "Loading worktrees…" with no error anywhere).
  */
-const MAX_MESSAGE_SIZE = 1024 * 1024;
+const MAX_MESSAGE_SIZE = 16 * 1024 * 1024;
+
+/**
+ * Transport-level WebSocket receive cap for the relay's Bun.serve
+ * (`maxPayloadLength`).
+ *
+ * Ticket #42B (the backstop): Bun's default maxPayloadLength is 16MB, and it is
+ * enforced by uWebSockets at the TRANSPORT layer — a frame over the cap is
+ * closed with 1006 ("Received too big message") BEFORE our app-level
+ * parseMessage / MAX_MESSAGE_SIZE (above, also 16MB) ever runs. That is exactly
+ * what killed a machine at browser-connect time:
+ *   [relay] machine ... disconnected (1006: Received too big message)
+ * cascading the client to 1000.
+ *
+ * The relay routes OPAQUE E2E-encrypted `data` frames — it cannot inspect or
+ * repackage them, so it must NOT guillotine a transiently-large legit frame at
+ * a low cap. We set the transport cap generously ABOVE the app cap so oversize
+ * frames are handled (rejected with a real error, or app-chunked) by our code
+ * rather than silently 1006-killing the whole connection. App-layer chunking
+ * (PTY output at PTY_CHUNK_SIZE=512KB, xterm serialize chunks) keeps normal
+ * frames far below this. Lives in protocol.ts (not server.ts) so the machine
+ * relay client can import it without pulling in the heavy relay server graph.
+ */
+export const RELAY_MAX_WS_PAYLOAD = 64 * 1024 * 1024;
+
+/**
+ * Warn threshold for oversize WS frames. Any frame larger than this is logged
+ * with its type so the oversize sender is visible in relay logs — this is how
+ * ticket #42 part A (slimming the oversize sender) finds what to trim.
+ */
+export const RELAY_WS_PAYLOAD_WARN = 4 * 1024 * 1024;
+
+/**
+ * TODO (ticket #42.3 — DEFERRED): app-layer chunking for the DATA-ROUTING path.
+ *
+ * When a `data` frame payload exceeds a safe threshold (~1MB), split it into
+ * ordered chunks with a small envelope {chunkId, seq, total} and reassemble on
+ * the receiving client/machine BEFORE base64-decode → decrypt → parse, mirroring
+ * the PTY chunking pattern (writeChunkedPtyToClient, PTY_CHUNK_SIZE=512KB in
+ * src/lib/tmux-lite/server.ts). Wire on BOTH send paths (machine
+ * relay-client createDataMessage; web/remote client send) and BOTH receive
+ * paths (machine relay-client `data` case; web/remote client receive) so the
+ * relay keeps routing opaque envelopes it cannot inspect. Small frames stay
+ * unchanged (backward compatible) — only oversize frames chunk.
+ *
+ * Deferred because: (1) raising RELAY_MAX_WS_PAYLOAD to 64MB already unblocks
+ * the immediate 1006 ("Received too big message"), and (2) ticket #42 part A is
+ * slimming the oversize sender, which may make chunking unnecessary. The
+ * RELAY_WS_PAYLOAD_WARN trace above surfaces any remaining oversize senders so
+ * we can decide whether chunking is still needed.
+ */
 
 /**
  * Pattern for valid identifiers (alphanumeric, hyphens, underscores, dots, colons)
@@ -645,6 +730,41 @@ function validateMessageFields(msg: Record<string, unknown>): ProtocolMessage | 
         registerPermit: msg.registerPermit,
         enrollmentToken: msg.enrollmentToken,
         deviceCertificate: msg.deviceCertificate,
+      };
+    }
+
+    case 'share_read': {
+      if (!isValidIdentifier(msg.requestId)) return null;
+      if (typeof msg.token !== 'string' || msg.token.length === 0 || msg.token.length > 8192) return null;
+      if (msg.subPath !== undefined && (typeof msg.subPath !== 'string' || msg.subPath.length === 0 || msg.subPath.length > 1024 || msg.subPath.includes('..'))) return null;
+      return { type: 'share_read', requestId: msg.requestId, token: msg.token, subPath: msg.subPath };
+    }
+
+    case 'share_read_chunk': {
+      if (!isValidIdentifier(msg.requestId)) return null;
+      if (typeof msg.seq !== 'number' || !Number.isFinite(msg.seq) || msg.seq < 0) return null;
+      if (msg.dataBase64 !== undefined && !isValidBase64(msg.dataBase64)) return null;
+      if (msg.done !== undefined && typeof msg.done !== 'boolean') return null;
+      if (msg.error !== undefined && (typeof msg.error !== 'string' || msg.error.length > 512)) return null;
+      if (msg.contentType !== undefined && (typeof msg.contentType !== 'string' || msg.contentType.length > 128)) return null;
+      if (msg.disposition !== undefined && msg.disposition !== 'inline' && msg.disposition !== 'attachment') return null;
+      if (msg.fileName !== undefined && (typeof msg.fileName !== 'string' || msg.fileName.length > 256)) return null;
+      if (msg.relPath !== undefined && (typeof msg.relPath !== 'string' || msg.relPath.length > 1024)) return null;
+      if (msg.pinnedCommit !== undefined && (typeof msg.pinnedCommit !== 'string' || !/^[0-9a-f]{7,40}$/i.test(msg.pinnedCommit))) return null;
+      if (msg.expiresAt !== undefined && typeof msg.expiresAt !== 'number') return null;
+      return {
+        type: 'share_read_chunk',
+        requestId: msg.requestId,
+        seq: msg.seq,
+        dataBase64: msg.dataBase64,
+        done: msg.done,
+        error: msg.error,
+        contentType: msg.contentType,
+        disposition: msg.disposition as 'inline' | 'attachment' | undefined,
+        fileName: msg.fileName,
+        relPath: msg.relPath,
+        pinnedCommit: msg.pinnedCommit,
+        expiresAt: msg.expiresAt,
       };
     }
 

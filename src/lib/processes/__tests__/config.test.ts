@@ -6,6 +6,7 @@ import {
   getProcessesConfigPath,
   loadProcessesConfig,
   loadProcessesConfigWithDiagnostics,
+  resetProcessesConfigWarnings,
 } from '../config.js';
 
 function makeWorkspace(): string {
@@ -78,6 +79,38 @@ describe('loadProcessesConfigWithDiagnostics', () => {
       const config = loadProcessesConfig(workspace);
       expect(config.processes).toHaveLength(1);
       expect(config.processes[0]?.name).toBe('api');
+    });
+  });
+
+  it('reports a mis-shaped restart value instead of ignoring it', () => {
+    withWorkspace((workspace) => {
+      const path = getProcessesConfigPath(workspace);
+      writeFileSync(path, '{"processes":[{"name":"web","command":"bun","restart":"on-failure"}]}');
+
+      const result = loadProcessesConfigWithDiagnostics(workspace);
+      expect(result.error).toContain('Invalid .gitspace/processes.json');
+      expect(result.error).toContain('restart must be an object like {"policy": "on-failure"}');
+    });
+  });
+
+  it('warns on stderr for config problems even when callers drop the diagnostic', () => {
+    withWorkspace((workspace) => {
+      const path = getProcessesConfigPath(workspace);
+      writeFileSync(path, '{"processes":[{"name":"web","command":"bun","restart":"on-failure"}]}');
+
+      resetProcessesConfigWarnings();
+      const original = console.error;
+      const lines: string[] = [];
+      console.error = (...args: unknown[]) => { lines.push(args.join(' ')); };
+      try {
+        loadProcessesConfig(workspace);
+        loadProcessesConfig(workspace); // repeat calls must not spam
+      } finally {
+        console.error = original;
+      }
+
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain('restart must be an object');
     });
   });
 

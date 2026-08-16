@@ -11,6 +11,7 @@ export interface WideEventQueryOptions {
   limit?: number;
   sinceMs?: number;
   untilMs?: number;
+  order?: 'asc' | 'desc';
 }
 
 export function listEventIndexes(eventsDir: string): WideEventIndex[] {
@@ -57,12 +58,16 @@ export function queryEvents(
   const results: WideEvent[] = [];
   const limit = options.limit ?? 100;
 
+  const scanNewestFirst = options.order !== 'asc';
   for (const index of indexes) {
     const path = join(eventsDir, index.file);
     if (!existsSync(path)) continue;
 
     const lines = readFileSync(path, 'utf-8').split('\n');
-    for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const start = scanNewestFirst ? lines.length - 1 : 0;
+    const end = scanNewestFirst ? -1 : lines.length;
+    const step = scanNewestFirst ? -1 : 1;
+    for (let i = start; i !== end; i += step) {
       const line = lines[i];
       if (!line || !line.trim()) continue;
       try {

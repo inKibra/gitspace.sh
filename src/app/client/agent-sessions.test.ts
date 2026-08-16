@@ -28,7 +28,7 @@ function makeBackend(overrides: Partial<SessionBackend>): SessionBackend {
     deleteProject: async () => undefined,
     attachSession: async () => undefined,
     detachSession: async () => undefined,
-    killSession: async () => undefined,
+    terminateSession: async () => undefined,
     deleteWorkspace: async () => undefined,
     getBundleRefreshPlan: async () => {
       throw new Error('unused');
@@ -60,9 +60,14 @@ function makeMulti(
       const backend = backendByKey[ref.backendKey];
       return backend?.createAgentSession?.(ref.workspaceId, title) ?? [];
     },
-    abortAgentSession: async (ref) => {
+    killAgentSession: async (ref) => {
       const backend = backendByKey[ref.backendKey];
+      // backend.abortAgentSession is the wire-level kill command — name stays.
       return backend?.abortAgentSession?.(ref.workspaceId, ref.agentSessionId) ?? false;
+    },
+    stopAgentTurn: async (ref) => {
+      const backend = backendByKey[ref.backendKey];
+      return backend?.interruptAgentSession?.(ref.workspaceId, ref.agentSessionId) ?? false;
     },
     closeAgentSession: async (ref) => {
       const backend = backendByKey[ref.backendKey];
@@ -76,9 +81,9 @@ function makeMulti(
       const backend = backendByKey[ref.backendKey];
       return backend?.restoreAgentSession?.(ref.workspaceId, ref.agentSessionId) ?? [];
     },
-    attachAgentSession: async (ref, options) => {
+    openAgentSession: async (ref, options) => {
       const backend = backendByKey[ref.backendKey];
-      await backend?.attachAgentSession?.(ref.workspaceId, ref.agentSessionId, options);
+      await backend?.openAgentSession?.(ref.workspaceId, ref.agentSessionId, options);
     },
     getAgentSessionPreference: async (ref) => {
       const backend = backendByKey[ref.backendKey];
@@ -119,8 +124,8 @@ describe('app client agent sessions', () => {
       throw new Error('disk full');
     });
 
-    const alpha = makeBackend({ attachAgentSession: attachAlpha });
-    const beta = makeBackend({ attachAgentSession: attachBeta, setAgentSessionPreference: setPreference });
+    const alpha = makeBackend({ openAgentSession: attachAlpha });
+    const beta = makeBackend({ openAgentSession: attachBeta, setAgentSessionPreference: setPreference });
     const workspaceRef = { backendKey: 'beta', workspaceId: 'proj:ws-1' } satisfies BackendScopedWorkspaceRef;
 
     const client = createAppAgentSessionsClient(makeContext({
@@ -142,7 +147,7 @@ describe('app client agent sessions', () => {
   });
 
   it('creates and opens the newly added agent session', async () => {
-    const attachAgentSession = mock(async () => undefined);
+    const openAgentSession = mock(async () => undefined);
     const createAgentSession = mock(async () => [
       { id: 'existing', title: 'Existing', updatedAt: '2026-03-01T00:00:00.000Z' },
       { id: 'created', title: 'Created', updatedAt: '2026-03-02T00:00:00.000Z' },
@@ -150,7 +155,7 @@ describe('app client agent sessions', () => {
 
     const backend = makeBackend({
       createAgentSession,
-      attachAgentSession,
+      openAgentSession,
     });
     const workspaceRef = { backendKey: 'local', workspaceId: 'proj:ws-1' } satisfies BackendScopedWorkspaceRef;
 
@@ -166,17 +171,17 @@ describe('app client agent sessions', () => {
 
     expect(result.ok).toBe(true);
     expect(createAgentSession).toHaveBeenCalledWith('proj:ws-1', 'Investigate bug');
-    expect(attachAgentSession).toHaveBeenCalledWith('proj:ws-1', 'created', undefined);
+    expect(openAgentSession).toHaveBeenCalledWith('proj:ws-1', 'created', undefined);
   });
 
   it('falls back to the most recently updated session when create returns no new id', async () => {
-    const attachAgentSession = mock(async () => undefined);
+    const openAgentSession = mock(async () => undefined);
     const backend = makeBackend({
       createAgentSession: mock(async () => [
         { id: 'existing-1', title: 'One', updatedAt: '2026-03-01T00:00:00.000Z' },
         { id: 'existing-2', title: 'Two', updatedAt: '2026-03-03T00:00:00.000Z' },
       ] satisfies AppClientAgentSessionSummary[]),
-      attachAgentSession,
+      openAgentSession,
     });
     const workspaceRef = { backendKey: 'local', workspaceId: 'proj:ws-1' } satisfies BackendScopedWorkspaceRef;
 
@@ -194,12 +199,12 @@ describe('app client agent sessions', () => {
     const result = await client.createAndOpen({ workspaceId: 'proj:ws-1' });
 
     expect(result.ok).toBe(true);
-    expect(attachAgentSession).toHaveBeenCalledWith('proj:ws-1', 'existing-2', undefined);
+    expect(openAgentSession).toHaveBeenCalledWith('proj:ws-1', 'existing-2', undefined);
   });
 
   it('returns an ambiguous-backend error when the workspace exists on multiple backends without context', async () => {
-    const alpha = makeBackend({ attachAgentSession: mock(async () => undefined) });
-    const beta = makeBackend({ attachAgentSession: mock(async () => undefined) });
+    const alpha = makeBackend({ openAgentSession: mock(async () => undefined) });
+    const beta = makeBackend({ openAgentSession: mock(async () => undefined) });
 
     const client = createAppAgentSessionsClient(makeContext({
       workspaceRefs: [

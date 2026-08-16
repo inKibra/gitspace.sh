@@ -1,14 +1,17 @@
 /**
  * Remote transport protocol for encrypted client<->machine communication.
  *
- * Each operation has an explicit request type. The server responds with a
- * CommandResponse wrapping the tmux-lite Response for request/response
- * correlation. Unsolicited pushes (machine_snapshot, agent_state_*, etc.)
- * are sent without a request.
+ * Bounded operations use request/response correlation. Long-running work is
+ * accepted quickly and then reported through machine-owned operation events.
+ * Unsolicited pushes (machine_snapshot, operation_snapshot, operation_event,
+ * agent_state_*, etc.) are sent without a request.
  */
 
 // Re-export InboxItem from tmux-lite protocol
 export type { InboxItem } from "../tmux-lite/protocol.js";
+import type { PortConflictInfo } from '../processes/port-conflicts.js';
+import type { AgentShakeMode } from '../../agents/agent-runtime-types.js';
+import type { AgentWorkspaceTargetPayload } from '../tmux-lite/protocol.js';
 
 // Re-export agent state types from AgentEventManager
 export type {
@@ -35,9 +38,61 @@ export type {
 } from '../../types/bundle.js';
 export type { ReplayFrame, ReplayFrameTarget, ReplayInfo, ReplayTimeline } from '../tmux-lite/replay/types.js';
 
-// Re-export attached mode control types from tmux-lite
-// These are used in attached mode for resize/detach/attach-init
+// Re-export tmux-lite attach-init/event types used on the machine-local Unix socket.
 export type { SessionCtrl, SessionEvent } from "../tmux-lite/protocol.js";
+
+export type RemoteOperationKind =
+  | 'project.create'
+  | 'project.prepare'
+  | 'project.finalize'
+  | 'project.delete'
+  | 'workspace.create'
+  | 'workspace.delete'
+  | 'workspace.scripts'
+  | 'space.command'
+  | 'review.github'
+  | 'workspace.editor.open';
+
+export type RemoteOperationState = 'running' | 'succeeded' | 'failed' | 'cancelled';
+
+export interface RemoteOperationScope {
+  projectName?: string;
+  workspaceId?: string;
+  workspaceName?: string;
+  sessionId?: string;
+}
+
+export interface RemoteOperationRecord {
+  operationId: string;
+  kind: RemoteOperationKind;
+  scope: RemoteOperationScope;
+  state: RemoteOperationState;
+  startedAt: number;
+  updatedAt: number;
+  phase?: string;
+  message?: string;
+  outputBase64?: string;
+  result?: unknown;
+  error?: { code?: string; message: string };
+}
+
+export type RemoteOperationEventType =
+  | 'operation_started'
+  | 'operation_progress'
+  | 'operation_output'
+  | 'operation_succeeded'
+  | 'operation_failed'
+  | 'operation_cancelled';
+
+export interface RemoteOperationEvent {
+  type: RemoteOperationEventType;
+  operation: RemoteOperationRecord;
+}
+
+export type RemoteSessionControl =
+  | { type: 'resize'; streamId: number; cols: number; rows: number }
+  | { type: 'detach'; streamId: number }
+  | { type: 'detach_all' };
 
 // ============================================================================
 // Client → Machine Messages (Browsing Mode)
@@ -77,14 +132,20 @@ export interface UndismissReplayRequest {
   replayId: string;
 }
 
+export interface DismissOperationRequest {
+  type: 'dismiss_operation';
+  operationId: string;
+}
+
 /** Attach to a session (existing or new) */
 export interface AttachSessionRequest {
   type: "attach_session";
+  streamId: number;       // Per-pane PTY stream ID (2+; 0/1 are reserved)
   sessionId?: string;     // Attach to existing session
   workspaceId?: string;   // Create new session in workspace
   sessionName?: string;   // Name for new session (optional)
-  cols?: number;          // Terminal dimensions
-  rows?: number;
+  cols: number;          // Terminal dimensions (required, used to send attach-init proactively)
+  rows: number;
   scriptPolicy?: 'auto' | 'skip';
   command?: string;       // Command to run (process sessions)
   args?: string[];        // Command arguments
@@ -131,6 +192,7 @@ export interface CreateProjectRequest {
   projectName?: string;
   baseBranch?: string;
   setCurrent?: boolean;
+  scratch?: boolean;
 }
 
 export interface PrepareProjectCreationRequest {
@@ -176,8 +238,145 @@ export interface CreateWorkspaceRequest {
   workspaceName: string;
   branchName?: string;
   baseBranch?: string;
+  parentWorkspaceName?: string;
   workspaceSource?: import('../../types/lifecycle.js').WorkspaceSource;
   linearIssue?: import('../../types/lifecycle.js').SessionLinearIssueSummary;
+  githubIssueNumber?: number;
+}
+
+export interface ListWorkspaceNotesRequest {
+  type: 'workspace_notes_list';
+  requestId: string;
+  projectName: string;
+  workspaceName: string;
+}
+
+
+export interface RefreshMachineSnapshotRequest {
+  type: 'refresh_machine_snapshot';
+  requestId: string;
+}
+
+/**
+ * Opt in to scoped machine deltas (ticket #3): after this, the machine pushes
+ * `machine_event` messages instead of a full `machine_snapshot` per change.
+ * Additive — clients that never send it keep receiving full snapshots, and a
+ * machine that predates it answers with an error the client swallows.
+ */
+export interface WatchMachineEventsRequest {
+  type: 'watch_machine_events';
+  requestId: string;
+}
+export interface AddWorkspaceNoteRequest {
+  type: 'workspace_note_add';
+  requestId: string;
+  projectName: string;
+  workspaceName: string;
+  body: string;
+}
+
+export interface UpdateWorkspaceNoteRequest {
+  type: 'workspace_note_update';
+  requestId: string;
+  projectName: string;
+  workspaceName: string;
+  noteId: string;
+  body: string;
+}
+
+export interface RemoveWorkspaceNoteRequest {
+  type: 'workspace_note_remove';
+  requestId: string;
+  projectName: string;
+  workspaceName: string;
+  noteId: string;
+}
+
+export interface UpdateGoalRequest {
+  type: 'goal_update';
+  requestId: string;
+  projectName: string;
+  goalId: string;
+  updates: import('../../types/goals.js').GoalUpdateInput;
+}
+
+/** Cold detail fetch (ticket #42): full goal doc + validation, on demand. */
+export interface GetGoalDetailRequest {
+  type: 'get_goal_detail';
+  requestId: string;
+  projectName: string;
+  goalId: string;
+}
+
+export interface AddGoalNearWorkspaceRequest {
+  type: 'goal_add_near_workspace';
+  requestId: string;
+  projectName: string;
+  workspaceName: string;
+  title: string;
+  position: 'before' | 'after';
+}
+
+export interface ReorderGoalRequest {
+  type: 'goal_reorder';
+  requestId: string;
+  projectName: string;
+  sourceToken: string;
+  targetToken: string;
+  position: 'before' | 'after';
+}
+
+/** List the project's chains for the workspace-free create-goal flow. */
+export interface ListGoalChainsRequest {
+  type: 'goal_chains_list';
+  requestId: string;
+  projectName: string;
+}
+
+/** Chain-centric planned-goal creation (no workspace). */
+export interface AddPlannedGoalRequest {
+  type: 'goal_add_planned';
+  requestId: string;
+  projectName: string;
+  input: import('../../core/goal-chain.js').AddPlannedGoalToChainInput;
+}
+
+export interface GoalStackStatusRequest {
+  type: 'goal_stack_status';
+  requestId: string;
+  projectName: string;
+  workspaceName: string;
+}
+
+/** HUMAN-ONLY phase-gate waive (UI button seam; the CLI has no waive flag). */
+export interface WaiveGoalGateRequest {
+  type: 'goal_gate_waive';
+  requestId: string;
+  projectName: string;
+  goalId: string;
+  phase: string;
+  reason: string;
+}
+export interface RerunWorkspaceScriptsRequest {
+  type: 'rerun_workspace_scripts';
+  requestId: string;
+  projectName: string;
+  workspaceId: string;
+}
+
+export interface RunWorkspaceOpenScriptsRequest {
+  type: 'run_workspace_open_scripts';
+  requestId: string;
+  projectName: string;
+  workspaceId: string;
+}
+
+export interface RunWorkspaceScriptSelectionRequest {
+  type: 'run_workspace_script_selection';
+  requestId: string;
+  projectName: string;
+  workspaceId: string;
+  selection: 'setup' | 'select' | 'setup-select';
 }
 
 export interface SetWorkspacePhaseRequest {
@@ -186,12 +385,23 @@ export interface SetWorkspacePhaseRequest {
   projectName: string;
   workspaceName: string;
   phase: import('../../types/config.js').WorkspacePhase;
+  cascade?: boolean;
 }
 
-export interface KillSessionRequest {
-  type: 'kill_session';
+export interface PreviewWorkspacePhaseRequest {
+  type: 'preview_workspace_phase';
+  requestId: string;
+  projectName: string;
+  workspaceName: string;
+  phase: import('../../types/config.js').WorkspacePhase;
+}
+
+export interface TerminateSessionRequest {
+  type: 'terminate_session';
   requestId: string;
   sessionId: string;
+  mode?: 'graceful' | 'force';
+  graceMs?: number;
 }
 
 // --- Process Management ---
@@ -203,6 +413,14 @@ export interface StartProcessRequest {
   processName: string;
   instance?: number;
 }
+
+export interface ResolvePortConflictRequest {
+  type: 'resolve_port_conflict';
+  requestId: string;
+  workspaceId: string;
+  conflict: PortConflictInfo;
+}
+
 
 export interface StopProcessRequest {
   type: 'stop_process';
@@ -339,13 +557,22 @@ export interface RestoreAgentSessionRequest {
   agentSessionId: string;
 }
 
-export interface AttachAgentSessionRequest {
-  type: 'attach_agent_session';
+/** Open an agent session for a native pane: a viewer lease, no PTY stream. */
+export interface OpenAgentSessionRequest {
+  type: 'open_agent_session';
   requestId: string;
-  target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
+  target: AgentWorkspaceTargetPayload;
   agentSessionId: string;
-  cols?: number;
-  rows?: number;
+  /** Scopes the lease so one client can hold several panes open. */
+  paneId?: string;
+}
+
+/** Drop the lease taken by {@link OpenAgentSessionRequest}. */
+export interface ReleaseAgentSessionRequest {
+  type: 'release_agent_session';
+  requestId: string;
+  agentSessionId: string;
+  paneId?: string;
 }
 
 export interface PromptAgentSessionRequest {
@@ -356,6 +583,15 @@ export interface PromptAgentSessionRequest {
   text: string;
   images?: import('../tmux-lite/protocol.js').AgentPromptImage[];
   streamingBehavior?: 'steer' | 'followUp';
+}
+
+export interface RemoveAgentQueuedMessageRequest {
+  type: 'remove_agent_queued_message';
+  requestId: string;
+  target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
+  agentSessionId: string;
+  kind: 'steering' | 'followUp';
+  index: number;
 }
 
 export interface StageAgentUploadRequest {
@@ -371,8 +607,8 @@ export interface RespondAgentDialogRequest {
   type: 'respond_agent_dialog';
   requestId: string;
   dialogId: string;
-  dialogType: 'select' | 'confirm' | 'input' | 'editor';
-  value: string | boolean | undefined;
+  dialogType: import('../tmux-lite/agents/host-ui-bridge.js').HostUIDialogResponseType;
+  value: import('../tmux-lite/agents/host-ui-bridge.js').HostUIDialogResponseValue;
 }
 
 export interface RespondAgentPermissionRequest {
@@ -384,10 +620,372 @@ export interface RespondAgentPermissionRequest {
   response: 'allow' | 'deny';
 }
 
+export interface GetAgentTranscriptRangeRequest {
+  type: 'get_agent_transcript_range';
+  requestId: string;
+  target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
+  agentSessionId: string;
+  before?: string;
+  limit: number;
+}
+
+export interface GetAgentControlInfoRequest {
+  type: 'get_agent_control_info';
+  requestId: string;
+  target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
+  agentSessionId: string;
+}
+
+export interface GetAgentGoalModeRequest {
+  type: 'get_agent_goal_mode';
+  requestId: string;
+  target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
+  agentSessionId: string;
+}
+
+export interface SetAgentGoalModeRequest {
+  type: 'set_agent_goal_mode';
+  requestId: string;
+  target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
+  agentSessionId: string;
+  enabled: boolean;
+  precursor?: string;
+}
+
+export interface ShakeAgentSessionRequest {
+  type: 'shake_agent_session';
+  requestId: string;
+  target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
+  agentSessionId: string;
+  mode: AgentShakeMode;
+}
+
+export interface GetAgentSessionUsageRequest {
+  type: 'get_agent_session_usage';
+  requestId: string;
+  target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
+  agentSessionId: string;
+}
+
+export interface SetAgentModelRequest {
+  type: 'set_agent_model';
+  requestId: string;
+  target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
+  agentSessionId: string;
+  provider: string;
+  modelId: string;
+}
+
+export interface SetAgentThinkingLevelRequest {
+  type: 'set_agent_thinking_level';
+  requestId: string;
+  target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
+  agentSessionId: string;
+  level: string;
+}
+
+export interface SetAgentApprovalModeRequest {
+  type: 'set_agent_approval_mode';
+  requestId: string;
+  target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
+  agentSessionId: string;
+  mode: string;
+}
+
+export interface GetAgentAuthProvidersRequest {
+  type: 'get_agent_auth_providers';
+  requestId: string;
+}
+
+export interface RemoveAgentProviderAccountRequest {
+  type: 'remove_agent_provider_account';
+  requestId: string;
+  provider: string;
+  credentialId: number;
+}
+
+export interface CheckAgentProviderUsageRequest {
+  type: 'check_agent_provider_usage';
+  requestId: string;
+  provider: string;
+}
+
+export interface SetAgentProviderApiKeyRequest {
+  type: 'set_agent_provider_api_key';
+  requestId: string;
+  provider: string;
+  key: string;
+}
+
+export interface GetAgentSettingsRequest {
+  type: 'get_agent_settings';
+  requestId: string;
+}
+
+export interface SetAgentSettingRequest {
+  type: 'set_agent_setting';
+  requestId: string;
+  path: string;
+  value: string | number | boolean | string[];
+}
+
+export interface StartAgentOAuthLoginRequest {
+  type: 'start_agent_oauth_login';
+  requestId: string;
+  provider: string;
+  flowId: string;
+}
+
+export interface RespondAgentOAuthPromptRequest {
+  type: 'respond_agent_oauth_prompt';
+  requestId: string;
+  flowId: string;
+  value: string;
+}
+
+export interface GetAgentSettingsSchemaRequest {
+  type: 'get_agent_settings_schema';
+  requestId: string;
+}
+
+export interface GetAgentToolsRequest {
+  type: 'get_agent_tools';
+  requestId: string;
+  target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
+  agentSessionId: string;
+}
+
+export interface ListAgentDefinitionsRequest {
+  type: 'list_agent_definitions';
+  requestId: string;
+  target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
+}
+
+export interface CompactAgentSessionRequest {
+  type: 'compact_agent_session';
+  requestId: string;
+  target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
+  agentSessionId: string;
+}
+
+export interface CycleAgentRoleRequest {
+  type: 'cycle_agent_role';
+  requestId: string;
+  target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
+  agentSessionId: string;
+  direction: 'forward' | 'backward';
+}
+
+export interface ApplyAgentRoleRequest {
+  type: 'apply_agent_role';
+  requestId: string;
+  target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
+  agentSessionId: string;
+  role: string;
+}
+
+export interface GetAgentHistoryRequest {
+  type: 'get_agent_history';
+  requestId: string;
+  target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
+  agentSessionId: string;
+}
+
+export interface NavigateAgentHistoryRequest {
+  type: 'navigate_agent_history';
+  requestId: string;
+  target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
+  agentSessionId: string;
+  entryId: string;
+  mode?: 'redo' | 'jump';
+}
+
+export interface GetAgentSessionTreeRequest {
+  type: 'get_agent_session_tree';
+  requestId: string;
+  target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
+  agentSessionId: string;
+}
+
+export interface ReportProblemRequest {
+  type: 'report_problem';
+  requestId: string;
+  note: string;
+  clientBundleJson: string;
+  fileIssue?: boolean;
+  projectName?: string;
+}
+
+export interface ProjectArtifactsRollupRequest {
+  type: 'project_artifacts_rollup';
+  requestId: string;
+  projectName: string;
+  workspace: string;
+  removeBranch?: boolean;
+}
+
+export interface ArtifactShareMintRequest {
+  type: 'artifact_share_mint';
+  requestId: string;
+  uri: string;
+  ttlMs?: number;
+  maxUses?: number;
+}
+
+export interface ArtifactShareRevokeRequest {
+  type: 'artifact_share_revoke';
+  requestId: string;
+  tokenId: string;
+}
+
+export interface ArtifactShareListRequest {
+  type: 'artifact_share_list';
+  requestId: string;
+}
+
+export interface ArtifactListRequest {
+  type: 'artifact_list';
+  requestId: string;
+  uriPrefix: string;
+}
+
+export interface ArtifactReadRequest {
+  type: 'artifact_read';
+  requestId: string;
+  uri: string;
+  offset?: number;
+  length?: number;
+}
+
+export interface ArtifactWriteRequest {
+  type: 'artifact_write';
+  requestId: string;
+  uri: string;
+  contentBase64: string;
+  message?: string;
+  cap?: string;
+}
+
+export interface FavoritesListRequest {
+  type: 'favorites_list';
+  requestId: string;
+  uriPrefix: string;
+}
+
+export interface FavoritesToggleRequest {
+  type: 'favorites_toggle';
+  requestId: string;
+  uri: string;
+}
+
+export interface FavoritesMergeRequest {
+  type: 'favorites_merge';
+  requestId: string;
+  uriPrefix: string;
+  paths: string[];
+}
+
+interface ProjectArtifactsStatusRequest {
+  type: 'project_artifacts_status';
+  requestId: string;
+  projectName: string;
+}
+
+interface ProjectArtifactsRemoteSetRequest {
+  type: 'project_artifacts_remote_set';
+  requestId: string;
+  projectName: string;
+  url: string;
+}
+
+interface ProjectArtifactsSyncRequest {
+  type: 'project_artifacts_sync';
+  requestId: string;
+  projectName: string;
+}
+
+interface ProjectArtifactsProvisionRequest {
+  type: 'project_artifacts_provision';
+  requestId: string;
+  projectName: string;
+}
+
+interface TriggerSaveRequest {
+  type: 'trigger_save';
+  requestId: string;
+  target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
+  trigger: import('../../core/triggers.js').TriggerRecord;
+}
+
+interface TriggerRunNowRequest {
+  type: 'trigger_run_now';
+  requestId: string;
+  target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
+  triggerId: string;
+}
+
+export interface RepoTreeRequest {
+  type: 'repo_tree';
+  requestId: string;
+  target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
+}
+
+export interface RepoReadRequest {
+  type: 'repo_read';
+  requestId: string;
+  target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
+  path: string;
+}
+
+export interface RepoCommitRequest {
+  type: 'repo_commit';
+  requestId: string;
+  target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
+  message: string;
+}
+
+export interface RepoSearchRequest {
+  type: 'repo_search';
+  requestId: string;
+  target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
+  query: string;
+  caseSensitive?: boolean;
+}
+
 export interface ListAgentCommandsRequest {
   type: 'list_agent_commands';
   requestId: string;
   target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
+}
+
+export interface ListWorkspaceEditorsRequest {
+  type: 'list_workspace_editors';
+  requestId: string;
+  target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
+}
+
+export interface OpenWorkspaceEditorRequest {
+  type: 'open_workspace_editor';
+  requestId: string;
+  target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
+  editorId: import('../../utils/open-editor.js').WorkspaceEditorId;
+}
+
+
+
+export interface RunSpaceCommandRequest {
+  type: 'run_space_command';
+  requestId: string;
+  target: import('../tmux-lite/protocol.js').AgentWorkspaceTargetPayload;
+  /** Human-typed command line (slash-command path). Tokenized with
+   *  parseCommandArgs on the daemon. For PROGRAMMATIC callers that already
+   *  hold structured args, send `args` instead — argsText is then just a
+   *  display/log join and MUST NOT be re-tokenized (parseCommandArgs has no
+   *  escapes, so quotes/backslashes in a value don't round-trip). */
+  argsText: string;
+  /** Authoritative pre-tokenized args. When present the daemon uses these
+   *  verbatim and skips parseCommandArgs. */
+  args?: string[];
 }
 
 export interface GetAgentFileSuggestionsRequest {
@@ -401,6 +999,7 @@ export interface GetAgentFileSuggestionsRequest {
 /** Delete a workspace */
 export interface DeleteWorkspaceRequest {
   type: "delete_workspace";
+  requestId?: string;
   workspaceId: string;
   projectName: string;  // Needed to locate workspace
   scriptPolicy?: 'auto' | 'skip';
@@ -488,15 +1087,40 @@ export interface ReplayUndismissedResponse {
 }
 
 
+/** Attached to session */
+export interface AttachedResponse {
+  type: 'attached';
+  streamId: number;
+  sessionId: string;
+  sessionName?: string;
+  viewOnly?: boolean;
+}
+
+/** Attached session metadata */
+export interface SessionMetaResponse {
+  type: 'session-meta';
+  streamId: number;
+  sessionName: string;
+  processTitle?: string;
+  terminalTitle?: string;
+  lastAlertKind?: import('../tmux-lite/protocol.js').InboxItem['type'];
+  lastAlertPreview?: string;
+  lastAlertAt?: number;
+  unreadAlertCount?: number;
+}
+
+
 /** Detached from session - back to browsing mode */
 export interface DetachedResponse {
   type: "detached";
+  streamId: number;
 }
 
 /** Session exited */
 export interface SessionExitedResponse {
   type: "session_exited";
   sessionId: string;
+  streamId: number;
   exitCode: number;
 }
 
@@ -513,7 +1137,38 @@ export interface ErrorResponse {
 /** Workspace deleted response */
 export interface WorkspaceDeletedResponse {
   type: "workspace_deleted";
+  requestId?: string;
   workspaceId: string;
+}
+
+export interface WorkspaceNotesResponse {
+  type: 'workspace_notes';
+  notes: import('../../types/workspace.js').WorkspaceNote[];
+}
+
+export interface WorkspaceNoteResponse {
+  type: 'workspace_note';
+  note: import('../../types/workspace.js').WorkspaceNote;
+}
+
+export interface WorkspacePhasePreviewResponse {
+  type: 'workspace_phase_preview';
+  preview: import('../../types/goals.js').WorkspacePhaseChangePreview;
+}
+
+export interface GoalResponse {
+  type: 'goal';
+  goal: import('../../types/goals.js').GoalRecord;
+}
+
+export interface GoalChainResponse {
+  type: 'goal-chain';
+  chain: import('../../types/goals.js').GoalChain;
+}
+
+export interface GoalStackStatusResponse {
+  type: 'goal-stack-status';
+  status: import('../../types/goals.js').ChainStackStatus;
 }
 
 /** Script output during attach_session (streams lifecycle script output) */
@@ -529,6 +1184,8 @@ export interface ScriptOutputResponse {
   exitCode?: number;
   /** Error message if scripts failed (only when done=true) */
   error?: string;
+  /** Workspace this script output belongs to. */
+  workspaceId?: string;
 }
 
 /**
@@ -540,6 +1197,47 @@ export interface CommandResponse {
   requestId: string;
   response: import('../tmux-lite/protocol.js').Response;
 }
+
+export interface OperationAcceptedResponse {
+  type: 'operation_accepted';
+  requestId: string;
+  operation: RemoteOperationRecord;
+}
+
+export interface OperationSnapshotResponse {
+  type: 'operation_snapshot';
+  operations: RemoteOperationRecord[];
+}
+
+export interface OperationDismissedResponse {
+  type: 'operation_dismissed';
+  operationId: string;
+}
+
+export interface OperationEventResponse {
+  type: 'operation_event';
+  event: RemoteOperationEvent;
+}
+
+export interface RunSpaceCommandResponse {
+  type: 'run_space_command_response';
+  requestId: string;
+  output: string;
+}
+
+export interface WorkspaceEditorsResponse {
+  type: 'workspace-editors';
+  requestId: string;
+  editors: import('../../utils/open-editor.js').WorkspaceEditorOption[];
+}
+
+export interface RefreshMachineSnapshotResponse {
+  type: 'refresh_machine_snapshot';
+  requestId: string;
+  snapshot: import('../tmux-lite/machine/protocol.js').MachineSnapshot;
+}
+
+
 
 /**
  * Machine pushes a full snapshot of all workspace agent states on client connect.
@@ -567,6 +1265,16 @@ export interface AgentStateUpdatePush {
 export interface MachineSnapshotPush {
   type: 'machine_snapshot';
   snapshot: import('../tmux-lite/machine/protocol.js').MachineSnapshot;
+}
+
+/**
+ * Machine pushes one scoped machine delta to a client that opted in via
+ * `watch_machine_events`. Full `machine_snapshot` pushes remain the resync
+ * path (and the only path for legacy clients).
+ */
+export interface MachineEventPush {
+  type: 'machine_event';
+  event: import('../tmux-lite/machine/protocol.js').MachineEvent;
 }
 
 /**
@@ -600,6 +1308,7 @@ export type ClientToMachineMessage =
   | GetReplayTimelineRequest
   | DismissReplayRequest
   | UndismissReplayRequest
+  | DismissOperationRequest
   | AttachSessionRequest
   | CancelPendingAttachRequest
   | DeleteWorkspaceRequest
@@ -615,8 +1324,27 @@ export type ClientToMachineMessage =
   | DeleteProjectRequest
   // Workspace CRUD
   | CreateWorkspaceRequest
+  | RefreshMachineSnapshotRequest
+  | WatchMachineEventsRequest
+  | ListWorkspaceNotesRequest
+  | AddWorkspaceNoteRequest
+  | UpdateWorkspaceNoteRequest
+  | RemoveWorkspaceNoteRequest
+  | AddGoalNearWorkspaceRequest
+  | UpdateGoalRequest
+  | GetGoalDetailRequest
+  | ReorderGoalRequest
+  | ListGoalChainsRequest
+  | AddPlannedGoalRequest
+  | GoalStackStatusRequest
+  | WaiveGoalGateRequest
+  | RerunWorkspaceScriptsRequest
+  | RunWorkspaceOpenScriptsRequest
+  | RunWorkspaceScriptSelectionRequest
+  | ResolvePortConflictRequest
   | SetWorkspacePhaseRequest
-  | KillSessionRequest
+  | TerminateSessionRequest
+  | PreviewWorkspacePhaseRequest
   // Process management
   | StartProcessRequest
   | StopProcessRequest
@@ -641,13 +1369,65 @@ export type ClientToMachineMessage =
   | CloseAgentSessionRequest
   | ArchiveAgentSessionRequest
   | RestoreAgentSessionRequest
-  | AttachAgentSessionRequest
+  | OpenAgentSessionRequest
+  | ReleaseAgentSessionRequest
   | PromptAgentSessionRequest
+  | RemoveAgentQueuedMessageRequest
   | StageAgentUploadRequest
   | RespondAgentDialogRequest
   | RespondAgentPermissionRequest
+  | GetAgentTranscriptRangeRequest
+  | GetAgentControlInfoRequest
+  | GetAgentGoalModeRequest
+  | SetAgentGoalModeRequest
+  | ShakeAgentSessionRequest
+  | GetAgentSessionUsageRequest
+  | SetAgentModelRequest
+  | SetAgentThinkingLevelRequest
+  | SetAgentApprovalModeRequest
+  | GetAgentAuthProvidersRequest
+  | RemoveAgentProviderAccountRequest
+  | CheckAgentProviderUsageRequest
+  | SetAgentProviderApiKeyRequest
+  | GetAgentSettingsRequest
+  | SetAgentSettingRequest
+  | StartAgentOAuthLoginRequest
+  | RespondAgentOAuthPromptRequest
+  | GetAgentSettingsSchemaRequest
+  | GetAgentToolsRequest
+  | ListAgentDefinitionsRequest
+  | CompactAgentSessionRequest
+  | CycleAgentRoleRequest
+  | ApplyAgentRoleRequest
+  | GetAgentHistoryRequest
+  | NavigateAgentHistoryRequest
+  | GetAgentSessionTreeRequest
+  | ReportProblemRequest
+  | ProjectArtifactsRollupRequest
+  | ArtifactShareMintRequest
+  | ArtifactShareRevokeRequest
+  | ArtifactShareListRequest
+  | ArtifactListRequest
+  | ArtifactReadRequest
+  | ArtifactWriteRequest
+  | FavoritesListRequest
+  | FavoritesToggleRequest
+  | FavoritesMergeRequest
+  | ProjectArtifactsStatusRequest
+  | ProjectArtifactsRemoteSetRequest
+  | ProjectArtifactsSyncRequest
+  | ProjectArtifactsProvisionRequest
+  | TriggerSaveRequest
+  | TriggerRunNowRequest
+  | RepoTreeRequest
+  | RepoReadRequest
+  | RepoCommitRequest
+  | RepoSearchRequest
   | ListAgentCommandsRequest
+  | ListWorkspaceEditorsRequest
+  | OpenWorkspaceEditorRequest
   | GetAgentFileSuggestionsRequest
+  | RunSpaceCommandRequest
   ;
 
 /** All messages from machine to client (browsing mode) */
@@ -657,15 +1437,31 @@ export type MachineToClientMessage =
   | ReplayTimelineResponse
   | ReplayDismissedResponse
   | ReplayUndismissedResponse
+  | AttachedResponse
+  | SessionMetaResponse
   | DetachedResponse
   | SessionExitedResponse
   | ErrorResponse
   | WorkspaceDeletedResponse
+  | WorkspaceNotesResponse
+  | WorkspacePhasePreviewResponse
+  | WorkspaceNoteResponse
+  | GoalResponse
+  | GoalChainResponse
+  | GoalStackStatusResponse
   | ScriptOutputResponse
   | CommandResponse
+  | OperationAcceptedResponse
+  | OperationSnapshotResponse
+  | OperationEventResponse
+  | OperationDismissedResponse
+  | RunSpaceCommandResponse
+  | WorkspaceEditorsResponse
+  | RefreshMachineSnapshotResponse
   | AgentStateSnapshotPush
   | AgentStateUpdatePush
   | MachineSnapshotPush
+  | MachineEventPush
   | AgentDialogRequestPush
   | AgentUIEventPush;
 
@@ -712,6 +1508,7 @@ export function isBrowseMessage(msg: RemoteSessionMessage): msg is ClientToMachi
     'get_replay_timeline',
     'dismiss_replay',
     'undismiss_replay',
+    'dismiss_operation',
     'attach_session',
     'cancel_pending_attach',
     'delete_workspace',
@@ -725,10 +1522,29 @@ export function isBrowseMessage(msg: RemoteSessionMessage): msg is ClientToMachi
     'cancel_project_creation',
     'delete_project',
     'create_workspace',
+    'refresh_machine_snapshot',
+    'watch_machine_events',
+    'workspace_notes_list',
+    'workspace_note_add',
+    'workspace_note_update',
+    'workspace_note_remove',
+    'goal_add_near_workspace',
+    'goal_update',
+    'get_goal_detail',
+    'goal_reorder',
+    'goal_chains_list',
+    'goal_add_planned',
+    'goal_stack_status',
+    'goal_gate_waive',
+    'rerun_workspace_scripts',
+    'run_workspace_open_scripts',
+    'run_workspace_script_selection',
+    'preview_workspace_phase',
     'set_workspace_phase',
-    'kill_session',
+    'terminate_session',
     'start_process',
     'stop_process',
+    'resolve_port_conflict',
     'request_events',
     'get_bundle_refresh_plan',
     'apply_bundle_refresh',
@@ -747,13 +1563,62 @@ export function isBrowseMessage(msg: RemoteSessionMessage): msg is ClientToMachi
     'close_agent_session',
     'archive_agent_session',
     'restore_agent_session',
-    'attach_agent_session',
     'prompt_agent_session',
+    'remove_agent_queued_message',
     'stage_agent_upload',
     'respond_agent_dialog',
     'respond_agent_permission',
+    'get_agent_transcript_range',
+    'get_agent_control_info',
+    'get_agent_goal_mode',
+    'set_agent_goal_mode',
+    'get_agent_session_usage',
+    'set_agent_model',
+    'set_agent_thinking_level',
+    'set_agent_approval_mode',
+    'get_agent_auth_providers',
+    'remove_agent_provider_account',
+    'check_agent_provider_usage',
+    'set_agent_provider_api_key',
+    'get_agent_settings',
+    'set_agent_setting',
+    'start_agent_oauth_login',
+    'respond_agent_oauth_prompt',
+    'get_agent_settings_schema',
+    'get_agent_tools',
+    'list_agent_definitions',
+    'compact_agent_session',
+    'cycle_agent_role',
+    'apply_agent_role',
+    'get_agent_history',
+    'navigate_agent_history',
+    'get_agent_session_tree',
+    'report_problem',
+    'project_artifacts_rollup',
+    'artifact_share_mint',
+    'artifact_share_revoke',
+    'artifact_share_list',
+    'artifact_list',
+    'artifact_read',
+    'artifact_write',
+    'favorites_list',
+    'favorites_toggle',
+    'favorites_merge',
+    'project_artifacts_status',
+    'project_artifacts_remote_set',
+    'project_artifacts_sync',
+    'project_artifacts_provision',
+    'trigger_save',
+    'trigger_run_now',
+    'repo_tree',
+    'repo_read',
+    'repo_commit',
+    'repo_search',
     'list_agent_commands',
+    'list_workspace_editors',
+    'open_workspace_editor',
     'get_agent_file_suggestions',
+    'run_space_command',
   ]);
   return BROWSE_TYPES.has(msg.type);
 }

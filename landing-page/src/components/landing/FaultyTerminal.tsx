@@ -1,5 +1,5 @@
 import { Renderer, Program, Mesh, Color, Triangle } from 'ogl';
-import React, { useEffect, useRef, useMemo, useCallback } from 'react';
+import React, { useEffect, useRef, useMemo, useCallback, useState } from 'react';
 
 type Vec2 = [number, number];
 
@@ -273,6 +273,7 @@ export default function FaultyTerminal({
   const rafRef = useRef<number>(0);
   const loadAnimationStartRef = useRef<number>(0);
   const timeOffsetRef = useRef<number>(Math.random() * 100);
+  const [renderFailed, setRenderFailed] = useState(false);
 
   const tintVec = useMemo(() => hexToRgb(tint), [tint]);
 
@@ -290,10 +291,22 @@ export default function FaultyTerminal({
   useEffect(() => {
     const ctn = containerRef.current;
     if (!ctn) return;
+    if (renderFailed) return;
 
-    const renderer = new Renderer({ dpr });
+    let renderer: Renderer;
+    try {
+      renderer = new Renderer({ dpr });
+    } catch {
+      setRenderFailed(true);
+      return;
+    }
+
     rendererRef.current = renderer;
     const gl = renderer.gl;
+    if (!gl?.canvas) {
+      setRenderFailed(true);
+      return;
+    }
     gl.clearColor(0, 0, 0, 1);
 
     const geometry = new Triangle(gl);
@@ -415,8 +428,18 @@ export default function FaultyTerminal({
     mouseStrength,
     pageLoadAnimation,
     brightness,
-    handleMouseMove
+    handleMouseMove,
+    renderFailed
   ]);
+
+  if (renderFailed) {
+    return (
+      <div ref={containerRef} className={`w-full h-full relative overflow-hidden ${className}`} style={style} {...rest}>
+        <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,rgba(34,197,94,0.18),transparent_55%)]" />
+        <div className="absolute inset-0 opacity-30 [background-image:linear-gradient(rgba(34,197,94,0.18)_1px,transparent_1px),linear-gradient(90deg,rgba(34,197,94,0.18)_1px,transparent_1px)] [background-size:36px_36px]" />
+      </div>
+    );
+  }
 
   return (
     <div ref={containerRef} className={`w-full h-full relative overflow-hidden ${className}`} style={style} {...rest} />

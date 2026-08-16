@@ -22,7 +22,7 @@ export function registerWebCommand(parent: Command): void {
     .option('--port <port>', 'Local relay/web port', '4480')
     .option('--relay', 'Start a hosted relay with cloudflared tunnel to your gitspace.sh subdomain')
     .option('-y, --yes', 'Auto-confirm prompts')
-    .option('--takeover', 'Clear persisted relay/serve owner state before starting newly launched services')
+    .option('--takeover', 'Reclaim the local relay and serve daemons for the current identity: clear persisted owner/control state and forget any stale relay trust pin before starting. Use when recovering from mismatched ownership or trust pins.')
     .option('--password-stdin', 'Read the local device identity password from stdin and pass it through to machine serve')
     .action(withErrorHandler(async (options) => {
       const { startLocalWeb } = await import('../../commands/web.js');

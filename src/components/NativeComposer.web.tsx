@@ -16,20 +16,63 @@ import React, {
   type KeyboardEvent as ReactKeyboardEvent,
   type CSSProperties,
 } from 'react';
+import { getSpaceCommandArgumentCompletions } from '../lib/tmux-lite/agents/extensions/space-command-autocomplete.js';
+import { findMagicKeywordRanges, hasMagicKeyword, segmentMagicKeywords } from '../blocks/agent/magic-keywords.js';
+
+/** A compact composer hint/affordance chip. */
+const composerChip = (tone: 'dim' | 'active' | 'violet'): CSSProperties => ({
+  fontSize: 11,
+  lineHeight: 1.4,
+  padding: '1px 8px',
+  borderRadius: 999,
+  border: `1px solid ${tone === 'active' ? 'var(--gs-accent)' : tone === 'violet' ? 'rgba(188,140,255,0.35)' : 'var(--gs-border)'}`,
+  background: tone === 'active' ? 'var(--gs-accent)' : tone === 'violet' ? 'rgba(188,140,255,0.08)' : 'transparent',
+  color: tone === 'active' ? 'var(--gs-bg)' : tone === 'violet' ? 'var(--gs-purple)' : 'var(--gs-text-dim)',
+  fontWeight: tone === 'active' ? 600 : 400,
+  cursor: tone === 'active' || tone === 'violet' ? 'default' : 'pointer',
+  WebkitTapHighlightColor: 'transparent',
+  whiteSpace: 'nowrap',
+});
+
+// Text-affecting styles shared by the textarea and its highlight mirror so the
+// keyword overlay lines up exactly with the typed text.
+const COMPOSER_TEXT_STYLE: CSSProperties = {
+  fontSize: 15,
+  lineHeight: 1.5,
+  padding: '8px 12px',
+  fontFamily: 'inherit',
+  boxSizing: 'border-box',
+  whiteSpace: 'pre-wrap',
+  overflowWrap: 'break-word',
+  wordBreak: 'break-word',
+};
 
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
 
+export type NativeComposerSubmitMode = 'send' | 'steer' | 'followUp';
+
 export interface NativeComposerWebProps {
-  onSubmit: (text: string, images: Array<{ dataUrl: string; name: string }>, files: Array<{ name: string; dataUrl: string }>) => void;
+  onSubmit: (text: string, images: Array<{ dataUrl: string; name: string }>, files: Array<{ name: string; dataUrl: string }>, mode: NativeComposerSubmitMode) => void | boolean | string | Promise<void | boolean | string>;
   onAbort?: () => void;
   isBusy?: boolean;
   isSubmitting?: boolean;
   disabled?: boolean;
   placeholder?: string;
+  draftStorageKey?: string | null;
+  draftStorageVersion?: number;
   onRequestCommands?: () => Promise<Array<{ name: string; description: string; kind: string }>>;
   onRequestFileSuggestions?: (prefix: string) => Promise<Array<{ path: string; isDirectory: boolean }>>;
+  /** Name of the workflow attached to this session, if any — renders the violet
+   *  workflow chip in the affordance row. Omitted → no chip. */
+  workflowLabel?: string | null;
+  /** Number of queued follow-up messages waiting on the current turn. When > 0
+   *  the hint line below the textarea becomes a queue-status row. */
+  queuedFollowUpCount?: number;
+  /** What the queued messages are waiting on (e.g. a subagent name); defaults
+   *  to "agent" in the status row. */
+  queuedWaitingOn?: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -52,11 +95,17 @@ interface AttachedFile {
 
 interface AutocompleteState {
   mode: 'slash' | 'at' | null;
-  items: Array<{ label: string; description?: string; kind?: string }>;
+  items: Array<{ label: string; description?: string; kind?: string; insertText?: string }>;
   selectedIndex: number;
   loading: boolean;
-  /** The trigger position in the text (index of / or @) */
+  /** The trigger position in the text (index of / or @, or active replacement span for slash args) */
   triggerPos: number;
+}
+
+interface CommandAutocompleteItem {
+  label: string;
+  description?: string;
+  kind?: string;
 }
 // ---------------------------------------------------------------------------
 // Helpers
@@ -225,10 +274,16 @@ export function NativeComposer({
   isSubmitting = false,
   disabled = false,
   placeholder = 'Message...',
+  draftStorageKey = null,
+  draftStorageVersion = 0,
   onRequestCommands,
   onRequestFileSuggestions,
+  workflowLabel = null,
+  queuedFollowUpCount = 0,
+  queuedWaitingOn = null,
 }: NativeComposerWebProps): React.ReactElement {
   const [text, setText] = useState('');
+  const [busySubmitMode, setBusySubmitMode] = useState<Extract<NativeComposerSubmitMode, 'steer' | 'followUp'>>('steer');
   const [images, setImages] = useState<AttachedImage[]>([]);
   const [files, setFiles] = useState<AttachedFile[]>([]);
   const [autocomplete, setAutocomplete] = useState<AutocompleteState>({
@@ -236,21 +291,38 @@ export function NativeComposer({
   });
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const mirrorRef = useRef<HTMLDivElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const commandsCacheRef = useRef<Array<{ label: string; description?: string; kind?: string }> | null>(null);
+  const commandsCacheRef = useRef<CommandAutocompleteItem[] | null>(null);
   const fileSuggestionsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    commandsCacheRef.current = null;
+  }, [onRequestCommands]);
 
   // Controls are disabled while submitting or externally disabled.
   // isBusy does not disable input — it shows the abort button instead of send.
   const isDisabled = disabled || isSubmitting;
   const hasContent = text.trim().length > 0 || images.some(i => !i.loading) || files.some(f => !f.loading);
-  const canSend = !isDisabled && !isBusy && hasContent;
-
+  const canSend = !isDisabled && hasContent;
+  const activeSubmitMode: NativeComposerSubmitMode = isBusy ? busySubmitMode : 'send';
   // Auto-focus on mount
   useEffect(() => {
     textareaRef.current?.focus();
   }, []);
+
+  useEffect(() => {
+    if (!draftStorageKey) {
+      setText('');
+      return;
+    }
+    try {
+      setText(localStorage.getItem(draftStorageKey) ?? '');
+    } catch {
+      setText('');
+    }
+  }, [draftStorageKey, draftStorageVersion]);
 
   // Auto-grow: reset to auto then clamp to MAX_TEXTAREA_HEIGHT
   useEffect(() => {
@@ -260,24 +332,49 @@ export function NativeComposer({
     const natural = ta.scrollHeight;
     ta.style.height = `${Math.min(natural, MAX_TEXTAREA_HEIGHT)}px`;
     ta.style.overflowY = natural > MAX_TEXTAREA_HEIGHT ? 'auto' : 'hidden';
+    if (mirrorRef.current) mirrorRef.current.scrollTop = ta.scrollTop;
   }, [text]);
 
-  // ── Submit helper — clears state after sending ───────────────────────────
+  // Keep the keyword-highlight mirror scrolled in lockstep with the textarea.
+  const syncMirrorScroll = useCallback(() => {
+    const ta = textareaRef.current;
+    const mirror = mirrorRef.current;
+    if (ta && mirror) mirror.scrollTop = ta.scrollTop;
+  }, []);
+
+  const showKeywordOverlay = hasMagicKeyword(text);
+  // Distinct magic keywords present → shown as active "mode" chips in the hint row.
+  const activeKeywords = Array.from(new Set(findMagicKeywordRanges(text).map((r) => r.keyword)));
+
+  // ── Submit helper — clears state after sending unless the submitter preserves the composer ───────────────────────────
   const submitAndClear = useCallback(
-    (currentText: string, currentImages: AttachedImage[], currentFiles: AttachedFile[]) => {
+    async (currentText: string, currentImages: AttachedImage[], currentFiles: AttachedFile[], mode: NativeComposerSubmitMode) => {
       const readyImages = currentImages
         .filter(img => !img.loading)
         .map(({ dataUrl, name }) => ({ dataUrl, name }));
       const readyFiles = currentFiles
         .filter(f => !f.loading && f.dataUrl)
         .map(({ name, dataUrl }) => ({ name, dataUrl }));
-      onSubmit(currentText.trim(), readyImages, readyFiles);
+      const submitResult = await onSubmit(currentText.trim(), readyImages, readyFiles, mode);
+      if (submitResult === false) {
+        return;
+      }
+      if (typeof submitResult === 'string') {
+        setText(submitResult);
+        if (draftStorageKey) {
+          try { localStorage.setItem(draftStorageKey, submitResult); } catch { /* ignore unavailable storage */ }
+        }
+        return;
+      }
       setText('');
+      if (draftStorageKey) {
+        try { localStorage.removeItem(draftStorageKey); } catch { /* ignore unavailable storage */ }
+      }
       setImages([]);
       setFiles([]);
       setAutocomplete({ mode: null, items: [], selectedIndex: 0, loading: false, triggerPos: 0 });
     },
-    [onSubmit]
+    [onSubmit, draftStorageKey]
   );
 
   // ── Autocomplete helpers ──────────────────────────────────────────────────────────
@@ -293,31 +390,36 @@ export function NativeComposer({
   const acceptAutocomplete = useCallback((index: number) => {
     const item = autocomplete.items[index];
     if (!item) return;
+    const cursorPos = textareaRef.current?.selectionStart ?? text.length;
     const before = text.slice(0, autocomplete.triggerPos);
-    const after = text.slice(textareaRef.current?.selectionStart ?? text.length);
-    if (autocomplete.mode === 'slash') {
-      setText(`${before}/${item.label} ${after}`);
-    } else if (autocomplete.mode === 'at') {
-      const suffix = item.kind === 'directory' ? '/' : ' ';
-      setText(`${before}@${item.label}${suffix}${after}`);
-    }
+    const after = text.slice(cursorPos);
+    const insertText = item.insertText
+      ?? (autocomplete.mode === 'slash'
+        ? `/${item.label} `
+        : `${item.kind === 'directory' ? `@${item.label}/` : `@${item.label} `}`);
+    setText(`${before}${insertText}${after}`);
     closeAutocomplete();
-    // Re-focus textarea after accepting
     requestAnimationFrame(() => textareaRef.current?.focus());
   }, [autocomplete, text, closeAutocomplete]);
 
-  const fetchCommands = useCallback(async (filter: string) => {
+  const fetchCommands = useCallback(async (filter: string, triggerPos = 0, insertPrefix = '/') => {
     if (!onRequestCommands) return;
     if (!commandsCacheRef.current) {
       try {
         const cmds = await onRequestCommands();
         commandsCacheRef.current = cmds.map(c => ({ label: c.name, description: c.description, kind: c.kind }));
       } catch {
-        commandsCacheRef.current = [];
+        commandsCacheRef.current = null;
       }
     }
-    const items = commandsCacheRef.current.filter(c => c.label.toLowerCase().startsWith(filter.toLowerCase()));
-    setAutocomplete(prev => ({ ...prev, items, selectedIndex: 0, loading: false }));
+    if (!commandsCacheRef.current) {
+      setAutocomplete(prev => ({ ...prev, items: [], selectedIndex: 0, loading: false, triggerPos }));
+      return;
+    }
+    const items = commandsCacheRef.current
+      .filter(c => c.label.toLowerCase().startsWith(filter.toLowerCase()))
+      .map(item => ({ ...item, insertText: `${insertPrefix}${item.label} ` }));
+    setAutocomplete(prev => ({ ...prev, items, selectedIndex: 0, loading: false, triggerPos }));
   }, [onRequestCommands]);
 
   const fetchFileSuggestions = useCallback((prefix: string) => {
@@ -348,16 +450,43 @@ export function NativeComposer({
     const newText = e.target.value;
     const cursorPos = e.target.selectionStart ?? newText.length;
     setText(newText);
-
+    if (draftStorageKey) {
+      try {
+        if (newText.length > 0) {
+          localStorage.setItem(draftStorageKey, newText);
+        } else {
+          localStorage.removeItem(draftStorageKey);
+        }
+      } catch { /* ignore unavailable storage */ }
+    }
     // Detect autocomplete triggers
-    // Slash command: text starts with / and cursor is in the first token
-    const hasSpace = newText.includes(' ');
-    const isSlashTrigger = newText.startsWith('/') && (!hasSpace || cursorPos <= newText.indexOf(' ', 1));
-    if (isSlashTrigger) {
-      const token = newText.slice(1, cursorPos);
-      setAutocomplete({ mode: 'slash', items: [], selectedIndex: 0, loading: true, triggerPos: 0 });
-      fetchCommands(token);
-      return;
+    // Slash command: support root command completion and command-specific argument completion.
+    if (newText.startsWith('/')) {
+      const slashText = newText.slice(1, cursorPos);
+      const firstSpace = slashText.indexOf(' ');
+      if (firstSpace === -1) {
+        setAutocomplete({ mode: 'slash', items: [], selectedIndex: 0, loading: true, triggerPos: 0 });
+        fetchCommands(slashText, 0, '/');
+        return;
+      }
+
+      const commandName = slashText.slice(0, firstSpace);
+      const argsPrefix = slashText.slice(firstSpace + 1);
+      if (commandName === 'space') {
+        const items = getSpaceCommandArgumentCompletions(argsPrefix)?.map((item) => ({
+          label: item.label,
+          description: item.description,
+          insertText: item.value,
+        })) ?? [];
+        setAutocomplete({
+          mode: 'slash',
+          items,
+          selectedIndex: 0,
+          loading: false,
+          triggerPos: cursorPos - argsPrefix.length,
+        });
+        return;
+      }
     }
 
     // @ mention: find the last @ before cursor that is at start-of-word
@@ -381,7 +510,7 @@ export function NativeComposer({
 
     // No trigger — close autocomplete
     closeAutocomplete();
-  }, [fetchCommands, fetchFileSuggestions, closeAutocomplete]);
+  }, [fetchCommands, fetchFileSuggestions, closeAutocomplete, draftStorageKey]);
 
   const handleKeyDown = useCallback(
     (e: ReactKeyboardEvent<HTMLTextAreaElement>) => {
@@ -403,7 +532,7 @@ export function NativeComposer({
           }));
           return;
         }
-        if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey)) {
+        if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey && autocomplete.mode !== 'slash')) {
           e.preventDefault();
           acceptAutocomplete(autocomplete.selectedIndex);
           return;
@@ -415,21 +544,24 @@ export function NativeComposer({
         }
       }
 
-      // Normal Enter-to-submit (without Shift)
+      // Enter submits. While busy, Enter steers and Ctrl/Cmd+Enter queues a follow-up.
       if (e.key === 'Enter' && !e.shiftKey) {
-        if (!isDisabled && !isBusy && text.trim().length > 0) {
+        if (!isDisabled && text.trim().length > 0) {
           e.preventDefault();
-          submitAndClear(text, images, files);
+          const mode: NativeComposerSubmitMode = isBusy
+            ? ((e.metaKey || e.ctrlKey) ? 'followUp' : 'steer')
+            : 'send';
+          void submitAndClear(text, images, files, mode);
         }
       }
     },
     [text, images, files, isDisabled, isBusy, submitAndClear, autocomplete, acceptAutocomplete, closeAutocomplete]
   );
 
-  const handleSend = useCallback(() => {
+  const handleSend = useCallback((mode: NativeComposerSubmitMode = activeSubmitMode) => {
     if (!canSend) return;
-    submitAndClear(text, images, files);
-  }, [canSend, text, images, files, submitAndClear]);
+    void submitAndClear(text, images, files, mode);
+  }, [activeSubmitMode, canSend, text, images, files, submitAndClear]);
 
   // ── Clipboard paste — intercept image data ───────────────────────────────
   const handlePaste = useCallback(
@@ -681,6 +813,19 @@ export function NativeComposer({
         </div>
       )}
 
+      {/* ── Affordance hints + active magic-mode tags ─────────────────────── */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', paddingLeft: 4 }}>
+        <button type="button" onClick={() => fileInputRef.current?.click()} disabled={isDisabled} style={composerChip('dim')} title="Attach a file">＋ attach</button>
+        <button type="button" onMouseDown={(e) => { e.preventDefault(); textareaRef.current?.focus(); }} style={composerChip('dim')} title="Type / at the start of the message for slash commands">/ commands</button>
+        <button type="button" onMouseDown={(e) => { e.preventDefault(); textareaRef.current?.focus(); }} style={composerChip('dim')} title="Type @ to mention a file">@ mention</button>
+        {workflowLabel && (
+          <span style={composerChip('violet')} title={`Workflow attached — ${workflowLabel}`}>workflow</span>
+        )}
+        {activeKeywords.map((kw) => (
+          <span key={kw} style={composerChip('active')} title={`"${kw}" triggers ${kw} mode`}>⚡ {kw}</span>
+        ))}
+      </div>
+
       {/* ── Input row — single visual bar with buttons inline ─────────────── */}
       <div style={{
         display: 'flex',
@@ -707,6 +852,31 @@ export function NativeComposer({
 
         {/* Textarea wrapper with autocomplete dropdown */}
         <div style={{ flex: 1, position: 'relative', minWidth: 0 }}>
+          {/* Magic-keyword highlight mirror: renders the same text behind a
+              text-transparent textarea, painting keywords (workflowz / orchestrate
+              / ultrathink) in the accent color so they read as triggers. */}
+          {showKeywordOverlay && (
+            <div
+              ref={mirrorRef}
+              aria-hidden="true"
+              style={{
+                ...COMPOSER_TEXT_STYLE,
+                position: 'absolute',
+                inset: 0,
+                overflow: 'hidden',
+                pointerEvents: 'none',
+                color: isDisabled ? 'var(--gs-text-dim)' : 'var(--gs-text)',
+              }}
+            >
+              {segmentMagicKeywords(text).map((seg, i) =>
+                seg.keyword ? (
+                  <span key={i} style={{ color: 'var(--gs-accent)', fontWeight: 600 }}>{seg.text}</span>
+                ) : (
+                  <span key={i}>{seg.text}</span>
+                )
+              )}
+            </div>
+          )}
           {/* Autocomplete dropdown */}
           {autocomplete.mode && autocomplete.items.length > 0 && (
             <div
@@ -742,7 +912,9 @@ export function NativeComposer({
                   }}
                 >
                   <span style={{ fontFamily: 'monospace' }}>
-                    {autocomplete.mode === 'slash' ? '/' : '@'}{item.label}
+                    {autocomplete.mode === 'slash'
+                      ? (autocomplete.triggerPos === 0 ? `/${item.label}` : item.label)
+                      : `@${item.label}`}
                   </span>
                   {item.description && (
                     <span style={{ color: 'var(--gs-text-dim)', fontSize: 12, marginLeft: 8, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -761,40 +933,44 @@ export function NativeComposer({
             onChange={handleTextChange}
             onKeyDown={handleKeyDown}
             onPaste={handlePaste}
+            onScroll={syncMirrorScroll}
             placeholder={placeholder}
             disabled={isDisabled}
             rows={1}
             style={{
+              ...COMPOSER_TEXT_STYLE,
+              position: 'relative',
+              zIndex: 1,
               width: '100%',
               background: 'transparent',
               border: 'none',
               color: isDisabled ? 'var(--gs-text-dim)' : 'var(--gs-text)',
-              fontSize: 15,
-              lineHeight: 1.5,
-              padding: '8px 12px',
+              // When a keyword is present, hide the textarea's own glyphs and let
+              // the highlight mirror show through; keep the caret visible.
+              WebkitTextFillColor: showKeywordOverlay ? 'transparent' : undefined,
               resize: 'none',
               outline: 'none',
               overflowY: 'hidden',
               minHeight: 38,
               maxHeight: MAX_TEXTAREA_HEIGHT,
-              boxSizing: 'border-box',
-              fontFamily: 'inherit',
               WebkitAppearance: 'none',
               caretColor: 'var(--gs-accent)',
             }}
           />
         </div>
 
-        {/* Send / Abort button — right side */}
-        <div style={{ display: 'flex', alignItems: 'center', flexShrink: 0, paddingRight: 4 }}>
-          {isBusy ? (
+        {/* Send / Abort controls — right side */}
+        <div style={{ display: 'flex', alignItems: 'center', flexShrink: 0, paddingRight: 4, gap: 4 }}>
+          {isBusy && (
             <button
               type="button"
               onClick={onAbort}
               disabled={!onAbort}
-              title="Abort"
+              title="Abort current turn"
               style={{
                 ...ACTION_BUTTON_BASE,
+                width: 34,
+                height: 34,
                 background: 'var(--gs-danger)',
                 color: 'white',
                 opacity: onAbort ? 1 : 0.4,
@@ -803,24 +979,59 @@ export function NativeComposer({
             >
               <IconStop />
             </button>
-          ) : (
+          )}
+          {isBusy && (
             <button
               type="button"
-              onClick={handleSend}
-              disabled={!canSend}
-              title="Send"
+              onClick={() => setBusySubmitMode((mode) => mode === 'steer' ? 'followUp' : 'steer')}
+              title={busySubmitMode === 'steer' ? 'Switch to Queue follow-up mode' : 'Switch to Steer current turn mode'}
               style={{
-                ...ACTION_BUTTON_BASE,
-                background: canSend ? 'var(--gs-accent)' : 'var(--gs-btn-secondary-bg)',
-                color: canSend ? 'var(--gs-text-on-accent)' : 'var(--gs-text-dim)',
-                cursor: canSend ? 'pointer' : 'default',
+                height: 34,
+                padding: '0 10px',
+                border: '1px solid var(--gs-border)',
+                borderRadius: 10,
+                background: 'var(--gs-bg-elevated)',
+                color: 'var(--gs-text-muted)',
+                cursor: 'pointer',
+                fontSize: 12,
+                fontWeight: 600,
+                minWidth: 150,
               }}
             >
-              {isSubmitting ? <Spinner /> : <IconPaperPlane />}
+              {busySubmitMode === 'steer' ? 'Steer current turn ▾' : 'Queue follow-up ▾'}
             </button>
           )}
+          <button
+            type="button"
+            onClick={() => handleSend(activeSubmitMode)}
+            disabled={!canSend}
+            title={isBusy
+              ? (activeSubmitMode === 'followUp' ? 'Send follow-up (Ctrl/Cmd+Enter)' : 'Send steering message (Enter)')
+              : 'Send (Enter)'}
+            style={{
+              ...ACTION_BUTTON_BASE,
+              background: canSend ? 'var(--gs-accent)' : 'var(--gs-btn-secondary-bg)',
+              color: canSend ? 'var(--gs-text-on-accent)' : 'var(--gs-text-dim)',
+              cursor: canSend ? 'pointer' : 'default',
+            }}
+          >
+            {isSubmitting ? <Spinner /> : <IconPaperPlane />}
+          </button>
         </div>
       </div>
+
+      {queuedFollowUpCount > 0 ? (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 7, padding: '3px 10px 0 10px', color: 'var(--gs-text-muted)', fontSize: 11 }}>
+          <span style={{ width: 7, height: 7, borderRadius: '50%', background: 'var(--gs-text-dim)', flexShrink: 0 }} />
+          {queuedFollowUpCount} message{queuedFollowUpCount === 1 ? '' : 's'} queued — sends when {queuedWaitingOn ?? 'agent'} returns
+        </div>
+      ) : (
+        <div style={{ padding: '3px 10px 0 10px', color: 'var(--gs-text-dim)', fontSize: 11 }}>
+          {isBusy
+            ? 'Enter steers current turn · Ctrl/Cmd+Enter queues follow-up · use the mode button to switch Send'
+            : 'Enter sends · Shift+Enter adds a newline'}
+        </div>
+      )}
 
       {/* Hidden file inputs */}
       <input

@@ -2,6 +2,8 @@
  * Type definitions for workspace management
  */
 
+import { z } from 'zod'
+
 /**
  * Information about a git worktree workspace
  */
@@ -24,27 +26,21 @@ export interface WorktreeInfo {
 	lastCommitDate: Date
 }
 
-export type WorkspaceNotePriority = 'low' | 'medium' | 'high'
+export const workspaceNoteSchema = z.object({
+	id: z.string().min(1),
+	body: z.string(),
+	kind: z.enum(['note', 'todo']),
+	priority: z.enum(['low', 'medium', 'high']).optional(),
+	doneAt: z.string().optional(),
+	createdAt: z.string(),
+	updatedAt: z.string(),
+})
 
-export interface WorkspaceNote {
-	id: string
-	body: string
-	kind: 'note' | 'todo'
-	priority?: WorkspaceNotePriority
-	doneAt?: string
-	createdAt: string
-	updatedAt: string
-}
+/** A workspace's `notes.json` is a list of notes; anything else is malformed. */
+export const workspaceNotesFileSchema = z.array(workspaceNoteSchema)
 
-export interface WorkspaceNotesSummary {
-	total: number
-	openTodoCount: number
-	doneTodoCount: number
-	highPriorityOpenTodoCount: number
-	topOpenTodos: WorkspaceNote[]
-	recentNotes: WorkspaceNote[]
-	updatedAt?: string
-}
+export type WorkspaceNotePriority = NonNullable<WorkspaceNote['priority']>
+export type WorkspaceNote = z.infer<typeof workspaceNoteSchema>
 
 export interface WorkspaceNotesSummary {
 	total: number

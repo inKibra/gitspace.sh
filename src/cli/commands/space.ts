@@ -1,5 +1,5 @@
 /**
- * gssh space [context|review|notes|service|hosting|events|bundle]
+ * gssh space [context|goal|chain|stack|review|notes|service|hosting|events|bundle]
  *
  * Hidden workspace-scoped command surface. Typical usage inside a workspace is
  * `space review list`, not `gssh space review list`.
@@ -14,6 +14,10 @@ import { withErrorHandler } from '../error.js';
 import { useSessionContext, getWorkspacePath } from '../workspace-context.js';
 import { logger } from '../../utils/logger.js';
 
+
+function collectRepeated(value: string, previous: string[]): string[] {
+  return [...previous, value];
+}
 function shouldRenderWorkspaceScopedUsage(): boolean {
   const ctx = useSessionContext();
   return !!(ctx?.project && ctx.workspace);
@@ -61,6 +65,11 @@ function requireSessionContext(): { project: string; workspace: string } {
   };
 }
 
+function collectFilter(value: string, previous: string[] = []): string[] {
+  return [...previous, value];
+}
+
+
 
 
 export function registerSpaceCommands(parent: Command): void {
@@ -73,20 +82,706 @@ export function registerSpaceCommands(parent: Command): void {
     .description('Show resolved workspace context')
     .option('--json', 'Output structured JSON')
     .action(withErrorHandler(async (options) => {
-      requireSessionContext();
+      const ctx = requireSessionContext();
       const { showSpaceContext } = await import('../../commands/review.js');
-      await showSpaceContext(options);
+      await showSpaceContext({ ...options, project: ctx.project, workspace: ctx.workspace });
     }));
 
   registerSpaceReviewCommands(cmd);
+  registerSpaceGoalCommands(cmd);
+  registerSpaceChainCommands(cmd);
+  registerSpaceStackCommands(cmd);
   registerSpaceNotesCommands(cmd);
   registerSpaceServiceCommands(cmd);
   registerSpaceHostingCommands(cmd);
   registerSpaceEventsCommands(cmd);
   registerSpaceBundleCommands(cmd);
+  registerSpaceJournalCommands(cmd);
+  registerSpaceGuideCommands(cmd);
+  registerSpaceArtifactsCommands(cmd);
+  registerSpaceWorkflowCommands(cmd);
   configureSpaceHelpRecursively(cmd);
 }
 
+function registerSpaceWorkflowCommands(space: Command): void {
+  const workflow = space
+    .command('workflow')
+    .description('The workspace’s single canonical workflow spec (*.workflow.json on the artifacts mount)');
+
+  workflow
+    .command('validate')
+    .description('Validate THE workflow: single spec, slice refs resolve to goal-doc headings, phase names sane. Dangling refs are warnings (exit 0); multiple specs / parse errors fail')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      const ctx = requireSessionContext();
+      const { validateSpaceWorkflow } = await import('../../commands/space-workflow.js');
+      validateSpaceWorkflow(ctx, options);
+    }));
+}
+
+/** '7d' / '24h' / '30m' → ms. */
+function parseTtl(ttl: string): number {
+  const m = ttl.trim().match(/^(\d+)\s*(m|h|d)$/);
+  if (!m) throw new Error(`Invalid --ttl '${ttl}' — use e.g. 30m, 24h, 7d`);
+  const n = Number(m[1]);
+  return n * (m[2] === 'm' ? 60_000 : m[2] === 'h' ? 3_600_000 : 86_400_000);
+}
+
+/**
+ * Resolve the calling session's artifacts scope — the root it OWNS.
+ *
+ * Every `space artifacts` path argument is SCOPE-relative, not mount-relative,
+ * so it lines up exactly with `local://`: an agent writes `local://reports/x`
+ * and captures it as `reports/x`. For a workspace session the scope root is
+ * `goals/<goal-id>/`, so that commits as `goals/<goal-id>/reports/x` — the
+ * disjoint subtree that keeps roll-up conflict-free (docs/ARTIFACTS-FS.md).
+ */
+async function requireArtifactsScope(): Promise<{ ctx: { project: string; workspace: string }; projectDir: string; scope: import('../../core/artifacts.js').ArtifactsScope }> {
+  const ctx = requireSessionContext();
+  const { getProjectDir } = await import('../../core/config.js');
+  const { artifactsScope } = await import('../../core/artifacts.js');
+  const { join } = await import('path');
+  const projectDir = getProjectDir(ctx.project);
+  return { ctx, projectDir, scope: artifactsScope(join(projectDir, 'workspaces', ctx.workspace)) };
+}
+
+/** Artifact-protocol verbs (docs/ARTIFACT-PROTOCOL.md). */
+function registerSpaceArtifactsCommands(space: Command): void {
+  const artifacts = space.command('artifacts').description('Workspace artifacts (paths are relative to the root you own — your goal folder)');
+
+  artifacts
+    .command('share <relPath>')
+    .description('Mint a signed public link for one artifact, served through your relay (requires serve active)')
+    .option('--ttl <duration>', 'Link lifetime (30m / 24h / 7d)', '7d')
+    .option('--max-uses <n>', 'Optional use cap')
+    .option('--live', 'Serve current branch state instead of pinning a point-in-time capture')
+    .action(withErrorHandler(async (relPath: string, options: { ttl: string; maxUses?: string; live?: boolean }) => {
+      const { ctx, scope } = await requireArtifactsScope();
+      const { send } = await import('../../lib/tmux-lite/cli.js');
+      const { formatArtifactUri, parseLocalRef, localScratchRel } = await import('../../core/artifact-cap.js');
+      // artifact:// URIs are MOUNT-relative (that is what the daemon's
+      // path-jailed reader resolves), but the argument the caller types is
+      // SCOPE-relative like every other `space artifacts` path — so lift it
+      // through the scope root here. A `local://<rel>` names a working-tree
+      // file that may not be committed yet, so it is always served LIVE.
+      const localRel = parseLocalRef(relPath);
+      const mountRel = scope.rel(localRel ? localScratchRel(localRel) : relPath);
+      const r = await send({
+        type: 'artifact-share-mint',
+        uri: formatArtifactUri(ctx.project, ctx.workspace, mountRel),
+        ttlMs: parseTtl(options.ttl),
+        maxUses: options.maxUses ? Number(options.maxUses) : undefined,
+        live: localRel ? true : (options.live || undefined),
+      });
+      if (r.type === 'error') { logger.error(r.message); process.exit(1); }
+      if (r.type !== 'artifact-share-mint') { logger.error('Unexpected response'); process.exit(1); }
+      logger.success('Share link (anyone with the URL can read this one file):');
+      logger.log(r.url);
+      logger.info(`Expires ${new Date(r.expiresAt).toLocaleString()} · revoke: space artifacts share-revoke ${r.tokenId}`);
+    }));
+
+  artifacts
+    .command('share-list')
+    .description('List minted share links (this machine)')
+    .action(withErrorHandler(async () => {
+      const { send } = await import('../../lib/tmux-lite/cli.js');
+      const r = await send({ type: 'artifact-share-list' });
+      if (r.type !== 'artifact-share-list') { logger.error(r.type === 'error' ? r.message : 'Unexpected response'); process.exit(1); }
+      if (r.shares.length === 0) { logger.info('No share links minted.'); return; }
+      for (const sh of r.shares) {
+        const state = sh.revokedAt ? 'revoked' : Date.now() > sh.expiresAt ? 'expired' : 'active';
+        logger.log(`${sh.tokenId}  ${state.padEnd(7)}  uses ${sh.useCount}${sh.maxUses ? `/${sh.maxUses}` : ''}  ${sh.uri}`);
+      }
+    }));
+
+  artifacts
+    .command('share-revoke <tokenId>')
+    .description('Revoke a share link (takes effect on the next request)')
+    .action(withErrorHandler(async (tokenId: string) => {
+      const { send } = await import('../../lib/tmux-lite/cli.js');
+      const r = await send({ type: 'artifact-share-revoke', tokenId });
+      if (r.type !== 'artifact-share-revoke') { logger.error(r.type === 'error' ? r.message : 'Unexpected response'); process.exit(1); }
+      logger.success(r.revoked ? 'Revoked.' : 'Not found or already revoked.');
+    }));
+
+  artifacts
+    .command('commit <paths...>')
+    .description('Capture files already written in the artifacts mount: pointer split + provenance in one commit')
+    .requiredOption('-m, --message <message>', 'Commit message')
+    .option('--cap <token>', 'Capability token (from a trigger run prompt) — verified, and the write scope is enforced')
+    .action(withErrorHandler(async (paths: string[], options: { message: string; cap?: string }) => {
+      const { ctx, projectDir, scope } = await requireArtifactsScope();
+      const { captureArtifacts, assertGoalScopeWrite, assertScopeRelPathsNotGoalPrefixed } = await import('../../core/artifacts.js');
+      const { join } = await import('path');
+      // Paths are scope-relative; `mountPaths` are what git actually commits.
+      assertScopeRelPathsNotGoalPrefixed(scope, paths);
+      const mountPaths = paths.map((p) => scope.rel(p));
+      // Guard: `goals/**` is roll-up-only. A project session's scope IS the
+      // tree root, so nothing stops it typing `goals/<other>/x` — this does.
+      assertGoalScopeWrite(scope, mountPaths);
+
+      let allowedWrites: string[] | undefined;
+      let provenance: Record<string, string | undefined> = { tool: 'cli' };
+      if (options.cap) {
+        const { verifyArtifactCap, capAllows, parseArtifactUri, formatArtifactUri } = await import('../../core/artifact-cap.js');
+        const { getOrCreateArtifactCapKeypair } = await import('../../core/artifact-cap-key.js');
+        const cap = verifyArtifactCap(options.cap, { publicKey: getOrCreateArtifactCapKeypair().publicKey });
+        // Cap scopes are artifact:// URIs, which are mount-relative — check the
+        // lifted paths, not the scope-relative ones the caller typed.
+        for (const mountRel of mountPaths) {
+          if (!capAllows(cap, 'write', parseArtifactUri(formatArtifactUri(ctx.project, ctx.workspace, mountRel)))) {
+            const { SpacesError } = await import('../../types/errors.js');
+            throw new SpacesError(`Capability does not permit writing ${mountRel} (scope: ${cap.scope.join(', ')})`, 'USER_ERROR', 1);
+          }
+        }
+        allowedWrites = cap.scope.map((u) => { try { return parseArtifactUri(u).relPath || '**'; } catch { return '(invalid)'; } });
+        provenance = { tool: cap.sub.kind, ...(cap.sub.kind === 'trigger' ? { trigger: cap.sub.id } : {}), ...(cap.sub.kind === 'session' ? { session: cap.sub.id } : {}) };
+      }
+      const result = await captureArtifacts(
+        projectDir,
+        scope.mountDir,
+        mountPaths.map((mountRel) => ({ path: mountRel, sourceFile: join(scope.mountDir, mountRel) })),
+        { message: options.message, provenance, allowedWrites },
+      );
+      logger.success(`Captured ${paths.length} file(s) → ${result.commit.slice(0, 8)}${result.pointers.length ? ` (${result.pointers.length} as LFS pointers)` : ''}`);
+    }));
+
+  artifacts
+    .command('promote <source> <destRelPath>')
+    .description('Promote an uncommitted working file (e.g. a local:// file in the artifacts mount) into the versioned artifacts tree — the TYPING act')
+    .option('-m, --message <message>', 'Commit message')
+    .action(withErrorHandler(async (source: string, destRelPath: string, options: { message?: string }) => {
+      const { projectDir, scope } = await requireArtifactsScope();
+      const { captureArtifacts, resolveLocalScratch, assertGoalScopeWrite, assertScopeRelPathsNotGoalPrefixed } = await import('../../core/artifacts.js');
+      const { parseLocalRef } = await import('../../core/artifact-cap.js');
+      const { resolve } = await import('path');
+      const { existsSync } = await import('fs');
+      // `local://<rel>` sources resolve inside the root this session owns;
+      // anything else is a plain filesystem path.
+      const localRel = parseLocalRef(source);
+      const src = localRel ? resolveLocalScratch(scope.rootDir, localRel).absPath : resolve(source);
+      if (!existsSync(src)) {
+        const { SpacesError } = await import('../../types/errors.js');
+        throw new SpacesError(`Source not found: ${source}`, 'USER_ERROR', 1);
+      }
+      assertScopeRelPathsNotGoalPrefixed(scope, [destRelPath]);
+      const destMountRel = scope.rel(destRelPath);
+      assertGoalScopeWrite(scope, [destMountRel]);
+      const result = await captureArtifacts(projectDir, scope.mountDir, [{ path: destMountRel, sourceFile: src }], {
+        message: options.message ?? `promote: ${destRelPath}`,
+        provenance: { tool: 'promote' },
+      });
+      logger.success(`Promoted → ${destRelPath} (${result.commit.slice(0, 8)}). It now types as a curated artifact (feeds, rails, precedents).`);
+    }));
+
+  artifacts
+    .command('scratch-path <rel>')
+    .description('Print the absolute path a local://<rel> reference resolves to — <rel> inside the artifacts mount (parent dirs are created). Write drafts there, then promote/share them by local://<rel>')
+    .action(withErrorHandler(async (rel: string) => {
+      const { scope } = await requireArtifactsScope();
+      const { resolveLocalScratch } = await import('../../core/artifacts.js');
+      const { parseLocalRef } = await import('../../core/artifact-cap.js');
+      const inner = parseLocalRef(rel) ?? rel; // accept both `local://x` and bare `x`
+      // local:// binds to the root this session owns, not the mount root.
+      logger.log(resolveLocalScratch(scope.rootDir, inner).absPath);
+    }));
+
+  artifacts
+    .command('repair')
+    .description('Convert raw large files in never-pushed commits to LFS pointers (fixes publish-gate refusals)')
+    .action(withErrorHandler(async () => {
+      const ctx = requireSessionContext();
+      const { getProjectDir } = await import('../../core/config.js');
+      const { repairArtifacts, artifactsMountDir, ensureArtifactsRepo } = await import('../../core/artifacts.js');
+      const { join } = await import('path');
+      const projectDir = getProjectDir(ctx.project);
+      await ensureArtifactsRepo(projectDir); // repair relies on the pre-commit converter being current
+      const mount = artifactsMountDir(join(projectDir, 'workspaces', ctx.workspace));
+      const r = await repairArtifacts(projectDir, mount);
+      if (r.repaired === 0) {
+        logger.info('Nothing to repair — no raw large files in unpushed commits.');
+        return;
+      }
+      logger.success(`Repaired: squashed ${r.repaired} commit(s) into ${r.commit?.slice(0, 8)} with pointer conversion.`);
+      logger.info('Sync will push this branch on its next 5-minute tick.');
+    }));
+}
+
+
+
+function registerSpaceJournalCommands(space: Command): void {
+  const journal = space
+    .command('journal')
+    .description('Phase-boundary journal: narrative from the agent, state snapshots from the system');
+
+  journal
+    .command('phase-start')
+    .description('Open a phase: record intent + snapshot goal/workflow/review state')
+    .requiredOption('--phase <name>', 'Workflow phase name')
+    .requiredOption('--intent <text>', 'What this phase intends to do and why')
+    .option('--workflow-ref <ref>', 'Workflow spec reference, e.g. parity.workflow.json#phases[1]')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      const ctx = requireSessionContext();
+      const { journalPhaseStart } = await import('../../commands/space-journal.js');
+      await journalPhaseStart(ctx, { phase: options.phase, intent: options.intent, workflowRef: options.workflowRef, json: options.json });
+    }));
+
+  journal
+    .command('phase-end')
+    .description('Close the open phase: record outcome, compute delta, auto-commit the repo. Blocked while the phase’s gate has owed requirements not accepted (escape: --revert; gate waives are human-only, via the UI)')
+    .option('--outcome <text>', 'What actually happened (required unless --revert)')
+    .option('--decision <text...>', 'Notable decision (repeatable)')
+    .option('--surprise <text...>', 'Something unexpected (repeatable)')
+    .option('--revert', 'Close WITHOUT satisfying the gate, marked reverted — the contract needs rewriting; the workflow returns to an earlier phase (default plan)')
+    .option('--reason <text>', 'Why the phase is being reverted (required with --revert)')
+    .option('--to <phase>', 'Phase the revert returns to (default: plan)')
+    .option('--no-commit', 'Skip the phase-boundary auto-commit')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      const ctx = requireSessionContext();
+      const { journalPhaseEnd } = await import('../../commands/space-journal.js');
+      await journalPhaseEnd(ctx, {
+        outcome: options.outcome,
+        decision: options.decision,
+        surprise: options.surprise,
+        noCommit: options.commit === false,
+        revert: options.revert,
+        reason: options.reason,
+        to: options.to,
+        json: options.json,
+      });
+    }));
+
+  journal
+    .command('status')
+    .description('Show the open phase, if any')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      const ctx = requireSessionContext();
+      const { journalStatus } = await import('../../commands/space-journal.js');
+      journalStatus(ctx, options);
+    }));
+}
+
+function registerSpaceGuideCommands(space: Command): void {
+  const guide = space
+    .command('guide')
+    .description('Review guide: analyzer worksheet + validated narrator submission');
+
+  guide
+    .command('analyze')
+    .description('Build the narrator worksheet (clusters, grounding, staleness) and commit it')
+    .option('--base <ref>', 'Base ref to diff against (default: project base branch)')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      const ctx = requireSessionContext();
+      const { guideAnalyze } = await import('../../commands/space-guide.js');
+      await guideAnalyze(ctx, options);
+    }));
+
+  guide
+    .command('submit')
+    .description('Validate and commit narrated sections (merges cached sections for unchanged clusters)')
+    .requiredOption('--file <path>', 'JSON file: { headSha, sections[], specEvolution? }')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      const ctx = requireSessionContext();
+      const { guideSubmit } = await import('../../commands/space-guide.js');
+      await guideSubmit(ctx, options);
+    }));
+
+  guide
+    .command('show')
+    .description('Show the committed guide')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      const ctx = requireSessionContext();
+      const { guideShow } = await import('../../commands/space-guide.js');
+      guideShow(ctx, options);
+    }));
+}
+
+function registerSpaceGoalCommands(space: Command): void {
+  const goal = space
+    .command('goal')
+    .description('Author goal doc, declare validation contract, and judge requirements');
+
+  goal
+    .command('show')
+    .description('Show a goal document — any goal in the project via --goal (defaults to the active workspace goal)')
+    .option('--goal <goal>', 'Goal id, workspace name, planned workspace name, or title')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      const ctx = requireSessionContext();
+      const { showSpaceGoal } = await import('../../commands/space-goals.js');
+      showSpaceGoal(ctx, options);
+    }));
+
+  goal
+    .command('set')
+    .description('Replace a goal document — any goal in the project via --goal, including PLANNED goals (defaults to the active workspace goal)')
+    .option('--goal <goal>', 'Goal id, workspace name, planned workspace name, or title')
+    .option('--file <path>', 'Read goal markdown from file')
+    .option('--stdin', 'Read goal markdown from stdin')
+    .option('--body <text>', 'Goal markdown body')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      const ctx = requireSessionContext();
+      const { setSpaceGoal } = await import('../../commands/space-goals.js');
+      setSpaceGoal(ctx, options);
+    }));
+
+  goal
+    .command('edit')
+    .description('Edit a goal document with EDITOR — any goal in the project via --goal (defaults to the active workspace goal)')
+    .option('--goal <goal>', 'Goal id, workspace name, planned workspace name, or title')
+    .option('--editor <command>', 'Editor command')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      const ctx = requireSessionContext();
+      const { editSpaceGoal } = await import('../../commands/space-goals.js');
+      editSpaceGoal(ctx, options);
+    }));
+
+  const doc = goal
+    .command('doc')
+    .description('Goal document structure (heading-anchored slices) — any goal via --goal');
+
+  doc
+    .command('slices')
+    .description('List slice ids (slugified headings) parsed from a goal doc — any goal in the project via --goal (defaults to the active workspace goal). These are the ids --slice and workflow phases reference')
+    .option('--goal <goal>', 'Goal id, workspace name, planned workspace name, or title')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      const ctx = requireSessionContext();
+      const { listSpaceGoalDocSlices } = await import('../../commands/space-goals.js');
+      listSpaceGoalDocSlices(ctx, options);
+    }));
+
+  goal
+    .command('status')
+    .description('Show validation readiness for a goal — any goal in the project via --goal (defaults to the active workspace goal)')
+    .option('--goal <goal>', 'Goal id, workspace name, planned workspace name, or title')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      const ctx = requireSessionContext();
+      const { showSpaceGoalStatus } = await import('../../commands/space-goals.js');
+      showSpaceGoalStatus(ctx, options);
+    }));
+
+  const requirement = goal
+    .command('requirement')
+    .description('Declare artifact requirements; each requirement owns its rubric, generation, and judgment');
+
+  requirement
+    .command('add')
+    .description('Declare an artifact requirement on a goal validation contract — any goal in the project via --goal (defaults to the active workspace goal)')
+    .requiredOption('--title <title>', 'Requirement title (e.g. "Screenshot showing the hover state")')
+    .requiredOption('--kind <kind>', 'Artifact kind: screenshot, video, test-output, note, file, url')
+    .requiredOption('--rubric <text>', 'Acceptance criteria: what makes this evidence acceptable')
+    .requiredOption('--gen <kind>', 'Generation: manual | command')
+    .option('--gen-command <command>', 'Command to run when --gen=command')
+    .option('--judge <kind>', 'Judgment: human | llm | command. Defaults to same-run command judgment with --gen command (--expect judges the generation run itself). llm has NO runner yet — it behaves like human: close it with `requirement verdict`')
+    .option('--judge-command <command>', 'Separate judgment command when --judge=command. Omit it with --gen command for same-run judging — do NOT repeat the generation command here')
+    .option('--expect <kind>', 'Command expectation: exit-zero | stdout-contains | stderr-empty | output-matches', 'exit-zero')
+    .option('--expect-needle <text>', 'Required substring when --expect=stdout-contains')
+    .option('--expect-pattern <regex>', 'Required regex when --expect=output-matches')
+    .option('--model-hint <name>', 'Preferred LLM model when --judge=llm')
+    .option('--optional', 'Mark the requirement optional (default: required)')
+    .option('--slice <sliceId>', 'Goal-doc slice this requirement grounds in (see `space goal doc slices`; dangling ids warn, never fail)')
+    .option('--phase <name>', 'Workflow phase that OWES this requirement — its gate blocks phase-end until acceptance (unknown names warn)')
+    .option('--goal <goal>', 'Goal id, workspace name, planned workspace name, or title')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      const ctx = requireSessionContext();
+      const { addSpaceGoalRequirement } = await import('../../commands/space-goals.js');
+      addSpaceGoalRequirement(ctx, options);
+    }));
+
+  requirement
+    .command('update')
+    .description('Update an existing requirement on a goal validation contract — any goal in the project via --goal (defaults to the active workspace goal)')
+    .requiredOption('--requirement <requirement>', 'Requirement id or title')
+    .option('--title <title>', 'New requirement title')
+    .option('--kind <kind>', 'Artifact kind: screenshot, video, test-output, note, file, url')
+    .option('--rubric <text>', 'Acceptance criteria')
+    .option('--gen <kind>', 'Generation: manual | command')
+    .option('--gen-command <command>', 'Command to run when --gen=command')
+    .option('--judge <kind>', 'Judgment: human | llm | command (llm has no runner yet — it behaves like human: close it with `requirement verdict`)')
+    .option('--judge-command <command>', 'Separate judgment command when --judge=command. Omit it on command-generated requirements for same-run judging — do NOT repeat the generation command')
+    .option('--expect <kind>', 'Command expectation: exit-zero | stdout-contains | stderr-empty | output-matches')
+    .option('--expect-needle <text>', 'Required substring when --expect=stdout-contains')
+    .option('--expect-pattern <regex>', 'Required regex when --expect=output-matches')
+    .option('--model-hint <name>', 'Preferred LLM model when --judge=llm')
+    .option('--required', 'Mark the requirement required')
+    .option('--optional', 'Mark the requirement optional')
+    .option('--goal <goal>', 'Goal id, workspace name, planned workspace name, or title')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      const ctx = requireSessionContext();
+      const { updateSpaceGoalRequirement } = await import('../../commands/space-goals.js');
+      updateSpaceGoalRequirement(ctx, options);
+    }));
+
+  requirement
+    .command('remove')
+    .description('Remove an artifact requirement from a goal — any goal in the project via --goal (defaults to the active workspace goal)')
+    .requiredOption('--requirement <requirement>', 'Requirement id or title')
+    .option('--goal <goal>', 'Goal id, workspace name, planned workspace name, or title')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      const ctx = requireSessionContext();
+      const { removeSpaceGoalRequirement } = await import('../../commands/space-goals.js');
+      removeSpaceGoalRequirement(ctx, options);
+    }));
+
+  requirement
+    .command('list')
+    .description('List artifact requirements on a goal — any goal in the project via --goal (defaults to the active workspace goal)')
+    .option('--goal <goal>', 'Goal id, workspace name, planned workspace name, or title')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      const ctx = requireSessionContext();
+      const { listSpaceGoalRequirements } = await import('../../commands/space-goals.js');
+      listSpaceGoalRequirements(ctx, options);
+    }));
+
+  requirement
+    .command('reorder')
+    .description('Move an artifact requirement to a specific position (0-indexed) on any goal in the project via --goal (defaults to the active workspace goal)')
+    .requiredOption('--requirement <requirement>', 'Requirement id or title')
+    .requiredOption('--position <index>', '0-indexed target position', (v) => parseInt(v, 10))
+    .option('--goal <goal>', 'Goal id, workspace name, planned workspace name, or title')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      const ctx = requireSessionContext();
+      const { reorderSpaceGoalRequirement } = await import('../../commands/space-goals.js');
+      reorderSpaceGoalRequirement(ctx, options);
+    }));
+
+  requirement
+    .command('verdict')
+    .description('Record an accept/reject verdict against the rubric on any goal in the project via --goal (defaults to the active workspace goal). For llm/human-judged requirements — in-phase judging; command-judged use `review run`')
+    .requiredOption('--requirement <requirement>', 'Requirement id or title')
+    .option('--accept', 'The evidence satisfies the rubric — status becomes accepted (what phase gates count)')
+    .option('--reject', 'The evidence does not satisfy the rubric — status stays review')
+    .requiredOption('--notes <text>', 'Grounding for the verdict (what was examined, against which rubric line)')
+    .option('--created-by <name>', 'Reviewer identity label')
+    .option('--goal <goal>', 'Goal id, workspace name, planned workspace name, or title')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      const ctx = requireSessionContext();
+      const { verdictSpaceGoalRequirement } = await import('../../commands/space-goals.js');
+      verdictSpaceGoalRequirement(ctx, options);
+    }));
+
+  requirement
+    .command('reopen')
+    .description('Reopen a requirement for re-review (sets status back to review) on any goal in the project via --goal (defaults to the active workspace goal)')
+    .requiredOption('--requirement <requirement>', 'Requirement id or title')
+    .option('--goal <goal>', 'Goal id, workspace name, planned workspace name, or title')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      const ctx = requireSessionContext();
+      const { reopenSpaceGoalRequirement } = await import('../../commands/space-goals.js');
+      reopenSpaceGoalRequirement(ctx, options);
+    }));
+
+  const artifact = goal
+    .command('artifact')
+    .description('Attach or generate artifacts that fulfill a requirement');
+
+  artifact
+    .command('attach')
+    .description('Attach an artifact manually against a declared requirement on any goal in the project via --goal (defaults to the active workspace goal)')
+    .requiredOption('--requirement <requirement>', 'Requirement id or title to fulfill')
+    .option('--name <label>', 'Display label for the attached artifact')
+    .option('--body <text>', 'Inline body (for note evidence)')
+    .option('--file <path>', 'Read body from file')
+    .option('--stdin', 'Read body from stdin')
+    .option('--path <path>', 'Local path to a file/screenshot/video')
+    .option('--url <url>', 'URL reference (for url requirements)')
+    .option('--goal <goal>', 'Goal id, workspace name, planned workspace name, or title')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      const ctx = requireSessionContext();
+      const { attachSpaceGoalEvidence } = await import('../../commands/space-goals.js');
+      attachSpaceGoalEvidence(ctx, options);
+    }));
+
+  artifact
+    .command('run')
+    .description('Run the requirement\u2019s configured generation command to produce evidence \u2014 requirements on any goal in the project via --goal (defaults to the active workspace goal)')
+    .requiredOption('--requirement <requirement>', 'Requirement id or title')
+    .option('--goal <goal>', 'Goal id, workspace name, planned workspace name, or title')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      const ctx = requireSessionContext();
+      const { runSpaceGoalGeneration } = await import('../../commands/space-goals.js');
+      runSpaceGoalGeneration(ctx, options);
+    }));
+
+  const review = goal
+    .command('review')
+    .description('Judge a requirement against its rubric (record a human review, or run a command judgment)');
+
+  review
+    .command('run')
+    .description('Run the requirement\u2019s configured COMMAND judgment (same-run command judgments judge the latest generation run without re-executing it). No LLM runner exists yet: an llm-judged requirement only records an "unavailable" amber review and never accepts \u2014 close it with `space goal requirement verdict --requirement <id> --accept|--reject --notes "\u2026"`')
+    .requiredOption('--requirement <requirement>', 'Requirement id or title')
+    .option('--goal <goal>', 'Goal id, workspace name, planned workspace name, or title')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      const ctx = requireSessionContext();
+      const { runSpaceGoalJudgment } = await import('../../commands/space-goals.js');
+      runSpaceGoalJudgment(ctx, options);
+    }));
+
+  review
+    .command('record')
+    .description('Record a human review decision for a requirement on any goal in the project via --goal (defaults to the active workspace goal)')
+    .requiredOption('--requirement <requirement>', 'Requirement id or title')
+    .requiredOption('--decision <decision>', 'pass | changes | fail')
+    .option('--body <text>', 'Review note')
+    .option('--file <path>', 'Read note from file')
+    .option('--stdin', 'Read note from stdin')
+    .option('--score <n>', 'Judgement score 0-100')
+    .option('--created-by <name>', 'Reviewer identity label')
+    .option('--goal <goal>', 'Goal id, workspace name, planned workspace name, or title')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      const ctx = requireSessionContext();
+      const { recordSpaceGoalHumanReview } = await import('../../commands/space-goals.js');
+      recordSpaceGoalHumanReview(ctx, { ...options, score: options.score !== undefined ? Number(options.score) : undefined });
+    }));
+}
+
+function registerSpaceChainCommands(space: Command): void {
+  const chain = space
+    .command('chain')
+    .description('Manage this space linear goal chain');
+
+  chain
+    .command('show')
+    .description('Show this goal chain')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      const ctx = requireSessionContext();
+      const { showSpaceChain } = await import('../../commands/space-goals.js');
+      showSpaceChain(ctx, options);
+    }));
+
+  chain
+    .command('add')
+    .description('Add a planned goal at an absolute position — --tail (end of chain) or --at <index>')
+    .requiredOption('--title <title>', 'Goal title')
+    .option('--tail', 'Append at the end of the chain')
+    .option('--at <index>', '0-indexed position to insert at', (v) => parseInt(v, 10))
+    .option('--dry-run', 'Print the resulting chain order without writing anything')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      const ctx = requireSessionContext();
+      const { addSpaceChainGoal } = await import('../../commands/space-goals.js');
+      addSpaceChainGoal(ctx, options.title, undefined, { ...options, at: options.at });
+    }));
+
+  chain
+    .command('add-after')
+    .description('Add a planned goal after an anchor goal — any goal via --goal (anchor defaults to the active workspace goal)')
+    .requiredOption('--title <title>', 'Goal title')
+    .option('--goal <goal>', 'Anchor goal: id, workspace name, planned workspace name, or title (defaults to current workspace goal)')
+    .option('--dry-run', 'Print the resulting chain order without writing anything')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      const ctx = requireSessionContext();
+      const { addSpaceChainGoal } = await import('../../commands/space-goals.js');
+      addSpaceChainGoal(ctx, options.title, 'after', options);
+    }));
+
+  chain
+    .command('add-before')
+    .description('Add a planned goal before an anchor goal — any goal via --goal (anchor defaults to the active workspace goal)')
+    .requiredOption('--title <title>', 'Goal title')
+    .option('--goal <goal>', 'Anchor goal: id, workspace name, planned workspace name, or title (defaults to current workspace goal)')
+    .option('--dry-run', 'Print the resulting chain order without writing anything')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      const ctx = requireSessionContext();
+      const { addSpaceChainGoal } = await import('../../commands/space-goals.js');
+      addSpaceChainGoal(ctx, options.title, 'before', options);
+    }));
+
+  chain
+    .command('remove')
+    .alias('rm')
+    .description('Remove a goal from the chain — planned goals are detached AND deleted; workspace-backed goals need --force and are only detached')
+    .argument('<goal>', 'Goal id, workspace name, planned workspace name, or title to remove')
+    .option('--detach-only', 'Detach from the chain but keep the planned doc on disk (orphaned)')
+    .option('--force', 'Required to detach a workspace-backed goal; the worktree and its goal.json are kept')
+    .option('--dry-run', 'Print the resulting chain order without writing anything')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (goalToken, options) => {
+      const ctx = requireSessionContext();
+      const { removeSpaceChainGoal } = await import('../../commands/space-goals.js');
+      removeSpaceChainGoal(ctx, goalToken, options);
+    }));
+
+  chain
+    .command('move-before')
+    .description('Move any goal before another goal in the chain — pass --goal to move a goal other than the active one')
+    .argument('<target>', 'Goal id, workspace name, planned workspace name, or title to move before')
+    .option('--goal <goal>', 'Goal id, workspace name, planned workspace name, or title to move (defaults to current workspace goal)')
+    .option('--dry-run', 'Print the resulting chain order without writing anything')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (targetToken, options) => {
+      const ctx = requireSessionContext();
+      const { moveSpaceChainGoal } = await import('../../commands/space-goals.js');
+      moveSpaceChainGoal(ctx, options.goal ?? ctx.workspace, targetToken, 'before', options);
+    }));
+
+  chain
+    .command('move-after')
+    .description('Move any goal after another goal in the chain — pass --goal to move a goal other than the active one')
+    .argument('<target>', 'Goal id, workspace name, planned workspace name, or title to move after')
+    .option('--goal <goal>', 'Goal id, workspace name, planned workspace name, or title to move (defaults to current workspace goal)')
+    .option('--dry-run', 'Print the resulting chain order without writing anything')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (targetToken, options) => {
+      const ctx = requireSessionContext();
+      const { moveSpaceChainGoal } = await import('../../commands/space-goals.js');
+      moveSpaceChainGoal(ctx, options.goal ?? ctx.workspace, targetToken, 'after', options);
+    }));
+
+  chain
+    .command('create-workspace')
+    .description('Create a workspace for a planned goal')
+    .option('--goal <goal>', 'Goal id, planned workspace name, or title (defaults to current goal)')
+    .option('--name <workspace>', 'Workspace name')
+    .option('--branch <branch>', 'Branch name')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      const ctx = requireSessionContext();
+      const { createSpaceChainWorkspace } = await import('../../commands/space-goals.js');
+      await createSpaceChainWorkspace(ctx, options);
+    }));
+}
+
+function registerSpaceStackCommands(space: Command): void {
+  const stack = space
+    .command('stack')
+    .description('Validate this space git stack');
+
+  stack
+    .command('status')
+    .description('Show adjacent goal workspace ancestry status')
+    .option('--json', 'Output structured JSON')
+    .action(withErrorHandler(async (options) => {
+      const ctx = requireSessionContext();
+      const { showSpaceStackStatus } = await import('../../commands/space-goals.js');
+      showSpaceStackStatus(ctx, options);
+    }));
+}
 
 function registerSpaceNotesCommands(space: Command): void {
   const notes = space
@@ -98,9 +793,9 @@ function registerSpaceNotesCommands(space: Command): void {
     .description('List workspace notes')
     .option('--format <format>', 'Output format: json (default) or text')
     .action(withErrorHandler(async (options) => {
-      requireSessionContext();
+      const ctx = requireSessionContext();
       const { listNotes } = await import('../../commands/notes.js');
-      await listNotes(options);
+      await listNotes({ ...options, project: ctx.project, workspace: ctx.workspace });
     }));
 
   notes
@@ -112,9 +807,9 @@ function registerSpaceNotesCommands(space: Command): void {
     .option('--priority <priority>', 'Todo priority: low, medium, high')
     .option('--json', 'Output structured JSON')
     .action(withErrorHandler(async (options) => {
-      requireSessionContext();
+      const ctx = requireSessionContext();
       const { addNote } = await import('../../commands/notes.js');
-      await addNote(options);
+      await addNote({ ...options, project: ctx.project, workspace: ctx.workspace });
     }));
 
   notes
@@ -129,9 +824,9 @@ function registerSpaceNotesCommands(space: Command): void {
     .option('--undone', 'Mark todo open')
     .option('--json', 'Output structured JSON')
     .action(withErrorHandler(async (options) => {
-      requireSessionContext();
+      const ctx = requireSessionContext();
       const { updateNote } = await import('../../commands/notes.js');
-      await updateNote(options);
+      await updateNote({ ...options, project: ctx.project, workspace: ctx.workspace });
     }));
 
   notes
@@ -140,9 +835,9 @@ function registerSpaceNotesCommands(space: Command): void {
     .requiredOption('--id <id>', 'Note id')
     .option('--json', 'Output structured JSON')
     .action(withErrorHandler(async (options) => {
-      requireSessionContext();
+      const ctx = requireSessionContext();
       const { removeNote } = await import('../../commands/notes.js');
-      await removeNote(options);
+      await removeNote({ ...options, project: ctx.project, workspace: ctx.workspace });
     }));
 
   notes
@@ -151,9 +846,9 @@ function registerSpaceNotesCommands(space: Command): void {
     .requiredOption('--id <id>', 'Note id')
     .option('--json', 'Output structured JSON')
     .action(withErrorHandler(async (options) => {
-      requireSessionContext();
+      const ctx = requireSessionContext();
       const { markNoteDone } = await import('../../commands/notes.js');
-      await markNoteDone(options);
+      await markNoteDone({ ...options, project: ctx.project, workspace: ctx.workspace });
     }));
 
   notes
@@ -162,9 +857,9 @@ function registerSpaceNotesCommands(space: Command): void {
     .requiredOption('--id <id>', 'Note id')
     .option('--json', 'Output structured JSON')
     .action(withErrorHandler(async (options) => {
-      requireSessionContext();
+      const ctx = requireSessionContext();
       const { markNoteUndone } = await import('../../commands/notes.js');
-      await markNoteUndone(options);
+      await markNoteUndone({ ...options, project: ctx.project, workspace: ctx.workspace });
     }));
 }
 
@@ -388,33 +1083,52 @@ function registerSpaceEventsCommands(space: Command): void {
   events
     .command('list')
     .description('List events (NDJSON)')
-    .option('--filter <expr>', 'Filter in key=value format')
+    .option('--filter <expr>', 'Filter in key=value format (repeatable)', collectFilter, [])
     .option('--limit <n>', 'Limit results', (v: string) => Number(v), 100)
+    .option('--process <name>', 'Filter by process name')
+    .option('--level <level>', 'Filter by event level')
+    .option('--event <name>', 'Filter by event name')
+    .option('--event-id <id>', 'Filter by event id')
+    .option('--correlation-id <id>', 'Filter by correlation id')
+    .option('--since <time>', 'Filter since duration (30m, 2h) or ISO timestamp')
+    .option('--until <time>', 'Filter until duration (30m, 2h) or ISO timestamp')
+    .option('--head [n]', 'Show oldest matching events', (v: string | undefined) => v === undefined ? 100 : Number(v))
+    .option('--tail [n]', 'Show newest matching events', (v: string | undefined) => v === undefined ? 100 : Number(v))
+    .option('--order <order>', 'Sort order: asc or desc')
     .action(withErrorHandler(async (options) => {
-      requireSessionContext();
+      const ctx = requireSessionContext();
       const { listEvents } = await import('../../commands/events.js');
-      await listEvents(options);
+      await listEvents({ ...options, ...ctx });
     }));
 
   events
     .command('show')
     .description('Show a single event by eventId')
-    .option('--filter <expr>', 'Filter in key=value format')
+    .option('--filter <expr>', 'Filter in key=value format (repeatable)', collectFilter, [])
+    .option('--event-id <id>', 'Event id')
     .action(withErrorHandler(async (options) => {
-      requireSessionContext();
+      const ctx = requireSessionContext();
       const { showEvent } = await import('../../commands/events.js');
-      await showEvent(options);
+      await showEvent({ ...options, ...ctx });
     }));
 
   events
     .command('tail')
-    .description('Tail recent events (no follow yet)')
-    .option('--filter <expr>', 'Filter in key=value format')
+    .description('Tail recent events')
+    .option('--filter <expr>', 'Filter in key=value format (repeatable)', collectFilter, [])
     .option('--limit <n>', 'Limit results', (v: string) => Number(v), 50)
+    .option('--process <name>', 'Filter by process name')
+    .option('--level <level>', 'Filter by event level')
+    .option('--event <name>', 'Filter by event name')
+    .option('--event-id <id>', 'Filter by event id')
+    .option('--correlation-id <id>', 'Filter by correlation id')
+    .option('--since <time>', 'Filter since duration (30m, 2h) or ISO timestamp')
+    .option('--until <time>', 'Filter until duration (30m, 2h) or ISO timestamp')
+    .option('--follow', 'Continue streaming new events')
     .action(withErrorHandler(async (options) => {
-      requireSessionContext();
+      const ctx = requireSessionContext();
       const { tailEvents } = await import('../../commands/events.js');
-      await tailEvents(options);
+      await tailEvents({ ...options, ...ctx });
     }));
 }
 

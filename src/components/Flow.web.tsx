@@ -220,6 +220,9 @@ function renderModal(state: FlowState, flow: UseFlowReturn, copyCurrentMessage: 
       return (
         <Modal title={state.title} kicker="Select" width="lg">
           <div className="gs-panel-block">
+            {state.message && (
+              <p className="mb-3 whitespace-pre-wrap text-sm text-[var(--gs-text-muted)]">{state.message}</p>
+            )}
             {state.searchable && (
               <input
                 type="text"

@@ -13,6 +13,7 @@ describe('buildWorkspaceSessionEnv', () => {
       GSSH_SESSION_MODE: 'workspace',
       GSSH_SPACE_PROJECT: 'acme',
       GSSH_SPACE_WORKSPACE: 'feature-1',
+      GITSPACE_WORKSPACE_ROOT: process.env.GITSPACE_WORKSPACE_ROOT || `${process.env.HOME}/gitspace`,
     });
   });
 });
@@ -62,6 +63,7 @@ describe('buildWorkspaceScopedExecCommand', () => {
         'GSSH_SESSION_MODE=workspace',
         'GSSH_SPACE_PROJECT=acme',
         'GSSH_SPACE_WORKSPACE=feature-1',
+        `GITSPACE_WORKSPACE_ROOT=${process.env.GITSPACE_WORKSPACE_ROOT || `${process.env.HOME}/gitspace`}`,
         'bun',
         '/tmp/dev repo/src/index.ts',
         'space',

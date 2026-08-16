@@ -30,6 +30,11 @@ function requireProjectAndWorkspace(command: Command): Command {
     .requiredOption('--workspace <name>', 'Workspace name (required)');
 }
 
+function collectFilter(value: string, previous: string[] = []): string[] {
+  return [...previous, value];
+}
+
+
 // ============================================================================
 // Registration
 // ============================================================================
@@ -67,6 +72,7 @@ export function registerWorkspaceCommands(parent: Command): void {
     .option('--branch <name>', 'Specify different branch name from workspace name')
     .option('--from <branch>', 'Create from specific branch instead of base')
     .option('--status <phase>', 'Kanban phase: plan, code, review, ship (default: code)')
+    .option('--issue <number>', 'Import a GitHub issue: name the workspace after it and seed its goal')
     .option('--no-setup', 'Skip setup commands')
     .action(withErrorHandler(async (workspaceName, options) => {
       const ctx = useExplicitContext(options);
@@ -80,12 +86,17 @@ export function registerWorkspaceCommands(parent: Command): void {
         );
       }
       const status = phase as typeof validPhases[number] | undefined;
+      const issueNumber = options.issue !== undefined ? Number(options.issue) : undefined;
+      if (issueNumber !== undefined && (!Number.isInteger(issueNumber) || issueNumber <= 0)) {
+        throw new SpacesError(`Invalid --issue: ${options.issue}. Must be a positive issue number.`, 'USER_ERROR', 1);
+      }
       const { addWorkspace } = await import('../../commands/add.js');
       await addWorkspace(workspaceName, {
         project: ctx.project,
         branchName: options.branch,
         fromBranch: options.from,
         status,
+        githubIssueNumber: issueNumber,
         // New CLI: never open shell (no implicit session attach)
         noShell: true,
         noSetup: options.setup === false,
@@ -519,8 +530,18 @@ function registerWorkspaceEventsCommands(workspace: Command): void {
       .command('list')
       .description('List events (NDJSON)')
   )
-    .option('--filter <expr>', 'Filter in key=value format')
+    .option('--filter <expr>', 'Filter in key=value format (repeatable)', collectFilter, [])
     .option('--limit <n>', 'Limit results', (v: string) => Number(v), 100)
+    .option('--process <name>', 'Filter by process name')
+    .option('--level <level>', 'Filter by event level')
+    .option('--event <name>', 'Filter by event name')
+    .option('--event-id <id>', 'Filter by event id')
+    .option('--correlation-id <id>', 'Filter by correlation id')
+    .option('--since <time>', 'Filter since duration (30m, 2h) or ISO timestamp')
+    .option('--until <time>', 'Filter until duration (30m, 2h) or ISO timestamp')
+    .option('--head [n]', 'Show oldest matching events', (v: string | undefined) => v === undefined ? 100 : Number(v))
+    .option('--tail [n]', 'Show newest matching events', (v: string | undefined) => v === undefined ? 100 : Number(v))
+    .option('--order <order>', 'Sort order: asc or desc')
     .action(withErrorHandler(async (options) => {
       useExplicitContext(options);
       const { listEvents } = await import('../../commands/events.js');
@@ -533,7 +554,8 @@ function registerWorkspaceEventsCommands(workspace: Command): void {
       .command('show')
       .description('Show a single event by eventId')
   )
-    .option('--filter <expr>', 'Filter in key=value format')
+    .option('--filter <expr>', 'Filter in key=value format (repeatable)', collectFilter, [])
+    .option('--event-id <id>', 'Event id')
     .action(withErrorHandler(async (options) => {
       useExplicitContext(options);
       const { showEvent } = await import('../../commands/events.js');
@@ -544,10 +566,18 @@ function registerWorkspaceEventsCommands(workspace: Command): void {
   requireProjectAndWorkspace(
     events
       .command('tail')
-      .description('Tail recent events (no follow yet)')
+      .description('Tail recent events')
   )
-    .option('--filter <expr>', 'Filter in key=value format')
+    .option('--filter <expr>', 'Filter in key=value format (repeatable)', collectFilter, [])
     .option('--limit <n>', 'Limit results', (v: string) => Number(v), 50)
+    .option('--process <name>', 'Filter by process name')
+    .option('--level <level>', 'Filter by event level')
+    .option('--event <name>', 'Filter by event name')
+    .option('--event-id <id>', 'Filter by event id')
+    .option('--correlation-id <id>', 'Filter by correlation id')
+    .option('--since <time>', 'Filter since duration (30m, 2h) or ISO timestamp')
+    .option('--until <time>', 'Filter until duration (30m, 2h) or ISO timestamp')
+    .option('--follow', 'Continue streaming new events')
     .action(withErrorHandler(async (options) => {
       useExplicitContext(options);
       const { tailEvents } = await import('../../commands/events.js');
@@ -571,6 +601,7 @@ function registerWorkspaceBundleCommands(workspace: Command): void {
       .description('Re-run bundle onboarding (keeps previous values as defaults)')
   )
     .option('--force', 'Force refresh even if no changes detected')
+    .option('--no-base-fallback', 'Only refresh a workspace-local .gitspace/bundle.json')
     .action(withErrorHandler(async (options) => {
       const ctx = useExplicitContext(options);
       const { bundleRefresh } = await import('../../commands/bundle.js');
@@ -581,6 +612,7 @@ function registerWorkspaceBundleCommands(workspace: Command): void {
         project: ctx.project,
         workspace: ctx.workspace,
         force: options.force,
+        noBaseFallback: options.baseFallback === false,
       });
     }));
 

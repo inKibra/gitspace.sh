@@ -471,8 +471,15 @@ describe("isValidBase64", () => {
     expect(isValidBase64("has\nnewline")).toBe(false);
   });
 
-  test("rejects very long strings", () => {
-    const longData = "x".repeat(2 * 1024 * 1024);
-    expect(isValidBase64(longData)).toBe(false);
+  test("rejects strings over MAX_MESSAGE_SIZE (16MB)", () => {
+    const overCap = "x".repeat(16 * 1024 * 1024 + 4);
+    expect(isValidBase64(overCap)).toBe(false);
+  });
+
+  test("accepts large frames under the cap (multi-MB machine snapshots)", () => {
+    // Regression: an 18-workspace snapshot is a ~1.65MB data frame; the old
+    // 1MB cap silently dropped it and the browser hung on "Loading worktrees".
+    const bigSnapshot = "A".repeat(2 * 1024 * 1024);
+    expect(isValidBase64(bigSnapshot)).toBe(true);
   });
 });

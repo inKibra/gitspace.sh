@@ -1,3 +1,5 @@
+import type { Block } from '../blocks/index.js';
+
 export type AgentBackendId = string;
 
 export interface AgentWorkspaceTarget {
@@ -66,16 +68,6 @@ export type AgentEvent =
       permissionId: string | null;
     }
   | {
-      type: 'question_added';
-      sessionId: string;
-      question: import('./agent-runtime-types.js').PendingQuestion;
-    }
-  | {
-      type: 'question_removed';
-      sessionId: string;
-      questionId: string;
-    }
-  | {
       type: 'status';
       sessionId: string;
       payload: unknown;
@@ -86,9 +78,32 @@ export type AgentEvent =
       queued: { steering: readonly string[]; followUp: readonly string[] };
     }
   | {
+      /** Live descendant count from the worker's AgentRegistry. A session whose
+       *  children are still working is NOT idle even though its own turn ended,
+       *  and the daemon cannot see the registry — it is process-global inside the
+       *  worker — so the worker has to report it. Pushed on registry change, not
+       *  polled. */
+      type: 'subagents';
+      sessionId: string;
+      count: number;
+    }
+  | {
       type: 'error';
       sessionId: string;
       error: string;
+    }
+  | {
+      type: 'transcript_live';
+      sessionId: string;
+      blocks: Block[];
+      committed: boolean;
+    }
+  | {
+      /** Idle recap (Pi's `recap`): transient orientation shown at the tail of
+       *  the transcript. `text: null` withdraws it. Never persisted. */
+      type: 'recap';
+      sessionId: string;
+      text: string | null;
     };
 
 export interface AgentSessionHandle {

@@ -1,5 +1,6 @@
 import type { AppClientContext } from './context.js';
 import { agentSessionFailure, agentSessionSuccess, describeAppClientError, type AgentSessionCommandResult } from './errors.js';
+import type { PortConflictInfo } from '../../lib/processes/port-conflicts.js';
 import { resolveWorkspaceRef } from './refs.js';
 
 export interface ProcessActionValue {
@@ -11,6 +12,7 @@ export interface ProcessActionValue {
 export interface AppProcessesClient {
   start: (workspaceId: string, processName: string, instance?: number) => Promise<AgentSessionCommandResult<ProcessActionValue>>;
   stop: (workspaceId: string, processName: string) => Promise<AgentSessionCommandResult<ProcessActionValue>>;
+  resolveConflict?: (workspaceId: string, conflict: PortConflictInfo) => Promise<void>;
 }
 
 export function createAppProcessesClient(context: AppClientContext): AppProcessesClient {
@@ -90,6 +92,19 @@ export function createAppProcessesClient(context: AppClientContext): AppProcesse
           cause: error,
         });
       }
+    },
+    resolveConflict: async (workspaceId, conflict) => {
+      const workspaceResult = resolveWorkspaceRef(context, workspaceId);
+      if (!workspaceResult.ok) {
+        throw new Error(workspaceResult.error.message);
+      }
+
+      const backend = context.multi.getBackend(workspaceResult.value.backendKey);
+      if (!backend?.resolvePortConflict) {
+        throw new Error('Port conflict resolution is unavailable');
+      }
+
+      await backend.resolvePortConflict(conflict);
     },
   };
 }

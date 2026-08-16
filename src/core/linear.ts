@@ -75,9 +75,12 @@ async function fetchWithRetry<T>(
 			let shouldRetry = false
 			let statusCode: number | undefined
 
+			// LinearError exposes `status` directly (@linear/sdk: `status?: number`).
+			// This previously read `error.response?.status` behind a @ts-ignore —
+			// LinearError has no `response` property at all, so statusCode was always
+			// undefined and the 429/5xx retry below could never fire.
 			if (error instanceof LinearError) {
-				// @ts-ignore - response may or may not have status
-				statusCode = error.response?.status
+				statusCode = error.status
 			}
 
 			if (statusCode === 429 || (statusCode && statusCode >= 500)) {

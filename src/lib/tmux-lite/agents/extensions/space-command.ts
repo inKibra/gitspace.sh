@@ -1,33 +1,10 @@
 import type { ExtensionAPI } from '@oh-my-pi/pi-coding-agent';
 import { parseCommandArgs } from '@oh-my-pi/pi-coding-agent/utils/command-args';
 import type { HookCommandContext } from '@oh-my-pi/pi-coding-agent/extensibility/hooks/types';
-import type { AutocompleteItem } from '@oh-my-pi/pi-tui';
 import { getWorkspaceRoot } from '../../../../core/paths.js';
 import { buildWorkspaceScopedExecCommand } from '../../../../session/workspace-shell-hooks.js';
 import { detectWorkspaceContextFromCwd } from '../../../../utils/workspace-id.js';
-
-const SPACE_TOP_LEVEL_SUBCOMMANDS = ['context', 'review', 'notes', 'service', 'hosting', 'events', 'bundle'];
-const SPACE_REVIEW_SUBCOMMANDS = ['list', 'import', 'push', 'hunks', 'add-hunk', 'add-file', 'add-line'];
-const SPACE_NOTES_SUBCOMMANDS = ['list', 'add', 'update', 'remove', 'done', 'undone'];
-
-export function getSpaceCommandArgumentCompletions(argumentPrefix: string): AutocompleteItem[] | null {
-  const hasTrailingWhitespace = /\s$/.test(argumentPrefix);
-  const rawParts = argumentPrefix.trim().length > 0
-    ? argumentPrefix.trim().split(/\s+/)
-    : [];
-  const completedParts = hasTrailingWhitespace ? rawParts : rawParts.slice(0, -1);
-  const activePrefix = hasTrailingWhitespace ? '' : (rawParts.at(-1) ?? '');
-  const commandContext = completedParts[0] ?? rawParts[0] ?? '';
-  const candidates = commandContext === 'review'
-    ? SPACE_REVIEW_SUBCOMMANDS
-    : commandContext === 'notes'
-      ? SPACE_NOTES_SUBCOMMANDS
-      : SPACE_TOP_LEVEL_SUBCOMMANDS;
-  const filtered = candidates
-    .filter((candidate) => candidate.startsWith(activePrefix))
-    .map((candidate) => ({ label: candidate, value: `${candidate} ` } satisfies AutocompleteItem));
-  return filtered.length > 0 ? filtered : null;
-}
+import { getSpaceCommandArgumentCompletions } from './space-command-autocomplete.js';
 
 function formatSpaceCommandResult(args: string[], result: { stdout: string; stderr: string; code: number }): string {
   const commandLabel = args.length > 0 ? `space ${args.join(' ')}` : 'space';
@@ -79,13 +56,21 @@ export async function executeSpaceCommand(
   return formatSpaceCommandResult(args, result);
 }
 
+export { getSpaceCommandArgumentCompletions };
+
 export default function gitSpaceSpaceCommandExtension(pi: ExtensionAPI) {
   pi.registerCommand('space', {
     description: 'Run workspace-scoped GitSpace commands like `space review list` in the current workspace',
     getArgumentCompletions: getSpaceCommandArgumentCompletions,
     handler: async (argsText, ctx) => {
-      const output = await executeSpaceCommand(pi, ctx, parseCommandArgs(argsText));
-      pi.sendUserMessage(output);
+      const args = parseCommandArgs(argsText);
+      const output = await executeSpaceCommand(pi, ctx, args);
+      pi.sendMessage({
+        customType: 'space-command',
+        content: output,
+        display: true,
+        attribution: 'agent',
+      });
     },
   });
 }

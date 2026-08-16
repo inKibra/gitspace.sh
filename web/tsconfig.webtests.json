@@ -1,0 +1,18 @@
+{
+  // Web-side tests (`src/**/*.web.test.ts(x)`) are excluded from the ROOT
+  // tsconfig because they need DOM libs, and the app project only includes
+  // `main.tsx` — so they landed in no program at all and were never
+  // type-checked, even though `bun run test` executes them.
+  //
+  // Same compiler settings and module paths as the app so the tests see exactly
+  // what the code they exercise sees.
+  "extends": "./tsconfig.app.json",
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.webtests.tsbuildinfo",
+    "types": ["vite/client", "node", "bun"],
+    // Tests legitimately declare fixtures they only partially use.
+    "noUnusedLocals": false,
+    "noUnusedParameters": false
+  },
+  "include": ["../src/**/*.web.test.ts", "../src/**/*.web.test.tsx"]
+}

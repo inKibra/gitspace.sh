@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, mock } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { executeSpaceCommand, getSpaceCommandArgumentCompletions } from '../extensions/space-command.js';
+import gitSpaceSpaceCommandExtension, { executeSpaceCommand, getSpaceCommandArgumentCompletions } from '../extensions/space-command.js';
 
 let tempHomeDir: string | null = null;
 const originalHome = process.env.HOME;
@@ -20,8 +20,21 @@ afterEach(() => {
 });
 
 describe('getSpaceCommandArgumentCompletions', () => {
-  it('suggests renamed review list subcommand', () => {
+  it('suggests review subcommands', () => {
     expect(getSpaceCommandArgumentCompletions('review l')?.map((item) => item.label)).toEqual(['list']);
+  });
+
+  it('suggests command-aware options for events tail', () => {
+    expect(getSpaceCommandArgumentCompletions('events tail --e')?.map((item) => item.label)).toEqual(['--event', '--event-id']);
+  });
+
+  it('suggests bundle edit flags after the leaf command', () => {
+    expect(getSpaceCommandArgumentCompletions('bundle edit ')?.map((item) => item.label)).toEqual([
+      '--input',
+      '--secret',
+      '--secret-unset',
+      '--confirm',
+    ]);
   });
 });
 
@@ -48,6 +61,7 @@ describe('executeSpaceCommand', () => {
         'GSSH_SESSION_MODE=workspace',
         'GSSH_SPACE_PROJECT=demo',
         'GSSH_SPACE_WORKSPACE=ws-1',
+        `GITSPACE_WORKSPACE_ROOT=${join(tempHomeDir, 'gitspace')}`,
         'bun',
         '/tmp/dev repo/src/index.ts',
         'space',
@@ -69,5 +83,48 @@ describe('executeSpaceCommand', () => {
       executeSpaceCommand({ exec }, { cwd: '/tmp/anywhere' }, ['review', 'list', '--project', 'other'])
     ).rejects.toThrow('/space always targets the current workspace');
     expect(exec).not.toHaveBeenCalled();
+  });
+});
+
+describe('gitSpaceSpaceCommandExtension', () => {
+  it('renders command output as a transcript message instead of editor text', async () => {
+    tempHomeDir = mkdtempSync(join(tmpdir(), 'gitspace-space-command-extension-'));
+    process.env.HOME = tempHomeDir;
+
+    const workspacePath = join(tempHomeDir, 'gitspace', 'demo', 'workspaces', 'ws-1');
+    mkdirSync(workspacePath, { recursive: true });
+
+    type TranscriptMessage = {
+      customType: string;
+      content: string;
+      display: boolean;
+      attribution: string;
+    };
+    
+    const sendMessage = mock((_message: TranscriptMessage) => {});
+    const setEditorText = mock(() => {});
+    const commandHandlers = new Map<string, (argsText: string, ctx: any) => Promise<void>>();
+    const pi = {
+      registerCommand: mock((name: string, options: { handler: (argsText: string, ctx: any) => Promise<void> }) => {
+        commandHandlers.set(name, options.handler);
+      }),
+      exec: mock(async () => ({ stdout: 'review rows', stderr: '', code: 0, killed: false })),
+      sendMessage,
+    };
+
+    gitSpaceSpaceCommandExtension(pi as any);
+    await commandHandlers.get('space')?.('review list', {
+      cwd: workspacePath,
+      ui: { setEditorText },
+    });
+
+    expect(setEditorText).not.toHaveBeenCalled();
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(sendMessage.mock.calls[0][0]).toEqual({
+      customType: 'space-command',
+      content: 'Output from `space review list` in the current workspace:\n\nreview rows',
+      display: true,
+      attribution: 'agent',
+    });
   });
 });

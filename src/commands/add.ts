@@ -10,11 +10,13 @@ import {
   createProject,
   setCurrentProject,
   getProjectBaseDir,
+  getProjectDir,
   getProjectWorkspacesDir,
   getAllProjectNames,
   projectExists,
 } from '../core/config.js';
 import { setWorkspaceStatus } from '../core/workspace-metadata.js';
+import { bindPlannedGoalForWorkspace } from '../core/goal-chain.js';
 import { checkCommandExists, checkGitHubAuth, ensureDependencies } from '../utils/deps.js';
 import { selectItem, promptConfirm, promptInput } from '../utils/prompts.js';
 import { logger } from '../utils/logger.js';
@@ -248,6 +250,34 @@ export async function addProject(options: {
     cleanupBundleDir(loadedBundle.bundleDir);
   }
 
+  // Artifacts FS: birth the project's artifacts repo and mount main at the
+  // base clone (docs/ARTIFACTS-FS.md). Best-effort — never fail project add.
+  // A committed .gitspace/artifacts.json pointer is ADOPTED here — this is
+  // the teammate path: clone a repo that shares artifacts, get wired up.
+  // (Previously only the web/session project-create path adopted; CLI
+  // teammates silently got a local-only repo.)
+  try {
+    const artifacts = await import('../core/artifacts.js');
+    if (existsSync(baseDir)) {
+      const pointer = artifacts.readArtifactsPointerConfig(baseDir);
+      if (pointer?.remote) {
+        await artifacts.setArtifactsRemote(getProjectDir(projectName), pointer.remote);
+        try {
+          await artifacts.syncArtifacts(getProjectDir(projectName));
+          logger.success(`Artifacts sharing adopted from the repo: ${pointer.remote}`);
+        } catch (error) {
+          logger.warning(`Artifacts remote configured (${pointer.remote}) but the first sync failed: ${error instanceof Error ? error.message.split('\n')[0] : error}`);
+          logger.info('Check access (GitHub: `gh auth login`), then run: gssh artifacts sync');
+        }
+      } else {
+        logger.info('Artifacts: local repo only (no sharing pointer in the code repo).');
+      }
+      await artifacts.ensureArtifactsMount(getProjectDir(projectName), baseDir, 'main');
+    }
+  } catch (error) {
+    logger.warning(`Artifacts repo skipped: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
   logger.success(`Project '${projectName}' created`);
 
   // Set as current project
@@ -260,7 +290,7 @@ export async function addProject(options: {
  */
 export async function addWorkspace(
   workspaceNameArg: string | undefined,
-  options: (Partial<CreateWorkspaceOptions> & { project: string })
+  options: (Partial<CreateWorkspaceOptions> & { project: string; githubIssueNumber?: number })
 ): Promise<void> {
   const currentProject = options.project;
   if (!currentProject) {
@@ -276,8 +306,21 @@ export async function addWorkspace(
 
   let existsRemotely = false;
   let selectedLinearIssue: Awaited<ReturnType<typeof fetchUnstartedIssues>>[0] | undefined;
+  // Loop 2 (docs/REPORT-A-PROBLEM.md): a GitHub issue imported as a workspace.
+  let selectedGithubIssue: import('../core/github-issues.js').GithubIssue | undefined;
 
-  if (workspaceNameArg) {
+  // Non-interactive import: `gssh workspace add --issue <n>` derives the name
+  // + branch from the issue and seeds its goal after the worktree is made.
+  if (options.githubIssueNumber !== undefined && !workspaceNameArg) {
+    const { resolveRepoSlug, fetchIssue } = await import('../core/github-issues.js');
+    const slug = await resolveRepoSlug(baseDir);
+    if (!slug) {
+      throw new SpacesError(`Could not resolve a GitHub repo for project '${currentProject}' (gh auth / remote?).`, 'USER_ERROR', 1);
+    }
+    selectedGithubIssue = await fetchIssue(slug, options.githubIssueNumber, baseDir);
+    workspaceName = generateWorkspaceName(String(selectedGithubIssue.number), selectedGithubIssue.title);
+    branchName = options.branchName || workspaceName;
+  } else if (workspaceNameArg) {
     // Workspace name provided as argument - sanitize it (allows branch-like names like fix/bla-bla-blah)
     const sanitizedName = sanitizeForFileSystem(workspaceNameArg);
     if (!sanitizedName) {
@@ -308,6 +351,14 @@ export async function addWorkspace(
     const linearConfig = await getLinearConfig(currentProject);
     if (linearConfig.apiKey && linearConfig.teamKeys.length > 0) {
       sourceOptions.splice(1, 0, 'Create from Linear issue');
+    }
+
+    // Add GitHub-issue option when the project resolves to a GitHub repo
+    // (Loop 2, docs/REPORT-A-PROBLEM.md — imports an issue as a workspace).
+    const { resolveRepoSlug: resolveGhSlug } = await import('../core/github-issues.js');
+    const ghSlug = await resolveGhSlug(baseDir);
+    if (ghSlug) {
+      sourceOptions.splice(1, 0, 'Create from GitHub issue');
     }
 
     const source = await selectItem(sourceOptions, 'How would you like to create the workspace?');
@@ -389,6 +440,26 @@ export async function addWorkspace(
       // Generate workspace name
       workspaceName = generateWorkspaceName(selectedLinearIssue.identifier, selectedLinearIssue.title);
       branchName = options.branchName || workspaceName;
+    } else if (source === 'Create from GitHub issue') {
+      logger.info('Fetching open GitHub issues...');
+      const { listIssues } = await import('../core/github-issues.js');
+      const issues = await listIssues(ghSlug!, { limit: 30 }, baseDir);
+      if (issues.length === 0) {
+        throw new SpacesError('No open GitHub issues found', 'USER_ERROR', 1);
+      }
+      const issueOptions = issues.map((i) => `#${i.number} - ${i.title}`);
+      const picked = await selectItem(issueOptions, 'Select an issue:');
+      if (!picked) {
+        logger.info('Cancelled');
+        return;
+      }
+      const num = Number(picked.slice(1).split(' - ')[0]);
+      selectedGithubIssue = issues.find((i) => i.number === num);
+      if (!selectedGithubIssue) {
+        throw new SpacesError(`Failed to find issue #${num}`, 'SYSTEM_ERROR', 2);
+      }
+      workspaceName = generateWorkspaceName(String(selectedGithubIssue.number), selectedGithubIssue.title);
+      branchName = options.branchName || workspaceName;
     } else {
       // Manual entry - accepts branch-like names (e.g., fix/bla-bla-blah) and sanitizes them
       const name = await promptInput('Enter workspace name (branch-like names will be sanitized):', {
@@ -454,14 +525,60 @@ export async function addWorkspace(
     existsRemotely
   );
 
-  const phase = options.status ?? 'code';
+  // New workspaces start in PLAN (author the spec first) unless an explicit
+  // --status was given. A bound planned goal (below) may set its own phase.
+  const phase = options.status ?? 'plan';
   setWorkspaceStatus(currentProject, workspaceName, phase);
-  logger.success(`Created worktree from ${baseBranch} (phase: ${phase})`);
+  let boundGoal: ReturnType<typeof bindPlannedGoalForWorkspace> = null;
+  try {
+    boundGoal = bindPlannedGoalForWorkspace(currentProject, workspaceName);
+  } catch (error) {
+    logger.warning(`Workspace created, but failed to bind planned goal: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (boundGoal) {
+    logger.success(`Created worktree from ${baseBranch} and bound goal '${boundGoal.title}' (phase: ${boundGoal.phase})`);
+  } else {
+    logger.success(`Created worktree from ${baseBranch} (phase: ${phase})`);
+  }
 
   // Register workspace bundle requirements in project-level metadata.
   const bundleSync = syncBundleWorkspaceState(currentProject, workspacePath);
   if (bundleSync.parseError) {
     logger.warning(`Bundle parse error: ${bundleSync.parseError}`);
+  }
+
+  // Artifacts FS: branch-per-workspace mount at .gitspace/artifacts
+  // (docs/ARTIFACTS-FS.md). Best-effort — never fail workspace creation.
+  try {
+    const { ensureArtifactsMount } = await import('../core/artifacts.js');
+    await ensureArtifactsMount(getProjectDir(currentProject), workspacePath, workspaceName);
+  } catch (error) {
+    logger.warning(`Artifacts mount skipped: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  // If created from a GitHub issue, seed a real goal (not just a .prompt file):
+  // the goal doc opens with the issue body, and the github sourceRef links it
+  // back to the issue so the eventual guide/PR can reference & close it.
+  if (selectedGithubIssue) {
+    try {
+      const { ensureWorkspaceGoalChain, updateGoalRecord } = await import('../core/goal-chain.js');
+      const { goal } = ensureWorkspaceGoalChain(currentProject, workspaceName);
+      const body = selectedGithubIssue.body?.trim()
+        ? selectedGithubIssue.body
+        : '_(issue had no description)_';
+      updateGoalRecord(currentProject, goal.id, {
+        title: selectedGithubIssue.title,
+        doc: {
+          bodyMarkdown: `# ${selectedGithubIssue.title}\n\n${body}\n\n---\n_Imported from ${selectedGithubIssue.url}_`,
+          updatedAt: new Date().toISOString(),
+          updatedBy: 'github-import',
+        },
+        sourceRefs: [{ type: 'github', id: String(selectedGithubIssue.number), url: selectedGithubIssue.url, title: selectedGithubIssue.title }],
+      });
+      logger.success(`Seeded goal from GitHub issue #${selectedGithubIssue.number}`);
+    } catch (error) {
+      logger.warning(`Workspace created, but failed to seed goal from issue: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   // If workspace was created from a Linear issue, save issue details as markdown

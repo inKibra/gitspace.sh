@@ -3,11 +3,21 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { removeTmuxLiteSandbox } from '../protocol.js';
 
 setDefaultTimeout(150_000);
 
 let root = '';
 let workspacePath = '';
+// Single source of truth for the sandbox key: the subprocess prelude applies it
+// and afterEach removes it. Deriving it twice is how the /tmp leak started.
+let sandboxName = '';
+// The OMP agent dir this run is pinned to. Set POSITIVELY in the subprocess env
+// (not merely unset): an inherited absolute PI_CODING_AGENT_DIR outranks HOME,
+// and clearing it only falls back to ~/.omp/agent — also real host state. Either
+// way the sandbox is bypassed and the mock provider is never seen, so the run
+// reads (and can write) the developer's live agent dir.
+let piAgentDir = '';
 
 function writeWorkspaceProjectConfig(projectPath: string): void {
   writeFileSync(
@@ -18,9 +28,10 @@ function writeWorkspaceProjectConfig(projectPath: string): void {
 
 function buildSubprocessPrelude(): string {
   return `
-    import { writeFileSync } from 'node:fs';
+    import { mkdirSync, writeFileSync } from 'node:fs';
+    import { join } from 'node:path';
     import {
-      attachAgentSession,
+      openAgentSession,
       createAgentSession,
       getAgentState,
       getMachineSnapshot,
@@ -37,8 +48,66 @@ function buildSubprocessPrelude(): string {
       projectName: 'demo',
     };
 
-    process.env.HOME = ${JSON.stringify(root)};
-    applyTmuxLiteSandboxEnvironment(${JSON.stringify(`pi-busy-${basename(root)}`)});
+    // HOME and PI_CODING_AGENT_DIR arrive via the subprocess env, not an
+    // assignment here: OMP captures the agent dir when pi-utils is imported,
+    // and ESM imports above already ran by the time this line would execute.
+    applyTmuxLiteSandboxEnvironment(${JSON.stringify(sandboxName)});
+
+    // Hermetic model backend: the sandbox HOME has no provider credentials, so
+    // without one the SDK selects no model and prompt() fails before
+    // 'agent_start' ever fires — the busy status would never be set. Serve a
+    // local OpenAI-compatible streaming endpoint and register it as a custom
+    // provider via models.json so a real turn runs (agent_start → busy)
+    // without network access or credentials. The response streams slowly
+    // (~15s) so the turn stays running while the test polls for busy.
+    const mockEncoder = new TextEncoder();
+    const mockSse = (payload: unknown) => mockEncoder.encode('data: ' + JSON.stringify(payload) + '\\n\\n');
+    const mockModelServer = Bun.serve({
+      hostname: '127.0.0.1',
+      port: 0,
+      idleTimeout: 120,
+      async fetch(req) {
+        if (!new URL(req.url).pathname.endsWith('/chat/completions')) {
+          return new Response('not found', { status: 404 });
+        }
+        const stream = new ReadableStream<Uint8Array>({
+          async start(controller) {
+            try {
+              const base = { id: 'chatcmpl-mock', object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model: 'mock-model' };
+              controller.enqueue(mockSse({ ...base, choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }] }));
+              for (let i = 1; i <= 60; i++) {
+                controller.enqueue(mockSse({ ...base, choices: [{ index: 0, delta: { content: i + '. streaming line\\n' }, finish_reason: null }] }));
+                await Bun.sleep(250);
+              }
+              controller.enqueue(mockSse({ ...base, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 60, total_tokens: 70 } }));
+              controller.enqueue(mockEncoder.encode('data: [DONE]\\n\\n'));
+              controller.close();
+            } catch {
+              // Client disconnected mid-stream (daemon killed) — expected.
+            }
+          },
+        });
+        return new Response(stream, { headers: { 'content-type': 'text/event-stream' } });
+      },
+    });
+    const mockModelsConfig = JSON.stringify({
+      providers: {
+        mockai: {
+          baseUrl: 'http://127.0.0.1:' + mockModelServer.port + '/v1',
+          api: 'openai-completions',
+          apiKey: 'mock-key',
+          models: [{ id: 'mock-model', name: 'Mock Model', contextWindow: 200000, maxTokens: 32768, supportsTools: true, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }],
+        },
+      },
+    }, null, 2);
+    // models.json goes in the agent dir this run is pinned to via
+    // PI_CODING_AGENT_DIR (set in the subprocess env), so every daemon and
+    // worker process resolves the mock provider from one known location.
+    mkdirSync(${JSON.stringify(piAgentDir)}, { recursive: true });
+    writeFileSync(join(${JSON.stringify(piAgentDir)}, 'models.json'), mockModelsConfig);
+    function stopMockModelServer(): void {
+      try { mockModelServer.stop(true); } catch {}
+    }
 
     const busyPrompt = 'Write a detailed numbered list from 1 to 120 about terminal state propagation. One sentence per item.';
 
@@ -89,6 +158,7 @@ function runIntegrationScript(name: string, scriptBody: string) {
     cwd: root,
     encoding: 'utf8',
     timeout: 180_000,
+    env: { ...process.env, HOME: root, PI_CODING_AGENT_DIR: piAgentDir },
   });
 
   const resultRaw = existsSync(resultFile) ? readFileSync(resultFile, 'utf8') : '';
@@ -109,6 +179,8 @@ function runIntegrationScript(name: string, scriptBody: string) {
 describe('Pi busy state integration', () => {
   beforeEach(() => {
     root = mkdtempSync(join(tmpdir(), 'gitspace-pi-busy-'));
+    sandboxName = `pi-busy-${basename(root)}`;
+    piAgentDir = join(root, 'gitspace', '.pi');
     const projectPath = join(root, 'gitspace', 'demo');
     workspacePath = join(projectPath, 'workspaces', 'ws-1');
     mkdirSync(workspacePath, { recursive: true });
@@ -118,6 +190,7 @@ describe('Pi busy state integration', () => {
 
   afterEach(() => {
     rmSync(root, { recursive: true, force: true });
+    removeTmuxLiteSandbox(sandboxName);
   });
 
   test('marks a live Pi session busy while a prompt is running', async () => {
@@ -141,6 +214,7 @@ describe('Pi busy state integration', () => {
         process.exitCode = 1;
       } finally {
         try { await killServer(); } catch {}
+        stopMockModelServer();
       }
     `);
 
@@ -162,7 +236,7 @@ describe('Pi busy state integration', () => {
         await killServer();
         await Bun.sleep(500);
 
-        await attachAgentSession(target, sessionId);
+        await openAgentSession(target, sessionId);
         const beforePrompt = await captureState(sessionId);
         const promptPromise = promptAgentSession(target, sessionId, busyPrompt);
         const final = await waitForBusy(sessionId);
@@ -182,6 +256,7 @@ describe('Pi busy state integration', () => {
         process.exitCode = 1;
       } finally {
         try { await killServer(); } catch {}
+        stopMockModelServer();
       }
     `);
 
@@ -220,6 +295,7 @@ describe('Pi busy state integration', () => {
         process.exitCode = 1;
       } finally {
         try { await killServer(); } catch {}
+        stopMockModelServer();
       }
     `);
 

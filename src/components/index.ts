@@ -5,8 +5,7 @@
  * depend on react-dom which is not available in CLI/TUI context.
  * Import web components directly from their files in the web project.
  *
- * TUI components are also not exported here to avoid @opentui/core deps.
- * Import TUI components directly from their files in the TUI project.
+ * (The TUI has been removed; the web app is the only UI surface.)
  */
 
 // MachineList
@@ -63,21 +62,6 @@ export {
   getInboxTypeLabel,
   formatTimeAgo,
 } from './Inbox.js';
-
-// ProjectList
-export type {
-  ProjectInfo,
-  ProjectListItem,
-  UseProjectListProps,
-  UseProjectListReturn,
-} from './ProjectList.js';
-
-export {
-  useProjectList,
-  getProjectDisplayName,
-  getShortRepoName,
-  formatWorkspaceCount,
-} from './ProjectList.js';
 
 // Flow (Modal System)
 export type {

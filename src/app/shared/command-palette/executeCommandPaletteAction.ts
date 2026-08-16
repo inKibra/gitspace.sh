@@ -25,12 +25,21 @@ interface ExecuteCommandPaletteActionArgs<T extends WorkspaceInfo & CommandPalet
   onAddRepo: () => void;
   onAddWorkspace: () => void;
   onSetStatus: (workspace: T) => void;
+  /** Optional: only surfaces where a backend can actually roll up. */
+  onRollupWorkspace?: (workspace: T) => void | Promise<void>;
   onDeleteWorkspace: (workspace: T) => void;
+  onDeleteWorkspaceSkipScripts: (workspace: T) => void;
   onEditBundleConfig: (workspace: T) => void | Promise<void>;
+  onRefreshBundle: (workspace: T) => void | Promise<void>;
+  onRerunBundleScripts: (workspace: T) => void | Promise<void>;
+  onAddNote: (workspace: T) => void | Promise<void>;
+  onListNotes: (workspace: T) => void | Promise<void>;
   onEditProcessConfig: (workspace: T) => void | Promise<void>;
   onDeleteRepo: (projectName: string) => void;
   onOpenGitHubPr?: (workspace: T) => void | Promise<void>;
   onOpenReview?: (workspace: T) => void | Promise<void>;
+  onOpenEditor?: (workspace: T) => void | Promise<void>;
+  onShowGoalChains?: () => void | Promise<void>;
 }
 
 export function executeCommandPaletteAction<T extends WorkspaceInfo & CommandPaletteWorkspaceLike>(
@@ -46,12 +55,20 @@ export function executeCommandPaletteAction<T extends WorkspaceInfo & CommandPal
     onAddRepo,
     onAddWorkspace,
     onSetStatus,
+    onRollupWorkspace,
     onDeleteWorkspace,
+    onDeleteWorkspaceSkipScripts,
     onEditBundleConfig,
+    onRefreshBundle,
+    onRerunBundleScripts,
+    onAddNote,
+    onListNotes,
     onEditProcessConfig,
     onDeleteRepo,
     onOpenGitHubPr,
     onOpenReview,
+    onOpenEditor,
+    onShowGoalChains,
   } = args;
 
   if (commandId === 'open-github-pr') {
@@ -80,6 +97,32 @@ export function executeCommandPaletteAction<T extends WorkspaceInfo & CommandPal
     return;
   }
 
+  if (commandId === 'open-editor') {
+    if (workspace && onOpenEditor) {
+      void onOpenEditor(workspace);
+    } else {
+      showMessage({
+        title: getMissingSelectionTitle(commandId),
+        message: 'Select a workspace on the board or in the list first.',
+        variant: 'info',
+      });
+    }
+    return;
+  }
+
+
+  if (commandId === 'show-goal-chains') {
+    if (onShowGoalChains) {
+      void onShowGoalChains();
+    } else {
+      showMessage({
+        title: 'Goal Chains',
+        message: 'Goal chains are not available in this view.',
+        variant: 'info',
+      });
+    }
+    return;
+  }
   const sharedCommand = resolveSharedCommand(commandId, { workspace, projectName });
   switch (sharedCommand.kind) {
     case 'add-repo':
@@ -91,11 +134,33 @@ export function executeCommandPaletteAction<T extends WorkspaceInfo & CommandPal
     case 'set-status':
       onSetStatus(sharedCommand.workspace);
       return;
+    case 'rollup-workspace':
+      if (!onRollupWorkspace) {
+        showMessage({ title: 'Roll-up unavailable', message: 'This connection cannot roll up artifacts.', variant: 'error' });
+        return;
+      }
+      void onRollupWorkspace(sharedCommand.workspace);
+      return;
     case 'delete-workspace':
       onDeleteWorkspace(sharedCommand.workspace);
       return;
+    case 'delete-workspace-skip-scripts':
+      onDeleteWorkspaceSkipScripts(sharedCommand.workspace);
+      return;
     case 'edit-bundle-config':
       void onEditBundleConfig(sharedCommand.workspace);
+      return;
+    case 'refresh-bundle':
+      void onRefreshBundle(sharedCommand.workspace);
+      return;
+    case 'rerun-bundle-scripts':
+      void onRerunBundleScripts(sharedCommand.workspace);
+      return;
+    case 'add-note':
+      void onAddNote(sharedCommand.workspace);
+      return;
+    case 'list-notes':
+      void onListNotes(sharedCommand.workspace);
       return;
     case 'edit-process-config':
       void onEditProcessConfig(sharedCommand.workspace);

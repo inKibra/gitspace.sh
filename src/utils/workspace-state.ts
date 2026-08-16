@@ -32,9 +32,17 @@ export interface WorkspaceLockSetupState {
   error?: string;
   inputsUsed: Record<string, string>;
   inputFingerprints: Record<string, string>;
-  secretFingerprints: Record<string, string>;
+  /**
+   * Presence-only secret markers: configKey -> whether a value was present when
+   * setup last ran. We deliberately do NOT store secret values or deterministic
+   * hashes of them (privacy). A secret going from missing -> present (or vice
+   * versa) invalidates setup; a value change alone does not.
+   */
+  secretPresence: Record<string, boolean>;
   confirmsUsed: Record<string, WorkspaceLockConfirmState>;
   usedOptionalSteps: Record<string, true>;
+  /** Combined fingerprint of everything that gates setup (steps, values, secret
+   *  presence, confirms, and the pre/setup script manifests). */
   setupFingerprint?: string;
 }
 
@@ -42,6 +50,9 @@ export interface WorkspaceLockSelectState {
   status: WorkspaceLockPhaseStatus;
   ranAt?: string;
   error?: string;
+  /** Fingerprint of what gates select (select manifest + the setup fingerprint/
+   *  status it depended on), so changed setup or select scripts invalidate it. */
+  selectFingerprint?: string;
 }
 
 export interface WorkspaceLockBundleState {
@@ -63,6 +74,10 @@ interface BuildSetupStateOptions {
   bundleValues?: Record<string, string>;
   bundleSecrets?: Record<string, string>;
   confirmResults?: Record<string, ConfirmStepResult>;
+  /** Fingerprint of the pre-phase script manifest (buildPhaseScriptManifest). */
+  preManifest?: string;
+  /** Fingerprint of the setup-phase script manifest. */
+  setupManifest?: string;
 }
 
 export function getWorkspaceLockPath(workspacePath: string): string {
@@ -76,7 +91,7 @@ export function createEmptyWorkspaceLockState(): WorkspaceLockState {
       status: 'never',
       inputsUsed: {},
       inputFingerprints: {},
-      secretFingerprints: {},
+      secretPresence: {},
       confirmsUsed: {},
       usedOptionalSteps: {},
     },
@@ -112,8 +127,8 @@ function normalizeSetupState(value: unknown): WorkspaceLockSetupState {
     inputFingerprints: isRecord(value.inputFingerprints)
       ? Object.fromEntries(Object.entries(value.inputFingerprints).filter(([, v]) => typeof v === 'string')) as Record<string, string>
       : {},
-    secretFingerprints: isRecord(value.secretFingerprints)
-      ? Object.fromEntries(Object.entries(value.secretFingerprints).filter(([, v]) => typeof v === 'string')) as Record<string, string>
+    secretPresence: isRecord(value.secretPresence)
+      ? Object.fromEntries(Object.entries(value.secretPresence).filter(([, v]) => typeof v === 'boolean')) as Record<string, boolean>
       : {},
     confirmsUsed: isRecord(value.confirmsUsed)
       ? Object.fromEntries(
@@ -148,6 +163,7 @@ function normalizeSelectState(value: unknown): WorkspaceLockSelectState {
     status: normalizedStatus,
     ranAt: typeof value.ranAt === 'string' ? value.ranAt : undefined,
     error: typeof value.error === 'string' ? value.error : undefined,
+    selectFingerprint: typeof value.selectFingerprint === 'string' ? value.selectFingerprint : undefined,
   };
 }
 
@@ -364,10 +380,19 @@ export function buildBundleStepFingerprints(bundle: SpacesBundle): Record<string
   return fingerprints;
 }
 
-export function buildSetupState(options: BuildSetupStateOptions): WorkspaceLockSetupState {
+/** The derived, hashable inputs that gate the setup phase. */
+interface SetupFingerprintParts {
+  inputsUsed: Record<string, string>;
+  inputFingerprints: Record<string, string>;
+  secretPresence: Record<string, boolean>;
+  confirmsUsed: Record<string, WorkspaceLockConfirmState>;
+  usedOptionalSteps: Record<string, true>;
+}
+
+/** Derive the per-step setup parts (input/secret/confirm state) from a bundle. */
+function deriveSetupParts(options: BuildSetupStateOptions): SetupFingerprintParts {
   const {
     bundle,
-    bundleHash,
     stepFingerprints,
     bundleValues = {},
     bundleSecrets = {},
@@ -377,7 +402,7 @@ export function buildSetupState(options: BuildSetupStateOptions): WorkspaceLockS
   const steps = bundle?.onboarding || [];
   const usedOptionalSteps: Record<string, true> = {};
   const inputFingerprints: Record<string, string> = {};
-  const secretFingerprints: Record<string, string> = {};
+  const secretPresence: Record<string, boolean> = {};
   const confirmsUsed: Record<string, WorkspaceLockConfirmState> = {};
   const inputsUsed: Record<string, string> = {};
 
@@ -399,7 +424,8 @@ export function buildSetupState(options: BuildSetupStateOptions): WorkspaceLockS
 
     if (step.type === 'secret') {
       const value = bundleSecrets[step.configKey] ?? '';
-      secretFingerprints[step.configKey] = fingerprintValue(value);
+      // Presence only — never a hash of the value.
+      secretPresence[step.configKey] = value.length > 0;
       if (isOptional && value.length > 0) {
         usedOptionalSteps[key] = true;
       }
@@ -420,27 +446,63 @@ export function buildSetupState(options: BuildSetupStateOptions): WorkspaceLockS
     }
   }
 
-  const setupFingerprint = createHash('sha256')
+  return { inputsUsed, inputFingerprints, secretPresence, confirmsUsed, usedOptionalSteps };
+}
+
+/**
+ * Compute the combined setup fingerprint for the given bundle/values/secrets/
+ * confirms plus the pre/setup script manifests. Used both to persist (build) and
+ * to decide whether setup must re-run (compare). No secret values or value
+ * hashes participate — only presence.
+ */
+export function computeSetupFingerprint(options: BuildSetupStateOptions): string {
+  const parts = deriveSetupParts(options);
+  return createHash('sha256')
     .update(JSON.stringify(deepSortForHash({
-      bundleHash: bundleHash ?? null,
-      stepFingerprints: stepFingerprints ?? {},
-      inputsUsed,
-      inputFingerprints,
-      secretFingerprints,
-      confirmsUsed,
-      usedOptionalSteps,
+      bundleHash: options.bundleHash ?? null,
+      stepFingerprints: options.stepFingerprints ?? {},
+      inputsUsed: parts.inputsUsed,
+      inputFingerprints: parts.inputFingerprints,
+      secretPresence: parts.secretPresence,
+      confirmsUsed: parts.confirmsUsed,
+      usedOptionalSteps: parts.usedOptionalSteps,
+      preManifest: options.preManifest ?? null,
+      setupManifest: options.setupManifest ?? null,
     })))
     .digest('hex')
     .slice(0, 16);
+}
 
+export function buildSetupState(options: BuildSetupStateOptions): WorkspaceLockSetupState {
+  const parts = deriveSetupParts(options);
   return {
     status: 'success',
     ranAt: new Date().toISOString(),
-    inputsUsed,
-    inputFingerprints,
-    secretFingerprints,
-    confirmsUsed,
-    usedOptionalSteps,
-    setupFingerprint,
+    inputsUsed: parts.inputsUsed,
+    inputFingerprints: parts.inputFingerprints,
+    secretPresence: parts.secretPresence,
+    confirmsUsed: parts.confirmsUsed,
+    usedOptionalSteps: parts.usedOptionalSteps,
+    setupFingerprint: computeSetupFingerprint(options),
   };
+}
+
+/**
+ * Compute the select fingerprint: the select script manifest plus the setup
+ * fingerprint/status it depends on, so a changed setup (or changed select
+ * scripts) invalidates a previously-successful select.
+ */
+export function computeSelectFingerprint(options: {
+  selectManifest?: string;
+  setupFingerprint?: string;
+  setupStatus?: WorkspaceLockPhaseStatus;
+}): string {
+  return createHash('sha256')
+    .update(JSON.stringify(deepSortForHash({
+      selectManifest: options.selectManifest ?? null,
+      setupFingerprint: options.setupFingerprint ?? null,
+      setupStatus: options.setupStatus ?? null,
+    })))
+    .digest('hex')
+    .slice(0, 16);
 }

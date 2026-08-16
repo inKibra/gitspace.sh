@@ -51,6 +51,9 @@ export interface WideEvent {
   raw: Record<string, unknown>;
   kind?: 'source' | 'wide';
   correlationId?: string;
+  /** How much structure the source line carried: a plain string, a JSON object,
+   *  or JSON that included a correlation id. */
+  fidelity?: 'string' | 'json' | 'json+correlation';
   timeline?: WideEventTimelineItem[];
   timelineMap?: WideSnapshotTimelineMap;
   timelineOrder?: string[];

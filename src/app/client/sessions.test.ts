@@ -25,7 +25,7 @@ function makeBackend(overrides: Partial<SessionBackend>): SessionBackend {
     deleteProject: async () => undefined,
     attachSession: async () => undefined,
     detachSession: async () => undefined,
-    killSession: async () => undefined,
+    terminateSession: async () => undefined,
     deleteWorkspace: async () => undefined,
     getBundleRefreshPlan: async () => { throw new Error('unused'); },
     applyBundleRefresh: async () => undefined,
@@ -45,11 +45,12 @@ function makeContext(backend: SessionBackend): AppClientContext {
   const multi: AppClientMulti = {
     getBackend: () => backend,
     createAgentSession: async () => [],
-    abortAgentSession: async () => false,
+    killAgentSession: async () => false,
+    stopAgentTurn: async () => false,
     closeAgentSession: async () => [],
     archiveAgentSession: async () => [],
     restoreAgentSession: async () => [],
-    attachAgentSession: async () => undefined,
+    openAgentSession: async () => undefined,
     getAgentSessionPreference: async () => null,
     setAgentSessionPreference: async () => undefined,
   };

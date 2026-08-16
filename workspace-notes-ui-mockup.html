@@ -1,0 +1,1081 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>GitSpace Workspace Notes UX Mockup</title>
+  <style>
+    :root {
+      --bg: #070807;
+      --panel: #0d100e;
+      --panel-2: #141813;
+      --panel-3: #181d17;
+      --ink: #ece7d8;
+      --muted: #9c9788;
+      --dim: #676357;
+      --line: #282d24;
+      --line-strong: #3a4334;
+      --green: #9bff69;
+      --amber: #ffcc66;
+      --red: #ff6b5f;
+      --blue: #7dd3fc;
+      --shadow: rgba(0, 0, 0, .55);
+      --mono: "Berkeley Mono", "SFMono-Regular", ui-monospace, Menlo, Consolas, monospace;
+      --serif: Georgia, "Times New Roman", serif;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      background:
+        radial-gradient(circle at 20% 0%, rgba(155, 255, 105, .10), transparent 28%),
+        radial-gradient(circle at 84% 14%, rgba(125, 211, 252, .08), transparent 24%),
+        linear-gradient(180deg, #090b08 0%, var(--bg) 52%, #050605 100%);
+      color: var(--ink);
+      font-family: var(--mono);
+      overflow: hidden;
+    }
+
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background-image:
+        linear-gradient(rgba(255,255,255,.025) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,.018) 1px, transparent 1px);
+      background-size: 36px 36px;
+      mask-image: linear-gradient(to bottom, rgba(0,0,0,.7), transparent 80%);
+    }
+
+    .app {
+      height: 100vh;
+      display: grid;
+      grid-template-rows: 48px 1fr;
+      position: relative;
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      padding: 0 18px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(10, 12, 9, .78);
+      backdrop-filter: blur(16px);
+      position: relative;
+      z-index: 5;
+    }
+
+    .brand {
+      font-family: var(--serif);
+      font-size: 21px;
+      letter-spacing: .02em;
+    }
+
+    .crumb {
+      color: var(--muted);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: .16em;
+    }
+
+    .workspace-strip {
+      display: flex;
+      gap: 6px;
+      margin-left: 18px;
+      min-width: 0;
+      overflow: auto;
+      scrollbar-width: none;
+    }
+    .workspace-strip::-webkit-scrollbar { display: none; }
+
+    .workspace-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 10px;
+      color: var(--muted);
+      border: 1px solid transparent;
+      background: transparent;
+      font: inherit;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .workspace-pill.active {
+      color: var(--ink);
+      background: rgba(155,255,105,.06);
+      border-color: rgba(155,255,105,.25);
+      border-radius: 8px;
+    }
+
+    .top-actions { margin-left: auto; display: flex; gap: 8px; }
+    .pill, .button {
+      border: 1px solid var(--line-strong);
+      color: var(--muted);
+      padding: 6px 10px;
+      font-size: 11px;
+      background: #0e120d;
+      font-family: inherit;
+      cursor: pointer;
+    }
+    .pill:hover, .button:hover { color: var(--ink); border-color: rgba(125,211,252,.35); }
+
+    .main {
+      display: grid;
+      grid-template-columns: 300px 1fr;
+      min-height: 0;
+    }
+
+    .sidebar {
+      border-right: 1px solid var(--line);
+      background: rgba(11, 13, 10, .82);
+      padding: 14px 12px;
+      overflow: auto;
+    }
+
+    .section-title {
+      color: var(--dim);
+      font-size: 10px;
+      letter-spacing: .22em;
+      text-transform: uppercase;
+      margin: 18px 0 8px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .section-extra { color: var(--muted); font-size: 10px; letter-spacing: .08em; }
+
+    .meta-line {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      color: var(--muted);
+      font-size: 11px;
+      margin-bottom: 10px;
+    }
+
+    .sidebar-item {
+      width: 100%;
+      display: flex;
+      align-items: flex-start;
+      gap: 9px;
+      padding: 8px 8px;
+      border: 1px solid transparent;
+      background: transparent;
+      color: var(--muted);
+      font: inherit;
+      text-align: left;
+      cursor: pointer;
+      border-radius: 8px;
+      margin-bottom: 4px;
+    }
+    .sidebar-item:hover {
+      background: rgba(255,255,255,.03);
+      border-color: rgba(255,255,255,.05);
+      color: var(--ink);
+    }
+
+    .sidebar-item .dot {
+      width: 7px;
+      height: 7px;
+      margin-top: 6px;
+      background: var(--blue);
+      border-radius: 50%;
+      flex: 0 0 auto;
+      box-shadow: 0 0 14px rgba(125,211,252,.35);
+    }
+
+    .sidebar-item .content { min-width: 0; }
+    .sidebar-item .label {
+      font-size: 12px;
+      line-height: 1.5;
+      color: var(--ink);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+    }
+    .sidebar-item .sub {
+      margin-top: 4px;
+      color: var(--dim);
+      font-size: 10px;
+      letter-spacing: .04em;
+    }
+
+    .sidebar-actions {
+      display: flex;
+      gap: 8px;
+      margin-top: 10px;
+    }
+
+    .workspace-pane {
+      min-width: 0;
+      min-height: 0;
+      display: grid;
+      grid-template-rows: 54px 1fr;
+      background: rgba(7, 8, 7, .65);
+    }
+
+    .workspace-header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 0 18px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(13, 16, 14, .72);
+    }
+    .workspace-header h1 {
+      font-size: 16px;
+      font-weight: 500;
+      margin: 0;
+    }
+    .status-chip {
+      color: var(--blue);
+      border: 1px solid rgba(125,211,252,.25);
+      padding: 3px 7px;
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: .12em;
+    }
+
+    .terminal-area {
+      min-height: 0;
+      position: relative;
+      display: grid;
+      grid-template-rows: 40px 1fr;
+      margin: 16px;
+      border: 1px solid var(--line);
+      background: #090b08;
+      box-shadow: 0 24px 80px var(--shadow);
+      overflow: hidden;
+    }
+
+    .dock-tabs {
+      display: flex;
+      gap: 2px;
+      align-items: stretch;
+      border-bottom: 1px solid var(--line);
+      background: #0f120f;
+      padding: 0 8px;
+    }
+
+    .dock-tab {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+      padding: 0 10px;
+      color: var(--muted);
+      border: 1px solid transparent;
+      border-bottom: 0;
+      background: transparent;
+      font: inherit;
+      cursor: pointer;
+      max-width: 260px;
+    }
+    .dock-tab.active {
+      color: var(--ink);
+      background: rgba(255,255,255,.04);
+      border-color: var(--line);
+    }
+    .dock-tab .label {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 12px;
+    }
+    .dock-tab .close {
+      color: var(--dim);
+      font-size: 14px;
+      line-height: 1;
+    }
+
+    .split-view {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      min-height: 0;
+    }
+
+    .pane {
+      min-height: 0;
+      border-right: 1px solid var(--line);
+      display: grid;
+      grid-template-rows: 28px 1fr;
+    }
+    .pane:last-child { border-right: 0; }
+    .pane-title {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 0 10px;
+      border-bottom: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 11px;
+      background: rgba(255,255,255,.02);
+    }
+    .pane pre {
+      margin: 0;
+      padding: 16px;
+      overflow: auto;
+      color: #a7b39d;
+      font-size: 12px;
+      line-height: 1.6;
+      white-space: pre-wrap;
+    }
+
+    .overlay {
+      position: fixed;
+      inset: 0;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 28px;
+      z-index: 20;
+      background: rgba(0,0,0,.56);
+      backdrop-filter: blur(10px);
+    }
+    .overlay.open { display: flex; }
+
+    .modal {
+      width: min(920px, calc(100vw - 56px));
+      max-height: calc(100vh - 56px);
+      overflow: hidden;
+      border: 1px solid var(--line-strong);
+      background: var(--panel);
+      box-shadow: 0 32px 120px var(--shadow);
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+    }
+
+    .modal-header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(255,255,255,.02);
+    }
+    .modal-title { font-size: 14px; color: var(--ink); }
+    .modal-kicker { color: var(--dim); font-size: 10px; letter-spacing: .16em; text-transform: uppercase; }
+    .modal-body { min-height: 0; overflow: auto; }
+    .modal-footer {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+      padding: 12px 16px;
+      border-top: 1px solid var(--line);
+      background: rgba(255,255,255,.02);
+    }
+
+    .command-list { padding: 10px; }
+    .command-item {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 10px;
+      width: 100%;
+      padding: 10px 12px;
+      border: 1px solid transparent;
+      background: transparent;
+      color: var(--muted);
+      font: inherit;
+      text-align: left;
+      cursor: pointer;
+      border-radius: 8px;
+    }
+    .command-item:hover, .command-item.active {
+      background: rgba(125,211,252,.06);
+      border-color: rgba(125,211,252,.25);
+      color: var(--ink);
+    }
+    .command-item .title { color: var(--ink); font-size: 12px; }
+    .command-item .desc { margin-top: 4px; font-size: 11px; color: var(--dim); }
+    .shortcut { color: var(--dim); font-size: 10px; letter-spacing: .1em; text-transform: uppercase; }
+
+    .command-search,
+    .notes-search {
+      width: 100%;
+      border: 1px solid var(--line-strong);
+      background: #101410;
+      color: var(--ink);
+      padding: 10px 12px;
+      font: 12px/1.4 var(--mono);
+      outline: 0;
+    }
+    .command-search::placeholder,
+    .notes-search::placeholder { color: var(--dim); }
+
+
+    .notes-grid {
+      display: grid;
+      grid-template-columns: 280px 1fr;
+      min-height: 520px;
+    }
+    .notes-list {
+      border-right: 1px solid var(--line);
+      overflow: auto;
+      background: rgba(255,255,255,.02);
+    }
+
+    .notes-search-wrap {
+      padding: 10px;
+      border-bottom: 1px solid rgba(255,255,255,.04);
+      background: rgba(255,255,255,.01);
+    }
+    .note-row {
+      width: 100%;
+      display: block;
+      padding: 12px 14px;
+      border: 0;
+      border-bottom: 1px solid rgba(255,255,255,.03);
+      background: transparent;
+      color: var(--muted);
+      text-align: left;
+      font: inherit;
+      cursor: pointer;
+    }
+    .note-row.active {
+      background: rgba(155,255,105,.06);
+      color: var(--ink);
+    }
+    .note-row:hover { background: rgba(255,255,255,.03); color: var(--ink); }
+    .note-row .title { color: var(--ink); font-size: 12px; }
+    .note-row .preview {
+      margin-top: 6px;
+      font-size: 11px;
+      color: var(--dim);
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+    .note-row .meta { margin-top: 8px; font-size: 10px; color: var(--dim); }
+
+    .editor-shell {
+      min-width: 0;
+      min-height: 0;
+      display: grid;
+      grid-template-rows: 40px 1fr;
+    }
+    .editor-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 0 12px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(255,255,255,.02);
+    }
+    .editor-toggle {
+      border: 1px solid var(--line-strong);
+      background: #101410;
+      color: var(--muted);
+      padding: 5px 8px;
+      font: inherit;
+      font-size: 11px;
+      cursor: pointer;
+    }
+    .editor-toggle.active { color: var(--ink); border-color: rgba(155,255,105,.3); }
+    .editor-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      min-height: 0;
+    }
+    .editor-grid.preview-only { grid-template-columns: 0 1fr; }
+    .editor-grid.edit-only { grid-template-columns: 1fr 0; }
+
+    .editor-pane, .preview-pane { min-width: 0; min-height: 0; }
+    .editor-pane { border-right: 1px solid var(--line); }
+    .editor-pane textarea {
+      width: 100%;
+      height: 100%;
+      resize: none;
+      border: 0;
+      outline: 0;
+      background: #0a0c09;
+      color: var(--ink);
+      padding: 16px;
+      font: 12px/1.6 var(--mono);
+    }
+    .preview-pane {
+      overflow: auto;
+      padding: 16px 18px;
+      color: var(--ink);
+      line-height: 1.65;
+      background: #0b0d0a;
+    }
+    .preview-pane h1, .preview-pane h2, .preview-pane h3 {
+      font-family: var(--serif);
+      margin-top: 0;
+      color: var(--ink);
+    }
+    .preview-pane code {
+      background: rgba(125,211,252,.12);
+      padding: 1px 4px;
+    }
+    .preview-pane pre {
+      margin: 0;
+      padding: 12px;
+      background: rgba(255,255,255,.03);
+      border: 1px solid var(--line);
+      overflow: auto;
+    }
+    .preview-pane ul { padding-left: 20px; }
+    .preview-pane p { margin: 0 0 12px; }
+
+    .footer-left, .footer-right { display: flex; gap: 8px; align-items: center; }
+    .hint { color: var(--dim); font-size: 11px; }
+    .button.primary {
+      color: var(--ink);
+      border-color: rgba(155,255,105,.3);
+      background: rgba(155,255,105,.08);
+    }
+    .button.danger {
+      color: var(--red);
+      border-color: rgba(255,107,95,.25);
+      background: rgba(255,107,95,.08);
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">GitSpace</div>
+      <div class="crumb">Workspace Notes Mockup</div>
+      <div class="workspace-strip">
+        <button class="workspace-pill active" data-workspace="browser-use"><span style="color: var(--blue)">●</span> browser-use</button>
+        <button class="workspace-pill" data-workspace="multi-pane"><span style="color: var(--green)">●</span> multi-pane</button>
+      </div>
+      <div class="top-actions">
+        <button class="pill" id="openPalette">Cmd + K</button>
+      </div>
+    </header>
+
+    <div class="main">
+      <aside class="sidebar">
+        <div class="meta-line">
+          <span>browser-use</span>
+          <span>[code]</span>
+          <span>0 session(s)</span>
+        </div>
+
+        <div class="section-title">
+          <span>Notes</span>
+          <span class="section-extra" id="noteCountLabel">3 notes</span>
+        </div>
+
+        <div id="notesSummary"></div>
+
+        <div class="sidebar-actions">
+          <button class="button" id="sidebarAddNote">Add note</button>
+          <button class="button" id="sidebarBrowseNotes">Open notes</button>
+        </div>
+      </aside>
+
+      <section class="workspace-pane">
+        <div class="workspace-header">
+          <h1>browser-use</h1>
+          <span class="status-chip">Code</span>
+          <span style="color: var(--muted); font-size: 12px;">Notes live in the workspace detail context and are accessed through Cmd+K or the notes panel.</span>
+        </div>
+
+        <div class="terminal-area">
+          <div class="dock-tabs">
+            <button class="dock-tab active"><span class="label">notes-design-agent</span><span class="close">×</span></button>
+            <button class="dock-tab"><span class="label">api-review-agent</span><span class="close">×</span></button>
+          </div>
+          <div class="split-view">
+            <div class="pane">
+              <div class="pane-title">notes-design-agent</div>
+              <pre># Notes workflow idea
+
+- Cmd+K → Add Note
+- Cmd+K → List Notes
+- Edit in modal textarea
+- Render markdown preview
+
+Switching workspaces should keep this pane layout intact.</pre>
+            </div>
+            <div class="pane">
+              <div class="pane-title">api-review-agent</div>
+              <pre>Reviewing note model:
+
+- note.body (markdown)
+- note.createdAt
+- note.updatedAt
+
+No separate title field.
+First heading / first line becomes display label.</pre>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <div class="overlay" id="paletteOverlay">
+    <div class="modal">
+      <div class="modal-header">
+        <div>
+          <div class="modal-kicker">Command palette</div>
+          <div class="modal-title">Workspace note actions</div>
+        </div>
+      </div>
+      <div class="modal-body">
+        <div style="padding: 10px; border-bottom: 1px solid rgba(255,255,255,.04);">
+          <input class="command-search" id="commandSearch" placeholder="Filter commands..." />
+        </div>
+        <div class="command-list" id="commandList"></div>
+      </div>
+      <div class="modal-footer">
+        <div class="hint">Press Cmd/Ctrl+K to open · Esc to close</div>
+        <div class="footer-right"><button class="button" data-close="palette">Close</button></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="overlay" id="notesOverlay">
+    <div class="modal">
+      <div class="modal-header">
+        <div>
+          <div class="modal-kicker">Workspace notes</div>
+          <div class="modal-title">Notes for <span id="notesWorkspaceLabel">browser-use</span></div>
+        </div>
+      </div>
+      <div class="modal-body notes-grid">
+        <div class="notes-list">
+          <div class="notes-search-wrap"><input class="notes-search" id="notesSearch" placeholder="Search notes..." /></div>
+          <div id="notesList"></div>
+        </div>
+        <div class="editor-shell">
+          <div class="editor-toolbar">
+            <button class="editor-toggle active" data-mode="split">Edit + Preview</button>
+            <button class="editor-toggle" data-mode="edit">Edit only</button>
+            <button class="editor-toggle" data-mode="preview">Preview only</button>
+            <div class="hint" id="noteMeta"></div>
+          </div>
+          <div class="editor-grid" id="editorGrid">
+            <div class="editor-pane">
+              <textarea id="noteEditor"></textarea>
+            </div>
+            <div class="preview-pane" id="notePreview"></div>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <div class="footer-left">
+          <button class="button danger" id="deleteNote">Delete</button>
+        </div>
+        <div class="footer-right">
+          <button class="button" data-close="notes">Close</button>
+          <button class="button primary" id="saveNote">Save note</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const state = {
+      workspace: 'browser-use',
+      notes: {
+        'browser-use': [
+          {
+            id: 'n1',
+            body: '# Notes workflow\n\nWe should make notes available from **Cmd+K** inside the workspace detail view.\n\n- Add Note\n- List Notes\n- Edit note\n',
+            createdAt: '2026-05-06T21:10:00Z',
+            updatedAt: '2026-05-06T21:42:00Z',
+          },
+          {
+            id: 'n2',
+            body: 'Need to verify whether we want notes to support `[[links]]` later, but plain markdown is enough for MVP.',
+            createdAt: '2026-05-06T21:12:00Z',
+            updatedAt: '2026-05-06T21:12:00Z',
+          },
+          {
+            id: 'n3',
+            body: '## UX reminder\n\nThe **sidebar is summary-only**. Editing should happen in a modal, not inline.',
+            createdAt: '2026-05-06T21:18:00Z',
+            updatedAt: '2026-05-06T21:20:00Z',
+          },
+        ],
+        'multi-pane': [
+          {
+            id: 'm1',
+            body: '# Multipane follow-up\n\nSwitching workspaces should preserve Dockview geometry and Ghostty scroll state.',
+            createdAt: '2026-05-06T22:01:00Z',
+            updatedAt: '2026-05-06T22:15:00Z',
+          }
+        ]
+      },
+      selectedNoteId: null,
+      editorMode: 'split',
+      dirtyBody: '',
+      commandQuery: '',
+      selectedCommandIndex: 0,
+      noteQuery: '',
+    };
+
+    const commands = [
+      {
+        id: 'add-note',
+        title: 'Add Note',
+        description: 'Create a markdown note in the current workspace.',
+        shortcut: 'N',
+        run() {
+          addNote();
+          openNotes();
+        },
+      },
+      {
+        id: 'list-notes',
+        title: 'List Notes',
+        description: 'Browse, edit, and delete notes for the current workspace.',
+        shortcut: 'L',
+        run() {
+          openNotes();
+        },
+      },
+      {
+        id: 'edit-latest-note',
+        title: 'Edit Latest Note',
+        description: 'Jump straight into the most recently updated note.',
+        shortcut: 'E',
+        run() {
+          const notes = getNotes();
+          if (notes.length === 0) addNote();
+          state.selectedNoteId = getNotes()[0].id;
+          openNotes();
+        },
+      }
+    ];
+
+    const els = {
+      notesSummary: document.getElementById('notesSummary'),
+      noteCountLabel: document.getElementById('noteCountLabel'),
+      paletteOverlay: document.getElementById('paletteOverlay'),
+      commandList: document.getElementById('commandList'),
+      commandSearch: document.getElementById('commandSearch'),
+      notesOverlay: document.getElementById('notesOverlay'),
+      notesList: document.getElementById('notesList'),
+      notesSearch: document.getElementById('notesSearch'),
+      noteEditor: document.getElementById('noteEditor'),
+      notePreview: document.getElementById('notePreview'),
+      noteMeta: document.getElementById('noteMeta'),
+      notesWorkspaceLabel: document.getElementById('notesWorkspaceLabel'),
+      editorGrid: document.getElementById('editorGrid'),
+      deleteNote: document.getElementById('deleteNote'),
+      saveNote: document.getElementById('saveNote'),
+    };
+
+    function getNotes() {
+      return [...(state.notes[state.workspace] ?? [])]
+        .sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
+    }
+
+    function getFilteredCommands() {
+      const q = state.commandQuery.trim().toLowerCase();
+      if (!q) return commands;
+      return commands.filter((command) =>
+        command.title.toLowerCase().includes(q)
+        || command.description.toLowerCase().includes(q)
+        || command.id.toLowerCase().includes(q)
+      );
+    }
+
+
+    function getSelectedNote() {
+      const notes = getNotes();
+      return notes.find((note) => note.id === state.selectedNoteId) ?? notes[0] ?? null;
+    }
+
+    function deriveNoteLabel(body) {
+      const lines = body.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+      const heading = lines.find((line) => line.startsWith('#'));
+      const raw = heading ? heading.replace(/^#+\s*/, '') : (lines[0] ?? 'Untitled note');
+      return raw.length > 48 ? raw.slice(0, 48) + '…' : raw;
+    }
+
+    function toPreview(body) {
+      return body.replace(/^#+\s*/gm, '').replace(/\s+/g, ' ').trim();
+    }
+
+    function formatDate(iso) {
+      const date = new Date(iso);
+      return date.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+    }
+
+    function escapeHtml(text) {
+      return text
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;');
+    }
+
+    function renderMarkdown(md) {
+      let html = escapeHtml(md);
+      html = html.replace(/^###\s+(.+)$/gm, '<h3>$1</h3>');
+      html = html.replace(/^##\s+(.+)$/gm, '<h2>$1</h2>');
+      html = html.replace(/^#\s+(.+)$/gm, '<h1>$1</h1>');
+      html = html.replace(/```([\s\S]*?)```/g, '<pre><code>$1</code></pre>');
+      html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+      html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+      html = html.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+      html = html.replace(/^-\s+(.+)$/gm, '<li>$1</li>');
+      html = html.replace(/(<li>.*<\/li>)/gs, '<ul>$1</ul>');
+      html = html.split(/\n{2,}/).map((block) => {
+        if (block.startsWith('<h') || block.startsWith('<pre>') || block.startsWith('<ul>')) return block;
+        return `<p>${block.replace(/\n/g, '<br />')}</p>`;
+      }).join('');
+      return html || '<p><em>Empty note.</em></p>';
+    }
+
+    function renderSummary() {
+      const notes = getNotes();
+      els.noteCountLabel.textContent = `${notes.length} note${notes.length === 1 ? '' : 's'}`;
+      els.notesSummary.innerHTML = '';
+      notes.slice(0, 3).forEach((note) => {
+        const btn = document.createElement('button');
+        btn.className = 'sidebar-item';
+        btn.innerHTML = `
+          <span class="dot"></span>
+          <span class="content">
+            <div class="label">${escapeHtml(deriveNoteLabel(note.body))}</div>
+            <div class="sub">${escapeHtml(toPreview(note.body).slice(0, 96))}</div>
+          </span>`;
+        btn.onclick = () => {
+          state.selectedNoteId = note.id;
+          openNotes();
+        };
+        els.notesSummary.appendChild(btn);
+      });
+    }
+
+    function renderCommandPalette() {
+      const filtered = getFilteredCommands();
+      if (state.selectedCommandIndex >= filtered.length) {
+        state.selectedCommandIndex = Math.max(0, filtered.length - 1);
+      }
+      els.commandList.innerHTML = '';
+      filtered.forEach((command, index) => {
+        const btn = document.createElement('button');
+        btn.className = 'command-item' + (index === state.selectedCommandIndex ? ' active' : '');
+        btn.innerHTML = `
+          <div>
+            <div class="title">${escapeHtml(command.title)}</div>
+            <div class="desc">${escapeHtml(command.description)}</div>
+          </div>
+          <div class="shortcut">${escapeHtml(command.shortcut)}</div>`;
+        btn.onclick = () => {
+          closePalette();
+          command.run();
+        };
+        els.commandList.appendChild(btn);
+      });
+    }
+
+    function ensureSelectedNote() {
+      const notes = getNotes();
+      if (!notes.length) {
+        state.selectedNoteId = null;
+        state.dirtyBody = '';
+        return;
+      }
+      if (!state.selectedNoteId || !notes.some((note) => note.id === state.selectedNoteId)) {
+        state.selectedNoteId = notes[0].id;
+      }
+      const note = getSelectedNote();
+      state.dirtyBody = note?.body ?? '';
+    }
+
+    function getFilteredNotes() {
+      const q = state.noteQuery.trim().toLowerCase();
+      const notes = getNotes();
+      if (!q) return notes;
+      return notes.filter((note) =>
+        deriveNoteLabel(note.body).toLowerCase().includes(q)
+        || toPreview(note.body).toLowerCase().includes(q)
+      );
+    }
+
+
+    function renderNotesList() {
+      const notes = getFilteredNotes();
+      els.notesList.innerHTML = '';
+      notes.forEach((note) => {
+        const row = document.createElement('button');
+        row.className = 'note-row' + (note.id === state.selectedNoteId ? ' active' : '');
+        row.innerHTML = `
+          <div class="title">${escapeHtml(deriveNoteLabel(note.body))}</div>
+          <div class="preview">${escapeHtml(toPreview(note.body).slice(0, 120) || 'Empty note')}</div>
+          <div class="meta">Updated ${escapeHtml(formatDate(note.updatedAt))}</div>`;
+        row.onclick = () => {
+          state.selectedNoteId = note.id;
+          state.dirtyBody = note.body;
+          renderNotesPanel();
+        };
+        els.notesList.appendChild(row);
+      });
+    }
+
+    function renderNotesPanel() {
+      ensureSelectedNote();
+      const note = getSelectedNote();
+      els.notesWorkspaceLabel.textContent = state.workspace;
+      renderNotesList();
+
+      if (!note) {
+        els.noteEditor.value = '';
+        els.notePreview.innerHTML = '<p><em>No notes yet. Add one from Cmd+K or the sidebar.</em></p>';
+        els.noteMeta.textContent = '';
+        els.deleteNote.disabled = true;
+        return;
+      }
+
+      els.deleteNote.disabled = false;
+      els.noteEditor.value = state.dirtyBody;
+      els.notePreview.innerHTML = renderMarkdown(state.dirtyBody);
+      els.noteMeta.textContent = `${deriveNoteLabel(note.body)} · Updated ${formatDate(note.updatedAt)}`;
+
+      els.editorGrid.className = 'editor-grid' + (state.editorMode === 'edit' ? ' edit-only' : state.editorMode === 'preview' ? ' preview-only' : '');
+      document.querySelectorAll('.editor-toggle').forEach((toggle) => {
+        toggle.classList.toggle('active', toggle.dataset.mode === state.editorMode);
+      });
+    }
+
+    function saveCurrentNote() {
+      const notes = getNotes();
+      const note = notes.find((entry) => entry.id === state.selectedNoteId);
+      if (!note) return;
+      note.body = state.dirtyBody;
+      note.updatedAt = new Date().toISOString();
+      state.notes[state.workspace] = notes;
+      renderSummary();
+      renderNotesPanel();
+    }
+
+    function addNote() {
+      const note = {
+        id: Math.random().toString(36).slice(2, 9),
+        body: '# New note\n\nWrite markdown here.',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      state.notes[state.workspace] = [note, ...getNotes()];
+      state.selectedNoteId = note.id;
+      state.dirtyBody = note.body;
+      renderSummary();
+    }
+
+    function deleteCurrentNote() {
+      if (!state.selectedNoteId) return;
+      state.notes[state.workspace] = getNotes().filter((note) => note.id !== state.selectedNoteId);
+      state.selectedNoteId = null;
+      state.dirtyBody = '';
+      renderSummary();
+      renderNotesPanel();
+    }
+
+    function openPalette() {
+      renderCommandPalette();
+      els.paletteOverlay.classList.add('open');
+      els.commandSearch.value = state.commandQuery;
+      requestAnimationFrame(() => els.commandSearch.focus());
+    }
+    function closePalette() { els.paletteOverlay.classList.remove('open'); }
+    function openNotes() {
+      ensureSelectedNote();
+      renderNotesPanel();
+      els.notesOverlay.classList.add('open');
+      els.notesSearch.value = state.noteQuery;
+      requestAnimationFrame(() => els.notesSearch.focus());
+    }
+    function closeNotes() { els.notesOverlay.classList.remove('open'); }
+
+    document.querySelectorAll('[data-workspace]').forEach((button) => {
+      button.onclick = () => {
+        document.querySelectorAll('[data-workspace]').forEach((el) => el.classList.remove('active'));
+        button.classList.add('active');
+        state.workspace = button.dataset.workspace;
+        state.selectedNoteId = null;
+        state.dirtyBody = '';
+        renderSummary();
+      };
+    });
+
+    document.getElementById('openPalette').onclick = openPalette;
+    document.getElementById('sidebarAddNote').onclick = () => { addNote(); openNotes(); };
+    document.getElementById('sidebarBrowseNotes').onclick = openNotes;
+    document.querySelectorAll('[data-close="palette"]').forEach((el) => el.onclick = closePalette);
+    document.querySelectorAll('[data-close="notes"]').forEach((el) => el.onclick = closeNotes);
+
+
+    els.commandSearch.addEventListener('input', () => {
+      state.commandQuery = els.commandSearch.value;
+      state.selectedCommandIndex = 0;
+      renderCommandPalette();
+    });
+
+    els.noteEditor.addEventListener('input', () => {
+      state.dirtyBody = els.noteEditor.value;
+      els.notePreview.innerHTML = renderMarkdown(state.dirtyBody);
+    });
+
+    els.notesSearch.addEventListener('input', () => {
+      state.noteQuery = els.notesSearch.value;
+      renderNotesPanel();
+    });
+    els.saveNote.onclick = saveCurrentNote;
+    els.deleteNote.onclick = deleteCurrentNote;
+
+    document.querySelectorAll('.editor-toggle').forEach((toggle) => {
+      toggle.onclick = () => {
+        state.editorMode = toggle.dataset.mode;
+        renderNotesPanel();
+      };
+    });
+
+    window.addEventListener('keydown', (event) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault();
+        openPalette();
+        return;
+      }
+      if (event.key === 'Escape') {
+        closePalette();
+        closeNotes();
+        return;
+      }
+      if (els.paletteOverlay.classList.contains('open')) {
+        const filtered = getFilteredCommands();
+        if (event.key === 'ArrowDown') {
+          event.preventDefault();
+          state.selectedCommandIndex = Math.min(filtered.length - 1, state.selectedCommandIndex + 1);
+          renderCommandPalette();
+          return;
+        }
+        if (event.key === 'ArrowUp') {
+          event.preventDefault();
+          state.selectedCommandIndex = Math.max(0, state.selectedCommandIndex - 1);
+          renderCommandPalette();
+          return;
+        }
+        if (event.key === 'Enter') {
+          const command = filtered[state.selectedCommandIndex];
+          if (command) {
+            event.preventDefault();
+            closePalette();
+            command.run();
+          }
+          return;
+        }
+      }
+    });
+
+    renderSummary();
+  </script>
+</body>
+</html>

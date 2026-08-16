@@ -7,11 +7,12 @@ import type { WorkspacePhase } from '../../types/config.js';
 export interface AppClientMulti {
   getBackend: (backendKey: BackendKey) => SessionBackend | null;
   createAgentSession: (ref: BackendScopedWorkspaceRef, title?: string) => Promise<AppClientAgentSessionSummary[]>;
-  abortAgentSession: (ref: BackendScopedAgentSessionRef) => Promise<boolean>;
+  killAgentSession: (ref: BackendScopedAgentSessionRef) => Promise<boolean>;
+  stopAgentTurn: (ref: BackendScopedAgentSessionRef) => Promise<boolean>;
   closeAgentSession: (ref: BackendScopedAgentSessionRef) => Promise<AppClientAgentSessionSummary[]>;
   archiveAgentSession: (ref: BackendScopedAgentSessionRef) => Promise<AppClientAgentSessionSummary[]>;
   restoreAgentSession: (ref: BackendScopedAgentSessionRef) => Promise<AppClientAgentSessionSummary[]>;
-  attachAgentSession: (ref: BackendScopedAgentSessionRef, options?: { viewOnly?: boolean; cols?: number; rows?: number }) => Promise<void>;
+  openAgentSession: (ref: BackendScopedAgentSessionRef, options?: { paneId?: string }) => Promise<void>;
   getAgentSessionPreference: (ref: BackendScopedWorkspaceRef) => Promise<string | null>;
   setAgentSessionPreference: (ref: BackendScopedWorkspaceRef, sessionId: string) => Promise<void>;
   respondToAgentPermission?: (ref: BackendScopedAgentSessionRef, permissionId: string, response: 'allow' | 'deny') => Promise<boolean>;

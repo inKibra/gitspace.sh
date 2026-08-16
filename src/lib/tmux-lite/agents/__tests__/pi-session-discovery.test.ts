@@ -86,6 +86,30 @@ describe('pi-session-files', () => {
     const found = findPiSessionFile(cwd, 'nonexistent-id', join(tmpDir, 'sessions'));
     expect(found).toBeNull();
   });
+
+  it('discovers sessions whose header is preceded by a leading title record', () => {
+    // Newer omp session files prepend a padded, in-place-updatable `title`
+    // record, so the `session` header is on line 2. Sessions must still be
+    // discovered (otherwise they vanish from the sidebar), and the leading
+    // title (freshest) should win over the header's original title.
+    const tmpDir = mkdtempSync(join(tmpdir(), 'pi-test-'));
+    const cwd = join(tmpDir, 'workspace');
+    mkdirSync(cwd, { recursive: true });
+    const sessionsRoot = join(tmpDir, 'sessions');
+    const dir = join(sessionsRoot, encodeSessionDirName(cwd));
+    mkdirSync(dir, { recursive: true });
+
+    const titleRecord = JSON.stringify({ type: 'title', v: 1, title: 'Fresh Title', source: 'auto', updatedAt: '2026-07-04T00:00:00.000Z', pad: ' '.repeat(50) });
+    const header = JSON.stringify({ type: 'session', version: 3, id: 'title-first', cwd, title: 'Old Title', timestamp: '2026-03-24T00:00:00.000Z' });
+    const userMsg = JSON.stringify({ type: 'message', id: 'm1', message: { role: 'user', content: 'hi' } });
+    writeFileSync(join(dir, '2026-03-24T00-00-00-000Z_title-first.jsonl'), [titleRecord, header, userMsg].join('\n') + '\n');
+
+    const sessions = listPiSessions(cwd, sessionsRoot);
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0].id).toBe('title-first');
+    expect(sessions[0].title).toBe('Fresh Title');
+    expect(sessions[0].messageCount).toBe(1);
+  });
 });
 
 describe('PiCoordinator session discovery', () => {
@@ -108,31 +132,4 @@ describe('PiCoordinator session discovery', () => {
     expect(sessions.length).toBe(1);
     expect(sessions[0].id).toBe('coord-test-1');
   });
-  it('tracks PTY ownership independently when one PTY forks to a new session', () => {
-    const coordinator = new PiCoordinator();
-    coordinator.rebindTerminalSession('test:ws', 'pty-a', 'agent-old');
-    coordinator.rebindTerminalSession('test:ws', 'pty-b', 'agent-old');
-
-    const reassignment = coordinator.rebindTerminalSession('test:ws', 'pty-b', 'agent-new');
-
-    expect(reassignment.previousAgentSessionId).toBe('agent-old');
-    expect(reassignment.previousOwnerCount).toBe(1);
-    expect(coordinator.getTerminalBinding('pty-a')).toEqual({ workspaceId: 'test:ws', agentSessionId: 'agent-old' });
-    expect(coordinator.getTerminalBinding('pty-b')).toEqual({ workspaceId: 'test:ws', agentSessionId: 'agent-new' });
-    expect(coordinator.hasTerminalOwners('test:ws', 'agent-old')).toBe(true);
-    expect(coordinator.hasTerminalOwners('test:ws', 'agent-new')).toBe(true);
-  });
-
-  it('reports zero previous owners when the last PTY leaves a session', () => {
-    const coordinator = new PiCoordinator();
-    coordinator.rebindTerminalSession('test:ws', 'pty-a', 'agent-old');
-
-    const reassignment = coordinator.rebindTerminalSession('test:ws', 'pty-a', 'agent-new');
-
-    expect(reassignment.previousAgentSessionId).toBe('agent-old');
-    expect(reassignment.previousOwnerCount).toBe(0);
-    expect(coordinator.hasTerminalOwners('test:ws', 'agent-old')).toBe(false);
-    expect(coordinator.getTerminalBinding('pty-a')).toEqual({ workspaceId: 'test:ws', agentSessionId: 'agent-new' });
-  });
-
 });

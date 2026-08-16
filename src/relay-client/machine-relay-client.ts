@@ -1,9 +1,21 @@
 import WebSocket from 'ws';
 import { logger } from '../utils/logger.js';
 import { signMessage } from '../relay/signing.js';
-import { PROTOCOL_VERSION } from '../relay/protocol.js';
+import { PROTOCOL_VERSION, RELAY_MAX_WS_PAYLOAD } from '../relay/protocol.js';
+import { chunkFrame, FrameChunkReassembler, FRAME_CHUNK_SIZE } from '../lib/tmux-lite/crypto/frame-chunk.js';
+import {
+  FrameLedger,
+  guardOversizeSend,
+  peekFrameType,
+  summarizeClose,
+} from '../lib/tmux-lite/transport-diagnostics.js';
+import { installServerTransportDiagnostics } from '../lib/tmux-lite/transport-diagnostics-server.js';
 import { ed25519 } from '@noble/curves/ed25519.js';
 import type { ServeEventHandler } from '../serve/types.js';
+
+// Machine side runs in the serve daemon: route transport diagnostics into the
+// trace ring so they ride in the problem-report bundle (report.server.traceRing).
+installServerTransportDiagnostics();
 
 export type RelayTrustResult =
   | { trusted: true }
@@ -56,7 +68,15 @@ export async function requestUnlockGrantViaRelay(options: {
 
   return await new Promise<UnlockGrantResponse>((resolve, reject) => {
     let completed = false;
-    const ws = new WebSocket(url.toString());
+    // NOTE (verified empirically, Bun 1.3): the `ws` package's `maxPayload`
+    // option is a NO-OP under Bun — the client accepts frames of ANY size
+    // regardless of this value (it fails lenient, not strict). The ONLY frame
+    // size enforcer in the whole path is the relay's Bun.serve maxPayloadLength
+    // (RELAY_MAX_WS_PAYLOAD = 64MB), which 1006s ("Received too big message") on
+    // receive over the cap. This option is kept for correctness under Node/`ws`
+    // but is NOT what prevents the 1006 — the durable fix is ticket #42.3
+    // chunking (frame-chunk.ts), which keeps every frame far below the cap.
+    const ws = new WebSocket(url.toString(), { maxPayload: RELAY_MAX_WS_PAYLOAD });
     const timeoutId = setTimeout(() => {
       fail('Timed out waiting for relay unlock grant');
     }, timeoutMs);
@@ -187,20 +207,63 @@ function signChallengeAndCreateRegistration(
   }
 }
 
-function createDataMessage(connectionId: string, data: Uint8Array | Buffer): string {
-  return JSON.stringify({
-    type: 'data',
-    connectionId,
-    data: Buffer.from(data).toString('base64'),
+// Ticket #42.3 (the durable fix): split an oversize encrypted `data` frame into
+// ordered chunks so no single WS frame is pathologically large. A single legit
+// payload — e.g. a full machine_snapshot, which grows with workspace/agent count
+// (a 6.68MB frame was seen in the field, and 1006'd the whole session with
+// "Received too big message") — must never ride as one frame. Each chunk stays
+// UNDER 1MB on the wire (FRAME_CHUNK_SIZE=512KB raw ⇒ ~683KB base64), matching
+// the 1MB frame limit the whole system is designed around (tmux-lite
+// MAX_FRAME_SIZE, PTY_CHUNK_SIZE, share-read) so oversize frames are safe on
+// EVERY transport path, not just the local relay's 64MB backstop. Chunking wraps
+// the already-encrypted ciphertext bytes, so E2E is intact and the relay keeps
+// routing opaque payloads it cannot inspect. Small frames are returned unwrapped
+// (backward compatible). Reassembly happens on the receiver before decryption.
+function createDataMessages(
+  connectionId: string,
+  data: Uint8Array | Buffer,
+  ledger?: FrameLedger,
+): string[] {
+  const frameBytes = data instanceof Uint8Array ? data : Buffer.from(data);
+  // Ticket #42.4: instrument the machine→relay send boundary. `frameBytes` is
+  // the already-encrypted logical frame PRE-chunk, so its size is the real
+  // producer's payload size (best-effort type peek is 'data' for encrypted
+  // frames; session-handler names the true producer at the plaintext boundary).
+  const frameType = peekFrameType(frameBytes, 'data');
+  guardOversizeSend({
+    socket: connectionId,
+    role: 'machine',
+    size: frameBytes.length,
+    type: frameType,
+    willChunk: true,
+    log: (m) => logger.warning(m),
   });
+  ledger?.record('send', frameBytes.length, frameType);
+  const chunks = chunkFrame(frameBytes, FRAME_CHUNK_SIZE);
+  if (chunks.length > 1) {
+    logger.dim(
+      `[serve] chunked oversize data frame: conn=${connectionId} ` +
+      `raw=${(frameBytes.length / (1024 * 1024)).toFixed(2)}MB into ${chunks.length} chunks`,
+    );
+  }
+  return chunks.map((chunk) =>
+    JSON.stringify({
+      type: 'data',
+      connectionId,
+      data: Buffer.from(chunk).toString('base64'),
+    }),
+  );
 }
 
 function createSendCallback(
   ws: WebSocket,
-  connectionId: string
+  connectionId: string,
+  ledger?: FrameLedger,
 ): (data: Buffer) => void {
   return (sendData) => {
-    ws.send(createDataMessage(connectionId, sendData));
+    for (const message of createDataMessages(connectionId, sendData, ledger)) {
+      ws.send(message);
+    }
   };
 }
 
@@ -223,6 +286,9 @@ export async function connectMachineRelay(
   registerPermit?: string,
   enrollmentToken?: string,
   deviceCertificate?: string,
+  /** Daemon-unification P1: receive a stop handle so an in-process host can
+   *  deactivate (close the socket, stop pings, suppress reconnection). */
+  lifecycle?: { onStop: (stop: () => void) => void },
 ): Promise<void> {
   const url = new URL(relayUrl);
   url.searchParams.set('role', 'machine');
@@ -233,8 +299,23 @@ export async function connectMachineRelay(
     const baseReconnectDelay = 1000;
     const maxReconnectDelay = 30000;
     const pingIntervalMs = 15_000;
+    // No pong within this window ⇒ half-open socket: terminate so the normal
+    // onclose → reconnect path runs (a dead TCP connection can otherwise sit
+    // silently for many minutes while clients see the machine as online).
+    const pongLivenessTimeoutMs = 45_000;
+    let lastPongAtMs = 0;
     let resolved = false;
     let pingTimer: ReturnType<typeof setInterval> | null = null;
+    let stopped = false;
+    let currentWs: WebSocket | null = null;
+    // Ticket #42.3: reassemble chunked client→machine data frames (keyed by
+    // connectionId) before handing bytes to the session decrypt path.
+    const dataReassemblers = new Map<string, FrameChunkReassembler>();
+    lifecycle?.onStop(() => {
+      stopped = true;
+      stopPing();
+      try { currentWs?.close(); } catch { /* already closed */ }
+    });
 
     const signingPublicKey = signingPrivateKey
       ? new Uint8Array(Buffer.from(publicIdentity.signingPublicKey, 'base64'))
@@ -258,8 +339,20 @@ export async function connectMachineRelay(
 
     const startPing = (ws: WebSocket) => {
       stopPing();
+      lastPongAtMs = Date.now();
       pingTimer = setInterval(() => {
         if (ws.readyState !== WebSocket.OPEN) {
+          return;
+        }
+        const sincePongMs = Date.now() - lastPongAtMs;
+        if (sincePongMs > pongLivenessTimeoutMs) {
+          console.log(`[serve] Relay liveness lost: no pong for ${Math.round(sincePongMs / 1000)}s, terminating connection`);
+          stopPing();
+          try {
+            ws.terminate();
+          } catch {
+            try { ws.close(); } catch { /* already closed */ }
+          }
           return;
         }
         ws.send(JSON.stringify({ type: 'ping', timestamp: Date.now() }));
@@ -267,23 +360,47 @@ export async function connectMachineRelay(
     };
 
     const connect = () => {
+      if (stopped) return;
       console.log(`[serve] Connecting to relay: ${url.toString()}`);
-      const ws = new WebSocket(url.toString());
+      // See note in requestUnlockGrantViaRelay: `ws` `maxPayload` is a no-op
+      // under Bun (client accepts any size). The binding cap is the relay's
+      // Bun.serve; ticket #42.3 chunking keeps frames well below it.
+      const ws = new WebSocket(url.toString(), { maxPayload: RELAY_MAX_WS_PAYLOAD });
+      currentWs = ws;
       ws.binaryType = 'arraybuffer';
+      // Ticket #42.4: per-socket rolling frame ledger + connect timestamp, reset
+      // on every (re)connect. On an abnormal close its contents are dumped so the
+      // close diagnostic names the last frames this end saw.
+      const frameLedger = new FrameLedger();
+      let connectedAtMs = 0;
 
       ws.onopen = () => {
+        connectedAtMs = Date.now();
         console.log('[serve] WebSocket connected, waiting for relay identity...');
       };
 
       ws.onclose = (event) => {
         stopPing();
         console.log(`[serve] WebSocket closed: code=${event.code} reason=${event.reason || 'none'}`);
+        // Ticket #42.4: the machine's OWN close view — code + reason + last
+        // frame each way + ledger — the exact signal that was missing when the
+        // relay only logged "machine disconnected". Routed to the trace ring.
+        summarizeClose({
+          role: 'machine',
+          socket: machineId,
+          code: event.code,
+          reason: event.reason,
+          ledger: frameLedger,
+          startedAtMs: connectedAtMs,
+          log: (m) => console.log(m),
+        });
         eventHandler({
           type: 'relay_disconnected',
           code: event.code,
           reason: event.reason || 'Connection closed',
         });
 
+        if (stopped) return;
         if (reconnectAttempts < maxReconnectAttempts) {
           reconnectAttempts += 1;
           const delay = Math.min(
@@ -383,19 +500,40 @@ export async function connectMachineRelay(
 
             case 'client_connected':
               sessionManager.handleConnect(msg.connectionId);
-              sessionManager.setSendCallback(msg.connectionId, createSendCallback(ws, msg.connectionId));
+              sessionManager.setSendCallback(msg.connectionId, createSendCallback(ws, msg.connectionId, frameLedger));
               break;
 
             case 'client_disconnected':
+              dataReassemblers.delete(msg.connectionId);
               sessionManager.handleDisconnect(msg.connectionId, msg.reason || 'Client disconnected');
               break;
 
             case 'data':
               if (msg.data && msg.connectionId) {
-                const messageData = Buffer.from(msg.data, 'base64');
+                const wireBytes = Buffer.from(msg.data, 'base64');
+                // Ticket #42.4: record the recv boundary (size + outer envelope
+                // type only — the inner frame is encrypted).
+                frameLedger.record('recv', wireBytes.length, 'data');
+
+                // Ticket #42.3: reassemble chunked frames before decrypt. Small
+                // (unchunked) frames pass straight through as a single chunk.
+                let reassembler = dataReassemblers.get(msg.connectionId);
+                if (!reassembler) {
+                  reassembler = new FrameChunkReassembler();
+                  dataReassemblers.set(msg.connectionId, reassembler);
+                }
+                const assembled = reassembler.receive(wireBytes);
+                if (assembled.kind === 'partial') {
+                  break;
+                }
+                if (assembled.kind === 'error') {
+                  logger.warning(`[serve] dropping malformed data chunk (conn=${msg.connectionId}): ${assembled.message}`);
+                  break;
+                }
+                const messageData = assembled.frame;
 
                 if (!sessionManager.getSession(msg.connectionId)) {
-                  sessionManager.setSendCallback(msg.connectionId, createSendCallback(ws, msg.connectionId));
+                  sessionManager.setSendCallback(msg.connectionId, createSendCallback(ws, msg.connectionId, frameLedger));
                 }
 
                 const response = await sessionManager.handleMessage(
@@ -404,7 +542,9 @@ export async function connectMachineRelay(
                 );
 
                 if (response) {
-                  ws.send(createDataMessage(msg.connectionId, response));
+                  for (const message of createDataMessages(msg.connectionId, response, frameLedger)) {
+                    ws.send(message);
+                  }
                 }
               }
               break;
@@ -416,7 +556,56 @@ export async function connectMachineRelay(
               }
               break;
 
+            case 'share_read': {
+              // Public share link fetch (docs/ARTIFACT-PROTOCOL.md Q3): verify
+              // with OUR key, enforce the ledger, stream resolved bytes back
+              // in ≤700KB frames (relay protocol caps messages at 1MB).
+              const requestId = String((msg as { requestId?: unknown }).requestId ?? '');
+              const token = String((msg as { token?: unknown }).token ?? '');
+              const subPathRaw = (msg as { subPath?: unknown }).subPath;
+              const subPath = typeof subPathRaw === 'string' ? subPathRaw : undefined;
+              void (async () => {
+                try {
+                  const { consumeShareRead } = await import('../lib/tmux-lite/artifact-share.js');
+                  const result = await consumeShareRead(token, subPath);
+                  const CHUNK = 512 * 1024;
+                  let seq = 0;
+                  for (let off = 0; off < result.bytes.length || seq === 0; off += CHUNK) {
+                    const slice = result.bytes.subarray(off, Math.min(off + CHUNK, result.bytes.length));
+                    const done = off + CHUNK >= result.bytes.length;
+                    signAndSend(ws, {
+                      type: 'share_read_chunk',
+                      requestId,
+                      seq,
+                      dataBase64: slice.length > 0 ? Buffer.from(slice).toString('base64') : undefined,
+                      ...(seq === 0 ? {
+                        contentType: result.contentType,
+                        disposition: result.disposition,
+                        fileName: result.fileName,
+                        relPath: result.relPath,
+                        ...(result.pinnedCommit ? { pinnedCommit: result.pinnedCommit } : {}),
+                        expiresAt: result.expiresAt,
+                      } : {}),
+                      ...(done ? { done: true } : {}),
+                    });
+                    seq += 1;
+                    if (done) break;
+                  }
+                } catch (error) {
+                  signAndSend(ws, {
+                    type: 'share_read_chunk',
+                    requestId,
+                    seq: 0,
+                    error: error instanceof Error ? error.message.slice(0, 200) : 'share read failed',
+                    done: true,
+                  });
+                }
+              })();
+              break;
+            }
+
             case 'pong':
+              lastPongAtMs = Date.now();
               break;
 
             default:

@@ -1,12 +1,20 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync } from 'fs';
-import { dirname, join } from 'path';
+import { execFileSync } from 'child_process';
+import { dirname, join, resolve } from 'path';
 import { getProjectWorkspacesDir, readProjectConfig, writeProjectConfig } from './config.js';
 import type { WorkspacePhase } from '../types/config.js';
-import type { WorkspaceNote, WorkspaceNotePriority, WorkspaceNotesSummary } from '../types/workspace.js';
+import type { WorkspaceNotesSummary } from '../types/workspace.js';
+import { workspaceNotesFileSchema, type WorkspaceNote, type WorkspaceNotePriority } from '../types/workspace.js';
+import { parseJsonWith, parseOrThrow } from './schema-parse.js';
 import { generateId } from '../utils/id.js';
 
 const WORKSPACE_STORAGE_DIR = join('.gitspace', 'workspace');
-const WORKSPACE_STORAGE_GITIGNORE_ENTRY = '.gitspace/workspace/';
+const WORKSPACE_STORAGE_GITIGNORE_ENTRIES = [
+  '.gitspace/workspace/',
+  '.gitspace/.processes/',
+  '.gitspace/uploads/',
+  '.gitspace/events/',
+];
 const WORKSPACE_STORAGE_GITIGNORE_MARKER = '# gssh workspace local state';
 
 export interface WorkspaceMetadata {
@@ -41,17 +49,64 @@ export function getWorkspaceReviewPath(workspacePath: string, workspaceName: str
 
 export function ensureWorkspaceStorageIgnored(workspacePath: string): void {
   const gitignorePath = join(workspacePath, '.gitignore');
-  const alreadyIgnored =
-    existsSync(gitignorePath) && readFileSync(gitignorePath, 'utf-8').includes(WORKSPACE_STORAGE_GITIGNORE_ENTRY);
-  if (alreadyIgnored) {
+  const existing = existsSync(gitignorePath) ? readFileSync(gitignorePath, 'utf-8') : '';
+  const existingEntries = new Set(existing.split(/\r?\n/).map((line) => line.trim()));
+  const missingEntries = WORKSPACE_STORAGE_GITIGNORE_ENTRIES.filter((entry) => !existingEntries.has(entry));
+  if (missingEntries.length === 0) {
     return;
   }
+  if (ensureWorkspaceStorageExcludedByGit(workspacePath)) {
+    return;
+  }
+
+  const needsMarker = !existingEntries.has(WORKSPACE_STORAGE_GITIGNORE_MARKER);
+  const separator = existing.length > 0 && !existing.endsWith('\n') ? '\n' : '';
+  const marker = needsMarker ? `${existing.length > 0 ? '\n' : ''}${WORKSPACE_STORAGE_GITIGNORE_MARKER}\n` : '';
   appendFileSync(
     gitignorePath,
-    `\n${WORKSPACE_STORAGE_GITIGNORE_MARKER}\n${WORKSPACE_STORAGE_GITIGNORE_ENTRY}\n`,
+    `${separator}${marker}${missingEntries.join('\n')}\n`,
     'utf-8',
   );
 }
+function appendWorkspaceStorageExclude(workspacePath: string, gitDirCommand: '--git-dir' | '--git-common-dir'): boolean {
+  try {
+    const rawGitDir = execFileSync('git', ['rev-parse', gitDirCommand], {
+      cwd: workspacePath,
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    if (!rawGitDir) {
+      return false;
+    }
+
+    const gitDir = rawGitDir.startsWith('/') ? rawGitDir : resolve(workspacePath, rawGitDir);
+    const excludePath = join(gitDir, 'info', 'exclude');
+    const existingExclude = existsSync(excludePath) ? readFileSync(excludePath, 'utf-8') : '';
+    const missing = WORKSPACE_STORAGE_GITIGNORE_ENTRIES.filter((entry) => !existingExclude.includes(entry));
+    if (missing.length === 0) {
+      return true;
+    }
+
+    mkdirSync(dirname(excludePath), { recursive: true });
+    const needsMarker = !existingExclude.includes(WORKSPACE_STORAGE_GITIGNORE_MARKER);
+    const prefix = needsMarker ? `\n${WORKSPACE_STORAGE_GITIGNORE_MARKER}\n` : '\n';
+    appendFileSync(
+      excludePath,
+      `${prefix}${missing.join('\n')}\n`,
+      'utf-8',
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function ensureWorkspaceStorageExcludedByGit(workspacePath: string): boolean {
+  const worktreeExcluded = appendWorkspaceStorageExclude(workspacePath, '--git-dir');
+  const commonExcluded = appendWorkspaceStorageExclude(workspacePath, '--git-common-dir');
+  return worktreeExcluded || commonExcluded;
+}
+
 
 function ensureParentDir(filePath: string): void {
   const dir = dirname(filePath);
@@ -144,10 +199,19 @@ export function setWorkspaceStatus(projectName: string, workspaceName: string, s
   clearLegacyWorkspaceStatus(projectName, workspaceName);
 }
 
+/**
+ * Notes are hand-editable and agent-authored, so a malformed `notes.json` must
+ * not take down every surface that lists notes. Parse, warn with the path and
+ * the field-level issues, and degrade to an empty list.
+ */
 export function listWorkspaceNotes(projectName: string, workspaceName: string): WorkspaceNote[] {
   const wsPath = workspacePath(projectName, workspaceName);
   const filePath = getWorkspaceNotesPath(wsPath, workspaceName);
-  return readJsonFile<WorkspaceNote[]>(filePath) ?? [];
+  if (!existsSync(filePath)) return [];
+  const parsed = parseJsonWith(workspaceNotesFileSchema, readFileSync(filePath, 'utf-8'));
+  if (parsed.ok) return parsed.data;
+  console.warn(`[workspace-metadata] ignoring malformed ${filePath}: ${parsed.issues.join('; ')}`);
+  return [];
 }
 
 function writeWorkspaceNotes(projectName: string, workspaceName: string, notes: WorkspaceNote[]): void {
@@ -155,7 +219,10 @@ function writeWorkspaceNotes(projectName: string, workspaceName: string, notes: 
   ensureWorkspaceStorageIgnored(wsPath);
   const filePath = getWorkspaceNotesPath(wsPath, workspaceName);
   ensureParentDir(filePath);
-  writeFileSync(filePath, JSON.stringify(notes, null, 2), 'utf-8');
+  // Validate before persisting: a note that cannot be read back is worse than
+  // a rejected write, and the author gets the failing field either way.
+  const validated = parseOrThrow(workspaceNotesFileSchema, notes, `workspace notes (${filePath})`);
+  writeFileSync(filePath, JSON.stringify(validated, null, 2), 'utf-8');
 }
 
 export function addWorkspaceNote(

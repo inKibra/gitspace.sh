@@ -49,6 +49,7 @@ export type RemoteSessionConnectionStatus =
 
 export interface RemoteSessionPtyBackend extends SessionBackend {
   setPtyOutputHandler?: (handler: ((data: Uint8Array) => void) | null) => void;
+  setScriptOutputHandler?: (handler: ((data: Uint8Array) => void) | null) => void;
   writePtyData?: (data: Uint8Array) => Promise<void>;
   resizePty?: (cols: number, rows: number) => Promise<void>;
 }
@@ -75,6 +76,7 @@ export interface UseRemoteSessionClientReturn<ConnectParams> {
   replays: ReplayInfo[];
   attachedSessionId: string | null;
   attachedSessionName: string | null;
+  attachedPanes: BackendSessionState['attachedPanes'];
   selectedProjectName: string | null;
 
   connect: (params: ConnectParams) => Promise<void>;
@@ -96,11 +98,17 @@ export interface UseRemoteSessionClientReturn<ConnectParams> {
   deleteProject: (projectName: string, params?: DeleteProjectParams) => Promise<void>;
   attachSession: (params: AttachSessionParams) => void;
   detachSession: () => void;
+  attachPane: (params: AttachSessionParams & { paneId: string }) => void;
+  detachPane: (paneId: string) => void;
+  detachAllPanes: () => void;
   cancelPendingScripts: () => void;
   cancelPendingReplayRequests: () => void;
+  sendPaneData: (paneId: string, data: Uint8Array) => void;
+  resizePane: (paneId: string, cols: number, rows: number) => void;
+  setPaneOutputHandler: (paneId: string, fn: ((data: Uint8Array) => void) | null) => void;
   selectProject: (projectName: string | null) => void;
 
-  killSession: (sessionId: string) => void;
+  terminateSession: (sessionId: string) => void;
   deleteWorkspace: (
     projectName: string,
     workspaceId: string,
@@ -122,6 +130,7 @@ export interface UseRemoteSessionClientReturn<ConnectParams> {
   send: (data: Uint8Array) => void;
   resize: (cols: number, rows: number) => void;
   setWriteCallback: (fn: ((data: Uint8Array) => void) | null) => void;
+  setScriptWriteCallback: (fn: ((data: Uint8Array) => void) | null) => void;
 
   inbox: InboxItem[];
   inboxUnreadCount: number;
@@ -175,6 +184,7 @@ export function useRemoteSessionClient<ConnectParams>(
   const activeBackendKeyRef = useRef<BackendKey | null>(null);
   const backendRef = useRef<RemoteSessionPtyBackend | null>(null);
   const writeCallbackRef = useRef<((data: Uint8Array) => void) | null>(null);
+  const scriptWriteCallbackRef = useRef<((data: Uint8Array) => void) | null>(null);
 
   const activeBackendState = useMemo(() => {
     const backendKey = activeBackendKeyRef.current;
@@ -215,6 +225,9 @@ export function useRemoteSessionClient<ConnectParams>(
       const { backendKey, backend } = createBackend(params);
       if (backend.setPtyOutputHandler) {
         backend.setPtyOutputHandler(writeCallbackRef.current);
+      }
+      if (backend.setScriptOutputHandler) {
+        backend.setScriptOutputHandler(scriptWriteCallbackRef.current);
       }
 
       backendRef.current = backend;
@@ -367,6 +380,18 @@ export function useRemoteSessionClient<ConnectParams>(
     void withActiveBackend((backendKey) => engine.detachSession(backendKey));
   }, [engine, withActiveBackend]);
 
+  const attachPane = useCallback((params: AttachSessionParams & { paneId: string }) => {
+    void withActiveBackend((backendKey) => engine.attachPane(backendKey, params));
+  }, [engine, withActiveBackend]);
+
+  const detachPane = useCallback((paneId: string) => {
+    void withActiveBackend((backendKey) => engine.detachPane(backendKey, paneId));
+  }, [engine, withActiveBackend]);
+
+  const detachAllPanes = useCallback(() => {
+    void withActiveBackend((backendKey) => engine.detachAllPanes(backendKey));
+  }, [engine, withActiveBackend]);
+
   const cancelPendingScripts = useCallback(() => {
     void withActiveBackend((backendKey) => engine.cancelPendingScripts(backendKey));
   }, [engine, withActiveBackend]);
@@ -406,8 +431,8 @@ export function useRemoteSessionClient<ConnectParams>(
     }
   }, [activeBackendState?.projects, selectProject, selectedProjectName]);
 
-  const killSession = useCallback((sessionId: string) => {
-    void withActiveBackend((backendKey) => engine.killSession(backendKey, sessionId));
+  const terminateSession = useCallback((sessionId: string) => {
+    void withActiveBackend((backendKey) => engine.terminateSession(backendKey, sessionId));
   }, [engine, withActiveBackend]);
 
   const deleteWorkspace = useCallback(async (
@@ -498,6 +523,35 @@ export function useRemoteSessionClient<ConnectParams>(
   const setWriteCallback = useCallback((fn: ((data: Uint8Array) => void) | null) => {
     writeCallbackRef.current = fn;
     backendRef.current?.setPtyOutputHandler?.(fn);
+  }, []);
+
+  const sendPaneData = useCallback((paneId: string, data: Uint8Array) => {
+    const backend = backendRef.current;
+    if (!backend) return;
+    if (backend.writePaneData) {
+      void backend.writePaneData(paneId, data);
+      return;
+    }
+    void backend.writePtyData?.(data);
+  }, []);
+
+  const resizePane = useCallback((paneId: string, cols: number, rows: number) => {
+    const backend = backendRef.current;
+    if (!backend) return;
+    if (backend.resizePane) {
+      void backend.resizePane(paneId, cols, rows);
+      return;
+    }
+    void backend.resizePty?.(cols, rows);
+  }, []);
+
+  const setPaneOutputHandler = useCallback((paneId: string, fn: ((data: Uint8Array) => void) | null) => {
+    backendRef.current?.setPaneOutputHandler?.(paneId, fn);
+  }, []);
+
+  const setScriptWriteCallback = useCallback((fn: ((data: Uint8Array) => void) | null) => {
+    scriptWriteCallbackRef.current = fn;
+    backendRef.current?.setScriptOutputHandler?.(fn);
   }, []);
 
   const requestInbox = useCallback(() => {
@@ -618,6 +672,7 @@ export function useRemoteSessionClient<ConnectParams>(
     replays: activeBackendState?.replays ?? [],
     attachedSessionId: activeBackendState?.attachedSessionId ?? null,
     attachedSessionName: activeBackendState?.attachedSessionName ?? null,
+    attachedPanes: activeBackendState?.attachedPanes ?? {},
     selectedProjectName,
 
     connect,
@@ -639,11 +694,14 @@ export function useRemoteSessionClient<ConnectParams>(
     deleteProject,
     attachSession,
     detachSession,
+    attachPane,
+    detachPane,
+    detachAllPanes,
     cancelPendingScripts,
     cancelPendingReplayRequests,
     selectProject,
 
-    killSession,
+    terminateSession,
     deleteWorkspace,
     getBundleRefreshPlan,
     applyBundleRefresh,
@@ -653,6 +711,10 @@ export function useRemoteSessionClient<ConnectParams>(
     send,
     resize,
     setWriteCallback,
+    sendPaneData,
+    resizePane,
+    setPaneOutputHandler,
+    setScriptWriteCallback,
 
     inbox: activeBackendState?.inbox ?? [],
     inboxUnreadCount: activeBackendState?.inboxUnreadCount ?? 0,
@@ -703,10 +765,13 @@ export function useRemoteSessionClient<ConnectParams>(
     deleteProject,
     attachSession,
     detachSession,
+    attachPane,
+    detachPane,
+    detachAllPanes,
     cancelPendingScripts,
     cancelPendingReplayRequests,
     selectProject,
-    killSession,
+    terminateSession,
     deleteWorkspace,
     getBundleRefreshPlan,
     applyBundleRefresh,
@@ -715,6 +780,10 @@ export function useRemoteSessionClient<ConnectParams>(
     send,
     resize,
     setWriteCallback,
+    setScriptWriteCallback,
+    sendPaneData,
+    resizePane,
+    setPaneOutputHandler,
     requestInbox,
     clearInboxItem,
     markInboxItemRead,

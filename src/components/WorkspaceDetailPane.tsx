@@ -8,6 +8,7 @@ import type { AgentSessionInfo } from './SpacesBrowser.js';
 import type { WorkspaceStatusInput, WorkspaceStatusSummary } from '../app/workspaces/workspace-status.js';
 import type { WorkspaceDetailReplayRow } from '../app/shared/workspace-detail/types.js';
 import type { WorkspaceRuntimeEntry } from '../app/shared/workspace-runtime/types.js';
+import type { KanbanGoalItem } from '../app/shared/board/types.js';
 
 export type WorkspaceDetailStripWorkspace = WorkspaceStatusInput & {
   name: string;
@@ -36,14 +37,37 @@ export interface WorkspaceDetailPaneProps {
   onOpenGitHubPullRequest?: (workspaceId: string) => void | Promise<void>;
   onLaunchCommit?: (workspaceId: string) => void | Promise<void>;
   onRequestStatusChange?: (workspaceId: string, projectName: string) => void | Promise<void>;
+  onOpenNotes?: (workspaceId: string) => void;
   onOpenEvents: (workspaceId: string) => void;
+  /** Kanban phase (stage) + switcher for the sidebar header (mock .sb-wh). */
+  phase?: import('../types/config.js').WorkspacePhase;
+  onSwitchStage?: (phase: import('../types/config.js').WorkspacePhase) => void;
+  /** Surfaces group targets (mock Sidebar Surfaces). */
+  onOpenRubric?: (workspaceId: string) => void;
+  onOpenWorkflow?: (workspaceId: string) => void;
+  onOpenCrons?: (workspaceId: string) => void;
+  onCreateDashboard?: () => void;
+  onOpenChangeGuide?: (workspaceId: string) => void;
+  onOpenGoalDoc?: (workspaceId: string) => void;
+  /** Dashboards group (from *.dashboard.json artifacts). */
+  dashboards?: Array<{ path: string; name: string; panels: number }>;
+  onOpenDashboard?: (path: string) => void;
+  /** Chain stack (mock chainstack) — the workspace's goal chain. */
+  chainGoals?: KanbanGoalItem[];
+  chainTitle?: string;
+  currentChainGoalId?: string;
+  onSwitchChainWorkspace?: (selectionKey: string) => void;
   onOpenAgentSession?: (workspaceId: string, agentSessionId: string) => void | Promise<void>;
   onCreateAgentSession?: (workspaceId: string) => void | Promise<void>;
-  onAbortAgentSession?: (workspaceId: string, agentSessionId: string) => void | Promise<void>;
+  onKillAgentSession?: (workspaceId: string, agentSessionId: string) => void | Promise<void>;
+  onStopAgentTurn?: (workspaceId: string, agentSessionId: string) => void | Promise<void>;
   onCloseAgentSession?: (workspaceId: string, agentSessionId: string) => void | Promise<void>;
   onArchiveAgentSession?: (workspaceId: string, agentSessionId: string) => void | Promise<void>;
   onRestoreAgentSession?: (workspaceId: string, agentSessionId: string) => void | Promise<void>;
   onDeleteSession?: (sessionId: string, sessionName: string) => void;
+  onDeleteWorkspace?: (workspace: WorkspaceInfo) => void;
+  goal?: KanbanGoalItem | null;
+  onOpenGoalDetail?: (goal: KanbanGoalItem) => void | Promise<void>;
   /** Raw cross-project workspaces available for the header strip. */
   allWorkspaces?: WorkspaceDetailStripWorkspace[];
   /** Platform-neutral status map used to filter/sort the header strip. */
@@ -51,6 +75,8 @@ export interface WorkspaceDetailPaneProps {
   runtime?: WorkspaceRuntimeEntry | null;
   attachedSessionId?: string | null;
   attachedAgentSessionId?: string | null;
+  attachedSessionIds?: readonly string[];
+  attachedAgentSessionIds?: readonly string[];
   pendingAgentAttach?: boolean;
   /** Called when user clicks a workspace in the header strip to switch to it. */
   onSelectWorkspace?: (workspaceSelectionKey: string) => void | Promise<void>;

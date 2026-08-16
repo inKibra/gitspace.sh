@@ -1,28 +1,26 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
-import { renderHook } from '@testing-library/react';
+import { act, renderHook, waitFor } from '@testing-library/react';
 import { setupTestDom, teardownTestDom } from '../../test/setup-dom.js';
 import { clearEnrolledBrowserIdentity, loadEnrolledBrowserIdentity, storeEnrolledBrowserIdentity } from '../../lib/storage/identity-store.web.js';
 import { generateIdentity, serializeIdentity } from '../../session/crypto/identity.web.js';
 
+let authToken: string | null = null;
+let logoutCalls = 0;
+
 mock.module('../../hooks/useAuth.web.ts', () => ({
   useAuth: () => ({
-    token: null,
-    isLoggedIn: false,
+    token: authToken,
+    isLoggedIn: authToken !== null,
     startLogin: () => {},
-    logout: () => {},
+    logout: () => {
+      logoutCalls += 1;
+      authToken = null;
+    },
   }),
 }));
 
 const { useIdentityGate } = await import('./useIdentityGate.web.js');
 
-async function waitFor(condition: () => boolean, timeoutMs = 2000, intervalMs = 20): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (condition()) return;
-    await new Promise((resolve) => setTimeout(resolve, intervalMs));
-  }
-  throw new Error('Timed out waiting for condition');
-}
 
 beforeAll(() => {
   setupTestDom();
@@ -41,6 +39,8 @@ beforeEach(() => {
   localStorage.clear();
   clearEnrolledBrowserIdentity();
   window.location.href = 'http://localhost/';
+  authToken = null;
+  logoutCalls = 0;
 });
 
 describe('useIdentityGate dev enrollment bootstrap', () => {
@@ -72,11 +72,38 @@ describe('useIdentityGate dev enrollment bootstrap', () => {
       readyCalls.push(identity.id);
     }));
 
-    await waitFor(() => readyCalls.length > 0);
+    await waitFor(() => {
+      expect(readyCalls.length).toBeGreaterThan(0);
+    });
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(readyCalls).toEqual([freshIdentity.id]);
     expect(loadEnrolledBrowserIdentity()?.identity.id).toBe(freshIdentity.id);
     expect(new URL(window.location.href).searchParams.get('enroll')).toBeNull();
+  });
+});
+
+describe('useIdentityGate logout', () => {
+  it('clears cloud recovery state and returns to login', async () => {
+    authToken = 'gst_1234567890abcdef1234';
+    Object.defineProperty(globalThis, 'fetch', {
+      value: mock(async () => new Response(null, { status: 404 })),
+      writable: true,
+      configurable: true,
+    });
+
+    const { result } = renderHook(() => useIdentityGate(() => {}));
+
+    await waitFor(() => {
+      expect(result.current.step).toBe('no-backup');
+    });
+
+    act(() => {
+      result.current.logout();
+    });
+
+    expect(logoutCalls).toBe(1);
+    expect(result.current.step).toBe('login');
+    expect(result.current.error).toBeNull();
   });
 });

@@ -1,22 +1,19 @@
-import type { OmpAgentSession, OmpCreateSessionResult } from './omp-types.js';
-import { HostUIBridgeState, type HostUIBridgeEmitter, type HostUIDialogResponse } from './host-ui-bridge.js';
+import { parseCommandArgs } from '@oh-my-pi/pi-coding-agent/utils/command-args';
+
+import type { HostUIBridgeEmitter, HostUIDialogRequest, HostUIDialogResponse } from './host-ui-bridge.js';
 import {
-  killSession as killTmuxSession,
-  listSessions as listTmuxSessions,
-  createVirtualSession as createTmuxVirtualSession,
-  resizeVirtualSession as resizeTmuxVirtualSession,
-} from '../cli.js';
-import type { Session as TmuxSession } from '../protocol.js';
-import {
-  createPiSessionManager,
-  getManagedPiExtensionPaths,
-  openPiSession,
-  persistInitialPiSessionModel,
+  createPiAuthStorage,
+  createPiModelRegistry,
+  getPiSettings,
+  openPiSessionManager,
+  readCycleOrder,
 } from './pi-runtime.js';
-// Dynamic imports: oh-my-pi has module-level side effects (postmortem signal
-// handlers, provider registration) that conflict with OpenTUI when loaded eagerly.
-const importSdk = () => import('@oh-my-pi/pi-coding-agent/sdk');
-const importSlashCommands = () => import('@oh-my-pi/pi-coding-agent/extensibility/slash-commands');
+import type { AgentCompactResult, AgentControlInfo, AgentDefinitionInfo, AgentGoalModeInfo, AgentHistoryEntry, AgentOAuthEvent, AgentSessionUsageReport, AgentSettingSchemaItem, AgentShakeMode, AgentShakeResult, AgentToolInfo, AgentTreeNode } from '../../../agents/agent-runtime-types.js';
+import { getTranscriptRange } from '../../../blocks/agent/transcript-source.js';
+import { resolveTranscriptImageData } from './transcript-image-resolver.js';
+import { CLAUDE_MODEL_ALIAS_TO_MODEL_ROLE } from '../../../blocks/model-roles.js';
+import type { TranscriptPage, TranscriptSource } from '../../../blocks/agent/transcript-source.js';
+import { executeSpaceCommand } from './extensions/space-command.js';
 import { listPiSessions, findPiSessionFile, type PiSessionFileInfo } from './pi-session-files.js';
 import { upsertArchivedSession, deleteArchivedSession } from '../../../agents/agent-db.js';
 import {
@@ -24,19 +21,90 @@ import {
   shouldDisplayAgentSession,
 } from '../../../agents/session-display.js';
 import type { AgentEvent } from '../../../agents/backend.js';
-import { getVirtualTerminal } from '../virtual-session-registry.js';
-import { startVirtualInteractiveMode, type VirtualInteractiveModeHandle } from './virtual-interactive-mode.js';
-import type {
-  PendingQuestion,
-  Permission,
-  QuestionInfo,
-} from '../../../agents/agent-runtime-types.js';
+import type { AgentSessionHost, SessionHostBoot, SessionHostSinks } from './session-host.js';
+import {
+  THINKING_LEVELS,
+  APPROVAL_MODES,
+  DEFAULT_TOOL_TIERS,
+} from './local-session-host.js';
+import { WorkerSessionHost, type WorkerSessionHostConfig } from './worker/worker-session-host.js';
+import { writeTraceLog } from '../../../utils/trace-log.js';
+import { resolveWorkspaceGoal } from '../../../core/goal-chain.js';
+import { getWorkspaceStatus } from '../../../core/workspace-metadata.js';
+
+/**
+ * Boots the per-session host. Production always uses {@link WorkerSessionHost}
+ * (one child process per agent session); the seam exists so unit tests can
+ * inject an in-process/fake host without spawning a real child. There is no
+ * daemon-level in-process fallback — worker hosting is mandatory (each session's
+ * own process is what isolates its SDK process-globals, AsyncJobManager, IRC
+ * bus and artifact registry from every other session).
+ */
+export type SessionHostFactory = (
+  target: PiWorkspaceTarget,
+  boot: SessionHostBoot,
+  sinks: SessionHostSinks,
+  config: WorkerSessionHostConfig,
+) => Promise<AgentSessionHost>;
+
+/** Ceiling on concurrent live agent hosts — a runaway guard, not a budget. The
+ *  target is a fleet (tens of agents working in parallel on one machine), so
+ *  this is deliberately high; raise it with GITSPACE_MAX_AGENT_WORKERS. */
+function maxAgentHosts(): number {
+  const n = Number.parseInt(process.env.GITSPACE_MAX_AGENT_WORKERS ?? '', 10);
+  return Number.isFinite(n) && n >= 1 ? n : 100;
+}
+
+// Dynamic imports: oh-my-pi has module-level side effects (postmortem signal
+// handlers that can call process.exit, provider registration) that must not
+// run just because this module is imported.
+const importSlashCommands = () => import('@oh-my-pi/pi-coding-agent/extensibility/slash-commands');
+const importExecModule = () => import('@oh-my-pi/pi-coding-agent/exec/exec');
 
 export const PI_AGENT_TMUX_SESSION_KIND = 'agent';
 
 /** Max time to wait for Pi to create its session file after spawning. */
 const SESSION_DISCOVERY_TIMEOUT_MS = 10_000;
 const SESSION_DISCOVERY_POLL_MS = 200;
+
+/** Curated, safe-to-edit settings surfaced in the settings panel. */
+const SETTINGS_CATALOG: Array<{ path: string; label: string; kind: 'boolean' | 'enum'; options?: string[] }> = [
+  { path: 'tools.approvalMode', label: 'Approval mode', kind: 'enum', options: APPROVAL_MODES },
+  { path: 'model.thinkingLevel', label: 'Thinking level', kind: 'enum', options: THINKING_LEVELS },
+  { path: 'compaction.enabled', label: 'Auto-compaction', kind: 'boolean' },
+  { path: 'compaction.autoContinue', label: 'Compaction auto-continue', kind: 'boolean' },
+  { path: 'retry.enabled', label: 'Auto-retry on errors', kind: 'boolean' },
+  { path: 'tools.intentTracing', label: 'Tool intent tracing', kind: 'boolean' },
+];
+
+/** Claude Code frontmatter model aliases → OMP role references ('pi/slow',
+ *  'pi/task', …). The alias table itself lives in the shared, bundle-safe
+ *  module src/blocks/model-roles.ts (web renderers translate legacy `model`
+ *  values with it); 'inherit'/'sonnet' → task are special-cased by the SDK's
+ *  resolveAgentModelPatterns to inherit the session model. */
+function claudeAliasToOmpRole(alias: string): string | null {
+  const role = CLAUDE_MODEL_ALIAS_TO_MODEL_ROLE[alias];
+  return role ? `pi/${role}` : null;
+}
+
+/**
+ * When an agent definition pins Claude-style model aliases that OMP cannot
+ * resolve, return the pi/<role> to map it to. Conservative: only exact known
+ * aliases (optionally with a `claude-`/bracketed variant prefix collapsed by
+ * lowercasing) trigger a mapping, and only when EVERY pattern in the list is
+ * such an alias — a mixed list already contains a resolvable pattern, so the
+ * file's own fallback chain is left in charge.
+ */
+function mapClaudeAliasModel(model: string | string[] | undefined): string | null {
+  if (!model) return null;
+  const patterns = (Array.isArray(model) ? model : model.split(','))
+    .map((p) => p.trim().toLowerCase())
+    .filter(Boolean);
+  if (patterns.length === 0) return null;
+  const roles = patterns.map((p) => claudeAliasToOmpRole(p));
+  if (roles.some((r) => r === null)) return null;
+  return roles[0];
+}
 
 export interface PiWorkspaceTarget {
   workspaceId: string;
@@ -45,151 +113,75 @@ export interface PiWorkspaceTarget {
   projectName: string;
 }
 
+function isTargetForLiveSession(
+  expected: PiWorkspaceTarget | undefined,
+  actual: PiWorkspaceTarget,
+): boolean {
+  return expected?.workspaceId === actual.workspaceId
+    && expected.workspaceName === actual.workspaceName
+    && expected.workspacePath === actual.workspacePath
+    && expected.projectName === actual.projectName;
+}
+
 export interface PiAgentSessionSummary {
   id: string;
   workspaceId: string;
   title: string;
   updatedAt?: string;
   closedAt?: string;
+  /** No live worker but not dismissed — resumable. Distinct from closedAt so a
+   *  never-activated session is not reported as deliberately closed. */
+  dormantSince?: string;
   archivedAt?: string;
 }
 
-function buildAgentTerminalSessionName(target: PiWorkspaceTarget, agentSessionId: string): string {
-  return `agent:${target.workspaceName}:${agentSessionId.slice(-8)}`;
-}
 
-function isAgentTmuxSession(session: TmuxSession, workspaceId: string, agentSessionId: string): boolean {
-  return session.kind === PI_AGENT_TMUX_SESSION_KIND
-    && session.metadata?.workspaceId === workspaceId
-    && session.metadata?.agentSessionId === agentSessionId;
-}
-
-// ---------------------------------------------------------------------------
-// Ask-question parsing (moved from the removed gitspace-status extension)
-// ---------------------------------------------------------------------------
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null;
-}
-
-function parseQuestionOptions(input: unknown): Array<{ label: string; description?: string }> {
-  if (!Array.isArray(input)) return [];
-  return input.flatMap((option) => {
-    if (typeof option === 'string') return [{ label: option }];
-    if (isRecord(option) && typeof option.label === 'string') {
-      return [{ label: option.label, description: typeof option.description === 'string' ? option.description : undefined }];
-    }
-    return [];
-  });
-}
-
-function parseAskQuestions(input: Record<string, unknown>): QuestionInfo[] {
-  if (Array.isArray(input.questions)) {
-    const parsed = input.questions.flatMap((q: unknown) => {
-      if (!isRecord(q) || typeof q.question !== 'string') return [];
-      return [{
-        question: q.question as string,
-        header: typeof q.header === 'string' ? q.header : 'Question',
-        options: parseQuestionOptions(q.options),
-        multiple: q.multiple === true,
-        custom: q.custom === true,
-      } satisfies QuestionInfo];
-    });
-    if (parsed.length > 0) return parsed;
-  }
-  if (typeof input.question === 'string') {
-    return [{
-      question: input.question,
-      header: typeof input.header === 'string' ? input.header : 'Question',
-      options: parseQuestionOptions(input.options),
-      multiple: input.multiple === true,
-      custom: input.custom === true,
-    }];
-  }
-  if (typeof input.prompt === 'string') {
-    return [{
-      question: input.prompt,
-      header: 'Question',
-      options: parseQuestionOptions(input.options),
-      multiple: input.multiple === true,
-      custom: true,
-    }];
-  }
-  return [{ question: 'Agent requested additional input.', header: 'Question', options: [], custom: true }];
-}
-
-function buildPendingQuestion(toolCallId: string, sessionId: string, input: Record<string, unknown>): PendingQuestion {
-  return {
-    id: toolCallId,
-    sessionID: sessionId,
-    questions: parseAskQuestions(input),
-    tool: { messageID: toolCallId, callID: toolCallId },
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Permission parsing (moved from the removed gitspace-status extension)
-// ---------------------------------------------------------------------------
-
-function buildPermission(sessionId: string, payload: unknown): Permission {
-  const record = isRecord(payload) ? payload : {};
-  const id = typeof record.id === 'string'
-    ? record.id
-    : typeof record.permissionId === 'string'
-      ? record.permissionId
-      : typeof record.callID === 'string'
-        ? record.callID
-        : typeof record.messageID === 'string'
-          ? record.messageID
-          : `perm-${sessionId}-${Date.now()}`;
-  return {
-    id,
-    type: typeof record.type === 'string' ? record.type : 'permission',
-    pattern: Array.isArray(record.pattern) || typeof record.pattern === 'string' ? record.pattern : undefined,
-    sessionID: sessionId,
-    messageID: typeof record.messageID === 'string' ? record.messageID : id,
-    callID: typeof record.callID === 'string' ? record.callID : undefined,
-    title: typeof record.title === 'string' ? record.title : 'Permission requested',
-    metadata: isRecord(record.metadata) ? record.metadata : record,
-    time: { created: typeof record.createdAt === 'number' ? record.createdAt : Date.now() },
-  };
-}
-
-function permissionIdFromPayload(payload: unknown): string | null {
-  if (!isRecord(payload)) return null;
-  if (typeof payload.id === 'string') return payload.id;
-  if (typeof payload.permissionId === 'string') return payload.permissionId;
-  if (typeof payload.callID === 'string') return payload.callID;
-  if (typeof payload.messageID === 'string') return payload.messageID;
-  return null;
-}
-
-interface TerminalSessionBinding {
-  workspaceId: string;
-  agentSessionId: string;
-}
-
+/**
+ * PiCoordinator — the daemon-side ROUTER for agent sessions.
+ *
+ * It does not touch live SDK sessions itself: each live session is owned by an
+ * AgentSessionHost — a WorkerSessionHost proxy over a per-session child process
+ * (the child runs a LocalSessionHost). The coordinator:
+ *   - discovers/boots hosts and tracks them by agent session id,
+ *   - forwards commands to the owning host,
+ *   - fans host events/dialog requests back out to clients,
+ *   - answers "cold" queries (no live host) straight from session files.
+ */
 export class PiCoordinator {
-  private readonly inflightTerminalSessions = new Map<string, Promise<TmuxSession>>();
-  private readonly inflightActiveSessions = new Map<string, Promise<OmpAgentSession>>();
-  private readonly terminalBindings = new Map<string, TerminalSessionBinding>();
-  private readonly terminalSessionIdsByAgentKey = new Map<string, Set<string>>();
-  private readonly activeSessions = new Map<string, OmpAgentSession>();
-  // Reverse index: agentSessionId → workspaceId, kept in sync with activeSessions.
+  private readonly oauthPrompts = new Map<string, (value: string) => void>();
+  private readonly inflightHosts = new Map<string, Promise<AgentSessionHost>>();
+  // Viewer leases: `${workspaceId}:${agentSessionId}` → lease keys, one per open
+  // client pane. This is what "someone is looking at this session" means for a
+  // native (non-terminal) client, and it is the successor to counting bound
+  // tmux sessions. Both are consulted while the terminal path still exists.
+  private readonly agentLeases = new Map<string, Set<string>>();
+  private readonly hosts = new Map<string, AgentSessionHost>();
+  // Reverse index: agentSessionId → workspaceId, kept in sync with hosts.
   private readonly sessionWorkspaceIds = new Map<string, string>();
-  private readonly sessionUnsubscribers = new Map<string, () => void>();
+  // agentSessionId → its workspace target, kept in sync with hosts. Lets host
+  // teardown (eviction / no-owners / crash) emit a lifecycle event for a
+  // session whose live worker is gone, so the snapshot returns it to the
+  // dormant (not-running) state instead of freezing its last busy/retry/error.
+  private readonly sessionTargets = new Map<string, PiWorkspaceTarget>();
+  // dialogId → agentSessionId for routing client dialog responses to the host.
+  private readonly dialogSessions = new Map<string, string>();
+  // dialogId → the full pending request, retained for the lifetime of the
+  // pending dialog so it can be RE-EMITTED to a (re)connecting client — a
+  // remounted pane / reconnected browser missed the original live broadcast and
+  // the agent is still blocked waiting. Same dialogId (never minted anew) so the
+  // existing agent-dialog-response path resolves it.
+  private readonly pendingDialogRequests = new Map<string, HostUIDialogRequest>();
   private readonly sessionsRoot: string | undefined;
-  private readonly virtualModeHandles = new Map<string, VirtualInteractiveModeHandle>();
   private eventHandler: ((target: PiWorkspaceTarget, event: AgentEvent) => void) | null = null;
-
-  // Host UI bridge: routes extension dialog requests to the native surface
-  // and resolves responses from the client.
-  private readonly sessionUIBinders = new Map<string, OmpCreateSessionResult['setToolUIContext']>();
-  private readonly hostUIBridge = new HostUIBridgeState();
   private hostUIEmitter: HostUIBridgeEmitter | null = null;
+  // Production always boots a WorkerSessionHost (one child process per session);
+  // tests inject an in-process/fake host. No daemon-level in-process fallback.
+  private readonly hostFactory: SessionHostFactory;
 
-  constructor(sessionsRoot?: string) {
+  constructor(sessionsRoot?: string, options?: { hostFactory?: SessionHostFactory }) {
     this.sessionsRoot = sessionsRoot;
+    this.hostFactory =
+      options?.hostFactory ?? ((target, boot, sinks, config) => WorkerSessionHost.boot(target, boot, sinks, config));
   }
 
   setEventHandler(handler: ((target: PiWorkspaceTarget, event: AgentEvent) => void) | null): void {
@@ -203,19 +195,48 @@ export class PiCoordinator {
   setHostUIEmitter(emitter: HostUIBridgeEmitter | null): void {
     this.hostUIEmitter = emitter;
     if (emitter) {
-      // Install host UI context on all already-active sessions
-      for (const [sessionId, binder] of this.sessionUIBinders) {
-        binder(this.hostUIBridge.createContextForSession(sessionId, emitter), true);
+      // Install the host UI context on all already-active hosts. Host sinks
+      // read this.hostUIEmitter dynamically, so replacing the emitter needs no
+      // per-host rewiring beyond first-time enablement.
+      for (const host of this.hosts.values()) {
+        if (!host.uiEnabled) host.enableUI();
       }
     }
   }
 
   /**
-   * Route a dialog response from a client to the pending Promise.
+   * The dialogs currently awaiting a user answer, keyed for status derivation.
+   * This is the single source of truth for "this session is blocked on the
+   * user" — the machine-snapshot build reads it live (rather than mirroring it
+   * into a second store) so a session shows amber exactly while a dialog is open
+   * and clears the instant it resolves, on every path, with no chance of drift.
+   */
+  getPendingDialogs(): Array<{ workspaceId: string; sessionId: string; dialogId: string }> {
+    const out: Array<{ workspaceId: string; sessionId: string; dialogId: string }> = [];
+    for (const [dialogId, sessionId] of this.dialogSessions) {
+      const workspaceId = this.sessionWorkspaceIds.get(sessionId);
+      if (workspaceId) out.push({ workspaceId, sessionId, dialogId });
+    }
+    return out;
+  }
+
+  /**
+   * Route a dialog response from a client to the owning host's pending Promise.
    * Returns true if the dialog was found and resolved.
    */
-  resolveDialogResponse(response: HostUIDialogResponse): boolean {
-    return this.hostUIBridge.resolveDialog(response);
+  async resolveDialogResponse(response: HostUIDialogResponse): Promise<boolean> {
+    const sessionId = this.dialogSessions.get(response.id);
+    this.dialogSessions.delete(response.id);
+    this.pendingDialogRequests.delete(response.id);
+    if (sessionId) {
+      const host = this.hosts.get(sessionId);
+      if (host) return host.resolveDialog(response);
+    }
+    // Mapping lost (shouldn't happen) — try every host.
+    for (const host of this.hosts.values()) {
+      if (await host.resolveDialog(response)) return true;
+    }
+    return false;
   }
 
   /**
@@ -239,39 +260,639 @@ export class PiCoordinator {
   }
 
   /**
-   * Create a new Pi agent session in-process so we get the canonical session ID
-   * immediately and can subscribe to live events. tmux terminals are created later
-   * when the user explicitly attaches.
+   * Read one page of a session's transcript as blocks (storage-free projection
+   * over the SDK session's entry tree). Prefers the live host so a leaf move
+   * (conversation rewind) is reflected immediately; falls back to a read-only
+   * file open, which always resets the leaf to the last entry.
+   */
+  async readTranscriptRange(
+    target: PiWorkspaceTarget,
+    agentSessionId: string,
+    opts: { before?: string; limit: number },
+  ): Promise<TranscriptPage> {
+    const host = this.hosts.get(agentSessionId);
+    if (host) {
+      return host.readTranscriptRange(opts);
+    }
+    const file = findPiSessionFile(target.workspacePath, agentSessionId, this.sessionsRoot);
+    if (!file) return { blocks: [], oldestCursor: null, hasMore: false };
+    const manager = await openPiSessionManager(file.path);
+    return getTranscriptRange(manager as unknown as TranscriptSource, { ...opts, resolveImageData: resolveTranscriptImageData });
+  }
+
+  /** Control-surface snapshot: usage, current model, and the model switcher list.
+   *  Live host computes the full snapshot; otherwise a cold, file-based subset. */
+  async getControlInfo(target: PiWorkspaceTarget, agentSessionId: string): Promise<AgentControlInfo> {
+    const host = this.hosts.get(agentSessionId);
+    if (host) {
+      return host.getControlInfo();
+    }
+    return this.getColdControlInfo(target, agentSessionId);
+  }
+
+  /** Cold control info: no live session — usage/model from the session file,
+   *  switcher list from the registry, settings from the global singleton. */
+  private async getColdControlInfo(target: PiWorkspaceTarget, agentSessionId: string): Promise<AgentControlInfo> {
+    const file = findPiSessionFile(target.workspacePath, agentSessionId, this.sessionsRoot);
+    let usage: AgentControlInfo['usage'] = null;
+    let currentModel: string | null = null;
+    if (file) {
+      const manager = (await openPiSessionManager(file.path)) as unknown as {
+        getUsageStatistics?: () => NonNullable<AgentControlInfo['usage']>;
+        buildSessionContext?: () => { models?: { default?: string } };
+      };
+      usage = manager.getUsageStatistics?.() ?? null;
+      currentModel = manager.buildSessionContext?.().models?.default ?? null;
+    }
+    let models: AgentControlInfo['models'] = [];
+    let rawModels: Array<{ provider: string; id: string; api?: string; contextWindow?: number }> = [];
+    try {
+      const [registry, auth] = await Promise.all([createPiModelRegistry(), createPiAuthStorage()]);
+      const isAuthed = (provider: string): boolean => {
+        try {
+          return auth.hasAuth(provider) || auth.has(provider);
+        } catch {
+          return false;
+        }
+      };
+      rawModels = registry.getAll();
+      // Limit the switcher to providers the user is signed in to — an unauthed
+      // model can't be selected. Always keep the current model so it stays shown.
+      models = rawModels
+        .filter((m) => isAuthed(m.provider) || `${m.provider}/${m.id}` === currentModel)
+        .map((m) => ({ provider: m.provider, id: m.id, contextWindow: m.contextWindow ?? null }));
+    } catch (err) {
+      console.warn('[pi-coordinator] model list failed:', err);
+    }
+
+    let approvalMode: string | null = null;
+    // Fast mode / service tier is PER MODEL FAMILY in 16.x (tier.openai /
+    // tier.anthropic / tier.google). Only models whose family exposes a
+    // serving-priority knob are "fast-capable"; others have no toggle.
+    let serviceTier: string | null = null;
+    let serviceTierKey: string | null = null;
+    let fastCapable = false;
+    try {
+      const settings = await getPiSettings();
+      const m = settings?.get('tools.approvalMode');
+      if (typeof m === 'string') approvalMode = m;
+
+      const { serviceTierFamily } = (await import('@oh-my-pi/pi-ai')) as {
+        serviceTierFamily: (model: { provider: string; api?: string; id: string }) => string | undefined;
+      };
+      const modelObj = rawModels.find((x) => `${x.provider}/${x.id}` === currentModel);
+      const family = modelObj ? serviceTierFamily(modelObj) : undefined;
+      fastCapable = !!family;
+      if (family) {
+        serviceTierKey = `tier.${family}`;
+        const st = settings?.get(serviceTierKey);
+        if (typeof st === 'string') serviceTier = st;
+      }
+    } catch {
+      /* settings unavailable */
+    }
+
+    // Full role CATALOG for the config UI (roles CYCLE needs a live session).
+    let roleCatalog: AgentControlInfo['roleCatalog'] = [];
+    let cycleOrder: string[] | null = null;
+    try {
+      const { MODEL_ROLE_IDS, MODEL_ROLES } = (await import('@oh-my-pi/pi-coding-agent/config/model-roles')) as unknown as {
+        MODEL_ROLE_IDS?: string[];
+        MODEL_ROLES?: Record<string, { name?: string; description?: string }>;
+      };
+      const settings = (await getPiSettings()) as { get(path: string): unknown; getModelRole?: (r: string) => string | undefined } | null;
+      cycleOrder = readCycleOrder(settings);
+      roleCatalog = (MODEL_ROLE_IDS ?? []).map((id) => ({
+        role: id,
+        name: MODEL_ROLES?.[id]?.name ?? id,
+        description: MODEL_ROLES?.[id]?.description,
+        model: (settings?.getModelRole ? settings.getModelRole(id) : undefined) ?? null,
+      }));
+    } catch {
+      /* role catalog unavailable */
+    }
+
+    return {
+      usage,
+      currentModel,
+      models,
+      roles: [],
+      roleCatalog,
+      cycleOrder: cycleOrder ?? undefined,
+      thinkingLevel: null,
+      thinkingLevels: THINKING_LEVELS,
+      approvalMode,
+      approvalModes: APPROVAL_MODES,
+      serviceTier,
+      serviceTierKey,
+      fastCapable,
+      context: null,
+    };
+  }
+
+  /** Cycle the active model through the configured roles (the cmd-P role cycle). */
+  async cycleRole(target: PiWorkspaceTarget, agentSessionId: string, direction: 'forward' | 'backward'): Promise<boolean> {
+    const host = await this.ensureHost(target, agentSessionId);
+    return host.cycleRole(direction);
+  }
+
+  /** Apply a specific role's model to the active session. */
+  async applyRole(target: PiWorkspaceTarget, agentSessionId: string, role: string): Promise<boolean> {
+    const host = await this.ensureHost(target, agentSessionId);
+    return host.applyRole(role);
+  }
+
+  /** Set the session's thinking/reasoning level (spins up the session if needed). */
+  async setThinkingLevel(target: PiWorkspaceTarget, agentSessionId: string, level: string): Promise<boolean> {
+    const host = await this.ensureHost(target, agentSessionId);
+    return host.setThinkingLevel(level);
+  }
+
+  /** Goal Mode belongs only to an already-live host; do not cold-open it. */
+  async getGoalMode(target: PiWorkspaceTarget, agentSessionId: string): Promise<AgentGoalModeInfo> {
+    const host = this.hosts.get(agentSessionId);
+    if (!host) {
+      return {
+        enabled: false,
+        available: false,
+        message: 'Goal Mode is available only while this agent session is active.',
+      };
+    }
+    if (!isTargetForLiveSession(this.sessionTargets.get(agentSessionId), target)) {
+      return {
+        enabled: false,
+        available: false,
+        message: 'This agent session is not bound to the requested workspace.',
+      };
+    }
+    return host.getGoalMode();
+  }
+
+  async setGoalMode(
+    target: PiWorkspaceTarget,
+    agentSessionId: string,
+    input: { enabled: boolean; precursor?: string },
+  ): Promise<AgentGoalModeInfo> {
+    const host = this.hosts.get(agentSessionId);
+    if (!host) {
+      return {
+        enabled: false,
+        available: false,
+        message: 'Goal Mode can only be changed while this agent session is active.',
+      };
+    }
+    if (!isTargetForLiveSession(this.sessionTargets.get(agentSessionId), target)) {
+      return {
+        enabled: false,
+        available: false,
+        message: 'This agent session is not bound to the requested workspace.',
+      };
+    }
+    if (!input.enabled) return host.setGoalMode({ enabled: false });
+
+    const goal = resolveWorkspaceGoal(target.projectName, target.workspaceName);
+    if (!goal || goal.workspaceName !== target.workspaceName || goal.archivedAt) {
+      return {
+        enabled: false,
+        available: true,
+        message: 'Goal Mode requires a GoalRecord bound to this workspace.',
+      };
+    }
+    const phase = getWorkspaceStatus(target.projectName, target.workspaceName) ?? goal.phase;
+    const precursor = input.precursor?.trim();
+    const objective = [
+      `GitSpace Goal ${goal.id}: ${goal.title}`,
+      `Current phase: ${phase}.`,
+      'When uncertain, use `space goal show --goal ' + goal.id + ' --json`, `space journal status --json`, and `space workflow validate`.',
+      precursor,
+    ].filter((part): part is string => Boolean(part)).join('\n\n');
+    return host.setGoalMode({ enabled: true, objective });
+  }
+
+  /** Shake rewrites only an already-live, workspace-bound session. */
+  async shake(target: PiWorkspaceTarget, agentSessionId: string, mode: AgentShakeMode): Promise<AgentShakeResult> {
+    const host = this.hosts.get(agentSessionId);
+    if (!host) {
+      throw new Error('Shake is available only while this agent session is active.');
+    }
+    if (!isTargetForLiveSession(this.sessionTargets.get(agentSessionId), target)) {
+      throw new Error('This agent session is not bound to the requested workspace.');
+    }
+    return host.shake(mode);
+  }
+
+  /** Set the tool-approval mode (persisted to settings). */
+  async setApprovalMode(target: PiWorkspaceTarget, agentSessionId: string, mode: string): Promise<boolean> {
+    const host = await this.ensureHost(target, agentSessionId);
+    return host.setApprovalMode(mode);
+  }
+
+  /** List known providers (from the model registry) with their auth status. */
+  async getAuthProviders(): Promise<Array<{ provider: string; hasAuth: boolean; accounts?: Array<{ id: number; type: string; label: string; disabled: boolean }> }>> {
+    const [auth, registry] = await Promise.all([createPiAuthStorage(), createPiModelRegistry()]);
+    const providers = [...new Set(registry.getAll().map((m) => m.provider))].sort();
+    return providers.map((provider) => {
+      let hasAuth = false;
+      let accounts: Array<{ id: number; type: string; label: string; disabled: boolean }> = [];
+      try {
+        hasAuth = auth.hasAuth(provider) || auth.has(provider);
+        // Multi-account pool: the pi SDK holds a LIST of credentials per
+        // provider (sibling accounts) and auto-rotates on rate-limit/401.
+        // Surface each so the UI can show + manage them, not just hasAuth.
+        const stored = auth.listStoredCredentials?.(provider) ?? [];
+        accounts = stored.map((c) => ({
+          id: c.id,
+          type: c.credential.type,
+          label: c.credential.email
+            ?? c.credential.label
+            ?? c.credential.accountId
+            ?? (c.credential.type === 'api_key' ? 'API key' : `account #${c.id}`),
+          disabled: c.disabledCause != null,
+        }));
+      } catch {
+        /* ignore */
+      }
+      return { provider, hasAuth, accounts };
+    });
+  }
+
+  /** Remove ONE account (credential) from a provider's pool by its row id. */
+  async removeProviderAccount(provider: string, credentialId: number): Promise<boolean> {
+    const auth = await createPiAuthStorage();
+    try {
+      return (await auth.removeCredential?.(provider, credentialId)) ?? false;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Probe live usage/limits for a provider's accounts (network round-trip via
+   *  the SDK's per-provider usage provider — e.g. Codex's rate-limit windows).
+   *  On-demand: it hits the upstream usage endpoint, so callers gate it behind
+   *  a user action rather than the settings-open path. */
+  async checkProviderUsage(provider: string): Promise<Array<{
+    id: number;
+    email?: string;
+    ok: boolean | null;
+    reason?: string;
+    limits: Array<{ label: string; unit?: string; used?: number; limit?: number; remaining?: number; remainingFraction?: number; resetsAt?: number; status?: string }>;
+    resetCredits?: { availableCount: number };
+  }>> {
+    const auth = await createPiAuthStorage();
+    if (!auth.checkCredentials) return [];
+    try {
+      const results = await auth.checkCredentials({ timeoutMs: 12_000 });
+      return results
+        .filter((r) => r.provider === provider)
+        .map((r) => ({
+          id: r.id,
+          email: r.email,
+          ok: r.ok,
+          reason: r.reason,
+          // The SDK nests amounts under `amount` and reset time under `window`.
+          // Derive remainingFraction from whatever the provider populated:
+          // explicit remainingFraction > 1-usedFraction > remaining/limit.
+          limits: (r.report?.limits ?? []).map((l) => {
+            const a = l.amount ?? {};
+            const remainingFraction =
+              a.remainingFraction ??
+              (a.usedFraction !== undefined ? Math.max(0, 1 - a.usedFraction) : undefined) ??
+              (a.remaining !== undefined && a.limit ? a.remaining / a.limit : undefined);
+            return {
+              label: l.label,
+              unit: a.unit,
+              used: a.used,
+              limit: a.limit,
+              remaining: a.remaining,
+              remainingFraction,
+              resetsAt: l.window?.resetsAt,
+              status: l.status,
+            };
+          }),
+          resetCredits: r.report?.resetCredits ? { availableCount: r.report.resetCredits.availableCount } : undefined,
+        }));
+    } catch {
+      return [];
+    }
+  }
+
+  /** Store an API key for a provider. */
+  async setProviderApiKey(provider: string, key: string): Promise<boolean> {
+    const auth = await createPiAuthStorage();
+    await auth.set(provider, { type: 'api_key', key });
+    return true;
+  }
+
+  /** Start an OAuth sign-in flow; emits auth/prompt/done events via `emit`. */
+  async startOAuthLogin(provider: string, flowId: string, emit: (ev: AgentOAuthEvent) => void): Promise<void> {
+    const auth = await createPiAuthStorage();
+    try {
+      await auth.login(provider, {
+        onAuth: (info) => emit({ flowId, kind: 'auth', url: info.url, instructions: info.instructions }),
+        onPrompt: (prompt) =>
+          new Promise<string>((resolve) => {
+            this.oauthPrompts.set(flowId, resolve);
+            emit({ flowId, kind: 'prompt', message: prompt.message, placeholder: prompt.placeholder });
+          }),
+      });
+      emit({ flowId, kind: 'done', ok: true });
+    } catch (e) {
+      emit({ flowId, kind: 'done', ok: false, error: e instanceof Error ? e.message : String(e) });
+    } finally {
+      this.oauthPrompts.delete(flowId);
+    }
+  }
+
+  /** Provide the value an in-progress OAuth flow asked for (onPrompt). */
+  respondOAuthPrompt(flowId: string, value: string): boolean {
+    const resolve = this.oauthPrompts.get(flowId);
+    if (!resolve) return false;
+    resolve(value);
+    this.oauthPrompts.delete(flowId);
+    return true;
+  }
+
+  /** Read the curated settings catalog with current values. */
+  async getSettings(): Promise<Array<{ path: string; label: string; kind: 'boolean' | 'enum'; value: string | boolean | null; options?: string[] }>> {
+    const settings = await getPiSettings();
+    return SETTINGS_CATALOG.map((c) => {
+      let value: string | boolean | null = null;
+      try {
+        const v = settings?.get(c.path);
+        if (typeof v === 'boolean' || typeof v === 'string') value = v;
+      } catch {
+        /* ignore */
+      }
+      return { ...c, value };
+    });
+  }
+
+  /** Write a single setting. `modelRoles.<role>` is routed to the record helper
+   *  (setModelRole) so one role is updated without clobbering the others, and
+   *  `task.agentModelOverrides.<agent>` is merged into the record (the SDK's
+   *  Settings.set only accepts whole schema paths — dotted record keys are not
+   *  schema paths). An empty-string value clears the agent's override.
+   *
+   *  Persists via the DAEMON's settings singleton (initialized on demand — see
+   *  getPiSettings), then fans out to every live host so worker processes'
+   *  own Settings singletons see the change immediately (best-effort; a dead
+   *  worker must not fail the global write). */
+  async setSetting(path: string, value: string | number | boolean | string[]): Promise<boolean> {
+    const settings = await getPiSettings();
+    if (!settings) return false;
+    // The quick cycle must never be emptied — the UI disables removing the
+    // last role; reject a bad write outright rather than persist it.
+    if (path === 'cycleOrder' && (!Array.isArray(value) || value.length === 0)) return false;
+    let wrote = false;
+    if (path.startsWith('modelRoles.') && typeof value === 'string') {
+      const role = path.slice('modelRoles.'.length);
+      const withRole = settings as { setModelRole?: (r: string, m: string) => void };
+      if (typeof withRole.setModelRole === 'function') {
+        withRole.setModelRole(role, value);
+        wrote = true;
+      }
+    }
+    if (path.startsWith('task.agentModelOverrides.') && typeof value === 'string') {
+      const agentName = path.slice('task.agentModelOverrides.'.length);
+      const record = this.readAgentModelOverrides(settings);
+      if (value.trim()) record[agentName] = value.trim();
+      else delete record[agentName];
+      settings.set('task.agentModelOverrides', record as never);
+      wrote = true;
+    }
+    if (!wrote) settings.set(path, value);
+    await Promise.all([...this.hosts.entries()].map(async ([sessionId, host]) => {
+      try {
+        await host.setSetting(path, value);
+      } catch (err) {
+        console.warn(`[pi-coordinator] setSetting fan-out to ${sessionId} failed:`, err instanceof Error ? err.message : err);
+      }
+    }));
+    return true;
+  }
+
+  /** The full settings schema (grouped client-side by tab) with current values. */
+  async getSettingsSchema(): Promise<AgentSettingSchemaItem[]> {
+    const settings = await getPiSettings();
+    const mod = (await import('@oh-my-pi/pi-coding-agent/config/settings-schema')) as unknown as {
+      SETTINGS_SCHEMA: Record<string, { type?: string; values?: readonly string[]; ui?: { tab?: string; label?: string; description?: string; options?: unknown } }>;
+    };
+    const schema = mod.SETTINGS_SCHEMA ?? {};
+    const items: AgentSettingSchemaItem[] = [];
+    for (const [path, def] of Object.entries(schema)) {
+      const ui = def.ui ?? {};
+      const t = def.type;
+      const kind: AgentSettingSchemaItem['kind'] =
+        t === 'boolean' || t === 'enum' || t === 'number' || t === 'string' || t === 'record' ? t : 'other';
+      const options = def.values
+        ? [...def.values]
+        : Array.isArray(ui.options)
+          ? ui.options.map((o) => (typeof o === 'string' ? o : o?.value)).filter((v): v is string => typeof v === 'string')
+          : undefined;
+      let value: string | number | boolean | null = null;
+      try {
+        const v = settings?.get(path);
+        if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') value = v;
+      } catch {
+        /* ignore */
+      }
+      items.push({ path, tab: ui.tab ?? 'other', label: ui.label ?? path, description: ui.description, kind, value, options });
+    }
+    return items;
+  }
+
+  /** Discovered subagent definitions (task-tool agents) for a workspace.
+   *
+   *  Cold by design: discovery is pure file reading (bundled + .omp/agents +
+   *  extension/plugin roots) and override/role resolution reads the DAEMON's
+   *  settings singleton — no live session needed, and worker sessions see the
+   *  same config.yml, so the resolved patterns match what a spawn would use.
+   *
+   *  Also applies managed CLAUDE-ALIAS defaults: an agent file that pins a
+   *  Claude Code model alias (sonnet/opus/haiku/inherit) cannot resolve in
+   *  OMP, so map it to a pi/<role> via task.agentModelOverrides — only when
+   *  the user hasn't already set an override for that agent name. Definition
+   *  files are never rewritten; the mapping lives in settings where the
+   *  AGENTS panel shows and edits it. */
+  async listAgents(target: PiWorkspaceTarget): Promise<AgentDefinitionInfo[]> {
+    const { discoverAgents } = (await import('@oh-my-pi/pi-coding-agent/task/discovery')) as unknown as {
+      discoverAgents: (cwd: string) => Promise<{
+        agents: Array<{
+          name: string;
+          description: string;
+          source: 'bundled' | 'user' | 'project';
+          filePath?: string;
+          model?: string | string[];
+        }>;
+      }>;
+    };
+    const { resolveAgentModelPatterns } = (await import('@oh-my-pi/pi-coding-agent/config/model-resolver')) as unknown as {
+      resolveAgentModelPatterns: (options: {
+        settingsOverride?: string | string[];
+        agentModel?: string | string[];
+        settings?: unknown;
+      }) => string[];
+    };
+    const settings = await getPiSettings();
+    const { agents } = await discoverAgents(target.workspacePath);
+
+    // Managed claude-alias mapping (persisted through setSetting so live
+    // hosts' settings singletons fan-out too).
+    let overrides = this.readAgentModelOverrides(settings);
+    for (const agent of agents) {
+      if (overrides[agent.name]?.trim()) continue;
+      const mapped = mapClaudeAliasModel(agent.model);
+      if (!mapped) continue;
+      await this.setSetting(`task.agentModelOverrides.${agent.name}`, mapped);
+      overrides = { ...overrides, [agent.name]: mapped };
+    }
+
+    const sourceOrder: Record<string, number> = { project: 0, user: 1, bundled: 2 };
+    return agents
+      .slice()
+      .sort((a, b) => (sourceOrder[a.source] ?? 3) - (sourceOrder[b.source] ?? 3) || a.name.localeCompare(b.name))
+      .map((agent) => {
+        const rawModel = Array.isArray(agent.model) ? agent.model.join(', ') : agent.model ?? null;
+        const overrideModel = overrides[agent.name]?.trim() || null;
+        let resolvedModel: string | null = null;
+        try {
+          const patterns = resolveAgentModelPatterns({
+            settingsOverride: overrideModel ?? undefined,
+            agentModel: agent.model,
+            settings: settings ?? undefined,
+          });
+          resolvedModel = patterns.length > 0 ? patterns.join(', ') : null;
+        } catch {
+          /* leave unresolved */
+        }
+        return {
+          name: agent.name,
+          description: (agent.description ?? '').split('\n')[0].trim(),
+          source: agent.source,
+          filePath: agent.filePath && !agent.filePath.startsWith('embedded:') ? agent.filePath : null,
+          model: rawModel,
+          overrideModel,
+          resolvedModel,
+        };
+      });
+  }
+
+  /** Current task.agentModelOverrides record (defensively typed). */
+  private readAgentModelOverrides(settings: { get(path: string): unknown } | null): Record<string, string> {
+    try {
+      const v = settings?.get('task.agentModelOverrides');
+      if (v && typeof v === 'object' && !Array.isArray(v)) {
+        const out: Record<string, string> = {};
+        for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+          if (typeof val === 'string') out[k] = val;
+        }
+        return out;
+      }
+    } catch {
+      /* ignore */
+    }
+    return {};
+  }
+
+  /** Tools available to the session (for per-tool approval). Live host merges
+   *  the session's tool registry; cold path serves the standard set + overrides. */
+  async getTools(_target: PiWorkspaceTarget, agentSessionId: string): Promise<AgentToolInfo[]> {
+    const host = this.hosts.get(agentSessionId);
+    if (host) return host.getTools();
+    let approvals: Record<string, string> = {};
+    try {
+      const a = (await getPiSettings())?.get('tools.approval');
+      if (a && typeof a === 'object') approvals = a as Record<string, string>;
+    } catch {
+      /* ignore */
+    }
+    const tiers = new Map<string, string>(DEFAULT_TOOL_TIERS);
+    for (const name of Object.keys(approvals)) if (!tiers.has(name)) tiers.set(name, 'exec');
+    return [...tiers.entries()]
+      .map(([name, tier]) => ({ name, tier, approval: approvals[name] ?? 'default' }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  /** Compact the session context. */
+  async compactSession(target: PiWorkspaceTarget, agentSessionId: string): Promise<AgentCompactResult> {
+    const host = await this.ensureHost(target, agentSessionId);
+    return host.compact();
+  }
+
+  /** User-message checkpoints in the current branch (for conversation rewind). */
+  async getHistory(target: PiWorkspaceTarget, agentSessionId: string): Promise<AgentHistoryEntry[]> {
+    const host = await this.ensureHost(target, agentSessionId);
+    return host.getHistory();
+  }
+
+  /** Navigate the conversation tree (see AgentSessionHost.navigateHistory). */
+  async navigateHistory(
+    target: PiWorkspaceTarget,
+    agentSessionId: string,
+    entryId: string,
+    mode: 'redo' | 'jump' = 'redo',
+  ): Promise<{ ok: boolean; editorText?: string }> {
+    const host = await this.ensureHost(target, agentSessionId);
+    return host.navigateHistory(entryId, mode);
+  }
+
+  /** The conversation tree for the explorer view (see AgentSessionHost). */
+  async getSessionTree(target: PiWorkspaceTarget, agentSessionId: string): Promise<AgentTreeNode[]> {
+    const host = await this.ensureHost(target, agentSessionId);
+    return host.getSessionTree();
+  }
+
+  /**
+   * Per-session usage attribution, read straight off the transcript. NOTE: no
+   * `ensureHost` — this is pure file I/O, so it works for closed/archived
+   * sessions and never spins a worker up just to answer a report.
+   */
+  async getSessionUsageReport(
+    target: PiWorkspaceTarget,
+    agentSessionId: string,
+  ): Promise<AgentSessionUsageReport | null> {
+    const file = findPiSessionFile(target.workspacePath, agentSessionId, this.sessionsRoot);
+    if (!file) return null;
+    const { buildSessionUsageReport, rollupByPath } = await import('../../../core/session-usage-report.js');
+    const report = await buildSessionUsageReport(file.path);
+    if (!report) return null;
+    const countChildren = (node: NonNullable<typeof report>): number =>
+      node.children.reduce((sum, child) => sum + 1 + countChildren(child), 0);
+    return {
+      totals: report.totals,
+      totalsDeep: report.totalsDeep,
+      byProviderModel: report.byProviderModel,
+      byRole: report.byRole,
+      byServiceTier: report.byServiceTier,
+      segments: report.segments,
+      paths: rollupByPath(report),
+      childSessions: countChildren(report),
+      warnings: report.warnings,
+    };
+  }
+
+  /** Switch the session's model. Spins up the session if needed. */
+  async setModel(target: PiWorkspaceTarget, agentSessionId: string, provider: string, modelId: string): Promise<boolean> {
+    const host = await this.ensureHost(target, agentSessionId);
+    return host.setModel(provider, modelId);
+  }
+
+  /**
+   * Create a new Pi agent session so we get the canonical session ID
+   * immediately and can subscribe to live events. tmux terminals are created
+   * later when the user explicitly attaches.
    */
   async createAgentSession(target: PiWorkspaceTarget, title?: string): Promise<PiAgentSessionSummary[]> {
-    const { createAgentSession: createPiAgentSessionSdk } = await importSdk();
-    const { agentDir, sessionManager } = await createPiSessionManager(target.workspacePath);
-    const result = await createPiAgentSessionSdk({
-      agentDir,
-      sessionManager,
-      cwd: target.workspacePath,
-      additionalExtensionPaths: getManagedPiExtensionPaths(),
-      hasUI: true,
-    });
-    const { session, setToolUIContext } = result as unknown as OmpCreateSessionResult;
-    if (!session?.sessionId || typeof setToolUIContext !== 'function') {
-      throw new Error('Unexpected createAgentSession result shape — SDK version may be incompatible');
-    }
-    if (title) {
-      await sessionManager.setSessionName(title);
-    }
-    await persistInitialPiSessionModel(session);
-    await sessionManager.rewriteEntries();
+    const host = await this.bootHost(target, { mode: 'create', title });
 
-    const sessionId = session.sessionId;
-    this.activeSessions.set(sessionId, session);
+    const sessionId = host.sessionId;
+    this.hosts.set(sessionId, host);
     this.sessionWorkspaceIds.set(sessionId, target.workspaceId);
-    this.bindSessionEvents(target, sessionId, title, session);
-    this.bindHostUI(sessionId, setToolUIContext);
+    this.sessionTargets.set(sessionId, target);
 
     const sessionFile = await this.waitForSessionFile(target.workspacePath, sessionId);
     if (!sessionFile) {
-      this.disposeActiveSession(sessionId);
+      await this.disposeHost(sessionId);
       throw new Error(
         `Timed out waiting for Pi to create a session file for workspace '${target.workspaceId}'.`,
       );
@@ -288,69 +909,64 @@ export class PiCoordinator {
     return mergeCreatedSession(sessions, created);
   }
 
+  /**
+   * Close an agent session: nothing is watching it anymore, so drop every
+   * lease and tear the host down. Returns whether a live host was disposed.
+   */
   async closeAgentSession(target: PiWorkspaceTarget, agentSessionId: string): Promise<boolean> {
-    let killed = false;
-    let killedTerminalSessionId: string | null = null;
-    try {
-      const sessions = await listTmuxSessions();
-      const pty = sessions.find((s) => isAgentTmuxSession(s, target.workspaceId, agentSessionId))
-        ?? this.findMappedTmuxSession(sessions, target.workspaceId, agentSessionId);
-      if (pty) {
-        await killTmuxSession(pty.id);
-        killed = true;
-        killedTerminalSessionId = pty.id;
-      }
-    } catch {
-      // non-fatal
-    }
-    if (killedTerminalSessionId) {
-      this.releaseTerminalSession(killedTerminalSessionId);
-    }
-    if (!this.hasTerminalOwners(target.workspaceId, agentSessionId)) {
-      this.disposeActiveSession(agentSessionId);
-    }
-    return killed;
+    const key = this.getBindingKey(target.workspaceId, agentSessionId);
+    this.agentLeases.delete(key);
+    const hadHost = this.hosts.has(agentSessionId);
+    await this.disposeHost(agentSessionId);
+    return hadHost;
   }
 
   /**
    * Interrupt the agent's current turn without killing the session.
-   * Calls the Pi SDK's session.abort() which stops LLM streaming and tool
-   * execution, then waits for the agent to become idle. The session stays
-   * alive and can accept new prompts afterward.
+   * The session stays alive and can accept new prompts afterward.
    *
    * Compare with closeAgentSession() which kills the tmux terminal session.
    */
-  async interruptAgentSession(target: PiWorkspaceTarget, agentSessionId: string): Promise<boolean> {
-    const session = this.activeSessions.get(agentSessionId);
-    if (!session) {
+  async interruptAgentSession(_target: PiWorkspaceTarget, agentSessionId: string): Promise<boolean> {
+    const host = this.hosts.get(agentSessionId);
+    if (!host) {
       return false;
     }
-    try {
-      await session.abort();
-      return true;
-    } catch {
-      return false;
-    }
+    return host.interrupt();
   }
 
   async promptAgentSession(target: PiWorkspaceTarget, agentSessionId: string, text: string, images?: import('../protocol.js').AgentPromptImage[], options?: { streamingBehavior?: 'steer' | 'followUp' }): Promise<void> {
-    const session = await this.ensureActiveSession(target, agentSessionId);
+    const traceStartMs = Date.now();
+    const host = await this.ensureHost(target, agentSessionId);
+    writeTraceLog('agent-prompt-session-ready', {
+      workspaceId: target.workspaceId,
+      agentSessionId,
+      durationMs: Date.now() - traceStartMs,
+      textLength: text.length,
+      imageCount: images?.length ?? 0,
+      streamingBehavior: options?.streamingBehavior,
+    });
 
-    // Intercept /compact — call session.compact() directly instead of prompt()
+    // Turn accepted: ok responds immediately. Turn progress and completion flow
+    // through agent/machine events. The host intercepts /compact internally.
     const trimmed = text.trim();
-    if (trimmed === '/compact' || trimmed.startsWith('/compact ')) {
-      if (typeof session.compact === 'function') {
-        const instructions = trimmed.startsWith('/compact ') ? trimmed.slice('/compact '.length).trim() : undefined;
-        await session.compact(instructions || undefined);
-        return;
-      }
-    }
+    writeTraceLog(trimmed === '/compact' || trimmed.startsWith('/compact ') ? 'agent-compact-dispatched' : 'agent-prompt-dispatch', {
+      workspaceId: target.workspaceId,
+      agentSessionId,
+      durationMs: Date.now() - traceStartMs,
+      textLength: text.length,
+    });
+    await host.prompt(text, images, options);
+  }
 
-    const piImages = images?.length
-      ? { images: images.map(img => ({ type: 'image' as const, data: img.data, mimeType: img.mimeType })) }
-      : undefined;
-    await session.prompt(text, { ...piImages, streamingBehavior: options?.streamingBehavior });
-    this.emitQueuedMessages(target, agentSessionId, session);
+  async removeQueuedAgentMessage(
+    target: PiWorkspaceTarget,
+    agentSessionId: string,
+    kind: 'steering' | 'followUp',
+    index: number,
+  ): Promise<string | null> {
+    const host = await this.ensureHost(target, agentSessionId);
+    return host.removeQueuedMessage(kind, index);
   }
 
   async archiveAgentSession(target: PiWorkspaceTarget, agentSessionId: string, title: string): Promise<void> {
@@ -366,164 +982,237 @@ export class PiCoordinator {
     deleteArchivedSession(target.workspaceId, agentSessionId);
   }
 
-  getTerminalBinding(terminalSessionId: string): TerminalSessionBinding | null {
-    return this.terminalBindings.get(terminalSessionId) ?? null;
-  }
-
-  hasTerminalOwners(workspaceId: string, agentSessionId: string): boolean {
-    return this.getTerminalOwnerCount(workspaceId, agentSessionId) > 0;
-  }
-
-  rebindTerminalSession(
-    workspaceId: string,
-    terminalSessionId: string,
-    nextAgentSessionId: string,
-  ): { previousAgentSessionId?: string; previousOwnerCount: number; nextOwnerCount: number } {
-    const existing = this.terminalBindings.get(terminalSessionId);
-    if (existing && existing.workspaceId !== workspaceId) {
-      throw new Error(
-        `Cannot rebind tmux session '${terminalSessionId}' from workspace '${existing.workspaceId}' to '${workspaceId}'.`,
-      );
-    }
-    const previous = this.unbindTerminalSession(terminalSessionId);
-    const nextOwnerCount = this.bindTerminalSession(workspaceId, terminalSessionId, nextAgentSessionId);
-    const previousOwnerCount = previous ? this.getTerminalOwnerCount(previous.workspaceId, previous.agentSessionId) : 0;
-    if (previous && previousOwnerCount === 0 && previous.agentSessionId !== nextAgentSessionId) {
-      this.disposeActiveSession(previous.agentSessionId);
-    }
-    return {
-      previousAgentSessionId: previous?.agentSessionId,
-      previousOwnerCount,
-      nextOwnerCount,
-    };
-  }
-
-  releaseTerminalSession(
-    terminalSessionId: string,
-  ): { workspaceId: string; agentSessionId: string; remainingOwnerCount: number } | null {
-    const binding = this.unbindTerminalSession(terminalSessionId);
-    if (!binding) return null;
-    const remainingOwnerCount = this.getTerminalOwnerCount(binding.workspaceId, binding.agentSessionId);
-    if (remainingOwnerCount === 0) {
-      this.disposeActiveSession(binding.agentSessionId);
-    }
-    return {
-      ...binding,
-      remainingOwnerCount,
-    };
+  /** Everything currently keeping a session's host alive. Native panes are the
+   *  only viewers now that agent sessions have no terminal. */
+  hasAgentViewers(workspaceId: string, agentSessionId: string): boolean {
+    return this.getViewerCount(workspaceId, agentSessionId) > 0;
   }
 
   /**
-   * Ensure a tmux-lite virtual terminal session exists for a Pi agent session.
-   * Uses Pi's session ID to find and resume the right JSONL file.
-   * Throws if the session file is not found (prevents silent mismatch).
+   * Open an agent session for a native client pane: boot (or reuse) its host
+   * and record a viewer lease. No tmux session, no PTY, no InteractiveMode —
+   * the client renders the transcript from events and cold file reads.
+   *
+   * `leaseKey` identifies one viewer (connection + pane). Re-opening with the
+   * same key is idempotent.
    */
-  async ensureAgentTerminalSession(
+  async openAgentSession(
     target: PiWorkspaceTarget,
     agentSessionId: string,
-    sessionFile?: PiSessionFileInfo,
-    options?: { cols?: number; rows?: number },
-  ): Promise<TmuxSession> {
-    const key = `${target.workspaceId}:${agentSessionId}`;
-    const inFlight = this.inflightTerminalSessions.get(key);
-    if (inFlight) return inFlight;
-
-    const ensurePromise = this.ensureAgentTerminalSessionInternal(target, agentSessionId, sessionFile, options).finally(() => {
-      this.inflightTerminalSessions.delete(key);
-    });
-    this.inflightTerminalSessions.set(key, ensurePromise);
-    return ensurePromise;
-  }
-
-  private async ensureAgentTerminalSessionInternal(
-    target: PiWorkspaceTarget,
-    agentSessionId: string,
-    sessionFile?: PiSessionFileInfo,
-    options?: { cols?: number; rows?: number },
-  ): Promise<TmuxSession> {
-    const tmuxSessions = await listTmuxSessions();
-    const existing = tmuxSessions.find((s) => isAgentTmuxSession(s, target.workspaceId, agentSessionId))
-      ?? this.findMappedTmuxSession(tmuxSessions, target.workspaceId, agentSessionId);
-    if (existing) {
-      if (existing.exitCode === undefined) {
-        if (options?.cols && options?.rows) {
-          await resizeTmuxVirtualSession(existing.id, options.cols, options.rows);
-        }
-        this.bindTerminalSession(target.workspaceId, existing.id, agentSessionId);
-        return existing;
-      }
-      this.releaseTerminalSession(existing.id);
-    }
-
-    const match = sessionFile ?? findPiSessionFile(target.workspacePath, agentSessionId, this.sessionsRoot);
+    leaseKey: string,
+  ): Promise<number> {
+    const match = findPiSessionFile(target.workspacePath, agentSessionId, this.sessionsRoot);
     if (!match) {
       throw new Error(
         `Pi session '${agentSessionId}' not found for workspace '${target.workspaceId}'. ` +
         `The session file may have been deleted or the ID is stale.`,
       );
     }
-
-    return this.createVirtualAgentSession(target, agentSessionId, match, options);
+    await this.ensureHost(target, agentSessionId, match);
+    const key = this.getBindingKey(target.workspaceId, agentSessionId);
+    let leases = this.agentLeases.get(key);
+    if (!leases) {
+      leases = new Set();
+      this.agentLeases.set(key, leases);
+    }
+    leases.add(leaseKey);
+    return leases.size;
   }
 
-  private async createVirtualAgentSession(
-    target: PiWorkspaceTarget,
-    agentSessionId: string,
-    sessionFile: PiSessionFileInfo,
-    options?: { cols?: number; rows?: number },
-  ): Promise<TmuxSession> {
-    const sdkSession = await this.ensureActiveSession(target, agentSessionId, sessionFile);
-    const tmuxSession = await createTmuxVirtualSession(
-      buildAgentTerminalSessionName(target, agentSessionId),
-      target.workspacePath,
-      {
-        cols: options?.cols,
-        rows: options?.rows,
-        kind: PI_AGENT_TMUX_SESSION_KIND,
-        hidden: true,
-        metadata: {
-          workspaceId: target.workspaceId,
-          agentSessionId,
-        },
-      },
-    );
-
-    const virtualTerminal = getVirtualTerminal(tmuxSession.id);
-    if (!virtualTerminal) {
-      await killTmuxSession(tmuxSession.id).catch(() => {});
-      throw new Error('VirtualTerminal not found in registry after session creation');
+  /**
+   * Drop one viewer lease. A lease records ATTENTION, never lifetime: losing
+   * the last viewer means nobody is watching, not that the work should stop.
+   * Returns the workspace the session belongs to (so callers can emit a scoped
+   * update) and the viewers that remain, or null when the lease was already
+   * gone. The host keeps running — see {@link assertHostCapacity}.
+   */
+  releaseAgentLease(agentSessionId: string, leaseKey: string): { workspaceId: string; remaining: number } | null {
+    const suffix = `:${agentSessionId}`;
+    for (const [key, leases] of this.agentLeases) {
+      if (!key.endsWith(suffix) || !leases.delete(leaseKey)) continue;
+      if (leases.size === 0) this.agentLeases.delete(key);
+      const workspaceId = key.slice(0, -suffix.length);
+      return { workspaceId, remaining: this.getViewerCount(workspaceId, agentSessionId) };
     }
-
-    try {
-      const handle = await startVirtualInteractiveMode(sdkSession, virtualTerminal, {
-        cwd: target.workspacePath,
-        agentDir: process.env.PI_CODING_AGENT_DIR,
-      });
-      this.virtualModeHandles.set(agentSessionId, handle);
-      this.bindTerminalSession(target.workspaceId, tmuxSession.id, agentSessionId);
-      return tmuxSession;
-    } catch (error) {
-      await killTmuxSession(tmuxSession.id).catch(() => {});
-      throw error;
-    }
+    return null;
   }
 
+  /** Release every lease whose key starts with `ownerPrefix` — a disconnecting
+   *  client stops watching everything it was watching. Its sessions keep
+   *  running; a dropped connection is not an instruction to abandon work. */
+  releaseAgentLeasesForOwner(ownerPrefix: string): void {
+    for (const [key, leases] of [...this.agentLeases]) {
+      for (const leaseKey of [...leases]) {
+        if (leaseKey.startsWith(ownerPrefix)) leases.delete(leaseKey);
+      }
+      if (leases.size === 0) this.agentLeases.delete(key);
+    }
+  }
 
   // -------------------------------------------------------------------------
   // Private helpers
   // -------------------------------------------------------------------------
 
-  private async ensureActiveSession(
+  /** Daemon shutdown: synchronously tear down every live host so agent worker
+   *  processes die WITH the daemon (no orphaned SDK sessions). Safe from
+   *  signal handlers — no awaits. */
+  shutdownHosts(): void {
+    for (const [sessionId, host] of this.hosts) {
+      try {
+        host.kill();
+      } catch (err) {
+        console.error(`[pi-coordinator] kill failed for ${sessionId}:`, err);
+      }
+    }
+    this.hosts.clear();
+    this.sessionWorkspaceIds.clear();
+    this.sessionTargets.clear();
+    this.dialogSessions.clear();
+    this.pendingDialogRequests.clear();
+  }
+
+  /** Boot a session host. Always a worker child process in production (via
+   *  {@link hostFactory}); tests may inject an in-process/fake host. The child
+   *  runs a LocalSessionHost internally (see agent-worker.ts) — the per-session
+   *  process boundary is what isolates SDK process-globals, IRC and artifacts. */
+  private async bootHost(
+    target: PiWorkspaceTarget,
+    boot: SessionHostBoot,
+  ): Promise<AgentSessionHost> {
+    this.assertHostCapacity();
+    const sinks = this.createHostSinks(target);
+    const enableUI = !!this.hostUIEmitter;
+    return this.hostFactory(target, boot, sinks, {
+      enableUI,
+      onUnexpectedExit: (sessionId, detail) => this.handleWorkerExit(target, sessionId, detail),
+    });
+  }
+
+  /** Runaway guard, not a reclamation policy. Sessions are durable: a live host
+   *  is never torn down to make room, because "idle" is not observable from the
+   *  outside — a session with no turn in flight may still owe a queued message,
+   *  a pending human answer, or a running subagent, and none of that survives
+   *  disposal. Idle workers cost cold pages, which the OS reclaims losslessly;
+   *  killing them costs commitments. So at the ceiling we refuse the new boot
+   *  and say so, rather than silently destroying someone's work. */
+  private assertHostCapacity(): void {
+    const max = maxAgentHosts();
+    if (this.hosts.size < max) return;
+    throw new Error(
+      `Agent worker ceiling reached (${this.hosts.size}/${max} live). ` +
+      `Close a session or raise GITSPACE_MAX_AGENT_WORKERS.`,
+    );
+  }
+
+  /** A worker died without being asked to — drop its bookkeeping and tell
+   *  clients the session is no longer running so it returns to the dormant
+   *  (grey) state instead of hanging busy or freezing on its last error. Red is
+   *  reserved for a live, currently-erroring session; a worker that is gone is
+   *  not running. The next interaction lazily restores it from its file. */
+  private handleWorkerExit(target: PiWorkspaceTarget, sessionId: string, detail: string): void {
+    this.hosts.delete(sessionId);
+    this.sessionWorkspaceIds.delete(sessionId);
+    this.sessionTargets.delete(sessionId);
+    for (const [dialogId, dialogSessionId] of this.dialogSessions) {
+      if (dialogSessionId === sessionId) {
+        this.dialogSessions.delete(dialogId);
+        this.pendingDialogRequests.delete(dialogId);
+      }
+    }
+    console.error(`[pi-coordinator] ${detail} (session ${sessionId})`);
+    this.eventHandler?.(target, { type: 'status', sessionId, payload: { type: 'dormant', reason: 'worker-exit' } });
+  }
+
+  /** Tell clients a session's live worker is gone (evicted / no owners / crash)
+   *  so its snapshot record returns to the dormant, not-running state. Emitted
+   *  as a synthetic status; the agent-control bridge maps 'dormant' onto
+   *  markSessionClosed, clearing the frozen busy/retry/error. */
+  private emitSessionDormant(sessionId: string): void {
+    const target = this.sessionTargets.get(sessionId);
+    if (!target) return;
+    this.eventHandler?.(target, { type: 'status', sessionId, payload: { type: 'dormant', reason: 'host-stopped' } });
+  }
+
+  private createHostSinks(target: PiWorkspaceTarget): SessionHostSinks {
+    return {
+      onEvent: (event) => {
+        this.eventHandler?.(target, event);
+      },
+      onDialogRequest: (request) => {
+        this.handleDialogRequest(request);
+      },
+      onUiEvent: (event) => {
+        this.hostUIEmitter?.emitEvent(event);
+      },
+      onAgentReport: (payload) => {
+        // Agent invoked the SDK's report_tool_issue tool — file it through the
+        // same pipeline as user reports (local write + issue + gist), with
+        // origin 'agent'. Worker mode delivers this over IPC; in-process mode
+        // calls it directly. Fire-and-forget: filing must never block the turn.
+        void (async () => {
+          try {
+            const { fileAgentReport } = await import('../problem-report.js');
+            const filed = await fileAgentReport(payload, Date.now());
+            console.log(
+              `[pi-coordinator] agent report filed for session ${payload.sessionId} -> ${filed.issueUrl ?? filed.path}`,
+            );
+          } catch (err) {
+            console.error('[pi-coordinator] agent report filing failed:', err);
+          }
+        })();
+      },
+    };
+  }
+
+  /** Forward an extension dialog request to a watching client; if no client
+   *  can answer, resolve it as cancelled so the extension unblocks. */
+  private handleDialogRequest(request: HostUIDialogRequest): void {
+    const emitter = this.hostUIEmitter;
+    if (emitter) {
+      try {
+        this.dialogSessions.set(request.id, request.sessionId);
+        this.pendingDialogRequests.set(request.id, request);
+        emitter.emitDialogRequest(request);
+        return;
+      } catch (err) {
+        this.dialogSessions.delete(request.id);
+        this.pendingDialogRequests.delete(request.id);
+        console.warn(
+          `[pi-coordinator] No client to answer dialog ${request.id} (${request.type}); cancelling:`,
+          err instanceof Error ? err.message : err,
+        );
+      }
+    }
+    const host = this.hosts.get(request.sessionId);
+    if (!host) return;
+    const cancel: HostUIDialogResponse = request.type === 'confirm'
+      ? { type: 'confirm', id: request.id, value: false }
+      : { type: request.type, id: request.id, value: undefined };
+    void host.resolveDialog(cancel).catch(() => undefined);
+  }
+
+  /**
+   * Every still-pending dialog request across all live sessions. Used for the
+   * connect-time catch-up (serve-runtime): a browser that connected/reconnected
+   * after a dialog fired missed the live broadcast while the agent stayed blocked
+   * on the ask, so these are re-pushed to it. The stored objects carry the
+   * ORIGINAL dialogId, so the existing agent-dialog-response path resolves them.
+   */
+  getPendingDialogRequests(): HostUIDialogRequest[] {
+    return [...this.pendingDialogRequests.values()];
+  }
+
+  private async ensureHost(
     target: PiWorkspaceTarget,
     agentSessionId: string,
     sessionFile: PiSessionFileInfo | null = null,
-  ): Promise<OmpAgentSession> {
-    const existing = this.activeSessions.get(agentSessionId);
+  ): Promise<AgentSessionHost> {
+    const existing = this.hosts.get(agentSessionId);
     if (existing) {
       return existing;
     }
 
-    const existingInFlight = this.inflightActiveSessions.get(agentSessionId);
+    const existingInFlight = this.inflightHosts.get(agentSessionId);
     if (existingInFlight) {
       return existingInFlight;
     }
@@ -538,277 +1227,48 @@ export class PiCoordinator {
           );
         }
 
-        const { session, setToolUIContext } = await openPiSession(target.workspacePath, match.path);
-        if (session.sessionId !== agentSessionId) {
-          session.dispose();
+        const host = await this.bootHost(
+          target,
+          { mode: 'open', sessionFilePath: match.path },
+        );
+        if (host.sessionId !== agentSessionId) {
+          await host.dispose();
           throw new Error(
-            `Pi session file '${match.path}' reopened as '${session.sessionId}', expected '${agentSessionId}'.`,
+            `Pi session file '${match.path}' reopened as '${host.sessionId}', expected '${agentSessionId}'.`,
           );
         }
+        host.setTitle(match.title ?? match.firstMessage ?? undefined);
 
-        this.activeSessions.set(agentSessionId, session);
+        this.hosts.set(agentSessionId, host);
         this.sessionWorkspaceIds.set(agentSessionId, target.workspaceId);
-        this.bindSessionEvents(
-          target,
-          agentSessionId,
-          match.title ?? match.firstMessage ?? undefined,
-          session,
-        );
-        this.bindHostUI(agentSessionId, setToolUIContext);
-        return session;
+        this.sessionTargets.set(agentSessionId, target);
+        return host;
       } finally {
-        this.inflightActiveSessions.delete(agentSessionId);
+        this.inflightHosts.delete(agentSessionId);
       }
     })();
 
-    this.inflightActiveSessions.set(agentSessionId, ensurePromise);
+    this.inflightHosts.set(agentSessionId, ensurePromise);
     return ensurePromise;
   }
 
-  private emitQueuedMessages(target: PiWorkspaceTarget, sessionId: string, session: OmpAgentSession): void {
-    if (!this.eventHandler || typeof session.getQueuedMessages !== 'function') return;
-    this.eventHandler(target, {
-      type: 'queued_messages',
-      sessionId,
-      queued: session.getQueuedMessages(),
-    });
-  }
-
-
-  private bindSessionEvents(
-    target: PiWorkspaceTarget,
-    sessionId: string,
-    title: string | undefined,
-    session: OmpAgentSession,
-  ): void {
-    const existing = this.sessionUnsubscribers.get(sessionId);
-    existing?.();
-
-    const summaryTitle = title ?? sessionId;
-    const unsubscribers: Array<() => void> = [];
-
-    // --- SDK session events (subscribe delivers all lifecycle + tool events) ---
-    unsubscribers.push(
-      session.subscribe((piEvent: { type?: string; [key: string]: unknown }) => {
-        if (!this.eventHandler || typeof piEvent.type !== 'string') return;
-
-        this.emitQueuedMessages(target, sessionId, session);
-
-        switch (piEvent.type) {
-          case 'message_update':
-            this.eventHandler(target, {
-              type: 'message',
-              sessionId,
-              payload: { ...piEvent, title: summaryTitle },
-            });
-            return;
-
-          case 'agent_start':
-            this.eventHandler(target, {
-              type: 'status',
-              sessionId,
-              payload: { type: 'busy', event: piEvent },
-            });
-            return;
-
-          case 'agent_end':
-            this.eventHandler(target, {
-              type: 'status',
-              sessionId,
-              payload: { type: 'idle', event: piEvent },
-            });
-            return;
-
-          case 'auto_retry_start': {
-            const errorMessage = typeof piEvent.errorMessage === 'string' ? piEvent.errorMessage : 'Retrying...';
-            this.eventHandler(target, {
-              type: 'error',
-              sessionId,
-              error: errorMessage,
-            });
-            this.eventHandler(target, {
-              type: 'status',
-              sessionId,
-              payload: {
-                type: 'retry',
-                attempt: typeof piEvent.attempt === 'number' ? piEvent.attempt : 1,
-                message: errorMessage,
-                next: Date.now() + (typeof piEvent.delayMs === 'number' ? piEvent.delayMs : 0),
-              },
-            });
-            return;
-          }
-
-          case 'auto_retry_end': {
-            const success = piEvent.success === true;
-            // Restore busy/idle first — then set error so it isn't wiped by status clear.
-            this.eventHandler(target, {
-              type: 'status',
-              sessionId,
-              payload: { type: success ? 'busy' : 'idle', event: piEvent },
-            });
-            if (!success && typeof piEvent.finalError === 'string') {
-              this.eventHandler(target, { type: 'error', sessionId, error: piEvent.finalError });
-            }
-            return;
-          }
-
-          // Ask tool: track pending questions
-          case 'tool_execution_start':
-          case 'tool_call': {
-            const toolName = piEvent.toolName ?? piEvent.tool_name;
-            if (toolName !== 'ask') break;
-            const toolCallId = String(piEvent.toolCallId ?? piEvent.tool_call_id ?? '');
-            if (!toolCallId) break;
-            const input = isRecord(piEvent.input) ? piEvent.input : {};
-            this.eventHandler(target, {
-              type: 'question_added',
-              sessionId,
-              question: buildPendingQuestion(toolCallId, sessionId, input),
-            });
-            return;
-          }
-
-          case 'tool_execution_end':
-          case 'tool_result': {
-            const toolName = piEvent.toolName ?? piEvent.tool_name;
-            // Always extract todo phases from tool_execution_end regardless of tool
-            const phases = (session as any).getTodoPhases?.();
-            if (Array.isArray(phases)) {
-              this.eventHandler(target, {
-                type: 'status',
-                sessionId,
-                payload: { type: 'todo_update', phases },
-              });
-            }
-            if (toolName !== 'ask') break;
-            const toolCallId = String(piEvent.toolCallId ?? piEvent.tool_call_id ?? '');
-            if (!toolCallId) break;
-            this.eventHandler(target, {
-              type: 'question_removed',
-              sessionId,
-              questionId: toolCallId,
-            });
-            return;
-          }
-
-          case 'todo_reminder': {
-            const phases = (session as any).getTodoPhases?.();
-            if (Array.isArray(phases)) {
-              this.eventHandler(target, {
-                type: 'status',
-                sessionId,
-                payload: { type: 'todo_update', phases },
-              });
-            }
-            break;
-          }
-
-          case 'model_change': {
-            const model = (session as any).model;
-            if (model) {
-              this.eventHandler(target, {
-                type: 'status',
-                sessionId,
-                payload: { type: 'model_update', name: model.name, provider: model.provider },
-              });
-            }
-            break;
-          }
-        }
-      }),
-    );
-
-    // --- Permission events via SDK internal event bus ---
-    // The SDK emits permission-gate events on its event bus. Since the agent
-    // runs in-process, we can subscribe directly instead of loading an extension.
-    const eventBus = (session as any).events ?? (session as any)._eventBus ?? (session as any).extensionEvents;
-    if (eventBus && typeof eventBus.on === 'function') {
-      const waitingHandler = (payload: unknown) => {
-        if (!this.eventHandler) return;
-        this.eventHandler(target, {
-          type: 'permission_added',
-          sessionId,
-          permission: buildPermission(sessionId, payload),
-        });
-      };
-      const resolvedHandler = (payload: unknown) => {
-        if (!this.eventHandler) return;
-        this.eventHandler(target, {
-          type: 'permission_removed',
-          sessionId,
-          permissionId: permissionIdFromPayload(payload),
-        });
-      };
-      for (const channel of ['gitspace:permission.waiting', 'permission-gate:waiting']) {
-        eventBus.on(channel, waitingHandler);
-      }
-      for (const channel of ['gitspace:permission.resolved', 'permission-gate:resolved']) {
-        eventBus.on(channel, resolvedHandler);
-      }
-      // Cleanup for event bus listeners if the bus supports off/removeListener
-      if (typeof eventBus.off === 'function') {
-        unsubscribers.push(() => {
-          for (const channel of ['gitspace:permission.waiting', 'permission-gate:waiting']) {
-            eventBus.off(channel, waitingHandler);
-          }
-          for (const channel of ['gitspace:permission.resolved', 'permission-gate:resolved']) {
-            eventBus.off(channel, resolvedHandler);
-          }
-        });
+  private async disposeHost(sessionId: string): Promise<void> {
+    for (const [dialogId, dialogSessionId] of this.dialogSessions) {
+      if (dialogSessionId === sessionId) {
+        this.dialogSessions.delete(dialogId);
+        this.pendingDialogRequests.delete(dialogId);
       }
     }
-
-    this.sessionUnsubscribers.set(sessionId, () => {
-      for (const unsub of unsubscribers) unsub();
-    });
-  }
-
-  private disposeActiveSession(sessionId: string): void {
-    const unsubscribe = this.sessionUnsubscribers.get(sessionId);
-    unsubscribe?.();
-    this.sessionUnsubscribers.delete(sessionId);
-    this.sessionUIBinders.delete(sessionId);
-    this.hostUIBridge.rejectAllForSession(sessionId, `Agent session disposed: ${sessionId}`);
-
-    const modeHandle = this.virtualModeHandles.get(sessionId);
-    if (modeHandle) {
-      this.virtualModeHandles.delete(sessionId);
-      void modeHandle.stop().catch(() => {});
-    }
-
-    const session = this.activeSessions.get(sessionId);
-    if (session) {
-      this.activeSessions.delete(sessionId);
+    const host = this.hosts.get(sessionId);
+    if (host) {
+      // Return the session to the dormant (not-running) state before dropping
+      // its bookkeeping — its live worker is going away, so the snapshot must
+      // not keep reporting its last busy/retry/error as if it were still live.
+      this.emitSessionDormant(sessionId);
+      this.hosts.delete(sessionId);
       this.sessionWorkspaceIds.delete(sessionId);
-      // Pi SDK has module-level postmortem signal handlers that can call
-      // process.exit() during dispose, which would kill the entire tmux-lite
-      // server and all sessions. Guard against both thrown errors and exit.
-      const originalExit = process.exit;
-      try {
-        process.exit = ((code?: number) => {
-          console.error(`[pi-coordinator] Blocked process.exit(${code}) during session dispose for ${sessionId}`);
-        }) as never;
-        session.dispose();
-      } catch (err) {
-        console.error(`[pi-coordinator] session.dispose() threw for ${sessionId}:`, err);
-      } finally {
-        process.exit = originalExit;
-      }
-    }
-  }
-
-  /**
-   * Store the SDK's setToolUIContext binder for a session.
-   * If a host UI context is already installed, apply it immediately.
-   */
-  private bindHostUI(
-    sessionId: string,
-    setToolUIContext: OmpCreateSessionResult['setToolUIContext'],
-  ): void {
-    this.sessionUIBinders.set(sessionId, setToolUIContext);
-    if (this.hostUIEmitter) {
-      setToolUIContext(this.hostUIBridge.createContextForSession(sessionId, this.hostUIEmitter), true);
+      this.sessionTargets.delete(sessionId);
+      await host.dispose();
     }
   }
 
@@ -816,37 +1276,10 @@ export class PiCoordinator {
     return `${workspaceId}:${agentSessionId}`;
   }
 
-  private getTerminalOwnerCount(workspaceId: string, agentSessionId: string): number {
-    return this.terminalSessionIdsByAgentKey.get(this.getBindingKey(workspaceId, agentSessionId))?.size ?? 0;
-  }
-
-  private bindTerminalSession(
-    workspaceId: string,
-    terminalSessionId: string,
-    agentSessionId: string,
-  ): number {
-    const key = this.getBindingKey(workspaceId, agentSessionId);
-    let terminalIds = this.terminalSessionIdsByAgentKey.get(key);
-    if (!terminalIds) {
-      terminalIds = new Set();
-      this.terminalSessionIdsByAgentKey.set(key, terminalIds);
-    }
-    terminalIds.add(terminalSessionId);
-    this.terminalBindings.set(terminalSessionId, { workspaceId, agentSessionId });
-    return terminalIds.size;
-  }
-
-  private unbindTerminalSession(terminalSessionId: string): TerminalSessionBinding | null {
-    const binding = this.terminalBindings.get(terminalSessionId);
-    if (!binding) return null;
-    this.terminalBindings.delete(terminalSessionId);
-    const key = this.getBindingKey(binding.workspaceId, binding.agentSessionId);
-    const terminalIds = this.terminalSessionIdsByAgentKey.get(key);
-    terminalIds?.delete(terminalSessionId);
-    if (terminalIds && terminalIds.size === 0) {
-      this.terminalSessionIdsByAgentKey.delete(key);
-    }
-    return binding;
+  /** Everything currently keeping a session's host alive: one entry per open
+   *  client pane. Disposal and eviction both gate on this. */
+  private getViewerCount(workspaceId: string, agentSessionId: string): number {
+    return this.agentLeases.get(this.getBindingKey(workspaceId, agentSessionId))?.size ?? 0;
   }
 
   private async waitForSessionFile(
@@ -864,56 +1297,40 @@ export class PiCoordinator {
     return null;
   }
 
-  private findMappedTmuxSession(
-    tmuxSessions: TmuxSession[],
-    workspaceId: string,
-    agentSessionId: string,
-  ): TmuxSession | undefined {
-    const key = this.getBindingKey(workspaceId, agentSessionId);
-    const mappedTmuxIds = this.terminalSessionIdsByAgentKey.get(key);
-    if (!mappedTmuxIds || mappedTmuxIds.size === 0) return undefined;
-    for (const mappedTmuxId of [...mappedTmuxIds]) {
-      const match = tmuxSessions.find((s) => s.id === mappedTmuxId);
-      if (match) {
-        return match;
-      }
-      this.releaseTerminalSession(mappedTmuxId);
-    }
-    return undefined;
+  async runSpaceCommand(target: PiWorkspaceTarget, argsText: string): Promise<string> {
+    const { execCommand } = await importExecModule();
+    const args = parseCommandArgs(argsText);
+    return executeSpaceCommand(
+      {
+        exec: async (command, commandArgs, options) => {
+          const result = await execCommand(command, commandArgs, options?.cwd ?? target.workspacePath, options);
+          return { stdout: result.stdout, stderr: result.stderr, code: result.code, killed: result.killed ?? false };
+        },
+      },
+      { cwd: target.workspacePath },
+      args,
+    );
   }
+
   async listAvailableCommands(target: PiWorkspaceTarget): Promise<Array<{ name: string; description: string; kind: 'file' | 'custom' | 'extension' }>> {
     const commands: Array<{ name: string; description: string; kind: 'file' | 'custom' | 'extension' }> = [];
 
-    // 0. Built-in commands supported through the web surface
-    commands.push({ name: 'compact', description: 'Compact the session context', kind: 'extension' });
-
-    // 1. Collect extension/custom commands from the active session for the requested workspace
-    //    (commands are workspace-scoped; skip any session belonging to a different workspace).
-    for (const [sessionId, session] of this.activeSessions) {
+    // 0. Built-in commands supported through the web surface. `space` is
+    // installed as a managed extension for active sessions, but it must be
+    // discoverable before the first session has loaded its extension runner.
+    commands.push(
+      { name: 'compact', description: 'Compact the session context', kind: 'extension' },
+      { name: 'space', description: 'Run GitSpace workspace-scoped commands', kind: 'extension' },
+    );
+    // 1. Collect extension/custom/skill commands from a live host for the
+    //    requested workspace (commands are workspace-scoped; one host suffices).
+    for (const [sessionId, host] of this.hosts) {
       if (this.sessionWorkspaceIds.get(sessionId) !== target.workspaceId) continue;
       try {
-        const reserved = new Set(commands.map((command) => command.name));
-        const extensionCommands = session.extensionRunner?.getRegisteredCommands(reserved) ?? [];
-        for (const cmd of extensionCommands) {
-          if (cmd?.name && !commands.some((command) => command.name === cmd.name)) {
-            commands.push({
-              name: cmd.name,
-              description: cmd.description ?? '',
-              kind: 'extension',
-            });
-          }
-        }
-
-        const customCmds = (session as any).customCommands;
-        if (Array.isArray(customCmds)) {
-          for (const cmd of customCmds) {
-            if (cmd?.command?.name && !commands.some(command => command.name === cmd.command.name)) {
-              commands.push({
-                name: cmd.command.name,
-                description: cmd.command.description ?? '',
-                kind: 'custom',
-              });
-            }
+        const sessionCommands = await host.listSessionCommands(commands.map((c) => c.name));
+        for (const cmd of sessionCommands) {
+          if (cmd.name && !commands.some((command) => command.name === cmd.name)) {
+            commands.push(cmd);
           }
         }
       } catch {

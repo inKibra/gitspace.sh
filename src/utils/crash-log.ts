@@ -1,6 +1,7 @@
 import { appendFileSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { getWorkspaceRoot } from '../core/paths.js';
+import { redactText } from './redact.js';
 
 const CRASH_LOG_DIR = join(getWorkspaceRoot(), '.logs');
 const CRASH_LOG_PATH = join(CRASH_LOG_DIR, 'gssh-crash.log');
@@ -90,7 +91,9 @@ export function writeCrashLog(kind: string, error: unknown, context?: Record<str
     }
 
     lines.push(toText(error), '');
-    appendFileSync(CRASH_LOG_PATH, `${lines.join('\n')}\n`, 'utf-8');
+    // Content-redact the whole record: error stacks and context routinely
+    // carry tokens/paths that argv-redaction alone doesn't catch.
+    appendFileSync(CRASH_LOG_PATH, `${redactText(lines.join('\n'))}\n`, 'utf-8');
     return CRASH_LOG_PATH;
   } catch (writeError) {
     try {

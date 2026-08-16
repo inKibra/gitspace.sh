@@ -65,8 +65,7 @@ export default function DocsPage() {
             
             {/* Simple footer within docs for "Next" navigation could go here */}
             <div className="mt-20 pt-8 border-t border-zinc-800 flex justify-between text-sm text-zinc-500">
-               <span>Last updated: Jan 8, 2026</span>
-               <a href="#" className="hover:text-green-500 transition-colors">Edit this page on GitHub</a>
+               <a href="https://github.com/inkibra/gitspace.sh" target="_blank" rel="noopener noreferrer" className="hover:text-green-500 transition-colors">Improve these docs on GitHub</a>
             </div>
           </div>
           <div className="lg:hidden">

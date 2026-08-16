@@ -13,13 +13,16 @@
  */
 
 import { spawn } from "bun";
-import { existsSync, readFileSync, unlinkSync } from "fs";
+import { existsSync, readFileSync, unlinkSync, closeSync } from "fs";
+import { getCodeVersion } from "./code-version.js";
 import { select } from "@inquirer/prompts";
 import { createBufferedSocketWriter } from "../../utils/bun-socket-writer";
+import { writeTraceLog } from "../../utils/trace-log";
 import {
   applyTmuxLiteSandboxEnvironment,
   getRouterSocket,
   getPidFile,
+  getSessionDir,
   PROTOCOL_VERSION,
   PACKAGE_VERSION,
   type Command,
@@ -73,6 +76,55 @@ export interface AttachPrepareOptions {
 
 // Terminal reset - RIS (Reset to Initial State) resets everything
 const TERM_RESET = "\x1bc";
+
+// ─── Command deadlines (ticket #4: fail fast instead of hanging) ────────────
+// Every router round-trip gets a deadline. A wedged daemon (e.g. SIGSTOP, or a
+// stuck event loop) accepts the connection but never replies — without a
+// deadline the CLI hangs forever with no output.
+/** Default for ordinary commands (list/status/inbox/...). */
+export const DEFAULT_SEND_TIMEOUT_MS = 15_000;
+/** Commands that hit the network or spawn processes (gh/git/linear, session create, replay render). */
+export const LONG_SEND_TIMEOUT_MS = 60_000;
+/** Long-running lifecycle work (project clone, workspace scripts, review runs). */
+export const OPERATION_SEND_TIMEOUT_MS = 10 * 60_000;
+
+export interface SendOptions {
+  /** Deadline for the round-trip. Defaults to DEFAULT_SEND_TIMEOUT_MS; null waits for a response or socket close. */
+  timeoutMs?: number | null;
+}
+
+/** Default deadline, overridable via GSSH_TMUX_SEND_TIMEOUT_MS (tests, debugging). */
+function getDefaultSendTimeoutMs(): number {
+  const raw = process.env.GSSH_TMUX_SEND_TIMEOUT_MS?.trim();
+  if (raw) {
+    const parsed = Number.parseInt(raw, 10);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+  return DEFAULT_SEND_TIMEOUT_MS;
+}
+
+/** Rejection produced when the daemon accepted the connection but never replied. */
+export class TmuxCliTimeoutError extends Error {
+  readonly commandType: string;
+  readonly socketPath: string;
+  readonly timeoutMs: number;
+  constructor(commandType: string, socketPath: string, timeoutMs: number) {
+    super(
+      `tmux-lite command '${commandType}' timed out after ${Math.round(timeoutMs / 1000)}s ` +
+      `(socket: ${socketPath}). daemon wedged? try: gssh machine tmux status / pkill -f tmux-lite/server`
+    );
+    this.name = 'TmuxCliTimeoutError';
+    this.commandType = commandType;
+    this.socketPath = socketPath;
+    this.timeoutMs = timeoutMs;
+  }
+}
+
+function traceCliTimeout(event: string, details: Record<string, unknown>): void {
+  // Instrumentation for ticket #5 (message-never-appears): every client-side
+  // deadline leaves a trace with the command type + elapsed time.
+  writeTraceLog(event, details);
+}
 
 const SERVER_SCRIPT = `${import.meta.dir}/server.ts`;
 
@@ -136,6 +188,21 @@ function initializeCliEnvironment(context: { sandboxName?: string; isTestMode: b
   }
 }
 
+
+/** Append-mode fd for the daemon's log — the process that owns PTYs, agents,
+ *  and artifacts must never log to /dev/null (instrumentation sweep #1).
+ *  Falls back to 'ignore' only if the log file can't be opened. */
+function getDaemonLogFd(): number | 'ignore' {
+  try {
+    const { openSync, mkdirSync } = require('node:fs') as typeof import('node:fs');
+    const dir = getSessionDir();
+    mkdirSync(dir, { recursive: true });
+    return openSync(`${dir}/tmux-lite-daemon.log`, 'a');
+  } catch {
+    return 'ignore';
+  }
+}
+
 const getServerCommand = (options: { testMode?: boolean } = {}): string[] => {
   // Detect if we're running as a compiled binary (not bun)
   const isCompiled = !process.execPath.endsWith('bun');
@@ -177,9 +244,91 @@ export async function isServerRunning(): Promise<boolean> {
   try {
     await send({ type: "list" });
     return true;
-  } catch {
+  } catch (err) {
+    // A timeout means the daemon exists but is wedged (it accepted the
+    // connection and never answered). Propagate instead of returning false —
+    // returning false would make ensureServer() spawn a duplicate server on
+    // top of the wedged one and mask the failure.
+    if (err instanceof TmuxCliTimeoutError) throw err;
     return false;
   }
+}
+
+// --- Stale-daemon detection --------------------------------------------------
+//
+// The relay client + E2E client-session-manager (the frame-chunking send path)
+// run INSIDE this daemon (serve-runtime.ts). ensureServer() reuses an already
+// running daemon without reloading its code, so a daemon started before a code
+// change keeps executing the OLD code — e.g. emitting un-chunked oversize frames
+// the relay rejects with a 1006. The daemon reports the code identity it booted
+// with (status.codeVersion); the CLI compares it to the current value and, when
+// they differ, recycles the daemon so the new code loads. See code-version.ts
+// for how that identity is derived (baked BUILD_ID in prod, a per-dev-run token
+// from scripts/dev.ts in dev, null → "don't police" otherwise).
+
+/** Freshness of the running daemon relative to the current code identity:
+ *   - 'fresh'      : daemon's code identity matches the current one — reuse it.
+ *   - 'stale-idle' : identities differ AND the daemon has no active sessions —
+ *                    safe to auto-recycle without losing work.
+ *   - 'stale-busy' : identities differ BUT sessions/agents are running — do NOT
+ *                    silently kill them; warn and reuse.
+ *   - 'unknown'    : can't tell (no current identity, daemon didn't answer, or a
+ *                    daemon predating codeVersion) — reuse rather than churn. */
+async function evaluateDaemonFreshness(): Promise<"fresh" | "stale-idle" | "stale-busy" | "wedged" | "unknown"> {
+  const expected = getCodeVersion();
+  // Query status FIRST (even without a code identity to police): a daemon that
+  // accepts the connection but never answers a trivial `status` has a blocked
+  // event loop — it's wedged, and reusing it makes every later command 15s-time-
+  // out (the "daemon wedged?" failure). A TmuxCliTimeoutError is that signal
+  // (connected, no reply); a connection error means gone/transient, not wedged.
+  let res: Awaited<ReturnType<typeof send>>;
+  try {
+    res = await send({ type: "status" }, { timeoutMs: 5000 });
+  } catch (err) {
+    if (err instanceof TmuxCliTimeoutError) {
+      // Confirm with one retry so a transient GC/IO pause can't cost a live daemon.
+      try {
+        res = await send({ type: "status" }, { timeoutMs: 5000 });
+      } catch (retryErr) {
+        return retryErr instanceof TmuxCliTimeoutError ? "wedged" : "unknown";
+      }
+    } else {
+      return "unknown"; // transient/connection error — don't recycle on a bad signal
+    }
+  }
+  if (res.type !== "status") return "unknown";
+  if (expected === null) return "fresh"; // responsive; no identity to police
+  if (res.codeVersion == null) return "unknown"; // daemon predates codeVersion reporting
+  if (res.codeVersion === expected) return "fresh";
+  return res.sessions > 0 ? "stale-busy" : "stale-idle";
+}
+
+/** Stop the running daemon and wait for it to actually exit, so the next
+ *  ensureServer() spawns a fresh process. Graceful kill-server first, then a
+ *  pidfile SIGTERM/SIGKILL fallback for a wedged one. */
+async function recycleStaleServer(): Promise<void> {
+  const pid = getServerPid();
+  try {
+    await send({ type: "kill-server" }, { timeoutMs: 3000 });
+  } catch {
+    /* wedged or already gone — fall through to the pid-based fallback */
+  }
+  const stillAlive = (): boolean =>
+    pid !== null ? isProcessRunning(pid) : existsSync(getRouterSocket());
+  for (let i = 0; i < 50 && stillAlive(); i++) {
+    await Bun.sleep(100);
+  }
+  if (pid !== null && isProcessRunning(pid)) {
+    try { process.kill(pid, "SIGTERM"); } catch { /* raced to exit */ }
+    for (let i = 0; i < 20 && isProcessRunning(pid); i++) await Bun.sleep(100);
+    if (isProcessRunning(pid)) {
+      try { process.kill(pid, "SIGKILL"); } catch { /* raced to exit */ }
+      await Bun.sleep(200);
+    }
+  }
+  // Clear stale socket/pid files so isServerRunning() reports gone.
+  try { unlinkSync(getRouterSocket()); } catch { /* already gone */ }
+  cleanupStalePidFile();
 }
 
 // Start server if not running
@@ -197,17 +346,42 @@ export async function ensureServer(): Promise<void> {
 
   ensureServerPromise = (async () => {
     if (await isServerRunning()) {
-      await send({ type: 'agent-state' });
-      await refreshHostingAfterEnsure();
-      return;
+      const freshness = await evaluateDaemonFreshness();
+      if (freshness === "stale-idle" || freshness === "wedged") {
+        console.error(
+          freshness === "wedged"
+            ? "[tmux-lite] running daemon is not responding (event loop wedged) — force-recycling it"
+            : "[tmux-lite] running daemon is on a different code version than the current build — recycling it to load the new code",
+        );
+        await recycleStaleServer();
+        // fall through to spawn a fresh daemon below
+      } else {
+        if (freshness === "stale-busy") {
+          console.error(
+            "[tmux-lite] WARNING: the running daemon is on a different code version than the current build but has active sessions — " +
+              "it will keep serving the OLD code. Run `gssh machine tmux stop` (or stop your sessions) to reload when safe.",
+          );
+        }
+        await send({ type: 'agent-state' });
+        await refreshHostingAfterEnsure();
+        return;
+      }
     }
 
-    spawn({
-      cmd: getServerCommand(),
-      stdout: "ignore",
-      stderr: "ignore",
-      env: process.env as Record<string, string>,
-    });
+    {
+      const logFd = getDaemonLogFd();
+      spawn({
+        cmd: getServerCommand(),
+        stdout: logFd,
+        stderr: logFd,
+        env: process.env as Record<string, string>,
+      });
+      // Bun dups the numeric fd into the child; the parent's copy is a leak
+      // (one per daemon spawn) — close it. 'ignore' has nothing to close.
+      if (typeof logFd === 'number') {
+        try { closeSync(logFd); } catch { /* already closed */ }
+      }
+    }
 
     for (let i = 0; i < 60; i++) {
       await Bun.sleep(100);
@@ -313,23 +487,41 @@ export async function getStatus(): Promise<ServerStatus> {
  */
 export const stopServer = killServer;
 
-// Send command to server
-export async function send(cmd: Command): Promise<Response> {
+// Send command to server. Bounded: rejects with TmuxCliTimeoutError if the
+// daemon does not answer within the deadline (default 15s; long operations
+// pass a higher explicit budget). No retries — a wedged daemon must surface.
+export async function send(cmd: Command, options: SendOptions = {}): Promise<Response> {
+  const timeoutMs = options.timeoutMs === null ? null : options.timeoutMs ?? getDefaultSendTimeoutMs();
+  const routerSocket = getRouterSocket();
+  const startedAtMs = Date.now();
   return new Promise(async (resolve, reject) => {
     let buffer: Buffer = Buffer.alloc(0);
     let settled = false;
     let socketRef: Awaited<ReturnType<typeof Bun.connect>> | null = null;
     let socketWriter: ReturnType<typeof createBufferedSocketWriter> | null = null;
 
+    const deadline = timeoutMs === null
+      ? undefined
+      : setTimeout(() => {
+          if (settled) return;
+          traceCliTimeout('cli-command-timeout', {
+            commandType: cmd.type,
+            socketPath: routerSocket,
+            timeoutMs,
+            elapsedMs: Date.now() - startedAtMs,
+          });
+          fail(new TmuxCliTimeoutError(cmd.type, routerSocket, timeoutMs));
+        }, timeoutMs);
+
     const fail = (err: Error) => {
       if (settled) return;
       settled = true;
+      clearTimeout(deadline);
       socketRef?.end();
       reject(err);
     };
 
     try {
-      const routerSocket = getRouterSocket();
       const socket = await Bun.connect({
         unix: routerSocket,
         socket: {
@@ -349,6 +541,7 @@ export async function send(cmd: Command): Promise<Response> {
             buffer = decoded.remaining as Buffer;
             if (decoded.messages.length > 0) {
               settled = true;
+              clearTimeout(deadline);
               resolve(decoded.messages[0] as Response);
               socket.end();
             }
@@ -363,6 +556,11 @@ export async function send(cmd: Command): Promise<Response> {
         }
       });
       socketRef = socket;
+      if (settled) {
+        // Deadline fired while connecting
+        socket.end();
+        return;
+      }
       socketWriter = createBufferedSocketWriter(socket);
       socketWriter.write(encodeRouterMessage(cmd));
     } catch (e) {
@@ -373,6 +571,7 @@ export async function send(cmd: Command): Promise<Response> {
 
 export async function prepareAttachSession(options: AttachPrepareOptions): Promise<Extract<Response, { type: 'attach-prepared' }>> {
   await ensureServer();
+  const startedAtMs = Date.now();
   return new Promise((resolve, reject) => {
     let buffer: Buffer<ArrayBufferLike> = Buffer.alloc(0);
     let settled = false;
@@ -381,9 +580,26 @@ export async function prepareAttachSession(options: AttachPrepareOptions): Promi
     let socketRef: Awaited<ReturnType<typeof Bun.connect>> | null = null;
     let writer: ReturnType<typeof createBufferedSocketWriter> | null = null;
     const cleanup = () => {
+      clearTimeout(deadline);
       try { writer?.flush(); } catch {}
       try { socketRef?.end(); } catch {}
     };
+    // attach-prepare streams script output and can legitimately run long
+    // (workspace setup scripts), so it gets the operation budget — but it must
+    // still terminate: a wedged daemon otherwise hangs the attach forever.
+    const deadline = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      traceCliTimeout('cli-attach-prepare-timeout', {
+        commandType: 'attach-prepare',
+        requestId,
+        socketPath: getRouterSocket(),
+        timeoutMs: OPERATION_SEND_TIMEOUT_MS,
+        elapsedMs: Date.now() - startedAtMs,
+      });
+      cleanup();
+      reject(new TmuxCliTimeoutError('attach-prepare', getRouterSocket(), OPERATION_SEND_TIMEOUT_MS));
+    }, OPERATION_SEND_TIMEOUT_MS);
 
     void Bun.connect({
       unix: getRouterSocket(),
@@ -458,7 +674,7 @@ export async function sendTmuxReviewRequest(
 ): Promise<Extract<Response, { type: 'review-response' }>> {
   await ensureServer();
   const requestId = crypto.randomUUID();
-  const res = await send({ type: 'review-request', requestId, operation });
+  const res = await send({ type: 'review-request', requestId, operation }, { timeoutMs: OPERATION_SEND_TIMEOUT_MS });
   if (res.type === 'review-response') return res;
   if (res.type === 'error') throw new Error(res.message);
   throw new Error('Unexpected response');
@@ -488,12 +704,18 @@ export async function setTmuxWorkspacePhase(
   throw new Error('Unexpected response');
 }
 
-export async function killTmuxSession(id: string): Promise<void> {
-  const res = await send({ type: 'kill', id });
+export interface TerminateSessionOptions {
+  mode?: 'graceful' | 'force';
+  graceMs?: number;
+}
+
+export async function terminateTmuxSession(id: string, options: TerminateSessionOptions = {}): Promise<void> {
+  const res = await send({ type: 'terminate', id, mode: options.mode, graceMs: options.graceMs }, { timeoutMs: LONG_SEND_TIMEOUT_MS });
   if (res.type === 'ok') return;
   if (res.type === 'error') throw new Error(res.message);
   throw new Error('Unexpected response');
 }
+
 
 export async function getTmuxInbox(): Promise<Extract<Response, { type: 'inbox' }>> {
   const res = await send({ type: 'inbox' });
@@ -533,91 +755,91 @@ export async function updateTmuxNotificationConfig(
 }
 
 export async function listTmuxGithubRepos(org?: string): Promise<string[]> {
-  const res = await send({ type: 'github-repos', org });
+  const res = await send({ type: 'github-repos', org }, { timeoutMs: LONG_SEND_TIMEOUT_MS });
   if (res.type === 'github-repos') return res.repos;
   if (res.type === 'error') throw new Error(res.message);
   throw new Error('Unexpected response');
 }
 
 export async function listTmuxRemoteBranches(projectName: string): Promise<string[]> {
-  const res = await send({ type: 'remote-branches', projectName });
+  const res = await send({ type: 'remote-branches', projectName }, { timeoutMs: LONG_SEND_TIMEOUT_MS });
   if (res.type === 'remote-branches') return res.branches;
   if (res.type === 'error') throw new Error(res.message);
   throw new Error('Unexpected response');
 }
 
 export async function listTmuxLinearIssues(projectName: string): Promise<import('../../types/lifecycle.js').SessionLinearIssueSummary[]> {
-  const res = await send({ type: 'linear-issues', projectName });
+  const res = await send({ type: 'linear-issues', projectName }, { timeoutMs: LONG_SEND_TIMEOUT_MS });
   if (res.type === 'linear-issues') return res.issues;
   if (res.type === 'error') throw new Error(res.message);
   throw new Error('Unexpected response');
 }
 
 export async function createTmuxProject(params: { repository: string; projectName?: string; baseBranch?: string; setCurrent?: boolean }): Promise<void> {
-  const res = await send({ type: 'project-create', ...params });
+  const res = await send({ type: 'project-create', ...params }, { timeoutMs: OPERATION_SEND_TIMEOUT_MS });
   if (res.type === 'project-created') return;
   if (res.type === 'error') throw new Error(res.message);
   throw new Error('Unexpected response');
 }
 
 export async function prepareTmuxProject(params: { repository: string; projectName?: string; baseBranch?: string; setCurrent?: boolean }): Promise<import('../../session/backend.js').PreparedProjectResult> {
-  const res = await send({ type: 'project-prepare', ...params });
+  const res = await send({ type: 'project-prepare', ...params }, { timeoutMs: OPERATION_SEND_TIMEOUT_MS });
   if (res.type === 'project-prepared') return res.result;
   if (res.type === 'error') throw new Error(res.message);
   throw new Error('Unexpected response');
 }
 
 export async function finalizeTmuxProject(params: { projectName: string; repository: string; baseBranch: string; bundle?: import('../../types/bundle.js').SpacesBundle; inputValues?: Record<string, string>; secretValues?: Record<string, string>; confirmResults?: Record<string, import('../../types/bundle.js').ConfirmStepResult>; setCurrent?: boolean }): Promise<void> {
-  const res = await send({ type: 'project-finalize', ...params });
+  const res = await send({ type: 'project-finalize', ...params }, { timeoutMs: OPERATION_SEND_TIMEOUT_MS });
   if (res.type === 'project-created') return;
   if (res.type === 'error') throw new Error(res.message);
   throw new Error('Unexpected response');
 }
 
 export async function cancelTmuxProjectCreation(projectName: string): Promise<void> {
-  const res = await send({ type: 'project-cancel', projectName });
+  const res = await send({ type: 'project-cancel', projectName }, { timeoutMs: OPERATION_SEND_TIMEOUT_MS });
   if (res.type === 'project-cancelled') return;
   if (res.type === 'error') throw new Error(res.message);
   throw new Error('Unexpected response');
 }
 
 export async function createTmuxWorkspace(params: { projectName: string; workspaceName: string; branchName?: string; baseBranch?: string; workspaceSource?: import('../../types/lifecycle.js').WorkspaceSource; linearIssue?: import('../../types/lifecycle.js').SessionLinearIssueSummary }): Promise<void> {
-  const res = await send({ type: 'workspace-create', ...params });
+  const res = await send({ type: 'workspace-create', ...params }, { timeoutMs: OPERATION_SEND_TIMEOUT_MS });
   if (res.type === 'workspace-created') return;
   if (res.type === 'error') throw new Error(res.message);
   throw new Error('Unexpected response');
 }
 
 export async function deleteTmuxProject(projectName: string): Promise<void> {
-  const res = await send({ type: 'project-delete', projectName });
+  const res = await send({ type: 'project-delete', projectName }, { timeoutMs: OPERATION_SEND_TIMEOUT_MS });
   if (res.type === 'project-deleted') return;
   if (res.type === 'error') throw new Error(res.message);
   throw new Error('Unexpected response');
 }
 
 export async function getTmuxBundleRefreshPlan(projectName: string, workspaceId: string): Promise<import('../../types/bundle-refresh.js').BundleRefreshPlan> {
-  const res = await send({ type: 'bundle-refresh-plan', projectName, workspaceId });
+  const res = await send({ type: 'bundle-refresh-plan', projectName, workspaceId }, { timeoutMs: LONG_SEND_TIMEOUT_MS });
   if (res.type === 'bundle-refresh-plan') return res.plan;
   if (res.type === 'error') throw new Error(res.message);
   throw new Error('Unexpected response');
 }
 
 export async function applyTmuxBundleRefresh(projectName: string, workspaceId: string, submission: import('../../types/bundle-refresh.js').BundleRefreshSubmission): Promise<void> {
-  const res = await send({ type: 'bundle-refresh-apply', projectName, workspaceId, submission });
+  const res = await send({ type: 'bundle-refresh-apply', projectName, workspaceId, submission }, { timeoutMs: OPERATION_SEND_TIMEOUT_MS });
   if (res.type === 'bundle-refresh-applied') return;
   if (res.type === 'error') throw new Error(res.message);
   throw new Error('Unexpected response');
 }
 
 export async function getTmuxBundleConfigState(projectName: string, workspaceId: string): Promise<import('../../types/bundle-config.js').BundleConfigState> {
-  const res = await send({ type: 'bundle-config-state', projectName, workspaceId });
+  const res = await send({ type: 'bundle-config-state', projectName, workspaceId }, { timeoutMs: LONG_SEND_TIMEOUT_MS });
   if (res.type === 'bundle-config-state') return res.state;
   if (res.type === 'error') throw new Error(res.message);
   throw new Error('Unexpected response');
 }
 
 export async function applyTmuxBundleConfig(projectName: string, workspaceId: string, submission: import('../../types/bundle-config.js').BundleConfigSubmission): Promise<void> {
-  const res = await send({ type: 'bundle-config-apply', projectName, workspaceId, submission });
+  const res = await send({ type: 'bundle-config-apply', projectName, workspaceId, submission }, { timeoutMs: OPERATION_SEND_TIMEOUT_MS });
   if (res.type === 'bundle-config-applied') return;
   if (res.type === 'error') throw new Error(res.message);
   throw new Error('Unexpected response');
@@ -630,6 +852,7 @@ export async function deleteTmuxWorkspace(options: {
   onScriptOutput?: (event: Extract<Response, { type: 'workspace-delete-output' }>) => void;
 }): Promise<void> {
   await ensureServer();
+  const startedAtMs = Date.now();
   return new Promise((resolve, reject) => {
     let buffer: Buffer<ArrayBufferLike> = Buffer.alloc(0);
     let settled = false;
@@ -637,9 +860,25 @@ export async function deleteTmuxWorkspace(options: {
     let socketRef: Awaited<ReturnType<typeof Bun.connect>> | null = null;
     let writer: ReturnType<typeof createBufferedSocketWriter> | null = null;
     const cleanup = () => {
+      clearTimeout(deadline);
       try { writer?.flush(); } catch {}
       try { socketRef?.end(); } catch {}
     };
+    // workspace-delete streams remove-script output; long but bounded.
+    const deadline = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      traceCliTimeout('cli-workspace-delete-timeout', {
+        commandType: 'workspace-delete',
+        requestId,
+        workspaceId: options.workspaceId,
+        socketPath: getRouterSocket(),
+        timeoutMs: OPERATION_SEND_TIMEOUT_MS,
+        elapsedMs: Date.now() - startedAtMs,
+      });
+      cleanup();
+      reject(new TmuxCliTimeoutError('workspace-delete', getRouterSocket(), OPERATION_SEND_TIMEOUT_MS));
+    }, OPERATION_SEND_TIMEOUT_MS);
     void Bun.connect({
       unix: getRouterSocket(),
       socket: {
@@ -669,7 +908,9 @@ export async function deleteTmuxWorkspace(options: {
               if (response.type === 'error') {
                 settled = true;
                 cleanup();
-                reject(new Error(response.message));
+                const error = new Error(response.message) as Error & { code?: string };
+                error.code = response.code;
+                reject(error);
                 return;
               }
             }
@@ -732,7 +973,7 @@ export async function getReplaySnapshot(
   } = {}
 ): Promise<TerminalSnapshot> {
   await ensureServer();
-  const res = await send({ type: "replay-snapshot", replayId, ...options });
+  const res = await send({ type: "replay-snapshot", replayId, ...options }, { timeoutMs: LONG_SEND_TIMEOUT_MS });
   if (res.type === "replay-snapshot") return res.snapshot;
   if (res.type === "error") throw new Error(res.message);
   throw new Error("Unexpected response");
@@ -748,7 +989,7 @@ export async function getReplayText(
   } = {}
 ): Promise<string> {
   await ensureServer();
-  const res = await send({ type: "replay-text", replayId, ...options });
+  const res = await send({ type: "replay-text", replayId, ...options }, { timeoutMs: LONG_SEND_TIMEOUT_MS });
   if (res.type === "replay-text") return res.text;
   if (res.type === "error") throw new Error(res.message);
   throw new Error("Unexpected response");
@@ -764,7 +1005,7 @@ export async function getReplayMarkdown(
   } = {}
 ): Promise<string> {
   await ensureServer();
-  const res = await send({ type: "replay-markdown", replayId, ...options });
+  const res = await send({ type: "replay-markdown", replayId, ...options }, { timeoutMs: LONG_SEND_TIMEOUT_MS });
   if (res.type === "replay-markdown") return res.markdown;
   if (res.type === "error") throw new Error(res.message);
   throw new Error("Unexpected response");
@@ -803,50 +1044,18 @@ export async function createSession(
     hidden: options?.hidden,
     recordReplay: options?.recordReplay,
     metadata: options?.metadata,
-  });
+  }, { timeoutMs: LONG_SEND_TIMEOUT_MS });
   if (res.type === "session") return res.session;
   if (res.type === "error") throw new Error(res.message);
   throw new Error("Unexpected response");
 }
 
-export async function createVirtualSession(
-  name: string,
-  cwd: string,
-  options?: {
-    cols?: number;
-    rows?: number;
-    kind?: import('./protocol.js').SessionKind;
-    hidden?: boolean;
-    metadata?: Record<string, string>;
-  }
-): Promise<Session> {
+export async function terminateSession(id: string, options: TerminateSessionOptions = {}): Promise<void> {
   await ensureServer();
-  const res = await send({
-    type: 'new-virtual',
-    name,
-    cwd,
-    cols: options?.cols,
-    rows: options?.rows,
-    kind: options?.kind,
-    hidden: options?.hidden,
-    metadata: options?.metadata,
-  });
-  if (res.type === 'session') return res.session;
-  if (res.type === 'error') throw new Error(res.message);
-  throw new Error('Unexpected response');
-}
-
-export async function resizeVirtualSession(id: string, cols: number, rows: number): Promise<void> {
-  await ensureServer();
-  const res = await send({ type: 'virtual-resize', id, cols, rows });
-  if (res.type === 'error') throw new Error(res.message);
-}
-
-export async function killSession(id: string): Promise<void> {
-  await ensureServer();
-  const res = await send({ type: "kill", id });
+  const res = await send({ type: "terminate", id, mode: options.mode, graceMs: options.graceMs }, { timeoutMs: LONG_SEND_TIMEOUT_MS });
   if (res.type === "error") throw new Error(res.message);
 }
+
 
 export async function getAgentState(): Promise<import('./agent-event-manager.js').WorkspaceAgentState[]> {
   await ensureServer();
@@ -860,6 +1069,16 @@ export async function getAgentState(): Promise<import('./agent-event-manager.js'
 export async function getMachineSnapshot(): Promise<import('./machine/protocol.js').MachineSnapshot> {
   await ensureServer();
   const res = await send({ type: 'machine-snapshot' });
+  if (res.type === 'machine-snapshot') return res.snapshot;
+  if (res.type === 'error') throw new Error(res.message);
+  throw new Error('Unexpected response');
+}
+
+/** Force a full daemon-side rebuild (client-detected nonce gap): the daemon
+ *  re-reads all sources instead of serving its live model. */
+export async function resyncMachineSnapshot(): Promise<import('./machine/protocol.js').MachineSnapshot> {
+  await ensureServer();
+  const res = await send({ type: 'machine-resync' });
   if (res.type === 'machine-snapshot') return res.snapshot;
   if (res.type === 'error') throw new Error(res.message);
   throw new Error('Unexpected response');
@@ -893,7 +1112,7 @@ export async function createAgentSession(
   title?: string,
 ): Promise<AgentSessionSummaryPayload[]> {
   await ensureServer();
-  const res = await send({ type: 'agent-create', target, title });
+  const res = await send({ type: 'agent-create', target, title }, { timeoutMs: LONG_SEND_TIMEOUT_MS });
   if (res.type === 'agent-sessions') return res.sessions;
   if (res.type === 'error') throw new Error(res.message);
   throw new Error('Unexpected response');
@@ -960,14 +1179,17 @@ export async function restoreAgentSession(
   throw new Error('Unexpected response');
 }
 
-export async function attachAgentSession(
+export async function openAgentSession(
   target: AgentWorkspaceTargetPayload,
   agentSessionId: string,
-  options?: { cols?: number; rows?: number },
-): Promise<Session> {
+  options?: { paneId?: string },
+): Promise<{ agentSessionId: string; workspaceId: string; leaseCount: number }> {
   await ensureServer();
-  const res = await send({ type: 'agent-attach', target, agentSessionId, cols: options?.cols, rows: options?.rows });
-  if (res.type === 'session') return res.session;
+  const res = await send(
+    { type: 'agent-open', target, agentSessionId, paneId: options?.paneId },
+    { timeoutMs: LONG_SEND_TIMEOUT_MS },
+  );
+  if (res.type === 'agent-opened') return res;
   if (res.type === 'error') throw new Error(res.message);
   throw new Error('Unexpected response');
 }
@@ -1014,6 +1236,7 @@ export async function watchAgentState(handlers: {
     let buffer: Buffer = Buffer.alloc(0);
 
     const fail = (error: Error) => {
+      clearTimeout(startDeadline);
       if (!started) {
         try { socketRef?.end(); } catch {}
         reject(error);
@@ -1021,6 +1244,18 @@ export async function watchAgentState(handlers: {
       }
       handlers.onError?.(error);
     };
+
+    // Bound the watch-start ack — a wedged daemon accepts the connection but
+    // never sends 'agent-watch-started'.
+    const startDeadline = setTimeout(() => {
+      if (started) return;
+      traceCliTimeout('cli-watch-start-timeout', {
+        commandType: 'agent-watch',
+        socketPath: getRouterSocket(),
+        timeoutMs: DEFAULT_SEND_TIMEOUT_MS,
+      });
+      fail(new TmuxCliTimeoutError('agent-watch', getRouterSocket(), DEFAULT_SEND_TIMEOUT_MS));
+    }, DEFAULT_SEND_TIMEOUT_MS);
 
     try {
       void Bun.connect({
@@ -1044,6 +1279,7 @@ export async function watchAgentState(handlers: {
               if (message.type === 'agent-watch-started') {
                 if (!started) {
                   started = true;
+                  clearTimeout(startDeadline);
                   resolve(() => {
                     closedByCaller = true;
                     try { sock.end(); } catch {}
@@ -1113,6 +1349,7 @@ export async function watchMachineEvents(handlers: {
     let buffer: Buffer = Buffer.alloc(0);
 
     const fail = (error: Error) => {
+      clearTimeout(startDeadline);
       if (!started) {
         try { socketRef?.end(); } catch {}
         reject(error);
@@ -1120,6 +1357,18 @@ export async function watchMachineEvents(handlers: {
       }
       handlers.onError?.(error);
     };
+
+    // Bound the watch-start ack — a wedged daemon accepts the connection but
+    // never sends 'machine-watch-started'.
+    const startDeadline = setTimeout(() => {
+      if (started) return;
+      traceCliTimeout('cli-watch-start-timeout', {
+        commandType: 'machine-watch',
+        socketPath: getRouterSocket(),
+        timeoutMs: DEFAULT_SEND_TIMEOUT_MS,
+      });
+      fail(new TmuxCliTimeoutError('machine-watch', getRouterSocket(), DEFAULT_SEND_TIMEOUT_MS));
+    }, DEFAULT_SEND_TIMEOUT_MS);
 
     try {
       void Bun.connect({
@@ -1143,6 +1392,7 @@ export async function watchMachineEvents(handlers: {
               if (message.type === 'machine-watch-started') {
                 if (!started) {
                   started = true;
+                  clearTimeout(startDeadline);
                   resolve(() => {
                     closedByCaller = true;
                     try { sock.end(); } catch {}
@@ -1530,14 +1780,21 @@ async function main() {
       return;
     }
     console.log("Starting server...");
-    spawn({
-      cmd: getServerCommand({ testMode: isTestMode }),
-      // Use "ignore" so server doesn't inherit CLI's stdout/stderr
-      // This allows CLI to exit cleanly when piped
-      stdout: "ignore",
-      stderr: "ignore",
-      env: process.env as Record<string, string>,
-    });
+    {
+      // A log file (not inherit) keeps the CLI exiting cleanly when piped,
+      // without discarding the daemon's output.
+      const logFd = getDaemonLogFd();
+      spawn({
+        cmd: getServerCommand({ testMode: isTestMode }),
+        stdout: logFd,
+        stderr: logFd,
+        env: process.env as Record<string, string>,
+      });
+      // Bun dups the numeric fd into the child; close the parent's leaked copy.
+      if (typeof logFd === 'number') {
+        try { closeSync(logFd); } catch { /* already closed */ }
+      }
+    }
     await Bun.sleep(300);
     if (!(await isServerRunning())) {
       console.error("Failed to start server");
@@ -1650,9 +1907,9 @@ async function main() {
         console.error("Usage: tl kill <id>");
         process.exit(1);
       }
-      const res = await send({ type: "kill", id });
+      const res = await send({ type: "terminate", id, mode: "force" });
       if (res.type === "ok") {
-        console.log(`Killed ${id}`);
+        console.log(`Terminated ${id}`);
       } else if (res.type === "error") {
         console.error("Error:", res.message);
       }

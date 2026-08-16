@@ -87,7 +87,7 @@ function formatLevel(level: string): string {
   return level.toLowerCase();
 }
 
-export function EventsWeb(props: UseEventsReturn & { workspaceLabel?: string | null }) {
+export function EventsWeb(props: UseEventsReturn & { workspaceLabel?: string | null; embedded?: boolean }) {
   const { filtered, selected, liveEventIds, savedFilters, activeFilterName, selectIndex, selectSavedFilter, close } = props;
   const [search, setSearch] = useState('');
 
@@ -130,8 +130,8 @@ export function EventsWeb(props: UseEventsReturn & { workspaceLabel?: string | n
     : null;
 
   return (
-    <div className="events-root h-visual-viewport w-full flex flex-col bg-[var(--gs-bg)] min-h-0">
-      <Header onBack={close} workspaceLabel={props.workspaceLabel} processLabel={processLabel} />
+    <div className={`events-root w-full flex flex-col bg-[var(--gs-bg)] min-h-0 ${props.embedded ? 'h-full' : 'h-visual-viewport'}`}>
+      {!props.embedded && <Header onBack={close} workspaceLabel={props.workspaceLabel} processLabel={processLabel} />}
       <div className="events-column flex-1 flex overflow-hidden min-h-0">
         <div className="w-[38%] min-w-[320px] border-r border-[var(--gs-border)] flex flex-col min-h-0">
           <div className="p-4 space-y-4 border-b border-[var(--gs-border)]">

@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, mock } from 'bun:test';
 
-const mockKillSession = mock(async () => undefined);
+const mockTerminateSession = mock(async () => undefined);
 const mockCreateSession = mock(async () => ({ id: 'sess-1', name: 'proc:test:web:1' }));
 const mockIsProcessRunning = mock(() => false);
 const mockIsServerRunning = mock(async () => true);
@@ -11,7 +11,8 @@ const mockListSessionsFromRunningServer = mock(async () => [] as Array<{
 }>);
 
 mock.module('../tmux-lite/cli.js', () => ({
-  killSession: mockKillSession,
+  terminateSession: mockTerminateSession,
+  killServer: mock(async () => undefined),
   createSession: mockCreateSession,
   isProcessRunning: mockIsProcessRunning,
   isServerRunning: mockIsServerRunning,
@@ -23,7 +24,7 @@ const { resolveManagedSession } = await import('./ports.js');
 
 describe('resolveManagedSession', () => {
   beforeEach(() => {
-    mockKillSession.mockReset();
+    mockTerminateSession.mockReset();
     mockCreateSession.mockReset();
     mockIsProcessRunning.mockReset();
     mockIsServerRunning.mockReset();
@@ -61,6 +62,36 @@ describe('resolveManagedSession', () => {
       managedSessionName: 'proc:figma-based-redesign:sample-server:1',
       managedWorkspaceId: 'figma-based-redesign',
       managedProcessName: 'sample-server',
+      managedInstance: 1,
+    });
+  });
+
+  it('uses session metadata (not the truncated name) for identity on long-named workspaces', async () => {
+    // The session name is capped at 64 chars, so a long workspace id is
+    // truncated in `name` but preserved in full in `metadata`. Ownership
+    // resolution must return the untruncated metadata id, otherwise the
+    // running process is never recognised as the owner of its port and its
+    // allocation gets reassigned (the port-flicker bug).
+    const fullWorkspaceId = 'core:bradleat-ink-404-zerbly-demo-voice-session-with-grok-voice-clone-call-prep';
+    mockListSessionsFromRunningServer.mockResolvedValue([
+      {
+        id: 'sess-9',
+        name: 'proc:bradleat-ink-404-zerbly-demo-voice-session-with-grok-:web:1', // truncated to 64
+        pid: 5150,
+        metadata: {
+          role: 'process',
+          workspaceId: fullWorkspaceId,
+          processName: 'web',
+          processInstance: '1',
+        },
+      },
+    ] as Array<any>);
+
+    await expect(resolveManagedSession(5150)).resolves.toMatchObject({
+      pid: 5150,
+      managedSessionId: 'sess-9',
+      managedWorkspaceId: fullWorkspaceId,
+      managedProcessName: 'web',
       managedInstance: 1,
     });
   });

@@ -1,50 +1,17 @@
-import { killSession, listSessionsFromRunningServer, isServerRunning } from '../tmux-lite/cli.js';
+import { terminateSession, listSessionsFromRunningServer, isServerRunning } from '../tmux-lite/cli.js';
 import { parseProcessSessionName } from './names.js';
-import type { ProcessPortProtocol, ResolvedProcessPort } from '../../types/processes.js';
-
-export interface PortConflictInfo {
-  port: number;
-  protocol: ProcessPortProtocol;
-  pid: number;
-  command?: string;
-  user?: string;
-  address?: string;
-  managedSessionId?: string;
-  managedSessionName?: string;
-  managedWorkspaceId?: string;
-  managedProcessName?: string;
-  managedInstance?: number;
-}
-
-export class PortConflictError extends Error {
-  readonly code = 'PORT_CONFLICT';
-  readonly conflicts: PortConflictInfo[];
-
-  constructor(processName: string, conflicts: PortConflictInfo[]) {
-    super(buildConflictMessage(processName, conflicts));
-    this.name = 'PortConflictError';
-    this.conflicts = conflicts;
-  }
-}
-
-function buildConflictMessage(processName: string, conflicts: PortConflictInfo[]): string {
-  const summary = conflicts
-    .map((conflict) => {
-      const owner = conflict.managedSessionId
-        ? `${conflict.managedProcessName ?? 'service'}#${conflict.managedInstance ?? 1} (${conflict.managedWorkspaceId ?? 'managed'})`
-        : `${conflict.command ?? 'unknown process'} (pid ${conflict.pid})`;
-      return `:${conflict.port} -> ${owner}`;
-    })
-    .join(', ');
-  return `Cannot start ${processName}; port already in use: ${summary}`;
-}
-
-export function normalizeProcessPortProtocol(protocol?: ProcessPortProtocol): ProcessPortProtocol {
-  return protocol === 'tcp' ? 'tcp' : 'http';
-}
+import type { ResolvedProcessPort } from '../../types/processes.js';
+import { normalizeProcessPortProtocol, PortConflictError, type PortConflictInfo } from './port-conflicts.js';
 
 export function inspectListeningProcess(port: number): Array<{ pid: number; command?: string; user?: string; address?: string }> {
-  const result = Bun.spawnSync(['lsof', '-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-F', 'pcuPn']);
+  // `lsof` can hang for many seconds (or indefinitely) on a socket in a bad
+  // state. This runs via blocking spawnSync, so an unbounded call freezes the
+  // single-threaded tmux-lite server mid snapshot build and serve never
+  // connects. Bound it and treat a timeout / non-zero exit as "no listener" —
+  // port-conflict detection is best-effort, not correctness-critical.
+  const result = Bun.spawnSync(['lsof', '-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-F', 'pcuPn'], {
+    timeout: 2000,
+  });
   if (result.exitCode !== 0) {
     return [];
   }
@@ -77,7 +44,7 @@ export function inspectListeningProcess(port: number): Array<{ pid: number; comm
 }
 
 function getParentPid(pid: number): number | null {
-  const result = Bun.spawnSync(['ps', '-o', 'ppid=', '-p', String(pid)]);
+  const result = Bun.spawnSync(['ps', '-o', 'ppid=', '-p', String(pid)], { timeout: 2000 });
   if (result.exitCode !== 0) {
     return null;
   }
@@ -86,20 +53,47 @@ function getParentPid(pid: number): number | null {
   return Number.isFinite(parentPid) && parentPid > 0 ? parentPid : null;
 }
 
+type ManagedSessionList = Awaited<ReturnType<typeof listSessionsFromRunningServer>>;
+
+/**
+ * Live-session accessor for port-conflict resolution.
+ *
+ * When this code runs *inside* the tmux-lite server process — e.g. while it is
+ * building a machine snapshot for a `machine-watch` subscriber — it must NOT
+ * call back into the server over its socket. The server is single-threaded and
+ * already busy handling the command that triggered this lookup, so the `list`
+ * request would queue behind it and never run: the server would wait on itself
+ * and deadlock. The server registers an in-process source via
+ * {@link setInProcessSessionSource} so we read its live sessions directly. CLI
+ * and other out-of-process callers leave it unset and query over the socket.
+ */
+let inProcessSessionSource: (() => ManagedSessionList) | null = null;
+
+export function setInProcessSessionSource(source: (() => ManagedSessionList) | null): void {
+  inProcessSessionSource = source;
+}
+
 export async function resolveManagedSession(pid: number): Promise<PortConflictInfo | null> {
-  try {
-    if (!await isServerRunning()) {
+  let sessions: ManagedSessionList;
+  if (inProcessSessionSource) {
+    try {
+      sessions = inProcessSessionSource();
+    } catch {
       return null;
     }
-  } catch {
-    return null;
-  }
-
-  let sessions: Awaited<ReturnType<typeof listSessionsFromRunningServer>>;
-  try {
-    sessions = await listSessionsFromRunningServer();
-  } catch {
-    return null;
+  } else {
+    try {
+      if (!await isServerRunning()) {
+        return null;
+      }
+    } catch {
+      return null;
+    }
+    try {
+      sessions = await listSessionsFromRunningServer();
+    } catch {
+      return null;
+    }
   }
 
   const sessionByPid = new Map(sessions.map((session) => [session.pid, session]));
@@ -108,6 +102,25 @@ export async function resolveManagedSession(pid: number): Promise<PortConflictIn
   while (currentPid && currentPid > 1) {
     const session = sessionByPid.get(currentPid);
     if (session) {
+      // Prefer exact identity from session metadata. The session *name* is
+      // capped at 64 chars (buildProcessSessionName), so parsing it silently
+      // truncates long workspace ids — which made ownership comparisons fail
+      // for long-named workspaces and reallocate a running process's own port.
+      // Metadata carries the full, untruncated ids recorded at process start.
+      const meta = session.metadata;
+      const metaInstance = meta?.processInstance !== undefined ? Number(meta.processInstance) : NaN;
+      if (meta?.role === 'process' && meta.workspaceId && meta.processName && Number.isInteger(metaInstance)) {
+        return {
+          port: 0,
+          protocol: 'http',
+          pid,
+          managedSessionId: session.id,
+          managedSessionName: session.name,
+          managedWorkspaceId: meta.workspaceId,
+          managedProcessName: meta.processName,
+          managedInstance: metaInstance,
+        };
+      }
       const parsed = parseProcessSessionName(session.name);
       if (parsed?.processName) {
         return {
@@ -168,7 +181,7 @@ export async function ensurePortsAvailable(args: { processName: string; ports?: 
 
 export async function resolvePortConflict(conflict: PortConflictInfo): Promise<void> {
   if (conflict.managedSessionId) {
-    await killSession(conflict.managedSessionId);
+    await terminateSession(conflict.managedSessionId);
   } else {
     process.kill(conflict.pid, 'SIGTERM');
   }

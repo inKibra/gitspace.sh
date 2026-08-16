@@ -3,6 +3,8 @@ import type {
   ProjectInfo,
   SessionInfo,
   ScriptOutputResponse,
+  RemoteOperationRecord,
+  RemoteOperationEvent,
   WorkspaceInfo,
 } from '../lib/remote-session/protocol.js';
 import type { NotificationConfig } from '../notifications/types.js';
@@ -27,16 +29,25 @@ export type BackendEvent =
       done?: boolean;
       error?: string;
       exitCode?: number;
+      workspaceId?: string;
     }
   | { type: 'notification_config'; config: NotificationConfig }
+  | { type: 'pane_attached'; paneId: string; streamId: number | null; sessionId: string | null; sessionName?: string; viewOnly?: boolean; workspaceId?: string; agentSessionId?: string }
+  | { type: 'pane_meta'; paneId: string; meta: AttachedSessionMeta }
+  | { type: 'pane_detached'; paneId: string }
+  | { type: 'pane_exited'; paneId: string; sessionId: string; exitCode?: number }
   | { type: 'attached'; sessionId: string; sessionName?: string; viewOnly?: boolean; workspaceId?: string; agentSessionId?: string }
   | { type: 'session_meta'; meta: AttachedSessionMeta }
   | { type: 'detached' }
   | { type: 'session_exited'; sessionId: string; exitCode?: number }
   | { type: 'command_error'; code?: string; message: string }
   | { type: 'error'; message: string }
+  | { type: 'snapshot_error'; message: string | null }
   | { type: 'events'; events: WideEvent[]; liveEventIds: string[]; savedEventFilters?: SavedEventFilter[] }
   | { type: 'machine_snapshot'; snapshot: MachineSnapshot }
+  | { type: 'operation_snapshot'; operations: RemoteOperationRecord[] }
+  | { type: 'operation_event'; event: RemoteOperationEvent }
+  | { type: 'operation_dismissed'; operationId: string }
   | { type: 'process_started'; workspaceId: string; processName: string; sessionId?: string; sessionIds?: string[] }
   | { type: 'process_stopped'; workspaceId: string; processName: string }
   | { type: 'host_ui_dialog_request'; request: HostUIDialogRequest }

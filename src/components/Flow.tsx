@@ -78,6 +78,7 @@ export interface FlowInput {
 export interface FlowSelect<T = unknown> {
   type: 'select';
   title: string;
+  message?: string;
   options: Array<{ label: string; description?: string; value: T }>;
   selectedIndex: number;
   searchable?: boolean;

@@ -24,6 +24,7 @@ import {
   getWorkspaceFileDiff,
   getWorkspaceFileVersions,
 } from './git.js';
+import { readHeadSha } from './review-analysis.js';
 import { importGitHubReview, pushGitHubReview } from './github-review.js';
 import { readProjectConfig } from './config.js';
 import { scanWorkspaces } from '../lib/remote-session/workspace-scanner.js';
@@ -187,18 +188,93 @@ export async function executeLocalReviewOperation(
       };
     }
 
+    case 'get_review_guide': {
+      // Resolve via the canonical goal-scoped reader (goals/<goalId>/review/
+      // guide.json). The UI previously read the mount-root 'review/guide.json',
+      // which never resolves for a workspace goal, so the Change Guide silently
+      // fell back to the heuristic diff-walk and appeared "not visible".
+      const { readReviewGuide } = await import('./review-guide.js');
+      const guide = readReviewGuide(operation.projectName, operation.workspaceName);
+      // The guide is a cache keyed by headSha (docs/REVIEW-GUIDE.md): resolve
+      // HEAD here so the reader can tell a current narrative from one written
+      // against an earlier diff. A failed rev-parse means "cannot tell", which
+      // must read as not-stale — flagging every guide on a git hiccup is worse
+      // than missing one.
+      let headSha: string | undefined;
+      try {
+        const workspace = await resolveWorkspaceByName(operation.projectName, operation.workspaceName, scan);
+        headSha = readHeadSha(workspace.path);
+      } catch { headSha = undefined; }
+      return {
+        op: 'review_guide',
+        guide,
+        ...(headSha ? { headSha } : {}),
+        ...(guide && headSha ? { stale: guide.headSha !== headSha } : {}),
+      };
+    }
+
+    case 'get_review_guide_state': {
+      const workspace = await resolveWorkspaceByName(
+        operation.projectName,
+        operation.workspaceName,
+        scan
+      );
+      const { readReviewGuideState } = await import('./review.js');
+
+      // Joins (phase-journal ⇄ goal ledger): the guide UI and the narrator
+      // share one source for the goal timeline + per-phase requirement motion.
+      let goalTimeline: import('../types/goals.js').TimelineEvent[] | undefined;
+      try {
+        const { readWorkspaceGoal } = await import('./goal-chain.js');
+        const goal = readWorkspaceGoal(operation.projectName, operation.workspaceName);
+        if (goal?.validation?.events?.length) goalTimeline = goal.validation.events;
+      } catch { /* no goal — state alone */ }
+      let journal: Array<{ phase: string; startedAt: string; endedAt?: string; requirementsAdvanced: Array<{ id: string; from: string; to: string }> }> | undefined;
+      try {
+        const { listPhaseJournalEntries } = await import('./phase-journal.js');
+        const entries = listPhaseJournalEntries(workspace.path);
+        if (entries.length > 0) {
+          journal = entries.map((e) => ({
+            phase: e.phase,
+            startedAt: e.startedAt,
+            endedAt: e.endedAt,
+            requirementsAdvanced: e.delta?.requirementsAdvanced ?? [],
+          }));
+        }
+      } catch { /* no journal mount */ }
+
+      return {
+        op: 'review_guide_state',
+        state: readReviewGuideState(workspace.path, workspace.id),
+        ...(goalTimeline ? { goalTimeline } : {}),
+        ...(journal ? { journal } : {}),
+      };
+    }
+
+    case 'set_review_guide_state': {
+      const workspace = await resolveWorkspaceByName(
+        operation.projectName,
+        operation.workspaceName,
+        scan
+      );
+      const { writeReviewGuideState } = await import('./review.js');
+      return { op: 'review_guide_state', state: writeReviewGuideState(workspace.path, workspace.id, operation.state) };
+    }
+
     case 'get_changed_files': {
       const workspace = await resolveWorkspaceByName(
         operation.projectName,
         operation.workspaceName,
         scan
       );
-      const changed = await getWorkspaceChangedFiles(workspace.path, workspace.baseBranch);
+      const changed = await getWorkspaceChangedFiles(workspace.path, operation.base ?? workspace.baseBranch);
+      const { listLocalBranches } = await import('./git.js');
       return {
         op: 'changed_files',
         files: changed.files,
         baseBranch: changed.baseBranch,
         headBranch: changed.headBranch,
+        branches: await listLocalBranches(workspace.path),
       };
     }
 
@@ -210,7 +286,7 @@ export async function executeLocalReviewOperation(
       );
       const result = await getWorkspaceFileDiff(
         workspace.path,
-        workspace.baseBranch,
+        operation.base ?? workspace.baseBranch,
         operation.filePath,
         operation.prevFilePath
       );
@@ -251,7 +327,8 @@ export async function executeLocalReviewOperation(
       );
       const result = await getWorkspaceFileContextRange(
         workspace.path,
-        workspace.baseBranch,
+        // Same ref the diff came from — see the op's `base` doc.
+        operation.base ?? workspace.baseBranch,
         operation.filePath,
         operation.prevFilePath,
         {

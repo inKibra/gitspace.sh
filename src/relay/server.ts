@@ -17,7 +17,8 @@ import type { Server, ServerWebSocket } from "bun";
 import type { RelayServerConfig, WebSocketData } from "./types";
 import { ed25519 } from "@noble/curves/ed25519.js";
 import { signMessage, verifySignedMessage, getSignerPublicKey, type SignedMessage } from "./signing.js";
-import { PROTOCOL_VERSION } from "./protocol.js";
+import { PROTOCOL_VERSION, RELAY_MAX_WS_PAYLOAD, RELAY_WS_PAYLOAD_WARN } from "./protocol.js";
+import { FrameLedger, peekFrameType, summarizeClose } from "../lib/tmux-lite/transport-diagnostics.js";
 import { formatRelayFingerprint, type RelayIdentity } from "./identity.js";
 import { deriveIdentityId } from "../lib/tmux-lite/crypto/identity.js";
 import { x25519 } from "@noble/curves/ed25519.js";
@@ -561,6 +562,31 @@ function setupClientConnection(
 /**
  * Create the relay server
  */
+
+// Coarse rate limit for POST /report — spam/DoS guard on the public ingress
+// (payload is diagnostic data, redacted client-side). ~20 reports/min.
+let reportWindowStart = 0;
+let reportsThisWindow = 0;
+function consumeReportSlot(): boolean {
+  const now = Date.now();
+  if (now - reportWindowStart > 60_000) { reportWindowStart = now; reportsThisWindow = 0; }
+  if (reportsThisWindow >= 20) return false;
+  reportsThisWindow += 1;
+  return true;
+}
+
+// In-flight share reads (GET /artifact-share/<token> → machine WS round
+// trip). Keyed by requestId; bound to the machineId that must answer.
+// Module scope: the HTTP handler and the machine-message switch live in
+// different closures. One relay instance per process.
+const pendingShareReads = new Map<string, {
+  machineId: string;
+  chunks: Buffer[];
+  meta: { contentType?: string; disposition?: string; fileName?: string; relPath?: string; pinnedCommit?: string; expiresAt?: number };
+  resolve: (r: { body: Buffer; contentType: string; disposition: string; fileName: string; relPath?: string; pinnedCommit?: string; expiresAt?: number } | null) => void;
+  timer: ReturnType<typeof setTimeout>;
+}>();
+
 export function createRelayServer(config: RelayServerConfig): Server<WebSocketData> {
   const { port, bind = "0.0.0.0", hostname, identity } = config;
   const disableRateLimit = config.disableRateLimit === true;
@@ -660,6 +686,102 @@ export function createRelayServer(config: RelayServerConfig): Server<WebSocketDa
         });
       }
 
+      // Dedicated problem-report ingress (docs/REPORT-A-PROBLEM.md). A fresh
+      // POST that bypasses the main WS (which may be wedged) and lands in the
+      // RELAY — a separate process that survives a frozen daemon. Spools to
+      // disk immediately and, when co-located with the machine (dev/self-
+      // hosted), enriches with the daemon's on-disk logs the frozen daemon
+      // can't hand over itself. Client redacts first; we redact again defensively.
+      if (url.pathname === "/report" && req.method === "POST") {
+        try {
+          if (!consumeReportSlot()) return new Response("Too many reports", { status: 429, headers: { 'Cache-Control': 'no-store' } });
+          const raw = await req.text();
+          if (raw.length > 8 * 1024 * 1024) return new Response("Report too large", { status: 413 });
+          let body: { note?: string; projectName?: string; clientBundle?: unknown };
+          try { body = JSON.parse(raw); } catch { return new Response("Invalid JSON", { status: 400 }); }
+
+          const fs = await import('node:fs');
+          const { join: pjoin } = await import('node:path');
+          const { getWorkspaceRoot } = await import('../core/paths.js');
+          const { redactDeep, redactText } = await import('../utils/redact.js');
+          const { readRecentTraceFromDisk } = await import('../utils/trace-log.js');
+          const { getSessionDir } = await import('../lib/tmux-lite/protocol.js');
+
+          // Freeze-safe server enrichment: read the daemon's on-disk logs
+          // directly (co-located only; empty when the relay isn't on the
+          // machine host). These bytes exist even if the daemon is frozen.
+          const readTail = (p: string, max = 256 * 1024): string => {
+            try { const t = fs.readFileSync(p, 'utf8'); return t.length > max ? t.slice(t.length - max) : t; } catch { return ''; }
+          };
+          const root = getWorkspaceRoot();
+          const serverDisk = {
+            daemonLogTail: redactText(readTail(pjoin(getSessionDir(), 'tmux-lite-daemon.log'))),
+            crashLogTail: redactText(readTail(pjoin(root, '.logs', 'gssh-crash.log'))),
+            traceTail: redactText(readRecentTraceFromDisk()),
+            note: 'server context read from disk by the relay (daemon may be unreachable/frozen)',
+          };
+
+          const report = redactDeep({
+            v: 1,
+            via: 'relay',
+            note: body.note ?? '',
+            projectName: body.projectName ?? null,
+            createdAt: new Date().toISOString(),
+            client: body.clientBundle ?? null,
+            serverDisk,
+          });
+
+          // Distinct dir so relay-ingested reports are obvious vs daemon-written.
+          const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+          const dir = pjoin(root, '.logs', 'reports', `${stamp}-relay`);
+          fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+          const path = pjoin(dir, 'report.json');
+          fs.writeFileSync(path, JSON.stringify(report, null, 2), { mode: 0o600 });
+
+          // Also file the GitHub issue — the relay is co-located with the machine
+          // and shares its gh auth, so a report still becomes an issue even when
+          // the daemon is frozen. Best-effort; the disk report is the guarantee.
+          // File in the BACKGROUND and only wait a small budget: a hammered relay
+          // or slow gh/GitHub must not hold the HTTP response past the client's
+          // report timeout and cost the user their report. The disk report (with
+          // both machine + relay logs, read above) is already persisted.
+          const { raceReportFiling } = await import('../lib/tmux-lite/problem-report.js');
+          const filing = (async (): Promise<{ issueUrl?: string; issueNumber?: number }> => {
+            try {
+              const { createIssue, createGist, reportRepoSlug } = await import('../core/github-issues.js');
+              const noteStr = String(body.note ?? '').trim();
+              const title = (noteStr.split('\n')[0] || 'Problem report').slice(0, 120);
+              const cb = (body.clientBundle ?? {}) as { url?: string; userAgent?: string; ring?: Array<{ kind: string; message: string }>; domSnapshot?: string };
+              const ring = Array.isArray(cb.ring) ? cb.ring : [];
+              // Attach the FULL logs (read from disk) as a gist — no truncation.
+              const logsUrl = await createGist([
+                { name: 'report.json', content: JSON.stringify(report, null, 2) },
+                { name: 'daemon.log', content: serverDisk.daemonLogTail },
+                { name: 'crash.log', content: serverDisk.crashLogTail },
+                { name: 'server-trace.log', content: serverDisk.traceTail },
+                { name: 'client-console.log', content: ring.map((e) => `[${e.kind}] ${e.message}`).join('\n') },
+                ...(cb.domSnapshot ? [{ name: 'dom-snapshot.html', content: cb.domSnapshot }] : []),
+              ], `GitSpace problem report (relay fallback) — ${new Date().toISOString()}`);
+              const issueBody = [
+                noteStr, '', '---', '**Environment** (relay fallback — machine daemon unreachable)',
+                cb.url ? `- page: ${cb.url}` : '', cb.userAgent ? `- ua: ${cb.userAgent}` : '',
+                '', `**Recent client errors (${ring.length})**`,
+                ...(ring.length ? ['```', ...ring.slice(-15).map((e) => `[${e.kind}] ${e.message}`), '```'] : ['_none captured_']),
+                '',
+                logsUrl ? `**Full logs** (daemon, crash, trace, client console, DOM): ${logsUrl}` : '_Full logs saved to the machine-local report.json (gist upload unavailable)._',
+                '', '_Filed from GitSpace · report a problem (relay fallback). Diagnostics read from disk; redacted._',
+              ].filter(Boolean).join('\n');
+              const issue = await createIssue({ slug: reportRepoSlug(), title, body: issueBody, labels: ['gitspace-report'], cwd: root });
+              return { issueUrl: issue.url, issueNumber: issue.number };
+            } catch { return {}; /* keep the disk report; issue stays unfiled */ }
+          })();
+          const filed = await raceReportFiling(filing);
+          return Response.json({ ok: true, path, issueUrl: filed.issueUrl, issueNumber: filed.issueNumber }, { headers: { 'Cache-Control': 'no-store' } });
+        } catch {
+          return new Response("Report failed", { status: 500, headers: { 'Cache-Control': 'no-store' } });
+        }
+      }
+
       // One-time browser enrollment endpoint. POST (runtime registration)
       // is blocked when a hosted hostname is configured because all tunnel-
       // proxied requests arrive from loopback, making the IP check useless.
@@ -747,6 +869,81 @@ export function createRelayServer(config: RelayServerConfig): Server<WebSocketDa
           return new Response("Not found", { status: 404 });
         }
       }
+      // Public share links (docs/ARTIFACT-PROTOCOL.md Q3): verify the token
+      // against the REGISTERED machine key, then stream the bytes from that
+      // machine over its WS — the relay never reads disk. All failures are
+      // 404 (no oracle).
+      if (url.pathname.startsWith('/artifact-share/')) {
+        const notFound = () => new Response('Not found', { status: 404, headers: { 'Cache-Control': 'no-store' } });
+        try {
+          const token = decodeURIComponent(url.pathname.slice('/artifact-share/'.length));
+
+          // Browser navigation (no ?raw) → the share VIEWER: the same built
+          // SPA, which routes /artifact-share/* to ShareViewer and fetches
+          // bytes back through ?raw=1. curl/wget (no text/html Accept) and
+          // ?raw=1 get bytes — the pre-viewer contract still holds.
+          const wantsRaw = url.searchParams.has('raw');
+          const wantsHtml = !wantsRaw && (req.headers.get('accept') ?? '').includes('text/html');
+          if (wantsHtml) {
+            const shell = await serveStaticFile('/index.html');
+            if (shell) {
+              const headers = new Headers(shell.headers);
+              headers.set('Cache-Control', 'no-store');
+              return new Response(shell.body, { status: 200, headers });
+            }
+            // No built web assets → fall through to bytes.
+          }
+          const subPath = url.searchParams.get('path') ?? undefined;
+          if (subPath !== undefined && (subPath.length === 0 || subPath.length > 1024 || subPath.includes('..'))) return notFound();
+          const { parseArtifactCapUnverified, verifyArtifactCap } = await import('../core/artifact-cap.js');
+          const unverified = parseArtifactCapUnverified(token);
+          if (!unverified || unverified.sub.kind !== 'link') return notFound();
+          const machine = getMachine(unverified.machineId);
+          if (!machine) return notFound();
+          try {
+            verifyArtifactCap(token, { publicKey: Uint8Array.from(Buffer.from(machine.signingKey, 'base64')) });
+          } catch {
+            return notFound();
+          }
+          if (!machine.ws) return new Response('Machine offline', { status: 503, headers: { 'Cache-Control': 'no-store' } });
+
+          const requestId = generateConnectionId();
+          const result = await new Promise<{ body: Buffer; contentType: string; disposition: string; fileName: string; relPath?: string; pinnedCommit?: string; expiresAt?: number } | null>((resolve) => {
+            const timer = setTimeout(() => {
+              pendingShareReads.delete(requestId);
+              resolve(null);
+            }, 30_000);
+            pendingShareReads.set(requestId, {
+              machineId: unverified.machineId,
+              chunks: [],
+              meta: {},
+              resolve,
+              timer,
+            });
+            machine.ws!.send(serializeMessage({ type: 'share_read', requestId, token, ...(subPath ? { subPath } : {}) }));
+          });
+          if (!result) return notFound();
+          return new Response(new Uint8Array(result.body), {
+            status: 200,
+            headers: {
+              'Content-Type': result.contentType,
+              'Content-Disposition': `${result.disposition}; filename="${result.fileName.replace(/[^\w.\-]/g, '_')}"`,
+              'X-Content-Type-Options': 'nosniff',
+              'Cache-Control': 'no-store',
+              // The viewer may run on a different origin in dev (vite) —
+              // share bytes are cap-gated public data, CORS is safe here.
+              'Access-Control-Allow-Origin': '*',
+              'Access-Control-Expose-Headers': 'X-Gssh-Rel-Path, X-Gssh-Pinned-Commit, X-Gssh-Expires-At, Content-Disposition',
+              ...(result.relPath ? { 'X-Gssh-Rel-Path': result.relPath } : {}),
+              ...(result.pinnedCommit ? { 'X-Gssh-Pinned-Commit': result.pinnedCommit } : {}),
+              ...(result.expiresAt ? { 'X-Gssh-Expires-At': String(result.expiresAt) } : {}),
+            },
+          });
+        } catch {
+          return notFound();
+        }
+      }
+
       // WebSocket upgrade
       // - Machines and clients connect freely
       // - Machine authentication happens via challenge-response during registration
@@ -769,6 +966,9 @@ export function createRelayServer(config: RelayServerConfig): Server<WebSocketDa
           machineId: "", // Set later by protocol messages
           role,
           connectionId: generateConnectionId(),
+          // Ticket #42.4: per-connection rolling frame ledger for the close diag.
+          ledger: new FrameLedger(),
+          openedAtMs: Date.now(),
         };
 
         // Upgrade to WebSocket
@@ -796,6 +996,12 @@ export function createRelayServer(config: RelayServerConfig): Server<WebSocketDa
     },
 
     websocket: {
+      // Ticket #42B: raise the transport receive cap explicitly and generously
+      // above the app-level MAX_MESSAGE_SIZE (16MB) so a transiently-large legit
+      // E2E frame is handled by our code instead of being 1006-killed by
+      // uWebSockets before parseMessage ever runs. See RELAY_MAX_WS_PAYLOAD.
+      maxPayloadLength: RELAY_MAX_WS_PAYLOAD,
+
       open(ws) {
         const { role, connectionId } = ws.data;
         console.log(`[ws] ${role} ${connectionId} connected`);
@@ -828,6 +1034,31 @@ export function createRelayServer(config: RelayServerConfig): Server<WebSocketDa
           ? message
           : new TextDecoder().decode(message instanceof ArrayBuffer ? message : message);
 
+        // Ticket #42.4 (trace): surface oversize frames so part A can find the
+        // culprit. Frames over RELAY_WS_PAYLOAD_WARN are logged with their type;
+        // frames that reach the transport cap (RELAY_MAX_WS_PAYLOAD) would have
+        // 1006-closed the socket before this handler runs, so this warn is the
+        // early-warning band below that hard limit.
+        const frameSize = typeof message === "string" ? message.length : message.byteLength;
+        // Ticket #42.4: ledger EVERY inbound frame (recv from the relay's POV) so
+        // an abnormal close can name the last frames this connection carried.
+        ws.data.ledger?.record("recv", frameSize, peekFrameType(msgStr, "(unparsed)"));
+        if (frameSize > RELAY_WS_PAYLOAD_WARN) {
+          let frameType = "(unparsed)";
+          try {
+            const peeked = JSON.parse(msgStr) as { type?: unknown };
+            frameType = typeof peeked?.type === "string" ? peeked.type : "(no-type)";
+          } catch {
+            // leave as "(unparsed)"
+          }
+          console.warn(
+            `[relay] oversize WS frame from ${ws.data.role ?? "unknown"} ` +
+            `(${ws.data.machineId || ws.data.connectionId}): type=${frameType} ` +
+            `size=${(frameSize / (1024 * 1024)).toFixed(2)}MB ` +
+            `(warn>${(RELAY_WS_PAYLOAD_WARN / (1024 * 1024)).toFixed(0)}MB, cap=${(RELAY_MAX_WS_PAYLOAD / (1024 * 1024)).toFixed(0)}MB)`,
+          );
+        }
+
         let rawMsg: unknown = null;
         // Handle ping/pong for keepalive FIRST (before protocol parsing)
         // These are simple keepalive messages, not protocol messages
@@ -844,25 +1075,46 @@ export function createRelayServer(config: RelayServerConfig): Server<WebSocketDa
           // Not valid JSON - continue with normal handling
         }
 
-        const parsed = parseMessage(msgStr);
-        if (!parsed) {
-          if (rejectUnsignedClientMessage(ws, rawMsg)) {
+        // Ticket #42.2 (fail soft): never let one bad/oversize frame drop the
+        // whole connection. parseMessage() and handleDataMessage() already
+        // fail-soft (return null / log-and-return on bad input), but wrap the
+        // routing body so any unexpected throw is logged and skipped instead of
+        // propagating out of the ws handler. NOTE: a transport-level 1006 from
+        // uWebSockets (frame over maxPayloadLength) closes the socket BEFORE
+        // this handler runs and cannot be caught here — the lever for that is
+        // the raised RELAY_MAX_WS_PAYLOAD cap + app-layer chunking, not this
+        // try/catch.
+        try {
+          const parsed = parseMessage(msgStr);
+          if (!parsed) {
+            if (rejectUnsignedClientMessage(ws, rawMsg)) {
+              return;
+            }
+            // Name the offender — a bare "Invalid message format" made a Mac
+            // snapshot outage undebuggable (relay silently ate machine messages).
+            const rejectedType = rawMsg && typeof rawMsg === 'object' ? String((rawMsg as { type?: unknown }).type ?? '(none)') : '(not json)';
+            console.warn(`[relay] rejecting invalid message from ${ws.data.role ?? 'unknown'}: type=${rejectedType} len=${msgStr.length} head=${msgStr.slice(0, 160)}`);
+            ws.send(serializeMessage(createErrorMessage("INVALID_REQUEST", `Invalid message format (type=${rejectedType})`)));
             return;
           }
-          ws.send(serializeMessage(createErrorMessage("INVALID_REQUEST", "Invalid message format")));
-          return;
-        }
 
-        // Route data and handshake messages between client and machine
-        // All other message types are protocol messages handled by the relay
-        if (parsed.type !== "data" && parsed.type !== "handshake") {
-          // Handle protocol message
-          void handleProtocolMessage(state, ws, parsed);
-          return;
-        }
+          // Route data and handshake messages between client and machine
+          // All other message types are protocol messages handled by the relay
+          if (parsed.type !== "data" && parsed.type !== "handshake") {
+            // Handle protocol message
+            void handleProtocolMessage(state, ws, parsed);
+            return;
+          }
 
-        // Handle data/handshake message - route based on role and connectionId
-        handleDataMessage(state, ws, message);
+          // Handle data/handshake message - route based on role and connectionId
+          handleDataMessage(state, ws, message);
+        } catch (err) {
+          console.error(
+            `[relay] error handling frame from ${ws.data.role ?? "unknown"} ` +
+            `(${ws.data.machineId || ws.data.connectionId}): ` +
+            `${err instanceof Error ? err.message : String(err)} — connection kept alive`,
+          );
+        }
       },
 
       close(ws, code, reason) {
@@ -870,6 +1122,20 @@ export function createRelayServer(config: RelayServerConfig): Server<WebSocketDa
         console.log(
           `[ws] ${role} ${connectionId} disconnected (${code}: ${reason})`
         );
+        // Ticket #42.4: enrich the relay close log with THIS connection's last
+        // frame size/type + (on abnormal close) its rolling ledger — the relay's
+        // own view of what it last routed before the drop.
+        if (ws.data.ledger) {
+          summarizeClose({
+            role: role === "machine" ? "machine" : "client",
+            socket: `${connectionId}${machineId ? `/${machineId}` : ""}`,
+            code,
+            reason,
+            ledger: ws.data.ledger,
+            startedAtMs: ws.data.openedAtMs ?? 0,
+            log: (m) => console.log(m),
+          });
+        }
 
         // Clean up pending challenge if any
         pendingChallenges.delete(connectionId);
@@ -940,6 +1206,41 @@ async function handleProtocolMessage(
 
   switch (msg.type) {
     // ========== Machine Messages ==========
+
+    case 'share_read_chunk': {
+      if (role !== 'machine') return;
+      const chunkMsg = msg as import('./protocol.js').ShareReadChunkMessage;
+      const pending = pendingShareReads.get(chunkMsg.requestId);
+      // Bind to the machine that was asked — no cross-machine spoofing.
+      if (!pending || pending.machineId !== ws.data.machineId) return;
+      if (chunkMsg.error) {
+        clearTimeout(pending.timer);
+        pendingShareReads.delete(chunkMsg.requestId);
+        pending.resolve(null);
+        return;
+      }
+      if (chunkMsg.contentType) pending.meta.contentType = chunkMsg.contentType;
+      if (chunkMsg.disposition) pending.meta.disposition = chunkMsg.disposition;
+      if (chunkMsg.fileName) pending.meta.fileName = chunkMsg.fileName;
+      if (chunkMsg.relPath) pending.meta.relPath = chunkMsg.relPath;
+      if (chunkMsg.pinnedCommit) pending.meta.pinnedCommit = chunkMsg.pinnedCommit;
+      if (chunkMsg.expiresAt) pending.meta.expiresAt = chunkMsg.expiresAt;
+      if (chunkMsg.dataBase64) pending.chunks.push(Buffer.from(chunkMsg.dataBase64, 'base64'));
+      if (chunkMsg.done) {
+        clearTimeout(pending.timer);
+        pendingShareReads.delete(chunkMsg.requestId);
+        pending.resolve({
+          body: Buffer.concat(pending.chunks),
+          contentType: pending.meta.contentType ?? 'application/octet-stream',
+          disposition: pending.meta.disposition ?? 'attachment',
+          fileName: pending.meta.fileName ?? 'artifact',
+          relPath: pending.meta.relPath,
+          pinnedCommit: pending.meta.pinnedCommit,
+          expiresAt: pending.meta.expiresAt,
+        });
+      }
+      return;
+    }
 
     case 'unlock_request': {
       if (role !== 'machine') {

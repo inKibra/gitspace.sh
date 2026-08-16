@@ -196,7 +196,7 @@ export function useMultiBackends(options: UseMultiBackendsOptions = {}) {
   const attachSession = useCallback((ref: BackendScopedWorkspaceRef, params: AttachSessionParams) => engine.attachSession(ref, params), [engine]);
   const detachSession = useCallback((ref: BackendScopedWorkspaceRef | BackendScopedSessionRef) => engine.detachSession(ref), [engine]);
   const cancelPendingScripts = useCallback((ref: BackendScopedWorkspaceRef) => engine.cancelPendingScripts(ref), [engine]);
-  const killSession = useCallback((ref: BackendScopedSessionRef) => engine.killSession(ref), [engine]);
+  const terminateSession = useCallback((ref: BackendScopedSessionRef) => engine.terminateSession(ref), [engine]);
   const deleteWorkspace = useCallback((ref: BackendScopedWorkspaceRef, params?: DeleteWorkspaceParams) => engine.deleteWorkspace(ref, params), [engine]);
   const setWorkspaceStatus = useCallback((ref: BackendScopedWorkspaceRef, phase: WorkspacePhase) => engine.setWorkspaceStatus(ref, phase), [engine]);
   const startProcess = useCallback((ref: BackendScopedWorkspaceRef, processName: string, instance?: number) => engine.startProcess(ref, processName, instance), [engine]);
@@ -212,11 +212,13 @@ export function useMultiBackends(options: UseMultiBackendsOptions = {}) {
   // Agent session
   const respondToAgentPermission = useCallback((ref: BackendScopedAgentSessionRef, permissionId: string, response: 'allow' | 'deny') => engine.respondToAgentPermission(ref, permissionId, response), [engine]);
   const createAgentSession = useCallback((ref: BackendScopedWorkspaceRef, title?: string) => engine.createAgentSession(ref, title), [engine]);
-  const abortAgentSession = useCallback((ref: BackendScopedAgentSessionRef) => engine.abortAgentSession(ref), [engine]);
+  const killAgentSession = useCallback((ref: BackendScopedAgentSessionRef) => engine.killAgentSession(ref), [engine]);
+  const stopAgentTurn = useCallback((ref: BackendScopedAgentSessionRef) => engine.stopAgentTurn(ref), [engine]);
   const closeAgentSession = useCallback((ref: BackendScopedAgentSessionRef) => engine.closeAgentSession(ref), [engine]);
   const archiveAgentSession = useCallback((ref: BackendScopedAgentSessionRef) => engine.archiveAgentSession(ref), [engine]);
   const restoreAgentSession = useCallback((ref: BackendScopedAgentSessionRef) => engine.restoreAgentSession(ref), [engine]);
-  const attachAgentSession = useCallback((ref: BackendScopedAgentSessionRef, attachOptions?: { viewOnly?: boolean; cols?: number; rows?: number }) => engine.attachAgentSession(ref, attachOptions), [engine]);
+  const openAgentSession = useCallback((ref: BackendScopedAgentSessionRef, options?: { paneId?: string }) => engine.openAgentSession(ref, options), [engine]);
+  const closeAgentPane = useCallback((backendKey: BackendKey, paneId: string) => engine.closeAgentPane(backendKey, paneId), [engine]);
   const getAgentSessionPreference = useCallback((ref: BackendScopedWorkspaceRef) => engine.getAgentSessionPreference(ref), [engine]);
   const setAgentSessionPreference = useCallback((ref: BackendScopedWorkspaceRef, sessionId: string) => engine.setAgentSessionPreference(ref, sessionId), [engine]);
 
@@ -240,6 +242,7 @@ export function useMultiBackends(options: UseMultiBackendsOptions = {}) {
   const dismissReplay = useCallback((backendKey: BackendKey, replayId: string) => engine.dismissReplay(backendKey, replayId), [engine]);
   const undismissReplay = useCallback((backendKey: BackendKey, replayId: string) => engine.undismissReplay(backendKey, replayId), [engine]);
   const cancelPendingReplayRequests = useCallback((backendKey: BackendKey) => engine.cancelPendingReplayRequests(backendKey), [engine]);
+  const runSpaceCommand = useCallback((backendKey: BackendKey, workspaceId: string, argsText: string): Promise<string> => engine.runSpaceCommand({ backendKey, workspaceId }, argsText), [engine]);
 
   return {
     state,
@@ -261,7 +264,7 @@ export function useMultiBackends(options: UseMultiBackendsOptions = {}) {
     attachSession,
     detachSession,
     cancelPendingScripts,
-    killSession,
+    terminateSession,
     deleteWorkspace,
     setWorkspaceStatus,
     startProcess,
@@ -276,11 +279,13 @@ export function useMultiBackends(options: UseMultiBackendsOptions = {}) {
 
     respondToAgentPermission,
     createAgentSession,
-    abortAgentSession,
+    killAgentSession,
+    stopAgentTurn,
     closeAgentSession,
     archiveAgentSession,
     restoreAgentSession,
-    attachAgentSession,
+    openAgentSession,
+    closeAgentPane,
     getAgentSessionPreference,
     setAgentSessionPreference,
 
@@ -301,6 +306,7 @@ export function useMultiBackends(options: UseMultiBackendsOptions = {}) {
     getReplayTimeline,
     dismissReplay,
     undismissReplay,
+    runSpaceCommand,
     cancelPendingReplayRequests,
   };
 }

@@ -6,6 +6,9 @@ import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
+// Real file-backed secrets store. `bundle-refresh` is imported dynamically inside
+// each test, so this module always evaluates first and wins the backend selection.
+import { resetSecretsStore, secrets } from '../../test/secrets-store.js';
 
 describe('bundle-refresh', () => {
   let testDir: string;
@@ -13,7 +16,6 @@ describe('bundle-refresh', () => {
   let mockProjectConfig: any;
   let mockOnboardingResult: any;
   let capturedOnboardingSteps: any[];
-  let savedSecrets: Record<string, string>;
   let commandAvailability: Record<string, boolean>;
 
   beforeEach(() => {
@@ -38,7 +40,7 @@ describe('bundle-refresh', () => {
     };
 
     capturedOnboardingSteps = [];
-    savedSecrets = {};
+    resetSecretsStore();
     commandAvailability = { bun: true };
 
     mock.module('../config', () => ({
@@ -51,31 +53,6 @@ describe('bundle-refresh', () => {
       getProjectDir: () => testDir,
       readGlobalConfig: () => ({ currentProject: null }),
       updateGlobalConfig: () => {},
-    }));
-
-    mock.module('../../utils/secrets', () => ({
-      setProjectSecret: async (_projectName: string, key: string, value: string) => {
-        savedSecrets[key] = value;
-      },
-      deleteProjectSecret: async (_projectName: string, key: string) => {
-        if (!(key in savedSecrets)) {
-          return false;
-        }
-        delete savedSecrets[key];
-        return true;
-      },
-      getProjectSecret: async (_projectName: string, key: string) => {
-        return savedSecrets[key] ?? null;
-      },
-      getProjectSecrets: async (_projectName: string, keys: string[]) => {
-        const result: Record<string, string> = {};
-        for (const key of keys) {
-          if (savedSecrets[key] !== undefined) {
-            result[key] = savedSecrets[key];
-          }
-        }
-        return result;
-      },
     }));
 
     mock.module('../../utils/deps', () => ({
@@ -291,7 +268,7 @@ describe('bundle-refresh', () => {
       expect(result.completed).toBe(true);
       expect(mockProjectConfig.bundleValues).toEqual({ REGION: 'us-east-1' });
       expect(mockProjectConfig.bundleSecretKeys).toContain('PULUMI_ACCESS_TOKEN');
-      expect(savedSecrets.PULUMI_ACCESS_TOKEN).toBe('pulumi-token-value');
+      expect(await secrets.getProjectSecret('test-project', 'PULUMI_ACCESS_TOKEN')).toBe('pulumi-token-value');
       expect(mockProjectConfig.bundleWorkspaceState.__base__.requiredSecretKeys).toEqual([
         'PULUMI_ACCESS_TOKEN',
       ]);
@@ -371,6 +348,103 @@ describe('bundle-refresh', () => {
       expect(capturedOnboardingSteps).toHaveLength(1);
       expect(capturedOnboardingSteps[0].id).toBe('check-pulumi');
     });
+    it('refreshes unchanged bundles when required secrets are missing', async () => {
+      const bundleDir = join(testBaseDir, '.gitspace');
+      mkdirSync(bundleDir, { recursive: true });
+      const bundle = {
+        version: '1.0' as const,
+        name: 'Unchanged Missing Secret Bundle',
+        onboarding: [
+          {
+            id: 'pulumi-token',
+            type: 'secret' as const,
+            title: 'Pulumi Access Token',
+            description: 'Required for Pulumi login',
+            configKey: 'PULUMI_ACCESS_TOKEN',
+            required: true,
+          },
+        ],
+      };
+      writeFileSync(join(bundleDir, 'bundle.json'), JSON.stringify(bundle));
+
+      const workspacePath = join(testDir, 'workspaces', 'unchanged-missing-secret');
+      mkdirSync(workspacePath, { recursive: true });
+
+      const { checkAndRefreshBundle, detectBundleChanges } = await import('../bundle-refresh');
+      const firstDetect = detectBundleChanges('test-project', workspacePath);
+      expect(firstDetect.currentHash).toBeDefined();
+
+      mockProjectConfig.bundleWorkspaceState = {
+        'unchanged-missing-secret': {
+          scope: 'unchanged-missing-secret',
+          bundleHash: firstDetect.currentHash,
+          requiredInputKeys: [],
+          requiredSecretKeys: ['PULUMI_ACCESS_TOKEN'],
+          confirmFingerprints: [],
+          updatedAt: new Date().toISOString(),
+        },
+      };
+      mockOnboardingResult = {
+        completed: true,
+        inputValues: {},
+        secretValues: { PULUMI_ACCESS_TOKEN: 'new-pulumi-token' },
+        confirmResults: {},
+      };
+
+      const ready = await checkAndRefreshBundle('test-project', workspacePath);
+
+      expect(ready).toBe(true);
+      expect(capturedOnboardingSteps.map((step) => step.id)).toEqual(['pulumi-token']);
+      expect(await secrets.getProjectSecret('test-project', 'PULUMI_ACCESS_TOKEN')).toBe('new-pulumi-token');
+      expect(mockProjectConfig.bundleSecretKeys).toContain('PULUMI_ACCESS_TOKEN');
+    });
+
+    it('treats unchanged bundles as ready when required secrets are present', async () => {
+      const bundleDir = join(testBaseDir, '.gitspace');
+      mkdirSync(bundleDir, { recursive: true });
+      const bundle = {
+        version: '1.0' as const,
+        name: 'Unchanged Ready Bundle',
+        onboarding: [
+          {
+            id: 'pulumi-token',
+            type: 'secret' as const,
+            title: 'Pulumi Access Token',
+            description: 'Required for Pulumi login',
+            configKey: 'PULUMI_ACCESS_TOKEN',
+            required: true,
+          },
+        ],
+      };
+      writeFileSync(join(bundleDir, 'bundle.json'), JSON.stringify(bundle));
+
+      const workspacePath = join(testDir, 'workspaces', 'unchanged-ready-secret');
+      mkdirSync(workspacePath, { recursive: true });
+
+      const { checkAndRefreshBundle, detectBundleChanges } = await import('../bundle-refresh');
+      const firstDetect = detectBundleChanges('test-project', workspacePath);
+      expect(firstDetect.currentHash).toBeDefined();
+
+      await secrets.setProjectSecret('test-project', 'PULUMI_ACCESS_TOKEN', 'existing-pulumi-token');
+      mockProjectConfig.bundleSecretKeys = ['PULUMI_ACCESS_TOKEN'];
+      mockProjectConfig.bundleWorkspaceState = {
+        'unchanged-ready-secret': {
+          scope: 'unchanged-ready-secret',
+          bundleHash: firstDetect.currentHash,
+          requiredInputKeys: [],
+          requiredSecretKeys: ['PULUMI_ACCESS_TOKEN'],
+          confirmFingerprints: [],
+          updatedAt: new Date().toISOString(),
+        },
+      };
+
+      const ready = await checkAndRefreshBundle('test-project', workspacePath);
+
+      expect(ready).toBe(true);
+      expect(capturedOnboardingSteps).toEqual([]);
+      expect(await secrets.getProjectSecret('test-project', 'PULUMI_ACCESS_TOKEN')).toBe('existing-pulumi-token');
+    });
+
   });
 
   describe('bundle refresh plan/apply', () => {
@@ -483,7 +557,7 @@ describe('bundle-refresh', () => {
 
       expect(mockProjectConfig.bundleValues).toEqual({ REGION: 'us-east-2' });
       expect(mockProjectConfig.bundleSecretKeys).toContain('API_TOKEN');
-      expect(savedSecrets.API_TOKEN).toBe('super-secret');
+      expect(await secrets.getProjectSecret('test-project', 'API_TOKEN')).toBe('super-secret');
       expect(mockProjectConfig.bundleWorkspaceState['feature-apply']).toBeDefined();
       expect(mockProjectConfig.bundleConfirmHistory).toBeDefined();
       expect(Object.keys(mockProjectConfig.bundleConfirmHistory || {}).length).toBe(1);
@@ -510,7 +584,7 @@ describe('bundle-refresh', () => {
       const workspacePath = join(testDir, 'workspaces', 'feature-sentinel');
       mkdirSync(workspacePath, { recursive: true });
 
-      savedSecrets.API_TOKEN = 'existing-secret';
+      await secrets.setProjectSecret('test-project', 'API_TOKEN', 'existing-secret');
 
       const { applyBundleRefreshSubmission } = await import('../bundle-refresh');
       await applyBundleRefreshSubmission('test-project', workspacePath, {
@@ -519,7 +593,7 @@ describe('bundle-refresh', () => {
         confirmResults: {},
       });
 
-      expect(savedSecrets.API_TOKEN).toBe('existing-secret');
+      expect(await secrets.getProjectSecret('test-project', 'API_TOKEN')).toBe('existing-secret');
       expect(mockProjectConfig.bundleSecretKeys).toContain('API_TOKEN');
     });
 
@@ -571,6 +645,62 @@ describe('bundle-refresh', () => {
       expect(plan.details).toContain('Missing required secrets: PULUMI_ACCESS_TOKEN.');
     });
 
+    it('does not prompt for added secrets that already exist project-wide', async () => {
+      const bundleDir = join(testBaseDir, '.gitspace');
+      mkdirSync(bundleDir, { recursive: true });
+      const workspacePath = join(testDir, 'workspaces', 'feature-existing-secret');
+      mkdirSync(workspacePath, { recursive: true });
+
+      const previousBundle = {
+        version: '1.0' as const,
+        name: 'Previous Bundle',
+        onboarding: [],
+      };
+      writeFileSync(join(bundleDir, 'bundle.json'), JSON.stringify(previousBundle));
+
+      const { detectBundleChanges, getBundleRefreshPlan } = await import('../bundle-refresh');
+      const firstDetect = detectBundleChanges('test-project', workspacePath);
+      expect(firstDetect.currentHash).toBeDefined();
+
+      await secrets.setProjectSecret('test-project', 'API_TOKEN', 'existing-secret');
+      mockProjectConfig.bundleSecretKeys = ['API_TOKEN'];
+      mockProjectConfig.bundleWorkspaceState = {
+        'feature-existing-secret': {
+          scope: 'feature-existing-secret',
+          bundleHash: firstDetect.currentHash!,
+          requiredInputKeys: [],
+          requiredSecretKeys: [],
+          confirmFingerprints: [],
+          updatedAt: new Date().toISOString(),
+        },
+      };
+
+      const nextBundle = {
+        version: '1.0' as const,
+        name: 'Next Bundle',
+        onboarding: [
+          {
+            id: 'token',
+            type: 'secret' as const,
+            title: 'API token',
+            description: 'Secret token',
+            configKey: 'API_TOKEN',
+            required: true,
+          },
+        ],
+      };
+      writeFileSync(join(bundleDir, 'bundle.json'), JSON.stringify(nextBundle));
+
+      const plan = await getBundleRefreshPlan(
+        'test-project',
+        workspacePath,
+        'test-project:feature-existing-secret'
+      );
+
+      expect(plan.hasChanged).toBe(true);
+      expect(plan.steps.map((step) => step.id)).not.toContain('token');
+      expect(plan.details).not.toContain('Missing required secrets: API_TOKEN.');
+    });
     it('allows clearing persisted bundle secret values via empty submission value', async () => {
       const bundleDir = join(testBaseDir, '.gitspace');
       mkdirSync(bundleDir, { recursive: true });
@@ -592,7 +722,7 @@ describe('bundle-refresh', () => {
       const workspacePath = join(testDir, 'workspaces', 'feature-unset-secret');
       mkdirSync(workspacePath, { recursive: true });
 
-      savedSecrets.API_TOKEN = 'existing-secret';
+      await secrets.setProjectSecret('test-project', 'API_TOKEN', 'existing-secret');
       mockProjectConfig.bundleSecretKeys = ['API_TOKEN'];
 
       const { applyBundleConfigSubmission } = await import('../bundle-refresh');
@@ -600,7 +730,7 @@ describe('bundle-refresh', () => {
         secretValues: { API_TOKEN: '' },
       });
 
-      expect(savedSecrets.API_TOKEN).toBeUndefined();
+      expect(await secrets.getProjectSecret('test-project', 'API_TOKEN')).toBeNull();
       expect(mockProjectConfig.bundleSecretKeys ?? []).not.toContain('API_TOKEN');
     });
   });

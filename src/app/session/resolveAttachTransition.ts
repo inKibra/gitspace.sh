@@ -1,5 +1,7 @@
 import type { AttachTarget } from './useAttachController.js'
-import type { AppView } from '../../tui/local-terminal-sync.js'
+
+/** App view identifiers used by the attach-transition logic. */
+export type AppView = 'projects' | 'workspace-detail' | 'terminal' | 'replay' | 'inbox' | 'scripts' | 'events'
 
 export interface AttachSuccessTransitionParams {
   view: AppView

@@ -4,6 +4,7 @@ import type { MultiMachineState } from '../../../machine/multi/types.js';
 import { toBackendScopedWorkspaceKey } from '../../../machine/multi/types.js';
 import { selectAllWorkspaces } from '../../../machine/multi/selectors.js';
 import { getAgentSessionDisplayTitle } from '../../../agents/session-display.js';
+import { sessionStatusFromActivity } from '../../../agents/agent-runtime-types.js';
 import type { AgentSessionInfo, SessionInfo } from '../../../components/SpacesBrowser.js';
 import { deriveWorkspaceStatusSummary } from '../../workspaces/workspace-status.js';
 import type { WorkspaceRuntimeEntry, WorkspaceRuntimeModel, WorkspaceRuntimeWorkspaceInfo } from './types.js';
@@ -28,13 +29,17 @@ function toSessionInfo(session: MachineTerminalSessionRecord): SessionInfo {
 }
 
 function toAgentSessionInfo(agent: MachineAgentSessionRecord): AgentSessionInfo {
-  const status = agent.state === 'running'
-    ? { type: 'busy' as const }
-    : agent.state === 'retrying'
-      ? { type: 'retry' as const, attempt: 1, message: agent.errorMessage ?? 'retrying', next: Date.now() + 1000 }
-      : agent.state === 'waiting' || agent.state === 'permission-needed'
-        ? { type: 'idle' as const }
-        : undefined;
+  // Derive from the shipped activity when present; the `state` inversion below
+  // is only a fallback for a daemon that predates it, and is lossy (it turns a
+  // human-blocked session into `idle` and hides `compacting`).
+  const status = sessionStatusFromActivity(agent.activity, agent.errorMessage)
+    ?? (agent.state === 'running'
+      ? { type: 'busy' as const }
+      : agent.state === 'retrying'
+        ? { type: 'retry' as const, attempt: 1, message: agent.errorMessage ?? 'retrying', next: Date.now() + 1000 }
+        : agent.state === 'waiting' || agent.state === 'permission-needed'
+          ? { type: 'idle' as const }
+          : undefined);
 
   return {
     id: agent.id,
@@ -42,8 +47,11 @@ function toAgentSessionInfo(agent: MachineAgentSessionRecord): AgentSessionInfo 
     title: getAgentSessionDisplayTitle({ id: agent.id, title: agent.title }),
     updatedAt: agent.updatedAt,
     closedAt: agent.closedAt,
+    dormantSince: agent.dormantSince,
     archivedAt: agent.archivedAt,
+    state: agent.state,
     status,
+    activity: agent.activity,
     pendingPermissionCount: agent.pendingPermissionCount,
     pendingQuestionCount: agent.pendingQuestionCount,
     errorMessage: agent.errorMessage,

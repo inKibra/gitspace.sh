@@ -13,7 +13,7 @@ describe('process tree signaling', () => {
     process.kill = killMock as typeof process.kill;
 
     try {
-      expect(signalProcessTree(1234, 'SIGKILL', () => 4321)).toBe(true);
+      expect(signalProcessTree(1234, 'SIGKILL', (pid) => pid === 1234 ? 4321 : null)).toBe(true);
       expect(killMock).toHaveBeenCalledTimes(1);
       expect(killMock).toHaveBeenCalledWith(-4321, 'SIGKILL');
     } finally {
@@ -38,11 +38,42 @@ describe('process tree signaling', () => {
     process.kill = killMock as typeof process.kill;
 
     try {
-      expect(signalProcessTree(1234, 'SIGTERM', () => 4321)).toBe(true);
+      expect(signalProcessTree(1234, 'SIGTERM', (pid) => pid === 1234 ? 4321 : null)).toBe(true);
       expect(killMock).toHaveBeenCalledTimes(3);
       expect(killMock).toHaveBeenNthCalledWith(1, -4321, 'SIGTERM');
       expect(killMock).toHaveBeenNthCalledWith(2, -1234, 'SIGTERM');
       expect(killMock).toHaveBeenNthCalledWith(3, 1234, 'SIGTERM');
+    } finally {
+      process.kill = originalKill;
+    }
+  });
+
+  it('refuses to signal the current process group', () => {
+    const originalKill = process.kill;
+    const currentGroup = 7777;
+    const killMock = mock((pid: number, _signal: NodeJS.Signals) => {
+      if (pid === -currentGroup) {
+        throw new Error('must not signal current group');
+      }
+      if (pid === -1234) {
+        throw new Error('legacy group missing');
+      }
+      if (pid !== 1234) {
+        throw new Error(`unexpected pid ${pid}`);
+      }
+      return true;
+    });
+    process.kill = killMock as typeof process.kill;
+
+    try {
+      expect(signalProcessTree(1234, 'SIGKILL', (pid) => {
+        if (pid === 1234) return currentGroup;
+        if (pid === process.pid) return currentGroup;
+        return null;
+      })).toBe(true);
+      expect(killMock).toHaveBeenCalledTimes(2);
+      expect(killMock).toHaveBeenNthCalledWith(1, -1234, 'SIGKILL');
+      expect(killMock).toHaveBeenNthCalledWith(2, 1234, 'SIGKILL');
     } finally {
       process.kill = originalKill;
     }
@@ -57,7 +88,7 @@ describe('process tree signaling', () => {
     const procKill = mock(() => undefined);
 
     try {
-      expect(signalSubprocessTree({ pid: 1234, kill: procKill }, 'SIGKILL', () => 4321)).toBe(true);
+      expect(signalSubprocessTree({ pid: 1234, kill: procKill }, 'SIGKILL', (pid) => pid === 1234 ? 4321 : null)).toBe(true);
       expect(killMock).toHaveBeenCalledTimes(3);
       expect(procKill).toHaveBeenCalledTimes(1);
       expect(procKill).toHaveBeenCalledWith('SIGKILL');

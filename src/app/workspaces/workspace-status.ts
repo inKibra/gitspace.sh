@@ -74,23 +74,41 @@ export function deriveWorkspaceStatusSummary(
   const services = { green: 0, red: 0 };
   const terminals = { green: 0, red: 0 };
 
+  // Count the state the record already carries. This used to re-derive it from
+  // activity/status/closedAt with its own precedence ladder, which drifted: it
+  // never checked dormantSince, so every session merely discovered on disk fell
+  // through to blue and made its whole workspace look busy — and sort above
+  // genuinely running ones in the detail strip.
   for (const agent of agentSessions) {
-    if (agent.archivedAt || agent.closedAt) {
-      continue;
+    switch (agent.state ?? 'waiting') {
+      case 'archived':
+      case 'closed':
+      case 'dormant':
+        // Not live. Contributes nothing, so a workspace whose only sessions are
+        // dormant reads 'dim' and drops out of the strip instead of crowding it.
+        break;
+      case 'permission-needed':
+        agents.orange += 1;
+        break;
+      case 'retrying':
+        // A retry counts red only for an error worth acting on. determineAgentState
+        // maps ANY errorMessage to 'retrying', so without this filter a noisy LSP
+        // message would paint the whole workspace red. This is a noise filter at
+        // the workspace level, not a second opinion about the session's state —
+        // the session itself still reads 'retrying' on its own row.
+        if (agent.errorMessage && !isActionableAgentError(agent.errorMessage)) {
+          agents.blue += 1;
+        } else {
+          agents.red += 1;
+        }
+        break;
+      case 'running':
+        agents.green += 1;
+        break;
+      case 'waiting':
+        agents.blue += 1;
+        break;
     }
-    if ((agent.pendingPermissionCount ?? 0) > 0 || (agent.pendingQuestionCount ?? 0) > 0) {
-      agents.orange += 1;
-      continue;
-    }
-    if (agent.status?.type === 'retry' || isActionableAgentError(agent.errorMessage)) {
-      agents.red += 1;
-      continue;
-    }
-    if (agent.status?.type === 'busy') {
-      agents.green += 1;
-      continue;
-    }
-    agents.blue += 1;
   }
 
   for (const session of sessions) {
@@ -129,7 +147,7 @@ export function deriveWorkspaceStatusSummary(
   let primaryColor: WorkspaceStatusColor = 'dim';
   if (agents.orange > 0) {
     primaryColor = 'orange';
-  } else if (agents.green > 0 || services.green > 0) {
+  } else if (agents.green > 0) {
     primaryColor = 'green';
   } else if (agents.blue > 0) {
     primaryColor = 'blue';
@@ -169,20 +187,3 @@ export function buildWorkspaceStatusSummaryMap(
   return result;
 }
 
-export function deriveWorkspacePrimaryColorFromMachineSummary(
-  summary: MachineWorkspaceSummaryInput,
-): WorkspaceStatusColor {
-  if (summary.permissionAgentCount > 0) {
-    return 'orange';
-  }
-  if (summary.runningAgentCount > 0 || summary.runningProcessCount > 0) {
-    return 'green';
-  }
-  if (summary.waitingAgentCount > 0) {
-    return 'blue';
-  }
-  if (summary.retryingAgentCount > 0 || summary.failedProcessCount > 0 || summary.failedTerminalCount > 0) {
-    return 'red';
-  }
-  return 'dim';
-}

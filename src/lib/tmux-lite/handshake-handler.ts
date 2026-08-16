@@ -313,7 +313,7 @@ export class HandshakeHandler {
 
   /** Check client authorization via owner-only user-root policy. */
   private async checkAuthorization(
-    authorization: X3DHAuthMessage["authorization"],
+    _authorization: X3DHAuthMessage["authorization"],
     userRootId?: string
   ): Promise<
     | { type: "accepted"; accessType: AccessType; sessionId?: string }

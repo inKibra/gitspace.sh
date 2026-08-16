@@ -24,7 +24,7 @@ export function canWrite(accessType: AccessType | undefined): boolean {
 /**
  * Check if an access type grants management permission
  *
- * Management includes: create/kill sessions, delete workspaces, etc.
+ * Management includes: create/terminate sessions, delete workspaces, etc.
  * Only 'full' access allows management operations.
  */
 export function canManage(accessType: AccessType | undefined): boolean {
@@ -74,7 +74,25 @@ export interface ServeOptions {
 // ============================================================================
 
 /** State of a client session */
-export type ClientSessionState = "handshaking" | "browsing" | "attached" | "closed";
+export type ClientSessionState = "handshaking" | "browsing" | "closed";
+
+export interface AttachedPane {
+  streamId: number;
+  sessionId: string;
+  sessionName: string;
+  tmuxSocket: Awaited<ReturnType<typeof Bun.connect>> | null;
+  tmuxSocketWriter: {
+    write(data: Buffer | Uint8Array | ArrayBuffer): void;
+    flush(): void;
+    clear(): void;
+  } | null;
+  sessionSocketPath: string;
+  initialCols: number;
+  initialRows: number;
+  viewOnly: boolean;
+  frameBuffer: Buffer;
+}
+
 
 /** Client session data */
 export interface ClientSession {
@@ -84,16 +102,8 @@ export interface ClientSession {
   state: ClientSessionState;
   /** When handshake started (Unix ms) */
   handshakeStartedAt: number;
-  /** tmux-lite session socket connection */
-  tmuxSocket?: Awaited<ReturnType<typeof Bun.connect>>;
-  /** Buffered writer for tmux-lite socket (Bun sockets can partially write under backpressure) */
-  tmuxSocketWriter?: {
-    write(data: Buffer | Uint8Array | ArrayBuffer): void;
-    flush(): void;
-    clear(): void;
-  };
-  /** Path to tmux-lite session socket */
-  sessionSocketPath?: string;
+  /** Per-pane tmux-lite socket connections keyed by stream ID. */
+  attachedPanes: Map<number, AttachedPane>;
   /** Session encryption keys */
   sessionKeys?: SessionKeys;
   /** Granted access type */
@@ -102,19 +112,6 @@ export interface ClientSession {
   sessionId?: string;
   /** Peer's identity ID */
   peerIdentityId?: string;
-  /** Attached tmux-lite session ID (when state === "attached") */
-  attachedSessionId?: string;
-  /** Human-readable session name for attach lifecycle events */
-  attachedSessionName?: string;
-  /** When true, this attached session is server-enforced read-only */
-  viewOnly?: boolean;
-  /** Initial terminal size requested by the client before attach-init is sent */
-  initialCols?: number;
-  initialRows?: number;
-  /** When true, we haven't sent attach-init yet — waiting for the first resize with real dimensions */
-  waitingForResize?: boolean;
-  /** Buffer for incomplete frames from tmux-lite socket */
-  frameBuffer?: Buffer;
 }
 
 // ============================================================================

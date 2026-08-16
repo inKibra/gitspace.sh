@@ -177,6 +177,93 @@ describe('validateProcessesConfig', () => {
     expect(result.errors[0]).toContain('protocol must be http or tcp');
   });
 
+  it('should fail when restart is a bare policy string (the silent-no-restart trap)', () => {
+    const config = {
+      processes: [{ name: 'web', command: 'npm start', restart: 'on-failure' }],
+    } as unknown as ProcessesConfig;
+    const result = validateProcessesConfig(config);
+    expect(result.valid).toBe(false);
+    expect(result.errors[0]).toContain('restart must be an object like {"policy": "on-failure"}');
+    expect(result.errors[0]).toContain('write {"policy": "on-failure"}');
+  });
+
+  it('should fail when restart is an array', () => {
+    const config = {
+      processes: [{ name: 'web', command: 'npm start', restart: [] }],
+    } as unknown as ProcessesConfig;
+    const result = validateProcessesConfig(config);
+    expect(result.valid).toBe(false);
+    expect(result.errors[0]).toContain('got an array');
+  });
+
+  it('should fail for an unknown restart policy', () => {
+    const config = {
+      processes: [{ name: 'web', command: 'npm start', restart: { policy: 'sometimes' } }],
+    } as unknown as ProcessesConfig;
+    const result = validateProcessesConfig(config);
+    expect(result.valid).toBe(false);
+    expect(result.errors[0]).toContain('restart.policy must be one of never | on-failure | always');
+  });
+
+  it('should fail for a negative restart backoff', () => {
+    const config = {
+      processes: [{ name: 'web', command: 'npm start', restart: { policy: 'always', backoffMs: -1 } }],
+    } as unknown as ProcessesConfig;
+    const result = validateProcessesConfig(config);
+    expect(result.valid).toBe(false);
+    expect(result.errors[0]).toContain('restart.backoffMs must be a non-negative integer');
+  });
+
+  it('should pass for a well-formed restart object', () => {
+    const config: ProcessesConfig = {
+      processes: [
+        {
+          name: 'web',
+          command: 'npm start',
+          restart: { policy: 'on-failure', maxAttempts: 5, backoffMs: 2000, maxBackoffMs: 30000 },
+        },
+      ],
+    };
+    const result = validateProcessesConfig(config);
+    expect(result.valid).toBe(true);
+  });
+
+  it('should fail when args is not an array of strings', () => {
+    const config = {
+      processes: [{ name: 'web', command: 'npm', args: ['run', 3] }],
+    } as unknown as ProcessesConfig;
+    const result = validateProcessesConfig(config);
+    expect(result.valid).toBe(false);
+    expect(result.errors[0]).toContain('args must be an array of strings');
+  });
+
+  it('should fail when env holds a non-string value', () => {
+    const config = {
+      processes: [{ name: 'web', command: 'npm start', env: { PORT: 3000 } }],
+    } as unknown as ProcessesConfig;
+    const result = validateProcessesConfig(config);
+    expect(result.valid).toBe(false);
+    expect(result.errors[0]).toContain('env values must be strings');
+  });
+
+  it('should fail when autostart is not boolean', () => {
+    const config = {
+      processes: [{ name: 'web', command: 'npm start', autostart: 'yes' }],
+    } as unknown as ProcessesConfig;
+    const result = validateProcessesConfig(config);
+    expect(result.valid).toBe(false);
+    expect(result.errors[0]).toContain('autostart must be a boolean');
+  });
+
+  it('should fail when cwd is not a string', () => {
+    const config = {
+      processes: [{ name: 'web', command: 'npm start', cwd: 42 }],
+    } as unknown as ProcessesConfig;
+    const result = validateProcessesConfig(config);
+    expect(result.valid).toBe(false);
+    expect(result.errors[0]).toContain('cwd must be a string');
+  });
+
   it('should accumulate multiple errors', () => {
     const config = {
       processes: [

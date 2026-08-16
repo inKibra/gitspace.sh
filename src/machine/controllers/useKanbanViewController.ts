@@ -5,7 +5,7 @@ import {
   type BackendScopedWorkspaceRef,
   toBackendScopedWorkspaceKey,
 } from '../multi/types.js';
-import { selectAllWorkspaces } from '../multi/selectors.js';
+import { selectAllGoals, selectAllWorkspaces } from '../multi/selectors.js';
 import { PHASES } from '../../app/shared/board/types.js';
 
 
@@ -37,12 +37,29 @@ export function useKanbanViewController(args: UseKanbanViewControllerArgs) {
         phase: (workspace.phase ?? 'code') as WorkspacePhase,
         pullRequest: workspace.pullRequest,
         linear: workspace.linear,
+        goal: workspace.goal,
         backendKey,
         machineLabel: backendState?.label ?? backendKey,
         isRemote: backendKey !== 'local',
       };
     });
   }, [args.state]);
+
+  const plannedGoals = useMemo(() => {
+    return selectAllGoals(args.state)
+      .filter(({ goal }) => goal.status === 'planned')
+      .map(({ backendKey, goal }) => {
+        const backendState = args.state.byBackend[backendKey];
+        return {
+          ...goal,
+          selectionKey: `${backendKey}:goal:${goal.id}`,
+          backendKey,
+          machineLabel: backendState?.label ?? backendKey,
+          isRemote: backendKey !== 'local',
+        };
+      });
+  }, [args.state]);
+
 
   const setPhase = useCallback((workspaceKey: string, phase: WorkspacePhase) => {
     const workspace = workspaces.find((item) => item.selectionKey === workspaceKey);
@@ -53,7 +70,8 @@ export function useKanbanViewController(args: UseKanbanViewControllerArgs) {
   const groups = useMemo(() => PHASES.map((phase) => ({
     phase,
     workspaces: workspaces.filter((workspace) => workspace.phase === phase),
-  })), [workspaces]);
+    plannedGoals: phase === 'plan' ? plannedGoals : [],
+  })), [plannedGoals, workspaces]);
 
   return {
     groups,
@@ -65,7 +83,12 @@ export function useKanbanViewController(args: UseKanbanViewControllerArgs) {
         return;
       }
       const workspace = workspaces.find((item) => item.selectionKey === workspaceKey);
-      args.onSelectRef(workspace ? { backendKey: workspace.backendKey, workspaceId: workspace.id } : null);
+      // Only `null` deselects. A key that resolves to nothing is a caller bug or
+      // a workspace this client cannot see; clearing the selection there turns a
+      // failed navigation into an eviction from the workspace you were in — which
+      // is how chain clicks appeared to "sometimes" work. Stay put instead.
+      if (!workspace) return;
+      args.onSelectRef({ backendKey: workspace.backendKey, workspaceId: workspace.id });
     },
     setPhase,
   };

@@ -13,6 +13,10 @@ function concatUint8Array(parts: Uint8Array[]): Uint8Array {
   return combined;
 }
 
+/** Bytes retained for an output handler that has not mounted yet. This ring is
+ *  the ONLY pre-handler buffer, so a stream with no consumer stays bounded. */
+export const MAX_REPLAY_BYTES = 1024 * 1024;
+
 export interface BeginAttachOptions {
   workspaceId?: string | null;
   viewOnly?: boolean;
@@ -38,8 +42,15 @@ export class AttachLifecycle {
   private attachedWorkspaceId: string | null = null;
   private viewOnly = false;
   private outputHandler: ((data: Uint8Array) => void) | null = null;
-  private pendingPtyChunks: Uint8Array[] = [];
   private pendingUtf8Bytes = new Uint8Array(0);
+  private replayChunks: Uint8Array[] = [];
+  private replayBytes = 0;
+
+  // Script output flows on its own channel so script bytes never leak into
+  // session terminals. Separate buffer + handler, separate UTF-8 boundary state.
+  private scriptOutputHandler: ((data: Uint8Array) => void) | null = null;
+  private pendingScriptChunks: Uint8Array[] = [];
+  private pendingScriptUtf8Bytes = new Uint8Array(0);
 
   private readonly emit: (event: BackendEvent) => void;
 
@@ -72,13 +83,20 @@ export class AttachLifecycle {
 
   setOutputHandler(handler: ((data: Uint8Array) => void) | null): void {
     this.outputHandler = handler;
-    if (!handler || this.pendingPtyChunks.length === 0) {
+    if (!handler) {
       return;
     }
+    this.replayToHandler();
+  }
 
-    const pending = concatUint8Array(this.pendingPtyChunks);
-    this.pendingPtyChunks = [];
-    this.pushPtyData(pending);
+  setScriptOutputHandler(handler: ((data: Uint8Array) => void) | null): void {
+    this.scriptOutputHandler = handler;
+    if (!handler || this.pendingScriptChunks.length === 0) {
+      return;
+    }
+    const pending = concatUint8Array(this.pendingScriptChunks);
+    this.pendingScriptChunks = [];
+    this.pushScriptData(pending);
   }
 
   beginAttach(options: BeginAttachOptions = {}): void {
@@ -128,7 +146,8 @@ export class AttachLifecycle {
   }
 
   clearAttachment(options: ClearAttachOptions = {}): void {
-    const hadAttached = this.attachedSessionId !== null;
+    const hadSession = this.attachedSessionId !== null;
+    const wasAttached = this.phase === 'attached';
     this.phase = 'browsing';
     this.attachedSessionId = null;
     if (!options.preserveWorkspaceId) {
@@ -139,7 +158,7 @@ export class AttachLifecycle {
     }
     this.clearPtyBuffer();
 
-    if ((options.emitDetached ?? false) && hadAttached) {
+    if ((options.emitDetached ?? false) && (hadSession || wasAttached)) {
       this.emit({ type: 'detached' });
     }
   }
@@ -157,8 +176,8 @@ export class AttachLifecycle {
   }
 
   pushPtyData(data: Uint8Array): void {
+    this.appendReplayChunk(data);
     if (!this.outputHandler) {
-      this.pendingPtyChunks.push(data);
       return;
     }
 
@@ -179,16 +198,72 @@ export class AttachLifecycle {
     }
   }
 
+  pushScriptData(data: Uint8Array): void {
+    if (!this.scriptOutputHandler) {
+      this.pendingScriptChunks.push(data);
+      return;
+    }
+
+    const combined = this.pendingScriptUtf8Bytes.length
+      ? concatUint8Array([this.pendingScriptUtf8Bytes, data])
+      : data;
+
+    const boundary = findUtf8Boundary(combined);
+    if (boundary < combined.length) {
+      this.pendingScriptUtf8Bytes = combined.slice(boundary);
+    } else {
+      this.pendingScriptUtf8Bytes = new Uint8Array(0);
+    }
+
+    const chunk = combined.slice(0, boundary);
+    if (chunk.length > 0) {
+      this.scriptOutputHandler(chunk);
+    }
+  }
+
   reset(): void {
     this.phase = 'browsing';
     this.attachedSessionId = null;
     this.attachedWorkspaceId = null;
     this.viewOnly = false;
     this.clearPtyBuffer();
+    this.clearScriptBuffer();
   }
 
   private clearPtyBuffer(): void {
-    this.pendingPtyChunks = [];
     this.pendingUtf8Bytes = new Uint8Array(0);
+    this.replayChunks = [];
+    this.replayBytes = 0;
+  }
+
+  clearScriptBuffer(): void {
+    this.pendingScriptChunks = [];
+    this.pendingScriptUtf8Bytes = new Uint8Array(0);
+  }
+
+  private replayToHandler(): void {
+    if (!this.outputHandler || this.replayChunks.length === 0) {
+      return;
+    }
+    const replay = concatUint8Array(this.replayChunks);
+    this.pendingUtf8Bytes = new Uint8Array(0);
+    const boundary = findUtf8Boundary(replay);
+    const chunk = replay.slice(0, boundary);
+    this.pendingUtf8Bytes = boundary < replay.length ? replay.slice(boundary) : new Uint8Array(0);
+    if (chunk.length > 0) {
+      this.outputHandler(chunk);
+    }
+  }
+
+  private appendReplayChunk(data: Uint8Array): void {
+    if (data.length === 0) {
+      return;
+    }
+    this.replayChunks.push(data);
+    this.replayBytes += data.length;
+    while (this.replayBytes > MAX_REPLAY_BYTES && this.replayChunks.length > 1) {
+      const dropped = this.replayChunks.shift();
+      this.replayBytes -= dropped?.length ?? 0;
+    }
   }
 }

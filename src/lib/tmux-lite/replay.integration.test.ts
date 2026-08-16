@@ -255,13 +255,18 @@ describe("tmux-lite replay capture", () => {
       command: "/bin/sh",
       args: [
         "-lc",
-        "printf '\\033[2J\\033[Hframe zero'; sleep 0.35; printf '\\033[2J\\033[Hframe one'; sleep 0.35; printf '\\033[2J\\033[Hframe two'; exit 0",
+        // 2s between frames, queried mid-window below. The frames used to be
+        // 350ms apart and queried at fixed offsets, which assumed shell startup
+        // and PTY latency stayed under ~150ms — true here, false on a loaded CI
+        // runner, where a query landed in the previous frame's window and the
+        // test failed on two runs out of four.
+        "printf '\\033[2J\\033[Hframe zero'; sleep 2; printf '\\033[2J\\033[Hframe one'; sleep 2; printf '\\033[2J\\033[Hframe two'; exit 0",
       ],
     });
 
     expect(response.type).toBe("session");
 
-    await waitFor(() => listReplayInfos().some((info) => info.status === "closed" && info.sessionName === "replay-timeline-session"), 5000);
+    await waitFor(() => listReplayInfos().some((info) => info.status === "closed" && info.sessionName === "replay-timeline-session"), 20000);
 
     const replayInfo = listReplayInfos().find((info) => info.sessionName === "replay-timeline-session");
     expect(replayInfo).toBeDefined();
@@ -271,7 +276,7 @@ describe("tmux-lite replay capture", () => {
       const earlyTextResponse = await sendRouterCommand({
         type: 'replay-text',
         replayId: replayInfo!.replayId,
-        atMs: 150,
+        atMs: 1000,
       });
       expect(earlyTextResponse.type).toBe('replay-text');
       expect(earlyTextResponse.text).toContain('frame zero');
@@ -279,7 +284,7 @@ describe("tmux-lite replay capture", () => {
       const middleTextResponse = await sendRouterCommand({
         type: 'replay-text',
         replayId: replayInfo!.replayId,
-        atMs: 500,
+        atMs: 3000,
       });
       expect(middleTextResponse.type).toBe('replay-text');
       expect(middleTextResponse.text).toContain('frame one');
@@ -287,7 +292,7 @@ describe("tmux-lite replay capture", () => {
       const lateTextResponse = await sendRouterCommand({
         type: 'replay-text',
         replayId: replayInfo!.replayId,
-        atMs: 850,
+        atMs: 5000,
       });
       expect(lateTextResponse.type).toBe('replay-text');
       expect(lateTextResponse.text).toContain('frame two');

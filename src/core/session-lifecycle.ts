@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'fs';
+import { execFileSync } from 'child_process';
 import { join } from 'path';
 import {
   createProject,
@@ -15,10 +16,12 @@ import { listAllRepos } from './github.js';
 import { fetchUnstartedIssues, getLinearConfig } from './linear.js';
 import { deleteProjectCore } from './workspace.js';
 import { syncBundleWorkspaceState } from './bundle-refresh.js';
+import { bindPlannedGoalForWorkspace } from './goal-chain.js';
+import { setWorkspaceStatus } from './workspace-metadata.js';
 import { detectBundleInRepo, loadBundleFromPath } from './bundle.js';
 import { applyProjectBundleState } from './project-lifecycle.js';
 import { SpacesError } from '../types/errors.js';
-import { extractRepoName, isValidBranchName, sanitizeForFileSystem } from '../utils/sanitize.js';
+import { extractRepoName, generateWorkspaceName, isValidBranchName, sanitizeForFileSystem } from '../utils/sanitize.js';
 import { generateMarkdown } from '../utils/markdown.js';
 import type { SessionLinearIssueSummary, WorkspaceSource } from '../types/lifecycle.js';
 import type { ConfirmStep, ConfirmStepResult, SpacesBundle } from '../types/bundle.js';
@@ -29,6 +32,10 @@ export interface SessionCreateProjectParams {
   projectName?: string;
   baseBranch?: string;
   setCurrent?: boolean;
+  /** Create a from-scratch project: git init the base repo locally instead of
+   *  cloning (`repository` is ignored). GitHub is a later, optional attachment
+   *  (docs/ARTIFACTS-FS.md — project creation & FTUE). */
+  scratch?: boolean;
 }
 
 export interface SessionCreateProjectResult {
@@ -64,6 +71,10 @@ export interface SessionCreateWorkspaceParams {
   workspaceSource?: WorkspaceSource;
   linearIssue?: SessionLinearIssueSummary;
   onProgress?: (message: string) => void;
+  parentWorkspaceName?: string;
+  /** Loop 2: import GitHub issue #n — derives the name (when workspaceName is
+   *  empty), seeds the goal, links the github sourceRef. */
+  githubIssueNumber?: number;
 }
 
 export interface SessionCreateWorkspaceResult {
@@ -76,6 +87,37 @@ export interface SessionCreateWorkspaceResult {
 export interface SessionDeleteProjectParams {
   projectName: string;
   onProgress?: (message: string) => void;
+}
+
+function runGit(args: string[], cwd: string): string | null {
+  try {
+    return execFileSync('git', args, { cwd, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+  } catch {
+    return null;
+  }
+}
+
+function createStackedWorktreeFromParent(projectName: string, parentWorkspaceName: string, workspacePath: string, branchName: string): boolean {
+  const parentPath = join(getProjectWorkspacesDir(projectName), parentWorkspaceName);
+  if (!existsSync(parentPath)) {
+    return false;
+  }
+  const parentBranch = runGit(['rev-parse', '--abbrev-ref', 'HEAD'], parentPath);
+  const parentRef = parentBranch && parentBranch !== 'HEAD'
+    ? parentBranch
+    : runGit(['rev-parse', 'HEAD'], parentPath);
+  if (!parentRef) {
+    return false;
+  }
+  try {
+    execFileSync('git', ['worktree', 'add', '-b', branchName, workspacePath, parentRef, '--no-track'], {
+      cwd: getProjectBaseDir(projectName),
+      stdio: 'ignore',
+    });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function sanitizeProjectName(input: string): string {
@@ -248,6 +290,7 @@ export async function listLinearIssuesForSession(
 export async function createProjectForSession(
   params: SessionCreateProjectParams
 ): Promise<SessionCreateProjectResult> {
+  if (params.scratch) return createScratchProjectForSession(params);
   const repository = validateRepository(params.repository);
   const projectName = sanitizeProjectName(params.projectName?.trim() || extractRepoName(repository));
 
@@ -270,11 +313,76 @@ export async function createProjectForSession(
     setCurrentProject(projectName);
   }
 
+  await mountProjectArtifacts(projectName, baseDir);
+
   return {
     projectName,
     repository,
     baseBranch,
   };
+}
+
+/** Artifacts FS: birth the project's artifacts repo + mount main at the base
+ *  clone; if the code repo carries a committed .gitspace/artifacts.json BYO
+ *  pointer, attach + fetch the remote (docs/ARTIFACTS-FS.md). Best-effort —
+ *  never fail project creation. */
+async function mountProjectArtifacts(projectName: string, baseDir: string): Promise<void> {
+  try {
+    const artifacts = await import('./artifacts.js');
+    const projectDir = getProjectDir(projectName);
+    // Attach a declared BYO remote BEFORE mounting so the fetched main is what
+    // gets checked out (fresh clones rediscover their artifacts automatically).
+    const pointer = artifacts.readArtifactsPointerConfig(baseDir);
+    if (pointer?.remote) {
+      await artifacts.setArtifactsRemote(projectDir, pointer.remote);
+      try {
+        await artifacts.syncArtifacts(projectDir);
+        console.error(`[artifacts] adopted shared remote for ${projectName}: ${pointer.remote}`);
+      } catch (e) {
+        // Mount proceeds locally, but say so — a teammate who can't reach the
+        // remote must not silently believe they're sharing.
+        console.error(`[artifacts] ${projectName}: remote ${pointer.remote} configured but first sync FAILED (${e instanceof Error ? e.message.split('\n')[0] : e}) — check access (gh auth login), then \`gssh artifacts sync\``);
+      }
+    }
+    await artifacts.ensureArtifactsMount(projectDir, baseDir, 'main');
+  } catch {
+    /* artifacts are additive */
+  }
+}
+
+/** From-scratch project: no repo required. `git init` the base, seed an
+ *  initial commit, and attach nothing — GitHub/publish is a later rung. */
+async function createScratchProjectForSession(
+  params: SessionCreateProjectParams
+): Promise<SessionCreateProjectResult> {
+  const rawName = params.projectName?.trim() || params.repository?.trim();
+  if (!rawName) {
+    throw new SpacesError('Project name is required for a from-scratch project.', 'USER_ERROR', 1);
+  }
+  const projectName = sanitizeProjectName(rawName);
+  if (projectExists(projectName)) {
+    throw new SpacesError(`Project "${projectName}" already exists.`, 'USER_ERROR', 1);
+  }
+  const baseBranch = params.baseBranch?.trim() || 'main';
+  const projectDir = getProjectDir(projectName);
+  const baseDir = getProjectBaseDir(projectName);
+  mkdirSync(baseDir, { recursive: true });
+  execFileSync('git', ['init', '-q', '--initial-branch', baseBranch, baseDir]);
+  writeFileSync(join(baseDir, 'README.md'), `# ${projectName}\n\nCreated with gitspace. Publish to a remote whenever you're ready.\n`);
+  execFileSync('git', ['-C', baseDir, 'add', 'README.md']);
+  execFileSync('git', [
+    '-C', baseDir,
+    '-c', 'user.name=gitspace', '-c', 'user.email=init@gitspace.sh', '-c', 'commit.gpgsign=false',
+    'commit', '-q', '-m', 'init project',
+  ]);
+
+  createProject(projectName, 'local', baseBranch);
+  if (params.setCurrent ?? true) {
+    setCurrentProject(projectName);
+  }
+  await mountProjectArtifacts(projectName, baseDir);
+
+  return { projectName, repository: 'local', baseBranch };
 }
 
 export async function prepareProjectForSession(
@@ -386,12 +494,23 @@ export async function createWorkspaceForSession(
   }
 
   const config = readProjectConfig(projectName);
+  const baseDir = getProjectBaseDir(projectName);
+
+  // Loop 2: fetch the issue up front so its title can name the workspace when
+  // the caller didn't supply one.
+  let githubIssue: import('./github-issues.js').GithubIssue | undefined;
+  if (params.githubIssueNumber !== undefined) {
+    const { resolveRepoSlug, fetchIssue } = await import('./github-issues.js');
+    const slug = await resolveRepoSlug(baseDir);
+    if (!slug) throw new SpacesError(`Could not resolve a GitHub repo for project '${projectName}'.`, 'USER_ERROR', 1);
+    githubIssue = await fetchIssue(slug, params.githubIssueNumber, baseDir);
+  }
+
   const { workspaceName, branchName } = resolveWorkspaceAndBranchNames(
-    params.workspaceName,
+    params.workspaceName || (githubIssue ? generateWorkspaceName(String(githubIssue.number), githubIssue.title) : params.workspaceName),
     params.branchName
   );
 
-  const baseDir = getProjectBaseDir(projectName);
   const workspacesDir = getProjectWorkspacesDir(projectName);
   const workspacePath = join(workspacesDir, workspaceName);
 
@@ -399,13 +518,19 @@ export async function createWorkspaceForSession(
     throw new SpacesError(`Workspace "${workspaceName}" already exists.`, 'USER_ERROR', 1);
   }
 
-  const baseBranch = params.baseBranch?.trim() || config.baseBranch;
-  const existsRemotely = await checkRemoteBranch(baseDir, branchName);
+  const createdFromParent = params.parentWorkspaceName
+    ? createStackedWorktreeFromParent(projectName, params.parentWorkspaceName, workspacePath, branchName)
+    : false;
 
-  await createWorktree(baseDir, workspacePath, branchName, baseBranch, {
-    existsRemotely,
-    onProgress: params.onProgress,
-  });
+  if (!createdFromParent) {
+    const baseBranch = params.baseBranch?.trim() || config.baseBranch;
+    const existsRemotely = await checkRemoteBranch(baseDir, branchName);
+
+    await createWorktree(baseDir, workspacePath, branchName, baseBranch, {
+      existsRemotely,
+      onProgress: params.onProgress,
+    });
+  }
 
   if (params.workspaceSource === 'linear' && params.linearIssue) {
     const linearConfig = await getLinearConfig(projectName);
@@ -418,8 +543,39 @@ export async function createWorkspaceForSession(
     );
     writeFileSync(join(issueArtifactDir, 'issue.md'), markdown, 'utf-8');
   }
+  bindPlannedGoalForWorkspace(projectName, workspaceName);
+  // A brand-new workspace ALWAYS starts in PLAN — creating a workspace from a
+  // planned goal means "start working on the spec," not "jump to code." (The
+  // goal record's own `phase` defaults to code, so adopting it here wrongly
+  // shoved fresh workspaces straight into the code lane.) The reviewer advances
+  // the phase deliberately via the workflow gates.
+  setWorkspaceStatus(projectName, workspaceName, 'plan');
+
+  // Loop 2: seed a real goal from the issue (same as CLI addWorkspace) — the
+  // github sourceRef links it back so the guide/PR can close the issue.
+  if (githubIssue) {
+    try {
+      const { ensureWorkspaceGoalChain, updateGoalRecord } = await import('./goal-chain.js');
+      const { goal } = ensureWorkspaceGoalChain(projectName, workspaceName);
+      const body = githubIssue.body?.trim() ? githubIssue.body : '_(issue had no description)_';
+      updateGoalRecord(projectName, goal.id, {
+        title: githubIssue.title,
+        doc: { bodyMarkdown: `# ${githubIssue.title}\n\n${body}\n\n---\n_Imported from ${githubIssue.url}_`, updatedAt: new Date().toISOString(), updatedBy: 'github-import' },
+        sourceRefs: [{ type: 'github', id: String(githubIssue.number), url: githubIssue.url, title: githubIssue.title }],
+      });
+    } catch { /* goal seed is additive; workspace remains usable */ }
+  }
 
   syncBundleWorkspaceState(projectName, workspacePath);
+
+  // Artifacts FS: branch-per-workspace mount at .gitspace/artifacts
+  // (docs/ARTIFACTS-FS.md). Best-effort — never fail workspace creation.
+  try {
+    const { ensureArtifactsMount } = await import('./artifacts.js');
+    await ensureArtifactsMount(getProjectDir(projectName), workspacePath, workspaceName);
+  } catch {
+    /* artifacts mount is additive; workspace remains usable without it */
+  }
 
   return {
     projectName,

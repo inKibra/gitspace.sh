@@ -1,0 +1,88 @@
+import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
+import React from 'react';
+import { render, type RenderResult } from '@testing-library/react';
+import { setupTestDom, teardownTestDom } from '../../test/setup-dom.js';
+import { HostUIDialogOverlay, HostUIDialogInline } from '../HostUIDialogs.web.js';
+import type { HostUIDialogRequest } from '../../lib/tmux-lite/agents/host-ui-bridge.js';
+
+beforeAll(() => setupTestDom());
+afterAll(() => teardownTestDom());
+
+describe('HostUIDialogInline (in-chat, no backdrop)', () => {
+  it('renders the dialog in-place (no portal/backdrop) so the chat stays visible', () => {
+    const request: HostUIDialogRequest = {
+      type: 'select', id: 'dlg-inline', sessionId: 's1', title: 'Pick', options: ['red', 'green'],
+    };
+    const view = render(<HostUIDialogInline request={request} onResponse={() => {}} />);
+    // Content renders INTO the component's own container (in normal flow) — the
+    // portal overlay would instead put it on document.body. In-flow rendering is
+    // what keeps the transcript above it visible.
+    expect(view.container.textContent).toContain('Pick');
+    expect(view.container.textContent).toContain('green');
+    view.unmount();
+  });
+
+  it('drops a malformed request without throwing', () => {
+    const bad = { type: 'ask-form', id: 'x', sessionId: 's1', title: 't', questions: [{ id: 'q' }] } as unknown as HostUIDialogRequest;
+    let view: ReturnType<typeof render> | undefined;
+    expect(() => { view = render(<HostUIDialogInline request={bad} onResponse={() => {}} />); }).not.toThrow();
+    view?.unmount();
+  });
+});
+
+describe('HostUIDialogOverlay render safety (BUG A)', () => {
+  it('renders a well-formed select dialog', () => {
+    const request: HostUIDialogRequest = {
+      type: 'select', id: 'dlg-ok', sessionId: 's1', title: 'Pick', options: ['red', 'green'],
+    };
+    const view = render(<HostUIDialogOverlay request={request} onResponse={() => {}} />);
+    expect(document.body.textContent).toContain('Pick');
+    expect(document.body.textContent).toContain('green');
+    view.unmount();
+  });
+
+  it('renders select options that are {label, description} objects (SDK shape) without crashing', () => {
+    // The SDK's ask tool passes ExtensionUISelectItem objects, not strings —
+    // rendering the raw object was a React "Objects are not valid as a child" crash.
+    const request: HostUIDialogRequest = {
+      type: 'select', id: 'dlg-obj', sessionId: 's1', title: 'Pick a color',
+      options: [
+        { label: 'Green', description: 'go' },
+        { label: 'Red', description: 'stop' },
+      ],
+    };
+    let picked: unknown = null;
+    const view = render(<HostUIDialogOverlay request={request} onResponse={(r) => { picked = r; }} />);
+    expect(document.body.textContent).toContain('Green');
+    expect(document.body.textContent).toContain('go'); // description shown
+    // Clicking sends the LABEL string (what the ask tool matches on), not the object.
+    const greenBtn = Array.from(document.getElementsByTagName('button')).find((b) => b.textContent?.includes('Green'));
+    (greenBtn as HTMLButtonElement).click();
+    expect(picked).toEqual({ type: 'select', id: 'dlg-obj', value: 'Green' });
+    view.unmount();
+  });
+
+  it('does not throw on a malformed ask-form request (question missing options)', () => {
+    // A dialog request for a background/other session can arrive misshapen; the
+    // render must never take down the pane. Cast past the type to model the wire
+    // shape that a strict compiler would otherwise forbid.
+    const bad = {
+      type: 'ask-form', id: 'dlg-bad', sessionId: 's-bg', title: 'Q',
+      questions: [{ id: 'q1', question: 'Which?' /* options MISSING */ }],
+    } as unknown as HostUIDialogRequest;
+    // Held in an object: a `let` assigned only inside the callback stays
+    // narrowed to `null`, so `view?.unmount()` would be typed `never`.
+    const rendered: { view: RenderResult | null } = { view: null };
+    expect(() => { rendered.view = render(<HostUIDialogOverlay request={bad} onResponse={() => {}} />); }).not.toThrow();
+    // Unrenderable request is dropped — no dialog shell in the DOM.
+    expect(document.body.textContent).not.toContain('Which?');
+    rendered.view?.unmount();
+  });
+
+  it('does not throw on a select request whose options are missing', () => {
+    const bad = { type: 'select', id: 'dlg-bad2', sessionId: 's-bg', title: 'Nope' } as unknown as HostUIDialogRequest;
+    const rendered: { view: RenderResult | null } = { view: null };
+    expect(() => { rendered.view = render(<HostUIDialogOverlay request={bad} onResponse={() => {}} />); }).not.toThrow();
+    rendered.view?.unmount();
+  });
+});

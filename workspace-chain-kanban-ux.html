@@ -1,0 +1,1499 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>GitSpace Goal Chain Kanban UX Draft</title>
+  <style>
+    :root {
+      --bg: #070807;
+      --panel: #0d100e;
+      --panel-2: #131812;
+      --panel-3: #1b2119;
+      --ink: #eee9db;
+      --muted: #9d9788;
+      --dim: #676154;
+      --ghost: #454137;
+      --line: #272d23;
+      --line-strong: #3a4535;
+      --green: #9bff69;
+      --green-soft: rgba(155, 255, 105, .14);
+      --amber: #ffcc66;
+      --amber-soft: rgba(255, 204, 102, .13);
+      --blue: #7dd3fc;
+      --blue-soft: rgba(125, 211, 252, .13);
+      --red: #ff6b5f;
+      --red-soft: rgba(255, 107, 95, .13);
+      --violet: #c4a7ff;
+      --violet-soft: rgba(196, 167, 255, .13);
+      --shadow: rgba(0, 0, 0, .58);
+      --mono: "Berkeley Mono", "SFMono-Regular", ui-monospace, Menlo, Consolas, monospace;
+      --serif: Georgia, "Times New Roman", serif;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      background:
+        radial-gradient(circle at 12% -12%, rgba(155, 255, 105, .12), transparent 30%),
+        radial-gradient(circle at 88% 5%, rgba(125, 211, 252, .10), transparent 28%),
+        radial-gradient(circle at 54% 120%, rgba(255, 204, 102, .08), transparent 34%),
+        linear-gradient(180deg, #090b08 0%, var(--bg) 54%, #050605 100%);
+      color: var(--ink);
+      font-family: var(--mono);
+      overflow: hidden;
+    }
+
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background-image:
+        linear-gradient(rgba(255,255,255,.025) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,.018) 1px, transparent 1px);
+      background-size: 34px 34px;
+      mask-image: linear-gradient(to bottom, rgba(0,0,0,.82), transparent 82%);
+    }
+
+    .app {
+      height: 100vh;
+      display: grid;
+      grid-template-rows: 48px 1fr;
+      position: relative;
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      padding: 0 18px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(10, 12, 9, .80);
+      backdrop-filter: blur(16px);
+      position: relative;
+      z-index: 5;
+    }
+
+    .brand {
+      font-family: var(--serif);
+      font-size: 21px;
+      letter-spacing: .02em;
+    }
+
+    .crumb {
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: .16em;
+    }
+
+    .top-actions {
+      margin-left: auto;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .pill {
+      border: 1px solid var(--line-strong);
+      background: rgba(255,255,255,.025);
+      color: var(--muted);
+      padding: 5px 8px;
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: .11em;
+    }
+
+    .board-shell {
+      min-height: 0;
+      display: grid;
+      grid-template-columns: 1fr 314px;
+      position: relative;
+      z-index: 1;
+    }
+
+    .board {
+      min-width: 0;
+      display: grid;
+      grid-template-columns: repeat(4, minmax(184px, 1fr));
+      gap: 1px;
+      background: var(--line);
+      overflow: hidden;
+    }
+
+    .lane {
+      min-width: 0;
+      background: rgba(9, 11, 8, .92);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .lane-head {
+      height: 38px;
+      flex: 0 0 auto;
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      padding: 0 12px;
+      border-bottom: 1px solid rgba(255,255,255,.035);
+      color: var(--muted);
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: .18em;
+    }
+
+    .lane-count { color: var(--ghost); }
+
+    .cards {
+      overflow: auto;
+      padding: 5px 0 42px;
+    }
+
+    .card {
+      width: 100%;
+      display: block;
+      border: 0;
+      border-left: 2px solid transparent;
+      background: transparent;
+      color: inherit;
+      text-align: left;
+      padding: 10px 10px 10px 12px;
+      cursor: pointer;
+      position: relative;
+      transition: background .14s ease, border-color .14s ease, transform .14s ease;
+    }
+
+    .card:hover,
+    .card:focus-visible,
+    .card.active {
+      outline: none;
+      background: rgba(255,255,255,.035);
+      border-left-color: var(--green);
+    }
+
+    .card.active {
+      background: linear-gradient(90deg, rgba(155,255,105,.075), rgba(255,255,255,.028));
+    }
+
+    .card.dimmed:not(.active) {
+      opacity: .42;
+    }
+
+    .card.related:not(.active) {
+      background: rgba(125, 211, 252, .035);
+      border-left-color: rgba(125, 211, 252, .42);
+    }
+
+    .card.blocking:not(.active) {
+      background: rgba(255, 204, 102, .04);
+      border-left-color: rgba(255, 204, 102, .55);
+    }
+
+    .row {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      min-width: 0;
+    }
+
+    .dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 999px;
+      background: var(--dim);
+      flex: 0 0 auto;
+      box-shadow: 0 0 0 3px rgba(255,255,255,.018);
+    }
+    .dot.plan { background: var(--blue); }
+    .dot.code { background: var(--green); }
+    .dot.review { background: var(--amber); }
+    .dot.ship { background: var(--violet); }
+
+    .name {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: -.01em;
+    }
+
+    .branch {
+      margin: 3px 0 0 14px;
+      color: var(--dim);
+      font-size: 10px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      margin: 7px 0 0 14px;
+    }
+
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      min-height: 17px;
+      padding: 2px 5px;
+      border: 1px solid transparent;
+      background: rgba(255,255,255,.045);
+      color: var(--muted);
+      font-size: 9px;
+      text-transform: uppercase;
+      letter-spacing: .08em;
+      line-height: 1;
+    }
+    .chip.green { color: var(--green); background: var(--green-soft); }
+    .chip.blue { color: var(--blue); background: var(--blue-soft); }
+    .chip.amber { color: var(--amber); background: var(--amber-soft); }
+    .chip.violet { color: var(--violet); background: var(--violet-soft); }
+    .chip.red { color: var(--red); background: var(--red-soft); }
+
+    .stack-handle {
+      margin-left: auto;
+      flex: 0 0 auto;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 26px;
+      height: 20px;
+      color: var(--blue);
+      border: 1px solid rgba(125, 211, 252, .24);
+      background: rgba(125, 211, 252, .055);
+      font-size: 12px;
+      line-height: 1;
+      position: relative;
+    }
+
+    .stack-handle::before {
+      content: attr(data-count);
+      position: absolute;
+      right: -5px;
+      top: -6px;
+      min-width: 13px;
+      height: 13px;
+      border-radius: 999px;
+      display: grid;
+      place-items: center;
+      background: var(--panel-3);
+      color: var(--ink);
+      border: 1px solid rgba(125,211,252,.34);
+      font-size: 8px;
+    }
+
+    .rearrange-affordance {
+      flex: 0 0 auto;
+      width: 22px;
+      height: 20px;
+      display: inline-grid;
+      place-items: center;
+      color: var(--amber);
+      border: 1px solid rgba(255, 204, 102, .22);
+      background: rgba(255, 204, 102, .055);
+      opacity: 0;
+      transform: translateX(4px);
+      transition: opacity .14s ease, transform .14s ease;
+      font-size: 12px;
+    }
+
+    .card:hover .rearrange-affordance,
+    .card:focus-visible .rearrange-affordance,
+    .card.active .rearrange-affordance {
+      opacity: 1;
+      transform: translateX(0);
+    }
+
+    .side-panel {
+      border-left: 1px solid var(--line);
+      background: rgba(8, 10, 7, .82);
+      backdrop-filter: blur(14px);
+      padding: 16px;
+      overflow: auto;
+    }
+
+    .side-kicker {
+      color: var(--muted);
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: .18em;
+      margin-bottom: 9px;
+    }
+
+    .side-title {
+      font-family: var(--serif);
+      font-size: 25px;
+      line-height: 1.04;
+      margin-bottom: 10px;
+    }
+
+    .side-copy {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.55;
+      margin-bottom: 14px;
+    }
+
+    .rules {
+      display: grid;
+      gap: 8px;
+    }
+
+    .rule {
+      padding: 10px;
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,.025);
+    }
+
+    .rule strong {
+      display: block;
+      color: var(--ink);
+      font-size: 11px;
+      margin-bottom: 5px;
+    }
+
+    .rule span {
+      display: block;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.45;
+    }
+
+    .hover-lens {
+      position: fixed;
+      width: min(760px, calc(100vw - 380px));
+      left: 26px;
+      bottom: 26px;
+      border: 1px solid rgba(155, 255, 105, .32);
+      background:
+        linear-gradient(180deg, rgba(21, 27, 19, .94), rgba(8, 10, 7, .96));
+      box-shadow: 0 28px 80px var(--shadow), inset 0 1px rgba(255,255,255,.05);
+      backdrop-filter: blur(20px);
+      opacity: 0;
+      transform: translateY(14px) scale(.985);
+      pointer-events: none;
+      transition: opacity .16s ease, transform .16s ease;
+      z-index: 20;
+    }
+
+    .hover-lens.visible {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+      pointer-events: auto;
+    }
+
+    .lens-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 14px 16px 12px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .lens-title {
+      font-family: var(--serif);
+      font-size: 22px;
+      line-height: 1.05;
+      margin-bottom: 5px;
+    }
+
+    .lens-subtitle {
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.45;
+    }
+
+    .lens-actions {
+      flex: 0 0 auto;
+      display: flex;
+      align-items: center;
+      gap: 7px;
+    }
+
+    .lens-action {
+      color: var(--green);
+      border: 1px solid rgba(155, 255, 105, .32);
+      background: rgba(155, 255, 105, .08);
+      padding: 7px 9px;
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: .11em;
+      cursor: pointer;
+    }
+
+    .lens-action.secondary {
+      color: var(--blue);
+      border-color: rgba(125, 211, 252, .28);
+      background: rgba(125, 211, 252, .07);
+    }
+
+    .lens-action.warning {
+      color: var(--amber);
+      border-color: rgba(255, 204, 102, .32);
+      background: rgba(255, 204, 102, .08);
+    }
+
+    .lens-action.danger {
+      color: var(--red);
+      border-color: rgba(255, 107, 95, .32);
+      background: rgba(255, 107, 95, .08);
+    }
+
+    .lens-action[hidden] { display: none; }
+
+    .chain-track {
+      padding: 16px;
+      overflow-x: auto;
+    }
+
+    .goal-rail {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(120px, 1fr));
+      gap: 0;
+      min-width: 650px;
+      position: relative;
+    }
+
+    .goal-rail::before {
+      content: "";
+      position: absolute;
+      left: 8%;
+      right: 8%;
+      top: 21px;
+      height: 1px;
+      background: linear-gradient(90deg, var(--green), var(--blue), var(--amber), var(--violet));
+      opacity: .68;
+    }
+
+    .goal-node {
+      position: relative;
+      display: grid;
+      justify-items: center;
+      gap: 8px;
+      padding: 0 8px;
+      z-index: 1;
+    }
+
+    .node-dot {
+      width: 43px;
+      height: 43px;
+      display: grid;
+      place-items: center;
+      border-radius: 999px;
+      background: #0b0e0a;
+      border: 1px solid var(--line-strong);
+      color: var(--muted);
+      box-shadow: 0 0 0 5px rgba(8, 10, 7, .88);
+      font-size: 13px;
+      font-weight: 800;
+    }
+
+    .goal-node.done .node-dot {
+      color: var(--green);
+      border-color: rgba(155,255,105,.45);
+      background: var(--green-soft);
+    }
+
+    .goal-node.active .node-dot {
+      color: #061006;
+      border-color: var(--green);
+      background: var(--green);
+      box-shadow: 0 0 0 5px rgba(8, 10, 7, .88), 0 0 28px rgba(155,255,105,.25);
+    }
+
+    .goal-node.ready .node-dot {
+      color: var(--blue);
+      border-color: rgba(125,211,252,.45);
+      background: var(--blue-soft);
+    }
+
+    .goal-node.blocked .node-dot {
+      color: var(--amber);
+      border-color: rgba(255,204,102,.45);
+      background: var(--amber-soft);
+    }
+
+    .node-card {
+      width: 100%;
+      min-height: 104px;
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,.025);
+      padding: 9px;
+    }
+
+    .goal-node.active .node-card {
+      border-color: rgba(155,255,105,.38);
+      background: rgba(155,255,105,.055);
+    }
+
+    .node-state {
+      color: var(--dim);
+      font-size: 9px;
+      text-transform: uppercase;
+      letter-spacing: .12em;
+      margin-bottom: 6px;
+    }
+
+    .node-name {
+      font-size: 11px;
+      line-height: 1.25;
+      margin-bottom: 7px;
+      font-weight: 700;
+    }
+
+    .node-meta {
+      color: var(--muted);
+      font-size: 9px;
+      line-height: 1.35;
+    }
+
+    .node-controls {
+      display: flex;
+      gap: 4px;
+      margin-top: 8px;
+      opacity: .42;
+      transition: opacity .14s ease;
+    }
+
+    .hover-lens.editing .node-controls { opacity: 1; }
+
+    .hover-lens:not(.editing) .node-control[data-action="earlier"],
+    .hover-lens:not(.editing) .node-control[data-action="later"] {
+      display: none;
+    }
+
+    .goal-node.order-dirty .node-card {
+      border-color: rgba(125, 211, 252, .46);
+      background: linear-gradient(180deg, rgba(125,211,252,.075), rgba(255,255,255,.025));
+    }
+
+    .edit-strip {
+      display: none;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 9px 14px;
+      border-top: 1px solid rgba(125,211,252,.20);
+      background: rgba(125,211,252,.065);
+      color: var(--blue);
+      font-size: 11px;
+      line-height: 1.35;
+    }
+
+    .edit-strip.visible { display: flex; }
+
+    .edit-strip strong { color: var(--ink); }
+
+    .goal-node:hover .node-controls,
+    .goal-node.reorder-target .node-controls { opacity: 1; }
+
+    .node-control {
+      border: 1px solid var(--line-strong);
+      background: rgba(255,255,255,.035);
+      color: var(--muted);
+      padding: 3px 5px;
+      font: inherit;
+      font-size: 9px;
+      cursor: pointer;
+    }
+
+    .node-control:disabled {
+      opacity: .32;
+      cursor: not-allowed;
+      color: var(--ghost);
+      border-color: rgba(255,255,255,.06);
+    }
+
+    .node-control:hover {
+      color: var(--ink);
+      border-color: rgba(155,255,105,.36);
+    }
+
+    .goal-node.needs-restack .node-card {
+      border-color: rgba(255, 204, 102, .44);
+      background: linear-gradient(180deg, rgba(255,204,102,.075), rgba(255,255,255,.025));
+    }
+
+    .dependency-strip {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 1px;
+      background: var(--line);
+      border-top: 1px solid var(--line);
+    }
+
+    .dep-box {
+      background: rgba(8,10,7,.65);
+      padding: 10px 12px;
+    }
+
+    .dep-label {
+      color: var(--dim);
+      font-size: 9px;
+      text-transform: uppercase;
+      letter-spacing: .14em;
+      margin-bottom: 5px;
+    }
+
+    .dep-value {
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.35;
+    }
+
+    .sync-warning {
+      display: none;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 10px 14px;
+      border-top: 1px solid rgba(255,204,102,.22);
+      background: rgba(255,204,102,.075);
+      color: var(--amber);
+      font-size: 11px;
+      line-height: 1.35;
+    }
+
+    .sync-warning.visible { display: flex; }
+
+    .sync-warning strong { color: var(--ink); }
+
+    .sync-warning button {
+      flex: 0 0 auto;
+      border: 1px solid rgba(255,204,102,.34);
+      background: rgba(255,204,102,.09);
+      color: var(--amber);
+      padding: 6px 8px;
+      font: inherit;
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: .1em;
+    }
+
+    .ghost-lines {
+      position: absolute;
+      inset: 48px 314px 0 0;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity .16s ease;
+      z-index: 2;
+    }
+
+    .ghost-lines.visible { opacity: 1; }
+
+    .ghost-lines svg {
+      width: 100%;
+      height: 100%;
+      overflow: visible;
+    }
+
+    .line-main,
+    .line-future {
+      fill: none;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+
+    .line-main {
+      stroke: rgba(155,255,105,.66);
+      stroke-width: 2;
+      stroke-dasharray: 5 6;
+      animation: dash 1.1s linear infinite;
+      filter: drop-shadow(0 0 8px rgba(155,255,105,.22));
+    }
+
+    .line-future {
+      stroke: rgba(125,211,252,.48);
+      stroke-width: 1.5;
+      stroke-dasharray: 3 7;
+    }
+
+    .line-anchor {
+      fill: rgba(8,10,7,.96);
+      stroke: rgba(155,255,105,.72);
+      stroke-width: 1.5;
+      filter: drop-shadow(0 0 7px rgba(155,255,105,.20));
+    }
+
+    @keyframes dash { to { stroke-dashoffset: -22; } }
+
+    .hint {
+      position: fixed;
+      left: 18px;
+      bottom: 16px;
+      z-index: 4;
+      color: var(--ghost);
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: .14em;
+      transition: opacity .16s ease;
+    }
+
+    body.chain-open .hint { opacity: 0; }
+
+    .order-panel {
+      position: fixed;
+      right: 342px;
+      top: 74px;
+      width: min(390px, calc(100vw - 64px));
+      border: 1px solid rgba(125,211,252,.34);
+      background: linear-gradient(180deg, rgba(18,24,22,.97), rgba(8,10,7,.98));
+      box-shadow: 0 26px 80px var(--shadow), inset 0 1px rgba(255,255,255,.05);
+      backdrop-filter: blur(20px);
+      z-index: 28;
+      opacity: 0;
+      pointer-events: none;
+      transform: translateY(-8px) scale(.985);
+      transition: opacity .14s ease, transform .14s ease;
+    }
+
+    .order-panel.visible {
+      opacity: 1;
+      pointer-events: auto;
+      transform: translateY(0) scale(1);
+    }
+
+    .order-panel-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 13px 14px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .order-panel-title {
+      font-family: var(--serif);
+      font-size: 20px;
+      line-height: 1.05;
+    }
+
+    .order-panel-subtitle {
+      margin-top: 4px;
+      color: var(--muted);
+      font-size: 10px;
+      line-height: 1.4;
+    }
+
+    .order-list {
+      display: grid;
+      gap: 1px;
+      background: var(--line);
+      max-height: 360px;
+      overflow: auto;
+    }
+
+    .order-item {
+      display: grid;
+      grid-template-columns: 22px 1fr auto;
+      align-items: center;
+      gap: 9px;
+      padding: 10px 11px;
+      border: 0;
+      background: rgba(8,10,7,.92);
+      color: var(--ink);
+      font: inherit;
+      text-align: left;
+      cursor: grab;
+    }
+
+    .order-item:focus-visible,
+    .order-item.selected {
+      outline: none;
+      background: rgba(125,211,252,.085);
+      box-shadow: inset 2px 0 var(--blue);
+    }
+
+    .order-item.drag-over { background: rgba(155,255,105,.075); }
+
+    .order-index {
+      color: var(--dim);
+      font-size: 10px;
+    }
+
+    .order-name { font-size: 12px; font-weight: 700; }
+    .order-meta { margin-top: 3px; color: var(--muted); font-size: 9px; text-transform: uppercase; letter-spacing: .08em; }
+
+    .order-move {
+      display: flex;
+      gap: 4px;
+    }
+
+    .order-move button,
+    .order-panel-actions button,
+    .order-panel-close {
+      border: 1px solid var(--line-strong);
+      background: rgba(255,255,255,.035);
+      color: var(--muted);
+      font: inherit;
+      font-size: 10px;
+      padding: 5px 7px;
+      cursor: pointer;
+    }
+
+    .order-move button:disabled { opacity: .32; cursor: not-allowed; }
+
+    .order-panel-actions {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 11px 14px;
+      border-top: 1px solid var(--line);
+      background: rgba(255,255,255,.018);
+    }
+
+    .order-panel-note {
+      color: var(--muted);
+      font-size: 10px;
+      line-height: 1.4;
+    }
+
+    .order-panel-actions .primary {
+      color: var(--green);
+      border-color: rgba(155,255,105,.32);
+      background: rgba(155,255,105,.08);
+    }
+    @media (max-width: 980px) {
+      .board-shell { grid-template-columns: 1fr; }
+      .side-panel { display: none; }
+      .ghost-lines { inset-right: 0; }
+      .hover-lens { width: calc(100vw - 32px); left: 16px; bottom: 16px; }
+      .board { grid-template-columns: repeat(4, minmax(174px, 1fr)); overflow-x: auto; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">GitSpace</div>
+      <div class="crumb">Kanban · goal chains overlay draft</div>
+      <div class="top-actions">
+        <div class="pill">Hover stack badge</div>
+        <div class="pill">Click to pin</div>
+      </div>
+    </header>
+
+    <main class="board-shell">
+      <section class="board" aria-label="Workspace kanban board">
+        <div class="lane">
+          <div class="lane-head"><span>Plan</span><span class="lane-count">3</span></div>
+          <div class="cards">
+            <button class="card" data-card="billing-schema" data-chain="billing"><div class="row"><span class="dot plan"></span><span class="name">billing-schema</span><span class="stack-handle" data-count="5">⛓</span></div><div class="branch">goal/billing-schema</div><div class="chips"><span class="chip green">done</span><span class="chip blue">1/5</span><span class="chip">ENG-123</span></div></button>
+            <button class="card"><div class="row"><span class="dot plan"></span><span class="name">audit-log-plan</span></div><div class="branch">plan/audit-log-events</div><div class="chips"><span class="chip blue">ready</span><span class="chip">standalone</span></div></button>
+            <button class="card"><div class="row"><span class="dot plan"></span><span class="name">settings-copy-review</span></div><div class="branch">copy/settings-empty-states</div><div class="chips"><span class="chip">1 agent</span></div></button>
+          </div>
+        </div>
+
+        <div class="lane">
+          <div class="lane-head"><span>Code</span><span class="lane-count">4</span></div>
+          <div class="cards">
+            <button class="card" data-card="billing-api" data-chain="billing"><div class="row"><span class="dot code"></span><span class="name">billing-api</span><span class="stack-handle" data-count="5">⛓</span></div><div class="branch">goal/billing-api</div><div class="chips"><span class="chip green">active</span><span class="chip blue">2/5</span><span class="chip">ENG-124</span></div></button>
+            <button class="card"><div class="row"><span class="dot code"></span><span class="name">host-subdomain-errors</span></div><div class="branch">fix/host-errors</div><div class="chips"><span class="chip amber">agent busy</span><span class="chip">PR draft</span></div></button>
+            <button class="card"><div class="row"><span class="dot code"></span><span class="name">audit-ingest</span></div><div class="branch">feat/audit-ingest</div><div class="chips"><span class="chip amber">agent busy</span><span class="chip">standalone</span></div></button>
+            <button class="card"><div class="row"><span class="dot code"></span><span class="name">tmux-pane-replay</span></div><div class="branch">feat/replay-stream-ids</div><div class="chips"><span class="chip green">2 term</span></div></button>
+          </div>
+        </div>
+
+        <div class="lane">
+          <div class="lane-head"><span>Review</span><span class="lane-count">3</span></div>
+          <div class="cards">
+            <button class="card" data-card="billing-ui" data-chain="billing"><div class="row"><span class="dot review"></span><span class="name">billing-ui</span><span class="stack-handle" data-count="5">⛓</span></div><div class="branch">goal/billing-ui</div><div class="chips"><span class="chip amber">blocked</span><span class="chip blue">3/5</span><span class="chip">ENG-125</span></div></button>
+            <button class="card"><div class="row"><span class="dot review"></span><span class="name">multi-pane</span></div><div class="branch">multi-pane</div><div class="chips"><span class="chip amber">PR #106</span><span class="chip green">build ok</span></div></button>
+            <button class="card" data-card="billing-e2e" data-chain="billing"><div class="row"><span class="dot review"></span><span class="name">billing-e2e</span><span class="stack-handle" data-count="5">⛓</span></div><div class="branch">goal/billing-e2e</div><div class="chips"><span class="chip amber">blocked</span><span class="chip blue">4/5</span></div></button>
+          </div>
+        </div>
+
+        <div class="lane">
+          <div class="lane-head"><span>Ship</span><span class="lane-count">2</span></div>
+          <div class="cards">
+            <button class="card"><div class="row"><span class="dot ship"></span><span class="name">relay-invite-copy</span></div><div class="branch">fix/invite-copy</div><div class="chips"><span class="chip violet">merged</span></div></button>
+            <button class="card" data-card="billing-polish" data-chain="billing"><div class="row"><span class="dot ship"></span><span class="name">billing-polish</span><span class="stack-handle" data-count="5">⛓</span></div><div class="branch">goal/billing-polish</div><div class="chips"><span class="chip amber">blocked</span><span class="chip blue">5/5</span></div></button>
+          </div>
+        </div>
+      </section>
+
+      <aside class="side-panel">
+        <div class="side-kicker">Design intent</div>
+        <div class="side-title">Show chains only when they are useful.</div>
+        <p class="side-copy">Cards stay compact. A small stack badge is the only always-visible affordance. Hovering or focusing any card in a chain opens a local “chain lens”: related cards are highlighted, unrelated cards fade, and only the active chain gets temporary guide lines.</p>
+        <div class="rules">
+          <div class="rule"><strong>No spaghetti mode</strong><span>Lines are hidden by default. They appear only for the hovered/pinned chain and disappear when focus leaves.</span></div>
+          <div class="rule"><strong>Goals, not tickets</strong><span>The overlay shows goal progression and workspace stack ancestry. Linear issue keys are supporting metadata, not the primary structure.</span></div>
+          <div class="rule"><strong>Linear only for MVP</strong><span>Every chain is one ordered sequence. The next workspace is created from the previous goal; no forks, parallel lanes, or custom dependency editing.</span></div>
+        </div>
+      </aside>
+    </main>
+
+    <div class="ghost-lines" id="ghostLines" aria-hidden="true">
+      <svg id="chainSvg"></svg>
+    </div>
+
+    <section class="hover-lens" id="lens" aria-live="polite">
+      <div class="lens-head">
+        <div>
+          <div class="lens-title" id="lensTitle">Billing settings rollout</div>
+          <div class="lens-subtitle" id="lensSubtitle">Workspace stack: billing-schema → billing-api → billing-ui → billing-e2e → billing-polish</div>
+        </div>
+        <div class="lens-actions">
+          <button class="lens-action secondary" id="editOrder" type="button">Edit order</button>
+          <button class="lens-action" id="saveOrder" type="button" hidden>Save order</button>
+          <button class="lens-action danger" id="cancelOrder" type="button" hidden>Cancel</button>
+          <button class="lens-action warning" id="restackDemo" type="button">Validate stack</button>
+          <button class="lens-action" type="button">Open chain</button>
+        </div>
+      </div>
+      <div class="chain-track">
+        <div class="goal-rail" id="goalRail"></div>
+      </div>
+      <div class="dependency-strip">
+        <div class="dep-box"><div class="dep-label">Current goal</div><div class="dep-value" id="currentGoal">billing-api · Expose settings API</div></div>
+        <div class="dep-box"><div class="dep-label">Previous in chain</div><div class="dep-value" id="blockedBy">billing-schema complete</div></div>
+        <div class="dep-box"><div class="dep-label">Next in chain</div><div class="dep-value" id="nextGoal">billing-ui after API</div></div>
+      </div>
+      <div class="edit-strip" id="editStrip">
+        <span><strong>Editing chain order.</strong> Use earlier/later. Lane order is enforced: a goal cannot move before an ancestor in a later kanban lane; same-lane ties are allowed.</span>
+      </div>
+      <div class="sync-warning" id="syncWarning">
+        <span><strong>Goal order changed; git stack unchanged.</strong> billing-ui is now before billing-api in the goal chain, but its branch is still stacked after billing-api.</span>
+        <button type="button" id="undoReorder">Undo</button>
+      </div>
+    </section>
+
+    <section class="order-panel" id="orderPanel" aria-live="polite" aria-label="Edit goal chain order">
+      <div class="order-panel-head">
+        <div>
+          <div class="order-panel-title">Edit chain order</div>
+          <div class="order-panel-subtitle">Drag goals or use keyboard/buttons. Lane progression is enforced.</div>
+        </div>
+        <button class="order-panel-close" id="closeOrderPanel" type="button">Close</button>
+      </div>
+      <div class="order-list" id="orderList"></div>
+      <div class="order-panel-actions">
+        <div class="order-panel-note" id="orderPanelNote">Plan → Code → Review → Ship. Same-lane swaps are allowed.</div>
+        <div>
+          <button type="button" id="cancelPanelOrder">Cancel</button>
+          <button class="primary" type="button" id="savePanelOrder">Save order</button>
+        </div>
+      </div>
+    </section>
+
+    <div class="hint">Hover a ⛓ stack badge/card to reveal one chain</div>
+  </div>
+
+  <script>
+    const chains = {
+      billing: {
+        title: 'Billing settings rollout',
+        subtitle: 'Workspace stack: billing-schema → billing-api → billing-ui → billing-e2e → billing-polish',
+        current: 'billing-api · Expose settings API',
+        blockedBy: 'billing-schema complete',
+        nextGoal: 'billing-ui after API',
+        goals: [
+          { id: 'schema', name: 'Persistence schema', workspace: 'billing-schema', phase: 'plan', state: 'done', meta: 'ENG-123 · base main' },
+          { id: 'api', name: 'API contract', workspace: 'billing-api', phase: 'code', state: 'active', meta: 'stacked from schema' },
+          { id: 'ui', name: 'Settings UI', workspace: 'billing-ui', phase: 'review', state: 'blocked', meta: 'previous: billing-api' },
+          { id: 'e2e', name: 'Integration coverage', workspace: 'billing-e2e', phase: 'review', state: 'blocked', meta: 'previous: billing-ui' },
+          { id: 'polish', name: 'Ship polish', workspace: 'billing-polish', phase: 'ship', state: 'blocked', meta: 'final cleanup' }
+        ]
+      }
+    };
+
+    const lens = document.getElementById('lens');
+    const ghostLines = document.getElementById('ghostLines');
+    const chainSvg = document.getElementById('chainSvg');
+    const rail = document.getElementById('goalRail');
+    const title = document.getElementById('lensTitle');
+    const subtitle = document.getElementById('lensSubtitle');
+    const currentGoal = document.getElementById('currentGoal');
+    const blockedBy = document.getElementById('blockedBy');
+    const nextGoal = document.getElementById('nextGoal');
+    const editOrder = document.getElementById('editOrder');
+    const saveOrder = document.getElementById('saveOrder');
+    const cancelOrder = document.getElementById('cancelOrder');
+    const editStrip = document.getElementById('editStrip');
+    const restackDemo = document.getElementById('restackDemo');
+    const syncWarning = document.getElementById('syncWarning');
+    const undoReorder = document.getElementById('undoReorder');
+    const orderPanel = document.getElementById('orderPanel');
+    const orderList = document.getElementById('orderList');
+    const closeOrderPanel = document.getElementById('closeOrderPanel');
+    const cancelPanelOrder = document.getElementById('cancelPanelOrder');
+    const savePanelOrder = document.getElementById('savePanelOrder');
+    const orderPanelNote = document.getElementById('orderPanelNote');
+    const cards = Array.from(document.querySelectorAll('.card'));
+    let pinned = false;
+    let activeChain = null;
+    let activeCardId = null;
+    let billingReordered = false;
+    let editingOrder = false;
+    let selectedOrderWorkspace = 'billing-api';
+    let draggedWorkspace = null;
+    const originalBillingOrder = chains.billing.goals.map(goal => goal.workspace);
+
+    function getChainCards(chainId) {
+      const chain = chains[chainId];
+      if (!chain) return [];
+      return chain.goals
+        .map(goal => document.querySelector(`[data-card="${goal.workspace}"]`))
+        .filter(Boolean);
+    }
+
+    function getAnchorPoint(card, svgRect) {
+      const handle = card.querySelector('.stack-handle');
+      const rect = (handle || card).getBoundingClientRect();
+      return {
+        x: rect.left + rect.width / 2 - svgRect.left,
+        y: rect.top + rect.height / 2 - svgRect.top,
+      };
+    }
+
+    function pathBetween(from, to) {
+      const horizontal = Math.abs(to.x - from.x);
+      const vertical = Math.abs(to.y - from.y);
+      if (horizontal < 72 && vertical > 24) {
+        const railX = Math.max(from.x, to.x) + 26;
+        return `M ${from.x.toFixed(1)} ${from.y.toFixed(1)} C ${railX.toFixed(1)} ${from.y.toFixed(1)} ${railX.toFixed(1)} ${to.y.toFixed(1)} ${to.x.toFixed(1)} ${to.y.toFixed(1)}`;
+      }
+      const dx = Math.max(56, horizontal * 0.34);
+      const direction = to.x >= from.x ? 1 : -1;
+      const c1x = from.x + dx * direction;
+      const c2x = to.x - dx * direction;
+      return `M ${from.x.toFixed(1)} ${from.y.toFixed(1)} C ${c1x.toFixed(1)} ${from.y.toFixed(1)} ${c2x.toFixed(1)} ${to.y.toFixed(1)} ${to.x.toFixed(1)} ${to.y.toFixed(1)}`;
+    }
+
+    function drawChainConnectors(chainId) {
+      const chainCards = getChainCards(chainId);
+      const svgRect = ghostLines.getBoundingClientRect();
+      chainSvg.setAttribute('viewBox', `0 0 ${svgRect.width} ${svgRect.height}`);
+      chainSvg.innerHTML = '';
+      if (chainCards.length < 2 || svgRect.width <= 0 || svgRect.height <= 0) return;
+
+      const fragment = document.createDocumentFragment();
+      chainCards.forEach((card) => {
+        const point = getAnchorPoint(card, svgRect);
+        const anchor = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+        anchor.setAttribute('class', 'line-anchor');
+        anchor.setAttribute('cx', point.x.toFixed(1));
+        anchor.setAttribute('cy', point.y.toFixed(1));
+        anchor.setAttribute('r', card.dataset.card === activeCardId ? '4.5' : '3');
+        fragment.appendChild(anchor);
+      });
+
+      for (let index = 0; index < chainCards.length - 1; index += 1) {
+        const from = getAnchorPoint(chainCards[index], svgRect);
+        const to = getAnchorPoint(chainCards[index + 1], svgRect);
+        const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        path.setAttribute('class', index <= 1 ? 'line-main' : 'line-future');
+        path.setAttribute('d', pathBetween(from, to));
+        fragment.appendChild(path);
+      }
+
+      chainSvg.appendChild(fragment);
+
+    }
+
+    const phaseOrder = { plan: 0, code: 1, review: 2, ship: 3 };
+
+    function laneOrderIsValid(goals) {
+      return goals.every((goal, index) => index === 0 || phaseOrder[goals[index - 1].phase] <= phaseOrder[goal.phase]);
+    }
+
+    function goalsAfterMove(workspace, direction) {
+      const goals = [...chains.billing.goals];
+      const index = goals.findIndex(goal => goal.workspace === workspace);
+      const nextIndex = index + direction;
+      if (index < 0 || nextIndex < 0 || nextIndex >= goals.length) return null;
+      [goals[index], goals[nextIndex]] = [goals[nextIndex], goals[index]];
+      return goals;
+    }
+
+    function canMoveGoal(workspace, direction) {
+      const moved = goalsAfterMove(workspace, direction);
+      return Boolean(moved && laneOrderIsValid(moved));
+    }
+
+    function refreshOrderPanelNote() {
+      const dirty = !orderMatchesOriginal();
+      orderPanelNote.textContent = dirty
+        ? 'Order changed. Saving updates planning order only; branch stack validation comes next.'
+        : 'Plan → Code → Review → Ship. Same-lane swaps are allowed.';
+    }
+
+    function renderOrderPanel() {
+      orderList.innerHTML = chains.billing.goals.map((goal, index) => {
+        const canEarlier = canMoveGoal(goal.workspace, -1);
+        const canLater = canMoveGoal(goal.workspace, 1);
+        const selected = goal.workspace === selectedOrderWorkspace;
+        return `
+          <div class="order-item${selected ? ' selected' : ''}" draggable="true" tabindex="0" data-goal="${goal.workspace}" role="option" aria-selected="${selected}">
+            <div class="order-index">${index + 1}</div>
+            <div>
+              <div class="order-name">${goal.workspace}</div>
+              <div class="order-meta">${goal.phase} · ${goal.name}</div>
+            </div>
+            <div class="order-move">
+              <button data-action="earlier" data-goal="${goal.workspace}" ${canEarlier ? '' : 'disabled'} title="Lane rule prevents this move">↑</button>
+              <button data-action="later" data-goal="${goal.workspace}" ${canLater ? '' : 'disabled'} title="Lane rule prevents this move">↓</button>
+            </div>
+          </div>`;
+      }).join('');
+      refreshOrderPanelNote();
+    }
+
+    function focusOrderItem(workspace) {
+      requestAnimationFrame(() => orderList.querySelector(`[data-goal="${workspace}"]`)?.focus());
+    }
+
+    function openOrderPanel(workspace = activeCardId || 'billing-api') {
+      selectedOrderWorkspace = workspace;
+      editingOrder = true;
+      pinned = true;
+      orderPanel.classList.add('visible');
+      renderBillingOrder(workspace);
+      renderOrderPanel();
+      focusOrderItem(workspace);
+    }
+
+    function closeFloatingOrderPanel({ restore = false } = {}) {
+      if (restore) {
+        const byWorkspace = new Map(chains.billing.goals.map(goal => [goal.workspace, goal]));
+        chains.billing.goals = originalBillingOrder.map(workspace => byWorkspace.get(workspace)).filter(Boolean);
+        billingReordered = false;
+      }
+      editingOrder = false;
+      orderPanel.classList.remove('visible');
+      renderBillingOrder(selectedOrderWorkspace);
+    }
+
+    function moveOrderPanelGoal(workspace, direction) {
+      const before = chains.billing.goals.map(goal => goal.workspace).join('|');
+      moveBillingGoal(workspace, direction);
+      const after = chains.billing.goals.map(goal => goal.workspace).join('|');
+      if (before !== after) selectedOrderWorkspace = workspace;
+      renderOrderPanel();
+      focusOrderItem(selectedOrderWorkspace);
+    }
+
+    function moveGoalToIndex(workspace, targetIndex) {
+      const goals = [...chains.billing.goals];
+      const fromIndex = goals.findIndex(goal => goal.workspace === workspace);
+      if (fromIndex < 0 || targetIndex < 0 || targetIndex >= goals.length || fromIndex === targetIndex) return;
+      const [goal] = goals.splice(fromIndex, 1);
+      goals.splice(targetIndex, 0, goal);
+      if (!laneOrderIsValid(goals)) {
+        orderPanelNote.textContent = 'Lane rule blocked that drop. Keep Plan → Code → Review → Ship order; same-lane ties are allowed.';
+        return;
+      }
+      chains.billing.goals = goals;
+      selectedOrderWorkspace = workspace;
+      renderBillingOrder(workspace);
+      renderOrderPanel();
+      focusOrderItem(workspace);
+    }
+
+    function renderChain(chainId, focusedCardId = null) {
+      const chain = chains[chainId];
+      if (!chain) return;
+      activeChain = chainId;
+      activeCardId = focusedCardId;
+      title.textContent = chain.title;
+      subtitle.textContent = chain.subtitle;
+      currentGoal.textContent = chain.current;
+      blockedBy.textContent = chain.blockedBy;
+      nextGoal.textContent = chain.nextGoal;
+      syncWarning.classList.toggle('visible', chainId === 'billing' && billingReordered && !editingOrder);
+      restackDemo.textContent = chainId === 'billing' && billingReordered ? 'Validate restack' : 'Validate stack';
+      editOrder.disabled = chainId !== 'billing';
+      lens.classList.toggle('editing', editingOrder);
+      editStrip.classList.toggle('visible', editingOrder);
+      editOrder.hidden = editingOrder;
+      saveOrder.hidden = !editingOrder;
+      cancelOrder.hidden = !editingOrder;
+      rail.style.gridTemplateColumns = `repeat(${chain.goals.length}, minmax(120px, 1fr))`;
+      rail.innerHTML = chain.goals.map((goal, index) => {
+        const needsRestack = chainId === 'billing' && billingReordered && !editingOrder && (goal.workspace === 'billing-ui' || goal.workspace === 'billing-api');
+        const orderDirty = chainId === 'billing' && chain.goals[index]?.workspace !== originalBillingOrder[index];
+        const targetClass = goal.workspace === focusedCardId ? ' reorder-target' : '';
+        const canMoveEarlier = canMoveGoal(goal.workspace, -1);
+        const canMoveLater = canMoveGoal(goal.workspace, 1);
+        const earlierReason = canMoveEarlier ? '' : 'Lane rule: cannot move before an ancestor in a later kanban lane.';
+        const laterReason = canMoveLater ? '' : 'Lane rule: cannot put a descendant in an earlier kanban lane.';
+        return `
+        <div class="goal-node ${goal.state}${needsRestack ? ' needs-restack' : ''}${orderDirty ? ' order-dirty' : ''}${targetClass}" data-goal="${goal.workspace}">
+          <div class="node-dot">${index + 1}</div>
+          <div class="node-card">
+            <div class="node-state">${goal.state}${needsRestack ? ' · needs restack' : ''}</div>
+            <div class="node-name">${goal.name}</div>
+            <div class="node-meta">${goal.workspace}<br>${goal.phase.toUpperCase()} · ${goal.meta}</div>
+            <div class="node-controls">
+              <button class="node-control" data-action="earlier" data-goal="${goal.workspace}" type="button" ${canMoveEarlier ? '' : 'disabled'} title="${earlierReason}">← earlier</button>
+              <button class="node-control" data-action="later" data-goal="${goal.workspace}" type="button" ${canMoveLater ? '' : 'disabled'} title="${laterReason}">later →</button>
+              <button class="node-control" data-action="edit" data-goal="${goal.workspace}" type="button">edit</button>
+            </div>
+          </div>
+        </div>`;
+      }).join('');
+
+      cards.forEach(card => {
+        const sameChain = card.dataset.chain === chainId;
+        card.classList.toggle('active', sameChain && card.dataset.card === focusedCardId);
+        card.classList.toggle('related', sameChain);
+        card.classList.toggle('dimmed', Boolean(card.dataset.chain) ? !sameChain : true);
+        if (sameChain && (card.dataset.card || '').includes('api')) card.classList.add('blocking');
+        else card.classList.remove('blocking');
+      });
+      lens.classList.add('visible');
+      ghostLines.classList.add('visible');
+      document.body.classList.add('chain-open');
+      requestAnimationFrame(() => drawChainConnectors(chainId));
+    }
+
+    function clearChain(force = false) {
+      if (pinned && !force) return;
+      activeChain = null;
+      activeCardId = null;
+      chainSvg.innerHTML = '';
+      cards.forEach(card => card.classList.remove('active', 'related', 'blocking', 'dimmed'));
+      lens.classList.remove('visible');
+      ghostLines.classList.remove('visible');
+      document.body.classList.remove('chain-open');
+    }
+
+    cards.forEach(card => {
+      if (!card.dataset.chain) return;
+      const row = card.querySelector('.row');
+      const affordance = document.createElement('span');
+      affordance.className = 'rearrange-affordance';
+      affordance.dataset.openOrder = card.dataset.card;
+      affordance.textContent = '⇅';
+      affordance.title = 'Edit chain order';
+      affordance.tabIndex = 0;
+      row?.appendChild(affordance);
+    });
+
+    cards.forEach(card => {
+      card.addEventListener('mouseenter', () => {
+        if (pinned) return;
+        if (card.dataset.chain) renderChain(card.dataset.chain, card.dataset.card);
+      });
+      card.addEventListener('focus', () => {
+        if (card.dataset.chain) renderChain(card.dataset.chain, card.dataset.card);
+      });
+      card.addEventListener('mouseleave', () => {
+        if (!pinned) clearChain();
+      });
+      card.addEventListener('click', (event) => {
+        const orderTarget = event.target.closest('[data-open-order]');
+        if (orderTarget) {
+          event.preventDefault();
+          event.stopPropagation();
+          openOrderPanel(orderTarget.dataset.openOrder);
+          return;
+        }
+        if (!card.dataset.chain) return;
+        event.preventDefault();
+        if (pinned && activeChain === card.dataset.chain && activeCardId === card.dataset.card) {
+          pinned = false;
+          clearChain(true);
+        } else {
+          pinned = true;
+          renderChain(card.dataset.chain, card.dataset.card);
+        }
+      });
+    });
+
+    document.addEventListener('keydown', (event) => {
+      const target = event.target.closest?.('[data-open-order]');
+      if (!target) return;
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        openOrderPanel(target.dataset.openOrder);
+      }
+    });
+
+    window.addEventListener('resize', () => {
+      if (activeChain) drawChainConnectors(activeChain);
+    });
+
+    document.querySelectorAll('.cards').forEach(scroller => {
+      scroller.addEventListener('scroll', () => {
+        if (activeChain) drawChainConnectors(activeChain);
+      }, { passive: true });
+    });
+
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') {
+        if (orderPanel.classList.contains('visible')) {
+          closeFloatingOrderPanel();
+          return;
+        }
+        pinned = false;
+        clearChain(true);
+      }
+    });
+
+    function orderMatchesOriginal() {
+      return chains.billing.goals.every((goal, index) => goal.workspace === originalBillingOrder[index]);
+    }
+
+    function updateBillingSummary(focusedWorkspace = activeCardId || 'billing-api') {
+      const billing = chains.billing;
+      const order = billing.goals.map(goal => goal.workspace);
+      const focusedIndex = Math.max(0, billing.goals.findIndex(goal => goal.workspace === focusedWorkspace));
+      const current = billing.goals[focusedIndex] || billing.goals[0];
+      const previous = billing.goals[focusedIndex - 1];
+      const next = billing.goals[focusedIndex + 1];
+      billingReordered = !orderMatchesOriginal();
+      billing.subtitle = billingReordered
+        ? `Goal order: ${order.join(' → ')} · git stack still schema → api → ui → e2e → polish`
+        : 'Workspace stack: billing-schema → billing-api → billing-ui → billing-e2e → billing-polish';
+      billing.current = `${current.workspace} · ${editingOrder ? 'editing position' : current.name}`;
+      billing.blockedBy = previous ? `previous: ${previous.workspace}${billingReordered ? ' · validate stack after save' : ''}` : 'first goal in chain';
+      billing.nextGoal = next ? `next: ${next.workspace}${billingReordered ? ' · branch ancestry needs validation' : ''}` : 'last goal in chain';
+    }
+
+    function renderBillingOrder(focusedWorkspace = activeCardId || 'billing-api') {
+      updateBillingSummary(focusedWorkspace);
+      renderChain('billing', focusedWorkspace);
+    }
+
+    function moveBillingGoal(workspace, direction) {
+      const moved = goalsAfterMove(workspace, direction);
+      if (!moved || !laneOrderIsValid(moved)) return;
+      chains.billing.goals = moved;
+      renderBillingOrder(workspace);
+    }
+
+    function setEditingOrder(nextValue) {
+      editingOrder = nextValue;
+      pinned = true;
+      if (!nextValue) billingReordered = !orderMatchesOriginal();
+      renderBillingOrder(activeCardId || 'billing-api');
+    }
+
+    editOrder.addEventListener('click', () => {
+      openOrderPanel(activeCardId || 'billing-api');
+    });
+
+    saveOrder.addEventListener('click', () => {
+      setEditingOrder(false);
+      if (billingReordered) {
+        syncWarning.classList.add('visible');
+        syncWarning.querySelector('span').innerHTML = '<strong>Goal order saved; git stack unchanged.</strong> Run validation/restack when ready.';
+      }
+    });
+
+    cancelOrder.addEventListener('click', () => {
+      const byWorkspace = new Map(chains.billing.goals.map(goal => [goal.workspace, goal]));
+      chains.billing.goals = originalBillingOrder.map(workspace => byWorkspace.get(workspace)).filter(Boolean);
+      editingOrder = false;
+      billingReordered = false;
+      renderBillingOrder('billing-api');
+    });
+
+    undoReorder.addEventListener('click', () => {
+      cancelOrder.click();
+    });
+
+    rail.addEventListener('click', (event) => {
+      const control = event.target.closest('.node-control');
+      if (!control) return;
+      const action = control.dataset.action;
+      const goal = control.dataset.goal;
+      if (action === 'earlier') moveBillingGoal(goal, -1);
+      if (action === 'later') moveBillingGoal(goal, 1);
+    });
+
+    orderList.addEventListener('click', (event) => {
+      const moveButton = event.target.closest('.order-move button');
+      const item = event.target.closest('.order-item');
+      if (moveButton) {
+        moveOrderPanelGoal(moveButton.dataset.goal, moveButton.dataset.action === 'earlier' ? -1 : 1);
+        return;
+      }
+      if (item) {
+        selectedOrderWorkspace = item.dataset.goal;
+        renderOrderPanel();
+      }
+    });
+
+    orderList.addEventListener('keydown', (event) => {
+      const item = event.target.closest('.order-item');
+      if (!item) return;
+      selectedOrderWorkspace = item.dataset.goal;
+      if (event.key === 'ArrowUp') {
+        event.preventDefault();
+        moveOrderPanelGoal(selectedOrderWorkspace, -1);
+      }
+      if (event.key === 'ArrowDown') {
+        event.preventDefault();
+        moveOrderPanelGoal(selectedOrderWorkspace, 1);
+      }
+    });
+
+    orderList.addEventListener('dragstart', (event) => {
+      const item = event.target.closest('.order-item');
+      if (!item) return;
+      draggedWorkspace = item.dataset.goal;
+      event.dataTransfer.effectAllowed = 'move';
+    });
+
+    orderList.addEventListener('dragover', (event) => {
+      const item = event.target.closest('.order-item');
+      if (!item || !draggedWorkspace) return;
+      event.preventDefault();
+      item.classList.add('drag-over');
+    });
+
+    orderList.addEventListener('dragleave', (event) => {
+      event.target.closest('.order-item')?.classList.remove('drag-over');
+    });
+
+    orderList.addEventListener('drop', (event) => {
+      const item = event.target.closest('.order-item');
+      if (!item || !draggedWorkspace) return;
+      event.preventDefault();
+      item.classList.remove('drag-over');
+      const targetIndex = chains.billing.goals.findIndex(goal => goal.workspace === item.dataset.goal);
+      moveGoalToIndex(draggedWorkspace, targetIndex);
+      draggedWorkspace = null;
+    });
+
+    orderList.addEventListener('dragend', () => {
+      draggedWorkspace = null;
+      orderList.querySelectorAll('.drag-over').forEach(item => item.classList.remove('drag-over'));
+    });
+
+    closeOrderPanel.addEventListener('click', () => closeFloatingOrderPanel());
+    cancelPanelOrder.addEventListener('click', () => closeFloatingOrderPanel({ restore: true }));
+    savePanelOrder.addEventListener('click', () => {
+      closeFloatingOrderPanel();
+      if (billingReordered) {
+        syncWarning.classList.add('visible');
+        syncWarning.querySelector('span').innerHTML = '<strong>Goal order saved; git stack unchanged.</strong> Run validation/restack when ready.';
+      }
+    });
+
+    restackDemo.addEventListener('click', () => {
+      pinned = true;
+      if (!activeChain) renderChain('billing', 'billing-api');
+      syncWarning.classList.add('visible');
+      syncWarning.querySelector('span').innerHTML = billingReordered
+        ? '<strong>Validation: restack needed.</strong> Adjacent chain order changed; at least one branch parent no longer matches the previous goal.'
+        : '<strong>Validation: aligned.</strong> Adjacent goal order and git stack currently agree for this linear chain.';
+    });
+
+    lens.addEventListener('mouseenter', () => { if (activeChain) lens.classList.add('visible'); });
+  </script>
+</body>
+</html>

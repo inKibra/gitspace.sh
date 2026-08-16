@@ -13,9 +13,12 @@ import {
   createPiSessionManager,
   getManagedPiExtensionPaths,
   persistInitialPiSessionModel,
+  makeLocalProtocolOptions,
 } from './pi-runtime.js';
+import { getManagedSessionBootstrap } from './managed-defaults.js';
 // Dynamic import: oh-my-pi has module-level side effects (postmortem signal
-// handlers, provider registration) that conflict with OpenTUI when loaded eagerly.
+// handlers that can call process.exit, provider registration) that must not
+// run just because this module is imported.
 const importSdk = () => import('@oh-my-pi/pi-coding-agent/sdk');
 import { listPiSessions, findPiSessionFile } from './pi-session-files.js';
 
@@ -119,19 +122,25 @@ export class PiBackend implements AgentBackend {
     const cwd = target.workspacePath;
     if (!cwd) throw new Error('workspacePath required for Pi session');
 
-    const { createAgentSession } = await importSdk();
+    const { createAgentSession, discoverSkills } = await importSdk();
     const { agentDir, sessionManager } = await createPiSessionManager(cwd);
+    const managedBootstrap = await getManagedSessionBootstrap(cwd, agentDir, discoverSkills);
+    const localProtocol = makeLocalProtocolOptions(cwd);
     const result = await createAgentSession({
       agentDir,
       sessionManager,
       cwd,
       additionalExtensionPaths: getManagedPiExtensionPaths(),
+      skills: managedBootstrap.skills,
       hasUI: true,
+      localProtocolOptions: localProtocol.options,
     });
     const { session } = result;
-    if (input.title) {
-      await sessionManager.setSessionName(input.title);
-    }
+    localProtocol.bind(session.sessionId);
+    // Deliberately NOT setSessionName(input.title) — Pi's title generation only
+    // runs when the session has no name, so seeding one here threw the generated
+    // title away. `input.title` remains the summary's display label below until
+    // Pi produces a real one.
     await persistInitialPiSessionModel(session);
     await sessionManager.rewriteEntries();
 

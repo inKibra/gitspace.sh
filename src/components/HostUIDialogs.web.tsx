@@ -19,13 +19,44 @@ const BTN_CANCEL = 'gs-button-secondary';
 const BTN_PRIMARY = 'gs-button-primary';
 const FIELD = 'gs-field';
 
+/**
+ * A dialog request can reach the overlay from a live broadcast, an attach
+ * catch-up re-emit, or a session that is not the foreground/attached one. Render
+ * defensively: a request whose per-type payload is missing/misshapen must never
+ * throw during render (which would take down the whole pane / React tree). An
+ * unrenderable request is dropped (logged) instead.
+ */
+function isRenderableDialogRequest(request: HostUIDialogRequest): boolean {
+  if (!request || typeof request !== 'object' || typeof (request as { id?: unknown }).id !== 'string') return false;
+  switch (request.type) {
+    case 'select':
+      return Array.isArray(request.options);
+    case 'ask-form':
+      return Array.isArray(request.questions) && request.questions.every((q) => q && Array.isArray(q.options));
+    case 'confirm':
+      return typeof request.message === 'string';
+    case 'input':
+    case 'editor':
+      return true;
+    default:
+      return false;
+  }
+}
+
 export function HostUIDialogOverlay({ request, onResponse }: HostUIDialogOverlayProps) {
   if (!request) return null;
+  if (!isRenderableDialogRequest(request)) {
+    console.error('[HostUIDialogs] dropping unrenderable dialog request', request);
+    return null;
+  }
 
   const dismiss = () => {
     switch (request.type) {
       case 'select':
         onResponse({ type: 'select', id: request.id, value: undefined });
+        return;
+      case 'ask-form':
+        onResponse({ type: 'ask-form', id: request.id, value: undefined });
         return;
       case 'confirm':
         onResponse({ type: 'confirm', id: request.id, value: false });
@@ -39,18 +70,7 @@ export function HostUIDialogOverlay({ request, onResponse }: HostUIDialogOverlay
     }
   };
 
-  const content = (() => {
-    switch (request.type) {
-      case 'select':
-        return <SelectDialog key={request.id} request={request} onResponse={onResponse} />;
-      case 'confirm':
-        return <ConfirmDialog key={request.id} request={request} onResponse={onResponse} />;
-      case 'input':
-        return <InputDialog key={request.id} request={request} onResponse={onResponse} />;
-      case 'editor':
-        return <EditorDialog key={request.id} request={request} onResponse={onResponse} />;
-    }
-  })();
+  const content = dialogContentFor(request, onResponse);
 
   return createPortal(
     <div className="gs-overlay-root" onClick={dismiss}>
@@ -59,6 +79,45 @@ export function HostUIDialogOverlay({ request, onResponse }: HostUIDialogOverlay
     </div>,
     document.body,
   );
+}
+
+/** The dialog card for a request, without any overlay/portal chrome. Shared by
+ *  the modal overlay and the inline (in-chat) presentation. */
+function dialogContentFor(
+  request: HostUIDialogRequest,
+  onResponse: (r: HostUIDialogResponse) => void,
+): ReactNode {
+  switch (request.type) {
+    case 'select':
+      return <SelectDialog key={request.id} request={request} onResponse={onResponse} />;
+    case 'ask-form':
+      return <AskFormDialog key={request.id} request={request} onResponse={onResponse} />;
+    case 'confirm':
+      return <ConfirmDialog key={request.id} request={request} onResponse={onResponse} />;
+    case 'input':
+      return <InputDialog key={request.id} request={request} onResponse={onResponse} />;
+    case 'editor':
+      return <EditorDialog key={request.id} request={request} onResponse={onResponse} />;
+    default:
+      return null;
+  }
+}
+
+/**
+ * Inline (in-chat) variant: renders the dialog card in normal document flow — no
+ * portal, no backdrop — so it sits directly above the composer while the
+ * transcript stays visible and scrollable above it. This is the right shape for
+ * an agent question: you need to read the conversation to answer it. A tall
+ * dialog scrolls within its own bounded region (.gs-agent-dialog-inline in CSS)
+ * rather than pushing the composer off-screen.
+ */
+export function HostUIDialogInline({ request, onResponse }: HostUIDialogOverlayProps) {
+  if (!request) return null;
+  if (!isRenderableDialogRequest(request)) {
+    console.error('[HostUIDialogs] dropping unrenderable dialog request', request);
+    return null;
+  }
+  return <div className="gs-agent-dialog-inline">{dialogContentFor(request, onResponse)}</div>;
 }
 
 interface DialogShellProps {
@@ -119,20 +178,161 @@ function SelectDialog({ request, onResponse }: SelectDialogProps) {
           <div className="gs-empty-panel">No options available.</div>
         ) : (
           <div className="gs-select-list max-h-72 overflow-y-auto">
-            {request.options.map((option, idx) => (
-              <button
-                key={idx}
-                type="button"
-                onClick={() => pick(option)}
-                className="gs-select-item"
-              >
-                {option}
-              </button>
-            ))}
+            {request.options.map((option, idx) => {
+              // The SDK passes {label, description} objects; older/plain callers
+              // pass strings. Never render the raw object (React child crash).
+              const label = typeof option === 'string' ? option : option.label;
+              const description = typeof option === 'string' ? undefined : option.description;
+              return (
+                <button
+                  key={idx}
+                  type="button"
+                  onClick={() => pick(label)}
+                  className="gs-select-item"
+                >
+                  <span className="text-[var(--gs-text)]">{label}</span>
+                  {description ? (
+                    <span className="ml-2 text-xs text-[var(--gs-text-dim)]">{description}</span>
+                  ) : null}
+                </button>
+              );
+            })}
           </div>
         )}
         <div className="flex justify-end">
           <button type="button" onClick={cancel} className={BTN_CANCEL}>Cancel</button>
+        </div>
+      </div>
+    </DialogShell>
+  );
+}
+
+interface AskFormDialogProps {
+  request: Extract<HostUIDialogRequest, { type: 'ask-form' }>;
+  onResponse: (r: HostUIDialogResponse) => void;
+}
+
+interface AskFormAnswerState {
+  /** Selected option labels (one for radio, many for checkbox). */
+  selected: string[];
+  /** Free-text "Other" answer. */
+  custom: string;
+}
+
+/**
+ * AskFormDialog — one native form presenting every question from a single `ask`
+ * tool call. Single-choice questions render radios; multi-choice render
+ * checkboxes; every question also offers a free-text "Other" field (matching the
+ * SDK, which always appends an "Other" option). One submit returns all answers.
+ */
+function AskFormDialog({ request, onResponse }: AskFormDialogProps) {
+  const [answers, setAnswers] = useState<Record<string, AskFormAnswerState>>(() => {
+    const initial: Record<string, AskFormAnswerState> = {};
+    for (const q of request.questions) {
+      const preselect =
+        typeof q.recommended === 'number' && q.recommended >= 0 && q.recommended < q.options.length
+          ? [q.options[q.recommended]!.label]
+          : [];
+      initial[q.id] = { selected: preselect, custom: '' };
+    }
+    return initial;
+  });
+
+  const cancel = () => onResponse({ type: 'ask-form', id: request.id, value: undefined });
+  const submit = () =>
+    onResponse({
+      type: 'ask-form',
+      id: request.id,
+      value: request.questions.map((q) => {
+        const state = answers[q.id] ?? { selected: [], custom: '' };
+        const custom = state.custom.trim();
+        return {
+          id: q.id,
+          selectedOptions: state.selected,
+          ...(custom ? { customInput: custom } : {}),
+        };
+      }),
+    });
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        cancel();
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, []);
+
+  const toggleOption = (questionId: string, label: string, multiple: boolean) => {
+    setAnswers((prev) => {
+      const state = prev[questionId] ?? { selected: [], custom: '' };
+      let selected: string[];
+      if (multiple) {
+        selected = state.selected.includes(label)
+          ? state.selected.filter((l) => l !== label)
+          : [...state.selected, label];
+      } else {
+        selected = state.selected[0] === label ? [] : [label];
+      }
+      return { ...prev, [questionId]: { ...state, selected } };
+    });
+  };
+
+  const setCustom = (questionId: string, custom: string) => {
+    setAnswers((prev) => {
+      const state = prev[questionId] ?? { selected: [], custom: '' };
+      return { ...prev, [questionId]: { ...state, custom } };
+    });
+  };
+
+  return (
+    <DialogShell title={request.title} onBackdropClick={cancel} width="lg" kicker="Agent questions">
+      <div className="gs-panel-block max-h-[70vh] overflow-y-auto">
+        {request.questions.map((q) => {
+          const state = answers[q.id] ?? { selected: [], custom: '' };
+          return (
+            <div key={q.id} className="flex flex-col gap-2 border-b border-[var(--gs-border-muted)] pb-3 last:border-b-0">
+              <div className="font-medium text-[var(--gs-text)] whitespace-pre-wrap">{q.question}</div>
+              <div className="flex flex-col gap-1">
+                {q.options.map((option, idx) => {
+                  const checked = state.selected.includes(option.label);
+                  return (
+                    <label
+                      key={idx}
+                      className="flex cursor-pointer items-start gap-2 rounded px-2 py-1 hover:bg-[var(--gs-bg-elevated)]"
+                    >
+                      <input
+                        type={q.multiple ? 'checkbox' : 'radio'}
+                        name={`askform-${request.id}-${q.id}`}
+                        checked={checked}
+                        onChange={() => toggleOption(q.id, option.label, q.multiple)}
+                        className="mt-1"
+                      />
+                      <span className="flex flex-col">
+                        <span className="text-[var(--gs-text)]">{option.label}</span>
+                        {option.description ? (
+                          <span className="text-xs text-[var(--gs-text-dim)]">{option.description}</span>
+                        ) : null}
+                      </span>
+                    </label>
+                  );
+                })}
+              </div>
+              <input
+                type="text"
+                value={state.custom}
+                onChange={(e) => setCustom(q.id, e.target.value)}
+                placeholder="Other (type your own)"
+                className={FIELD}
+              />
+            </div>
+          );
+        })}
+        <div className="flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
+          <button type="button" onClick={cancel} className={BTN_CANCEL}>Cancel</button>
+          <button type="button" onClick={submit} className={BTN_PRIMARY}>Submit</button>
         </div>
       </div>
     </DialogShell>

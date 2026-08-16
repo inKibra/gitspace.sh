@@ -41,7 +41,16 @@ export function useProcessActions(options: UseProcessActionsOptions): UseProcess
       await attemptStart();
     } catch (error) {
       if (isPortConflictError(error)) {
-        const resolved = await promptToResolveProcessStartConflict({ error, showConfirm: options.flow.showConfirm });
+        const resolved = await promptToResolveProcessStartConflict({
+          error,
+          showConfirm: options.flow.showConfirm,
+          resolveConflict: async (conflict) => {
+            if (!client.processes.resolveConflict) {
+              throw new Error('Port conflict resolution is unavailable');
+            }
+            await client.processes.resolveConflict(workspaceId, conflict);
+          },
+        });
         if (resolved) {
           await attemptStart();
           return;

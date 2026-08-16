@@ -4,15 +4,15 @@ This document provides comprehensive information for AI assistants working on th
 
 ## Project Overview
 
-**GitSpace** is a powerful CLI tool for managing GitHub repository workspaces using git worktrees, with secure remote terminal access via an E2E encrypted relay system. It features both a TUI (Terminal User Interface) and web interface for interactive management.
+**GitSpace** is a powerful CLI tool for managing GitHub repository workspaces using git worktrees, with secure remote terminal access via an E2E encrypted relay system. Its interactive surface is the web app.
 
 **Key Capabilities:**
 - Git worktrees for parallel branch development
-- Interactive TUI for workspace management
+- Web app for interactive workspace management
 - **Remote terminal access** via E2E encrypted relay
 - **Identity-based access control** with Ed25519/X25519 keys
 - **X3DH handshake** for forward-secret session encryption
-- Web terminal interface (React + xterm.js)
+- Web terminal interface (React + ghostty-web)
 - Linear issue integration for workspace creation
 - Convention-based custom scripts in `.gitspace/scripts/` (pre, setup, select, remove phases)
 
@@ -50,13 +50,11 @@ This document provides comprehensive information for AI assistants working on th
 
 ```
 src/
-├── index.ts                    # Entry point (TUI or CLI dispatch)
+├── index.ts                    # Entry point (CLI dispatch)
 ├── commands/                   # CLI command implementations (17 files)
-│   ├── access.ts               # Access control list (add/list/remove)
 │   ├── add.ts                  # Add projects/workspaces
 │   ├── auth.ts                 # GitHub OAuth for gitspace.sh
 │   ├── connect.ts              # Connect to remote machine
-│   ├── directory.ts            # Get project directory path
 │   ├── host.ts                 # Subdomain hosting (reserve/release/list)
 │   ├── identity.ts             # Identity management (init/show)
 │   ├── linear.ts               # Linear integration (setup/show/clear)
@@ -67,7 +65,6 @@ src/
 │   ├── serve.ts                # Machine daemon for remote access
 │   ├── invite.ts               # Root-signed invite management
 │   ├── status.ts               # Unified daemon status display
-│   ├── switch.ts               # Switch projects/workspaces
 │   └── tmux.ts                 # tmux-lite CLI commands
 ├── core/                       # Core business logic (8 files)
 │   ├── access.ts               # Access list management
@@ -101,7 +98,6 @@ src/
 │   ├── server.ts               # WebSocket routing server
 │   ├── protocol.ts             # Message types and validation
 │   ├── registries.ts           # Machine/invite/auth/global access registries
-│   ├── jwt.ts                  # JWT token creation/verification (HMAC + Ed25519)
 │   ├── pipes.ts                # Pipe abstraction for data routing
 │   └── types.ts                # WebSocketData, RelayConfig types
 ├── serve/                      # Machine daemon (4 files)
@@ -110,39 +106,15 @@ src/
 │   ├── pty-session.ts          # PTY session management
 │   └── types.ts                # ServeOptions, permissions
 ├── shared/                     # Cross-platform components
-│   ├── components/             # Shared UI components (16 files)
+│   ├── components/             # Shared UI components (10 files)
 │   │   ├── MachineList.tsx     # Logic + hooks
-│   │   ├── MachineList.web.tsx # Web rendering
-│   │   ├── MachineList.tui.tsx # TUI rendering
-│   │   ├── SpacesBrowser.tsx   # Workspace browser logic
-│   │   ├── SpacesBrowser.web.tsx
-│   │   ├── SpacesBrowser.tui.tsx
-│   │   ├── Inbox.tsx           # Notification system
-│   │   ├── Inbox.web.tsx
-│   │   ├── Inbox.tui.tsx
-│   │   ├── Flow.tsx            # Modal dialog system
-│   │   ├── Flow.web.tsx
-│   │   ├── Flow.tui.tsx
-│   │   ├── ProjectList.tsx
-│   │   ├── ProjectList.web.tsx
-│   │   └── ProjectList.tui.tsx
+│   │   └── MachineList.web.tsx # Web rendering
 │   ├── providers/              # Machine access abstraction
 │   │   ├── MachineProvider.ts  # Interface definition
 │   │   └── LocalMachineProvider.ts  # Direct tmux-lite access
 │   ├── hooks/
 │   │   └── useUserActivity.ts  # Activity tracking for notifications
 │   └── types.ts                # Shared type definitions
-├── tui/                        # Terminal UI (OpenTUI)
-│   ├── index.ts                # TUI entry point
-│   ├── app.tsx                 # Main TUI application
-│   ├── components/
-│   │   ├── RemoteMachineScreen.tsx # Remote machine browser screen
-│   │   └── RemoteTerminal.tsx  # Embedded session terminal
-│   └── hooks/
-│       ├── useRemoteMachines.ts
-│       ├── useRemoteTerminal.ts
-│       ├── useLocalSession.ts
-│       └── useDaemonStatus.ts
 ├── web/                        # Web application (Vite + React)
 │   └── src/
 │       ├── App.tsx             # Main web app
@@ -182,7 +154,7 @@ src/
 ### Workspace Management
 | Command | Description |
 |---------|-------------|
-| `gssh` | Launch TUI (no args) |
+| `gssh` | Print help (no args) |
 | `gssh project add` | Add a new project from GitHub |
 | `gssh workspace add <name> --project <project-name>` | Create workspace in current project |
 | `gssh workspace context --project <project-name> --workspace <name>` | Show resolved workspace context |
@@ -196,10 +168,9 @@ src/
 |---------|-------------|
 | `gssh user identity init` | Create user root identity |
 | `gssh user identity show` | Display identity fingerprint |
-| `gssh machine access add <gssh-user:...>` | Grant machine full access |
-| `gssh machine access list` | List machine collaborators |
-| `gssh machine access remove <user-id\|label>` | Remove machine full access |
-| `gssh invite machine-user create <machine-id> <gssh-user:...> --relay <url>` | Create machine ACL invite |
+| `gssh invite relay-machine ...` | Invite a machine to register on a relay |
+| `gssh invite list` | List relay-machine invites you own |
+| `gssh invite revoke <invite-id>` | Revoke a machine enrollment invite |
 
 ### Remote Access
 | Command | Description |
@@ -215,8 +186,7 @@ src/
 | Command | Description |
 |---------|-------------|
 | `gssh relay start` | Start relay server |
-| `gssh relay access add <gssh-user:...>` | Grant relay membership |
-| `gssh relay access remove <user-id\|label>` | Revoke relay membership |
+| `gssh relay status` | Show relay server status |
 | `gssh invite relay-machine create --relay <url> --machine-signing-key <k> --machine-key-exchange-key <k>` | Create machine enrollment invite token |
 | `gssh relay machines list` | List authorized machines |
 | `gssh relay machines revoke <machine-id>` | Revoke machine authorization |
@@ -260,6 +230,20 @@ src/
 | `gssh user config linear clear` | Clear user-level Linear configuration |
 | `gssh user config linear clear --project <name>` | Clear project-specific Linear configuration |
 
+### Artifacts (per-project artifacts repo — docs/ARTIFACTS-FS.md, docs/ARTIFACT-PROTOCOL.md)
+| Command | Description |
+|---------|-------------|
+| `gssh artifacts provision` | One-click GitHub sharing: private `<owner>/<repo>-artifacts`, collaborators mirrored, large files on GitHub LFS |
+| `gssh artifacts status` | Repo path, tier (GitHub/BYO/local), hooks health, branches, blob store |
+| `gssh artifacts remote add <url>` | BYO remote (branches sync; no large-file transport) |
+| `gssh artifacts sync` | Fetch + ff main, publish-gate scan, push branches (+ LFS blobs on GitHub tier) |
+| `gssh artifacts rollup <workspace>` | Merge a workspace's artifacts branch into main |
+| `gssh artifacts repair` | Rewrite never-pushed commits that carry raw ≥2MB blobs into LFS pointers |
+| `gssh space artifacts commit <paths...> -m <msg>` | Sanctioned capture with provenance (in-session; `--cap` enforces a write scope) |
+| `gssh space artifacts promote <src> <destRelPath>` | Promote scratch into the versioned tree (the typing act) |
+| `gssh space artifacts share <relPath> [--ttl 7d] [--max-uses N]` | Mint a signed public link served through your relay |
+| `gssh space artifacts share-list` / `share-revoke <tokenId>` | Manage minted links |
+
 ### Bundle Management
 | Command | Description |
 |---------|-------------|
@@ -292,10 +276,14 @@ src/
 
 1. Machine runs `gssh machine serve start --relay ws://relay:4480/ws`
 2. Machine registers with relay (Ed25519 challenge-response auth)
-3. Owner creates relay/machine invites and collaborator accepts them (`gssh invite ...`, `gssh user auth invite accept <token>`)
+3. Owner creates a relay-machine invite (`gssh invite relay-machine ...`); the collaborator machine enrolls with it (`gssh machine enroll --invite <token>`)
 4. Client connects directly: `gssh client connect <machine-id>`
 5. X3DH handshake establishes session keys
 6. All terminal I/O is E2E encrypted
+
+### Agent Session Panes
+
+An agent pane is opened with `agent-open` and closed with `agent-release` over the local socket, or with `open_agent_session` and `release_agent_session` over the relay. Opening takes a viewer lease on the daemon; releasing drops it. Agent sessions have no attached terminal; the web client renders a native block transcript. The machine daemon and tmux-lite daemon run as one process, with agent SDK sessions in per-session worker child processes.
 
 ### Cryptographic Primitives
 
@@ -307,14 +295,13 @@ src/
 | Key derivation | HKDF-SHA256 |
 | Relay authentication | Ed25519 challenge-response |
 
-## TUI/Web Shared Component Pattern
+## Shared Component Pattern
 
-Components are split into three files:
+Components are split into two files:
 - `Component.tsx` - Logic/hooks (React-compatible)
 - `Component.web.tsx` - Web rendering (React DOM)
-- `Component.tui.tsx` - TUI rendering (OpenTUI)
 
-This allows shared business logic with platform-specific rendering.
+This allows shared business logic with web-specific rendering.
 
 ### MachineProvider Abstraction
 
@@ -338,14 +325,25 @@ interface MachineProvider {
 ### Building and Testing
 
 ```bash
+# Tests — ALWAYS use this for any result you intend to trust.
+# Runs each test file in its own process. Bun's `mock.module` is process-global
+# and `mock.restore()` does not undo it, so a shared process leaks mocks between
+# files: bare `bun test` reported 125 failures and hung, while the same tree run
+# one file per process reported 5. `bun test <one.test.ts>` is fine for a single
+# file; anything wider needs this.
+bun run test
+
+# Single-process run — fast iteration ONLY, results are not trustworthy.
+bun run test:fast
+
 # Type check
 bun run typecheck
 
 # Build
 bun run build
 
-# Run TUI
-bun src/index.ts
+# Run the web app (served by the machine daemon)
+bun src/index.ts machine serve start
 
 # Run relay (uses Ed25519 identity from keychain)
 bun src/index.ts relay start
@@ -372,11 +370,10 @@ bun src/index.ts machine serve start --relay ws://localhost:4480/ws
 | Entry point | `src/index.ts` |
 | Config management | `src/core/config.ts` |
 | Identity/crypto | `src/core/identity.ts`, `src/lib/tmux-lite/crypto/` |
-| Access control | `src/relay/auth/store.ts`, `src/commands/machine-access.ts` |
+| Access control | `src/relay/auth/store.ts` |
 | Relay server | `src/relay/server.ts` |
 | Relay protocol | `src/relay/protocol.ts` |
 | Relay registries | `src/relay/registries.ts` |
-| JWT tokens | `src/relay/jwt.ts` (HMAC + Ed25519) |
 | Machine daemon | `src/commands/serve.ts`, `src/serve/` |
 | Daemon lifecycle | `src/serve/daemon.ts` |
 | X3DH handshake | `src/lib/tmux-lite/handshake-handler.ts` |
@@ -392,7 +389,6 @@ bun src/index.ts machine serve start --relay ws://localhost:4480/ws
 **Runtime:**
 - `commander` - CLI framework
 - `@inquirer/prompts` - User prompts
-- `@opentui/core` - Terminal UI framework
 - `@linear/sdk` - Linear API client
 - `chalk` - Terminal colors
 - `ws` - WebSocket (relay)
@@ -400,7 +396,6 @@ bun src/index.ts machine serve start --relay ws://localhost:4480/ws
 - `@noble/ciphers` - AES-GCM encryption
 - `@noble/hashes` - HKDF, SHA256
 - `@xterm/headless` - Terminal state tracking
-- `ghostty-opentui` - TUI terminal embedding
 
 **System Commands:**
 - `gh` - GitHub CLI
@@ -417,7 +412,7 @@ bun src/index.ts machine serve start --relay ws://localhost:4480/ws
 | `docs/GETTING-STARTED.md` | Remote access setup guide |
 | `docs/CONNECTION.md` | Connection state management |
 | `docs/REMOTE-DESIGN.md` | E2E encryption design (identity-based) |
-| `docs/UNIFIED_ARCHITECTURE.md` | TUI/Web architecture plan |
+| `docs/UNIFIED_ARCHITECTURE.md` | Unified daemon and agent session architecture |
 | `docs/GATEWAY-WORKER.md` | Cloudflare Worker gateway spec |
 | `docs/ROADMAP.md` | Feature roadmap and vision |
 | `docs/INFRASTRUCTURE.md` | Future VM infrastructure (not implemented) |

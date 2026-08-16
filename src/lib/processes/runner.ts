@@ -62,7 +62,9 @@ function printEventLine(event: WideEvent): void {
 function shouldSuppressRaw(definition: ReturnType<typeof getProcessDefinition>): boolean {
   if (!definition) return true;
   if (definition.events?.enabled === false) return true;
-  if (definition.events?.mode === "json") return false;
+  // json/all gates capture from the full stream, so raw output is kept (not
+  // suppressed) — the events are an additional structured projection.
+  if (definition.events?.mode === "json" || definition.events?.mode === "all") return false;
   return definition.events?.keepRawOutput === true ? false : true;
 }
 
@@ -141,6 +143,14 @@ async function run(): Promise<void> {
 
   const suppressRaw = shouldSuppressRaw(definition);
   const prefix = eventsConfig.prefix || "@event";
+  const mode = eventsConfig.mode || "prefix";
+  // Which lines are event candidates, per capture gate. The collector then parses
+  // each with graceful fidelity (JSON → structured, else → string log).
+  const isEventCandidate = (trimmed: string): boolean => {
+    if (mode === "all") return trimmed.length > 0;
+    if (mode === "json") return trimmed.startsWith("{");
+    return trimmed.startsWith(prefix);
+  };
 
   let stdoutBuffer = "";
   let stderrBuffer = "";
@@ -152,6 +162,42 @@ async function run(): Promise<void> {
     stdout: "pipe",
     stderr: "pipe",
   });
+
+  // The runner is a supervisor: if it goes away, the service it started MUST go
+  // with it. Nothing else reliably does this. The daemon group-signals a
+  // session's tree on shutdown, but that only reaches this child when the
+  // runner leads its own process group — when the runner instead shares the
+  // daemon's group, group-signalling is (correctly) skipped to avoid killing
+  // the daemon itself, and only this process is signalled. Without the handlers
+  // below the service is orphaned to PID 1 and runs forever.
+  let terminating = false;
+  const terminate = (signal: NodeJS.Signals): void => {
+    if (terminating) return;
+    terminating = true;
+    try { child.kill(signal); } catch { /* already gone */ }
+    process.exit(0);
+  };
+  for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const) {
+    process.on(signal, () => terminate(signal));
+  }
+
+  // A SIGKILLed daemon runs no shutdown code and can signal nothing, so the
+  // handlers above never fire. The one thing the kernel still does is close the
+  // daemon's PTY master, which makes our end of that tty report EOF. Watching
+  // for it is the only way to notice a parent that died without warning — and
+  // it costs no polling. Guarded on isTTY so a runner started without a tty
+  // (stdin already closed) does not immediately kill its own service.
+  if (process.stdin.isTTY) {
+    void (async () => {
+      try {
+        for await (const _chunk of Bun.stdin.stream()) {
+          // The service owns no stdin; input here is only ever a keystroke from
+          // an attached viewer. Drain and discard — we care solely about EOF.
+        }
+      } catch { /* read error is a dead tty too */ }
+      terminate('SIGTERM');
+    })();
+  }
 
   const handleChunk = (data: Uint8Array, stream: "stdout" | "stderr") => {
     const buffer = Buffer.from(data);
@@ -180,7 +226,7 @@ async function run(): Promise<void> {
 
     for (const line of parts) {
       const trimmed = line.trim();
-      if (trimmed.startsWith(prefix)) {
+      if (isEventCandidate(trimmed)) {
         eventLines.push(trimmed);
       } else {
         nonEventPayload += `${line}\n`;

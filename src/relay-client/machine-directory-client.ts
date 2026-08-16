@@ -64,14 +64,23 @@ type RelayIncomingMessage = RelayMachineListMessage | RelayErrorMessage | { type
 export class RelayMachineDirectoryClient<TSocket> {
   private readonly options: RelayMachineDirectoryClientOptions<TSocket>;
   private readonly pingIntervalMs: number;
+  private readonly pongLivenessTimeoutMs: number;
   private socket: TSocket | null = null;
   private pingTimer: ReturnType<typeof setInterval> | null = null;
   private status: RelayStatus = 'disconnected';
   private machines: MachineInfo[] = [];
+  private lastPongAtMs = 0;
+  private manualDisconnect = false;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private reconnectAttempts = 0;
+  private readonly maxReconnectAttempts = 10;
 
   constructor(options: RelayMachineDirectoryClientOptions<TSocket>) {
     this.options = options;
     this.pingIntervalMs = options.pingIntervalMs ?? 15000;
+    // Three missed pings (min 45s) ⇒ the relay connection is dead even if the
+    // socket never emitted close (half-open TCP).
+    this.pongLivenessTimeoutMs = Math.max(this.pingIntervalMs * 3, 45000);
   }
 
   getStatus(): RelayStatus {
@@ -91,6 +100,8 @@ export class RelayMachineDirectoryClient<TSocket> {
       return;
     }
 
+    this.manualDisconnect = false;
+    this.cancelReconnect();
     this.setStatus('connecting');
 
     const url = new URL(this.options.relayUrl);
@@ -116,6 +127,9 @@ export class RelayMachineDirectoryClient<TSocket> {
           this.stopPing();
           this.socket = null;
           this.setStatus('disconnected');
+          // Unexpected close (liveness failure, relay restart): reconnect with
+          // backoff so machine discovery doesn't silently stay stale.
+          this.scheduleReconnect();
         },
         onError: (error) => {
           const message = error.message || 'Relay connection failed';
@@ -130,6 +144,8 @@ export class RelayMachineDirectoryClient<TSocket> {
   }
 
   disconnect(): void {
+    this.manualDisconnect = true;
+    this.cancelReconnect();
     this.stopPing();
 
     if (this.socket) {
@@ -145,12 +161,41 @@ export class RelayMachineDirectoryClient<TSocket> {
     this.options.onMachineList?.([]);
   }
 
+  private scheduleReconnect(): void {
+    if (this.manualDisconnect || this.reconnectTimer || this.socket) {
+      return;
+    }
+    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+      this.emitError(`Relay directory connection lost (gave up after ${this.maxReconnectAttempts} reconnect attempts)`);
+      this.setStatus('error');
+      return;
+    }
+    this.reconnectAttempts += 1;
+    const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts - 1) + Math.random() * 1000, 30000);
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      if (this.manualDisconnect || this.socket) return;
+      this.connect().catch(() => {
+        // onError already surfaced the failure; schedule the next attempt.
+        this.scheduleReconnect();
+      });
+    }, delay);
+  }
+
+  private cancelReconnect(): void {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+  }
+
   refreshMachines(): void {
     this.requestMachineList();
   }
 
   private startPing(): void {
     this.stopPing();
+    this.lastPongAtMs = Date.now();
     this.pingTimer = setInterval(() => {
       const socket = this.socket;
       if (!socket) {
@@ -159,6 +204,16 @@ export class RelayMachineDirectoryClient<TSocket> {
 
       const openState = this.options.socketAdapter.getOpenReadyStateValue();
       if (this.options.socketAdapter.getReadyState(socket) !== openState) {
+        return;
+      }
+
+      const sincePongMs = Date.now() - this.lastPongAtMs;
+      if (sincePongMs > this.pongLivenessTimeoutMs) {
+        // Half-open socket: no pong despite pings. Close it so the onClose
+        // path (status + reconnect) runs instead of hanging silently.
+        this.emitError(`Relay connection lost (no pong for ${Math.round(sincePongMs / 1000)}s)`);
+        this.stopPing();
+        this.options.socketAdapter.close(socket);
         return;
       }
 
@@ -215,7 +270,13 @@ export class RelayMachineDirectoryClient<TSocket> {
       return;
     }
 
+    if (msg.type === 'pong') {
+      this.lastPongAtMs = Date.now();
+      return;
+    }
+
     if (msg.type === 'machine_list') {
+      this.reconnectAttempts = 0;
       this.setStatus('connected');
       this.machines = msg.machines.map((machine) => ({
         machineId: machine.machineId,
@@ -236,7 +297,7 @@ export class RelayMachineDirectoryClient<TSocket> {
       return;
     }
 
-    // Pong and unknown messages are intentionally ignored.
+    // Unknown messages are intentionally ignored.
   }
 
   private setStatus(status: RelayStatus): void {

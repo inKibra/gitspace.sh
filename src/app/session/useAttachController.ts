@@ -12,6 +12,7 @@ export interface AttachSelectionParams {
   workspaceId?: string
   viewOnly?: boolean
   backendKey?: BackendKey
+  paneId?: string
 }
 
 export type AttachTarget = 'session' | 'workspace'
@@ -144,7 +145,7 @@ export function useAttachController(options: UseAttachControllerOptions): UseAtt
     backendKeyOverride?: BackendKey,
   ): Promise<boolean> => {
     const attachParams = withAttachSize(params)
-    const target: AttachTarget = attachParams.workspaceId ? 'workspace' : 'session'
+    const target: AttachTarget = attachParams.sessionId || !attachParams.workspaceId ? 'session' : 'workspace'
     const projectName = attachParams.workspaceId
       ? resolveProjectName?.(attachParams.workspaceId) ??
         parseProjectNameFromWorkspaceId(attachParams.workspaceId) ??
@@ -166,7 +167,7 @@ export function useAttachController(options: UseAttachControllerOptions): UseAtt
           workspaceId: '',
         }
     const attachParamsWithBackend: WorkspaceScopedBundleRefreshAttachParams =
-      attachParams.workspaceId
+      attachParams.workspaceId && !attachParams.sessionId
         ? {
             ...attachParams,
             backendKey: ref.backendKey,
@@ -177,7 +178,7 @@ export function useAttachController(options: UseAttachControllerOptions): UseAtt
       target,
       params: attachParams,
       projectName,
-      workspaceRef: attachParams.workspaceId ? ref : undefined,
+      workspaceRef: target === 'workspace' && attachParams.workspaceId ? ref : undefined,
     }
 
     await onBeforeAttach?.(context)
@@ -250,8 +251,14 @@ export function useAttachController(options: UseAttachControllerOptions): UseAtt
       const attachParams: BundleRefreshAttachParams = {
         sessionId: selection.sessionId,
       }
+      if (selection.workspaceId !== undefined) {
+        attachParams.workspaceId = selection.workspaceId
+      }
       if (selection.viewOnly !== undefined) {
         attachParams.viewOnly = selection.viewOnly
+      }
+      if (selection.paneId !== undefined) {
+        attachParams.paneId = selection.paneId
       }
 
       await attach(attachParams, selection.backendKey)
@@ -273,6 +280,7 @@ export function useAttachController(options: UseAttachControllerOptions): UseAtt
         await attach({
           workspaceId: selection.workspaceId,
           sessionName: sessionName.trim() || undefined,
+          paneId: selection.paneId,
         }, selection.backendKey)
       },
     })

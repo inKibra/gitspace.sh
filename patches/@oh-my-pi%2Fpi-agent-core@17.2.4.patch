@@ -1,0 +1,24 @@
+diff --git a/src/agent.ts b/src/agent.ts
+index 7e6216c3a0ffbbb1e148639087290cdcf26b6c19..a55655a450f6e42461441f0636cf4bc39191459d 100644
+--- a/src/agent.ts
++++ b/src/agent.ts
+@@ -958,6 +958,19 @@ export class Agent {
+ 	clearFollowUpQueue() {
+ 		this.#followUpQueue = [];
+ 	}
++	/** Remove and return a steering message by queue index (GitSpace patch). */
++	removeSteer(index: number): AgentMessage | undefined {
++		if (!Number.isInteger(index) || index < 0 || index >= this.#steeringQueue.length) return undefined;
++		const [removed] = this.#steeringQueue.splice(index, 1);
++		return removed;
++	}
++
++	/** Remove and return a follow-up message by queue index (GitSpace patch). */
++	removeFollowUp(index: number): AgentMessage | undefined {
++		if (!Number.isInteger(index) || index < 0 || index >= this.#followUpQueue.length) return undefined;
++		const [removed] = this.#followUpQueue.splice(index, 1);
++		return removed;
++	}
+ 
+ 	/**
+ 	 * Drop tool-directive state retained across a gate-stopped run: the

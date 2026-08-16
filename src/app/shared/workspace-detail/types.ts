@@ -1,3 +1,4 @@
+import type { AgentSessionRenderState } from '../../../agents/agent-runtime-types.js';
 import type { AgentSessionInfo, ReplayInfo, SessionInfo, WorkspaceInfo } from '../../../components/SpacesBrowser.js';
 import type {
   WorkspaceDetailStripStatus,
@@ -30,7 +31,8 @@ export interface WorkspaceDetailModelInput {
     onRequestStatusChange?: (workspaceId: string, projectName: string) => void | Promise<void>;
     onOpenAgentSession?: (workspaceId: string, agentSessionId: string) => void | Promise<void>;
     onCreateAgentSession?: (workspaceId: string) => void | Promise<void>;
-    onAbortAgentSession?: (workspaceId: string, agentSessionId: string) => void | Promise<void>;
+    onKillAgentSession?: (workspaceId: string, agentSessionId: string) => void | Promise<void>;
+    onStopAgentTurn?: (workspaceId: string, agentSessionId: string) => void | Promise<void>;
     onCloseAgentSession?: (workspaceId: string, agentSessionId: string) => void | Promise<void>;
     onArchiveAgentSession?: (workspaceId: string, agentSessionId: string) => void | Promise<void>;
     onRestoreAgentSession?: (workspaceId: string, agentSessionId: string) => void | Promise<void>;
@@ -75,7 +77,7 @@ export interface WorkspaceDetailModel {
     id: string;
     title: string;
     bucket: 'active' | 'closed' | 'archived';
-    state: 'needs-permission' | 'running' | 'waiting' | 'retrying' | 'error' | 'closed' | 'archived';
+    state: AgentSessionRenderState;
     lastActiveLabel?: string;
     modelLabel?: string;
   }>;
@@ -97,6 +99,10 @@ export interface WorkspaceDetailModel {
   notesSummary?: WorkspaceNotesSummary;
   visibleTodoRows: WorkspaceDetailNoteRow[];
   visibleRecentNoteRows: WorkspaceDetailNoteRow[];
+  /** The workspace's `.gitspace/processes.json` failed to parse/validate. This
+   *  is what shows the card's "svc error" — surfaced here so the detail view can
+   *  display the actual message instead of a bare red dot. */
+  processConfigError?: string;
   serviceRows: Array<{
     key: string;
     processName: string;
@@ -134,7 +140,8 @@ export interface WorkspaceDetailModel {
     footerAction: (id: 'open-github-pr' | 'open-review' | 'launch-commit' | 'edit-bundle-config' | 'edit-process-config' | 'change-status') => void | Promise<void>;
     openAgentSession: (agentSessionId: string) => void | Promise<void>;
     createAgentSession: () => void | Promise<void>;
-    abortAgentSession: (agentSessionId: string) => void | Promise<void>;
+    killAgentSession: (agentSessionId: string) => void | Promise<void>;
+    stopAgentTurn: (agentSessionId: string) => void | Promise<void>;
     closeAgentSession: (agentSessionId: string) => void | Promise<void>;
     archiveAgentSession: (agentSessionId: string) => void | Promise<void>;
     restoreAgentSession: (agentSessionId: string) => void | Promise<void>;

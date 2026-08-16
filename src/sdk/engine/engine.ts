@@ -30,6 +30,7 @@ import type {
   SessionBackend,
 } from '../../session/backend.js';
 import type { BackendManagerEvent } from '../../session/backend-manager.js';
+import { backendEventToActions } from '../../session/backend-event-actions.js';
 import type { NotificationConfig } from '../../notifications/types.js';
 import type { WideEventFilter } from '../../types/events.js';
 import type { SessionLinearIssueSummary } from '../../types/lifecycle.js';
@@ -65,87 +66,7 @@ export const LOCAL_BACKEND_KEY: BackendKey = 'local';
 
 export type GitSpaceEngineListener = (state: MultiMachineState) => void;
 
-/**
- * Dispatches a BackendManagerEvent into the session engine reducer.
- * Mirrors the `dispatchBackendEvent` helper from useMultiBackends.
- */
-function dispatchBackendEvent(
-  event: BackendManagerEvent
-): SessionEngineAction | null {
-  const { backendKey, event: evt } = event;
-  switch (evt.type) {
-    case 'status':
-      return { type: 'SET_BACKEND_STATUS', backendKey, status: evt.status, error: evt.error ?? null };
-    case 'projects':
-      return { type: 'SET_PROJECTS', backendKey, projects: evt.projects };
-    case 'workspaces':
-      // workspaces event may carry savedEventFilters — handle below
-      return null; // handled specially
-    case 'sessions':
-      return { type: 'SET_SESSIONS', backendKey, sessions: evt.sessions };
-    case 'replays':
-      return { type: 'SET_REPLAYS', backendKey, replays: evt.replays };
-    case 'inbox':
-      return { type: 'SET_INBOX', backendKey, items: evt.items, unreadCount: evt.unreadCount };
-    case 'notification_config':
-      return { type: 'SET_NOTIFICATION_CONFIG', backendKey, config: evt.config };
-    case 'attached':
-      return {
-        type: 'SET_ATTACHED_SESSION',
-        backendKey,
-        sessionId: evt.sessionId,
-        sessionName: evt.sessionName ?? null,
-        meta: { sessionName: evt.sessionName ?? null },
-        workspaceId: evt.workspaceId ?? null,
-        agentSessionId: evt.agentSessionId ?? null,
-      };
-    case 'session_meta':
-      return { type: 'SET_ATTACHED_SESSION_META', backendKey, meta: evt.meta };
-    case 'detached':
-    case 'session_exited':
-      return { type: 'SET_ATTACHED_SESSION', backendKey, sessionId: null };
-    case 'command_error':
-      return {
-        type: 'SET_COMMAND_ERROR',
-        backendKey,
-        commandError: { code: evt.code, message: evt.message },
-      };
-    case 'error':
-      return { type: 'SET_BACKEND_STATUS', backendKey, status: 'error', error: evt.message };
-    case 'script_output':
-      return {
-        type: 'SET_SCRIPT_STATE',
-        backendKey,
-        scriptState:
-          evt.done && !evt.error
-            ? null
-            : {
-                phase: evt.phase,
-                isRunning: !evt.done,
-                error: evt.error,
-                exitCode: evt.exitCode,
-              },
-      };
-    case 'events':
-      // events may carry savedEventFilters — handled specially
-      return null;
-    case 'machine_snapshot':
-      return { type: 'SET_MACHINE_SNAPSHOT', backendKey, snapshot: evt.snapshot };
-    case 'host_ui_dialog_request':
-      return { type: 'SET_HOST_UI_DIALOG', backendKey, request: evt.request };
-    case 'host_ui_event':
-      if (evt.event.type === 'working-message') {
-        return {
-          type: 'SET_HOST_UI_WORKING_MESSAGE',
-          backendKey,
-          message: evt.event.payload.message,
-        };
-      }
-      return null;
-    default:
-      return null;
-  }
-}
+
 
 export class GitSpaceEngine {
   private manager: BackendManager;
@@ -274,6 +195,77 @@ export class GitSpaceEngine {
     return this.engineState.backends[key] ?? null;
   }
 
+  /**
+   * Force a reconnect of a backend (used by the board's retry action when a
+   * connect or initial-snapshot deadline fired). Remote backends hold a
+   * one-shot relay socket, so retry recreates the backend and re-runs the
+   * routing + handshake + snapshot sequence; the local backend reconnects
+   * in place.
+   */
+  async retryBackend(key: BackendKey): Promise<void> {
+    this.dispatch({ type: 'SET_SNAPSHOT_ERROR', backendKey: key, message: null });
+
+    const remoteEntry = [...this.registeredRemoteBackends.entries()].find(([, backendKey]) => backendKey === key);
+    if (remoteEntry) {
+      const [machineId] = remoteEntry;
+      const { createRemoteBackend } = this.platform;
+      const relayUrl = this.relay?.url;
+      const identity = this.identity;
+      const deviceCertificate = this.deviceCert;
+      if (!createRemoteBackend || !relayUrl || !identity || !deviceCertificate) {
+        throw new Error('Relay configuration unavailable; cannot retry remote backend');
+      }
+      const wasActive = this.engineState.activeBackendKey === key;
+      const machineLabel = this.engineState.backends[key]?.descriptor.label;
+
+      this.registeredRemoteBackends.delete(machineId);
+      await this.manager.unregister(key).catch(() => undefined);
+      this.dispatch({ type: 'UNREGISTER_BACKEND', backendKey: key });
+
+      const { backend } = createRemoteBackend({
+        relayUrl,
+        identity,
+        machineId,
+        deviceCertificate,
+        machineLabel,
+        storage: this.platform.storage,
+      });
+      this.dispatch({ type: 'REGISTER_BACKEND', descriptor: backend.descriptor });
+      this.manager.register(backend);
+      this.registeredRemoteBackends.set(machineId, key);
+      if (wasActive) {
+        this.dispatch({ type: 'SET_ACTIVE_BACKEND', backendKey: key });
+      }
+      try {
+        await this.manager.connect(key);
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.error(`[engine] Backend retry failed (${key}): ${message}`);
+        this.dispatch({ type: 'SET_BACKEND_STATUS', backendKey: key, status: 'error', error: message });
+        throw error;
+      }
+      backend.listProjects().catch(() => undefined);
+      backend.listWorkspaces().catch(() => undefined);
+      backend.listSessions().catch(() => undefined);
+      return;
+    }
+
+    const backend = this.manager.get(key);
+    if (!backend) throw new Error(`No backend registered: ${key}`);
+    try {
+      await this.manager.disconnect(key);
+      await this.manager.connect(key);
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.error(`[engine] Backend retry failed (${key}): ${message}`);
+      this.dispatch({ type: 'SET_BACKEND_STATUS', backendKey: key, status: 'error', error: message });
+      throw error;
+    }
+    backend.listProjects().catch(() => undefined);
+    backend.listWorkspaces().catch(() => undefined);
+    backend.listSessions().catch(() => undefined);
+  }
+
   // ─── Fanout actions (ALL connected backends) ────────────────────────────────
 
   listProjects(): void {
@@ -352,8 +344,8 @@ export class GitSpaceEngine {
     return this.withRefBackend(ref, (b) => b.cancelPendingScripts?.() ?? Promise.resolve());
   }
 
-  killSession(ref: BackendScopedSessionRef): Promise<void> {
-    return this.withRefBackend(ref, (b) => b.killSession(ref.sessionId));
+  terminateSession(ref: BackendScopedSessionRef): Promise<void> {
+    return this.withRefBackend(ref, (b) => b.terminateSession(ref.sessionId));
   }
 
   deleteWorkspace(ref: BackendScopedWorkspaceRef, params?: DeleteWorkspaceParams): Promise<void> {
@@ -448,18 +440,24 @@ export class GitSpaceEngine {
     );
   }
 
-  abortAgentSession(ref: BackendScopedAgentSessionRef): Promise<boolean> {
+  /**
+   * Destroy the agent session entirely (kills the backing tmux session).
+   * Use this for row-menu / explicit close actions. Compare with stopAgentTurn()
+   * which only cancels the current LLM turn and leaves the session alive.
+   */
+  killAgentSession(ref: BackendScopedAgentSessionRef): Promise<boolean> {
     return this.withRefBackend(ref, (b) =>
       b.abortAgentSession?.(ref.workspaceId, ref.agentSessionId) ?? Promise.resolve(false)
     );
   }
 
   /**
-   * Interrupt the agent's current turn without killing the session.
-   * Use this for the "stop" button. Compare with abortAgentSession()
-   * which kills the tmux session entirely.
+   * Cancel the current LLM turn without killing the session.
+   * The session remains alive and transitions to IDLE. Use this for the
+   * composer stop button and the sidebar ✕ shown on a running agent.
+   * Compare with killAgentSession() which destroys the session entirely.
    */
-  interruptAgentSession(ref: BackendScopedAgentSessionRef): Promise<boolean> {
+  stopAgentTurn(ref: BackendScopedAgentSessionRef): Promise<boolean> {
     return this.withRefBackend(ref, (b) =>
       b.interruptAgentSession?.(ref.workspaceId, ref.agentSessionId) ?? Promise.resolve(false)
     );
@@ -483,11 +481,16 @@ export class GitSpaceEngine {
     );
   }
 
-  async attachAgentSession(ref: BackendScopedAgentSessionRef, attachOptions?: { viewOnly?: boolean; cols?: number; rows?: number }): Promise<void> {
+  /**
+   * Open an agent session in a pane. The backend takes a viewer lease on the
+   * daemon and the client renders the native transcript — no terminal is
+   * attached, so no PTY bytes are streamed for a surface that never draws them.
+   */
+  async openAgentSession(ref: BackendScopedAgentSessionRef, options?: { paneId?: string }): Promise<void> {
     this.dispatch({ type: 'SET_PENDING_AGENT_ATTACH', backendKey: ref.backendKey, pending: true });
     try {
       return await this.withRefBackend(ref, (b) =>
-        b.attachAgentSession?.(ref.workspaceId, ref.agentSessionId, attachOptions) ?? Promise.resolve()
+        b.openAgentSession?.(ref.workspaceId, ref.agentSessionId, options) ?? Promise.resolve()
       );
     } catch (error) {
       this.dispatch({ type: 'SET_PENDING_AGENT_ATTACH', backendKey: ref.backendKey, pending: false });
@@ -495,9 +498,20 @@ export class GitSpaceEngine {
     }
   }
 
+  /** Release an agent pane's lease and drop the pane. */
+  closeAgentPane(backendKey: BackendKey, paneId: string): Promise<void> {
+    return this.manager.get(backendKey)?.closeAgentPane?.(paneId) ?? Promise.resolve();
+  }
+
   promptAgentSession(ref: BackendScopedAgentSessionRef, text: string, images?: import('../../lib/tmux-lite/protocol.js').AgentPromptImage[], options?: { streamingBehavior?: 'steer' | 'followUp' }): Promise<void> {
     return this.withRefBackend(ref, (b) =>
       b.promptAgentSession?.(ref.workspaceId, ref.agentSessionId, text, images, options) ?? Promise.resolve()
+    );
+  }
+
+  removeAgentQueuedMessage(ref: BackendScopedAgentSessionRef, kind: 'steering' | 'followUp', index: number): Promise<string | null> {
+    return this.withRefBackend(ref, (b) =>
+      b.removeAgentQueuedMessage?.(ref.workspaceId, ref.agentSessionId, kind, index) ?? Promise.resolve(null)
     );
   }
 
@@ -511,16 +525,16 @@ export class GitSpaceEngine {
   sendDialogResponse(
     backendKey: BackendKey,
     dialogId: string,
-    dialogType: 'select' | 'confirm' | 'input' | 'editor',
-    value: string | boolean | undefined,
+    dialogType: import('../../lib/tmux-lite/agents/host-ui-bridge.js').HostUIDialogResponseType,
+    value: import('../../lib/tmux-lite/agents/host-ui-bridge.js').HostUIDialogResponseValue,
   ): Promise<void> {
     return this.withBackend(backendKey, (b) =>
       b.sendDialogResponse?.(dialogId, dialogType, value) ?? Promise.resolve()
     );
   }
 
-  clearPendingDialog(backendKey: BackendKey): void {
-    this.dispatch({ type: 'CLEAR_HOST_UI_DIALOG', backendKey });
+  clearPendingDialog(backendKey: BackendKey, agentSessionId?: string): void {
+    this.dispatch({ type: 'CLEAR_HOST_UI_DIALOG', backendKey, agentSessionId });
   }
 
   getAgentSessionPreference(ref: BackendScopedWorkspaceRef): Promise<string | null> {
@@ -535,6 +549,27 @@ export class GitSpaceEngine {
     return this.withRefBackend(ref, (b) => {
       if (!b.listAgentCommands) return Promise.reject(new Error('Command listing unavailable'));
       return b.listAgentCommands(ref.workspaceId);
+    });
+  }
+
+  listAvailableEditors(ref: BackendScopedWorkspaceRef): Promise<import('../../utils/open-editor.js').WorkspaceEditorOption[]> {
+    return this.withRefBackend(ref, (b) => {
+      if (!b.listAvailableEditors) return Promise.reject(new Error('Editor detection unavailable'));
+      return b.listAvailableEditors(ref.workspaceId);
+    });
+  }
+
+  openWorkspaceInEditor(ref: BackendScopedWorkspaceRef, editorId: import('../../utils/open-editor.js').WorkspaceEditorId): Promise<void> {
+    return this.withRefBackend(ref, (b) => {
+      if (!b.openWorkspaceInEditor) return Promise.reject(new Error('Open in editor unavailable'));
+      return b.openWorkspaceInEditor(ref.workspaceId, editorId);
+    });
+  }
+
+  runSpaceCommand(ref: BackendScopedWorkspaceRef, argsText: string): Promise<string> {
+    return this.withRefBackend(ref, (b) => {
+      if (!b.runSpaceCommand) return Promise.reject(new Error('Space command execution unavailable'));
+      return b.runSpaceCommand(ref.workspaceId, argsText);
     });
   }
 
@@ -588,6 +623,56 @@ export class GitSpaceEngine {
       await b.createWorkspace(params);
       await b.listWorkspaces();
       await b.listSessions();
+    });
+  }
+
+  addGoalNearWorkspace(backendKey: BackendKey, projectName: string, workspaceName: string, title: string, position: 'before' | 'after'): Promise<import('../../types/goals.js').GoalRecord> {
+    return this.withBackend(backendKey, async (b) => {
+      if (!b.addGoalNearWorkspace) throw new Error('Goal creation unavailable');
+      const goal = await b.addGoalNearWorkspace(projectName, workspaceName, title, position);
+      await b.listWorkspaces();
+      return goal;
+    });
+  }
+
+  updateGoal(backendKey: BackendKey, projectName: string, goalId: string, updates: import('../../types/goals.js').GoalUpdateInput): Promise<import('../../types/goals.js').GoalRecord> {
+    return this.withBackend(backendKey, async (b) => {
+      if (!b.updateGoal) throw new Error('Goal update unavailable');
+      const goal = await b.updateGoal(projectName, goalId, updates);
+      await b.listWorkspaces();
+      return goal;
+    });
+  }
+
+  moveGoalInChain(backendKey: BackendKey, projectName: string, sourceToken: string, targetToken: string, position: 'before' | 'after'): Promise<import('../../types/goals.js').GoalChain> {
+    return this.withBackend(backendKey, async (b) => {
+      if (!b.moveGoalInChain) throw new Error('Goal reorder unavailable');
+      const chain = await b.moveGoalInChain(projectName, sourceToken, targetToken, position);
+      await b.listWorkspaces();
+      return chain;
+    });
+  }
+
+  listGoalChains(backendKey: BackendKey, projectName: string): Promise<import('../../types/goals.js').GoalChainSummary[]> {
+    return this.withBackend(backendKey, async (b) => {
+      if (!b.listGoalChains) throw new Error('Goal chains unavailable');
+      return b.listGoalChains(projectName);
+    });
+  }
+
+  addPlannedGoalToChain(backendKey: BackendKey, projectName: string, input: import('../../core/goal-chain.js').AddPlannedGoalToChainInput): Promise<import('../../types/goals.js').GoalRecord> {
+    return this.withBackend(backendKey, async (b) => {
+      if (!b.addPlannedGoalToChain) throw new Error('Goal creation unavailable');
+      const goal = await b.addPlannedGoalToChain(projectName, input);
+      await b.listWorkspaces();
+      return goal;
+    });
+  }
+
+  getGoalStackStatus(backendKey: BackendKey, projectName: string, workspaceName: string): Promise<import('../../types/goals.js').ChainStackStatus> {
+    return this.withBackend(backendKey, async (b) => {
+      if (!b.getGoalStackStatus) throw new Error('Goal stack status unavailable');
+      return b.getGoalStackStatus(projectName, workspaceName);
     });
   }
 
@@ -696,26 +781,9 @@ export class GitSpaceEngine {
   }
 
   private handleBackendEvent(evt: BackendManagerEvent): void {
-    const { backendKey, event } = evt;
-
-    // Special cases that produce multiple dispatches
-    if (event.type === 'workspaces') {
-      this.dispatch({ type: 'SET_WORKSPACES', backendKey, workspaces: event.workspaces });
-      if (event.savedEventFilters) {
-        this.dispatch({ type: 'SET_SAVED_EVENT_FILTERS', backendKey, filters: event.savedEventFilters });
-      }
-      return;
+    for (const action of backendEventToActions(evt.backendKey, evt.event)) {
+      this.dispatch(action);
     }
-    if (event.type === 'events') {
-      this.dispatch({ type: 'SET_EVENTS', backendKey, events: event.events, liveEventIds: event.liveEventIds });
-      if (event.savedEventFilters) {
-        this.dispatch({ type: 'SET_SAVED_EVENT_FILTERS', backendKey, filters: event.savedEventFilters });
-      }
-      return;
-    }
-
-    const action = dispatchBackendEvent(evt);
-    if (action) this.dispatch(action);
   }
 
   // ─── Internal: backend routing ────────────────────────────────────────────

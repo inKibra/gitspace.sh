@@ -2,15 +2,19 @@
  * tmux-lite protocol
  */
 
+import { rmSync } from 'node:fs';
 import { SpacesError } from '../../types/errors.js';
 import { logger } from '../../utils/logger.js';
+import type { AgentCompactResult, AgentGoalModeInfo, AgentShakeMode, AgentShakeResult } from '../../agents/agent-runtime-types.js';
 
 
 /** Protocol version - increment when making breaking changes */
 export const PROTOCOL_VERSION = 1;
 
 /** Package version - should match package.json */
-export const PACKAGE_VERSION = "1.0.0";
+import { VERSION } from '../../version.generated.js';
+// Single source of truth: generated from package.json by scripts/build.ts.
+export const PACKAGE_VERSION = VERSION;
 
 export const TMUX_LITE_SANDBOX_ENV = "TMUX_LITE_SANDBOX";
 const DEFAULT_ROUTER_SOCKET = "/tmp/tmux-lite.sock";
@@ -118,6 +122,30 @@ export function applyTmuxLiteSandboxEnvironment(
   return paths;
 }
 
+/**
+ * Teardown counterpart to {@link applyTmuxLiteSandboxEnvironment}.
+ *
+ * A sandbox is four paths (`protocol.ts` `getTmuxLitePathsForSandbox`), not just
+ * the socket and pid file. Callers that hand-rolled the path strings kept
+ * forgetting `sessionDir`/`replayDir`, which leaked a `/tmp/tmux-lite-<sandbox>/`
+ * tree per test run. Derive the set from the same helper that created it so a
+ * new path can never be added to one side only.
+ *
+ * `replayDir` lives inside `sessionDir`, so the recursive remove covers it; it is
+ * still listed explicitly because a caller may override `TMUX_LITE_REPLAY_DIR`
+ * out of tree. Best-effort by design: teardown must never fail a passing test.
+ */
+export function removeTmuxLiteSandbox(sandbox: string): void {
+  const paths = getTmuxLitePathsForSandbox(sandbox);
+  for (const path of [paths.routerSocket, paths.pidFile, paths.replayDir, paths.sessionDir]) {
+    try {
+      rmSync(path, { recursive: true, force: true });
+    } catch {
+      // Stale sandbox state is not worth failing teardown over.
+    }
+  }
+}
+
 export function getRouterSocket(): string {
   return getTmuxLitePaths().routerSocket;
 }
@@ -161,7 +189,15 @@ export function getSessionSocketPath(id: string): string {
   return socketPath;
 }
 
-export const MAX_ROUTER_MESSAGE_SIZE = 32 * 1024 * 1024;
+// This is a LOCAL IPC unix-socket cap (daemon ↔ CLI / serve-runtime), not a
+// network limit — the 4-byte length header supports up to 4 GiB. 32 MiB was too
+// tight: a large machine snapshot / agent-state / transcript response can exceed
+// it, and encodeRouterMessage throwing inside the socket 'data' handler took the
+// whole daemon down (clients then saw "Disconnected"). 128 MiB gives real
+// headroom; sendRouterResponse now also degrades gracefully rather than crashing
+// if a response somehow still exceeds it. (A response this large is itself a
+// bloat smell worth slimming at the source — see machine snapshot build.)
+export const MAX_ROUTER_MESSAGE_SIZE = 128 * 1024 * 1024;
 
 
 const ROUTER_FRAME_HEADER_BYTES = 4;
@@ -229,6 +265,33 @@ export interface SessionCreateHooks {
 export type SessionKind = 'shell' | 'agent';
 
 export type { ReplayInfo, ReplayStatus, TerminalSnapshot } from './replay/types.js';
+
+
+/** Daemon-unification P1 (docs/DAEMON-UNIFICATION.md): the activator passes
+ *  the DECRYPTED identity over the same-user 0600 unix socket — the same
+ *  trust domain as the encrypted keyfile + keychain password. Keys are
+ *  base64; the server reconstructs Uint8Arrays. */
+export interface ServeActivatePayload {
+  relayUrl: string;
+  /** Pinned by the activator's interactive trust check. */
+  relayPubkey: string;
+  machineId: string;
+  ownerUserRootId?: string;
+  identity: {
+    id: string;
+    label?: string;
+    createdAt: number;
+    signingPublicKey: string;
+    signingSecretKey: string;
+    keyExchangePublicKey: string;
+    keyExchangeSecretKey: string;
+  };
+  publicIdentity: { id: string; signingPublicKey: string; keyExchangePublicKey: string; label?: string };
+  bootstrapToken?: string;
+  registerPermit?: string;
+  enrollmentToken?: string;
+  deviceCertificate?: string;
+}
 
 export interface AgentWorkspaceTargetPayload {
   workspaceId: string;
@@ -340,17 +403,6 @@ export type Command =
       metadata?: Record<string, string>;
     }
   | {
-      type: 'new-virtual';
-      name?: string;
-      cwd: string;
-      cols?: number;
-      rows?: number;
-      kind?: SessionKind;
-      hidden?: boolean;
-      metadata?: Record<string, string>;
-    }
-  | { type: 'virtual-resize'; id: string; cols: number; rows: number }
-  | {
       type: 'attach-prepare';
       requestId: string;
       sessionId?: string;
@@ -364,16 +416,23 @@ export type Command =
     }
   | { type: 'attach-cancel'; requestId: string }
   | { type: "attach"; id: string; force?: boolean }
-  | { type: "kill"; id: string }
+  | { type: "terminate"; id: string; mode?: "graceful" | "force"; graceMs?: number }
   | { type: 'agent-state' }
   | { type: 'agent-watch' }
   | { type: 'machine-snapshot' } // legacy tmux router alias for getMachineSnapshot
   | { type: 'machine-watch' }    // legacy tmux router alias for watchMachineEvents
+  /** Force a full snapshot rebuild from sources (client-detected nonce gap
+   *  or explicit reconciliation). Replies with a machine-snapshot response. */
+  | { type: 'machine-resync' }
+  /** Fire-and-forget notify from the space CLI after a goal.json write: the
+   *  daemon re-reads that project's goals and emits scoped machine deltas. */
+  | { type: 'goal-changed'; projectName: string; workspaceName?: string }
   | {
       type: 'workspace-set-phase';
       projectName: string;
       workspaceName: string;
       phase: import('../../types/config.js').WorkspacePhase;
+      cascade?: boolean;
     }
   | { type: 'agent-sessions'; target: AgentWorkspaceTargetPayload; mode?: 'known' | 'live' }
   | { type: 'agent-create'; target: AgentWorkspaceTargetPayload; title?: string }
@@ -382,23 +441,110 @@ export type Command =
   | { type: 'agent-close'; target: AgentWorkspaceTargetPayload; agentSessionId: string }
   | { type: 'agent-archive'; target: AgentWorkspaceTargetPayload; agentSessionId: string }
   | { type: 'agent-restore'; target: AgentWorkspaceTargetPayload; agentSessionId: string }
-  | { type: 'agent-attach'; target: AgentWorkspaceTargetPayload; agentSessionId: string; cols?: number; rows?: number }
+  /** Open an agent session for viewing: boots/keeps its host alive so the
+   *  client can render the native transcript. No PTY, no terminal session.
+   *  The lease is scoped by `owner` + `paneId`, so one client can hold several
+   *  panes open. `owner` lets an in-process caller (the remote session handler,
+   *  which has a connection id but no socket) scope its own leases; socket
+   *  clients omit it and the daemon fills in their connection id. */
+  | { type: 'agent-open'; target: AgentWorkspaceTargetPayload; agentSessionId: string; paneId?: string; owner?: string }
+  /** Drop a lease taken by `agent-open`. The host is disposed once its last
+   *  lease goes away (a socket disconnect releases that socket's leases). */
+  | { type: 'agent-release'; agentSessionId: string; paneId?: string; owner?: string }
   | { type: 'agent-prompt'; target: AgentWorkspaceTargetPayload; agentSessionId: string; text: string; images?: AgentPromptImage[]; streamingBehavior?: 'steer' | 'followUp' }
+  | { type: 'agent-queue-remove'; target: AgentWorkspaceTargetPayload; agentSessionId: string; kind: 'steering' | 'followUp'; index: number }
   | { type: 'agent-stage-upload'; target: AgentWorkspaceTargetPayload; fileName: string; data: string; mimeType: string }
   | { type: 'agent-list-commands'; target: AgentWorkspaceTargetPayload }
+  | { type: 'agent-transcript-range'; target: AgentWorkspaceTargetPayload; agentSessionId: string; before?: string; limit: number }
+  | { type: 'agent-control-info'; target: AgentWorkspaceTargetPayload; agentSessionId: string }
+  | { type: 'agent-session-usage'; target: AgentWorkspaceTargetPayload; agentSessionId: string }
+  | { type: 'agent-set-model'; target: AgentWorkspaceTargetPayload; agentSessionId: string; provider: string; modelId: string }
+  | { type: 'agent-set-thinking-level'; target: AgentWorkspaceTargetPayload; agentSessionId: string; level: string }
+  | { type: 'agent-goal-mode'; target: AgentWorkspaceTargetPayload; agentSessionId: string }
+  | { type: 'agent-set-goal-mode'; target: AgentWorkspaceTargetPayload; agentSessionId: string; enabled: boolean; precursor?: string }
+  | { type: 'agent-shake'; target: AgentWorkspaceTargetPayload; agentSessionId: string; mode: AgentShakeMode }
+  | { type: 'agent-set-approval-mode'; target: AgentWorkspaceTargetPayload; agentSessionId: string; mode: string }
+  | { type: 'agent-auth-providers' }
+  | { type: 'agent-remove-account'; provider: string; credentialId: number }
+  | { type: 'agent-provider-usage'; provider: string }
+  | { type: 'agent-set-api-key'; provider: string; key: string }
+  | { type: 'agent-get-settings' }
+  | { type: 'agent-set-setting'; path: string; value: string | number | boolean | string[] }
+  | { type: 'agent-oauth-login'; provider: string; flowId: string }
+  | { type: 'agent-oauth-respond'; flowId: string; value: string }
+  | { type: 'agent-settings-schema' }
+  | { type: 'agent-tools'; target: AgentWorkspaceTargetPayload; agentSessionId: string }
+  | { type: 'agent-list-agents'; target: AgentWorkspaceTargetPayload }
+  | { type: 'agent-compact'; target: AgentWorkspaceTargetPayload; agentSessionId: string }
+  | { type: 'agent-cycle-role'; target: AgentWorkspaceTargetPayload; agentSessionId: string; direction: 'forward' | 'backward' }
+  | { type: 'agent-apply-role'; target: AgentWorkspaceTargetPayload; agentSessionId: string; role: string }
+  | { type: 'agent-history'; target: AgentWorkspaceTargetPayload; agentSessionId: string }
+  | { type: 'agent-tree'; target: AgentWorkspaceTargetPayload; agentSessionId: string }
+  | { type: 'agent-navigate-history'; target: AgentWorkspaceTargetPayload; agentSessionId: string; entryId: string; mode?: 'redo' | 'jump' }
+  | { type: 'artifact-list'; uriPrefix: string }
+  | { type: 'artifact-read'; uri: string; offset?: number; length?: number }
+  | { type: 'artifact-write'; uri: string; contentBase64: string; message?: string; cap?: string }
+  | { type: 'project-artifacts-status'; projectName: string }
+  | { type: 'project-artifacts-remote-set'; projectName: string; url: string }
+  | { type: 'project-artifacts-sync'; projectName: string }
+  | { type: 'project-artifacts-provision'; projectName: string }
+  | { type: 'serve-activate'; config: ServeActivatePayload }
+  | { type: 'serve-deactivate' }
+  | { type: 'serve-status' }
+  | { type: 'project-artifacts-rollup'; projectName: string; workspace: string; removeBranch?: boolean }
+  | { type: 'report-problem'; note: string; clientBundleJson: string; fileIssue?: boolean; projectName?: string }
+  | { type: 'artifact-share-mint'; uri: string; ttlMs?: number; maxUses?: number; live?: boolean }
+  | { type: 'artifact-share-revoke'; tokenId: string }
+  | { type: 'artifact-share-list' }
+  | { type: 'favorites-list'; uriPrefix: string }
+  | { type: 'favorites-toggle'; uri: string }
+  | { type: 'favorites-merge'; uriPrefix: string; paths: string[] }
+  | { type: 'trigger-save'; target: AgentWorkspaceTargetPayload; trigger: import('../../core/triggers.js').TriggerRecord }
+  | { type: 'trigger-run-now'; target: AgentWorkspaceTargetPayload; triggerId: string }
+  | { type: 'repo-tree'; target: AgentWorkspaceTargetPayload }
+  | { type: 'repo-read'; target: AgentWorkspaceTargetPayload; path: string }
+  | { type: 'repo-commit'; target: AgentWorkspaceTargetPayload; message: string }
+  | { type: 'repo-search'; target: AgentWorkspaceTargetPayload; query: string; caseSensitive?: boolean }
+  | { type: 'workspace-editors-list'; target: AgentWorkspaceTargetPayload }
+  | { type: 'workspace-editor-open'; target: AgentWorkspaceTargetPayload; editorId: import('../../utils/open-editor.js').WorkspaceEditorId }
   | { type: 'agent-file-suggestions'; target: AgentWorkspaceTargetPayload; prefix: string; limit?: number }
   | { type: 'service-start'; workspaceId: string; processName: string; instance?: number }
   | { type: 'service-stop'; workspaceId: string; processName: string }
+  | { type: 'service-resolve-port-conflict'; conflict: import('../processes/port-conflicts.js').PortConflictInfo }
   | { type: 'github-repos'; org?: string }
   | { type: 'remote-branches'; projectName: string }
   | { type: 'linear-issues'; projectName: string }
-  | { type: 'project-create'; repository: string; projectName?: string; baseBranch?: string; setCurrent?: boolean }
+  | { type: 'project-create'; repository: string; projectName?: string; baseBranch?: string; setCurrent?: boolean; scratch?: boolean }
   | { type: 'project-prepare'; repository: string; projectName?: string; baseBranch?: string; setCurrent?: boolean }
   | { type: 'project-finalize'; projectName: string; repository: string; baseBranch: string; bundle?: import('../../types/bundle.js').SpacesBundle; inputValues?: Record<string, string>; secretValues?: Record<string, string>; confirmResults?: Record<string, import('../../types/bundle.js').ConfirmStepResult>; setCurrent?: boolean }
   | { type: 'project-cancel'; projectName: string }
-  | { type: 'workspace-create'; projectName: string; workspaceName: string; branchName?: string; baseBranch?: string; workspaceSource?: import('../../types/lifecycle.js').WorkspaceSource; linearIssue?: import('../../types/lifecycle.js').SessionLinearIssueSummary }
+  | { type: 'workspace-create'; projectName: string; workspaceName: string; branchName?: string; baseBranch?: string; parentWorkspaceName?: string; workspaceSource?: import('../../types/lifecycle.js').WorkspaceSource; linearIssue?: import('../../types/lifecycle.js').SessionLinearIssueSummary; githubIssueNumber?: number }
   | { type: 'project-delete'; projectName: string }
   | { type: 'workspace-delete'; requestId: string; projectName: string; workspaceId: string; scriptPolicy?: 'auto' | 'skip' }
+  | { type: 'workspace-phase-preview'; projectName: string; workspaceName: string; phase: import('../../types/config.js').WorkspacePhase }
+  | { type: 'workspace-notes-list'; projectName: string; workspaceName: string }
+  | { type: 'workspace-note-add'; projectName: string; workspaceName: string; body: string }
+  | { type: 'workspace-note-update'; projectName: string; workspaceName: string; noteId: string; body: string }
+  | { type: 'workspace-note-remove'; projectName: string; workspaceName: string; noteId: string }
+  | { type: 'goal-update'; projectName: string; goalId: string; updates: import('../../types/goals.js').GoalUpdateInput }
+  | { type: 'goal-add-near-workspace'; projectName: string; workspaceName: string; title: string; position: 'before' | 'after' }
+  /** List the project's chains projected for the create-goal UI (chain title +
+   *  ordered goals with effective phases). Workspace-free chain picker. */
+  | { type: 'goal-chains-list'; projectName: string }
+  /** Chain-centric planned-goal creation (no workspace): seed a new chain or
+   *  insert into an existing one at a legal position. */
+  | { type: 'goal-add-planned'; projectName: string; input: import('../../core/goal-chain.js').AddPlannedGoalToChainInput }
+  | { type: 'goal-reorder'; projectName: string; sourceToken: string; targetToken: string; position: 'before' | 'after' }
+  | { type: 'goal-stack-status'; projectName: string; workspaceName: string }
+  /** Cold detail fetch for one goal (ticket #42): the connect snapshot ships a
+   *  slim goal projection; the full doc + validation (evidence/reviews/events)
+   *  are pulled on demand when a detail view opens. Mirrors
+   *  agent-transcript-range's lazy-load shape. */
+  | { type: 'goal-detail'; projectName: string; goalId: string }
+  /** HUMAN-ONLY gate waive (goal-rubric-workflow interconnect): reachable
+   *  only through the UI — the CLI has no waive flag. Appends a timeline
+   *  event kind 'gate' with the reason and actor 'human/ui'. */
+  | { type: 'goal-gate-waive'; projectName: string; goalId: string; phase: string; reason: string }
   | { type: 'bundle-refresh-plan'; projectName: string; workspaceId: string }
   | { type: 'bundle-refresh-apply'; projectName: string; workspaceId: string; submission: import('../../types/bundle-refresh.js').BundleRefreshSubmission }
   | { type: 'bundle-config-state'; projectName: string; workspaceId: string }
@@ -421,8 +567,8 @@ export type Command =
   | {
       type: 'agent-dialog-response';
       dialogId: string;
-      dialogType: 'select' | 'confirm' | 'input' | 'editor';
-      value: string | boolean | undefined;
+      dialogType: import('./agents/host-ui-bridge.js').HostUIDialogResponseType;
+      value: import('./agents/host-ui-bridge.js').HostUIDialogResponseValue;
     }
   | { type: "kill-server" }
   | { type: "inbox" }
@@ -455,8 +601,56 @@ export type Response =
   | { type: 'machine-watch-started' }
   | { type: 'agent-sessions'; sessions: AgentSessionSummaryPayload[] }
   | { type: 'agent-bool'; ok: boolean }
+  | { type: 'agent-opened'; agentSessionId: string; workspaceId: string; leaseCount: number }
+  | { type: 'agent-queued-message'; message: string | null }
   | { type: 'agent-staged'; stagedPath: string }
   | { type: 'agent-commands'; commands: Array<{ name: string; description: string; kind: 'file' | 'custom' | 'extension' }> }
+  | { type: 'agent-transcript-range'; blocks: unknown[]; oldestCursor: string | null; hasMore: boolean }
+  | { type: 'agent-control-info'; info: import('../../agents/agent-runtime-types.js').AgentControlInfo }
+  | { type: 'agent-session-usage'; report: import('../../agents/agent-runtime-types.js').AgentSessionUsageReport | null }
+  | { type: 'agent-goal-mode'; info: AgentGoalModeInfo }
+  | { type: 'agent-shake-result'; result: AgentShakeResult }
+  | { type: 'agent-compact-result'; result: AgentCompactResult }
+  | { type: 'agent-set-model'; ok: boolean }
+  | { type: 'agent-auth-providers'; providers: Array<{ provider: string; hasAuth: boolean; accounts?: Array<{ id: number; type: string; label: string; disabled: boolean }> }> }
+  | { type: 'agent-remove-account'; ok: boolean }
+  | { type: 'agent-provider-usage'; accounts: Array<{ id: number; email?: string; ok: boolean | null; reason?: string; limits: Array<{ label: string; unit?: string; used?: number; limit?: number; remaining?: number; remainingFraction?: number; resetsAt?: number; status?: string }>; resetCredits?: { availableCount: number } }> }
+  | { type: 'agent-settings'; settings: Array<{ path: string; label: string; kind: 'boolean' | 'enum'; value: string | boolean | null; options?: string[] }> }
+  | { type: 'agent-settings-schema'; schema: import('../../agents/agent-runtime-types.js').AgentSettingSchemaItem[] }
+  | { type: 'agent-tools'; tools: import('../../agents/agent-runtime-types.js').AgentToolInfo[] }
+  | { type: 'agent-list-agents'; agents: import('../../agents/agent-runtime-types.js').AgentDefinitionInfo[] }
+  | { type: 'agent-history'; entries: import('../../agents/agent-runtime-types.js').AgentHistoryEntry[] }
+  | { type: 'agent-tree'; nodes: import('../../agents/agent-runtime-types.js').AgentTreeNode[] }
+  | { type: 'artifact-list'; entries: import('../../core/artifacts.js').ArtifactListEntry[] }
+  | { type: 'artifact-read'; base64: string; size: number; truncated: boolean }
+  | { type: 'artifact-write'; commit: string }
+  | {
+      type: 'project-artifacts-status';
+      repoPath: string;
+      remote: string | null;
+      branches: string[];
+      pointerCommitted?: boolean;
+      /** Per branch: commits main does not have. Deleting a workspace drops its
+       *  artifacts branch, so the confirmation needs this to say what is lost. */
+      unmergedByBranch?: Record<string, number>;
+    }
+  | { type: 'project-artifacts-sync'; pushed: boolean; fastForwarded: boolean }
+  | { type: 'project-artifacts-provision'; slug: string; url: string; created: boolean; blobsUploaded: number; collaboratorsCopied: number }
+  | { type: 'serve-status'; status: { active: boolean; relayUrl?: string; relayStatus?: string; clients?: number; machineId?: string; startedAt?: number } }
+  | { type: 'project-artifacts-rollup'; mergeCommit: string }
+  | { type: 'report-problem'; path: string; issueUrl?: string; issueNumber?: number }
+  | { type: 'artifact-share-mint'; url: string; tokenId: string; expiresAt: number }
+  | { type: 'artifact-share-revoke'; revoked: boolean }
+  | { type: 'artifact-share-list'; shares: import('./artifact-share.js').ShareLedgerEntry[] }
+  | { type: 'favorites'; favorites: string[]; snapshotSkipped?: string[] }
+  | { type: 'trigger-save'; trigger: import('../../core/triggers.js').TriggerRecord }
+  | { type: 'trigger-run-now'; sessionId: string }
+  | { type: 'repo-tree'; entries: import('../../core/git.js').RepoFileEntry[] }
+  | { type: 'repo-read'; base64: string | null; size: number; truncated: boolean }
+  | { type: 'repo-commit'; commit: string | null }
+  | { type: 'repo-search'; hits: import('../../core/git.js').RepoSearchHit[]; truncated: boolean }
+  | { type: 'agent-navigate'; ok: boolean; editorText?: string }
+  | { type: 'workspace-editors'; editors: import('../../utils/open-editor.js').WorkspaceEditorOption[] }
   | { type: 'agent-file-suggestions'; suggestions: Array<{ path: string; isDirectory: boolean }> }
   | {
       type: 'agent-dialog-request';
@@ -480,6 +674,14 @@ export type Response =
   | { type: 'project-deleted'; projectName: string }
   | { type: 'workspace-delete-output'; requestId: string; data: string; done?: boolean; error?: string }
   | { type: 'workspace-deleted'; requestId: string; workspaceId: string }
+  | { type: 'workspace-notes'; notes: import('../../types/workspace.js').WorkspaceNote[] }
+  | { type: 'workspace-phase-preview'; preview: import('../../types/goals.js').WorkspacePhaseChangePreview }
+  | { type: 'workspace-note'; note: import('../../types/workspace.js').WorkspaceNote }
+  | { type: 'goal'; goal: import('../../types/goals.js').GoalRecord }
+  | { type: 'goal-detail'; doc: import('../../types/goals.js').GoalDoc; validation: import('../../types/goals.js').GoalValidation }
+  | { type: 'goal-chain'; chain: import('../../types/goals.js').GoalChain }
+  | { type: 'goal-chains'; chains: import('../../types/goals.js').GoalChainSummary[] }
+  | { type: 'goal-stack-status'; status: import('../../types/goals.js').ChainStackStatus }
   | { type: 'bundle-refresh-plan'; plan: import('../../types/bundle-refresh.js').BundleRefreshPlan }
   | { type: 'bundle-refresh-applied'; projectName: string; workspaceId: string }
   | { type: 'bundle-config-state'; state: import('../../types/bundle-config.js').BundleConfigState }
@@ -493,11 +695,11 @@ export type Response =
   | { type: "session"; session: Session }
   | { type: "already-attached"; session: Session }
   | { type: "ok" }
-  | { type: "error"; message: string; code?: string; processName?: string; portConflicts?: import('../processes/ports.js').PortConflictInfo[] }
+  | { type: "error"; message: string; code?: string; processName?: string; portConflicts?: import('../processes/port-conflicts.js').PortConflictInfo[] }
   | { type: "inbox"; items: InboxItem[] }
   | { type: 'notification-config'; config: import('../../notifications/types.js').NotificationConfig }
-  | { type: "version"; version: string; protocol: number }
-  | { type: "status"; version: string; protocol: number; pid: number; uptime: number; sessions: number; attached: number };
+  | { type: "version"; version: string; protocol: number; codeVersion: string | null }
+  | { type: "status"; version: string; protocol: number; pid: number; uptime: number; sessions: number; attached: number; codeVersion: string | null };
 
 export interface Session {
   id: string;
@@ -571,7 +773,6 @@ export type SessionCtrl =
 
 /** Session events (server → client) */
 export type SessionEvent =
-  | { type: "attach-ready"; cols: number; rows: number }
   | { type: "attached" }
   | {
       type: 'session-meta';

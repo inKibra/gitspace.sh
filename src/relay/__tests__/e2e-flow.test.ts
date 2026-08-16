@@ -225,6 +225,59 @@ describe("E2E: Machine Registration", () => {
     ws.close();
   });
 
+  // Ticket #42.3 (real-path transport, before/after): a registered machine
+  // streams an oversize snapshot-class payload through the REAL relay.
+  //
+  // BEFORE: sending it as ONE frame over the transport cap 1006-kills the
+  // machine socket ("Received too big message") — proving the failure the field
+  // hit. AFTER: the SAME payload, split by chunkFrame into the exact <1MB
+  // `data` messages the machine send path (createDataMessages) emits, is
+  // accepted frame-by-frame and the machine socket stays OPEN.
+  test("machine streaming a >cap payload as <1MB chunks is NOT closed (was 1006 as one frame)", async () => {
+    const { chunkFrame, FRAME_CHUNK_SIZE } = await import(
+      "../../lib/tmux-lite/crypto/frame-chunk"
+    );
+    const { RELAY_MAX_WS_PAYLOAD } = await import("../protocol");
+
+    // A payload larger than the transport cap — as one frame this 1006s.
+    const oversize = new Uint8Array(RELAY_MAX_WS_PAYLOAD + 8 * 1024 * 1024);
+
+    // ---- BEFORE: one oversize frame → transport 1006 ----------------------
+    {
+      const { ws } = await createMachineConnection(testFixtures.machine, new AccessControlList());
+      const before = await new Promise<{ code: number; reason: string }>((resolve) => {
+        ws.onclose = (ev) => resolve({ code: ev.code, reason: ev.reason });
+        // One frame carrying the whole oversize payload.
+        ws.send(JSON.stringify({ type: "data", connectionId: "cid", data: Buffer.from(oversize).toString("base64") }));
+        setTimeout(() => resolve({ code: -1, reason: "stayed-open" }), 2500);
+      });
+      expect(before.code).toBe(1006);
+      try { ws.close(); } catch { /* ignore */ }
+    }
+
+    // ---- AFTER: same payload as <1MB chunks → machine stays connected -----
+    {
+      const { ws } = await createMachineConnection(testFixtures.machine, new AccessControlList());
+      let closed: { code: number; reason: string } | null = null;
+      ws.onclose = (ev) => { closed = { code: ev.code, reason: ev.reason }; };
+
+      // Exactly the wire messages the machine send path emits (createDataMessages).
+      const chunks = chunkFrame(oversize, FRAME_CHUNK_SIZE);
+      expect(chunks.length).toBeGreaterThan(64);
+      for (const chunk of chunks) {
+        const wire = JSON.stringify({ type: "data", connectionId: "cid", data: Buffer.from(chunk).toString("base64") });
+        // Every emitted frame is under 1MB (the design frame limit).
+        expect(wire.length).toBeLessThan(1024 * 1024);
+        ws.send(wire);
+      }
+      // Give the relay time to process every chunk (and to 1006 if any were too big).
+      await new Promise((r) => setTimeout(r, 800));
+      expect(closed).toBeNull();
+      expect(ws.readyState).toBe(WebSocket.OPEN);
+      try { ws.close(); } catch { /* ignore */ }
+    }
+  }, 20000);
+
   test("machine registration is visible to ACL-authorized clients", async () => {
     const accessList = new AccessControlList();
 

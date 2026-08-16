@@ -1,0 +1,155 @@
+---
+name: space-chain
+description: Plan and operate a stacked chain of GitSpace goals — planned vs workspace-backed, phase progression, ancestor-blocked descendants, and stack alignment.
+---
+
+# GitSpace Chain & Stack
+
+Use this skill when asked to plan a sequence of related goals, bind goals to workspaces, advance phases, reorder a chain, or interpret stack alignment.
+
+## Contract
+
+- A chain is a linear sequence of goals. Each goal is either `planned` (no workspace) or `workspace-backed` (worktree exists).
+- Each goal advances through `plan → code → review → ship`. A descendant cannot outpace an ancestor. Moving an ancestor backward requires a cascade.
+- Stack alignment is git-level: do adjacent workspaces' HEADs form an ancestor relationship? If not, the chain is `needs-rebase`.
+- Do not infer alignment from phase alone. Stack alignment and phase are orthogonal: a `code → review` adjacent pair can still be `needs-rebase` at the git level.
+- `space chain` mutates the goal chain. `space stack status` reports git alignment without touching anything.
+
+## Vocabulary
+
+- **Chain**: an ordered list of goal ids in one project.
+- **Goal status**: `planned` (lives at `.gitspace/goals/planned/<id>.json`) or `workspace-backed` (lives at `.gitspace/workspace/<name>/goal.json`).
+- **Phase**: `plan | code | review | ship`. Constrained by ancestor goals.
+- **Stack edge**: an adjacent pair `(parent, child)` of workspace-backed goals, with a `status` of `aligned | needs-rebase | missing-workspace | missing-branch | dirty-worktree | unknown`.
+- **You are next**: the first non-aligned edge into the active goal — the agent has rebase work to do.
+
+## Inspect the chain
+
+```sh
+# Show all goals in the active chain with phase + status
+space chain show
+
+# Show the readiness summary of the active goal
+space goal status
+
+# Show git-level alignment across the chain
+space stack status
+```
+
+## Plan goals
+
+```sh
+# Anchored insert. The anchor defaults to the ACTIVE workspace goal,
+# but --goal anchors on ANY goal in the chain.
+space chain add-before --title "Wire connector hover state"
+space chain add-after  --title "Capture screencast"
+space chain add-after  --goal billing-schema --title "Backfill job"
+
+# Absolute insert: end of chain, or an explicit 0-indexed position.
+# `add` REQUIRES exactly one of --tail or --at <index>. Passing neither fails
+# with "needs --tail or --at <index>"; passing both fails with "Use either
+# --tail or --at <index>, not both." To insert relative to a goal, use
+# add-after/add-before instead — `add` takes no anchor.
+space chain add --tail --title "Ship notes"
+space chain add --at 2 --title "Telemetry pass"
+
+# Reorder. --goal moves a goal OTHER than the active one.
+space chain move-before billing-api                        # move active goal before billing-api
+space chain move-after  billing-schema                     # move active goal after billing-schema
+space chain move-after  billing-api --goal billing-ui      # move billing-ui after billing-api
+
+# Remove. Planned goals are detached AND their doc is deleted.
+space chain remove billing-ui                  # planned → detached + planned/<id>.json deleted
+space chain rm billing-ui --detach-only        # detached, doc kept on disk (orphaned)
+space chain remove billing-api --force         # workspace-backed → detach only; worktree kept
+```
+
+Every mutating verb (`add`, `add-before`, `add-after`, `move-before`, `move-after`, `remove`) accepts `--dry-run`, which prints the resulting chain order and any guard warning **without writing**. There is no undo — preview first.
+
+```sh
+space chain add --tail --title "Ship notes" --dry-run
+space chain remove billing-ui --dry-run
+```
+
+Both reorder and insert are **enforced** against phase, and both **refuse** — they do not warn.
+
+- **Reorder** (`move-*`): you cannot move a goal ahead of one that has already advanced past it.
+- **Insert** (`add-*`): a brand-new planned goal reads as phase `plan`, so the insert is **rejected** if any goal *at or after* the insert point has already moved past `plan` — e.g. `add-before` an anchor that is in `review` fails with `Cannot insert "<title>" before "<goal>": review is further along than plan.` Insert **after** the advanced work instead, or move that goal back to `plan` first.
+
+Only a phase violation that already existed in the untouched order is reported as a warning. `remove` refuses a workspace-backed goal without `--force`, and never deletes a worktree.
+
+## Author a PLANNED goal
+
+A planned goal has no workspace, but its whole body and validation contract are authorable today — every `space goal` verb takes `--goal`:
+
+```sh
+space goal set --goal billing-ui --body "# Billing UI\n\n## Objective\n..."
+space goal show --goal billing-ui
+space goal doc slices --goal billing-ui
+space goal requirement add --goal billing-ui \
+  --title "Screenshot of the invoice table" --kind screenshot \
+  --rubric "Shows the paid/unpaid badge" --gen manual --judge human
+space goal status --goal billing-ui
+```
+
+Without `--goal`, every one of these targets the active workspace goal.
+
+## Bind a planned goal to a workspace
+
+```sh
+# Create a workspace for the active planned goal (branches from previous goal's HEAD)
+space chain create-workspace
+
+# Or specify a different name/branch
+space chain create-workspace --name billing-ui --branch feat/billing-ui
+
+# Bind ANY planned goal in the chain, not just the active one.
+# --goal takes a goal id, planned workspace name, or title.
+space chain create-workspace --goal billing-ui
+space chain create-workspace --goal "Billing UI" --branch feat/billing-ui
+```
+
+You do not have to make a planned goal active before binding it — `--goal`
+targets it directly, the same way every `space goal` verb does.
+
+The new workspace branches from the previous chain goal's HEAD when one exists. Otherwise it branches from the project base. After creation:
+- The goal record moves from planned storage to workspace-local storage.
+- Any planned validation evidence (the artifacts dir) is moved into the workspace, under the goal's own folder on the artifacts mount (`goals/<goal-id>/`).
+- The workspace's phase is set to the goal's phase.
+
+## Advance phase
+
+Phase changes go through `space goal status` / `space chain` indirectly — the workspace phase is set when the agent (or user) marks the workspace as moving forward. Constraints:
+
+- An ancestor at phase `code` blocks a descendant from reaching `review` or `ship`.
+- Moving an ancestor backward (e.g. from `review` to `plan`) requires a cascade that moves every affected descendant back too.
+
+When asked to move a workspace backward, surface the cascade preview before applying it.
+
+## Stack status outputs
+
+`space stack status` returns one of these per edge:
+
+- `aligned` — child's HEAD descends from parent's HEAD.
+- `needs-rebase` — child's HEAD does not descend from parent's HEAD; child needs a rebase onto parent.
+- `missing-workspace` — parent or child has no workspace yet.
+- `missing-branch` — one or both workspaces could not resolve HEAD.
+- `dirty-worktree` — one or both workspaces have uncommitted changes; can't compare cleanly.
+- `unknown` — git did not return a deterministic answer.
+
+Top-line `status` is the first non-aligned edge. If `youAreNext` is true, the active goal is the one to rebase next (everything before it is aligned, the incoming edge needs rebase).
+
+## Workflow
+
+1. `space chain show` to see the planned/backed mix and phase ladder.
+2. `space stack status` to see git alignment.
+3. If a planned goal is next, `space chain create-workspace` to bind it.
+4. If `needs-rebase` is reported, rebase the active goal onto the ancestor's HEAD. Use the workspace's git surface; this skill does not rebase for you.
+5. After rebase, re-run `space stack status` to confirm `aligned`.
+6. Use the `space-goal` skill to author and fulfill the validation contract for the active goal.
+
+## Non-goals
+
+- This skill does not rebase, merge, or push branches. It reads the chain, mutates the chain order, and binds planned goals to workspaces. Git operations are the implementer's responsibility.
+- Stack status is git-level only. It does not consider whether goal validation has passed; that's `space goal status`.
+- "Ship" phase does not imply merged. It marks readiness for ship; the merge itself happens through the project's normal git workflow.

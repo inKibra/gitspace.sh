@@ -1,3 +1,5 @@
+import type { ReviewGuide } from '../core/review-guide.js';
+
 /**
  * Review system types
  *
@@ -176,7 +178,10 @@ export type ReviewOperation =
       threadId: string;
       commentId: string;
     }
-  | { op: 'get_changed_files'; projectName: string; workspaceName: string }
+  | { op: 'get_review_guide'; projectName: string; workspaceName: string }
+  | { op: 'get_review_guide_state'; projectName: string; workspaceName: string }
+  | { op: 'set_review_guide_state'; projectName: string; workspaceName: string; state: { readSections: string[]; approval?: { by: string; at: string; headSha: string }; requestedChangesAt?: string } }
+  | { op: 'get_changed_files'; projectName: string; workspaceName: string; base?: string }
   | { op: 'get_diff'; projectName: string; workspaceName: string }
   | {
       op: 'get_file_diff';
@@ -184,6 +189,7 @@ export type ReviewOperation =
       workspaceName: string;
       filePath: string;
       prevFilePath?: string;
+      base?: string;
     }
   | {
       op: 'get_file_versions';
@@ -200,6 +206,13 @@ export type ReviewOperation =
       filePath: string;
       /** Optional old path for renames (rename from) */
       prevFilePath?: string;
+      /**
+       * Ref the old side comes from. MUST match the ref the diff being expanded
+       * was produced against — the repo view can diff vs any ref, and pulling
+       * context from the workspace base instead would splice the wrong file's
+       * text into the gaps. Omit for the workspace's base branch.
+       */
+      base?: string;
       /** 1-based inclusive range on old/base side. Omit for full file */
       oldStart?: number;
       /** 1-based inclusive range on old/base side. Omit for full file */
@@ -224,11 +237,42 @@ export interface ReviewChangedFile {
   /** Optional old path for renames/copies (source path) */
   prevFilePath?: string;
   changeType: 'new' | 'deleted' | 'renamed' | 'copied' | 'modified';
+  /** Line counts vs the diff base (from --numstat; absent for binary). */
+  additions?: number;
+  deletions?: number;
 }
 
 /** Results returned from machine to client */
 export type ReviewResult =
   | { op: 'threads'; threads: ReviewThread[] }
+  | {
+      /** The committed narrated guide (review/guide.json), resolved via the
+       *  canonical goal-scoped reader so the UI never has to reconstruct the
+       *  `goals/<goalId>/` path. Null when no guide has been submitted. */
+      op: 'review_guide';
+      guide: ReviewGuide | null;
+      /** Workspace HEAD at read time. The guide is a cache keyed by `headSha`
+       *  (docs/REVIEW-GUIDE.md), so a reader needs both to know what it holds. */
+      headSha?: string;
+      /** `guide.headSha` no longer matches HEAD: the narrative describes an
+       *  earlier diff. Serving that silently is how a guide starts lying. */
+      stale?: boolean;
+    }
+  | {
+      op: 'review_guide_state';
+      state: { readSections: string[]; approval?: { by: string; at: string; headSha: string }; requestedChangesAt?: string };
+      /** Goal-validation timeline (phase-stamped) — one source shared by the
+       *  guide UI and the narrator. Absent when the workspace has no goal. */
+      goalTimeline?: import('./goals.js').TimelineEvent[];
+      /** Phase-journal lite: which requirements advanced in which phase.
+       *  Absent when the workspace has no journal. */
+      journal?: Array<{
+        phase: string;
+        startedAt: string;
+        endedAt?: string;
+        requirementsAdvanced: Array<{ id: string; from: string; to: string }>;
+      }>;
+    }
   | { op: 'thread_created'; thread: ReviewThread }
   | { op: 'thread_updated'; thread: ReviewThread }
   | { op: 'comment_added'; thread: ReviewThread }
@@ -239,6 +283,9 @@ export type ReviewResult =
       files: ReviewChangedFile[];
       baseBranch: string;
       headBranch: string;
+      /** The repo's actual local branches (for the "diff vs" selector) — so the
+       *  UI offers real branches instead of hardcoded main/develop. */
+      branches?: string[];
     }
   | { op: 'diff'; diff: string; baseBranch: string; headBranch: string }
   | {

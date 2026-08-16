@@ -38,7 +38,14 @@ describe('review storage prompting', () => {
       'Needs another look.'
     );
 
-    expect(readFileSync(join(workspacePath, '.gitignore'), 'utf-8')).toContain('.gitspace/workspace/');
+    const gitignoreEntries = readFileSync(join(workspacePath, '.gitignore'), 'utf-8').split(/\r?\n/);
+    expect(gitignoreEntries).toContain('.gitspace/workspace/');
+    expect(gitignoreEntries).toContain('.gitspace/.processes/');
+    expect(gitignoreEntries).toContain('.gitspace/uploads/');
+    expect(gitignoreEntries).toContain('.gitspace/events/');
+    expect(gitignoreEntries).not.toContain('.processes/');
+    expect(gitignoreEntries).not.toContain('uploads/');
+    expect(gitignoreEntries).not.toContain('.events/');
     expect(
       existsSync(join(workspacePath, '.gitspace', 'workspace', 'feature-one', 'review.json'))
     ).toBe(true);
@@ -58,8 +65,29 @@ describe('review storage prompting', () => {
       { allowPrompt: true }
     );
 
-    expect(readFileSync(join(workspacePath, '.gitignore'), 'utf-8')).toContain('.gitspace/workspace/');
+    const gitignoreEntries = readFileSync(join(workspacePath, '.gitignore'), 'utf-8').split(/\r?\n/);
+    expect(gitignoreEntries).toContain('.gitspace/workspace/');
+    expect(gitignoreEntries).toContain('.gitspace/.processes/');
+    expect(gitignoreEntries).toContain('.gitspace/uploads/');
+    expect(gitignoreEntries).toContain('.gitspace/events/');
     expect(existsSync(join(workspacePath, '.gitspace', 'workspace', 'feature-two', 'review.json'))).toBe(true);
+  });
+
+  it('does not add root runtime ignore entries when nested runtime entries already exist', async () => {
+    writeFileSync(join(workspacePath, '.gitignore'), '# existing\n.gitspace/uploads/\n');
+    const { createThread } = await loadReviewModule();
+
+    await createThread(
+      workspacePath,
+      'feature-three',
+      'main',
+      { kind: 'file', file: 'src/app.ts' },
+      'Check runtime ignores.'
+    );
+
+    const gitignoreEntries = readFileSync(join(workspacePath, '.gitignore'), 'utf-8').split(/\r?\n/);
+    expect(gitignoreEntries).toContain('.gitspace/uploads/');
+    expect(gitignoreEntries).not.toContain('uploads/');
   });
 });
 

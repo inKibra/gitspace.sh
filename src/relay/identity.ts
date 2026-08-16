@@ -66,6 +66,8 @@ const IDENTITY_FILENAME = "identity.json";
  * @returns Path to ~/.gitspace/.relay/
  */
 export function getRelayDir(): string {
+  const override = process.env.GITSPACE_RELAY_DIR?.trim();
+  if (override) return override;
   return join(getSpacesDir(), ".relay");
 }
 

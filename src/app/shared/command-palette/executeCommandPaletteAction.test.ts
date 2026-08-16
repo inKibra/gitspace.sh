@@ -21,11 +21,18 @@ function createHandlers() {
     onAddWorkspace: mock(() => undefined),
     onSetStatus: mock(() => undefined),
     onDeleteWorkspace: mock(() => undefined),
+    onDeleteWorkspaceSkipScripts: mock(() => undefined),
     onEditBundleConfig: mock(() => undefined),
+    onRefreshBundle: mock(() => undefined),
+    onRerunBundleScripts: mock(() => undefined),
+    onAddNote: mock(() => undefined),
+    onListNotes: mock(() => undefined),
     onEditProcessConfig: mock(() => undefined),
     onDeleteRepo: mock(() => undefined),
     onOpenGitHubPr: mock(() => undefined),
     onOpenReview: mock(() => undefined),
+    onOpenEditor: mock(() => undefined),
+    onShowGoalChains: mock(() => undefined),
   };
 }
 
@@ -56,5 +63,46 @@ describe('executeCommandPaletteAction', () => {
     expect(handlers.showSelect).toHaveBeenCalledTimes(1);
     const firstCall = (handlers.showSelect as { mock: { calls: unknown[][] } }).mock.calls[0];
     expect(firstCall?.[0]).toMatchObject({ title: 'Demo web#1' });
+  });
+
+  it('runs refresh-bundle for selected workspace', () => {
+    const handlers = createHandlers();
+    const workspace = createWorkspace();
+
+    executeCommandPaletteAction({
+      commandId: 'refresh-bundle',
+      workspace,
+      projectName: 'proj',
+      ...handlers,
+    });
+
+    expect(handlers.onRefreshBundle).toHaveBeenCalledWith(workspace);
+  });
+
+  it('runs open-editor for selected workspace', () => {
+    const handlers = createHandlers();
+    const workspace = createWorkspace();
+
+    executeCommandPaletteAction({
+      commandId: 'open-editor',
+      workspace,
+      projectName: 'proj',
+      ...handlers,
+    });
+
+    expect(handlers.onOpenEditor).toHaveBeenCalledWith(workspace);
+  });
+
+  it('runs goal chain command without requiring a workspace selection', () => {
+    const handlers = createHandlers();
+
+    executeCommandPaletteAction({
+      commandId: 'show-goal-chains',
+      workspace: null,
+      projectName: 'proj',
+      ...handlers,
+    });
+
+    expect(handlers.onShowGoalChains).toHaveBeenCalledTimes(1);
   });
 });

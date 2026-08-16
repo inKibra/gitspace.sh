@@ -8,11 +8,12 @@
  * - Editing/deleting own comments
  */
 
-import { Fragment, useState, useCallback, useEffect, useMemo, useRef, type ReactNode } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import type { ReviewThread, HunkDecision } from '../types/review.js';
 import type { HunkFocusTarget } from './DiffViewer.web.js';
 import { normalizeHunkHeader } from '../utils/hunk-header.js';
 import { REVIEW_DECISION_COLORS } from './review-decision-colors.js';
+import { CommentComposer, ReviewCommentList } from './review-comment-ui.web.js';
 
 export interface ThreadPanelProps {
   threads: ReviewThread[];
@@ -28,46 +29,9 @@ export interface ThreadPanelProps {
   onDeleteComment: (threadId: string, commentId: string) => Promise<void>;
   onUpdateDecision: (threadId: string, decision: HunkDecision) => Promise<void>;
   onOpenThreadTarget?: (threadId: string) => void;
+  /** Route a finding to the workspace's agent ('✦ Send to agent → fix'). */
+  onSendToAgent?: (thread: ReviewThread) => Promise<void> | void;
   onClose?: () => void;
-}
-
-const SAFE_LINK_SCHEMES = new Set(['http', 'https', 'mailto', 'tel']);
-
-function isSafeMarkdownHref(href: string): boolean {
-  const trimmed = href.trim();
-  if (!trimmed) {
-    return false;
-  }
-
-  if (trimmed.startsWith('//')) {
-    return false;
-  }
-
-  if (
-    trimmed.startsWith('#') ||
-    trimmed.startsWith('/') ||
-    trimmed.startsWith('./') ||
-    trimmed.startsWith('../')
-  ) {
-    return true;
-  }
-
-  const scheme = trimmed.match(/^([a-zA-Z][a-zA-Z\d+.-]*):/);
-  if (!scheme?.[1]) {
-    // Relative paths without a URI scheme are safe.
-    return true;
-  }
-
-  return SAFE_LINK_SCHEMES.has(scheme[1].toLowerCase());
-}
-
-function formatDate(iso: string): string {
-  try {
-    const d = new Date(iso);
-    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-  } catch {
-    return iso;
-  }
 }
 
 function targetLabel(thread: ReviewThread): string {
@@ -76,155 +40,6 @@ function targetLabel(thread: ReviewThread): string {
   if (t.kind === 'line') return `L${t.startLine}–${t.endLine} · ${t.file.split('/').pop()}`;
   if (t.kind === 'file') return `File · ${t.file.split('/').pop()}`;
   return 'Overall';
-}
-
-function renderMarkdownInline(text: string, keyPrefix: string): ReactNode[] {
-  const tokenPattern = /(\[[^\]]+\]\([^\)]+\)|`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*)/g;
-  const tokens = text.split(tokenPattern);
-
-  return tokens.map((token, index) => {
-    const key = `${keyPrefix}-inline-${index}`;
-
-    if (token.startsWith('`') && token.endsWith('`')) {
-      return (
-        <code key={key} style={{
-          fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
-          fontSize: '11px',
-          background: 'var(--gs-bg)',
-          border: '1px solid var(--gs-border)',
-          borderRadius: '3px',
-          padding: '0 4px',
-          color: 'var(--gs-text-secondary)',
-        }}>
-          {token.slice(1, -1)}
-        </code>
-      );
-    }
-
-    if (token.startsWith('**') && token.endsWith('**')) {
-      return <strong key={key}>{token.slice(2, -2)}</strong>;
-    }
-
-    if (token.startsWith('*') && token.endsWith('*')) {
-      return <em key={key}>{token.slice(1, -1)}</em>;
-    }
-
-    const linkMatch = token.match(/^\[([^\]]+)\]\(([^\)]+)\)$/);
-    if (linkMatch) {
-      const label = linkMatch[1] ?? token;
-      const href = linkMatch[2] ?? '#';
-      if (!isSafeMarkdownHref(href)) {
-        return <Fragment key={key}>{label}</Fragment>;
-      }
-      return (
-        <a
-          key={key}
-          href={href}
-          target="_blank"
-          rel="noopener noreferrer"
-          style={{ color: 'var(--gs-info)' }}
-        >
-          {label}
-        </a>
-      );
-    }
-
-    return <Fragment key={key}>{token}</Fragment>;
-  });
-}
-
-function renderMarkdownBody(markdown: string, keyPrefix: string): ReactNode[] {
-  const lines = markdown.replace(/\r/g, '').split('\n');
-  const nodes: ReactNode[] = [];
-  let paragraph: string[] = [];
-  let listItems: string[] = [];
-  let inCodeBlock = false;
-  let codeLines: string[] = [];
-
-  const flushParagraph = () => {
-    if (paragraph.length === 0) return;
-    const text = paragraph.join(' ');
-    nodes.push(
-      <p key={`${keyPrefix}-p-${nodes.length}`} style={{ margin: '0 0 6px 0' }}>
-        {renderMarkdownInline(text, `${keyPrefix}-p-${nodes.length}`)}
-      </p>
-    );
-    paragraph = [];
-  };
-
-  const flushList = () => {
-    if (listItems.length === 0) return;
-    nodes.push(
-      <ul key={`${keyPrefix}-ul-${nodes.length}`} style={{ margin: '0 0 6px 16px', padding: 0 }}>
-        {listItems.map((item, index) => (
-          <li key={`${keyPrefix}-li-${index}`} style={{ marginBottom: '2px' }}>
-            {renderMarkdownInline(item, `${keyPrefix}-li-${index}`)}
-          </li>
-        ))}
-      </ul>
-    );
-    listItems = [];
-  };
-
-  const flushCodeBlock = () => {
-    if (codeLines.length === 0) return;
-    nodes.push(
-      <pre key={`${keyPrefix}-code-${nodes.length}`} style={{
-        margin: '0 0 6px 0',
-        padding: '8px',
-        borderRadius: '6px',
-        background: 'var(--gs-bg)',
-        border: '1px solid var(--gs-border)',
-        overflowX: 'auto',
-      }}>
-        <code style={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace', fontSize: '11px' }}>
-          {codeLines.join('\n')}
-        </code>
-      </pre>
-    );
-    codeLines = [];
-  };
-
-  for (const line of lines) {
-    if (line.trim().startsWith('```')) {
-      flushParagraph();
-      flushList();
-      if (inCodeBlock) {
-        flushCodeBlock();
-      }
-      inCodeBlock = !inCodeBlock;
-      continue;
-    }
-
-    if (inCodeBlock) {
-      codeLines.push(line);
-      continue;
-    }
-
-    if (!line.trim()) {
-      flushParagraph();
-      flushList();
-      continue;
-    }
-
-    if (line.trimStart().startsWith('- ')) {
-      flushParagraph();
-      listItems.push(line.trimStart().slice(2));
-      continue;
-    }
-
-    paragraph.push(line.trim());
-  }
-
-  flushParagraph();
-  flushList();
-  flushCodeBlock();
-
-  if (nodes.length === 0) {
-    nodes.push(<p key={`${keyPrefix}-empty`} style={{ margin: 0 }} />);
-  }
-
-  return nodes;
 }
 
 export function ThreadPanel({
@@ -236,6 +51,7 @@ export function ThreadPanel({
   selectedThreadId,
   hoveredThreadId,
   onResolveThread,
+  onSendToAgent,
   onAddReply,
   onUpdateComment,
   onDeleteComment,
@@ -244,9 +60,6 @@ export function ThreadPanel({
   onClose,
 }: ThreadPanelProps) {
   const [replyingTo, setReplyingTo] = useState<string | null>(null);
-  const [replyBody, setReplyBody] = useState('');
-  const [editingComment, setEditingComment] = useState<{ threadId: string; commentId: string; body: string } | null>(null);
-  const [submitting, setSubmitting] = useState(false);
   const threadRefs = useRef<Record<string, HTMLDivElement | null>>({});
 
   const visibleThreads = useMemo(() => {
@@ -286,33 +99,6 @@ export function ThreadPanel({
 
     el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   }, [hoveredThreadId, selectedThreadId]);
-
-  const handleAddReply = useCallback(async (threadId: string) => {
-    if (!replyBody.trim()) return;
-    setSubmitting(true);
-    try {
-      await onAddReply(threadId, replyBody.trim());
-      setReplyBody('');
-      setReplyingTo(null);
-    } catch {
-      // Error is surfaced via review hook state; avoid unhandled promise rejections.
-    } finally {
-      setSubmitting(false);
-    }
-  }, [replyBody, onAddReply]);
-
-  const handleSaveEdit = useCallback(async () => {
-    if (!editingComment || !editingComment.body.trim()) return;
-    setSubmitting(true);
-    try {
-      await onUpdateComment(editingComment.threadId, editingComment.commentId, editingComment.body.trim());
-      setEditingComment(null);
-    } catch {
-      // Error is surfaced via review hook state; avoid unhandled promise rejections.
-    } finally {
-      setSubmitting(false);
-    }
-  }, [editingComment, onUpdateComment]);
 
   if (visibleThreads.length === 0) {
     return (
@@ -543,194 +329,28 @@ export function ThreadPanel({
                   </div>
                 )}
 
-                {/* Comments */}
-                {thread.comments.map((comment, idx) => (
-                  <div
-                    key={comment.id}
-                    style={{
-                      marginBottom: '8px',
-                      paddingLeft: idx > 0 ? '12px' : 0,
-                      borderLeft: idx > 0 ? '2px solid var(--gs-border-muted)' : 'none',
-                    }}
-                  >
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '3px' }}>
-                      <span style={{ fontSize: '12px', fontWeight: 600, color: 'var(--gs-info)' }}>{comment.author}</span>
-                      <span style={{ fontSize: '11px', color: 'var(--gs-text-dim)' }}>{formatDate(comment.createdAt)}</span>
-                      {comment.githubId && (
-                        <span style={{ fontSize: '10px', color: 'var(--gs-text-dim)' }}>· GH</span>
-                      )}
-                    </div>
+                {/* Comments — shared renderer (review-comment-ui.web.tsx) */}
+                <ReviewCommentList
+                  comments={thread.comments}
+                  onUpdateComment={(commentId, body) => onUpdateComment(thread.id, commentId, body)}
+                  onDeleteComment={(commentId) => onDeleteComment(thread.id, commentId)}
+                />
 
-                    {editingComment?.commentId === comment.id ? (
-                      <div>
-                        <textarea
-                          value={editingComment.body}
-                          onChange={(e) => setEditingComment({ ...editingComment, body: e.target.value })}
-                          rows={3}
-                          style={{
-                            width: '100%',
-                            background: 'var(--gs-bg-elevated)',
-                            border: '1px solid var(--gs-border)',
-                            borderRadius: '4px',
-                            color: 'var(--gs-text)',
-                            padding: '6px',
-                            fontSize: '12px',
-                            resize: 'vertical',
-                            boxSizing: 'border-box',
-                          }}
-                          autoFocus
-                        />
-                        <div style={{ display: 'flex', gap: '6px', marginTop: '4px' }}>
-                          <button
-                            onClick={() => {
-                              void handleSaveEdit().catch(() => {});
-                            }}
-                            disabled={submitting}
-                            style={{
-                              fontSize: '11px',
-                              padding: '3px 10px',
-                              background: 'var(--gs-accent)',
-                              color: 'var(--gs-text-on-accent)',
-                              border: 'none',
-                              borderRadius: '4px',
-                              cursor: 'pointer',
-                            }}
-                          >
-                            Save
-                          </button>
-                          <button
-                            onClick={() => setEditingComment(null)}
-                            style={{
-                              fontSize: '11px',
-                              padding: '3px 10px',
-                              background: 'var(--gs-btn-secondary-bg)',
-                              color: 'var(--gs-text-muted)',
-                              border: '1px solid var(--gs-border)',
-                              borderRadius: '4px',
-                              cursor: 'pointer',
-                            }}
-                          >
-                            Cancel
-                          </button>
-                        </div>
-                      </div>
-                    ) : (
-                      <div style={{ display: 'flex', gap: '6px', alignItems: 'flex-start' }}>
-                        <div style={{
-                          flex: 1,
-                          fontSize: '12px',
-                          color: 'var(--gs-text)',
-                          margin: 0,
-                          whiteSpace: 'normal',
-                          wordBreak: 'break-word',
-                          lineHeight: 1.45,
-                        }}>
-                          {renderMarkdownBody(comment.body, comment.id)}
-                        </div>
-                        {comment.author === 'local' && (
-                          <div style={{ display: 'flex', gap: '4px', flexShrink: 0 }}>
-                            <button
-                              onClick={() => setEditingComment({ threadId: thread.id, commentId: comment.id, body: comment.body })}
-                              style={{
-                                fontSize: '10px',
-                                padding: '1px 5px',
-                                background: 'none',
-                                color: 'var(--gs-text-dim)',
-                                border: '1px solid var(--gs-border)',
-                                borderRadius: '3px',
-                                cursor: 'pointer',
-                              }}
-                            >
-                              Edit
-                            </button>
-                            <button
-                              onClick={() => {
-                                void onDeleteComment(thread.id, comment.id).catch(() => {});
-                              }}
-                              style={{
-                                fontSize: '10px',
-                                padding: '1px 5px',
-                                background: 'none',
-                                color: 'var(--gs-danger)',
-                                border: '1px solid var(--gs-danger)',
-                                borderRadius: '3px',
-                                cursor: 'pointer',
-                              }}
-                            >
-                              Del
-                            </button>
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                ))}
-
-                {/* Reply form */}
+                {/* Reply form — shared composer (review-comment-ui.web.tsx) */}
                 {replyingTo === thread.id ? (
                   <div style={{ marginTop: '6px' }}>
-                    <textarea
-                      value={replyBody}
-                      onChange={(e) => setReplyBody(e.target.value)}
+                    <CommentComposer
                       placeholder="Write a reply..."
+                      submitLabel="Reply"
                       rows={2}
-                      style={{
-                        width: '100%',
-                        background: 'var(--gs-bg-elevated)',
-                        border: '1px solid var(--gs-border)',
-                        borderRadius: '4px',
-                        color: 'var(--gs-text)',
-                        padding: '6px',
-                        fontSize: '12px',
-                        resize: 'vertical',
-                        boxSizing: 'border-box',
-                      }}
-                      autoFocus
-                      onKeyDown={(e) => {
-                        if (e.key === 'Escape') { setReplyingTo(null); setReplyBody(''); }
-                        if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-                          void handleAddReply(thread.id).catch(() => {});
-                        }
-                      }}
+                      onSubmit={async (body) => { await onAddReply(thread.id, body); setReplyingTo(null); }}
+                      onCancel={() => setReplyingTo(null)}
                     />
-                    <div style={{ display: 'flex', gap: '6px', marginTop: '4px' }}>
-                      <button
-                        onClick={() => {
-                          void handleAddReply(thread.id).catch(() => {});
-                        }}
-                        disabled={submitting || !replyBody.trim()}
-                        style={{
-                          fontSize: '11px',
-                          padding: '3px 10px',
-                          background: 'var(--gs-accent)',
-                          color: 'var(--gs-text-on-accent)',
-                          border: 'none',
-                          borderRadius: '4px',
-                          cursor: 'pointer',
-                        }}
-                      >
-                        Reply
-                      </button>
-                      <button
-                        onClick={() => { setReplyingTo(null); setReplyBody(''); }}
-                        style={{
-                          fontSize: '11px',
-                          padding: '3px 10px',
-                          background: 'var(--gs-btn-secondary-bg)',
-                          color: 'var(--gs-text-muted)',
-                          border: '1px solid var(--gs-border)',
-                          borderRadius: '4px',
-                          cursor: 'pointer',
-                        }}
-                      >
-                        Cancel
-                      </button>
-                    </div>
                   </div>
                 ) : (
                   <div style={{ display: 'flex', gap: '6px', marginTop: '6px' }}>
                     <button
-                      onClick={() => { setReplyingTo(thread.id); setReplyBody(''); }}
+                      onClick={() => setReplyingTo(thread.id)}
                       style={{
                         fontSize: '11px',
                         padding: '2px 8px',
@@ -759,6 +379,23 @@ export function ThreadPanel({
                     >
                       {thread.resolved ? 'Re-open' : 'Resolve'}
                     </button>
+                    {onSendToAgent && !thread.resolved && (
+                      <button
+                        onClick={() => { void Promise.resolve(onSendToAgent(thread)).catch(() => {}); }}
+                        title="Route this finding to the workspace agent"
+                        style={{
+                          fontSize: '11px',
+                          padding: '2px 8px',
+                          background: 'none',
+                          color: 'var(--gs-accent)',
+                          border: '1px solid rgba(0,255,102,.35)',
+                          borderRadius: '4px',
+                          cursor: 'pointer',
+                        }}
+                      >
+                        ✦ Send to agent → fix
+                      </button>
+                    )}
                   </div>
                 )}
               </div>

@@ -13,9 +13,14 @@
 
 import { spawn, type Subprocess } from 'bun';
 import { join, basename } from 'path';
-import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync, unlinkSync } from 'fs';
-import { createServer, type AddressInfo } from 'net';
-import { tmpdir } from 'os';
+import { mkdirSync, writeFileSync, readFileSync, existsSync, unlinkSync } from 'fs';
+import { createServer, connect, type AddressInfo } from 'net';
+
+
+import { clearSandboxBootstrapMetadata, createSandboxSecretsStore, validateSandboxBootstrap, writeSandboxSecretsFile } from './dev-bootstrap.js';
+import { createRootInviteToken } from '../src/lib/tmux-lite/crypto/root-invites.js';
+import { mnemonicToUserIdentity } from '../src/lib/tmux-lite/crypto/user-identity.js';
+
 
 const ROOT = join(import.meta.dir, '..');
 const ENTRY = join(ROOT, 'src/index.ts');
@@ -27,10 +32,11 @@ const RESET = '\x1b[0m';
 const BOLD = '\x1b[1m';
 const DIM = '\x1b[2m';
 const COLORS = {
-  relay: '\x1b[36m',   // cyan
-  serve: '\x1b[33m',   // yellow
-  web:   '\x1b[35m',   // magenta
-  dev:   '\x1b[32m',   // green
+  relay:  '\x1b[36m',   // cyan
+  serve:  '\x1b[33m',   // yellow
+  web:    '\x1b[35m',   // magenta
+  dev:    '\x1b[32m',   // green
+  daemon: '\x1b[34m',   // blue — tmux-lite daemon log (startup, caps, wedge points)
 };
 
 function prefix(label: keyof typeof COLORS): string {
@@ -44,7 +50,7 @@ function log(label: keyof typeof COLORS, msg: string): void {
 
 // ─── Port allocation ─────────────────────────────────────────────────────────
 
-const DEFAULT_DEV_RELAY_PORT = 4480;
+// Relay port is chosen fresh each run to avoid collisions with stale daemons
 const DEFAULT_DEV_WEB_PORT = 5173;
 function findFreePort(preferredPort?: number): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -89,6 +95,8 @@ async function waitForPort(port: number, timeoutMs = 15000): Promise<void> {
   throw new Error(`Timed out waiting for port ${port}`);
 }
 
+
+
 // ─── Sandbox ─────────────────────────────────────────────────────────────────
 
 function deriveSandboxName(): string {
@@ -98,10 +106,44 @@ function deriveSandboxName(): string {
   return worktreeName.replace(/[^a-zA-Z0-9_-]/g, '-').replace(/^-+/, 'dev-');
 }
 
+function deriveDevStateDir(): string {
+  return join(ROOT, '.gitspace', 'dev');
+}
+
+function deriveDevRuntimeDir(): string {
+  return join(deriveDevStateDir(), 'runtime');
+}
+
+
 // ─── Process management ──────────────────────────────────────────────────────
 
 const children: Subprocess[] = [];
 let shuttingDown = false;
+let daemonLogTail: Subprocess | null = null;
+
+/**
+ * Surface the tmux-lite daemon log in the dev console. The daemon is a detached
+ * grandchild whose stdout/stderr go to a log FILE, so its startup, [snapshot-cap]
+ * / [agent-state-cap], serve-activation step logs, and any wedge point were
+ * invisible here — you had to know the path and cat it. Tail it with a [daemon]
+ * prefix so everything the daemon says shows up live alongside relay/serve/web.
+ */
+function tailDaemonLog(sandboxName: string): void {
+  if (daemonLogTail) return;
+  const logPath = `/tmp/tmux-lite-${sandboxName}/tmux-lite-daemon.log`;
+  try {
+    // -n 100: recent context; -F: follow by name even though the file may not
+    // exist yet (the daemon creates it when it first spawns) and across recreation.
+    daemonLogTail = spawn(['tail', '-n', '100', '-F', logPath], {
+      cwd: ROOT,
+      stdout: 'pipe',
+      stderr: 'ignore',
+    });
+    pipeOutput(daemonLogTail, 'daemon');
+  } catch (err) {
+    log('dev', `could not tail daemon log (${logPath}): ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
 
 function pipeOutput(proc: Subprocess, label: keyof typeof COLORS): void {
   const pfx = prefix(label);
@@ -160,21 +202,49 @@ function spawnChild(
   children.push(proc);
   pipeOutput(proc, label);
 
-  // Monitor for unexpected exit
+  // Any unexpected exit (including code 0) tears the whole stack down — no
+  // component should exit on its own while we are running. This closes a hole
+  // where a clean exit-0 left us with a half-dead stack and orphaned state.
   proc.exited.then((code) => {
-    if (!shuttingDown && code !== 0) {
-      log(label, `Process exited with code ${code}`);
-      shutdown(1);
+    if (!shuttingDown) {
+      log(label, `Process exited with code ${code ?? 'unknown'}`);
+      shutdown(code ?? 1);
     }
   });
 
   return proc;
 }
 
+/** True if something is actively listening on a unix socket (a live daemon),
+ *  distinct from a stale socket file left behind by a dead process. */
+function socketAccepts(path: string, timeoutMs = 500): Promise<boolean> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (v: boolean, sock?: ReturnType<typeof connect>) => {
+      if (settled) return;
+      settled = true;
+      try { sock?.destroy(); } catch { /* ignore */ }
+      resolve(v);
+    };
+    try {
+      const sock = connect(path);
+      sock.once('connect', () => done(true, sock));
+      sock.once('error', () => done(false, sock));
+      setTimeout(() => done(false, sock), timeoutMs);
+    } catch {
+      done(false);
+    }
+  });
+}
+
 async function shutdown(exitCode = 0): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
   log('dev', 'Shutting down...');
+
+  // Stop tailing the daemon log first so it doesn't emit during teardown.
+  try { daemonLogTail?.kill('SIGTERM'); } catch { /* already gone */ }
+  daemonLogTail = null;
 
   // Kill in reverse order: vite -> serve -> relay
   for (const child of [...children].reverse()) {
@@ -191,29 +261,50 @@ async function shutdown(exitCode = 0): Promise<void> {
 
   // Kill the tmux-lite server — it's a grandchild process spawned by serve
   // that survives after serve exits because it's not in the same process group.
+  // Report the ACTUAL outcome of each step: the old code logged "Sent SIGTERM to
+  // pid N" unconditionally and never checked whether N existed or died — so a
+  // stale pidfile (pid recycled/gone) read as a clean shutdown while the real
+  // daemon kept LISTENING on the socket, which is what makes the next launch's
+  // serve-activate 15s-time-out ("daemon wedged?").
+  const alive = (pid: number): boolean => { try { process.kill(pid, 0); return true; } catch { return false; } };
   try {
     const sandboxName = deriveSandboxName();
     const pidFile = `/tmp/tmux-lite-${sandboxName}.pid`;
+    const socketFile = `/tmp/tmux-lite-${sandboxName}.sock`;
     if (existsSync(pidFile)) {
       const pid = parseInt(readFileSync(pidFile, 'utf-8').trim(), 10);
       if (pid && !isNaN(pid)) {
-        try {
-          process.kill(pid, 'SIGTERM');
-          log('dev', `Sent SIGTERM to tmux-lite server (pid ${pid})`);
-          // Give it a moment to shut down cleanly
-          await Bun.sleep(500);
-          try { process.kill(pid, 0); process.kill(pid, 'SIGKILL'); } catch {}
-        } catch {
-          // Already dead
+        if (!alive(pid)) {
+          log('dev', `tmux-lite pidfile pid ${pid} is not running (stale pidfile) — nothing to signal`);
+        } else {
+          try { process.kill(pid, 'SIGTERM'); } catch { /* raced to exit */ }
+          let died = false;
+          for (let i = 0; i < 20; i++) { if (!alive(pid)) { died = true; break; } await Bun.sleep(100); }
+          if (died) {
+            log('dev', `tmux-lite server (pid ${pid}) exited after SIGTERM`);
+          } else {
+            try { process.kill(pid, 'SIGKILL'); } catch { /* raced to exit */ }
+            await Bun.sleep(200);
+            log('dev', alive(pid)
+              ? `⚠ tmux-lite server (pid ${pid}) STILL ALIVE after SIGKILL — kill manually: pkill -9 -f tmux-lite/server`
+              : `tmux-lite server (pid ${pid}) killed with SIGKILL (ignored SIGTERM — was wedged)`);
+          }
         }
       }
-      try { unlinkSync(pidFile); } catch {}
+      try { unlinkSync(pidFile); } catch { /* already gone */ }
     }
-    // Clean up sandbox socket file
-    const socketFile = `/tmp/tmux-lite-${sandboxName}.sock`;
-    try { unlinkSync(socketFile); } catch {}
-  } catch {
-    // Best-effort cleanup
+    // A daemon can outlive its pidfile pid (stale/mismatched pid) yet keep
+    // LISTENING on the socket — the exact state that wedges the next launch.
+    // Probe the socket and report the truth before we exit, so this is visible
+    // in the log instead of surfacing as an opaque timeout next time.
+    if (existsSync(socketFile)) {
+      if (await socketAccepts(socketFile)) {
+        log('dev', `⚠ a tmux-lite daemon is STILL LISTENING on ${socketFile} after cleanup (pid mismatch) — kill it: pkill -9 -f tmux-lite/server`);
+      }
+      try { unlinkSync(socketFile); } catch { /* already gone */ }
+    }
+  } catch (err) {
+    log('dev', `tmux-lite cleanup error: ${err instanceof Error ? err.message : String(err)}`);
   }
 
   process.exit(exitCode);
@@ -227,80 +318,152 @@ const DEV_PASSWORD = 'dev';
 
 async function main(): Promise<void> {
   const sandboxName = deriveSandboxName();
+  // Per-dev-run code identity. Every dev:web launch mints a fresh token that all
+  // children (relay, serve→tmux-lite daemon, vite) inherit. On restart the token
+  // changes, so any tmux-lite daemon that survived from the previous run reports
+  // the OLD token and ensureServer() recycles it — this is what makes a dev:web
+  // restart actually reload server code (see src/lib/tmux-lite/code-version.ts).
+  process.env.GITSPACE_CODE_VERSION = `dev-${crypto.randomUUID()}`;
+  // relayPort: random free port (no preferred port) so stale daemons can't
+  // collide with us. vitePort prefers the classic 5173 for habitual DX.
   const [relayPort, vitePort] = await Promise.all([
-    findFreePort(DEFAULT_DEV_RELAY_PORT),
+    findFreePort(),
     findFreePort(DEFAULT_DEV_WEB_PORT),
   ]);
 
-  // Wipe and recreate sandbox directory tree (each run gets a fresh state)
-  const sandboxDir = join(tmpdir(), `gssh-dev-${sandboxName}`);
-  rmSync(sandboxDir, { recursive: true, force: true });
-  const identityDir = join(sandboxDir, 'identity');
-  const controlDir = join(sandboxDir, 'relay-control');
-  const serveDaemonDir = join(sandboxDir, 'serve');
-  for (const dir of [identityDir, controlDir, serveDaemonDir]) {
+  // Persistent per-worktree dev directory — survives dev:web restarts and
+  // system temp cleanup so bundle secrets, identity, and relay config don't
+  // need to be re-entered.
+  const devStateDir = deriveDevStateDir();
+  const runtimeDir = deriveDevRuntimeDir();
+  const identityDir = join(devStateDir, 'identity');
+  const controlDir = join(devStateDir, 'relay-control');
+  const relayDir = join(devStateDir, 'relay');
+  const traceLogPath = join(runtimeDir, 'gitspace-runtime-trace.jsonl');
+  for (const dir of [identityDir, controlDir, relayDir, runtimeDir]) {
     mkdirSync(dir, { recursive: true });
   }
 
-  log('dev', `Sandbox: ${sandboxName}`);
+  // Validate all required bootstrap artifacts before reuse. If any are
+  // missing, malformed, or bound to a stale machine id, regenerate the full
+  // sandbox identity set — identity, secrets, browser identity, and persisted
+  // machine metadata are interdependent so partial repair is unsafe.
+  const keypairPath = join(identityDir, 'keypair.json');
+  const secretsPath = join(devStateDir, 'secrets.json');
+  const devIdentityPath = join(devStateDir, 'dev-browser-identity.json');
+  const machineIdentityPath = join(identityDir, 'machine.json');
+  const relayConfigPath = join(identityDir, 'relay.json');
+  const bootstrapValidation = validateSandboxBootstrap({
+    keypairPath,
+    secretsPath,
+    devIdentityPath,
+    machineIdentityPath,
+    relayConfigPath,
+  });
+  log('dev', `Dev state: ${devStateDir}`);
+  const isFirstRun = !bootstrapValidation.valid;
+
+  log('dev', `Sandbox: ${sandboxName}${isFirstRun ? ' (regenerating identity)' : ''}`);
+  if (isFirstRun && bootstrapValidation.reason) {
+    log('dev', `  reason: ${bootstrapValidation.reason}`);
+  }
   log('dev', `Relay port: ${relayPort}`);
   log('dev', `Vite port: ${vitePort}`);
   log('dev', '');
 
-  // Generate a self-contained sandbox identity (root + browser device).
-  // No user password needed — everything is freshly generated.
-  log('dev', 'Generating sandbox identity...');
-  const identityScript = join(import.meta.dir, 'dev-identity.ts');
-  const genProc = spawn(['bun', identityScript], {
-    cwd: ROOT,
-    env: process.env as Record<string, string>,
-    stdout: 'pipe',
-    stderr: 'pipe',
-    stdin: 'ignore',
-  });
-  const genExit = await genProc.exited;
-  if (genExit !== 0) {
-    const stderr = await new Response(genProc.stderr).text();
-    log('dev', `Failed to generate identity: ${stderr.trim()}`);
-    await shutdown(1);
-    return;
+  // Generate sandbox identity only on first run or if prior bootstrap is
+  // incomplete. Reuse on subsequent healthy runs so relay identity stays
+  // stable and bundle secrets persist. 
+
+  if (isFirstRun) {
+    clearSandboxBootstrapMetadata({
+      keypairPath,
+      secretsPath,
+      devIdentityPath,
+      machineIdentityPath,
+      relayConfigPath,
+    });
+    log('dev', 'Generating sandbox identity...');
+    const identityScript = join(import.meta.dir, 'dev-identity.ts');
+    const genProc = spawn(['bun', identityScript], {
+      cwd: ROOT,
+      env: process.env as Record<string, string>,
+      stdout: 'pipe',
+      stderr: 'pipe',
+      stdin: 'ignore',
+    });
+    const genExit = await genProc.exited;
+    if (genExit !== 0) {
+      const stderr = await new Response(genProc.stderr).text();
+      log('dev', `Failed to generate identity: ${stderr.trim()}`);
+      await shutdown(1);
+      return;
+    }
+    const genOutput = JSON.parse(await new Response(genProc.stdout).text());
+
+    // Write root keypair.json so serve can load the device identity
+    writeFileSync(keypairPath, JSON.stringify(genOutput.keypairStorage, null, 2), { mode: 0o600 });
+
+    // Seed test secrets file with user root identity (bypasses system keychain)
+    const secretsStore = createSandboxSecretsStore(secretsPath, genOutput.userRootStored);
+    writeSandboxSecretsFile(secretsPath, secretsStore);
+
+    // Write browser identity for the Vite dev endpoint
+    writeFileSync(devIdentityPath, JSON.stringify(genOutput.browserIdentity));
+    log('dev', 'Sandbox identity generated');
+  } else {
+    log('dev', 'Reusing existing sandbox identity');
   }
-  const genOutput = JSON.parse(await new Response(genProc.stdout).text());
-
-  // Write root keypair.json so serve can load the device identity
-  const keypairPath = join(identityDir, 'keypair.json');
-  writeFileSync(keypairPath, JSON.stringify(genOutput.keypairStorage, null, 2), { mode: 0o600 });
-
-  // Seed test secrets file with user root identity (bypasses system keychain)
-  const secretsPath = join(sandboxDir, 'secrets.json');
-  const unifiedBlob = {
-    global: { USER_ROOT_IDENTITY: JSON.stringify(genOutput.userRootStored) },
-    projects: {},
-    metadata: { schemaVersion: 2, legacyMigrationComplete: true, legacyEntriesRetained: false },
-  };
-  writeFileSync(secretsPath, JSON.stringify({
-    entries: { 'com.gitspace:secrets': JSON.stringify(unifiedBlob) },
-  }), { mode: 0o600 });
-
-  // Write browser identity for the Vite dev endpoint
-  const devIdentityPath = join(sandboxDir, 'dev-browser-identity.json');
-  writeFileSync(devIdentityPath, JSON.stringify(genOutput.browserIdentity));
-  log('dev', 'Sandbox identity generated');
   log('dev', '');
 
   // Shared env for relay + serve: sandbox identity + test secrets file.
   // Workspace scanning stays on the real ~/gitspace tree so dev reflects the
   // same project/workspace metadata as the TUI.
   const sandboxEnv = {
+    GITSPACE_TRACE_FILE: traceLogPath,
+    GITSPACE_TRACE: process.env.GITSPACE_TRACE?.trim() || '1',
     GITSPACE_IDENTITY_DIR: identityDir,
+    GITSPACE_RELAY_DIR: relayDir,
     GSSH_TEST_RUNTIME: '1',
     GSSH_ENABLE_TEST_SECRETS_BACKEND: '1',
     GSSH_TEST_SECRETS_FILE: secretsPath,
   };
 
+  const unifiedSecrets = JSON.parse(
+    JSON.parse(readFileSync(secretsPath, 'utf-8')).entries['com.gitspace:secrets']
+  ) as { global: Record<string, string> };
+  const storedUserRoot = JSON.parse(unifiedSecrets.global.USER_ROOT_IDENTITY) as { mnemonic: string };
+  const ownerUserRoot = mnemonicToUserIdentity(storedUserRoot.mnemonic);
+  const keypairStorage = JSON.parse(readFileSync(keypairPath, 'utf-8')) as {
+    signingPublicKey: string;
+    keyExchangePublicKey: string;
+  };
+  const relayUrl = `ws://127.0.0.1:${relayPort}/ws`;
+  const enrollmentToken = createRootInviteToken({
+    type: 'relay-machine',
+    owner: ownerUserRoot,
+    relayUrl,
+    targetMachineSigningKey: keypairStorage.signingPublicKey,
+    targetMachineKeyExchangeKey: keypairStorage.keyExchangePublicKey,
+    expiresAt: Date.now() + 60 * 60 * 1000,
+    maxUses: 1,
+    label: 'Dev Sandbox Machine',
+  });
+
+  log('dev', `Trace log: ${traceLogPath}`);
+
   // Phase 1: Start relay
   log('dev', 'Starting relay...');
-  spawnChild('relay', ['bun', ENTRY, 'relay', 'start', '--port', String(relayPort)], {
+  // Relay runs in foreground as a direct child of this supervisor so Ctrl+C
+  // truly kills it — no daemon fork, no stale listener on restart. --yes
+  // auto-confirms the --takeover prompt since the child has no stdin.
+  spawnChild('relay', [
+    'bun', ENTRY, 'relay', 'start',
+    '--foreground',
+    '--takeover',
+    '--yes',
+    '--port', String(relayPort),
+  ], {
     ...sandboxEnv,
     GITSPACE_CONTROL_DIR: controlDir,
   });
@@ -314,27 +477,51 @@ async function main(): Promise<void> {
   }
   log('dev', 'Relay ready');
 
-  // Phase 2: Start serve with the dev password piped via stdin
-  const relayUrl = `ws://127.0.0.1:${relayPort}/ws`;
-  log('dev', 'Starting serve...');
-  const serveProc = spawnChild('serve',
-    ['bun', ENTRY, 'machine', 'serve', 'start', '--foreground', '--relay', relayUrl, '--password-stdin'],
-    { ...sandboxEnv, GITSPACE_CONTROL_DIR: controlDir, TMUX_LITE_SANDBOX: sandboxName, GITSPACE_SERVE_DAEMON_DIR: serveDaemonDir },
-    undefined,
-    { stdin: 'pipe' },
-  );
+  // Phase 2: serve is an ACTIVATOR now (daemon unification P2): it unlocks
+  // the identity, activates the serve runtime inside the tmux-lite daemon,
+  // and EXITS 0. Deliberately not spawnChild-tracked — a clean exit is the
+  // success signal here, not a stack failure.
+  // Surface the daemon log NOW — serve activation spawns the daemon, and this is
+  // exactly where a wedge (e.g. an oversized startup scan) would otherwise be an
+  // opaque 15s serve-activate timeout. -F handles the file not existing yet.
+  tailDaemonLog(sandboxName);
+
+  log('dev', 'Activating serve in the machine daemon...');
+  const serveProc = spawn([
+    'bun', ENTRY, 'machine', 'serve', 'start',
+    '--takeover',
+    '--yes',
+    '--relay', relayUrl,
+    '--enrollment-token', enrollmentToken,
+    '--password-stdin',
+  ], {
+    cwd: ROOT,
+    env: { ...process.env, ...sandboxEnv, GITSPACE_CONTROL_DIR: controlDir, TMUX_LITE_SANDBOX: sandboxName },
+    stdout: 'pipe',
+    stderr: 'pipe',
+    stdin: 'pipe',
+  });
+  pipeOutput(serveProc, 'serve');
   serveProc.stdin.write(DEV_PASSWORD + '\n');
   serveProc.stdin.end();
 
-  // Give serve a moment to initialize
-  await Bun.sleep(2000);
-  log('dev', 'Serve started');
+  const serveExit = await serveProc.exited;
+  if (serveExit !== 0) {
+    log('dev', `Serve activation failed (exit ${serveExit})`);
+    await shutdown(1);
+    return;
+  }
+  log('dev', 'Serve active (hosted in the machine daemon)');
 
   // Phase 3: Start Vite dev server with enrollment token
-  const enrollToken = crypto.randomUUID();
+  const enrollToken = process.env.DEV_ENROLL_TOKEN ?? crypto.randomUUID();
   log('dev', 'Starting Vite...');
+  // NOTE: spawning 'node' here was a placebo — machines without a real node
+  // get Bun's node shim (bun itself). The destroySoon Bun-compat gap is
+  // polyfilled in web/vite.config.ts instead, which holds under either runtime.
   spawnChild('web', ['bunx', 'vite', '--port', String(vitePort), '--host'], {
     RELAY_PORT: String(relayPort),
+    VITE_RELAY_URL: relayUrl,
     DEV_IDENTITY_PATH: devIdentityPath,
     DEV_ENROLL_TOKEN: enrollToken,
   }, WEB_DIR);
@@ -353,7 +540,7 @@ async function main(): Promise<void> {
   log('dev', `  ${BOLD}Open:${RESET}  http://localhost:${vitePort}?enroll=${enrollToken}`);
   log('dev', '');
   log('dev', `  Relay:   ws://127.0.0.1:${relayPort}/ws`);
-  log('dev', `  Sandbox: ${sandboxDir}`);
+  log('dev', `  Dev state: ${devStateDir}`);
   log('dev', '');
   log('dev', `${DIM}The enrollment link auto-authenticates the browser.${RESET}`);
   log('dev', `${DIM}Press Ctrl+C to stop all services${RESET}`);

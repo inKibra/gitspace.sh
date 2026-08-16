@@ -39,6 +39,17 @@ function isPathInside(basePath: string, targetPath: string): boolean {
   return resolvedTarget === resolvedBase || resolvedTarget.startsWith(`${resolvedBase}${sep}`);
 }
 
+function isRepoLocalDevSecretsPath(targetPath: string): boolean {
+  const parts = resolve(targetPath).split(sep).filter(Boolean);
+  for (let index = 0; index < parts.length - 2; index += 1) {
+    if (parts[index] === '.gitspace' && parts[index + 1] === 'dev') {
+      return true;
+    }
+  }
+  return false;
+}
+
+
 function resolveTestSecretsFilePath(): string | null {
   const rawPath = process.env.GSSH_TEST_SECRETS_FILE?.trim() || null;
   if (!rawPath || !TEST_SECRETS_BACKEND_ENABLED || !isTestRuntime()) {
@@ -47,8 +58,8 @@ function resolveTestSecretsFilePath(): string | null {
 
   const resolvedPath = resolve(rawPath);
   const tempRoot = resolve(tmpdir());
-  if (!isPathInside(tempRoot, resolvedPath)) {
-    throw new Error('GSSH_TEST_SECRETS_FILE must be within the system temp directory');
+  if (!isPathInside(tempRoot, resolvedPath) && !isRepoLocalDevSecretsPath(resolvedPath)) {
+    throw new Error('GSSH_TEST_SECRETS_FILE must be within the system temp directory or a repo-local .gitspace/dev directory');
   }
 
   return resolvedPath;
@@ -308,6 +319,16 @@ async function loadUnifiedSecretsBlob(): Promise<UnifiedSecretsBlob> {
   }
 }
 
+async function loadFreshUnifiedSecretsBlob(): Promise<UnifiedSecretsBlob> {
+  const raw = await readSecretValue(UNIFIED_SECRETS_KEY);
+  unifiedSecretsCache = parseUnifiedSecretsBlob(raw);
+  unifiedSecretsCachePromise = Promise.resolve(unifiedSecretsCache);
+  if (unifiedSecretsCache.metadata.legacyMigrationComplete) {
+    legacyEntriesDetected = unifiedSecretsCache.metadata.legacyEntriesRetained;
+  }
+  return unifiedSecretsCache;
+}
+
 async function saveUnifiedSecretsBlob(blob: UnifiedSecretsBlob): Promise<void> {
   const normalized: UnifiedSecretsBlob = {
     global: { ...blob.global },
@@ -396,8 +417,8 @@ function mergeSecrets(
 /**
  * Load project secrets from the unified blob.
  */
-async function loadProjectSecretsBlob(projectName: string): Promise<Record<string, string>> {
-  const blob = await loadUnifiedSecretsBlob();
+async function loadProjectSecretsBlob(projectName: string, options: { fresh?: boolean } = {}): Promise<Record<string, string>> {
+  const blob = options.fresh ? await loadFreshUnifiedSecretsBlob() : await loadUnifiedSecretsBlob();
   return { ...(blob.projects[projectName] || {}) };
 }
 
@@ -408,7 +429,7 @@ async function saveProjectSecretsBlob(
   projectName: string,
   secrets: Record<string, string>
 ): Promise<void> {
-  const blob = await loadUnifiedSecretsBlob();
+  const blob = await loadFreshUnifiedSecretsBlob();
   if (Object.keys(secrets).length === 0) {
     delete blob.projects[projectName];
   } else {
@@ -425,7 +446,7 @@ export async function setProjectSecret(
   key: string,
   value: string
 ): Promise<void> {
-  const secrets = await loadProjectSecretsBlob(projectName);
+  const secrets = await loadProjectSecretsBlob(projectName, { fresh: true });
   secrets[key] = value;
   await saveProjectSecretsBlob(projectName, secrets);
   notifyOwnerSyncCategoryDirty('project/workspace');
@@ -441,7 +462,11 @@ export async function getProjectSecret(
   projectName: string,
   key: string
 ): Promise<string | null> {
-  const blob = await loadUnifiedSecretsBlob();
+  // Always read fresh: secrets can be written by another process (e.g. bundle
+  // refresh from the tmux-lite server while scripts run in the machine daemon),
+  // and a stale process-local cache would report a just-saved secret as missing.
+  // The legacy project-blob / per-secret fallback below still runs unchanged.
+  const blob = await loadFreshUnifiedSecretsBlob();
   const current = blob.projects[projectName] || {};
 
   // Found in new format
@@ -490,7 +515,7 @@ export async function deleteProjectSecret(
   projectName: string,
   key: string
 ): Promise<boolean> {
-  const secrets = await loadProjectSecretsBlob(projectName);
+  const secrets = await loadProjectSecretsBlob(projectName, { fresh: true });
   if (!(key in secrets)) {
     return false;
   }
@@ -508,7 +533,9 @@ export async function getProjectSecrets(
   projectName: string,
   keys: string[]
 ): Promise<Record<string, string>> {
-  const blob = await loadUnifiedSecretsBlob();
+  // Always read fresh (see getProjectSecret) so cross-process writes are visible
+  // without a manual cache clear.
+  const blob = await loadFreshUnifiedSecretsBlob();
   let secrets = blob.projects[projectName] || {};
   let changed = false;
 
@@ -574,7 +601,7 @@ export async function deleteProjectSecrets(
   projectName: string,
   keys: string[]
 ): Promise<void> {
-  const secrets = await loadProjectSecretsBlob(projectName);
+  const secrets = await loadProjectSecretsBlob(projectName, { fresh: true });
   for (const key of keys) {
     delete secrets[key];
   }
@@ -587,7 +614,7 @@ export async function deleteProjectSecrets(
  * Used when removing a project entirely
  */
 export async function deleteAllProjectSecrets(projectName: string): Promise<void> {
-  const blob = await loadUnifiedSecretsBlob();
+  const blob = await loadFreshUnifiedSecretsBlob();
   delete blob.projects[projectName];
   await saveUnifiedSecretsBlob(blob);
   notifyOwnerSyncCategoryDirty('project/workspace');
@@ -600,8 +627,8 @@ export async function deleteAllProjectSecrets(projectName: string): Promise<void
 /**
  * Load global secrets from the unified blob.
  */
-async function loadGlobalSecretsBlob(): Promise<Record<string, string>> {
-  const blob = await loadUnifiedSecretsBlob();
+async function loadGlobalSecretsBlob(options: { fresh?: boolean } = {}): Promise<Record<string, string>> {
+  const blob = options.fresh ? await loadFreshUnifiedSecretsBlob() : await loadUnifiedSecretsBlob();
   return { ...blob.global };
 }
 
@@ -609,7 +636,7 @@ async function loadGlobalSecretsBlob(): Promise<Record<string, string>> {
  * Save the global secrets blob to keychain
  */
 async function saveGlobalSecretsBlob(secrets: Record<string, string>): Promise<void> {
-  const blob = await loadUnifiedSecretsBlob();
+  const blob = await loadFreshUnifiedSecretsBlob();
   blob.global = { ...secrets };
   await saveUnifiedSecretsBlob(blob);
 }
@@ -619,7 +646,7 @@ async function saveGlobalSecretsBlob(secrets: Record<string, string>): Promise<v
  * Used for: GITSPACE_TOKEN, TUNNEL_TOKEN_{subdomain}, etc.
  */
 export async function setSecret(key: string, value: string): Promise<void> {
-  const secrets = await loadGlobalSecretsBlob();
+  const secrets = await loadGlobalSecretsBlob({ fresh: true });
   secrets[key] = value;
   await saveGlobalSecretsBlob(secrets);
   notifyGlobalSecretChangeForSync(key);
