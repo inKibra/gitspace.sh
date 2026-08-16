@@ -81,6 +81,7 @@ import {
   guardOversizeSend,
   summarizeClose,
 } from '../../lib/tmux-lite/transport-diagnostics.js';
+import { reportClientDiagnostic, reportRpcFailure } from '../../lib/client-diagnostics-sink.js';
 // No-op in the browser (window guard); under node/TUI it routes transport
 // diagnostics into the trace ring. Browser routing is installed by
 // installClientDiagnostics (client-diagnostics.web).
@@ -115,25 +116,18 @@ const PONG_LIVENESS_TIMEOUT_MS = 45_000;
  *  the browser client-diagnostics ring (ticket #5 leans on both). */
 function traceTimeoutEvent(event: string, details: Record<string, unknown>): void {
   writeTraceLog(event, details);
-  if (typeof window !== 'undefined') {
-    void import('../../lib/client-diagnostics.web.js')
-      .then((mod) => mod.pushDiagnostic({
-        kind: 'rpc',
-        message: event,
-        detail: JSON.stringify(details),
-        source: 'remote-session',
-      }))
-      .catch(() => undefined);
-  }
+  reportClientDiagnostic({
+    kind: 'rpc',
+    message: event,
+    detail: JSON.stringify(details),
+    source: 'remote-session',
+  });
 }
 /** Ticket #5: every generic RPC rejection (timeout, send failure, error
  *  response, disconnect flush) lands in the browser diagnostics ring with the
  *  command type + elapsed time. No-op outside the browser; never throws. */
 function recordRpcRejection(command: string, error: unknown, elapsedMs: number): void {
-  if (typeof window === 'undefined') return;
-  void import('../../lib/client-diagnostics.web.js')
-    .then((mod) => mod.recordRpcFailure(command, error, { elapsedMs }))
-    .catch(() => undefined);
+  reportRpcFailure(command, error, { elapsedMs });
 }
 
 const OPERATION_COMMAND_TYPES = new Set<string>([

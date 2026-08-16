@@ -9,15 +9,11 @@
  * Nothing here throws: diagnostics must never be the reason the app breaks.
  */
 
-export interface DiagnosticEntry {
+import { setClientDiagnosticsSink, type ClientDiagnostic } from './client-diagnostics-sink.js';
+
+export interface DiagnosticEntry extends ClientDiagnostic {
   /** epoch ms */
   t: number;
-  kind: 'error' | 'unhandledrejection' | 'console.error' | 'console.warn' | 'console.log' | 'react' | 'rpc' | 'freeze' | 'click' | 'nav' | 'transport';
-  message: string;
-  /** stack or extra context, already string-ified */
-  detail?: string;
-  /** originating surface hint, e.g. 'transcript', 'app', an RPC type */
-  source?: string;
 }
 
 const RING_MAX = 200;
@@ -89,7 +85,9 @@ export function installClientDiagnostics(): void {
   if (installed || typeof window === 'undefined') return;
   installed = true;
 
-  installBrowserTransportDiagnostics();
+  // Shared (DOM-less) code reports through the sink rather than importing this
+  // module — see client-diagnostics-sink.ts for why that edge is inverted.
+  setClientDiagnosticsSink({ pushDiagnostic, recordRpcFailure });
 
   // Inspectable handle: the report dialog reads the ring from here, and it's a
   // useful console debugging hook (`__gsDiag.ring()`).

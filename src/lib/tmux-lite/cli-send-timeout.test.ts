@@ -78,7 +78,7 @@ function installControlledTimers(): ControlledTimers {
     const timer: ControlledTimer = { callback, cancelled: false };
     timers.add(timer);
     return timer as unknown as number;
-  }) as typeof setTimeout;
+  }) as unknown as typeof setTimeout;
   globalThis.clearTimeout = ((timer: unknown) => {
     if (typeof timer === "object" && timer !== null && timers.has(timer as ControlledTimer)) {
       (timer as ControlledTimer).cancelled = true;

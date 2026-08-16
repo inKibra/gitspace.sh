@@ -7,7 +7,8 @@ const DEFAULT_TRACE_FILE = 'gitspace-runtime-trace.jsonl';
 const MAX_TRACE_BYTES = 4 * 1024 * 1024; // rotate at 4MB; one .1 backup kept
 
 function isServerRuntime(): boolean {
-  return typeof window === 'undefined';
+  // See transport-diagnostics-server.ts: no DOM lib in this program.
+  return !('window' in globalThis);
 }
 
 function getWorkspaceRootFallback(): string {

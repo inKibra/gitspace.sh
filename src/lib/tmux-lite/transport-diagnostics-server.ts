@@ -24,7 +24,9 @@ let installed = false;
  */
 export function installServerTransportDiagnostics(): void {
   if (installed) return;
-  if (typeof window !== 'undefined') return;
+  // `'window' in globalThis` rather than `typeof window`: this file is in the
+  // DOM-less root program, where a bare `window` is an undeclared name.
+  if ('window' in globalThis) return;
   installed = true;
   setTransportDiagnosticSink((diagnostic: TransportDiagnostic) => {
     // writeTraceLog pushes to the in-memory ring (report.server.traceRing, the
