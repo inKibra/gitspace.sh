@@ -1,1 +1,19 @@
-/*    /index.html   200
+# The blog was renamed to Notes. Nothing was widely linked at the time, but the
+# old paths cost one line to honour and a 301 keeps any stray link alive.
+/blog                /notes                301
+/blog/*              /notes/:splat         301
+
+# Intentionally no SPA catch-all.
+#
+# There used to be `/*  /index.html  200` here. Every route is static and known
+# at build time, so tools/build-static.ts writes a real index.html for each one
+# and the fallback is no longer needed to make deep links work.
+#
+# Keeping it would be actively harmful: it answered HTTP 200 for ANY path,
+# including nonsense, so /whatever-you-type served the homepage with a success
+# status. Search engines read that as unlimited duplicate pages, and genuinely
+# dead links looked alive. Without it, Cloudflare Pages falls through to
+# dist/404.html and returns a real 404.
+#
+# If a dynamic (non-prerenderable) route is ever added, give it its own rule
+# here rather than restoring the blanket catch-all.

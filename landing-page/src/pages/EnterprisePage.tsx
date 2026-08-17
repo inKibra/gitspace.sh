@@ -73,10 +73,10 @@ export default function EnterprisePage() {
               Book an intro call →
             </a>
             <a
-              href="mailto:hello@inkibra.com"
+              href="mailto:contact@inkibra.com"
               className="font-mono text-sm text-zinc-400 hover:text-white transition-colors underline underline-offset-4 decoration-zinc-700"
             >
-              or email hello@inkibra.com
+              or email contact@inkibra.com
             </a>
           </div>
         </div>
@@ -175,10 +175,10 @@ export default function EnterprisePage() {
               Book an intro call →
             </a>
             <a
-              href="mailto:hello@inkibra.com"
+              href="mailto:contact@inkibra.com"
               className="font-mono text-sm text-zinc-400 hover:text-white transition-colors underline underline-offset-4 decoration-zinc-700"
             >
-              or email hello@inkibra.com
+              or email contact@inkibra.com
             </a>
           </div>
           <p className="mt-12 text-sm text-zinc-600 font-mono">

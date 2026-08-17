@@ -1012,7 +1012,7 @@ export function ProcessSection() {
 
         <div className="mt-8 text-center text-sm text-zinc-500">
           Every stage above is in the product today.{" "}
-          <a href="/blog/babysitting-agents-sucks" className="text-green-400 hover:text-green-300">
+          <a href="/notes/babysitting-agents-sucks" className="text-green-400 hover:text-green-300">
             See stage 03 in the blog’s interactive demos →
           </a>
         </div>

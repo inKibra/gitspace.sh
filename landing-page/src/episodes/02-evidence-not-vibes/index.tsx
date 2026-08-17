@@ -50,8 +50,8 @@ const META = {
   title: "Agents lie about what they shipped. — gitspace",
   description:
     "The good ones lie best about what they shipped. Declare done as a contract the agent cannot game, judged by runs you can replay.",
-  image: "https://gitspace.sh/blog/evidence-not-vibes-og.png",
-  url: "https://gitspace.sh/blog/evidence-not-vibes",
+  image: "https://gitspace.sh/notes/evidence-not-vibes-og.png",
+  url: "https://gitspace.sh/notes/evidence-not-vibes",
 };
 
 export default function BlogPost() {
@@ -146,7 +146,7 @@ export default function BlogPost() {
 
         <P>
           You already run more than one of these.{" "}
-          <a href="/blog/babysitting-agents-sucks" className="text-green-400 hover:text-green-300 underline underline-offset-4">
+          <a href="/notes/babysitting-agents-sucks" className="text-green-400 hover:text-green-300 underline underline-offset-4">
             Nº 01
           </a>{" "}
           was about the fleet: too much work in flight to read every line, so “which one needs me” has to be answerable at a glance. This one is the

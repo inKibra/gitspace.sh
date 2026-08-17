@@ -1,29 +1,29 @@
 import { LandingNavbar } from "../components/layout/LandingNavbar";
 import { Footer } from "../components/layout/Footer";
 import { ArrowRight } from "lucide-react";
+import { visiblePosts, type Post } from "../content/posts";
 
-const POSTS = [
-  {
-    slug: "babysitting-agents-sucks",
-    kicker: "The agent fleet · Nº 01",
-    title: "Babysitting agents sucks.",
-    dek: "Your agent list only knows “spinning or not.” Idle, closed, and asked-you-a-question are different states. Drive the fleet to green.",
-    date: "July 2026",
-    image: "/blog/babysitting-agents-sucks-og.png",
-  },
-  { slug: "evidence-not-vibes", kicker: "The agent fleet · Nº 02", title: "Agents lie about what they shipped.", dek: "The good ones lie best. State the goal and the contract derives; a reviewer hunts fake-green tests; judges rule on runs you can replay.", date: "Draft", image: null },
-  { slug: "the-change-guide", kicker: "The agent fleet · Nº 03", title: "The change guide.", dek: "Code review as a build-order story, and blame for the agent age: which conceptual change put this line here, and what was it trying to do.", date: "Draft", image: null },
-  { slug: "shipped-isnt-done", kicker: "The agent fleet · Nº 04", title: "Shipped isn’t done.", dek: "Chains are the plan over goals; workspaces come and go as execution reaches them. Merge is the midpoint, and shipped goals reopen on signals.", date: "Draft", image: null },
-];
+/** Human-readable date for a card. Drafts have no date yet, so they say so. */
+function cardDate(p: Post): string {
+  if (!p.date) return "Draft";
+  return new Date(`${p.date}T00:00:00Z`).toLocaleDateString("en-US", {
+    month: "long",
+    year: "numeric",
+    timeZone: "UTC",
+  });
+}
 
 export default function BlogIndex() {
+  // Drafts are visible while developing and stripped from the production build.
+  const posts = visiblePosts(import.meta.env.DEV);
+
   return (
     <div className="min-h-screen bg-black text-white selection:bg-green-500/30">
       <LandingNavbar />
 
       <header className="border-b border-white/10">
         <div className="container mx-auto px-4 pt-20 pb-14 max-w-4xl">
-          <div className="text-[13px] font-mono text-green-500/80 mb-4 uppercase tracking-widest">Blog</div>
+          <div className="text-[13px] font-mono text-green-500/80 mb-4 uppercase tracking-widest">Notes</div>
           <h1 className="text-4xl md:text-5xl font-bold tracking-tight">Running a fleet of agents, out loud.</h1>
           <p className="text-lg text-zinc-400 mt-4 max-w-2xl">
             Essays with working demos: what breaks when you run many coding agents at once, and what we’re building to fix it.
@@ -33,10 +33,10 @@ export default function BlogIndex() {
 
       <main className="container mx-auto px-4 py-14 max-w-4xl">
         <div className="grid gap-8">
-          {POSTS.map((p) => (
+          {posts.map((p) => (
             <a
               key={p.slug}
-              href={`/blog/${p.slug}`}
+              href={`/notes/${p.slug}`}
               className="group rounded-lg border border-zinc-800 bg-zinc-950 overflow-hidden hover:border-zinc-600 transition-colors"
             >
               {p.image ? (
@@ -54,7 +54,7 @@ export default function BlogIndex() {
                 <div className="flex items-center gap-3 text-sm text-zinc-500">
                   <span>Bradley Leatherwood</span>
                   <span className="text-zinc-700">·</span>
-                  <span>{p.date}</span>
+                  <span>{cardDate(p)}</span>
                   <span className="ml-auto flex items-center gap-1 text-green-400 opacity-0 group-hover:opacity-100 transition-opacity">
                     Read <ArrowRight className="w-4 h-4" />
                   </span>

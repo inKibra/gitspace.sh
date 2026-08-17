@@ -33,7 +33,7 @@ export default function LandingPage() {
             <BoardShot />
             <div className="mt-4 text-center text-[12px] font-mono text-zinc-600">
               live mock · the real thing runs in your terminal and browser ·{" "}
-              <a href="/blog/babysitting-agents-sucks" className="text-green-500 hover:text-green-400">try the interactive version →</a>
+              <a href="/notes/babysitting-agents-sucks" className="text-green-500 hover:text-green-400">try the interactive version →</a>
             </div>
           </div>
         </section>

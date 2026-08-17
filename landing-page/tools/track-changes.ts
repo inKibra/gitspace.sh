@@ -180,4 +180,4 @@ Bun.serve({
   },
 });
 
-console.log('track changes → overlay on http://localhost:5180/blog/babysitting-agents-sucks (raw: http://localhost:5191)');
+console.log('track changes → overlay on http://localhost:5180/notes/babysitting-agents-sucks (raw: http://localhost:5191)');

@@ -21,12 +21,12 @@ export function Credibility() {
               </p>
               <div className="flex flex-col sm:flex-row gap-4">
                 <Button asChild size="lg" className="bg-white text-black hover:bg-gray-200 h-12 px-8 rounded-none">
-                  <a href="mailto:hello@inkibra.com">
+                  <a href="mailto:contact@inkibra.com">
                     Talk to inkibra <ArrowRight className="ml-2 w-4 h-4" />
                   </a>
                 </Button>
                 <Button asChild variant="outline" size="lg" className="h-12 px-8 border-white/10 hover:bg-white/5 rounded-none">
-                  <a href="/blog">Read the blog</a>
+                  <a href="/notes">Read the blog</a>
                 </Button>
               </div>
             </div>

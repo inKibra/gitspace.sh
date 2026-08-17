@@ -4,8 +4,10 @@
   "version": "0.0.1",
   "type": "module",
   "scripts": {
-    "build": "vite build",
-    "dev": "vite"
+    "build": "vite build && bun tools/build-static.ts",
+    "dev": "vite",
+    "preview": "vite preview",
+    "deploy": "bun run build && wrangler pages deploy dist --project-name=gitspace"
   },
   "dependencies": {
     "@emotion/react": "11.14.0",

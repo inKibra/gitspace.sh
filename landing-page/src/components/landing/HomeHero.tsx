@@ -65,10 +65,10 @@ export function HomeHero() {
             controls
             playsInline
             preload="metadata"
-            poster="/blog/fleet-green-poster.jpg"
+            poster="/notes/fleet-green-poster.jpg"
             className="relative w-full border border-[#1a1a1a] bg-black"
           >
-            <source src="/blog/fleet-green.mp4" type="video/mp4" />
+            <source src="/notes/fleet-green.mp4" type="video/mp4" />
           </video>
           <div className="flex flex-wrap items-center justify-center gap-x-6 gap-y-2 mt-4 text-[12px] font-mono text-zinc-500">
             {DOTS.map(([c, l]) => (
@@ -76,7 +76,7 @@ export function HomeHero() {
                 <span className={`h-2 w-2 ${c}`} /> {l}
               </span>
             ))}
-            <a href="/blog/babysitting-agents-sucks" className="text-green-400 hover:text-green-300">
+            <a href="/notes/babysitting-agents-sucks" className="text-green-400 hover:text-green-300">
               the story behind this → Nº 01: “Babysitting agents sucks.”
             </a>
           </div>
