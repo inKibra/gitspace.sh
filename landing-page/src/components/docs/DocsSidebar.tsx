@@ -21,10 +21,18 @@ export function DocsSidebar({ className, activeSection, onSectionChange }: DocsS
     {
       title: "Local Workflow",
       items: [
-        { id: "tui-interface", label: "TUI Interface", icon: Layers },
+        { id: "web-app", label: "Web App", icon: Layers },
         { id: "cli-commands", label: "CLI Commands", icon: Terminal },
+        { id: "workspace-review", label: "Diff Review", icon: FileCode },
+        { id: "workspace-ops", label: "Notes, Services, Events", icon: Layers },
         { id: "custom-scripts", label: "Custom Scripts", icon: FileCode },
         { id: "repo-bundles", label: "Repo Config Bundles", icon: FileCode },
+      ]
+    },
+    {
+      title: "Artifacts",
+      items: [
+        { id: "artifacts", label: "Artifacts", icon: Server },
       ]
     },
     {

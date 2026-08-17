@@ -14,7 +14,7 @@ export function Pricing() {
         "Unlimited workspaces & agents",
         "The full lifecycle: plan, build, review, ship",
         "Self-hosted relay & remote access",
-        "TUI, web UI & CLI",
+        "Web UI & CLI",
         "Linear integration"
       ],
       cta: "Star on GitHub",
