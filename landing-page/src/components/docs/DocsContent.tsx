@@ -158,6 +158,145 @@ export function DocsContent({ section }: { section: string }) {
         </div>
       );
 
+    case "concepts":
+      return (
+        <div className="max-w-3xl animate-in fade-in slide-in-from-bottom-4 duration-500">
+          <h1 className="text-4xl font-bold mb-6">What a space contains</h1>
+          <p className="text-xl text-zinc-400 mb-8 leading-relaxed">A workspace is not just a checkout. As an agent works, it writes things down: what it is about to do, what it produced, what proves the work is done. Those records are the things you read. You almost never write them yourself.</p>
+
+          <p className="text-zinc-400 mb-8">This page names them once. Everything else in these docs assumes you know what they are.</p>
+
+          <h3 className="text-xl font-semibold text-white mb-4">Who does what</h3>
+          <p className="text-zinc-400 mb-4">The split is worth stating plainly, because it is the whole shape of the product.</p>
+          <div className="border border-[#1a1a1a] bg-[#0c0c0c] mb-8">
+            <div className="grid grid-cols-2 border-b border-[#1a1a1a] font-mono text-[11px] uppercase tracking-widest text-zinc-600">
+              <div className="px-4 py-2.5 border-r border-[#1a1a1a]">The agent writes</div>
+              <div className="px-4 py-2.5">You read and decide</div>
+            </div>
+            {[
+              ["Declares intent before editing", "Whether the intent was right"],
+              ["Produces the diff", "Whether to accept it"],
+              ["Collects evidence for each requirement", "The calls only a person can make"],
+              ["Narrates the change in build order", "Where to slow down"],
+            ].map(([a, b]) => (
+              <div key={a} className="grid grid-cols-2 border-b border-[#1a1a1a] last:border-b-0 text-sm">
+                <div className="px-4 py-3 border-r border-[#1a1a1a] text-zinc-400">{a}</div>
+                <div className="px-4 py-3 text-zinc-300">{b}</div>
+              </div>
+            ))}
+          </div>
+          <p className="text-zinc-400 mb-8">The boundary is enforced, not a convention. An agent cannot close a phase while that phase still owes an unmet requirement, and it cannot wave the gate through on its own: waiving is human only, and only in the app.</p>
+
+          <h3 className="text-xl font-semibold text-white mb-4">The goal</h3>
+          <p className="text-zinc-400 mb-4">A goal is a piece of work with a written definition of done. It holds the goal doc, which says what is being attempted and why, and a validation contract: a list of requirements, each with a rubric describing what would prove it, and a judge that rules on the evidence.</p>
+          <p className="text-zinc-400 mb-8">A goal outlives the workspace that executed it. Before work starts it is planned, with no checkout on disk. While an agent is on it, it holds a workspace. After it merges, the workspace is deleted and the goal remains.</p>
+        <div className="border border-[#1a1a1a] bg-[#0c0c0c] mb-8 font-mono text-sm overflow-x-auto">
+            <div className="flex items-center gap-2 border-b border-[#1a1a1a] px-4 py-2.5 text-[11px] uppercase tracking-widest text-zinc-600">
+              <span className="h-2 w-2 bg-green-500" />checkout-flags · validation contract
+            </div>
+            {[
+              ["R1", "checkout suite passes", "command", "accepted", "text-green-400"],
+              ["R2", "error rate stays under 0.10%", "command", "accepted", "text-green-400"],
+              ["R3", "screenshot of the live order total", "human", "review", "text-amber-300"],
+            ].map(([id, rubric, judge, state, tone]) => (
+              <div key={id} className="flex items-center gap-4 border-b border-[#1a1a1a] px-4 py-2.5 last:border-b-0">
+                <span className="w-6 flex-none text-zinc-600">{id}</span>
+                <span className="min-w-0 flex-1 text-zinc-300">{rubric}</span>
+                <span className="w-16 flex-none text-zinc-600">{judge}</span>
+                <span className={`w-20 flex-none text-right ${tone}`}>{state}</span>
+              </div>
+            ))}
+            <div className="px-4 py-2.5 text-[13px] text-zinc-500">2 accepted · 1 awaiting review · not ready</div>
+          </div>
+
+          <h3 className="text-xl font-semibold text-white mb-4">The journal</h3>
+          <p className="text-zinc-400 mb-4">Work happens in phases, and the journal records both ends of each one. At the start of a phase the agent writes down what it intends to do and why, before it edits anything. At the end it records what actually happened, and the system snapshots the goal, workflow, and review state alongside it.</p>
+          <p className="text-zinc-400 mb-8">The order is the point. Intent is on record before the code exists, so it cannot be quietly rewritten afterwards into a story that flatters the diff. When you want to know why a change was made, this is the honest answer rather than a reconstruction.</p>
+        <div className="border border-[#1a1a1a] bg-[#0c0c0c] mb-8 font-mono text-sm overflow-x-auto">
+            <div className="flex items-center gap-2 border-b border-[#1a1a1a] px-4 py-2.5 text-[11px] uppercase tracking-widest text-zinc-600">
+              <span className="h-2 w-2 bg-blue-500" />phase journal
+            </div>
+            {[
+              ["09:14", "phase start", "remove-api", "intent", "drop the checkout_v2 read in api first; expect flags.ts and one test", "text-blue-400"],
+              ["09:41", "phase end", "remove-api", "outcome", "guard removed, one test added; the registry was the load-bearing part", "text-green-400"],
+            ].map(([time, kind, phase, field, body, tone]) => (
+              <div key={time} className="border-b border-[#1a1a1a] px-4 py-3 last:border-b-0">
+                <div className="flex items-center gap-3 text-[13px]">
+                  <span className="text-zinc-600">{time}</span>
+                  <span className={tone}>{kind}</span>
+                  <span className="text-zinc-500">{phase}</span>
+                </div>
+                <div className="mt-1.5 text-zinc-400">
+                  <span className="text-zinc-600">{field}: </span>{body}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <h3 className="text-xl font-semibold text-white mb-4">The change guide</h3>
+          <p className="text-zinc-400 mb-8">A diff arrives sorted by filename, which is the one order nobody built anything in. The guide retells the same change in build order: foundations first, then the code that wires them together, then the surfaces you touch. Each step is narrated, and the narration is grounded in the journal rather than invented after the fact. You read the change as a story instead of reconstructing it in your head.</p>
+        <div className="grid gap-4 sm:grid-cols-2 mb-8 font-mono text-[13px]">
+            <div className="border border-[#1a1a1a] bg-[#0c0c0c] overflow-x-auto">
+              <div className="border-b border-[#1a1a1a] px-4 py-2.5 text-[11px] uppercase tracking-widest text-zinc-600">the diff · by filename</div>
+              {["api/middleware/flag-guard.ts", "checkout/cart.tsx", "e2e/checkout.spec.ts", "flags/registry.ts", "types/flags.ts", "worker/handler.ts"].map((f) => (
+                <div key={f} className="border-b border-[#1a1a1a] px-4 py-2 text-zinc-500 last:border-b-0">{f}</div>
+              ))}
+            </div>
+            <div className="border border-[#1a1a1a] bg-[#0c0c0c] overflow-x-auto">
+              <div className="border-b border-[#1a1a1a] px-4 py-2.5 text-[11px] uppercase tracking-widest text-zinc-600">the guide · by build order</div>
+              {[
+                ["1", "the registry", "what everything else reads"],
+                ["2", "the transports", "same edit, three times"],
+                ["3", "the surfaces", "what users touch"],
+                ["4", "the tests", "what guards the risky part"],
+              ].map(([n, title, note]) => (
+                <div key={n} className="flex gap-3 border-b border-[#1a1a1a] px-4 py-2 last:border-b-0">
+                  <span className="text-zinc-700">{n}</span>
+                  <span className="text-zinc-300">{title}</span>
+                  <span className="ml-auto text-zinc-600">{note}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <h3 className="text-xl font-semibold text-white mb-4">The chain and the stack</h3>
+          <p className="text-zinc-400 mb-4">Some work does not fit in one goal. A chain is an ordered list of goals where each one builds on the last, and a later goal cannot outrun an earlier one. The chain is the plan; workspaces appear and disappear underneath it as execution reaches each goal.</p>
+          <p className="text-zinc-400 mb-8">The stack is the git side of the same idea: whether each workspace is still sitting on top of its ancestor, or has drifted and needs a rebase.</p>
+        <div className="border border-[#1a1a1a] bg-[#0c0c0c] mb-8 p-4 overflow-x-auto">
+            <div className="flex items-stretch gap-0 font-mono text-[13px] min-w-[560px]">
+              {[
+                ["1/4", "billing-schema", "merged", "text-zinc-600", "workspace removed"],
+                ["2/4", "backfill-job", "merged", "text-zinc-600", "workspace removed"],
+                ["3/4", "checkout-flags", "running", "text-green-400", "agent working"],
+                ["4/4", "checkout-e2e", "planned", "text-zinc-700", "no workspace yet"],
+              ].map(([n, id, state, tone, note], i) => (
+                <div key={id} className="flex items-center">
+                  <div className="border border-[#1a1a1a] px-3 py-2.5 min-w-[130px]">
+                    <div className="text-[11px] text-zinc-700">{n}</div>
+                    <div className="mt-0.5 text-zinc-300">{id}</div>
+                    <div className={`mt-1 ${tone}`}>{state}</div>
+                    <div className="mt-0.5 text-[11px] text-zinc-700">{note}</div>
+                  </div>
+                  {i < 3 && <span className="px-2 text-zinc-700">&rarr;</span>}
+                </div>
+              ))}
+            </div>
+            <div className="mt-3 text-[13px] text-zinc-500 font-mono">a later goal cannot outrun an earlier one</div>
+          </div>
+
+          <h3 className="text-xl font-semibold text-white mb-4">Artifacts</h3>
+          <p className="text-zinc-400 mb-8">Anything the work produces that is worth keeping: evidence attached to a requirement, a dashboard, a captured run. Artifacts live in the project's artifacts repository rather than in the code, so they survive the workspace being deleted. A goal that shipped last month still has its evidence.</p>
+
+          <h3 className="text-xl font-semibold text-white mb-4">Where you see them</h3>
+          <ul className="list-disc list-inside space-y-2 text-zinc-400 mb-8 ml-2">
+            <li>Goals, contracts, and readiness: the goal panel, covered in <span className="text-zinc-300">Goals and Chains</span></li>
+            <li>The guide and the diff: the review view, covered in <span className="text-zinc-300">Reviewing Changes</span></li>
+            <li>Evidence, dashboards, and scheduled runs: covered in <span className="text-zinc-300">Artifacts and Operations</span></li>
+          </ul>
+          <p className="text-zinc-400 mb-8">Each of these has a command behind it, and agents use those commands constantly. You do not have to. If you ever want to see what a screen is doing, the CLI reference lists them.</p>
+        </div>
+      );
+
     case "the-board":
       return (
         <div className="max-w-3xl animate-in fade-in slide-in-from-bottom-4 duration-500">

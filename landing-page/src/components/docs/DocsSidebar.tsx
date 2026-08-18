@@ -14,6 +14,7 @@ export function DocsSidebar({ className, activeSection, onSectionChange }: DocsS
       title: "Start here",
       items: [
         { id: "getting-started", label: "Getting Started", icon: Zap },
+        { id: "concepts", label: "What a space contains", icon: Book },
       ]
     },
     {

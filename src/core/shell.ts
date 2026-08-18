@@ -54,7 +54,11 @@ export async function openWorkspaceShell(
 	}
 
 	printToTerminal('')
-	printToTerminal('💡 Press Shift+Esc to detach and return to GitSpace TUI')
+	// Shift+Esc detach is still real (lib/tmux-lite/cli.ts). Only the old
+	// destination was wrong: this used to say "return to GitSpace TUI", and the
+	// TUI was removed. Detaching drops you back to the shell you launched from;
+	// the session keeps running.
+	printToTerminal('💡 Press Shift+Esc to detach. The session keeps running.')
 	printToTerminal('')
 
 	// Create or attach to tmux-lite session
