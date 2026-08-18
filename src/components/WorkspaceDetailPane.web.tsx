@@ -596,6 +596,13 @@ export function WorkspaceDetailPaneWeb(props: WorkspaceDetailPaneWebProps) {
 
   const [showMobileSidebar, setShowMobileSidebar] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(readStoredSidebarWidth);
+  // TODO(dead-ui): nothing can ever set this to true. The only caller of
+  // setDesktopSidebarClosed is the ☰ button inside the `sidebarClosed` branch
+  // itself (~line 824), and it sets false. There is no collapse control, so the
+  // collapsed strip is unreachable except via a stale localStorage value under
+  // SIDEBAR_CLOSED_STORAGE_KEY. Either add the missing collapse affordance or
+  // delete the branch and this state. Found while documenting the workspace
+  // pane: the markup reads as a working feature and is not one.
   const [sidebarClosed, setSidebarClosed] = useState(readStoredSidebarClosed);
 
   const detailModel = useWorkspaceDetailModel({

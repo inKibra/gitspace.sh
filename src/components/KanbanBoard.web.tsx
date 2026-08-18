@@ -755,6 +755,11 @@ function StacksLanes({
                     </div>
                     <div className="mt-1.5 flex items-center gap-[7px] text-[10px]">
                       <span className="uppercase tracking-[0.05em] text-[var(--gs-text-dim)]">{goal.status === 'planned' ? 'planned' : goal.phase}</span>
+                      {/* TODO(copy): `align` is the raw stackStatus enum, so this
+                          chip shows users strings like `needs-rebase`,
+                          `dirty-worktree` and `missing-workspace`. getGoalStatusChip
+                          (~line 108) already maps these to written labels; use that
+                          here instead of printing the enum. */}
                       <PmChip label={align} tone={ALIGN_CHIP_TONE[align] ?? 'dim'} />
                     </div>
                     {!workspace && goal.status === 'planned' && onCreatePlannedGoalWorkspace && (

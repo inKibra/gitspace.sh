@@ -10,7 +10,7 @@ import { Sheet, SheetContent, SheetTrigger } from "../app/components/ui/sheet";
 
 export default function DocsPage() {
   const location = useLocation();
-  const [activeSection, setActiveSection] = useState("overview");
+  const [activeSection, setActiveSection] = useState("getting-started");
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   useEffect(() => {

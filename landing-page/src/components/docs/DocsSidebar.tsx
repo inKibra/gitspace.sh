@@ -11,37 +11,28 @@ interface DocsSidebarProps extends React.HTMLAttributes<HTMLDivElement> {
 export function DocsSidebar({ className, activeSection, onSectionChange }: DocsSidebarProps) {
   const sections = [
     {
-      title: "Getting Started",
+      title: "Start here",
       items: [
-        { id: "overview", label: "Overview", icon: Book },
-        { id: "quick-start", label: "Quick Start", icon: Zap },
-        { id: "installation", label: "Installation", icon: Terminal },
+        { id: "getting-started", label: "Getting Started", icon: Zap },
       ]
     },
     {
-      title: "Local Workflow",
+      // The product is the web app. These five are the whole of normal use, and
+      // deliberately mention the CLI only where a person genuinely has to type
+      // something. CLI reference lives under Reference, below.
+      title: "Using GitSpace",
       items: [
-        { id: "web-app", label: "Web App", icon: Layers },
-        { id: "cli-commands", label: "CLI Commands", icon: Terminal },
-        { id: "workspace-review", label: "Diff Review", icon: FileCode },
-        { id: "workspace-ops", label: "Notes, Services, Events", icon: Layers },
-        { id: "custom-scripts", label: "Custom Scripts", icon: FileCode },
-        { id: "repo-bundles", label: "Repo Config Bundles", icon: FileCode },
+        { id: "the-board", label: "The Board", icon: Layers },
+        { id: "workspaces-and-agents", label: "Workspaces and Agents", icon: Terminal },
+        { id: "reviewing-changes", label: "Reviewing Changes", icon: FileCode },
+        { id: "goals-and-chains", label: "Goals and Chains", icon: Link },
+        { id: "artifacts-ops", label: "Artifacts and Operations", icon: Server },
       ]
     },
     {
-      title: "Artifacts",
+      title: "Machines and Access",
       items: [
-        { id: "artifacts", label: "Artifacts", icon: Server },
-      ]
-    },
-    {
-      title: "Remote Access",
-      items: [
-        { id: "gitspace-managed", label: "gitspace.sh (Managed)", icon: Globe },
-        { id: "self-hosted-relay", label: "Self-Hosted Relay", icon: Server },
-        { id: "identity-management", label: "Identity Management", icon: Key },
-        { id: "access-control", label: "Access Control", icon: Users },
+        { id: "machines-access", label: "Machines and Access", icon: Globe },
       ]
     },
     {
@@ -53,6 +44,9 @@ export function DocsSidebar({ className, activeSection, onSectionChange }: DocsS
     {
       title: "Reference",
       items: [
+        { id: "cli-commands", label: "CLI Commands", icon: Terminal },
+        { id: "custom-scripts", label: "Custom Scripts", icon: FileCode },
+        { id: "repo-bundles", label: "Repo Config Bundles", icon: FileCode },
         { id: "configuration", label: "Configuration", icon: Settings },
         { id: "troubleshooting", label: "Troubleshooting", icon: HelpCircle },
         { id: "security", label: "Security", icon: Shield },
