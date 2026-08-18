@@ -18,7 +18,7 @@ export function Comparison() {
         { text: "Instant branch switching", checked: true },
         { text: "Custom setup/select scripts", checked: true },
         { text: "Linear issue integration", checked: true },
-        { text: "Interactive TUI", checked: true },
+        { text: "Interactive web UI", checked: true },
         { text: "Project templates", checked: true }
       ]
     },

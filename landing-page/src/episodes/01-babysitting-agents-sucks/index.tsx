@@ -58,8 +58,8 @@ const META = {
   title: "Babysitting agents sucks. It doesn’t have to. — gitspace",
   description:
     "Your agent list only knows “spinning or not.” Idle, closed, and asked-you-a-question are different states. Drive the fleet to green.",
-  image: "https://gitspace.sh/blog/babysitting-agents-sucks-og.png",
-  url: "https://gitspace.sh/blog/babysitting-agents-sucks",
+  image: "https://gitspace.sh/notes/babysitting-agents-sucks-og.png",
+  url: "https://gitspace.sh/notes/babysitting-agents-sucks",
 };
 
 export default function BlogPost() {
@@ -138,10 +138,10 @@ export default function BlogPost() {
             controls
             playsInline
             preload="metadata"
-            poster="/blog/fleet-green-poster.jpg"
+            poster="/notes/fleet-green-poster.jpg"
             className="w-full border border-[#1a1a1a] bg-black"
           >
-            <source src="/blog/fleet-green.mp4" type="video/mp4" />
+            <source src="/notes/fleet-green.mp4" type="video/mp4" />
           </video>
         </Wide>
 
@@ -162,7 +162,7 @@ export default function BlogPost() {
           your next move; the others you closed, or they’re asking you a question. Codex only knows whether a thread is spinning. Find the idle one in
           the thread list.
         </P>
-        <Wide caption="“Spinning or not” isn’t a status. Working, idle, asking, and closed are four different things.">
+        <Wide caption="Working, idle, asking, and closed are four different things. The list shows one.">
           <FindTheOne />
         </Wide>
 
@@ -174,7 +174,7 @@ export default function BlogPost() {
         <H2 id="missing">Two things the list throws away</H2>
         <Rule />
         <P>
-          The wall of words isn’t missing information so much as <em className="text-zinc-100">organization</em>. The panel knows one thing (spinning or
+          The wall of words has the information. What it lacks is <em className="text-zinc-100">organization</em>. The panel knows one thing (spinning or
           not) and collapses two that matter. Add them back:
         </P>
         <Wide>
@@ -187,15 +187,15 @@ export default function BlogPost() {
           calm and dread.
         </P>
         <P>
-          The second is <strong className="text-white">stage</strong>: plan, code, review, ship, maintenance. Not “does it need me” but “where is it in
-          its life.” Together they tell you what to do <em className="text-zinc-100">and</em> in what order.
+          The second is <strong className="text-white">stage</strong>: plan, code, review, ship, maintenance. Where is it in its life. Together they
+          tell you what to do <em className="text-zinc-100">and</em> in what order.
         </P>
 
         <H2 id="glance">Your eyes vs. a list of words</H2>
         <Rule />
         <P>
           State and stage are the <em className="text-zinc-100">information</em>. Color is the <em className="text-zinc-100">enrichment</em> that makes it
-          glanceable, and that part isn’t taste: it’s how vision works. Reading words is serial; your brain does them one at a time. Spotting an odd
+          glanceable, and that part is how vision works. Reading words is serial; your brain does them one at a time. Spotting an odd
           color is <em className="text-zinc-100">pre-attentive</em>: about 200ms, in parallel, before you’re even “looking.” Time yourself reading the
           tiles, then time yourself just looking. The gap is the whole point.
         </P>
@@ -209,7 +209,7 @@ export default function BlogPost() {
         <P>
           Step back and look at where your day actually goes. You’re reviewing agent slop. You’re deciding which workflow to reach for, and which
           skills to write, or to have an agent write. You’re drafting plans as HTML so humans and agents read from the same page, arguing definition
-          of done, standing up reviewer agents to check the work. The work got <em className="text-zinc-100">deeper</em>, not lighter.
+          of done, standing up reviewer agents to check the work. The work got <em className="text-zinc-100">deeper</em>.
         </P>
         <P>
           So the last thing you can afford to think about is <strong className="text-white">“what do I look at next.”</strong> That’s pure overhead,
@@ -227,19 +227,18 @@ export default function BlogPost() {
           <ResolveFleet />
         </Wide>
         <P>
-          Superhuman didn’t make email more powerful; it made <em className="text-zinc-100">getting to zero</em> a game you could win, and that changed
-          how it felt to do the work. Inbox zero, for your fleet. A wall of green means every agent is either working for you or parked by you.
-          Nothing wasted, nothing ignored.
+          Superhuman made <em className="text-zinc-100">getting to zero</em> a game you could win, and that changed how it felt to do the work. Inbox
+          zero, for your fleet. A wall of green means every agent still on the board is working, and nothing is sitting there waiting on you.
         </P>
 
         <H2 id="close">Babysitting agents shouldn’t suck</H2>
         <Rule />
         <P>
-          Plenty of tools nailed quick-switching between threads. Nobody has nailed the <em className="text-zinc-100">organization</em>: telling you, at
-          a glance and without thinking, which workspace is humming and which is standing there waiting for you. We obsess over that part because it
-          decides whether running a fleet feels like flow or drowning.
+          Quick-switching between threads is solved. <em className="text-zinc-100">Organization</em> isn’t: telling you, at a glance and without
+          thinking, which workspace is humming and which is standing there waiting for you. We obsess over that part because it decides whether
+          running a fleet feels like flow or drowning.
         </P>
-        <P>You’re going to be running more agents next year, not fewer. The bar is how you keep your head above them.</P>
+        <P>You’re going to be running more agents next year. The bar is how you keep your head above them.</P>
 
         <div className="mt-12 flex flex-col sm:flex-row gap-4">
           <a href="https://github.com/inkibra/gitspace.sh" target="_blank" rel="noopener noreferrer">

@@ -118,8 +118,8 @@ const META = {
   title: "The change guide. — gitspace",
   description:
     "A diff is not a story. The change guide retells your agent’s change in the order it was built: foundations, then wiring, then what users touch.",
-  image: "https://gitspace.sh/blog/the-change-guide-og.png",
-  url: "https://gitspace.sh/blog/the-change-guide",
+  image: "https://gitspace.sh/og-image.png",
+  url: "https://gitspace.sh/notes/the-change-guide",
 };
 
 export default function BlogPost() {

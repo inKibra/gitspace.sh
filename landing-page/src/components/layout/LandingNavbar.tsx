@@ -9,8 +9,9 @@ export function LandingNavbar() {
   const navLinks = [
     { name: "Features", href: "/#features" },
     { name: "Pricing", href: "/#pricing" },
-    { name: "Blog", href: "/blog" },
+    { name: "Notes", href: "/notes" },
     { name: "Docs", href: "/docs" },
+    { name: "Specs", href: "/specs" },
   ];
 
   return (

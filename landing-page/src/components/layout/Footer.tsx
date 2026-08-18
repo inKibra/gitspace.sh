@@ -36,7 +36,7 @@ export function Footer() {
             <h4 className="font-mono text-xs uppercase tracking-[0.18em] text-zinc-500">Company</h4>
             <ul className="space-y-2 text-muted-foreground">
               <li><a href="https://www.inkibra.com/ink" target="_blank" rel="noopener noreferrer" className="hover:text-foreground">About</a></li>
-              <li><a href="/blog" className="hover:text-foreground">Blog</a></li>
+              <li><a href="/notes" className="hover:text-foreground">Notes</a></li>
             </ul>
           </div>
         </div>

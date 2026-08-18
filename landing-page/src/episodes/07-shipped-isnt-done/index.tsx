@@ -42,8 +42,8 @@ const META = {
   title: "Shipped isn’t done. — gitspace",
   description:
     "Merge is the midpoint of a goal’s life. Cron refreshes the ops dashboard from rolled-up artifacts, and the rubric that shipped a goal is the tripwire that reopens it.",
-  image: "https://gitspace.sh/blog/shipped-isnt-done-og.png",
-  url: "https://gitspace.sh/blog/shipped-isnt-done",
+  image: "https://gitspace.sh/og-image.png",
+  url: "https://gitspace.sh/notes/shipped-isnt-done",
 };
 
 export default function BlogPost() {

@@ -11,29 +11,29 @@ interface DocsSidebarProps extends React.HTMLAttributes<HTMLDivElement> {
 export function DocsSidebar({ className, activeSection, onSectionChange }: DocsSidebarProps) {
   const sections = [
     {
-      title: "Getting Started",
+      title: "Start here",
       items: [
-        { id: "overview", label: "Overview", icon: Book },
-        { id: "quick-start", label: "Quick Start", icon: Zap },
-        { id: "installation", label: "Installation", icon: Terminal },
+        { id: "getting-started", label: "Getting Started", icon: Zap },
+        { id: "concepts", label: "What a space contains", icon: Book },
       ]
     },
     {
-      title: "Local Workflow",
+      // The product is the web app. These five are the whole of normal use, and
+      // deliberately mention the CLI only where a person genuinely has to type
+      // something. CLI reference lives under Reference, below.
+      title: "Using GitSpace",
       items: [
-        { id: "tui-interface", label: "TUI Interface", icon: Layers },
-        { id: "cli-commands", label: "CLI Commands", icon: Terminal },
-        { id: "custom-scripts", label: "Custom Scripts", icon: FileCode },
-        { id: "repo-bundles", label: "Repo Config Bundles", icon: FileCode },
+        { id: "the-board", label: "The Board", icon: Layers },
+        { id: "workspaces-and-agents", label: "Workspaces and Agents", icon: Terminal },
+        { id: "reviewing-changes", label: "Reviewing Changes", icon: FileCode },
+        { id: "goals-and-chains", label: "Goals and Chains", icon: Link },
+        { id: "artifacts-ops", label: "Artifacts and Operations", icon: Server },
       ]
     },
     {
-      title: "Remote Access",
+      title: "Machines and Access",
       items: [
-        { id: "gitspace-managed", label: "gitspace.sh (Managed)", icon: Globe },
-        { id: "self-hosted-relay", label: "Self-Hosted Relay", icon: Server },
-        { id: "identity-management", label: "Identity Management", icon: Key },
-        { id: "access-control", label: "Access Control", icon: Users },
+        { id: "machines-access", label: "Machines and Access", icon: Globe },
       ]
     },
     {
@@ -45,13 +45,29 @@ export function DocsSidebar({ className, activeSection, onSectionChange }: DocsS
     {
       title: "Reference",
       items: [
+        { id: "cli-commands", label: "CLI Commands", icon: Terminal },
+        { id: "custom-scripts", label: "Custom Scripts", icon: FileCode },
+        { id: "repo-bundles", label: "Repo Config Bundles", icon: FileCode },
         { id: "configuration", label: "Configuration", icon: Settings },
         { id: "troubleshooting", label: "Troubleshooting", icon: HelpCircle },
         { id: "security", label: "Security", icon: Shield },
         { id: "glossary", label: "Glossary", icon: Book },
       ]
+    },
+    {
+      // Design docs that are public on purpose but still moving. They are
+      // separate routes rather than doc sections, and they are noindex'd and
+      // kept out of the sitemap until promoted — see src/content/site.ts.
+      // Promoting one means changing its status there and moving it up a group.
+      title: "In development",
+      items: [
+        { id: "agent-rubric", label: "Agent Rubric", icon: Shield, href: "/agent-rubric" },
+      ]
     }
-  ];
+  ] satisfies ReadonlyArray<{
+    title: string;
+    items: ReadonlyArray<{ id: string; label: string; icon: typeof Book; href?: string }>;
+  }>;
 
   return (
     <div className={cn("pb-12 w-64 border-r border-zinc-800 bg-black hidden lg:block", className)}>
@@ -63,23 +79,35 @@ export function DocsSidebar({ className, activeSection, onSectionChange }: DocsS
                 {section.title}
               </h2>
               <div className="space-y-1">
-                {section.items.map((item) => (
-                  <Button
-                    key={item.id}
-                    variant="ghost"
-                    size="sm"
-                    className={cn(
-                      "w-full justify-start font-normal h-8",
-                      activeSection === item.id 
-                        ? "bg-zinc-800 text-white font-medium" 
-                        : "text-zinc-400 hover:text-white hover:bg-zinc-900"
-                    )}
-                    onClick={() => onSectionChange(item.id)}
-                  >
-                    <item.icon className="mr-2 h-4 w-4" />
-                    {item.label}
-                  </Button>
-                ))}
+                {section.items.map((item) => {
+                  const classes = cn(
+                    "w-full justify-start font-normal h-8",
+                    activeSection === item.id
+                      ? "bg-zinc-800 text-white font-medium"
+                      : "text-zinc-400 hover:text-white hover:bg-zinc-900"
+                  );
+                  // An item with an href is its own route, not a section of this
+                  // page, so it navigates instead of swapping the content pane.
+                  return item.href ? (
+                    <Button key={item.id} asChild variant="ghost" size="sm" className={classes}>
+                      <a href={item.href}>
+                        <item.icon className="mr-2 h-4 w-4" />
+                        {item.label}
+                      </a>
+                    </Button>
+                  ) : (
+                    <Button
+                      key={item.id}
+                      variant="ghost"
+                      size="sm"
+                      className={classes}
+                      onClick={() => onSectionChange(item.id)}
+                    >
+                      <item.icon className="mr-2 h-4 w-4" />
+                      {item.label}
+                    </Button>
+                  );
+                })}
               </div>
             </div>
           ))}

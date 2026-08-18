@@ -674,6 +674,11 @@ export function PaneTerminalPanel({
           modifiers={modifiers}
           onModifiersChange={onModifiersChange}
           showFloatingControls={showFloatingControls}
+          // TODO(dead-ui): every dock pane passes false here, and the Detach and
+          // Input controls only render inside AttachedTerminalPane's `showHeader`
+          // branch. So in a dock pane there is no way to detach from a session or
+          // reach the mobile modifier strip. Either surface those actions in the
+          // pane chrome or drop the unreachable header markup.
           showHeader={false}
         />
       )}
