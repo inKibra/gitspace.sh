@@ -1,10 +1,17 @@
 # GitSpace CLI
 
-A powerful CLI tool for managing GitHub repository workspaces using git worktrees and optional Linear integration. Work on multiple features/tasks simultaneously, each in its own isolated workspace. Features an interactive TUI and support for repo config bundles for team onboarding.
+GitSpace manages GitHub repository workspaces as git worktrees, so you can work on
+several branches at once, each in its own isolated directory.
+
+You run a few commands to set it up, then you work in the web app. `gssh web` starts
+the local relay and machine daemon on this machine and opens the browser. The CLI is
+there for setup, scripting, and anything you want to automate.
+
+Full documentation: <https://gitspace.sh/docs>
 
 ## Features
 
-- **Interactive TUI**: Beautiful terminal interface for managing projects and workspaces
+- **Web app**: The interactive surface, started with `gssh web`
 - **Git Worktrees**: Work on multiple branches simultaneously without stashing
 - **Linear Integration**: Create workspaces directly from Linear issues with automatic markdown documentation
 - **Smart Branch Management**: Automatic detection of remote branches
@@ -17,11 +24,10 @@ A powerful CLI tool for managing GitHub repository workspaces using git worktree
 
 The following tools must be installed and available in your PATH:
 
-- [GitHub CLI (`gh`)](https://cli.github.com/) - for listing repositories
-- [Git](https://git-scm.com/) - for worktree management
-- [jq](https://stedolan.github.io/jq/) - for JSON processing
+- [Git](https://git-scm.com/) - required, for worktree management
+- [GitHub CLI (`gh`)](https://cli.github.com/) - for discovering and cloning GitHub repositories
 
-**GitHub Authentication**: You must authenticate the GitHub CLI before using GitSpace:
+**GitHub Authentication**: Authenticate the GitHub CLI before adding a project from GitHub:
 
 ```bash
 gh auth login
@@ -48,31 +54,43 @@ gssh --version
 
 ## Quick Start
 
-### Launch the TUI
+### Open the web app
 
-Simply run `gssh` with no arguments to launch the interactive TUI:
+`gssh web` is how you start GitSpace. It needs two identities first, both one-time
+setup:
 
 ```bash
-gssh
+# 1. Create your user root identity (generates a 24-word mnemonic).
+#    On a second machine, use `gssh user identity recover` instead.
+gssh user identity init
+
+# 2. Create the local device identity for this machine.
+#    `gssh user auth login` prompts for it as part of GitHub login.
+gssh user auth login
+
+# 3. Start the local relay and machine daemon, and open the browser
+gssh web
 ```
 
-The TUI provides a two-panel interface:
-- **Left panel**: Your projects
-- **Right panel**: Workspaces in the selected project
+`gssh web` starts a local relay on port 4480 (change it with `--port`), starts
+`machine serve` against that relay, registers a one-time browser enrollment, and
+opens the browser at that enrollment URL. Press Ctrl+C to stop the stack.
 
-**Key Bindings:**
-| Key | Action |
-|-----|--------|
-| `Enter` | Select project / Open workspace |
-| `Tab` | Switch between panels |
-| `n` | New project / workspace |
-| `d` | Delete selected item |
-| `?` | Show help |
-| `q` | Quit |
+If a local relay is already running on that port and is bound to your user root
+identity, `gssh web` reuses it instead of starting a second one. The same is true
+for the machine daemon: if it is already serving the same relay URL, `gssh web`
+reuses it. It stops with an error if the running relay is on a different port, is
+bound to a different identity, or is a hosted relay.
 
-### CLI Commands
+`gssh web` checks for the two identities above and nothing else. It does not check
+gitspace.sh authentication. The GitHub login half of `gssh user auth login` only
+matters if you later want a gitspace.sh subdomain, which is what `gssh web --relay`
+uses to serve the same app over `https://<name>.gitspace.sh` through a cloudflared
+tunnel. See [Remote Access](#remote-access).
 
-You can also use traditional CLI commands:
+### Setup commands
+
+Projects and workspaces can be created from the CLI:
 
 #### 1. Add Your First Project
 
@@ -111,8 +129,9 @@ gssh workspace context --project my-project --workspace my-feature
 When GitSpace opens a workspace-scoped terminal session, it injects a `space` shell function (bash/zsh).
 
 - Use `space ...` for workspace operations without repeating `--project` and `--workspace`
-- `gssh` commands are restricted in this mode to avoid cross-workspace mistakes
-- `gssh machine tmux ...` is blocked inside workspace sessions
+- Inside a workspace session (`GSSH_SESSION_MODE=workspace`), `gssh` accepts only
+  `gssh space ...`, `gssh help`, `-h`/`--help`, and `-V`/`--version`. Everything
+  else exits with an error.
 
 Examples:
 
@@ -193,6 +212,7 @@ A bundle is a directory (typically `.gitspace/`) containing:
 | `confirm` | Verify installation (can check command in PATH) | N/A |
 | `secret` | Collect sensitive values (masked input) | OS Keychain |
 | `input` | Collect plain text values | Project config |
+| `select` | Choose one value from a fixed list of options | Project config |
 
 ### Using Bundle Values in Scripts
 
@@ -231,9 +251,28 @@ Bundles can be loaded from:
 
 ## Commands Reference
 
-### `gssh` (TUI)
+Run `gssh` with no arguments to print help. Every command's options are available
+from `gssh <command> --help`.
 
-Launch the interactive terminal UI.
+The workspace-scoped `gssh space` commands are not listed in the root help output.
+Run `gssh space --help` to see them.
+
+### `gssh web`
+
+Start the local relay and machine serve stack and open the web app.
+
+```bash
+gssh web [options]
+
+Options:
+  --port <port>     Local relay/web port (default: 4480)
+  --relay           Start a hosted relay with cloudflared tunnel to your
+                    gitspace.sh subdomain
+  -y, --yes         Auto-confirm prompts
+  --takeover        Reclaim the local relay and serve daemons for the current
+                    identity
+  --password-stdin  Read the local device identity password from stdin
+```
 
 ### `gssh project add`
 
@@ -261,6 +300,9 @@ gssh workspace add [workspace-name] --project <project-name> [options]
 Options:
   --branch <name>        Specify different branch name from workspace name
   --from <branch>        Create from specific branch instead of base
+  --status <phase>       Kanban phase: plan, code, review, ship (default: code)
+  --issue <number>       Import a GitHub issue: name the workspace after it and
+                         seed its goal
   --no-setup             Skip setup commands
 ```
 
@@ -269,7 +311,10 @@ Options:
 Show the resolved workspace context.
 
 ```bash
-gssh workspace context --project <project-name> --workspace <workspace-name>
+gssh workspace context --project <project-name> --workspace <workspace-name> [options]
+
+Options:
+  --json                 Output structured JSON
 ```
 
 Use `--project` on workspace commands to target a project.
@@ -334,24 +379,19 @@ Located at `~/gitspace/<project-name>/.config.json`:
   "name": "my-app",
   "repository": "myorg/my-app",
   "baseBranch": "main",
-  "linearApiKey": "lin_api_...",
-  "linearTeamKey": "ENG",
+  "createdAt": "2025-01-01T00:00:00Z",
+  "lastAccessed": "2025-01-01T00:00:00Z",
+  "linearTeams": ["ENG"],
   "bundleValues": {
     "teamName": "engineering"
   },
-  "bundleSecretKeys": ["apiKey"],
-  "appliedBundle": {
-    "name": "my-app-bundle",
-    "version": "1.0",
-    "source": "/path/to/bundle",
-    "appliedAt": "2025-01-01T00:00:00Z"
-  }
+  "bundleSecretKeys": ["apiKey"]
 }
 ```
 
-- `bundleValues`: Values collected from input steps during onboarding
+- `linearTeams`: Linear team keys this project uses
+- `bundleValues`: Values collected from input and select steps during onboarding
 - `bundleSecretKeys`: Keys of secrets stored in OS keychain (values are NOT stored in config)
-- `appliedBundle`: Information about the bundle that was applied
 
 ### Custom Scripts
 
@@ -423,7 +463,7 @@ GitSpace provides secure remote terminal access with **end-to-end encryption**. 
 The easiest way to get remote access is through [gitspace.sh](https://gitspace.sh):
 
 ```bash
-# 1. Initialize machine identity on your control host
+# 1. Create your user root identity on your control host
 gssh user identity init
 gssh user identity show
 
@@ -434,13 +474,16 @@ gssh user auth login
 gssh user host reserve yourname
 gssh user host status
 
-# 4. Start serving
-gssh machine serve start
-gssh machine serve status
-gssh status
+# 4. Start the hosted web stack (relay + tunnel + serve) and open the browser
+gssh web --relay
 
-# 5. Access from browser at https://yourname.gitspace.sh
+# 5. Check status any time
+gssh status
 ```
+
+`gssh web --relay` requires `cloudflared` on your PATH and a reserved subdomain, and
+it starts its own relay, so stop any running relay with `gssh relay stop` first. It
+serves the same web app at `https://yourname.gitspace.sh`.
 
 In hosted mode, this machine is your control node (owner): it runs the relay path, maintains access state, and is the place cloud-control state/secrets are managed.
 
@@ -474,7 +517,7 @@ replacing loopback access.
 Every machine and client has a cryptographic identity (Ed25519 + X25519 keypair):
 
 ```bash
-# Create machine identity (stored in OS keychain)
+# Create your user root identity (generates a 24-word mnemonic)
 gssh user identity init
 
 # View identity fingerprint
@@ -525,11 +568,13 @@ gssh client machines list --relay wss://relay.example.com
 | `gssh user identity init` | Create user root identity |
 | `gssh user identity recover` | Recover identity from mnemonic |
 | `gssh user identity show` | Display identity fingerprint |
-| `gssh machine serve start --foreground` | Start machine daemon |
+| `gssh web` | Start the local relay + serve stack and open the web app |
 | `gssh machine serve start` | Start serve as background daemon |
+| `gssh machine serve start --foreground` | Run the serve daemon in the foreground |
 | `gssh machine serve stop` | Stop background serve daemon |
-| `gssh cloud status` | Show cloud control status on current control node |
-| `gssh cloud list` | List cloud workspaces from control store |
+| `gssh machine serve status` | Show serve daemon status |
+| `gssh cloud status` | Show cloud control status for the running serve daemon |
+| `gssh cloud list` | List cloud workspaces from the control relay store |
 | `gssh invite relay-machine create --relay <url> --machine-signing-key <k> --machine-key-exchange-key <k>` | Create machine enrollment invite |
 | `gssh invite list --relay <url>` | List root-signed invites |
 | `gssh invite revoke <invite-id> --relay <url>` | Revoke root-signed invite |
@@ -560,7 +605,7 @@ Manage terminal sessions:
 | `gssh machine tmux stop` | Stop tmux-lite daemon |
 | `gssh machine tmux list` | List sessions |
 | `gssh machine tmux attach <id>` | Attach to session |
-| `gssh machine tmux new` | Create new session |
+| `gssh machine tmux new [name]` | Create and attach to a new session |
 | `gssh machine tmux kill <id>` | Kill session |
 
 ### Environment Variables
@@ -609,15 +654,25 @@ If expected bundle key environment variables are empty, ensure:
 # Install dependencies
 bun install
 
-# Development mode
+# Run the CLI from source
 bun run dev
+
+# Build the web UI assets (gssh web requires them)
+bun run build:web
 
 # Type checking
 bun run typecheck
 
 # Run linter
 bun run lint
+
+# Tests (runs each test file in its own process)
+bun run test
 ```
+
+## Documentation
+
+Full documentation is at <https://gitspace.sh/docs>.
 
 ## License
 
