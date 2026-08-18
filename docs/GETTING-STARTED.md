@@ -4,6 +4,8 @@
 
 This guide covers setting up secure remote terminal access to your machine. The system is designed around a simple philosophy: **one owner identity controls the relay, the machines, and the clients, and nothing connects without proving it holds that identity.**
 
+There are two ways a machine comes to hold that proof. On a machine you own, `gssh user identity init` or `gssh user identity recover` binds it directly. A machine that is not already bound is bootstrapped with `gssh machine enroll --invite`: the invite is a root-signed token that authorizes the machine to register, and enrollment is what produces its owner-bound certificate. The invite is a bootstrap into the same trust relationship, not a second, parallel way in.
+
 You do not drive GitSpace from the terminal. The CLI is for setup and for running the daemons. The thing you actually work in is the web app, which the relay serves in your browser. On the machine you are sitting at, `gssh web` starts everything and opens it.
 
 ---
@@ -427,7 +429,7 @@ Check with `gssh invite list --relay <url>`.
 - "The running relay has no owner identity bound": stop it with `gssh relay stop` so `gssh web` can restart it with your identity.
 - "The running relay is bound to a different user root identity": stop the relay, or recover the original identity.
 - "Relay is already running on port N": rerun as `gssh web --port N` to reuse it, or stop the relay.
-- "The machine daemon is already serving on ...": run `gssh machine serve stop` first.
+- "The machine daemon is already serving on ...": `gssh web` reuses a daemon only when it is already serving the relay being selected. When the running daemon is bound to a different relay URL it cannot be reused, so stop it with `gssh machine serve stop` and rerun. If it is serving the same relay, no action is needed.
 - "cloudflared is required": only for `gssh web --relay`. Install cloudflared.
 - "No gitspace.sh subdomain configured": run `gssh user auth login` then `gssh user host reserve <name>`.
 

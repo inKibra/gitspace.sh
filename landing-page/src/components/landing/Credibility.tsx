@@ -26,7 +26,7 @@ export function Credibility() {
                   </a>
                 </Button>
                 <Button asChild variant="outline" size="lg" className="h-12 px-8 border-white/10 hover:bg-white/5 rounded-none">
-                  <a href="/notes">Read the blog</a>
+                  <a href="/notes">Read the notes</a>
                 </Button>
               </div>
             </div>

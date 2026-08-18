@@ -2,6 +2,52 @@ import { describe, expect, it } from 'bun:test';
 import { validateBundle } from '../bundle';
 
 describe('validateBundle', () => {
+  // Regression: OnboardingStepType has allowed 'select' and utils/onboarding.ts has
+  // handled it, but validateBundle's allowlist did not, so every bundle using a
+  // select step died with "Invalid step type: select" before onboarding ran.
+  it('accepts select steps', () => {
+    expect(() =>
+      validateBundle({
+        version: '1.0',
+        name: 'Select Bundle',
+        onboarding: [
+          {
+            id: 'region',
+            type: 'select',
+            title: 'Region',
+            description: 'Where this deploys',
+            configKey: 'region',
+            options: [
+              { label: 'US East', value: 'us-east' },
+              { label: 'EU West', value: 'eu-west' },
+            ],
+          },
+        ],
+      })
+    ).not.toThrow();
+  });
+
+  it('requires a configKey on select steps', () => {
+    // Cast: SelectStep requires configKey at compile time, but a bundle.json is
+    // untrusted input, so the runtime guard is what actually protects us. The
+    // cast is how we reach it from a typed test.
+    const missingKey = {
+      version: '1.0',
+      name: 'Select Bundle',
+      onboarding: [
+        {
+          id: 'region',
+          type: 'select',
+          title: 'Region',
+          description: 'Where this deploys',
+          options: [{ label: 'US East', value: 'us-east' }],
+        },
+      ],
+    } as unknown as Parameters<typeof validateBundle>[0];
+
+    expect(() => validateBundle(missingKey)).toThrow(/must have a configKey/);
+  });
+
   it('allows unique config keys with distinct normalized aliases', () => {
     expect(() =>
       validateBundle({

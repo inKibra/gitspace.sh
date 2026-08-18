@@ -50,7 +50,7 @@ const META = {
   title: "Agents lie about what they shipped. — gitspace",
   description:
     "The good ones lie best about what they shipped. Declare done as a contract the agent cannot game, judged by runs you can replay.",
-  image: "https://gitspace.sh/notes/evidence-not-vibes-og.png",
+  image: "https://gitspace.sh/og-image.png",
   url: "https://gitspace.sh/notes/evidence-not-vibes",
 };
 

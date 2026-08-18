@@ -224,12 +224,16 @@ export function validateBundle(bundle: SpacesBundle): void {
       }
       ids.add(step.id);
 
-      if (!['info', 'confirm', 'secret', 'input'].includes(step.type)) {
+      // Keep this list in sync with OnboardingStepType in types/bundle.ts.
+      // 'select' was implemented end to end (SelectStep, and both branches in
+      // utils/onboarding.ts) but missing here, so every bundle using it died at
+      // validation with "Invalid step type: select" before onboarding ran.
+      if (!['info', 'confirm', 'secret', 'input', 'select'].includes(step.type)) {
         throw new SpacesError(`Invalid step type: ${step.type}`, 'USER_ERROR', 1);
       }
 
-      // Validate configKey for secret/input steps
-      if (step.type === 'secret' || step.type === 'input') {
+      // Validate configKey for the steps that persist a value
+      if (step.type === 'secret' || step.type === 'input' || step.type === 'select') {
         // Cast to access configKey since TypeScript knows these types should have it
         const stepWithKey = step as { configKey?: string };
         if (!stepWithKey.configKey) {

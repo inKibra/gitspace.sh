@@ -22,10 +22,9 @@ Full documentation: <https://gitspace.sh/docs>
 
 ## Prerequisites
 
-The following tools must be installed and available in your PATH:
-
-- [Git](https://git-scm.com/) - required, for worktree management
-- [GitHub CLI (`gh`)](https://cli.github.com/) - for discovering and cloning GitHub repositories
+- [Git](https://git-scm.com/) - required. GitSpace checks for it and stops if it is missing.
+- [GitHub CLI (`gh`)](https://cli.github.com/) - only needed to discover and clone GitHub
+  repositories. Without it you can still add a project from a git remote URL.
 
 **GitHub Authentication**: Authenticate the GitHub CLI before adding a project from GitHub:
 
@@ -87,6 +86,14 @@ gitspace.sh authentication. The GitHub login half of `gssh user auth login` only
 matters if you later want a gitspace.sh subdomain, which is what `gssh web --relay`
 uses to serve the same app over `https://<name>.gitspace.sh` through a cloudflared
 tunnel. See [Remote Access](#remote-access).
+
+If you are running from a source checkout rather than an installed package, build the
+web assets first or `gssh web` has nothing to serve:
+
+```bash
+bun run build:web
+```
+
 
 ### Setup commands
 

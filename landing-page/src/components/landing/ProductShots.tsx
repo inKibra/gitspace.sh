@@ -2,7 +2,7 @@
  * Marketing shots of the actual app, rebuilt as live React mocks in the
  * product's exact visual language: flat black, 1px #1a1a1a hairlines, square
  * corners, JetBrains-style mono, product status hexes (not Tailwind greens).
- * Same fleet story as video Nº 01, so site, film, and blog all rhyme.
+ * Same fleet story as video Nº 01, so site, film, and notes all rhyme.
  */
 
 const C = {
