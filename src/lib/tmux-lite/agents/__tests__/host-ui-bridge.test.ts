@@ -4,7 +4,7 @@ import {
   type HostUIBridgeEmitter,
   type HostUIDialogRequest,
 } from '../host-ui-bridge.js';
-import type { OmpAskFormAnswer, OmpAskFormQuestion } from '../omp-types.js';
+import type { OmpAskDialogQuestion, OmpAskFormAnswer, OmpAskFormQuestion } from '../omp-types.js';
 
 function makeCapturingEmitter(): { emitter: HostUIBridgeEmitter; requests: HostUIDialogRequest[] } {
   const requests: HostUIDialogRequest[] = [];
@@ -15,28 +15,36 @@ function makeCapturingEmitter(): { emitter: HostUIBridgeEmitter; requests: HostU
   return { emitter, requests };
 }
 
-const QUESTIONS: OmpAskFormQuestion[] = [
+const QUESTIONS: OmpAskDialogQuestion[] = [
   {
     id: 'color',
     question: 'Pick a color',
     options: [{ label: 'red' }, { label: 'green' }, { label: 'blue' }],
-    multiple: false,
+    multi: false,
   },
   {
     id: 'sizes',
     question: 'Pick sizes',
     options: [{ label: 'small' }, { label: 'large' }],
-    multiple: true,
+    multi: true,
   },
 ];
 
-describe('HostUIBridgeState askForm round-trip', () => {
+const WIRE_QUESTIONS: OmpAskFormQuestion[] = QUESTIONS.map((question) => ({
+  id: question.id,
+  question: question.question,
+  options: question.options,
+  multiple: question.multi ?? false,
+  recommended: question.recommended,
+}));
+
+describe('HostUIBridgeState askDialog round-trip', () => {
   it('emits one ask-form request and resolves with all answers', async () => {
     const bridge = new HostUIBridgeState();
     const { emitter, requests } = makeCapturingEmitter();
     const ctx = bridge.createContextForSession('sess-1', emitter);
 
-    const pending = ctx.askForm('Agent questions', QUESTIONS);
+    const pending = ctx.askDialog(QUESTIONS);
 
     // A single ask-form request is emitted carrying every question.
     expect(requests).toHaveLength(1);
@@ -45,7 +53,7 @@ describe('HostUIBridgeState askForm round-trip', () => {
     if (request.type !== 'ask-form') throw new Error('expected ask-form request');
     expect(request.sessionId).toBe('sess-1');
     expect(request.title).toBe('Agent questions');
-    expect(request.questions).toEqual(QUESTIONS);
+    expect(request.questions).toEqual(WIRE_QUESTIONS);
 
     // The client answers all questions in one submit.
     const answers: OmpAskFormAnswer[] = [
@@ -55,7 +63,27 @@ describe('HostUIBridgeState askForm round-trip', () => {
     const resolved = bridge.resolveDialog({ type: 'ask-form', id: request.id, value: answers });
     expect(resolved).toBe(true);
 
-    await expect(pending).resolves.toEqual(answers);
+    await expect(pending).resolves.toEqual({
+      kind: 'submit',
+      results: [
+        {
+          id: 'color',
+          question: 'Pick a color',
+          options: ['red', 'green', 'blue'],
+          multi: false,
+          selectedOptions: ['green'],
+          customInput: undefined,
+        },
+        {
+          id: 'sizes',
+          question: 'Pick sizes',
+          options: ['small', 'large'],
+          multi: true,
+          selectedOptions: ['small', 'large'],
+          customInput: undefined,
+        },
+      ],
+    });
   });
 
   it('resolves undefined when the form is cancelled', async () => {
@@ -63,7 +91,7 @@ describe('HostUIBridgeState askForm round-trip', () => {
     const { emitter, requests } = makeCapturingEmitter();
     const ctx = bridge.createContextForSession('sess-2', emitter);
 
-    const pending = ctx.askForm('Agent questions', QUESTIONS);
+    const pending = ctx.askDialog(QUESTIONS);
     const request = requests[0]!;
 
     expect(bridge.resolveDialog({ type: 'ask-form', id: request.id, value: undefined })).toBe(true);
@@ -75,7 +103,7 @@ describe('HostUIBridgeState askForm round-trip', () => {
     const { emitter, requests } = makeCapturingEmitter();
     const ctx = bridge.createContextForSession('sess-3', emitter);
 
-    const pending = ctx.askForm('Agent questions', QUESTIONS);
+    const pending = ctx.askDialog(QUESTIONS);
     const request = requests[0]!;
 
     const answers: OmpAskFormAnswer[] = [
@@ -83,7 +111,27 @@ describe('HostUIBridgeState askForm round-trip', () => {
       { id: 'sizes', selectedOptions: ['small'] },
     ];
     bridge.resolveDialog({ type: 'ask-form', id: request.id, value: answers });
-    await expect(pending).resolves.toEqual(answers);
+    await expect(pending).resolves.toEqual({
+      kind: 'submit',
+      results: [
+        {
+          id: 'color',
+          question: 'Pick a color',
+          options: ['red', 'green', 'blue'],
+          multi: false,
+          selectedOptions: [],
+          customInput: 'chartreuse',
+        },
+        {
+          id: 'sizes',
+          question: 'Pick sizes',
+          options: ['small', 'large'],
+          multi: true,
+          selectedOptions: ['small'],
+          customInput: undefined,
+        },
+      ],
+    });
   });
 
   it('rejects a response whose type does not match the pending ask-form', async () => {
@@ -91,7 +139,7 @@ describe('HostUIBridgeState askForm round-trip', () => {
     const { emitter, requests } = makeCapturingEmitter();
     const ctx = bridge.createContextForSession('sess-4', emitter);
 
-    const pending = ctx.askForm('Agent questions', QUESTIONS);
+    const pending = ctx.askDialog(QUESTIONS);
     const request = requests[0]!;
 
     // A mismatched dialog type must not resolve the ask-form promise.
@@ -104,7 +152,7 @@ describe('HostUIBridgeState askForm round-trip', () => {
     const { emitter, requests } = makeCapturingEmitter();
     const ctx = bridge.createContextForSession('sess-5', emitter);
 
-    const pending = ctx.askForm('Agent questions', QUESTIONS);
+    const pending = ctx.askDialog(QUESTIONS);
     const request = requests[0]!;
 
     // selectedOptions missing → invalid payload, rejected before resolving.

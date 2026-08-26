@@ -1,0 +1,295 @@
+diff --git a/src/config/model-resolver.ts b/src/config/model-resolver.ts
+index 4682ea53218b1959d32e53e9dc420e8aa058912f..0c1710434e5e81356b355470457237cb0adb5060 100644
+--- a/src/config/model-resolver.ts
++++ b/src/config/model-resolver.ts
+@@ -40,6 +40,7 @@ import { isAuthenticated, kNoAuth, type ModelRegistry } from "./model-registry";
+ import {
+ 	DEFAULT_MODEL_ROLE_ALIAS,
+ 	formatModelRoleAlias,
++	getKnownRoleIds,
+ 	LEGACY_MODEL_ROLE_ALIAS_PREFIX,
+ 	MODEL_ROLE_ALIAS_PREFIX,
+ 	MODEL_ROLE_IDS,
+@@ -2212,3 +2213,48 @@ export async function findSlowModel(
+ 	// 3. Fallback to first available (same as default)
+ 	return availableModels[0];
+ }
++
++/**
++ * GITSPACE PATCH — agents address models by ROLE, never by model id.
++ *
++ * Throws when `value` names a concrete model (`openai-codex/gpt-5.5`) rather
++ * than a role (`pi/smol`, optionally with a `:thinking` suffix). Roles are the
++ * single place an operator binds capability→model; a hardcoded model id in an
++ * agent-authored spawn silently opts out of that config, rots when model ids
++ * change (gpt-5.5 → gpt-5.6-luna), and makes spend unattributable to a role.
++ *
++ * Deliberately NOT wired into `resolveAgentModelPatterns` itself: that resolver
++ * also serves human surfaces (the agent dashboard) and agent-definition
++ * frontmatter, where naming a concrete model is legitimate. This guard is for
++ * the agent-facing spawn path only.
++ *
++ * `undefined` is allowed — it means "inherit", which is the desired default.
++ */
++export function assertRoleOnlyModelSelector(value: string | string[] | undefined, settings?: Settings): void {
++	const patterns = normalizeModelPatternList(value);
++	if (patterns.length === 0) return;
++
++	// Every role the operator can see under settings > Models > model roles:
++	// non-hidden built-ins PLUS custom roles introduced via cycleOrder,
++	// modelRoles or modelTags. Deliberately NOT limited to roles that already
++	// have a model bound, nor to the quick-cycle subset — an agent may name any
++	// role the operator has, bound or not.
++	const knownRoles = settings ? getKnownRoleIds(settings) : (MODEL_ROLE_IDS as string[]);
++	const known = new Set(knownRoles);
++
++	const offenders = patterns.filter(pattern => {
++		const trimmed = pattern.trim();
++		const prefix = [MODEL_ROLE_ALIAS_PREFIX, LEGACY_MODEL_ROLE_ALIAS_PREFIX].find(candidate => trimmed.startsWith(candidate));
++		if (!prefix) return true;
++		const { base } = splitThinkingSuffix(trimmed, prefix.length, MAX_THINKING_SUFFIX_OPTIONS);
++		return !known.has(base.slice(prefix.length));
++	});
++	if (offenders.length === 0) return;
++
++	throw new Error(
++		`model must name a role, not a model id. Got ${offenders.map(o => JSON.stringify(o)).join(", ")}. ` +
++			`Available roles: ${knownRoles.map(role => `pi/${role}`).join(", ")}. ` +
++			`Roles are bound to models in settings, so this stays correct when models change. ` +
++			`Omit \`model\` to inherit the session's model, or use \`agent=<name>\` to pick a named subagent.`,
++	);
++}
+diff --git a/src/eval/agent-bridge.ts b/src/eval/agent-bridge.ts
+index 296e7726bd8e117d359a106a7909fe04004c7aca..73c9366ccaf9cfd08a4f63a7dedb540c01dd8b42 100644
+--- a/src/eval/agent-bridge.ts
++++ b/src/eval/agent-bridge.ts
+@@ -1,6 +1,8 @@
+ /**
+  * Host-side handler for the eval `agent()` helper.
+  */
++import { assertRoleOnlyModelSelector } from "../config/model-resolver";
++import { resolveSpawnPolicy } from "../task/spawn-policy";
+ import { type } from "@oh-my-pi/omptype";
+ import {
+ 	buildStructuredSubagentRecoveryHint,
+@@ -123,6 +125,16 @@ function buildSubagentFailureMessage(agentName: string, result: SingleResult): s
+  */
+ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOptions): Promise<EvalAgentResult> {
+ 	const parsed = parseAgentArgs(args);
++	const spawnDefaultAgent = resolveSpawnPolicy(options.session.getSessionSpawns()).defaultAgent;
++	const agentName = parsed.agent ?? spawnDefaultAgent;
++	assertRoleOnlyModelSelector(parsed.model, options.session.settings);
++	if (parsed.model !== undefined && agentName !== spawnDefaultAgent) {
++		throw new ToolError(
++			`agent() takes either agent="${agentName}" or model=, not both. ` +
++				`A named agent already carries its own model configuration; passing model= would override it. ` +
++				`Drop model= to use ${agentName}'s configured model, or drop agent= to run the default worker at that role.`,
++		);
++	}
+ 	const turnBudget = options.session.getTurnBudget?.();
+ 	if (turnBudget?.hard && turnBudget.total !== null && turnBudget.spent >= turnBudget.total) {
+ 		throw new ToolError(
+diff --git a/src/eval/py/prelude.py b/src/eval/py/prelude.py
+index a0bf1f970327d35d579277bb10d78880cc66a416..17027a4d20226a168368b0646545b0706acc00a9 100644
+--- a/src/eval/py/prelude.py
++++ b/src/eval/py/prelude.py
+@@ -498,6 +498,17 @@ if "__omp_prelude_loaded__" not in globals():
+     ):
+         """Run a subagent and return its final output or structured data.
+ 
++        Pass EITHER `agent` OR `model` — not both. `agent` selects a named
++        subagent definition, which already carries its own model configuration;
++        adding `model` would override that config and is rejected. Use `model`
++        alone to run the default worker at a given role.
++
++        `model` is ONLY a model ROLE — any role listed under settings > Models
++        (`pi/default`, `pi/smol`, `pi/slow`, `pi/plan`, `pi/vision`,
++        `pi/advisor`, ... plus any custom roles). A concrete model id like
++        `gpt-5.5` is REJECTED. Omit `model` to inherit the session's model, or
++        pass `agent=<name>` to pick a named subagent.
++
+         `schema` overrides agent and session schemas. `schema_mode` is
+         `"permissive"` or `"strict"`. `handle=True` returns the child output
+         reference and metadata, with parsed data under `"data"` when available.
+diff --git a/src/internal-urls/local-protocol.ts b/src/internal-urls/local-protocol.ts
+index 942cb98f43a9318925fcf6f7e029dbf8c0341d8d..a845a60a34123a828d6dcfd7db401344c87f9842 100644
+--- a/src/internal-urls/local-protocol.ts
++++ b/src/internal-urls/local-protocol.ts
+@@ -243,7 +243,10 @@ function extractRelativePath(url: InternalUrl): string {
+ export function resolveLocalRoot(options: LocalProtocolOptions, platform: NodeJS.Platform = process.platform): string {
+ 	const artifactsDir = options.getArtifactsDir?.();
+ 	if (artifactsDir) {
+-		const candidate = path.resolve(artifactsDir, "local");
++		// GitSpace patch: local:// maps to the artifacts mount ROOT (no "local"
++		// subdir) so local://x === <workspace>/.gitspace/artifacts/x, matching the
++		// `space artifacts` CLI. getArtifactsDir already returns the mount.
++		const candidate = path.resolve(artifactsDir);
+ 		if (platform === "win32" && candidate.length >= WINDOWS_LOCAL_ROOT_MAX_CHARS) {
+ 			return shortLocalRoot(options);
+ 		}
+diff --git a/src/sdk.ts b/src/sdk.ts
+index e450d68ebe1dc9e1eea292c2b56e6655e9f8a229..05f2b0c2571b01fa5fe5b0783082935f53388dde 100644
+--- a/src/sdk.ts
++++ b/src/sdk.ts
+@@ -3530,6 +3530,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 		// block createAgentSession for tens of seconds while the whole file is
+ 		// streamed and parsed on the main thread.
+ 		session = new AgentSession({
++			// GitSpace patch: thread the host's local:// mapping into the session
++			// itself, not just the tool session, so plan-reference / plan-mode /
++			// image-vision resolution uses the same root as every tool.
++			localProtocolOptions,
+ 			codeModeState,
+ 			advisorWatchdogPrompt,
+ 			advisorContextPrompt,
+diff --git a/src/session/agent-session-types.ts b/src/session/agent-session-types.ts
+index 3a5a8f52c1791c685669b36e2f8eeca904d99977..6f638d36aaf9bb83628368e262fc733d89af002a 100644
+--- a/src/session/agent-session-types.ts
++++ b/src/session/agent-session-types.ts
+@@ -19,6 +19,7 @@ import type {
+ 	ToolChoice,
+ } from "@oh-my-pi/pi-ai";
+ import type { postmortem } from "@oh-my-pi/pi-utils";
++import type { LocalProtocolOptions } from "../internal-urls";
+ import type { AdvisorConfig } from "../advisor";
+ import type { AsyncJob, AsyncJobDeliveryState, AsyncJobManager } from "../async";
+ import type { ModelRegistry } from "../config/model-registry";
+@@ -125,6 +126,8 @@ export interface AgentSessionConfig {
+ 	codeModeState?: { namespacesInfo?: unknown };
+ 	sessionManager: SessionManager;
+ 	settings: Settings;
++	/** GitSpace patch: host-supplied local:// mapping used by session internals. */
++	localProtocolOptions?: LocalProtocolOptions;
+ 	/** Whether the session spawn policy permits the read-only `scout` subagent. Defaults to true. */
+ 	scoutAllowedBySpawnPolicy?: boolean;
+ 	/** Whether the caller explicitly requested yolo/auto-approve behavior for this session. */
+diff --git a/src/session/agent-session.ts b/src/session/agent-session.ts
+index 6cbd5669da7acb7791d45f44b4092a4288c15cb0..a166e17a70e8d742abacbba0d9e88f14f0aab6e3 100644
+--- a/src/session/agent-session.ts
++++ b/src/session/agent-session.ts
+@@ -473,6 +473,8 @@ export class AgentSession {
+ 	readonly agent: Agent;
+ 	readonly sessionManager: SessionManager;
+ 	readonly settings: Settings;
++	/** GitSpace patch: host-supplied local:// mapping for session resolution. */
++	readonly hostLocalProtocolOptions?: LocalProtocolOptions;
+ 	/** Entries of tools mounted under `xd://`; empty when virtual devices are unmounted. */
+ 	getXdevToolEntries: () => Array<{ name: string; summary: string }>;
+ 	readonly yieldQueue: YieldQueue;
+@@ -996,6 +998,7 @@ export class AgentSession {
+ 		this.agent = config.agent;
+ 		this.#codeModeState = config.codeModeState ?? {};
+ 		this.sessionManager = config.sessionManager;
++		this.hostLocalProtocolOptions = config.localProtocolOptions;
+ 		this.settings = config.settings;
+ 		this.#modelRegistry = config.modelRegistry;
+ 		this.#codexResetCoordinator = config.codexResetCoordinator ?? defaultCodexAutoRedeemCoordinator;
+@@ -3563,10 +3566,16 @@ export class AgentSession {
+ 	}
+ 
+ 	#localProtocolOptions(): LocalProtocolOptions {
+-		return {
+-			getArtifactsDir: () => this.sessionManager.getArtifactsDir(),
+-			getSessionId: () => this.sessionManager.getSessionId(),
+-		};
++		// GitSpace patch: prefer the host-supplied mapping (the same object every
++		// tool, subagent, and eval bridge resolves `local://` against) so the
++		// session's own resolution can never drift to a different root. Falls back
++		// to the SessionManager pair for plain SDK consumers that pass nothing.
++		return (
++			this.hostLocalProtocolOptions ?? {
++				getArtifactsDir: () => this.sessionManager.getArtifactsDir(),
++				getSessionId: () => this.sessionManager.getSessionId(),
++			}
++		);
+ 	}
+ 
+ 	#resetSessionStopContinuationState(): void {
+@@ -6686,6 +6695,23 @@ export class AgentSession {
+ 		};
+ 	}
+ 
++	/** Remove a queued user message by visible kind + index (GitSpace patch).
++	 *  Maps the display index (user-visible messages, matching getQueuedMessages)
++	 *  to the raw queue index and removes it via the agent. */
++	removeQueuedMessage(kind: "steering" | "followUp", index: number): string | undefined {
++		const queue = kind === "steering" ? this.agent.peekSteeringQueue() : this.agent.peekFollowUpQueue();
++		const userIndices: number[] = [];
++		queue.forEach((m, i) => {
++			if (isUserQueuedMessage(m)) userIndices.push(i);
++		});
++		const rawIndex = userIndices[index];
++		if (rawIndex === undefined) return undefined;
++		const removed = queue[rawIndex];
++		if (kind === "steering") this.agent.removeSteer(rawIndex);
++		else this.agent.removeFollowUp(rawIndex);
++		return removed ? queueChipText(removed) : undefined;
++	}
++
+ 	/**
+ 	 * Pop the last queued message (steering first, then follow-up).
+ 	 * Used by dequeue keybinding to restore messages to editor one at a time.
+diff --git a/src/session/blob-store.ts b/src/session/blob-store.ts
+index 7d66cea6114821550afe290810faadd35b2ae309..120f112617b3c4ed8ebcc9cdd9ac01c16d1efc1f 100644
+--- a/src/session/blob-store.ts
++++ b/src/session/blob-store.ts
+@@ -206,6 +206,20 @@ export function isImageDataUrl(data: string): boolean {
+ 	return data.startsWith("data:image/") && data.includes(";base64,");
+ }
+ 
++/**
++ * GitSpace patch: structurally-valid placeholder for an image whose backing blob
++ * is missing (evicted / resolved against a different blobs dir). A 1x1 fully
++ * transparent PNG. Previously the resolvers returned the raw `blob:sha256:...`
++ * reference on a miss, which downstream was spliced into an `image_url` /
++ * `data:` URL as if it were base64 — producing an "invalid image_url / invalid
++ * base64" provider 400 that permanently bricked the session until manually
++ * cleared. Returning a real (empty) image keeps the payload valid so the request
++ * always succeeds; the model simply sees a blank image instead of a hard error.
++ */
++const MISSING_IMAGE_PLACEHOLDER_BASE64 =
++	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
++const MISSING_IMAGE_PLACEHOLDER_DATA_URL = `data:image/png;base64,${MISSING_IMAGE_PLACEHOLDER_BASE64}`;
++
+ /**
+  * Externalize a provider image data URL to the blob store, returning a blob reference.
+  * The full data URL string is preserved so transport-native history can be reconstructed on resume.
+@@ -258,8 +272,10 @@ export async function resolveImageDataUrl(blobStore: BlobStore, data: string): P
+ 
+ 	const buffer = await blobStore.get(hash);
+ 	if (!buffer) {
+-		logger.warn("Blob not found for persisted image data URL", { hash });
+-		return data;
++		// GitSpace patch: degrade to a valid transparent-PNG data URL instead of
++		// returning the unresolved ref (which becomes an invalid image_url → 400).
++		logger.warn("Blob not found for persisted image data URL; using placeholder", { hash });
++		return MISSING_IMAGE_PLACEHOLDER_DATA_URL;
+ 	}
+ 	return buffer.toString("utf8");
+ }
+@@ -275,8 +291,10 @@ export async function resolveImageData(blobStore: BlobStore, data: string): Prom
+ 
+ 	const buffer = await blobStore.get(hash);
+ 	if (!buffer) {
+-		logger.warn("Blob not found for image reference", { hash });
+-		return data; // Return the ref as-is; downstream will see invalid base64 but won't crash
++		// GitSpace patch: return valid transparent-PNG base64 instead of the raw
++		// ref, so the restored image block never carries invalid base64.
++		logger.warn("Blob not found for image reference; using placeholder", { hash });
++		return MISSING_IMAGE_PLACEHOLDER_BASE64;
+ 	}
+ 	return buffer.toString("base64");
+ }
+@@ -288,8 +306,10 @@ export function resolveImageDataSync(blobStore: BlobStore, data: string): string
+ 
+ 	const buffer = blobStore.getSync(hash);
+ 	if (!buffer) {
+-		logger.warn("Blob not found for image reference", { hash });
+-		return data;
++		// GitSpace patch: return valid transparent-PNG base64 instead of the raw
++		// ref, so the restored image block never carries invalid base64.
++		logger.warn("Blob not found for image reference; using placeholder", { hash });
++		return MISSING_IMAGE_PLACEHOLDER_BASE64;
+ 	}
+ 	return buffer.toString("base64");
+ }

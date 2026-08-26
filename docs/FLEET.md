@@ -583,10 +583,11 @@ allowlist-default-deny.
 
 ## 21. Build spine (each step is the test harness for the next)
 
-1. OMP bump 17.2.4 → 17.3.7 (edit-tool infinite-loop fix #7437,
-   stale-job wait-forever #8634, late-cleanup settle #7488; browser-relay
-   and the global broker arrive with 17.3.x). Produce the patch/RPC
-   table; re-verify report capture end-to-end (broken silently twice).
+1. OMP bump 17.2.4 → 18.0.6 (edit-tool infinite-loop fix #7437,
+   stale-job wait-forever #8634, late-cleanup settle #7488; browser-relay,
+   the global broker, large-session restoration improvements, and stable-row
+   transcript APIs included). Produce the patch/RPC table; re-verify report
+   capture end-to-end (broken silently twice).
 2. Skinny events + payload truncation (+ snapshot debounce forerunner).
 3. Space SDK v1 + broker adoption (incl. raw-stdin spike).
 4. Flip machinery (§17's four items) → Promote v0.
@@ -640,7 +641,7 @@ Already done this session: #135 (OS sandbox), #136 (delegate),
 21. NEW "Workspace email addresses: receive-only v1" (§15). Sequenced
     after the cloud Worker skeleton + directory exist; files with the
     extension-canary framing.
-22. NEW "OMP 17.3.7 bump" (§21 step 1). First mechanical op after this
+22. NEW "OMP 18.0.6 bump" (§21 step 1). First mechanical op after this
     doc lands.
 23. NEW "Skinny events: push facts, pull bytes" (§20) + snapshot-debounce
     forerunner; absorbs the UI memory-churn evidence.

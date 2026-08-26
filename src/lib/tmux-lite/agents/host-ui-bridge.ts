@@ -15,6 +15,8 @@
 import type {
   OmpHostUIContext,
   OmpDialogOptions,
+  OmpAskDialogQuestion,
+  OmpAskDialogResult,
   OmpAskFormQuestion,
   OmpAskFormAnswer,
 } from './omp-types.js';
@@ -217,14 +219,37 @@ export class HostUIBridgeState {
         });
       },
 
-      askForm: (title, questions) => {
-        return this.requestDialog<OmpAskFormAnswer[] | undefined>(emitter, {
+      askDialog: async (questions: OmpAskDialogQuestion[]): Promise<OmpAskDialogResult | undefined> => {
+        const wireQuestions: OmpAskFormQuestion[] = questions.map((question) => ({
+          id: question.id,
+          question: question.question,
+          options: question.options,
+          multiple: question.multi ?? false,
+          recommended: question.recommended,
+        }));
+        const answers = await this.requestDialog<OmpAskFormAnswer[] | undefined>(emitter, {
           type: 'ask-form',
           id: nextDialogId(),
           sessionId,
-          title,
-          questions,
+          title: 'Agent questions',
+          questions: wireQuestions,
         });
+        if (!answers) return undefined;
+        const byId = new Map(answers.map((answer) => [answer.id, answer]));
+        return {
+          kind: 'submit',
+          results: questions.map((question) => {
+            const answer = byId.get(question.id);
+            return {
+              id: question.id,
+              question: question.question,
+              options: question.options.map((option) => option.label),
+              multi: question.multi ?? false,
+              selectedOptions: answer?.selectedOptions ?? [],
+              customInput: answer?.customInput,
+            };
+          }),
+        };
       },
 
       confirm: (title, message, dialogOptions) => {

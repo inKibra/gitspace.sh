@@ -60,12 +60,12 @@
     "@linear/sdk": "^80.1.0",
     "@noble/curves": "^2.2.0",
     "@noble/hashes": "^2.2.0",
-    "@oh-my-pi/pi-agent-core": "17.2.4",
-    "@oh-my-pi/pi-ai": "17.2.4",
-    "@oh-my-pi/pi-coding-agent": "17.2.4",
-    "@oh-my-pi/pi-natives": "17.2.4",
-    "@oh-my-pi/pi-tui": "17.2.4",
-    "@oh-my-pi/pi-utils": "17.2.4",
+    "@oh-my-pi/pi-agent-core": "18.0.6",
+    "@oh-my-pi/pi-ai": "18.0.6",
+    "@oh-my-pi/pi-coding-agent": "18.0.6",
+    "@oh-my-pi/pi-natives": "18.0.6",
+    "@oh-my-pi/pi-tui": "18.0.6",
+    "@oh-my-pi/pi-utils": "18.0.6",
     "@pierre/diffs": "1.2.12",
     "@pierre/trees": "1.0.0-beta.6",
     "@scure/bip39": "^2.2.0",
@@ -110,7 +110,7 @@
   },
   "patchedDependencies": {
     "markit-ai@0.5.3": "patches/markit-ai@0.5.3.patch",
-    "@oh-my-pi/pi-agent-core@17.2.4": "patches/@oh-my-pi%2Fpi-agent-core@17.2.4.patch",
-    "@oh-my-pi/pi-coding-agent@17.2.4": "patches/@oh-my-pi%2Fpi-coding-agent@17.2.4.patch"
+    "@oh-my-pi/pi-agent-core@18.0.6": "patches/@oh-my-pi%2Fpi-agent-core@18.0.6.patch",
+    "@oh-my-pi/pi-coding-agent@18.0.6": "patches/@oh-my-pi%2Fpi-coding-agent@18.0.6.patch"
   }
 }
