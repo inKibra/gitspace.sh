@@ -16,6 +16,7 @@ import { pathToFileURL } from "node:url";
 import {
   loadOrCreateRelayIdentity,
   formatRelayFingerprint,
+  resetRelayIdentity,
 } from "../relay/identity.js";
 import { loadUserRootIdentity } from "../core/user-identity.js";
 import { getSpacesDir } from "../core/config.js";
@@ -652,6 +653,24 @@ export async function startRelay(options: {
     );
   }
 
+  if (options.takeover && mode === "local") {
+    if (!options.yes) {
+      const confirmed = await promptConfirm(
+        'Rotate the local relay identity and clear persisted relay ownership, registrations, access lists, and invites?',
+        false,
+      );
+      if (!confirmed) {
+        throw new SpacesError('Cancelled', 'USER_ERROR', 1);
+      }
+    }
+    const removed = await resetRelayIdentity();
+    logger.warning(
+      removed
+        ? 'Rotated the local relay identity due to --takeover.'
+        : 'No persisted local relay identity existed; --takeover will create one.',
+    );
+  }
+
   // Load or create relay identity
   const identity = await loadOrCreateRelayIdentity(options.label);
   const fingerprint = formatRelayFingerprint(identity.signingPublicKey);
@@ -671,26 +690,11 @@ export async function startRelay(options: {
       });
     if (userRoot) {
       ownerUserRootId = userRoot.id;
-      let ownerBinding;
-      try {
-        ownerBinding = bindRelayOwnerForStartup(ownerUserRootId);
-      } catch (error) {
-        if (!options.takeover || !isRelayOwnerMismatchError(error)) {
-          throw error;
-        }
-
-        if (!options.yes) {
-          const confirmed = await promptConfirm(
-            'Relay ownership belongs to a different identity. Clear persisted relay registrations, access lists, invites, and owner metadata so the current identity can take over?',
-            false,
-          );
-          if (!confirmed) {
-            throw new SpacesError('Cancelled', 'USER_ERROR', 1);
-          }
-        }
-
-        logger.warning('Clearing persisted relay control state and taking ownership with the current identity.');
-        ownerBinding = takeOverRelayOwnerForStartup(ownerUserRootId);
+      const ownerBinding = options.takeover
+        ? takeOverRelayOwnerForStartup(ownerUserRootId)
+        : bindRelayOwnerForStartup(ownerUserRootId);
+      if (options.takeover) {
+        logger.warning('Cleared persisted relay control state and rebound ownership to the current identity.');
       }
 
       if (ownerBinding.repairedOwnerBinding && !ownerBinding.missingVaultInitialization) {

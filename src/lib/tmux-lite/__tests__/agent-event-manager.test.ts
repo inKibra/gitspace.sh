@@ -2,6 +2,7 @@ import { describe, expect, it } from 'bun:test';
 
 import { AgentEventManager, computeSessionActivity, type AgentStateUpdateDelta, type WorkspaceAgentState } from '../agent-event-manager.js';
 import { determineAgentState, type SessionActivity } from '../../../agents/agent-runtime-types.js';
+import { applyAgentDeltaToAgentState, applyTranscriptDelta } from '../agent-state-reducer.js';
 
 function createManager() {
   let now = 1_000;
@@ -56,7 +57,11 @@ describe('AgentEventManager', () => {
     harness.manager.setExternalLastMessage('workspace-1', 'session-1', 'third');
 
     expect(deltas).toEqual([
-      { type: 'agent_state_snapshot', workspaces: harness.manager.getSnapshot() },
+      {
+        type: 'agent_workspace_snapshot',
+        workspaceId: 'workspace-1',
+        workspace: harness.manager.getSnapshot()['workspace-1']!,
+      },
       { type: 'agent_last_message', workspaceId: 'workspace-1', sessionId: 'session-1', preview: 'first' },
     ]);
     expect(harness.delays).toEqual([100]);
@@ -109,7 +114,11 @@ describe('AgentEventManager', () => {
     ]);
 
     expect(harness.manager.getSnapshot()['workspace-1']?.sessions).toEqual([]);
-    expect(deltas.at(-1)).toEqual({ type: 'agent_state_snapshot', workspaces: harness.manager.getSnapshot() });
+    expect(deltas.at(-1)).toEqual({
+      type: 'agent_workspace_snapshot',
+      workspaceId: 'workspace-1',
+      workspace: harness.manager.getSnapshot()['workspace-1']!,
+    });
   });
 
   it('closing a session clears frozen retry + error', () => {
@@ -196,9 +205,68 @@ describe('AgentEventManager', () => {
     expect(session?.dormantSince).toBeUndefined();
     expect(session?.closedAt).toBeUndefined();
   });
+  it('streams append-only text patches instead of rebroadcasting the growing block', () => {
+    const harness = createManager();
+    const deltas = collectDeltas(harness.manager);
+    const block = (text: string) => ({
+      id: 'assistant-1',
+      type: 'message',
+      data: { role: 'assistant', text },
+    });
+
+    harness.manager.emitTranscriptLive('workspace-1', 'session-1', [block('a')], false);
+    harness.manager.emitTranscriptLive('workspace-1', 'session-1', [block('ab')], false);
+    harness.manager.emitTranscriptLive('workspace-1', 'session-1', [block('abc')], false);
+
+    const transcriptDeltas = deltas.filter(
+      (delta): delta is Extract<AgentStateUpdateDelta, { type: 'agent_transcript_delta' }> =>
+        delta.type === 'agent_transcript_delta',
+    );
+    expect(transcriptDeltas).toHaveLength(3);
+    expect(transcriptDeltas[0]?.upserts).toEqual([block('a')]);
+    expect(transcriptDeltas[1]).toMatchObject({
+      upserts: [],
+      appends: [{ id: 'assistant-1', field: 'text', text: 'b' }],
+      order: ['assistant-1'],
+    });
+    expect(transcriptDeltas[2]?.appends).toEqual([{ id: 'assistant-1', field: 'text', text: 'c' }]);
+
+    const reconstructed = transcriptDeltas.reduce(applyTranscriptDelta, []);
+    expect(reconstructed).toEqual([block('abc')]);
+
+    harness.manager.emitTranscriptLive('workspace-1', 'session-1', [], true);
+    expect(applyTranscriptDelta(reconstructed, deltas.at(-1) as typeof transcriptDeltas[number])).toEqual([]);
+  });
+
+  it('bounds structured live tool payloads while committed history remains authoritative', () => {
+    const harness = createManager();
+    const deltas = collectDeltas(harness.manager);
+    harness.manager.emitTranscriptLive('workspace-1', 'session-1', [{
+      id: 'tool-1',
+      type: 'tool-call',
+      data: {
+        tool: 'read',
+        status: 'done',
+        details: { text: 'x'.repeat(100_000) },
+      },
+    }], false);
+
+    const delta = deltas.at(-1);
+    expect(delta?.type).toBe('agent_transcript_delta');
+    if (delta?.type !== 'agent_transcript_delta') throw new Error('expected transcript delta');
+    const data = delta.upserts[0]?.data;
+    if (!data || typeof data !== 'object' || !('details' in data)) throw new Error('expected bounded details');
+    const details = data.details;
+    if (!details || typeof details !== 'object' || !('truncated' in details) || !('originalChars' in details)) {
+      throw new Error('expected truncation metadata');
+    }
+    expect(details.truncated).toBe(true);
+    expect(details.originalChars).toBeGreaterThan(100_000);
+    expect(JSON.stringify(delta).length).toBeLessThan(20_000);
+  });
+
 });
 
-describe('computeSessionActivity', () => {
   function stateWith(overrides: Partial<WorkspaceAgentState>): WorkspaceAgentState {
     return {
       workspaceId: 'workspace-1',
@@ -215,6 +283,7 @@ describe('computeSessionActivity', () => {
       ...overrides,
     };
   }
+describe('computeSessionActivity', () => {
 
   it('reports inactive only when the session owes nothing', () => {
     const activity = computeSessionActivity(stateWith({ statuses: { 'session-1': { type: 'idle' } } }), 'session-1');
@@ -303,5 +372,21 @@ describe('determineAgentState', () => {
     // 'queued' and 'subagents' mean owed, not executing.
     expect(determineAgentState({ active: true, reasons: [{ kind: 'queued', steering: 1, followUp: 0 }] }, {}, undefined)).toBe('waiting');
     expect(determineAgentState({ active: true, reasons: [{ kind: 'subagents', count: 3 }] }, {}, undefined)).toBe('waiting');
+  });
+});
+
+describe('agent workspace snapshots', () => {
+  it('replaces only the affected workspace', () => {
+    const alpha = stateWith({ workspaceId: 'alpha' });
+    const beta = stateWith({ workspaceId: 'beta' });
+    const updatedAlpha = stateWith({
+      workspaceId: 'alpha',
+      sessions: [{ id: 'session-1', title: 'Updated' }],
+    });
+
+    expect(applyAgentDeltaToAgentState(
+      { alpha, beta },
+      { type: 'agent_workspace_snapshot', workspaceId: 'alpha', workspace: updatedAlpha },
+    )).toEqual({ alpha: updatedAlpha, beta });
   });
 });

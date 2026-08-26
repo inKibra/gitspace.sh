@@ -552,8 +552,10 @@ function applyMachineSnapshotForAgentDelta(
   delta: AgentStateUpdateDelta,
 ): void {
   switch (delta.type) {
-    // Preview text only; nothing the machine snapshot renders moves.
+    // Transcript/recap payloads are pane-only; nothing in the machine model moves.
     case 'agent_last_message':
+    case 'agent_transcript_delta':
+    case 'agent_recap':
       return;
     // Transient sign-in flow state: global, and absent from the snapshot.
     case 'agent_oauth_event':
