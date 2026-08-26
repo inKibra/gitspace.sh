@@ -182,13 +182,25 @@ export function useTranscript(opts: {
   // fire a scroll event, flip browse → follow, and yank a scrolled-up reader to
   // the bottom when a turn completes. Appending before paint keeps the height
   // stable (the render-time dedup absorbs any transient overlap).
+  // Memory cap: in browse mode the commit path below appends every finished
+  // turn to `committed` with no replace (the follow-mode refetch is what
+  // normally bounds it). Long-running agents with MB-scale turns grow this
+  // array without limit — the "UI at 12GB" bug. Trim from the top beyond a
+  // generous window; trimmed history is server-side and re-fetchable, though
+  // after a trim the older-page cursor may skip the evicted span.
+  const MAX_COMMITTED_BLOCKS = 2000;
   const prevLiveRef = useRef<readonly Block[]>([]);
   useLayoutEffect(() => {
     const prev = prevLiveRef.current;
     prevLiveRef.current = live;
     if (prev.length === 0 || live.length !== 0) return;
     const generation = generationRef.current;
-    setCommitted((c) => [...c, ...prev]); // sync, pre-paint — no shrink frame
+    setCommitted((c) => {
+      const next = [...c, ...prev]; // sync, pre-paint — no shrink frame
+      if (next.length <= MAX_COMMITTED_BLOCKS) return next;
+      setHasMoreOlder(true);
+      return next.slice(next.length - MAX_COMMITTED_BLOCKS);
+    });
     if (modeRef.current === 'browse') return;
     let alive = true;
     fetchRange(undefined, pageSize)
