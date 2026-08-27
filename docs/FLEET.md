@@ -518,16 +518,31 @@ hosted:     dispatch Worker → same relay artifact as WfP User Worker
 - WfP isolation is untrusted mode + hostname-derived tenant dispatch + signed
   deployment admission + tenant-only raw bindings (or mediated shared
   resources). Key prefixes are not isolation.
-- Platform-controlled limits exist per dispatch and upload (`cpuMs`,
-  `subRequests`). External GraphQL/Logpush metrics attribute Worker and DO
-  requests, CPU, subrequests, rows, and stored bytes by script/class/namespace.
-  Credits are an immutable microdollar ledger with admission reservations,
-  measured settlement, prepaid risk reserve, quarantine at exhaustion, and
-  `force=true` script/DO deletion as the destructive abuse stop.
-- Outbound Workers police stateless User Worker fetches (destination policy,
-  control-plane protection, delegated credentials, attribution). They do not
-  intercept DO fetches; DO egress is bounded by script/platform limits,
-  externally metered, and suspended/quarantined—not trusted for billing.
+- Platform-controlled limits work for the dispatched User Worker: four external
+  subrequests succeeded, six failed at a configured limit of five; CPU burn was
+  terminated. These limits DO NOT contain user-authored Durable Objects:
+  25 Worker→DO invocations succeeded, DO-originated `fetch()` bypassed the
+  Outbound Worker, and a DO alarm rescheduled independently of dispatch.
+- External GraphQL/Logpush metrics DO attribute DO requests/CPU/duration/rows by
+  script/class/namespace and R2 operations by bucket. The implemented credit
+  prototype provides a versioned gross-list-price microdollar rate card,
+  idempotent CreditDO ledger, dispatch reservations, risk reserve, automatic
+  quarantine, and `force=true` deletion; beta remained healthy throughout
+  alpha exhaustion/deletion.
+  Usage capture must stream into platform-owned immutable ledger storage before
+  destructive suspension: after force-deleting alpha, a later namespace query
+  no longer returned its rows, while the pre-delete capture remained usable.
+- **Blocking result**: Cloudflare exposes no externally enforced per-tenant DO
+  instance count or aggregate burn-rate cap. Metrics are delayed; a malicious
+  DO can create more objects/alarms during that window. Therefore maximum
+  uncollected exposure for arbitrary public user-authored DO code is NOT
+  finitely bounded with current controls.
+- Standalone BYO remains safe economically because Cloudflare bills the user.
+  Hosted WfP may allow arbitrary RelayDO code only after one of: Cloudflare
+  supplies a hard aggregate tenant cap/subaccount boundary; users post a
+  platform-acceptable externally enforceable reserve; or hosted mode constrains
+  DO code behind a platform-owned state capability. Do not paper over this with
+  delayed analytics.
 - R2 stores only client-sealed artifacts/session segments/reports. Keys remain
   with user devices/root identity. GitSpace/Cloudflare can observe tenant,
   object sizes, hashes, access timing, and billing—not plaintext.
@@ -571,21 +586,25 @@ hosted:     dispatch Worker → same relay artifact as WfP User Worker
    account. Prove hibernating machine/browser sockets and custom HTTP tunnel.
 4. Build one relay artifact once; deploy the identical hash through WfP for two
    tenants. Prove DO migration/state preservation and cross-tenant isolation.
-5. Hostile-tenant/credit spike: limits, attribution, R2/DO/storage charging,
-   quarantine, force delete A while B remains healthy.
-6. Build shared `deployment` engine; `bun run dev` replaces B through it, and
+5. Hostile-tenant/credit spike: completed. Attribution, encrypted tenant R2,
+   ledger/reservation/quarantine/force-delete work; arbitrary user DO burn is
+   unbounded across the analytics delay because no instance/aggregate cap exists.
+6. **Architecture gate**: choose/obtain an externally enforceable hosted DO
+   containment boundary. Standalone arbitrary RelayDO remains valid. Do not
+   public-launch arbitrary WfP RelayDO code before this gate passes.
+7. Build shared `deployment` engine; `bun run dev` replaces B through it, and
    user-approved promotion installs the exact proven artifacts into A.
-7. Consolidate mutable local state into `gitspace.db`; make rescan/rebuild a
+8. Consolidate mutable local state into `gitspace.db`; make rescan/rebuild a
    supported recovery path.
-8. Build canonical typed handlers + `better-result`, then full
+9. Build canonical typed handlers + `better-result`, then full
    `space.*`/`gitspace.*` parity and web adoption domain by domain.
-9. Adopt OMP broker for processes/PTYS; delete tmux-lite process ownership.
-10. Rebuild mini-apps as `local://` artifact trees backed by named broker
+10. Adopt OMP broker for processes/PTYS; delete tmux-lite process ownership.
+11. Rebuild mini-apps as `local://` artifact trees backed by named broker
     processes and development-tunnel routes; remove inline `.gssh.html` state.
-11. Add encrypted R2 artifacts/session mirrors, shares, and move/resume.
-12. Delete routine CLI, local relay/cloudflared architecture, scattered state
+12. Add encrypted R2 artifacts/session mirrors, shares, and move/resume.
+13. Delete routine CLI, local relay/cloudflared architecture, scattered state
     files, old handlers, and compatibility shims.
-13. Add platform email, settings sync, checks/placement, and remaining fleet UX
+14. Add platform email, settings sync, checks/placement, and remaining fleet UX
     on the proven substrate.
 
 Already completed: OMP SDK 18.0.6 migration (`f061638`), first skinny-event
@@ -596,43 +615,46 @@ issue #136, transcript-images issue #146.
 
 Execute one by one; each ticket must name the package/replacement unit it owns.
 
-1. Land FLEET 1.0 rewrite; close/reframe stale tickets that assume local relay,
-   D1 directory, full CLI, `gssh dev up`, or separate dev/promote mechanics.
-2. NEW “GitSpace 1.0 monorepo substrate” — Bun workspaces + minimal packages;
-   no broad file move.
-3. NEW “Portable relay standalone spike” — Worker + user RelayDO + hibernating
+1. DONE “FLEET 1.0 rewrite” — stale local-relay/D1/full-CLI/dev-promote
+   assumptions replaced.
+2. DONE “GitSpace 1.0 monorepo substrate” — Bun workspaces + minimal packages.
+3. DONE “Portable relay standalone spike” — Worker + user RelayDO + hibernating
    sockets + encrypted frame echo + custom dev HTTP tunnel.
-4. NEW “Canonical relay deployment manifest” — one artifact/migration/binding
-   declaration rendered to Wrangler and WfP multipart metadata.
-5. NEW “WfP two-tenant relay spike” — same artifact hash, user-authored DO
-   migration, binding/hostname isolation.
-6. NEW “WfP hostile tenant + credit ledger” — external attribution, rate card,
-   admission reserve, reconciliation, quarantine, force deletion.
-7. NEW “Shared replacement engine” — entrypoint graph, artifact set, drain,
+4. DONE “Canonical relay deployment manifest” — one artifact/migration/binding
+   declaration renders Wrangler and WfP metadata, including tenant R2.
+5. DONE “WfP two-tenant relay spike” — same artifact hash, user-authored DO
+   migration, binding/hostname/R2 isolation.
+6. DONE “WfP hostile tenant + credit ledger” — encrypted tenant R2, external
+   attribution, rate card, idempotent ledger, admission reserve, exhaustion
+   quarantine, and force deletion. Result: no finite arbitrary-DO exposure bound.
+7. GATE “Hosted user-authored DO containment” — obtain Cloudflare aggregate
+   tenant limit/subaccount isolation, or choose a constrained hosted state
+   capability. Standalone arbitrary RelayDO remains supported.
+8. NEW “Shared replacement engine” — entrypoint graph, artifact set, drain,
    replace, health, rollback, durable journal.
-8. NEW “GitSpace B package-script development” — `bun run dev` watcher invoking
+9. NEW “GitSpace B package-script development” — `bun run dev` watcher invoking
    shared engine; B self-validates; user-signed immutable promotion plan.
-9. NEW “One local GitSpace SQLite” — schema, repositories, rescan/rebuild;
-   migrate/delete mutable JSON/control stores.
-10. NEW “Canonical handlers + better-result” — Result codecs, tagged domain
+10. NEW “One local GitSpace SQLite” — schema, repositories, rescan/rebuild;
+    migrate/delete mutable JSON/control stores.
+11. NEW “Canonical handlers + better-result” — Result codecs, tagged domain
     errors, web/SDK adapters.
-11. NEW “Full code-mode parity + CLI removal” — `space.*`, `gitspace.*`, migrate
+12. NEW “Full code-mode parity + CLI removal” — `space.*`, `gitspace.*`, migrate
     every caller, delete routine Commander tree.
-12. Rewrite #131 as OMP broker adoption; raw-stdin gate; delete process runner,
+13. Rewrite #131 as OMP broker adoption; raw-stdin gate; delete process runner,
     watchdog, scheduler, and tmux-lite PTY ownership when proven.
-13. Reframe #126 under the shared deployment engine: stable promoter,
+14. Reframe #126 under the shared deployment engine: stable promoter,
     generation handoff, per-entrypoint hashes, worker drain, asset reload.
-14. NEW “Encrypted R2 artifacts + session mirrors” — packfiles/segments,
+15. NEW “Encrypted R2 artifacts + session mirrors” — packfiles/segments,
     manifest CAS, shares, local eviction, move/resume.
-15. NEW “Workspace email on platform domain” — default-branch allowlist,
+16. NEW “Workspace email on platform domain” — default-branch allowlist,
     DKIM/SPF gate, plaintext-at-MX disclosure, sealed MIME in R2.
-16. NEW “Broker-backed local mini-apps” — `local://apps/<id>` artifact tree,
+17. NEW “Broker-backed local mini-apps” — `local://apps/<id>` artifact tree,
     named OMP process, readiness/logs/route reference block, immutable promote/
     share snapshot; delete inline `.gssh.html` program state.
-17. Keep: side-agent read tier; checks/placement; runtime/fleet view;
+18. Keep: side-agent read tier; checks/placement; runtime/fleet view;
     browser-relay grant; subagent report/blame capture; worker wedge capture;
     isolinear pilot. Sequence them after the 1.0 substrate they consume.
 
-The Cloudflare relay spike is first because it is the largest new runtime and
-security assumption. Local DB/SDK/UI restructuring follows only after the
-portable standalone/WfP data plane is proven.
+The portable relay data plane is proven standalone and under WfP. Hosted
+arbitrary user-authored DO containment is not. Local DB/SDK and standalone work
+may proceed; public hosted RelayDO execution waits at operation 7.

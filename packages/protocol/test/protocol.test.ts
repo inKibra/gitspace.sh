@@ -5,7 +5,9 @@ import {
   TUNNEL_CHUNK_BYTES,
   createRelayAuthorization,
   decodeTunnelChunk,
+  decryptArtifactBytes,
   encodeTunnelChunk,
+  encryptArtifactBytes,
   parseRelaySocketMessage,
   verifyRelayAuthorization,
 } from '../src/index.js';
@@ -60,5 +62,20 @@ describe('relay messages', () => {
     const bytes = Uint8Array.from({ length: TUNNEL_CHUNK_BYTES }, (_, index) => index % 251);
     expect(decodeTunnelChunk(encodeTunnelChunk(bytes))).toEqual(bytes);
     expect(() => encodeTunnelChunk(new Uint8Array(TUNNEL_CHUNK_BYTES + 1))).toThrow(/exceeds/);
+  });
+});
+
+describe('artifact encryption', () => {
+  it('stores authenticated ciphertext and round-trips only with the client key', async () => {
+    const key = Uint8Array.from({ length: 32 }, (_, index) => 255 - index);
+    const plaintext = new TextEncoder().encode('private artifact payload');
+    const sealed = await encryptArtifactBytes(
+      plaintext,
+      key,
+      Uint8Array.from({ length: 12 }, (_, index) => index),
+    );
+    expect(new TextDecoder().decode(sealed)).not.toContain('private artifact payload');
+    expect(await decryptArtifactBytes(sealed, key)).toEqual(plaintext);
+    await expect(decryptArtifactBytes(sealed, new Uint8Array(32))).rejects.toThrow();
   });
 });

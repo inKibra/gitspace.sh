@@ -1,10 +1,12 @@
-import { exports } from 'cloudflare:workers';
+import { env, exports } from 'cloudflare:workers';
 import { describe, expect, it } from 'vitest';
 import {
   RELAY_PROTOCOL_VERSION,
   createRelayAuthorization,
   decodeTunnelChunk,
+  decryptArtifactBytes,
   encodeTunnelChunk,
+  encryptArtifactBytes,
   tunnelRequestMessageSchema,
   type TunnelRequestMessage,
 } from '@gitspace/protocol';
@@ -43,6 +45,11 @@ function parseTunnelRequest(input: string): TunnelRequestMessage {
   const parsed = tunnelRequestMessageSchema.safeParse(JSON.parse(input));
   if (!parsed.success) throw new Error(`Invalid tunnel request: ${parsed.error.message}`);
   return parsed.data;
+}
+
+async function ciphertextHash(bytes: Uint8Array): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
 describe('portable RelayDO', () => {
@@ -139,4 +146,35 @@ describe('portable RelayDO', () => {
     expect(new TextDecoder().decode(requestBody)).toBe('request body');
     machine.close(1000, 'done');
   });
+  it('stores only client-encrypted content-addressed artifact bytes', async () => {
+    const key = Uint8Array.from({ length: 32 }, (_, index) => 200 - index);
+    const plaintextText = 'artifact plaintext must not reach R2';
+    const plaintext = new TextEncoder().encode(plaintextText);
+    const sealed = await encryptArtifactBytes(plaintext, key);
+    const hash = await ciphertextHash(sealed);
+    const path = `/artifacts/${hash}`;
+
+    const put = await exports.default.fetch(authorizedRequest(`https://relay.test${path}`, {
+      method: 'PUT',
+      headers: {
+        'content-type': 'application/vnd.gitspace.encrypted',
+        'content-length': String(sealed.byteLength),
+        'x-gitspace-encryption': 'aes-256-gcm-v1',
+      },
+      body: sealed,
+    }));
+    expect(put.status).toBe(201);
+
+    const stored = await env.BLOBS.get(`artifacts/${hash}`);
+    if (!stored) throw new Error('Expected encrypted artifact in R2');
+    const raw = new Uint8Array(await stored.arrayBuffer());
+    expect(new TextDecoder().decode(raw)).not.toContain(plaintextText);
+    expect(raw).toEqual(sealed);
+
+    const get = await exports.default.fetch(authorizedRequest(`https://relay.test${path}`));
+    expect(get.status).toBe(200);
+    expect(get.headers.get('x-gitspace-encryption')).toBe('aes-256-gcm-v1');
+    expect(await decryptArtifactBytes(new Uint8Array(await get.arrayBuffer()), key)).toEqual(plaintext);
+  });
+
 });

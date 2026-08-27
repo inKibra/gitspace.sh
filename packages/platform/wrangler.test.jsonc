@@ -1,0 +1,25 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "gitspace-credit-platform-test",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-27",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [
+      { "name": "CREDITS", "class_name": "CreditLedgerDO" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["CreditLedgerDO"] }
+  ],
+  "vars": {
+    "TENANT_HOST_SUFFIX": "-test.invalid",
+    "DEFAULT_CPU_MS": 50,
+    "DEFAULT_SUBREQUESTS": 20,
+    "ADMIN_PUBLIC_KEY": "test",
+    "ADMIN_AUTH_MAX_SKEW_MS": 60000,
+    "DISPATCH_RESERVATION_MICROS": 100,
+    "DISPATCH_SETTLEMENT_MICROS": 1,
+    "RESERVATION_TTL_MS": 30000
+  }
+}

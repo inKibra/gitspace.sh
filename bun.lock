@@ -70,6 +70,10 @@
     "packages/platform": {
       "name": "@gitspace/platform",
       "version": "0.0.0",
+      "dependencies": {
+        "@gitspace/protocol": "workspace:*",
+        "better-result": "3.0.1",
+      },
     },
     "packages/protocol": {
       "name": "@gitspace/protocol",

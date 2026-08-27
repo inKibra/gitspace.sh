@@ -19,6 +19,9 @@ const INTERNAL_ENDPOINT_ID = 'x-gitspace-endpoint-id';
 const INTERNAL_TUNNEL_MACHINE = 'x-gitspace-tunnel-machine';
 const INTERNAL_TUNNEL_PATH = 'x-gitspace-tunnel-path';
 const ENDPOINT_ID = /^[A-Za-z0-9._-]{1,128}$/u;
+const ARTIFACT_PATH = /^\/artifacts\/([a-f0-9]{64})$/u;
+const MAX_ARTIFACT_BYTES = 8 * 1024 * 1024;
+const ENCRYPTED_ARTIFACT_CONTENT_TYPE = 'application/vnd.gitspace.encrypted';
 const HOP_BY_HOP_HEADERS = new Set([
   'connection',
   'keep-alive',
@@ -82,6 +85,62 @@ function relayRequest(request: Request, authorization: { nonce: string; timestam
   return new Request(request, { headers });
 }
 
+async function artifactDigest(bytes: ArrayBuffer): Promise<{ hex: string; digest: ArrayBuffer }> {
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  const hex = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
+  return { hex, digest };
+}
+
+async function handleArtifactRequest(request: Request, env: Env, hash: string): Promise<Response> {
+  const key = `artifacts/${hash}`;
+  if (request.method === 'PUT') {
+    if (request.headers.get('content-type') !== ENCRYPTED_ARTIFACT_CONTENT_TYPE
+      || request.headers.get('x-gitspace-encryption') !== 'aes-256-gcm-v1') {
+      return jsonError(415, 'ENCRYPTION_REQUIRED', 'Artifact must use the GitSpace encrypted artifact format');
+    }
+    const length = Number(request.headers.get('content-length'));
+    if (!Number.isSafeInteger(length) || length <= 0 || length > MAX_ARTIFACT_BYTES) {
+      return jsonError(413, 'ARTIFACT_SIZE_INVALID', `Artifact content-length must be between 1 and ${MAX_ARTIFACT_BYTES}`);
+    }
+    const bytes = await request.arrayBuffer();
+    if (bytes.byteLength !== length) return jsonError(400, 'ARTIFACT_LENGTH_MISMATCH', 'Artifact body length does not match content-length');
+    const calculated = await artifactDigest(bytes);
+    if (calculated.hex !== hash) return jsonError(400, 'ARTIFACT_HASH_MISMATCH', 'Artifact ciphertext does not match its content address');
+    await env.BLOBS.put(key, bytes, {
+      sha256: calculated.digest,
+      httpMetadata: { contentType: ENCRYPTED_ARTIFACT_CONTENT_TYPE },
+      customMetadata: { encryption: 'aes-256-gcm-v1' },
+    });
+    return Response.json({ hash, bytes: length }, { status: 201 });
+  }
+
+  if (request.method === 'HEAD') {
+    const object = await env.BLOBS.head(key);
+    if (!object) return jsonError(404, 'ARTIFACT_NOT_FOUND', 'Encrypted artifact not found');
+    return new Response(null, {
+      headers: {
+        'content-length': String(object.size),
+        etag: object.httpEtag,
+        'content-type': ENCRYPTED_ARTIFACT_CONTENT_TYPE,
+        'x-gitspace-encryption': object.customMetadata?.encryption ?? 'unknown',
+      },
+    });
+  }
+
+  if (request.method === 'GET') {
+    const object = await env.BLOBS.get(key);
+    if (!object) return jsonError(404, 'ARTIFACT_NOT_FOUND', 'Encrypted artifact not found');
+    const headers = new Headers();
+    object.writeHttpMetadata(headers);
+    headers.set('content-length', String(object.size));
+    headers.set('etag', object.httpEtag);
+    headers.set('x-gitspace-encryption', object.customMetadata?.encryption ?? 'unknown');
+    return new Response(object.body, { headers });
+  }
+
+  return jsonError(405, 'METHOD_NOT_ALLOWED', 'Artifact route supports PUT, GET, and HEAD');
+}
+
 export class UserRelayDO extends DurableObject<Env> {
   private readonly pendingTunnels = new Map<string, PendingTunnel>();
 
@@ -100,7 +159,7 @@ export class UserRelayDO extends DurableObject<Env> {
   async fetch(request: Request): Promise<Response> {
     const nonce = request.headers.get(INTERNAL_NONCE);
     const timestamp = Number(request.headers.get(INTERNAL_TIMESTAMP));
-    if (!nonce || !Number.isSafeInteger(timestamp) || !this.consumeNonce(nonce, timestamp)) {
+    if (!nonce || !Number.isSafeInteger(timestamp) || !this.consumeAuthorization(nonce, timestamp)) {
       return jsonError(401, 'AUTH_REPLAY', 'Relay authorization was already used or is invalid');
     }
 
@@ -180,7 +239,7 @@ export class UserRelayDO extends DurableObject<Env> {
     if (attachment?.role === 'machine') this.failMachineTunnels(attachment.id, new Error('Machine socket failed'));
   }
 
-  private consumeNonce(nonce: string, timestamp: number): boolean {
+  consumeAuthorization(nonce: string, timestamp: number): boolean {
     const expiry = timestamp - Number(this.env.AUTH_MAX_SKEW_MS) * 2;
     this.ctx.storage.sql.exec('DELETE FROM auth_nonces WHERE used_at < ?', expiry);
     try {
@@ -317,6 +376,15 @@ export default {
     const authorization = authorizedRequest(request, env);
     if (authorization instanceof Response) return authorization;
 
+    const stub = env.RELAY.getByName(env.RELAY_NAME);
+    const artifact = ARTIFACT_PATH.exec(url.pathname);
+    if (artifact) {
+      if (!await stub.consumeAuthorization(authorization.nonce, authorization.timestamp)) {
+        return jsonError(401, 'AUTH_REPLAY', 'Relay authorization was already used or is invalid');
+      }
+      return handleArtifactRequest(request, env, artifact[1]!);
+    }
+
     const headers = new Headers(request.headers);
     if (url.pathname === '/ws') {
       const parsed = socketAttachmentSchema.safeParse({ role: url.searchParams.get('role'), id: url.searchParams.get('id') });
@@ -330,7 +398,6 @@ export default {
       headers.set(INTERNAL_TUNNEL_PATH, tunnel.path);
     }
 
-    const stub = env.RELAY.getByName(env.RELAY_NAME);
     return stub.fetch(relayRequest(request, authorization, headers));
   },
 } satisfies ExportedHandler<Env>;

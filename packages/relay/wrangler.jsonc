@@ -12,6 +12,12 @@
       }
     ]
   },
+  "r2_buckets": [
+    {
+      "binding": "BLOBS",
+      "bucket_name": "gitspace-relay-spike-standalone"
+    }
+  ],
   "migrations": [
     {
       "tag": "v1",

@@ -9,6 +9,11 @@
   "scripts": {
     "types": "wrangler types worker-configuration.d.ts --include-runtime false --config wrangler.jsonc",
     "typecheck": "tsgo --noEmit -p tsconfig.json",
-    "deploy:dry": "wrangler deploy --dry-run --config wrangler.jsonc"
+    "deploy:dry": "wrangler deploy --dry-run --config wrangler.jsonc",
+    "test": "vitest run --config vitest.config.ts"
+  },
+  "dependencies": {
+    "@gitspace/protocol": "workspace:*",
+    "better-result": "3.0.1"
   }
 }

@@ -18,6 +18,7 @@ export const relayDeploymentManifestSchema = z.object({
   relayBinding: z.string().min(1).default('RELAY'),
   relayClass: z.string().min(1).default('UserRelayDO'),
   relayName: z.string().min(1).default('default'),
+  blobBinding: z.string().min(1).default('BLOBS'),
   authPublicKey: z.string().min(1),
   authMaxSkewMs: z.number().int().positive(),
   tunnelHeaderTimeoutMs: z.number().int().positive(),
@@ -37,6 +38,10 @@ export class UnknownMigrationTag extends TaggedError('UnknownMigrationTag')<{
   message: string;
 }> {}
 
+export interface RelayResourceAllocation {
+  bucketName: string;
+}
+
 export interface StandaloneWranglerConfig {
   $schema: string;
   name: string;
@@ -44,6 +49,7 @@ export interface StandaloneWranglerConfig {
   compatibility_date: string;
   compatibility_flags: string[];
   durable_objects: { bindings: Array<{ name: string; class_name: string }> };
+  r2_buckets: Array<{ binding: string; bucket_name: string }>;
   migrations: Array<{
     tag: string;
     new_sqlite_classes?: string[];
@@ -60,6 +66,7 @@ export interface WfpUploadMetadata {
   bindings: Array<
     | { name: string; type: 'durable_object_namespace'; class_name: string }
     | { name: string; type: 'plain_text'; text: string }
+    | { name: string; type: 'r2_bucket'; bucket_name: string }
   >;
   migrations?: {
     old_tag?: string;
@@ -81,7 +88,10 @@ export function validateRelayDeployment(input: unknown): ResultType<RelayDeploym
     : Result.err(new InvalidRelayDeployment({ message: z.prettifyError(parsed.error) }));
 }
 
-export function renderStandaloneWrangler(manifest: RelayDeploymentManifest): StandaloneWranglerConfig {
+export function renderStandaloneWrangler(
+  manifest: RelayDeploymentManifest,
+  allocation: RelayResourceAllocation,
+): StandaloneWranglerConfig {
   return {
     $schema: '../../node_modules/wrangler/config-schema.json',
     name: manifest.workerName,
@@ -91,6 +101,7 @@ export function renderStandaloneWrangler(manifest: RelayDeploymentManifest): Sta
     durable_objects: {
       bindings: [{ name: manifest.relayBinding, class_name: manifest.relayClass }],
     },
+    r2_buckets: [{ binding: manifest.blobBinding, bucket_name: allocation.bucketName }],
     migrations: manifest.migrations.map((migration) => ({
       tag: migration.tag,
       ...(migration.newSqliteClasses.length > 0 ? { new_sqlite_classes: migration.newSqliteClasses } : {}),
@@ -111,6 +122,7 @@ export function renderStandaloneWrangler(manifest: RelayDeploymentManifest): Sta
 
 export function renderWfpUploadMetadata(
   manifest: RelayDeploymentManifest,
+  allocation: RelayResourceAllocation,
   oldTag?: string,
 ): ResultType<WfpUploadMetadata, UnknownMigrationTag> {
   const oldIndex = oldTag === undefined ? -1 : manifest.migrations.findIndex((migration) => migration.tag === oldTag);
@@ -131,6 +143,7 @@ export function renderWfpUploadMetadata(
     main_module: manifest.mainModule.split('/').at(-1)!,
     bindings: [
       { name: manifest.relayBinding, type: 'durable_object_namespace', class_name: manifest.relayClass },
+      { name: manifest.blobBinding, type: 'r2_bucket', bucket_name: allocation.bucketName },
       { name: 'AUTH_PUBLIC_KEY', type: 'plain_text', text: manifest.authPublicKey },
       { name: 'RELAY_NAME', type: 'plain_text', text: manifest.relayName },
       { name: 'AUTH_MAX_SKEW_MS', type: 'plain_text', text: String(manifest.authMaxSkewMs) },
