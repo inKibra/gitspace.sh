@@ -1,8 +1,9 @@
-# FLEET.md — fleet, movability, lifecycle, and self-development design
+# FLEET.md — GitSpace 1.0 architecture
 
-Status: DRAFT for approval. Captured 2026-08-10 from a full design session.
-This is the anchor document: tickets reference it instead of re-deriving
-rationale. When a decision here changes, change it here first.
+Status: DRAFT for approval. Originally captured 2026-08-10; rewritten
+2026-08-27 after the OMP 18 migration, cross-machine session move, skinny-event
+work, and Cloudflare platform design. This is the anchor document: change the
+decision here before filing or implementing work that depends on it.
 
 ---
 
@@ -10,38 +11,49 @@ rationale. When a decision here changes, change it here first.
 
 **Don't hide machines. Name them, and make crossing between them cheap.**
 
-Five primitives, which every subsystem below reduces to:
+Seven primitives:
 
 1. **Possession** — one writer per thing (workspace tree, goal folder, session,
-   deploy environment). Movement is an explicit verb, never ambient. Possession
-   is the lock; there is no separate lease registry.
-2. **Refs** — git is the data plane: code, WIP snapshots, artifacts, canon,
-   goal content, the recovery estate.
-3. **Signals** — the relay is the control plane: dispatch, pings, log streams.
-   It carries no state.
-4. **Names** — work lands somewhere explicit: labeled runner, pinned service,
-   identity-bearing machine, the user's seat. Nothing migrates transparently.
-5. **Facts → agent** — the system observes (probes, timings, failures) and
-   presents facts; the agent chooses. Safe because placement is a performance
-   decision only — correctness is structural (single writer + fences).
+   deployment environment). Movement is explicit, never ambient.
+2. **Git** — code, declarations, goals, reviews, specs, and release refs live
+   in repositories the user owns.
+3. **Encrypted blobs** — artifacts, session mirrors, reports, and large payloads
+   are client-sealed before R2. Cloud storage owns bytes, never plaintext.
+4. **Transactional state** — one local SQLite database per machine; one
+   coordination database per cloud atom (RelayDO SQLite, platform control DB).
+   Mutable application state does not sprawl across JSON files.
+5. **Signals** — the relay routes live ciphertext, tunnel streams, enrollment,
+   and coordination events. It is a stateful rendezvous, not a data authority.
+6. **Names** — work lands on an explicit machine, environment, process,
+   deployment, and user-owned relay.
+7. **Facts → agent; promotion → user** — the system measures and presents
+   facts. Agents may replace isolated development environments. A user signs
+   promotion into the environment they currently depend on.
+
+GitSpace 1.0 is the first stable architecture; 0.x is the prototype. Clean
+cutovers are the default. Compatibility exists only where a current,
+evidence-backed consumer requires it.
 
 ## 2. Rejected alternatives (do not relitigate without new evidence)
 
 | Rejected | Why |
 |---|---|
-| Network filesystem mounts for code | metadata-storm syscall tax (100x on stat-heavy builds); owner death bricks every consumer — contradicts the founding "disconnect and keep going" requirement; watchers don't cross mounts; SQLite-on-NFS |
-| Live session/process migration | can't serialize a mid-turn process; industry (Codex cloud, Cursor cloud agents) moves git artifacts at boundaries and keeps conversation in a backend |
-| Ambient multi-master state sync | conflict soup; replication (one writer per namespace) gives durability without merges |
-| Credential distribution/leasing per-cred | the credential surface is unenumerable ($HOME sprawl); route work to identity instead; delegate for the top few |
-| Transparent remote shells (migrating bash state) | shell/kernel state is machine-local; the honest model is named per-host contexts (ssh-tab model) — later superseded entirely by "move the whole harness" |
-| Per-command remote exec surface (maintained) | an entire product surface to maintain; collapsed into two lanes: declared checks + whole-harness moves |
-| `space check` as a new agent-facing verb | space surface is shrinking (#117 codemode); the chokepoint is the bash/eval tool; declaration ≠ invocation |
-| GitHub-hosted CI as the check engine | queue+boot+cache-transfer latency; we originate the push events, so their control plane adds nothing |
-| Live worker reattach across daemon versions | requires OUR wire protocol stable across versions — the thing guaranteed to churn during self-development. See §10 |
-| Orphaning busy workers through an upgrade | old OUR-code mutating artifacts/records while new code migrates schemas = cross-version skew via the filesystem |
-| A "meta project" product type for self-dev | gitspace-on-gitspace is a normal project; the feature is that there is no feature (§11) |
+| Network filesystem mounts for code | Metadata-storm syscall tax; owner death bricks consumers; watchers and SQLite semantics do not cross safely |
+| Ambient multi-master state sync | Conflict soup; possession plus namespaced replication gives durability without merges |
+| Migrating a mid-turn process | Kernel/model/tool state is not serializable; drain at a boundary, persist, reopen |
+| Per-command remote execution product | Whole-environment placement + declared checks covers the need without a second shell product |
+| A meta-project type for self-development | GitSpace is a normal project with normal package scripts |
+| Separate development and production replacement engines | Dev would prove the wrong mechanism; both must share artifacts, drains, health, migrations, and rollback |
+| A platform-owned fixed relay | Users must be able to modify their protocol, tunnel behavior, Worker, and RelayDO |
+| WfP-only or standalone-only relay code | One portable relay artifact supports both deployment envelopes |
+| A full product CLI | Humans use web; agents use code mode. Keep only bootstrap, setup, recovery, diagnostics, and headless hosting |
+| SDK-to-CLI fallbacks and deprecation shims | They preserve dead parsing/formatting surfaces and hide incomplete cutovers |
+| One global Durable Object | Wrong coordination atom and cross-tenant bottleneck |
+| Shared raw cloud bindings separated by key prefixes | Prefixes organize data; they do not isolate malicious user code |
+| Hiding relay/security code | Account owners can inspect deployed code; security must come from crypto and capability isolation |
+| Treating compatibility as a product value by itself | Preserve identities/data only when the current user journey needs them; otherwise rebuild, rescan, or cut over |
 
-## 3. Audited current-state facts (verified in-repo this session)
+## 3. Audited 0.x facts (replacement inputs, not 1.0 promises)
 
 - One Bun daemon (`src/lib/tmux-lite/server.ts`) owns PTYs (in-process
   `Bun.Terminal` fds), agent workers (anonymous IPC + ppid watchdog kill),
@@ -84,6 +96,14 @@ Five primitives, which every subsystem below reduces to:
   planned goals have no workspaceName (goal = unmaterialized workspace).
 - GitHub App exists (verify `checks:write`, `deployments:write`; private key
   custody with gitspace.sh → delegate mints installation tokens via API).
+- Embedded OMP packages are 18.0.6 (`f061638`); native `askDialog` replaced
+  one patch, while queue removal, role-only models, flat `local://`, and
+  missing-image fallback remain explicit patches.
+- Skinny-event cut `b972282` replaces recurring whole-fleet agent snapshots
+  with workspace snapshots and growing text blocks with append deltas.
+- Session `019fed50` moved Mac→WSL by copying JSONL/blobs/memory and preserving
+  `/Users/bradleat` via symlink. It proves boundary resume and exposes the
+  missing first-class manifest/path/final-sync machinery.
 
 ## 4. Sandbox (#135 filed; #116 is its research arm)
 
@@ -108,17 +128,21 @@ Five primitives, which every subsystem below reduces to:
 - CPU quotas: cgroups where the heavy work runs (Linux boxes / containers).
   Never contort macOS.
 
-## 5. Processes & services (#131 rewrite)
+## 5. Processes & services
 
-- Adopt the OMP broker under `space process`: broker owns spawn/PTY/readiness/
-  restart/logs/persistence/re-adoption. GitSpace keeps workspace-scoped names,
-  port allocation, env interpolation (#124), hostnames/hosting, wide-events,
-  autostart policy. **One owner rule** — broker replaces the tmux-lite `proc:`
-  path and the dead watchdog; never both supervising one process.
-- Namespace: root per workspace (or prefix names with workspace id) — NOT
-  OMP's per-project-dir default. This is the main integration risk.
-- Broker `owner` field is metadata, not a lock; sharing named processes
-  across a workspace's agents is intended behavior.
+- Adopt the OMP broker under `space.processes.*`: broker owns spawn, PTY,
+  readiness, restart, logs, persistence, and re-adoption. GitSpace owns
+  workspace names, port/hostname allocation, environment interpolation,
+  correlated events, policy, and panels.
+- **One owner rule** — broker replaces tmux-lite `proc:` and the dead
+  watchdog/autostart path; never run two supervisors for one process.
+- Namespace broker processes by workspace identity, not whichever agent first
+  launched them. Agents in a workspace intentionally share named processes.
+- Raw interactive input latency is the gate for moving terminal PTYs to the
+  broker. Once broker-held, terminals survive daemon replacement.
+- Repository development remains repository-owned: `bun run dev`, `bun run
+  test`, and project-specific package scripts. GitSpace does not invent
+  `space.dev`.
 
 ## 6. Agent topology
 
@@ -140,9 +164,9 @@ declaration:
 
 ```
 .gitspace/lifecycle/
-  cloud/provision       once per WORKSPACE IDENTITY; fingerprint travels
-                        (artifacts mount) — NEVER re-runs on move; probe
-                        ("stack exists?") degrades lost state to a skip
+  cloud/provision       once per WORKSPACE IDENTITY; fingerprint stored in
+                        local DB + encrypted portable manifest — NEVER re-runs
+                        on move; probe ("resource exists?") repairs lost cache
   cloud/destroy         at RETIRE only. The only real teardown.
   machine/prepare       once per machine; success registers a capability
   workspace/materialize every arrival — first setup and move-in are the
@@ -154,48 +178,46 @@ declaration:
   retire = explicit verb, destroys cloud, releases bindings. Inferring
   destruction from absence is prohibited. Careless local delete = evict
   semantics; the dev stack survives.
-- `cloud/*` steps need credentials + repo ref, NOT the worktree → they run
-  where identity lives, even if the workspace's machine is dead (bindings
-  travel via artifacts).
-- **Bindings**: provision emits `bindings.json` (ids/URLs — non-secret) into
-  the artifacts mount; secrets go to the delegate BY NAME. `.env` becomes a
-  DERIVED artifact: render(bindings) + inject(delegate secrets) at
-  materialize. Never synced, never committed. Pulumi et al MUST use remote
-  state backends keyed by workspace id.
+- `cloud/*` steps need credentials + repo ref, not the worktree. They run where
+  identity lives even if the workspace machine is dead.
+- **Bindings**: provision stores non-secret resource IDs/URLs in local SQLite
+  and a client-sealed portable manifest in R2. Secrets are delegated by name.
+  `.env` is derived at materialize from bindings + scoped secrets; never synced
+  or committed. External infrastructure tools use remote state keyed by
+  workspace identity.
 - Migration mapping (conservative): `pre/`→materialize (already deprecated),
   `setup/`→materialize (cloud bits hand-lifted to provision),
   `select/`→materialize (ordered after), `remove/`→**cloud/destroy ONLY**
   (mapping remove→dematerialize would run deletions on every move).
 - Effect-scoped fingerprints are load-bearing: worktree = per (machine,
-  workspace); machine = per machine; cloud = per workspace identity, stored
-  where it travels.
+  workspace); machine = per machine; cloud = per workspace identity in SQLite
+  + encrypted manifest.
 
-## 8. Bundle v2 + identity
 
-- bundle.json = the repo's contract with the fleet (additive fields):
-  `requires` / `permits` (capabilities, platforms, per-role: server may be
-  linux; interface needs macos+display), `secrets` (declarations → delegate
-  rules, never values), `checks` (pointers at existing package scripts —
-  transcribe, don't port), onboarding v1 unchanged as interactive fallback.
-- Setup SDK (TS): steps declare { scope, effect, probe, satisfy, requires }.
-  Probes have TTL/freshness ("once per user per session length per tool").
-  **Preflight**: resolve every step's identity/capability needs BEFORE
-  running — route the step to a satisfying machine or walk the user through
-  auth at the seat. Scripts never die at the gcloud step.
-- **Identity routing**: work goes to where logins live (learned table:
-  login events, `auth status` probes, 401-retry outcomes). Never declared
-  lists.
-- **Delegate (#136)**: fleet egress proxy holds/injects secrets; workers
-  never hold them. v0 = GitHub (App installation tokens via gitspace.sh) +
-  LLM gateway (base URLs). Prefer named per-service endpoints over MITM-CA.
-  Availability failure degrades to identity-routed placement, not outage.
-  v2 = GitSpace as OIDC issuer (cloud workload identity federation; claims
-  can include env-lease). **Access** = the ingress mirror: deny-by-default
-  route policies at the relay, OAuth→scoped cookie, reuse `gssh-share:`
-  token format + revocation ledger. Same policy engine, opposite directions.
-- **Seat** = dynamic capability on the user's live client connection:
-  `process open`, OAuth callbacks, approvals, docs route to the seat.
-  Distinct from `display:attached` (machine with a GUI session).
+## 8. State, declarations, bundle, and identity
+
+- Mutable local GitSpace state converges into `~/gitspace/gitspace.db`:
+  projects, workspaces, machine metadata, settings, deployments, endpoint
+  trust, events, outbox, process/service metadata, shares, and cloud resource
+  references. WAL + ordinary schema migrations; rebuilding by scanning git
+  roots and the cloud endpoint is a first-class recovery path.
+- Secrets never enter SQLite: user/device private keys, provider refresh
+  tokens, Cloudflare credentials, and delegated integration credentials remain
+  in the OS keychain or provider-owned credential store.
+- Large bytes never enter SQLite: git owns source/history; local blob files or
+  encrypted R2 own artifacts, sessions, reports, and bundles. SQLite stores
+  manifests, hashes, offsets, and ownership.
+- Versioned repository declarations remain files because agents and humans must
+  edit/review them through git: lifecycle code, bundle requirements, workflow
+  specs, goals, checks, and project package scripts. These are source, not
+  application state.
+- Bundle requirements declare capabilities, platforms, secrets by name, checks,
+  and lifecycle entrypoints. No secret values. Preflight resolves every
+  capability before work starts and routes human action to the live seat.
+- OMP auth broker is the provider-login authority: refresh credentials stay
+  with the broker; machines/workers receive scoped, short-lived access.
+- Root identity anchors machine enrollment, signed cloud deployments, promotion
+  approvals, encrypted blob recipients, and user-owned subdomain reservations.
 
 ## 9. Checks, CI, placement
 
@@ -225,61 +247,55 @@ declaration:
   declared inputs; stale-hit is the worst failure — earn it per check) and
   intent-vs-facts split (agent supplies intent, scheduler placement).
 
-## 10. Replication, moves, upgrades (the drain doctrine)
+## 10. Replication, moves, and the drain doctrine
 
-- **Replication** = eager push, lazy pull. Each machine writes only its own
-  namespace: `refs/gitspace/<machine>/<ws>/wip`. Disjoint writers →
-  conflict-free (same trick as goals/). v0 = git shadow-snapshot on a
-  debounce; upgrade = jj colocated (working-copy-as-commit; snapshot.
-  max-new-file-size replaces the LFS hook role; first-class conflicts
-  soften roll-up; op log; weak git-notes interop is the gap).
-  Sync boundary = gitignore ("carry everything except ignored"); ignored
-  dirs are REDERIVED per machine (grown, not shipped). Ignored-but-precious
-  ceases to exist once .env is derived (§7).
-- **Move** = the #126 restart aimed at another machine: drain at a gate →
-  sync (tracked + artifacts + session JSONL + carry-list) → lifecycle
-  materialize on target → reopen. Goal = unmaterialized workspace; moving
-  an unmaterialized one is copying a record. Recovery from a dead machine =
-  force-take from its replica namespace; unpushed work is lost (git's
-  contract, understood by everyone). Retire-from-anywhere works because
-  cloud/destroy needs bindings + credentials, not the corpse.
-- **Upgrade-in-place (Promote) is the same verb, destination = same host,
-  different code.** THE STABILITY RULE: a process may only survive a flip
-  if the interface it speaks is one we don't own or can't churn.
-  - Survive: hub broker + services (OMP's protocol), PTY holders (byte
-    pipe + replay file; MUST stay tiny/rarely redeployed), session JSONL
-    (OMP's at-rest format).
-  - Die, always: OUR workers. Drain via OMP pause gate (freezes at next
-    model/tool boundary in seconds; abort() as fallback) → worker exits →
-    new-code worker reopens from JSONL + durable inbox. No cross-version
-    IPC ever; no orphaned old code mutating shared files.
-  - Durable runtime store (small; SQLite fine, files fine): prompt inbox,
-    session registry snapshot, previous-build pointer. At-rest schemas get
-    ordinary migrations; wire protocols never cross versions.
-- This SHRINKS #126-A: worker named-socket reattach is not needed for
-  promote. Survivors: holders + broker only.
+- **Code replication** = git refs. Each machine writes only its own WIP
+  namespace (`refs/gitspace/<machine>/<workspace>/wip`); tracked releases use
+  user-owned refs and read-only machine deploy keys.
+- **Blob replication** = encrypted R2. Artifact packfiles, session JSONL
+  segments, and manifests are sealed on the machine. R2 sees ciphertext,
+  hashes, size, and timing; never keys or plaintext.
+- **Move** = drain at a safe boundary → publish git/blob state → materialize on
+  target → reopen. The successful Mac→WSL move of session `019fed50` proves the
+  current manual shape; 1.0 makes path translation, manifests, and final sync
+  explicit.
+- **Upgrade-in-place is the same replacement engine**, target = same
+  environment, next generation. A component survives only when its interface
+  is external/stable enough to cross the generation boundary.
+- Survive: stable bootloader/promoter, OMP broker processes/PTYs, encrypted
+  blobs, immutable artifact manifests, and externally owned services.
+- Drain and replace: our daemon, agent worker, offload worker, web generation,
+  relay Worker, RelayDO code, platform Worker, and schemas they own.
+- Every entrypoint has one policy: build, dependencies, drain, replace, health,
+  rollback. Import-graph hashes choose the affected set; there is no curated
+  “files that need restart” map.
+- Compatibility is not assumed. Multi-machine promotion either drains and
+  updates the participating fleet as one approved plan or marks offline
+  machines as requiring bootloader-assisted convergence when they return.
 
-## 11. Self-development (gitspace-on-gitspace)
+## 11. Self-development (GitSpace on GitSpace)
 
-- gitspace.sh is a NORMAL project: N workspaces for feature ideas, same
-  kanban/goals/review flow. No meta-product.
-- Day-one kit: `gssh dev up` (boot THIS workspace's build as the single "B"
-  instance — own session dir/control dir/port block, devroot FIXTURE root;
-  env seams already exist and are test-exercised), a single-B lockfile,
-  and `serve restart --into <workspace>` (promotion; also the rollback,
-  pointed at the previous build).
-- **Promote UI**: workspace card/detail action on self-repo workspaces;
-  preflight sheet (build state, diff, B smoke); flip = drain doctrine (§10);
-  toast with one-click Revert; global chip showing console version.
-  Asset-skew: reconnect detects new web bundle → hard reload (layout is
-  localStorage). NEVER waits for busy agents (pause-gate drain in seconds).
-  Promote is the daily acceptance test of #126 and the rehearsal of B2.
-- B on fixture root only; "candidate against real root" IS promotion.
-- Parked (FLEET-future, only if traction): A/B health slots + auto-revert,
-  patch-queue agent (rebase personal patches on upstream — precedent:
-  our own patches/@oh-my-pi), propose-upstream flow, community funnel.
-- Hermetic B doubles as the e2e check ("dev instance boots + smoke") that
-  any executor incl. Codex cloud containers can run.
+- GitSpace is a normal project in the same monorepo, with normal workspaces,
+  goals, reviews, artifacts, and package scripts. No meta-project type.
+- Installed stable `gssh` creates/opens isolated environment B. Inside B, an
+  agent develops exactly as in another repository: `bun run dev`, `bun run
+  test`, and other package-level commands owned by this repo.
+- `bun run dev` is only a watcher/trigger for the shared deployment engine. It
+  hashes entrypoints, builds content-addressed artifacts, drains affected B
+  components, replaces them, verifies health, rolls back failure, and keeps
+  watching. Edits arriving mid-deployment coalesce into the next generation.
+- B has isolated SQLite, sockets/ports, OMP profile, broker namespace, relay
+  deployment, and R2 resources. It exercises real daemon/worker/web/RelayDO
+  replacement rather than shortcuts.
+- Promotion uses the exact artifacts proven in B; it never rebuilds source.
+  Environment configuration is injected at activation.
+- The agent may prepare a promotion: immutable artifact hashes, affected
+  entrypoints, drain/migration/reconnect impact, evidence, and rollback plan.
+  Only the user can sign promotion into A. Approval is invalidated by any plan,
+  target-generation, migration, or artifact change.
+- A stable executor outside replaceable generations runs approved promotion.
+  Automatic rollback is covered by the approval; destructive/forward-only
+  database or DO migrations must say plainly that rollback is unavailable.
 
 ## 12. Routing & client (#126-B rider)
 
@@ -304,27 +320,21 @@ cover attention):
   dependent parts noted); schedules UX (pause/resume/run-now/history) → #127
 - queue-vs-steer explicit shortcuts (plumbing exists: streamingBehavior)
 - settings: Inherit tri-state affordance; integration status cards
-- **FTUE + settings pages** ("getting everything running"): every subsystem
-  (identity, auth, hosting, daemon, project, Linear, artifacts, delegate
-  later) exposes the same probe `gssh status` uses — status + one repair
-  action = a settings card. FTUE is the SAME cards arranged as an ordered
-  checklist with empty states; settings is them arranged by subsystem.
-  One component set, two arrangements — never two implementations.
-  Two legs, because the web app is served by the daemon: a terminal leg
-  (bare `gssh` guides init → daemon+web running — the §11 bootloader is
-  also the first-run wizard) then the web leg (auth, host, first project,
-  integrations). Bundle onboarding (utils/onboarding.ts) is the per-project
-  FTUE that already exists; this is the machine-level analogue.
-  The crypto/remote side is cards too: identity (keypair + fingerprint),
-  relay mode (gitspace.sh tunnel vs self-hosted, reachability), machine
-  enrollment (enrolled-at-relay, last seen), browser/client identities
-  (localStorage keys awaiting approval), invites (mint/revoke). FTUE
-  defaults the hosted path (auth login → host reserve → serve start);
-  self-hosted/multi-machine lives in settings. Enrollment is a TWO-machine
-  ceremony — owner's settings mints the invite, the new machine's FTUE
-  redeems it — and the resulting Machines page is the seed of the fleet
-  registry view (B3): naming a machine here is what later gives it
-  capability rows.
+- **FTUE + settings pages**: every subsystem exposes one probe-backed card
+  (identity, Cloudflare deployment, relay reachability, machine enrollment,
+  provider auth, projects, artifacts, integrations). FTUE is those cards in
+  dependency order; settings is the same cards grouped by subsystem.
+- Two legs remain: stable `gssh setup` establishes root identity, local DB, and
+  enough runtime to open web; web completes Cloudflare target choice
+  (standalone or hosted WfP), relay deployment, first project, integrations,
+  and machine enrollment.
+- Cloud cards show exact ownership/cost/trust facts: deployment target,
+  account/platform owner, relay artifact hash, RelayDO migration, R2 encryption
+  state, credit/risk reserve for hosted users, last usage reconciliation, and
+  whether development tunnel traffic is plaintext-at-Cloudflare or E2E.
+- Enrollment is a two-machine ceremony: owner settings mints a root-signed
+  invite; new-machine FTUE redeems it. The Machines page is the seed of the
+  fleet registry and later placement/capability view.
 - design-language pass on the web app (compounds across every shell)
 - **Runtime dropdown** in the agent session pane header (AgentPaneHeader) —
   not a dedicated pane. Kanban stays the WORK view; this dropdown is the
@@ -362,306 +372,254 @@ cover attention):
   machines, never in shells. The moment product logic lands in a shell,
   the choice is being made implicitly — don't.
 
-## 14. Extensions & specs (the distribution model)
+## 14. Extensions, specs, and self-modification
 
-Three tiers, ordered by frozen-interface burden; §10's stability rule
-decides which exist:
+- **Tier 0 — data conventions**: block schemas, artifact kinds, workflow/goal
+  formats, `.gssh.html` mini-apps.
+- **Tier 1 — OMP extensions + GitSpace renderers**: agent tools and display
+  behavior on OMP-owned extension surfaces.
+- **Tier 2 — replacement-unit packages**: in-tree `protocol`, `relay`,
+  `deployment`, `machine`, and platform packages. Their interfaces may churn
+  until 1.0; no speculative plugin API freezes them.
+- **Specs** remain the distribution mechanism for features: intent + substrate
+  contract + teaching + agent-runnable rubric + reference implementation. An
+  agent implements a spec into the user’s fork, validates it in B, and the user
+  promotes it.
+- Self-modification is primary. Extensions organize capabilities and on/off
+  boundaries; they do not replace the user-owned fork.
+- The user relay is itself a self-modifiable extension boundary: the user owns
+  Worker source, RelayDO source/migrations, tunnel protocol, and private cloud
+  routes. The platform owns only admission, tenant routing, binding allocation,
+  limits, billing, and suspension.
+- In-tree features double as reference implementations of their specs.
+  Divergence is expected; upstream adoption is a separate user choice.
 
-- **Tier 0 — data conventions** (shipped): artifact kinds (`*.dashboard.json`
-  → rails), `.gssh.html` mini-apps + #129 action bridge. The "API" is file
-  formats.
-- **Tier 1 — OMP extension + GitSpace renderer**: agent-side tools via OMP's
-  extension API (OMP-owned — stable for free), display via the block/tool
-  renderer registry or mini-apps.
-- **Tier 2 — GitSpace plugin API: REJECTED-FOR-NOW.** A plugin API freezes
-  exactly the surfaces self-development most needs to churn. Self-mod
-  deletes this tier, not the other two.
+## 15. Workspace email
 
-**Distribution = specs, not binaries.** An "extension" is a spec — goal +
-rubric + skill (the teaching) + optional reference implementation — that the
-user's agent implements into THEIR fork: implement in a workspace → checks
-green in a B instance → review gate → promote. Every piece already exists;
-the catalog is a set of planned goals. Divergence stops being a bug:
-integration into the user's own setup is the product. Tiers 0–1 are what
-specs compile against — thin stable substrate, thick spec layer.
+- Hosted addresses are human-readable:
+  `<project>.<workspace>@<user>.gssh.dev` (normalized like workspace names).
+  Owning the platform zone makes routing and tenant attribution deterministic.
+- CF Email Routing → platform Email Worker → DKIM/SPF alignment → allowlist →
+  seal to user root key → encrypted MIME in R2 → envelope fact through the
+  user relay. Email is another inbox/tunnel channel.
+- `.gitspace/email.jsonc` remains a versioned declaration with exact senders
+  and `@domain` entries. Empty/missing = receive nothing. Effective policy is
+  synced only from the project default branch so a workspace agent cannot
+  widen its own ingress without review.
+- Email is inert untrusted data, never auto-injected into an agent turn.
+- Cloudflare sees plaintext at MX ingestion before sealing. This is an explicit
+  exception to blind storage. Outbound email needs a sending provider and is
+  outside receive-only 1.0.
 
-**Everybody owns their own**: GitSpace's in-tree features double as the
-reference implementations of their own specs; a user's fork owns its
-variants via the self-modifying flow (§11), with the patch-queue agent as
-"spec rebase" when upstream specs update, and propose-upstream as the
-return path.
+## 16. GitSpace 1.0 monorepo and bootloader
 
-Caveats (recorded): implementing > installing (reference impls are the fast
-path); quality floor = the rubric + checks in the spec; security = §11's
-stack (mandatory review gate, blame provenance, delegate-shrunk secrets).
+Replacement-unit packages:
 
-**Pilot recipe: the isolinear codebase display.** v1 is pure tier 0: a
-skill emits a codebase-map artifact (chip grid of the tree), rendered as a
-dashboard/mini-app, heat from data we uniquely have — `blame/edits.jsonl`
-(agent activity), goal association per area, check status. If the spec
-model works, this is catalog entry #1; if not, we still got the display.
-
-**Spec doc strawman** (format DELIBERATELY UNSPECIFIED until op 19 writes
-the real one; FLEET.md itself is the informal prototype). A spec is
-ordinary markdown, agent-first — no manifest, no registry schema; the
-reader is an agent with your fork checked out. Sections:
-
-```markdown
-# Spec: <name>
-version: 1 · tier: 0|1 · targets: <stable surfaces>
-
-## Intent            — one paragraph: what exists when done, for whom
-## Substrate contract — the ONLY compat-sensitive section: exact shapes of
-                        emitted artifacts (schema inline), render surface
-                        (.gssh.html + #129 verbs), data read. May only
-                        reference tier-0/1 surfaces — this is what keeps
-                        specs viable without a plugin API.
-## Teaching          — the skill, inline or skill:// ref; conventions the
-                        user's fork may override
-## Rubric            — agent-runnable acceptance checks ("checks green in
-                        B" made specific). Without it: documentation.
-                        With it: an installer.
-## Reference implementation — pointer to upstream's own build (fast path:
-                        adapt, don't reimplement)
-## Non-goals
+```text
+packages/
+  protocol/          portable messages, crypto, identities, frame rules
+  core/              local SQLite + domain handlers
+  machine/           daemon, broker consumers, tunnel endpoint
+  sdk/               space.* / gitspace.* code-mode bindings
+  blocks/            transcript/block model
+  web/               browser product
+  cli/               bootstrap/setup/recovery/headless-host binary
+  deployment/        shared planner, drain, replace, health, rollback
+  relay/             portable user Worker + user-authored RelayDO
+  relay-deployment/  canonical manifest + standalone/WfP adapters
+  platform/          optional trusted WfP dispatch/control/billing plane
 ```
 
-Install verb: drop the spec in a goal folder → agent implements against
-the rubric → B instance → review gate → promote. The catalog is a
-directory of these files (home — docs/specs/ vs bundle — also open until
-the pilot).
+- `relay` never imports `platform`. One artifact, DO class, migration chain,
+  binding contract, and protocol run standalone or inside WfP.
+- `deployment` owns mechanics shared by `bun run dev` in B and signed promotion
+  into A. Callers differ only in source immutability, target, authority, and
+  failure policy.
+- Stable `gssh` is firmware: start/setup/status/doctor/update/recover, identity,
+  enrollment, and headless machine hosting. Routine project/workspace/goal/
+  review/artifact/process/cloud commands disappear after web + SDK parity.
+- No CLI compatibility period, aliases, SDK-to-CLI calls, or duplicated command
+  handlers. Each domain cutover migrates every caller and deletes its old tree.
+- Recovery floor = channel-installed previous bootloader generation plus a
+  rebuildable local DB. Self-modification may replace everything above it.
 
-## 15. Workspace email (receive-only v1)
+## 17. Shared replacement engine
 
-Every workspace gets a human-readable address:
-`<project>.<workspace>@<subdomain>.gitspace.sh` (normalized like workspace
-dir-names; mail to unresolvable addresses drops silently — no bounce, no
-enumeration oracle). Guessability is fine because ingress is
-allowlist-default-deny.
+Entrypoints:
 
-- **Pipeline** (pure "push facts, pull bytes"): CF Email Routing catch-all →
-  Email Worker → DKIM/SPF alignment check → allowlist check → raw MIME
-  sealed to user root key → R2; envelope-fact via relay DO; machine pulls
-  bytes on open. Email = another inbox transport on the named-agents plan
-  (§6/§13) — no new primitive.
-- **Allowlist** = `.gitspace/email.jsonc` in the repo: exact senders and
-  `@domain` entries (domain entries are what make agent-testable
-  transactional flows work — allow `@yourapp.dev`, receive every
-  password-reset/confirmation mail the app under test sends). Absent/empty
-  file = receive nothing; email is opt-in per project. Allowlist means
-  nothing without the DKIM/SPF gate first (From: is spoofable).
-- **Self-widening guard**: the Worker syncs the allowlist from the project
-  base repo's DEFAULT BRANCH only. A workspace agent editing its own
-  `email.jsonc` gets no ingress until a human merges — consistent with
-  repo-config-as-defaults scoping.
-- **Injection stance**: mail is untrusted input adjacent to agents. It lands
-  as inert inbox data an agent reads deliberately; never auto-injected into
-  a session.
-- **Doctrine disclosure**: email arrives plaintext at the MX — this is the
-  ONE channel where CF sees content (sealed before R2, but visible at
-  ingestion). Say so; don't pretend.
-- **Sending** is out of v1 (CF doesn't send; needs Resend/SES + DKIM).
-  Outbound later, hosted-tier — same paywall line as App-backed
-  integrations.
-- **Extension canary #2**: settings-sync proves daemon+cloud legs;
-  workspace-email proves Worker-routes-owned-by-an-extension (Email Worker
-  binding + R2 + directory rows, all private to the extension).
+```text
+bootloader, cli, daemon, agent-worker, offload-worker, web,
+relay-worker, relay-do, platform-dispatch, platform-api,
+local-database, cloud-schema
+```
 
-## 16. Bootloader inversion & dev mode
+Each declares artifact/build/dependency/drain/replace/health/rollback policy.
+`Bun.build` import-graph hashes identify changed entrypoints.
 
-- Installed stable `gssh` CREATES the dev environment; the dev env is
-  gitspace.sh as a normal project bundle. B = a space process behind an env
-  lease; promote = A execing its successor.
-- The bootloader contract (exec + env + socket + health) is the ONE
-  conservative interface. Everything above it may churn.
-- Recovery floor = channel-installed binary: no self-mod outcome may leave
-  a machine without a working `gssh`.
+- Web: atomic asset-generation swap → code-version event → client reload.
+- Agent worker: stop admissions → finish turn/tool boundary → persist → recycle.
+- Offload worker: stop queue intake → finish jobs → recycle.
+- Daemon: stop admissions/RPC mutations → successor generation socket/health →
+  handoff. Broker-held PTYs/processes survive.
+- Bootloader: stage, hash/signature verify, health probe, atomic pointer swap;
+  previous generation retained.
+- Relay Worker/RelayDO: stop enrollment/new tunnels → persist → reconnect notice
+  → deploy code/migration → machines/clients reconnect. Session/PTY authority
+  remains on endpoints.
+- Database/schema: checkpoint first; run exact migration proven in B; declare
+  forward-only effects. Never claim rollback that cannot restore data.
 
-## 17. Self-mod machinery (replacement map + flip)
+Development and production consume the same content-addressed artifacts and
+executor. B allows dirty source and agent authority; A requires immutable
+artifacts and a user signature.
 
-- **Detection = import-graph hashing, not curated maps**: `Bun.build` per
-  entry point (server.ts, agent-worker.ts, offload-worker.ts), hash the
-  artifact. Replace the `code-version.ts` single token with a
-  `{daemon, worker, offload}` triple. Worker-hash-only diff → recycle
-  workers, no daemon flip. `evaluateDaemonFreshness()` (cli.ts —
-  fresh/stale-idle/stale-busy/wedged) is the existing sensor.
-- **Replacement map** = extension types (boundary vocabulary, NO compat
-  promise) × restart tiers (hot / worker / daemon / swapper / cloud). Type
-  implies tier. The swapper self-swaps via generation handoff.
-- **Missing flip items (4)**: `gssh machine serve restart` verb;
-  `recycleIdleWorkers()`; per-entrypoint hashes; asset-skew web reload
-  (daemon pushes codeVersion over the agent-state conduit → client
-  location.reload).
-- **Extension rings**: kernel (possession/crypto/process-lifetime litmus) /
-  in-tree extensions (internal daemon SPI ok) / packaged extensions (tiers
-  0–1 + declarative only, NEVER daemon SPI) / specs (anything). Proving
-  set: settings-sync, workspace-email (§15), isolinear, Linear.
-- Self-mod is the PRIMARY extension mechanism; extensions are the
-  organizing principle / on-off boundaries, not a replacement for
-  spec-driven self-mod. The core need is knowing which entry point an edit
-  affected and what reload level it requires — the hash triple answers
-  both.
+## 18. Multi-machine updates
 
-## 18. Multi-machine updates (git-only distribution)
+- Release transport is git fetch from a user-owned follow repository; relay
+  traffic never carries source/update bytes. N machines have read-only deploy
+  keys; human/user authority pushes.
+- No current machine is special. Promotion names the fleet/environment targets
+  and their expected generations.
+- We do not preserve arbitrary mixed-version protocol compatibility. An
+  approved fleet update drains online participants; offline machines are fenced
+  and converge through the stable bootloader before rejoining.
+- Fork-on-first-self-mod provisions a user-owned follow repo; no maintainer
+  concept and no requirement that users host git servers.
 
-- A release = a git ref in a user-owned follow repo; each machine holds
-  `{remote, ref}`. Transport = `git fetch` ONLY — the relay NEVER carries
-  update bytes.
-- Credentials: N machines × read-only deploy keys, 1 human × push. Users
-  are NEVER asked to host git servers.
-- Convergence is per-machine and independent, at local idle; no machine is
-  special. Mixed versions are tolerated (PROTOCOL_VERSION, additive
-  changes); expand→contract migrations ship one release behind the code
-  that needs them.
-- No maintainer concept: fork-on-first-self-mod, provision-style
-  automation.
+## 19. Portable Cloudflare relay and optional Workers for Platforms
 
-## 19. Cloud stack (CF-first, all BYO via wrangler deploy)
+`packages/relay` is a portable Cloudflare application:
 
-- **Relay → per-user Durable Object**: machines dial out wss; deletes
-  tunnel + local relay + gateway. E2E keeps it blind; frame chunking
-  already fits the 1MB WS cap. GATE: DO pricing math before commitment.
-- **R2** = artifact blobs + durable share links (Worker validates token →
-  short-lived R2 URL) + session mirrors.
-- **D1** = directory, NEVER authority: machines disagree → machine wins.
-  Machines never speak SQL to D1 — the Worker owns schema; migrations are
-  atomic with deploy.
-- **Artifacts cross-machine with nobody hosting git**: objects =
-  bundles/packfiles → R2 (Worker stores bytes only); refs = name→sha CAS
-  in the DO (~20 lines); possession = single writer, so CAS only contends
-  at rollup. GitHub `-artifacts` repo demoted to optional export. A move =
-  final bundle push + fetch.
-- **Pi session mirrors**: append-only JSONL → segment objects in R2 +
-  manifest CAS in the DO, at turn-settle, async. Replica NEVER authority;
-  client-side encrypted (sealed to user root key); unit = the session
-  directory (nested subagent JSONLs). Filesystem-level, below the SDK — no
-  OMP support needed. Enables transcript-reads-despite-wedged-worker,
-  move/resume, local eviction.
-- **Auth/settings sync**: adopt OMP auth-broker (one authority + read-only
-  mirrors; refresh tokens never leave the broker) ≈ delegate v0 done
-  upstream. Panel settings sync via D1 KV LWW per scope (repo config =
-  defaults; synced prefs shadow; session overrides local);
-  credential-flagged keys excluded; history/stats stay home.
-  Settings-sync = extension canary #1 (daemon + cloud legs; SPI =
-  onSettingChanged/applySetting/nudge; extensions may own Worker routes,
-  routes private to the extension).
-- **App-backed integrations** (Checks API is App-only; delegate tokens) =
-  hosted paywall tier. The GitHub App today is only the device-flow login
-  client.
+```text
+standalone: route → Relay Worker → user RelayDO → user R2
+hosted:     dispatch Worker → same relay artifact as WfP User Worker
+                            → user RelayDO → tenant bindings
+```
 
-## 20. Space SDK v1, broker adoption, skinny events
+- RelayDO is the tunnel: one outbound machine WebSocket multiplexes terminal,
+  agent, machine control, enrollment, development HTTP/WebSockets, and
+  coordination channels. Hibernation attachments restore socket identity.
+- Users may modify and redeploy Worker code, RelayDO code/migrations, routing,
+  and custom tunnel protocols. The WfP Upload Worker API supports exported DO
+  classes, SQLite migrations, limits, and subsequent rename/delete steps.
+- Standalone target: user Cloudflare account, direct Wrangler deployment, user
+  pays Cloudflare, no GitSpace credit system.
+- WfP target: GitSpace dispatch namespace, tenant-scoped script/DO/resources,
+  GitSpace supplies domain/resources and bills credits. Platform code is
+  optional and never imported by relay runtime.
+- WfP isolation is untrusted mode + hostname-derived tenant dispatch + signed
+  deployment admission + tenant-only raw bindings (or mediated shared
+  resources). Key prefixes are not isolation.
+- Platform-controlled limits exist per dispatch and upload (`cpuMs`,
+  `subRequests`). External GraphQL/Logpush metrics attribute Worker and DO
+  requests, CPU, subrequests, rows, and stored bytes by script/class/namespace.
+  Credits are an immutable microdollar ledger with admission reservations,
+  measured settlement, prepaid risk reserve, quarantine at exhaustion, and
+  `force=true` script/DO deletion as the destructive abuse stop.
+- Outbound Workers police stateless User Worker fetches (destination policy,
+  control-plane protection, delegated credentials, attribution). They do not
+  intercept DO fetches; DO egress is bounded by script/platform limits,
+  externally metered, and suspended/quarantined—not trusted for billing.
+- R2 stores only client-sealed artifacts/session segments/reports. Keys remain
+  with user devices/root identity. GitSpace/Cloudflare can observe tenant,
+  object sizes, hashes, access timing, and billing—not plaintext.
+- Normal HTTPS development tunnels terminate TLS at Cloudflare and are not
+  content-blind; encrypted GitSpace protocol channels remain E2E. Document the
+  distinction.
+- Trusted product/control origins use `gitspace.com`; untrusted user relay/app
+  origins use `gssh.dev`, exact-audience auth, and `__Host-` cookies.
 
-- **Space SDK v1**: typed `space.*` namespace in the eval kernel,
-  eval-only first; NO CLI cutover (CLI stays a thin frontend over the same
-  daemon API). `space.processes.*` backed by the OMP broker day one;
-  processes.jsonc names = broker names, pinned before step 1. The old proc
-  path dies by attrition, then delete runner/watchdog/scheduler.
-- **Placement**: consumers (log tails→events, xterm-headless per PTY,
-  port/hostname registries, panels) = daemon side; the SDK stub = worker
-  side, stateless RPC to the daemon. Broker discovery = deterministic
-  wyhash socket paths, connect-if-exists.
-- **Keep our correlated event system** — the broker has only pull
-  primitives (logs/wait/ready), no push/classify/wake pipeline. Broker
-  owns bytes; we own meaning.
-- **tmux-lite rip-out (directional)**: the daemon stops owning PTYs and
-  becomes viewer/coordinator over broker-held PTYs (= the PTY-holder plan
-  for free; terminals survive flips). Make-or-break spike: broker
-  raw-stdin latency for interactive input. Agent-opened PTYs appear under
-  Terminals; attach/send behind a per-workspace capability grant (same
-  policy line as the browser-relay port).
-- **Skinny events principle**: "push facts, pull bytes." Transcript live
-  deltas by block id + focused-pane expanded subscription; payloads
-  truncate-with-handle; snapshots → change events + on-demand fetch.
-  Evidence: 4.7GB renderer peak measured from snapshot churn (0.74MB
-  encrypted frames ~1/sec); daemon-side snapshot debounce is the cheap
-  forerunner. Images are the fattest payloads — thumbnail inline, full on
-  expand (rider on the transcript-images ticket, #146).
-- **omp-via-RPC without patching** (plausible): prize = zero patches →
-  stock worker binary → workers stop dying at our flips. Deliverable = one
-  table (every patch + createAgentSession arg: stock-expressible /
-  upstream-PR / must-keep), produced during the bump patch re-apply.
+## 20. Code-mode SDK, typed handlers, broker, and event doctrine
 
-## 21. Build spine (each step is the test harness for the next)
+- Agents retain the full capability surface they had through CLI, but as code:
+  `space.*` is the current workspace; `gitspace.*` covers projects, workspaces,
+  machines, users, cloud, deployments, and fleet administration.
+- One canonical typed handler owns each operation. Web RPC and code mode are
+  adapters. The remaining recovery CLI adapts only bootloader operations.
+- Every fallible operation returns `Promise<Result<T, E>>` using
+  `better-result` v3 and method-specific `TaggedError` unions. Expected domain
+  failures are data. Broken contracts/invariants throw `Panic`.
+- RPC serializes Result through schema-backed codecs (Zod/Standard Schema):
+  `{status:"ok",value}` or `{status:"error",error}`. JS rehydrates
+  `better-result`; Python receives equivalent envelope/wrapper semantics.
+- No public generic exec, argv construction, stdout parsing, CLI fallback, or
+  CLI-only agent capability at completed cutover.
+- `space.processes.*` uses OMP broker; GitSpace owns meaning/policy/events while
+  broker owns bytes/process lifetime. Raw-stdin latency gates PTY ownership.
+- **Push facts, pull bytes**: full snapshots only for connect/resync; normal
+  updates are workspace/block scoped; streaming text uses append deltas; large
+  live payloads truncate while committed history remains authoritative.
+  OMP 18 + commit `b972282` implement the first skinny-event cut.
+- Browser relay uses a per-workspace capability grant and OMP’s global broker.
+  Logged-in browser access is never ambient.
 
-1. OMP bump 17.2.4 → 18.0.6 (edit-tool infinite-loop fix #7437,
-   stale-job wait-forever #8634, late-cleanup settle #7488; browser-relay,
-   the global broker, large-session restoration improvements, and stable-row
-   transcript APIs included). Produce the patch/RPC table; re-verify report
-   capture end-to-end (broken silently twice).
-2. Skinny events + payload truncation (+ snapshot debounce forerunner).
-3. Space SDK v1 + broker adoption (incl. raw-stdin spike).
-4. Flip machinery (§17's four items) → Promote v0.
-5. Dev mode (§16) → the board takes over (monorepo re-org as
-   replacement-map packages, named agents + cron + inbox, FTUE probes,
-   tmux-ectomy, settings-sync extension, isolinear).
+## 21. GitSpace 1.0 build spine
 
-Cloud track runs parallel: Worker skeleton → ref-CAS + R2 artifacts →
-share links → relay-DO (pricing math FIRST) → session mirrors → D1
-directory → workspace email (§15).
+1. Land this rewrite and create the minimal Bun workspace skeleton:
+   `protocol`, `relay`, `relay-deployment`, `platform`.
+2. Extract protocol/crypto without semantic change; preserve known-answer and
+   authorization tests.
+3. Build portable Relay Worker + RelayDO; deploy standalone in our Cloudflare
+   account. Prove hibernating machine/browser sockets and custom HTTP tunnel.
+4. Build one relay artifact once; deploy the identical hash through WfP for two
+   tenants. Prove DO migration/state preservation and cross-tenant isolation.
+5. Hostile-tenant/credit spike: limits, attribution, R2/DO/storage charging,
+   quarantine, force delete A while B remains healthy.
+6. Build shared `deployment` engine; `bun run dev` replaces B through it, and
+   user-approved promotion installs the exact proven artifacts into A.
+7. Consolidate mutable local state into `gitspace.db`; make rescan/rebuild a
+   supported recovery path.
+8. Build canonical typed handlers + `better-result`, then full
+   `space.*`/`gitspace.*` parity and web adoption domain by domain.
+9. Adopt OMP broker for processes/PTYS; delete tmux-lite process ownership.
+10. Add encrypted R2 artifacts/session mirrors, shares, and move/resume.
+11. Delete routine CLI, local relay/cloudflared architecture, scattered state
+    files, old handlers, and compatibility shims.
+12. Add platform email, settings sync, checks/placement, and remaining fleet UX
+    on the proven substrate.
 
-## 22. Ticket operations (execute one by one, in order)
+Already completed: OMP SDK 18.0.6 migration (`f061638`), first skinny-event
+cut and atomic local takeover (`b972282`), OS sandbox issue #135, delegate
+issue #136, transcript-images issue #146.
 
-Already done this session: #135 (OS sandbox), #136 (delegate),
-#126 comment (backendKey).
+## 22. Operations / issue sequence
 
-1. Land this document (approval gate for everything below).
-2. Close #112 as superseded by #126 (comment pointing here).
-3. Comment on #126: drain doctrine rider — workstream A scope change
-   (workers always drain+die via pause gate; survivors = holders + broker;
-   durable inbox/runtime store; `restart --into`; Promote UI + asset-skew
-   reload; gates as drain points). References §10–§11.
-4. Rewrite #131 (hub spike → adoption): broker under space process,
-   workspace namespace, one-owner rule, delete tmux proc path + watchdog.
-5. Comment on #130: collab findings (§12).
-6. Comment on #127: gooey schedules UX reference.
-7. NEW "Lifecycle v2: effect-target phases" (§7). Keystone.
-8. NEW "Bundle v2: fleet contract + setup SDK + preflight" (§8).
-9. NEW "Bindings + derived .env" (§7; may fold into 7 at filing time).
-10. NEW "Bug: process watchdog/autostart have no callers" (restart.policy
-    inert; resolution likely = delete in favor of broker, ties #131).
-11. NEW "Side agents: read-tier + .sessions local:// binding" (§6).
-12. NEW "GitSpace Access: authenticated ingress for hosted routes" (§8).
-13. NEW "Seat routing: process open at the seat" (§8).
-14. NEW "Hermetic B instance: gssh dev up + single-B lease" (§11).
-15. NEW "UX adoptions umbrella" (§13).
-15b. NEW "Runtime dropdown in AgentPaneHeader: live agents
-    (model/state/context) + hub daemons per backend" (§13). Grows into
-    B3's registry view.
-16. NEW "Hygiene: stale local:// comment + ARTIFACT-PROTOCOL Q2" (§3).
-17. Track B (filed now, sequenced after #126-A): "Replication: namespaced
-    WIP refs" (§10); "Movable harness" (§10, absorbs restart --into if not
-    in #126); "Capability registry + placement" (§8–9); "Check lane + GHA
-    frontend + App wiring" (§9).
-18. Wire existing GitHub App: verify checks:write + deployments:write,
-    installation-token minting path (rides the check-lane ticket).
-19. NEW "Isolinear codebase display — tier-0 pilot spec" (§14). Also the
-    first catalog entry if the spec model proves out.
-20. NEW "FTUE + settings pages: shared subsystem probes, cards as wizard
-    and as settings" (§13).
-21. NEW "Workspace email addresses: receive-only v1" (§15). Sequenced
-    after the cloud Worker skeleton + directory exist; files with the
-    extension-canary framing.
-22. NEW "OMP 18.0.6 bump" (§21 step 1). First mechanical op after this
-    doc lands.
-23. NEW "Skinny events: push facts, pull bytes" (§20) + snapshot-debounce
-    forerunner; absorbs the UI memory-churn evidence.
-24. NEW "Space SDK v1 + broker adoption" (§20); includes the raw-stdin
-    latency spike as its gate.
-25. NEW "Flip machinery: restart verb, recycleIdleWorkers, per-entrypoint
-    hashes, asset-skew reload" (§17).
-26. NEW "Bug: subagent tool events invisible to host — report capture and
-    blame breadcrumbs miss all subagent activity; move both to the
-    managed-extension seam" (specimen: ttsc-graph report, 2026-08-19).
-27. NEW "Browser-relay from OMP: enable + per-workspace capability grant"
-    (§20 policy line; requires op 22 — not present in 17.2.4).
-28. NEW "Worker watchdog: wedge detection + heartbeat column in runtime
-    dropdown" (two wedged-worker incidents on record; `hub wait` timeout
-    failed to fire).
-29. NEW "Monorepo re-org as replacement-map packages" (§17/§21 step 5);
-    timed after the SDK exists; ideal board + B-instance dogfood ticket.
+Execute one by one; each ticket must name the package/replacement unit it owns.
 
-Sequencing spine: #126-A (as amended) + hermetic B + hygiene make
-GitSpace-inside-GitSpace safe → everything else increasingly dogfooded
-through the board itself. Codex cloud is suitable for the well-specified,
-daemon-free tickets (10, 12 plumbing, 16, parts of 8); GitSpace agents for
-everything touching worker/daemon lifecycle or UI.
+1. Land FLEET 1.0 rewrite; close/reframe stale tickets that assume local relay,
+   D1 directory, full CLI, `gssh dev up`, or separate dev/promote mechanics.
+2. NEW “GitSpace 1.0 monorepo substrate” — Bun workspaces + minimal packages;
+   no broad file move.
+3. NEW “Portable relay standalone spike” — Worker + user RelayDO + hibernating
+   sockets + encrypted frame echo + custom dev HTTP tunnel.
+4. NEW “Canonical relay deployment manifest” — one artifact/migration/binding
+   declaration rendered to Wrangler and WfP multipart metadata.
+5. NEW “WfP two-tenant relay spike” — same artifact hash, user-authored DO
+   migration, binding/hostname isolation.
+6. NEW “WfP hostile tenant + credit ledger” — external attribution, rate card,
+   admission reserve, reconciliation, quarantine, force deletion.
+7. NEW “Shared replacement engine” — entrypoint graph, artifact set, drain,
+   replace, health, rollback, durable journal.
+8. NEW “GitSpace B package-script development” — `bun run dev` watcher invoking
+   shared engine; B self-validates; user-signed immutable promotion plan.
+9. NEW “One local GitSpace SQLite” — schema, repositories, rescan/rebuild;
+   migrate/delete mutable JSON/control stores.
+10. NEW “Canonical handlers + better-result” — Result codecs, tagged domain
+    errors, web/SDK adapters.
+11. NEW “Full code-mode parity + CLI removal” — `space.*`, `gitspace.*`, migrate
+    every caller, delete routine Commander tree.
+12. Rewrite #131 as OMP broker adoption; raw-stdin gate; delete process runner,
+    watchdog, scheduler, and tmux-lite PTY ownership when proven.
+13. Reframe #126 under the shared deployment engine: stable promoter,
+    generation handoff, per-entrypoint hashes, worker drain, asset reload.
+14. NEW “Encrypted R2 artifacts + session mirrors” — packfiles/segments,
+    manifest CAS, shares, local eviction, move/resume.
+15. NEW “Workspace email on platform domain” — default-branch allowlist,
+    DKIM/SPF gate, plaintext-at-MX disclosure, sealed MIME in R2.
+16. Keep: side-agent read tier; checks/placement; runtime/fleet view;
+    browser-relay grant; subagent report/blame capture; worker wedge capture;
+    isolinear pilot. Sequence them after the 1.0 substrate they consume.
+
+The Cloudflare relay spike is first because it is the largest new runtime and
+security assumption. Local DB/SDK/UI restructuring follows only after the
+portable standalone/WfP data plane is proven.
