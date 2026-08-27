@@ -67,6 +67,15 @@
         "@gitspace/linux-x64": "0.2.0-rc.38",
       },
     },
+    "packages/deployment": {
+      "name": "@gitspace/deployment",
+      "version": "0.0.0",
+      "dependencies": {
+        "@noble/curves": "^2.2.0",
+        "better-result": "3.0.1",
+        "zod": "^4.4.3",
+      },
+    },
     "packages/platform": {
       "name": "@gitspace/platform",
       "version": "0.0.0",
@@ -208,6 +217,8 @@
     "@gitspace/darwin-arm64": ["@gitspace/darwin-arm64@0.2.0-rc.38", "", { "os": "darwin", "cpu": "arm64", "bin": { "gssh-darwin-arm64": "bin/gssh" } }, "sha512-0oqD0sb+w09n8O2+Fa8zULqS5dPutHpxpiuKHKSFU99/KEM7eNj/OXbS39vn9RQUrduaY+QkHs6nVTaWWjZlfQ=="],
 
     "@gitspace/darwin-x64": ["@gitspace/darwin-x64@0.2.0-rc.38", "", { "os": "darwin", "cpu": "x64", "bin": { "gssh-darwin-x64": "bin/gssh" } }, "sha512-tZundEmfhmq2GCROi8CyphL/NisuJIDfpJAwSr8F4HRLp8A0tagFB+Phn0ffEV/tT8Z3YHfMrnCu8Ch44zswQQ=="],
+
+    "@gitspace/deployment": ["@gitspace/deployment@workspace:packages/deployment"],
 
     "@gitspace/linux-arm64": ["@gitspace/linux-arm64@0.2.0-rc.38", "", { "os": "linux", "cpu": "arm64", "bin": { "gssh-linux-arm64": "bin/gssh" } }, "sha512-CF62/RGuDviVSiwyledDVKByf8NHcZrZKb80+I1gpMZJHaz2/CtPIOPD8+i9fMvGHQXFLYPa4Ve/IE9ewQAFEw=="],
 

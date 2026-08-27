@@ -630,8 +630,11 @@ Execute one by one; each ticket must name the package/replacement unit it owns.
 7. GATE “Hosted user-authored DO containment” — obtain Cloudflare aggregate
    tenant limit/subaccount isolation, or choose a constrained hosted state
    capability. Standalone arbitrary RelayDO remains supported.
-8. NEW “Shared replacement engine” — entrypoint graph, artifact set, drain,
-   replace, health, rollback, durable journal.
+8. DONE “Shared replacement engine core” — signed immutable plans, dependency
+   expansion, SQLite journal/recovery, drain-all/stage/activate/health/commit,
+   reverse rollback, frontend pointer swap, machine socket handoff with database
+   checkpoint/migrate/restore, OMP worker drain, and broker PTY fence. Wiring
+   real hosts belongs to operations 9/13/14.
 9. NEW “GitSpace B package-script development” — `bun run dev` watcher invoking
    shared engine; B self-validates; user-signed immutable promotion plan.
 10. NEW “One local GitSpace SQLite” — schema, repositories, rescan/rebuild;
