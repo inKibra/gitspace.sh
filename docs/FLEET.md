@@ -375,7 +375,15 @@ cover attention):
 ## 14. Extensions, specs, and self-modification
 
 - **Tier 0 — data conventions**: block schemas, artifact kinds, workflow/goal
-  formats, `.gssh.html` mini-apps.
+  formats, and local-backed mini-app descriptors.
+- **Mini-app reset**: a mini-app is a `local://apps/<app-id>/` artifact tree
+  (source, assets, manifest, durable app data) plus a named OMP broker process.
+  The process owns build/dev-server lifetime, logs, readiness, ports, restart,
+  and re-adoption; GitSpace supplies workspace capability policy, hostname/
+  development-tunnel routing, and a transcript block that references the app
+  id/process/route. Do not inline an entire `.gssh.html` program into transcript
+  state. Promotion/share captures an immutable artifact version; the live app
+  remains an ordinary workspace process.
 - **Tier 1 — OMP extensions + GitSpace renderers**: agent tools and display
   behavior on OMP-owned extension surfaces.
 - **Tier 2 — replacement-unit packages**: in-tree `protocol`, `relay`,
@@ -572,10 +580,12 @@ hosted:     dispatch Worker → same relay artifact as WfP User Worker
 8. Build canonical typed handlers + `better-result`, then full
    `space.*`/`gitspace.*` parity and web adoption domain by domain.
 9. Adopt OMP broker for processes/PTYS; delete tmux-lite process ownership.
-10. Add encrypted R2 artifacts/session mirrors, shares, and move/resume.
-11. Delete routine CLI, local relay/cloudflared architecture, scattered state
+10. Rebuild mini-apps as `local://` artifact trees backed by named broker
+    processes and development-tunnel routes; remove inline `.gssh.html` state.
+11. Add encrypted R2 artifacts/session mirrors, shares, and move/resume.
+12. Delete routine CLI, local relay/cloudflared architecture, scattered state
     files, old handlers, and compatibility shims.
-12. Add platform email, settings sync, checks/placement, and remaining fleet UX
+13. Add platform email, settings sync, checks/placement, and remaining fleet UX
     on the proven substrate.
 
 Already completed: OMP SDK 18.0.6 migration (`f061638`), first skinny-event
@@ -616,7 +626,10 @@ Execute one by one; each ticket must name the package/replacement unit it owns.
     manifest CAS, shares, local eviction, move/resume.
 15. NEW “Workspace email on platform domain” — default-branch allowlist,
     DKIM/SPF gate, plaintext-at-MX disclosure, sealed MIME in R2.
-16. Keep: side-agent read tier; checks/placement; runtime/fleet view;
+16. NEW “Broker-backed local mini-apps” — `local://apps/<id>` artifact tree,
+    named OMP process, readiness/logs/route reference block, immutable promote/
+    share snapshot; delete inline `.gssh.html` program state.
+17. Keep: side-agent read tier; checks/placement; runtime/fleet view;
     browser-relay grant; subagent report/blame capture; worker wedge capture;
     isolinear pilot. Sequence them after the 1.0 substrate they consume.
 
