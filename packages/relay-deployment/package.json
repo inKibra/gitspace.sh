@@ -1,0 +1,17 @@
+{
+  "name": "@gitspace/relay-deployment",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsgo --noEmit -p tsconfig.json",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "better-result": "3.0.1",
+    "zod": "^4.4.3"
+  }
+}

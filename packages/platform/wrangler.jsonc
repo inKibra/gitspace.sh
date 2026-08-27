@@ -1,0 +1,32 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "gitspace-relay-platform-spike",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-27",
+  "compatibility_flags": ["nodejs_compat"],
+  "dispatch_namespaces": [
+    {
+      "binding": "DISPATCHER",
+      "namespace": "gitspace-relays-spike"
+    }
+  ],
+  "routes": [
+    {
+      "pattern": "alpha-relay-spike.gssh.dev",
+      "custom_domain": true
+    },
+    {
+      "pattern": "beta-relay-spike.gssh.dev",
+      "custom_domain": true
+    }
+  ],
+  "vars": {
+    "TENANT_HOST_SUFFIX": "-relay-spike.gssh.dev",
+    "DEFAULT_CPU_MS": 50,
+    "DEFAULT_SUBREQUESTS": 20
+  },
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  }
+}
