@@ -1,1 +1,1 @@
-export const authorityLayers = ["goal", "workflow", "rubric", "journal", "guide"] as const;\n
+export const authorityLayers = ["goal", "workflow", "rubric", "journal", "guide"] as const;

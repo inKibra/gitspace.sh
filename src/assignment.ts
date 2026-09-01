@@ -1,1 +1,1 @@
-export interface Assignment { projectSpace: boolean; workspaces: boolean; }\n
+export interface Assignment { projectSpace: boolean; workspaces: boolean; }

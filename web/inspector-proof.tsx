@@ -1,1 +1,1 @@
-export function InspectorProof() { return <section>Scrollable review proof</section>; }\n
+export function InspectorProof() { return <section>Scrollable review proof</section>; }

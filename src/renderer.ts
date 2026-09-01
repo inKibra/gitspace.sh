@@ -1,1 +1,1 @@
-export function renderEvidence(label: string): string { return `Evidence: ${label}`; }\n
+export function renderEvidence(label: string): string { return `Evidence: ${label}`; }
