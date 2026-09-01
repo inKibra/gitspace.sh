@@ -1,0 +1,1 @@
+import { expect, test } from "bun:test";\nimport { authorityLayers } from "./authority";\ntest("keeps typed layers", () => expect(authorityLayers).toHaveLength(5));\n

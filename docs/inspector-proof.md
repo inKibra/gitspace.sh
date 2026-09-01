@@ -1,0 +1,1 @@
+# Inspector proof\n\nThe long review fixture exercises navigation and scrolling across typed sections.\n
