@@ -1,0 +1,13 @@
+diff --git a/dist/ghostty-web.js b/dist/ghostty-web.js
+index a4ca427b95288e70c782ce303013cd644893dcec..adf2b76bda397fe34c25edda8d3d52ecc8e88bae 100644
+--- a/dist/ghostty-web.js
++++ b/dist/ghostty-web.js
+@@ -1474,7 +1474,7 @@ class $ {
+         }
+       else
+         c = A.getLine(t);
+-      c && this.renderLine(c, t, D.cols);
++      c ? this.renderLine(c, t, D.cols) : (this.ctx.fillStyle = this.theme.background, this.ctx.fillRect(0, t * this.metrics.height, D.cols * this.metrics.width, this.metrics.height));
+     }
+     g === 0 && I.visible && this.cursorVisible && this.renderCursor(I.x, I.y), E && C > 0 && this.renderScrollbar(g, i, D.rows, C), this.lastCursorPosition = { x: I.x, y: I.y }, A.clearDirty();
+   }

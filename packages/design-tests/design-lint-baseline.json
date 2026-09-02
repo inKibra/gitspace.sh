@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "maximumEntries": 7,
+  "entries": [
+    { "rule": "legacy-stylesheet", "path": "packages/web/src/styles.css", "reason": "Outer application geometry only (shell regions, resizable panes, terminal dock); one status-dot radius and one pulse keyframe.", "properties": { "color": 0, "box-shadow": 0, "border-radius": 1, "motion": 1 } }
+  ]
+}

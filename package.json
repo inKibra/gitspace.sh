@@ -15,8 +15,8 @@
     "packages/*"
   ],
   "scripts": {
-    "dev": "bun src/index.ts",
-    "dev:web": "bun scripts/dev.ts",
+    "dev": "bun scripts/self-develop.ts",
+    "demo:move": "bun scripts/move-demo.ts",
     "check:lockfile-sync": "bun scripts/check-lockfile-sync.ts",
     "gen:version": "bun scripts/gen-version.ts",
     "typecheck": "bun scripts/gen-version.ts && tsgo --noEmit -p tsconfig.json && cd web && bunx tsc -b && bunx tsc -p tsconfig.webtests.json --noEmit && cd .. && bun run typecheck:packages",
@@ -25,6 +25,9 @@
     "test:packages": "bun run --workspaces --if-present test",
     "test:fast": "bun test",
     "lint": "eslint src/",
+    "design:lint": "bun run --cwd packages/design-tests lint",
+    "design:test": "bun run --cwd packages/design-tests test",
+    "design:update-snapshots": "bun run --cwd packages/design-tests test:update",
     "build:web": "bun scripts/gen-version.ts && cd web && bun install && bun run build",
     "build": "bun scripts/build.ts",
     "build:all": "bun scripts/build.ts --all",
@@ -65,12 +68,15 @@
     "@linear/sdk": "^80.1.0",
     "@noble/curves": "^2.2.0",
     "@noble/hashes": "^2.2.0",
+    "@oh-my-pi/omptype": "18.0.6",
     "@oh-my-pi/pi-agent-core": "18.0.6",
     "@oh-my-pi/pi-ai": "18.0.6",
+    "@oh-my-pi/pi-catalog": "18.0.6",
     "@oh-my-pi/pi-coding-agent": "18.0.6",
     "@oh-my-pi/pi-natives": "18.0.6",
     "@oh-my-pi/pi-tui": "18.0.6",
     "@oh-my-pi/pi-utils": "18.0.6",
+    "@oh-my-pi/pi-wire": "18.0.6",
     "@pierre/diffs": "1.2.12",
     "@pierre/trees": "1.0.0-beta.6",
     "@scure/bip39": "^2.2.0",
@@ -78,6 +84,7 @@
     "@xterm/addon-serialize": "^0.14.0",
     "@xterm/headless": "^6.0.0",
     "ansi-escapes": "^7.3.0",
+    "aws4fetch": "1.0.20",
     "better-result": "3.0.1",
     "chalk": "^5.6.2",
     "clipboardy": "^5.3.2",
@@ -111,7 +118,7 @@
     "ffmpeg-static": "^5.3.0",
     "ghostty-web": "^0.4.0",
     "happy-dom": "^20.11.1",
-    "miniflare": "^3.20250718.3",
+    "miniflare": "3.20250718.3",
     "vitest": "^4.1.11",
     "wrangler": "^4.127.0"
   },
@@ -121,6 +128,8 @@
   "patchedDependencies": {
     "markit-ai@0.5.3": "patches/markit-ai@0.5.3.patch",
     "@oh-my-pi/pi-agent-core@18.0.6": "patches/@oh-my-pi%2Fpi-agent-core@18.0.6.patch",
-    "@oh-my-pi/pi-coding-agent@18.0.6": "patches/@oh-my-pi%2Fpi-coding-agent@18.0.6.patch"
+    "@oh-my-pi/pi-coding-agent@18.0.6": "patches/@oh-my-pi%2Fpi-coding-agent@18.0.6.patch",
+    "@oh-my-pi/pi-ai@18.0.6": "patches/@oh-my-pi%2Fpi-ai@18.0.6.patch",
+    "ghostty-web@0.4.0": "patches/ghostty-web@0.4.0.patch"
   }
 }

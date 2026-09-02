@@ -1,0 +1,20 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "gitspace-sandbox-worker",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-29",
+  "compatibility_flags": ["nodejs_compat"],
+  "vars": { "SANDBOX_HOSTNAME": "sandboxes.gitspace.sh" },
+  "containers": [
+    { "class_name": "GitSpaceSandbox", "image": "./.container-context/Dockerfile", "image_build_context": "./.container-context", "instance_type": "lite", "max_instances": 20 }
+  ],
+  "durable_objects": {
+    "bindings": [
+      { "name": "Sandbox", "class_name": "GitSpaceSandbox" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["GitSpaceSandbox"] }
+  ],
+  "observability": { "enabled": true, "head_sampling_rate": 1 }
+}

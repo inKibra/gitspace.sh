@@ -72,3 +72,6 @@ local/
 
 # Artifacts repo working state (artifacts live in <repo>-artifacts)
 .gitspace/artifacts/
+
+# Self-develop sandboxes (machine db, miniflare, rustfs, managed worktrees)
+.gitspace/environments/

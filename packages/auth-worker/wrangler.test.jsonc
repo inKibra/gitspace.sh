@@ -1,0 +1,44 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "gitspace-auth-worker-test",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-27",
+  "compatibility_flags": ["nodejs_compat"],
+  "vars": {
+    "GITSPACE_OMP_BROKER_TOKEN": "test-omp-broker-token"
+  },
+  "r2_buckets": [
+    { "binding": "DATA", "bucket_name": "gitspace-data-test" }
+  ],
+  "durable_objects": {
+    "bindings": [
+      { "name": "CREDENTIALS", "class_name": "CredentialVaultDO" },
+      { "name": "USER_STORAGE", "class_name": "UserStorageDO" },
+      { "name": "SPACE_AUTHORITY", "class_name": "SpaceAuthorityDO" },
+      { "name": "FLEET_CATALOG", "class_name": "FleetCatalogDO" },
+      { "name": "USER_SETTINGS", "class_name": "UserSettingsDO" },
+      { "name": "USER_HANDLES", "class_name": "HandleRegistryDO" },
+      { "name": "PROJECT_SECRETS", "class_name": "ProjectSecretsDO" },
+      { "name": "PROJECT_CRONS", "class_name": "ProjectCronsDO" },
+      { "name": "SPACE_CONTEXT", "class_name": "SpaceContextDO" },
+      { "name": "USER_SKILLS", "class_name": "UserSkillsDO" },
+      { "name": "USER_PROJECTS", "class_name": "UserProjectIndexDO" },
+      { "name": "PROJECT_AUTHORITY", "class_name": "ProjectAuthorityDO" },
+      { "name": "USER_MCP_CONNECTIONS", "class_name": "UserMcpConnectionsDO" },
+      { "name": "TENANT_RELEASES", "class_name": "TenantReleasesDO" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["CredentialVaultDO"] },
+    { "tag": "v2", "new_sqlite_classes": ["UserStorageDO"] },
+    { "tag": "v3", "new_sqlite_classes": ["SpaceAuthorityDO"] },
+    { "tag": "v4", "new_sqlite_classes": ["FleetCatalogDO"] },
+    { "tag": "v5", "new_sqlite_classes": ["UserSettingsDO", "HandleRegistryDO"] },
+    { "tag": "v6", "new_sqlite_classes": ["ProjectSecretsDO"] },
+    { "tag": "v7", "new_sqlite_classes": ["ProjectCronsDO", "SpaceContextDO"] },
+    { "tag": "v8", "new_sqlite_classes": ["UserSkillsDO"] },
+    { "tag": "v9", "new_sqlite_classes": ["UserProjectIndexDO", "ProjectAuthorityDO"] },
+    { "tag": "v10", "new_sqlite_classes": ["UserMcpConnectionsDO"] },
+    { "tag": "v11", "new_sqlite_classes": ["TenantReleasesDO"] }
+  ]
+}

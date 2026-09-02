@@ -201,6 +201,11 @@ declaration:
   trust, events, outbox, process/service metadata, shares, and cloud resource
   references. WAL + ordinary schema migrations; rebuilding by scanning git
   roots and the cloud endpoint is a first-class recovery path.
+- Machine notes are canonical shared fleet metadata, synchronized into the
+  local database cache rather than trapped in one browser or machine. They
+  describe purpose, installed tools, constraints, and credential boundaries;
+  they are visible in machine settings and agent placement context. Notes are
+  not a secret store and the editor warns against putting credentials in them.
 - Secrets never enter SQLite: user/device private keys, provider refresh
   tokens, Cloudflare credentials, and delegated integration credentials remain
   in the OS keychain or provider-owned credential store.
@@ -214,10 +219,16 @@ declaration:
 - Bundle requirements declare capabilities, platforms, secrets by name, checks,
   and lifecycle entrypoints. No secret values. Preflight resolves every
   capability before work starts and routes human action to the live seat.
-- OMP auth broker is the provider-login authority: refresh credentials stay
-  with the broker; machines/workers receive scoped, short-lived access.
-- Root identity anchors machine enrollment, signed cloud deployments, promotion
-  approvals, encrypted blob recipients, and user-owned subdomain reservations.
+- Provider login remains a live-seat action. The durable refresh authority can
+  be a per-user `CredentialVaultDO`: root-signed device grants authorize access,
+  refresh credentials are sealed at rest, the DO leases and atomically commits
+  rotating refresh operations, and returned access tokens are X25519/HKDF/
+  AES-GCM sealed to the requesting machine. Hosted refresh is an explicit trust
+  boundary: the Worker necessarily decrypts a refresh credential while calling
+  the provider; Cloudflare/GitSpace are not content-blind at that moment.
+- Root identity anchors machine enrollment, credential-device grants, signed
+  cloud deployments, promotion approvals, encrypted blob recipients, and
+  user-owned subdomain reservations.
 
 ## 9. Checks, CI, placement
 
@@ -278,15 +289,20 @@ declaration:
 - GitSpace is a normal project in the same monorepo, with normal workspaces,
   goals, reviews, artifacts, and package scripts. No meta-project type.
 - Installed stable `gssh` creates/opens isolated environment B. Inside B, an
-  agent develops exactly as in another repository: `bun run dev`, `bun run
-  test`, and other package-level commands owned by this repo.
-- `bun run dev` is only a watcher/trigger for the shared deployment engine. It
-  hashes entrypoints, builds content-addressed artifacts, drains affected B
-  components, replaces them, verifies health, rolls back failure, and keeps
-  watching. Edits arriving mid-deployment coalesce into the next generation.
-- B has isolated SQLite, sockets/ports, OMP profile, broker namespace, relay
-  deployment, and R2 resources. It exercises real daemon/worker/web/RelayDO
-  replacement rather than shortcuts.
+  agent develops exactly as in another repository with package scripts owned by
+  this repo. GitSpace has no product-level “dev mode”: B and current environment
+  A use the same `ReplacementEnvironment`, machine runtime, frontend generation
+  server, Result RPC transport, database migrations, drain, health, pointer
+  switch, and rollback mechanics. Sandbox vs current is target root, resources,
+  authority, and promotion policy—not another implementation.
+- This repository's `bun run dev` is only a source watcher that builds immutable
+  machine and frontend artifacts and submits sandbox-authorized replacement
+  plans into B. Edits arriving mid-deployment coalesce into the next generation.
+  It does not launch Vite or a development-only machine server.
+- B has isolated SQLite, sockets/ports, OMP session storage, and artifact
+  generations. Provider credential authority still needs the planned OMP auth
+  broker before the whole OMP profile can be isolated without duplicating
+  credentials. Relay and R2 sandbox allocation remain to be wired.
 - Promotion uses the exact artifacts proven in B; it never rebuilds source.
   Environment configuration is injected at activation.
 - The agent may prepare a promotion: immutable artifact hashes, affected
@@ -309,52 +325,118 @@ declaration:
   under §10's stability rule, collab-in-OUR-worker is version-safe only via
   the same drain/recycle path — guests reconnect after a flip.
 
-## 13. UX adoptions (from gooey-pi review; MIT)
+## 13. UX architecture (Gooey Pi + OpenSession references; GitSpace semantics)
 
-Final cut after scrutiny (kanban IS the fleet view; amber/idle chips already
-cover attention):
-
-- highlight terminal output → attach to next prompt
-- browser annotations → prompt attachments (browser lane)
-- reference designs: preview-tab adoption by agent + glide cursor (Electron-
-  dependent parts noted); schedules UX (pause/resume/run-now/history) → #127
-- queue-vs-steer explicit shortcuts (plumbing exists: streamingBehavior)
-- settings: Inherit tri-state affordance; integration status cards
-- **FTUE + settings pages**: every subsystem exposes one probe-backed card
-  (identity, Cloudflare deployment, relay reachability, machine enrollment,
-  provider auth, projects, artifacts, integrations). FTUE is those cards in
-  dependency order; settings is the same cards grouped by subsystem.
-- Two legs remain: stable `gssh setup` establishes root identity, local DB, and
-  enough runtime to open web; web completes Cloudflare target choice
-  (standalone or hosted WfP), relay deployment, first project, integrations,
-  and machine enrollment.
+- One persistent main agent per canonical space. Every project owns exactly one
+  `kind=base` space; worktree spaces are its indented children.
+  `agent_sessions.space_id` is unique, artifacts are indexed by `space_id`, and
+  machine paths/generations live only in `space_placements`. Project routes
+  resolve to the base space; workspace routes resolve to worktree spaces. Side
+  agents belong to a main turn and surface as nested activity/reports, never
+  peer navigation.
+- Machine bootstrap creates metadata and placements only; it never creates an
+  agent. Code-generation replacement persists live sessions with
+  `stopForRestart(close=false)`, and the successor recovers only
+  opening/active/draining rows. Closed, failed, and absent agents remain stopped.
+  `space.open` is the sole ensure-live operation, including when placement is
+  already local but its canonical agent has not started.
+- Mid-turn replacement drains the current OMP run, persists a
+  `resume_pending` fence, and lets the successor call `Agent.continue()` from
+  the persisted user tail. The fence remains set until continuation settles;
+  a second crash therefore retries rather than silently declaring the turn
+  complete.
+- No global top bar. The left app panel owns navigation, search, projects,
+  inbox, settings, and active work. The project row is the base-project agent;
+  its separately toggled, indented children are workspace agents. Agent focus
+  occupies the main canvas. Kanban/project/review views widen into the canvas
+  while the main agent contracts into a floating dock.
+- The right inspector is a resizable workbench sibling, not a transcript
+  overlay. Its 42px strip owns Summary, Subagents, Changes, Browser, Files, and
+  Artifacts. When closed, a reserved accessory lane shows workspace status,
+  deterministic subagent blobvatars, and artifact counts without covering the
+  centered transcript or composer. Subagent rows are read-only observability:
+  status, role, resolved model, summary, and the complete child OMP transcript.
+  Selecting a child replays its persisted events, then follows the same
+  ordinal stream until dismissal; completed children therefore remain
+  inspectable while running children update without polling in the browser.
+  Workspace action menus render through a fixed body portal so neither the
+  inspector nor the left panel can clip them.
+- Port the 0.x activity system as one truth, not lifecycle inference. Activity
+  reasons are ordered turn, compacting/retry, human, queued steering/follow-up,
+  and live subagents. Human wait renders permission orange; turn or compaction
+  renders green; queued or subagent-only debt stays waiting blue rather than
+  pretending the main agent is executing; actionable retry is red;
+  closed/dormant/archived contribute nothing. Workspace precedence remains
+  orange, green, blue, red, dim. Current workspace sorts first, then orange/red,
+  blue, green; other dim workspaces stay hidden. Visual color tables remain
+  exhaustive and consume this one projection.
+- `packages/blocks` owns a stable reducer and schema: first-class turns,
+  messages, thinking, tool calls/groups, distinct ask and permission blocks,
+  todos, nested side agents/reports, interruptions, coalesced transport state,
+  service-backed previews, rich content, and application reference blocks.
+  Raw `message_update`/advisor lifecycle noise is not persisted into the
+  product transcript; only committed semantic events produce replay facts.
+- Goal/workflow/review documents open in context or wide application surfaces;
+  transcript references point to them rather than embedding document editors.
+  Inline `.gssh.html` blocks are removed in favor of `local://apps/<id>` plus a
+  named OMP workspace-hub service and preview reference.
+- OpenSession provides reference patterns for turn grouping, compact tool
+  lifecycles, asks, turn footers, diffs, and virtualization. Gooey Pi provides
+  reference patterns for quiet timelines, progressive detail, scroll behavior,
+  changes summaries, terminal drawers, and the composer. Existing GitSpace
+  remains authoritative for OMP event semantics, permissions, TTSR, artifacts,
+  phase, possession, and workspace status.
+- Highlight terminal output → attach to the next prompt. Browser annotations →
+  prompt attachments. Queue-vs-steer remains explicit through OMP
+  `streamingBehavior`.
+- **FTUE + settings pages**: `UserSettingsDO`, keyed by user identity, owns the
+  versioned profile, onboarding completion, Git author defaults, placement, and
+  composer behavior. Mutations use expected revisions. `HandleRegistryDO`,
+  keyed by normalized handle, provides globally serialized `gitspace.sh`
+  namespace claims. The saved Queue/Steer choice maps directly to OMP
+  `followUp`/`steer` prompt behavior. A missing or incomplete record opens FTUE;
+  completion returns to the workspace. Settings opens at `?view=settings`.
+- **OMP settings**: OMP remains the schema and persistence authority. GitSpace
+  renders the installed `SETTINGS_SCHEMA` instead of maintaining a parallel
+  catalog. `UserSettingsDO` stores the exact managed `config.yml` with a
+  generation, SHA-256 checksum, writer, and update time. Each machine keeps a
+  writable local replica at OMP's normal path. Native OMP or GitSpace writes are
+  watched and published with compare-and-swap; stale writes are rejected and
+  replaced by the newer cloud generation. A hibernation-safe Durable Object
+  WebSocket broadcasts generation changes to every authenticated machine;
+  reconnect uses bounded backoff and there is no settings poller. Machines
+  replace newer files atomically, call `Settings.reloadFromDisk()`, fan reloads
+  into active OMP sessions, and retain the last replica for offline startup.
+- **Git identity**: the user fleet owns one generated Ed25519 SSH identity in
+  canonical cloud storage. Each enrolled machine materializes the same key with
+  `0600` permissions. GitSpace repositories receive its `core.sshCommand` plus
+  the shared author name/email; existing non-GitSpace repositories are untouched.
+- Physical/self-hosted machines join through the 1.x machine enrollment path.
+  Every fleet definition carries a provider ID (`physical` or
+  `cloudflare-sandbox`) in addition to presentation kind and shared notes. The
+  generic lifecycle RPC resolves that provider record; no sandbox branch exists
+  in machine control. The physical adapter owns daemon-specific behavior. The
+  Cloudflare adapter calls package-local `@gitspace/sandbox-worker`, which owns
+  container stop/restart/destroy and RPC re-exposure.
+- Create sandbox requires provisioned user Git storage, generates an
+  Ed25519/X25519 managed-machine identity, records its scoped grant, and passes
+  private runtime material only through the internal service binding. The image
+  contains the package-only 1.x runtime, OMP native addon, migrations, OpenSSH,
+  WalGit, and an actual Result RPC probe. Runtime startup resolves the user's R2
+  binding and mints project-scoped WalGit credentials dynamically. A machine is
+  registered online only after its readiness log, TCP port, and RPC query pass.
+  Sleep or destroy is rejected while the machine owns an open space; destroy
+  removes the fleet record and managed grant only after provider teardown.
 - Cloud cards show exact ownership/cost/trust facts: deployment target,
   account/platform owner, relay artifact hash, RelayDO migration, R2 encryption
-  state, credit/risk reserve for hosted users, last usage reconciliation, and
-  whether development tunnel traffic is plaintext-at-Cloudflare or E2E.
-- Enrollment is a two-machine ceremony: owner settings mints a root-signed
-  invite; new-machine FTUE redeems it. The Machines page is the seed of the
-  fleet registry and later placement/capability view.
-- design-language pass on the web app (compounds across every shell)
-- **Runtime dropdown** in the agent session pane header (AgentPaneHeader) —
-  not a dedicated pane. Kanban stays the WORK view; this dropdown is the
-  machine's process table, agent-aware, one click from any agent pane.
-  Current session's row pinned/highlighted at top; everything live on the
-  backend below it.
-  - agents: workspace, session title, model (as ROLE per #113, id
-    secondary), thinking level, state (busy/idle/waiting), context %,
-    viewer count, worker pid — and after a Promote, a "previous build,
-    recycles at idle" badge (drain doctrine §10 made visible)
-  - hub broker daemons per workspace: name, state, pid, uptime, restarts,
-    persist/detached, ports
-  - data sources already exist: PiCoordinator hosts/leases +
-    getControlInfo (model/thinking/contextUsage), broker `list` op,
-    machine snapshot broadcast. Gap: per-worker subagent/job registries
-    are worker-internal (IrcBus/jobs are process-local) — needs a small
-    worker snapshot sink; precedent: OMP's own agent-hub TUI component
-    and collab's agent-registry snapshot mirroring.
-  - grows into the fleet registry view (B3): same table, one column per
-    machine.
+  state, hosted credit reserve, and whether tunnel traffic is plaintext at
+  Cloudflare or E2E. Physical enrollment remains a root-signed two-machine
+  ceremony. Managed sandboxes instead require an authenticated owner-machine
+  control request; the control vault records the generated scoped device grant
+  before private runtime material crosses the internal sandbox service binding.
+- OMP workspace-hub process mechanics are internal. Users see Services: state,
+  readiness, logs, ports/routes, restart, and preview. Machine-global browser
+  relay remains separate.
 - Seat apps (parked, shell choice DELIBERATELY OPEN — Electron vs Tauri
   desktop; Expo/RN vs Tauri-mobile). Facts both ways, recorded so the
   eventual decision doesn't re-derive them:
@@ -559,12 +641,13 @@ hosted:     dispatch Worker → same relay artifact as WfP User Worker
   machines, users, cloud, deployments, and fleet administration.
 - One canonical typed handler owns each operation. Web RPC and code mode are
   adapters. The remaining recovery CLI adapts only bootloader operations.
-- Every fallible operation returns `Promise<Result<T, E>>` using
-  `better-result` v3 and method-specific `TaggedError` unions. Expected domain
-  failures are data. Broken contracts/invariants throw `Panic`.
-- RPC serializes Result through schema-backed codecs (Zod/Standard Schema):
-  `{status:"ok",value}` or `{status:"error",error}`. JS rehydrates
-  `better-result`; Python receives equivalent envelope/wrapper semantics.
+- Every fallible operation returns `Promise<Result<T, E>>` through the single
+  workspace `better-result` v3 runtime. Browser RPC uses `result-rpc`: the
+  browser-safe contract owns codecs and declared public error definitions;
+  core/machine own handlers and routers. Browser code never imports a router.
+  Expected failures cross as rehydrated tagged values; broken invariants and
+  undeclared exceptions become sanitized internal failures plus private
+  incident signals.
 - No public generic exec, argv construction, stdout parsing, CLI fallback, or
   CLI-only agent capability at completed cutover.
 - `space.processes.*` uses OMP broker; GitSpace owns meaning/policy/events while
@@ -575,6 +658,29 @@ hosted:     dispatch Worker → same relay artifact as WfP User Worker
   OMP 18 + commit `b972282` implement the first skinny-event cut.
 - Browser relay uses a per-workspace capability grant and OMP’s global broker.
   Logged-in browser access is never ambient.
+- Browser RPC stays on result-rpc's native transport: batched HTTP requests for
+  queries/mutations and exactly one replayable streaming-HTTP fact subscription
+  per browser↔machine connection. Components share its cache; they never open
+  subscriptions. The committed SQLite event log is the queue: bounded pages and
+  explicit offsets prevent per-client memory backlogs. result-rpc 0.5 documents
+  `.resumable()` but omits it from the browser-safe contract builder, so the
+  first implementation reconnects with an explicit `afterOffset` and dedupes by
+  monotonic offset. Replace that input with native resumability when the
+  contract API actually exposes it.
+- Local HTTP goes directly to the machine. Remote HTTP/streaming HTTP is
+  tunneled through RelayDO over the machine's required outbound WebSocket.
+  An `e2eFetch` wrapper encrypts ordered request/response stream records with
+  the browser↔machine session key, so RelayDO routes opaque bytes while
+  result-rpc still sees ordinary Fetch requests and responses.
+- WebSockets are on-demand interactive transports, not the application RPC:
+  terminal, CDP/browser control, service WebSockets, and the machine's outbound
+  NAT tunnel. Static assets, RPC, transcript ranges, and artifact bytes use
+  HTTP. Fact queues are bounded/coalesced; overflow closes with an explicit
+  resync requirement rather than accumulating memory.
+- ReflectDB is deferred. Possession deliberately prevents ambient multi-master
+  writes; result-rpc subscriptions/cache cover current live-state needs.
+  Reconsider offline sync only for low-risk personal UI state such as notes,
+  read markers, and saved views.
 
 ## 21. GitSpace 1.0 build spine
 
@@ -635,26 +741,114 @@ Execute one by one; each ticket must name the package/replacement unit it owns.
    reverse rollback, frontend pointer swap, machine socket handoff with database
    checkpoint/migrate/restore, OMP worker drain, and broker PTY fence. Wiring
    real hosts belongs to operations 9/13/14.
-9. NEW “GitSpace B package-script development” — `bun run dev` watcher invoking
-   shared engine; B self-validates; user-signed immutable promotion plan.
-10. NEW “One local GitSpace SQLite” — schema, repositories, rescan/rebuild;
-    migrate/delete mutable JSON/control stores.
-11. NEW “Canonical handlers + better-result” — Result codecs, tagged domain
-    errors, web/SDK adapters.
+9. IN PROGRESS “GitSpace B package-script self-development” — root `bun run dev`
+   is now a thin watcher/plan submitter. The same exported
+   `ReplacementEnvironment` mechanics can host sandbox B or current A. It builds
+   content-addressed machine and frontend artifacts, invokes the shared engine,
+   checkpoints/migrates SQLite, health-gates successors, switches stable RPC and
+   asset endpoints, preserves the OMP session, emits `code-version`, reloads the
+   browser, and coalesces source changes. User-signed immutable B→A promotion,
+   auth-broker-isolated OMP configuration, and sandbox relay/R2 allocation remain.
+10. IN PROGRESS “One local GitSpace SQLite” — Drizzle Kit now owns the first
+    `packages/core` schema and migrations for projects, possessed workspaces,
+    artifact scopes/cache, OMP sessions/transcript offsets, and promotions.
+    Restart recovery is proven across a closed/reopened database. Repository
+    rescan and migration/deletion of the 0.x stores remain.
+11. IN PROGRESS “Canonical handlers + better-result/result-rpc” — browser-safe
+    contracts, reified tagged errors, bootstrap/possession/session handlers,
+    Fetch router, bounded fact log, live React client, and encrypted unary/
+    streaming adapters are proven through real HTTP wire tests. Complete every
+    remaining domain and the SDK adapter before calling parity.
 12. NEW “Full code-mode parity + CLI removal” — `space.*`, `gitspace.*`, migrate
     every caller, delete routine Commander tree.
 13. Rewrite #131 as OMP broker adoption; raw-stdin gate; delete process runner,
     watchdog, scheduler, and tmux-lite PTY ownership when proven.
-14. Reframe #126 under the shared deployment engine: stable promoter,
-    generation handoff, per-entrypoint hashes, worker drain, asset reload.
-15. NEW “Encrypted R2 artifacts + session mirrors” — packfiles/segments,
-    manifest CAS, shares, local eviction, move/resume.
+14. IN PROGRESS under the shared deployment engine: machine and frontend
+    generations both drain/stage/activate/health/commit through common
+    environment hosts. Machine replacement switches the stable RPC endpoint;
+    frontend replacement switches the stable asset generation and reloads the
+    browser; the same OMP session survives. Stable bootloader promotion and
+    wiring installed `gssh web` to the common current-environment host remain.
+15. IN PROGRESS “Encrypted R2 artifacts + session mirrors” — the first
+    capability-scoped `local://` projection now provides base/current/sibling
+    views, client encryption, lazy object fetch, local materialization,
+    generation-CAS manifests, and explicit re-encrypting workspace→base
+    promotion. Shares, chunked large blobs, remote ref authority, eviction
+    policy, and fleet move/resume remain.
 16. NEW “Workspace email on platform domain” — default-branch allowlist,
     DKIM/SPF gate, plaintext-at-MX disclosure, sealed MIME in R2.
 17. NEW “Broker-backed local mini-apps” — `local://apps/<id>` artifact tree,
     named OMP process, readiness/logs/route reference block, immutable promote/
     share snapshot; delete inline `.gssh.html` program state.
-18. Keep: side-agent read tier; checks/placement; runtime/fleet view;
+18. DONE “First local 1.0 vertical slice” — `packages/machine` enforces and
+    reopens one main agent per possessed workspace plus one project agent at the
+    base repository. Project and workspace sessions keep isolated OMP identities,
+    transcripts, and writable artifact scopes; scope migration preserves existing
+    workspace transcripts. Semantic transcript events survive database/machine
+    replacement. `packages/blocks` reduces OMP history into turns, nested side
+    agents, typed interactions/content, and coalesced transport blocks.
+    `packages/web` now uses the panel-first shell: no top bar, left app
+    navigation with status-sorted active work and an indented project/workspace
+    hierarchy, agent focus plus floating context capsule, combined right context,
+    wide Kanban/project canvases, and mobile bottom navigation. Desktop project/
+    workspace agent routing, agent/context/Kanban, and mobile agent surfaces are
+    browser-verified.
+19. IN PROGRESS “Worker credential authority” — `packages/auth-worker` proves a
+    Worker-compatible per-user CredentialVaultDO, root-signed machine grants,
+    signed/replay-protected access requests, at-rest vault sealing, per-request
+    refresh leases, revision-CAS token rotation, refresh-uncertain fail-closed
+    state, and machine-sealed access responses. Anthropic, OpenAI Codex, Google
+    Gemini CLI, Google Antigravity, and Cursor refresh under Workers and pass
+    local DO simulations. None are copied now: one narrow
+    `@oh-my-pi/pi-ai` patch adds a Worker-only bounded HTTP/error core plus
+    provider-specific portable refresh modules; each original OMP adapter calls
+    the same module and maps portable errors back into its existing `OAuthError`
+    contract. A pristine `bun install --force` applies the patch. Upstream these
+    modules and delete the patch once released. The DO now exposes OMP's native
+    auth-broker health/snapshot/conditional-fetch/refresh routes; self-development
+    imports existing local OAuth rows into the DO, then launches OMP with only
+    `OMP_AUTH_BROKER_URL` and `OMP_AUTH_BROKER_TOKEN`. A real Codex turn completed
+    through `RemoteAuthCredentialStore` while the refresh token remained absent
+    from the client snapshot. Live deployment, scoped incarnation bearer grants,
+    remaining providers, SSE snapshot streaming, and uncertain-refresh recovery
+    remain.
+20. DONE “Portable space checkpoint substrate” — one versioned manifest and one
+    hierarchical key builder keep repository state at `projects/<project>/repo`
+    and agent/artifact/checkpoint state under its owning space. The machine uses
+    temporary Git indexes to preserve HEAD, staged and unstaged trees, modes,
+    symlinks, and policy-approved untracked files without touching visible
+    history; a supervised per-project walgit process publishes immutable refs.
+    Encrypted application-data objects carry OMP, transcript, and artifact
+    manifests through the signed Worker API into the dedicated `DATA` R2
+    binding. `SpaceAuthorityDO` generation-fences close/open. Git storage is a
+    separate bucket: walgit uses S3 against RustFS in development and R2 in
+    production. `bun run dev` runs that exact topology with programmatic
+    Miniflare, persistent local R2/DO state, RustFS, and a packaged walgit
+    binary. Result RPC delegates close/open only to `PortableSpaceLifecycle`;
+    there is no direct local stop/release/start path. The live integration test
+    deletes repository and OMP state, reconstructs an empty target, restores
+    staged/unstaged/non-ignored untracked state, excludes ignored secrets,
+    resumes the canonical agent, and accepts another prompt.
+    Destructive close also requires the repository root to be beneath the
+    machine's managed-space root; self-development source checkouts and other
+    externally owned paths fail closed before deletion.
+    The move demo adds a user-scoped `FleetCatalogDO`, separate per-machine
+    SQLite projections, and client-orchestrated source close plus target open.
+    `bun run demo:move` runs two isolated machines behind one browser transport
+    directory. Verification moved generation 1 on Machine A to generation 3 on
+    Machine B, deleted the complete Machine A root, preserved the canonical
+    agent and OMP ids, restored staged/unstaged/untracked Git state, and accepted
+    a new target prompt while rejecting the stale source generation.
+    The prototype database history was intentionally reset at this boundary:
+    the fresh schema has only `projects`, `spaces`, `space_placements`, and
+    space-owned agent/artifact rows; no legacy project/workspace session columns
+    or local-only workspace lifecycle RPC remain.
+    Machine/control transport is one canonical signed envelope: device key,
+    capability grant, timestamp, UUID nonce, operation, payload, and Ed25519
+    signature. `CredentialVaultDO` consumes replay nonces before routing
+    generation-checked space operations to `SpaceAuthorityDO`; the machine
+    implements the same authority interface through `CloudSpaceCheckpointAuthority`.
+21. Keep: side-agent read tier; checks/placement; runtime/fleet view;
     browser-relay grant; subagent report/blame capture; worker wedge capture;
     isolinear pilot. Sequence them after the 1.0 substrate they consume.
 

@@ -9,6 +9,10 @@
       {
         "name": "CREDITS",
         "class_name": "CreditLedgerDO"
+      },
+      {
+        "name": "DEPLOYMENTS",
+        "class_name": "TenantDeploymentsDO"
       }
     ]
   },
@@ -16,6 +20,10 @@
     {
       "tag": "v1",
       "new_sqlite_classes": ["CreditLedgerDO"]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": ["TenantDeploymentsDO"]
     }
   ],
   "dispatch_namespaces": [
@@ -23,6 +31,15 @@
       "binding": "DISPATCHER",
       "namespace": "gitspace-relays-spike"
     }
+  ],
+  // RELEASES keeps a copy of every tenant worker bundle the platform uploaded
+  // (`tenants/<tenant>/<sha>/worker.mjs`) plus our channel build at
+  // `channel/worker.mjs` + `channel/metadata.json` (WorkerReleaseMetadata).
+  // DATA is the tenant data bucket; tenants stage `releases/<sha>/worker.mjs`
+  // there and hand the platform the full object key.
+  "r2_buckets": [
+    { "binding": "RELEASES", "bucket_name": "gitspace-platform-releases" },
+    { "binding": "DATA", "bucket_name": "gitspace-data" }
   ],
   "routes": [
     {
@@ -34,6 +51,9 @@
       "custom_domain": true
     }
   ],
+  // Secret (set with `wrangler secret put CF_API_TOKEN`): an API token with
+  // "Workers Scripts Write" on CF_ACCOUNT_ID, used to upload tenant scripts into
+  // DISPATCH_NAMESPACE. Never a var.
   "vars": {
     "TENANT_HOST_SUFFIX": "-relay-spike.gssh.dev",
     "DEFAULT_CPU_MS": 50,
@@ -42,7 +62,11 @@
     "ADMIN_AUTH_MAX_SKEW_MS": 60000,
     "DISPATCH_RESERVATION_MICROS": 100,
     "DISPATCH_SETTLEMENT_MICROS": 1,
-    "RESERVATION_TTL_MS": 30000
+    "DEPLOY_SETTLEMENT_MICROS": 1000,
+    "DEPLOY_PROBE_DELAY_MS": 2000,
+    "RESERVATION_TTL_MS": 30000,
+    "DISPATCH_NAMESPACE": "gitspace-relays-spike",
+    "CF_ACCOUNT_ID": "configure-at-deploy"
   },
   "observability": {
     "enabled": true,

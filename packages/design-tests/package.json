@@ -1,0 +1,15 @@
+{
+  "name": "@gitspace/design-tests",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "lint": "bun run src/design-lint.ts",
+    "test": "playwright test",
+    "test:update": "playwright test --update-snapshots"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.62.1",
+    "@types/bun": "^1.3.14"
+  }
+}

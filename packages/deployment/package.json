@@ -11,6 +11,7 @@
     "test": "bun test"
   },
   "dependencies": {
+    "@gitspace/protocol": "workspace:*",
     "@noble/curves": "^2.2.0",
     "better-result": "3.0.1",
     "zod": "^4.4.3"

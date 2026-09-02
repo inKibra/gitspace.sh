@@ -377,7 +377,6 @@ export interface CloudLaunchDependencies {
     expiresAtIso: string
   ) => Promise<CloudEnrollmentInvite>;
 }
-
 export async function cloudLaunch(
   options: CloudLaunchOptions,
   dependencies: CloudLaunchDependencies = {}

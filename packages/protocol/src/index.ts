@@ -215,3 +215,21 @@ export async function decryptArtifactBytes(sealed: Uint8Array, key: Uint8Array):
   );
   return new Uint8Array(plaintext);
 }
+
+export * from './agent-activity.js';
+export * from './credential-vault.js';
+export * from './device-grant.js';
+export * from './client.js';
+export * from './routed-transport.js';
+export * from './deployment.js';
+export * from './cron-contract.js';
+export * from './inspector-contract.js';
+export * from './mcp-contract.js';
+export * from './rpc-contract.js';
+export * from './project-authority.js';
+export * from './rpc-crypto.js';
+export * from './skills-contract.js';
+export * from './space-checkpoint.js';
+export * from './user-settings.js';
+export * from './workspace-status.js';
+export * from './dependency-graph.js';
