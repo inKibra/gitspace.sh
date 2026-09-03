@@ -143,7 +143,9 @@ export interface GitSpaceShellProps {
   sendError?: string;
   onSelectWorkspace?: (workspaceId: string) => void;
   onSelectProject?: (projectId: string) => void;
-  onCloseWorkspace?: (workspaceId: string) => void | Promise<void>;
+  onCloseSpace?: (spaceId: string) => void | Promise<void>;
+  onReopenSpace?: (spaceId: string) => void | Promise<void>;
+  onArchiveWorkspace?: (workspaceId: string) => void | Promise<void>;
   /** Machines a released or archived space can be opened on (online, reachable). */
   claimMachines?: Array<{ id: string; label: string }>;
   /** The machine serving this page; `null` in `onClaimWorkspace` means it. */
@@ -191,6 +193,7 @@ function selectOptions(options: readonly { value: string; label: ReactNode; disa
 
 export function workspaceStatusLabel(space: AgentScopeView): string {
   if (space.closedAt) return 'Archived';
+  if (space.holder.kind === 'released') return 'Closed';
   switch (space.status.primaryColor) {
     case 'green': return 'Working';
     case 'blue': return 'Waiting';
@@ -239,7 +242,7 @@ export function EmptyState({ icon, title, description, action }: { icon?: ReactN
 }
 
 // ── Agent canvas ──
-function AgentCanvas({ workspace, mainAgent, sessionControls, defaultSendBehavior, turns, transport, onSend, pending, error, onSetWorkspacePhase, onClaimWorkspace, claimMachines = [], homeMachineId = null, defaultMachineId = null, checkpoint = null, providers, banner }: {
+function AgentCanvas({ workspace, mainAgent, sessionControls, defaultSendBehavior, turns, transport, onSend, pending, error, onSetWorkspacePhase, onCloseSpace, onReopenSpace, onClaimWorkspace, claimMachines = [], homeMachineId = null, defaultMachineId = null, checkpoint = null, providers, skills, banner }: {
   workspace: AgentScopeView;
   mainAgent: GitSpaceShellProps['mainAgent'];
   sessionControls?: SessionControlsProps;
@@ -250,19 +253,22 @@ function AgentCanvas({ workspace, mainAgent, sessionControls, defaultSendBehavio
   pending: boolean;
   error?: string;
   onSetWorkspacePhase?: GitSpaceShellProps['onSetWorkspacePhase'];
+  onCloseSpace?: GitSpaceShellProps['onCloseSpace'];
+  onReopenSpace?: GitSpaceShellProps['onReopenSpace'];
   onClaimWorkspace?: GitSpaceShellProps['onClaimWorkspace'];
   claimMachines?: GitSpaceShellProps['claimMachines'];
   homeMachineId?: GitSpaceShellProps['homeMachineId'];
   defaultMachineId?: GitSpaceShellProps['defaultMachineId'];
   checkpoint?: GitSpaceShellProps['checkpoint'];
   providers?: readonly ProviderAuthView[];
+  skills?: SkillsPageProps['skills'];
   banner?: ReactNode;
 }) {
   const shape = useShape();
   const running = mainAgent?.state === 'running';
   // Released: closed in the cloud with its files kept somewhere; the transcript above is the checkpoint, read-only.
   const released = !workspace.closedAt && workspace.holder.kind === 'released';
-  const idle = !!workspace.closedAt || !mainAgent || released;
+  const idle = !!workspace.closedAt || !mainAgent || mainAgent.state === 'closed' || released;
   const [chosenMachineId, setChosenMachineId] = useState<string | null>(null);
   const claimMachineId = [chosenMachineId, defaultMachineId, homeMachineId, claimMachines[0]?.id ?? null]
     .find((candidate): candidate is string => !!candidate && claimMachines.some((machine) => machine.id === candidate)) ?? null;
@@ -270,12 +276,12 @@ function AgentCanvas({ workspace, mainAgent, sessionControls, defaultSendBehavio
   const idleTitle = workspace.closedAt
     ? (workspace.kind === 'project' ? 'Project archived' : 'Workspace archived')
     : released
-      ? `Released${lastMachine ? ` · last on ${lastMachine}` : ''}`
+      ? `Closed${lastMachine ? ` · last on ${lastMachine}` : ''}`
       : `${workspace.kind === 'project' ? 'Base' : PHASE_LABEL[workspace.phase]} agent not started`;
   const idleDetail = workspace.closedAt
     ? 'Files, history, artifacts, and review state are preserved.'
     : released
-      ? 'Read-only until it is opened on a machine; the files stay where they were.'
+      ? 'Read-only until it is reopened; local files are retained.'
       : 'Start this space’s canonical agent.';
   // Chat semantics: open at the newest message and follow new content unless
   // the reader has scrolled up to look at something.
@@ -312,9 +318,17 @@ function AgentCanvas({ workspace, mainAgent, sessionControls, defaultSendBehavio
                     <Select size="compact" value={claimMachineId ?? ''} onValueChange={(value) => setChosenMachineId(value)}><SelectTrigger variant="borderless" aria-label="Open on machine" />{selectOptions(claimMachines.map((machine) => ({ value: machine.id, label: machine.label })))}</Select>
                   </span>
                 : null}
-              <Button variant="secondary" size="compact" disabled={released && !claimMachineId} onClick={() => void onClaimWorkspace?.(workspace.id, released ? claimMachineId : null)} leadingIcon={glyph(RefreshCcw01)}>{workspace.closedAt || released ? 'Restore' : 'Start'}</Button>
+              <Button variant="secondary" size="compact" disabled={released && claimMachines.length > 0 && !claimMachineId} onClick={() => {
+                if (workspace.closedAt) void onClaimWorkspace?.(workspace.id, null);
+                else if (released && claimMachineId) void onClaimWorkspace?.(workspace.id, claimMachineId);
+                else if (released) void onReopenSpace?.(workspace.id);
+                else void onReopenSpace?.(workspace.id);
+              }} leadingIcon={glyph(RefreshCcw01)}>{workspace.closedAt ? 'Restore' : released ? 'Reopen' : 'Start'}</Button>
             </div>
-          : <Composer workspace={workspace} controls={sessionControls} providers={providers} running={running} defaultSendBehavior={defaultSendBehavior} onSend={onSend} pending={pending} error={error} />}
+          : <>
+              {workspace.status.primaryColor === 'blue' && onCloseSpace ? <div className="mb-2 flex justify-end"><Button variant="secondary" size="compact" onClick={() => void onCloseSpace(workspace.id)} leadingIcon={glyph(XClose)}>Close space</Button></div> : null}
+              <Composer workspace={workspace} controls={sessionControls} providers={providers} skills={skills} running={running} defaultSendBehavior={defaultSendBehavior} onSend={onSend} pending={pending} error={error} />
+            </>}
       </div>
     </div>
   </div>;
@@ -431,13 +445,15 @@ export function CreateWorkspaceDialog({ projectId, workspaces, initialPhase = 'c
   </Dialog>;
 }
 
-export function ProjectsView({ projects, workspaces, onOpen, onOpenProject, onClose, onReopen, onCreateProject, onCreateWorkspace, onArchiveProject, onRestoreProject, onDeleteProject, onDeleteWorkspace }: {
+export function ProjectsView({ projects, workspaces, onOpen, onOpenProject, onCloseSpace, onReopenSpace, onArchiveWorkspace, onRestoreWorkspace, onCreateProject, onCreateWorkspace, onArchiveProject, onRestoreProject, onDeleteProject, onDeleteWorkspace }: {
   projects: readonly ProjectLifecycleView[];
   workspaces: WorkspaceView[];
   onOpen: (workspace: WorkspaceView) => void;
   onOpenProject?: (projectId: string) => void;
-  onClose?: (workspaceId: string) => void | Promise<void>;
-  onReopen?: (workspaceId: string) => void | Promise<void>;
+  onCloseSpace?: GitSpaceShellProps['onCloseSpace'];
+  onReopenSpace?: GitSpaceShellProps['onReopenSpace'];
+  onArchiveWorkspace?: GitSpaceShellProps['onArchiveWorkspace'];
+  onRestoreWorkspace?: (workspaceId: string) => void | Promise<void>;
   onCreateProject?: GitSpaceShellProps['onCreateProject'];
   onCreateWorkspace?: GitSpaceShellProps['onCreateWorkspace'];
   onArchiveProject?: GitSpaceShellProps['onArchiveProject'];
@@ -464,8 +480,9 @@ export function ProjectsView({ projects, workspaces, onOpen, onOpenProject, onCl
     <div className="flex flex-col gap-6">
       {visible.map((project) => {
         const items = workspaces.filter((workspace) => workspace.projectId === project.id);
-        const open = items.filter((workspace) => !workspace.closedAt);
-        const closed = items.filter((workspace) => workspace.closedAt);
+        const open = items.filter((workspace) => !workspace.closedAt && workspace.holder.kind !== 'released');
+        const runtimeClosed = items.filter((workspace) => !workspace.closedAt && workspace.holder.kind === 'released');
+        const archived = items.filter((workspace) => !!workspace.closedAt);
         return <section key={project.id} className="flex flex-col gap-3">
           <div className="flex items-center justify-between gap-3">
             <button type="button" className="flex min-w-0 items-center gap-2 text-left" onClick={() => onOpenProject?.(project.id)}>
@@ -486,15 +503,22 @@ export function ProjectsView({ projects, workspaces, onOpen, onOpenProject, onCl
                 <CardDescription><span className="font-mono">{workspace.branch}</span></CardDescription>
               </CardHeader>
               <CardContent><Badge variant="dot" size="compact" color="gray">{PHASE_LABEL[workspace.phase]}</Badge></CardContent>
-              {onClose ? <CardFooter><Tooltip content="Archive workspace" side="top"><Button variant="ghost" size="icon-compact" aria-label={`Archive ${workspace.name}`} disabled={pending} onClick={() => void run(() => onClose(workspace.id))}><Archive width={16} height={16} strokeWidth={1.5} /></Button></Tooltip></CardFooter> : null}
+              <CardFooter>
+                {onCloseSpace ? <Tooltip content="Close space" side="top"><Button variant="ghost" size="icon-compact" aria-label={`Close ${workspace.name}`} disabled={pending} onClick={() => void run(() => onCloseSpace(workspace.id))}><XClose width={16} height={16} strokeWidth={1.5} /></Button></Tooltip> : null}
+                {onArchiveWorkspace ? <Tooltip content="Archive workspace" side="top"><Button variant="ghost" size="icon-compact" aria-label={`Archive ${workspace.name}`} disabled={pending} onClick={() => void run(() => onArchiveWorkspace(workspace.id))}><Archive width={16} height={16} strokeWidth={1.5} /></Button></Tooltip> : null}
+              </CardFooter>
             </Card>)}
-            {closed.map((workspace, index) => <Card key={workspace.id} index={open.length + index} size="compact" onClick={() => onOpen(workspace)} label={`Open ${workspace.name}`}>
+            {runtimeClosed.map((workspace, index) => <Card key={workspace.id} index={open.length + index} size="compact" onClick={() => onOpen(workspace)} label={`Open ${workspace.name}`}>
+              <CardHeader><CardTitle><span className="flex items-center gap-2 text-muted-foreground"><XClose width={14} height={14} strokeWidth={1.5} />{workspace.name}</span></CardTitle><CardDescription>Closed · local files retained</CardDescription></CardHeader>
+              {onReopenSpace ? <CardFooter><Tooltip content="Reopen space" side="top"><Button variant="ghost" size="icon-compact" aria-label={`Reopen ${workspace.name}`} disabled={pending} onClick={() => void run(() => onReopenSpace(workspace.id))}><RefreshCcw01 width={16} height={16} strokeWidth={1.5} /></Button></Tooltip></CardFooter> : null}
+            </Card>)}
+            {archived.map((workspace, index) => <Card key={workspace.id} index={open.length + runtimeClosed.length + index} size="compact" onClick={() => onOpen(workspace)} label={`Open ${workspace.name}`}>
               <CardHeader>
                 <CardTitle><span className="flex items-center gap-2 text-muted-foreground"><Archive width={14} height={14} strokeWidth={1.5} />{workspace.name}</span></CardTitle>
                 <CardDescription>Archived</CardDescription>
               </CardHeader>
               <CardFooter>
-                {onReopen ? <Tooltip content="Restore workspace" side="top"><Button variant="ghost" size="icon-compact" aria-label={`Restore ${workspace.name}`} disabled={pending} onClick={() => void run(() => onReopen(workspace.id))}><RefreshCcw01 width={16} height={16} strokeWidth={1.5} /></Button></Tooltip> : null}
+                {onRestoreWorkspace ? <Tooltip content="Restore workspace" side="top"><Button variant="ghost" size="icon-compact" aria-label={`Restore ${workspace.name}`} disabled={pending} onClick={() => void run(() => onRestoreWorkspace(workspace.id))}><RefreshCcw01 width={16} height={16} strokeWidth={1.5} /></Button></Tooltip> : null}
                 {onDeleteWorkspace ? <Tooltip content="Delete workspace" side="top"><Button variant="ghost" size="icon-compact" aria-label={`Delete ${workspace.name}`} disabled={pending} onClick={() => void run(() => onDeleteWorkspace(workspace.id))}><Trash01 width={16} height={16} strokeWidth={1.5} /></Button></Tooltip> : null}
               </CardFooter>
             </Card>)}
@@ -557,8 +581,8 @@ function TerminalResizeHandle({ height, onHeight }: { height: number; onHeight: 
 }
 
 // ── Shell ──
-export function GitSpaceShell({ project, projects, workspace, baseSpace, workspaces, mainAgent, turns, transport, artifacts, machines = [], onSend, defaultSendBehavior, sessionControls, onSetWorkspacePhase, onSetWorkspaceRelations, sendPending = false, sendError, onSelectWorkspace, onSelectProject, onCloseWorkspace, onClaimWorkspace, claimMachines, homeMachineId, defaultMachineId, checkpoint, onMoveWorkspace, onCreateProject, onCreateWorkspace, onArchiveProject, onRestoreProject, onDeleteProject, onDeleteWorkspace, onOpenSettings, activeView, onNavigateView, terminals, secrets, crons, skills, plugins, renderInspector, user, providers, deployment, launchBanner }: GitSpaceShellProps) {
-  // Restore from list rows always lands on the home machine; the canvas card is where a machine is chosen.
+export function GitSpaceShell({ project, projects, workspace, baseSpace, workspaces, mainAgent, turns, transport, artifacts, machines = [], onSend, defaultSendBehavior, sessionControls, onSetWorkspacePhase, onSetWorkspaceRelations, sendPending = false, sendError, onSelectWorkspace, onSelectProject, onCloseSpace, onReopenSpace, onArchiveWorkspace, onClaimWorkspace, claimMachines, homeMachineId, defaultMachineId, checkpoint, onMoveWorkspace, onCreateProject, onCreateWorkspace, onArchiveProject, onRestoreProject, onDeleteProject, onDeleteWorkspace, onOpenSettings, activeView, onNavigateView, terminals, secrets, crons, skills, plugins, renderInspector, user, providers, deployment, launchBanner }: GitSpaceShellProps) {
+  // Archive restores from list rows still land on the home machine.
   const restoreHome = onClaimWorkspace ? (spaceId: string) => onClaimWorkspace(spaceId, null) : undefined;
   const [internalView, setInternalView] = useState<AppView>('agent');
   const [inspectorOpen, setInspectorOpen] = useState(false);
@@ -609,9 +633,10 @@ export function GitSpaceShell({ project, projects, workspace, baseSpace, workspa
       machines={machines}
       onSelectProject={onSelectProject}
       onSelectWorkspace={openWorkspace}
-      onArchive={onCloseWorkspace}
+      onClose={onCloseSpace}
+      onReopen={onReopenSpace}
+      onArchive={onArchiveWorkspace}
       onRestore={restoreHome}
-      onMove={onMoveWorkspace}
       onNewWorkspace={onCreateWorkspace ? (projectId) => setNewWorkspaceFor({ projectId, phase: 'code' }) : undefined}
       onNewProject={onCreateProject ? () => setNewProject(true) : undefined}
       onOpenSettings={onOpenSettings}
@@ -628,6 +653,8 @@ export function GitSpaceShell({ project, projects, workspace, baseSpace, workspa
           {view === 'agent' ? <>
             <span className="flex items-center gap-2 pr-2 text-caption text-muted-foreground"><StatusDot color={workspace.status.primaryColor} pulse={running} /><span className="max-md:hidden">{workspaceStatusLabel(workspace)}</span></span>
             {workspace.kind === 'workspace' && onSetWorkspacePhase ? <Select size="compact" value={workspace.phase} onValueChange={(value) => void onSetWorkspacePhase(workspace.id, value as WorkspaceView['phase'])}><SelectTrigger variant="borderless" aria-label="Workspace phase" />{selectOptions(PHASES.map((phase) => ({ value: phase, label: PHASE_LABEL[phase] })))}</Select> : null}
+            {!workspace.closedAt && workspace.holder.kind === 'released' && onReopenSpace ? <Button variant="secondary" size="compact" onClick={() => void onReopenSpace(workspace.id)} leadingIcon={glyph(RefreshCcw01)}>Reopen</Button> : null}
+            {!workspace.closedAt && workspace.holder.kind !== 'released' && onCloseSpace ? <Button variant="ghost" size="compact" onClick={() => void onCloseSpace(workspace.id)} leadingIcon={glyph(XClose)}>Close</Button> : null}
             {sessionControls?.value.context ? <Tooltip content={`${Math.round(sessionControls.value.context.tokens).toLocaleString()} of ${Math.round(sessionControls.value.context.contextWindow).toLocaleString()} tokens`} side="bottom"><span className="tabular-nums px-2 text-caption text-muted-foreground">{Math.round(sessionControls.value.context.percent)}%</span></Tooltip> : null}
             {terminals ? <Tooltip content="Terminals" side="bottom"><Button variant="ghost" size="icon-compact" aria-label="Open terminals" aria-pressed={terminalOpen} onClick={() => setTerminalOpen((value) => !value)}><Terminal width={16} height={16} strokeWidth={1.5} /></Button></Tooltip> : null}
             {renderInspector ? <Tooltip content="Inspector" side="bottom"><Button variant="ghost" size="icon-compact" aria-label="Open Inspector" aria-pressed={inspectorOpen} onClick={() => setInspectorOpen((value) => !value)}><LayoutRight width={16} height={16} strokeWidth={1.5} /></Button></Tooltip> : null}
@@ -639,7 +666,7 @@ export function GitSpaceShell({ project, projects, workspace, baseSpace, workspa
         ? <div className="workspace-workbench" data-terminal-open={terminalOpen && !!terminals || undefined} style={{ '--inspector-width': `${inspectorWidth}px`, '--terminal-height': `${terminalHeight}px` } as CSSProperties}>
             <div className="workspace-content">
               <div className="conversation-stage">
-                <AgentCanvas workspace={workspace} mainAgent={mainAgent} sessionControls={sessionControls} defaultSendBehavior={defaultSendBehavior} turns={turns} transport={transport} onSend={onSend} pending={sendPending} error={sendError} onSetWorkspacePhase={onSetWorkspacePhase} onClaimWorkspace={onClaimWorkspace} claimMachines={claimMachines} homeMachineId={homeMachineId} defaultMachineId={defaultMachineId} checkpoint={checkpoint} providers={providers} banner={launchBanner} />
+                <AgentCanvas workspace={workspace} mainAgent={mainAgent} sessionControls={sessionControls} defaultSendBehavior={defaultSendBehavior} turns={turns} transport={transport} onSend={onSend} pending={sendPending} error={sendError} onSetWorkspacePhase={onSetWorkspacePhase} onCloseSpace={onCloseSpace} onReopenSpace={onReopenSpace} onClaimWorkspace={onClaimWorkspace} claimMachines={claimMachines} homeMachineId={homeMachineId} defaultMachineId={defaultMachineId} checkpoint={checkpoint} providers={providers} skills={skills?.skills} banner={launchBanner} />
               </div>
               {inspectorOpen && renderInspector ? <InspectorResizeHandle width={inspectorWidth} onWidth={updateInspectorWidth} /> : null}
               {inspectorOpen && renderInspector ? <aside className="inspector-pane flex min-w-0 flex-col" aria-label="Inspector">{renderInspector(() => setInspectorOpen(false))}</aside> : null}
@@ -647,7 +674,7 @@ export function GitSpaceShell({ project, projects, workspace, baseSpace, workspa
             {terminalOpen && terminals ? <><TerminalResizeHandle height={terminalHeight} onHeight={setTerminalHeight} /><section className="min-h-0 min-w-0 overflow-hidden"><WorkspaceTerminals {...terminals} onClose={() => setTerminalOpen(false)} /></section></> : null}
           </div>
         : view === 'kanban' ? <KanbanView workspaces={openWorkspaces} selectedId={workspace.kind === 'workspace' ? workspace.id : null} onOpen={openWorkspace} onSetRelations={onSetWorkspaceRelations} onNewWorkspace={onCreateWorkspace ? (phase) => setNewWorkspaceFor({ projectId: workspace.projectId, phase }) : undefined} />
-        : view === 'projects' ? <ProjectsView projects={projectItems} workspaces={workspaces} onOpen={openWorkspace} onOpenProject={onSelectProject} onClose={onCloseWorkspace} onReopen={restoreHome} onCreateProject={onCreateProject} onCreateWorkspace={onCreateWorkspace} onArchiveProject={onArchiveProject} onRestoreProject={onRestoreProject} onDeleteProject={onDeleteProject} onDeleteWorkspace={onDeleteWorkspace} />
+        : view === 'projects' ? <ProjectsView projects={projectItems} workspaces={workspaces} onOpen={openWorkspace} onOpenProject={onSelectProject} onCloseSpace={onCloseSpace} onReopenSpace={onReopenSpace} onArchiveWorkspace={onArchiveWorkspace} onRestoreWorkspace={restoreHome} onCreateProject={onCreateProject} onCreateWorkspace={onCreateWorkspace} onArchiveProject={onArchiveProject} onRestoreProject={onRestoreProject} onDeleteProject={onDeleteProject} onDeleteWorkspace={onDeleteWorkspace} />
         : view === 'plugins' ? (plugins ? <PluginsPage {...plugins} /> : unavailable('Plugins unavailable'))
         : view === 'skills' ? (skills ? <SkillsPage {...skills} /> : unavailable('Skills unavailable'))
         : view === 'crons' ? (crons ? <ProjectCronsPage {...crons} /> : unavailable('Project crons unavailable'))

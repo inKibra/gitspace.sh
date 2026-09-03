@@ -34,6 +34,19 @@ export interface WorkspaceTerminalOutput {
   data: string;
 }
 
+export interface WorkspaceLifecyclePlanStep {
+  id: string;
+  kind: 'check' | 'script';
+  command: string;
+}
+
+export interface WorkspaceLifecyclePlanResult {
+  terminalName: string;
+  exitCode: number;
+  output: string;
+  steps: ReadonlyArray<{ id: string; exitCode: number; output: string }>;
+}
+
 export class WorkspaceHubSpaceUnavailable extends Error {
   constructor(readonly spaceId: string) {
     super(`Space ${spaceId} is unavailable on this machine`);
@@ -63,7 +76,7 @@ function ownerFor(spaceId: string, kind: 'user' | 'lifecycle' | 'service'): stri
 }
 
 function terminalKind(spaceId: string, owner: string | undefined): WorkspaceTerminalKind {
-  if (owner === ownerFor(spaceId, 'lifecycle')) return 'lifecycle';
+  if (owner === ownerFor(spaceId, 'lifecycle') || owner?.startsWith(`${ownerFor(spaceId, 'lifecycle')}:`)) return 'lifecycle';
   if (owner === ownerFor(spaceId, 'service') || owner?.startsWith(`${ownerFor(spaceId, 'service')}:`)) return 'service';
   if (owner === ownerFor(spaceId, 'user') || owner === undefined) return 'user';
   return 'agent';
@@ -146,6 +159,80 @@ export class WorkspaceHubTerminalCoordinator {
     const started = await scope.client.request({ op: 'start', spec, owner: `${ownerFor(spaceId, 'service')}:${serviceName}` });
     if (started.op !== 'start') throw new Error(`OMP Hub returned an invalid start response for service ${serviceName}`);
     return this.view(spaceId, started.daemon, spec);
+  }
+
+  async runLifecyclePlan(
+    spaceId: string,
+    phase: 'checks' | 'setup' | 'select' | 'remove',
+    steps: readonly WorkspaceLifecyclePlanStep[],
+    env: Record<string, string>,
+  ): Promise<WorkspaceLifecyclePlanResult> {
+    const scope = await this.scope(spaceId);
+    const name = `gitspace-life-${spaceId.slice(0, 10)}-${phase}-${crypto.randomUUID().slice(0, 8)}`;
+    const marker = (kind: 'START' | 'END', id: string) => `__GITSPACE_${kind}__${Buffer.from(id).toString('base64url')}`;
+    const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+    const plan = steps.flatMap((step) => {
+      const start = marker('START', step.id);
+      const end = marker('END', step.id);
+      const command = step.kind === 'script' ? `sh ${quote(step.command)}` : `sh -lc ${quote(step.command)}`;
+      return [
+        `printf '%s\\n' ${quote(start)}`,
+        command,
+        '__gitspace_status=$?',
+        `printf '%s:%s\\n' ${quote(end)} \"$__gitspace_status\"`,
+        'if [ \"$__gitspace_status\" -ne 0 ]; then exit \"$__gitspace_status\"; fi',
+      ];
+    }).join('\n');
+    const spec: DaemonSpec = {
+      name,
+      application: 'sh',
+      args: ['-c', plan],
+      env,
+      cwd: scope.space.rootPath,
+      pty: false,
+      restart: 'no',
+      persist: false,
+      detached: false,
+    };
+    const started = await scope.client.request({ op: 'start', spec, owner: `${ownerFor(spaceId, 'lifecycle')}:${phase}` });
+    if (started.op !== 'start') throw new Error(`OMP Hub returned an invalid lifecycle start response for ${phase}`);
+    const waited = await scope.client.request({ op: 'wait', name, for: 'exit', timeoutMs: 3_600_000 });
+    if (waited.op !== 'wait' || waited.timedOut) throw new Error(`Lifecycle ${phase} did not finish within one hour`);
+    const logs = await scope.client.request({ op: 'logs', name, lines: 10_000, head: true, follow: false, renderTerminalRows: false, timeoutMs: 30_000 });
+    if (logs.op !== 'logs') throw new Error(`OMP Hub returned an invalid lifecycle logs response for ${phase}`);
+    const output = logs.terminalText ?? logs.text;
+    const results: Array<{ id: string; exitCode: number; output: string }> = [];
+    for (const step of steps) {
+      const start = `${marker('START', step.id)}\n`;
+      const startAt = output.indexOf(start);
+      if (startAt < 0) continue;
+      const bodyAt = startAt + start.length;
+      const end = `${marker('END', step.id)}:`;
+      const endAt = output.indexOf(end, bodyAt);
+      if (endAt < 0) {
+        results.push({ id: step.id, exitCode: waited.daemon.exitCode ?? 1, output: output.slice(bodyAt).trimEnd() });
+        break;
+      }
+      const statusEnd = output.indexOf('\n', endAt);
+      const exitCode = Number(output.slice(endAt + end.length, statusEnd < 0 ? undefined : statusEnd));
+      results.push({ id: step.id, exitCode, output: output.slice(bodyAt, endAt).trimEnd() });
+    }
+    return { terminalName: name, exitCode: waited.daemon.exitCode ?? 1, output, steps: results };
+  }
+
+  async stopOwned(spaceId: string): Promise<void> {
+    const space = this.database.getSpace(spaceId);
+    if (!space) throw new WorkspaceHubSpaceUnavailable(spaceId);
+    const client = await this.clientForProject(space.rootPath);
+    const listed = await client.request({ op: 'list' });
+    if (listed.op !== 'list') throw new Error('OMP Hub returned an invalid list response');
+    for (const daemon of listed.daemons) {
+      if (daemon.state === 'exited' || daemon.state === 'failed') continue;
+      const described = await client.request({ op: 'describe', name: daemon.name });
+      if (described.op !== 'describe' || !described.daemon.owner?.startsWith(`gitspace:${spaceId}:`)) continue;
+      const stopped = await client.request({ op: 'stop', name: daemon.name, timeoutMs: 5_000 });
+      if (stopped.op !== 'stop') throw new Error(`OMP Hub returned an invalid stop response for ${daemon.name}`);
+    }
   }
 
   async read(spaceId: string, name: string, cursor: number | null): Promise<WorkspaceTerminalOutput> {

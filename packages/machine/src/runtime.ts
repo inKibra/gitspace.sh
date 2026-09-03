@@ -151,6 +151,7 @@ export async function startMachineRuntime() {
     authStorage,
     mcp,
     skills: configuredSkills,
+    spaceAuthority: authority,
   });
   const managedSpaceRoot = requiredEnvironment('GITSPACE_MANAGED_SPACE_ROOT');
   const sessions = new MachineSessionCoordinator(
@@ -173,9 +174,6 @@ export async function startMachineRuntime() {
     (userSettings) => gitIdentity.apply(userSettings),
   );
   await settings.start();
-  // Replacement successors continue only sessions drained from the prior generation.
-  const recovered = await sessions.recover();
-  if (recovered.status === 'error') throw recovered.error;
 
   for (const project of database.listProjects()) {
     const cloudProject = await authority.bootstrapProject({
@@ -568,6 +566,10 @@ export async function startMachineRuntime() {
           const startedAt = Date.now();
           try {
             await spaces.release(space, space.generation);
+            database.orm.insert(releasedSpaces)
+              .values({ spaceId: space.id, generation: space.generation + 1, releasedAt: new Date().toISOString() })
+              .onConflictDoUpdate({ target: releasedSpaces.spaceId, set: { generation: space.generation + 1, releasedAt: new Date().toISOString() } })
+              .run();
             stopLog(`[gitspace-release] ${space.id} released in ${Date.now() - startedAt}ms`);
           } catch (error) {
             stopLog(`[gitspace-release] ${space.id} failed: ${error instanceof Error ? error.stack ?? error.message : String(error)}`);

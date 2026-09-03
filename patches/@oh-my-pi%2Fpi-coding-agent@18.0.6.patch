@@ -1,5 +1,33 @@
+diff --git a/dist/types/internal-urls/local-protocol.d.ts b/dist/types/internal-urls/local-protocol.d.ts
+index 992b557..f731b0f 100644
+--- a/dist/types/internal-urls/local-protocol.d.ts
++++ b/dist/types/internal-urls/local-protocol.d.ts
+@@ -1,7 +1,14 @@
+ import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext, UrlCompletion } from "./types.js";
++export type LocalMountAccess = "read" | "write";
++export interface EvalNamespaceDefinition {
++    declaration: string;
++    call(method: string, args: unknown, signal?: AbortSignal): Promise<unknown>;
++}
+ export interface LocalProtocolOptions {
+     getArtifactsDir?: () => string | null;
+     getSessionId?: () => string | null;
++    getLocalMounts?: () => Record<string, LocalMountAccess>;
++    getEvalNamespaces?: () => Record<string, EvalNamespaceDefinition>;
+ }
+ /** Resolve the session-scoped local:// root, shortening long Windows artifact paths before writes hit MAX_PATH. */
+ export declare function resolveLocalRoot(options: LocalProtocolOptions, platform?: NodeJS.Platform): string;
+@@ -14,7 +21,7 @@ export declare function resolveLocalRoot(options: LocalProtocolOptions, platform
+  */
+ export declare function copyLocalArtifacts(sourceRoot: string, destinationRoot: string): Promise<void>;
+ /** Resolve a local:// URL to an on-disk path under the active session's local root. */
+-export declare function resolveLocalUrlToPath(input: string | InternalUrl, options: LocalProtocolOptions, platform?: NodeJS.Platform): string;
++export declare function resolveLocalUrlToPath(input: string | InternalUrl, options: LocalProtocolOptions, platform?: NodeJS.Platform, access?: LocalMountAccess): string;
+ /**
+  * On-disk roots the eval helpers (`read`/`write`) substitute for
+  * internal-URL schemes so e.g. `write("local://x.md")` lands where a later
 diff --git a/src/config/model-resolver.ts b/src/config/model-resolver.ts
-index 4682ea53218b1959d32e53e9dc420e8aa058912f..0c1710434e5e81356b355470457237cb0adb5060 100644
+index 4682ea5..0c17104 100644
 --- a/src/config/model-resolver.ts
 +++ b/src/config/model-resolver.ts
 @@ -40,6 +40,7 @@ import { isAuthenticated, kNoAuth, type ModelRegistry } from "./model-registry";
@@ -60,7 +88,7 @@ index 4682ea53218b1959d32e53e9dc420e8aa058912f..0c1710434e5e81356b355470457237cb
 +	);
 +}
 diff --git a/src/eval/agent-bridge.ts b/src/eval/agent-bridge.ts
-index 296e7726bd8e117d359a106a7909fe04004c7aca..73c9366ccaf9cfd08a4f63a7dedb540c01dd8b42 100644
+index 296e772..73c9366 100644
 --- a/src/eval/agent-bridge.ts
 +++ b/src/eval/agent-bridge.ts
 @@ -1,6 +1,8 @@
@@ -89,11 +117,587 @@ index 296e7726bd8e117d359a106a7909fe04004c7aca..73c9366ccaf9cfd08a4f63a7dedb540c
  	const turnBudget = options.session.getTurnBudget?.();
  	if (turnBudget?.hard && turnBudget.total !== null && turnBudget.spent >= turnBudget.total) {
  		throw new ToolError(
+diff --git a/src/eval/backend.ts b/src/eval/backend.ts
+index 50022d2..d827de9 100644
+--- a/src/eval/backend.ts
++++ b/src/eval/backend.ts
+@@ -1,4 +1,4 @@
+-import { buildEvalUrlRoots, type LocalProtocolOptions } from "../internal-urls";
++import { buildEvalUrlPolicies, buildEvalUrlRoots, type EvalNamespaceDefinition, type LocalProtocolOptions } from "../internal-urls";
+ import type { ToolSession } from "../tools";
+ import type { BackendProbeOptions } from "./probe";
+ import type { EvalDisplayOutput, EvalLanguage, EvalStatusEvent } from "./types";
+@@ -70,3 +70,15 @@ export function resolveEvalUrlRoots(session: ToolSession): Record<string, string
+ 	};
+ 	return buildEvalUrlRoots(options);
+ }
++
++export function resolveEvalUrlPolicies(session: ToolSession): Record<string, Record<string, "read" | "write">> {
++	const options: LocalProtocolOptions = session.localProtocolOptions ?? {
++		getArtifactsDir: () => session.getArtifactsDir?.() ?? null,
++		getSessionId: () => session.getSessionId?.() ?? null,
++	};
++	return buildEvalUrlPolicies(options);
++}
++
++export function resolveEvalNamespaces(session: ToolSession): Record<string, EvalNamespaceDefinition> {
++	return session.localProtocolOptions?.getEvalNamespaces?.() ?? {};
++}
+diff --git a/src/eval/executor-base.ts b/src/eval/executor-base.ts
+index 173302a..9e146ed 100644
+--- a/src/eval/executor-base.ts
++++ b/src/eval/executor-base.ts
+@@ -271,6 +271,7 @@ export const MANAGED_KERNEL_ENV_KEYS = [
+ 	"PI_TOOL_BRIDGE_TOKEN",
+ 	"PI_TOOL_BRIDGE_SESSION",
+ 	"PI_EVAL_LOCAL_ROOTS",
++	"PI_EVAL_LOCAL_POLICIES",
+ ] as const;
+ 
+ interface ManagedKernelEnvOptions {
+@@ -279,6 +280,7 @@ interface ManagedKernelEnvOptions {
+ 	bridgeSessionId?: string;
+ 	bridge?: { url: string; token: string };
+ 	localRoots?: Record<string, string>;
++	localPolicies?: Record<string, Record<string, "read" | "write">>;
+ }
+ interface ManagedKernelEnvPolicy {
+ 	sparse?: boolean;
+@@ -294,6 +296,7 @@ export function buildManagedKernelEnvPatch(
+ 	policy?: ManagedKernelEnvPolicy,
+ ): KernelEnvPatch {
+ 	const localRoots = options.localRoots;
++	const localPolicies = options.localPolicies;
+ 	if (policy?.sparse) {
+ 		const patch: Record<string, string | undefined> = {};
+ 		if (options.sessionFile) patch.PI_SESSION_FILE = options.sessionFile;
+@@ -304,6 +307,7 @@ export function buildManagedKernelEnvPatch(
+ 			patch.PI_TOOL_BRIDGE_SESSION = options.bridgeSessionId ?? "";
+ 		}
+ 		if (localRoots) patch.PI_EVAL_LOCAL_ROOTS = JSON.stringify(localRoots);
++		if (localPolicies) patch.PI_EVAL_LOCAL_POLICIES = JSON.stringify(localPolicies);
+ 		return patch;
+ 	}
+ 	return {
+@@ -313,6 +317,7 @@ export function buildManagedKernelEnvPatch(
+ 		PI_TOOL_BRIDGE_TOKEN: options.bridge?.token ?? null,
+ 		PI_TOOL_BRIDGE_SESSION: options.bridge && options.bridgeSessionId ? options.bridgeSessionId : null,
+ 		PI_EVAL_LOCAL_ROOTS: localRoots && Object.keys(localRoots).length > 0 ? JSON.stringify(localRoots) : null,
++		PI_EVAL_LOCAL_POLICIES: localPolicies && Object.keys(localPolicies).length > 0 ? JSON.stringify(localPolicies) : null,
+ 	};
+ }
+ 
+diff --git a/src/eval/jl/executor.ts b/src/eval/jl/executor.ts
+index 54dba0e..474455b 100644
+--- a/src/eval/jl/executor.ts
++++ b/src/eval/jl/executor.ts
+@@ -35,6 +35,7 @@ export interface JuliaExecutorOptions {
+ 	sessionFile?: string;
+ 	artifactsDir?: string;
+ 	localRoots?: Record<string, string>;
++	localPolicies?: Record<string, Record<string, "read" | "write">>;
+ 	interpreter?: string;
+ 	onChunk?: (text: string) => void | Promise<void>;
+ 	onStatus?: (event: EvalStatusEvent) => void;
+diff --git a/src/eval/jl/index.ts b/src/eval/jl/index.ts
+index 91b2476..4b20f2b 100644
+--- a/src/eval/jl/index.ts
++++ b/src/eval/jl/index.ts
+@@ -4,6 +4,7 @@ import {
+ 	type ExecutorBackendExecOptions,
+ 	type ExecutorBackendResult,
+ 	resolveEvalUrlRoots,
++	resolveEvalUrlPolicies,
+ } from "../backend";
+ import {
+ 	namespaceSessionId as sharedNamespace,
+@@ -44,6 +45,7 @@ export default {
+ 			sessionFile: opts.sessionFile,
+ 			artifactsDir: opts.session.getArtifactsDir?.() ?? undefined,
+ 			localRoots: resolveEvalUrlRoots(opts.session),
++			localPolicies: resolveEvalUrlPolicies(opts.session),
+ 			kernelOwnerId: opts.kernelOwnerId,
+ 			reset: opts.reset,
+ 			onChunk: opts.onChunk,
+diff --git a/src/eval/jl/prelude.jl b/src/eval/jl/prelude.jl
+index 1adcdbc..edba131 100644
+--- a/src/eval/jl/prelude.jl
++++ b/src/eval/jl/prelude.jl
+@@ -31,7 +31,7 @@ function __omp_url_decode(s::String)
+     return String(take!(res))
+ end
+ 
+-function __omp_resolve_path(p::AbstractString)
++function __omp_resolve_path(p::AbstractString, operation::String = "read")
+     m = match(r"^([a-z][a-z0-9+.\-]*)://(.*)$"i, p)
+     if m === nothing
+         return abspath(p)
+@@ -49,6 +49,18 @@ function __omp_resolve_path(p::AbstractString)
+     end
+     
+     relative = __omp_url_decode(replace(string(m.captures[2]), '\\' => '/'))
++    policies = try
++        Main.json_parse(get(ENV, "PI_EVAL_LOCAL_POLICIES", "{}"))
++    catch
++        Dict{String, Any}()
++    end
++    mounts = get(policies, scheme, nothing)
++    if mounts isa AbstractDict
++        mount = first(split(relative, '/'; limit=2))
++        granted = get(mounts, mount, nothing)
++        granted === nothing && error("$scheme://$relative is outside the authorized artifact mounts")
++        operation == "write" && granted != "write" && error("$scheme://$mount/ is read-only in this session")
++    end
+     root_path = abspath(string(root))
+     if isempty(relative)
+         return root_path
+@@ -126,7 +138,7 @@ function Base.read(path::AbstractString, offset::Integer=1, limit::Union{Integer
+ end
+ 
+ function Base.write(path::AbstractString, content::Any)
+-    resolved = __omp_resolve_path(string(path))
++    resolved = __omp_resolve_path(string(path), "write")
+     mkpath(dirname(resolved))
+     open(resolved, "w") do io
+         Base.write(io, string(content))
+diff --git a/src/eval/js/context-manager.ts b/src/eval/js/context-manager.ts
+index 14341ee..0177e0b 100644
+--- a/src/eval/js/context-manager.ts
++++ b/src/eval/js/context-manager.ts
+@@ -6,6 +6,7 @@ import {
+ 	workerEnvFromParent,
+ } from "../../subprocess/worker-client";
+ import type { ToolSession } from "../../tools";
++import type { EvalNamespaceDefinition } from "../../internal-urls";
+ import { ToolAbortError, ToolError } from "../../tools/tool-errors";
+ import { safeSend as safeSendIpc } from "../../utils/ipc";
+ import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../bridge-timeout";
+@@ -47,6 +48,7 @@ interface PendingRun {
+ 	runState: VmRunState;
+ 	toolSession: ToolSession;
+ 	resolve(value: { value: unknown }): void;
++	evalNamespaces: Record<string, EvalNamespaceDefinition>;
+ 	reject(error: Error): void;
+ 	toolCalls: Map<string, AbortController>;
+ 	/**
+@@ -132,6 +134,8 @@ export async function executeInVmContext(options: {
+ 	cwd: string;
+ 	session: ToolSession;
+ 	localRoots?: Record<string, string>;
++	localPolicies?: Record<string, Record<string, "read" | "write">>;
++	evalNamespaces?: Record<string, EvalNamespaceDefinition>;
+ 	reset?: boolean;
+ 	code: string;
+ 	filename: string;
+@@ -171,7 +175,13 @@ export async function executeInVmContext(options: {
+ 	}
+ 	const session = await acquireSession(
+ 		sessionKey,
+-		{ cwd: options.cwd, sessionId: options.sessionId, localRoots: options.localRoots },
++		{
++			cwd: options.cwd,
++			sessionId: options.sessionId,
++			localRoots: options.localRoots,
++			localPolicies: options.localPolicies,
++			evalNamespaces: Object.keys(options.evalNamespaces ?? {}),
++		},
+ 		options.timeoutMs,
+ 		options.ownerId,
+ 	);
+@@ -274,6 +284,8 @@ async function runOnce(
+ 		cwd: string;
+ 		session: ToolSession;
+ 		localRoots?: Record<string, string>;
++		localPolicies?: Record<string, Record<string, "read" | "write">>;
++		evalNamespaces?: Record<string, EvalNamespaceDefinition>;
+ 		code: string;
+ 		filename: string;
+ 		runState: VmRunState;
+@@ -285,6 +297,7 @@ async function runOnce(
+ 		runId,
+ 		runState: options.runState,
+ 		toolSession: options.session,
++		evalNamespaces: options.evalNamespaces ?? {},
+ 		resolve,
+ 		reject,
+ 		toolCalls: new Map(),
+@@ -327,7 +340,13 @@ async function runOnce(
+ 			runId,
+ 			code: options.code,
+ 			filename: options.filename,
+-			snapshot: { cwd: options.cwd, sessionId: options.sessionId, localRoots: options.localRoots },
++			snapshot: {
++				cwd: options.cwd,
++				sessionId: options.sessionId,
++				localRoots: options.localRoots,
++				localPolicies: options.localPolicies,
++				evalNamespaces: Object.keys(options.evalNamespaces ?? {}),
++			},
+ 		});
+ 		return await promise;
+ 	} finally {
+@@ -512,6 +531,13 @@ function trackDeferPhase(pending: PendingRun, event: JsStatusEvent): void {
+ 	pending.deferDrained = undefined;
+ }
+ 
++function parseNamespaceCall(args: unknown): { namespace: string; method: string; args: unknown } | null {
++	if (!args || typeof args !== "object") return null;
++	const value = args as Record<string, unknown>;
++	if (typeof value.namespace !== "string" || typeof value.method !== "string") return null;
++	return { namespace: value.namespace, method: value.method, args: value.args };
++}
++
+ async function handleToolCall(session: JsSession, msg: Extract<WorkerOutbound, { type: "tool-call" }>): Promise<void> {
+ 	const pending = session.pending.get(msg.runId);
+ 	if (!pending) {
+@@ -533,20 +559,24 @@ async function handleToolCall(session: JsSession, msg: Extract<WorkerOutbound, {
+ 	const ctrl = new AbortController();
+ 	pending.toolCalls.set(msg.id, ctrl);
+ 	try {
+-		const value = await callSessionTool(msg.name, msg.args, {
+-			session: pending.toolSession,
+-			signal: ctrl.signal,
+-			emitStatus: (event: JsStatusEvent) => {
+-				trackDeferPhase(pending, event);
+-				pending.runState.onDisplay?.({ type: "status", event });
+-			},
+-		});
++		const namespaceCall = msg.name === "__eval_namespace__" ? parseNamespaceCall(msg.args) : null;
++		const definition = namespaceCall ? pending.evalNamespaces[namespaceCall.namespace] : undefined;
++		if (namespaceCall && !definition) throw new ToolError(`Eval namespace ${namespaceCall.namespace} is unavailable`);
++		const value = namespaceCall
++			? await definition!.call(namespaceCall.method, namespaceCall.args, ctrl.signal)
++			: await callSessionTool(msg.name, msg.args, {
++					session: pending.toolSession,
++					signal: ctrl.signal,
++					emitStatus: (event: JsStatusEvent) => {
++						trackDeferPhase(pending, event);
++						pending.runState.onDisplay?.({ type: "status", event });
++					},
++				});
+ 		safeSend(session, { type: "tool-reply", id: msg.id, reply: { ok: true, value } });
+ 	} catch (error) {
+ 		safeSend(session, { type: "tool-reply", id: msg.id, reply: { ok: false, error: toErrorPayload(error) } });
+ 	} finally {
+ 		pending.toolCalls.delete(msg.id);
+-		// Last call of a run whose worker result was withheld: settle it now.
+ 		const held = pending.heldResult;
+ 		if (held && !pending.settled && !pending.aborted && pending.toolCalls.size === 0) {
+ 			finishPending(pending, held);
+diff --git a/src/eval/js/executor.ts b/src/eval/js/executor.ts
+index d515b08..0e1f6c7 100644
+--- a/src/eval/js/executor.ts
++++ b/src/eval/js/executor.ts
+@@ -1,5 +1,5 @@
+ import { DEFAULT_MAX_BYTES, OutputSink } from "../../session/streaming-output";
+-import type { ToolSession } from "../../tools";
++import type { EvalNamespaceDefinition } from "../../internal-urls";
+ import { resolveOutputMaxColumns, resolveOutputSinkHeadBytes } from "../../tools/output-meta";
+ import { isEvalTimeoutControlEvent } from "../bridge-timeout";
+ import { executeInVmContext, type JsDisplayOutput } from "./context-manager";
+@@ -28,6 +28,8 @@ export interface JsExecutorOptions {
+ 	session: ToolSession;
+ 	/** On-disk roots the helpers substitute for internal-URL schemes (e.g. `local://`). */
+ 	localRoots?: Record<string, string>;
++	localPolicies?: Record<string, Record<string, "read" | "write">>;
++	evalNamespaces?: Record<string, EvalNamespaceDefinition>;
+ }
+ 
+ export interface JsResult {
+@@ -106,6 +108,8 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
+ 			cwd: options.cwd ?? options.session.cwd,
+ 			session: options.session,
+ 			localRoots: options.localRoots,
++			localPolicies: options.localPolicies,
++			evalNamespaces: options.evalNamespaces,
+ 			reset: options.reset,
+ 			code,
+ 			filename: `js-cell-${crypto.randomUUID()}.js`,
+diff --git a/src/eval/js/index.ts b/src/eval/js/index.ts
+index 6842a26..c52c6ba 100644
+--- a/src/eval/js/index.ts
++++ b/src/eval/js/index.ts
+@@ -3,6 +3,8 @@ import {
+ 	type ExecutorBackend,
+ 	type ExecutorBackendExecOptions,
+ 	type ExecutorBackendResult,
++	resolveEvalNamespaces,
++	resolveEvalUrlPolicies,
+ 	resolveEvalUrlRoots,
+ } from "../backend";
+ import { namespaceSessionId as sharedNamespace, toExecutorBackendResult } from "../backend-helpers";
+@@ -23,6 +25,7 @@ export default {
+ 	},
+ 
+ 	async execute(code: string, opts: ExecutorBackendExecOptions): Promise<ExecutorBackendResult> {
++		const evalNamespaces = resolveEvalNamespaces(opts.session);
+ 		const result = await executeJs(code, {
+ 			cwd: opts.cwd,
+ 			idleTimeoutMs: opts.idleTimeoutMs,
+@@ -35,6 +38,8 @@ export default {
+ 			onStatus: opts.onStatus,
+ 			session: opts.session,
+ 			localRoots: resolveEvalUrlRoots(opts.session),
++			localPolicies: resolveEvalUrlPolicies(opts.session),
++			evalNamespaces,
+ 		});
+ 		return toExecutorBackendResult(result);
+ 	},
+diff --git a/src/eval/js/shared/helpers.ts b/src/eval/js/shared/helpers.ts
+index 0cbbb0f..aebef32 100644
+--- a/src/eval/js/shared/helpers.ts
++++ b/src/eval/js/shared/helpers.ts
+@@ -22,6 +22,7 @@ export interface HelperContext {
+ 	 * to `<root>/x.md` before any filesystem op; unknown schemes are rejected.
+ 	 */
+ 	localRoots(): Record<string, string>;
++	localPolicies(): Record<string, Record<string, "read" | "write">>;
+ 	emitStatus(event: JsStatusEvent): void;
+ }
+ 
+@@ -115,12 +116,19 @@ function resolveHelperPath(ctx: HelperContext, rawPath: string, op: "read" | "wr
+ 	if (!root) {
+ 		throw new ToolError(`Protocol paths are not supported by ${op}(): ${rawPath}`);
+ 	}
+-	return resolveUnderRoot(scheme, root, match[2], rawPath);
++	return resolveUnderRoot(scheme, root, match[2], rawPath, op, ctx.localPolicies()[scheme]);
+ }
+ 
+ /** Resolve an internal-URL relative path under its root, mirroring the host
+  *  local-protocol handler: decode, reject absolute/traversal, confine to root. */
+-function resolveUnderRoot(scheme: string, root: string, rawRelative: string, rawPath: string): string {
++function resolveUnderRoot(
++	scheme: string,
++	root: string,
++	rawRelative: string,
++	rawPath: string,
++	op: "read" | "write",
++	mounts?: Record<string, "read" | "write">,
++): string {
+ 	let relative: string;
+ 	try {
+ 		relative = decodeURIComponent(rawRelative.replaceAll("\\", "/"));
+@@ -128,7 +136,10 @@ function resolveUnderRoot(scheme: string, root: string, rawRelative: string, raw
+ 		throw new ToolError(`Invalid URL encoding in ${scheme}:// path: ${rawPath}`);
+ 	}
+ 	const rootPath = path.resolve(root);
+-	if (relative === "") return rootPath;
++	if (relative === "") {
++		if (op === "write" && mounts) throw new ToolError(`${scheme}:// root is not writable`);
++		return rootPath;
++	}
+ 	if (path.isAbsolute(relative)) {
+ 		throw new ToolError(`Absolute paths are not allowed in ${scheme}:// URLs: ${rawPath}`);
+ 	}
+@@ -136,6 +147,12 @@ function resolveUnderRoot(scheme: string, root: string, rawRelative: string, raw
+ 	if (normalized.startsWith("..") || normalized.includes("/../") || normalized.includes("/..")) {
+ 		throw new ToolError(`Path traversal (..) is not allowed in ${scheme}:// URLs: ${rawPath}`);
+ 	}
++	if (mounts) {
++		const mount = normalized.replaceAll("\\", "/").split("/", 1)[0] ?? "";
++		const granted = mounts[mount];
++		if (!granted) throw new ToolError(`${scheme}://${normalized} is outside the authorized artifact mounts`);
++		if (op === "write" && granted !== "write") throw new ToolError(`${scheme}://${mount}/ is read-only in this session`);
++	}
+ 	const resolved = path.resolve(rootPath, normalized);
+ 	if (resolved !== rootPath && !resolved.startsWith(`${rootPath}${path.sep}`)) {
+ 		throw new ToolError(`${scheme}:// path escapes its root: ${rawPath}`);
+diff --git a/src/eval/js/shared/prelude.txt b/src/eval/js/shared/prelude.txt
+index 9acdf51..b0d46f7 100644
+--- a/src/eval/js/shared/prelude.txt
++++ b/src/eval/js/shared/prelude.txt
+@@ -275,6 +275,28 @@ if (!globalThis.__omp_js_prelude_loaded__) {
+ 		},
+ 	};
+ 
++	const namespaceProxy = (namespace, path = []) =>
++		new Proxy(() => undefined, {
++			get(_target, prop) {
++				if (prop === "then") return undefined;
++				if (typeof prop !== "string") return undefined;
++				return namespaceProxy(namespace, [...path, prop]);
++			},
++			apply(_target, _thisArg, args) {
++				if (path.length === 0) throw new TypeError(`${namespace} is a namespace, not a function`);
++				const value = args.length <= 1 ? args[0] : args;
++				return globalThis.__omp_call_tool__("__eval_namespace__", {
++					namespace,
++					method: path.join("."),
++					args: value ?? {},
++				});
++			},
++		});
++
++	for (const namespace of globalThis.__omp_eval_namespaces__ ?? []) {
++		globalThis[namespace] = namespaceProxy(namespace);
++	}
++
+ 	globalThis.console = consoleBridge;
+ 	globalThis.print = consoleBridge.log;
+ 	globalThis.display = display;
+diff --git a/src/eval/js/shared/runtime.ts b/src/eval/js/shared/runtime.ts
+index 29ef3fe..e287994 100644
+--- a/src/eval/js/shared/runtime.ts
++++ b/src/eval/js/shared/runtime.ts
+@@ -70,6 +70,8 @@ export interface RuntimeOptions {
+ 	 * `{ local: "/…/artifacts/local" }`). Stable for the worker's lifetime.
+ 	 */
+ 	localRoots?: Record<string, string>;
++	localPolicies?: Record<string, Record<string, "read" | "write">>;
++	evalNamespaces?: string[];
+ }
+ 
+ // Strict base64: characters from the standard alphabet plus optional `=` padding, and a
+@@ -191,6 +193,7 @@ export class JsRuntime {
+ 	#env: Map<string, string>;
+ 	#als = new AsyncLocalStorage<RunContext>();
+ 	#moduleLoader: LocalModuleLoader;
++	#localPolicies: Record<string, Record<string, "read" | "write">>;
+ 	#localRoots: Record<string, string>;
+ 
+ 	constructor(opts: RuntimeOptions) {
+@@ -199,14 +202,16 @@ export class JsRuntime {
+ 		this.sessionId = opts.sessionId;
+ 		this.#env = new Map();
+ 		this.#moduleLoader = new LocalModuleLoader(this.sessionId);
++		this.#localPolicies = opts.localPolicies ?? {};
+ 		this.#localRoots = opts.localRoots ?? {};
+ 		this.helpers = createHelpers({
+ 			cwd: () => this.#activeCwd(),
+ 			env: this.#env,
++			localPolicies: () => this.#localPolicies,
+ 			localRoots: () => this.#localRoots,
+ 			emitStatus: event => this.#activeHooks("emitStatus")?.onDisplay({ type: "status", event }),
+ 		});
+-		this.#install(opts.extraGlobals);
++		this.#install(opts.extraGlobals, opts.evalNamespaces);
+ 	}
+ 
+ 	get cwd(): string {
+@@ -351,13 +356,14 @@ export class JsRuntime {
+ 		return dynamicRequire;
+ 	}
+ 
+-	#install(extraGlobals: Record<string, unknown> | undefined): void {
++	#install(extraGlobals: Record<string, unknown> | undefined, evalNamespaces: string[] = []): void {
+ 		// Constructing a runtime while another same-realm runtime is mid-run would
+ 		// silently replace the live runtime's globals (Object.assign + prelude eval
+ 		// below). Fail before any global/stack mutation; WorkerCore reports it as
+ 		// init-failed instead of corrupting the active run.
+ 		assertCanUseGlobalOwner(this.#globalOwner, "initialize a JS runtime");
+ 		const injected: Record<string, unknown> = {
++			__omp_eval_namespaces__: evalNamespaces,
+ 			__omp_session__: this.#session,
+ 			__omp_helpers__: this.helpers,
+ 			__omp_call_tool__: async (name: string, args: unknown) => {
+@@ -425,6 +431,7 @@ export class JsRuntime {
+ 		const allGlobalKeys = new Set<string>([
+ 			...Object.keys(injected),
+ 			...Object.keys(extraGlobals ?? {}),
++			...evalNamespaces,
+ 			...PRELUDE_GLOBAL_KEYS,
+ 		]);
+ 
+diff --git a/src/eval/js/worker-core.ts b/src/eval/js/worker-core.ts
+index 6706e75..65c933f 100644
+--- a/src/eval/js/worker-core.ts
++++ b/src/eval/js/worker-core.ts
+@@ -237,6 +237,8 @@ export class WorkerCore {
+ 			initialCwd: snapshot.cwd,
+ 			sessionId: snapshot.sessionId,
+ 			localRoots: snapshot.localRoots,
++			localPolicies: snapshot.localPolicies,
++			evalNamespaces: snapshot.evalNamespaces,
+ 		});
+ 		return this.#runtime;
+ 	}
+diff --git a/src/eval/js/worker-protocol.ts b/src/eval/js/worker-protocol.ts
+index 65586f3..789ec0f 100644
+--- a/src/eval/js/worker-protocol.ts
++++ b/src/eval/js/worker-protocol.ts
+@@ -11,6 +11,8 @@ export interface SessionSnapshot {
+ 	 * accept `local://…` paths instead of writing a literal `local:/` directory.
+ 	 */
+ 	localRoots?: Record<string, string>;
++	localPolicies?: Record<string, Record<string, "read" | "write">>;
++	evalNamespaces?: string[];
+ }
+ 
+ export interface RunErrorPayload {
+diff --git a/src/eval/py/executor.ts b/src/eval/py/executor.ts
+index ceef235..45f2e45 100644
+--- a/src/eval/py/executor.ts
++++ b/src/eval/py/executor.ts
+@@ -85,6 +85,7 @@ export interface PythonExecutorOptions {
+ 	 * where `read local://x` resolves instead of a literal `local:/` directory.
+ 	 */
+ 	localRoots?: Record<string, string>;
++	localPolicies?: Record<string, Record<string, "read" | "write">>;
+ 	/**
+ 	 * ToolSession used to resolve host-side `tool.<name>(args)` calls made from
+ 	 * the Python prelude's bridge proxy. When omitted, the bridge env vars are
+diff --git a/src/eval/py/index.ts b/src/eval/py/index.ts
+index ccddd5d..44e465b 100644
+--- a/src/eval/py/index.ts
++++ b/src/eval/py/index.ts
+@@ -4,6 +4,7 @@ import {
+ 	type ExecutorBackendExecOptions,
+ 	type ExecutorBackendResult,
+ 	resolveEvalUrlRoots,
++	resolveEvalUrlPolicies,
+ } from "../backend";
+ import {
+ 	readSetting,
+@@ -46,6 +47,7 @@ export default {
+ 			sessionFile: opts.sessionFile,
+ 			artifactsDir: opts.session.getArtifactsDir?.() ?? undefined,
+ 			localRoots: resolveEvalUrlRoots(opts.session),
++			localPolicies: resolveEvalUrlPolicies(opts.session),
+ 			kernelOwnerId: opts.kernelOwnerId,
+ 			reset: opts.reset,
+ 			onChunk: opts.onChunk,
 diff --git a/src/eval/py/prelude.py b/src/eval/py/prelude.py
-index a0bf1f970327d35d579277bb10d78880cc66a416..17027a4d20226a168368b0646545b0706acc00a9 100644
+index a0bf1f9..565dc34 100644
 --- a/src/eval/py/prelude.py
 +++ b/src/eval/py/prelude.py
-@@ -498,6 +498,17 @@ if "__omp_prelude_loaded__" not in globals():
+@@ -79,7 +79,7 @@ if "__omp_prelude_loaded__" not in globals():
+             return result["text"]
+         return result
+ 
+-    def _resolve_omp_path(path: str | Path) -> Path:
++    def _resolve_omp_path(path: str | Path, operation: str = "read") -> Path:
+         """Map a helper path to a real filesystem Path.
+ 
+         A `scheme://…` whose scheme has an injected on-disk root (e.g.
+@@ -101,6 +101,18 @@ if "__omp_prelude_loaded__" not in globals():
+         if not root:
+             raise ValueError(f"Protocol paths are not supported by this helper: {path}")
+         relative = unquote(match.group(2).replace("\\", "/"))
++        try:
++            policies = json.loads(os.environ.get("PI_EVAL_LOCAL_POLICIES") or "{}")
++        except (ValueError, TypeError):
++            policies = {}
++        mounts = policies.get(scheme) if isinstance(policies, dict) else None
++        if isinstance(mounts, dict):
++            mount = relative.split("/", 1)[0]
++            granted = mounts.get(mount)
++            if not granted:
++                raise ValueError(f"{scheme}://{relative} is outside the authorized artifact mounts")
++            if operation == "write" and granted != "write":
++                raise ValueError(f"{scheme}://{mount}/ is read-only in this session")
+         # Mirror the host `path.resolve`/`resolveLocalUrlToPath`: normalize and
+         # make absolute WITHOUT realpath'ing symlinks (Path.resolve would turn
+         # /tmp into /private/tmp and diverge from the read-side resolution).
+@@ -137,7 +149,7 @@ if "__omp_prelude_loaded__" not in globals():
+ 
+     def write(path: str | Path, content: str) -> Path:
+         """Write file contents (create parents)."""
+-        p = _resolve_omp_path(path)
++        p = _resolve_omp_path(path, "write")
+         p.parent.mkdir(parents=True, exist_ok=True)
+         p.write_text(content, encoding="utf-8")
+         _emit_status("write", path=str(p), chars=len(content))
+@@ -498,6 +510,17 @@ if "__omp_prelude_loaded__" not in globals():
      ):
          """Run a subagent and return its final output or structured data.
  
@@ -111,11 +715,116 @@ index a0bf1f970327d35d579277bb10d78880cc66a416..17027a4d20226a168368b0646545b070
          `schema` overrides agent and session schemas. `schema_mode` is
          `"permissive"` or `"strict"`. `handle=True` returns the child output
          reference and metadata, with parsed data under `"data"` when available.
+diff --git a/src/eval/rb/executor.ts b/src/eval/rb/executor.ts
+index 17fc8f7..2fb1115 100644
+--- a/src/eval/rb/executor.ts
++++ b/src/eval/rb/executor.ts
+@@ -68,6 +68,7 @@ export interface RubyExecutorOptions {
+ 	 * `PI_EVAL_LOCAL_ROOTS` (JSON).
+ 	 */
+ 	localRoots?: Record<string, string>;
++	localPolicies?: Record<string, Record<string, "read" | "write">>;
+ 	/**
+ 	 * ToolSession used to resolve host-side `tool.<name>(args)` calls. When
+ 	 * omitted, the bridge env vars are not injected and `tool.foo(...)` raises.
+diff --git a/src/eval/rb/index.ts b/src/eval/rb/index.ts
+index 985d937..fef0c96 100644
+--- a/src/eval/rb/index.ts
++++ b/src/eval/rb/index.ts
+@@ -4,6 +4,7 @@ import {
+ 	type ExecutorBackendExecOptions,
+ 	type ExecutorBackendResult,
+ 	resolveEvalUrlRoots,
++	resolveEvalUrlPolicies,
+ } from "../backend";
+ import {
+ 	namespaceSessionId as sharedNamespace,
+@@ -44,6 +45,7 @@ export default {
+ 			sessionFile: opts.sessionFile,
+ 			artifactsDir: opts.session.getArtifactsDir?.() ?? undefined,
+ 			localRoots: resolveEvalUrlRoots(opts.session),
++			localPolicies: resolveEvalUrlPolicies(opts.session),
+ 			kernelOwnerId: opts.kernelOwnerId,
+ 			reset: opts.reset,
+ 			onChunk: opts.onChunk,
+diff --git a/src/eval/rb/prelude.rb b/src/eval/rb/prelude.rb
+index c6ae9c3..5fd2561 100644
+--- a/src/eval/rb/prelude.rb
++++ b/src/eval/rb/prelude.rb
+@@ -27,7 +27,7 @@ unless defined?($__omp_prelude_loaded) && $__omp_prelude_loaded
+   # Map a helper path to a real filesystem path. A `scheme://…` whose scheme has
+   # an injected on-disk root (PI_EVAL_LOCAL_ROOTS, e.g. `local://`) is rewritten
+   # under that root; plain paths pass through; any other `scheme://` is rejected.
+-  def __omp_resolve_path(path)
++  def __omp_resolve_path(path, operation = "read")
+     return path unless path.is_a?(String)
+     m = path.match(%r{\A([a-z][a-z0-9+.\-]*)://(.*)\z}i)
+     return path unless m
+@@ -42,6 +42,14 @@ unless defined?($__omp_prelude_loaded) && $__omp_prelude_loaded
+     root = roots.is_a?(Hash) ? roots[scheme] : nil
+     raise "Protocol paths are not supported by this helper: #{path}" if root.nil? || root.to_s.empty?
+     relative = __omp_url_decode(m[2].tr("\\", "/"))
++    policies = JSON.parse(ENV.fetch("PI_EVAL_LOCAL_POLICIES", "{}")) rescue {}
++    mounts = policies.is_a?(Hash) ? policies[scheme] : nil
++    if mounts.is_a?(Hash)
++      mount = relative.split("/", 2).first
++      granted = mounts[mount]
++      raise "#{scheme}://#{relative} is outside the authorized artifact mounts" unless granted
++      raise "#{scheme}://#{mount}/ is read-only in this session" if operation == "write" && granted != "write"
++    end
+     root_path = File.absolute_path(root.to_s)
+     return root_path if relative.empty?
+     if relative.start_with?("/") || relative.split("/").include?("..")
+@@ -104,7 +112,7 @@ unless defined?($__omp_prelude_loaded) && $__omp_prelude_loaded
+   end
+ 
+   def write(path, content)
+-    resolved = __omp_resolve_path(path)
++    resolved = __omp_resolve_path(path, "write")
+     require "fileutils"
+     FileUtils.mkdir_p(File.dirname(resolved.to_s))
+     File.write(resolved.to_s, content.to_s)
 diff --git a/src/internal-urls/local-protocol.ts b/src/internal-urls/local-protocol.ts
-index 942cb98f43a9318925fcf6f7e029dbf8c0341d8d..a845a60a34123a828d6dcfd7db401344c87f9842 100644
+index 942cb98..b4d347e 100644
 --- a/src/internal-urls/local-protocol.ts
 +++ b/src/internal-urls/local-protocol.ts
-@@ -243,7 +243,10 @@ function extractRelativePath(url: InternalUrl): string {
+@@ -9,9 +9,18 @@ import { parseInternalUrl } from "./parse";
+ import { validateRelativePath } from "./skill-protocol";
+ import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext, UrlCompletion } from "./types";
+ 
++export type LocalMountAccess = "read" | "write";
++
++export interface EvalNamespaceDefinition {
++	declaration: string;
++	call(method: string, args: unknown, signal?: AbortSignal): Promise<unknown>;
++}
++
+ export interface LocalProtocolOptions {
+ 	getArtifactsDir?: () => string | null;
+ 	getSessionId?: () => string | null;
++	getLocalMounts?: () => Record<string, LocalMountAccess>;
++	getEvalNamespaces?: () => Record<string, EvalNamespaceDefinition>;
+ }
+ 
+ function parseLocalUrl(input: string): InternalUrl {
+@@ -190,8 +199,14 @@ async function listFilesRecursively(rootPath: string): Promise<string[]> {
+ 	return files.sort((a, b) => a.localeCompare(b));
+ }
+ 
+-async function buildListing(url: InternalUrl, localRoot: string): Promise<InternalResource> {
+-	const files = await listFilesRecursively(localRoot);
++function visibleLocalFiles(files: string[], options: LocalProtocolOptions): string[] {
++	const mounts = options.getLocalMounts?.();
++	if (!mounts) return files;
++	return files.filter(file => Boolean(mounts[file.split("/", 1)[0] ?? ""]));
++}
++
++async function buildListing(url: InternalUrl, localRoot: string, options: LocalProtocolOptions): Promise<InternalResource> {
++	const files = visibleLocalFiles(await listFilesRecursively(localRoot), options);
+ 	const listing = files.length === 0 ? "(empty)" : files.map(file => `- [${file}](local://${file})`).join("\n");
+ 	const content =
+ 		`# Local\n\n` +
+@@ -243,7 +258,10 @@ function extractRelativePath(url: InternalUrl): string {
  export function resolveLocalRoot(options: LocalProtocolOptions, platform: NodeJS.Platform = process.platform): string {
  	const artifactsDir = options.getArtifactsDir?.();
  	if (artifactsDir) {
@@ -127,8 +836,87 @@ index 942cb98f43a9318925fcf6f7e029dbf8c0341d8d..a845a60a34123a828d6dcfd7db401344
  		if (platform === "win32" && candidate.length >= WINDOWS_LOCAL_ROOT_MAX_CHARS) {
  			return shortLocalRoot(options);
  		}
+@@ -295,20 +313,38 @@ async function copyLocalArtifactEntries(sourceDir: string, destinationDir: strin
+ 	}
+ }
+ 
+-/** Resolve a local:// URL to an on-disk path under the active session's local root. */
++function assertLocalMountAccess(relativePath: string, options: LocalProtocolOptions, access: LocalMountAccess): void {
++	const mounts = options.getLocalMounts?.();
++	if (!mounts) return;
++	const mount = relativePath.split("/", 1)[0] ?? "";
++	const granted = mounts[mount];
++	if (!granted) {
++		throw new Error(`local://${relativePath} is outside the authorized artifact mounts`);
++	}
++	if (access === "write" && granted !== "write") {
++		throw new Error(`local://${mount}/ is read-only in this session`);
++	}
++}
++
++/** Resolve a local:// URL to an on-disk path under the active session's authorized artifact mounts. */
+ export function resolveLocalUrlToPath(
+ 	input: string | InternalUrl,
+ 	options: LocalProtocolOptions,
+ 	platform: NodeJS.Platform = process.platform,
++	access: LocalMountAccess = "read",
+ ): string {
+ 	const url = typeof input === "string" ? parseLocalUrl(input) : input;
+ 	const localRoot = path.resolve(resolveLocalRoot(options, platform));
+ 	const relativePath = extractRelativePath(url);
+ 
+ 	if (!relativePath) {
++		if (access === "write" && options.getLocalMounts) {
++			throw new Error("The local:// root is not writable; select an authorized mount");
++		}
+ 		return localRoot;
+ 	}
+ 
++	assertLocalMountAccess(relativePath, options, access);
+ 	const resolved = path.resolve(localRoot, relativePath);
+ 	ensureWithinRoot(resolved, localRoot);
+ 	return resolved;
+@@ -327,6 +363,12 @@ export function buildEvalUrlRoots(options: LocalProtocolOptions): Record<string,
+ 	return { local: resolveLocalRoot(options) };
+ }
+ 
++/** Serializable mount policy consumed by eval language helpers. */
++export function buildEvalUrlPolicies(options: LocalProtocolOptions): Record<string, Record<string, LocalMountAccess>> {
++	const mounts = options.getLocalMounts?.();
++	return mounts ? { local: mounts } : {};
++}
++
+ const LOCAL_WRITE_NOTE = "Use write path local://<file> to persist large intermediate artifacts across turns.";
+ 
+ type ResolvedLocalTarget =
+@@ -356,6 +398,7 @@ async function resolveLocalTarget(url: InternalUrl, opts: LocalProtocolOptions):
+ 	}
+ 
+ 	const relativePath = extractRelativePath(url);
++	if (relativePath) assertLocalMountAccess(relativePath, opts, "read");
+ 	const targetPath = relativePath ? path.resolve(resolvedRoot, relativePath) : resolvedRoot;
+ 	ensureWithinRoot(targetPath, resolvedRoot);
+ 
+@@ -489,7 +532,7 @@ export class LocalProtocolHandler implements ProtocolHandler {
+ 
+ 		const resolved = await resolveLocalTarget(url, opts);
+ 		if (resolved.kind === "listing") {
+-			return buildListing(url, resolved.root);
++			return buildListing(url, resolved.root, opts);
+ 		}
+ 		if (resolved.kind === "directory") {
+ 			return buildDirectoryResource(url.href, resolved.path, [LOCAL_WRITE_NOTE]);
+@@ -503,7 +546,7 @@ export class LocalProtocolHandler implements ProtocolHandler {
+ 		if (!opts) return [];
+ 		const localRoot = path.resolve(resolveLocalRoot(opts));
+ 		try {
+-			const files = await listFilesRecursively(localRoot);
++			const files = visibleLocalFiles(await listFilesRecursively(localRoot), opts);
+ 			return files.map(value => ({ value }));
+ 		} catch (err) {
+ 			if (isEnoent(err)) return [];
 diff --git a/src/sdk.ts b/src/sdk.ts
-index e450d68ebe1dc9e1eea292c2b56e6655e9f8a229..05f2b0c2571b01fa5fe5b0783082935f53388dde 100644
+index e450d68..05f2b0c 100644
 --- a/src/sdk.ts
 +++ b/src/sdk.ts
 @@ -3530,6 +3530,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
@@ -143,7 +931,7 @@ index e450d68ebe1dc9e1eea292c2b56e6655e9f8a229..05f2b0c2571b01fa5fe5b0783082935f
  			advisorWatchdogPrompt,
  			advisorContextPrompt,
 diff --git a/src/session/agent-session-types.ts b/src/session/agent-session-types.ts
-index 3a5a8f52c1791c685669b36e2f8eeca904d99977..6f638d36aaf9bb83628368e262fc733d89af002a 100644
+index 3a5a8f5..6f638d3 100644
 --- a/src/session/agent-session-types.ts
 +++ b/src/session/agent-session-types.ts
 @@ -19,6 +19,7 @@ import type {
@@ -164,7 +952,7 @@ index 3a5a8f52c1791c685669b36e2f8eeca904d99977..6f638d36aaf9bb83628368e262fc733d
  	scoutAllowedBySpawnPolicy?: boolean;
  	/** Whether the caller explicitly requested yolo/auto-approve behavior for this session. */
 diff --git a/src/session/agent-session.ts b/src/session/agent-session.ts
-index 6cbd5669da7acb7791d45f44b4092a4288c15cb0..a166e17a70e8d742abacbba0d9e88f14f0aab6e3 100644
+index 6cbd566..a166e17 100644
 --- a/src/session/agent-session.ts
 +++ b/src/session/agent-session.ts
 @@ -473,6 +473,8 @@ export class AgentSession {
@@ -230,7 +1018,7 @@ index 6cbd5669da7acb7791d45f44b4092a4288c15cb0..a166e17a70e8d742abacbba0d9e88f14
  	 * Pop the last queued message (steering first, then follow-up).
  	 * Used by dequeue keybinding to restore messages to editor one at a time.
 diff --git a/src/session/blob-store.ts b/src/session/blob-store.ts
-index 7d66cea6114821550afe290810faadd35b2ae309..120f112617b3c4ed8ebcc9cdd9ac01c16d1efc1f 100644
+index 7d66cea..120f112 100644
 --- a/src/session/blob-store.ts
 +++ b/src/session/blob-store.ts
 @@ -206,6 +206,20 @@ export function isImageDataUrl(data: string): boolean {
@@ -293,3 +1081,43 @@ index 7d66cea6114821550afe290810faadd35b2ae309..120f112617b3c4ed8ebcc9cdd9ac01c1
  	}
  	return buffer.toString("base64");
  }
+diff --git a/src/tools/eval.ts b/src/tools/eval.ts
+index 962d362..9044d3f 100644
+--- a/src/tools/eval.ts
++++ b/src/tools/eval.ts
+@@ -339,7 +339,12 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
+ 				autoBackgroundEnabled: this.session.settings.get("eval.autoBackground.enabled"),
+ 			});
+ 		}
+-		return this.#codeModeDescription(base) ?? base;
++		const description = this.#codeModeDescription(base) ?? base;
++		const namespaces = this.session?.localProtocolOptions?.getEvalNamespaces?.() ?? {};
++		const declarations = Object.entries(namespaces)
++			.map(([name, definition]) => `declare const ${name}: ${definition.declaration};`)
++			.join("\n");
++		return declarations ? `${description}\n\nHost SDK namespaces available in JavaScript:\n\`\`\`ts\n${declarations}\n\`\`\`` : description;
+ 	}
+ 
+ 	/**
+diff --git a/src/tools/plan-mode-guard.ts b/src/tools/plan-mode-guard.ts
+index 12d97fb..068e634 100644
+--- a/src/tools/plan-mode-guard.ts
++++ b/src/tools/plan-mode-guard.ts
+@@ -136,6 +136,17 @@ export function enforcePlanModeWrite(
+ 	targetPath: string,
+ 	options?: { move?: string; op?: "create" | "update" | "delete" },
+ ): void {
++	const localOptions = planLocalProtocolOptions(session);
++	for (const candidate of [targetPath, options?.move]) {
++		if (!candidate) continue;
++		const normalized = normalizeLocalScheme(unwrapHashlineHeaderPath(candidate));
++		if (!normalized.startsWith(LOCAL_SCHEME_PREFIX)) continue;
++		try {
++			resolveLocalUrlToPath(normalized, localOptions, process.platform, "write");
++		} catch (error) {
++			throw new ToolError(error instanceof Error ? error.message : String(error));
++		}
++	}
+ 	const state = session.getPlanModeState?.();
+ 	if (!state?.enabled) return;
+ 

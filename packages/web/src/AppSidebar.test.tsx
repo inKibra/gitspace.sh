@@ -60,4 +60,21 @@ describe('AppSidebar Source pill', () => {
     expect(html).not.toMatch(/relay-hardening<\/span><\/span><span[^>]*title="GitSpace is running/u);
     expect(render({ ...sidebarDeploymentFixture, status: { ...deploymentStatusFixture, desired: { ...deploymentStatusFixture.desired, sha: null } } })).not.toContain('GitSpace is running from this workspace');
   });
+
+  it('keeps released spaces inline and visually marks them as released', () => {
+    if (verticalSliceFixture.workspace.kind !== 'workspace') throw new Error('Expected workspace fixture');
+    const released = { ...verticalSliceFixture.workspace, holder: { kind: 'released' as const } };
+    const html = renderToStaticMarkup(<SidebarProvider persist={false}><AppSidebar {...base} selected={released} projects={[{ base: verticalSliceFixture.baseSpace, workspaces: [released] }]} onClose={() => undefined} onReopen={() => undefined} deployment={null} /></SidebarProvider>);
+    expect(html).toContain('· released');
+    expect(html).not.toContain('>Closed<');
+    expect(html).not.toContain('>Archived<');
+  });
+
+  it('reserves the collapsed disclosure for archived spaces', () => {
+    if (verticalSliceFixture.workspace.kind !== 'workspace') throw new Error('Expected workspace fixture');
+    const archived = { ...verticalSliceFixture.workspace, closedAt: new Date('2026-09-01T00:00:00.000Z') };
+    const html = renderToStaticMarkup(<SidebarProvider persist={false}><AppSidebar {...base} projects={[{ base: verticalSliceFixture.baseSpace, workspaces: [archived] }]} deployment={null} /></SidebarProvider>);
+    expect(html).toContain('>Archived<');
+    expect(html).not.toContain('>Closed<');
+  });
 });

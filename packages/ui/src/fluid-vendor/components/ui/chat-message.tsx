@@ -14,6 +14,8 @@ interface ChatMessageProps
   /** Who sent the message. Drives alignment and bubble colour:
    *  `user` → right-aligned accent bubble, `assistant` → left-aligned plain text. */
   from: "user" | "assistant";
+  /** Persisted attachment previews rendered above the bubble. */
+  attachments?: ReactNode;
   /** Optional attachments rendered as square thumbnails above the bubble. */
   files?: File[];
   /** Side length of each attachment thumbnail in pixels. Defaults to 64. */
@@ -39,7 +41,7 @@ interface ChatMessageProps
 // lets earlier messages slide up smoothly when a new one is appended.
 const ChatMessage = forwardRef<HTMLDivElement, ChatMessageProps>(
   (
-    { from, files, thumbnailSize = 64, time, actions, children, size, className, ...props },
+    { from, attachments, files, thumbnailSize = 64, time, actions, children, size, className, ...props },
     ref
   ) => {
     const shape = useShape();
@@ -59,20 +61,21 @@ const ChatMessage = forwardRef<HTMLDivElement, ChatMessageProps>(
         transition={spring.moderate}
         style={{ transformOrigin: isUser ? "bottom right" : "bottom left" }}
         className={cn(
-          "group flex max-w-[80%] flex-col gap-1.5",
-          isUser ? "items-end self-end" : "items-start self-start",
+          "group flex flex-col gap-1.5",
+          isUser ? "max-w-[80%] items-end self-end" : "w-full max-w-none items-stretch self-stretch",
           className
         )}
         {...props}
       >
-        {files && files.length > 0 && (
+        {(attachments != null || (files && files.length > 0)) && (
           <div
             className={cn(
-              "flex flex-wrap gap-1.5",
+              "flex max-w-full flex-wrap gap-1.5",
               isUser ? "justify-end" : "justify-start"
             )}
           >
-            {files.map((file, i) => (
+            {attachments}
+            {files?.map((file, i) => (
               <FileThumbnail
                 key={`${file.name}-${file.size}-${file.lastModified}-${i}`}
                 file={file}
@@ -100,7 +103,7 @@ const ChatMessage = forwardRef<HTMLDivElement, ChatMessageProps>(
                     // stays put as the text grows.
                     "text-pretty bg-[color-mix(in_oklab,var(--accent),var(--background)_45%)] text-accent-foreground"
                   )
-                : "text-foreground"
+                : "min-w-0 w-full text-foreground"
             )}
           >
             {children}

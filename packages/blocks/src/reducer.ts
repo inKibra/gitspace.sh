@@ -1,4 +1,4 @@
-import type { RichContentBlock, SideAgentBlock, ToolCallBlock, TransportBlock, TurnBlock, TurnItem } from './model.js';
+import type { MessageImage, RichContentBlock, SideAgentBlock, ToolCallBlock, TransportBlock, TurnBlock, TurnItem } from './model.js';
 
 export interface TranscriptEventInput {
   sessionId: string;
@@ -33,6 +33,38 @@ function contentText(content: unknown): string {
     const item = record(part);
     return item?.type === 'text' && typeof item.text === 'string' ? item.text : '';
   }).join('');
+}
+
+const IMAGE_MIME_TYPES: Record<MessageImage['mimeType'], true> = {
+  'image/png': true,
+  'image/jpeg': true,
+  'image/webp': true,
+};
+
+function contentImages(content: unknown): MessageImage[] {
+  if (!Array.isArray(content)) return [];
+  const images: MessageImage[] = [];
+  for (const part of content) {
+    const item = record(part);
+    if (
+      item?.type !== 'image'
+      || typeof item.data !== 'string'
+      || !item.data
+      || typeof item.mimeType !== 'string'
+      || IMAGE_MIME_TYPES[item.mimeType as MessageImage['mimeType']] !== true
+    ) continue;
+    images.push({ data: item.data, mimeType: item.mimeType as MessageImage['mimeType'] });
+  }
+  return images;
+}
+
+function richImages(id: string, content: unknown): RichContentBlock[] {
+  return contentImages(content).map((image, index) => ({
+    id: `${id}:${index}`,
+    type: 'image',
+    url: `data:${image.mimeType};base64,${image.data}`,
+    alt: `Tool output image ${index + 1}`,
+  }));
 }
 
 function toolTarget(tool: string, args: Record<string, unknown>): string | undefined {
@@ -175,12 +207,13 @@ export function reduceTranscriptToTurns(events: readonly TranscriptEventInput[])
       if (!message || typeof message.role !== 'string') continue;
       if (message.role === 'user') {
         const text = contentText(message.content);
-        if (!text) continue;
+        const images = contentImages(message.content);
+        if (!text && images.length === 0) continue;
         // Rehydrated transcripts carry no turn_start/turn_end, so a user message
         // landing on a turn that already has content is the next turn's opener.
         if (current && (current.user || current.items.length > 0)) commit('done', timestamp(event.createdAt));
         const turn = ensureTurn(event);
-        turn.user = { id: `${turn.id}:user`, type: 'message', role: 'user', text };
+        turn.user = { id: `${turn.id}:user`, type: 'message', role: 'user', text, ...(images.length ? { images } : {}) };
         continue;
       }
       const turn = ensureTurn(event);
@@ -222,7 +255,10 @@ export function reduceTranscriptToTurns(events: readonly TranscriptEventInput[])
         tool.status = message.isError === true ? 'error' : 'done';
         tool.endedAt = timestamp(event.createdAt);
         tool.details = message.details;
-        tool.result = richText(`${tool.id}:result`, contentText(message.content));
+        tool.result = [
+          ...richText(`${tool.id}:result`, contentText(message.content)),
+          ...richImages(`${tool.id}:result:image`, message.content),
+        ];
         if (tool.tool === 'task' || tool.tool === 'hub') turn.sideAgents.push(...sideAgents(message.details, turn.id));
       }
       continue;

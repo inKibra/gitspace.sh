@@ -1,5 +1,5 @@
 import { reduceTranscriptToTurns, type TransportBlock, type TurnBlock } from '@gitspace/blocks';
-import type { DeploymentStatusView, LaunchProgressView, OmpSettingValue, ProviderLoginEvent, ReleaseTarget, RepositoryDiffView, RepositoryFileView, RepositoryMode, UserSettings } from '@gitspace/protocol';
+import type { DeploymentStatusView, EnvironmentBundle as ProtocolEnvironmentBundle, LaunchProgressView, OmpSettingValue, ProviderLoginEvent, ReleaseTarget, RepositoryDiffView, RepositoryFileView, RepositoryMode, UserSettings } from '@gitspace/protocol';
 import type { ProjectMcpGrantRpcView } from '@gitspace/protocol/mcp-contract';
 import { Button, InputField, InputGroup, ThinkingIndicator } from '@gitspace/ui';
 import { Key01 } from '@untitledui/icons';
@@ -13,6 +13,8 @@ import { createApiClient, enrollDevice, type ApiClientDraft } from './device.js'
 import { applyAppearance } from './appearance.js';
 import type { ProviderLoginFlow, ProvidersSectionProps } from './ProvidersSection.js';
 import { SettingsPage } from './SettingsPage.js';
+import { EnvironmentView } from './environment/EnvironmentView.js';
+import type { EnvironmentCheckDefinition as EnvironmentCheckView, EnvironmentViewModel, LifecyclePhase, LifecycleRun } from './environment/types.js';
 import { Inspector } from './inspector/index.js';
 import { appendLaunchProgress, converging, launchTrackFrom, RELEASE_TARGETS, shortSha, type LaunchTrack } from './release.js';
 import { productRouteFromLocation, setProductRoute, type AppView, type ProductRoute } from './routes.js';
@@ -76,6 +78,98 @@ function isLaunchStatus(value: unknown): value is LaunchProgressView['status'] {
 function optionalQueryParameter(name: string): string | null {
   if (typeof window === 'undefined') return null;
   return new URL(window.location.href).searchParams.get(name);
+}
+
+function LiveEnvironment({ projectName, workspaceName, spaceId, workspace }: { projectName: string; workspaceName: string; spaceId: string; workspace: boolean }) {
+  const query = useResultQuery(rpcClient.environment.get, { spaceId });
+  const [actionError, setActionError] = useState<string | null>(null);
+  if (query.state === 'pending') return <div className="flex flex-1 items-center justify-center"><ThinkingIndicator aria-label="Loading workspace setup…" /></div>;
+  if (query.state === 'failure') return <EmptyState title="Workspace setup could not load" description={query.error.message} />;
+  const remote = query.value;
+  const bundle = JSON.parse(remote.bundleJson) as ProtocolEnvironmentBundle;
+  const mutate = (operation: () => Promise<unknown>): void => {
+    setActionError(null);
+    void operation().then(() => query.refetch()).catch((error: unknown) => setActionError(error instanceof Error ? error.message : String(error)));
+  };
+  const saveBundle = (next: ProtocolEnvironmentBundle): void => mutate(async () => {
+    const result = await rpcClient.environment.putBundle({ spaceId, bundleJson: JSON.stringify(next) });
+    if (result.status === 'error') throw result.error;
+  });
+  const openSecrets = (): void => {
+    window.history.pushState({}, '', setProductRoute(new URL(window.location.href), 'secrets'));
+    window.dispatchEvent(new PopStateEvent('popstate'));
+  };
+  const lastRun = (executionHash: string, executionId: string): LifecycleRun => {
+    const run = remote.runs.find((candidate) => candidate.status !== 'running' && candidate.executionHashes.includes(executionHash));
+    if (!run) return { status: 'never' };
+    const startedAt = new Date(run.startedAt).getTime();
+    const finishedAt = new Date(run.finishedAt ?? run.startedAt).getTime();
+    const output = run.results.find((result) => result.id === executionId)?.output ?? run.output;
+    const relativeTime = new Date(run.finishedAt ?? run.startedAt).toLocaleString();
+    const duration = `${Math.max(0, finishedAt - startedAt)}ms`;
+    return run.status === 'failed'
+      ? { status: 'failed', relativeTime, duration, output: output || `Exited ${run.exitCode ?? 1}` }
+      : { status: 'succeeded', relativeTime, duration, ...(output ? { output } : {}) };
+  };
+  const latestChecks = remote.runs.find((run) => run.phase === 'checks' && run.status !== 'running');
+  const model: EnvironmentViewModel = {
+    project: { name: projectName, repository: projectName },
+    workspace: { name: workspaceName, profile: remote.selectedProfile, machineId: 'current' },
+    bundle: {
+      default: bundle.defaultProfile,
+      checks: Object.fromEntries(Object.entries(bundle.checks).map(([id, definition]) => [id, definition.kind === 'built-in'
+        ? { id, label: definition.label ?? definition.check, source: 'catalog' as const, requirement: definition.requirement, probe: remote.executions.find((item) => item.kind === 'check' && item.id === id)?.command, trust: { status: remote.executions.find((item) => item.kind === 'check' && item.id === id)?.approval ? 'approved' as const : 'pending' as const, commandHash: remote.executions.find((item) => item.kind === 'check' && item.id === id)?.hash ?? '', approvedBy: remote.executions.find((item) => item.kind === 'check' && item.id === id)?.approval ?? undefined, approvedAt: remote.executions.find((item) => item.kind === 'check' && item.id === id)?.approval ? 'inherited approval' : undefined } as EnvironmentCheckView['trust'] }
+        : { id, label: definition.label, source: 'custom' as const, probe: definition.command, trust: { status: remote.executions.find((item) => item.kind === 'check' && item.id === id)?.approval ? 'approved' as const : 'pending' as const, commandHash: remote.executions.find((item) => item.kind === 'check' && item.id === id)?.hash ?? '', approvedBy: remote.executions.find((item) => item.kind === 'check' && item.id === id)?.approval ?? undefined, approvedAt: remote.executions.find((item) => item.kind === 'check' && item.id === id)?.approval ? 'inherited approval' : undefined } as EnvironmentCheckView['trust'] }])),
+      profiles: Object.fromEntries(Object.entries(bundle.profiles).map(([name, profile]) => [name, { checks: profile.checks, secrets: profile.secrets, inputs: profile.values, notes: profile.notes ?? '' }])),
+      inputs: bundle.values,
+    },
+    machines: [{
+      id: 'current',
+      label: 'this machine',
+      platform: navigator.platform.toLowerCase().includes('mac') ? 'darwin' : navigator.platform.toLowerCase().includes('win') ? 'win32' : 'linux',
+      current: true,
+      capabilities: Object.fromEntries(remote.executions.filter((item) => item.kind === 'check').map((item) => {
+        const result = latestChecks?.results.find((candidate) => candidate.id === item.id);
+        return [item.id, result ? { status: result.exitCode === 0 ? 'pass' as const : 'fail' as const, output: result.output || `Exited ${result.exitCode}` } : { status: 'unprobed' as const }];
+      })),
+    }],
+    lifecycle: remote.executions.filter((item) => item.kind === 'script').map((item) => ({
+      id: item.id,
+      phase: item.phase!,
+      path: `${item.phase}/${item.fileName}`,
+      command: item.command,
+      ...(item.fileName?.match(/\.([a-z][a-z0-9-]*)\.sh$/u)?.[1] ? { profiles: [item.fileName.match(/\.([a-z][a-z0-9-]*)\.sh$/u)![1]!] } : {}),
+      trust: item.approval ? { status: 'approved', approvedBy: item.approval, approvedAt: 'inherited approval', commandHash: item.hash } : { status: 'pending', commandHash: item.hash },
+      lastRun: lastRun(item.hash, item.id),
+    })),
+    secrets: remote.effective.secrets.map((name) => ({ name, source: 'project', granted: remote.configuredSecrets.includes(name), requiredBy: [remote.selectedProfile] })),
+    inputValues: Object.entries(remote.values.effective).map(([name, value]) => ({ name, value, source: name in remote.values.workspace ? 'workspace' : 'project' })),
+  };
+  const updateProfile = (transform: (profile: ProtocolEnvironmentBundle['profiles'][string]) => ProtocolEnvironmentBundle['profiles'][string]): ProtocolEnvironmentBundle => ({
+    ...bundle,
+    profiles: { ...bundle.profiles, [remote.selectedProfile]: transform(bundle.profiles[remote.selectedProfile]!) },
+  });
+  return <div className="flex min-h-0 flex-1 flex-col">
+    {actionError ? <p className="border-b border-destructive/30 px-4 py-2 text-caption text-destructive">{actionError}</p> : null}
+    <EnvironmentView
+      model={model}
+      onProfileChange={(profile) => mutate(async () => { const result = await rpcClient.environment.setProfile({ spaceId, profile }); if (result.status === 'error') throw result.error; })}
+      onApprove={(targetId) => { const execution = remote.executions.find((item) => item.id === targetId); if (execution) mutate(async () => { const result = await rpcClient.environment.approve({ spaceId, scope: workspace ? 'workspace' : 'project', executionHash: execution.hash }); if (result.status === 'error') throw result.error; }); }}
+      onRevoke={(targetId) => { const execution = remote.executions.find((item) => item.id === targetId); if (execution?.approval) mutate(async () => { const result = await rpcClient.environment.revokeApproval({ spaceId, scope: execution.approval!, executionHash: execution.hash }); if (result.status === 'error') throw result.error; }); }}
+      onGrantSecret={openSecrets}
+      onInputChange={(name, value) => mutate(async () => { const result = await rpcClient.environment.putValue({ spaceId, scope: workspace ? 'workspace' : 'project', name, value }); if (result.status === 'error') throw result.error; })}
+      onFixCheck={() => undefined}
+      onUpdateCheck={(checkId, patch) => saveBundle({ ...bundle, checks: { ...bundle.checks, [checkId]: bundle.checks[checkId]?.kind === 'command' ? { kind: 'command', label: patch.label ?? bundle.checks[checkId].label, command: patch.probe ?? bundle.checks[checkId].command } : { ...bundle.checks[checkId]!, label: patch.label, requirement: patch.requirement } } })}
+      onDeleteCheck={(checkId) => saveBundle({ ...bundle, checks: Object.fromEntries(Object.entries(bundle.checks).filter(([id]) => id !== checkId)), profiles: Object.fromEntries(Object.entries(bundle.profiles).map(([name, profile]) => [name, { ...profile, checks: profile.checks.filter((id) => id !== checkId) }])) })}
+      onAddCheck={(check) => saveBundle({ ...updateProfile((profile) => ({ ...profile, checks: [...new Set([...profile.checks, check.id])] })), checks: { ...bundle.checks, [check.id]: check.source === 'catalog' ? { kind: 'built-in', check: check.id, label: check.label, requirement: check.requirement } : { kind: 'command', command: check.probe ?? '', label: check.label } } })}
+      onAddValue={(name, defaultValue) => saveBundle({ ...updateProfile((profile) => ({ ...profile, values: [...new Set([...profile.values, name])] })), values: { ...bundle.values, [name]: defaultValue ? { default: defaultValue } : {} } })}
+      onOpenSecrets={openSecrets}
+      onOpenLifecycleFile={() => undefined}
+      onRunChecks={() => mutate(async () => { const result = await rpcClient.environment.runChecks({ spaceId }); if (result.status === 'error') throw result.error; })}
+      onOpenLifecycleOutput={() => undefined}
+      onRunLifecycle={(phase: LifecyclePhase) => mutate(async () => { const result = await rpcClient.environment.runPhase({ spaceId, phase }); if (result.status === 'error') throw result.error; })}
+    />
+  </div>;
 }
 
 function LiveInspector({
@@ -191,6 +285,7 @@ function LiveInspector({
     overview={overview.value}
     scope={scope}
     workspaces={workspaces}
+    environment={<LiveEnvironment projectName={scope.projectName} workspaceName={scope.name} spaceId={spaceId} workspace={scope.kind === 'workspace'} />}
     onSelectWorkspace={onSelectWorkspace}
     onSetRelations={onSetRelations}
     stackStatus={stackStatus.state === 'success' ? stackStatus.value : null}
@@ -345,8 +440,12 @@ function LiveWorkspace({ onOpenSettings, enterAction, defaultMachineId, activeVi
     return () => { cancelled = true; };
   }, [projectsQuery.state, projectsQuery.state === 'success' ? projectsQuery.value.map((project) => `${project.id}:${project.revision}`).join('|') : '']);
   const mcpToolsQuery = useResultQuery(rpcClient.mcp.discover, { projectId }, { enabled: projectId.length > 0 });
-  const liveSessionId = bootstrap.state === 'success' ? bootstrap.value.mainAgent?.id ?? '' : '';
+  const liveSession = bootstrap.state === 'success' ? bootstrap.value.mainAgent : null;
+  const liveSessionId = liveSession?.id ?? '';
   const sessionControlQuery = useResultQuery(rpcClient.session.control, { sessionId: liveSessionId }, { enabled: liveSessionId.length > 0 });
+  useEffect(() => {
+    if (liveSessionId && liveSession?.state !== 'closed') void sessionControlQuery.refetch();
+  }, [liveSessionId, liveSession?.state]);
   const [transport, setTransport] = useState<TransportBlock[]>([]);
   const [inspectorRefreshToken, setInspectorRefreshToken] = useState(0);
   // Self-development: what GitSpace runs, polled every 3s while a launch runs
@@ -505,6 +604,8 @@ function LiveWorkspace({ onOpenSettings, enterAction, defaultMachineId, activeVi
 
   const prompt = useResultMutation(rpcClient.session.prompt);
   const archiveWorkspace = useResultMutation(rpcClient.workspace.archive);
+  const closeSpace = useResultMutation(rpcClient.space.close);
+  const reopenSpace = useResultMutation(rpcClient.space.reopen);
   const createProject = useResultMutation(rpcClient.project.create);
   const createWorkspace = useResultMutation(rpcClient.workspace.create);
   const archiveProject = useResultMutation(rpcClient.project.archive);
@@ -523,21 +624,19 @@ function LiveWorkspace({ onOpenSettings, enterAction, defaultMachineId, activeVi
     const destination = machinesQuery.value.find((machine) => machine.id === destinationMachineId);
     if (!target || !destination?.rpcEndpoint) throw new Error('Move destination is unavailable');
     const source = target.possessedBy ?? 'its machine';
-    setTransport([{ id: 'move-close', type: 'transport', title: `Checkpointing on ${source}`, detail: 'Publishing Git and agent checkpoint', status: 'reconnecting' }]);
-    // Archive routes to the current holder; restore is the one call whose
-    // destination is a choice, so it goes to the chosen machine explicitly.
-    const closed = await archiveWorkspace.mutateAsync({ spaceId: targetSpaceId, expectedGeneration: target.spaceGeneration });
+    setTransport([{ id: 'move-close', type: 'transport', title: `Closing on ${source}`, detail: 'Publishing Git and agent checkpoint', status: 'reconnecting' }]);
+    const closed = await closeSpace.mutateAsync({ spaceId: targetSpaceId, expectedGeneration: target.spaceGeneration });
     if (closed.status === 'error') throw closed.error;
     setTransport([
-      { id: 'move-close', type: 'transport', title: `Checkpointed on ${source}`, detail: 'Source files removed', status: 'replaced' },
-      { id: 'move-open', type: 'transport', title: `Opening on ${destination.label}`, detail: 'Restoring repository and agent', status: 'reconnecting' },
+      { id: 'move-close', type: 'transport', title: `Closed on ${source}`, detail: 'Local files retained', status: 'replaced' },
+      { id: 'move-open', type: 'transport', title: `Reopening on ${destination.label}`, detail: 'Claiming the canonical space', status: 'reconnecting' },
     ]);
     const destinationUrl = destination.id === homeMachineId ? '/rpc' : destination.rpcEndpoint;
-    const opened = await createGitSpaceBrowserClient({ url: destinationUrl }).workspace.restore({ spaceId: targetSpaceId, expectedGeneration: closed.value.generation });
+    const opened = await createGitSpaceBrowserClient({ url: destinationUrl }).space.reopen({ spaceId: targetSpaceId, expectedGeneration: closed.value.generation });
     if (opened.status === 'error') throw opened.error;
     setTransport([
-      { id: 'move-close', type: 'transport', title: `Checkpointed on ${source}`, detail: 'Source files removed', status: 'replaced' },
-      { id: 'move-open', type: 'transport', title: `Opened on ${destination.label}`, detail: 'Canonical agent restored', status: 'restored' },
+      { id: 'move-close', type: 'transport', title: `Closed on ${source}`, detail: 'Local files retained', status: 'replaced' },
+      { id: 'move-open', type: 'transport', title: `Reopened on ${destination.label}`, detail: 'Canonical space claimed', status: 'restored' },
     ]);
     routedTransport.invalidate();
     await Promise.all([placementsQuery.refetch(), bootstrap.refetch()]);
@@ -559,7 +658,10 @@ function LiveWorkspace({ onOpenSettings, enterAction, defaultMachineId, activeVi
     const expectedGeneration = bootstrap.value.checkpoint && targetSpaceId === (workspaceId ?? bootstrap.value.baseSpace.id)
       ? bootstrap.value.checkpoint.generation
       : target.spaceGeneration;
-    const opened = await createGitSpaceBrowserClient({ url: destinationUrl }).workspace.restore({ spaceId: targetSpaceId, expectedGeneration });
+    const destinationClient = createGitSpaceBrowserClient({ url: destinationUrl });
+    const opened = target.closedAt
+      ? await destinationClient.workspace.restore({ spaceId: targetSpaceId, expectedGeneration })
+      : await destinationClient.space.reopen({ spaceId: targetSpaceId, expectedGeneration });
     if (opened.status === 'error') throw opened.error;
     routedTransport.invalidate();
     await Promise.all([placementsQuery.refetch(), bootstrap.refetch(), projectsQuery.refetch()]);
@@ -765,6 +867,19 @@ function LiveWorkspace({ onOpenSettings, enterAction, defaultMachineId, activeVi
           const result = await rpcClient.secrets.delete({ projectId, name });
           if (result.status === 'error') throw result.error;
         },
+        listValues: async () => {
+          const result = await rpcClient.environment.get({ spaceId: baseSpace.id });
+          if (result.status === 'error') throw result.error;
+          return { global: result.value.values.global, project: result.value.values.project };
+        },
+        putValue: async (valueScope, name, environmentValue) => {
+          const result = await rpcClient.environment.putValue({ spaceId: baseSpace.id, scope: valueScope, name, value: environmentValue });
+          if (result.status === 'error') throw result.error;
+        },
+        deleteValue: async (valueScope, name) => {
+          const result = await rpcClient.environment.deleteValue({ spaceId: baseSpace.id, scope: valueScope, name });
+          if (result.status === 'error') throw result.error;
+        },
       },
       crons: {
         projectId,
@@ -899,9 +1014,24 @@ function LiveWorkspace({ onOpenSettings, enterAction, defaultMachineId, activeVi
         url.searchParams.delete('workspace');
         window.location.assign(setProductRoute(url, 'agent'));
       },
-      onCloseWorkspace: async (targetSpaceId: string) => {
+      onCloseSpace: async (targetSpaceId: string) => {
         const target = targetSpaceId === value.baseSpace.id ? value.baseSpace : value.workspaces.find((candidate) => candidate.id === targetSpaceId);
         if (!target) throw new Error(`Space ${targetSpaceId} is unavailable`);
+        const result = await closeSpace.mutateAsync({ spaceId: targetSpaceId, expectedGeneration: target.spaceGeneration });
+        if (result.status === 'error') throw result.error;
+        await Promise.all([placementsQuery.refetch(), bootstrap.refetch()]);
+      },
+      onReopenSpace: async (targetSpaceId: string) => {
+        const target = targetSpaceId === value.baseSpace.id ? value.baseSpace : value.workspaces.find((candidate) => candidate.id === targetSpaceId);
+        if (!target) throw new Error(`Space ${targetSpaceId} is unavailable`);
+        const result = await reopenSpace.mutateAsync({ spaceId: targetSpaceId, expectedGeneration: target.spaceGeneration });
+        if (result.status === 'error') throw result.error;
+        routedTransport.invalidate();
+        await Promise.all([placementsQuery.refetch(), bootstrap.refetch()]);
+      },
+      onArchiveWorkspace: async (targetSpaceId: string) => {
+        const target = value.workspaces.find((candidate) => candidate.id === targetSpaceId);
+        if (!target) throw new Error(`Workspace ${targetSpaceId} is unavailable`);
         const result = await archiveWorkspace.mutateAsync({ spaceId: targetSpaceId, expectedGeneration: target.spaceGeneration });
         if (result.status === 'error') throw result.error;
         await Promise.all([bootstrap.refetch(), projectsQuery.refetch()]);

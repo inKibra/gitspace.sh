@@ -134,14 +134,19 @@ export const environmentFixture: EnvironmentViewModel = {
   bundle: {
     default: 'backend',
     profiles: {
-      backend: {
-        checks: ['bun', 'git', 'gh', 'wrangler', 'cloudflared', 'docker', 'db-migrated'],
-        secrets: ['CLOUDFLARE_API_TOKEN', 'ANTHROPIC_API_KEY'],
+      base: {
+        checks: ['bun', 'git', 'gh'],
+        secrets: ['ANTHROPIC_API_KEY'],
         inputs: ['region'],
+        notes: 'Shared requirements run in every workspace.',
+      },
+      backend: {
+        checks: ['wrangler', 'cloudflared', 'docker', 'db-migrated'],
+        secrets: ['CLOUDFLARE_API_TOKEN'],
+        inputs: [],
         notes: 'Needs ~8GB RAM. Postgres runs in docker.',
       },
       ios: {
-        extends: 'backend',
         checks: ['xcode', 'fastlane'],
         secrets: ['APPLE_TEAM_ID'],
         inputs: [],

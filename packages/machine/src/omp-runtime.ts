@@ -11,7 +11,9 @@ import {
   type AuthStorage,
   type SessionTreeNode,
 } from '@oh-my-pi/pi-coding-agent';
+import type { CloudSpaceCheckpointAuthority } from './cloud-space-authority.js';
 import type { MachineMcpCoordinator, ProjectedMcpSession } from './local-mcp.js';
+import { createSpaceEvalNamespace } from './space-eval-sdk.js';
 
 export interface OmpRuntimeEvent {
   type: string;
@@ -87,6 +89,7 @@ export interface EmbeddedOmpRuntimeOptions {
   authStorage?: () => Promise<AuthStorage>;
   mcp?: MachineMcpCoordinator;
   skills?: readonly SkillView[];
+  spaceAuthority?: CloudSpaceCheckpointAuthority;
 }
 
 interface PermissionEventBus {
@@ -233,6 +236,13 @@ export class EmbeddedOmpRuntime implements OmpRuntime {
         ? configured.scope === 'project' || configured.scope === 'all'
         : configured.scope === 'workspaces' || configured.scope === 'all';
     });
+    const localProtocolOptions = {
+      getArtifactsDir: () => artifactsDir,
+      getSessionId: () => sessionId,
+      getLocalMounts: (): Record<string, 'read' | 'write'> => workspaceId === null
+        ? { base: 'write' }
+        : { base: 'read', workspace: 'write' },
+    };
     let result: Awaited<ReturnType<typeof createAgentSession>>;
     try {
       result = await createAgentSession({
@@ -247,8 +257,11 @@ export class EmbeddedOmpRuntime implements OmpRuntime {
         ...(authStorage ? { authStorage } : {}),
         ...(projectedMcp ? { mcpManager: projectedMcp.manager } : {}),
         localProtocolOptions: {
-          getArtifactsDir: () => artifactsDir,
-          getSessionId: () => sessionId,
+          ...localProtocolOptions,
+          getEvalNamespaces: () => ({
+            ...(this.options.spaceAuthority ? { space: createSpaceEvalNamespace(this.options.spaceAuthority, projectId, workspaceId) } : {}),
+            ...(projectedMcp ? { mcp: projectedMcp.evalNamespace(localProtocolOptions) } : {}),
+          }),
         },
       });
     } catch (error) {
@@ -272,6 +285,22 @@ export class EmbeddedOmpRuntime implements OmpRuntime {
       await session.removeVibeToolsPreservingActive();
       session.setVibeModeState(undefined);
     }
+    const writableArtifactMount = workspaceId === null ? 'base' : 'workspace';
+    const qualifyLocalArtifactPath = (value: string): string => {
+      if (!value.startsWith('local://')) return value;
+      const relative = value.slice('local://'.length);
+      const mount = relative.split('/', 1)[0];
+      return mount === 'base' || mount === 'workspace' || mount === 'workspaces'
+        ? value
+        : `local://${writableArtifactMount}/${relative}`;
+    };
+    const planState = session.getPlanModeState();
+    if (planState) {
+      const planFilePath = qualifyLocalArtifactPath(planState.planFilePath);
+      if (planFilePath !== planState.planFilePath) session.setPlanModeState({ ...planState, planFilePath });
+    }
+    const planReferencePath = session.getPlanReferencePath();
+    session.setPlanReferencePath(qualifyLocalArtifactPath(planReferencePath || 'local://PLAN.md'));
     let goalPreviousTools: string[] | null = null;
     sessionId = session.sessionId;
     await manager.ensureOnDisk();

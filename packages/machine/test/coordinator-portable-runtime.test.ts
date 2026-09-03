@@ -208,7 +208,7 @@ describe('CoordinatorPortableSpaceRuntime', () => {
     expect(listed.value.map((entry) => entry.path)).toContain('agent.txt');
     database.close();
   });
-  it('releases a space with local files kept, projects its checkpoint read-only, and reclaims it on the same machine', async () => {
+  it('releases a space with local files kept and only reopens it explicitly', async () => {
     const root = mkdtempSync(join(tmpdir(), 'gitspace-coordinator-release-'));
     roots.push(root);
     const workspaceRoot = join(root, 'workspace');
@@ -229,7 +229,7 @@ describe('CoordinatorPortableSpaceRuntime', () => {
     expect(database.createWorkspace({ id: 'workspace-a', projectId: 'project-a', name: 'Workspace', branch: 'main', rootPath: workspaceRoot }).status).toBe('ok');
     expect(database.possessWorkspace('workspace-a', 'machine-a').status).toBe('ok');
     const artifacts = new LocalArtifactResolver(database, new MemoryArtifactObjectStore(), join(root, 'artifact-cache'), new Uint8Array(32).fill(3));
-    const coordinator = new MachineSessionCoordinator(database, artifacts, new PortableOmpRuntime(sessionFile), 'machine-a', join(root, 'runtime'), new FactEventStore(database));
+    const coordinator = new MachineSessionCoordinator(database, artifacts, new PortableOmpRuntime(sessionFile), 'machine-a', join(root, 'runtime'), new FactEventStore(database), join(root, 'managed-spaces'));
     const created = await coordinator.create('workspace-a');
     if (created.status === 'error') throw created.error;
     expect((await coordinator.prompt(created.value.id, 'before-release')).status).toBe('ok');
@@ -242,7 +242,7 @@ describe('CoordinatorPortableSpaceRuntime', () => {
     await spaces.release(database.getSpace('workspace-a')!, 1);
     expect(authority.state).toBe('closed');
     expect(database.getSpace('workspace-a')).toMatchObject({ placementState: 'closed', holderId: 'unassigned', generation: 2, closedAt: null });
-    expect(database.orm.select().from(releasedSpaces).all()).toEqual([expect.objectContaining({ spaceId: 'workspace-a', generation: 2 })]);
+    expect(database.orm.select().from(releasedSpaces).all()).toEqual([]);
     expect(readFileSync(join(workspaceRoot, 'tracked.txt'), 'utf8')).toBe('changed\n');
     expect(readFileSync(join(workspaceRoot, 'secret.env'), 'utf8')).toBe('stays-local\n');
     expect(existsSync(sessionFile)).toBe(true);

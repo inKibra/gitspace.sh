@@ -1,0 +1,72 @@
+import type { TurnBlock } from '@gitspace/blocks';
+import { renderToStaticMarkup } from 'react-dom/server';
+import { describe, expect, it } from 'vitest';
+import { TurnTranscript } from './TurnTranscript.js';
+
+describe('TurnTranscript', () => {
+  it('renders persisted image attachments and full-width assistant content', () => {
+    const turns: TurnBlock[] = [{
+      id: 'turn-1',
+      type: 'turn',
+      status: 'done',
+      user: {
+        id: 'turn-1:user',
+        type: 'message',
+        role: 'user',
+        text: 'Inspect this image.',
+        images: [{ mimeType: 'image/png', data: 'aW1hZ2U=' }],
+      },
+      items: [{
+        id: 'turn-1:assistant',
+        type: 'message',
+        role: 'assistant',
+        text: '```ts\nconst visible = true;\n```',
+      }, {
+        id: 'turn-1:tool:read-1',
+        type: 'tool-call',
+        toolCallId: 'read-1',
+        tool: 'read',
+        target: 'screenshot.png',
+        status: 'done',
+        result: [{
+          id: 'turn-1:tool:read-1:image:0',
+          type: 'image',
+          url: 'data:image/webp;base64,dG9vbA==',
+          alt: 'Tool output image 1',
+        }],
+      }],
+      sideAgents: [],
+    }];
+
+    const html = renderToStaticMarkup(<TurnTranscript turns={turns} transport={[]} />);
+
+    expect(html).toContain('src="data:image/png;base64,aW1hZ2U="');
+    expect(html).toContain('aria-label="Open attached image 1"');
+    expect(html).toContain('src="data:image/webp;base64,dG9vbA=="');
+    expect(html).toContain('aria-label="Open tool output image"');
+    expect(html).toContain('w-full max-w-none items-stretch self-stretch');
+    expect(html).toContain('class="max-w-full w-full"');
+    expect(html).toContain('data-streamdown="code-block"');
+  });
+
+  it('keeps completed thinking as a collapsed transcript block', () => {
+    const turn = (status: TurnBlock['status']): TurnBlock => ({
+      id: `turn-${status}`,
+      type: 'turn',
+      status,
+      items: [{ id: `thinking-${status}`, type: 'thinking', text: 'Reasoning retained after reload.' }],
+      sideAgents: [],
+    });
+
+    const completed = renderToStaticMarkup(<TurnTranscript turns={[turn('done')]} transport={[]} />);
+    expect(completed).toContain('Reasoning retained after reload.');
+    expect(completed).toContain('aria-expanded="false"');
+    expect(completed).toContain('>Thinking</span>');
+
+    const running = renderToStaticMarkup(<TurnTranscript turns={[turn('running')]} transport={[]} />);
+    expect(running).toContain('Reasoning');
+    expect(running).toContain('reload.');
+    expect(running).toContain('aria-expanded="true"');
+    expect(running).toContain('role="status"');
+  });
+});

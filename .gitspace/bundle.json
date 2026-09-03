@@ -1,50 +1,37 @@
 {
-  "version": "1.0",
-  "name": "gitspace-dev",
-  "description": "Development setup for the GitSpace CLI project",
-  "onboarding": [
-    {
-      "id": "welcome",
-      "type": "info",
-      "title": "Welcome to GitSpace CLI Development",
-      "description": "This onboarding will help you set up your development environment.\n\nYou'll need:\n- Bun runtime installed\n- GitHub CLI (gh) authenticated\n\nLet's verify your setup!"
-    },
-    {
-      "id": "bun",
-      "type": "confirm",
-      "title": "Bun Runtime",
-      "description": "Bun is required to run and build the CLI.",
-      "checkCommand": "bun",
-      "installUrl": "https://bun.sh"
-    },
-    {
-      "id": "gh",
-      "type": "confirm",
-      "title": "GitHub CLI",
-      "description": "The GitHub CLI is used for repository operations. Make sure you're logged in with 'gh auth login'.",
-      "checkCommand": "gh",
-      "installUrl": "https://cli.github.com"
-    },
-    {
-      "id": "dev-name",
-      "type": "input",
-      "title": "Your Name",
-      "description": "Enter your name for the development environment (used in example scripts).",
-      "configKey": "developerName",
-      "defaultValue": "Developer"
-    },
-    {
-      "id": "api-token",
-      "type": "secret",
-      "title": "Example API Token",
-      "description": "Enter a sample API token. This demonstrates how secrets are stored securely in your OS keychain.\n\nYou can enter any value - this is just for demonstration.",
-      "configKey": "exampleApiToken"
-    },
-    {
-      "id": "ready",
-      "type": "info",
-      "title": "You're All Set!",
-      "description": "Your development environment is configured.\n\nNext steps:\n1. Run 'bun install' to install dependencies\n2. Run 'bun run dev' to start the CLI in dev mode\n3. Run 'bun run typecheck' to check types\n\nHappy coding!"
+  "version": 1,
+  "defaultProfile": "base",
+  "profiles": {
+    "base": {
+      "checks": [
+        "bun",
+        "gh"
+      ],
+      "secrets": [
+        "EXAMPLE_API_TOKEN"
+      ],
+      "values": [
+        "DEVELOPER_NAME"
+      ],
+      "notes": "Development setup for GitSpace. Bun and an authenticated GitHub CLI are required."
     }
-  ]
+  },
+  "checks": {
+    "bun": {
+      "kind": "built-in",
+      "check": "bun",
+      "label": "Bun runtime"
+    },
+    "gh": {
+      "kind": "built-in",
+      "check": "gh",
+      "label": "GitHub CLI"
+    }
+  },
+  "values": {
+    "DEVELOPER_NAME": {
+      "default": "Developer",
+      "description": "Name used by development scripts."
+    }
+  }
 }

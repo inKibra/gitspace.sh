@@ -20,7 +20,6 @@ export interface EnvironmentCheckDefinition {
 }
 
 export interface EnvironmentProfileDefinition {
-  extends?: string;
   checks: readonly string[];
   secrets: readonly string[];
   inputs: readonly string[];
@@ -139,5 +138,6 @@ export interface EnvironmentViewProps {
   onOpenSecrets(): void;
   onOpenLifecycleFile(scriptId: string): void;
   onOpenLifecycleOutput(scriptId: string): void;
+  onRunChecks(): void;
   onRunLifecycle(phase: LifecyclePhase): void;
 }

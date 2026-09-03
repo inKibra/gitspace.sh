@@ -58,6 +58,32 @@ export interface GitSpaceDatabaseOptions {
   migrationsFolder?: string;
 }
 
+export type EnvironmentValueScope = 'global' | 'project' | 'workspace';
+export type EnvironmentApprovalScope = 'project' | 'workspace';
+export interface EnvironmentApproval {
+  projectId: string;
+  scope: EnvironmentApprovalScope;
+  ownerId: string;
+  executionHash: string;
+  kind: 'check' | 'script';
+  command: string;
+  approvedAt: string;
+}
+export interface EnvironmentRun {
+  id: string;
+  projectId: string;
+  spaceId: string;
+  phase: 'checks' | 'setup' | 'select' | 'remove';
+  status: 'running' | 'succeeded' | 'failed';
+  terminalName: string | null;
+  executionHashes: readonly string[];
+  results: ReadonlyArray<{ id: string; exitCode: number; output: string }>;
+  output: string;
+  exitCode: number | null;
+  startedAt: string;
+  finishedAt: string | null;
+}
+
 export class GitSpaceDatabase {
   readonly orm: BunSQLiteDatabase<typeof schema>;
   private readonly sqlite: Database;
@@ -505,6 +531,121 @@ export class GitSpaceDatabase {
     return changed ? Result.ok(changed) : Result.err(conflict('possession', input.spaceId, 'Space placement changed while failing open'));
   }
 
+  getEnvironmentProfile(spaceId: string): string | null {
+    const row = this.sqlite.query<{ profile: string }, [string]>(
+      'SELECT profile FROM environment_space_profiles WHERE space_id = ?',
+    ).get(spaceId);
+    return row?.profile ?? null;
+  }
+
+  setEnvironmentProfile(spaceId: string, profile: string): void {
+    if (!this.getSpace(spaceId)) throw new CoreNotFound({ resource: 'space', id: spaceId, message: `Space ${spaceId} does not exist` });
+    const parsed = z.string().min(1).max(64).regex(/^[a-z][a-z0-9-]*$/u).parse(profile);
+    this.sqlite.query(
+      `INSERT INTO environment_space_profiles(space_id,profile,updated_at) VALUES(?,?,?)
+       ON CONFLICT(space_id) DO UPDATE SET profile=excluded.profile,updated_at=excluded.updated_at`,
+    ).run(spaceId, parsed, new Date().toISOString());
+  }
+
+  listEnvironmentValues(scope: EnvironmentValueScope, ownerId: string): Record<string, string> {
+    const rows = this.sqlite.query<{ name: string; value: string }, [string, string]>(
+      'SELECT name,value FROM environment_values WHERE scope=? AND owner_id=? ORDER BY name',
+    ).all(scope, ownerId);
+    return Object.fromEntries(rows.map((row) => [row.name, row.value]));
+  }
+
+  putEnvironmentValue(scope: EnvironmentValueScope, ownerId: string, name: string, value: string): void {
+    const parsedName = z.string().regex(/^[A-Z][A-Z0-9_]*$/u).max(128).parse(name);
+    const parsedValue = z.string().max(16_384).parse(value);
+    this.sqlite.query(
+      `INSERT INTO environment_values(scope,owner_id,name,value,updated_at) VALUES(?,?,?,?,?)
+       ON CONFLICT(scope,owner_id,name) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`,
+    ).run(scope, ownerId, parsedName, parsedValue, new Date().toISOString());
+  }
+
+  deleteEnvironmentValue(scope: EnvironmentValueScope, ownerId: string, name: string): boolean {
+    return this.sqlite.query(
+      'DELETE FROM environment_values WHERE scope=? AND owner_id=? AND name=? RETURNING name',
+    ).get(scope, ownerId, name) !== null;
+  }
+
+  listEnvironmentApprovals(projectId: string, workspaceId?: string): EnvironmentApproval[] {
+    const rows = workspaceId
+      ? this.sqlite.query<Record<string, string>, [string, string, string]>(
+        `SELECT project_id,scope,owner_id,execution_hash,kind,command,approved_at FROM environment_approvals
+         WHERE project_id=? AND ((scope='project' AND owner_id=?) OR (scope='workspace' AND owner_id=?)) ORDER BY approved_at`,
+      ).all(projectId, projectId, workspaceId)
+      : this.sqlite.query<Record<string, string>, [string, string]>(
+        `SELECT project_id,scope,owner_id,execution_hash,kind,command,approved_at FROM environment_approvals
+         WHERE project_id=? AND scope='project' AND owner_id=? ORDER BY approved_at`,
+      ).all(projectId, projectId);
+    return rows.map((row) => ({
+      projectId: row.project_id!,
+      scope: row.scope as EnvironmentApprovalScope,
+      ownerId: row.owner_id!,
+      executionHash: row.execution_hash!,
+      kind: row.kind as EnvironmentApproval['kind'],
+      command: row.command!,
+      approvedAt: row.approved_at!,
+    }));
+  }
+
+  putEnvironmentApproval(input: Omit<EnvironmentApproval, 'approvedAt'>): EnvironmentApproval {
+    if (input.scope === 'project' && input.ownerId !== input.projectId) throw new CoreInputError({ message: 'Project approval owner must be the project' });
+    const space = input.scope === 'workspace' ? this.getWorkspace(input.ownerId) : null;
+    if (input.scope === 'workspace' && space?.projectId !== input.projectId) throw new CoreInputError({ message: 'Workspace approval owner must belong to the project' });
+    const approvedAt = new Date().toISOString();
+    this.sqlite.query(
+      `INSERT INTO environment_approvals(project_id,scope,owner_id,execution_hash,kind,command,approved_at) VALUES(?,?,?,?,?,?,?)
+       ON CONFLICT(scope,owner_id,execution_hash) DO UPDATE SET kind=excluded.kind,command=excluded.command,approved_at=excluded.approved_at`,
+    ).run(input.projectId, input.scope, input.ownerId, input.executionHash, input.kind, input.command, approvedAt);
+    return { ...input, approvedAt };
+  }
+
+  deleteEnvironmentApproval(scope: EnvironmentApprovalScope, ownerId: string, executionHash: string): boolean {
+    return this.sqlite.query(
+      'DELETE FROM environment_approvals WHERE scope=? AND owner_id=? AND execution_hash=? RETURNING execution_hash',
+    ).get(scope, ownerId, executionHash) !== null;
+  }
+
+  startEnvironmentRun(input: Pick<EnvironmentRun, 'id' | 'projectId' | 'spaceId' | 'phase' | 'executionHashes'>): EnvironmentRun {
+    const active = this.sqlite.query<{ id: string }, [string, string]>(
+      `SELECT id FROM environment_runs WHERE space_id=? AND phase=? AND status='running' LIMIT 1`,
+    ).get(input.spaceId, input.phase);
+    if (active) throw new CoreConflict({ resource: 'space', id: input.spaceId, message: `Environment ${input.phase} is already running` });
+    const startedAt = new Date().toISOString();
+    this.sqlite.query(
+      `INSERT INTO environment_runs(id,project_id,space_id,phase,status,terminal_name,execution_hashes_json,results_json,output,exit_code,started_at,finished_at)
+       VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+    ).run(input.id, input.projectId, input.spaceId, input.phase, 'running', null, JSON.stringify(input.executionHashes), '[]', '', null, startedAt, null);
+    return { ...input, status: 'running', terminalName: null, results: [], output: '', exitCode: null, startedAt, finishedAt: null };
+  }
+
+  finishEnvironmentRun(input: Pick<EnvironmentRun, 'id' | 'status' | 'terminalName' | 'results' | 'output' | 'exitCode'>): EnvironmentRun {
+    if (input.status === 'running') throw new CoreInputError({ message: 'A finished environment run must have a terminal status' });
+    const finishedAt = new Date().toISOString();
+    this.sqlite.query(
+      `UPDATE environment_runs SET status=?,terminal_name=?,results_json=?,output=?,exit_code=?,finished_at=? WHERE id=?`,
+    ).run(input.status, input.terminalName, JSON.stringify(input.results), input.output, input.exitCode, finishedAt, input.id);
+    const run = this.getEnvironmentRun(input.id);
+    if (!run) throw new CoreNotFound({ resource: 'space', id: input.id, message: `Environment run ${input.id} does not exist` });
+    return run;
+  }
+
+  getEnvironmentRun(runId: string): EnvironmentRun | null {
+    const row = this.sqlite.query<Record<string, string | number | null>, [string]>(
+      'SELECT * FROM environment_runs WHERE id=?',
+    ).get(runId);
+    return row ? environmentRun(row) : null;
+  }
+
+  listEnvironmentRuns(spaceId: string, limit = 20): EnvironmentRun[] {
+    const rows = this.sqlite.query<Record<string, string | number | null>, [string, number]>(
+      'SELECT * FROM environment_runs WHERE space_id=? ORDER BY started_at DESC LIMIT ?',
+    ).all(spaceId, limit);
+    return rows.map(environmentRun);
+  }
+
 
   deleteWorkspace(workspaceId: string): boolean {
     const workspace = this.getWorkspace(workspaceId);
@@ -538,6 +679,23 @@ export class GitSpaceDatabase {
   releaseWorkspacePossession(input: { workspaceId: string; holderId: string; expectedGeneration: number }): ResultType<void, CoreInputError | CoreConflict | CoreNotFound> {
     return this.releaseSpacePossession({ spaceId: input.workspaceId, holderId: input.holderId, expectedGeneration: input.expectedGeneration });
   }
+}
+
+function environmentRun(row: Record<string, string | number | null>): EnvironmentRun {
+  return {
+    id: String(row.id),
+    projectId: String(row.project_id),
+    spaceId: String(row.space_id),
+    phase: String(row.phase) as EnvironmentRun['phase'],
+    status: String(row.status) as EnvironmentRun['status'],
+    terminalName: row.terminal_name === null ? null : String(row.terminal_name),
+    executionHashes: JSON.parse(String(row.execution_hashes_json)) as string[],
+    results: JSON.parse(String(row.results_json)) as EnvironmentRun['results'],
+    output: String(row.output),
+    exitCode: row.exit_code === null ? null : Number(row.exit_code),
+    startedAt: String(row.started_at),
+    finishedAt: row.finished_at === null ? null : String(row.finished_at),
+  };
 }
 
 function materialized(space: Space, placement: SpacePlacement): MaterializedSpace {

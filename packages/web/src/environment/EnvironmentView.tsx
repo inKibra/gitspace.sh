@@ -48,15 +48,14 @@ const RUN_COLOR: Record<LifecycleRun['status'], NonNullable<BadgeProps['color']>
 const PHASE_LABEL: Record<LifecycleScript['phase'], string> = { setup: 'Setup', select: 'Select', remove: 'Remove' };
 
 function profileDefinition(profileName: string, profiles: Record<string, EnvironmentProfileDefinition>): EnvironmentProfileDefinition {
-  const profile = profiles[profileName];
-  if (!profile) return { checks: [], secrets: [], inputs: [], notes: '' };
-  if (!profile.extends) return profile;
-  const parent = profileDefinition(profile.extends, profiles);
+  const base = profiles.base ?? { checks: [], secrets: [], inputs: [], notes: '' };
+  if (profileName === 'base') return base;
+  const selected = profiles[profileName] ?? { checks: [], secrets: [], inputs: [], notes: '' };
   return {
-    checks: [...parent.checks, ...profile.checks],
-    secrets: [...parent.secrets, ...profile.secrets],
-    inputs: [...parent.inputs, ...profile.inputs],
-    notes: profile.notes,
+    checks: [...new Set([...base.checks, ...selected.checks])],
+    secrets: [...new Set([...base.secrets, ...selected.secrets])],
+    inputs: [...new Set([...base.inputs, ...selected.inputs])],
+    notes: [base.notes, selected.notes].filter(Boolean).join(' '),
   };
 }
 
@@ -184,7 +183,7 @@ function LifecycleCard({ script, onApprove, onRevoke, onOpenFile, onOpenOutput, 
   </Card>;
 }
 
-export function EnvironmentView({ model, onProfileChange, onApprove, onRevoke, onGrantSecret, onInputChange, onFixCheck, onUpdateCheck, onDeleteCheck, onAddCheck, onAddValue, onOpenSecrets, onOpenLifecycleFile, onOpenLifecycleOutput, onRunLifecycle }: EnvironmentViewProps) {
+export function EnvironmentView({ model, onProfileChange, onApprove, onRevoke, onGrantSecret, onInputChange, onFixCheck, onUpdateCheck, onDeleteCheck, onAddCheck, onAddValue, onOpenSecrets, onOpenLifecycleFile, onOpenLifecycleOutput, onRunChecks, onRunLifecycle }: EnvironmentViewProps) {
   const shape = useShape();
   const [addCheckOpen, setAddCheckOpen] = useState(false);
   const [addValueOpen, setAddValueOpen] = useState(false);
@@ -224,11 +223,11 @@ export function EnvironmentView({ model, onProfileChange, onApprove, onRevoke, o
 
       <Elevated offset={1} className={`${shape.container} flex items-start gap-3 p-3`}>
         <AlertIcon size={16} strokeWidth={1.5} className="mt-0.5 shrink-0 text-muted-foreground" />
-        <div className="flex min-w-0 flex-col gap-1"><p className="text-body text-muted-foreground">{selectedProfile.notes}</p>{model.bundle.profiles[model.workspace.profile]?.extends ? <Badge size="compact" color="gray">extends {model.bundle.profiles[model.workspace.profile]?.extends}</Badge> : null}</div>
+        <p className="min-w-0 text-body text-muted-foreground">{selectedProfile.notes}</p>
       </Elevated>
 
       <section className="flex flex-col gap-2">
-        <div className="flex items-center justify-between gap-2"><h3 className="text-caption font-medium text-muted-foreground">Checks · <span className="tabular-nums">{checks.length}</span></h3><Button variant="secondary" size="compact" leadingIcon={PlusIcon} onClick={() => setAddCheckOpen(true)}>Add check</Button></div>
+        <div className="flex items-center justify-between gap-2"><h3 className="text-caption font-medium text-muted-foreground">Checks · <span className="tabular-nums">{checks.length}</span></h3><span className="flex items-center gap-1"><Button variant="ghost" size="compact" leadingIcon={PlayIcon} onClick={onRunChecks}>Run checks</Button><Button variant="secondary" size="compact" leadingIcon={PlusIcon} onClick={() => setAddCheckOpen(true)}>Add check</Button></span></div>
         <CardGroup border="outlined" separated proximityHover={false}>{checks.map((check, index) => <CheckCard key={check.id} index={index} check={check} result={machine?.capabilities[check.id] ?? { status: 'unprobed' }} onApprove={() => onApprove(check.id)} onRevoke={() => onRevoke(check.id)} onFix={() => onFixCheck(check.id)} onEdit={() => setEditingCheck(check)} onDelete={() => setRemovingCheck(check)} />)}</CardGroup>
       </section>
 

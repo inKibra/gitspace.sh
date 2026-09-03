@@ -50,6 +50,20 @@
       "when": 1788600000000,
       "tag": "0006_released_spaces",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1788800000000,
+      "tag": "0007_environment_state",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1788900000000,
+      "tag": "0008_environment_runs",
+      "breakpoints": true
     }
   ]
 }

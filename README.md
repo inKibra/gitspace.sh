@@ -148,105 +148,85 @@ space review hunks src/app.ts --format json
 space review add-hunk src/app.ts --index 1 --approve --body "Looks good"
 ```
 
-## Repo Config Bundles
+## Workspace Environments
 
-Repo config bundles allow repository owners to share onboarding configurations with their team. When someone clones a project that contains a bundle, they'll be guided through setup steps and have scripts automatically installed.
+Repository owners declare workspace requirements in `.gitspace/bundle.json` and ordered lifecycle scripts under `.gitspace/lifecycle/`.
 
-### Bundle Structure
-
-A bundle is a directory (typically `.gitspace/`) containing:
-
-```
+```text
 .gitspace/
-├── bundle.json           # Bundle manifest with onboarding steps
-└── scripts/
-    ├── pre/              # Deprecated: migrate scripts into ordered setup/
-    │   └── 01-copy-env.sh
-    ├── setup/            # Scripts for setup runs (when bundle/value state changes)
-    │   └── 01-install-deps.sh
-    ├── select/           # Scripts to run on each new terminal attach
+├── bundle.json
+└── lifecycle/
+    ├── setup/
+    │   ├── 01-install.sh
+    │   └── 02-xcode.ios.sh
+    ├── select/
     │   └── 01-status.sh
-    └── remove/           # Scripts to run before workspace deletion
+    └── remove/
         └── 01-cleanup.sh
 ```
 
-### Bundle Manifest (`bundle.json`)
+### Bundle Manifest
+
+Every bundle has a reserved `base` profile. A workspace uses either `base` alone or `base` plus one exact selected profile; profiles do not inherit from one another.
 
 ```json
 {
-  "version": "1.0",
-  "name": "my-app-bundle",
-  "description": "Setup bundle for my-app",
-  "onboarding": [
-    {
-      "id": "welcome",
-      "type": "info",
-      "title": "Welcome",
-      "description": "Let's get you set up!"
+  "version": 1,
+  "defaultProfile": "backend",
+  "profiles": {
+    "base": {
+      "checks": ["bun", "git"],
+      "secrets": ["API_KEY"],
+      "values": ["TEAM_NAME"],
+      "notes": "Shared requirements for every workspace."
     },
-    {
-      "id": "node",
-      "type": "confirm",
-      "title": "Node.js",
-      "description": "Node.js 18+ is required",
-      "checkCommand": "node",
-      "installUrl": "https://nodejs.org"
+    "backend": {
+      "checks": ["postgres"],
+      "secrets": [],
+      "values": ["DATABASE_URL"]
     },
-    {
-      "id": "api-key",
-      "type": "secret",
-      "title": "API Key",
-      "description": "Enter your API key",
-      "configKey": "apiKey"
-    },
-    {
-      "id": "team-name",
-      "type": "input",
-      "title": "Team Name",
-      "description": "Enter your team name",
-      "configKey": "teamName",
-      "defaultValue": "engineering"
+    "ios": {
+      "checks": ["xcode"],
+      "secrets": ["APPLE_TEAM_ID"],
+      "values": []
     }
-  ]
+  },
+  "checks": {
+    "bun": { "kind": "built-in", "check": "bun", "label": "Bun" },
+    "git": { "kind": "built-in", "check": "git", "label": "Git" },
+    "postgres": { "kind": "command", "label": "Postgres", "command": "pg_isready" },
+    "xcode": { "kind": "command", "label": "Xcode", "command": "xcodebuild -version" }
+  },
+  "values": {
+    "TEAM_NAME": { "default": "engineering" },
+    "DATABASE_URL": { "description": "Workspace database connection." }
+  }
 }
 ```
 
-### Onboarding Step Types
+Built-in and custom checks both require approval before execution. Approvals bind to the exact check command or script hash:
 
-| Type | Purpose | Storage |
-|------|---------|---------|
-| `info` | Display information | N/A |
-| `confirm` | Verify installation (can check command in PATH) | N/A |
-| `secret` | Collect sensitive values (masked input) | OS Keychain |
-| `input` | Collect plain text values | Project config |
-| `select` | Choose one value from a fixed list of options | Project config |
+- A project approval made from the base space applies to matching content in every workspace.
+- Changed workspace content requires a workspace approval; it does not approve siblings or the base space.
+- After changed content merges into base, it requires a new project approval before that approval flows to workspaces.
 
-### Using Bundle Values in Scripts
+### Values and Secrets
 
-Bundle values are passed to scripts as environment variables using the configured bundle keys:
+Visible values use `global < project < workspace` precedence. Only values declared by the effective profile are injected into checks and scripts. Project secrets are write-only in the web app and are materialized only for the effective profile during an authorized server-side execution.
 
-- `<KEY>` - Regular or secret value using the exact `configKey` from `bundle.json`
-- `<NORMALIZED_KEY>` - Uppercase snake-case alias (for example, `teamName` -> `TEAM_NAME`)
+### Lifecycle Selection
 
-**Example script:**
+Scripts run lexicographically and stop at the first non-zero exit:
 
-```bash
-#!/bin/bash
-# .gitspace/scripts/select/01-status.sh
+- `01-install.sh` is unqualified and runs for every profile.
+- `02-xcode.ios.sh` runs only when the exact selected profile is `ios`.
+- Unknown profile qualifiers and malformed filenames reject the lifecycle plan.
 
-WORKSPACE_NAME=$1
-REPOSITORY=$2
+The Setup Inspector manages the selected profile, checks, values, approvals, and lifecycle runs inline. The Secrets & values page manages write-only project secrets plus visible global and project values.
 
-# Access bundle values
-if [ -n "$TEAM_NAME" ]; then
-  echo "Welcome, $TEAM_NAME team!"
-fi
+Checks and lifecycle scripts execute as OMP Hub-owned processes. Each run persists its phase, exact execution hashes, terminal name, per-step output, exit code, and completion state; the Setup Inspector reads those persisted outcomes.
 
-# Access secrets (stored securely in OS keychain)
-if [ -n "$API_KEY" ]; then
-  echo "API Key configured"
-fi
-```
+Closing a space is distinct from archiving a workspace. **Close** checkpoints the canonical agent, retains local files, stops Hub processes owned by that space, and releases placement. **Reopen** reclaims that same space. Both operations are generation-fenced and idempotent. Archive and Restore remain workspace lifecycle operations.
 
 ### Bundle Sources
 

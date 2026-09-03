@@ -1,11 +1,16 @@
 import { z } from 'zod';
 
 const base = z.object({ id: z.string().min(1) });
+const messageImageSchema = z.object({
+  data: z.string().min(1),
+  mimeType: z.enum(['image/png', 'image/jpeg', 'image/webp']),
+});
 
 export const messageBlockSchema = base.extend({
   type: z.literal('message'),
   role: z.enum(['user', 'assistant']),
   text: z.string(),
+  images: z.array(messageImageSchema).optional(),
   pending: z.boolean().optional(),
 });
 
@@ -134,6 +139,7 @@ export const transportBlockSchema = base.extend({
 });
 
 export type MessageBlock = z.infer<typeof messageBlockSchema>;
+export type MessageImage = z.infer<typeof messageImageSchema>;
 export type RichContentBlock = z.infer<typeof richContentSchema>;
 export type ToolCallBlock = z.infer<typeof toolCallBlockSchema>;
 export type TurnItem = z.infer<typeof turnItemSchema>;

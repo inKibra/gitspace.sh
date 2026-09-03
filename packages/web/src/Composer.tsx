@@ -1,4 +1,4 @@
-import type { SessionControlView } from '@gitspace/protocol';
+import type { SessionControlView, SkillView } from '@gitspace/protocol';
 import { Button, Dropdown, DropdownContent, DropdownMenu, DropdownTrigger, InputMessage, MenuItem, Select, SelectContent, SelectItem, SelectTrigger, ThinkingStep, ThinkingSteps, ThinkingStepsContent, ThinkingStepsHeader, useIcons, useShape, type IconName, type QueuedMessage } from '@gitspace/ui';
 import { Attachment01, CpuChip01, DotsHorizontal, Zap } from '@untitledui/icons';
 import { useMemo, useState, type ReactNode } from 'react';
@@ -68,6 +68,7 @@ export interface ComposerProps {
   workspace: AgentScopeView;
   controls?: SessionControlsProps;
   providers?: readonly ProviderAuthView[];
+  skills?: readonly SkillView[];
   running: boolean;
   defaultSendBehavior?: SendBehavior;
   onSend?: GitSpaceShellProps['onSend'];
@@ -75,7 +76,7 @@ export interface ComposerProps {
   error?: string;
 }
 
-export function Composer({ workspace, controls, providers, running, defaultSendBehavior = 'followUp', onSend, pending, error }: ComposerProps) {
+export function Composer({ workspace, controls, providers, skills = [], running, defaultSendBehavior = 'followUp', onSend, pending, error }: ComposerProps) {
   const icons = useIcons();
   const [message, setMessage] = useState('');
   const [attachments, setAttachments] = useState<File[]>([]);
@@ -113,13 +114,23 @@ export function Composer({ workspace, controls, providers, running, defaultSendB
     for (const item of next) if (!known.has(item.id)) void submit(item.text, item.files, 'followUp');
   };
 
-  const commands: SlashCommand[] = controls ? [
-    { name: '/compact', hint: 'Compact the context window', run: () => void controls.onCompact() },
-    { name: '/history', hint: 'Browse the session tree', run: () => setShowHistory(true) },
-    { name: '/fast', hint: controls.value.fastMode ? 'Disable fast mode' : 'Enable fast mode', run: () => void controls.onSetFast(!controls.value.fastMode) },
-    { name: '/goal', hint: controls.value.goal ? 'Disable Goal mode' : 'Enable Goal mode', run: () => void controls.onSetGoal(!controls.value.goal) },
-    { name: '/queue', hint: 'Clear queued messages', run: () => void controls.onClearQueue() },
-  ] : [];
+  const availableSkills = skills.filter((skill) => {
+    if (!skill.enabled || skill.exceptions.includes(workspace.projectId)) return false;
+    const assignment = skill.assignments.find((candidate) => candidate.projectId === workspace.projectId);
+    if (assignment) return workspace.kind === 'project' ? assignment.projectSpaceEnabled : assignment.workspacesEnabled;
+    return workspace.kind === 'project'
+      ? skill.scope === 'project' || skill.scope === 'all'
+      : skill.scope === 'workspaces' || skill.scope === 'all';
+  });
+  const commands: SlashCommand[] = message.startsWith('/skill:')
+    ? availableSkills.map((skill) => ({
+        name: `/skill:${skill.name}`,
+        hint: skill.description,
+        run: () => setMessage(`/skill:${skill.name} `),
+      }))
+    : availableSkills.length
+      ? [{ name: '/skill:', hint: 'Run an available skill', run: () => setMessage('/skill:') }]
+      : [];
 
   const thinkingLevels = ['auto', 'off', 'low', 'medium', 'high', 'xhigh'];
   const streaming = running && sendBehavior === 'followUp';

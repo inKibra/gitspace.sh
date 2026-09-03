@@ -74,6 +74,7 @@ import {
   Play,
   Scales02,
   Terminal,
+  Tool02,
   User01,
   Users01,
   XClose,
@@ -85,7 +86,7 @@ import { EmptyState, StatusDot, type AgentScopeView, type WorkspaceView } from '
 import { OverviewView, type OverviewViewProps } from './OverviewView.js';
 import { UsageView, type UsageStatus } from './UsageView.js';
 
-export type InspectorPermanentView = 'overview' | 'goal' | 'subagents' | 'files' | 'artifacts' | 'services' | 'usage' | 'guide' | 'journal';
+export type InspectorPermanentView = 'overview' | 'environment' | 'goal' | 'subagents' | 'files' | 'artifacts' | 'services' | 'usage' | 'guide' | 'journal';
 export type InspectorDocumentKind = 'file' | 'diff' | 'artifact' | 'goal' | 'workflow' | 'rubric';
 export interface InspectorOpenDocument {
   id: string;
@@ -123,6 +124,7 @@ export interface InspectorProps {
   onSelectWorkspace(workspaceId: string): void;
   onSetRelations?: OverviewViewProps['onSetRelations'];
   stackStatus?: OverviewViewProps['stackStatus'];
+  environment?: ReactNode;
   repositoryEntries: readonly RepositoryTreeEntry[];
   repositoryFile: RepositoryFileView | null;
   repositoryDiff: RepositoryDiffView | null;
@@ -166,6 +168,7 @@ const guideViewCache = new Map<string, GuideViewState>();
 
 const permanentTabs: ReadonlyArray<{ id: InspectorPermanentView; label: string }> = [
   { id: 'overview', label: 'Overview' },
+  { id: 'environment', label: 'Setup' },
   { id: 'goal', label: 'Goal' },
   { id: 'subagents', label: 'Subagents' },
   { id: 'files', label: 'Files' },
@@ -909,6 +912,7 @@ export function Inspector(props: InspectorProps) {
   const renderSurface = (id: InspectorPermanentView): ReactNode => {
     switch (id) {
       case 'overview': return <OverviewView scope={props.scope} workspaces={props.workspaces} onSelectWorkspace={props.onSelectWorkspace} onSetRelations={props.onSetRelations} stackStatus={props.stackStatus} />;
+      case 'environment': return props.environment ?? <Padded><EmptyState icon={ic(Tool02, 22)} title="Workspace setup unavailable" description="This machine does not expose the workspace environment contract." /></Padded>;
       case 'goal': return <GoalOverview overview={props.overview} openDocuments={documents.length} onOpenProduct={openProduct} onOpenEvidence={openEvidence} />;
       case 'subagents': return <SubagentsSurface subagents={props.subagents} />;
       case 'files': return <FilesSurface entries={props.repositoryEntries} changedOnly={changedOnly} setChangedOnly={setChangedOnly} onOpen={(entry) => openFile(entry.path, 'current')} />;

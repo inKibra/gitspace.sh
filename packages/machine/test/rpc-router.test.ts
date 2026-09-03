@@ -7,6 +7,7 @@ import {
   GitSpaceHandlers,
   LocalArtifactResolver,
   MemoryArtifactObjectStore,
+  type MaterializedSpace,
 } from '@gitspace/core';
 import { createDeviceBinding, createEncryptedRpcFetch, createSignedRpcFetch, credentialProtocolBase64, gitspaceContract, rpcErrors, signDeviceInvite, type DeviceCapability, type DeviceGrantRecord, type ProjectEvent } from '@gitspace/protocol';
 import { CloudProjectEventWriter } from '../src/cloud-project-events.js';
@@ -22,6 +23,7 @@ import {
   type OmpRuntime,
   type OmpRuntimeEvent,
   type OmpRuntimeSession,
+  type WorkspaceHubTerminalCoordinator,
 } from '../src/index.js';
 
 const roots: string[] = [];
@@ -118,7 +120,7 @@ describe('GitSpace Result RPC', () => {
       events,
     );
     const spaces = {
-      close: async (space: NonNullable<ReturnType<GitSpaceDatabase['getSpace']>>, expectedGeneration: number) => {
+      close: async (space: MaterializedSpace, expectedGeneration: number) => {
         const started = database.beginSpaceClose({ spaceId: space.id, holderId: 'machine-a', expectedGeneration });
         if (started.status === 'error') throw started.error;
         const session = sessions.list(space.id)[0];
@@ -129,6 +131,12 @@ describe('GitSpace Result RPC', () => {
         const committed = database.commitSpaceClosed({ spaceId: space.id, holderId: 'machine-a', expectedGeneration });
         if (committed.status === 'error') throw committed.error;
         database.setSpaceClosed(space.id, true);
+      },
+      release: async (space: MaterializedSpace, expectedGeneration: number) => {
+        const started = database.beginSpaceClose({ spaceId: space.id, holderId: 'machine-a', expectedGeneration });
+        if (started.status === 'error') throw started.error;
+        const committed = database.commitSpaceClosed({ spaceId: space.id, holderId: 'machine-a', expectedGeneration });
+        if (committed.status === 'error') throw committed.error;
       },
       open: async (spaceId: string, expectedGeneration: number) => {
         const space = database.getSpace(spaceId)!;
@@ -219,6 +227,10 @@ describe('GitSpace Result RPC', () => {
       database,
       handlers,
       artifacts,
+      terminals: {
+        stopOwned: async () => undefined,
+        runLifecyclePlan: async () => ({ terminalName: 'test-lifecycle', exitCode: 0, output: '', steps: [] }),
+      } as unknown as WorkspaceHubTerminalCoordinator,
       sessions,
       spaces,
       serviceManager: {
@@ -402,10 +414,23 @@ describe('GitSpace Result RPC', () => {
     expect(rpcErrors.workspaceNotFound.is(unknownRelated.error)).toBe(true);
     expect(database.deleteWorkspace('workspace-b')).toBe(true);
 
-    const closed = await client.workspace.archive({ spaceId: 'workspace-a', expectedGeneration: 1 });
+    const runtimeClosed = await client.space.close({ spaceId: 'workspace-a', expectedGeneration: 1 });
+    expect(runtimeClosed.status).toBe('ok');
+    if (runtimeClosed.status === 'error') throw runtimeClosed.error;
+    expect(runtimeClosed.value).toMatchObject({ id: 'workspace-a', state: 'closed', machineId: null, generation: 2 });
+    expect(database.getWorkspace('workspace-a')?.closedAt).toBeNull();
+    expect((await client.space.close({ spaceId: 'workspace-a', expectedGeneration: 1 })).status).toBe('ok');
+
+    const runtimeReopened = await client.space.reopen({ spaceId: 'workspace-a', expectedGeneration: 2 });
+    expect(runtimeReopened.status).toBe('ok');
+    if (runtimeReopened.status === 'error') throw runtimeReopened.error;
+    expect(runtimeReopened.value).toMatchObject({ id: 'workspace-a', state: 'active', machineId: 'machine-a', generation: 3 });
+    expect((await client.space.reopen({ spaceId: 'workspace-a', expectedGeneration: 2 })).status).toBe('ok');
+
+    const closed = await client.workspace.archive({ spaceId: 'workspace-a', expectedGeneration: 3 });
     expect(closed.status).toBe('ok');
     if (closed.status === 'error') throw closed.error;
-    expect(closed.value).toMatchObject({ id: 'workspace-a', kind: 'worktree', state: 'archived', machineId: null, generation: 2 });
+    expect(closed.value).toMatchObject({ id: 'workspace-a', kind: 'worktree', state: 'archived', machineId: null, generation: 4 });
 
     // Closed in the cloud: bootstrap serves the checkpoint read-only instead of the local agent.
     const closedBootstrap = await client.bootstrap({ projectId: 'project-a', workspaceId: 'workspace-a' });
@@ -413,15 +438,15 @@ describe('GitSpace Result RPC', () => {
     expect(closedBootstrap.status).toBe('ok');
     expect(checkpointReads.at(-1)).toEqual({ projectId: 'project-a', spaceId: 'workspace-a' });
     expect(closedBootstrap.value.mainAgent).toBeNull();
-    expect(closedBootstrap.value.checkpoint).toEqual({ sessionId: created.value.id, generation: 2, lastMachineId: 'machine-a' });
+    expect(closedBootstrap.value.checkpoint).toEqual({ sessionId: created.value.id, generation: 4, lastMachineId: 'machine-a' });
     expect(closedBootstrap.value.transcript).toHaveLength(1);
     expect(closedBootstrap.value.transcript[0]).toMatchObject({ sessionId: created.value.id, kind: 'message_end', payload: { source: 'checkpoint' } });
     expect(closedBootstrap.value.workspaces.find((workspace) => workspace.id === 'workspace-a')).toMatchObject({ possessedBy: null, closedAt: expect.any(Date) });
 
-    const reopened = await client.workspace.restore({ spaceId: 'workspace-a', expectedGeneration: 2 });
+    const reopened = await client.workspace.restore({ spaceId: 'workspace-a', expectedGeneration: 4 });
     expect(reopened.status).toBe('ok');
     if (reopened.status === 'error') throw reopened.error;
-    expect(reopened.value).toMatchObject({ id: 'workspace-a', kind: 'worktree', state: 'active', machineId: 'machine-a', generation: 3 });
+    expect(reopened.value).toMatchObject({ id: 'workspace-a', kind: 'worktree', state: 'active', machineId: 'machine-a', generation: 5 });
 
     const reopenedBootstrap = await client.bootstrap({ projectId: 'project-a', workspaceId: 'workspace-a' });
     expect(reopenedBootstrap.status).toBe('ok');

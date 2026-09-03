@@ -28,6 +28,46 @@ describe('reduceTranscriptToTurns', () => {
     ]);
   });
 
+  it('projects supported user images into persisted message attachments', () => {
+    const turns = reduceTranscriptToTurns([
+      { sessionId: 's1', ordinal: 1, kind: 'message_end', payload: { message: { role: 'user', content: [
+        { type: 'image', mimeType: 'image/png', data: 'aW1hZ2U=' },
+        { type: 'image', mimeType: 'image/svg+xml', data: 'PHN2Zz4=' },
+      ] } } },
+    ]);
+
+    expect(turns[0]?.user).toEqual(expect.objectContaining({
+      text: '',
+      images: [{ mimeType: 'image/png', data: 'aW1hZ2U=' }],
+    }));
+  });
+
+  it('projects supported tool-result images into expanded tool details', () => {
+    const turns = reduceTranscriptToTurns([
+      { sessionId: 's1', ordinal: 1, kind: 'turn_start', payload: {} },
+      { sessionId: 's1', ordinal: 2, kind: 'message_end', payload: { message: { role: 'assistant', content: [
+        { type: 'toolCall', id: 'read-1', name: 'read', arguments: { path: 'screenshot.png' } },
+      ] } } },
+      { sessionId: 's1', ordinal: 3, kind: 'message_end', payload: { message: {
+        role: 'toolResult',
+        toolCallId: 'read-1',
+        toolName: 'read',
+        content: [
+          { type: 'text', text: 'Opened screenshot.png' },
+          { type: 'image', mimeType: 'image/webp', data: 'aW1hZ2U=' },
+        ],
+      } } },
+    ]);
+
+    expect(turns[0]?.items[0]).toMatchObject({
+      type: 'tool-call',
+      result: [
+        { type: 'code', text: 'Opened screenshot.png' },
+        { type: 'image', url: 'data:image/webp;base64,aW1hZ2U=', alt: 'Tool output image 1' },
+      ],
+    });
+  });
+
   it('splits a rehydrated transcript without turn markers at each user message', () => {
     const turns = reduceTranscriptToTurns([
       { sessionId: 's1', ordinal: 1, kind: 'message_end', payload: { message: { role: 'user', content: [{ type: 'text', text: 'first' }] } } },

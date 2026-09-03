@@ -215,7 +215,7 @@ export const SpaceLifecycleViewCodec = wire.object({
   id: wire.string,
   projectId: wire.string,
   kind: wire.enum(['base', 'worktree']),
-  state: wire.enum(['active', 'archived']),
+  state: wire.enum(['active', 'closed', 'archived']),
   machineId: wire.nullable(wire.string),
   generation: wire.number,
 });
@@ -286,6 +286,60 @@ export const ProjectSecretMetadataCodec = wire.object({
   revision: wire.number,
   updatedAt: wire.string,
   updatedBy: wire.string,
+});
+
+export const EnvironmentExecutionViewCodec = wire.object({
+  id: wire.string,
+  kind: wire.enum(['check', 'script']),
+  label: wire.string,
+  command: wire.string,
+  hash: wire.string,
+  approval: wire.nullable(wire.enum(['project', 'workspace'])),
+  phase: wire.nullable(wire.enum(['setup', 'select', 'remove'])),
+  fileName: wire.nullable(wire.string),
+});
+export const EnvironmentRunViewCodec = wire.object({
+  id: wire.string,
+  projectId: wire.string,
+  spaceId: wire.string,
+  phase: wire.enum(['checks', 'setup', 'select', 'remove']),
+  status: wire.enum(['running', 'succeeded', 'failed']),
+  terminalName: wire.nullable(wire.string),
+  executionHashes: wire.array(wire.string),
+  results: wire.array(wire.object({ id: wire.string, exitCode: wire.number, output: wire.string })),
+  output: wire.string,
+  exitCode: wire.nullable(wire.number),
+  startedAt: wire.string,
+  finishedAt: wire.nullable(wire.string),
+});
+export const WorkspaceEnvironmentViewCodec = wire.object({
+  spaceId: wire.string,
+  projectId: wire.string,
+  bundleJson: wire.string,
+  selectedProfile: wire.string,
+  effective: wire.object({
+    name: wire.string,
+    checks: wire.array(wire.string),
+    secrets: wire.array(wire.string),
+    values: wire.array(wire.string),
+    notes: wire.array(wire.string),
+  }),
+  configuredSecrets: wire.array(wire.string),
+  values: wire.object({
+    global: wire.record(wire.string),
+    project: wire.record(wire.string),
+    workspace: wire.record(wire.string),
+    effective: wire.record(wire.string),
+  }),
+  executions: wire.array(EnvironmentExecutionViewCodec),
+  runs: wire.array(EnvironmentRunViewCodec),
+});
+export const EnvironmentExecutionResultCodec = wire.object({
+  id: wire.string,
+  hash: wire.string,
+  exitCode: wire.number,
+  stdout: wire.string,
+  stderr: wire.string,
 });
 
 export const SessionViewCodec = wire.object({
@@ -448,6 +502,20 @@ export const bootstrapContract = gitspaceRpc
   .output(BootstrapViewCodec)
   .errors({ ProjectNotFound: rpcErrors.projectNotFound, WorkspaceNotFound: rpcErrors.workspaceNotFound, OperationFailed: rpcErrors.operationFailed })
   .query();
+
+export const closeSpaceContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ spaceId: wire.string, expectedGeneration: wire.number }))
+  .output(SpaceLifecycleViewCodec)
+  .errors({ OperationFailed: rpcErrors.operationFailed })
+  .mutation();
+
+export const reopenSpaceContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ spaceId: wire.string, expectedGeneration: wire.number }))
+  .output(SpaceLifecycleViewCodec)
+  .errors({ OperationFailed: rpcErrors.operationFailed })
+  .mutation();
 
 export const archiveWorkspaceContract = gitspaceRpc
   .procedure()
@@ -619,6 +687,69 @@ export const deleteProjectSecretContract = gitspaceRpc
   .input(wire.object({ projectId: wire.string, name: wire.string }))
   .output(wire.object({ deleted: wire.boolean }))
   .errors({ ProjectNotFound: rpcErrors.projectNotFound, OperationFailed: rpcErrors.operationFailed })
+  .mutation();
+
+export const getWorkspaceEnvironmentContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ spaceId: wire.string }))
+  .output(WorkspaceEnvironmentViewCodec)
+  .errors({ OperationFailed: rpcErrors.operationFailed })
+  .query();
+
+export const putWorkspaceEnvironmentBundleContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ spaceId: wire.string, bundleJson: wire.string }))
+  .output(WorkspaceEnvironmentViewCodec)
+  .errors({ OperationFailed: rpcErrors.operationFailed })
+  .mutation();
+
+export const setWorkspaceEnvironmentProfileContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ spaceId: wire.string, profile: wire.string }))
+  .output(WorkspaceEnvironmentViewCodec)
+  .errors({ OperationFailed: rpcErrors.operationFailed })
+  .mutation();
+
+export const putWorkspaceEnvironmentValueContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ spaceId: wire.string, scope: wire.enum(['global', 'project', 'workspace']), name: wire.string, value: wire.string }))
+  .output(WorkspaceEnvironmentViewCodec)
+  .errors({ OperationFailed: rpcErrors.operationFailed })
+  .mutation();
+
+export const deleteWorkspaceEnvironmentValueContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ spaceId: wire.string, scope: wire.enum(['global', 'project', 'workspace']), name: wire.string }))
+  .output(WorkspaceEnvironmentViewCodec)
+  .errors({ OperationFailed: rpcErrors.operationFailed })
+  .mutation();
+
+export const approveWorkspaceEnvironmentExecutionContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ spaceId: wire.string, scope: wire.enum(['project', 'workspace']), executionHash: wire.string }))
+  .output(WorkspaceEnvironmentViewCodec)
+  .errors({ OperationFailed: rpcErrors.operationFailed })
+  .mutation();
+
+export const revokeWorkspaceEnvironmentApprovalContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ spaceId: wire.string, scope: wire.enum(['project', 'workspace']), executionHash: wire.string }))
+  .output(WorkspaceEnvironmentViewCodec)
+  .errors({ OperationFailed: rpcErrors.operationFailed })
+  .mutation();
+
+export const runWorkspaceEnvironmentChecksContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ spaceId: wire.string }))
+  .output(wire.array(EnvironmentExecutionResultCodec))
+  .errors({ OperationFailed: rpcErrors.operationFailed })
+  .mutation();
+
+export const runWorkspaceEnvironmentPhaseContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ spaceId: wire.string, phase: wire.enum(['setup', 'select', 'remove']) }))
+  .output(wire.array(EnvironmentExecutionResultCodec))
+  .errors({ OperationFailed: rpcErrors.operationFailed })
   .mutation();
 
 export const listMcpConnectionsContract = gitspaceRpc
@@ -1473,6 +1604,17 @@ export const gitspaceContract = gitspaceRpc.contract({
     put: putProjectSecretContract,
     delete: deleteProjectSecretContract,
   },
+  environment: {
+    get: getWorkspaceEnvironmentContract,
+    putBundle: putWorkspaceEnvironmentBundleContract,
+    setProfile: setWorkspaceEnvironmentProfileContract,
+    putValue: putWorkspaceEnvironmentValueContract,
+    deleteValue: deleteWorkspaceEnvironmentValueContract,
+    approve: approveWorkspaceEnvironmentExecutionContract,
+    revokeApproval: revokeWorkspaceEnvironmentApprovalContract,
+    runChecks: runWorkspaceEnvironmentChecksContract,
+    runPhase: runWorkspaceEnvironmentPhaseContract,
+  },
   mcp: {
     connections: {
       list: listMcpConnectionsContract,
@@ -1545,6 +1687,10 @@ export const gitspaceContract = gitspaceRpc.contract({
     archive: archiveProjectContract,
     restore: restoreProjectContract,
     delete: deleteProjectContract,
+  },
+  space: {
+    close: closeSpaceContract,
+    reopen: reopenSpaceContract,
   },
   workspace: {
     create: createWorkspaceContract,

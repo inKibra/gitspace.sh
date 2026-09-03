@@ -7,7 +7,7 @@ import { WorkspaceTerminals } from './WorkspaceTerminals.js';
 
 describe('GitSpaceShell', () => {
   it('renders one workspace agent with project navigation and a single collapsed Inspector entry', () => {
-    const html = renderToStaticMarkup(<GitSpaceShell {...verticalSliceFixture} />);
+    const html = renderToStaticMarkup(<GitSpaceShell {...verticalSliceFixture} onCloseSpace={async () => undefined} />);
     expect(html).toContain('Darktop');
     expect(html).not.toContain('Active work');
     expect(html).toContain('Build the GitSpace 1.0 working loop.');
@@ -20,6 +20,7 @@ describe('GitSpaceShell', () => {
     expect(html).not.toContain('class=\"topbar\"');
     expect(html).toContain('agent-blame');
     expect(html).toContain('Space actions for agent-blame');
+    expect(html).toContain('Close space');
     expect(html).not.toContain('Code · green');
     expect(html).not.toContain('Open base project');
   });
@@ -67,11 +68,11 @@ describe('GitSpaceShell', () => {
       defaultMachineId="studio"
       onClaimWorkspace={async () => undefined}
     />);
-    expect(html).toContain('Released · last on Studio');
+    expect(html).toContain('Closed · last on Studio');
     expect(html).toContain('Build the GitSpace 1.0 working loop.');
     expect(html).not.toContain('Ask the workspace agent');
     expect(html).toContain('aria-label="Open on machine"');
-    expect(html).toContain('Restore');
+    expect(html).toContain('Reopen');
     expect(html).toContain('· released');
   });
 

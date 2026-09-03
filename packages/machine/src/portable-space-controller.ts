@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { releasedSpaces, type GitSpaceDatabase, type MaterializedSpace } from '@gitspace/core';
+import { type GitSpaceDatabase, type MaterializedSpace } from '@gitspace/core';
 import type { PortableSpaceDefinition } from './cloud-space-authority.js';
 import { CoordinatorPortableSpaceRuntime } from './coordinator-portable-runtime.js';
 import type { PortableSpaceDescriptor, PortableSpaceLifecycle } from './portable-space-lifecycle.js';
@@ -8,7 +8,7 @@ import type { WalgitProjectBinding } from './walgit-supervisor.js';
 
 export interface SpaceLifecycleController {
   close(space: MaterializedSpace, expectedGeneration: number): Promise<void>;
-  /** Hand the space back to the cloud (placement closed) but keep local files and the agent record so this machine can reclaim it. */
+  /** Hand the space back to the cloud, retaining local files and its dormant agent record. */
   release(space: MaterializedSpace, expectedGeneration: number): Promise<void>;
   open(spaceId: string, expectedGeneration: number): Promise<void>;
 }
@@ -58,10 +58,6 @@ export class MachinePortableSpaceController implements SpaceLifecycleController 
       const closed = await this.sessions.close(session.id);
       if (closed.status === 'error') throw closed.error;
     }
-    this.database.orm.insert(releasedSpaces)
-      .values({ spaceId: space.id, generation: expectedGeneration + 1, releasedAt: new Date().toISOString() })
-      .onConflictDoUpdate({ target: releasedSpaces.spaceId, set: { generation: expectedGeneration + 1, releasedAt: new Date().toISOString() } })
-      .run();
   }
 
   async open(spaceId: string, expectedGeneration: number): Promise<void> {

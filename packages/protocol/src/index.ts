@@ -222,6 +222,7 @@ export * from './device-grant.js';
 export * from './client.js';
 export * from './routed-transport.js';
 export * from './deployment.js';
+export * from './environment-contract.js';
 export * from './cron-contract.js';
 export * from './inspector-contract.js';
 export * from './mcp-contract.js';

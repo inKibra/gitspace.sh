@@ -1,6 +1,7 @@
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'bun:test';
 import type {
+  DiscoveredMcpTool,
   McpAuditEvent,
   McpConnection,
   McpConnectionDraft,
@@ -175,7 +176,7 @@ describe('MachineMcpCoordinator', () => {
     }
   });
 
-  it('executes grant-scoped MCP code with live discovery and bounded nested calls', async () => {
+  it('exposes grant-scoped MCP discovery and calls through the eval namespace', async () => {
     const authority = new FakeMcpAuthority();
     const fixture = join(import.meta.dir, 'fixtures', 'fake-mcp-stdio.ts');
     authority.connections = [connection({
@@ -188,21 +189,18 @@ describe('MachineMcpCoordinator', () => {
     const coordinator = new MachineMcpCoordinator(authority, 'machine-a');
     const projected = await coordinator.createSession({ projectId: 'project-a', workspaceId: 'workspace-a', workspacePath: import.meta.dir });
     try {
-      const codeTool = projected.tools().find((tool) => tool.name === 'mcp_code');
-      expect(codeTool?.description).toContain('stdio.echo');
-      const result = await codeTool!.execute('code-a', {
-        code: `const matches = integrations.search(\"echo\");\nconst value = await integrations.use(\"stdio\").tool(\"echo\", { value: \"hello from code\" });\nreturn { selected: matches[0].name, value };`,
-        timeout_ms: 10_000,
-        max_output_chars: 20_000,
-      }, undefined, {} as never);
-      expect(result.details).toMatchObject({ truncated: false, calls: 1 });
-      expect(JSON.stringify(result)).toContain('hello from code');
+      expect(projected.tools().some((tool) => tool.name === 'mcp_code')).toBe(false);
+      const namespace = projected.evalNamespace();
+      const matches = await namespace.call('search', { query: 'echo' }) as DiscoveredMcpTool[];
+      expect(matches.map((tool) => tool.name)).toEqual(['echo']);
+      expect(await namespace.call('describe', { name: 'stdio.echo' })).toMatchObject({ connectionId: 'stdio', name: 'echo' });
+      const result = await namespace.call('call', { name: 'stdio.echo', args: { value: 'hello from eval' } });
+      expect(JSON.stringify(result)).toContain('hello from eval');
       expect(authority.audit.filter((event) => event.type === 'tool-invocation')).toHaveLength(2);
-      await expect(codeTool!.execute('code-forbidden', {
-        code: 'return await fetch(\"https://example.com\");',
-        timeout_ms: 10_000,
-        max_output_chars: 20_000,
-      }, undefined, {} as never)).rejects.toThrow('only exposes the grant-scoped integrations API');
+
+      authority.grants = [{ ...authority.grants[0]!, enabled: false, revision: 2 }];
+      await projected.reload();
+      expect(await namespace.call('list', {})).toEqual([]);
     } finally {
       await projected.dispose();
     }

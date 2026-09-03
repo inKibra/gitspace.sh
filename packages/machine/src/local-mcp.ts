@@ -1,5 +1,4 @@
 import { isAbsolute, relative, resolve } from 'node:path';
-import { type as schema } from '@oh-my-pi/omptype';
 import type { CustomTool } from '@oh-my-pi/pi-coding-agent';
 import {
   MCPManager,
@@ -188,74 +187,31 @@ function toolDescriptor(projected: ProjectedConnection, tool: MCPToolDefinition,
   };
 }
 
-const mcpCodeSchema = schema({
-  code: schema('string').describe('JavaScript async-function body. Return the final value. Use integrations.use(connectionId), search(), describe(), call(), tools, or ALL_TOOLS.'),
-  'timeout_ms?': schema('1000 <= number <= 120000').describe('Execution deadline in milliseconds. Defaults to 60000.'),
-  'max_output_chars?': schema('1000 <= number <= 100000').describe('Maximum serialized output returned to the model. Defaults to 50000.'),
-});
 
-interface McpCodeCallMessage {
-  type: 'call';
-  id: number;
-  name: string;
-  args: Record<string, unknown>;
-}
-
-interface McpCodeResultMessage {
-  type: 'result';
-  value: unknown;
-}
-
-interface McpCodeErrorMessage {
-  type: 'error';
-  error: string;
-}
-
-type McpCodeWorkerMessage = McpCodeCallMessage | McpCodeResultMessage | McpCodeErrorMessage;
-
-function codeModeDescription(tools: readonly DiscoveredMcpTool[]): string {
-  const catalog = tools.slice(0, 80).map((tool) => {
-    const effect = tool.destructive ? 'destructive' : tool.readOnly ? 'read-only' : 'write-capable';
-    return `- ${tool.connectionId}.${tool.name} (${effect})\\n  ${tool.description ?? 'No description supplied.'}\\n  input: ${JSON.stringify(tool.inputSchema)}`;
-  }).join('\\n');
-  return `Execute JavaScript that discovers, composes, filters, and aggregates the MCP tools enabled for this project session.
-
-The code is an async-function body and must return its final value.
-
-Available APIs:
-- integrations.use(connectionId).searchTools(query, { limit? })
-- integrations.use(connectionId).describeTool(name)
-- integrations.use(connectionId).tool(name, args)
-- search(query, { limit? }) / integrations.search(...)
-- describe(name) / integrations.describe(...)
-- call(name, args) / integrations.call(...)
-- tools[ompToolName](args)
-- ALL_TOOLS
-
-Direct network credentials are never provided. Nested calls use the same grant-scoped OMP MCP tools. The outer mcp_code call is classified as executable code and may require approval.
-
-Current live catalog:
-${catalog || '- No MCP tools are currently connected.'}`;
-}
-
-function boundedCodeResult(value: unknown, maxChars: number): { text: string; truncated: boolean } {
-  let text: string;
+function normalizeMcpEvalResult(result: unknown): unknown {
+  if (!result || typeof result !== 'object') return result;
+  const record = result as Record<string, unknown>;
+  if (record.details !== undefined && record.details !== null) return record.details;
+  if (!Array.isArray(record.content)) return result;
+  const text = record.content.flatMap((part) => (
+    part
+    && typeof part === 'object'
+    && 'type' in part
+    && part.type === 'text'
+    && 'text' in part
+    && typeof part.text === 'string'
+      ? [part.text]
+      : []
+  )).join('\n');
+  if (!text) return result;
   try {
-    const serialized = JSON.stringify(value, null, 2);
-    text = serialized === undefined ? String(value) : serialized;
-  } catch (error) {
-    text = error instanceof Error ? `Unable to serialize result: ${error.message}` : 'Unable to serialize result';
+    return JSON.parse(text) as unknown;
+  } catch {
+    return text;
   }
-  if (text.length <= maxChars) return { text, truncated: false };
-  return { text: `${text.slice(0, maxChars)}\\n--- TRUNCATED ---`, truncated: true };
 }
-
-interface McpCodeToolResult {
-  content: Array<{ type: 'text'; text: string }>;
-  details: { result: unknown; truncated: boolean; calls: number };
-}
-
 export class ProjectedMcpSession {
+
   readonly manager: MCPManager;
   private readonly projected = new Map<string, ProjectedConnection>();
   private readonly unsubscribeStatus: () => void;
@@ -393,120 +349,60 @@ export class ProjectedMcpSession {
   }
 
   tools(): CustomTool[] {
-    const tools: CustomTool[] = [...this.manager.getTools()];
-    const descriptors = this.descriptors();
-    if (descriptors.length > 0) tools.push(this.codeModeTool(descriptors));
-    return tools;
+    return [...this.manager.getTools()];
   }
 
-  private codeModeTool(descriptors: DiscoveredMcpTool[]): CustomTool<typeof mcpCodeSchema> {
+  evalNamespace(localProtocolOptions?: unknown): { declaration: string; call(method: string, args: unknown, signal?: AbortSignal): Promise<unknown> } {
     return {
-      name: 'mcp_code',
-      label: 'MCP Code',
-      description: codeModeDescription(descriptors),
-      parameters: mcpCodeSchema,
-      strict: true,
-      loadMode: 'discoverable',
-      approval: { tier: 'exec', reason: 'Executes code that may compose enabled MCP tools.' },
-      formatApprovalDetails: (args) => {
-        if (!args || typeof args !== 'object' || !('code' in args) || typeof args.code !== 'string') return undefined;
-        const firstLine = args.code.trim().split('\\n', 1)[0] ?? '';
-        return [`Code: ${firstLine.slice(0, 160) || '(empty)'}`, `Enabled MCP tools: ${descriptors.length}`];
-      },
-      execute: (toolCallId, params, _onUpdate, ctx, signal) => this.executeMcpCode(toolCallId, params, ctx, descriptors, signal),
+      declaration: `{
+  list(): Promise<DiscoveredMcpTool[]>;
+  search(input: { query: string; limit?: number }): Promise<DiscoveredMcpTool[]>;
+  describe(input: { name: string }): Promise<DiscoveredMcpTool>;
+  call(input: { name: string; args?: Record<string, unknown> }): Promise<unknown>;
+}`,
+      call: (method, args, signal) => this.callEvalNamespace(method, args, localProtocolOptions, signal),
     };
   }
 
-  private executeMcpCode(
-    toolCallId: string,
-    params: typeof mcpCodeSchema.infer,
-    ctx: Parameters<CustomTool<typeof mcpCodeSchema>['execute']>[3],
-    descriptors: DiscoveredMcpTool[],
-    signal?: AbortSignal,
-  ): Promise<McpCodeToolResult> {
-    const timeoutMs = params.timeout_ms ?? 60_000;
-    const maxOutputChars = params.max_output_chars ?? 50_000;
-    const toolByName = new Map<string, CustomTool>();
-    for (const tool of this.manager.getTools()) {
-      toolByName.set(tool.name, tool);
-      if (tool.mcpToolName) {
-        toolByName.set(tool.mcpToolName, tool);
-        if (tool.mcpServerName) {
-          const projected = this.projected.get(tool.mcpServerName);
-          if (projected) toolByName.set(`${projected.connection.id}.${tool.mcpToolName}`, tool);
-        }
-      }
+  private async callEvalNamespace(method: string, rawArgs: unknown, localProtocolOptions: unknown, signal?: AbortSignal): Promise<unknown> {
+    const args = rawArgs && typeof rawArgs === 'object' ? rawArgs as Record<string, unknown> : {};
+    const descriptors = this.descriptors();
+    if (method === 'list') return descriptors;
+    if (method === 'search') {
+      const query = typeof args.query === 'string' ? args.query.trim().toLowerCase() : '';
+      const limit = typeof args.limit === 'number' ? Math.max(1, Math.trunc(args.limit)) : 50;
+      if (!query) return descriptors.slice(0, limit);
+      return descriptors.filter((descriptor) => [
+        descriptor.connectionId,
+        descriptor.connectionLabel,
+        descriptor.name,
+        descriptor.ompToolName,
+        descriptor.description ?? '',
+      ].some((value) => value.toLowerCase().includes(query))).slice(0, limit);
     }
-
-    const deferred = Promise.withResolvers<McpCodeToolResult>();
-    const resolvePromise = deferred.resolve;
-    const rejectPromise = deferred.reject;
-    const worker = new Worker(new URL('./mcp-code-worker.ts', import.meta.url).href, { type: 'module' });
-      let calls = 0;
-      let settled = false;
-      const finish = () => {
-        if (settled) return false;
-        settled = true;
-        clearTimeout(timer);
-        signal?.removeEventListener('abort', abort);
-        worker.terminate();
-        return true;
-      };
-      const abort = () => {
-        if (!finish()) return;
-        rejectPromise(new Error('MCP code execution aborted'));
-      };
-      const timer = setTimeout(() => {
-        if (!finish()) return;
-        rejectPromise(new Error(`MCP code execution exceeded ${timeoutMs}ms`));
-      }, timeoutMs);
-
-      worker.onerror = (event) => {
-        if (!finish()) return;
-        rejectPromise(new Error(event.message || 'MCP code worker failed'));
-      };
-      worker.onmessage = (event: MessageEvent<McpCodeWorkerMessage>) => {
-        const message = event.data;
-        if (message.type === 'call') {
-          const tool = toolByName.get(message.name);
-          if (!tool) {
-            worker.postMessage({ type: 'call-result', id: message.id, error: `MCP tool ${message.name} is unavailable in this project session.` });
-            return;
-          }
-          calls += 1;
-          this.recordToolEvent({ type: 'tool_execution_start', toolName: tool.name });
-          void tool.execute(`${toolCallId}:${message.id}`, message.args, undefined, ctx, signal)
-            .then((value) => {
-              this.recordToolEvent({ type: 'tool_execution_end', toolName: tool.name, result: value });
-              worker.postMessage({ type: 'call-result', id: message.id, value });
-            })
-            .catch((error) => {
-              this.recordToolEvent({ type: 'tool_execution_end', toolName: tool.name, error, isError: true });
-              const projected = tool.mcpServerName ? this.projected.get(tool.mcpServerName) : null;
-              worker.postMessage({ type: 'call-result', id: message.id, error: redact(error, projected?.secrets ?? []) ?? 'MCP tool call failed' });
-            });
-          return;
-        }
-        if (message.type === 'error') {
-          if (!finish()) return;
-          rejectPromise(new Error(message.error));
-          return;
-        }
-        if (!finish()) return;
-        const output = boundedCodeResult(message.value, maxOutputChars);
-        resolvePromise({
-          content: [{ type: 'text', text: output.text }],
-          details: { result: message.value, truncated: output.truncated, calls },
-        });
-      };
-
-      if (signal?.aborted) {
-        abort();
-        return deferred.promise;
-      }
-      signal?.addEventListener('abort', abort, { once: true });
-      worker.postMessage({ type: 'execute', code: params.code, tools: descriptors });
-    return deferred.promise;
+    const name = typeof args.name === 'string' ? args.name : '';
+    const descriptor = descriptors.find((candidate) => (
+      candidate.ompToolName === name
+      || candidate.name === name
+      || `${candidate.connectionId}.${candidate.name}` === name
+    ));
+    if (!descriptor) throw new Error(`MCP tool ${name || '(missing name)'} is unavailable in this project session`);
+    if (method === 'describe') return descriptor;
+    if (method !== 'call') throw new Error(`Unknown mcp namespace method: ${method}`);
+    const tool = this.manager.getTools().find((candidate) => candidate.name === descriptor.ompToolName);
+    if (!tool) throw new Error(`MCP tool ${name} disconnected before invocation`);
+    const callArgs = args.args && typeof args.args === 'object' ? args.args as Record<string, unknown> : {};
+    this.recordToolEvent({ type: 'tool_execution_start', toolName: tool.name });
+    try {
+      const context = { localProtocolOptions } as never;
+      const result = await tool.execute(`eval:${crypto.randomUUID()}`, callArgs, undefined, context, signal);
+      this.recordToolEvent({ type: 'tool_execution_end', toolName: tool.name, result });
+      return normalizeMcpEvalResult(result);
+    } catch (error) {
+      this.recordToolEvent({ type: 'tool_execution_end', toolName: tool.name, error, isError: true });
+      const projected = tool.mcpServerName ? this.projected.get(tool.mcpServerName) : null;
+      throw new Error(redact(error, projected?.secrets ?? []) ?? 'MCP tool call failed');
+    }
   }
 
   recordToolEvent(event: OmpMcpToolEvent): void {

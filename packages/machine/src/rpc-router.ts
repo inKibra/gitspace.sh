@@ -1,6 +1,7 @@
 import {
   bootstrapContract,
   archiveWorkspaceContract,
+  closeSpaceContract,
   archiveProjectContract,
   createProjectSessionContract,
   createProjectContract,
@@ -20,6 +21,7 @@ import {
   getGitIdentityContract,
   getOmpSettingsContract,
   getMcpConnectionStatusContract,
+  getWorkspaceEnvironmentContract,
   getUserSettingsContract,
   listMachinesContract,
   listProjectsContract,
@@ -31,6 +33,7 @@ import {
   listProjectMcpGrantsContract,
   machineEventsContract,
   restoreWorkspaceContract,
+  reopenSpaceContract,
   restoreProjectContract,
   resumeMachineContract,
   sleepMachineContract,
@@ -82,6 +85,14 @@ import {
   subagentTranscriptEventsContract,
   updateUserSettingsContract,
   updateMcpConnectionContract,
+  putWorkspaceEnvironmentBundleContract,
+  setWorkspaceEnvironmentProfileContract,
+  putWorkspaceEnvironmentValueContract,
+  deleteWorkspaceEnvironmentValueContract,
+  approveWorkspaceEnvironmentExecutionContract,
+  revokeWorkspaceEnvironmentApprovalContract,
+  runWorkspaceEnvironmentChecksContract,
+  runWorkspaceEnvironmentPhaseContract,
   updateMachineNotesContract,
   createProjectCronContract,
   deleteProjectCronContract,
@@ -179,6 +190,7 @@ import {
   WorkspaceHubTerminalUnavailable,
   type WorkspaceHubTerminalCoordinator,
 } from './workspace-hub.js';
+import { WorkspaceEnvironmentManager, type WorkspaceEnvironmentView } from './workspace-environment.js';
 import { CanonicalSettingsConflict, type CanonicalSettingsChangedEvent, type CanonicalSettingsCoordinator } from './canonical-settings.js';
 import { ProviderAuthError, type ProviderAuthCoordinator } from './provider-auth.js';
 import type { SharedGitIdentityCoordinator } from './shared-git-identity.js';
@@ -213,6 +225,7 @@ export interface ProjectSecretsRpc {
 
   putProjectSecret(projectId: string, name: string, value: string): Promise<{ projectId: string; name: string; revision: number; updatedAt: string; updatedBy: string }>;
   deleteProjectSecret(projectId: string, name: string): Promise<{ deleted: boolean }>;
+  materializeProjectSecrets(projectId: string, names: string[]): Promise<Record<string, string>>;
 }
 export interface MachineMcpRpc {
   listConnections(): Promise<McpConnection[]>;
@@ -359,7 +372,7 @@ function lifecycleView(space: NonNullable<ReturnType<GitSpaceDatabase['getSpace'
     id: space.id,
     projectId: space.projectId,
     kind: space.kind,
-    state: space.placementState === 'closed' ? 'archived' as const : 'active' as const,
+    state: space.closedAt ? 'archived' as const : space.placementState === 'closed' ? 'closed' as const : 'active' as const,
     machineId: space.placementState === 'closed' || space.holderId === 'unassigned' ? null : space.holderId,
     generation: space.generation,
   };
@@ -463,6 +476,22 @@ function authorityFailureMessage(failure: AuthorityFailure): string {
 
 export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
   const server = serverRpc.context<GitSpaceRpcContext>();
+  const environment = new WorkspaceEnvironmentManager(options.database, options.secrets, options.terminals);
+  const environmentOutput = (view: WorkspaceEnvironmentView) => ({
+    spaceId: view.spaceId,
+    projectId: view.projectId,
+    bundleJson: JSON.stringify(view.bundle),
+    selectedProfile: view.selectedProfile,
+    effective: view.effective,
+    configuredSecrets: view.configuredSecrets,
+    values: view.values,
+    executions: view.executions.map((execution) => ({
+      ...execution,
+      phase: execution.phase ?? null,
+      fileName: execution.fileName ?? null,
+    })),
+    runs: view.runs,
+  });
   const settingsCoordinator = (): CanonicalSettingsCoordinator => {
     if (!options.settings) throw new Error('Canonical settings are unavailable');
     return options.settings;
@@ -695,6 +724,47 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
       return err(errors.OperationFailed({ operation: 'list machines', message: error instanceof Error ? error.message : 'Unable to list machines' }));
     }
   });
+  const closeSpace = server.implement(closeSpaceContract).handler(async ({ input, errors }) => {
+    const space = options.database.getSpace(input.spaceId);
+    if (!space) return err(errors.OperationFailed({ operation: 'close space', message: `Space ${input.spaceId} does not exist` }));
+    if (space.placementState === 'closed') return ok(lifecycleView(space));
+    if (space.holderId !== options.machineId || space.generation !== input.expectedGeneration) {
+      return err(errors.OperationFailed({ operation: 'close space', message: 'Space placement changed before close' }));
+    }
+    try {
+      await options.spaces.release(space, input.expectedGeneration);
+      await options.terminals.stopOwned(space.id);
+      const closed = options.database.getSpace(space.id);
+      if (!closed) throw new Error(`Space ${space.id} disappeared after close`);
+      return ok(lifecycleView(closed));
+    } catch (error) {
+      return err(errors.OperationFailed({ operation: 'close space', message: error instanceof Error ? error.message : 'Unable to close space' }));
+    }
+  });
+  const reopenSpace = server.implement(reopenSpaceContract).handler(async ({ input, errors }) => {
+    const space = options.database.getSpace(input.spaceId);
+    if (!space) return err(errors.OperationFailed({ operation: 'reopen space', message: `Space ${input.spaceId} does not exist` }));
+    if (space.closedAt) return err(errors.OperationFailed({ operation: 'reopen space', message: 'Archived spaces must be restored before they can reopen' }));
+    if (space.placementState !== 'closed') {
+      if (space.placementState !== 'open' || space.holderId !== options.machineId) {
+        return err(errors.OperationFailed({ operation: 'reopen space', message: 'Space placement is transitioning or active on another machine' }));
+      }
+      const resumed = await options.sessions.openSpace(space.id);
+      return resumed.status === 'ok'
+        ? ok(lifecycleView(space))
+        : err(errors.OperationFailed({ operation: 'reopen space', message: resumed.error.message }));
+    }
+    if (space.generation !== input.expectedGeneration) return err(errors.OperationFailed({ operation: 'reopen space', message: 'Space placement changed before reopen' }));
+    try {
+      await options.spaces.open(space.id, input.expectedGeneration);
+      const opened = options.database.getSpace(space.id);
+      if (!opened) throw new Error(`Space ${space.id} disappeared after reopen`);
+      return ok(lifecycleView(opened));
+    } catch (error) {
+      return err(errors.OperationFailed({ operation: 'reopen space', message: error instanceof Error ? error.message : 'Unable to reopen space' }));
+    }
+  });
+
   const archiveWorkspace = server.implement(archiveWorkspaceContract).handler(async ({ input, errors }) => {
     const space = options.database.getSpace(input.spaceId);
     if (!space) return err(errors.WorkspaceNotFound({ workspaceId: input.spaceId }));
@@ -833,7 +903,7 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
     }
     const prompted = await options.sessions.prompt(input.sessionId, input.text, { streamingBehavior: input.streamingBehavior, images: input.images.map((image) => ({ type: 'image' as const, ...image })) });
     if (prompted.status === 'error') {
-      return err(errors.OperationFailed({ operation: 'prompt session', message: 'Unable to prompt session' }));
+      return err(errors.OperationFailed({ operation: 'prompt session', message: prompted.error.message }));
     }
     return prompted.value
       ? ok({ accepted: true })
@@ -1296,6 +1366,71 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
       return err(errors.OperationFailed({ operation: 'delete project secret', message: error instanceof Error ? error.message : 'Unable to delete project secret' }));
     }
   });
+  const getEnvironment = server.implement(getWorkspaceEnvironmentContract).handler(async ({ input, errors }) => {
+    try {
+      return ok(environmentOutput(await environment.view(input.spaceId)));
+    } catch (error) {
+      return err(errors.OperationFailed({ operation: 'get workspace environment', message: error instanceof Error ? error.message : 'Unable to get workspace environment' }));
+    }
+  });
+  const putEnvironmentBundle = server.implement(putWorkspaceEnvironmentBundleContract).handler(async ({ input, errors }) => {
+    try {
+      return ok(environmentOutput(await environment.putBundle(input.spaceId, JSON.parse(input.bundleJson))));
+    } catch (error) {
+      return err(errors.OperationFailed({ operation: 'put workspace environment bundle', message: error instanceof Error ? error.message : 'Unable to save workspace environment bundle' }));
+    }
+  });
+  const setEnvironmentProfile = server.implement(setWorkspaceEnvironmentProfileContract).handler(async ({ input, errors }) => {
+    try {
+      return ok(environmentOutput(await environment.setProfile(input.spaceId, input.profile)));
+    } catch (error) {
+      return err(errors.OperationFailed({ operation: 'set workspace environment profile', message: error instanceof Error ? error.message : 'Unable to set workspace environment profile' }));
+    }
+  });
+  const putEnvironmentValue = server.implement(putWorkspaceEnvironmentValueContract).handler(async ({ input, errors }) => {
+    try {
+      return ok(environmentOutput(await environment.putValue(input.spaceId, input.scope, input.name, input.value)));
+    } catch (error) {
+      return err(errors.OperationFailed({ operation: 'put workspace environment value', message: error instanceof Error ? error.message : 'Unable to save workspace environment value' }));
+    }
+  });
+  const deleteEnvironmentValue = server.implement(deleteWorkspaceEnvironmentValueContract).handler(async ({ input, errors }) => {
+    try {
+      return ok(environmentOutput(await environment.deleteValue(input.spaceId, input.scope, input.name)));
+    } catch (error) {
+      return err(errors.OperationFailed({ operation: 'delete workspace environment value', message: error instanceof Error ? error.message : 'Unable to delete workspace environment value' }));
+    }
+  });
+  const approveEnvironmentExecution = server.implement(approveWorkspaceEnvironmentExecutionContract).handler(async ({ input, errors }) => {
+    try {
+      return ok(environmentOutput(await environment.approve(input.spaceId, input.scope, input.executionHash)));
+    } catch (error) {
+      return err(errors.OperationFailed({ operation: 'approve workspace environment execution', message: error instanceof Error ? error.message : 'Unable to approve workspace environment execution' }));
+    }
+  });
+  const revokeEnvironmentApproval = server.implement(revokeWorkspaceEnvironmentApprovalContract).handler(async ({ input, errors }) => {
+    try {
+      return ok(environmentOutput(await environment.revokeApproval(input.spaceId, input.scope, input.executionHash)));
+    } catch (error) {
+      return err(errors.OperationFailed({ operation: 'revoke workspace environment approval', message: error instanceof Error ? error.message : 'Unable to revoke workspace environment approval' }));
+    }
+  });
+
+  const runEnvironmentChecks = server.implement(runWorkspaceEnvironmentChecksContract).handler(async ({ input, errors }) => {
+    try {
+      return ok(await environment.runChecks(input.spaceId));
+    } catch (error) {
+      return err(errors.OperationFailed({ operation: 'run workspace environment checks', message: error instanceof Error ? error.message : 'Unable to run workspace environment checks' }));
+    }
+  });
+  const runEnvironmentPhase = server.implement(runWorkspaceEnvironmentPhaseContract).handler(async ({ input, errors }) => {
+    try {
+      return ok(await environment.runPhase(input.spaceId, input.phase));
+    } catch (error) {
+      return err(errors.OperationFailed({ operation: `run workspace environment ${input.phase}`, message: error instanceof Error ? error.message : `Unable to run workspace environment ${input.phase}` }));
+    }
+  });
+
   const listSkills = server.implement(listSkillsContract).handler(async ({ input, errors }) => {
     if (!options.database.getProject(input.projectId)) return err(errors.ProjectNotFound({ projectId: input.projectId }));
     if (!options.skills) return err(errors.OperationFailed({ operation: 'list skills', message: 'Skills authority is unavailable' }));
@@ -1964,9 +2099,21 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
       usage: providerUsage,
       models: listAvailableModels,
     },
+    space: { close: closeSpace, reopen: reopenSpace },
     devices: { list: listDevices, revoke: revokeDevice },
     deployment: { status: deploymentStatus, launch: deploymentLaunch, revert: deploymentRevert },
     secrets: { list: listSecrets, put: putSecret, delete: deleteSecret },
+    environment: {
+      get: getEnvironment,
+      putBundle: putEnvironmentBundle,
+      setProfile: setEnvironmentProfile,
+      putValue: putEnvironmentValue,
+      deleteValue: deleteEnvironmentValue,
+      approve: approveEnvironmentExecution,
+      revokeApproval: revokeEnvironmentApproval,
+      runChecks: runEnvironmentChecks,
+      runPhase: runEnvironmentPhase,
+    },
     mcp: {
       connections: {
         list: listMcpConnections,

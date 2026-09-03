@@ -1,19 +1,18 @@
-import type { RichContentBlock, SideAgentBlock, ToolCallBlock, TransportBlock, TurnBlock, TurnItem } from '@gitspace/blocks';
-import { AskUserQuestions, Badge, Button, ChatMessage, Table, TableBody, TableCell, TableHead, TableHeader, TableRow, ThinkingIndicator, ThinkingStep, ThinkingStepDetails, ThinkingSteps, ThinkingStepsContent, ThinkingStepsHeader, useShape, type AskUserAnswer, type IconName } from '@gitspace/ui';
+import type { MessageImage, RichContentBlock, SideAgentBlock, ToolCallBlock, TransportBlock, TurnBlock, TurnItem } from '@gitspace/blocks';
+import { AskUserQuestions, Badge, Button, ChatMessage, Dialog, DialogContent, DialogTitle, Table, TableBody, TableCell, TableHead, TableHeader, TableRow, ThinkingIndicator, ThinkingStep, ThinkingStepDetails, ThinkingSteps, ThinkingStepsContent, ThinkingStepsHeader, useShape, type AskUserAnswer, type IconName } from '@gitspace/ui';
 import { AlertCircle, GitBranch01, Link03, ShieldTick } from '@untitledui/icons';
 import { GitSpaceMarkdown } from './GitSpaceMarkdown.js';
 import { glyph } from './glyph.js';
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 
 function RichContent({ block }: { block: RichContentBlock }) {
-  const shape = useShape();
   switch (block.type) {
     case 'markdown': return <GitSpaceMarkdown>{block.text}</GitSpaceMarkdown>;
     case 'code': return <GitSpaceMarkdown>{`~~~${block.language ?? ''}\n${block.text}\n~~~`}</GitSpaceMarkdown>;
     case 'diff': return <GitSpaceMarkdown>{`~~~diff\n${block.patch}\n~~~`}</GitSpaceMarkdown>;
     case 'diagram': return <GitSpaceMarkdown>{`~~~mermaid\n${block.source}\n~~~`}</GitSpaceMarkdown>;
     case 'file-tree': return <div className="flex flex-col gap-0.5 font-mono text-caption text-muted-foreground">{block.paths.map((path) => <code key={path}>{path}</code>)}</div>;
-    case 'image': return <img className={`${shape.container} max-w-full outline outline-1 -outline-offset-1 outline-black/10 dark:outline-white/10`} src={block.url} alt={block.alt ?? ''} />;
+    case 'image': return <TranscriptImage alt={block.alt ?? 'Tool output image'} label="Open tool output image" src={block.url} />;
     case 'artifact-ref': return <a className="inline-flex items-center gap-1 text-body text-foreground underline-offset-4 hover:underline" href={block.url}><Link03 width={14} height={14} strokeWidth={1.5} />{block.label}</a>;
     case 'table': return <Table>
       <TableHeader><TableRow>{block.columns.map((column) => <TableHead key={column}>{column}</TableHead>)}</TableRow></TableHeader>
@@ -22,18 +21,58 @@ function RichContent({ block }: { block: RichContentBlock }) {
   }
 }
 
+function TranscriptImage({ alt, label, src }: { alt: string; label: string; src: string }) {
+  const [open, setOpen] = useState(false);
+  const shape = useShape();
+  return <>
+    <button
+      aria-label={label}
+      className={`${shape.container} block w-fit max-w-full cursor-zoom-in overflow-hidden bg-surface-2 shadow-surface-1 outline-none transition-transform duration-80 active:scale-[0.96] focus-visible:ring-1 focus-visible:ring-[color:var(--focus-ring,#6B97FF)]`}
+      onClick={() => setOpen(true)}
+      type="button"
+    >
+      <img
+        alt={alt}
+        className="block max-h-64 max-w-full object-contain outline outline-1 -outline-offset-1 outline-black/10 dark:outline-white/10"
+        loading="lazy"
+        src={src}
+      />
+    </button>
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogContent className="flex max-h-[calc(100dvh-2rem)] !max-w-[calc(100vw-2rem)] items-center justify-center overflow-hidden bg-surface-1 p-4" size="lg">
+        <DialogTitle className="sr-only">{alt}</DialogTitle>
+        <img
+          alt={alt}
+          className={`${shape.container} block max-h-[calc(100dvh-4rem)] max-w-full object-contain outline outline-1 -outline-offset-1 outline-black/10 dark:outline-white/10`}
+          src={src}
+        />
+      </DialogContent>
+    </Dialog>
+  </>;
+}
+
+function MessageAttachments({ images }: { images: MessageImage[] }) {
+  return <>{images.map((image, index) => <TranscriptImage
+    alt={`Attached image ${index + 1}`}
+    key={`${image.mimeType}:${index}`}
+    label={`Open attached image ${index + 1}`}
+    src={`data:${image.mimeType};base64,${image.data}`}
+  />)}</>;
+}
+
 // ThinkingStep drops `pending` rows, so every state maps to a visible icon.
 const TOOL_ICON: Record<ToolCallBlock['status'], IconName> = { pending: 'circle', running: 'loader', done: 'check', error: 'x', interrupted: 'x' };
 
 /** One tool call is one reasoning-steps block: header names the tool, the step carries the target and status, details hold input and result. */
 function ToolCall({ block }: { block: ToolCallBlock }) {
   const hasDetail = (block.input?.length ?? 0) + (block.result?.length ?? 0) > 0;
+  const hasImage = [...(block.input ?? []), ...(block.result ?? [])].some((content) => content.type === 'image');
   const failed = block.status === 'error';
-  return <ThinkingSteps defaultOpen={failed}>
+  return <ThinkingSteps className="w-full" defaultOpen={failed}>
     <ThinkingStepsHeader>{block.tool}</ThinkingStepsHeader>
     <ThinkingStepsContent>
       <ThinkingStep label={block.target ?? block.tool} description={failed ? 'failed' : block.status} status={block.status === 'running' ? 'active' : 'complete'} icon={TOOL_ICON[block.status]} isLast>
-        {hasDetail ? <ThinkingStepDetails summary="Details" defaultOpen={failed}>
+        {hasDetail ? <ThinkingStepDetails key={hasImage ? 'image' : 'detail'} summary="Details" defaultOpen={failed || hasImage}>
           <div className="flex min-w-0 flex-col gap-2">
             {block.input?.map((content) => <RichContent block={content} key={content.id} />)}
             {block.result?.map((content) => <RichContent block={content} key={content.id} />)}
@@ -88,12 +127,27 @@ export interface TurnTranscriptProps {
   onAnswer?(text: string): void;
 }
 
+function ThinkingBlock({ active, text }: { active: boolean; text: string }) {
+  return <ThinkingSteps className="w-full" defaultOpen={active} key={active ? 'active' : 'complete'}>
+    <ThinkingStepsHeader>{active ? <ThinkingIndicator className="p-0" showIcon={false} size="compact" /> : 'Thinking'}</ThinkingStepsHeader>
+    <ThinkingStepsContent>
+      <div className="min-w-0 w-full text-foreground">
+        <GitSpaceMarkdown streaming={active}>{text}</GitSpaceMarkdown>
+      </div>
+    </ThinkingStepsContent>
+  </ThinkingSteps>;
+}
+
 function TurnItemView({ item, active, onAnswer }: { item: TurnItem; active: boolean; onAnswer?: TurnTranscriptProps['onAnswer'] }) {
   switch (item.type) {
     case 'message':
-      return <ChatMessage from={item.role} data-pending={item.pending || undefined}>{item.role === 'assistant' ? <GitSpaceMarkdown streaming={item.pending}>{item.text}</GitSpaceMarkdown> : item.text}</ChatMessage>;
+      return <ChatMessage
+        attachments={item.images?.length ? <MessageAttachments images={item.images} /> : undefined}
+        from={item.role}
+        data-pending={item.pending || undefined}
+      >{item.role === 'assistant' ? <GitSpaceMarkdown streaming={item.pending}>{item.text}</GitSpaceMarkdown> : item.text}</ChatMessage>;
     case 'thinking':
-      return active ? <ChatMessage from="assistant"><ThinkingIndicator /></ChatMessage> : null;
+      return <ThinkingBlock active={active} text={item.text} />;
     case 'tool-call':
       return <ToolCall block={item} />;
     case 'ask':

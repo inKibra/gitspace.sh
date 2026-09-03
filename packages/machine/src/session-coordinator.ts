@@ -466,7 +466,6 @@ export class MachineSessionCoordinator {
 
 
   async quiesceSpace(spaceId: string): Promise<void> {
-    this.assertManagedSpaceRoot(spaceId);
     const session = this.list(spaceId)[0];
     if (!session || !this.live.has(session.id)) throw runtimeError('quiesce', new Error('Space session is not live'), session?.id);
     this.quiesced.add(session.id);

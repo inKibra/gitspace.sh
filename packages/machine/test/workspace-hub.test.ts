@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { GitSpaceDatabase } from '@gitspace/core';
-import { closeDaemonClients } from '@oh-my-pi/pi-coding-agent/launch/client';
+import { closeDaemonClients, daemonClientForProject } from '@oh-my-pi/pi-coding-agent/launch/client';
 import { WorkspaceHubTerminalCoordinator } from '../src/workspace-hub.js';
 
 const roots: string[] = [];
@@ -42,7 +42,26 @@ describe('WorkspaceHubTerminalCoordinator', () => {
     }
     expect(rendered).toContain('hub-ready');
 
-    const stopped = await coordinator.stop('workspace-a', terminal.name);
-    expect(['exited', 'failed']).toContain(stopped.state);
+    const lifecycle = await coordinator.runLifecyclePlan('workspace-a', 'checks', [
+      { id: 'first', kind: 'check', command: "printf 'first\\n'" },
+      { id: 'second', kind: 'check', command: "printf 'second\\n'" },
+    ], { PATH: process.env.PATH ?? '' });
+    expect(lifecycle.exitCode).toBe(0);
+    expect(lifecycle.steps).toEqual([
+      { id: 'first', exitCode: 0, output: 'first' },
+      { id: 'second', exitCode: 0, output: 'second' },
+    ]);
+
+    const closing = database.beginSpaceClose({ spaceId: 'workspace-a', holderId: 'machine-a', expectedGeneration: 1 });
+    if (closing.status === 'error') throw closing.error;
+    const closed = database.commitSpaceClosed({ spaceId: 'workspace-a', holderId: 'machine-a', expectedGeneration: 1 });
+    if (closed.status === 'error') throw closed.error;
+    await coordinator.stopOwned('workspace-a');
+    const hub = await daemonClientForProject(workspacePath);
+    const described = await hub.request({ op: 'describe', name: terminal.name });
+    expect(described.op).toBe('describe');
+    if (described.op !== 'describe') throw new Error('Expected Hub describe response');
+    expect(described.daemon.state).toBe('exited');
+
   }, 20_000);
 });
