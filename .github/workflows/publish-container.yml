@@ -1,0 +1,93 @@
+name: Publish Cloud Container
+
+on:
+  push:
+    tags: ['container-*']
+  workflow_dispatch:
+
+concurrency:
+  group: cloud-container-publication
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+      IMAGE: registry.cloudflare.com/${{ vars.CLOUDFLARE_ACCOUNT_ID }}/gitspace-onboarding:${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check publication configuration
+        env:
+          API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          REGISTRY_USERNAME: ${{ secrets.CLOUDFLARE_REGISTRY_USERNAME }}
+          REGISTRY_PASSWORD: ${{ secrets.CLOUDFLARE_REGISTRY_PASSWORD }}
+        run: |
+          test -n "$CLOUDFLARE_ACCOUNT_ID"
+          if [ -z "$API_TOKEN" ] && { [ -z "$REGISTRY_USERNAME" ] || [ -z "$REGISTRY_PASSWORD" ]; }; then
+            echo 'Configure CLOUDFLARE_API_TOKEN with registry write access, or fresh short-lived CLOUDFLARE_REGISTRY_USERNAME and CLOUDFLARE_REGISTRY_PASSWORD secrets.' >&2
+            exit 1
+          fi
+      - uses: docker/setup-buildx-action@v3
+      - name: Build the complete Linux x64 runtime
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: packages/sandbox-worker/Dockerfile
+          platforms: linux/amd64
+          load: true
+          tags: ${{ env.IMAGE }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          cache-from: type=gha,scope=cloud-container
+          cache-to: type=gha,mode=max,scope=cloud-container
+      - name: Exercise packaged Bun, walgit, and OMP with a clean home
+        run: |
+          test "$(docker run --rm --entrypoint bun "$IMAGE" --version)" = '1.4.0'
+          docker run --rm --entrypoint walgit "$IMAGE" --version
+          docker run --rm --mount "type=bind,source=$GITHUB_WORKSPACE,target=/probe,readonly" \
+            --entrypoint bun "$IMAGE" /probe/packages/sandbox-worker/scripts/probe-image.ts
+      - name: Authenticate only for publication
+        env:
+          API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          REGISTRY_USERNAME: ${{ secrets.CLOUDFLARE_REGISTRY_USERNAME }}
+          REGISTRY_PASSWORD: ${{ secrets.CLOUDFLARE_REGISTRY_PASSWORD }}
+        run: |
+          if [ -n "$API_TOKEN" ]; then
+            credentials=$(curl --fail-with-body --silent --show-error \
+              "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/containers/registries/registry.cloudflare.com/credentials" \
+              -H "Authorization: Bearer $API_TOKEN" -H 'Content-Type: application/json' \
+              --data '{"expiration_minutes":60,"permissions":["push","pull"]}')
+            REGISTRY_USERNAME=$(printf '%s' "$credentials" | jq -er '.result.username')
+            REGISTRY_PASSWORD=$(printf '%s' "$credentials" | jq -er '.result.password')
+          fi
+          echo "::add-mask::$REGISTRY_PASSWORD"
+          printf '%s' "$REGISTRY_PASSWORD" | docker login registry.cloudflare.com --username "$REGISTRY_USERNAME" --password-stdin
+      - name: Upload and verify the immutable registry image
+        run: |
+          docker push "$IMAGE"
+          digest=$(docker buildx imagetools inspect "$IMAGE" --format '{{json .Manifest}}' | jq -er '.digest | select(test("^sha256:[a-f0-9]{64}$"))')
+          reference="${IMAGE%:*}@$digest"
+          docker buildx imagetools inspect "$reference"
+          printf '%s\n' "$reference" > image-reference.txt
+          jq -n --arg image "$reference" --arg tag "$IMAGE" --arg revision "$GITHUB_SHA" \
+            --arg run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            '{image: $image, tag: $tag, revision: $revision, run: $run}' > image-provenance.json
+          printf 'Published `%s`\n\nPublication only. Use the checkpointed sandbox rollout procedure to deploy it.\n' "$reference" >> "$GITHUB_STEP_SUMMARY"
+      - name: Retain immutable image reference and provenance
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloud-container-reference
+          path: |
+            image-reference.txt
+            image-provenance.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Remove registry login
+        if: always()
+        run: docker logout registry.cloudflare.com
