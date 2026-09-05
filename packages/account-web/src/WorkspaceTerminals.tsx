@@ -415,6 +415,8 @@ export function WorkspaceTerminals(props: WorkspaceTerminalsProps) {
   const [output, setOutput] = useState<WorkspaceTerminalOutput | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  const pendingInput = useRef<Array<{ name: string; chunks: string[]; send: WorkspaceTerminalsProps['send'] }>>([]);
+  const sendingInput = useRef(false);
   const selected = useMemo(() => terminals.find((terminal) => terminal.name === selectedName) ?? terminals[0] ?? null, [terminals, selectedName]);
 
   useEffect(() => {
@@ -470,10 +472,25 @@ export function WorkspaceTerminals(props: WorkspaceTerminalsProps) {
 
   const sendInput = (data: string): void => {
     if (!selected || !isRunning(selected.state)) return;
-    void send(selected.name, data).then(
-      () => setError(null),
-      (cause: unknown) => setError(cause instanceof Error ? cause.message : String(cause)),
-    );
+    const tail = pendingInput.current.at(-1);
+    if (tail?.name === selected.name && tail.send === send) tail.chunks.push(data);
+    else pendingInput.current.push({ name: selected.name, chunks: [data], send });
+    if (sendingInput.current) return;
+    sendingInput.current = true;
+    void (async () => {
+      try {
+        while (pendingInput.current.length > 0) {
+          const next = pendingInput.current.shift()!;
+          await next.send(next.name, next.chunks.join(''));
+        }
+        setError(null);
+      } catch (cause) {
+        pendingInput.current.length = 0;
+        setError(cause instanceof Error ? cause.message : String(cause));
+      } finally {
+        sendingInput.current = false;
+      }
+    })();
   };
 
 
