@@ -2,11 +2,11 @@ FROM rust:1.97.1-bullseye AS walgit-builder
 RUN apt-get update && apt-get install -y --no-install-recommends protobuf-compiler libprotobuf-dev cmake clang pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
 WORKDIR /walgit
 RUN git init . && git remote add origin https://github.com/tobi/walgit.git && git fetch --depth 1 origin 6d8fa54ba0f83072a1a50317bb6c8c1afa5a3cd1 && git checkout --detach FETCH_HEAD
-COPY --from=oven/bun:1.3.14 /usr/local/bin/bun /usr/local/bin/bun
+COPY --from=oven/bun:1.4.0 /usr/local/bin/bun /usr/local/bin/bun
 RUN cd web && bun install --frozen-lockfile && bun run build
 RUN cargo build --locked --release -p walgit-cli && strip --strip-debug target/release/walgit
 
-FROM oven/bun:1.3.14 AS builder
+FROM oven/bun:1.4.0 AS builder
 WORKDIR /app
 COPY package.json bun.lock ./
 COPY packages ./packages
