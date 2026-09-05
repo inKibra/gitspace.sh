@@ -64,6 +64,7 @@ export class SharedGitIdentityCoordinator {
   private identity: GitIdentityDocument | null = null;
   private readonly privateKeyPath: string;
   private readonly publicKeyPath: string;
+  private readonly knownHostsPath: string;
 
   constructor(
     private readonly cloud: GitIdentityCloud,
@@ -73,6 +74,7 @@ export class SharedGitIdentityCoordinator {
     const directory = join(root, 'git-identity');
     this.privateKeyPath = join(directory, 'id_ed25519');
     this.publicKeyPath = `${this.privateKeyPath}.pub`;
+    this.knownHostsPath = join(directory, 'known_hosts');
   }
 
   async start(): Promise<void> {
@@ -97,22 +99,43 @@ export class SharedGitIdentityCoordinator {
     return { generation, publicKey, fingerprint, updatedAt, updatedBy };
   }
 
+  /** First clone has no repository config yet; use the same account identity
+   *  that apply() installs for subsequent Git operations. */
+  gitEnvironment(repositoryUrl: string): Record<string, string> {
+    if (!this.identity) throw new Error('Shared Git identity is not initialized');
+    const environment: Record<string, string> = { GIT_SSH_COMMAND: this.sshCommand(), GIT_TERMINAL_PROMPT: '0' };
+    if (repositoryUrl.startsWith('https://github.com/')) {
+      const count = Number(process.env.GIT_CONFIG_COUNT ?? 0);
+      environment.GIT_CONFIG_COUNT = String(count + 1);
+      environment[`GIT_CONFIG_KEY_${count}`] = 'url.git@github.com:.insteadOf';
+      environment[`GIT_CONFIG_VALUE_${count}`] = 'https://github.com/';
+    }
+    return environment;
+  }
+
+  private sshCommand(): string {
+    const identity = `'${this.privateKeyPath.replaceAll("'", "'\\''")}'`;
+    const knownHosts = `'${`${JSON.stringify(this.knownHostsPath)} ~/.ssh/known_hosts`.replaceAll("'", "'\\''")}'`;
+    return `ssh -i ${identity} -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=${knownHosts}`;
+  }
+
   private applying: Promise<void> = Promise.resolve();
 
   /** Applies the identity to every project repository. Calls are serialized:
    *  startup, a settings save, and a cloud settings event can all arrive
    *  together, and two `git config` writers on one repo collide on its lock. */
-  apply(settings: UserSettings): Promise<void> {
-    const run = this.applying.then(() => this.applyNow(settings));
+  apply(settings: UserSettings, repositories?: readonly string[]): Promise<void> {
+    const run = this.applying.then(() => this.applyNow(settings, repositories ?? this.repositories()));
     this.applying = run.catch(() => undefined);
     return run;
   }
 
-  private async applyNow(settings: UserSettings): Promise<void> {
+  private async applyNow(settings: UserSettings, repositories: readonly string[]): Promise<void> {
     if (!this.identity) throw new Error('Shared Git identity is not initialized');
-    const sshCommand = `ssh -i ${JSON.stringify(this.privateKeyPath)} -o IdentitiesOnly=yes`;
-    for (const repository of this.repositories()) {
+    const sshCommand = this.sshCommand();
+    for (const repository of repositories) {
       await setConfig(repository, 'core.sshCommand', sshCommand);
+      await setConfig(repository, 'url.git@github.com:.insteadOf', 'https://github.com/');
       if (settings.git.authorName) await setConfig(repository, 'user.name', settings.git.authorName);
       if (settings.git.authorEmail) await setConfig(repository, 'user.email', settings.git.authorEmail);
     }
@@ -124,6 +147,9 @@ export class SharedGitIdentityCoordinator {
     const publicTemp = `${this.publicKeyPath}.${process.pid}.tmp`;
     await writeFile(privateTemp, identity.privateKey, { mode: 0o600 });
     await writeFile(publicTemp, `${identity.publicKey}\n`, { mode: 0o644 });
+    // GitHub's published Ed25519 host key: https://api.github.com/meta.
+    // Pin it rather than disabling host verification on fresh cloud machines.
+    await writeFile(this.knownHostsPath, 'github.com,[ssh.github.com]:443 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl\n', { mode: 0o644 });
     await rename(privateTemp, this.privateKeyPath);
     await rename(publicTemp, this.publicKeyPath);
   }

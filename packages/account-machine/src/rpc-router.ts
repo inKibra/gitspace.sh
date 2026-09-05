@@ -321,7 +321,7 @@ export interface SkillsRpc {
 
 export interface ProjectLifecycleRpc {
   list(lifecycle: 'all' | 'active' | 'archived'): Promise<CloudProjectSummary[]>;
-  createProject(input: { name: string; baseBranch: string; repositoryUrl: string | null }): Promise<{ project: CloudProjectSummary; operation: CloudProjectOperation }>;
+  createProject(input: { name: string; baseBranch: string | null; repositoryUrl: string | null }): Promise<{ project: CloudProjectSummary; operation: CloudProjectOperation }>;
   createWorkspace(input: { projectId: string; name: string; branch: string; phase: 'plan' | 'code' | 'review' | 'ship'; sourceKind: 'base' | 'branch' | 'workspace' | 'pull-request' | 'tag' | 'commit'; sourceRef: string; dependsOn?: readonly string[] }): Promise<{ workspace: { id: string }; operation: CloudProjectOperation }>;
   archiveProject(projectId: string, expectedRevision: number): Promise<CloudProjectSummary>;
   restoreProject(projectId: string, expectedRevision: number): Promise<CloudProjectSummary>;

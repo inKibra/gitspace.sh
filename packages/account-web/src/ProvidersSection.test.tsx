@@ -8,7 +8,7 @@ const rejects = async (): Promise<never> => { throw new Error('not called during
 const noop = (): void => undefined;
 
 function provider(overrides: Partial<ProviderView> & Pick<ProviderView, 'id' | 'name'>): ProviderView {
-  return { available: true, loginable: true, authKind: 'oauth', hasAuth: false, source: null, accounts: [], hasUsage: false, ...overrides };
+  return { credentialProvider: overrides.id, available: true, loginable: true, authKind: 'oauth', hasAuth: false, source: null, accounts: [], hasUsage: false, ...overrides };
 }
 const anthropic = provider({ id: 'anthropic', name: 'Anthropic', hasAuth: true, source: 'oauth', hasUsage: true, accounts: [{ id: 'cred-1', type: 'oauth', label: 'Claude Max', email: 'dev@example.com', disabled: false }] });
 const openai = provider({ id: 'openai', name: 'OpenAI', authKind: 'api_key', loginable: false });
@@ -49,7 +49,6 @@ describe('ProvidersSection', () => {
   it('renders connected and unconnected provider rows with the right actions', () => {
     const html = renderToStaticMarkup(<ProvidersSection {...props()} />);
     expect(html).toContain('Anthropic');
-    expect(html).toContain('dev@example.com');
     expect(html).toContain('Connected');
     expect(html).toContain('aria-label="Remove Claude Max"');
     expect(html).toContain('Add account');
@@ -60,6 +59,28 @@ describe('ProvidersSection', () => {
     expect(html).toContain('aria-label="Refresh usage"');
     expect(html).not.toContain('Ollama');
     expect(html).not.toContain('role="meter"');
+  });
+
+  it('shows shared credentials and usage once while keeping distinct accounts and providers', () => {
+    const accounts: ProviderView['accounts'] = [
+      { id: 'personal', type: 'oauth', label: 'same@example.com · Personal', email: 'same@example.com', disabled: false },
+      { id: 'team', type: 'oauth', label: 'same@example.com · Team', email: 'same@example.com', disabled: false },
+    ];
+    const connected = provider({ ...codex, hasAuth: true, hasUsage: true, accounts });
+    const device = provider({ ...connected, id: 'openai-codex-device', name: 'Codex device code', credentialProvider: connected.id });
+    const separate = provider({ ...anthropic, accounts: [{ id: 'claude', type: 'oauth', label: 'same@example.com · Claude', email: 'same@example.com', disabled: false }] });
+    const html = renderToStaticMarkup(<ProvidersSection {...props({
+      providers: [device, separate, connected],
+      usage: { ...usage, reports: [{ ...usage.reports[0]!, provider: connected.id }], errors: [] },
+    })} />);
+    expect(html.match(/data-provider="openai-codex"/g)).toHaveLength(1);
+    expect(html).not.toContain('data-provider="openai-codex-device"');
+    expect(html).toContain('data-provider="anthropic"');
+    expect(html.match(/aria-label="Remove /g)).toHaveLength(3);
+    expect(html).toContain('aria-label="Remove same@example.com · Personal"');
+    expect(html).toContain('aria-label="Remove same@example.com · Team"');
+    expect(html.match(/62% used/g)).toHaveLength(1);
+    expect(html).toContain('aria-haspopup="menu"');
   });
 
   it('renders usage limits with meters, resets, and per-provider usage errors under connected rows', () => {

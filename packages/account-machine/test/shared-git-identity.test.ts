@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'bun:test';
@@ -46,9 +46,8 @@ describe('shared Git identity', () => {
       updatedBy: 'machine-a',
     };
     await coordinator.apply(settings);
-    expect(await git(repository, 'config', 'user.name')).toBe('Brad');
-    expect(await git(repository, 'config', 'user.email')).toBe('brad@example.com');
-    expect(await git(repository, 'config', 'core.sshCommand')).toContain('git-identity/id_ed25519');
+    await git(repository, 'commit', '--allow-empty', '-m', 'Verify shared author');
+    expect(await git(repository, 'log', '-1', '--format=%an <%ae>')).toBe('Brad <brad@example.com>');
 
     const secondRoot = mkdtempSync(join(tmpdir(), 'gitspace-git-identity-second-'));
     roots.push(secondRoot);
@@ -78,6 +77,54 @@ describe('shared Git identity', () => {
     // Startup, a settings save, and a cloud settings event used to race here
     // and fail with "could not lock config file .git/config: File exists".
     await Promise.all(Array.from({ length: 6 }, (_, index) => coordinator.apply(settings(`Brad ${index}`))));
-    expect(await git(repository, 'config', 'user.name')).toBe('Brad 5');
+    await git(repository, 'commit', '--allow-empty', '-m', 'Verify latest author');
+    expect(await git(repository, 'log', '-1', '--format=%an')).toBe('Brad 5');
+  });
+  it('clones a pasted GitHub HTTPS address using the shared SSH key before any repository exists', async () => {
+    const root = mkdtempSync(join(tmpdir(), "gitspace ssh '$identity-"));
+    roots.push(root);
+    const source = join(root, 'source');
+    const bin = join(root, 'bin');
+    mkdirSync(source);
+    mkdirSync(bin);
+    await git(source, 'init', '-q', '-b', 'trunk');
+    writeFileSync(join(source, 'proof.txt'), 'authenticated clone\n');
+    await git(source, 'add', 'proof.txt');
+    await git(source, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.com', 'commit', '-m', 'Source');
+    const cloud = new FakeGitCloud();
+    const coordinator = new SharedGitIdentityCoordinator(cloud, root, () => []);
+    await coordinator.start();
+    const ssh = join(bin, 'ssh');
+    writeFileSync(ssh, `#!${process.execPath}
+const args = process.argv.slice(2);
+const index = args.indexOf('-i');
+if (index < 0 || !args.includes('git@github.com')) process.exit(41);
+const key = Bun.spawnSync(['ssh-keygen', '-y', '-f', args[index + 1]]);
+if (key.exitCode !== 0 || key.stdout.toString().trim().split(' ').slice(0, 2).join(' ') !== process.env.AUTHORIZED_KEY) process.exit(42);
+const child = Bun.spawn(['git-upload-pack', process.env.SOURCE_REPOSITORY], { stdin: 'inherit', stdout: 'inherit', stderr: 'inherit' });
+process.exit(await child.exited);
+`);
+    chmodSync(ssh, 0o755);
+    const destination = join(root, 'imported');
+    const child = Bun.spawn(['git', 'clone', '--', 'https://github.com/owner/private.git', destination], {
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH}`,
+        GIT_CONFIG_GLOBAL: '/dev/null',
+        GIT_CONFIG_NOSYSTEM: '1',
+        GIT_ALLOW_PROTOCOL: 'ssh',
+        GIT_SSH_VARIANT: 'ssh',
+        AUTHORIZED_KEY: cloud.identity!.publicKey.split(' ').slice(0, 2).join(' '),
+        SOURCE_REPOSITORY: source,
+        ...coordinator.gitEnvironment('https://github.com/owner/private.git'),
+      },
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    const [code, stderr] = await Promise.all([child.exited, new Response(child.stderr).text(), new Response(child.stdout).text()]);
+    expect({ code, stderr: code === 0 ? '' : stderr }).toEqual({ code: 0, stderr: '' });
+    expect(readFileSync(join(destination, 'proof.txt'), 'utf8')).toBe('authenticated clone\n');
+    expect(await git(destination, 'branch', '--show-current')).toBe('trunk');
   });
 });
+

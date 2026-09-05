@@ -15,12 +15,16 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
+  DropdownContent,
+  DropdownMenu,
+  DropdownTrigger,
   InputCopy,
   InputField,
   InputGroup,
+  MenuItem,
   ThinkingIndicator,
 } from '@gitspace/ui';
-import { CpuChip01, RefreshCcw01, XClose } from '@untitledui/icons';
+import { ChevronDown, CpuChip01, RefreshCcw01, XClose } from '@untitledui/icons';
 import { useEffect, useState, type ReactNode } from 'react';
 import { EmptyState } from './GitSpaceShell.js';
 import { glyph } from './glyph.js';
@@ -115,24 +119,27 @@ function providerBadge(provider: ProviderView): { color: 'green' | 'gray' | 'amb
   return provider.hasAuth ? { color: 'green', label: 'Connected' } : { color: 'gray', label: 'Not signed in' };
 }
 function providerDescription(provider: ProviderView): string {
-  if (provider.accounts.length) return provider.accounts.map((account) => account.email ?? account.label).join(', ');
+  if (provider.accounts.length) return provider.accounts.map((account) => account.label).join(', ');
   if (provider.hasAuth) return provider.source ? `Connected via ${provider.source}` : 'Connected';
   return 'Not connected';
 }
 
-function ProviderRow({ provider, reports, usageError, now, pending, onSignIn, onAddKey, onSignOut, index }: {
+function ProviderRow({ provider, signInMethods, reports, usageError, now, pending, onSignIn, onAddKey, onSignOut, index }: {
   provider: ProviderView;
+  signInMethods: readonly ProviderView[];
   reports: readonly ProviderUsageReport[];
   usageError: string | null;
   now: number;
   pending: string | null;
-  onSignIn(): void;
+  onSignIn(providerId: string): void;
   onAddKey(): void;
   onSignOut(credentialId: string): void;
   index?: number;
 }) {
   const badge = providerBadge(provider);
   const showUsage = provider.hasAuth && provider.hasUsage && (reports.length > 0 || usageError !== null);
+  const signInLabel = provider.accounts.length ? 'Add account' : 'Sign in';
+  const signingIn = signInMethods.some((method) => pending === `login:${method.id}`);
   return <Card size="compact" index={index} className={showUsage ? 'flex-wrap' : undefined} data-provider={provider.id}>
     <CardMedia icon={PROVIDER_ICON} />
     <CardHeader><CardTitle>{provider.name}</CardTitle><CardDescription>{providerDescription(provider)}</CardDescription></CardHeader>
@@ -140,9 +147,15 @@ function ProviderRow({ provider, reports, usageError, now, pending, onSignIn, on
       <Badge variant="dot" color={badge.color}>{badge.label}</Badge>
       {provider.authKind === 'api_key'
         ? <Button variant="secondary" size="compact" type="button" disabled={pending !== null} onClick={onAddKey}>{provider.accounts.length ? 'Replace API key' : 'Add API key'}</Button>
-        : provider.authKind === 'oauth' && provider.loginable
-          ? <Button variant="secondary" size="compact" type="button" disabled={pending !== null} loading={pending === `login:${provider.id}`} onClick={onSignIn}>{provider.accounts.length ? 'Add account' : 'Sign in'}</Button>
-          : null}
+        : null}
+      {signInMethods.length > 1
+        ? <DropdownMenu>
+            <DropdownTrigger render={<Button variant="secondary" size="compact" type="button" disabled={pending !== null} loading={signingIn} trailingIcon={glyph(ChevronDown)}>{signInLabel}</Button>} />
+            <DropdownContent align="end">
+              {signInMethods.map((method, methodIndex) => <MenuItem key={method.id} index={methodIndex} label={method.name} onSelect={() => onSignIn(method.id)} />)}
+            </DropdownContent>
+          </DropdownMenu>
+        : signInMethods.map((method) => <Button key={method.id} variant="secondary" size="compact" type="button" disabled={pending !== null} loading={signingIn} onClick={() => onSignIn(method.id)}>{signInLabel}</Button>)}
       {provider.accounts.map((account) => <Button key={account.id} variant="ghost" size="icon-compact" type="button" aria-label={`Remove ${account.label}`} disabled={pending !== null} loading={pending === `logout:${provider.id}:${account.id}`} onClick={() => onSignOut(account.id)}>{icon(XClose)}</Button>)}
     </CardFooter>
     {showUsage ? <UsageReports reports={reports} error={usageError} now={now} /> : null}
@@ -248,14 +261,23 @@ export function ProvidersSection({ providers, error, usage, usageStatus, usageEr
   const [apiKeyFor, setApiKeyFor] = useState<ProviderView | null>(null);
   useEffect(() => onShow(), []);
   const now = Date.now();
-  // Connected accounts first, then providers you can sign in to, then key-only
-  // ones; registry order is kept inside each band.
-  const rank = (provider: ProviderView): number => (provider.hasAuth ? 0 : provider.loginable ? 1 : 2);
-  const visible = providers
-    .map((provider, index) => ({ provider, index }))
-    .filter(({ provider }) => provider.loginable || provider.hasAuth || provider.available)
-    .sort((left, right) => rank(left.provider) - rank(right.provider) || left.index - right.index)
-    .map(({ provider }) => provider);
+  // A login alias shares accounts and usage, but remains a separate sign-in method.
+  const groups = new Map<string, { provider: ProviderView; signInMethods: ProviderView[]; index: number }>();
+  for (const provider of providers) {
+    let group = groups.get(provider.credentialProvider);
+    if (!group) {
+      group = { provider, signInMethods: [], index: groups.size };
+      groups.set(provider.credentialProvider, group);
+    } else if (provider.id === provider.credentialProvider) {
+      group.provider = provider;
+    }
+    if (provider.loginable && provider.authKind === 'oauth') group.signInMethods.push(provider);
+  }
+  // Connected accounts first, then providers you can sign in to, then key-only ones.
+  const rank = ({ provider, signInMethods }: { provider: ProviderView; signInMethods: readonly ProviderView[] }): number => (provider.hasAuth ? 0 : provider.loginable || signInMethods.length ? 1 : 2);
+  const visible = [...groups.values()]
+    .filter(({ provider, signInMethods }) => provider.loginable || signInMethods.length || provider.hasAuth || provider.available)
+    .sort((left, right) => rank(left) - rank(right) || left.index - right.index);
   const loginProvider = login.flow ? providers.find((provider) => provider.id === login.flow?.providerId) : null;
   const run = async (key: string, action: () => Promise<void>): Promise<void> => {
     setPending(key);
@@ -283,14 +305,15 @@ export function ProvidersSection({ providers, error, usage, usageStatus, usageEr
       : visible.length === 0
         ? <EmptyState icon={icon(CpuChip01)} title="No providers on this machine" description="The machine’s OMP install reports no loginable or configured model providers." />
         : <CardGroup orientation="inline" border="outlined" separated proximityHover={false}>
-          {visible.map((provider) => <ProviderRow
-            key={provider.id}
+          {visible.map(({ provider, signInMethods }) => <ProviderRow
+            key={provider.credentialProvider}
             provider={provider}
-            reports={usage?.reports.filter((report) => report.provider === provider.id) ?? []}
-            usageError={usage?.errors.find((item) => item.provider === provider.id)?.message ?? null}
+            signInMethods={signInMethods}
+            reports={usage?.reports.filter((report) => report.provider === provider.credentialProvider) ?? []}
+            usageError={usage?.errors.find((item) => item.provider === provider.credentialProvider)?.message ?? null}
             now={now}
             pending={pending}
-            onSignIn={() => void run(`login:${provider.id}`, () => onSignIn(provider.id))}
+            onSignIn={(providerId) => void run(`login:${providerId}`, () => onSignIn(providerId))}
             onAddKey={() => setApiKeyFor(provider)}
             onSignOut={(credentialId) => void run(`logout:${provider.id}:${credentialId}`, () => onSignOut(provider.id, credentialId))}
           />)}

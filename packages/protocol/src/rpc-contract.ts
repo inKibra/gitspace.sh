@@ -572,7 +572,7 @@ export const createProjectContract = gitspaceRpc
   .procedure()
   .input(wire.object({
     name: wire.string,
-    baseBranch: wire.string,
+    baseBranch: wire.nullable(wire.string),
     repositoryUrl: wire.nullable(wire.string),
   }))
   .output(wire.object({ project: ProjectLifecycleViewCodec, operation: ProjectOperationViewCodec }))
@@ -975,6 +975,8 @@ export const ProviderAccountCodec = wire.object({
 export type ProviderAccount = InputOf<typeof ProviderAccountCodec>;
 export const ProviderViewCodec = wire.object({
   id: wire.string,
+  /** Canonical credential store shared by this provider's sign-in methods. */
+  credentialProvider: wire.string,
   name: wire.string,
   available: wire.boolean,
   loginable: wire.boolean,

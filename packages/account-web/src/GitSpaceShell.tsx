@@ -123,7 +123,7 @@ export interface SessionControlsProps {
   onNavigateTree(entryId: string): Promise<void>;
 }
 
-export interface CreateProjectInput { name: string; baseBranch: string; repositoryUrl: string | null }
+export interface CreateProjectInput { name: string; baseBranch: string | null; repositoryUrl: string | null }
 export interface CreateWorkspaceInput { projectId: string; name: string; branch: string; phase: WorkspaceView['phase']; sourceKind: 'base' | 'branch' | 'workspace' | 'pull-request' | 'tag' | 'commit'; sourceRef: string; dependsOn: readonly string[] }
 export interface ProviderAuthView { id: string; name: string; hasAuth: boolean }
 
@@ -376,18 +376,19 @@ function KanbanView({ workspaces, selectedId, onOpen, onSetRelations, onNewWorks
 
 // ── Projects ──
 function CreateProjectDialog({ open, onOpenChange, onSubmit, pending, error }: { open: boolean; onOpenChange(open: boolean): void; onSubmit(input: CreateProjectInput): Promise<void>; pending: boolean; error: string | null }) {
-  const [form, setForm] = useState<Record<'name' | 'baseBranch' | 'repositoryUrl', string>>({ name: '', baseBranch: 'main', repositoryUrl: '' });
+  const [form, setForm] = useState<Record<'name' | 'baseBranch' | 'repositoryUrl', string>>({ name: '', baseBranch: '', repositoryUrl: '' });
   const set = (key: keyof typeof form) => (value: string) => setForm((current) => ({ ...current, [key]: value }));
   return <Dialog open={open} onOpenChange={onOpenChange}>
     <DialogContent>
-      <DialogHeader><DialogTitle>Create or import</DialogTitle><DialogDescription>Create a new project or connect an existing repository.</DialogDescription></DialogHeader>
-      <form id="create-project-form" className="flex flex-col gap-4" onSubmit={(event) => { event.preventDefault(); void onSubmit({ name: form.name, baseBranch: form.baseBranch || 'main', repositoryUrl: form.repositoryUrl.trim() || null }); }}>
+      <DialogHeader><DialogTitle>Create or import</DialogTitle><DialogDescription>Paste a repository address to import it, or leave it empty to create a new repository.</DialogDescription></DialogHeader>
+      <form id="create-project-form" className="flex flex-col gap-4" onSubmit={(event) => { event.preventDefault(); void onSubmit({ name: form.name.trim(), baseBranch: form.baseBranch.trim() || null, repositoryUrl: form.repositoryUrl.trim() || null }); }}>
         <InputGroup>
-          <InputField index={0} label="Name" value={form.name} onChange={set('name')} required autoFocus />
-          <InputField index={1} label="Base branch" value={form.baseBranch} onChange={set('baseBranch')} required />
-          <InputField index={2} label="Repository URL" placeholder="https://github.com/owner/repository.git" value={form.repositoryUrl} onChange={set('repositoryUrl')} type="url" error={error ?? undefined} />
+          <InputField index={0} label="Project name" placeholder="My project" value={form.name} onChange={set('name')} required autoFocus />
+          <InputField index={1} label="Repository address (optional)" placeholder="https://github.com/owner/repository" value={form.repositoryUrl} onChange={set('repositoryUrl')} />
+          <InputField index={2} label="Base branch (optional)" placeholder={form.repositoryUrl.trim() ? 'Detect repository default branch' : 'main'} value={form.baseBranch} onChange={set('baseBranch')} />
         </InputGroup>
-        <p className="text-caption text-muted-foreground">Leave the URL empty for a new repository.</p>
+        <p className="text-caption text-muted-foreground">Use the repository’s root URL, an SSH address, or owner/repository for GitHub. A .git suffix is optional. GitHub imports use your shared SSH key; add it to your GitHub account in Settings → Git.</p>
+        {error ? <p role="alert" className="text-caption text-destructive">{error}</p> : null}
       </form>
       <DialogFooter>
         <Button variant="secondary" type="button" onClick={() => onOpenChange(false)}>Cancel</Button>

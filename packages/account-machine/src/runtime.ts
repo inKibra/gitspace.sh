@@ -373,16 +373,18 @@ export async function startMachineRuntime() {
     }
   }
   await canonicalSessionWriter.flush().catch((error) => console.error('[gitspace-recovery] canonical publication failed', error));
+  await gitIdentity.apply(await settings.getUserSettings());
   const checkpointSpace = async (spaceId: string): Promise<void> => {
     const space = database.getSpace(spaceId);
     if (!space || space.holderId !== machineId || space.placementState !== 'open') throw new Error(`Space ${spaceId} is not held here`);
+    await gitIdentity.apply(await settings.getUserSettings(), [space.rootPath]);
     const opened = await sessions.openSpace(spaceId);
     if (opened.status === 'error') throw opened.error;
     await spaces.release(space, space.generation);
     await spaces.open(space.id, space.generation + 1, { resumeOnMachineRestart: true });
     await canonicalSessionWriter.flush();
   };
-  const projectLifecycle = new ProjectLifecycleManager(database, authority, machineId, managedSpaceRoot, checkpointSpace);
+  const projectLifecycle = new ProjectLifecycleManager(database, authority, machineId, managedSpaceRoot, checkpointSpace, (repositoryUrl) => gitIdentity.gitEnvironment(repositoryUrl));
 
   const handlers = new GitSpaceHandlers(database, artifacts, projectEventWriter);
   const terminals = new WorkspaceHubTerminalCoordinator(database, machineId);

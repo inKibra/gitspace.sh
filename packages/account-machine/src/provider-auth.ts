@@ -22,6 +22,7 @@ import {
   type UsageLimit,
   type UsageReport,
 } from '@oh-my-pi/pi-ai';
+import { resolveCredentialIdentityKey } from '@oh-my-pi/pi-ai/auth/sqlite-credential-store';
 import { ModelRegistry } from '@oh-my-pi/pi-coding-agent/config/model-registry';
 import { discoverAuthStorage } from '@oh-my-pi/pi-coding-agent/session/auth-broker-config';
 import { collectUnreportedAccounts, type UsageAccountIdentity } from '@oh-my-pi/pi-coding-agent/cli/usage-cli';
@@ -134,13 +135,19 @@ function describeProviders(): ProviderDescriptor[] {
   return descriptors;
 }
 
+function oauthAccountLabel(account: { email?: string; accountId?: string; orgId?: string; orgName?: string }): string {
+  const base = account.email ?? account.accountId ?? 'OAuth account';
+  const org = account.orgName ?? account.orgId;
+  return org && org !== base ? `${base} · ${org}` : base;
+}
+
 function storedAccount(row: StoredAuthCredential): ProviderAccount {
   const { credential } = row;
   return credential.type === 'oauth'
     ? {
         id: String(row.id),
         type: 'oauth',
-        label: credential.email ?? credential.orgName ?? credential.accountId ?? 'OAuth account',
+        label: oauthAccountLabel(credential),
         email: credential.email ?? null,
         disabled: row.disabledCause !== null,
       }
@@ -154,17 +161,16 @@ function storedAccount(row: StoredAuthCredential): ProviderAccount {
 }
 
 /**
- * Tombstones worth surfacing (mirrors `omp usage`): OAuth rows torn down automatically, not ones the
- * user replaced or deleted, and not identities that are signed in again on an active row.
+ * Surface automatically disabled OAuth accounts, unless that credential identity is signed in again.
+ * Use the credential store's organization-aware identity rules, not an email-only match.
  */
 function actionableTombstone(summary: DisabledCredentialSummary, active: readonly StoredAuthCredential[]): boolean {
   if (summary.type !== 'oauth' || /^(replaced by|deleted by user)/i.test(summary.cause)) return false;
-  const email = summary.email?.toLowerCase();
-  const accountId = summary.accountId?.toLowerCase();
-  return !active.some(({ credential }) =>
-    credential.type === 'oauth'
-    && ((email !== undefined && credential.email?.toLowerCase() === email)
-      || (accountId !== undefined && credential.accountId?.toLowerCase() === accountId)),
+  // Tombstones retain identity metadata only; the resolver never reads token fields.
+  const identity = resolveCredentialIdentityKey(summary.provider, { ...summary, type: 'oauth', access: '', refresh: '', expires: 0 });
+  return !active.some(({ id, credential }) =>
+    id === summary.id
+    || (identity !== null && resolveCredentialIdentityKey(summary.provider, credential) === identity),
   );
 }
 
@@ -407,6 +413,7 @@ export class ProviderAuthCoordinator {
     const origin = storage.getCredentialOrigin(provider);
     return {
       id: descriptor.id,
+      credentialProvider: provider,
       name: descriptor.name,
       available: descriptor.available,
       loginable: descriptor.loginable,
@@ -420,7 +427,7 @@ export class ProviderAuthCoordinator {
           .map((summary) => ({
             id: String(summary.id),
             type: 'oauth' as const,
-            label: summary.email ?? summary.orgName ?? summary.accountId ?? 'OAuth account',
+            label: oauthAccountLabel(summary),
             email: summary.email ?? null,
             disabled: true,
           })),

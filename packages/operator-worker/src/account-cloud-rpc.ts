@@ -102,20 +102,25 @@ function accountRouter(env: Env, userId: string, deviceId: string) {
     const [snapshot, machines] = await Promise.all([vault.ompSnapshot(), catalog.listMachines()]);
     const online = machines.some((machine) => machine.state === 'online' && machine.desiredState === 'online' && machine.rpcEndpoint);
     return authProviders().map((policy) => {
-      const stored = snapshot.credentials.filter((entry) => entry.provider === (policy.storeAs ?? policy.id));
+      const credentialProvider = policy.storeAs ?? policy.id;
+      const stored = snapshot.credentials.filter((entry) => entry.provider === credentialProvider);
       const oauth = stored.some((entry) => entry.credential.type === 'oauth');
       const apiKey = policy.apiKeyFormat === 'bearer' && (!policy.login || policy.login.kind === 'api-key' || policy.env !== undefined);
       return {
-        id: policy.id, name: policy.name, available: policy.available ?? true,
+        id: policy.id, credentialProvider, name: policy.name, available: policy.available ?? true,
         // Interactive OAuth still routes to a machine, when one is available.
         loginable: online && policy.login !== undefined,
         authKind: !online && apiKey && !oauth ? 'api_key' : oauth || policy.refresh !== undefined || policy.callbackPort !== undefined || policy.pasteCode === true ? 'oauth' : apiKey ? 'api_key' : 'none',
         hasAuth: stored.length > 0, source: stored.length ? oauth ? 'oauth' : 'api_key' : null,
-        accounts: stored.map(({ id, credential }) => ({
-          id: String(id), type: credential.type, disabled: false,
-          label: credential.type === 'oauth' ? credential.email ?? credential.orgName ?? credential.accountId ?? 'OAuth account' : 'API key',
-          email: credential.type === 'oauth' ? credential.email ?? null : null,
-        })),
+        accounts: stored.map(({ id, credential }) => {
+          const base = credential.type === 'oauth' ? credential.email ?? credential.accountId ?? 'OAuth account' : 'API key';
+          const org = credential.type === 'oauth' ? credential.orgName ?? credential.orgId : null;
+          return {
+            id: String(id), type: credential.type, disabled: false,
+            label: org && org !== base ? `${base} · ${org}` : base,
+            email: credential.type === 'oauth' ? credential.email ?? null : null,
+          };
+        }),
         hasUsage: false,
       };
     });

@@ -88,9 +88,23 @@ Once a machine is online, connect a provider from the **Providers** step or **Se
 
 For Codex on a cloud machine, **Open sign-in page** takes you to OpenAI. After approval, your browser may reach a `localhost:1455/auth/callback` page that cannot load. Copy that page's full address into GitSpace's prompt and choose **Continue**. Keep the URL private. On a local machine, the callback can finish automatically.
 
-## 4. Try a small task
+Codex's browser and device-code sign-in methods share one account list. Choose a method from **Sign in** or **Add account**.
 
-Finish setup, then create a project and a workspace in the browser. Use a repository you can recover elsewhere for your first test.
+## 4. Configure Git and finish setup
+
+In the **Git** step, set your commit author name and email. Copy the shared public key and [add it to GitHub as an authentication key](https://github.com/settings/ssh/new). Your GitHub account must have access to each repository you import. If your organization requires SSO, authorize the key for that organization too.
+
+GitSpace uses this SSH identity for GitHub imports, including pasted HTTPS browser URLs. It configures the key before the first clone and keeps SSH host verification enabled.
+
+The final setup step enables **Add the GitSpace project** by default. With a machine online, finishing setup imports the source branch used to build your current frontend. You and your agents can then work on GitSpace itself. Turn this off to finish without importing the source. A failed import keeps setup open so you can correct the problem and retry.
+
+## 5. Try a small task
+
+Create a workspace in the GitSpace project, or choose **New project** to import another repository. Enter a project name and the repository's root URL, an SSH address, or GitHub `owner/repository`. The `.git` suffix is optional. Do not paste a file or branch page.
+
+Leave **Base branch** empty to detect the repository's default branch. Enter a branch only to override it. Leave the repository address empty to create a new repository with `main` as its default. An invalid address or failed clone does not create a project entry.
+
+Use a repository you can recover elsewhere for your first test.
 
 Ask the agent to make a small change. Review its diff, answer any questions, open a terminal, and save an artifact. Close and reopen the workspace, then continue the conversation.
 

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'bun:test';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { GitSpaceDatabase } from '@gitspace/core';
@@ -11,9 +11,20 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-function git(cwd: string, ...args: string[]): void {
-  const result = Bun.spawnSync(['git', ...args], { cwd, stdout: 'ignore', stderr: 'pipe' });
+function git(cwd: string, ...args: string[]): string {
+  const result = Bun.spawnSync(['git', ...args], { cwd, stdin: 'ignore', stdout: 'pipe', stderr: 'pipe', env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } });
   if (result.exitCode !== 0) throw new Error(result.stderr.toString());
+  return result.stdout.toString().trim();
+}
+
+function seedRepository(root: string, branch = 'trunk'): string {
+  const source = join(root, 'source');
+  mkdirSync(source);
+  git(source, 'init', '-b', branch);
+  writeFileSync(join(source, 'README.txt'), 'imported\n');
+  git(source, 'add', 'README.txt');
+  git(source, '-c', 'user.name=GitSpace', '-c', 'user.email=gitspace@local.invalid', 'commit', '-m', 'seed');
+  return source;
 }
 
 class MemoryProjectAuthority implements ProjectLifecycleAuthority {
@@ -34,7 +45,7 @@ class MemoryProjectAuthority implements ProjectLifecycleAuthority {
   }
 
   async listProjects(lifecycle?: 'active' | 'archived') {
-    return [...this.projects.values()].filter((project) => !lifecycle || (lifecycle === 'archived' ? project.lifecycle === 'archived' : project.lifecycle !== 'archived'));
+    return [...this.projects.values()].filter((project) => project.lifecycle !== 'deleting' && (!lifecycle || (lifecycle === 'archived' ? project.lifecycle === 'archived' : project.lifecycle !== 'archived')));
   }
 
   async bootstrapProject(input: { projectId: string; name: string; repositoryReference: string | null; baseBranch: string }) {
@@ -55,6 +66,7 @@ class MemoryProjectAuthority implements ProjectLifecycleAuthority {
   }
 
   async deleteProject(projectId: string, expectedRevision: number) {
+    for (const workspace of await this.listProjectWorkspaces(projectId)) this.workspaces.delete(workspace.id);
     return this.setProjectLifecycle(projectId, expectedRevision, 'deleting');
   }
 
@@ -98,8 +110,8 @@ describe('ProjectLifecycleManager', () => {
     const authority = new MemoryProjectAuthority();
     const manager = new ProjectLifecycleManager(database, authority, 'machine-a', join(root, 'spaces'));
 
-    const created = await manager.createProject({ name: 'Example', baseBranch: 'main', repositoryUrl: null });
-    expect(created.project.lifecycle).toBe('active');
+    const created = await manager.createProject({ name: 'Example', baseBranch: null, repositoryUrl: null });
+    expect(created.project).toMatchObject({ lifecycle: 'active', baseBranch: 'main' });
     expect(created.operation).toMatchObject({ state: 'succeeded', revision: 3 });
     expect(existsSync(database.getBaseSpace(created.project.id)!.rootPath)).toBe(true);
 
@@ -140,22 +152,178 @@ describe('ProjectLifecycleManager', () => {
     database.close();
   });
 
-  it('imports an existing repository into the managed project projection', async () => {
+  it('imports the remote default branch when it is not main', async () => {
     const root = mkdtempSync(join(tmpdir(), 'gitspace-project-import-'));
     roots.push(root);
-    const source = join(root, 'source');
-    mkdirSync(source);
-    git(source, 'init', '-b', 'main');
-    writeFileSync(join(source, 'README.txt'), 'imported\n');
-    git(source, 'add', 'README.txt');
-    git(source, '-c', 'user.name=GitSpace', '-c', 'user.email=gitspace@local.invalid', 'commit', '-m', 'seed');
+    const source = seedRepository(root);
     const database = new GitSpaceDatabase(join(root, 'gitspace.db'));
     const authority = new MemoryProjectAuthority();
     const manager = new ProjectLifecycleManager(database, authority, 'machine-a', join(root, 'spaces'));
 
-    const imported = await manager.createProject({ name: 'Imported', baseBranch: 'main', repositoryUrl: source });
-    expect(imported.project).toMatchObject({ lifecycle: 'active', repositoryReference: source });
-    expect(existsSync(join(database.getBaseSpace(imported.project.id)!.rootPath, 'README.txt'))).toBe(true);
+    const imported = await manager.createProject({ name: 'Imported', baseBranch: null, repositoryUrl: source });
+    expect(imported.project).toMatchObject({ lifecycle: 'active', repositoryReference: source, baseBranch: 'trunk' });
+    const base = database.getBaseSpace(imported.project.id)!;
+    expect(database.getProject(imported.project.id)?.baseBranch).toBe('trunk');
+    expect((await authority.listProjectWorkspaces(imported.project.id))[0]?.branch).toBe('trunk');
+    expect(git(base.rootPath, 'symbolic-ref', '--short', 'HEAD')).toBe('trunk');
+    expect(git(base.rootPath, 'show', 'HEAD:README.txt')).toBe('imported');
+    database.close();
+  });
+
+  it('preserves an explicit imported branch override', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'gitspace-project-branch-'));
+    roots.push(root);
+    const source = seedRepository(root);
+    git(source, 'checkout', '-b', 'release');
+    writeFileSync(join(source, 'README.txt'), 'release\n');
+    git(source, '-c', 'user.name=GitSpace', '-c', 'user.email=gitspace@local.invalid', 'commit', '-am', 'release');
+    git(source, 'checkout', 'trunk');
+    const database = new GitSpaceDatabase(join(root, 'gitspace.db'));
+    const authority = new MemoryProjectAuthority();
+    const manager = new ProjectLifecycleManager(database, authority, 'machine-a', join(root, 'spaces'));
+
+    const imported = await manager.createProject({ name: 'Release', baseBranch: 'release', repositoryUrl: source });
+    const base = database.getBaseSpace(imported.project.id)!;
+    expect(imported.project.baseBranch).toBe('release');
+    expect(git(base.rootPath, 'symbolic-ref', '--short', 'HEAD')).toBe('release');
+    expect(git(base.rootPath, 'show', 'HEAD:README.txt')).toBe('release');
+    database.close();
+  });
+
+  it('leaves no published project or local folder after clone failure and preserves unrelated work', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'gitspace-project-clone-failure-'));
+    roots.push(root);
+    const database = new GitSpaceDatabase(join(root, 'gitspace.db'));
+    const authority = new MemoryProjectAuthority();
+    const managedRoot = join(root, 'spaces');
+    const manager = new ProjectLifecycleManager(database, authority, 'machine-a', managedRoot);
+    const existing = await manager.createProject({ name: 'Keep', baseBranch: null, repositoryUrl: null });
+    const existingPath = database.getBaseSpace(existing.project.id)!.rootPath;
+    writeFileSync(join(existingPath, 'keep.txt'), 'uncommitted user work');
+
+    await expect(manager.createProject({ name: 'Broken', baseBranch: null, repositoryUrl: join(root, 'missing-repository') })).rejects.toThrow();
+    expect((await manager.list('all')).map((project) => project.id)).toEqual([existing.project.id]);
+    expect(database.listProjects().map((project) => project.id)).toEqual([existing.project.id]);
+    expect(readdirSync(managedRoot)).toEqual([existing.project.id]);
+    expect(await Bun.file(join(existingPath, 'keep.txt')).text()).toBe('uncommitted user work');
+    expect([...authority.operations.values()]).toEqual([existing.operation]);
+    database.close();
+  });
+
+  it.each([
+    '--upload-pack=unexpected-command',
+    'ext::unexpected-command',
+    'https://github.com/owner/repo/tree/main',
+    'https://github.com/owner/repo/blob/main/file.ts',
+    'owner/repo/tree/main',
+    'https://token@github.com/owner/repo',
+  ])('rejects malformed repository address %s before publication', async (repositoryUrl) => {
+    const root = mkdtempSync(join(tmpdir(), 'gitspace-project-address-'));
+    roots.push(root);
+    const database = new GitSpaceDatabase(join(root, 'gitspace.db'));
+    const authority = new MemoryProjectAuthority();
+    const managedRoot = join(root, 'spaces');
+    const manager = new ProjectLifecycleManager(database, authority, 'machine-a', managedRoot);
+
+    await expect(manager.createProject({ name: 'Invalid', baseBranch: null, repositoryUrl })).rejects.toThrow();
+    expect(await manager.list('all')).toEqual([]);
+    expect(database.listProjects()).toEqual([]);
+    expect(existsSync(managedRoot)).toBe(false);
+    database.close();
+  });
+
+  it.each([
+    ['https://github.com/owner/repo', 'https://github.com/owner/repo.git'],
+    ['https://github.com/owner/repo.git', 'https://github.com/owner/repo.git'],
+    ['owner/repo', 'https://github.com/owner/repo.git'],
+    ['git@github.com:owner/repo.git', 'git@github.com:owner/repo.git'],
+    ['ssh://git@git.example.com/team/repo.git', 'ssh://git@git.example.com/team/repo.git'],
+    ['https://git.example.com/team/repo.git', 'https://git.example.com/team/repo.git'],
+  ])('imports normalized repository address %s through repository-scoped Git settings', async (repositoryUrl, repositoryReference) => {
+    const root = mkdtempSync(join(tmpdir(), 'gitspace-project-normalized-'));
+    roots.push(root);
+    const source = seedRepository(root);
+    const database = new GitSpaceDatabase(join(root, 'gitspace.db'));
+    const authority = new MemoryProjectAuthority();
+    const manager = new ProjectLifecycleManager(database, authority, 'machine-a', join(root, 'spaces'), undefined, () => ({
+      GIT_CONFIG_COUNT: '1',
+      GIT_CONFIG_KEY_0: `url.${source}.insteadOf`,
+      GIT_CONFIG_VALUE_0: repositoryReference,
+    }));
+
+    const imported = await manager.createProject({ name: 'Normalized', baseBranch: null, repositoryUrl });
+    expect(imported.project.repositoryReference).toBe(repositoryReference);
+    expect(database.getProject(imported.project.id)?.repositoryReference).toBe(repositoryReference);
+    expect(git(database.getBaseSpace(imported.project.id)!.rootPath, 'show', 'HEAD:README.txt')).toBe('imported');
+    database.close();
+  });
+
+  it('rolls back local and canonical provisioning while retaining a failed operation', async () => {
+    class FailingInspectorAuthority extends MemoryProjectAuthority {
+      override async bootstrapInspector(_input: { projectId: string; spaceId: string }): Promise<never> {
+        throw new Error('Inspector unavailable');
+      }
+    }
+    const root = mkdtempSync(join(tmpdir(), 'gitspace-project-projection-failure-'));
+    roots.push(root);
+    const database = new GitSpaceDatabase(join(root, 'gitspace.db'));
+    const authority = new FailingInspectorAuthority();
+    const managedRoot = join(root, 'spaces');
+    const manager = new ProjectLifecycleManager(database, authority, 'machine-a', managedRoot);
+
+    await expect(manager.createProject({ name: 'Partial', baseBranch: null, repositoryUrl: null })).rejects.toThrow('Inspector unavailable');
+    expect(await manager.list('all')).toEqual([]);
+    expect(database.listProjects()).toEqual([]);
+    expect(readdirSync(managedRoot)).toEqual([]);
+    const operation = [...authority.operations.values()][0]!;
+    expect(operation).toMatchObject({ state: 'failed', kind: 'project.create' });
+    expect(database.getBaseSpace(operation.projectId)).toBeNull();
+    expect(await authority.listProjectWorkspaces(operation.projectId)).toEqual([]);
+    expect((await authority.getProject(operation.projectId))?.lifecycle).toBe('deleting');
+    database.close();
+  });
+
+  it('compensates a bootstrap that committed before its response failed', async () => {
+    class FailedBootstrapResponseAuthority extends MemoryProjectAuthority {
+      override async bootstrapProject(input: Parameters<MemoryProjectAuthority['bootstrapProject']>[0]): Promise<never> {
+        await super.bootstrapProject(input);
+        throw new Error('Bootstrap response lost');
+      }
+    }
+    const root = mkdtempSync(join(tmpdir(), 'gitspace-project-bootstrap-failure-'));
+    roots.push(root);
+    const database = new GitSpaceDatabase(join(root, 'gitspace.db'));
+    const authority = new FailedBootstrapResponseAuthority();
+    const managedRoot = join(root, 'spaces');
+    const manager = new ProjectLifecycleManager(database, authority, 'machine-a', managedRoot);
+
+    await expect(manager.createProject({ name: 'Partial', baseBranch: null, repositoryUrl: null })).rejects.toThrow('Bootstrap response lost');
+    expect(await manager.list('all')).toEqual([]);
+    expect(database.listProjects()).toEqual([]);
+    expect(readdirSync(managedRoot)).toEqual([]);
+    database.close();
+  });
+
+  it('preserves an activated project if its activation response is lost', async () => {
+    class FailedActivationResponseAuthority extends MemoryProjectAuthority {
+      override async setProjectLifecycle(projectId: string, expectedRevision: number, lifecycle: CloudProjectSummary['lifecycle']) {
+        const project = await super.setProjectLifecycle(projectId, expectedRevision, lifecycle);
+        if (lifecycle === 'active') throw new Error('Activation response lost');
+        return project;
+      }
+    }
+    const root = mkdtempSync(join(tmpdir(), 'gitspace-project-activation-failure-'));
+    roots.push(root);
+    const database = new GitSpaceDatabase(join(root, 'gitspace.db'));
+    const authority = new FailedActivationResponseAuthority();
+    const manager = new ProjectLifecycleManager(database, authority, 'machine-a', join(root, 'spaces'));
+
+    await expect(manager.createProject({ name: 'Activated', baseBranch: null, repositoryUrl: null })).rejects.toThrow('Activation response lost');
+    const project = (await manager.list('active'))[0]!;
+    expect(project.lifecycle).toBe('active');
+    const base = database.getBaseSpace(project.id)!;
+    expect(git(base.rootPath, 'symbolic-ref', '--short', 'HEAD')).toBe('main');
+    expect([...authority.operations.values()][0]?.state).toBe('failed');
     database.close();
   });
 });

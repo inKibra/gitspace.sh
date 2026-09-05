@@ -1432,6 +1432,7 @@ function GitSpaceProduct() {
   const reserveHandle = useResultMutation(rpcClient.settings.reserveHandle);
   const setOmpSetting = useResultMutation(rpcClient.settings.omp.set);
   const updateMachineNotes = useResultMutation(rpcClient.machine.updateNotes);
+  const createStarterProject = useResultMutation(rpcClient.project.create);
   const createSandboxMachine = useResultMutation(rpcClient.machine.createSandbox);
   const sleepMachine = useResultMutation(rpcClient.machine.sleep);
   const resumeMachine = useResultMutation(rpcClient.machine.resume);
@@ -1501,6 +1502,7 @@ function GitSpaceProduct() {
     void providersQuery.refetch();
     if (runtimeAvailable) {
       void modelsQuery.refetch();
+      void gitIdentityQuery.refetch();
       if (usageVisible) void usageQuery.refetch();
     }
   }, [runtimeMetadataEnabled, onlineMachineIds]);
@@ -1656,9 +1658,37 @@ function GitSpaceProduct() {
     }
     await settingsDeploymentQuery.refetch();
   };
-  const completeOnboarding = async (next: UserSettings): Promise<void> => {
-    await saveSettings({ ...next, onboardingComplete: true });
-    navigateProduct('agent', 'replace');
+  const completeOnboarding = async (next: UserSettings, addGitSpaceProject: boolean): Promise<void> => {
+    setSettingsError(null);
+    try {
+      let starterProjectId: string | null = null;
+      if (addGitSpaceProject) {
+        if (!runtimeAvailable) throw new Error('Start or connect a machine before importing the GitSpace project.');
+        const projects = await rpcClient.project.list({ lifecycle: 'active' });
+        if (projects.status === 'error') throw projects.error;
+        const existing = projects.value.find((project) => /^(?:https:\/\/github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)inkibra\/gitspace\.sh(?:\.git)?\/?$/iu.test(project.repositoryReference ?? ''));
+        if (existing) starterProjectId = existing.id;
+        else {
+          const sourceBranch = import.meta.env.VITE_GITSPACE_SOURCE_BRANCH;
+          if (!sourceBranch) throw new Error('This frontend is missing its GitSpace source branch. Rebuild with GITSPACE_SOURCE_BRANCH.');
+          const created = await createStarterProject.mutateAsync({ name: 'GitSpace', repositoryUrl: 'https://github.com/inKibra/gitspace.sh.git', baseBranch: sourceBranch });
+          if (created.status === 'error') throw created.error;
+          starterProjectId = created.value.project.id;
+        }
+        await productProjectsQuery.refetch();
+      }
+      await saveSettings({ ...next, onboardingComplete: true });
+      if (starterProjectId) {
+        const url = new URL(window.location.href);
+        url.searchParams.set('project', starterProjectId);
+        url.searchParams.delete('workspace');
+        window.history.replaceState(null, '', url);
+      }
+      navigateProduct('agent', 'replace');
+    } catch (error) {
+      setSettingsError(error instanceof Error ? error.message : String(error));
+      throw error;
+    }
   };
   const refreshProviders = async (): Promise<void> => {
     await providersQuery.refetch();
@@ -1798,7 +1828,7 @@ function GitSpaceProduct() {
     projects={productProjectsQuery.state === 'success' ? productProjectsQuery.value.map((project) => ({ id: project.id, name: project.name })) : []}
     onBack={() => navigateProduct('agent', 'replace')}
     onComplete={completeOnboarding}
-    saving={updateSettings.state === 'pending' || reserveHandle.state === 'pending' || setOmpSetting.state === 'pending' || updateMachineNotes.state === 'pending' || createSandboxMachine.state === 'pending' || sleepMachine.state === 'pending' || resumeMachine.state === 'pending' || destroyMachine.state === 'pending' || revertDeployment.state === 'pending'}
+    saving={createStarterProject.state === 'pending' || updateSettings.state === 'pending' || reserveHandle.state === 'pending' || setOmpSetting.state === 'pending' || updateMachineNotes.state === 'pending' || createSandboxMachine.state === 'pending' || sleepMachine.state === 'pending' || resumeMachine.state === 'pending' || destroyMachine.state === 'pending' || revertDeployment.state === 'pending'}
     error={settingsError}
   />;
   if (!draft.onboardingComplete || forceOnboarding) return page('onboarding');

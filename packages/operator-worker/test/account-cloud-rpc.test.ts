@@ -1,6 +1,7 @@
 import { env, SELF } from 'cloudflare:test';
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { createDeviceBinding, createSignedRpcFetch, credentialProtocolBase64, deriveArtifactScopeKey, encryptArtifactBytes, signDeviceInvite, signRpcRequest, spaceCheckpointManifestKey, spaceOmpCheckpointKey, type DeviceCapability, type DeviceScope } from '@gitspace/protocol';
+import type { ProviderView } from '@gitspace/protocol';
 import { gitspaceContract } from '@gitspace/protocol/rpc-contract';
 import { createRoutedTransport } from '@gitspace/protocol/routed-transport';
 import { createBrowserClient } from 'result-rpc/client';
@@ -114,6 +115,29 @@ describe('account cloud RPC without machines', () => {
     const logout = await SELF.fetch(fixture.request(single('providers.logout', { providerId: 'openai', credentialId: String(snapshot.credentials[0]!.id) })));
     expect(parse(await logout.text())).toMatchObject({ status: 'ok', value: { provider: { hasAuth: false, accounts: [] } } });
     expect((await fixture.vault.ompSnapshot()).credentials).toEqual([]);
+  });
+
+  it('identifies Codex sign-in aliases as one credential store without merging organization accounts', async () => {
+    const fixture = await account();
+    for (const orgId of ['personal', 'team']) {
+      await fixture.vault.putCredential({
+        id: orgId,
+        credential: { provider: 'openai-codex', email: 'same@example.com', orgId, refresh: `refresh-${orgId}`, access: `access-${orgId}`, expires: Date.now() + 60_000 },
+      });
+    }
+    const response = await SELF.fetch(fixture.request(single('providers.list')));
+    const body = await response.text();
+    expect(response.status, body).toBe(200);
+    const result = parse(body) as { status: 'ok'; value: { providers: ProviderView[] } };
+    const codex = result.value.providers.find((provider) => provider.id === 'openai-codex')!;
+    const device = result.value.providers.find((provider) => provider.id === 'openai-codex-device')!;
+    expect(codex.credentialProvider).toBe('openai-codex');
+    expect(device.credentialProvider).toBe(codex.credentialProvider);
+    expect(codex.accounts.map((account) => account.label)).toEqual(['same@example.com · personal', 'same@example.com · team']);
+    expect(new Set(codex.accounts.map((account) => account.id)).size).toBe(2);
+    expect(device.accounts).toEqual(codex.accounts);
+    expect(body).not.toContain('refresh-personal');
+    expect(body).not.toContain('access-personal');
   });
 
   it('authorizes every batch item before any mutation and rejects replay, tampering and revocation', async () => {

@@ -3,9 +3,19 @@ import react from '@vitejs/plugin-react';
 import { defineConfig } from 'vite';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { execFileSync } from 'node:child_process';
+
+// The public default branch can lag the running beta. Seed the source branch
+// used to publish this frontend, not an unrelated checkout of the product.
+const sourceBranch = process.env.GITSPACE_SOURCE_BRANCH?.trim()
+  || process.env.GITHUB_HEAD_REF?.trim()
+  || (process.env.GITHUB_REF_TYPE === 'branch' ? process.env.GITHUB_REF_NAME?.trim() : '')
+  || execFileSync('git', ['branch', '--show-current'], { cwd: fileURLToPath(new URL('.', import.meta.url)), encoding: 'utf8' }).trim();
+if (!sourceBranch) throw new Error('Set GITSPACE_SOURCE_BRANCH when building GitSpace from a detached checkout.');
 
 
 export default defineConfig({
+  define: { 'import.meta.env.VITE_GITSPACE_SOURCE_BRANCH': JSON.stringify(sourceBranch) },
   resolve: { alias: { '@': resolve(fileURLToPath(new URL('.', import.meta.url)), '../ui/src/fluid-vendor') } },
   plugins: [react(), tailwindcss()],
   server: {

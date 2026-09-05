@@ -112,7 +112,7 @@ describe('ProviderAuthCoordinator.list', () => {
   it('maps registry providers with stored credentials, disabled tombstones, origin and usage support', async () => {
     const storage = new FakeAuthStorage({
       credentials: [
-        { id: 1, provider: 'anthropic', credential: { type: 'oauth', refresh: 'r', access: 'a', expires: 1, email: 'me@example.com', orgName: 'Acme' }, disabledCause: null },
+        { id: 1, provider: 'anthropic', credential: { type: 'oauth', refresh: 'r', access: 'a', expires: 1, email: 'me@example.com' }, disabledCause: null },
         { id: 2, provider: 'openai', credential: { type: 'api_key', key: 'sk-test' }, disabledCause: null },
         { id: 3, provider: 'zai', credential: { type: 'api_key', key: 'sk-zai', source: 'login' }, disabledCause: null },
       ],
@@ -151,6 +151,46 @@ describe('ProviderAuthCoordinator.list', () => {
     // Login-only alias entries never appear twice; registry order is preserved.
     expect(providers.map((provider) => provider.id)).toEqual([...new Set(providers.map((provider) => provider.id))]);
     expect(providers.findIndex((provider) => provider.id === 'anthropic')).toBeLessThan(providers.findIndex((provider) => provider.id === 'openai'));
+  });
+
+  it('identifies shared credential stores without collapsing same-email organization accounts', async () => {
+    const storage = new FakeAuthStorage({
+      credentials: [
+        { id: 1, provider: 'openai-codex', credential: { type: 'oauth', refresh: 'personal', access: 'a', expires: 1, email: 'same@example.com', orgId: 'personal', orgName: 'Personal' }, disabledCause: null },
+        { id: 2, provider: 'openai-codex', credential: { type: 'oauth', refresh: 'team', access: 'b', expires: 1, email: 'same@example.com', orgId: 'team', orgName: 'Team' }, disabledCause: null },
+      ],
+    });
+    const providers = await coordinator(storage).list();
+    const codex = providers.find((provider) => provider.id === 'openai-codex')!;
+    const device = providers.find((provider) => provider.id === 'openai-codex-device')!;
+    expect(codex.credentialProvider).toBe('openai-codex');
+    expect(device).toMatchObject({ credentialProvider: codex.credentialProvider, loginable: true, authKind: 'oauth' });
+    expect(codex.accounts.map(({ id, label }) => ({ id, label }))).toEqual([
+      { id: '1', label: 'same@example.com · Personal' },
+      { id: '2', label: 'same@example.com · Team' },
+    ]);
+    expect(device.accounts).toEqual(codex.accounts);
+  });
+
+  it('matches disabled accounts by credential identity, including org-only identities, rather than email alone', async () => {
+    const storage = new FakeAuthStorage({
+      credentials: [
+        { id: 1, provider: 'openai-codex', credential: { type: 'oauth', refresh: 'r', access: 'a', expires: 1, email: 'same@example.com', orgId: 'personal' }, disabledCause: null },
+        { id: 2, provider: 'openai-codex', credential: { type: 'oauth', refresh: 'r', access: 'a', expires: 1, orgId: 'org-only' }, disabledCause: null },
+        { id: 3, provider: 'cursor', credential: { type: 'oauth', refresh: 'r', access: 'a', expires: 1, accountId: 'current', email: 'same@example.com' }, disabledCause: null },
+      ],
+      disabled: [
+        { id: 10, provider: 'openai-codex', type: 'oauth', email: ' SAME@example.com ', orgId: 'personal', cause: 'oauth refresh failed' },
+        { id: 11, provider: 'openai-codex', type: 'oauth', email: 'same@example.com', orgId: 'team', cause: 'oauth refresh failed' },
+        { id: 12, provider: 'openai-codex', type: 'oauth', orgId: 'org-only', cause: 'oauth refresh failed' },
+        { id: 13, provider: 'openai-codex', type: 'oauth', cause: 'oauth refresh failed' },
+        { id: 14, provider: 'cursor', type: 'oauth', accountId: 'other', email: 'same@example.com', cause: 'oauth refresh failed' },
+      ],
+    });
+    const auth = coordinator(storage);
+    const codex = await auth.view('openai-codex');
+    expect(codex.accounts.filter((account) => account.disabled).map((account) => account.id)).toEqual(['11', '13']);
+    expect((await auth.view('cursor')).accounts.filter((account) => account.disabled).map((account) => account.id)).toEqual(['14']);
   });
 
   it('rejects unknown providers and providers without an interactive sign-in', async () => {

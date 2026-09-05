@@ -94,7 +94,7 @@ export interface SettingsPageProps {
   /** Projects this account can scope an API client to. */
   projects: ReadonlyArray<{ id: string; name: string }>;
   onBack: () => void;
-  onComplete: (settings: UserSettings) => Promise<void>;
+  onComplete: (settings: UserSettings, addGitSpaceProject: boolean) => Promise<void>;
   ompSync: { status: 'connecting' | 'synced' | 'offline' | 'conflict' | 'error'; message: string | null };
   /** What GitSpace runs here and across the fleet; null until the home machine answers. */
   deployment: DeploymentStatusView | null;
@@ -204,7 +204,7 @@ function OmpSettings({ ompSettings, ompGeneration, onSetOmpSetting, saving, prov
   const roles = rolesItem ? parseValue(rolesItem) as Record<string, string> : {};
   const cycle = cycleItem ? parseValue(cycleItem) as string[] : [];
   const overrides = overridesItem ? parseValue(overridesItem) as Record<string, string | string[]> : {};
-  const roleLabels: Readonly<Record<string, string>> = { default: 'Default', task: 'Current model', slow: 'Thinking', smol: 'Fast', plan: 'Architect', designer: 'Designer', vision: 'Vision', commit: 'Commit', tiny: 'Tiny', advisor: 'Advisor' };
+  const roleLabels: Readonly<Record<string, string>> = { default: 'Default', task: 'Task', slow: 'Thinking', smol: 'Fast', plan: 'Architect', designer: 'Designer', vision: 'Vision', commit: 'Commit', tiny: 'Tiny', advisor: 'Advisor' };
   const roleIds = [...new Set([...Object.keys(roleLabels), ...Object.keys(roles)])];
   const agentDefaults: Readonly<Record<string, string>> = { scout: 'smol', reviewer: 'slow', 'security-reviewer': 'slow', librarian: 'slow', task: 'task', designer: 'designer', sonic: 'tiny' };
   const agentNames = [...new Set([...Object.keys(agentDefaults), ...Object.keys(overrides)])];
@@ -285,6 +285,7 @@ function GitSettings({ settings, gitIdentity, onChange }: Pick<SettingsPageProps
         ? <SettingRows><Card size="compact"><CardMedia icon={ICONS.git} /><CardHeader><CardTitle>GitSpace Ed25519</CardTitle><CardDescription><span className="font-mono">{gitIdentity.fingerprint}</span> · <span className="tabular-nums">generation {gitIdentity.generation}</span></CardDescription></CardHeader><CardFooter><Badge color="green">Shared</Badge></CardFooter></Card></SettingRows>
         : <EmptyState icon={icon(GitBranch01, 20)} title="Git identity unavailable" description="The connected machine could not materialize the cloud identity." />}
       {gitIdentity ? <InputCopy value={gitIdentity.publicKey} label="Copy GitSpace public key" /> : null}
+      <p className="text-caption text-muted-foreground">Add this public key to <a href="https://github.com/settings/ssh/new" target="_blank" rel="noopener noreferrer" className="underline underline-offset-2">GitHub as an authentication key</a>. GitHub imports use it even when you paste an HTTPS browser URL. Your GitHub account still needs access to the repository.</p>
     </Group>
   </>;
 }
@@ -688,11 +689,13 @@ function SettingsShell(props: SettingsPageProps) {
 }
 function OnboardingShell(props: SettingsPageProps) {
   const [step, setStep] = useState(0);
+  const [addGitSpaceProject, setAddGitSpaceProject] = useState(true);
   const steps: Array<{ label: string; section: Section }> = [{ label: 'Profile', section: 'profile' }, { label: 'Machine', section: 'machines' }, { label: 'Providers', section: 'omp-providers' }, { label: 'OMP', section: 'omp' }, { label: 'Git', section: 'git' }, { label: 'Defaults', section: 'defaults' }];
   const current = steps[step]!;
   const last = step === steps.length - 1;
   const profileIncomplete = step === 0 && (!props.settings.profile.displayName.trim() || !props.settings.profile.handle);
-  const advance = async () => { if (last) await props.onComplete({ ...props.settings, onboardingComplete: true }); else { await props.onSave(props.settings); setStep((value) => value + 1); } };
+  const needsMachine = last && addGitSpaceProject && !props.machines.some((machine) => machine.state === 'online' && machine.desiredState === 'online');
+  const advance = async () => { if (last) await props.onComplete({ ...props.settings, onboardingComplete: true }, addGitSpaceProject); else { await props.onSave(props.settings); setStep((value) => value + 1); } };
   return <PageCanvas>
     <div className="flex items-center justify-between gap-4 pb-4">
       <span className="flex items-center gap-2 text-body font-semibold text-foreground">{icon(Zap)}GitSpace</span>
@@ -700,9 +703,10 @@ function OnboardingShell(props: SettingsPageProps) {
     </div>
     <SectionHeader section={current.section} ompSync={props.ompSync} actions={<span aria-hidden className="flex items-center gap-1.5">{steps.map(({ label }, index) => <i key={label} className={`h-1.5 w-1.5 rounded-full ${index === step ? 'bg-foreground' : 'bg-border'}`} />)}</span>} />
     <div className="flex flex-col gap-8"><SettingsContent section={current.section} {...props} /></div>
+    {last ? <Group title="Your GitSpace source"><SettingRows><SettingRow title="Add the GitSpace project" description="Import the source branch used by this GitSpace release so you and your agents can change it. Add your shared SSH key to GitHub first."><Switch label="Add GitSpace project" checked={addGitSpaceProject} disabled={props.saving} onToggle={() => setAddGitSpaceProject((value) => !value)} /></SettingRow></SettingRows>{needsMachine ? <p role="status" className="text-caption text-muted-foreground">Start or connect a machine to import the project, or turn this off to finish without importing it.</p> : null}</Group> : null}
     <footer className="mt-10 flex items-center justify-between gap-4 border-t border-border pt-6">
       <Button variant="secondary" disabled={step === 0 || props.saving} onClick={() => setStep((value) => value - 1)}>Back</Button>
-      <Button variant="primary" disabled={profileIncomplete || props.saving} onClick={() => settle(advance())}>{last ? 'Open GitSpace' : 'Continue'}</Button>
+      <Button variant="primary" disabled={profileIncomplete || needsMachine || props.saving} onClick={() => settle(advance())}>{last ? props.saving ? 'Finishing setup…' : 'Open GitSpace' : 'Continue'}</Button>
     </footer>
   </PageCanvas>;
 }
