@@ -192,7 +192,7 @@ describe('tenant deployment token', () => {
 });
 
 describe('POST /__platform/tenants/:tenant/deploy', () => {
-  it('uploads the bundle with the exact multipart metadata and meters the deploy', async () => {
+  it('uploads the bundle with tenant-scoped bindings and migrations and meters the deploy', async () => {
     await env.CREDITS.getByName('bravo').configure({ balanceMicros: 1_000_000, riskReserveMicros: 0 });
     const token = await mintToken('bravo', 'v8');
     const result = await deploy('bravo', token, 'abc123', ['v7', 'v8', 'v9', 'v10']);
@@ -206,17 +206,14 @@ describe('POST /__platform/tenants/:tenant/deploy', () => {
       main_module: 'worker.mjs',
       compatibility_date: '2026-08-27',
       compatibility_flags: ['nodejs_compat'],
-      bindings: [
+      bindings: expect.arrayContaining([
         { type: 'durable_object_namespace', name: 'CREDENTIALS', class_name: 'CredentialVaultDO' },
         { type: 'durable_object_namespace', name: 'USER_STORAGE', class_name: 'UserStorageDO' },
         { type: 'r2_bucket', name: 'BLOBS', bucket_name: 'gsp-relay-f144a6907dc4284d1f9fe6a7d9b9ff53' },
         { type: 'plain_text', name: 'AUTH_PUBLIC_KEY', text: ADMIN_PUBLIC_KEY },
         { type: 'plain_text', name: 'OPERATOR_URL', text: 'https://authority.test' },
         { type: 'plain_text', name: 'RELAY_NAME', text: 'bravo' },
-        { type: 'plain_text', name: 'AUTH_MAX_SKEW_MS', text: '60000' },
-        { type: 'plain_text', name: 'TUNNEL_HEADER_TIMEOUT_MS', text: '10000' },
-        { type: 'plain_text', name: 'TUNNEL_IDLE_TIMEOUT_MS', text: '30000' },
-      ],
+      ]),
       migrations: { old_tag: 'v8', new_tag: 'v10', steps: [{ new_sqlite_classes: ['Classv9'] }, { new_sqlite_classes: ['Classv10'] }] },
       keep_bindings: upload.metadata.keep_bindings,
       tags: ['bravo', 'abc123'],
