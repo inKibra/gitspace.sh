@@ -241,4 +241,56 @@ describe('replacement environment host routes', () => {
     expect(channel.pid).not.toBe(custom.pid);
     expect(environment.status()).toMatchObject({ machineHash: hash, machineReleaseSha: null, ompReleaseSha: null });
   });
+
+  it('boots selected machine code after host restart and preserves an explicit channel rollback', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'gitspace-machine-restart-'));
+    roots.push(root);
+    const options = {
+      id: 'restart-test', root, repositoryRoot: root, rpcPort: 0, webPort: 0,
+      machineId: 'machine-a', artifactKey: new Uint8Array(32).fill(1),
+      ompAgentDir: join(root, 'omp'), controlToken: 'control-token',
+    };
+    for (const label of ['channel', 'selected']) {
+      const path = join(root, label);
+      await mkdir(path);
+      await writeFile(join(path, 'machine.js'), `
+        await Bun.write(process.env.GITSPACE_ENVIRONMENT_ROOT + '/executed-code', ${JSON.stringify(label)});
+        const server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => Response.json({ status: 'ok' }) });
+        console.log('GitSpace RPC ready at http://127.0.0.1:' + server.port + '/rpc');
+      `);
+    }
+    const channelPath = join(root, 'channel');
+    const selectedPath = join(root, 'selected');
+    let environment = new ReplacementEnvironment(options);
+    environments.push(environment);
+    await environment.bootMachine(channelPath);
+    await environment.deploy({
+      artifacts: [{ entrypoint: 'machine-daemon', path: selectedPath, hash: await hashArtifactPath(selectedPath), dependsOn: [] }],
+      releaseSha: 'account-selected', revision: 'account-selected', dirty: false,
+    });
+    expect(await readFile(join(root, 'executed-code'), 'utf8')).toBe('selected');
+    await environment.close();
+    environments.pop();
+
+    environment = new ReplacementEnvironment(options);
+    environments.push(environment);
+    await environment.bootMachine(channelPath);
+    expect(await readFile(join(root, 'executed-code'), 'utf8')).toBe('selected');
+    expect(environment.status().machineReleaseSha).toBe('account-selected');
+    const rollback = await fetch(`${environment.hostUrl}/__environment/channel`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer control-token', 'content-type': 'application/json' },
+      body: JSON.stringify({ target: 'machine' }),
+    });
+    expect(rollback.status).toBe(200);
+    expect(await readFile(join(root, 'executed-code'), 'utf8')).toBe('channel');
+    await environment.close();
+    environments.pop();
+
+    environment = new ReplacementEnvironment(options);
+    environments.push(environment);
+    await environment.bootMachine(channelPath);
+    expect(await readFile(join(root, 'executed-code'), 'utf8')).toBe('channel');
+    expect(environment.status().machineReleaseSha).toBeNull();
+  });
 });

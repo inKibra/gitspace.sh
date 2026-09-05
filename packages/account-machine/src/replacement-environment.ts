@@ -1,4 +1,4 @@
-import { cp, mkdir, rm } from 'node:fs/promises';
+import { cp, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join, resolve, sep } from 'node:path';
 import {
@@ -14,6 +14,13 @@ import {
   type MachineReplacementHost,
 } from '@gitspace/deployment';
 import { z } from 'zod';
+
+const machineSelectionSchema = z.object({
+  version: z.literal(1),
+  path: z.string().min(1),
+  hash: z.templateLiteral(['sha256:', z.string().regex(/^[a-f0-9]{64}$/u)]),
+  releaseSha: z.string().min(1).nullable(),
+});
 
 export interface ReplacementEnvironmentBootstrap {
   projectId: string;
@@ -236,6 +243,13 @@ class MachineHost implements MachineReplacementHost {
 
   async switchActiveSocket(next: MachineGenerationPointer): Promise<void> {
     const generation = await this.ensureGeneration(next);
+    const path = join(this.options.root, 'machine-selection.json');
+    const temporary = `${path}.${crypto.randomUUID()}`;
+    await writeFile(temporary, JSON.stringify({
+      version: 1, path: next.artifactPath, hash: next.hash,
+      releaseSha: this.releaseShas.get(next.socketPath) ?? null,
+    }), { mode: 0o600 });
+    await rename(temporary, path);
     this.current = next;
     this.activeUrl = generation.url;
   }
@@ -415,6 +429,29 @@ export class ReplacementEnvironment {
       frontendReleaseSha: this.frontendReleaseSha,
       lastLaunch: this.lastLaunch,
     };
+  }
+
+  /** Restore an account-selected machine without briefly running the bundled channel. */
+  async bootMachine(channelPath: string): Promise<void> {
+    if (this.machineHash !== null) throw new Error('Machine bootstrap requires an unstarted machine host');
+    const channel: DeploymentArtifact = {
+      entrypoint: 'machine-daemon', path: channelPath, hash: await hashArtifactPath(channelPath), dependsOn: [],
+    };
+    let selection: z.infer<typeof machineSelectionSchema> | null = null;
+    try {
+      selection = machineSelectionSchema.parse(JSON.parse(await readFile(join(this.options.root, 'machine-selection.json'), 'utf8')));
+    } catch (error) {
+      if (!(error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT')) throw error;
+    }
+    const selected = selection?.releaseSha ? selection : null;
+    if (selected && await hashArtifactPath(selected.path) !== selected.hash) throw new Error('Selected machine release hash mismatch');
+    this.channelArtifacts.set('machine', channel);
+    await this.deploy({
+      artifacts: [selected ? { ...channel, path: selected.path, hash: selected.hash } : channel],
+      releaseSha: selected?.releaseSha ?? null,
+      revision: selected?.releaseSha ?? 'bundled',
+      dirty: false,
+    });
   }
 
   /** Plan and execute a replacement for the artifacts whose hash differs from what is running; serialized. */

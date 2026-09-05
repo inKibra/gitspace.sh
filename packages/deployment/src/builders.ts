@@ -136,11 +136,12 @@ async function copyNativeRuntime(root: string, outDir: string): Promise<void> {
     || !leaf.os.includes(process.platform) || !leaf.cpu.includes(process.arch)) {
     throw new Error(`Installed native addon ${name} is incompatible with pi-natives ${manifest.version}`);
   }
-  // x64 ships both variants: an artifact must work on baseline CPUs as well as AVX2 hosts.
-  const filenames = process.arch === 'x64'
-    ? [`pi_natives.${tag}-baseline.node`, `pi_natives.${tag}-modern.node`]
-    : [`pi_natives.${tag}.node`];
+  // Baseline is required on x64; include AVX2 when upstream ships a second variant.
   const installed = await readdir(leafRoot);
+  const filenames = process.arch === 'x64'
+    ? [`pi_natives.${tag}-baseline.node`]
+    : [`pi_natives.${tag}.node`];
+  if (process.arch === 'x64' && installed.includes(`pi_natives.${tag}-modern.node`)) filenames.push(`pi_natives.${tag}-modern.node`);
   for (const filename of filenames) {
     if (!installed.includes(filename) || !(await lstat(join(leafRoot, filename))).isFile()) {
       throw new Error(`Installed native addon ${name} is missing ${filename}`);

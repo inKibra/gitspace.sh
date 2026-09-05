@@ -7,6 +7,7 @@ import { pipeline } from 'node:stream/promises';
 import { createGzip } from 'node:zlib';
 import { buildInitialRuntime, workspaceSha } from './builders.js';
 import { prepareRuntimeLocks } from './runtime-packaging.js';
+import { OMP_IPC_VERSION, OmpRpcPeer, type OmpChildApi } from '../../account-omp/src/ipc.js';
 import {
   DISTRIBUTION_BUN_VERSION,
   currentDistributionPlatform,
@@ -129,6 +130,12 @@ async function packageWalgit(scratch: string, destination: string): Promise<void
   });
   await cp(join(source, 'target/release/walgit'), destination);
   await chmod(destination, 0o755);
+  await command([destination, '--version'], scratch);
+  if (process.platform === 'darwin') {
+    const libraries = (await command(['otool', '-L', destination], scratch)).split('\n').slice(1).map((line) => line.trim().split(' ')[0]!);
+    const external = libraries.filter((path) => path && !path.startsWith('/usr/lib/') && !path.startsWith('/System/Library/'));
+    if (external.length) throw new Error(`WalGit depends on unbundled macOS libraries: ${external.join(', ')}`);
+  }
 }
 
 /** Read every shipped ELF's version requirements, rather than claiming the build host's libc is the ABI floor. */
@@ -148,6 +155,29 @@ async function minimumGlibc(root: string, files: DistributionFile[], client: str
     }
   }
   return minimum;
+}
+
+async function probeOmpRuntime(runtime: string, scratch: string): Promise<void> {
+  const home = join(scratch, 'probe-home');
+  await mkdir(home);
+  const rpc = new OmpRpcPeer<OmpChildApi, Record<string, never>>((message) => child.send(message), {});
+  const child = Bun.spawn([join(runtime, 'bin/bun'), join(runtime, 'omp/omp.js')], {
+    cwd: runtime,
+    env: { HOME: home, XDG_CONFIG_HOME: home, TMPDIR: home, PATH: `${join(runtime, 'bin')}:/usr/bin:/bin:/usr/sbin:/sbin` },
+    stdout: 'inherit', stderr: 'inherit',
+    ipc: (message) => rpc.receive(message),
+    onExit: (_child, code) => rpc.close(new Error(`Packaged OMP exited during health check (${code})`)),
+  });
+  try {
+    const health = await rpc.call('health', [], AbortSignal.timeout(30_000));
+    if (health.protocolVersion !== OMP_IPC_VERSION || health.bunVersion !== DISTRIBUTION_BUN_VERSION || health.platform !== process.platform || health.arch !== process.arch) {
+      throw new Error('Packaged OMP runtime health does not match the native distribution');
+    }
+  } finally {
+    rpc.close();
+    child.kill();
+    await child.exited;
+  }
 }
 
 export async function buildDistribution(options: { release: string; output: string; runtimeLocks: string; platform?: string }): Promise<string> {
@@ -183,6 +213,7 @@ export async function buildDistribution(options: { release: string; output: stri
       'exec "$runtime_dir/bin/bun" "$runtime_dir/omp-launcher.js" "$@"',
       '',
     ].join('\n'), { mode: 0o755 });
+    await probeOmpRuntime(runtime, staging);
     await packageWalgit(staging, join(runtime, 'bin/walgit'));
     const files = await inventory(runtime);
     const glibc = await minimumGlibc(runtime, files, client);

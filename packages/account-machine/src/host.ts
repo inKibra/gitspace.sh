@@ -1,14 +1,13 @@
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import { hashArtifactPath } from '@gitspace/deployment';
 import { ReplacementEnvironment } from './replacement-environment.js';
 import { signedCredentialAuthorityGrantSchema } from '@gitspace/protocol/credential-vault';
 import { MachineRelayConnector } from './relay-connector.js';
 
 /**
- * Production host: `bun host.js`. Runs the machine bundle shipped next to it
- * (`<dir>/machine/machine.js` + `machine/drizzle`) as the first generation
- * behind the RPC proxy, then swaps generations whenever a running machine asks
+ * Production host: `bun host.js`. Restores the selected machine release, or
+ * boots the adjacent `machine/` bundle for a fresh or channel-selected machine,
+ * behind the RPC proxy. It swaps generations whenever a running machine asks
  * via `/__environment/launch` after downloading a release. Everything else in
  * the environment (`GITSPACE_CONTROL_URL`, keys, buckets) passes through to the
  * generations untouched.
@@ -39,13 +38,7 @@ const environment = new ReplacementEnvironment({
   controlToken: process.env.GITSPACE_CONTROL_TOKEN ?? crypto.randomUUID(),
 });
 
-const initial = join(bundleRoot, 'machine');
-await environment.deploy({
-  artifacts: [{ entrypoint: 'machine-daemon', path: initial, hash: await hashArtifactPath(initial), dependsOn: [] }],
-  releaseSha: null,
-  revision: 'bundled',
-  dirty: false,
-});
+await environment.bootMachine(join(bundleRoot, 'machine'));
 const relayUrl = process.env.GITSPACE_RELAY_URL;
 const relay = relayUrl ? new MachineRelayConnector({
   relayUrl,
@@ -56,7 +49,7 @@ const relay = relayUrl ? new MachineRelayConnector({
   onError: (error) => console.error('[gitspace-relay]', error),
 }) : null;
 relay?.start();
-console.log(`GitSpace host ready rpc=${environment.options.rpcHost}:${environment.options.rpcPort} control=${environment.hostUrl} release=channel`);
+console.log(`GitSpace host ready rpc=${environment.options.rpcHost}:${environment.options.rpcPort} control=${environment.hostUrl} release=${environment.status().machineReleaseSha ?? 'channel'}`);
 
 let stopping = false;
 const stop = (): void => {
