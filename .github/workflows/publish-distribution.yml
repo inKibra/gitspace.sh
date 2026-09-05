@@ -1,6 +1,8 @@
 name: Publish Native Distribution
 
 on:
+  push:
+    tags: ['distribution-*']
   workflow_dispatch:
     inputs:
       release:
@@ -83,7 +85,7 @@ jobs:
           path: ${{ runner.temp }}/runtime-locks
       - name: Build this native client and complete runtime
         env:
-          GITSPACE_RELEASE: ${{ inputs.release }}
+          GITSPACE_RELEASE: ${{ inputs.release || github.ref_name }}
           GITSPACE_BUILD_PLATFORM: ${{ matrix.target }}
         run: |
           bun packages/deployment/src/release.ts build \
