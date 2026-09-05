@@ -1,0 +1,69 @@
+---
+$schema: https://holocron.so/frontmatter.json
+title: Connect machines and browsers
+description: How machines, browser devices, the account Worker, and relay routing connect.
+icon: radio
+---
+
+# Connect machines and browsers
+
+GitSpace uses separate identities for the account root, each machine, and each browser. Enrollment decides which device may call account and machine APIs.
+
+## Connect a machine
+
+After logging in, enroll and start the computer:
+
+```bash
+gitspace machine setup
+gitspace machine start
+```
+
+Setup creates machine Ed25519 and X25519 keys, a per-machine artifact key, and a root-signed capability grant. The grant authorizes the machine for the production capabilities listed in the client.
+
+The started runtime connects to the account relay. It owns the repositories, workspaces, agents, and services placed on that machine.
+
+## Connect a browser
+
+Create a one-time browser enrollment:
+
+```bash
+gitspace open
+```
+
+Use `gitspace open --print` when the browser is on another device or when you need to copy the URL yourself. The invitation expires after five minutes.
+
+The browser generates a non-extractable Ed25519 key in IndexedDB, redeems the invitation, and receives a revocable device grant. Future browser RPC requests are signed by that device key.
+
+## Request path
+
+```text
+Browser
+  | signed account or machine RPC request
+  v
+Account Worker and relay
+  | routes the request to the selected machine
+  v
+Machine runtime
+  | reads or changes the workspace it owns
+  v
+Signed response to the browser
+```
+
+The browser uses the account Worker for account-scoped state and the relay tunnel for machine-scoped operations. Machine placement therefore remains part of the workspace model.
+
+## Important security boundary
+
+Signed requests provide device authentication and tamper detection. They do not, by themselves, hide the RPC body from the Worker or relay that routes it.
+
+GitSpace encrypts artifact and checkpoint blobs with AES-GCM. Machine credentials are sealed to machine keys with ephemeral X25519, HKDF-SHA256, and AES-GCM. These are scoped protections. Browser and terminal RPC bodies are not currently encrypted end to end.
+
+Read [Security boundaries](/security/remote-access) for the implemented guarantees and limits.
+
+## Troubleshooting
+
+```bash
+gitspace machine status
+gitspace doctor
+```
+
+`machine status` reports the local daemon and relay. `doctor` checks the account configuration, machine enrollment, Bun, OMP, walgit, control endpoint, and relay endpoint.

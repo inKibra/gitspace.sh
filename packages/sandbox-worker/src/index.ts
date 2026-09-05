@@ -17,8 +17,13 @@ export class GitSpaceSandbox extends CloudflareSandbox<Env> {
     const input = await this.requireEnrollment();
     const previous = await this.ctx.storage.get<SandboxMachineRecord>(MACHINE_KEY);
     const process = await this.getProcess('gitspace-machine');
-    if (process?.status === 'running' && previous?.rpcEndpoint) return { ...previous, state: 'online', error: null };
-    return this.record(input, 'offline', null, 'Managed Cloudflare Sandbox is not running.', previous?.desiredState === 'online' ? 'online' : 'offline');
+    if (process?.status === 'running' && previous?.rpcEndpoint) {
+      const probe = await this.exec('bun /opt/gitspace/rpc-probe.js http://127.0.0.1:8081/rpc');
+      if (probe.success && probe.exitCode === 0) {
+        return this.record(input, 'online', previous.rpcEndpoint, 'Managed Cloudflare Sandbox. GitSpace machine runtime enrolled and ready.', 'online');
+      }
+    }
+    return this.record(input, 'offline', previous?.rpcEndpoint ?? null, 'Managed Cloudflare Sandbox is starting or unavailable.', previous?.desiredState === 'online' ? 'online' : 'offline');
   }
 
   async resumeMachine(): Promise<SandboxMachineRecord> {
@@ -39,21 +44,19 @@ export class GitSpaceSandbox extends CloudflareSandbox<Env> {
   }
 
   private async startMachine(input: ManagedEnrollment): Promise<SandboxMachineRecord> {
-    const readiness = await this.exec('git --version && bun --version');
-    if (!readiness.success || readiness.exitCode !== 0) throw new Error(readiness.stderr.trim() || 'Cloudflare Sandbox failed its GitSpace readiness probe');
-    const exposed = await this.exposePort(8081, { hostname: this.env.SANDBOX_HOSTNAME, name: 'gitspace-rpc' });
-    const rpcEndpoint = new URL('/rpc', exposed.url).toString();
+    await this.exposePort(8081, { hostname: this.env.SANDBOX_HOSTNAME, name: 'gitspace-rpc' });
+    const controlUrl = input.environment.GITSPACE_CONTROL_URL;
+    if (!controlUrl) throw new Error('GitSpace control URL is required');
+    const rpcEndpoint = new URL(`/__sandbox/${encodeURIComponent(input.userId)}/${encodeURIComponent(input.machineId)}/rpc`, controlUrl).toString();
     const existing = await this.getProcess('gitspace-machine');
-    const process = existing?.status === 'running' ? existing : await this.startProcess('bun /opt/gitspace/host.js', {
-      processId: 'gitspace-machine',
-      autoCleanup: false,
-      env: { ...input.environment, GITSPACE_PUBLIC_RPC_URL: rpcEndpoint },
-    });
-    await process.waitForLog(/GitSpace RPC ready/u, 120_000);
-    await process.waitForPort(8081, { mode: 'tcp' });
-    const probe = await this.exec('bun /opt/gitspace/rpc-probe.js http://127.0.0.1:8081/rpc');
-    if (!probe.success || probe.exitCode !== 0) throw new Error(probe.stderr.trim() || 'GitSpace machine RPC probe failed');
-    return this.record(input, 'online', rpcEndpoint, 'Managed Cloudflare Sandbox. GitSpace machine runtime enrolled and ready.', 'online');
+    if (existing?.status !== 'running') {
+      await this.startProcess('bun /opt/gitspace/host.js', {
+        processId: 'gitspace-machine',
+        autoCleanup: false,
+        env: { ...input.environment, GITSPACE_PUBLIC_RPC_URL: rpcEndpoint },
+      });
+    }
+    return this.record(input, 'offline', rpcEndpoint, 'Managed Cloudflare Sandbox is starting.', 'online');
   }
 
   private async requireEnrollment(): Promise<ManagedEnrollment> {
@@ -95,9 +98,11 @@ export default {
         const userId = request.headers.get('x-gitspace-user-id');
         if (!userId) throw new Error('Sandbox user id is required');
         const stub = await sandbox(env, userId, rpc[1]!);
+        const headers = new Headers(request.headers);
+        headers.delete('host');
         return stub.containerFetch('http://localhost/rpc', {
           method: 'POST',
-          headers: { 'content-type': request.headers.get('content-type') ?? 'application/json' },
+          headers,
           body: await request.arrayBuffer(),
         }, 8081);
       }

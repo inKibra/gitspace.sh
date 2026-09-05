@@ -433,14 +433,17 @@ export class GitSpaceDatabase {
   }
   alignClosedSpaceProjection(spaceId: string, generation: number): ResultType<SpacePlacement, CoreConflict> {
     const current = this.getSpacePlacement(spaceId);
-    if (current?.state === 'closed' && current.holderId === 'unassigned' && current.generation === generation) return Result.ok(current);
+    if (!current || !Number.isSafeInteger(generation) || generation < 0) {
+      return Result.err(conflict('possession', spaceId, 'Closed space projection cannot align to the authority generation'));
+    }
+    if (current.state === 'closed' && current.holderId === 'unassigned' && current.generation === generation) return Result.ok(current);
     const changed = this.orm.update(spacePlacements).set({
       generation,
       updatedAt: new Date().toISOString(),
     }).where(and(
       eq(spacePlacements.spaceId, spaceId),
       eq(spacePlacements.holderId, 'unassigned'),
-      eq(spacePlacements.generation, 0),
+      eq(spacePlacements.generation, current.generation),
       eq(spacePlacements.state, 'closed'),
     )).returning().get();
     return changed ? Result.ok(changed) : Result.err(conflict('possession', spaceId, 'Closed space projection cannot align to the authority generation'));

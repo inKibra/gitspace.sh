@@ -240,7 +240,10 @@ const Button = forwardRef<HTMLButtonElement, ButtonProps>(
                   on the label span (a blockified flex item), not the flex root.
                   The button's height is fixed (h-*), so this doesn't change
                   layout — it just centers the cap-to-baseline box optically. */}
-              <span className="[text-box:trim-both_cap_alphabetic]">{label}</span>
+              <span className={cn(
+                "inline-flex items-center justify-center gap-[inherit] [text-box:trim-both_cap_alphabetic] [&_svg]:shrink-0 [&_svg]:transition-[stroke-width] [&_svg]:duration-80 group-hover:[&_svg]:stroke-[2]",
+                isCompact ? "[&_svg]:size-3.5" : "[&_svg]:size-4"
+              )}>{label}</span>
               {TrailingIcon && (
                 <TrailingIcon
                   size={iconSize}

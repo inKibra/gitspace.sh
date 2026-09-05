@@ -1,0 +1,53 @@
+---
+$schema: https://holocron.so/frontmatter.json
+title: Agent workflow
+description: Keep intent, implementation, evidence, and operation attached to one workspace.
+icon: bot
+---
+
+# Agent workflow
+
+GitSpace treats agent work as a lifecycle, not a chat window.
+
+## Plan
+
+Start with the **Goal**. Record the outcome, constraints, and observable requirements before implementation changes the shape of the problem.
+
+Use the **Workflow** when the workspace needs an explicit execution contract. Use the **Rubric** to make review criteria concrete before judging the result.
+
+## Build with context
+
+Run the main agent inside the workspace on the machine that owns the checkout. Skills, plugins, secrets, and project context are available from the same browser surface.
+
+Structured agent questions appear as native interactions. Answer the decision directly without searching terminal output for a prompt.
+
+## Preserve decisions
+
+The **Journal** records phase narrative, decisions, artifacts, and state changes. It explains how the workspace reached its current state without asking a reviewer to reconstruct the story from a transcript.
+
+Use the journal for durable reasoning. Keep temporary narration in the agent session.
+
+## Verify with evidence
+
+A completion claim is not proof. Attach evidence that demonstrates each observable requirement:
+
+- A browser run for a web behavior.
+- Runtime output for a service or CLI behavior.
+- A focused test for a permanent contract that cannot be exercised directly.
+- An artifact when the output itself is the deliverable.
+
+The **Review** product keeps discussions attached to files, hunks, lines, or the whole workspace. Resolve the concern, not just the thread state.
+
+## Explain the change
+
+The **Change Guide** turns the current diff, goal, journal, and evidence into a review path. It should explain the behavior, important code paths, tradeoffs, and proof. It is not a generated file list.
+
+## Operate the result
+
+Shipping code does not make the workspace irrelevant. Keep services, events, release state, unresolved review threads, and rollback information with the workspace until the work is quiet.
+
+Move the workspace through `plan`, `code`, `review`, and `ship`. Archive or release it only after the operational state agrees with the completion claim.
+
+## Direct attention across the fleet
+
+The fleet view distinguishes work that is active, waiting, failed, or needs attention. Machine placement appears with the workspace, so you know where the code and runtime live before taking control or moving the work.

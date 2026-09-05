@@ -1,6 +1,6 @@
 {
   "$schema": "../../node_modules/wrangler/config-schema.json",
-  "name": "gitspace-relay-platform-spike",
+  "name": "gitspace-platform",
   "main": "src/index.ts",
   "compatibility_date": "2026-08-27",
   "compatibility_flags": ["nodejs_compat"],
@@ -13,6 +13,10 @@
       {
         "name": "DEPLOYMENTS",
         "class_name": "TenantDeploymentsDO"
+      },
+      {
+        "name": "TENANT_CONTROL",
+        "class_name": "TenantControlDO"
       }
     ]
   },
@@ -24,12 +28,16 @@
     {
       "tag": "v2",
       "new_sqlite_classes": ["TenantDeploymentsDO"]
+    },
+    {
+      "tag": "v3",
+      "new_sqlite_classes": ["TenantControlDO"]
     }
   ],
   "dispatch_namespaces": [
     {
       "binding": "DISPATCHER",
-      "namespace": "gitspace-relays-spike"
+      "namespace": "gitspace-relays"
     }
   ],
   // RELEASES keeps a copy of every tenant worker bundle the platform uploaded
@@ -41,21 +49,24 @@
     { "binding": "RELEASES", "bucket_name": "gitspace-platform-releases" },
     { "binding": "DATA", "bucket_name": "gitspace-data" }
   ],
+  "services": [
+    { "binding": "AUTH", "service": "gitspace-auth" }
+  ],
   "routes": [
     {
-      "pattern": "alpha-relay-spike.gssh.dev",
+      "pattern": "platform.gssh.dev",
       "custom_domain": true
     },
     {
-      "pattern": "beta-relay-spike.gssh.dev",
-      "custom_domain": true
+      "pattern": "*.gssh.dev/*",
+      "zone_name": "gssh.dev"
     }
   ],
-  // Secret (set with `wrangler secret put CF_API_TOKEN`): an API token with
-  // "Workers Scripts Write" on CF_ACCOUNT_ID, used to upload tenant scripts into
-  // DISPATCH_NAMESPACE. Never a var.
+  // Secrets: CF_API_TOKEN uploads tenant relay scripts; PLATFORM_BOOTSTRAP_TOKEN
+  // authenticates bootstrap, account lifecycle, and account-bound deployment calls from gitspace-auth.
   "vars": {
-    "TENANT_HOST_SUFFIX": "-relay-spike.gssh.dev",
+    "TENANT_HOST_SUFFIX": ".gssh.dev",
+    "OPERATOR_URL": "https://api.gitspace.sh",
     "DEFAULT_CPU_MS": 50,
     "DEFAULT_SUBREQUESTS": 20,
     "ADMIN_PUBLIC_KEY": "vOSduG2Ge02PoTK0oGKKFODyStGjBO46mv9TQXdRmLA=",
@@ -65,8 +76,8 @@
     "DEPLOY_SETTLEMENT_MICROS": 1000,
     "DEPLOY_PROBE_DELAY_MS": 2000,
     "RESERVATION_TTL_MS": 30000,
-    "DISPATCH_NAMESPACE": "gitspace-relays-spike",
-    "CF_ACCOUNT_ID": "configure-at-deploy"
+    "DISPATCH_NAMESPACE": "gitspace-relays",
+    "CF_ACCOUNT_ID": "2ed07d2f77ecb2aa43ca99a9c970597c"
   },
   "observability": {
     "enabled": true,

@@ -1,0 +1,89 @@
+---
+$schema: https://holocron.so/frontmatter.json
+title: Getting started
+description: Create an account, enroll a machine, and open GitSpace.
+icon: play
+---
+
+# Getting started
+
+You need an invitation, a permanent account handle, and a computer that can run the GitSpace machine runtime.
+
+## 1. Create an invited account
+
+Open [gitspace.sh](https://gitspace.sh), enter your invitation, and choose your handle.
+
+Choose **Prepare recovery key**. Your browser creates the account root Ed25519 key and shows its `gsr_` recovery key before making any account request. Save it in a password manager, then paste the saved key into the confirmation field.
+
+<Warning>
+Save the recovery key before creating the account. GitSpace does not store it and cannot restore it. Anyone with this key can act as your account root.
+</Warning>
+
+Choose **Create invited account** after saving the key. If the request fails, retry on the same page. If you reload or lose the response, choose **Resume with a saved recovery key** and enter the same handle and key. Keep the original invitation until account creation finishes.
+
+## 2. Install the client
+
+Run the installer on the computer that will hold your repositories and agent workspaces.
+
+```bash
+curl -fsSL https://gitspace.sh/install | sh
+```
+
+The installed command is `gitspace`.
+
+## 3. Connect the computer to your account
+
+Use the handle and recovery key from account creation.
+
+```bash
+gitspace login <handle> --recovery-key <gsr_key>
+```
+
+This stores the local account configuration under `~/.config/gitspace/` with owner-only file permissions.
+
+Recovery does not consume another invitation or provision a second account. Suspended accounts require help from the operator.
+
+## 4. Enroll and start the machine
+
+```bash
+gitspace machine setup
+gitspace machine start
+```
+
+`machine setup` creates the machine signing and key-exchange keys, registers a root-signed capability grant, and builds the local runtime. `machine start` starts that runtime and connects it to the production relay.
+
+Check the connection:
+
+```bash
+gitspace machine status
+gitspace doctor
+```
+
+## 5. Open the web app
+
+```bash
+gitspace open
+```
+
+This creates a five-minute browser invitation, opens your account URL, and enrolls that browser with its own revocable device key.
+
+To print the URL instead of opening a browser:
+
+```bash
+gitspace open --print
+```
+
+## Add another computer
+
+Repeat installation, login, machine setup, and machine start on that computer. Use the same account handle and recovery key. Each machine receives a separate identity and capability grant.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Core concepts" icon="folder-git-2" href="/concepts">
+    Learn what GitSpace places on each machine.
+  </Card>
+  <Card title="Agent workflow" icon="bot" href="/agent-workflow">
+    Take a workspace from intent through operation.
+  </Card>
+</CardGroup>

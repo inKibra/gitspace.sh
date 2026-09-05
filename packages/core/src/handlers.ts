@@ -82,6 +82,7 @@ export class GitSpaceHandlers {
         ompSessionId: mainAgent.ompSessionId,
         state: mainAgent.state,
         lastEventOffset: mainAgent.lastEventOffset,
+        resumePending: mainAgent.resumePending,
         createdAt: new Date(mainAgent.createdAt),
         activity: mainAgent.activity,
         renderState: renderState(mainAgent),

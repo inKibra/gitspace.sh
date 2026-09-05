@@ -8,6 +8,7 @@ export const deploymentRunStates = [
   'staging',
   'activating',
   'health-checking',
+  'finalizing',
   'committed',
   'rolling-back',
   'rolled-back',
@@ -22,6 +23,7 @@ export const deploymentStepStates = [
   'activated',
   'healthy',
   'committed',
+  'finalized',
   'rolled-back',
 ] as const;
 export type DeploymentStepState = typeof deploymentStepStates[number];

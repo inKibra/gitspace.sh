@@ -1,4 +1,4 @@
-import type { MessageImage, RichContentBlock, SideAgentBlock, ToolCallBlock, TransportBlock, TurnBlock, TurnItem } from './model.js';
+import type { AskBlock, MessageImage, RichContentBlock, SideAgentBlock, ToolCallBlock, TransportBlock, TurnBlock, TurnItem } from './model.js';
 
 export interface TranscriptEventInput {
   sessionId: string;
@@ -74,6 +74,60 @@ function toolTarget(tool: string, args: Record<string, unknown>): string | undef
   if (tool === 'task' && Array.isArray(args.tasks)) return `${args.tasks.length} side agents`;
   return undefined;
 }
+function askQuestions(args: Record<string, unknown>): AskBlock['questions'] {
+  if (!Array.isArray(args.questions)) return [];
+  return args.questions.flatMap((rawQuestion, index) => {
+    const question = record(rawQuestion);
+    if (!question || typeof question.question !== 'string') return [];
+    const options = Array.isArray(question.options)
+      ? question.options.flatMap((rawOption) => {
+          if (typeof rawOption === 'string') return [{ id: rawOption, title: rawOption }];
+          const option = record(rawOption);
+          if (!option || typeof option.label !== 'string') return [];
+          return [{
+            id: option.label,
+            title: option.label,
+            ...(typeof option.description === 'string' ? { description: option.description } : {}),
+            ...(typeof option.preview === 'string' ? { preview: option.preview } : {}),
+          }];
+        })
+      : undefined;
+    return [{
+      id: typeof question.id === 'string' ? question.id : `question-${index + 1}`,
+      prompt: question.question,
+      ...(typeof question.header === 'string' ? { header: question.header } : {}),
+      ...(options?.length ? { options } : {}),
+      ...(question.multi === true ? { multiple: true } : {}),
+      ...(typeof question.recommended === 'number' ? { recommended: question.recommended } : {}),
+    }];
+  });
+}
+function applyAskAnswers(ask: AskBlock, details: unknown): void {
+  const root = record(details);
+  if (!root) return;
+  const results = Array.isArray(root.results) ? root.results : [root];
+  for (const rawResult of results) {
+    const result = record(rawResult);
+    if (!result) continue;
+    const question = typeof result.id === 'string'
+      ? ask.questions.find((candidate) => candidate.id === result.id)
+      : typeof result.question === 'string'
+        ? ask.questions.find((candidate) => candidate.prompt === result.question)
+        : ask.questions.length === 1
+          ? ask.questions[0]
+          : undefined;
+    if (!question) continue;
+    const selected = Array.isArray(result.selectedOptions)
+      ? result.selectedOptions.filter((option): option is string => typeof option === 'string')
+      : [];
+    const custom = typeof result.customInput === 'string' && result.customInput.trim()
+      ? [result.customInput.trim()]
+      : [];
+    const answer = [...selected, ...custom];
+    if (answer.length === 1 && !question.multiple) question.answer = answer[0];
+    else if (answer.length > 0) question.answer = answer;
+  }
+}
 
 function richText(id: string, text: string, language?: string): RichContentBlock[] {
   return text.trim() ? [{ id, type: 'code', text, ...(language ? { language } : {}) }] : [];
@@ -134,6 +188,9 @@ function sideAgents(details: unknown, turnId: string): SideAgentBlock[] {
 
 function findTool(turn: TurnBlock, toolCallId: string): ToolCallBlock | undefined {
   return turn.items.find((item): item is ToolCallBlock => item.type === 'tool-call' && item.toolCallId === toolCallId);
+}
+function findAsk(turn: TurnBlock, toolCallId: string): AskBlock | undefined {
+  return turn.items.find((item): item is AskBlock => item.type === 'ask' && item.toolCallId === toolCallId);
 }
 
 function startTurn(event: TranscriptEventInput): TurnBlock {
@@ -235,7 +292,15 @@ export function reduceTranscriptToTurns(events: readonly TranscriptEventInput[])
             else turn.items.push({ id: `${turn.id}:thinking:${event.ordinal}:${index}`, type: 'thinking', text: part.thinking });
           } else if (part.type === 'toolCall' && typeof part.id === 'string' && typeof part.name === 'string') {
             const args = record(part.arguments) ?? {};
-            if (!findTool(turn, part.id)) turn.items.push({
+            if (part.name === 'ask') {
+              if (!findAsk(turn, part.id)) turn.items.push({
+                id: `${turn.id}:ask:${part.id}`,
+                type: 'ask',
+                toolCallId: part.id,
+                status: 'pending',
+                questions: askQuestions(args),
+              });
+            } else if (!findTool(turn, part.id)) turn.items.push({
               id: `${turn.id}:tool:${part.id}`,
               type: 'tool-call',
               toolCallId: part.id,
@@ -250,6 +315,12 @@ export function reduceTranscriptToTurns(events: readonly TranscriptEventInput[])
         continue;
       }
       if (message.role === 'toolResult' && typeof message.toolCallId === 'string') {
+        const ask = findAsk(turn, message.toolCallId);
+        if (ask) {
+          ask.status = message.isError === true ? 'dismissed' : 'answered';
+          applyAskAnswers(ask, message.details);
+          continue;
+        }
         const tool = findTool(turn, message.toolCallId);
         if (!tool) continue;
         tool.status = message.isError === true ? 'error' : 'done';
@@ -260,7 +331,8 @@ export function reduceTranscriptToTurns(events: readonly TranscriptEventInput[])
           ...richImages(`${tool.id}:result:image`, message.content),
         ];
         if (tool.tool === 'task' || tool.tool === 'hub') turn.sideAgents.push(...sideAgents(message.details, turn.id));
-      }
+      continue;
+    }
       continue;
     }
     if (event.kind === 'tool_execution_start') {
@@ -268,7 +340,15 @@ export function reduceTranscriptToTurns(events: readonly TranscriptEventInput[])
       const toolCallId = typeof event.payload.toolCallId === 'string' ? event.payload.toolCallId : `tool-${event.ordinal}`;
       const tool = typeof event.payload.toolName === 'string' ? event.payload.toolName : 'tool';
       const args = record(event.payload.args) ?? {};
-      if (!findTool(turn, toolCallId)) turn.items.push({
+      if (tool === 'ask') {
+        if (!findAsk(turn, toolCallId)) turn.items.push({
+          id: `${turn.id}:ask:${toolCallId}`,
+          type: 'ask',
+          toolCallId,
+          status: 'pending',
+          questions: askQuestions(args),
+        });
+      } else if (!findTool(turn, toolCallId)) turn.items.push({
         id: `${turn.id}:tool:${toolCallId}`,
         type: 'tool-call',
         toolCallId,
@@ -293,6 +373,12 @@ export function reduceTranscriptToTurns(events: readonly TranscriptEventInput[])
     if (event.kind === 'tool_execution_end') {
       const turn = ensureTurn(event);
       const toolCallId = typeof event.payload.toolCallId === 'string' ? event.payload.toolCallId : '';
+      const ask = findAsk(turn, toolCallId);
+      if (ask) {
+        ask.status = event.payload.isError === true ? 'dismissed' : 'answered';
+        applyAskAnswers(ask, event.payload.details);
+        continue;
+      }
       const tool = findTool(turn, toolCallId);
       if (!tool) continue;
       tool.status = event.payload.isError === true ? 'error' : 'done';
@@ -310,7 +396,7 @@ export function reduceTranscriptToTurns(events: readonly TranscriptEventInput[])
   }
   const inferredStatus = current?.status === 'error'
     ? 'error'
-    : current?.items.some((item) => item.type === 'message' && item.pending || item.type === 'tool-call' && item.status === 'running')
+    : current?.items.some((item) => item.type === 'message' && item.pending || item.type === 'tool-call' && item.status === 'running' || item.type === 'ask' && item.status === 'pending')
       ? 'running'
       : 'done';
   commit(inferredStatus);

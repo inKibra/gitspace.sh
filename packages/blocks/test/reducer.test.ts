@@ -112,6 +112,71 @@ describe('reduceTranscriptToTurns', () => {
       result: [expect.objectContaining({ text: '# Partial result' })],
     });
   });
+  it('projects ask tool calls as interactive question blocks', () => {
+    const turns = reduceTranscriptToTurns([
+      { sessionId: 's1', ordinal: 1, kind: 'turn_start', payload: {} },
+      { sessionId: 's1', ordinal: 2, kind: 'tool_execution_start', payload: { toolCallId: 'ask-1', toolName: 'ask', args: { questions: [
+        { id: 'runtime', header: 'Runtime', question: 'Choose a runtime', options: [{ label: 'Bun', description: 'Fast' }], recommended: 0 },
+        { id: 'checks', question: 'Which checks?', options: [{ label: 'Types' }, { label: 'Browser' }], multi: true },
+      ] } } },
+    ]);
+    expect(turns[0]?.status).toBe('running');
+    expect(turns[0]?.items[0]).toEqual(expect.objectContaining({
+      type: 'ask',
+      toolCallId: 'ask-1',
+      status: 'pending',
+      questions: [
+        { id: 'runtime', header: 'Runtime', prompt: 'Choose a runtime', options: [{ id: 'Bun', title: 'Bun', description: 'Fast' }], recommended: 0 },
+        { id: 'checks', prompt: 'Which checks?', options: [{ id: 'Types', title: 'Types' }, { id: 'Browser', title: 'Browser' }], multiple: true },
+      ],
+    }));
+  });
+
+  it('retains submitted ask answers in the completed block', () => {
+    const turns = reduceTranscriptToTurns([
+      { sessionId: 's1', ordinal: 1, kind: 'turn_start', payload: {} },
+      { sessionId: 's1', ordinal: 2, kind: 'tool_execution_start', payload: { toolCallId: 'ask-1', toolName: 'ask', args: { questions: [
+        { id: 'runtime', question: 'Choose a runtime', options: [{ label: 'Bun' }] },
+        { id: 'checks', question: 'Which checks?', options: [{ label: 'Types' }, { label: 'Browser' }], multi: true },
+        { id: 'notes', question: 'Anything else?', options: [{ label: 'None' }] },
+      ] } } },
+      { sessionId: 's1', ordinal: 3, kind: 'message_end', payload: { message: { role: 'toolResult', toolCallId: 'ask-1', details: { results: [
+        { id: 'runtime', selectedOptions: ['Bun'] },
+        { id: 'checks', selectedOptions: ['Types', 'Browser'] },
+        { id: 'notes', selectedOptions: [], customInput: 'Keep it compact' },
+      ] }, content: [] } } },
+    ]);
+    expect(turns[0]?.items[0]).toEqual(expect.objectContaining({
+      type: 'ask',
+      status: 'answered',
+      questions: [
+        expect.objectContaining({ id: 'runtime', answer: 'Bun' }),
+        expect.objectContaining({ id: 'checks', answer: ['Types', 'Browser'] }),
+        expect.objectContaining({ id: 'notes', answer: 'Keep it compact' }),
+      ],
+    }));
+  });
+
+  it('retains the flat answer payload used by single-question asks', () => {
+    const turns = reduceTranscriptToTurns([
+      { sessionId: 's1', ordinal: 1, kind: 'turn_start', payload: {} },
+      { sessionId: 's1', ordinal: 2, kind: 'tool_execution_start', payload: { toolCallId: 'ask-1', toolName: 'ask', args: { questions: [
+        { id: 'choice', question: 'Choose A or B.', options: [{ label: 'A' }, { label: 'B' }] },
+      ] } } },
+      { sessionId: 's1', ordinal: 3, kind: 'message_end', payload: { message: {
+        role: 'toolResult',
+        toolCallId: 'ask-1',
+        details: { question: 'Choose A or B.', options: ['A', 'B'], multi: false, selectedOptions: ['A'] },
+        content: [{ type: 'text', text: 'User selected: A' }],
+      } } },
+    ]);
+    expect(turns[0]?.items[0]).toEqual(expect.objectContaining({
+      type: 'ask',
+      status: 'answered',
+      questions: [expect.objectContaining({ id: 'choice', answer: 'A' })],
+    }));
+  });
+
 
   it('tracks asynchronous task progress and completed hub results as subagents', () => {
     const turns = reduceTranscriptToTurns([

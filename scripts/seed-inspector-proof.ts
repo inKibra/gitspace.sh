@@ -1,4 +1,4 @@
-import { createGitSpaceBrowserClient } from '../packages/web/src/rpc-client.js';
+import { createGitSpaceBrowserClient } from '../packages/account-web/src/rpc-client.js';
 
 const rpcUrl = process.env.GITSPACE_PROOF_RPC_URL ?? 'http://127.0.0.1:4510/rpc';
 const projectId = process.env.GITSPACE_PROOF_PROJECT ?? 'project-a';

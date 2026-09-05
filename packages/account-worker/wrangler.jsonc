@@ -1,0 +1,39 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "gitspace-relay",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-27",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "RELAY",
+        "class_name": "UserRelayDO"
+      }
+    ]
+  },
+  "r2_buckets": [
+    {
+      "binding": "BLOBS",
+      "bucket_name": "gitspace-relay-blobs"
+    }
+  ],
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["UserRelayDO"]
+    }
+  ],
+  "vars": {
+    "AUTH_PUBLIC_KEY": "replace-with-base64-ed25519-public-key",
+    "OPERATOR_URL": "https://api.gitspace.sh",
+    "RELAY_NAME": "default",
+    "AUTH_MAX_SKEW_MS": 60000,
+    "TUNNEL_HEADER_TIMEOUT_MS": 300000,
+    "TUNNEL_IDLE_TIMEOUT_MS": 300000
+  },
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  }
+}

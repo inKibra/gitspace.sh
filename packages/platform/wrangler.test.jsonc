@@ -7,12 +7,14 @@
   "durable_objects": {
     "bindings": [
       { "name": "CREDITS", "class_name": "CreditLedgerDO" },
-      { "name": "DEPLOYMENTS", "class_name": "TenantDeploymentsDO" }
+      { "name": "DEPLOYMENTS", "class_name": "TenantDeploymentsDO" },
+      { "name": "TENANT_CONTROL", "class_name": "TenantControlDO" }
     ]
   },
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["CreditLedgerDO"] },
-    { "tag": "v2", "new_sqlite_classes": ["TenantDeploymentsDO"] }
+    { "tag": "v2", "new_sqlite_classes": ["TenantDeploymentsDO"] },
+    { "tag": "v3", "new_sqlite_classes": ["TenantControlDO"] }
   ],
   "r2_buckets": [
     { "binding": "RELEASES", "bucket_name": "gitspace-platform-releases-test" },
@@ -20,6 +22,7 @@
   ],
   "vars": {
     "TENANT_HOST_SUFFIX": "-test.invalid",
+    "OPERATOR_URL": "https://authority.test",
     "DEFAULT_CPU_MS": 50,
     "DEFAULT_SUBREQUESTS": 20,
     "ADMIN_PUBLIC_KEY": "test",
@@ -31,6 +34,7 @@
     "RESERVATION_TTL_MS": 30000,
     "DISPATCH_NAMESPACE": "gitspace-relays-test",
     "CF_ACCOUNT_ID": "test-account",
-    "CF_API_TOKEN": "test-api-token"
+    "CF_API_TOKEN": "test-api-token",
+    "PLATFORM_BOOTSTRAP_TOKEN": "test-bootstrap-token"
   }
 }

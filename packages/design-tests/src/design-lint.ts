@@ -34,7 +34,11 @@ function report(rule: string, path: string, source: string, index: number, prope
   violations.push({ rule, path, line: source.slice(0, index).split('\n').length, property, detail });
 }
 
-const files = (await Promise.all([collect(resolve(root, 'packages/web/src')), collect(resolve(root, 'packages/ui/src'))])).flat();
+const files = (await Promise.all([
+  collect(resolve(root, 'packages/account-web/src')),
+  collect(resolve(root, 'packages/operator-web/src')),
+  collect(resolve(root, 'packages/ui/src')),
+])).flat();
 for (const absolutePath of files) {
   const path = relative(root, absolutePath).replaceAll('\\', '/');
   const extension = extname(path);

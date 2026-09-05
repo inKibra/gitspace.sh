@@ -9,6 +9,7 @@ import { actionFailure, atomicWrite, copyArtifact, hashArtifactPath, verifyArtif
 const machinePointerSchema = z.object({
   hash: z.string().regex(/^sha256:[a-f0-9]{64}$/u),
   artifactPath: z.string().min(1),
+  /** Runtime instance identity, independent of the content-addressed artifact hash. */
   socketPath: z.string().min(1),
 });
 export type MachineGenerationPointer = z.infer<typeof machinePointerSchema>;
@@ -16,6 +17,7 @@ export type MachineGenerationPointer = z.infer<typeof machinePointerSchema>;
 const machineRollbackSchema = z.object({
   previous: machinePointerSchema.nullable(),
   databaseCheckpoint: z.string().min(1),
+  restored: z.boolean().default(false),
 });
 type MachineRollbackRecord = z.infer<typeof machineRollbackSchema>;
 
@@ -27,9 +29,11 @@ export interface MachineReplacementHost {
   checkpointDatabase(): Promise<string>;
   migrateDatabase(nextGenerationHash: string): Promise<void>;
   restoreDatabase(checkpointId: string): Promise<void>;
+  /** Idempotent: finalization and rollback cleanup can retry after interruption. */
   releaseDatabaseCheckpoint(checkpointId: string): Promise<void>;
   startSuccessor(next: MachineGenerationPointer): Promise<void>;
   probeSuccessor(next: MachineGenerationPointer): Promise<void>;
+  /** Restart the generation if necessary before routing traffic to it. */
   switchActiveSocket(next: MachineGenerationPointer): Promise<void>;
   stopGeneration(generation: MachineGenerationPointer): Promise<void>;
   resumeAdmissions(): Promise<void>;
@@ -73,6 +77,7 @@ export class MachineReplacementDriver implements ReplacementDriver {
       const rollback: MachineRollbackRecord = {
         previous: await this.host.currentGeneration(),
         databaseCheckpoint: await this.host.checkpointDatabase(),
+        restored: false,
       };
       await atomicWrite(this.rollbackPath(context), JSON.stringify(rollback));
       return Result.ok(undefined);
@@ -103,41 +108,50 @@ export class MachineReplacementDriver implements ReplacementDriver {
   async commit(context: ReplacementContext): Promise<ResultType<void, ReplacementActionError>> {
     try {
       const next = await this.nextPointer(context);
-      const rollback = await this.rollbackRecord(context);
-      const previous = rollback?.previous ?? null;
+      if (!await this.rollbackRecord(context)) throw new Error('Machine rollback checkpoint is missing');
       await this.host.switchActiveSocket(next);
       await atomicWrite(this.currentPath(), JSON.stringify(next));
-      if (previous) await this.host.stopGeneration(previous);
-      if (rollback) await this.host.releaseDatabaseCheckpoint(rollback.databaseCheckpoint);
-      await this.host.resumeAdmissions();
-      await rm(this.rollbackPath(context), { force: true });
       return Result.ok(undefined);
     } catch (error) {
       return actionFailure(this.entrypoint, 'commit', error);
     }
   }
 
-  async rollback(context: ReplacementContext): Promise<ResultType<void, ReplacementActionError>> {
+  async finalize(context: ReplacementContext): Promise<ResultType<void, ReplacementActionError>> {
     try {
-      const next = await this.nextPointer(context);
       const rollback = await this.rollbackRecord(context);
-      const previous = rollback?.previous ?? null;
-      await this.host.stopGeneration(next);
-      if (rollback) await this.host.restoreDatabase(rollback.databaseCheckpoint);
-      if (previous) {
-        await this.host.switchActiveSocket(previous);
-        await atomicWrite(this.currentPath(), JSON.stringify(previous));
-      } else {
-        await rm(this.currentPath(), { force: true });
-      }
+      if (!rollback) return Result.ok(undefined);
+      if (rollback.previous) await this.host.stopGeneration(rollback.previous);
+      await this.host.releaseDatabaseCheckpoint(rollback.databaseCheckpoint);
       await this.host.resumeAdmissions();
       await rm(this.rollbackPath(context), { force: true });
       return Result.ok(undefined);
     } catch (error) {
-      if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') {
-        await this.host.resumeAdmissions();
-        return Result.ok(undefined);
+      return actionFailure(this.entrypoint, 'finalize', error);
+    }
+  }
+
+  async rollback(context: ReplacementContext): Promise<ResultType<void, ReplacementActionError>> {
+    try {
+      const rollback = await this.rollbackRecord(context);
+      if (!rollback) return Result.ok(undefined);
+      if (!rollback.restored) {
+        await this.host.stopGeneration(await this.nextPointer(context));
+        await this.host.restoreDatabase(rollback.databaseCheckpoint);
+        if (rollback.previous) {
+          await this.host.switchActiveSocket(rollback.previous);
+          await atomicWrite(this.currentPath(), JSON.stringify(rollback.previous));
+        } else {
+          await rm(this.currentPath(), { force: true });
+        }
+        // Recovery is complete. Cleanup retries must not restore a released checkpoint.
+        await atomicWrite(this.rollbackPath(context), JSON.stringify({ ...rollback, restored: true }));
       }
+      await this.host.releaseDatabaseCheckpoint(rollback.databaseCheckpoint);
+      await this.host.resumeAdmissions();
+      await rm(this.rollbackPath(context), { force: true });
+      return Result.ok(undefined);
+    } catch (error) {
       return actionFailure(this.entrypoint, 'rollback', error);
     }
   }
@@ -149,7 +163,7 @@ export class MachineReplacementDriver implements ReplacementDriver {
     return {
       hash: context.artifact.hash,
       artifactPath: join(this.environmentRoot, 'machine', 'generations', generation, artifactName),
-      socketPath: join(this.environmentRoot, 'machine', 'sockets', `machine-${generation}.sock`),
+      socketPath: join(this.environmentRoot, 'machine', 'sockets', `machine-${context.plan.id}-${context.attempt}.sock`),
     };
   }
 

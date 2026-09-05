@@ -1,0 +1,30 @@
+{
+  "name": "@gitspace/account-machine",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "start": "bun src/runtime.ts",
+    "typecheck": "tsgo --noEmit -p tsconfig.json",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@gitspace/account-omp": "workspace:*",
+    "@gitspace/core": "workspace:*",
+    "@gitspace/deployment": "workspace:*",
+    "@gitspace/protocol": "workspace:*",
+    "@oh-my-pi/omptype": "18.1.10",
+    "@oh-my-pi/pi-ai": "18.1.10",
+    "@oh-my-pi/pi-coding-agent": "18.1.10",
+    "@oh-my-pi/pi-utils": "18.1.10",
+    "aws4fetch": "1.0.20",
+    "better-result": "3.0.1",
+    "devalue": "5.8.2",
+    "drizzle-orm": "^0.45.2",
+    "result-rpc": "0.5.0",
+    "zod": "^4.4.3"
+  }
+}

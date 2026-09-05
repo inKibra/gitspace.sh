@@ -56,7 +56,11 @@ export interface ScriptUploadMetadata {
   main_module: string;
   compatibility_date: string;
   compatibility_flags: string[];
-  bindings: Array<{ type: 'durable_object_namespace'; name: string; class_name: string }>;
+  bindings: Array<
+    | { type: 'durable_object_namespace'; name: string; class_name: string }
+    | { type: 'r2_bucket'; name: string; bucket_name: string }
+    | { type: 'plain_text'; name: string; text: string }
+  >;
   migrations?: MigrationUpload;
   keep_bindings: string[];
   tags: string[];
@@ -100,16 +104,28 @@ export function scriptUploadMetadata(
   metadata: WorkerReleaseMetadata,
   migrations: MigrationUpload | null,
   tags: string[],
+  tenant?: { id: string; rootPublicKey: string; blobBucket: string; operatorUrl: string },
 ): ScriptUploadMetadata {
   return {
     main_module: metadata.mainModule,
     compatibility_date: metadata.compatibilityDate,
     compatibility_flags: metadata.compatibilityFlags,
-    bindings: metadata.durableObjects.map((binding) => ({
-      type: 'durable_object_namespace',
-      name: binding.name,
-      class_name: binding.className,
-    })),
+    bindings: [
+      ...metadata.durableObjects.map((binding) => ({
+        type: 'durable_object_namespace' as const,
+        name: binding.name,
+        class_name: binding.className,
+      })),
+      ...(tenant ? [
+        { type: 'r2_bucket' as const, name: 'BLOBS', bucket_name: tenant.blobBucket },
+        { type: 'plain_text' as const, name: 'AUTH_PUBLIC_KEY', text: tenant.rootPublicKey },
+        { type: 'plain_text' as const, name: 'OPERATOR_URL', text: tenant.operatorUrl },
+        { type: 'plain_text' as const, name: 'RELAY_NAME', text: tenant.id },
+        { type: 'plain_text' as const, name: 'AUTH_MAX_SKEW_MS', text: '60000' },
+        { type: 'plain_text' as const, name: 'TUNNEL_HEADER_TIMEOUT_MS', text: '10000' },
+        { type: 'plain_text' as const, name: 'TUNNEL_IDLE_TIMEOUT_MS', text: '30000' },
+      ] : []),
+    ],
     ...(migrations ? { migrations } : {}),
     keep_bindings: [...KEPT_BINDING_TYPES],
     tags,
@@ -171,7 +187,7 @@ interface Probe {
 }
 
 /** Hits the freshly uploaded script through the dispatcher; the version stamp must match the release. */
-async function probeHealth(env: Env, tenant: string, expectedSha: string | null): Promise<Probe> {
+async function probeHealth(env: Env, tenant: string, expectedSha: string): Promise<Probe> {
   let version: string | null = null;
   for (let attempt = 0; attempt < PROBE_ATTEMPTS; attempt += 1) {
     if (attempt > 0) {
@@ -182,7 +198,8 @@ async function probeHealth(env: Env, tenant: string, expectedSha: string | null)
     try {
       const response = await env.DISPATCHER.get(`tenant-${tenant}`).fetch('https://tenant/healthz');
       version = response.headers.get(WORKER_VERSION_HEADER);
-      if (response.ok && version !== null && (expectedSha === null || version === expectedSha)) return { healthy: true, version };
+      const matches = version === expectedSha || (expectedSha === CHANNEL_SHA && version?.startsWith(`${CHANNEL_SHA}:`) === true);
+      if (response.ok && matches) return { healthy: true, version };
     } catch (error) {
       console.error(JSON.stringify({ event: 'deploy-probe-failed', tenant, attempt, message: error instanceof Error ? error.message : String(error) }));
     }
@@ -223,9 +240,20 @@ async function loadChannel(env: Env): Promise<Candidate | null> {
  * nothing changed on Cloudflare and the caller releases explicitly.
  */
 async function swap(env: Env, tenant: string, deployments: Deployments, state: TenantDeploymentState, candidate: Candidate, autoRevert: boolean): Promise<DeployResult> {
-  const expectedSha = candidate.sha === CHANNEL_SHA ? null : candidate.sha;
+  const expectedSha = candidate.sha;
+  const tenantConfig = await deployments.tenantConfig();
+  if (!tenantConfig) {
+    await deployments.releaseLease();
+    return { status: 'error', error: { status: 409, code: 'TENANT_UNCONFIGURED', message: 'Tenant bindings are not configured' } };
+  }
   const delta = migrationDelta(candidate.metadata.migrations, state.appliedMigrationTag);
-  const rejected = await uploadScript(env, tenant, candidate.bundle, scriptUploadMetadata(candidate.metadata, delta, [tenant, candidate.sha]));
+  const uploadMetadata = scriptUploadMetadata(candidate.metadata, delta, [tenant, candidate.sha], {
+    id: tenant,
+    rootPublicKey: tenantConfig.rootPublicKey,
+    blobBucket: tenantConfig.blobBucket,
+    operatorUrl: env.OPERATOR_URL,
+  });
+  const rejected = await uploadScript(env, tenant, candidate.bundle, uploadMetadata);
   if (rejected) {
     await deployments.releaseLease();
     return { status: 'error', error: rejected };
@@ -242,11 +270,16 @@ async function swap(env: Env, tenant: string, deployments: Deployments, state: T
   let revertedTo: string | null = null;
   if (fallback) {
     const fallbackDelta = migrationDelta(fallback.metadata.migrations, appliedMigrationTag);
-    const fallbackRejected = await uploadScript(env, tenant, fallback.bundle, scriptUploadMetadata(fallback.metadata, fallbackDelta, [tenant, fallback.sha]));
+    const fallbackRejected = await uploadScript(env, tenant, fallback.bundle, scriptUploadMetadata(
+      fallback.metadata,
+      fallbackDelta,
+      [tenant, fallback.sha],
+      { id: tenant, rootPublicKey: tenantConfig.rootPublicKey, blobBucket: tenantConfig.blobBucket, operatorUrl: env.OPERATOR_URL },
+    ));
     if (fallbackRejected) {
       console.error(JSON.stringify({ event: 'deploy-revert-rejected', tenant, sha: candidate.sha, message: fallbackRejected.message }));
     } else {
-      const fallbackProbe = await probeHealth(env, tenant, fallback.sha === CHANNEL_SHA ? null : fallback.sha);
+      const fallbackProbe = await probeHealth(env, tenant, fallback.sha);
       const fallbackSha = fallbackProbe.version ?? fallback.sha;
       if (fallbackProbe.healthy) {
         revertedTo = fallbackSha;
@@ -263,6 +296,17 @@ async function swap(env: Env, tenant: string, deployments: Deployments, state: T
   }
   await deployments.recordDeploy({ sha: candidate.sha, bundleKey: candidate.bundleKey, metadata: candidate.metadata, healthy: false, revertedTo, appliedMigrationTag });
   return { status: 'ok', value: { sha: candidate.sha, healthy: false, revertedTo, appliedMigrationTag } };
+}
+
+export async function deployChannelTenant(env: Env, tenant: string): Promise<DeployResult> {
+  const candidate = await loadChannel(env);
+  if (!candidate) {
+    return { status: 'error', error: { status: 503, code: 'CHANNEL_UNAVAILABLE', message: 'Relay channel bundle is not published' } };
+  }
+  const deployments = env.DEPLOYMENTS.getByName(tenant);
+  const lease = await deployments.acquireLease();
+  if (lease.status === 'error') return { status: 'error', error: { status: 409, ...lease.error } };
+  return swap(env, tenant, deployments, lease.value, candidate, false);
 }
 
 export async function deployTenantWorker(env: Env, tenant: string, request: PlatformDeployRequest): Promise<DeployResult> {

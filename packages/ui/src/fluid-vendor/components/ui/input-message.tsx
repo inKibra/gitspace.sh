@@ -107,6 +107,7 @@ interface QueuedMessage {
   id: string;
   text: string;
   files: File[];
+  kind?: "steering" | "followUp";
 }
 
 interface InputMessageProps
@@ -171,10 +172,16 @@ interface InputMessageProps
    *  consumer should halt the current response and flip `status` to `"idle"`,
    *  which immediately dispatches the next queued message. */
   onStop?: () => void;
+  /** While streaming, submit drafts to the queue by default or send immediately as steering. */
+  streamingSubmitBehavior?: "queue" | "send";
   /** Controlled queue of pending messages. Requires `status` to be controlled. */
   queue?: QueuedMessage[];
   /** Called when the queue changes (enqueue, edit, delete, reorder, dispatch). */
-  onQueueChange?: (queue: QueuedMessage[]) => void;
+  onQueueChange?: (queue: QueuedMessage[]) => boolean | void | Promise<boolean | void>;
+  /** Promote a queued follow-up so it steers the active turn immediately. */
+  onQueueSteer?: (item: QueuedMessage) => void;
+  /** Dispatch queued rows on the streaming-to-idle edge. Disable when the server owns queue draining. */
+  autoDispatchQueue?: boolean;
   /** Render the built-in reorderable queue rows above the textarea. Set to
    *  `false` to suppress them and render the queue yourself (e.g. as full-width
    *  rows above the composer) — enqueue + auto-dispatch still run. */
@@ -257,6 +264,7 @@ interface QueuedRowProps {
   isTouch: boolean;
   onEdit: (item: QueuedMessage) => void;
   onRemove: (item: QueuedMessage) => void;
+  onSteer?: (item: QueuedMessage) => void;
   onMove: (item: QueuedMessage, dir: -1 | 1) => void;
 }
 
@@ -269,6 +277,7 @@ function QueuedRow({
   onEdit,
   onRemove,
   onMove,
+  onSteer,
 }: QueuedRowProps) {
   const XIcon = useIcon("x");
   const ImageIcon = useIcon("image");
@@ -328,6 +337,44 @@ function QueuedRow({
       {/* py-1/-my-1 keeps truncate's overflow:hidden from clipping
           ascenders/descenders outside the trimmed box. */}
       <span className="min-w-0 flex-1 truncate [text-box:trim-both_cap_alphabetic] py-1 -my-1">{label}</span>
+      <Tooltip content="Edit" side="top">
+        <button
+          type="button"
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation();
+            onEdit(item);
+          }}
+          aria-label={`Edit queued message: ${label}`}
+          className={cn(
+            "shrink-0 rounded-md px-1.5 py-1 text-[11px] text-muted-foreground hover:bg-hover hover:text-foreground",
+            isTouch ? "opacity-100" : "opacity-0 group-hover/qrow:opacity-100 focus-visible:opacity-100",
+            "transition-opacity duration-80 cursor-pointer outline-none focus-visible:ring-1 focus-visible:ring-[color:var(--focus-ring,#6B97FF)]"
+          )}
+        >
+          Edit
+        </button>
+      </Tooltip>
+      {item.kind === "followUp" && onSteer && (
+        <Tooltip content="Send now as steering" side="top">
+          <button
+            type="button"
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.stopPropagation();
+              onSteer(item);
+            }}
+            aria-label={`Steer queued message: ${label}`}
+            className={cn(
+              "shrink-0 rounded-md px-1.5 py-1 text-[11px] text-muted-foreground hover:bg-hover hover:text-foreground",
+              isTouch ? "opacity-100" : "opacity-0 group-hover/qrow:opacity-100 focus-visible:opacity-100",
+              "transition-opacity duration-80 cursor-pointer outline-none focus-visible:ring-1 focus-visible:ring-[color:var(--focus-ring,#6B97FF)]"
+            )}
+          >
+            Steer
+          </button>
+        </Tooltip>
+      )}
       <Tooltip content="Remove" side="top">
         <button
           type="button"
@@ -466,6 +513,9 @@ const InputMessage = forwardRef<HTMLDivElement, InputMessageProps>(
       onStop,
       queue,
       onQueueChange,
+      streamingSubmitBehavior = "queue",
+      onQueueSteer,
+      autoDispatchQueue = true,
       showQueue = true,
       history = [],
       placeholderSuggestion,
@@ -638,19 +688,19 @@ const InputMessage = forwardRef<HTMLDivElement, InputMessageProps>(
           ? `0 0 0 1px var(--border), ${EDGE_DROP}`
           : undefined;
 
-    const handleSend = useCallback(() => {
+    const handleSend = useCallback(async () => {
       if (!canSend) return;
       setHistoryIndex(null);
-      // While the assistant is streaming, a submit enqueues instead of sending:
-      // snapshot the draft (text + currently-attached files) into a queue item,
-      // then clear the composer and keep focus.
-      if (streaming && supportsQueue) {
+      // While the assistant is streaming, queue mode snapshots the draft
+      // while steer mode sends it directly into the active turn.
+      if (streaming && supportsQueue && streamingSubmitBehavior === "queue") {
         const item: QueuedMessage = {
           id: crypto.randomUUID(),
           text: trimmed,
           files: filesArr,
         };
-        onQueueChange?.([...queueRef.current, item]);
+        const accepted = await onQueueChange?.([...queueRef.current, item]);
+        if (accepted === false) return;
         onValueChange("");
         if (supportsFiles) onFilesChange?.([]);
         requestAnimationFrame(() => textareaRef.current?.focus());
@@ -668,6 +718,7 @@ const InputMessage = forwardRef<HTMLDivElement, InputMessageProps>(
       onValueChange,
       supportsFiles,
       onFilesChange,
+      streamingSubmitBehavior,
     ]);
 
     const handleStop = useCallback(() => onStop?.(), [onStop]);
@@ -680,7 +731,7 @@ const InputMessage = forwardRef<HTMLDivElement, InputMessageProps>(
     useEffect(() => {
       const prev = prevStatusRef.current;
       prevStatusRef.current = status;
-      if (!supportsQueue) return;
+      if (!supportsQueue || !autoDispatchQueue) return;
       if (prev === "streaming" && status === "idle" && queueArr.length > 0) {
         const [next, ...rest] = queueArr;
         onQueueChange?.(rest);
@@ -689,7 +740,7 @@ const InputMessage = forwardRef<HTMLDivElement, InputMessageProps>(
           `Message sent.${rest.length ? ` ${rest.length} still queued.` : ""}`
         );
       }
-    }, [status, supportsQueue, queueArr, onQueueChange, onSend]);
+    }, [status, supportsQueue, autoDispatchQueue, queueArr, onQueueChange, onSend]);
 
     // ── Queue item actions ────────────────────────────────────────────
     const editQueued = useCallback(
@@ -746,8 +797,8 @@ const InputMessage = forwardRef<HTMLDivElement, InputMessageProps>(
     // Stop⇄arrow swap animates.
     const buttonMode: "send" | "queue" | "stop" = !streaming
       ? "send"
-      : canSend && supportsQueue
-        ? "queue"
+      : canSend
+        ? supportsQueue && streamingSubmitBehavior === "queue" ? "queue" : "send"
         : onStop
           ? "stop"
           : "send";
@@ -1134,6 +1185,7 @@ const InputMessage = forwardRef<HTMLDivElement, InputMessageProps>(
                           onEdit={editQueued}
                           onRemove={removeQueued}
                           onMove={moveQueued}
+                          onSteer={onQueueSteer}
                         />
                       ))}
                     </AnimatePresence>

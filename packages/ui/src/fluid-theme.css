@@ -1,8 +1,9 @@
 @import "tailwindcss";
 @source "./fluid-vendor/**/*.{ts,tsx}";
 @source "./*.tsx";
-@source "../../web/src/**/*.{ts,tsx}";
-@source "../../web/node_modules/streamdown/dist/*.js";
+@source "../../account-web/src/**/*.{ts,tsx}";
+@source "../../account-web/node_modules/streamdown/dist/*.js";
+@source "../../operator-web/src/**/*.{ts,tsx}";
 
 @custom-variant dark (&:is(.dark *));
 

@@ -55,7 +55,7 @@ export class FrontendReplacementDriver implements ReplacementDriver {
           throw error;
         }
       }
-      await atomicWrite(this.rollbackPath(context), JSON.stringify(await this.currentPointer()));
+      await atomicWrite(this.rollbackPath(context), JSON.stringify(await this.readPointer(this.currentPath()) ?? null));
       return Result.ok(undefined);
     } catch (error) {
       return actionFailure(this.entrypoint, 'stage', error);
@@ -89,16 +89,26 @@ export class FrontendReplacementDriver implements ReplacementDriver {
 
   async commit(context: ReplacementContext): Promise<ResultType<void, ReplacementActionError>> {
     try {
-      await rm(this.rollbackPath(context), { force: true });
+      if (await this.readPointer(this.rollbackPath(context)) === undefined) throw new Error('Frontend rollback record is missing');
       return Result.ok(undefined);
     } catch (error) {
       return actionFailure(this.entrypoint, 'commit', error);
     }
   }
 
+  async finalize(context: ReplacementContext): Promise<ResultType<void, ReplacementActionError>> {
+    try {
+      await rm(this.rollbackPath(context), { force: true });
+      return Result.ok(undefined);
+    } catch (error) {
+      return actionFailure(this.entrypoint, 'finalize', error);
+    }
+  }
+
   async rollback(context: ReplacementContext): Promise<ResultType<void, ReplacementActionError>> {
     try {
-      const previous = frontendPointerSchema.nullable().parse(JSON.parse(await readFile(this.rollbackPath(context), 'utf8')));
+      const previous = await this.readPointer(this.rollbackPath(context));
+      if (previous === undefined) return Result.ok(undefined);
       if (previous) {
         await atomicWrite(this.currentPath(), JSON.stringify(previous));
         await this.host.publishGeneration(previous.hash);
@@ -108,7 +118,6 @@ export class FrontendReplacementDriver implements ReplacementDriver {
       await rm(this.rollbackPath(context), { force: true });
       return Result.ok(undefined);
     } catch (error) {
-      if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') return Result.ok(undefined);
       return actionFailure(this.entrypoint, 'rollback', error);
     }
   }
@@ -125,11 +134,11 @@ export class FrontendReplacementDriver implements ReplacementDriver {
     return join(this.environmentRoot, 'frontend', `rollback-${context.plan.id}-${context.attempt}.json`);
   }
 
-  private async currentPointer(): Promise<FrontendPointer | null> {
+  private async readPointer(path: string): Promise<FrontendPointer | null | undefined> {
     try {
-      return frontendPointerSchema.parse(JSON.parse(await readFile(this.currentPath(), 'utf8')));
+      return frontendPointerSchema.nullable().parse(JSON.parse(await readFile(path, 'utf8')));
     } catch (error) {
-      if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') return null;
+      if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') return undefined;
       throw error;
     }
   }

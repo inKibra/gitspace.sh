@@ -39,6 +39,10 @@ import {
 } from './inspector-contract.js';
 import { SkillUpdateCodec, SkillViewCodec } from './skills-contract.js';
 import {
+  ComposioPluginAuthorizationViewCodec,
+  ComposioPluginCatalogViewCodec,
+  ComposioPluginToolViewCodec,
+  ComposioSetupViewCodec,
   DiscoveredMcpToolViewCodec,
   McpConnectionDraftCodec,
   McpConnectionViewCodec,
@@ -350,6 +354,7 @@ export const SessionViewCodec = wire.object({
   ompSessionId: wire.string,
   state: wire.enum(['opening', 'active', 'draining', 'closed', 'failed']),
   lastEventOffset: wire.number,
+  resumePending: wire.boolean,
   createdAt: wire.date,
   activity: SessionActivityCodec,
   renderState: wire.enum(['closed', 'dormant', 'waiting', 'running', 'permission-needed', 'retrying', 'archived']),
@@ -371,6 +376,24 @@ const SessionTodoTaskCodec = wire.object({
   blocker: wire.nullable(wire.string),
 });
 const SessionTodoPhaseCodec = wire.object({ name: wire.string, tasks: wire.array(SessionTodoTaskCodec) });
+const PendingAskQuestionCodec = wire.object({
+  id: wire.string,
+  question: wire.string,
+  header: wire.nullable(wire.string),
+  options: wire.array(wire.object({
+    label: wire.string,
+    description: wire.nullable(wire.string),
+    preview: wire.nullable(wire.string),
+  })),
+  multi: wire.boolean,
+  recommended: wire.nullable(wire.number),
+});
+const PendingAskAnswerCodec = wire.object({
+  id: wire.string,
+  selectedOptions: wire.array(wire.string),
+  customInput: wire.nullable(wire.string),
+});
+export type PendingAskAnswer = InputOf<typeof PendingAskAnswerCodec>;
 export const SessionControlViewCodec = wire.object({
   sessionId: wire.string,
   role: wire.nullable(wire.string),
@@ -386,6 +409,7 @@ export const SessionControlViewCodec = wire.object({
   cost: wire.number,
   todos: wire.array(SessionTodoPhaseCodec),
   queue: wire.object({ steering: wire.array(wire.string), followUp: wire.array(wire.string) }),
+  pendingAsk: wire.nullable(wire.object({ id: wire.string, questions: wire.array(PendingAskQuestionCodec) })),
   goal: wire.nullable(wire.object({
     id: wire.string,
     status: wire.enum(['active', 'paused', 'budget-limited', 'complete', 'dropped']),
@@ -787,6 +811,98 @@ export const getMcpConnectionStatusContract = gitspaceRpc
   .errors({ McpNotFound: rpcErrors.mcpNotFound, OperationFailed: rpcErrors.operationFailed })
   .query();
 
+export const getComposioSetupContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({}))
+  .output(ComposioSetupViewCodec)
+  .errors({ OperationFailed: rpcErrors.operationFailed })
+  .query();
+
+export const putComposioSetupContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ apiKey: wire.string }))
+  .output(ComposioSetupViewCodec)
+  .errors({ OperationFailed: rpcErrors.operationFailed })
+  .mutation();
+
+export const deleteComposioSetupContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({}))
+  .output(ComposioSetupViewCodec)
+  .errors({ OperationFailed: rpcErrors.operationFailed })
+  .mutation();
+
+export const listComposioPluginCatalogContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({}))
+  .output(ComposioPluginCatalogViewCodec)
+  .errors({ OperationFailed: rpcErrors.operationFailed })
+  .query();
+
+export const authorizeComposioPluginContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ toolkit: wire.string, label: wire.string }))
+  .output(ComposioPluginAuthorizationViewCodec)
+  .errors({ McpInvalid: rpcErrors.mcpInvalid, OperationFailed: rpcErrors.operationFailed })
+  .mutation();
+
+export const refreshComposioPluginContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ connectionId: wire.string }))
+  .output(McpConnectionViewCodec)
+  .errors({ McpNotFound: rpcErrors.mcpNotFound, OperationFailed: rpcErrors.operationFailed })
+  .mutation();
+
+export const listComposioPluginToolsContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ connectionId: wire.string }))
+  .output(wire.array(ComposioPluginToolViewCodec))
+  .errors({ McpNotFound: rpcErrors.mcpNotFound, OperationFailed: rpcErrors.operationFailed })
+  .query();
+
+export const updateComposioPluginToolsContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ connectionId: wire.string, expectedRevision: wire.number, allowedTools: wire.array(wire.string) }))
+  .output(McpConnectionViewCodec)
+  .errors({ McpNotFound: rpcErrors.mcpNotFound, McpRevisionConflict: rpcErrors.mcpRevisionConflict, McpInvalid: rpcErrors.mcpInvalid, OperationFailed: rpcErrors.operationFailed })
+  .mutation();
+
+export const disconnectComposioPluginContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ connectionId: wire.string, expectedRevision: wire.number }))
+  .output(wire.object({ connectionId: wire.string, deleted: wire.boolean }))
+  .errors({ McpNotFound: rpcErrors.mcpNotFound, McpRevisionConflict: rpcErrors.mcpRevisionConflict, OperationFailed: rpcErrors.operationFailed })
+  .mutation();
+
+export const BrowserRelayStatusCodec = wire.object({
+  state: wire.enum(['stopped', 'starting', 'waiting', 'connected', 'error']),
+  installed: wire.boolean,
+  extensionPath: wire.string,
+  chromeExtensionPath: wire.string,
+  owned: wire.boolean,
+  endpoint: wire.string,
+  browserName: wire.nullable(wire.string),
+  browserVersion: wire.nullable(wire.string),
+  message: wire.nullable(wire.string),
+});
+export type BrowserRelayStatus = InputOf<typeof BrowserRelayStatusCodec>;
+
+export const getBrowserRelayStatusContract = gitspaceRpc
+  .procedure().input(wire.object({})).output(BrowserRelayStatusCodec)
+  .errors({ OperationFailed: rpcErrors.operationFailed }).query();
+export const setupBrowserRelayContract = gitspaceRpc
+  .procedure().input(wire.object({})).output(BrowserRelayStatusCodec)
+  .errors({ OperationFailed: rpcErrors.operationFailed }).mutation();
+export const startBrowserRelayContract = gitspaceRpc
+  .procedure().input(wire.object({})).output(BrowserRelayStatusCodec)
+  .errors({ OperationFailed: rpcErrors.operationFailed }).mutation();
+export const stopBrowserRelayContract = gitspaceRpc
+  .procedure().input(wire.object({})).output(BrowserRelayStatusCodec)
+  .errors({ OperationFailed: rpcErrors.operationFailed }).mutation();
+export const testBrowserRelayContract = gitspaceRpc
+  .procedure().input(wire.object({})).output(BrowserRelayStatusCodec)
+  .errors({ OperationFailed: rpcErrors.operationFailed }).mutation();
+
 export const listProjectMcpGrantsContract = gitspaceRpc
   .procedure()
   .input(wire.object({ projectId: wire.string }))
@@ -1098,6 +1214,30 @@ export const compactSessionContract = gitspaceRpc
   .errors({ SessionNotFound: rpcErrors.sessionNotFound, OperationFailed: rpcErrors.operationFailed })
   .mutation();
 export const clearSessionQueueContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ sessionId: wire.string }))
+  .output(SessionControlViewCodec)
+  .errors({ SessionNotFound: rpcErrors.sessionNotFound, OperationFailed: rpcErrors.operationFailed })
+  .mutation();
+export const removeSessionQueuedMessageContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ sessionId: wire.string, kind: wire.enum(['steering', 'followUp']), index: wire.integer({ min: 0 }) }))
+  .output(SessionControlViewCodec)
+  .errors({ SessionNotFound: rpcErrors.sessionNotFound, OperationFailed: rpcErrors.operationFailed })
+  .mutation();
+export const promoteSessionQueuedMessageContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ sessionId: wire.string, index: wire.integer({ min: 0 }) }))
+  .output(SessionControlViewCodec)
+  .errors({ SessionNotFound: rpcErrors.sessionNotFound, OperationFailed: rpcErrors.operationFailed })
+  .mutation();
+export const answerSessionAskContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ sessionId: wire.string, id: wire.string, answers: wire.array(PendingAskAnswerCodec) }))
+  .output(SessionControlViewCodec)
+  .errors({ SessionNotFound: rpcErrors.sessionNotFound, OperationFailed: rpcErrors.operationFailed })
+  .mutation();
+export const stopSessionTurnContract = gitspaceRpc
   .procedure()
   .input(wire.object({ sessionId: wire.string }))
   .output(SessionControlViewCodec)
@@ -1499,18 +1639,25 @@ export const locateSessionContract = gitspaceRpc
   .output(wire.nullable(SpacePlacementViewCodec))
   .errors({ OperationFailed: rpcErrors.operationFailed })
   .query();
-/** Self-development: GitSpace built from a workspace, launched across worker, machines, and frontend. */
+/** Self-development: GitSpace built from a workspace, launched across account-owned targets. */
 export const ReleaseStatusWireCodec = wire.enum(['pending', 'applied', 'failed', 'skipped']);
-export const ReleaseTargetWireCodec = wire.enum(['worker', 'machine', 'frontend']);
+export const ReleaseTargetWireCodec = wire.enum(['worker', 'machine', 'omp', 'frontend']);
 export const ReleaseArtifactWireCodec = wire.object({ key: wire.string, hash: wire.string, size: wire.number });
+export const OmpReleaseMetadataWireCodec = wire.object({
+  upstreamVersion: wire.string,
+  bunVersion: wire.string,
+  packages: wire.record(wire.string),
+  patches: wire.array(wire.object({ path: wire.string, hash: wire.string })),
+});
 export const ReleaseRecordWireCodec = wire.object({
   sha: wire.string,
   label: wire.string,
   workspaceId: wire.nullable(wire.string),
   builtBy: wire.string,
   createdAt: wire.string,
-  artifacts: wire.object({ worker: wire.nullable(ReleaseArtifactWireCodec), machine: wire.nullable(ReleaseArtifactWireCodec), frontend: wire.nullable(ReleaseArtifactWireCodec) }),
-  status: wire.object({ worker: ReleaseStatusWireCodec, frontend: ReleaseStatusWireCodec, machines: wire.record(ReleaseStatusWireCodec) }),
+  artifacts: wire.object({ worker: wire.nullable(ReleaseArtifactWireCodec), machine: wire.nullable(ReleaseArtifactWireCodec), omp: wire.nullable(ReleaseArtifactWireCodec), frontend: wire.nullable(ReleaseArtifactWireCodec) }),
+  omp: wire.nullable(OmpReleaseMetadataWireCodec),
+  status: wire.object({ worker: ReleaseStatusWireCodec, frontend: ReleaseStatusWireCodec, machines: wire.record(ReleaseStatusWireCodec), omps: wire.record(ReleaseStatusWireCodec) }),
   error: wire.nullable(wire.string),
 });
 /** A launch in flight (or the last one) on the answering machine; phases arrive as `deployment` fact events too. */
@@ -1528,14 +1675,14 @@ export const LaunchProgressWireCodec = wire.object({
 });
 export type LaunchProgressView = InputOf<typeof LaunchProgressWireCodec>;
 export const DeploymentStatusWireCodec = wire.object({
-  desired: wire.object({ sha: wire.nullable(wire.string), targets: wire.array(ReleaseTargetWireCodec), updatedAt: wire.string }),
+  desired: wire.object({ worker: wire.nullable(wire.string), machine: wire.nullable(wire.string), omp: wire.nullable(wire.string), frontend: wire.nullable(wire.string), updatedAt: wire.string }),
   current: wire.object({
     worker: wire.object({ sha: wire.nullable(wire.string), version: wire.nullable(wire.string) }),
-    machines: wire.record(wire.object({ sha: wire.nullable(wire.string), generation: wire.nullable(wire.string) })),
+    machines: wire.record(wire.object({ sha: wire.nullable(wire.string), ompSha: wire.nullable(wire.string), generation: wire.nullable(wire.string) })),
   }),
   releases: wire.array(ReleaseRecordWireCodec),
   /** This machine's own running generation, so the caller can tell home from the fleet. */
-  thisMachine: wire.object({ machineId: wire.string, sha: wire.nullable(wire.string), generation: wire.nullable(wire.string) }),
+  thisMachine: wire.object({ machineId: wire.string, sha: wire.nullable(wire.string), ompSha: wire.nullable(wire.string), ompDraining: wire.number, generation: wire.nullable(wire.string) }),
   launch: wire.nullable(LaunchProgressWireCodec),
 });
 export type DeploymentStatusView = InputOf<typeof DeploymentStatusWireCodec>;
@@ -1623,12 +1770,32 @@ export const gitspaceContract = gitspaceRpc.contract({
       delete: deleteMcpConnectionContract,
       status: getMcpConnectionStatusContract,
     },
+    composio: {
+      setup: {
+        get: getComposioSetupContract,
+        put: putComposioSetupContract,
+        delete: deleteComposioSetupContract,
+      },
+      catalog: listComposioPluginCatalogContract,
+      authorize: authorizeComposioPluginContract,
+      refresh: refreshComposioPluginContract,
+      tools: listComposioPluginToolsContract,
+      updateTools: updateComposioPluginToolsContract,
+      disconnect: disconnectComposioPluginContract,
+    },
     grants: {
       list: listProjectMcpGrantsContract,
       put: putProjectMcpGrantContract,
       delete: deleteProjectMcpGrantContract,
     },
     discover: discoverProjectMcpToolsContract,
+  },
+  browserRelay: {
+    status: getBrowserRelayStatusContract,
+    setup: setupBrowserRelayContract,
+    start: startBrowserRelayContract,
+    stop: stopBrowserRelayContract,
+    test: testBrowserRelayContract,
   },
   crons: {
     list: listProjectCronsContract,
@@ -1719,6 +1886,10 @@ export const gitspaceContract = gitspaceRpc.contract({
     compact: compactSessionContract,
     navigateTree: navigateSessionTreeContract,
     clearQueue: clearSessionQueueContract,
+    removeQueuedMessage: removeSessionQueuedMessageContract,
+    promoteQueuedMessage: promoteSessionQueuedMessageContract,
+    answerAsk: answerSessionAskContract,
+    stop: stopSessionTurnContract,
   },
   terminals: {
     list: listWorkspaceTerminalsContract,

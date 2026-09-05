@@ -46,12 +46,20 @@ export const toolCallBlockSchema = base.extend({
 
 export const askBlockSchema = base.extend({
   type: z.literal('ask'),
+  toolCallId: z.string(),
   status: z.enum(['pending', 'answered', 'dismissed']),
   questions: z.array(z.object({
     id: z.string(),
     prompt: z.string(),
-    options: z.array(z.string()).optional(),
+    header: z.string().optional(),
+    options: z.array(z.object({
+      id: z.string(),
+      title: z.string(),
+      description: z.string().optional(),
+      preview: z.string().optional(),
+    })).optional(),
     multiple: z.boolean().optional(),
+    recommended: z.number().int().nonnegative().optional(),
     answer: z.union([z.string(), z.array(z.string())]).optional(),
   })),
 });
@@ -141,6 +149,7 @@ export const transportBlockSchema = base.extend({
 export type MessageBlock = z.infer<typeof messageBlockSchema>;
 export type MessageImage = z.infer<typeof messageImageSchema>;
 export type RichContentBlock = z.infer<typeof richContentSchema>;
+export type AskBlock = z.infer<typeof askBlockSchema>;
 export type ToolCallBlock = z.infer<typeof toolCallBlockSchema>;
 export type TurnItem = z.infer<typeof turnItemSchema>;
 export type SideAgentBlock = z.infer<typeof sideAgentBlockSchema>;

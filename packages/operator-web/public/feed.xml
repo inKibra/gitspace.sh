@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>GitSpace Notes</title>
+  <id>https://gitspace.sh/notes</id>
+  <link href="https://gitspace.sh/feed.xml" rel="self" />
+  <link href="https://gitspace.sh/notes" />
+  <updated>2026-09-01T00:00:00Z</updated>
+  <entry>
+    <title>Babysitting agents sucks. It does not have to.</title>
+    <id>https://gitspace.sh/notes/babysitting-agents-sucks</id>
+    <link href="https://gitspace.sh/notes/babysitting-agents-sucks" />
+    <updated>2026-09-01T00:00:00Z</updated>
+    <summary>An agent list that only knows spinning or not throws away the states that decide where your attention goes.</summary>
+  </entry>
+</feed>

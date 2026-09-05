@@ -222,9 +222,17 @@ Scripts run lexicographically and stop at the first non-zero exit:
 - `02-xcode.ios.sh` runs only when the exact selected profile is `ios`.
 - Unknown profile qualifiers and malformed filenames reject the lifecycle plan.
 
-The Setup Inspector manages the selected profile, checks, values, approvals, and lifecycle runs inline. The Secrets & values page manages write-only project secrets plus visible global and project values.
+The Setup Inspector manages the selected profile, checks, values, approvals, and lifecycle runs inline. The Secrets page manages write-only project secrets plus visible account and project environment variables.
 
 Checks and lifecycle scripts execute as OMP Hub-owned processes. Each run persists its phase, exact execution hashes, terminal name, per-step output, exit code, and completion state; the Setup Inspector reads those persisted outcomes.
+
+### Connections
+
+Settings → Connections owns account and machine integrations:
+
+- Composio API keys are validated before they are encrypted in the account credential vault. The Plugins page links directly to this setup flow when Composio is unavailable.
+- Browser Relay setup installs OMP's Manifest V3 extension into the machine environment, configures OMP's local relay URL, starts the relay process, and distinguishes a running relay that is waiting for Chrome from a connected extension. The UI never reports a connected browser until the relay's `/json/version` probe succeeds.
+- Enrolled browsers and delegated API clients remain listed and revocable in the same section.
 
 Closing a space is distinct from archiving a workspace. **Close** checkpoints the canonical agent, retains local files, stops Hub processes owned by that space, and releases placement. **Reopen** reclaims that same space. Both operations are generation-fenced and idempotent. Archive and Restore remain workspace lifecycle operations.
 

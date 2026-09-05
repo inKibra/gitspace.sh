@@ -12,5 +12,5 @@ export default defineConfig({
     { name: 'tablet', use: { ...devices['Desktop Chrome'], viewport: { width: 768, height: 1024 } } },
     { name: 'mobile', use: { ...devices['Desktop Chrome'], viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true } },
   ],
-  webServer: { command: 'bun run --cwd ../web dev --host 127.0.0.1 --port 4178', port: 4178, reuseExistingServer: !process.env.CI, timeout: 120_000 },
+  webServer: { command: 'bun run --cwd ../account-web dev --host 127.0.0.1 --port 4178', port: 4178, reuseExistingServer: !process.env.CI, timeout: 120_000 },
 });

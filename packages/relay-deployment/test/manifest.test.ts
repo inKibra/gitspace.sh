@@ -19,6 +19,7 @@ const manifest: RelayDeploymentManifest = {
   relayName: 'default',
   blobBinding: 'BLOBS',
   authPublicKey: 'public-key',
+  operatorUrl: 'https://authority.test',
   authMaxSkewMs: 60_000,
   tunnelHeaderTimeoutMs: 10_000,
   tunnelIdleTimeoutMs: 30_000,

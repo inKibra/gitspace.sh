@@ -27,9 +27,14 @@ export const mcpHeaderBindingSchema = z.object({
 });
 export type McpHeaderBinding = z.infer<typeof mcpHeaderBindingSchema>;
 
-export const mcpExecutionTargetSchema = z.discriminatedUnion('kind', [
+export const mcpCustomExecutionTargetSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('workspace') }),
   z.object({ kind: z.literal('machine'), machineId: identifierSchema }),
+]);
+export type McpCustomExecutionTarget = z.infer<typeof mcpCustomExecutionTargetSchema>;
+export const mcpExecutionTargetSchema = z.union([
+  mcpCustomExecutionTargetSchema,
+  z.object({ kind: z.literal('cloud') }),
 ]);
 export type McpExecutionTarget = z.infer<typeof mcpExecutionTargetSchema>;
 
@@ -56,11 +61,20 @@ export const mcpSseTransportSchema = z.object({
 });
 export type McpSseTransport = z.infer<typeof mcpSseTransportSchema>;
 
-export const mcpTransportSchema = z.discriminatedUnion('type', [
+export const mcpCustomTransportSchema = z.discriminatedUnion('type', [
   mcpStdioTransportSchema,
   mcpHttpTransportSchema,
   mcpSseTransportSchema,
 ]);
+export type McpCustomTransport = z.infer<typeof mcpCustomTransportSchema>;
+export const mcpComposioTransportSchema = z.object({
+  type: z.literal('composio'),
+  toolkit: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,159}$/u),
+  connectedAccountId: identifierSchema,
+  allowedTools: z.array(identifierSchema).max(512).refine((tools) => new Set(tools).size === tools.length, 'Composio tool grants must be unique'),
+});
+export type McpComposioTransport = z.infer<typeof mcpComposioTransportSchema>;
+export const mcpTransportSchema = z.union([mcpCustomTransportSchema, mcpComposioTransportSchema]);
 export type McpTransport = z.infer<typeof mcpTransportSchema>;
 
 export const mcpConnectionStatusSchema = z.enum(['disabled', 'connecting', 'ready', 'offline', 'failed']);
@@ -70,8 +84,8 @@ export const mcpConnectionDraftSchema = z.object({
   id: identifierSchema,
   label: labelSchema,
   enabled: z.boolean(),
-  target: mcpExecutionTargetSchema,
-  transport: mcpTransportSchema,
+  target: mcpCustomExecutionTargetSchema,
+  transport: mcpCustomTransportSchema,
   timeoutMs: z.number().int().min(0).max(10 * 60_000),
 }).superRefine((draft, context) => {
   if (draft.transport.type === 'stdio') {
@@ -112,6 +126,51 @@ export const mcpConnectionDraftSchema = z.object({
   }
 });
 export type McpConnectionDraft = z.infer<typeof mcpConnectionDraftSchema>;
+
+export const composioPluginToolkitSchema = z.object({
+  slug: identifierSchema,
+  name: labelSchema,
+  description: z.string().max(2_048).nullable(),
+  logoUrl: z.string().url().max(8_192).nullable(),
+  toolsCount: z.number().int().nonnegative(),
+});
+export type ComposioPluginToolkit = z.infer<typeof composioPluginToolkitSchema>;
+
+export const composioPluginToolSchema = z.object({
+  slug: identifierSchema,
+  name: labelSchema,
+  description: z.string().max(4_096).nullable(),
+  readOnly: z.boolean(),
+  destructive: z.boolean(),
+});
+export type ComposioPluginTool = z.infer<typeof composioPluginToolSchema>;
+
+export const composioPluginCatalogSchema = z.object({
+  configured: z.boolean(),
+  toolkits: z.array(composioPluginToolkitSchema),
+});
+export type ComposioPluginCatalog = z.infer<typeof composioPluginCatalogSchema>;
+
+export const composioSetupSchema = z.object({
+  configured: z.boolean(),
+  source: z.enum(['account', 'platform']).nullable(),
+  updatedAt: z.string().datetime().nullable(),
+});
+export type ComposioSetup = z.infer<typeof composioSetupSchema>;
+
+export const composioPluginAuthorizationSchema = z.object({
+  connection: z.lazy(() => mcpConnectionSchema),
+  redirectUrl: z.string().url().max(8_192),
+});
+export type ComposioPluginAuthorization = z.infer<typeof composioPluginAuthorizationSchema>;
+
+export const composioMcpMaterializationSchema = z.object({
+  type: z.enum(['http', 'sse']),
+  url: z.string().url().max(8_192),
+  headers: z.record(z.string(), z.string()),
+  timeoutMs: z.number().int().min(0).max(10 * 60_000),
+});
+export type ComposioMcpMaterialization = z.infer<typeof composioMcpMaterializationSchema>;
 
 export const mcpConnectionSchema = z.object({
   principalId: identifierSchema,
@@ -179,21 +238,32 @@ export type McpAuditEvent = z.infer<typeof mcpAuditEventSchema>;
 const SecretReferenceCodec = wire.object({ source: wire.literal('project'), name: wire.string });
 const EnvironmentBindingCodec = wire.object({ name: wire.string, secret: SecretReferenceCodec });
 const HeaderBindingCodec = wire.object({ name: wire.string, secret: SecretReferenceCodec });
+const McpCustomExecutionTargetCodec = wire.union([
+  wire.object({ kind: wire.literal('workspace') }),
+  wire.object({ kind: wire.literal('machine'), machineId: wire.string }),
+]);
 export const McpExecutionTargetCodec = wire.union([
   wire.object({ kind: wire.literal('workspace') }),
   wire.object({ kind: wire.literal('machine'), machineId: wire.string }),
+  wire.object({ kind: wire.literal('cloud') }),
+]);
+const McpCustomTransportCodec = wire.union([
+  wire.object({ type: wire.literal('stdio'), command: wire.string, args: wire.array(wire.string), cwd: wire.nullable(wire.string), environment: wire.array(EnvironmentBindingCodec) }),
+  wire.object({ type: wire.literal('http'), url: wire.string, headers: wire.array(HeaderBindingCodec) }),
+  wire.object({ type: wire.literal('sse'), url: wire.string, headers: wire.array(HeaderBindingCodec) }),
 ]);
 export const McpTransportCodec = wire.union([
   wire.object({ type: wire.literal('stdio'), command: wire.string, args: wire.array(wire.string), cwd: wire.nullable(wire.string), environment: wire.array(EnvironmentBindingCodec) }),
   wire.object({ type: wire.literal('http'), url: wire.string, headers: wire.array(HeaderBindingCodec) }),
   wire.object({ type: wire.literal('sse'), url: wire.string, headers: wire.array(HeaderBindingCodec) }),
+  wire.object({ type: wire.literal('composio'), toolkit: wire.string, connectedAccountId: wire.string, allowedTools: wire.array(wire.string) }),
 ]);
 export const McpConnectionDraftCodec = wire.object({
   id: wire.string,
   label: wire.string,
   enabled: wire.boolean,
-  target: McpExecutionTargetCodec,
-  transport: McpTransportCodec,
+  target: McpCustomExecutionTargetCodec,
+  transport: McpCustomTransportCodec,
   timeoutMs: wire.number,
 });
 export const McpConnectionViewCodec = wire.object({
@@ -245,5 +315,37 @@ export const DiscoveredMcpToolViewCodec = wire.object({
 export type McpConnectionRpcView = InputOf<typeof McpConnectionViewCodec>;
 export type ProjectMcpGrantRpcView = InputOf<typeof ProjectMcpGrantViewCodec>;
 export type DiscoveredMcpToolRpcView = InputOf<typeof DiscoveredMcpToolViewCodec>;
+export const ComposioPluginToolkitViewCodec = wire.object({
+  slug: wire.string,
+  name: wire.string,
+  description: wire.nullable(wire.string),
+  logoUrl: wire.nullable(wire.string),
+  toolsCount: wire.number,
+});
+export const ComposioPluginToolViewCodec = wire.object({
+  slug: wire.string,
+  name: wire.string,
+  description: wire.nullable(wire.string),
+  readOnly: wire.boolean,
+  destructive: wire.boolean,
+});
+export const ComposioPluginCatalogViewCodec = wire.object({
+  configured: wire.boolean,
+  toolkits: wire.array(ComposioPluginToolkitViewCodec),
+});
+export const ComposioSetupViewCodec = wire.object({
+  configured: wire.boolean,
+  source: wire.nullable(wire.enum(['account', 'platform'])),
+  updatedAt: wire.nullable(wire.date),
+});
+export const ComposioPluginAuthorizationViewCodec = wire.object({
+  connection: McpConnectionViewCodec,
+  redirectUrl: wire.string,
+});
+export type ComposioPluginToolkitRpcView = InputOf<typeof ComposioPluginToolkitViewCodec>;
+export type ComposioPluginToolRpcView = InputOf<typeof ComposioPluginToolViewCodec>;
+export type ComposioPluginCatalogRpcView = InputOf<typeof ComposioPluginCatalogViewCodec>;
+export type ComposioPluginAuthorizationRpcView = InputOf<typeof ComposioPluginAuthorizationViewCodec>;
+export type ComposioSetupRpcView = InputOf<typeof ComposioSetupViewCodec>;
 
 export type McpConnectionDraftInput = InputOf<typeof McpConnectionDraftCodec>;

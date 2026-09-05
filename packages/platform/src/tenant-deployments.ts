@@ -51,6 +51,11 @@ interface StateRow extends Record<string, SqlStorageValue> {
   active_deploy_id: number | null;
   lease_until: number | null;
 }
+interface TenantConfigRow extends Record<string, SqlStorageValue> {
+  root_public_key: string;
+  blob_bucket: string | null;
+}
+
 
 const TOKEN_BYTES = 32;
 const LEASE_MS = 5 * 60_000;
@@ -104,11 +109,46 @@ export class TenantDeploymentsDO extends DurableObject<Env> {
           healthy INTEGER NOT NULL CHECK (healthy IN (0, 1)),
           reverted_to TEXT
         );
+        CREATE TABLE IF NOT EXISTS tenant_config (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          root_public_key TEXT NOT NULL,
+          blob_bucket TEXT,
+          created_at TEXT NOT NULL
+        );
         INSERT OR IGNORE INTO tenant_state(id, applied_migration_tag, active_deploy_id, lease_until, updated_at)
         VALUES (1, NULL, NULL, NULL, '1970-01-01T00:00:00.000Z');
       `);
+      try {
+        ctx.storage.sql.exec('ALTER TABLE tenant_config ADD COLUMN blob_bucket TEXT');
+      } catch {
+        // Existing instances already have the column.
+      }
     });
   }
+  configure(rootPublicKey: string, blobBucket: string): { created: boolean; rootPublicKey: string; blobBucket: string } {
+    if (!/^[A-Za-z0-9+/]{43}=$/u.test(rootPublicKey)) throw new Error('Tenant root public key is invalid');
+    if (!/^gsp-relay-[a-z0-9](?:[a-z0-9-]{0,50}[a-z0-9])?$/u.test(blobBucket)) throw new Error('Tenant relay bucket is invalid');
+    const existing = this.ctx.storage.sql.exec<TenantConfigRow>('SELECT root_public_key, blob_bucket FROM tenant_config WHERE id = 1').toArray()[0];
+    if (existing && existing.root_public_key !== rootPublicKey) throw new Error('Tenant is already owned by another root key');
+    if (existing?.blob_bucket && existing.blob_bucket !== blobBucket) throw new Error('Tenant is already bound to another relay bucket');
+    if (!existing) {
+      this.ctx.storage.sql.exec(
+        'INSERT INTO tenant_config(id, root_public_key, blob_bucket, created_at) VALUES (1, ?, ?, ?)',
+        rootPublicKey,
+        blobBucket,
+        new Date().toISOString(),
+      );
+    } else if (!existing.blob_bucket) {
+      this.ctx.storage.sql.exec('UPDATE tenant_config SET blob_bucket=? WHERE id=1', blobBucket);
+    }
+    return { created: !existing, rootPublicKey, blobBucket };
+  }
+
+  tenantConfig(): { rootPublicKey: string; blobBucket: string } | null {
+    const row = this.ctx.storage.sql.exec<TenantConfigRow>('SELECT root_public_key, blob_bucket FROM tenant_config WHERE id = 1').toArray()[0];
+    return row?.blob_bucket ? { rootPublicKey: row.root_public_key, blobBucket: row.blob_bucket } : null;
+  }
+
 
   /** Mints a fresh token, invalidating the previous one. The raw token is returned exactly once. */
   async rotateToken(): Promise<string> {

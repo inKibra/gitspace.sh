@@ -1,0 +1,21 @@
+{
+  "name": "@gitspace/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "gitspace": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "bun build src/index.ts --target=bun --outdir=dist",
+    "typecheck": "tsgo --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@gitspace/deployment": "workspace:*",
+    "@noble/curves": "^2.2.0",
+    "@gitspace/protocol": "workspace:*",
+    "@noble/hashes": "^2.2.0",
+    "commander": "^12.1.0",
+    "open": "^11.0.0"
+  }
+}

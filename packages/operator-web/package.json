@@ -1,0 +1,29 @@
+{
+  "name": "@gitspace/operator-web",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "bun run --cwd ../cli build && bun run --cwd ../account-web build && vite build",
+    "typecheck": "tsgo --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@gitspace/protocol": "workspace:*",
+    "@gitspace/ui": "workspace:*",
+    "@noble/curves": "^2.2.0",
+    "@noble/hashes": "^2.2.0",
+    "@untitledui/icons": "^0.0.22",
+    "framer-motion": "^13.1.1",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.1.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
+    "tailwindcss": "^4.1.0",
+    "vite": "^7.0.0"
+  }
+}

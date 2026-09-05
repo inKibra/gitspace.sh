@@ -1,0 +1,63 @@
+---
+$schema: https://holocron.so/frontmatter.json
+title: CLI reference
+description: Commands in the current GitSpace production client.
+icon: terminal
+---
+
+# CLI reference
+
+The current binary is `gitspace`. It connects a local computer to the browser product. Projects, workspaces, agents, reviews, and releases are managed in the web app.
+
+## Account
+
+| Command | Purpose |
+| --- | --- |
+| `gitspace login <handle>` | Create or reconnect a local root identity for a handle. |
+| `gitspace login <handle> --recovery-key <gsr_key>` | Recover an existing account root identity on this computer. |
+| `gitspace logout` | Stop the local machine process and remove `~/.config/gitspace/`. |
+
+`login` also accepts `--api <url>`. The default control plane is `https://api.gitspace.sh`.
+
+<Warning>
+`gitspace logout` removes the local account and machine identity. Confirm that the account recovery key is stored safely first.
+</Warning>
+
+## Machine
+
+| Command | Purpose |
+| --- | --- |
+| `gitspace machine setup` | Enroll this physical machine and build its local runtime. |
+| `gitspace machine setup --label <label>` | Enroll it with a custom fleet label. |
+| `gitspace machine start` | Start the machine daemon and production relay connector. |
+| `gitspace machine stop` | Stop the local machine daemon. |
+| `gitspace machine status` | Show the local process, relay status, and log path. |
+| `gitspace machine remove` | Revoke this machine and remove its local enrollment. |
+
+The daemon log is stored at `~/.config/gitspace/machine.log`.
+
+## Browser
+
+| Command | Purpose |
+| --- | --- |
+| `gitspace open` | Create a one-time browser invitation and open the account URL. |
+| `gitspace open --print` | Print the invitation URL without opening a browser. |
+
+Browser invitations expire after five minutes.
+
+## Maintenance
+
+| Command | Purpose |
+| --- | --- |
+| `gitspace doctor` | Check the account, relay, machine runtime, and required tools. |
+| `gitspace update` | Rebuild the installed machine runtime from the current GitSpace release. |
+| `gitspace --help` | Show the command tree. |
+| `gitspace --version` | Show the installed client version. |
+
+After `gitspace update`, restart the machine runtime:
+
+```bash
+gitspace machine stop
+gitspace machine start
+```
+

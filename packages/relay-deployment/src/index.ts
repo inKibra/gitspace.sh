@@ -20,6 +20,7 @@ export const relayDeploymentManifestSchema = z.object({
   relayName: z.string().min(1).default('default'),
   blobBinding: z.string().min(1).default('BLOBS'),
   authPublicKey: z.string().min(1),
+  operatorUrl: z.string().url(),
   authMaxSkewMs: z.number().int().positive(),
   tunnelHeaderTimeoutMs: z.number().int().positive(),
   tunnelIdleTimeoutMs: z.number().int().positive(),
@@ -110,6 +111,7 @@ export function renderStandaloneWrangler(
     })),
     vars: {
       AUTH_PUBLIC_KEY: manifest.authPublicKey,
+      OPERATOR_URL: manifest.operatorUrl,
       RELAY_NAME: manifest.relayName,
       AUTH_MAX_SKEW_MS: manifest.authMaxSkewMs,
       TUNNEL_HEADER_TIMEOUT_MS: manifest.tunnelHeaderTimeoutMs,
@@ -145,6 +147,7 @@ export function renderWfpUploadMetadata(
       { name: manifest.relayBinding, type: 'durable_object_namespace', class_name: manifest.relayClass },
       { name: manifest.blobBinding, type: 'r2_bucket', bucket_name: allocation.bucketName },
       { name: 'AUTH_PUBLIC_KEY', type: 'plain_text', text: manifest.authPublicKey },
+      { name: 'OPERATOR_URL', type: 'plain_text', text: manifest.operatorUrl },
       { name: 'RELAY_NAME', type: 'plain_text', text: manifest.relayName },
       { name: 'AUTH_MAX_SKEW_MS', type: 'plain_text', text: String(manifest.authMaxSkewMs) },
       { name: 'TUNNEL_HEADER_TIMEOUT_MS', type: 'plain_text', text: String(manifest.tunnelHeaderTimeoutMs) },

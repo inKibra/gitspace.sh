@@ -3,10 +3,12 @@
   "name": "gitspace-sandbox-worker",
   "main": "src/index.ts",
   "compatibility_date": "2026-08-29",
+  "workers_dev": false,
+  "preview_urls": false,
   "compatibility_flags": ["nodejs_compat"],
   "vars": { "SANDBOX_HOSTNAME": "sandboxes.gitspace.sh" },
   "containers": [
-    { "class_name": "GitSpaceSandbox", "image": "./.container-context/Dockerfile", "image_build_context": "./.container-context", "instance_type": "lite", "max_instances": 20 }
+    { "class_name": "GitSpaceSandbox", "image": "./.container-context/Dockerfile", "instance_type": "standard-1", "max_instances": 20 }
   ],
   "durable_objects": {
     "bindings": [

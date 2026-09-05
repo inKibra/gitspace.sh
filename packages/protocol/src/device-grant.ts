@@ -340,7 +340,7 @@ export function inputWithinScope(scope: DeviceScope, input: unknown, workspacePr
   const workspaceId = [record.workspaceId, record.spaceId].find((value): value is string => typeof value === 'string') ?? null;
   const projectId = typeof record.projectId === 'string' ? record.projectId : null;
   if (scope.kind === 'workspace') return workspaceId === scope.workspaceId && (projectId === null || workspaceProject?.(workspaceId) === projectId);
-  if (projectId !== null) return projectId === scope.projectId;
+  if (projectId !== null) return projectId === scope.projectId && (workspaceId === null || workspaceProject?.(workspaceId) === projectId);
   return workspaceId !== null && workspaceProject?.(workspaceId) === scope.projectId;
 }
 

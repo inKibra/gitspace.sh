@@ -1,0 +1,64 @@
+---
+$schema: https://holocron.so/frontmatter.json
+title: Security boundaries
+description: The identities, signatures, encryption, and relay limits implemented by current GitSpace packages.
+icon: shield-check
+---
+
+# Security boundaries
+
+This page describes the current implementation in `packages/`. It separates authentication from confidentiality so the guarantee stays precise.
+
+## Account root
+
+Account creation generates an Ed25519 root key. The private key is encoded as the `gsr_` recovery key and shown to the user. The control plane receives the public key.
+
+The root key signs machine and browser authority. Possession of the recovery key is therefore account-root authority.
+
+<Warning>
+GitSpace does not store the recovery key and cannot restore it. Keep it outside source control, chat, workspace notes, and browser screenshots.
+</Warning>
+
+## Machine identity
+
+`gitspace machine setup` creates separate Ed25519 signing and X25519 key-exchange keys. It registers a capability grant signed by the account root.
+
+The grant names the user, machine, public keys, generation, and allowed capabilities. Revoking the machine removes its account authorization.
+
+## Browser identity
+
+`gitspace open` creates a short-lived signed browser invitation. The browser creates a non-extractable Ed25519 key in IndexedDB and redeems the invitation for a device grant.
+
+Browser RPC requests are signed. Verification binds a request to the enrolled device and detects changes to the signed request.
+
+## Encrypted data
+
+Current package code encrypts these data classes:
+
+- Artifact and checkpoint blobs use AES-GCM with machine-managed artifact key material.
+- Machine credential envelopes use ephemeral X25519 key agreement, HKDF-SHA256 key derivation, and AES-GCM authenticated encryption.
+
+These are scoped guarantees. They do not imply that every request or terminal byte uses the same encryption boundary.
+
+## Relay and Worker visibility
+
+The production browser transport signs RPC requests, but it does not currently encrypt every RPC body end to end between the browser and machine. The account Worker and relay terminate or route production requests and may observe data needed by that path.
+
+A full encrypted RPC transport exists in package library and test code, but it is not wired into the production browser transport. Treat the account Worker and relay as part of the trusted routing path, not as zero-knowledge infrastructure.
+
+## Operational responsibilities
+
+- Protect the `gsr_` recovery key as the account root secret.
+- Use separate machine and browser enrollments instead of copying device private keys.
+- Revoke devices that should no longer have access.
+- Treat machine hosts as trusted for the repositories, agents, services, and decrypted workspace data placed on them.
+- Review device grants and capability changes as security-sensitive operations.
+
+## Algorithms in current package code
+
+| Purpose | Algorithm |
+| --- | --- |
+| Account, machine, and browser signing | Ed25519 |
+| Machine credential key agreement | X25519 |
+| Key derivation for sealed credentials | HKDF-SHA256 |
+| Artifact, checkpoint, and credential encryption | AES-GCM |

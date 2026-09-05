@@ -233,12 +233,29 @@ export class CreditLedgerDO extends DurableObject<Env> {
     }));
   }
 
+  usageSummary(): { records: number; debitedMicros: number } {
+    const row = this.ctx.storage.sql.exec<{ records: number; debited_micros: number }>(
+      'SELECT COUNT(*) AS records, COALESCE(SUM(debit_micros), 0) AS debited_micros FROM credit_ledger',
+    ).one();
+    return { records: row.records, debitedMicros: row.debited_micros };
+  }
+
   quarantine(reason: string): CreditResult<CreditAccount> {
     const account = this.accountRow();
     if (!account) return { status: 'error', error: { code: 'ACCOUNT_UNCONFIGURED', message: 'Tenant credit account is not configured' } };
     this.ctx.storage.sql.exec(
       "UPDATE credit_account SET status = 'quarantined', reason = ?, updated_at = ? WHERE id = 1",
       reason.slice(0, 500),
+      new Date().toISOString(),
+    );
+    return { status: 'ok', value: this.requireAccount() };
+  }
+
+  resume(): CreditResult<CreditAccount> {
+    const account = this.accountRow();
+    if (!account) return { status: 'error', error: { code: 'ACCOUNT_UNCONFIGURED', message: 'Tenant credit account is not configured' } };
+    this.ctx.storage.sql.exec(
+      "UPDATE credit_account SET status = 'active', reason = NULL, updated_at = ? WHERE id = 1",
       new Date().toISOString(),
     );
     return { status: 'ok', value: this.requireAccount() };

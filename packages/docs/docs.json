@@ -1,0 +1,66 @@
+{
+  "$schema": "https://holocron.so/docs.json",
+  "name": "GitSpace",
+  "description": "Run coding agents across your own machines and workspaces.",
+  "logo": {
+    "light": "/logo-light.svg",
+    "dark": "/logo-dark.svg",
+    "href": "https://gitspace.sh/"
+  },
+  "favicon": {
+    "light": "/logo-light.svg",
+    "dark": "/logo-dark.svg"
+  },
+  "colors": {
+    "primary": "#171717"
+  },
+  "appearance": {
+    "default": "system"
+  },
+  "icons": {
+    "library": "lucide"
+  },
+  "assistant": {
+    "enabled": false
+  },
+  "navbar": {
+    "links": [
+      { "label": "GitSpace", "href": "/" },
+      { "type": "github", "href": "https://github.com/inKibra/gitspace.sh" }
+    ],
+    "primary": {
+      "type": "button",
+      "label": "Get started",
+      "href": "/getting-started"
+    }
+  },
+  "navigation": {
+    "global": {
+      "anchors": [
+        {
+          "anchor": "GitHub",
+          "href": "https://github.com/inKibra/gitspace.sh",
+          "icon": "github",
+          "placement": "sidebar"
+        }
+      ]
+    },
+    "groups": [
+      {
+        "group": "Start",
+        "icon": "play",
+        "pages": ["index", "getting-started"]
+      },
+      {
+        "group": "Use GitSpace",
+        "icon": "panels-top-left",
+        "pages": ["concepts", "agent-workflow", "remote-access"]
+      },
+      {
+        "group": "Reference",
+        "icon": "terminal",
+        "pages": ["cli-reference", "security/remote-access"]
+      }
+    ]
+  }
+}

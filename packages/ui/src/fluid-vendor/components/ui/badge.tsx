@@ -128,7 +128,10 @@ const Badge = forwardRef<HTMLSpanElement, BadgeProps>(
         {/* text-box needs a block container — the badge root is a flex
             container, so the label gets its own span. Height is fixed (h-*),
             so trimming only recenters the letterforms. */}
-        <span className="[text-box:trim-both_cap_alphabetic]">{children}</span>
+        <span className={cn(
+          "inline-flex items-center justify-center gap-[inherit] [text-box:trim-both_cap_alphabetic] [&_svg]:shrink-0",
+          size === "compact" ? "[&_svg]:size-2.5" : "[&_svg]:size-3"
+        )}>{children}</span>
       </span>
     );
   }

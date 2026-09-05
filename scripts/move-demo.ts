@@ -1,4 +1,4 @@
-import { cp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, normalize } from 'node:path';
@@ -6,6 +6,8 @@ import { AwsClient } from 'aws4fetch';
 import { ed25519, x25519 } from '@noble/curves/ed25519.js';
 import { Miniflare } from 'miniflare';
 import { credentialProtocolBase64, signCredentialAuthorityGrant } from '../packages/protocol/src/index.js';
+import { buildMachineBundle, buildOmpBundle, type BuiltOmpArtifact } from '../packages/deployment/src/index.js';
+import { machineBrokerToken } from '../packages/operator-worker/src/account-access.js';
 
 const repositoryRoot = dirname(import.meta.dir);
 const root = process.env.GITSPACE_MOVE_DEMO_ROOT ?? join(repositoryRoot, '.gitspace', 'environments', 'move-demo');
@@ -54,7 +56,7 @@ async function registerMachine(id: string): Promise<void> {
     machineId: id,
     signingPublicKey: credentialProtocolBase64.encode(ed25519.getPublicKey(signing)),
     exchangePublicKey: credentialProtocolBase64.encode(x25519.getPublicKey(exchange)),
-    capabilities: ['storage.access', 'space.control'],
+    capabilities: ['storage.access', 'space.control', 'credential.access', 'credential.manage'],
     generation: 1,
   }, rootPrivateKey);
   const response = await fetch(new URL('/__dev/bootstrap', controlUrl), {
@@ -62,6 +64,7 @@ async function registerMachine(id: string): Promise<void> {
     headers: { authorization: `Bearer ${bootstrapToken}`, 'content-type': 'application/json' },
     body: JSON.stringify({
       userId: 'demo-user',
+      handle: 'demo-user',
       rootPublicKey: credentialProtocolBase64.encode(ed25519.getPublicKey(rootPrivateKey)),
       vaultKey: credentialProtocolBase64.encode(artifactKey),
       deviceGrant,
@@ -96,15 +99,12 @@ async function prepareFixture(): Promise<string> {
 }
 
 async function buildMachine(): Promise<string> {
-  const output = join(root, 'machine-artifact');
-  await rm(output, { recursive: true, force: true });
-  const built = await Bun.build({ entrypoints: [join(repositoryRoot, 'packages/machine/src/runtime.ts')], target: 'bun', outdir: output, naming: 'machine.js', external: ['@oh-my-pi/*', '@noble/*'], sourcemap: 'linked' });
-  if (!built.success) throw new AggregateError(built.logs, 'Machine build failed');
-  await cp(join(repositoryRoot, 'packages/core/drizzle'), join(output, 'drizzle'), { recursive: true });
+  const output = join(root, 'machine-artifacts', crypto.randomUUID());
+  await buildMachineBundle(repositoryRoot, output);
   return output;
 }
 
-async function startMachine(input: { id: string; port: number; artifact: string; workspace?: string }): Promise<ReturnType<typeof Bun.spawn>> {
+async function startMachine(input: { id: string; port: number; artifact: string; omp: BuiltOmpArtifact; workspace?: string }): Promise<ReturnType<typeof Bun.spawn>> {
   const machineRoot = join(root, 'machines', input.id);
   const managedRoot = join(machineRoot, 'managed');
   await mkdir(managedRoot, { recursive: true });
@@ -117,6 +117,10 @@ async function startMachine(input: { id: string; port: number; artifact: string;
       GITSPACE_PUBLIC_RPC_URL: `/${input.id}/rpc`,
       GITSPACE_ARTIFACT_KEY: Buffer.from(artifactKey).toString('base64'),
       GITSPACE_OMP_AGENT_DIR: Bun.env.PI_CODING_AGENT_DIR ?? join(homedir(), '.omp', 'agent'),
+      GITSPACE_OMP_RUNTIME_PATH: join(input.omp.path, 'omp.js'),
+      GITSPACE_OMP_MANIFEST_HASH: input.omp.manifestHash,
+      OMP_AUTH_BROKER_URL: `${controlUrl}/omp/users/demo-user`,
+      OMP_AUTH_BROKER_TOKEN: await machineBrokerToken(ompBrokerToken, 'demo-user', input.id, 1),
       GITSPACE_MIGRATIONS_FOLDER: join(input.artifact, 'drizzle'),
       GITSPACE_RPC_PORT: String(input.port),
       GITSPACE_CONTROL_URL: controlUrl,
@@ -149,9 +153,9 @@ async function startMachine(input: { id: string; port: number; artifact: string;
 }
 
 async function buildFrontend(): Promise<string> {
-  const process = Bun.spawn(['bun', 'run', 'build'], { cwd: join(repositoryRoot, 'packages/web'), env: environment(), stdout: 'inherit', stderr: 'inherit' });
+  const process = Bun.spawn(['bun', 'run', 'build'], { cwd: join(repositoryRoot, 'packages/account-web'), env: environment(), stdout: 'inherit', stderr: 'inherit' });
   if (await process.exited !== 0) throw new Error('Frontend build failed');
-  return join(repositoryRoot, 'packages/web/dist');
+  return join(repositoryRoot, 'packages/account-web/dist');
 }
 
 await rm(root, { recursive: true, force: true });
@@ -164,7 +168,7 @@ children.push(rustfs);
 await waitFor(gitEndpoint, rustfs, 'RustFS');
 await createBucket();
 const controlBundle = join(root, 'control-worker');
-const controlBuild = await Bun.build({ entrypoints: [join(repositoryRoot, 'packages/auth-worker/src/index.ts')], target: 'browser', outdir: controlBundle, naming: 'worker.mjs', external: ['cloudflare:workers'] });
+const controlBuild = await Bun.build({ entrypoints: [join(repositoryRoot, 'packages/operator-worker/src/index.ts')], target: 'browser', outdir: controlBundle, naming: 'worker.mjs', external: ['cloudflare:workers'] });
 if (!controlBuild.success) throw new AggregateError(controlBuild.logs, 'Control Worker build failed');
 const control = new Miniflare({
   modules: true,
@@ -189,8 +193,9 @@ await registerMachine('machine-a');
 await registerMachine('machine-b');
 const workspace = await prepareFixture();
 const machineArtifact = await buildMachine();
-const machineA = await startMachine({ id: 'machine-a', port: 4521, artifact: machineArtifact, workspace });
-await startMachine({ id: 'machine-b', port: 4522, artifact: machineArtifact });
+const ompArtifact = await buildOmpBundle(repositoryRoot, join(root, 'omp-artifacts', crypto.randomUUID()));
+const machineA = await startMachine({ id: 'machine-a', port: 4521, artifact: machineArtifact, omp: ompArtifact, workspace });
+await startMachine({ id: 'machine-b', port: 4522, artifact: machineArtifact, omp: ompArtifact });
 const frontendRoot = await buildFrontend();
 const web = Bun.serve({
   hostname: '127.0.0.1',

@@ -53,6 +53,7 @@ export const relaySocketMessageSchema = z.discriminatedUnion('type', [
   }),
 ]);
 export type RelaySocketMessage = z.infer<typeof relaySocketMessageSchema>;
+export type TunnelResponseMessage = Exclude<RelaySocketMessage, { type: 'frame' }>;
 
 export const tunnelRequestMessageSchema = z.discriminatedUnion('type', [
   z.object({
@@ -98,6 +99,19 @@ export function parseRelaySocketMessage(input: string): ResultType<RelaySocketMe
   }
   return Result.ok(parsed.data);
 }
+export function parseTunnelRequestMessage(input: string): ResultType<TunnelRequestMessage, InvalidRelayMessage> {
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(input);
+  } catch {
+    return Result.err(new InvalidRelayMessage({ message: 'Tunnel request is not valid JSON' }));
+  }
+  const parsed = tunnelRequestMessageSchema.safeParse(decoded);
+  return parsed.success
+    ? Result.ok(parsed.data)
+    : Result.err(new InvalidRelayMessage({ message: z.prettifyError(parsed.error) }));
+}
+
 
 export function endpointTag(attachment: SocketAttachment): string {
   return `endpoint:${attachment.role}:${attachment.id}`;

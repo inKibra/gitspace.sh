@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+
+install_dir="${HOME}/.local/bin"
+install_path="${install_dir}/gitspace"
+mkdir -p "${install_dir}"
+curl -fsSL "https://gitspace.sh/gitspace" -o "${install_path}"
+chmod +x "${install_path}"
+printf 'Installed gitspace at %s\n' "${install_path}"
+case ":${PATH}:" in
+  *":${install_dir}:"*) ;;
+  *) printf 'Add %s to PATH to run gitspace.\n' "${install_dir}" ;;
+esac

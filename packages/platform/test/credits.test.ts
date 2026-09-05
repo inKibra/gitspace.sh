@@ -80,7 +80,9 @@ describe('CreditLedgerDO', () => {
     expect(firstUsage).toMatchObject({ status: 'ok', value: { applied: true, account: { balanceMicros: 949 } } });
     expect(duplicateUsage).toMatchObject({ status: 'ok', value: { applied: false, account: { balanceMicros: 949 } } });
     expect(await credits.listLedger()).toHaveLength(2);
+    expect(await credits.usageSummary()).toEqual({ records: 2, debitedMicros: 51 });
   });
+
 
   it('keeps the risk reserve unavailable and blocks quarantined tenants', async () => {
     const credits = env.CREDITS.getByName('limited');
@@ -90,5 +92,23 @@ describe('CreditLedgerDO', () => {
     await credits.quarantine('hostile test');
     expect(await credits.reserveDispatch({ id: 'after-quarantine', amountMicros: 1, expiresAt: Date.now() + 30_000 }))
       .toMatchObject({ status: 'error', error: { code: 'ACCOUNT_QUARANTINED' } });
+  });
+
+  it('restores a quarantined balance without changing prepaid funds', async () => {
+    const credits = env.CREDITS.getByName('restorable');
+    await credits.configure({ balanceMicros: 100, riskReserveMicros: 20 });
+    await credits.quarantine('operator review');
+    expect(await credits.resume()).toMatchObject({ status: 'ok', value: { status: 'active', balanceMicros: 100, riskReserveMicros: 20 } });
+  });
+});
+
+
+describe('TenantControlDO', () => {
+  it('persists quarantine, suspension, and restoration reasons', async () => {
+    const control = env.TENANT_CONTROL.getByName('controlled');
+    expect(await control.get()).toEqual({ status: 'active', reason: null, updatedAt: null });
+    expect(await control.set({ status: 'quarantined', reason: 'abuse review' })).toMatchObject({ status: 'quarantined', reason: 'abuse review' });
+    expect(await control.set({ status: 'suspended', reason: 'manual hold' })).toMatchObject({ status: 'suspended', reason: 'manual hold' });
+    expect(await control.set({ status: 'active', reason: null })).toMatchObject({ status: 'active', reason: null });
   });
 });

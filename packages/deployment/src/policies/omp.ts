@@ -51,6 +51,7 @@ abstract class OmpGenerationDriver implements ReplacementDriver {
   abstract activate(context: ReplacementContext): Promise<ResultType<void, ReplacementActionError>>;
   abstract health(context: ReplacementContext): Promise<ResultType<void, ReplacementActionError>>;
   abstract commit(context: ReplacementContext): Promise<ResultType<void, ReplacementActionError>>;
+  abstract finalize(context: ReplacementContext): Promise<ResultType<void, ReplacementActionError>>;
   abstract rollback(context: ReplacementContext): Promise<ResultType<void, ReplacementActionError>>;
 
   async stage(context: ReplacementContext): Promise<ResultType<void, ReplacementActionError>> {
@@ -98,11 +99,12 @@ abstract class OmpGenerationDriver implements ReplacementDriver {
     return join(this.environmentRoot, 'omp', this.entrypoint, `rollback-${context.plan.id}-${context.attempt}.json`);
   }
 
-  protected async previousGeneration(context: ReplacementContext): Promise<OmpGenerationPointer | null> {
+  /** Missing record means cleanup already completed; recorded null means an initial deployment. */
+  protected async previousGeneration(context: ReplacementContext): Promise<OmpGenerationPointer | null | undefined> {
     try {
       return generationPointerSchema.nullable().parse(JSON.parse(await readFile(this.rollbackPath(context), 'utf8')));
     } catch (error) {
-      if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') return null;
+      if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') return undefined;
       throw error;
     }
   }
@@ -149,29 +151,38 @@ export class OmpWorkerReplacementDriver extends OmpGenerationDriver {
     try {
       const next = await this.nextPointer(context);
       const previous = await this.previousGeneration(context);
+      if (previous === undefined) throw new Error('OMP worker rollback record is missing');
       await this.host.activateWorkerGeneration(next, previous);
-      await this.host.reopenDrainedSessions();
-      await this.host.resumeAdmissions();
-      await rm(this.rollbackPath(context), { force: true });
       return Result.ok(undefined);
     } catch (error) {
       return actionFailure(this.entrypoint, 'commit', error);
     }
   }
 
-  async rollback(context: ReplacementContext): Promise<ResultType<void, ReplacementActionError>> {
+  async finalize(context: ReplacementContext): Promise<ResultType<void, ReplacementActionError>> {
     try {
-      const next = await this.nextPointer(context);
-      await this.host.stopProbe(next);
-      await this.host.restoreWorkerGeneration(await this.previousGeneration(context));
+      if (await this.previousGeneration(context) === undefined) return Result.ok(undefined);
+      await this.host.reopenDrainedSessions();
       await this.host.resumeAdmissions();
       await rm(this.rollbackPath(context), { force: true });
       return Result.ok(undefined);
     } catch (error) {
-      if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') {
-        await this.host.resumeAdmissions();
-        return Result.ok(undefined);
-      }
+      return actionFailure(this.entrypoint, 'finalize', error);
+    }
+  }
+
+  async rollback(context: ReplacementContext): Promise<ResultType<void, ReplacementActionError>> {
+    try {
+      const previous = await this.previousGeneration(context);
+      if (previous === undefined) return Result.ok(undefined);
+      const next = await this.nextPointer(context);
+      await this.host.stopProbe(next);
+      await this.host.restoreWorkerGeneration(previous);
+      await this.host.reopenDrainedSessions();
+      await this.host.resumeAdmissions();
+      await rm(this.rollbackPath(context), { force: true });
+      return Result.ok(undefined);
+    } catch (error) {
       return actionFailure(this.entrypoint, 'rollback', error);
     }
   }
@@ -228,28 +239,36 @@ export class OmpBrokerReplacementDriver extends OmpGenerationDriver {
 
   async commit(context: ReplacementContext): Promise<ResultType<void, ReplacementActionError>> {
     try {
+      if (await this.previousGeneration(context) === undefined) throw new Error('OMP broker rollback record is missing');
       await this.host.activateBrokerGeneration(await this.nextPointer(context));
-      await this.host.resumeAdmissions();
-      await rm(this.rollbackPath(context), { force: true });
       return Result.ok(undefined);
     } catch (error) {
       return actionFailure(this.entrypoint, 'commit', error);
     }
   }
 
+  async finalize(context: ReplacementContext): Promise<ResultType<void, ReplacementActionError>> {
+    try {
+      if (await this.previousGeneration(context) === undefined) return Result.ok(undefined);
+      await this.host.resumeAdmissions();
+      await rm(this.rollbackPath(context), { force: true });
+      return Result.ok(undefined);
+    } catch (error) {
+      return actionFailure(this.entrypoint, 'finalize', error);
+    }
+  }
+
   async rollback(context: ReplacementContext): Promise<ResultType<void, ReplacementActionError>> {
     try {
+      const previous = await this.previousGeneration(context);
+      if (previous === undefined) return Result.ok(undefined);
       await this.host.stopBroker(await this.nextPointer(context));
-      await this.host.restoreBrokerGeneration(await this.previousGeneration(context));
+      await this.host.restoreBrokerGeneration(previous);
       await this.host.reAdoptDetached();
       await this.host.resumeAdmissions();
       await rm(this.rollbackPath(context), { force: true });
       return Result.ok(undefined);
     } catch (error) {
-      if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') {
-        await this.host.resumeAdmissions();
-        return Result.ok(undefined);
-      }
       return actionFailure(this.entrypoint, 'rollback', error);
     }
   }

@@ -1,0 +1,74 @@
+---
+$schema: https://holocron.so/frontmatter.json
+title: Core concepts
+description: Accounts, devices, machines, projects, workspaces, and agent sessions.
+icon: boxes
+---
+
+# Core concepts
+
+## Account
+
+A GitSpace account owns its devices, machines, projects, workspaces, settings, and product state. Each account has a permanent handle and its own account Worker, relay endpoint, state, and storage.
+
+The account root key is the authority that enrolls machines and browsers. The `gsr_` recovery key is an encoding of that private root key.
+
+## Browser device
+
+A browser enrolls from the one-time link created by `gitspace open`. It generates a non-extractable Ed25519 key in IndexedDB and signs RPC requests with that key.
+
+Browser grants are revocable. Enrolling a new browser does not require sharing another browser's private key.
+
+## Machine
+
+A machine is a physical computer or managed sandbox that can materialize workspaces and run their agents. A physical machine runs the runtime started by `gitspace machine start`.
+
+Machines expose capabilities such as available runtimes, isolation, hardware, services, and credential scopes. Placement uses those capabilities to keep work on an eligible machine. GitSpace also reports machine state such as online, offline, sleeping, or error so the fleet view can direct attention.
+
+## Project
+
+A project groups work for one repository. It is the stable parent for that repository's workspaces.
+
+## Workspace
+
+A workspace is an isolated, durable unit of change. Closed agent workspaces remain in cloud storage. Opening one materializes or moves it onto an eligible machine for work; closing it returns the durable state to cloud storage instead of occupying that machine indefinitely.
+
+Workspace phases are:
+
+| Phase | Purpose |
+| --- | --- |
+| `plan` | Define intent, requirements, and approach. |
+| `code` | Implement and verify the change. |
+| `review` | Read the diff, evidence, review threads, and change guide. |
+| `ship` | Release the work and watch its operational state. |
+
+A workspace can move between eligible machines. Placement remains explicit because the selected machine owns the active checkout and runs the work. A GitSpace workspace can also modify and release the account's own GitSpace code.
+
+## Account releases
+
+The account selects four release targets independently: Worker, frontend, machine, and OMP. Updating one target keeps the others on their selected releases. Settings shows each selection and the versions that machines actually run.
+
+OMP runs in child processes, separate from the machine daemon. During an OMP update, active turns keep their old process. Idle sessions move to the verified replacement. The release stays pending while old sessions drain. A machine update preserves the selected OMP release, but replaces the machine process after draining it.
+
+Runtime releases carry an authenticated file inventory and compatibility requirements for the operating system, architecture, Bun version, and machine protocol. Activation checks the complete payload against its content hashes, including native modules. Replacement plans retain rollback state until all targets commit.
+
+The shared Cloudflare sandbox service belongs to the platform. Its container image supplies the operating system, tools, and initial runtime. Replacing that image can stop existing containers; it is a separate operation from releasing account code inside them. Checkpoint work before platform image maintenance.
+
+## Agent session
+
+An agent session belongs to a workspace and is rendered as a native block transcript in the browser. The browser can show tool calls, structured questions, approvals, artifacts, and output without treating a terminal emulator as the application shell.
+
+## Inspector products
+
+Each workspace can expose the following durable products:
+
+- **Goal** for intent and observable requirements.
+- **Workflow** for the current execution contract.
+- **Rubric** for how the result will be judged.
+- **Journal** for phase narrative, decisions, and state snapshots.
+- **Review** for evidence-backed threads on the change.
+- **Change Guide** for a reviewable explanation of the final diff.
+- **Artifacts** for files and proof produced by the work.
+- **Services** for running processes and previews.
+
+These products stay attached to the workspace instead of disappearing when an agent session ends.

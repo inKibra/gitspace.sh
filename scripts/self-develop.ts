@@ -10,11 +10,14 @@ import { AuthStorage } from '@oh-my-pi/pi-ai';
 import {
   buildFrontendTree,
   buildMachineBundle,
-  buildWorkerBundle,
+  buildOmpBundle,
+  buildControlWorkerBundle,
   workspaceSha,
   type DeploymentArtifact,
 } from '../packages/deployment/src/index.js';
-import { ReplacementEnvironment } from '../packages/machine/src/index.js';
+import { ReplacementEnvironment } from '../packages/account-machine/src/index.js';
+import { machineBrokerToken } from '../packages/operator-worker/src/account-access.js';
+import { executableManifestPath } from '../packages/account-omp/src/manifest.js';
 
 const repositoryRoot = dirname(import.meta.dir);
 const environmentRoot = process.env.GITSPACE_SANDBOX_ROOT
@@ -33,6 +36,8 @@ const ompAgentDir = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), '.omp', '
 const walgitBinary = process.env.GITSPACE_WALGIT_BINARY ?? join(environmentRoot, 'bin', 'walgit');
 const controlUrl = 'http://127.0.0.1:4512';
 const gitEndpoint = 'http://127.0.0.1:4513';
+const controlToken = crypto.randomUUID();
+const initialOmp = await buildOmpBundle(repositoryRoot, join(environmentRoot, 'initial-omp', crypto.randomUUID()));
 const environment = new ReplacementEnvironment({
   id: 'self-sandbox',
   root: environmentRoot,
@@ -42,11 +47,13 @@ const environment = new ReplacementEnvironment({
   machineId: 'local-machine',
   artifactKey,
   ompAgentDir,
-  controlToken: crypto.randomUUID(),
+  controlToken,
   environment: {
     GITSPACE_CONTROL_URL: controlUrl,
     OMP_AUTH_BROKER_URL: `${controlUrl}/omp/users/local-user`,
-    OMP_AUTH_BROKER_TOKEN: ompBrokerToken,
+    OMP_AUTH_BROKER_TOKEN: await machineBrokerToken(ompBrokerToken, 'local-user', 'local-machine', 1),
+    GITSPACE_OMP_RUNTIME_PATH: join(initialOmp.path, 'omp.js'),
+    GITSPACE_OMP_MANIFEST_HASH: initialOmp.manifestHash,
     GITSPACE_USER_ID: 'local-user',
     GITSPACE_ROOT_PUBLIC_KEY: credentialProtocolBase64.encode(ed25519.getPublicKey(rootSigningPrivateKey)),
     GITSPACE_MACHINE_SIGNING_PRIVATE_KEY: Buffer.from(machineSigningPrivateKey).toString('base64'),
@@ -72,7 +79,7 @@ const environment = new ReplacementEnvironment({
   },
 });
 
-type EntrypointKind = 'machine' | 'frontend';
+type EntrypointKind = 'machine' | 'omp' | 'frontend';
 
 function processEnvironment(): Record<string, string> {
   return Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined));
@@ -127,7 +134,7 @@ async function bootstrapDevelopmentControlPlane(): Promise<void> {
     machineId: 'local-machine',
     signingPublicKey: credentialProtocolBase64.encode(ed25519.getPublicKey(machineSigningPrivateKey)),
     exchangePublicKey: credentialProtocolBase64.encode(x25519.getPublicKey(machineExchangePrivateKey)),
-    capabilities: ['storage.access', 'space.control'],
+    capabilities: ['storage.access', 'space.control', 'credential.access', 'credential.manage'],
     generation: 1,
   }, rootSigningPrivateKey);
   const localAuth = await AuthStorage.create(join(ompAgentDir, 'agent.db'));
@@ -146,6 +153,7 @@ async function bootstrapDevelopmentControlPlane(): Promise<void> {
     },
     body: JSON.stringify({
       userId: 'local-user',
+      handle: 'local-user',
       rootPublicKey: credentialProtocolBase64.encode(ed25519.getPublicKey(rootSigningPrivateKey)),
       vaultKey: credentialProtocolBase64.encode(artifactKey),
       gitBucketName,
@@ -175,7 +183,7 @@ await waitForService(gitEndpoint, rustfs, 'RustFS');
 await createGitBucket();
 const controlBundleRoot = join(environmentRoot, 'control-worker');
 await rm(controlBundleRoot, { recursive: true, force: true });
-await buildWorkerBundle(repositoryRoot, await workspaceSha(repositoryRoot), controlBundleRoot);
+await buildControlWorkerBundle(repositoryRoot, await workspaceSha(repositoryRoot), controlBundleRoot);
 const control = new Miniflare({
   modules: true,
   scriptPath: join(controlBundleRoot, 'worker.mjs'),
@@ -235,15 +243,27 @@ async function deployPending(): Promise<void> {
           candidates.push(built.path);
           artifacts.push({ entrypoint: 'frontend', hash: built.hash, path: built.path, dependsOn: ['machine-daemon'] });
         }
-        // Watcher builds are this checkout at its sha, which is exactly what
-        // launching workspace-a would stage; stamping them keeps the release
-        // follower from fighting the watcher over which one is "desired".
-        const deployed = await environment.deploy({ artifacts, releaseSha: await workspaceSha(repositoryRoot), revision: String(Date.now()), dirty: true });
-        if (deployed.changed.length === 0) continue;
-        const status = environment.status();
-        console.log(`GitSpace self-sandbox active machine=${status.machineHash ?? 'none'} frontend=${status.frontendHash ?? 'none'}`);
+        // Watcher builds are local channel candidates, independent of account release selections.
+        if (artifacts.length > 0) {
+          await environment.deploy({ artifacts, releaseSha: null, revision: String(Date.now()), dirty: true });
+          const status = environment.status();
+          console.log(`GitSpace self-sandbox active machine=${status.machineHash ?? 'none'} frontend=${status.frontendHash ?? 'none'}`);
+        }
+        if (selected.has('omp')) {
+          const built = await buildOmpBundle(repositoryRoot, join(environmentRoot, 'candidates', `omp-${crypto.randomUUID()}`));
+          const response = await fetch('http://127.0.0.1:4511/__control/omp-activate', {
+            method: 'POST',
+            headers: { authorization: `Bearer ${controlToken}`, 'content-type': 'application/json' },
+            body: JSON.stringify({ path: built.path, hash: built.hash, manifestHash: built.manifestHash, sha: null }),
+          });
+          if (!response.ok) throw new Error(`OMP activation failed (${response.status}): ${await response.text()}`);
+          console.log(`[gitspace-self-develop] OMP selected ${built.hash}: ${await response.text()}`);
+        }
       } finally {
-        for (const candidate of candidates) await rm(candidate, { recursive: true, force: true });
+        for (const candidate of candidates) {
+          await rm(candidate, { recursive: true, force: true });
+          await rm(executableManifestPath(candidate), { force: true });
+        }
       }
     }
   } finally {
@@ -277,18 +297,26 @@ async function stopChild(process: ReturnType<typeof Bun.spawn>): Promise<void> {
 const watchers: FSWatcher[] = [];
 if (process.env.GITSPACE_DEV_NO_WATCH !== '1') {
   for (const sourceRoot of [
-    join(repositoryRoot, 'packages/protocol/src'),
     join(repositoryRoot, 'packages/core/src'),
-    join(repositoryRoot, 'packages/machine/src'),
+    join(repositoryRoot, 'packages/account-machine/src'),
   ]) {
     for (const directory of await sourceDirectories(sourceRoot)) {
       watchers.push(watch(directory, () => schedule('machine')));
     }
   }
-  for (const directory of await sourceDirectories(join(repositoryRoot, 'packages/web/src'))) {
+  for (const sourceRoot of [
+    join(repositoryRoot, 'packages/account-omp/src'),
+    join(repositoryRoot, 'packages/account-omp/patches'),
+  ]) {
+    for (const directory of await sourceDirectories(sourceRoot)) watchers.push(watch(directory, () => schedule('omp')));
+  }
+  for (const directory of await sourceDirectories(join(repositoryRoot, 'packages/protocol/src'))) {
+    watchers.push(watch(directory, () => { schedule('machine'); schedule('omp'); }));
+  }
+  for (const directory of await sourceDirectories(join(repositoryRoot, 'packages/account-web/src'))) {
     watchers.push(watch(directory, () => schedule('frontend')));
   }
-  for (const file of [join(repositoryRoot, 'packages/web/index.html'), join(repositoryRoot, 'packages/web/vite.config.ts')]) {
+  for (const file of [join(repositoryRoot, 'packages/account-web/index.html'), join(repositoryRoot, 'packages/account-web/vite.config.ts')]) {
     watchers.push(watch(file, () => schedule('frontend')));
   }
 }

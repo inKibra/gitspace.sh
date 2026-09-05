@@ -1,0 +1,14 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "gitspace-docs",
+  "main": "spiceflow/cloudflare-entrypoint",
+  "compatibility_date": "2026-08-27",
+  "compatibility_flags": ["nodejs_compat"],
+  "routes": [
+    { "pattern": "gitspace.sh/docs*", "zone_name": "gitspace.sh" }
+  ],
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  }
+}

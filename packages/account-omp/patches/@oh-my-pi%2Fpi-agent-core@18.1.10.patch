@@ -1,0 +1,36 @@
+diff --git a/dist/types/agent.d.ts b/dist/types/agent.d.ts
+--- a/dist/types/agent.d.ts
++++ b/dist/types/agent.d.ts
+@@ -434,6 +434,8 @@
+     followUp(m: AgentMessage): void;
+     clearSteeringQueue(): void;
+     clearFollowUpQueue(): void;
++    removeSteer(index: number): AgentMessage | undefined;
++    removeFollowUp(index: number): AgentMessage | undefined;
+     /**
+      * Drop tool-directive state retained across a gate-stopped run: the
+      * deferred hard choice and the soft-requirement lifecycle.
+diff --git a/src/agent.ts b/src/agent.ts
+--- a/src/agent.ts
++++ b/src/agent.ts
+@@ -1013,6 +1013,20 @@
+ 	clearFollowUpQueue() {
+ 		this.#followUpQueue = [];
+ 	}
++	/** Remove and return a steering message by queue index (GitSpace patch). */
++	removeSteer(index: number): AgentMessage | undefined {
++		if (!Number.isInteger(index) || index < 0 || index >= this.#steeringQueue.length) return undefined;
++		const [removed] = this.#steeringQueue.splice(index, 1);
++		return removed;
++	}
++
++	/** Remove and return a follow-up message by queue index (GitSpace patch). */
++	removeFollowUp(index: number): AgentMessage | undefined {
++		if (!Number.isInteger(index) || index < 0 || index >= this.#followUpQueue.length) return undefined;
++		const [removed] = this.#followUpQueue.splice(index, 1);
++		return removed;
++	}
++
+ 
+ 	/**
+ 	 * Drop tool-directive state retained across a gate-stopped run: the

@@ -2,7 +2,7 @@ import { Result, TaggedError, type Result as ResultType } from 'better-result';
 import { verifyDeploymentPlan, type DeploymentArtifact, type DeploymentPlan, type EntrypointId } from './contracts.js';
 import { DeploymentJournal, type DeploymentRunRecord, type DeploymentStepState } from './journal.js';
 
-export type ReplacementPhase = 'drain' | 'stage' | 'activate' | 'health' | 'commit' | 'rollback';
+export type ReplacementPhase = 'drain' | 'stage' | 'activate' | 'health' | 'commit' | 'finalize' | 'rollback';
 
 export class ReplacementActionError extends TaggedError('ReplacementActionError')<{
   entrypoint: EntrypointId;
@@ -30,7 +30,10 @@ export interface ReplacementDriver {
   stage(context: ReplacementContext): Promise<ResultType<void, ReplacementActionError>>;
   activate(context: ReplacementContext): Promise<ResultType<void, ReplacementActionError>>;
   health(context: ReplacementContext): Promise<ResultType<void, ReplacementActionError>>;
+  /** Publish the target while retaining everything needed to roll it back. */
   commit(context: ReplacementContext): Promise<ResultType<void, ReplacementActionError>>;
+  /** Irreversible cleanup, called only after every target commits. Must be safe to retry. */
+  finalize?(context: ReplacementContext): Promise<ResultType<void, ReplacementActionError>>;
   rollback(context: ReplacementContext): Promise<ResultType<void, ReplacementActionError>>;
 }
 
@@ -69,7 +72,8 @@ export class DeploymentEngine {
       return Result.err(new DeploymentExecutionError({ deploymentId: plan.id, message: begun.error.message }));
     }
     if (begun.value.state === 'committed') return Result.ok(begun.value);
-    if (!['planned', 'rolled-back', 'failed'].includes(begun.value.state)) {
+    if (begun.value.state === 'finalizing') return this.finalize(plan, begun.value);
+    if (!['planned', 'rolled-back'].includes(begun.value.state)) {
       const recovered = await this.rollbackRecordedAttempt(plan, begun.value);
       if (recovered.status === 'error') return recovered;
       this.journal.restart(plan.id);
@@ -84,8 +88,8 @@ export class DeploymentEngine {
 
     const phases: Array<{
       runState: 'draining' | 'staging' | 'activating' | 'health-checking';
-      action: Exclude<ReplacementPhase, 'commit' | 'rollback'>;
-      stepState: Exclude<DeploymentStepState, 'pending' | 'committed' | 'rolled-back'>;
+      action: Exclude<ReplacementPhase, 'commit' | 'finalize' | 'rollback'>;
+      stepState: Exclude<DeploymentStepState, 'pending' | 'committed' | 'finalized' | 'rolled-back'>;
     }> = [
       { runState: 'draining', action: 'drain', stepState: 'drained' },
       { runState: 'staging', action: 'stage', stepState: 'staged' },
@@ -109,6 +113,34 @@ export class DeploymentEngine {
       if (committed.status === 'error') return this.failAndRollback(plan, committed.error);
       this.journal.recordStep(plan.id, artifact.entrypoint, ordinal, 'committed');
     }
+    // Persist the commit decision before any driver discards rollback resources.
+    return this.finalize(plan, this.journal.transition(plan.id, 'finalizing'));
+  }
+
+  private async finalize(
+    plan: DeploymentPlan,
+    run: DeploymentRunRecord,
+  ): Promise<ResultType<DeploymentRunRecord, DeploymentExecutionError>> {
+    for (const step of this.journal.steps(plan.id)) {
+      if (step.state === 'finalized') continue;
+      const context: ReplacementContext = {
+        plan,
+        artifact: plan.artifacts[step.ordinal]!,
+        ordinal: step.ordinal,
+        attempt: run.attempt,
+      };
+      const finalized = await this.invoke(this.drivers.get(step.entrypoint)!, 'finalize', context);
+      if (finalized.status === 'error') {
+        this.journal.transition(plan.id, 'finalizing', finalized.error.message);
+        return Result.err(new DeploymentExecutionError({
+          deploymentId: plan.id,
+          entrypoint: step.entrypoint,
+          phase: 'finalize',
+          message: finalized.error.message,
+        }));
+      }
+      this.journal.recordStep(plan.id, step.entrypoint, step.ordinal, 'finalized');
+    }
     return Result.ok(this.journal.transition(plan.id, 'committed'));
   }
 
@@ -118,6 +150,7 @@ export class DeploymentEngine {
     context: ReplacementContext,
   ): Promise<ResultType<void, ReplacementActionError>> {
     try {
+      if (phase === 'finalize') return await driver.finalize?.(context) ?? Result.ok(undefined);
       return await driver[phase](context);
     } catch (error) {
       return Result.err(new ReplacementActionError({

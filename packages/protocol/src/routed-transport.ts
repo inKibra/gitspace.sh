@@ -33,11 +33,15 @@ export interface RoutedTransport extends ClientTransport {
 
 const PLACEMENTS_TTL_MS = 5_000;
 
-function spaceIdOf(input: unknown): string | null {
+function spaceIdOf(path: string, input: unknown): string | null {
   if (!input || typeof input !== 'object') return null;
   const record = input as Record<string, unknown>;
   const candidate = [record.spaceId, record.workspaceId].find((value): value is string => typeof value === 'string');
-  return candidate ?? null;
+  if (candidate) return candidate;
+  if (path === 'bootstrap' || path === 'workspace.create' || path === 'session.createProject' || path === 'events') {
+    return typeof record.projectId === 'string' ? record.projectId : null;
+  }
+  return null;
 }
 
 function sessionIdOf(input: unknown): string | null {
@@ -103,7 +107,7 @@ export function createRoutedTransport(options: RoutedTransportOptions): RoutedTr
   const resolve = async (path: string, input: unknown): Promise<ClientTransport> => {
     // Routing reads never recurse into routing.
     if (path === 'placements' || path === 'session.locate') return home;
-    const spaceId = spaceIdOf(input);
+    const spaceId = spaceIdOf(path, input);
     if (spaceId) return transportFor(await urlForSpace(spaceId));
     const sessionId = sessionIdOf(input);
     if (sessionId) return transportFor(await urlForSession(sessionId));

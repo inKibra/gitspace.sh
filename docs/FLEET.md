@@ -266,6 +266,12 @@ declaration:
 - **Blob replication** = encrypted R2. Artifact packfiles, session JSONL
   segments, and manifests are sealed on the machine. R2 sees ciphertext,
   hashes, size, and timing; never keys or plaintext.
+- **Managed-beta key custody**: checkpoint and artifact encryption uses one
+  account-scoped key derived by `CredentialVaultDO`. Enrolled machines obtain
+  it through signed, replay-protected `artifacts.key.get` requests with
+  `space.control`; suspended accounts and revoked grants are denied. Random
+  per-machine keys are not a portable checkpoint format. The managed vault is
+  part of the trust boundary; encrypted R2 storage is not zero-knowledge hosting.
 - **Move** = drain at a safe boundary → publish git/blob state → materialize on
   target → reopen. The successful Mac→WSL move of session `019fed50` proves the
   current manual shape; 1.0 makes path translation, manifests, and final sync
@@ -295,14 +301,21 @@ declaration:
   server, Result RPC transport, database migrations, drain, health, pointer
   switch, and rollback mechanics. Sandbox vs current is target root, resources,
   authority, and promotion policy—not another implementation.
+- Account-owned releases name four targets: `worker`, `frontend`, `machine`,
+  and `omp`. OMP artifacts include resolved dependencies, native modules,
+  upstream version, ordered patches, and machine-runtime compatibility.
+  Activation verifies the complete artifact, not only its entrypoint.
+- OMP runs behind child-process IPC. Selecting a new OMP generation does not
+  restart the machine process: a busy session, including a pending question,
+  finishes on its original child before migration. Session identity survives.
+  Replacement keeps rollback material until every target has committed.
 - This repository's `bun run dev` is only a source watcher that builds immutable
   machine and frontend artifacts and submits sandbox-authorized replacement
   plans into B. Edits arriving mid-deployment coalesce into the next generation.
   It does not launch Vite or a development-only machine server.
 - B has isolated SQLite, sockets/ports, OMP session storage, and artifact
-  generations. Provider credential authority still needs the planned OMP auth
-  broker before the whole OMP profile can be isolated without duplicating
-  credentials. Relay and R2 sandbox allocation remain to be wired.
+  generations. OMP obtains provider access through the account credential
+  broker rather than copying refresh credentials into each environment.
 - Promotion uses the exact artifacts proven in B; it never rebuilds source.
   Environment configuration is injected at activation.
 - The agent may prepare a promotion: immutable artifact hashes, affected
@@ -324,6 +337,11 @@ declaration:
   free; open question is our relay speaking the pi-wire envelope. NOTE:
   under §10's stability rule, collab-in-OUR-worker is version-safe only via
   the same drain/recycle path — guests reconnect after a flip.
+- Browser routing uses the cloud space directory, not a machine's local
+  checkouts. Project routes resolve through the base space; session lookup
+  follows the current holder. The managed sandbox RPC proxy supports browser
+  preflight and exposes the Result RPC contract header; device signatures,
+  not cookies or CORS, authorize calls.
 
 ## 13. UX architecture (Gooey Pi + OpenSession references; GitSpace semantics)
 
@@ -337,7 +355,9 @@ declaration:
 - Machine bootstrap creates metadata and placements only; it never creates an
   agent. Code-generation replacement persists live sessions with
   `stopForRestart(close=false)`, and the successor recovers only
-  opening/active/draining rows. Closed, failed, and absent agents remain stopped.
+  opening/active/draining rows with a positive-generation open placement owned
+  by that machine. Recovery rechecks ownership after opening the OMP child.
+  Closed, failed, absent, and remotely held agents remain stopped.
   `space.open` is the sole ensure-live operation, including when placement is
   already local but its canonical agent has not started.
 - Mid-turn replacement drains the current OMP run, persists a
@@ -345,6 +365,8 @@ declaration:
   the persisted user tail. The fence remains set until continuation settles;
   a second crash therefore retries rather than silently declaring the turn
   complete.
+  A cancelled partial assistant response resumes through OMP's manual-continue
+  prompt rather than calling `Agent.continue()` on an assistant tail.
 - No global top bar. The left app panel owns navigation, search, projects,
   inbox, settings, and active work. The project row is the base-project agent;
   its separately toggled, indented children are workspace agents. Agent focus
@@ -625,9 +647,10 @@ hosted:     dispatch Worker → same relay artifact as WfP User Worker
   platform-acceptable externally enforceable reserve; or hosted mode constrains
   DO code behind a platform-owned state capability. Do not paper over this with
   delayed analytics.
-- R2 stores only client-sealed artifacts/session segments/reports. Keys remain
-  with user devices/root identity. GitSpace/Cloudflare can observe tenant,
-  object sizes, hashes, access timing, and billing—not plaintext.
+- R2 stores machine-sealed artifacts/session segments/reports and exposes
+  object sizes, hashes, access timing, and billing. In the managed beta, the
+  account credential vault can derive the encryption key and is trusted with
+  that capability. Do not describe this custody model as operator-blind.
 - Normal HTTPS development tunnels terminate TLS at Cloudflare and are not
   content-blind; encrypted GitSpace protocol channels remain E2E. Document the
   distinction.

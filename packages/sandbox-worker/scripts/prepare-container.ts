@@ -5,8 +5,6 @@ import { fileURLToPath } from 'node:url';
 const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const repositoryRoot = dirname(dirname(packageRoot));
 const context = join(packageRoot, '.container-context');
-const walgitBinary = process.env.GITSPACE_WALGIT_BINARY;
-if (!walgitBinary) throw new Error('GITSPACE_WALGIT_BINARY is required to build the sandbox machine image');
 await rm(context, { recursive: true, force: true });
 await mkdir(context, { recursive: true });
 for (const file of ['package.json', 'bun.lock']) await cp(join(repositoryRoot, file), join(context, file));
@@ -21,7 +19,8 @@ for (const entry of await readdir(join(repositoryRoot, 'packages'), { withFileTy
 }
 await mkdir(join(context, 'packages', 'sandbox-worker'), { recursive: true });
 await cp(join(packageRoot, 'package.json'), join(context, 'packages', 'sandbox-worker', 'package.json'));
-await cp(walgitBinary, join(context, 'walgit'));
+await mkdir(join(context, 'packages', 'sandbox-worker', 'scripts'), { recursive: true });
+await cp(join(packageRoot, 'scripts', 'build-runtime.ts'), join(context, 'packages', 'sandbox-worker', 'scripts', 'build-runtime.ts'));
 const dockerfile = await readFile(join(packageRoot, 'Dockerfile'), 'utf8');
 await writeFile(join(context, 'Dockerfile'), dockerfile);
 console.log(context);
