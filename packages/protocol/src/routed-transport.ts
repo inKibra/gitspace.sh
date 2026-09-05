@@ -1,4 +1,4 @@
-import { batchFetchTransport, createBrowserClient, type ClientTransport } from 'result-rpc/client';
+import { batchFetchTransport, createBrowserClient, fetchTransport, type ClientTransport } from 'result-rpc/client';
 import { gitspaceContract, type SpacePlacementView } from './rpc-contract.js';
 import { ACCOUNT_CLOUD_RPC_PATHS, ACCOUNT_RUNTIME_RPC_PATHS } from './account-rpc.js';
 
@@ -58,6 +58,9 @@ export function createRoutedTransport(options: RoutedTransportOptions): RoutedTr
   };
   const home = transportFor(options.homeUrl);
   const account = batchFetchTransport({ url: options.homeUrl, fetch: options.fetch, maxItems: options.maxItems ?? 32 });
+  // Initializing and uploading a Git repository can outlast ordinary queries.
+  // Keep creation's longer deadline out of their batch and timeout budget.
+  const projectCreation = fetchTransport({ url: options.homeUrl, fetch: options.fetch, timeoutMs: 300_000 });
   // Runtime schemas/provider capabilities come from a machine when online,
   // with canonical cloud views when offline. Keep that choice independently signed.
   const runtimeMetadata = batchFetchTransport({ url: options.homeUrl, fetch: options.fetch, maxItems: options.maxItems ?? 32 });
@@ -109,6 +112,7 @@ export function createRoutedTransport(options: RoutedTransportOptions): RoutedTr
   };
 
   const resolve = async (path: string, input: unknown): Promise<ClientTransport> => {
+    if (path === 'project.create') return projectCreation;
     if (Object.hasOwn(ACCOUNT_RUNTIME_RPC_PATHS, path)) return runtimeMetadata;
     if (Object.hasOwn(ACCOUNT_CLOUD_RPC_PATHS, path)) return account;
     // Routing reads never recurse into routing.
