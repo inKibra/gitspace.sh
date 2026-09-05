@@ -1422,6 +1422,10 @@ function GitSpaceProduct() {
   const workspaceAvailability = useResultQuery(rpcClient.inspector.availability, { projectId: selectedProjectId, workspaceId: optionalQueryParameter('workspace') }, { enabled: selectedProjectId.length > 0 });
   const runtimeMetadataEnabled = route === 'settings' || forceOnboarding || (settingsQuery.state === 'success' && !settingsQuery.value.onboardingComplete) || (workspaceAvailability.state === 'success' && workspaceAvailability.value.runtimeAvailable);
   const machinesQuery = useResultQuery(rpcClient.machines, {}, { enabled: runtimeMetadataEnabled });
+  const onlineMachineIds = machinesQuery.state === 'success'
+    ? machinesQuery.value.filter((machine) => machine.state === 'online' && machine.desiredState === 'online' && machine.rpcEndpoint).map((machine) => machine.id).sort().join(',')
+    : '';
+  const runtimeAvailable = runtimeMetadataEnabled && onlineMachineIds.length > 0;
   const ompQuery = useResultQuery(rpcClient.settings.omp.get, {}, { enabled: runtimeMetadataEnabled });
   const gitIdentityQuery = useResultQuery(rpcClient.settings.git.get, {});
   const updateSettings = useResultMutation(rpcClient.settings.update);
@@ -1484,12 +1488,22 @@ function GitSpaceProduct() {
     deviceRejected('SIGNED_OUT');
   };
   const providersQuery = useResultQuery(rpcClient.providers.list, {}, { enabled: runtimeMetadataEnabled });
-  const modelsQuery = useResultQuery(rpcClient.providers.models, {}, { enabled: runtimeMetadataEnabled });
+  const modelsQuery = useResultQuery(rpcClient.providers.models, {}, { enabled: runtimeAvailable });
   // Usage is fetched only once the Providers tab/step is shown; the first
   // load reads the machine's cache, every explicit refresh bypasses it.
   const [usageVisible, setUsageVisible] = useState(false);
   const [usageRefresh, setUsageRefresh] = useState(false);
-  const usageQuery = useResultQuery(rpcClient.providers.usage, { providerId: null, refresh: usageRefresh }, { enabled: runtimeMetadataEnabled && usageVisible });
+  const usageQuery = useResultQuery(rpcClient.providers.usage, { providerId: null, refresh: usageRefresh }, { enabled: runtimeAvailable && usageVisible });
+  useEffect(() => {
+    if (!runtimeMetadataEnabled) return;
+    // The cloud's offline provider view cannot sign in. Replace it when the
+    // reachable runtime changes, including first-machine startup during onboarding.
+    void providersQuery.refetch();
+    if (runtimeAvailable) {
+      void modelsQuery.refetch();
+      if (usageVisible) void usageQuery.refetch();
+    }
+  }, [runtimeMetadataEnabled, onlineMachineIds]);
   const startProviderLogin = useResultMutation(rpcClient.providers.login.start);
   const respondProviderLogin = useResultMutation(rpcClient.providers.login.respond);
   const cancelProviderLogin = useResultMutation(rpcClient.providers.login.cancel);
@@ -1647,8 +1661,11 @@ function GitSpaceProduct() {
     navigateProduct('agent', 'replace');
   };
   const refreshProviders = async (): Promise<void> => {
-    await Promise.all([providersQuery.refetch(), modelsQuery.refetch()]);
-    if (usageVisible) await usageQuery.refetch();
+    await providersQuery.refetch();
+    if (runtimeAvailable) {
+      await modelsQuery.refetch();
+      if (usageVisible) await usageQuery.refetch();
+    }
   };
   const appendLoginEvent = (flowId: string, event: ProviderLoginEvent): void => {
     setLoginFlow((current) => current?.flowId === flowId ? { ...current, events: [...current.events, event], done: event.type === 'done' } : current);
@@ -1715,7 +1732,8 @@ function GitSpaceProduct() {
     await refreshProviders();
   };
   const refreshUsage = async (): Promise<void> => {
-    if (providersQuery.state === 'failure') await providersQuery.refetch();
+    await providersQuery.refetch();
+    if (!runtimeAvailable) return;
     if (usageRefresh) await usageQuery.refetch();
     else setUsageRefresh(true);
   };
@@ -1724,8 +1742,8 @@ function GitSpaceProduct() {
     providers: providerViews,
     ...(providersQuery.state === 'failure' ? { error: providersQuery.error.message } : {}),
     usage: usageQuery.state === 'success' ? usageQuery.value : usageQuery.state === 'failure' ? usageQuery.previous ?? null : null,
-    usageStatus: !usageVisible ? 'idle' : usageQuery.state === 'failure' ? 'error' : usageQuery.state === 'pending' || usageQuery.fetch === 'fetching' ? 'loading' : 'ready',
-    ...(usageQuery.state === 'failure' ? { usageError: usageQuery.error.message } : {}),
+    usageStatus: !runtimeAvailable || !usageVisible ? 'idle' : usageQuery.state === 'failure' ? 'error' : usageQuery.state === 'pending' || usageQuery.fetch === 'fetching' ? 'loading' : 'ready',
+    ...(runtimeAvailable && usageQuery.state === 'failure' ? { usageError: usageQuery.error.message } : {}),
     onShow: () => setUsageVisible(true),
     onRefreshUsage: refreshUsage,
     onSignIn: signInProvider,
