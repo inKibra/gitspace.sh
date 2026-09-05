@@ -26,6 +26,7 @@ import {
   discoverProjectMcpToolsContract,
   destroyMachineContract,
   determineAgentState,
+  gitspaceContract,
   getGitIdentityContract,
   getOmpSettingsContract,
   getComposioSetupContract,
@@ -194,7 +195,7 @@ import {
   type WorkflowView,
 } from '@gitspace/protocol';
 import { phaseCeilingViolation, type ArtifactCapability, type GitSpaceDatabase, type GitSpaceHandlers, type LocalArtifactResolver, type MaterializedSpace } from '@gitspace/core';
-import { err, ok } from 'result-rpc';
+import { contractDigest, err, ok } from 'result-rpc';
 import { createFetchHandler, serverRpc } from 'result-rpc/server';
 import { DeploymentLaunchError, type LaunchProgress } from './deployment-launcher.js';
 import { DeviceRegistry } from './device-registry.js';
@@ -2389,10 +2390,14 @@ export function procedureKinds(router: ReturnType<typeof createGitSpaceRpcRouter
   };
 }
 
+const RPC_CONTRACT_VERSION = contractDigest(gitspaceContract);
+
 export function createGitSpaceRpcHandler(options: GitSpaceRpcRouterOptions) {
   const router = createGitSpaceRpcRouter(options);
   const handler = createFetchHandler({
     router,
+    // Cloud and machine routers implement different slices of the same public contract.
+    contractVersion: RPC_CONTRACT_VERSION,
     endpoint: '/rpc',
     createContext: ({ request }) => {
       const caller = callerFor(request);

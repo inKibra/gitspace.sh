@@ -194,6 +194,9 @@ function accountRouter(env: Env, userId: string, deviceId: string) {
   const machineEvents = server.implement(machineLifecycleEventsContract).stream(async function* ({ signal, errors }) {
     let previous: Record<string, FleetMachineDefinition> = {};
     try {
+      await requireSubscription();
+      // Flush the stream before an empty fleet can hit the client's header deadline.
+      yield ok({ type: 'ready' as const });
       while (!signal.aborted) {
         const machines = await fleet();
         await requireSubscription();

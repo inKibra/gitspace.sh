@@ -50,6 +50,29 @@ describe('account cloud RPC without machines', () => {
     ] });
   });
 
+  it('opens an empty fleet stream and reports the first machine without reconnecting', async () => {
+    const fixture = await account();
+    const response = await SELF.fetch(fixture.request(single('machine.events')));
+    const reader = response.body!.getReader();
+    try {
+      const ready = await reader.read();
+      expect(parse(new TextDecoder().decode(ready.value).trim())).toMatchObject({
+        response: { status: 'ok', value: { type: 'ready' } },
+      });
+      await env.FLEET_CATALOG.getByName(fixture.userId).putMachine({
+        id: 'first-machine', label: 'First machine', state: 'offline', rpcEndpoint: null,
+        kind: 'physical', provider: 'physical', notes: '', desiredState: 'online',
+        lifecycleRevision: 1, operationId: null, error: null,
+      });
+      const changed = await reader.read();
+      expect(parse(new TextDecoder().decode(changed.value).trim())).toMatchObject({
+        response: { status: 'ok', value: { type: 'upsert', machineId: 'first-machine' } },
+      });
+    } finally {
+      await reader.cancel();
+    }
+  });
+
   it('keeps missing machine data from failing concurrent account queries for API clients', async () => {
     const fixture = await account(['rpc.read'], 'client');
     const content = 'modelRoles:\n  default: openai/gpt-4o\n';

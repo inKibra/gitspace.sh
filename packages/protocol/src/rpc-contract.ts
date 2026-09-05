@@ -239,11 +239,14 @@ export const FleetMachineViewCodec = wire.object({
   operationId: wire.nullable(wire.string),
   error: wire.nullable(wire.string),
 });
-export const FleetMachineEventCodec = wire.object({
-  type: wire.enum(['upsert', 'remove']),
-  machineId: wire.string,
-  machine: wire.nullable(FleetMachineViewCodec),
-});
+export const FleetMachineEventCodec = wire.union([
+  wire.object({ type: wire.literal('ready') }),
+  wire.object({
+    type: wire.enum(['upsert', 'remove']),
+    machineId: wire.string,
+    machine: wire.nullable(FleetMachineViewCodec),
+  }),
+]);
 export const UserSettingsViewCodec = wire.object({
   version: wire.literal(1),
   revision: wire.number,
