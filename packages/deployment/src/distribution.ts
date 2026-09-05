@@ -2,7 +2,7 @@ import { z } from 'zod';
 
 /** Native dependency graphs are built on each target, never cross-labelled. Linux artifacts use glibc, not musl. */
 export const DISTRIBUTION_PLATFORMS = ['darwin-arm64', 'darwin-x64', 'linux-arm64', 'linux-x64'] as const;
-export const DISTRIBUTION_BUN_VERSION = '1.3.14';
+export const DISTRIBUTION_BUN_VERSION = '1.4.0';
 export const distributionPlatformSchema = z.enum(DISTRIBUTION_PLATFORMS);
 export type DistributionPlatform = z.infer<typeof distributionPlatformSchema>;
 export const distributionReleaseSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u);

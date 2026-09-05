@@ -28,12 +28,12 @@ const COMPILE_TARGETS: Record<DistributionPlatform, Bun.Build.CompileTarget> = {
   'linux-arm64': 'bun-linux-arm64',
   'linux-x64': 'bun-linux-x64-baseline',
 };
-// Official release asset digests: https://api.github.com/repos/oven-sh/bun/releases/tags/bun-v1.3.14
+// Official release asset digests: https://api.github.com/repos/oven-sh/bun/releases/tags/bun-v1.4.0
 const BUN_ASSETS: Record<DistributionPlatform, { name: string; sha256: string }> = {
-  'darwin-arm64': { name: 'bun-darwin-aarch64', sha256: 'd8b96221828ad6f97ac7ac0ab7e95872341af763001e8803e8267652c2652620' },
-  'darwin-x64': { name: 'bun-darwin-x64-baseline', sha256: '3e35ad6f53971a9834bf9e6786e2adf72b5f1921cc9a9c5fde073d2972944076' },
-  'linux-arm64': { name: 'bun-linux-aarch64', sha256: 'a27ffb63a8310375836e0d6f668ae17fa8d8d18b88c37c821c65331973a19a3b' },
-  'linux-x64': { name: 'bun-linux-x64-baseline', sha256: 'a063908ae08b7852ca10939bbdc6ceed3ddabce8fb9402dce83d65d73b36e6c7' },
+  'darwin-arm64': { name: 'bun-darwin-aarch64', sha256: 'c669e97f6164e1c96e0701748db98dfa77492908cbd8394c7557134a735de381' },
+  'darwin-x64': { name: 'bun-darwin-x64-baseline', sha256: 'da9b9f1b4ba766c6f299711f38dfaa98623e1ed9c40896aa53db803c52ec1fa0' },
+  'linux-arm64': { name: 'bun-linux-aarch64', sha256: '4b1a332ee861983eb93bcfe6f770fff94e3e31b2c388bdaea3c8ed35e58eed0e' },
+  'linux-x64': { name: 'bun-linux-x64-baseline', sha256: '184fb4595f0d401a217cf7c78c1bc430ba83314dab7a8b94805babbf7fa7097f' },
 };
 
 async function packageBun(platform: DistributionPlatform, scratch: string): Promise<string> {
