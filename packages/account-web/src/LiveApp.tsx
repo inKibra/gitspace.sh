@@ -1510,9 +1510,21 @@ function GitSpaceProduct() {
   useEffect(() => {
     const controller = new AbortController();
     void (async () => {
-      for await (const event of rpcClient.settings.events({}, { signal: controller.signal })) {
-        if (event.status === 'error') break;
-        await Promise.all([settingsQuery.refetch(), gitIdentityQuery.refetch(), ...(runtimeMetadataEnabled ? [ompQuery.refetch()] : [])]);
+      while (!controller.signal.aborted) {
+        try {
+          for await (const event of rpcClient.settings.events({}, { signal: controller.signal })) {
+            if (controller.signal.aborted) return;
+            if (event.status === 'error') break;
+            await Promise.all([settingsQuery.refetch(), gitIdentityQuery.refetch(), ...(runtimeMetadataEnabled ? [ompQuery.refetch()] : [])]);
+          }
+        } catch {
+          if (controller.signal.aborted) return;
+        }
+        if (!controller.signal.aborted) {
+          const tick = Promise.withResolvers<void>();
+          setTimeout(tick.resolve, 500);
+          await tick.promise;
+        }
       }
     })();
     return () => controller.abort();
@@ -1521,9 +1533,21 @@ function GitSpaceProduct() {
     if (!runtimeMetadataEnabled) return;
     const controller = new AbortController();
     void (async () => {
-      for await (const event of rpcClient.machine.events({}, { signal: controller.signal })) {
-        if (event.status === 'error') break;
-        await machinesQuery.refetch();
+      while (!controller.signal.aborted) {
+        try {
+          for await (const event of rpcClient.machine.events({}, { signal: controller.signal })) {
+            if (controller.signal.aborted) return;
+            if (event.status === 'error') break;
+            await machinesQuery.refetch();
+          }
+        } catch {
+          if (controller.signal.aborted) return;
+        }
+        if (!controller.signal.aborted) {
+          const tick = Promise.withResolvers<void>();
+          setTimeout(tick.resolve, 500);
+          await tick.promise;
+        }
       }
     })();
     return () => controller.abort();

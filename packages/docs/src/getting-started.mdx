@@ -31,6 +31,8 @@ Complete your profile, then choose a machine during setup. You can also skip thi
 
 Choose **Create cloud machine** and confirm. GitSpace creates a temporary machine with the standard tools and your account's runtime. Wait for its state to become **online** before placing work on it. Provider usage charges may apply.
 
+A cold start or restore can take several minutes. Keep the page open; GitSpace updates the machine state when it is ready.
+
 This path does not need the local client.
 
 In **Settings > Machines**, choose **Stop** to save supported workspace state and stop the cloud machine. If saving fails, the machine stays online. Choose **Start** to run a fresh machine environment and restore saved workspaces.
@@ -83,6 +85,8 @@ gitspace doctor
 ## 3. Configure your agent provider
 
 Once a machine is online, connect a provider from the **Providers** step or **Settings > OMP > Providers**. Choose the model settings your agents should use. You can skip provider setup while exploring the account, but an agent needs a configured provider before it can work.
+
+For Codex on a cloud machine, **Open sign-in page** takes you to OpenAI. After approval, your browser may reach a `localhost:1455/auth/callback` page that cannot load. Copy that page's full address into GitSpace's prompt and choose **Continue**. Keep the URL private. On a local machine, the callback can finish automatically.
 
 ## 4. Try a small task
 
