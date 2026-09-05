@@ -72,6 +72,13 @@ bun run typecheck:packages
 
 `bun run dev` starts the self-development environment. Release builds use the pinned toolchain and native platform workflow in `.github/workflows/publish-distribution.yml`.
 
+Cloud container images build on GitHub through `.github/workflows/publish-container.yml`. Push a `container-*` tag to build and publish that commit.
+
+- Set the repository variable `CLOUDFLARE_ACCOUNT_ID`.
+- Set `CLOUDFLARE_API_TOKEN` with registry write access. For a one-off run, fresh `CLOUDFLARE_REGISTRY_USERNAME` and `CLOUDFLARE_REGISTRY_PASSWORD` secrets also work; these credentials expire.
+- The workflow checks packaged Bun, walgit, and OMP before uploading. Its `cloud-container-reference` artifact records the immutable image digest and source commit.
+- Publication does not change running machines. Deploy the digest through `packages/sandbox-worker/scripts/rollout.ts`, which checkpoints machines before replacing the provider image.
+
 Bun's module mocks leak between test files in a shared process. Use isolated processes for trusted machine/core results, for example:
 
 ```sh
