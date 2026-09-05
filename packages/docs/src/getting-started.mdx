@@ -45,12 +45,12 @@ Run the installer:
 curl -fsSL https://gitspace.sh/install | sh
 ```
 
-If the installer asks you to add `~/.local/bin` to your PATH, do so before continuing. You can also invoke `~/.local/bin/gitspace` directly.
+The pairing command uses the full path to `~/.local/bin/gitspace`, so you do not need to change your PATH. You can add that directory to your PATH later to run `gitspace` by name.
 
 In the browser, choose **Generate pairing command**. Copy that command to the computer's terminal. It has this form:
 
 ```bash
-gitspace machine setup --pair <short-lived-pairing-token>
+"$HOME/.local/bin/gitspace" machine setup --pair <short-lived-pairing-token>
 ```
 
 The computer generates its own keys. Compare its name and signing key in the browser with the terminal, then choose **Approve this computer**. The command downloads the verified runtime and starts it. Keep the terminal open until setup reports readiness, then check that the browser shows **Connected**.

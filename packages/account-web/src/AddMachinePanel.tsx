@@ -97,7 +97,7 @@ export function AddMachinePanel({ machines, onClose }: { machines: readonly Sett
   };
   const now = Date.now();
   const command = pairing && !expired && pairing.expiresAt > now && (!status || status.state === 'created')
-    ? `gitspace machine setup --pair ${encodeMachinePairingToken({ version: 1, ...pairing }, now)}` : null;
+    ? `"$HOME/.local/bin/gitspace" machine setup --pair ${encodeMachinePairingToken({ version: 1, ...pairing }, now)}` : null;
   return <Card>
     <CardHeader>
       <CardTitle>Add your computer</CardTitle>
@@ -108,7 +108,7 @@ export function AddMachinePanel({ machines, onClose }: { machines: readonly Sett
         <h3 className="text-body font-semibold">1. Install on the computer you want to connect</h3>
         <p className="text-body text-muted-foreground">Install Git and the OpenSSH client first. On Windows, use a supported Linux distribution in WSL. The installer detects the platform and checks the download.</p>
         <InputCopy value="curl -fsSL https://gitspace.sh/install | sh" />
-        <p className="text-caption text-muted-foreground">If gitspace is not on your PATH, open a new terminal or run ~/.local/bin/gitspace.</p>
+        <p className="text-caption text-muted-foreground">The pairing command uses the default install location, so you do not need to change your PATH.</p>
       </section>
       <section className="flex flex-col gap-2">
         <h3 className="text-body font-semibold">2. Pair this computer</h3>
