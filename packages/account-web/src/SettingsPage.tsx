@@ -40,6 +40,7 @@ import { glyph } from './glyph.js';
 import { EmptyState, PageCanvas, PageHeader } from './GitSpaceShell.js';
 import { ProvidersSection, type ProvidersSectionProps } from './ProvidersSection.js';
 import { desiredLabel, machineRollup, ompRollup, RELEASE_STATUS_COLOR, RELEASE_TARGET_LABEL, RELEASE_TARGETS, shortSha, type ReleaseRecordView } from './release.js';
+import { AddMachinePanel } from './AddMachinePanel.js';
 
 // `omp-providers` is the onboarding step for provider sign-in; in settings
 // mode it is reached as `?section=omp-providers`, which opens the OMP section
@@ -560,21 +561,17 @@ function MachineSettings({ machines, onUpdateMachine, onCreateSandbox, onControl
           {machine.provider !== 'physical' && machine.state !== 'deleting' ? <Button variant="ghost" onClick={() => { if (window.confirm(`Destroy ${machine.label}? This cannot be undone.`)) settle(onDestroyMachine(machine.id)); }}>Destroy</Button> : null}
         </CardFooter>
       </Card>)}</SettingRows>
-        : <EmptyState icon={icon(Server01, 20)} title="No machines connected" description="Set up GitSpace from the computer you want to use." />}
+        : <EmptyState icon={icon(Server01, 20)} title="No machines connected" description="Create a cloud machine or connect your own computer. You can also finish account setup and add capacity later." />}
       {editingMachine ? <Panel title={`Machine notes · ${editingMachine.label}`} description="Shared purpose, tools, constraints, and credential boundaries." footer={<><Button variant="secondary" onClick={() => setEditing(null)}>Cancel</Button><Button variant="primary" onClick={() => settle(onUpdateMachine(editingMachine.id, notes).then(() => setEditing(null)))}>Save notes</Button></>}>
         {/* FLUID-GAP: multi-line textarea (no textarea in the registry) */}
         <textarea aria-label="Machine notes" rows={4} value={notes} className={`${shape.input} w-full border border-border bg-surface-2 p-2 text-body text-foreground`} onChange={(event) => setNotes(event.currentTarget.value)} />
       </Panel> : null}
     </Group>
-    {setup ? <Panel title="Set up a computer" description="Enrollment happens in the CLI; cloud fleet state updates after the machine connects." footer={<Button variant="secondary" onClick={() => setSetup(false)}>Done</Button>}>
-      <ol className="flex flex-col gap-4">
-        <li className="flex items-start gap-3"><Badge color="gray" className="tabular-nums">1</Badge><div className="flex min-w-0 flex-1 flex-col gap-2"><strong className="text-body font-semibold text-foreground">Connect your account</strong><InputCopy value="gitspace login <handle> --recovery-key <key>" /></div></li>
-        <li className="flex items-start gap-3"><Badge color="gray" className="tabular-nums">2</Badge><div className="flex min-w-0 flex-1 flex-col gap-2"><strong className="text-body font-semibold text-foreground">Enroll and start this computer</strong><InputCopy value="gitspace machine setup && gitspace machine start && gitspace open" /></div></li>
-      </ol>
-    </Panel> : sandboxSetup ? <Panel title="Create managed sandbox" description="Creates a Cloudflare Sandbox container, enrolls a managed 1.x machine identity, starts the GitSpace runtime, and waits for its RPC endpoint. Cloudflare usage charges may apply." footer={<><Button variant="secondary" onClick={() => setSandboxSetup(false)}>Cancel</Button><Button variant="primary" onClick={() => settle(onCreateSandbox().then(() => setSandboxSetup(false)))}>Create sandbox</Button></>} />
+    {setup ? <AddMachinePanel machines={machines} onClose={() => setSetup(false)} />
+    : sandboxSetup ? <Panel title="Create managed cloud machine" description="Creates a Cloudflare container, starts your account’s GitSpace runtime, and waits for its connection. You can keep and personalize this machine. Cloudflare usage charges may apply." footer={<><Button variant="secondary" onClick={() => setSandboxSetup(false)}>Cancel</Button><Button variant="primary" onClick={() => settle(onCreateSandbox().then(() => setSandboxSetup(false)))}>Create cloud machine</Button></>} />
     : <div className="flex flex-wrap items-center gap-2">
       <Button variant="primary" onClick={() => setSetup(true)}>{icon(Terminal)}Add a computer</Button>
-      <Button variant="secondary" onClick={() => setSandboxSetup(true)}>{icon(Server01)}Create sandbox</Button>
+      <Button variant="secondary" onClick={() => setSandboxSetup(true)}>{icon(Server01)}Create cloud machine</Button>
     </div>}
   </>;
 }
@@ -686,7 +683,7 @@ function SettingsShell(props: SettingsPageProps) {
 }
 function OnboardingShell(props: SettingsPageProps) {
   const [step, setStep] = useState(0);
-  const steps: Array<{ label: string; section: Section }> = [{ label: 'Profile', section: 'profile' }, { label: 'OMP', section: 'omp' }, { label: 'Providers', section: 'omp-providers' }, { label: 'Git', section: 'git' }, { label: 'Machine', section: 'machines' }, { label: 'Defaults', section: 'defaults' }];
+  const steps: Array<{ label: string; section: Section }> = [{ label: 'Profile', section: 'profile' }, { label: 'Machine', section: 'machines' }, { label: 'Providers', section: 'omp-providers' }, { label: 'OMP', section: 'omp' }, { label: 'Git', section: 'git' }, { label: 'Defaults', section: 'defaults' }];
   const current = steps[step]!;
   const last = step === steps.length - 1;
   const profileIncomplete = step === 0 && (!props.settings.profile.displayName.trim() || !props.settings.profile.handle);

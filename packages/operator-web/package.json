@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "bun run --cwd ../cli build && bun run --cwd ../account-web build && vite build",
+    "build": "bun run --cwd ../account-web build && vite build",
     "typecheck": "tsgo --noEmit -p tsconfig.json"
   },
   "dependencies": {

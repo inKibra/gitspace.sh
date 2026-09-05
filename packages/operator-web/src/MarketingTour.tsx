@@ -88,7 +88,7 @@ export function AskSection() {
 }
 
 const capabilities = [
-  ['Fleet', 'Physical machines and managed sandboxes', 'Current state and placement'],
+  ['Fleet', 'Your computers and managed cloud machines', 'Current state and placement'],
   ['Work', 'Projects, workspaces, phases, and chains', 'Move, archive, release'],
   ['Agents', 'OMP sessions and native block transcripts', 'Structured questions and inbox'],
   ['Context', 'Goals, workflows, rubrics, and notes', 'Durable agent-readable intent'],

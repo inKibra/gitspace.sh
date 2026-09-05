@@ -233,6 +233,7 @@ export async function decryptArtifactBytes(sealed: Uint8Array, key: Uint8Array):
 export * from './agent-activity.js';
 export * from './credential-vault.js';
 export * from './device-grant.js';
+export * from './machine-pairing.js';
 export * from './client.js';
 export * from './routed-transport.js';
 export * from './deployment.js';

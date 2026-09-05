@@ -7,7 +7,7 @@
     "gitspace": "./src/index.ts"
   },
   "scripts": {
-    "build": "bun build src/index.ts --target=bun --outdir=dist",
+    "build": "bun ../deployment/src/release.ts client --out dist/gitspace",
     "typecheck": "tsgo --noEmit -p tsconfig.json"
   },
   "dependencies": {

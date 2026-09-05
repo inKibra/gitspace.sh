@@ -6,8 +6,10 @@
   "exports": {
     ".": "./src/index.ts",
     "./agent-activity": "./src/agent-activity.ts",
+    "./account-rpc": "./src/account-rpc.ts",
     "./credential-vault": "./src/credential-vault.ts",
     "./device-grant": "./src/device-grant.ts",
+    "./machine-pairing": "./src/machine-pairing.ts",
     "./client": "./src/client.ts",
     "./routed-transport": "./src/routed-transport.ts",
     "./deployment": "./src/deployment.ts",

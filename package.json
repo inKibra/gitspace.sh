@@ -121,6 +121,7 @@
     "ghostty-web": "^0.4.0",
     "happy-dom": "^20.11.1",
     "miniflare": "3.20250718.3",
+    "vite": "^8.2.2",
     "vitest": "^4.1.11",
     "wrangler": "^4.127.0"
   },

@@ -112,14 +112,21 @@ function exportedLiteral(source: string, name: string): string {
   return JSON.parse(match[1]!) as string;
 }
 
-async function installRuntime(path: string, dependencies: Record<string, string>, overrides?: Record<string, string>): Promise<void> {
+async function installRuntime(path: string, dependencies: Record<string, string>, overrides?: Record<string, string>, lockRoot?: string): Promise<void> {
   await mkdir(path, { recursive: true });
   await writeFile(join(path, 'package.json'), JSON.stringify({
     private: true, type: 'module', dependencies, overrides,
     trustedDependencies: ['onnxruntime-node', 'sharp'],
   }));
+  if (lockRoot) {
+    const locked = JSON.parse(await readFile(join(lockRoot, 'package.json'), 'utf8')) as { dependencies: Record<string, string>; overrides?: Record<string, string> };
+    if (JSON.stringify(locked.dependencies) !== JSON.stringify(dependencies) || JSON.stringify(locked.overrides) !== JSON.stringify(overrides)) {
+      throw new Error(`Runtime dependency pins changed; prepare and retain a new release lock set: ${lockRoot}`);
+    }
+    await cp(join(lockRoot, 'bun.lock'), join(path, 'bun.lock'));
+  }
   // This generated manifest contains no devDependencies. Production mode would suppress the provenance lockfile.
-  const install = Bun.spawn([process.execPath, 'install', '--linker=hoisted', '--save-text-lockfile'], {
+  const install = Bun.spawn([process.execPath, 'install', '--linker=hoisted', '--save-text-lockfile', ...(lockRoot ? ['--frozen-lockfile'] : [])], {
     cwd: path,
     env: { ...process.env, BUN_BE_BUN: '1' },
     stdout: 'pipe', stderr: 'pipe',
@@ -128,6 +135,39 @@ async function installRuntime(path: string, dependencies: Record<string, string>
     new Response(install.stdout).text(), new Response(install.stderr).text(), install.exited,
   ]);
   if (exitCode !== 0) throw new Error(`Executable side-runtime install failed: ${stdout}\n${stderr}`);
+}
+
+async function runtimeDependencyPins(agentRoot: string) {
+  const mnemopiRoot = await installedPackageRoot('@oh-my-pi/pi-mnemopi', agentRoot);
+  const memoryManifest = JSON.parse(await readFile(join(mnemopiRoot, 'package.json'), 'utf8')) as RuntimePackage;
+  const fastembedVersion = pinnedVersion(memoryManifest.peerDependencies?.fastembed, 'fastembed');
+  const ttsSource = await readFile(join(agentRoot, 'src/tts/runtime.ts'), 'utf8');
+  const kokoroPackage = exportedLiteral(ttsSource, 'KOKORO_PACKAGE');
+  const kokoroVersion = pinnedVersion(exportedLiteral(ttsSource, 'KOKORO_VERSION'), kokoroPackage);
+  const onnxPackage = exportedLiteral(ttsSource, 'ONNXRUNTIME_NODE_PACKAGE');
+  const onnxVersion = pinnedVersion(exportedLiteral(ttsSource, 'ONNXRUNTIME_NODE_VERSION'), onnxPackage);
+  return { fastembedVersion, kokoroPackage, kokoroVersion, onnxPackage, onnxVersion };
+}
+
+/** Resolve once for a release; retain these lockfiles and use the same set on every native build runner. */
+export async function prepareRuntimeLocks(root: string, outDir: string): Promise<void> {
+  const agentRoot = await installedPackageRoot('@oh-my-pi/pi-coding-agent', join(root, 'packages/account-omp'));
+  const pins = await runtimeDependencyPins(agentRoot);
+  for (const [name, dependencies, overrides] of [
+    ['memory', { fastembed: pins.fastembedVersion }, undefined],
+    ['tts', { [pins.kokoroPackage]: pins.kokoroVersion }, { [pins.onnxPackage]: pins.onnxVersion }],
+  ] as const) {
+    const path = join(outDir, name);
+    await mkdir(path, { recursive: true });
+    await writeFile(join(path, 'package.json'), JSON.stringify({
+      private: true, type: 'module', dependencies, overrides, trustedDependencies: ['onnxruntime-node', 'sharp'],
+    }), { flag: 'wx' });
+    const install = Bun.spawn([process.execPath, 'install', '--lockfile-only', '--ignore-scripts', '--save-text-lockfile'], {
+      cwd: path, env: { ...process.env, BUN_BE_BUN: '1' }, stdout: 'pipe', stderr: 'pipe',
+    });
+    const [stdout, stderr, code] = await Promise.all([new Response(install.stdout).text(), new Response(install.stderr).text(), install.exited]);
+    if (code !== 0) throw new Error(`Cannot resolve release runtime lock ${name}: ${stdout}\n${stderr}`);
+  }
 }
 
 export interface PackagedOmpRuntime {
@@ -139,7 +179,7 @@ export interface PackagedOmpRuntime {
 }
 
 /** Build-time closure of optional executable code; model weights remain ordinary runtime data. */
-export async function packageOmpRuntime(root: string, outDir: string): Promise<PackagedOmpRuntime> {
+export async function packageOmpRuntime(root: string, outDir: string, runtimeLockRoot?: string): Promise<PackagedOmpRuntime> {
   const resolutionRoot = join(root, 'packages/account-omp');
   const agentRoot = await installedPackageRoot('@oh-my-pi/pi-coding-agent', resolutionRoot);
   const packageRoots: Record<string, string> = {};
@@ -158,25 +198,21 @@ export async function packageOmpRuntime(root: string, outDir: string): Promise<P
   const graph = new RuntimeGraphCopier(outDir);
   for (const dependency of ['@huggingface/transformers', 'sherpa-onnx-node', 'puppeteer-core', '@babel/parser']) await graph.copy(dependency, agentRoot);
   await packageCudaProviders(outDir);
-  const mnemopiRoot = await installedPackageRoot('@oh-my-pi/pi-mnemopi', agentRoot);
   for (const asset of ['package.json', 'CHANGELOG.md', 'README.md', 'LICENSE', 'THIRD-PARTY-NOTICES.txt', 'examples']) {
     await cp(join(agentRoot, asset), join(outDir, asset), { recursive: true, dereference: true });
   }
-  const memoryManifest = JSON.parse(await readFile(join(mnemopiRoot, 'package.json'), 'utf8')) as RuntimePackage;
-  const fastembedVersion = pinnedVersion(memoryManifest.peerDependencies?.fastembed, 'fastembed');
-  const ttsSource = await readFile(join(agentRoot, 'src/tts/runtime.ts'), 'utf8');
-  const kokoroPackage = exportedLiteral(ttsSource, 'KOKORO_PACKAGE');
-  const kokoroVersion = pinnedVersion(exportedLiteral(ttsSource, 'KOKORO_VERSION'), kokoroPackage);
-  const onnxPackage = exportedLiteral(ttsSource, 'ONNXRUNTIME_NODE_PACKAGE');
-  const onnxVersion = pinnedVersion(exportedLiteral(ttsSource, 'ONNXRUNTIME_NODE_VERSION'), onnxPackage);
+  const { fastembedVersion, kokoroPackage, kokoroVersion, onnxPackage, onnxVersion } = await runtimeDependencyPins(agentRoot);
   const scratch = await mkdtemp(`${outDir}.runtime-build-`);
   try {
     const memorySource = join(scratch, 'memory');
-    await installRuntime(memorySource, { fastembed: fastembedVersion });
+    await installRuntime(memorySource, { fastembed: fastembedVersion }, undefined, runtimeLockRoot ? join(runtimeLockRoot, 'memory') : undefined);
     await graph.copy('fastembed', memorySource);
+    await mkdir(join(outDir, 'runtime/memory'), { recursive: true });
+    await cp(join(memorySource, 'package.json'), join(outDir, 'runtime/memory/package.json'));
+    await cp(join(memorySource, 'bun.lock'), join(outDir, 'runtime/memory/bun.lock'));
     const ttsRoot = join(outDir, 'runtime/tts');
     const ttsInstall = join(scratch, 'tts');
-    await installRuntime(ttsInstall, { [kokoroPackage]: kokoroVersion }, { [onnxPackage]: onnxVersion });
+    await installRuntime(ttsInstall, { [kokoroPackage]: kokoroVersion }, { [onnxPackage]: onnxVersion }, runtimeLockRoot ? join(runtimeLockRoot, 'tts') : undefined);
     const ttsGraph = new RuntimeGraphCopier(ttsRoot);
     await ttsGraph.copy(kokoroPackage, ttsInstall);
     await writeFile(join(ttsRoot, 'package.json'), await readFile(join(ttsInstall, 'package.json')));

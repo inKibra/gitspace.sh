@@ -1248,7 +1248,9 @@ function LiveWorkspace({ onOpenSettings, defaultMachineId, activeView, onNavigat
   </>;
   if (projectsQuery.state === 'pending') return <main className="flex h-dvh items-center justify-center bg-background"><EmptyState icon={<ThinkingIndicator />} title="Opening projects…" description="Loading cloud project authority." /></main>;
   if (projectsQuery.state === 'failure') return <main className="flex h-dvh items-center justify-center bg-background"><EmptyState title="Projects are unavailable" description={projectsQuery.error.message} action={<Button variant="ghost" onClick={() => void projectsQuery.refetch()}>Retry</Button>} /></main>;
-  if (!projectId) return <ProjectsView
+  if (!projectId) return <div className="flex h-dvh flex-col bg-background">
+    <div className="flex justify-end px-6 pt-4"><Button variant="secondary" onClick={() => onOpenSettings()}>Account settings</Button></div>
+    <ProjectsView
     projects={projectsQuery.value}
     workspaces={[]}
     onOpen={() => undefined}
@@ -1275,7 +1277,8 @@ function LiveWorkspace({ onOpenSettings, defaultMachineId, activeView, onNavigat
       if (result.status === 'error') throw result.error;
       await projectsQuery.refetch();
     }}
-  />;
+    />
+  </div>;
 
   if (bootstrap.state === 'pending' || recoveryScheduled) return <main className="flex h-dvh items-center justify-center bg-background"><EmptyState icon={<ThinkingIndicator />} title="Opening GitSpace…" description={recoveryScheduled ? 'Reconnecting to the selected machine.' : 'Loading the selected agent.'} /></main>;
   if (bootstrap.state === 'failure') return <main className="flex h-dvh items-center justify-center bg-background"><EmptyState title="GitSpace is unavailable" description={bootstrap.error.message} action={<Button variant="ghost" onClick={() => { setConnectionRecoveryAttempt(0); routedTransport.invalidate(); void bootstrap.refetch(); }}>Retry</Button>} /></main>;
@@ -1585,12 +1588,12 @@ function GitSpaceProduct() {
     onSetApiKey: saveProviderApiKey,
     login: { flow: loginFlow, respond: respondLogin, cancel: dismissLogin },
   };
-  if (settingsQuery.state === 'pending' || !draft || ompQuery.state === 'pending' || gitIdentityQuery.state === 'pending') {
-    return <main className="flex h-dvh items-center justify-center bg-background"><EmptyState icon={<ThinkingIndicator />} title="Opening your GitSpace account…" description="Loading cloud settings and OMP configuration." /></main>;
-  }
   if (settingsQuery.state === 'failure' || ompQuery.state === 'failure' || gitIdentityQuery.state === 'failure') {
     const message = settingsQuery.state === 'failure' ? settingsQuery.error.message : ompQuery.state === 'failure' ? ompQuery.error.message : gitIdentityQuery.state === 'failure' ? gitIdentityQuery.error.message : 'Cloud settings are unavailable';
     return <main className="flex h-dvh items-center justify-center bg-background"><EmptyState title="GitSpace setup is unavailable" description={message} action={<Button variant="ghost" onClick={() => { void settingsQuery.refetch(); void ompQuery.refetch(); void gitIdentityQuery.refetch(); }}>Retry</Button>} /></main>;
+  }
+  if (settingsQuery.state === 'pending' || !draft || ompQuery.state === 'pending' || gitIdentityQuery.state === 'pending') {
+    return <main className="flex h-dvh items-center justify-center bg-background"><EmptyState icon={<ThinkingIndicator />} title="Opening your GitSpace account…" description="Loading cloud settings and OMP configuration." /></main>;
   }
   const page = (mode: 'settings' | 'onboarding') => <SettingsPage
     mode={mode}
@@ -1646,29 +1649,45 @@ type DeviceGateState =
   | { status: 'unenrolled'; error: string | null };
 
 /**
- * Nothing renders until this browser holds an enrolled device: `?enroll=`
+ * Nothing renders until this browser holds an enrolled device: `#enroll=`
  * redeems an invite, a stored device passes straight through, and a
- * machine-side rejection (revoked, expired) drops back to this screen.
+ * revoked or expired device drops back to this screen.
  */
 function DeviceGate({ children }: { children: ReactNode }) {
   const [state, setState] = useState<DeviceGateState>({ status: 'loading' });
   const [pasted, setPasted] = useState('');
+  const initialized = useRef(false);
+  const enrolling = useRef(false);
   const redeem = async (token: string): Promise<void> => {
+    if (enrolling.current) return;
+    enrolling.current = true;
+    setPasted('');
+    const url = new URL(window.location.href);
+    const fragment = new URLSearchParams(url.hash.slice(1));
+    if (fragment.has('enroll')) {
+      fragment.delete('enroll');
+      url.hash = fragment.toString();
+    }
+    url.searchParams.delete('enroll');
+    window.history.replaceState(null, '', url);
     setState({ status: 'enrolling' });
     try {
       setCurrentDevice(await enrollDevice(token));
-      const url = new URL(window.location.href);
-      url.searchParams.delete('enroll');
-      window.history.replaceState(null, '', url);
       setState({ status: 'enrolled' });
     } catch (error) {
       setState({ status: 'unenrolled', error: error instanceof Error ? error.message : 'Enrollment failed' });
+    } finally {
+      enrolling.current = false;
     }
   };
   useEffect(() => {
-    const token = new URL(window.location.href).searchParams.get('enroll');
-    if (token) void redeem(token);
-    else void currentDevice().then((device) => setState(device ? { status: 'enrolled' } : { status: 'unenrolled', error: null }));
+    if (!initialized.current) {
+      initialized.current = true;
+      const url = new URL(window.location.href);
+      const token = new URLSearchParams(url.hash.slice(1)).get('enroll') ?? url.searchParams.get('enroll');
+      if (token) void redeem(token);
+      else void currentDevice().then((device) => setState(device ? { status: 'enrolled' } : { status: 'unenrolled', error: null }));
+    }
     const onRejected = (event: Event): void => {
       const code = event instanceof CustomEvent ? String(event.detail?.code ?? '') : '';
       setState({ status: 'unenrolled', error: code === 'SIGNED_OUT' ? 'You signed out of this browser.' : 'This browser’s access was revoked. Reconnect with a new enrollment link.' });
@@ -1678,12 +1697,15 @@ function DeviceGate({ children }: { children: ReactNode }) {
   }, []);
   if (state.status === 'enrolled') return <>{children}</>;
   if (state.status === 'loading' || state.status === 'enrolling') {
-    return <main className="flex h-dvh items-center justify-center bg-background"><EmptyState icon={<ThinkingIndicator />} title={state.status === 'enrolling' ? 'Connecting this browser…' : 'Checking this browser…'} description="Device identity is verified by your machines, not by the cloud." /></main>;
+    return <main className="flex h-dvh items-center justify-center bg-background"><EmptyState icon={<ThinkingIndicator />} title={state.status === 'enrolling' ? 'Connecting this browser…' : 'Checking this browser…'} description="This browser gets its own revocable key. No local machine is required." /></main>;
   }
   const submit = (): void => {
     const trimmed = pasted.trim();
     let token = trimmed;
-    try { token = new URL(trimmed).searchParams.get('enroll') ?? trimmed; } catch { /* a bare token */ }
+    try {
+      const url = new URL(trimmed);
+      token = new URLSearchParams(url.hash.slice(1)).get('enroll') ?? url.searchParams.get('enroll') ?? trimmed;
+    } catch { /* a bare token */ }
     if (token) void redeem(token);
   };
   return <main className="flex h-dvh items-center justify-center bg-background p-6">
@@ -1691,11 +1713,14 @@ function DeviceGate({ children }: { children: ReactNode }) {
       <EmptyState
         icon={<Key01 width={20} height={20} strokeWidth={1.5} />}
         title="This browser isn’t connected"
-        description={state.error ?? 'Run `gitspace open` on an enrolled machine, or paste the one-time link printed by `gitspace open --print`. Each browser gets its own revocable device key.'}
-        action={<form className="flex w-full items-center gap-2" onSubmit={(event) => { event.preventDefault(); submit(); }}>
-          <InputGroup className="flex-1"><InputField index={0} label="Enrollment link" labelHidden value={pasted} placeholder="Paste the enrollment link" onChange={setPasted} /></InputGroup>
-          <Button variant="primary" type="submit" disabled={!pasted.trim()}>Connect</Button>
-        </form>}
+        description={state.error ?? 'Create an account or use your saved recovery key to connect this browser. You can also paste an enrollment link from a connected device.'}
+        action={<div className="flex w-full flex-col gap-4">
+          <a href="https://gitspace.sh/#start"><Button variant="primary">Create or recover account</Button></a>
+          <form className="flex w-full items-center gap-2" onSubmit={(event) => { event.preventDefault(); submit(); }}>
+            <InputGroup className="flex-1"><InputField index={0} label="Enrollment link" labelHidden value={pasted} placeholder="Paste the enrollment link" onChange={setPasted} /></InputGroup>
+            <Button variant="secondary" type="submit" disabled={!pasted.trim()}>Connect</Button>
+          </form>
+        </div>}
       />
     </div>
   </main>;

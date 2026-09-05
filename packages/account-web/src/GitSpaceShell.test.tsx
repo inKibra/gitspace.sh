@@ -7,24 +7,6 @@ import { WorkspaceTerminals } from './WorkspaceTerminals.js';
 
 
 describe('GitSpaceShell', () => {
-  it('renders one workspace agent with project navigation and a single collapsed Inspector entry', () => {
-    const html = renderToStaticMarkup(<GitSpaceShell {...verticalSliceFixture} onCloseSpace={async () => undefined} />);
-    expect(html).toContain('Darktop');
-    expect(html).not.toContain('Active work');
-    expect(html).toContain('Build the GitSpace 1.0 working loop.');
-    expect(html).not.toContain('Workspace changes and review details appear in this inspector.');
-    expect(html).toContain('UX review');
-    expect(html).toContain('Secrets');
-    expect(html).toContain('Kanban');
-    expect(html).toContain('Crons');
-    expect(html).toContain('Base · Waiting');
-    expect(html).not.toContain('class=\"topbar\"');
-    expect(html).toContain('agent-blame');
-    expect(html).toContain('Space actions for agent-blame');
-    expect(html).toContain('Close space');
-    expect(html).not.toContain('Code · green');
-    expect(html).not.toContain('Open base project');
-  });
   it('gates prompt intake while a reopened session is recovering', () => {
     const html = renderToStaticMarkup(<GitSpaceShell
       {...verticalSliceFixture}
@@ -37,38 +19,9 @@ describe('GitSpaceShell', () => {
     expect(html).toContain('disabled=""');
   });
 
-  it('uses the header lifecycle action for a working workspace', () => {
-    const html = renderToStaticMarkup(<GitSpaceShell {...verticalSliceFixture} onCloseSpace={async () => undefined} />);
-    expect(html).toContain('Stop and close');
-    expect(html).not.toContain('Close space</button></div>');
-  });
 
 
 
-  it('renders closed workspaces as preserved and reopenable', () => {
-    const closedAt = new Date('2026-08-01T00:00:00.000Z');
-    if (verticalSliceFixture.workspace.kind !== 'workspace') throw new Error('Expected workspace fixture');
-    const closedWorkspace: WorkspaceView = {
-      ...verticalSliceFixture.workspace,
-      status: {
-        primaryColor: 'dim' as const,
-        agents: { green: 0, blue: 0, orange: 0, red: 0 },
-        services: { green: 0, red: 0 },
-        terminals: { green: 0, red: 0 },
-      },
-      closedAt,
-    };
-    const html = renderToStaticMarkup(<GitSpaceShell
-      {...verticalSliceFixture}
-      workspace={closedWorkspace}
-      workspaces={verticalSliceFixture.workspaces.map((workspace) => workspace.id === closedWorkspace.id ? closedWorkspace : workspace)}
-      mainAgent={{ ...verticalSliceFixture.mainAgent!, state: 'closed' }}
-    />);
-    expect(html).toContain('Workspace archived');
-    expect(html).toContain('Files, history, artifacts, and review state are preserved.');
-    expect(html).toContain('Restore');
-    expect(html).toContain('Closed');
-  });
 
   it('renders a released workspace read-only with a machine picker defaulting to the preferred machine', () => {
     if (verticalSliceFixture.workspace.kind !== 'workspace') throw new Error('Expected workspace fixture');

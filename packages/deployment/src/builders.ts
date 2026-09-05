@@ -156,12 +156,12 @@ async function copyNativeRuntime(root: string, outDir: string): Promise<void> {
   }
 }
 
-async function buildExecutable(root: string, outDir: string, target: 'machine' | 'omp'): Promise<BuiltExecutableArtifact> {
+async function buildExecutable(root: string, outDir: string, target: 'machine' | 'omp', runtimeLockRoot?: string): Promise<BuiltExecutableArtifact> {
   await mkdir(outDir, { recursive: true });
   if ((await readdir(outDir)).length !== 0 || await Bun.file(executableManifestPath(outDir)).exists()) {
     throw new Error(`Executable output must be a new empty directory: ${outDir}`);
   }
-  const packaged = target === 'omp' ? await packageOmpRuntime(root, outDir) : null;
+  const packaged = target === 'omp' ? await packageOmpRuntime(root, outDir, runtimeLockRoot) : null;
   const entrypoints: Array<readonly [string, string]> = [
     [join(root, `packages/account-${target}/src/runtime.ts`), target],
     target === 'omp'
@@ -199,15 +199,15 @@ export interface BuiltOmpArtifact extends BuiltExecutableArtifact {
 }
 
 /** Independent OMP child executable; never includes the machine daemon or its migrations. */
-export async function buildOmpBundle(root: string, outDir: string): Promise<BuiltOmpArtifact> {
-  const built = await buildExecutable(root, outDir, 'omp');
+export async function buildOmpBundle(root: string, outDir: string, runtimeLockRoot?: string): Promise<BuiltOmpArtifact> {
+  const built = await buildExecutable(root, outDir, 'omp', runtimeLockRoot);
   return { ...built, metadata: built.manifest.omp! };
 }
 
 /** Bootstrap a host with independently versioned machine and OMP payloads and an embedded initial trust anchor. */
-export async function buildInitialRuntime(root: string, outDir: string): Promise<{ machine: BuiltExecutableArtifact; omp: BuiltOmpArtifact }> {
+export async function buildInitialRuntime(root: string, outDir: string, runtimeLockRoot?: string): Promise<{ machine: BuiltExecutableArtifact; omp: BuiltOmpArtifact }> {
   const machine = await buildMachineBundle(root, join(outDir, 'machine'));
-  const omp = await buildOmpBundle(root, join(outDir, 'omp'));
+  const omp = await buildOmpBundle(root, join(outDir, 'omp'), runtimeLockRoot);
   for (const [source, name] of [['host', 'host-runtime'], ['rpc-probe', 'rpc-probe']] as const) {
     const result = await Bun.build({
       entrypoints: [join(root, `packages/account-machine/src/${source}.ts`)],
@@ -215,6 +215,12 @@ export async function buildInitialRuntime(root: string, outDir: string): Promise
     });
     if (!result.success) throw new AggregateError(result.logs, 'Machine host build failed');
   }
+  const launcher = await Bun.build({
+    entrypoints: [join(root, 'packages/deployment/src/omp-launcher.ts')],
+    target: 'bun', outdir: outDir, naming: 'omp-launcher.js',
+    define: { 'process.env.GITSPACE_INITIAL_OMP_MANIFEST_HASH': JSON.stringify(omp.manifestHash) },
+  });
+  if (!launcher.success) throw new AggregateError(launcher.logs, 'Selected OMP command launcher build failed');
   await writeFile(join(outDir, 'host.js'), [
     "import { fileURLToPath } from 'node:url';",
     "process.env.GITSPACE_OMP_RUNTIME_PATH = fileURLToPath(new URL('./omp/omp.js', import.meta.url));",

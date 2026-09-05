@@ -1,151 +1,86 @@
 #!/usr/bin/env bun
-import { chmod, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
-import { closeSync, existsSync, openSync } from 'node:fs';
+import { chmod, mkdir, open, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { closeSync, existsSync, openSync, statSync } from 'node:fs';
 import { homedir, hostname } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { ed25519, x25519 } from '@noble/curves/ed25519.js';
-import { sha256 } from '@noble/hashes/sha2.js';
-import { buildInitialRuntime } from '@gitspace/deployment';
-import {
-  createRelayAuthorization,
-  createSignedControlRequest,
-  encodeDeviceInviteToken,
-  signDeviceInvite,
-} from '@gitspace/protocol';
-import {
-  credentialProtocolBase64,
-  signCredentialAuthorityGrant,
-  type SignedCredentialAuthorityGrant,
-} from '@gitspace/protocol/credential-vault';
+import { createRelayAuthorization, createSignedControlRequest, decodeMachinePairingToken, signRpcRequest } from '@gitspace/protocol';
+import { credentialProtocolBase64, type SignedCredentialAuthorityGrant } from '@gitspace/protocol/credential-vault';
 import { Command } from 'commander';
 import openBrowser from 'open';
+import { installRuntime } from './bootstrap.js';
 
-const VERSION = '0.1.0';
-const DEFAULT_API_URL = 'https://api.gitspace.sh';
 const CONFIG_ROOT = process.env.GITSPACE_CONFIG_HOME ?? join(homedir(), '.config', 'gitspace');
 const CONFIG_PATH = join(CONFIG_ROOT, 'config.json');
 const PID_PATH = join(CONFIG_ROOT, 'machine.pid');
 const LOG_PATH = join(CONFIG_ROOT, 'machine.log');
-const REPOSITORY_ROOT = process.env.GITSPACE_SOURCE_ROOT
-  ?? [resolve(import.meta.dir, '../../..'), resolve(import.meta.dir, '../..'), process.cwd()]
-    .find((candidate) => existsSync(join(candidate, 'packages/account-machine/src/runtime.ts')))
-  ?? resolve(import.meta.dir, '../../..');
-
+const PAIRING_PATH = join(CONFIG_ROOT, 'pairing.json');
 interface MachineConfig {
-  id: string;
-  label: string;
-  signingPrivateKey: string;
-  exchangePrivateKey: string;
-  grant: SignedCredentialAuthorityGrant;
-}
-
-interface GitSpaceConfig {
-  version: 2;
+  version: 3;
   apiUrl: string;
   accountUrl: string;
   handle: string;
   userId: string;
   relayUrl: string;
-  rootPrivateKey: string;
   rootPublicKey: string;
-  vaultKey: string;
-  machine?: MachineConfig;
+  brokerUrl: string;
+  brokerToken: string;
+  machine: { id: string; label: string; signingPrivateKey: string; exchangePrivateKey: string; grant: SignedCredentialAuthorityGrant };
+}
+interface PendingPairing {
+  pairingId: string;
+  machineId: string;
+  label: string;
+  signingPrivateKey: string;
+  exchangePrivateKey: string;
+}
+interface EnrolledPairing {
+  state: 'enrolled';
+  userId: string;
+  handle: string;
+  accountUrl: string;
+  relayUrl: string;
+  operatorUrl: string;
+  rootPublicKey: string;
+  machineId: string;
+  grant: SignedCredentialAuthorityGrant;
+  brokerUrl: string;
+  brokerToken: string;
 }
 
-function base64(bytes: Uint8Array): string {
-  return credentialProtocolBase64.encode(bytes);
-}
-
-function recoveryToken(privateKey: Uint8Array): string {
-  return `gsr_${base64(privateKey).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/u, '')}`;
-}
-
-function recoveryPrivateKey(token: string): Uint8Array {
-  if (!token.startsWith('gsr_')) throw new Error('Recovery key must start with gsr_');
-  const encoded = token.slice(4).replaceAll('-', '+').replaceAll('_', '/');
-  const key = credentialProtocolBase64.decode(encoded.padEnd(Math.ceil(encoded.length / 4) * 4, '='));
-  if (key.byteLength !== 32) throw new Error('Recovery key is invalid');
-  return key;
-}
-
-function derivedVaultKey(rootPrivateKey: Uint8Array): Uint8Array {
-  return sha256.create().update(new TextEncoder().encode('gitspace-vault-v1\n')).update(rootPrivateKey).digest();
-}
-
-async function loadConfig(): Promise<GitSpaceConfig | null> {
+async function loadConfig(): Promise<MachineConfig | null> {
   try {
-    return JSON.parse(await readFile(CONFIG_PATH, 'utf8')) as GitSpaceConfig;
+    const config = JSON.parse(await readFile(CONFIG_PATH, 'utf8')) as MachineConfig;
+    if (config.version !== 3) throw new Error('This is a legacy enrollment. Revoke the old machine in your account before relinking it. Your local files have not been changed.');
+    return config;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
     throw error;
   }
 }
-
-async function requireConfig(): Promise<GitSpaceConfig> {
+async function requireConfig(): Promise<MachineConfig> {
   const config = await loadConfig();
-  if (!config) throw new Error('Not logged in. Run `gitspace login`.');
+  if (!config) throw new Error('This machine is not linked. Open your GitSpace account, choose Settings > Machines > Add a computer, and follow the pairing steps.');
   return config;
 }
-
-async function saveConfig(config: GitSpaceConfig): Promise<void> {
+async function savePrivateJson(path: string, value: unknown): Promise<void> {
   await mkdir(CONFIG_ROOT, { recursive: true, mode: 0o700 });
-  const temporary = `${CONFIG_PATH}.${crypto.randomUUID()}.tmp`;
-  await writeFile(temporary, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
+  const temporary = `${path}.${crypto.randomUUID()}.tmp`;
+  await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
   await chmod(temporary, 0o600);
-  await rename(temporary, CONFIG_PATH);
+  await rename(temporary, path);
 }
-
-async function signedPost<T>(config: Pick<GitSpaceConfig, 'apiUrl' | 'rootPrivateKey'>, path: string, body: unknown): Promise<T> {
-  const privateKey = credentialProtocolBase64.decode(config.rootPrivateKey);
-  const response = await fetch(new URL(path, config.apiUrl), {
-    method: 'POST',
-    headers: {
-      authorization: createRelayAuthorization(privateKey, path),
-      'content-type': 'application/json',
-    },
-    body: JSON.stringify(body),
-  });
-  const result = await response.json() as { status?: string; value?: T; error?: { message?: string } } & T;
-  if (!response.ok || result.status === 'error') throw new Error(result.error?.message ?? `GitSpace API returned HTTP ${response.status}`);
-  return (result.status === 'ok' ? result.value : result) as T;
-}
-
-async function accountArtifactKey(config: GitSpaceConfig, machine: MachineConfig): Promise<string> {
-  const request = createSignedControlRequest({
-    userId: config.userId,
-    machineId: machine.id,
-    operation: 'artifacts.key.get',
-    payload: {},
-    signingPrivateKey: credentialProtocolBase64.decode(machine.signingPrivateKey),
-  });
-  const response = await fetch(new URL('/v1/control', config.apiUrl), {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(request),
-  });
+async function accountArtifactKey(config: MachineConfig): Promise<string> {
+  const request = createSignedControlRequest({ userId: config.userId, machineId: config.machine.id, operation: 'artifacts.key.get', payload: {}, signingPrivateKey: credentialProtocolBase64.decode(config.machine.signingPrivateKey) });
+  const response = await fetch(new URL('/v1/control', config.apiUrl), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(request), signal: AbortSignal.timeout(30_000) });
   if (!response.ok) throw new Error(`Account artifact key request failed (HTTP ${response.status})`);
-  try {
-    const result = await response.json() as { status?: unknown; value?: { key?: unknown } } | null;
-    const key = result?.value?.key;
-    if (result?.status !== 'ok' || typeof key !== 'string' || credentialProtocolBase64.decode(key).byteLength !== 32) {
-      throw new Error('Invalid account artifact key');
-    }
-    return key;
-  } catch {
-    // Do not expose response bodies or decoder errors: they may contain key material.
-    throw new Error('Control plane returned an invalid account artifact key');
-  }
+  const result = await response.json() as { status?: string; value?: { key?: string } };
+  if (result.status !== 'ok' || !result.value?.key || credentialProtocolBase64.decode(result.value.key).byteLength !== 32) throw new Error('Control plane returned an invalid account artifact key');
+  return result.value.key;
 }
-
-async function processIsRunning(pid: number): Promise<boolean> {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
+function processIsRunning(pid: number): boolean {
+  try { process.kill(pid, 0); return true; } catch { return false; }
 }
-
 async function machinePid(): Promise<number | null> {
   try {
     const pid = Number((await readFile(PID_PATH, 'utf8')).trim());
@@ -155,278 +90,177 @@ async function machinePid(): Promise<number | null> {
     throw error;
   }
 }
-
-async function buildRuntime(): Promise<string> {
-  const runtimeRoot = join(CONFIG_ROOT, 'runtime', crypto.randomUUID());
-  await mkdir(runtimeRoot, { recursive: true });
-  try {
-    await buildInitialRuntime(REPOSITORY_ROOT, runtimeRoot);
-    const selection = join(CONFIG_ROOT, 'runtime-selection.json');
-    const temporary = `${selection}.next`;
-    await writeFile(temporary, JSON.stringify({ path: runtimeRoot }), { mode: 0o600 });
-    await rename(temporary, selection);
-    return runtimeRoot;
-  } catch (error) {
-    await rm(runtimeRoot, { recursive: true, force: true });
-    throw error;
+function requireSystemTools(): void {
+  const missing = ['git', 'ssh', 'ssh-agent', 'ssh-add', 'ssh-keygen'].filter(tool => !Bun.which(tool));
+  if (missing.length) throw new Error(`Install Git and the OpenSSH client before linking this machine. Missing: ${missing.join(', ')}. Bun and OMP are included by GitSpace.`);
+}
+async function startMachine(): Promise<void> {
+  const config = await requireConfig();
+  requireSystemTools();
+  const currentPid = await machinePid();
+  if (currentPid && processIsRunning(currentPid)) throw new Error(`Machine is already running (pid ${currentPid})`);
+  const selectionPath = join(CONFIG_ROOT, 'runtime-selection.json');
+  if (!existsSync(selectionPath)) {
+    console.log('Downloading the verified machine runtime...');
+    await installRuntime(CONFIG_ROOT, config.apiUrl);
   }
-}
-
-const program = new Command()
-  .name('gitspace')
-  .description('GitSpace production client')
-  .version(VERSION);
-
-program.command('login')
-  .description('Create or recover your GitSpace account')
-  .argument('<handle>', 'Permanent GitSpace account handle')
-  .option('--recovery-key <key>', 'Recover an existing root identity')
-  .option('--invite <token>', 'Operator invitation required to create an account')
-  .option('--api <url>', 'GitSpace control plane URL', process.env.GITSPACE_API_URL ?? DEFAULT_API_URL)
-  .action(async (handleInput: string, options: { recoveryKey?: string; invite?: string; api: string }) => {
-    const existing = await loadConfig();
-    const created = !options.recoveryKey && !existing;
-    if (created && !options.invite) throw new Error('Creating an account requires --invite <token>. For an existing account, use --recovery-key <key>.');
-    const rootPrivateKey = options.recoveryKey
-      ? recoveryPrivateKey(options.recoveryKey)
-      : existing
-        ? credentialProtocolBase64.decode(existing.rootPrivateKey)
-        : ed25519.utils.randomSecretKey();
-    const rootPublicKey = ed25519.getPublicKey(rootPrivateKey);
-    const vaultKey = derivedVaultKey(rootPrivateKey);
-    const handle = handleInput.trim().toLowerCase();
-    if (!/^[a-z0-9](?:[a-z0-9-]{0,28}[a-z0-9])?$/u.test(handle)) throw new Error('Handle must be 1 to 30 lowercase letters, numbers, or hyphens');
-    const bootstrap = await signedPost<{ userId: string; handle: string; relayUrl: string; accountUrl: string; apiUrl: string }>(
-      { apiUrl: options.api, rootPrivateKey: base64(rootPrivateKey) },
-      created ? '/v1/accounts/bootstrap' : '/v1/accounts/recover',
-      { rootPublicKey: base64(rootPublicKey), handle, ...(created ? { vaultKey: base64(vaultKey), invite: options.invite } : {}) },
-    );
-    await saveConfig({
-      version: 2,
-      apiUrl: options.api,
-      accountUrl: bootstrap.accountUrl,
-      handle: bootstrap.handle,
-      userId: bootstrap.userId,
-      relayUrl: bootstrap.relayUrl,
-      rootPrivateKey: base64(rootPrivateKey),
-      rootPublicKey: base64(rootPublicKey),
-      vaultKey: base64(vaultKey),
-      ...(existing?.machine ? { machine: existing.machine } : {}),
-    });
-    console.log(`Logged in as ${bootstrap.handle} (${bootstrap.userId})`);
-    if (created) console.log(`Recovery key (store it now): ${recoveryToken(rootPrivateKey)}`);
+  const { path: runtimeRoot } = JSON.parse(await readFile(selectionPath, 'utf8')) as { path: string };
+  const bun = join(runtimeRoot, 'bin', 'bun');
+  const walgit = join(runtimeRoot, 'bin', 'walgit');
+  if (!existsSync(bun) || !existsSync(walgit)) throw new Error('The installed runtime is incomplete. Run gitspace doctor to inspect the installation; your workspace data has not been changed.');
+  const artifactKey = await accountArtifactKey(config);
+  const environmentRoot = join(CONFIG_ROOT, 'machine');
+  await mkdir(environmentRoot, { recursive: true, mode: 0o700 });
+  const log = openSync(LOG_PATH, 'a', 0o600);
+  let offset = statSync(LOG_PATH).size;
+  const child = Bun.spawn([bun, join(runtimeRoot, 'host.js')], {
+    cwd: CONFIG_ROOT, detached: true, stdout: log, stderr: log,
+    env: {
+      ...process.env,
+      PATH: `${join(runtimeRoot, 'bin')}${delimiter}${process.env.PATH ?? ''}`,
+      GITSPACE_ENVIRONMENT_ROOT: environmentRoot,
+      GITSPACE_BUNDLE_ROOT: runtimeRoot,
+      GITSPACE_MACHINE_ID: config.machine.id,
+      GITSPACE_MACHINE_LABEL: config.machine.label,
+      GITSPACE_MACHINE_SIGNING_PRIVATE_KEY: config.machine.signingPrivateKey,
+      GITSPACE_MACHINE_GRANT: JSON.stringify(config.machine.grant),
+      GITSPACE_ROOT_PUBLIC_KEY: config.rootPublicKey,
+      GITSPACE_ARTIFACT_KEY: artifactKey,
+      GITSPACE_CONTROL_URL: config.apiUrl,
+      GITSPACE_USER_ID: config.userId,
+      GITSPACE_RELAY_URL: config.relayUrl,
+      GITSPACE_PUBLIC_RPC_URL: `${config.relayUrl}/tunnel/${encodeURIComponent(config.machine.id)}/rpc`,
+      GITSPACE_SERVICE_DOMAIN: 'gssh.dev',
+      GITSPACE_SERVICE_NAMESPACE: config.handle,
+      GITSPACE_OMP_AGENT_DIR: join(CONFIG_ROOT, 'omp'),
+      OMP_AUTH_BROKER_URL: config.brokerUrl,
+      OMP_AUTH_BROKER_TOKEN: config.brokerToken,
+      GITSPACE_MANAGED_SPACE_ROOT: process.env.GITSPACE_MANAGED_SPACE_ROOT ?? join(homedir(), 'gitspace', 'spaces'),
+      GITSPACE_WALGIT_BINARY: walgit,
+    },
   });
-
-const machine = program.command('machine').description('Manage this physical machine');
-
-machine.command('setup')
-  .description('Enroll this machine and build its local runtime')
-  .option('--label <label>', 'Machine label', hostname())
-  .action(async (options: { label: string }) => {
-    const config = await requireConfig();
-    const signingPrivateKey = ed25519.utils.randomSecretKey();
-    const exchangePrivateKey = x25519.utils.randomSecretKey();
-    const machineId = `m-${crypto.randomUUID()}`;
-    const grant = signCredentialAuthorityGrant({
-      version: 1,
-      userId: config.userId,
-      machineId,
-      signingPublicKey: base64(ed25519.getPublicKey(signingPrivateKey)),
-      exchangePublicKey: base64(x25519.getPublicKey(exchangePrivateKey)),
-      capabilities: ['credential.access', 'credential.refresh', 'credential.manage', 'storage.provision', 'storage.access', 'space.control'],
-      generation: 1,
-    }, credentialProtocolBase64.decode(config.rootPrivateKey));
-    console.log('Building machine runtime…');
-    await buildRuntime();
-    await signedPost(config, '/v1/machines/enroll', { userId: config.userId, label: options.label, deviceGrant: grant });
-    config.machine = {
-      id: machineId,
-      label: options.label,
-      signingPrivateKey: base64(signingPrivateKey),
-      exchangePrivateKey: base64(exchangePrivateKey),
-      grant,
-    };
-    await saveConfig(config);
-    console.log(`Enrolled ${options.label} (${machineId})`);
-  });
-
-machine.command('start')
-  .description('Start the GitSpace machine daemon and production relay connector')
-  .action(async () => {
-    const config = await requireConfig();
-    if (!config.machine) throw new Error('Machine is not enrolled. Run `gitspace machine setup`.');
-    const currentPid = await machinePid();
-    if (currentPid && await processIsRunning(currentPid)) throw new Error(`Machine is already running (pid ${currentPid})`);
-    const { path: runtimeRoot } = JSON.parse(await readFile(join(CONFIG_ROOT, 'runtime-selection.json'), 'utf8')) as { path: string };
-    const artifactKey = await accountArtifactKey(config, config.machine);
-    const environmentRoot = join(CONFIG_ROOT, 'machine');
-    await mkdir(environmentRoot, { recursive: true, mode: 0o700 });
-    const hostEntrypoint = join(runtimeRoot, 'host.js');
-    const log = openSync(LOG_PATH, 'a', 0o600);
-    const child = Bun.spawn([process.execPath, hostEntrypoint], {
-      cwd: CONFIG_ROOT,
-      detached: true,
-      stdout: log,
-      stderr: log,
-      env: {
-        ...process.env,
-        GITSPACE_ENVIRONMENT_ROOT: environmentRoot,
-        GITSPACE_BUNDLE_ROOT: runtimeRoot,
-        GITSPACE_MACHINE_ID: config.machine.id,
-        GITSPACE_MACHINE_LABEL: config.machine.label,
-        GITSPACE_MACHINE_SIGNING_PRIVATE_KEY: config.machine.signingPrivateKey,
-        GITSPACE_MACHINE_GRANT: JSON.stringify(config.machine.grant),
-        GITSPACE_ROOT_PUBLIC_KEY: config.rootPublicKey,
-        GITSPACE_ARTIFACT_KEY: artifactKey,
-        GITSPACE_CONTROL_URL: config.apiUrl,
-        GITSPACE_USER_ID: config.userId,
-        GITSPACE_RELAY_URL: config.relayUrl,
-        GITSPACE_PUBLIC_RPC_URL: `${config.relayUrl}/tunnel/${encodeURIComponent(config.machine.id)}/rpc`,
-        GITSPACE_SERVICE_DOMAIN: 'gssh.dev',
-        GITSPACE_SERVICE_NAMESPACE: config.handle,
-        GITSPACE_OMP_AGENT_DIR: process.env.PI_CODING_AGENT_DIR ?? join(homedir(), '.omp', 'agent'),
-        GITSPACE_MANAGED_SPACE_ROOT: join(homedir(), 'gitspace', 'spaces'),
-        GITSPACE_WALGIT_BINARY: Bun.which('walgit') ?? 'walgit',
-      },
-    });
-    closeSync(log);
-    child.unref();
-    await writeFile(PID_PATH, `${child.pid}\n`, { mode: 0o600 });
-    await Bun.sleep(1_000);
-    if (!await processIsRunning(child.pid)) throw new Error(`Machine failed to start. See ${LOG_PATH}`);
-    console.log(`Machine started (pid ${child.pid})`);
-  });
-
-machine.command('stop')
-  .description('Stop the local GitSpace machine daemon')
-  .action(async () => {
-    const pid = await machinePid();
-    if (!pid || !await processIsRunning(pid)) {
-      await rm(PID_PATH, { force: true });
-      console.log('Machine is stopped');
-      return;
-    }
-    process.kill(pid, 'SIGTERM');
-    for (let attempt = 0; attempt < 50 && await processIsRunning(pid); attempt += 1) await Bun.sleep(100);
-    if (await processIsRunning(pid)) throw new Error(`Machine ${pid} did not stop`);
-    await rm(PID_PATH, { force: true });
-    console.log('Machine stopped');
-  });
-
-machine.command('status')
-  .description('Show local process and production relay status')
-  .action(async () => {
-    const config = await requireConfig();
-    const pid = await machinePid();
-    const running = pid !== null && await processIsRunning(pid);
-    let relay = 'unreachable';
-    try {
-      const response = await fetch(new URL('/health', config.relayUrl), { signal: AbortSignal.timeout(5_000) });
-      relay = response.ok ? 'online' : `HTTP ${response.status}`;
-    } catch {}
-    console.log(`Machine: ${config.machine?.label ?? 'not enrolled'}`);
-    console.log(`Daemon: ${running ? `running (pid ${pid})` : 'stopped'}`);
-    console.log(`Relay: ${relay}`);
-    console.log(`Log: ${LOG_PATH}`);
-  });
-
-machine.command('remove')
-  .description('Revoke and remove this physical machine')
-  .action(async () => {
-    const config = await requireConfig();
-    if (!config.machine) {
-      console.log('Machine is not enrolled');
-      return;
-    }
-    const pid = await machinePid();
-    if (pid && await processIsRunning(pid)) process.kill(pid, 'SIGTERM');
-    await signedPost(config, '/v1/machines/revoke', { userId: config.userId, machineId: config.machine.id });
-    delete config.machine;
-    await saveConfig(config);
-    await rm(PID_PATH, { force: true });
-    console.log('Machine revoked');
-  });
-
-program.command('open')
-  .description('Open GitSpace in the browser and enroll this browser')
-  .option('--print', 'Print the one-time enrollment URL without opening a browser')
-  .action(async (options: { print?: boolean }) => {
-    const config = await requireConfig();
-    if (!config.machine) throw new Error('Machine is not enrolled. Run `gitspace machine setup`.');
-    const now = Date.now();
-    const invite = signDeviceInvite({
-      version: 1,
-      userId: config.userId,
-      inviteId: crypto.randomUUID(),
-      kind: 'browser',
-      label: 'GitSpace browser',
-      scope: { kind: 'user' },
-      capabilities: ['rpc.read', 'rpc.write', 'session.prompt', 'fleet.control', 'devices.manage', 'deployment.control'],
-      canDelegate: true,
-      issuedAt: now,
-      expiresAt: now + 5 * 60_000,
-      grantTtlMs: null,
-      enrollUrl: config.apiUrl,
-    }, credentialProtocolBase64.decode(config.rootPrivateKey));
-    const url = new URL(config.accountUrl);
-    url.searchParams.set('enroll', encodeDeviceInviteToken(invite));
-    if (options.print) {
-      console.log(url.toString());
-      return;
-    }
-    await openBrowser(url.toString());
-    console.log(url.origin);
-  });
-
-program.command('doctor')
-  .description('Check production account, relay, machine runtime, and dependencies')
-  .action(async () => {
-    const config = await loadConfig();
-    const checks: Array<[string, 'ok' | 'warn' | 'fail', string]> = [];
-    checks.push(['identity', config ? 'ok' : 'fail', config ? config.userId : 'run `gitspace login`']);
-    checks.push(['machine', config?.machine ? 'ok' : 'fail', config?.machine?.label ?? 'run `gitspace machine setup`']);
-    checks.push(['bun', Bun.which('bun') ? 'ok' : 'fail', Bun.which('bun') ?? 'missing']);
-    checks.push(['omp', Bun.which('omp') ? 'ok' : 'fail', Bun.which('omp') ?? 'missing']);
-    checks.push(['walgit', Bun.which('walgit') ? 'ok' : 'warn', Bun.which('walgit') ?? 'install before creating repositories']);
-    if (config) {
-      const endpoints = [
-        ['control', `${config.apiUrl}/health`],
-        ['relay', new URL('/health', config.relayUrl).toString()],
-      ] as const;
-      for (const [name, url] of endpoints) {
-        try {
-          const response = await fetch(url, { signal: AbortSignal.timeout(5_000) });
-          checks.push([name, response.ok ? 'ok' : 'fail', response.ok ? url : `HTTP ${response.status}`]);
-        } catch (error) {
-          checks.push([name, 'fail', error instanceof Error ? error.message : String(error)]);
-        }
+  closeSync(log);
+  child.unref();
+  await writeFile(PID_PATH, `${child.pid}\n`, { mode: 0o600 });
+  console.log(`Starting ${config.machine.label}. Its releases are managed by your account.`);
+  const reader = await open(LOG_PATH, 'r');
+  const bytes = Buffer.alloc(16 * 1024);
+  let recent = '';
+  try {
+    const deadline = Date.now() + 180_000;
+    while (Date.now() < deadline) {
+      if (!processIsRunning(child.pid)) throw new Error(`Machine failed to start. See ${LOG_PATH}`);
+      const { bytesRead } = await reader.read(bytes, 0, bytes.length, offset);
+      offset += bytesRead;
+      recent = (recent + bytes.toString('utf8', 0, bytesRead)).slice(-32_768);
+      if (recent.includes('GitSpace host ready ')) {
+        console.log(`Machine runtime ready (pid ${child.pid}). Check its connection in ${config.accountUrl}`);
+        return;
       }
+      await Bun.sleep(500);
     }
-    for (const [name, status, detail] of checks) console.log(`${status.padEnd(4)} ${name.padEnd(9)} ${detail}`);
-    if (checks.some(([, status]) => status === 'fail')) process.exitCode = 1;
-  });
-
-program.command('update')
-  .description('Rebuild the installed machine runtime from the current GitSpace release')
-  .action(async () => {
-    await requireConfig();
-    console.log('Building machine runtime…');
-    await buildRuntime();
-    console.log('Machine runtime updated. Restart it to apply the update.');
-  });
-
-program.command('logout')
-  .description('Remove the local account and machine identity')
-  .action(async () => {
-    const pid = await machinePid();
-    if (pid && await processIsRunning(pid)) process.kill(pid, 'SIGTERM');
-    await rm(CONFIG_ROOT, { recursive: true, force: true });
-    console.log('Logged out');
-  });
-
-try {
-  await program.parseAsync(process.argv);
-} catch (error) {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exitCode = 1;
+    throw new Error(`The machine is still starting. Check gitspace machine status and ${LOG_PATH}; no process was killed.`);
+  } finally { await reader.close(); }
 }
+async function stopMachine(): Promise<void> {
+  const pid = await machinePid();
+  if (!pid || !processIsRunning(pid)) {
+    await rm(PID_PATH, { force: true });
+    console.log('Machine is stopped');
+    return;
+  }
+  process.kill(pid, 'SIGTERM');
+  const deadline = Date.now() + 120_000;
+  while (Date.now() < deadline && processIsRunning(pid)) await Bun.sleep(250);
+  if (processIsRunning(pid)) throw new Error(`Machine ${pid} has not stopped. Inspect ${LOG_PATH}; it has not been force-killed.`);
+  await rm(PID_PATH, { force: true });
+  console.log('Machine stopped');
+}
+
+const program = new Command().name('gitspace').description('Connect this computer to your GitSpace account').version('1.0.0');
+const machine = program.command('machine').description('Link and operate this computer');
+machine.command('setup').description('Link using the pairing command from your account, then start the runtime')
+  .requiredOption('--pair <token>', 'Short-lived pairing token from Settings > Machines > Add a computer')
+  .option('--label <label>', 'Machine label', hostname())
+  .action(async (options: { pair: string; label: string }) => {
+    requireSystemTools();
+    if (await loadConfig()) throw new Error('This computer is already linked. Use gitspace machine start, or remove its enrollment before linking another account.');
+    const token = decodeMachinePairingToken(options.pair);
+    if (!token) throw new Error('Invalid or expired pairing token. Create a new pairing command in your account.');
+    let pending: PendingPairing;
+    try {
+      pending = JSON.parse(await readFile(PAIRING_PATH, 'utf8')) as PendingPairing;
+      if (pending.pairingId !== token.pairingId) throw new Error('Another pairing is recorded locally. Cancel it in the browser and remove the local pairing.json before starting a new one.');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      pending = { pairingId: token.pairingId, machineId: `m-${crypto.randomUUID()}`, label: options.label.slice(0, 160), signingPrivateKey: credentialProtocolBase64.encode(ed25519.utils.randomSecretKey()), exchangePrivateKey: credentialProtocolBase64.encode(x25519.utils.randomSecretKey()) };
+      await savePrivateJson(PAIRING_PATH, pending);
+    }
+    const privateKey = credentialProtocolBase64.decode(pending.signingPrivateKey);
+    const pairingRequest = async <T>(action: 'claim' | 'poll', payload: object): Promise<T> => {
+      const url = new URL(`/v1/machine-pairings/${action}`, token.operatorUrl);
+      const body = new TextEncoder().encode(JSON.stringify(payload));
+      const response = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', 'x-gitspace-device': signRpcRequest({ deviceId: token.pairingId, signingPrivateKey: privateKey, method: 'POST', path: url.pathname, body }) }, body, signal: AbortSignal.timeout(30_000) });
+      const result = await response.json() as { status: string; value: T; error?: { message?: string } };
+      if (!response.ok || result.status !== 'ok') throw new Error(result.error?.message ?? `Machine pairing failed (HTTP ${response.status})`);
+      return result.value;
+    };
+    await pairingRequest('claim', { userId: token.userId, pairingId: token.pairingId, token: token.token, machineId: pending.machineId, label: pending.label, signingPublicKey: credentialProtocolBase64.encode(ed25519.getPublicKey(privateKey)), exchangePublicKey: credentialProtocolBase64.encode(x25519.getPublicKey(credentialProtocolBase64.decode(pending.exchangePrivateKey))) });
+    console.log(`Approve ${pending.label} in the browser. Signing key: ${credentialProtocolBase64.encode(ed25519.getPublicKey(privateKey))}`);
+    while (Date.now() < token.expiresAt) {
+      const result = await pairingRequest<EnrolledPairing | { state: 'pending' }>('poll', { userId: token.userId, pairingId: token.pairingId });
+      if (result.state === 'enrolled') {
+        if (result.machineId !== pending.machineId || result.userId !== token.userId || result.grant.grant.signingPublicKey !== credentialProtocolBase64.encode(ed25519.getPublicKey(privateKey))) throw new Error('Pairing response does not match this machine');
+        await savePrivateJson(CONFIG_PATH, { version: 3, apiUrl: result.operatorUrl, accountUrl: result.accountUrl, handle: result.handle, userId: result.userId, relayUrl: result.relayUrl, rootPublicKey: result.rootPublicKey, brokerUrl: result.brokerUrl, brokerToken: result.brokerToken, machine: { id: pending.machineId, label: pending.label, signingPrivateKey: pending.signingPrivateKey, exchangePrivateKey: pending.exchangePrivateKey, grant: result.grant } } satisfies MachineConfig);
+        await rm(PAIRING_PATH, { force: true });
+        console.log(`Linked ${pending.label} to ${result.handle}. No account recovery key was stored on this machine.`);
+        await startMachine();
+        return;
+      }
+      await Bun.sleep(2_000);
+    }
+    throw new Error('Pairing expired. Create a new pairing command in the browser.');
+  });
+machine.command('start').description('Start the installed account-managed runtime').action(startMachine);
+machine.command('stop').description('Stop this machine runtime').action(stopMachine);
+machine.command('status').description('Show local runtime and relay status').action(async () => {
+  const config = await requireConfig();
+  const pid = await machinePid();
+  let relay = 'unreachable';
+  try { const response = await fetch(new URL('/health', config.relayUrl), { signal: AbortSignal.timeout(5_000) }); relay = response.ok ? 'online' : `HTTP ${response.status}`; } catch { /* Report unreachable below. */ }
+  console.log(`Machine: ${config.machine.label}\nDaemon: ${pid && processIsRunning(pid) ? `running (pid ${pid})` : 'stopped'}\nRelay: ${relay}\nAccount: ${config.accountUrl}\nLog: ${LOG_PATH}`);
+});
+machine.command('remove').description('Stop and revoke this computer; retain its local workspace files').action(async () => {
+  const config = await requireConfig();
+  await stopMachine();
+  const path = '/v1/machines/revoke';
+  const response = await fetch(new URL(path, config.apiUrl), { method: 'POST', headers: { authorization: createRelayAuthorization(credentialProtocolBase64.decode(config.machine.signingPrivateKey), path), 'content-type': 'application/json' }, body: JSON.stringify({ userId: config.userId, machineId: config.machine.id }), signal: AbortSignal.timeout(30_000) });
+  const result = await response.json() as { status?: string; error?: { message?: string } };
+  if (!response.ok || result.status !== 'ok') throw new Error(result.error?.message ?? 'Machine revocation failed; local identity retained');
+  await rm(CONFIG_PATH);
+  console.log('Machine revoked. Local workspace files and runtime installation were retained.');
+});
+program.command('open').description('Open your account in the browser').option('--print', 'Print the account URL').action(async (options: { print?: boolean }) => {
+  const config = await requireConfig();
+  if (!options.print) await openBrowser(config.accountUrl);
+  console.log(config.accountUrl);
+});
+program.command('doctor').description('Check this machine installation and account connection').action(async () => {
+  const config = await loadConfig();
+  const checks: Array<[string, 'ok' | 'warn' | 'fail', string]> = [['machine', config ? 'ok' : 'warn', config?.machine.label ?? 'Link from Settings > Machines in your account']];
+  for (const tool of ['git', 'ssh', 'ssh-agent', 'ssh-add', 'ssh-keygen']) checks.push([tool, Bun.which(tool) ? 'ok' : 'fail', Bun.which(tool) ?? 'Install Git and the OpenSSH client']);
+  try {
+    const selection = JSON.parse(await readFile(join(CONFIG_ROOT, 'runtime-selection.json'), 'utf8')) as { path: string };
+    for (const executable of ['bun', 'walgit']) { const path = join(selection.path, 'bin', executable); checks.push([executable, existsSync(path) ? 'ok' : 'fail', path]); }
+    checks.push(['omp', existsSync(join(selection.path, 'omp', 'omp.js')) ? 'ok' : 'fail', 'Account-managed packaged OMP']);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    checks.push(['runtime', 'warn', 'Not installed yet; machine setup/start downloads it']);
+  }
+  if (config) for (const [name, url] of [['control', new URL('/health', config.apiUrl)], ['relay', new URL('/health', config.relayUrl)]] as const) {
+    try { const response = await fetch(url, { signal: AbortSignal.timeout(5_000) }); checks.push([name, response.ok ? 'ok' : 'fail', `HTTP ${response.status}`]); } catch { checks.push([name, 'fail', 'Unreachable']); }
+  }
+  for (const [name, status, detail] of checks) console.log(`${status.padEnd(4)} ${name.padEnd(10)} ${detail}`);
+  if (checks.some(([, status]) => status === 'fail')) process.exitCode = 1;
+});
+try { await program.parseAsync(process.argv); } catch (error) { console.error(error instanceof Error ? error.message : String(error)); process.exitCode = 1; }

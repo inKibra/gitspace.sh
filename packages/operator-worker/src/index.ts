@@ -3,6 +3,7 @@ import { ed25519, x25519 } from '@noble/curves/ed25519.js';
 import type { CredentialRefreshResponse, CredentialUploadResponse, SnapshotResponse } from '@oh-my-pi/pi-ai/auth-broker';
 import { z } from 'zod';
 import { handleSandboxRollout } from './sandbox-rollout.js';
+import { handleAccountCloudRpc } from './account-cloud-rpc.js';
 import {
   credentialAccessRequestSchema,
   gitIdentityUpdateSchema,
@@ -28,6 +29,14 @@ import {
   type DeviceBinding,
   type DeviceGrantRecord,
   type SignedDeviceInvite,
+  decodeSignedRpcHeader,
+  verifyRpcSignature,
+  RPC_DEVICE_HEADER,
+  RPC_SIGNATURE_MAX_SKEW_MS,
+  MACHINE_PAIRING_TTL_MS,
+  credentialAuthorityGrantPayload,
+  type CredentialAuthorityGrant,
+  type DeviceCapability,
 } from '@gitspace/protocol';
 import {
   platformDeployResponseSchema,
@@ -139,6 +148,28 @@ const brokerUploadSchema = z.strictObject({
 const brokerDisableSchema = z.strictObject({ cause: z.string().optional() });
 type StoredVaultOAuthCredential = StoredOAuthCredential & { type?: 'oauth' };
 type StoredVaultCredential = StoredVaultOAuthCredential | (Extract<z.infer<typeof brokerUploadSchema>['credential'], { type: 'api_key' }> & { provider: string });
+const pairingMachineSchema = z.strictObject({
+  machineId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u),
+  label: z.string().trim().min(1).max(160),
+  signingPublicKey: z.string().min(40).max(64),
+  exchangePublicKey: z.string().min(40).max(64),
+});
+interface PairingRow extends Record<string, SqlStorageValue> {
+  pairing_id: string;
+  creator_device_id: string;
+  token_hash: string;
+  expires_at: number;
+  state: 'created' | 'claimed' | 'approved' | 'enrolled' | 'cancelled';
+  machine_json: string | null;
+  grant_json: string | null;
+}
+type MachinePairingValue =
+  | { pairingId: string; token: string; expiresAt: number }
+  | { pairingId: string; state: PairingRow['state'] }
+  | { pairingId: string; state: PairingRow['state']; expiresAt: number; machine: z.infer<typeof pairingMachineSchema> | null; grant: CredentialAuthorityGrant | null; issuerChain: DeviceGrantRecord[] }
+  | { state: 'pending' }
+  | { state: 'enrolled'; userId: string; handle: string; accountUrl: string; relayUrl: string; operatorUrl: string; rootPublicKey: string; machineId: string; grant: SignedCredentialAuthorityGrant; brokerUrl: string; brokerToken: string; artifactKey: string };
+const PAIRING_CAPABILITIES: DeviceCapability[] = ['devices.manage', 'fleet.control', 'rpc.write', 'session.prompt', 'deployment.control'];
 
 function brokerCredentialIdentity(credential: StoredVaultCredential): string | null {
   if (credential.type === 'api_key') return null;
@@ -200,6 +231,7 @@ interface DeviceRow extends Record<string, SqlStorageValue> {
   exchange_public_key: string;
   capabilities_json: string;
   generation: number;
+  grant_json: string | null;
 }
 
 interface CredentialRow extends Record<string, SqlStorageValue> {
@@ -314,6 +346,15 @@ export class CredentialVaultDO extends DurableObject<Env> {
           revoked_at INTEGER,
           updated_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS machine_pairings (
+          pairing_id TEXT PRIMARY KEY,
+          creator_device_id TEXT NOT NULL,
+          token_hash TEXT NOT NULL,
+          expires_at INTEGER NOT NULL,
+          state TEXT NOT NULL CHECK (state IN ('created', 'claimed', 'approved', 'enrolled', 'cancelled')),
+          machine_json TEXT,
+          grant_json TEXT
+        );
         CREATE TABLE IF NOT EXISTS oauth_credentials (
           id TEXT PRIMARY KEY,
           provider TEXT NOT NULL,
@@ -345,6 +386,8 @@ export class CredentialVaultDO extends DurableObject<Env> {
         );
       `);
       this.ctx.storage.sql.exec('INSERT OR IGNORE INTO credential_snapshot(id, generation) VALUES (1, ?)', Date.now());
+      const columns = this.ctx.storage.sql.exec<{ name: string }>('PRAGMA table_info(credential_devices)').toArray();
+      if (!columns.some((column) => column.name === 'grant_json')) this.ctx.storage.sql.exec('ALTER TABLE credential_devices ADD COLUMN grant_json TEXT');
     });
   }
 
@@ -379,7 +422,7 @@ export class CredentialVaultDO extends DurableObject<Env> {
   authorizeRelayGrant(input: SignedCredentialAuthorityGrant, capability: 'space.control' | 'storage.access'): CredentialVaultResult<{ authorized: true }> {
     const config = this.config();
     if (!config) return publicError('VAULT_UNCONFIGURED', 'Vault is not configured');
-    const grant = verifyCredentialAuthorityGrant(input, credentialProtocolBase64.decode(config.root_public_key));
+    const grant = verifyCredentialAuthorityGrant(input, credentialProtocolBase64.decode(config.root_public_key), Date.now(), (deviceId) => this.deviceGrant(deviceId));
     if (!grant || grant.userId !== config.user_id) return publicError('DEVICE_UNAUTHORIZED', 'Device grant is invalid');
     const device = this.device(grant.machineId);
     if (!device || device.generation !== grant.generation
@@ -397,7 +440,7 @@ export class CredentialVaultDO extends DurableObject<Env> {
     if (!config) return publicError('VAULT_UNCONFIGURED', 'Vault is not configured');
     let grant;
     try {
-      grant = verifyCredentialAuthorityGrant(input, credentialProtocolBase64.decode(config.root_public_key));
+      grant = verifyCredentialAuthorityGrant(input, credentialProtocolBase64.decode(config.root_public_key), Date.now(), (deviceId) => this.deviceGrant(deviceId));
       if (!grant || grant.userId !== config.user_id) return publicError('INVALID_DEVICE_GRANT', 'Device grant is invalid');
       if (credentialProtocolBase64.decode(grant.signingPublicKey).byteLength !== 32 || credentialProtocolBase64.decode(grant.exchangePublicKey).byteLength !== 32) {
         return publicError('INVALID_DEVICE_GRANT', 'Device grant keys are invalid');
@@ -422,6 +465,7 @@ export class CredentialVaultDO extends DurableObject<Env> {
         generation = excluded.generation,
         updated_at = excluded.updated_at
     `, grant.machineId, grant.signingPublicKey, grant.exchangePublicKey, JSON.stringify(grant.capabilities), grant.generation, new Date().toISOString());
+    this.ctx.storage.sql.exec('UPDATE credential_devices SET grant_json = ? WHERE machine_id = ?', JSON.stringify(input), grant.machineId);
     return { status: 'ok', value: { machineId: grant.machineId, generation: grant.generation } };
   }
   registerManagedDevice(input: {
@@ -451,6 +495,7 @@ export class CredentialVaultDO extends DurableObject<Env> {
         exchange_public_key = excluded.exchange_public_key, capabilities_json = excluded.capabilities_json,
         generation = excluded.generation, updated_at = excluded.updated_at
     `, input.machineId, input.signingPublicKey, input.exchangePublicKey, JSON.stringify(input.capabilities), generation, new Date().toISOString());
+    this.ctx.storage.sql.exec('UPDATE credential_devices SET grant_json = NULL WHERE machine_id = ?', input.machineId);
     return { status: 'ok', value: { machineId: input.machineId, generation } };
   }
   rootPublicKey(): string | null {
@@ -468,6 +513,166 @@ export class CredentialVaultDO extends DurableObject<Env> {
     if (verified.status === 'error') return publicError('ROOT_UNAUTHORIZED', verified.error.message);
     return this.consumeRequestNonce(verified.value.nonce, verified.value.timestamp);
   }
+  authorizeBrowserRequest(input: { header: string | null; target: string; body: Uint8Array; capabilities: DeviceCapability[] }): CredentialVaultResult<{ deviceId: string }> {
+    return this.authorizeRpcRequest(input, true);
+  }
+
+  authorizeAccountDeviceRequest(input: { header: string | null; target: string; body: Uint8Array; capabilities: DeviceCapability[] }): CredentialVaultResult<{ deviceId: string }> {
+    return this.authorizeRpcRequest(input, false);
+  }
+
+  private authorizeRpcRequest(input: { header: string | null; target: string; body: Uint8Array; capabilities: DeviceCapability[] }, browserOnly: boolean): CredentialVaultResult<{ deviceId: string }> {
+    const config = this.config();
+    const header = input.header ? decodeSignedRpcHeader(input.header) : null;
+    const now = Date.now();
+    if (!config || !header || input.body.byteLength > REQUEST_MAX_BYTES || Math.abs(now - header.timestamp) > RPC_SIGNATURE_MAX_SKEW_MS) {
+      return publicError('RPC_UNAUTHORIZED', 'Device signature is missing, invalid or expired');
+    }
+    const record = this.deviceGrant(header.deviceId);
+    const resolve = (deviceId: string) => {
+      const candidate = this.deviceGrant(deviceId);
+      return candidate?.invite.invite.userId === config.user_id ? candidate : null;
+    };
+    const device = record?.invite.invite.userId === config.user_id
+      ? verifyDeviceGrantRecord(record, credentialProtocolBase64.decode(config.root_public_key), now, resolve) : null;
+    if (!device || !verifyRpcSignature(header, { method: 'POST', path: input.target, body: input.body }, device.signingPublicKey)) {
+      return publicError('RPC_UNAUTHORIZED', 'Device signature is invalid or its grant is revoked');
+    }
+    if ((browserOnly && device.kind !== 'browser') || device.scope.kind !== 'user'
+      || !input.capabilities.every((capability) => device.capabilities.includes(capability))) {
+      return publicError('RPC_FORBIDDEN', 'Device is out of scope or lacks permission');
+    }
+    const nonce = this.consumeRequestNonce(header.nonce, header.timestamp);
+    return nonce.status === 'error' ? nonce : { status: 'ok', value: { deviceId: device.deviceId } };
+  }
+
+  async machinePairingRequest(input: { operation: string; header: string | null; target: string; body: Uint8Array; operatorUrl: string }): Promise<CredentialVaultResult<MachinePairingValue>> {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      const config = this.config();
+      if (!config || input.body.byteLength > REQUEST_MAX_BYTES) return publicError('INVALID_PAIRING', 'Pairing request is invalid');
+      const body = JSON.parse(new TextDecoder().decode(input.body)) as Record<string, unknown>;
+      if (body.userId !== config.user_id) return publicError('INVALID_PAIRING', 'Pairing belongs to another account');
+      const browserOperation = ['create', 'inspect', 'approve', 'cancel'].includes(input.operation);
+      let browserDeviceId: string | undefined;
+      if (browserOperation) {
+        const authorized = this.authorizeBrowserRequest({ ...input, capabilities: PAIRING_CAPABILITIES });
+        if (authorized.status === 'error') return authorized;
+        browserDeviceId = authorized.value.deviceId;
+      }
+      const now = Date.now();
+      if (input.operation === 'create') {
+        const issuer = this.deviceGrant(browserDeviceId!)!;
+        if (!issuer.invite.invite.canDelegate) return publicError('PAIRING_FORBIDDEN', 'Browser may not delegate machine access');
+        this.ctx.storage.sql.exec('DELETE FROM machine_pairings WHERE expires_at <= ?', now);
+        const count = this.ctx.storage.sql.exec<{ count: number }>("SELECT COUNT(*) AS count FROM machine_pairings WHERE creator_device_id = ? AND state != 'cancelled'", browserDeviceId!).one().count;
+        if (count >= 5) return publicError('PAIRING_LIMIT', 'Too many active pairing sessions');
+        const pairingId = crypto.randomUUID();
+        const token = credentialProtocolBase64.encode(crypto.getRandomValues(new Uint8Array(32))).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/u, '');
+        const tokenHash = credentialProtocolBase64.encode(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token))));
+        const expiresAt = now + MACHINE_PAIRING_TTL_MS;
+        this.ctx.storage.sql.exec("INSERT INTO machine_pairings(pairing_id, creator_device_id, token_hash, expires_at, state) VALUES (?, ?, ?, ?, 'created')", pairingId, browserDeviceId!, tokenHash, expiresAt);
+        return { status: 'ok', value: { pairingId, token, expiresAt } };
+      }
+      const pairingId = z.uuid().parse(body.pairingId);
+      const row = this.ctx.storage.sql.exec<PairingRow>('SELECT * FROM machine_pairings WHERE pairing_id = ?', pairingId).toArray()[0];
+      if (!row || row.expires_at <= now || row.state === 'cancelled') return publicError('PAIRING_UNAVAILABLE', 'Pairing is expired, cancelled or unavailable');
+      if (browserOperation && row.creator_device_id !== browserDeviceId) return publicError('PAIRING_FORBIDDEN', 'Pairing belongs to another browser');
+      let machine = row.machine_json ? pairingMachineSchema.parse(JSON.parse(row.machine_json)) : null;
+      if (!browserOperation) {
+        const header = input.header ? decodeSignedRpcHeader(input.header) : null;
+        const claimant = input.operation === 'claim' ? pairingMachineSchema.parse({
+          machineId: body.machineId, label: body.label, signingPublicKey: body.signingPublicKey, exchangePublicKey: body.exchangePublicKey,
+        }) : machine;
+        if (!claimant || !header || header.deviceId !== pairingId || Math.abs(now - header.timestamp) > RPC_SIGNATURE_MAX_SKEW_MS) return publicError('PAIRING_UNAUTHORIZED', 'Machine proof is missing or expired');
+        let signingPublicKey: Uint8Array;
+        try {
+          signingPublicKey = credentialProtocolBase64.decode(claimant.signingPublicKey);
+          if (signingPublicKey.byteLength !== 32 || credentialProtocolBase64.decode(claimant.exchangePublicKey).byteLength !== 32) throw new Error('Invalid keys');
+        } catch {
+          return publicError('PAIRING_UNAUTHORIZED', 'Machine keys are invalid');
+        }
+        if (!verifyRpcSignature(header, { method: 'POST', path: input.target, body: input.body }, signingPublicKey)) return publicError('PAIRING_UNAUTHORIZED', 'Machine proof does not match request');
+        const nonce = this.consumeRequestNonce(header.nonce, header.timestamp);
+        if (nonce.status === 'error') return nonce;
+        if (input.operation === 'claim') {
+          if (machine && row.state !== 'created' && claimant.machineId === machine.machineId && claimant.label === machine.label
+            && claimant.signingPublicKey === machine.signingPublicKey && claimant.exchangePublicKey === machine.exchangePublicKey) {
+            return { status: 'ok', value: { pairingId, state: row.state } };
+          }
+          if (row.state !== 'created' || typeof body.token !== 'string' || !/^[A-Za-z0-9_-]{43}$/u.test(body.token)) return publicError('PAIRING_USED', 'Pairing token has already been claimed');
+          const tokenHash = credentialProtocolBase64.encode(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(body.token))));
+          if (tokenHash !== row.token_hash) return publicError('PAIRING_UNAUTHORIZED', 'Pairing token is invalid');
+          if (this.ctx.storage.sql.exec('SELECT machine_id FROM credential_devices WHERE machine_id = ?', claimant.machineId).toArray().length) return publicError('MACHINE_EXISTS', 'Choose a new machine identity');
+          const changed = this.ctx.storage.sql.exec("UPDATE machine_pairings SET state = 'claimed', machine_json = ?, token_hash = '' WHERE pairing_id = ? AND state = 'created' AND expires_at > ?", JSON.stringify(claimant), pairingId, Date.now()).rowsWritten;
+          return changed === 1 ? { status: 'ok', value: { pairingId, state: 'claimed' } } : publicError('PAIRING_USED', 'Pairing token is expired or already claimed');
+        }
+      }
+      const issuerChain: DeviceGrantRecord[] = [];
+      let issuerId: string | null = row.creator_device_id;
+      while (issuerId && issuerChain.length < 4) {
+        const issuer = this.deviceGrant(issuerId);
+        if (!issuer || issuerChain.some((record) => record.binding.deviceId === issuerId)) return publicError('PAIRING_FORBIDDEN', 'Browser issuer chain is unavailable');
+        issuerChain.push(issuer);
+        issuerId = issuer.invite.issuer.kind === 'device' ? issuer.invite.issuer.deviceId : null;
+      }
+      if (issuerId) return publicError('PAIRING_FORBIDDEN', 'Browser issuer chain is too deep');
+      const expiresAt = Math.min(row.expires_at + 365 * 24 * 60 * 60_000, ...issuerChain.map((record) => deviceGrantExpiresAt(record) ?? Infinity));
+      const grant: CredentialAuthorityGrant | null = machine ? {
+        version: 1, userId: config.user_id, machineId: machine.machineId,
+        signingPublicKey: machine.signingPublicKey, exchangePublicKey: machine.exchangePublicKey,
+        capabilities: ['storage.access', 'space.control', 'credential.access', 'credential.manage'],
+        generation: 1, issuerDeviceId: row.creator_device_id, expiresAt,
+      } : null;
+      if (input.operation === 'inspect') return { status: 'ok', value: { pairingId, state: row.state, expiresAt: row.expires_at, machine, grant, issuerChain } };
+      if (input.operation === 'cancel') {
+        if (row.state === 'enrolled') return publicError('PAIRING_USED', 'Machine is enrolled; revoke it from the fleet');
+        if (machine && row.state === 'approved') this.removeManagedDevice(machine.machineId);
+        this.ctx.storage.sql.exec("UPDATE machine_pairings SET state = 'cancelled', token_hash = '' WHERE pairing_id = ?", pairingId);
+        return { status: 'ok', value: { pairingId, state: 'cancelled' } };
+      }
+      if (input.operation === 'approve') {
+        if (row.state !== 'claimed' || !grant) return publicError('PAIRING_NOT_CLAIMED', 'Pairing must be claimed before approval');
+        const signed = signedCredentialAuthorityGrantSchema.parse(body.grant);
+        if (credentialProtocolBase64.encode(credentialAuthorityGrantPayload(signed.grant)) !== credentialProtocolBase64.encode(credentialAuthorityGrantPayload(grant))) return publicError('PAIRING_GRANT_MISMATCH', 'Approval does not match the claimed machine');
+        return this.ctx.storage.transactionSync(() => {
+          const registered = this.registerDevice(signed);
+          if (registered.status === 'error') return registered;
+          this.ctx.storage.sql.exec("UPDATE machine_pairings SET state = 'approved', grant_json = ? WHERE pairing_id = ? AND state = 'claimed'", JSON.stringify(signed), pairingId);
+          return { status: 'ok', value: { pairingId, state: 'approved' } };
+        });
+      }
+      if (input.operation !== 'poll' || !machine) return publicError('INVALID_PAIRING', 'Unknown pairing operation');
+      if (row.state === 'claimed') return { status: 'ok', value: { state: 'pending' } };
+      if ((row.state !== 'approved' && row.state !== 'enrolled') || !row.grant_json) return publicError('PAIRING_UNAVAILABLE', 'Pairing is not approved');
+      const signed = signedCredentialAuthorityGrantSchema.parse(JSON.parse(row.grant_json));
+      const authorized = this.authorizeRelayGrant(signed, 'space.control');
+      if (authorized.status === 'error') return authorized;
+      const settings = await (this.env.USER_SETTINGS as DurableObjectNamespace<UserSettingsDO>).getByName(config.user_id).get(machine.machineId);
+      const handle = settings.profile.handle;
+      if (!handle) return publicError('ACCOUNT_UNPROVISIONED', 'Account tenant is not provisioned');
+      const relayUrl = `https://${handle}.gssh.dev`;
+      if (row.state === 'approved') await (this.env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>).getByName(config.user_id).putMachine({
+        id: machine.machineId, label: machine.label, state: 'offline', rpcEndpoint: `${relayUrl}/tunnel/${encodeURIComponent(machine.machineId)}/rpc`,
+        kind: 'physical', provider: 'physical', notes: '', desiredState: 'online', lifecycleRevision: signed.grant.generation, operationId: null, error: null,
+      });
+      const brokerSecret = this.env.GITSPACE_OMP_BROKER_TOKEN;
+      if (!brokerSecret) return publicError('BROKER_UNAVAILABLE', 'The account credential broker is not configured');
+      const brokerToken = await machineBrokerToken(brokerSecret, config.user_id, machine.machineId, signed.grant.generation);
+      const artifactKey = await this.artifactKey(config.user_id);
+      // Retrieval is retryable for the same proof-bound key until the original
+      // short expiry; a lost HTTP response never strands a newly enrolled CLI.
+      if (row.expires_at <= Date.now()) return publicError('PAIRING_UNAVAILABLE', 'Pairing has expired');
+      const current = this.authorizeRelayGrant(signed, 'space.control');
+      if (current.status === 'error') return current;
+      this.ctx.storage.sql.exec("UPDATE machine_pairings SET state = 'enrolled' WHERE pairing_id = ?", pairingId);
+      return { status: 'ok', value: {
+        state: 'enrolled', userId: config.user_id, handle, accountUrl: `https://${handle}.gitspace.sh`, relayUrl,
+        operatorUrl: input.operatorUrl, rootPublicKey: config.root_public_key, machineId: machine.machineId, grant: signed,
+        brokerUrl: `${input.operatorUrl}/omp/users/${encodeURIComponent(config.user_id)}`, brokerToken, artifactKey,
+      } };
+    });
+  }
+
 
   authorizeMachineRequest(header: string | null, target: string, machineId: string): CredentialVaultResult<{ authorized: true }> {
     const config = this.config();
@@ -601,9 +806,27 @@ export class CredentialVaultDO extends DurableObject<Env> {
   }
 
   async ompUpload(input: unknown, machineId: string, generation: number): Promise<CredentialUploadResponse | null> {
-    const parsed = brokerUploadSchema.parse(input);
     return this.ctx.blockConcurrencyWhile(async () => {
       if (!this.authorizeBroker(machineId, generation, 'credential.manage')) return null;
+      return this.uploadCredential(input);
+    });
+  }
+
+  async putBrowserApiKey(provider: string, key: string): Promise<void> {
+    await this.ctx.blockConcurrencyWhile(() => this.uploadCredential({ provider, credential: { type: 'api_key', key } }));
+  }
+
+  disableBrowserCredentials(provider: string, credentialId: string | null): void {
+    const rows = credentialId === null
+      ? this.ctx.storage.sql.exec<{ row_id: number }>("SELECT rowid AS row_id FROM oauth_credentials WHERE provider = ? AND state = 'active'", provider).toArray()
+      : this.ctx.storage.sql.exec<{ row_id: number }>("SELECT rowid AS row_id FROM oauth_credentials WHERE provider = ? AND rowid = ? AND state = 'active'", provider, Number(credentialId)).toArray();
+    this.ctx.storage.transactionSync(() => {
+      for (const row of rows) this.disableCredentialRow(row.row_id);
+    });
+  }
+
+  private async uploadCredential(input: unknown): Promise<CredentialUploadResponse> {
+      const parsed = brokerUploadSchema.parse(input);
       const credential = { ...parsed.credential, provider: parsed.provider } as StoredVaultCredential;
       const config = this.config();
       if (!config) throw new Error('Vault is not configured');
@@ -626,7 +849,6 @@ export class CredentialVaultDO extends DurableObject<Env> {
       }
       const snapshot = await this.ompSnapshot();
       return { entries: snapshot.credentials.filter((entry) => entry.provider === parsed.provider).map(({ rotatesInMs: _rotates, ...entry }) => entry) };
-    });
   }
 
   ompDisable(rowId: number, machineId: string, generation: number): boolean | null {
@@ -757,7 +979,7 @@ export class CredentialVaultDO extends DurableObject<Env> {
       return publicError('ACCESS_DENIED', `Device lacks ${capability}`);
     }
     const inserted = this.ctx.storage.transactionSync(() => {
-      this.ctx.storage.sql.exec('DELETE FROM request_nonces WHERE used_at < ?', Date.now() - REQUEST_MAX_SKEW_MS);
+      this.ctx.storage.sql.exec('DELETE FROM request_nonces WHERE used_at < ?', Date.now() - RPC_SIGNATURE_MAX_SKEW_MS);
       try {
         this.ctx.storage.sql.exec('INSERT INTO request_nonces(nonce, used_at) VALUES (?, ?)', parsed.data.nonce, Date.now());
         return true;
@@ -803,7 +1025,7 @@ export class CredentialVaultDO extends DurableObject<Env> {
       return publicError('ACCESS_DENIED', 'Device cannot access credentials');
     }
     const nonceInserted = this.ctx.storage.transactionSync(() => {
-      this.ctx.storage.sql.exec('DELETE FROM request_nonces WHERE used_at < ?', Date.now() - REQUEST_MAX_SKEW_MS);
+      this.ctx.storage.sql.exec('DELETE FROM request_nonces WHERE used_at < ?', Date.now() - RPC_SIGNATURE_MAX_SKEW_MS);
       try {
         this.ctx.storage.sql.exec('INSERT INTO request_nonces(nonce, used_at) VALUES (?, ?)', parsed.data.nonce, Date.now());
         return true;
@@ -896,9 +1118,9 @@ export class CredentialVaultDO extends DurableObject<Env> {
 
   private consumeRequestNonce(nonce: string, timestamp: number): CredentialVaultResult<{ authorized: true }> {
     const inserted = this.ctx.storage.transactionSync(() => {
-      this.ctx.storage.sql.exec('DELETE FROM request_nonces WHERE used_at < ?', Date.now() - REQUEST_MAX_SKEW_MS);
+      this.ctx.storage.sql.exec('DELETE FROM request_nonces WHERE used_at < ?', Date.now() - RPC_SIGNATURE_MAX_SKEW_MS);
       try {
-        this.ctx.storage.sql.exec('INSERT INTO request_nonces(nonce, used_at) VALUES (?, ?)', nonce, timestamp);
+        this.ctx.storage.sql.exec('INSERT INTO request_nonces(nonce, used_at) VALUES (?, ?)', nonce, Math.max(Date.now(), timestamp));
         return true;
       } catch {
         return false;
@@ -914,10 +1136,17 @@ export class CredentialVaultDO extends DurableObject<Env> {
   }
 
   private device(machineId: string): DeviceRow | undefined {
-    return this.ctx.storage.sql.exec<DeviceRow>(
-      'SELECT signing_public_key, exchange_public_key, capabilities_json, generation FROM credential_devices WHERE machine_id = ?',
+    const row = this.ctx.storage.sql.exec<DeviceRow>(
+      'SELECT signing_public_key, exchange_public_key, capabilities_json, generation, grant_json FROM credential_devices WHERE machine_id = ?',
       machineId,
     ).toArray()[0];
+    if (!row) return undefined;
+    if (row.grant_json) {
+      const config = this.config();
+      if (!config || !verifyCredentialAuthorityGrant(JSON.parse(row.grant_json) as SignedCredentialAuthorityGrant,
+        credentialProtocolBase64.decode(config.root_public_key), Date.now(), (deviceId) => this.deviceGrant(deviceId))) return undefined;
+    }
+    return row;
   }
 
   private credential(id: string): CredentialRow | undefined {
@@ -1441,7 +1670,41 @@ export async function reconcileFleetMachines(env: Env, userId: string, catalog: 
   return catalog.listMachines();
 }
 
-async function provisionManagedSandbox(env: Env, userId: string, controlUrl: string): Promise<FleetMachineDefinition> {
+
+export function controlFleetMachine(env: Env, userId: string, machineId: string, action: 'sleep' | 'resume'): Promise<FleetMachineDefinition>;
+export function controlFleetMachine(env: Env, userId: string, machineId: string, action: 'destroy'): Promise<{ machineId: string; removed: true }>;
+export function controlFleetMachine(env: Env, userId: string, machineId: string, action: 'sleep' | 'resume' | 'destroy'): Promise<FleetMachineDefinition | { machineId: string; removed: true }>;
+export async function controlFleetMachine(env: Env, userId: string, machineId: string, action: 'sleep' | 'resume' | 'destroy'): Promise<FleetMachineDefinition | { machineId: string; removed: true }> {
+  if (action === 'resume' && await accountRegistry(env).sandboxRollout()) throw new Error('Cloud machine replacement has fenced new work');
+  const catalog = (env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>).getByName(userId);
+  const existing = await catalog.getMachine(machineId);
+  if (!existing) {
+    if (action === 'destroy') return { machineId, removed: true };
+    throw new Error('Machine does not exist');
+  }
+  const desiredState = action === 'sleep' ? 'offline' : action === 'resume' ? 'online' : 'removed';
+  if ((action === 'sleep' && existing.state === 'offline' && existing.desiredState === 'offline') || (action === 'resume' && existing.state === 'online' && existing.desiredState === 'online')) return existing;
+  if (action !== 'resume') await assertMachineHasNoOpenSpaces(env, userId, catalog, machineId);
+  const transition = await catalog.putMachine({
+    ...existing, state: action === 'sleep' ? 'sleeping' : action === 'resume' ? 'resuming' : 'deleting',
+    desiredState, lifecycleRevision: existing.lifecycleRevision + 1, operationId: existing.operationId ?? crypto.randomUUID(), error: null,
+  });
+  const provider = machineProviderFor(env, userId, transition);
+  try {
+    if (action === 'destroy') {
+      await provider.destroy(transition);
+      await catalog.removeMachine(machineId);
+      await credentialVault(env, userId).removeManagedDevice(machineId);
+      return { machineId, removed: true };
+    }
+    const machine = action === 'sleep' ? await provider.sleep(transition) : await provider.resume(transition);
+    return await catalog.putMachine({ ...machine, desiredState, lifecycleRevision: transition.lifecycleRevision + 1, operationId: null, error: null });
+  } catch (error) {
+    await catalog.putMachine({ ...transition, state: 'error', lifecycleRevision: transition.lifecycleRevision + 1, operationId: null, error: error instanceof Error ? error.message : String(error) });
+    throw error;
+  }
+}
+export async function provisionManagedSandbox(env: Env, userId: string, controlUrl: string): Promise<FleetMachineDefinition> {
   const storageNamespace = env.USER_STORAGE as DurableObjectNamespace<UserStorageDO>;
   await storageNamespace.getByName(userId).requireReady(userId);
   const machineId = `sandbox-${crypto.randomUUID().slice(0, 8)}`;
@@ -1541,6 +1804,8 @@ async function accountRpcResponse(request: Request, env: Env): Promise<Response>
   if (!handle || hostname !== `${handle}.gitspace.sh`) {
     return Response.json(publicError('ACCOUNT_HOST_MISMATCH', 'Request does not belong to this account hostname'), { status: 403 });
   }
+  const cloud = await handleAccountCloudRpc(request, env, userId);
+  if (cloud) return cloud;
   const machines = await (env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>).getByName(userId).listMachines();
   const candidates = machines.filter((machine) => machine.state === 'online' && machine.desiredState === 'online' && machine.rpcEndpoint);
   if (candidates.length === 0) {
@@ -1572,6 +1837,49 @@ async function accountRpcResponse(request: Request, env: Env): Promise<Response>
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+    if (url.pathname.startsWith('/distribution/')) {
+      if (request.method !== 'GET' && request.method !== 'HEAD') return new Response('Method not allowed', { status: 405, headers: { allow: 'GET, HEAD' } });
+      const stable = /^\/distribution\/v1\/stable\/(?:darwin|linux)-(?:arm64|x64)\.(?:json|txt)$/u.test(url.pathname);
+      const release = /^\/distribution\/v1\/releases\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/(?:darwin|linux)-(?:arm64|x64)\/(?:gitspace|manifest\.json|runtime\.bin\.gz|provenance\.json)$/u.test(url.pathname);
+      if (!stable && !release) return new Response('Not found', { status: 404 });
+      const key = url.pathname.slice(1);
+      const object = request.method === 'HEAD' ? await env.DATA.head(key) : await env.DATA.get(key);
+      if (!object) return new Response('Not found', { status: 404 });
+      const headers = new Headers({
+        'content-type': key.endsWith('.json') ? 'application/json' : key.endsWith('.txt') ? 'text/plain; charset=utf-8' : key.endsWith('.gz') ? 'application/gzip' : 'application/octet-stream',
+        'content-length': String(object.size),
+        'cache-control': stable ? 'no-cache' : 'public, max-age=31536000, immutable',
+        'etag': object.httpEtag,
+        'x-content-type-options': 'nosniff',
+        'access-control-allow-origin': '*',
+      });
+      return new Response(request.method === 'HEAD' ? null : (object as R2ObjectBody).body, { headers });
+    }
+    const pairingRoute = /^\/v1\/machine-pairings\/(create|inspect|approve|cancel|claim|poll)$/u.exec(url.pathname);
+    if (pairingRoute) {
+      const cors = {
+        'access-control-allow-origin': '*',
+        'access-control-allow-methods': 'POST, OPTIONS',
+        'access-control-allow-headers': `content-type, ${RPC_DEVICE_HEADER}, x-gitspace-user`,
+        'cache-control': 'private, no-store',
+      };
+      if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
+      if (request.method !== 'POST') return new Response('Method not allowed', { status: 405, headers: cors });
+      try {
+        const body = new Uint8Array(await request.arrayBuffer());
+        if (body.byteLength > REQUEST_MAX_BYTES) throw new Error('Pairing request is too large');
+        const parsed = JSON.parse(new TextDecoder().decode(body)) as { userId?: unknown };
+        if (typeof parsed.userId !== 'string' || !/^u-[a-f0-9]{32}$/u.test(parsed.userId)) throw new Error('Account identity is invalid');
+        const denied = accountAccessResponse(await activeAccount(env, parsed.userId));
+        if (denied) return new Response(denied.body, { status: denied.status, headers: { ...Object.fromEntries(denied.headers), ...cors } });
+        const result = await credentialVault(env, parsed.userId).machinePairingRequest({
+          operation: pairingRoute[1]!, header: request.headers.get(RPC_DEVICE_HEADER), target: `${url.pathname}${url.search}`, body, operatorUrl: url.origin,
+        });
+        return Response.json(result, { status: result.status === 'ok' ? 200 : 403, headers: cors });
+      } catch (error) {
+        return Response.json(publicError('INVALID_PAIRING', error instanceof Error ? error.message : 'Invalid pairing request'), { status: 400, headers: cors });
+      }
+    }
     if (url.pathname === '/health') {
       return Response.json({ status: 'ok', providers: [...SUPPORTED_PROVIDERS] }, { headers: { 'cache-control': 'no-store' } });
     }
@@ -1969,7 +2277,9 @@ export default {
           return Response.json(publicError('INVALID_MACHINE', 'Machine identity is required'), { status: 400 });
         }
         const vault = credentialVault(env, body.userId);
-        const authorized = await vault.authorizeRoot(request.headers.get('authorization'), `${url.pathname}${url.search}`);
+        const root = await vault.authorizeRoot(request.headers.get('authorization'), `${url.pathname}${url.search}`);
+        const authorized = root.status === 'ok' ? root
+          : await vault.authorizeMachineRequest(request.headers.get('authorization'), `${url.pathname}${url.search}`, body.machineId);
         if (authorized.status === 'error') return Response.json(authorized, { status: 401 });
         const denied = accountAccessResponse(await activeAccount(env, body.userId));
         if (denied) return denied;
@@ -2776,46 +3086,9 @@ export default {
             case 'catalog.sandbox.create': value = await provisionManagedSandbox(env, body.userId, url.origin); break;
             case 'catalog.machine.sleep':
             case 'catalog.machine.resume':
-            case 'catalog.machine.destroy': {
-              const machineId = String(body.payload.machineId ?? '');
-              const action = body.operation.slice('catalog.machine.'.length) as 'sleep' | 'resume' | 'destroy';
-              const existing = await catalog.getMachine(machineId);
-              if (!existing) {
-                if (action === 'destroy') { value = { machineId, removed: true }; break; }
-                throw new Error('Machine does not exist');
-              }
-              const desiredState = action === 'sleep' ? 'offline' : action === 'resume' ? 'online' : 'removed';
-              if ((action === 'sleep' && existing.state === 'offline' && existing.desiredState === 'offline') || (action === 'resume' && existing.state === 'online' && existing.desiredState === 'online')) {
-                value = existing;
-                break;
-              }
-              if (action !== 'resume') await assertMachineHasNoOpenSpaces(env, body.userId, catalog, machineId);
-              const operationId = existing.operationId ?? crypto.randomUUID();
-              const transition = await catalog.putMachine({
-                ...existing,
-                state: action === 'sleep' ? 'sleeping' : action === 'resume' ? 'resuming' : 'deleting',
-                desiredState,
-                lifecycleRevision: existing.lifecycleRevision + 1,
-                operationId,
-                error: null,
-              });
-              const provider = machineProviderFor(env, body.userId, transition);
-              try {
-                if (action === 'destroy') {
-                  await provider.destroy(transition);
-                  await catalog.removeMachine(machineId);
-                  await credentialVault(env, body.userId).removeManagedDevice(machineId);
-                  value = { machineId, removed: true };
-                } else {
-                  const machine = action === 'sleep' ? await provider.sleep(transition) : await provider.resume(transition);
-                  value = await catalog.putMachine({ ...machine, desiredState, lifecycleRevision: transition.lifecycleRevision + 1, operationId: null, error: null });
-                }
-              } catch (error) {
-                await catalog.putMachine({ ...transition, state: 'error', lifecycleRevision: transition.lifecycleRevision + 1, operationId: null, error: error instanceof Error ? error.message : String(error) });
-                throw error;
-              }
+            case 'catalog.machine.destroy':
+              value = await controlFleetMachine(env, body.userId, String(body.payload.machineId ?? ''), body.operation.slice('catalog.machine.'.length) as 'sleep' | 'resume' | 'destroy');
               break;
-            }
             default: throw new Error('Unsupported catalog operation');
           }
           return Response.json({ status: 'ok', value }, { headers: { 'cache-control': 'no-store' } });

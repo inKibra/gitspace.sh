@@ -4,11 +4,15 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./distribution": "./src/distribution.ts"
   },
   "scripts": {
     "typecheck": "tsgo --noEmit -p tsconfig.json",
-    "test": "bun test"
+    "test": "bun test",
+    "release:locks": "bun src/release.ts locks",
+    "release:build": "bun src/release.ts build",
+    "release:publish": "bun src/release.ts publish"
   },
   "dependencies": {
     "@gitspace/account-omp": "workspace:*",

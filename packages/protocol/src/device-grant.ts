@@ -246,6 +246,7 @@ export function verifyDeviceGrantRecord(record: DeviceGrantRecord, rootSigningPu
     // browser that minted an API key invalidates the key on the next check.
     const issuerRecord = resolveIssuer?.(parsed.data.invite.issuer.deviceId) ?? null;
     const issuer = issuerRecord ? verifyDeviceGrantRecord(issuerRecord, rootSigningPublicKey, now, resolveIssuer, depth + 1) : null;
+    if (issuerRecord?.invite.invite.userId !== parsed.data.invite.invite.userId) return null;
     if (!issuer || !issuer.canDelegate || issuer.deviceId !== parsed.data.invite.issuer.deviceId) return null;
     if (!scopeContains(issuer.scope, parsed.data.invite.invite.scope)) return null;
     if (!parsed.data.invite.invite.capabilities.every((capability) => issuer.capabilities.includes(capability))) return null;

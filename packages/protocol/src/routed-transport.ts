@@ -1,13 +1,13 @@
 import { batchFetchTransport, createBrowserClient, type ClientTransport } from 'result-rpc/client';
 import { gitspaceContract, type SpacePlacementView } from './rpc-contract.js';
+import { ACCOUNT_CLOUD_RPC_PATHS, ACCOUNT_RUNTIME_RPC_PATHS } from './account-rpc.js';
 
 /**
- * One client, every machine. Calls that name a space go to the machine that
- * holds it; calls that name a session are located first; everything else
- * (cloud-owned: projects, settings, crons, devices…) goes to the home
- * machine, which proxies the control plane. The placement table comes from
- * the home machine and is refreshed on a short TTL, so a move is followed
- * within seconds without the caller knowing machines exist.
+ * One client, every machine. Calls naming a space go to the machine that
+ * holds it; calls that name a session are located first. Account operations go
+ * to the home endpoint, which may be an account Worker or a machine. Separate
+ * batch queues keep cloud authority work independent of machine availability
+ * without rewriting a signed request.
  */
 export interface RoutedTransportOptions {
   /** RPC URL of the machine the caller can always reach; the routing table is read from it. */
@@ -57,6 +57,10 @@ export function createRoutedTransport(options: RoutedTransportOptions): RoutedTr
     return transports[url];
   };
   const home = transportFor(options.homeUrl);
+  const account = batchFetchTransport({ url: options.homeUrl, fetch: options.fetch, maxItems: options.maxItems ?? 32 });
+  // Runtime schemas/provider capabilities come from a machine when online,
+  // with canonical cloud views when offline. Keep that choice independently signed.
+  const runtimeMetadata = batchFetchTransport({ url: options.homeUrl, fetch: options.fetch, maxItems: options.maxItems ?? 32 });
   const homeClient = createBrowserClient({ contract: gitspaceContract, transport: home });
   const sessionSpaces: Record<string, string> = {};
   let table: RouteTable | null = null;
@@ -105,6 +109,8 @@ export function createRoutedTransport(options: RoutedTransportOptions): RoutedTr
   };
 
   const resolve = async (path: string, input: unknown): Promise<ClientTransport> => {
+    if (Object.hasOwn(ACCOUNT_RUNTIME_RPC_PATHS, path)) return runtimeMetadata;
+    if (Object.hasOwn(ACCOUNT_CLOUD_RPC_PATHS, path)) return account;
     // Routing reads never recurse into routing.
     if (path === 'placements' || path === 'session.locate') return home;
     const spaceId = spaceIdOf(path, input);

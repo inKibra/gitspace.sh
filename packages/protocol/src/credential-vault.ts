@@ -2,6 +2,7 @@ import { ed25519, x25519 } from '@noble/curves/ed25519.js';
 import { hkdf } from '@noble/hashes/hkdf.js';
 import { sha256 } from '@noble/hashes/sha2.js';
 import { z } from 'zod';
+import { deviceGrantRecordSchema, MAX_DELEGATION_DEPTH, verifyDeviceGrantRecord, type DeviceGrantResolver } from './device-grant.js';
 
 const keySchema = z.string().min(40).max(64);
 const idSchema = z.string().min(1).max(160);
@@ -14,12 +15,17 @@ export const credentialAuthorityGrantSchema = z.object({
   exchangePublicKey: keySchema,
   capabilities: z.array(z.enum(['credential.access', 'credential.refresh', 'credential.manage', 'storage.provision', 'storage.access', 'space.control'])).min(1),
   generation: z.number().int().positive(),
+  /** Present only for browser-delegated machine enrollment; covered by the signature. */
+  issuerDeviceId: z.uuid().optional(),
+  expiresAt: z.number().int().positive().optional(),
 });
 export type CredentialAuthorityGrant = z.infer<typeof credentialAuthorityGrantSchema>;
 
 export const signedCredentialAuthorityGrantSchema = z.object({
   grant: credentialAuthorityGrantSchema,
   signature: z.string().min(64).max(128),
+  /** Offline root-to-device proof. Online authority MUST resolve canonical records instead. */
+  issuerChain: z.array(deviceGrantRecordSchema).min(1).max(MAX_DELEGATION_DEPTH).optional(),
 });
 export type SignedCredentialAuthorityGrant = z.infer<typeof signedCredentialAuthorityGrantSchema>;
 
@@ -216,6 +222,11 @@ function ownedBuffer(bytes: Uint8Array): ArrayBuffer {
   return owned.buffer;
 }
 
+/** Canonical signed bytes, also used by WebCrypto browser approvers. */
+export function credentialAuthorityGrantPayload(grant: CredentialAuthorityGrant): Uint8Array {
+  return payload(credentialAuthorityGrantSchema.parse(grant));
+}
+
 export function signCredentialAuthorityGrant(
   grant: CredentialAuthorityGrant,
   rootSigningPrivateKey: Uint8Array,
@@ -227,13 +238,36 @@ export function signCredentialAuthorityGrant(
 export function verifyCredentialAuthorityGrant(
   input: SignedCredentialAuthorityGrant,
   rootSigningPublicKey: Uint8Array,
+  now = Date.now(),
+  resolveCanonicalIssuer?: DeviceGrantResolver,
 ): CredentialAuthorityGrant | null {
   const parsed = signedCredentialAuthorityGrantSchema.safeParse(input);
   if (!parsed.success) return null;
   try {
-    return ed25519.verify(fromBase64(parsed.data.signature), payload(parsed.data.grant), rootSigningPublicKey)
-      ? parsed.data.grant
-      : null;
+    const { grant, issuerChain } = parsed.data;
+    if (grant.expiresAt !== undefined && grant.expiresAt <= now) return null;
+    let signingPublicKey = rootSigningPublicKey;
+    if (grant.issuerDeviceId) {
+      if (!issuerChain || !grant.expiresAt) return null;
+      const embedded = new Map(issuerChain.map((record) => [record.binding.deviceId, record]));
+      if (embedded.size !== issuerChain.length) return null;
+      const resolve: DeviceGrantResolver = (deviceId) => {
+        const record = resolveCanonicalIssuer ? resolveCanonicalIssuer(deviceId) : embedded.get(deviceId) ?? null;
+        return record?.invite.invite.userId === grant.userId ? record : null;
+      };
+      const record = resolve(grant.issuerDeviceId);
+      const issuer = record ? verifyDeviceGrantRecord(record, rootSigningPublicKey, now, resolve) : null;
+      // A machine controls account data, credentials and release execution. Only an
+      // account-wide delegator with those powers may mint its credential.
+      if (!issuer || issuer.kind !== 'browser' || !issuer.canDelegate || issuer.scope.kind !== 'user'
+        || !['devices.manage', 'fleet.control', 'rpc.write', 'session.prompt', 'deployment.control'].every((capability) => issuer.capabilities.includes(capability as typeof issuer.capabilities[number]))
+        || (issuer.expiresAt !== null && grant.expiresAt > issuer.expiresAt)
+        || grant.capabilities.includes('storage.provision')) return null;
+      signingPublicKey = issuer.signingPublicKey;
+    } else if (issuerChain) {
+      return null;
+    }
+    return ed25519.verify(fromBase64(parsed.data.signature), payload(grant), signingPublicKey) ? grant : null;
   } catch {
     return null;
   }

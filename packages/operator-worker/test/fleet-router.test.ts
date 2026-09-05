@@ -1,5 +1,6 @@
 import { env, SELF } from 'cloudflare:test';
 import { HttpResponse, http } from 'msw';
+import { stringify } from 'devalue';
 import { describe, expect, it } from 'vitest';
 import type { FleetCatalogDO } from '../src/fleet-catalog.js';
 import type { UserSettingsDO } from '../src/user-settings.js';
@@ -45,8 +46,8 @@ describe('account fleet router', () => {
 
     const response = await SELF.fetch('https://bravo.gitspace.sh/rpc', {
       method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-gitspace-user': accountId, 'x-gitspace-device': 'opaque-test-signature' },
-      body: '{}',
+      headers: { 'content-type': 'application/result-rpc+devalue; sv=1', 'x-gitspace-user': accountId, 'x-gitspace-device': 'opaque-test-signature' },
+      body: stringify({ v: 1, path: 'browserRelay.status', input: {} }),
     });
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ status: 'ok', value: { machineId: 'machine-b' } });

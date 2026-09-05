@@ -11,28 +11,23 @@ GitSpace uses separate identities for the account root, each machine, and each b
 
 ## Connect a machine
 
-After logging in, enroll and start the computer:
+Open **Settings > Machines > Add a computer** in your account. Install the client on that computer and run the short-lived pairing command shown by the walkthrough:
 
 ```bash
-gitspace machine setup
-gitspace machine start
+gitspace machine setup --pair <token>
 ```
 
-Setup creates machine Ed25519 and X25519 keys, a per-machine artifact key, and a root-signed capability grant. The grant authorizes the machine for the production capabilities listed in the client.
+The computer creates its own Ed25519 and X25519 keys. Compare the signing key in the terminal with the browser, then approve it. The browser signs a delegated machine grant backed by its account-root authorization chain. Setup downloads the verified runtime and starts it without a source checkout or account recovery key.
 
 The started runtime connects to the account relay. It owns the repositories, workspaces, agents, and services placed on that machine.
 
 ## Connect a browser
 
-Create a one-time browser enrollment:
+Create or recover your account at [gitspace.sh](https://gitspace.sh), then choose **Open GitSpace**. The resulting browser invitation expires after five minutes.
 
-```bash
-gitspace open
-```
+The enrollment token travels in the URL fragment and the app removes it before making the enrollment request. The browser generates a non-extractable Ed25519 key in IndexedDB, redeems the invitation, and receives a revocable device grant. Future requests use that device key.
 
-Use `gitspace open --print` when the browser is on another device or when you need to copy the URL yourself. The invitation expires after five minutes.
-
-The browser generates a non-extractable Ed25519 key in IndexedDB, redeems the invitation, and receives a revocable device grant. Future browser RPC requests are signed by that device key.
+Once linked, `gitspace open` opens the account URL only. It does not mint an invitation or copy authority from the machine.
 
 ## Request path
 
@@ -40,8 +35,8 @@ The browser generates a non-extractable Ed25519 key in IndexedDB, redeems the in
 Browser
   | signed account or machine RPC request
   v
-Account Worker and relay
-  | routes the request to the selected machine
+Account cloud APIs and relay
+  | account state works without a machine; workspace requests follow ownership
   v
 Machine runtime
   | reads or changes the workspace it owns
@@ -66,4 +61,4 @@ gitspace machine status
 gitspace doctor
 ```
 
-`machine status` reports the local daemon and relay. `doctor` checks the account configuration, machine enrollment, Bun, OMP, walgit, control endpoint, and relay endpoint.
+`machine status` reports the local daemon and relay. `doctor` checks machine enrollment, bundled runtime components, Git/OpenSSH prerequisites, and account connectivity. Account release controls manage subsequent runtime changes.

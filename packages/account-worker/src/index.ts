@@ -8,6 +8,7 @@ import {
   parseRelaySocketMessage,
   socketAttachmentSchema,
   verifyRelayAuthorization,
+  deviceGrantExpiresAt,
   type SocketAttachment,
   type TunnelRequestMessage,
 } from '@gitspace/protocol';
@@ -70,12 +71,21 @@ interface RelaySocketAttachment extends SocketAttachment {
   authorizedUntil?: number;
 }
 
+function machineAuthorizationDeadline(grant: SignedCredentialAuthorityGrant): number {
+  let deadline = Math.min(Date.now() + MACHINE_LEASE_MS, grant.grant.expiresAt ?? Infinity);
+  for (const issuer of grant.issuerChain ?? []) deadline = Math.min(deadline, deviceGrantExpiresAt(issuer) ?? Infinity);
+  return deadline;
+}
+
 async function currentMachineAuthority(
   env: Env,
   grant: SignedCredentialAuthorityGrant,
   capability: 'space.control' | 'storage.access',
 ): Promise<Response | null> {
   try {
+    if (!verifyCredentialAuthorityGrant(grant, credentialProtocolBase64.decode(env.AUTH_PUBLIC_KEY))) {
+      return jsonError(401, 'MACHINE_GRANT_REJECTED', 'Machine issuer proof is invalid or expired');
+    }
     const response = await fetch(new URL('/v1/relay/authorize', env.OPERATOR_URL), {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -364,10 +374,10 @@ export class UserRelayDO extends DurableObject<Env> {
       return jsonError(401, 'MACHINE_GRANT_REQUIRED', 'Machine credential grant is missing');
     }
     // Begin the lease before the authority check, never after a slow response.
-    const authorizedUntil = Date.now() + MACHINE_LEASE_MS;
+    const authorizedUntil = machineGrant ? machineAuthorizationDeadline(machineGrant) : Date.now() + MACHINE_LEASE_MS;
     if (machineGrant) {
       const rejected = await currentMachineAuthority(this.env, machineGrant, 'space.control');
-      if (rejected) return rejected;
+      if (rejected || authorizedUntil <= Date.now()) return rejected ?? jsonError(401, 'MACHINE_GRANT_REJECTED', 'Machine grant has expired');
     }
 
     const tag = endpointTag(parsed.data);
@@ -523,9 +533,9 @@ export class UserRelayDO extends DurableObject<Env> {
     if (checking) return checking;
     if (!force && (attachment.authorizedUntil ?? 0) > Date.now()) return true;
     const check = (async () => {
-      const authorizedUntil = Date.now() + MACHINE_LEASE_MS;
+      const authorizedUntil = machineAuthorizationDeadline(attachment.machineGrant!);
       const rejected = await currentMachineAuthority(this.env, attachment.machineGrant!, 'space.control');
-      if (rejected || socket.readyState !== 1) {
+      if (rejected || authorizedUntil <= Date.now() || socket.readyState !== 1) {
         this.rejectMachineSocket(socket, attachment);
         return false;
       }

@@ -1,0 +1,159 @@
+name: Publish Native Distribution
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: 'New immutable release id (for example 1.0.0-rc.1); builds the selected workflow ref'
+        required: true
+        type: string
+      publish:
+        description: 'Upload all four immutable platform releases to R2 (does not activate channels)'
+        required: true
+        type: boolean
+        default: false
+      activate:
+        description: 'Publish and activate all four stable platform channels after every native build succeeds'
+        required: true
+        type: boolean
+        default: false
+
+concurrency:
+  group: native-distribution
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  runtime-locks:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.3.14'
+      - name: Install the source dependency graph
+        run: bun install --frozen-lockfile
+      - name: Resolve one common side-runtime lock set
+        run: bun packages/deployment/src/release.ts locks --out "$RUNNER_TEMP/runtime-locks"
+      - name: Retain the common runtime locks
+        uses: actions/upload-artifact@v4
+        with:
+          name: gitspace-runtime-locks
+          path: ${{ runner.temp }}/runtime-locks/
+          if-no-files-found: error
+          retention-days: 90
+
+  build:
+    needs: runtime-locks
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: darwin-arm64
+            runner: macos-15
+          - target: darwin-x64
+            runner: macos-15-intel
+          - target: linux-x64
+            runner: ubuntu-24.04
+          - target: linux-arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.3.14'
+      - name: Install Linux native build prerequisites
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y binutils clang cmake libprotobuf-dev libssl-dev pkg-config protobuf-compiler unzip
+      - name: Install macOS native build prerequisites
+        if: runner.os == 'macOS'
+        run: brew install protobuf cmake pkg-config openssl@3
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal
+      - name: Install the source dependency graph
+        run: bun install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: gitspace-runtime-locks
+          path: ${{ runner.temp }}/runtime-locks
+      - name: Build this native client and complete runtime
+        env:
+          GITSPACE_RELEASE: ${{ inputs.release }}
+          GITSPACE_BUILD_PLATFORM: ${{ matrix.target }}
+        run: |
+          bun packages/deployment/src/release.ts build \
+            --release "$GITSPACE_RELEASE" \
+            --platform "$GITSPACE_BUILD_PLATFORM" \
+            --runtime-locks "$RUNNER_TEMP/runtime-locks" \
+            --out "$RUNNER_TEMP/distribution"
+      - name: Run the standalone client with an empty HOME and no Bun on PATH
+        run: |
+          mkdir -p "$RUNNER_TEMP/empty-home"
+          env -i HOME="$RUNNER_TEMP/empty-home" PATH=/usr/bin:/bin "$RUNNER_TEMP/distribution/gitspace" --version
+      - name: Retain native release artifacts and provenance
+        uses: actions/upload-artifact@v4
+        with:
+          name: gitspace-native-${{ matrix.target }}
+          path: ${{ runner.temp }}/distribution/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 90
+
+  publish:
+    if: inputs.publish || inputs.activate
+    needs: build
+    runs-on: ubuntu-24.04
+    env:
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET: ${{ vars.GITSPACE_DISTRIBUTION_BUCKET || 'gitspace-data' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.3.14'
+      - name: Install release tooling
+        run: bun install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: gitspace-native-*
+          path: ${{ runner.temp }}/native-releases
+      - name: Publish every immutable platform release without changing channels
+        run: |
+          for platform in darwin-arm64 darwin-x64 linux-arm64 linux-x64; do
+            bun packages/deployment/src/release.ts publish --from "$RUNNER_TEMP/native-releases/gitspace-native-$platform"
+          done
+
+  activate:
+    if: inputs.activate
+    needs: publish
+    runs-on: ubuntu-24.04
+    environment: distribution-production
+    # Configure required reviewers on this environment if production activation needs a second approval.
+    env:
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET: ${{ vars.GITSPACE_DISTRIBUTION_BUCKET || 'gitspace-data' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.3.14'
+      - name: Install release tooling
+        run: bun install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: gitspace-native-*
+          path: ${{ runner.temp }}/native-releases
+      - name: Activate the verified platform channels
+        run: |
+          for platform in darwin-arm64 darwin-x64 linux-arm64 linux-x64; do
+            bun packages/deployment/src/release.ts publish --from "$RUNNER_TEMP/native-releases/gitspace-native-$platform" --activate
+          done

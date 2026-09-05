@@ -1,89 +1,93 @@
 ---
 $schema: https://holocron.so/frontmatter.json
 title: Getting started
-description: Create an account, enroll a machine, and open GitSpace.
+description: Create an account in the browser, then choose where your work runs.
 icon: play
 ---
 
 # Getting started
 
-You need an invitation, a permanent account handle, and a computer that can run the GitSpace machine runtime.
+Start at [gitspace.sh](https://gitspace.sh). You need an invitation and a permanent account handle. You do not need to install anything to create an account or use cloud machines.
 
 ## 1. Create an invited account
 
-Open [gitspace.sh](https://gitspace.sh), enter your invitation, and choose your handle.
+Enter your invitation and choose your handle. Choose **Prepare recovery key**.
 
-Choose **Prepare recovery key**. Your browser creates the account root Ed25519 key and shows its `gsr_` recovery key before making any account request. Save it in a password manager, then paste the saved key into the confirmation field.
+Your browser creates the account root key and displays a recovery key beginning with `gsr_`. Save it in a password manager, then paste the saved key into the confirmation field.
 
 <Warning>
 Save the recovery key before creating the account. GitSpace does not store it and cannot restore it. Anyone with this key can act as your account root.
 </Warning>
 
-Choose **Create invited account** after saving the key. If the request fails, retry on the same page. If you reload or lose the response, choose **Resume with a saved recovery key** and enter the same handle and key. Keep the original invitation until account creation finishes.
+Choose **Create invited account**, then **Open GitSpace**. This enrolls the browser and opens your account. You do not need a local machine or a terminal for this step.
 
-## 2. Install the client
+If you lose the response or need to connect another browser, return to gitspace.sh and choose **Resume with a saved recovery key**. Enter the same handle and key. Recovery does not create a second account or consume another invitation for a completed account. Keep the original invitation until initial account creation finishes.
 
-Run the installer on the computer that will hold your repositories and agent workspaces.
+## 2. Choose where work runs
+
+Complete your profile, then choose a machine during setup. You can also skip this step and return through **Account settings > Machines**.
+
+### Use a cloud machine
+
+Choose **Create cloud machine** and confirm. Wait for its state to become **online** before placing work on it. Cloud machines can remain around for ongoing work and personalization. Provider usage charges may apply.
+
+This path does not need the local client.
+
+### Connect your own computer
+
+Choose **Add a computer** in the web app. Follow the walkthrough on the computer you want to connect.
+
+The client supports published macOS and Linux platform builds. On Windows, use a supported Linux distribution in WSL. Install Git and the OpenSSH client first. GitSpace supplies its own Bun, OMP, and walgit runtime; no GitSpace source checkout or local build is required.
+
+Run the installer:
 
 ```bash
 curl -fsSL https://gitspace.sh/install | sh
 ```
 
-The installed command is `gitspace`.
+If the installer asks you to add `~/.local/bin` to your PATH, do so before continuing. You can also invoke `~/.local/bin/gitspace` directly.
 
-## 3. Connect the computer to your account
-
-Use the handle and recovery key from account creation.
+In the browser, choose **Generate pairing command**. Copy that command to the computer's terminal. It has this form:
 
 ```bash
-gitspace login <handle> --recovery-key <gsr_key>
+gitspace machine setup --pair <short-lived-pairing-token>
 ```
 
-This stores the local account configuration under `~/.config/gitspace/` with owner-only file permissions.
+The computer generates its own keys. Compare its name and signing key in the browser with the terminal, then choose **Approve this computer**. The command downloads the verified runtime and starts it. Keep the terminal open until setup reports readiness, then check that the browser shows **Connected**.
 
-Recovery does not consume another invitation or provision a second account. Suspended accounts require help from the operator.
+<Warning>
+Only approve a computer you control. An enrolled machine can access your workspace data and configured credentials. Pairing does not copy your account recovery key to that machine.
+</Warning>
 
-## 4. Enroll and start the machine
+Pairing commands expire after ten minutes. If setup stops after the account has approved and linked the machine, resume with:
 
 ```bash
-gitspace machine setup
 gitspace machine start
 ```
 
-`machine setup` creates the machine signing and key-exchange keys, registers a root-signed capability grant, and builds the local runtime. `machine start` starts that runtime and connects it to the production relay.
-
-Check the connection:
+For a connection problem:
 
 ```bash
 gitspace machine status
 gitspace doctor
 ```
 
-## 5. Open the web app
+## 3. Configure your agent provider
 
-```bash
-gitspace open
-```
+Once a machine is online, connect a provider from the **Providers** step or **Settings > OMP > Providers**. Choose the model settings your agents should use. You can skip provider setup while exploring the account, but an agent needs a configured provider before it can work.
 
-This creates a five-minute browser invitation, opens your account URL, and enrolls that browser with its own revocable device key.
+## 4. Try a small task
 
-To print the URL instead of opening a browser:
+Finish setup, then create a project and a workspace in the browser. Use a repository you can recover elsewhere for your first test.
 
-```bash
-gitspace open --print
-```
+Ask the agent to make a small change. Review its diff, answer any questions, open a terminal, and save an artifact. Close and reopen the workspace, then continue the conversation.
 
-## Add another computer
+Controlled workspace close and provider replacement use durable checkpoints. Unexpected machine or disk loss can still lose uncheckpointed edits. The unclean-disconnect recovery choice and returning-machine recovery ZIP are not implemented yet. Ignored workspace files are excluded from checkpoints.
 
-Repeat installation, login, machine setup, and machine start on that computer. Use the same account handle and recovery key. Each machine receives a separate identity and capability grant.
+## Releases and additional machines
 
-## Next steps
+Add each computer through its own pairing walkthrough. Each receives a separate identity and grant.
 
-<CardGroup cols={2}>
-  <Card title="Core concepts" icon="folder-git-2" href="/concepts">
-    Learn what GitSpace places on each machine.
-  </Card>
-  <Card title="Agent workflow" icon="bot" href="/agent-workflow">
-    Take a workspace from intent through operation.
-  </Card>
-</CardGroup>
+Your account manages releases of the Worker, frontend, machine runtime, and OMP. The installer bootstraps a computer; there is no standalone local update command. Use the account release controls for subsequent runtime changes.
+
+See [CLI reference](/cli-reference) for local start, stop, status, and diagnostic commands, or [Agent workflow](/agent-workflow) for the workspace workflow.

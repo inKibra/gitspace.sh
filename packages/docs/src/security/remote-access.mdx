@@ -13,7 +13,7 @@ This page describes the current implementation in `packages/`. It separates auth
 
 Account creation generates an Ed25519 root key. The private key is encoded as the `gsr_` recovery key and shown to the user. The control plane receives the public key.
 
-The root key signs machine and browser authority. Possession of the recovery key is therefore account-root authority.
+The root key signs browser authority. An account-wide delegating browser can approve a machine grant without copying the root key to that machine. Possession of the recovery key is account-root authority.
 
 <Warning>
 GitSpace does not store the recovery key and cannot restore it. Keep it outside source control, chat, workspace notes, and browser screenshots.
@@ -21,13 +21,15 @@ GitSpace does not store the recovery key and cannot restore it. Keep it outside 
 
 ## Machine identity
 
-`gitspace machine setup` creates separate Ed25519 signing and X25519 key-exchange keys. It registers a capability grant signed by the account root.
+`gitspace machine setup --pair <token>` creates separate Ed25519 signing and X25519 key-exchange keys on the computer. It proves possession of the signing key before the browser can approve the request.
 
-The grant names the user, machine, public keys, generation, and allowed capabilities. Revoking the machine removes its account authorization.
+The browser signs a grant naming the account, machine, public keys, generation, allowed capabilities, and approving device. The grant carries the root/device proof chain. Verification also checks the canonical issuer's revocation and expiry state. Revoking that authority can invalidate a dependent machine grant.
+
+Pairing tokens expire after ten minutes and cannot bind a second set of machine keys. A claimed machine can retry retrieval with a fresh signature until the original expiry. The machine receives only its own enrollment configuration, not the account root private key.
 
 ## Browser identity
 
-`gitspace open` creates a short-lived signed browser invitation. The browser creates a non-extractable Ed25519 key in IndexedDB and redeems the invitation for a device grant.
+Account creation or recovery in the web page creates a short-lived signed browser invitation. The browser creates a non-extractable Ed25519 key in IndexedDB and redeems the invitation for a device grant. The account root key is not persisted in browser storage.
 
 Browser RPC requests are signed. Verification binds a request to the enrolled device and detects changes to the signed request.
 
@@ -35,7 +37,7 @@ Browser RPC requests are signed. Verification binds a request to the enrolled de
 
 Current package code encrypts these data classes:
 
-- Artifact and checkpoint blobs use AES-GCM with machine-managed artifact key material.
+- Artifact and checkpoint blobs use AES-GCM with an account-scoped key supplied to authorized machines. The managed credential vault is part of this trust boundary.
 - Machine credential envelopes use ephemeral X25519 key agreement, HKDF-SHA256 key derivation, and AES-GCM authenticated encryption.
 
 These are scoped guarantees. They do not imply that every request or terminal byte uses the same encryption boundary.

@@ -82,7 +82,7 @@ export class DeviceEnrollmentError extends Error {
 }
 
 /**
- * Redeem `?enroll=<token>`: generate the key pair, sign a binding to the
+ * Redeem an enrollment token: generate the key pair, sign a binding to the
  * invite, and register it with the deployment named by the invite. The
  * private key never leaves WebCrypto.
  */

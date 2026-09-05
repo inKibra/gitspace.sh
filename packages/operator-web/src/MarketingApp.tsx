@@ -1,5 +1,5 @@
 import { Badge, Button, Card, CardContent } from '@gitspace/ui';
-import { createRelayAuthorization } from '@gitspace/protocol';
+import { createRelayAuthorization, encodeDeviceInviteToken, signDeviceInvite } from '@gitspace/protocol';
 import { credentialProtocolBase64 } from '@gitspace/protocol/credential-vault';
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { sha256 } from '@noble/hashes/sha2.js';
@@ -16,12 +16,36 @@ export function MarketingApp() {
   const [usingSavedKey, setUsingSavedKey] = useState(false);
   const [savedRecoveryKey, setSavedRecoveryKey] = useState('');
   const [recoveryConfirmation, setRecoveryConfirmation] = useState('');
-  const [identity, setIdentity] = useState<{ handle: string; rootPrivateKey: Uint8Array; recoveryKey: string } | null>(null);
+  const [identity, setIdentity] = useState<{ handle: string; recoveryKey: string } | null>(null);
+  const rootKeyRef = useRef<Uint8Array | null>(null);
   const creatingRef = useRef(false);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [created, setCreated] = useState<{ accountUrl: string; recoveryKey: string; handle: string } | null>(null);
+  const [created, setCreated] = useState<{ enrollmentUrl: string | null; expiresAt: number; handle: string } | null>(null);
   const [installCopied, setInstallCopied] = useState(false);
+  useEffect(() => {
+    const clearRootKey = (): void => {
+      rootKeyRef.current?.fill(0);
+      rootKeyRef.current = null;
+    };
+    const clearPage = (): void => {
+      clearRootKey();
+      setIdentity(null);
+      setSavedRecoveryKey('');
+      setRecoveryConfirmation('');
+      setCreated(null);
+    };
+    window.addEventListener('pagehide', clearPage);
+    return () => {
+      clearRootKey();
+      window.removeEventListener('pagehide', clearPage);
+    };
+  }, []);
+  useEffect(() => {
+    if (!created?.enrollmentUrl) return;
+    const timeout = window.setTimeout(() => setCreated((current) => current ? { ...current, enrollmentUrl: null } : null), Math.max(0, created.expiresAt - Date.now()));
+    return () => window.clearTimeout(timeout);
+  }, [created]);
   useEffect(() => {
     if (!installCopied) return;
     const timeout = window.setTimeout(() => setInstallCopied(false), 2_000);
@@ -48,9 +72,13 @@ export function MarketingApp() {
         ? credentialProtocolBase64.decode(`${savedKey.slice(4).replaceAll('-', '+').replaceAll('_', '/')}=`)
         : ed25519.utils.randomSecretKey();
       const recoveryKey = `gsr_${credentialProtocolBase64.encode(rootPrivateKey).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/u, '')}`;
-      if (usingSavedKey && recoveryKey !== savedKey) throw new Error('Recovery key is invalid.');
+      if (usingSavedKey && recoveryKey !== savedKey) {
+        rootPrivateKey.fill(0);
+        throw new Error('Recovery key is invalid.');
+      }
+      rootKeyRef.current = rootPrivateKey;
       setHandle(normalized);
-      setIdentity({ handle: normalized, rootPrivateKey, recoveryKey });
+      setIdentity({ handle: normalized, recoveryKey });
       setRecoveryConfirmation(usingSavedKey ? recoveryKey : '');
       setSavedRecoveryKey('');
     } catch (cause) {
@@ -58,15 +86,17 @@ export function MarketingApp() {
     }
   };
   const createAccount = async (): Promise<void> => {
-    if (creatingRef.current || !identity || recoveryConfirmation.trim() !== identity.recoveryKey) return;
+    const rootPrivateKey = rootKeyRef.current;
+    if (creatingRef.current || !identity || !rootPrivateKey || recoveryConfirmation.trim() !== identity.recoveryKey) return;
     creatingRef.current = true;
     setCreating(true);
     setError(null);
     const invitation = invite.trim();
     try {
-      const { rootPrivateKey, recoveryKey, handle: accountHandle } = identity;
+      const { handle: accountHandle } = identity;
       const rootPublicKey = credentialProtocolBase64.encode(ed25519.getPublicKey(rootPrivateKey));
       const requestAccount = async (path: string, payload: Record<string, string>) => {
+        if (rootKeyRef.current !== rootPrivateKey) throw new Error('Resume with your saved recovery key to open this account.');
         const response = await fetch(path, {
           method: 'POST',
           cache: 'no-store',
@@ -76,7 +106,7 @@ export function MarketingApp() {
           },
           body: JSON.stringify(payload),
         });
-        const body = await response.json() as { status: 'ok'; value: { accountUrl: string } } | { status: 'error'; error: { code: string; message: string } };
+        const body = await response.json() as { status: 'ok'; value: { userId: string; accountUrl: string; apiUrl: string } } | { status: 'error'; error: { code: string; message: string } };
         return { response, body };
       };
       let result = await requestAccount('/v1/accounts/recover', { handle: accountHandle, rootPublicKey });
@@ -87,16 +117,45 @@ export function MarketingApp() {
       )) {
         if (!invitation) throw new Error('Enter your invitation to finish creating this account.');
         const vaultKey = sha256.create().update(new TextEncoder().encode('gitspace-vault-v1\n')).update(rootPrivateKey).digest();
-        result = await requestAccount('/v1/accounts/bootstrap', {
-          handle: accountHandle,
-          invite: invitation,
-          rootPublicKey,
-          vaultKey: credentialProtocolBase64.encode(vaultKey),
-        });
+        try {
+          result = await requestAccount('/v1/accounts/bootstrap', {
+            handle: accountHandle,
+            invite: invitation,
+            rootPublicKey,
+            vaultKey: credentialProtocolBase64.encode(vaultKey),
+          });
+        } finally {
+          vaultKey.fill(0);
+        }
       }
       const { response, body } = result;
       if (!response.ok || body.status === 'error') throw new Error(body.status === 'error' ? body.error.message : `Account request failed with HTTP ${response.status}`);
-      setCreated({ accountUrl: body.value.accountUrl, recoveryKey, handle: accountHandle });
+      if (rootKeyRef.current !== rootPrivateKey) throw new Error('Resume with your saved recovery key to open this account.');
+      const now = Date.now();
+      const expiresAt = now + 5 * 60_000;
+      const browserInvite = signDeviceInvite({
+        version: 1,
+        userId: body.value.userId,
+        inviteId: crypto.randomUUID(),
+        kind: 'browser',
+        label: 'GitSpace browser',
+        scope: { kind: 'user' },
+        capabilities: ['rpc.read', 'rpc.write', 'session.prompt', 'fleet.control', 'devices.manage', 'deployment.control'],
+        canDelegate: true,
+        issuedAt: now,
+        expiresAt,
+        grantTtlMs: null,
+        enrollUrl: body.value.apiUrl,
+      }, rootPrivateKey);
+      const accountUrl = new URL(body.value.accountUrl);
+      accountUrl.hash = new URLSearchParams({ enroll: encodeDeviceInviteToken(browserInvite) }).toString();
+      rootPrivateKey.fill(0);
+      rootKeyRef.current = null;
+      setIdentity(null);
+      setSavedRecoveryKey('');
+      setRecoveryConfirmation('');
+      setInvite('');
+      setCreated({ enrollmentUrl: accountUrl.toString(), expiresAt, handle: accountHandle });
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Account creation failed');
     } finally {
@@ -124,7 +183,7 @@ export function MarketingApp() {
             {[
               ['Studio', 'Online', 'docker · production', 'bg-emerald-500'],
               ['Home server', 'Online', 'storage · long-running', 'bg-emerald-500'],
-              ['Cloud sandbox', 'Sleeping', 'isolated · disposable', 'bg-amber-500'],
+              ['Cloud machine', 'Sleeping', 'managed · resumes your work', 'bg-amber-500'],
             ].map(([machine, state, capabilities, tone]) => <div key={machine} className="flex min-h-14 items-center justify-between gap-4 rounded-lg bg-surface-3 px-4 shadow-surface-1">
               <span className="min-w-0"><strong className="block truncate text-body font-medium">{machine}</strong><span className="block truncate font-mono text-[11px] text-muted-foreground">{capabilities}</span></span><span className="flex shrink-0 items-center gap-2 text-caption text-muted-foreground"><span className={`size-1.5 rounded-full ${tone}`} />{state}</span>
             </div>)}
@@ -174,7 +233,7 @@ export function MarketingApp() {
             {[
               ['checkout-redesign', 'Shop', 'Working', 'Darktop', 'bg-emerald-500'],
               ['relay-hardening', 'GitSpace', 'Needs attention', 'Studio', 'bg-orange-500'],
-              ['docs-refresh', 'GitSpace', 'Waiting', 'Cloud sandbox', 'bg-blue-500'],
+              ['docs-refresh', 'GitSpace', 'Waiting', 'Cloud machine', 'bg-blue-500'],
               ['release-check', 'API', 'Failed', 'Home server', 'bg-red-500'],
             ].map(([workspace, project, state, machine, color]) => <div key={workspace} className="grid min-h-16 grid-cols-[minmax(0,1fr)_auto] items-center gap-4 rounded-lg bg-surface-3 px-4 shadow-surface-1">
               <span className="min-w-0"><strong className="block truncate text-body font-medium">{workspace}</strong><span className="block truncate text-caption text-muted-foreground">{project} · {machine}</span></span>
@@ -278,16 +337,17 @@ export function MarketingApp() {
       <div className="mx-auto max-w-2xl text-center">
         <Badge color="gray">Invite only</Badge>
         <h2 className="mt-5 text-balance text-display font-semibold tracking-tight">Create your GitSpace account.</h2>
-        <p className="mt-4 text-pretty text-body text-muted-foreground">Enter your invitation and choose your permanent handle. Save your recovery key before creating the account, or resume with a key you already saved. The private root key stays in this page, not in browser storage.</p>
+        <p className="mt-4 text-pretty text-body text-muted-foreground">Enter your invitation and choose your permanent handle, or recover an account with your saved key. Open GitSpace in this browser, then create a cloud machine or connect a computer when you need one. No installation is required to create your account.</p>
       </div>
       {created
         ? <Card className="mx-auto mt-10 max-w-2xl bg-surface-2 shadow-surface-3"><CardContent className="p-6 lg:p-8">
           <Badge color="green">Account ready</Badge>
           <h3 className="mt-5 text-title font-semibold">{created.handle}.gitspace.sh</h3>
-          <p className="mt-2 text-pretty text-body text-muted-foreground">Keep your saved recovery key safe. GitSpace does not store it and cannot restore it for you.</p>
-          <button type="button" onClick={() => void navigator.clipboard.writeText(created.recoveryKey)} className="mt-5 min-h-12 w-full overflow-x-auto rounded-lg bg-surface-3 px-4 py-3 text-left font-mono text-caption shadow-surface-1 transition-transform active:scale-[0.96]">{created.recoveryKey}</button>
-          <pre className="mt-3 overflow-x-auto rounded-lg bg-surface-3 px-4 py-3 text-left font-mono text-caption shadow-surface-1"><code>gitspace login {created.handle} --recovery-key {created.recoveryKey}</code></pre>
-          <div className="mt-6 flex flex-wrap gap-3"><a href={created.accountUrl}><Button variant="primary">Open account</Button></a><Button variant="secondary" onClick={() => void navigator.clipboard.writeText(`gitspace login ${created.handle} --recovery-key ${created.recoveryKey}`)}>Copy login command</Button></div>
+          <p className="mt-2 text-pretty text-body text-muted-foreground">Keep your saved recovery key safe. GitSpace cannot restore it for you. The private root key has been cleared from this page.</p>
+          <p className="mt-4 text-pretty text-body text-muted-foreground">{created.enrollmentUrl ? 'Open GitSpace within five minutes to connect this browser. You can set up your account and create a cloud machine without installing the client.' : 'The browser connection link has expired. Use your saved recovery key to get a new one.'}</p>
+          <div className="mt-6 flex flex-wrap gap-3">
+            {created.enrollmentUrl ? <a href={created.enrollmentUrl} referrerPolicy="no-referrer"><Button variant="primary">Open GitSpace <ArrowRight width={16} height={16} /></Button></a> : <Button variant="primary" onClick={() => { setCreated(null); setUsingSavedKey(true); }}>Use saved recovery key</Button>}
+          </div>
         </CardContent></Card>
         : <form className="mx-auto mt-10 max-w-xl space-y-4" onSubmit={(event) => { event.preventDefault(); if (identity) void createAccount(); else prepareAccount(); }}>
           <label className="block">
@@ -302,7 +362,7 @@ export function MarketingApp() {
           {identity ? <>
             <div className="space-y-4 rounded-lg bg-surface-2 p-4 shadow-surface-2">
               <h3 className="text-body font-semibold">{usingSavedKey ? 'Saved recovery key loaded' : 'Save your recovery key first'}</h3>
-              <p className="text-pretty text-caption text-muted-foreground">Keep this key in a password manager with your handle and invitation. Anyone with the key can control your account. If you reload or lose the response, resume with the same saved key, handle, and invitation.</p>
+              <p className="text-pretty text-caption text-muted-foreground">Save this key in a password manager with your handle and invitation. Anyone with the key can control your account. It stays in this page until your browser connection link is ready, never in browser storage. If signup is interrupted, resume with the same key.</p>
               {!usingSavedKey ? <>
                 <label className="block">
                   <span className="mb-2 block text-caption font-medium">Recovery key</span>
@@ -330,7 +390,7 @@ export function MarketingApp() {
         </form>}
       {error ? <p role="alert" className="mx-auto mt-4 max-w-xl text-body text-red-600">{error}</p> : null}
       <div className="mx-auto mt-12 max-w-2xl">
-        <p className="mb-3 text-caption text-muted-foreground">Install the client on your first machine.</p>
+        <p className="mb-3 text-caption text-muted-foreground">Optional: install the client to connect a computer. You can create cloud machines from GitSpace without it.</p>
         <div className="flex min-h-14 items-center gap-3 rounded-lg bg-surface-2 py-2 pl-5 pr-2 shadow-surface-2">
           <code className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap font-mono text-body"><span className="text-muted-foreground">$ </span>{installCommand}</code>
           <Button variant="secondary" size="compact" onClick={() => void copyInstall()} leadingIcon={installCopied ? CheckCircle : Copy01} aria-live="polite">{installCopied ? 'Copied' : 'Copy'}</Button>
