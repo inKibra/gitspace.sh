@@ -243,6 +243,7 @@ export * from './inspector-contract.js';
 export * from './mcp-contract.js';
 export * from './rpc-contract.js';
 export * from './project-authority.js';
+export * from './artifact-storage.js';
 export * from './rpc-crypto.js';
 export * from './skills-contract.js';
 export * from './space-checkpoint.js';

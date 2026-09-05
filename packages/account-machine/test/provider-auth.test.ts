@@ -196,6 +196,25 @@ describe('ProviderAuthCoordinator login flows', () => {
     await expect(auth.respond(flowId, prompt.promptId, 'again')).rejects.toThrow('no open prompt');
   });
 
+  it('retires the remote paste prompt when the local callback wins', async () => {
+    const callback = Promise.withResolvers<string>();
+    const storage = new FakeAuthStorage({
+      login: async (provider, ctrl, fake) => {
+        await Promise.race([ctrl.onManualCodeInput(), callback.promise]);
+        fake.addOAuth(provider, 'local@example.com');
+        return { type: 'oauth', email: 'local@example.com' };
+      },
+    });
+    const auth = coordinator(storage);
+    const flowId = await auth.startLogin('openai-codex');
+    const waiting = await collect(auth.events(flowId), (event) => event.type === 'prompt');
+    const prompt = waiting.at(-1) as Extract<ProviderLoginEvent, { type: 'prompt' }>;
+    callback.resolve('local-callback');
+    const events = await collect(auth.events(flowId), () => false);
+    expect(events.at(-1)).toMatchObject({ type: 'done', ok: true });
+    await expect(auth.respond(flowId, prompt.promptId, 'late-remote-callback')).rejects.toThrow('no open prompt');
+  });
+
   it('cancel aborts the flow, rejects open prompts and ends the stream with done ok:false', async () => {
     let aborted = false;
     const storage = new FakeAuthStorage({

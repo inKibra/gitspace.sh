@@ -8,6 +8,8 @@ const ENROLLMENT_KEY = 'gitspace:managed-enrollment';
 const MACHINE_KEY = 'gitspace:machine-record';
 
 export class GitSpaceSandbox extends CloudflareSandbox<Env> {
+  private machineStart: Promise<SandboxMachineRecord> | null = null;
+
   async enrollMachine(input: ManagedEnrollment): Promise<SandboxMachineRecord> {
     await this.ctx.storage.put(ENROLLMENT_KEY, input);
     return this.startMachine(input);
@@ -16,8 +18,9 @@ export class GitSpaceSandbox extends CloudflareSandbox<Env> {
   async statusMachine(): Promise<SandboxMachineRecord> {
     const input = await this.requireEnrollment();
     const previous = await this.ctx.storage.get<SandboxMachineRecord>(MACHINE_KEY);
-    const process = await this.getProcess('gitspace-machine');
-    if (process?.status === 'running' && previous?.rpcEndpoint) {
+    // Reading status must not boot the SDK or probe a deliberately discarded disk.
+    if (previous?.state === 'offline' && previous.desiredState === 'offline') return previous;
+    if (previous?.rpcEndpoint) {
       const probe = await this.exec('bun /opt/gitspace/rpc-probe.js http://127.0.0.1:8081/rpc');
       if (probe.success && probe.exitCode === 0) {
         return this.record(input, 'online', previous.rpcEndpoint, 'Managed Cloudflare Sandbox. GitSpace machine runtime enrolled and ready.', 'online');
@@ -53,7 +56,7 @@ export class GitSpaceSandbox extends CloudflareSandbox<Env> {
   async sleepMachine(): Promise<SandboxMachineRecord> {
     const input = await this.requireEnrollment();
     await this.stop('SIGTERM');
-    return this.record(input, 'offline', null, 'Managed Cloudflare Sandbox sleeping.', 'offline');
+    return this.record(input, 'offline', null, 'Temporary cloud machine stopped.', 'offline');
   }
 
   async destroyMachine(): Promise<{ machineId: string }> {
@@ -62,7 +65,12 @@ export class GitSpaceSandbox extends CloudflareSandbox<Env> {
     return { machineId: input.machineId };
   }
 
-  private async startMachine(input: ManagedEnrollment): Promise<SandboxMachineRecord> {
+  private startMachine(input: ManagedEnrollment): Promise<SandboxMachineRecord> {
+    this.machineStart ??= this.launchMachine(input).finally(() => { this.machineStart = null; });
+    return this.machineStart;
+  }
+
+  private async launchMachine(input: ManagedEnrollment): Promise<SandboxMachineRecord> {
     await this.startAndWaitForPorts({ ports: 3000 });
     await this.exposePort(8081, { hostname: this.env.SANDBOX_HOSTNAME, name: 'gitspace-rpc' });
     const controlUrl = input.environment.GITSPACE_CONTROL_URL;
@@ -70,11 +78,16 @@ export class GitSpaceSandbox extends CloudflareSandbox<Env> {
     const rpcEndpoint = new URL(`/__sandbox/${encodeURIComponent(input.userId)}/${encodeURIComponent(input.machineId)}/rpc`, controlUrl).toString();
     const existing = await this.getProcess('gitspace-machine');
     if (existing?.status !== 'running') {
-      await this.startProcess('bun /opt/gitspace/host.js', {
-        processId: 'gitspace-machine',
-        autoCleanup: false,
-        env: { ...input.environment, GITSPACE_PUBLIC_RPC_URL: rpcEndpoint },
-      });
+      // A previous concurrent launch may have replaced the SDK process record
+      // while the original host still owns its port (including during startup).
+      const listening = await this.exec('bun -e "await fetch(\'http://127.0.0.1:8081/health\')"');
+      if (!listening.success || listening.exitCode !== 0) {
+        await this.startProcess('bun /opt/gitspace/host.js', {
+          processId: 'gitspace-machine',
+          autoCleanup: false,
+          env: { ...input.environment, GITSPACE_PUBLIC_RPC_URL: rpcEndpoint },
+        });
+      }
     }
     return this.record(input, 'offline', rpcEndpoint, 'Managed Cloudflare Sandbox is starting.', 'online');
   }

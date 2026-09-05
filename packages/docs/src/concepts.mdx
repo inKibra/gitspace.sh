@@ -23,7 +23,11 @@ Browser grants are revocable. Enrolling a new browser does not require sharing a
 
 A machine is a physical computer or managed sandbox that can materialize workspaces and run their agents. A physical machine runs the runtime started by `gitspace machine start`.
 
-Machines expose capabilities such as available runtimes, isolation, hardware, services, and credential scopes. Placement uses those capabilities to keep work on an eligible machine. GitSpace also reports machine state such as online, offline, sleeping, or error so the fleet view can direct attention.
+Machines expose capabilities such as available runtimes, isolation, hardware, services, and credential scopes. Placement uses those capabilities to keep work on an eligible machine. GitSpace also reports machine state such as online, offline, starting, stopping, or error so the fleet view can direct attention.
+
+Cloud machines are temporary. **Stop** saves supported workspace state before stopping; if saving fails, the machine stays online. **Start** runs a fresh machine environment and restores saved workspaces. Neither a new machine nor Start restores the old machine disk. Installed packages, machine-local configuration, ignored files, and other files outside GitSpace's checkpoints do not survive Stop or replacement. This includes arbitrary files in the machine's home directory.
+
+Ask a normal workspace agent to install tools when needed. Those changes are temporary; there is no separate setup agent.
 
 ## Project
 
@@ -32,6 +36,8 @@ A project groups work for one repository. It is the stable parent for that repos
 ## Workspace
 
 A workspace is an isolated, durable unit of change. Closed agent workspaces remain in cloud storage. Opening one materializes or moves it onto an eligible machine for work; closing it returns the durable state to cloud storage instead of occupying that machine indefinitely.
+
+A completed workspace checkpoint saves the Git branch, commits, staged and unstaged tracked changes, non-ignored untracked files, agent conversation, and GitSpace artifacts. It is not a backup of the whole machine. After an unexpected interruption, the last completed checkpoint is the recovery limit; uncheckpointed work may be lost. Automatic recovery from unclean disk loss and a returning-machine recovery ZIP are not implemented yet.
 
 Workspace phases are:
 
@@ -72,3 +78,9 @@ Each workspace can expose the following durable products:
 - **Services** for running processes and previews.
 
 These products stay attached to the workspace instead of disappearing when an agent session ends.
+
+Opening Inspector does not open a workspace or start a machine. When the workspace is closed or its machine is offline, Inspector reads saved cloud records: goals, workflow, rubric, journal, review, Change Guide, and referenced artifacts. The workspace page shows its saved checkpoint and conversation when available, not a live session.
+
+Live files, terminals, processes, services, and usage controls require an open workspace on an online machine. Disabled controls explain that requirement. Artifact files are read-only while closed; supported cloud record edits remain available. Use **Open workspace** to place work on an online machine. If no machine is online, start one explicitly in Account settings first.
+
+For a workspace already open on a running machine, Inspector keeps its existing live behavior.

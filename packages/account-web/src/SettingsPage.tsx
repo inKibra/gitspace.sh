@@ -299,7 +299,7 @@ const API_CLIENT_CAPABILITIES: ReadonlyArray<{ id: DeviceCapability; label: stri
   { id: 'rpc.read', label: 'Read', description: 'Queries and event streams' },
   { id: 'rpc.write', label: 'Write', description: 'Create and change workspaces, settings, crons' },
   { id: 'session.prompt', label: 'Talk to agents', description: 'Prompt, steer, and answer' },
-  { id: 'fleet.control', label: 'Fleet', description: 'Create, sleep, resume, destroy machines' },
+  { id: 'fleet.control', label: 'Fleet', description: 'Create, stop, start, destroy machines' },
 ];
 
 /** Mints a delegated API client; the key is shown once, then only its device row remains. */
@@ -547,17 +547,22 @@ function MachineSettings({ machines, onUpdateMachine, onCreateSandbox, onControl
   const editingMachine = machines.find((machine) => machine.id === editing) ?? null;
   return <>
     <Group title="Your machines">
+      <p className="text-caption text-muted-foreground">Cloud machines are temporary. Stop saves supported workspace state before discarding the machine disk. Start runs a fresh machine environment and restores saved workspaces, not installed packages or machine-local configuration.</p>
+      <p className="text-caption text-muted-foreground">GitSpace does not save ignored files or other files outside its workspace checkpoints, including files in the machine&apos;s home directory. After an unexpected interruption, the last completed checkpoint is the recovery limit; uncheckpointed work may be lost. You can ask a normal workspace agent to install tools, but those changes are temporary.</p>
       {machines.length ? <SettingRows>{machines.map((machine) => <Card key={machine.id} size="compact">
         <CardMedia icon={machine.kind === 'sandbox' ? ICONS.server : ICONS.monitor} />
         <CardHeader>
           <CardTitle>{machine.label}</CardTitle>
-          <CardDescription>{machine.kind === 'sandbox' ? 'Cloud sandbox' : <span className="font-mono">{machine.id}</span>}{machine.notes ? <> · {machine.notes}</> : null}</CardDescription>
+          <CardDescription>{machine.kind === 'sandbox' ? 'Temporary cloud machine' : <span className="font-mono">{machine.id}</span>}{machine.notes ? <> · {machine.notes}</> : null}</CardDescription>
           {machine.error ? <p role="alert" className="text-caption text-destructive">{machine.error}</p> : null}
         </CardHeader>
         <CardFooter>
-          <Badge color={machine.state === 'online' ? 'green' : machine.state === 'error' ? 'amber' : 'gray'}>{machine.state}</Badge>
+          <Badge color={machine.state === 'online' ? 'green' : machine.state === 'error' ? 'amber' : 'gray'}>{machine.state === 'sleeping' ? 'stopping' : machine.state === 'resuming' ? 'starting' : machine.provider !== 'physical' && machine.state === 'offline' && machine.desiredState === 'offline' ? 'stopped' : machine.state}</Badge>
           <Button variant="ghost" onClick={() => { setEditing(machine.id); setNotes(machine.notes); }}>Notes</Button>
-          {machine.provider !== 'physical' && (machine.state === 'online' || machine.state === 'offline' || machine.state === 'error') ? <Button variant="ghost" onClick={() => settle(onControlMachine(machine.state === 'online' ? 'sleep' : 'resume', machine.id))}>{machine.state === 'online' ? 'Sleep' : 'Resume'}</Button> : null}
+          {machine.provider !== 'physical' && (machine.state === 'online' || machine.state === 'offline' || machine.state === 'error') ? <Button variant="ghost" onClick={() => {
+            if (machine.state === 'online' && !window.confirm(`Stop ${machine.label}?\n\nGitSpace saves supported workspace state before stopping. If saving fails, the machine stays online.\n\nStopping discards installed packages, machine-local configuration, ignored files, and other files GitSpace has not captured, including files in the machine's home directory. Start restores saved workspaces in a fresh machine environment, not the old disk.`)) return;
+            settle(onControlMachine(machine.state === 'online' ? 'sleep' : 'resume', machine.id));
+          }}>{machine.state === 'online' ? 'Stop' : 'Start'}</Button> : null}
           {machine.provider !== 'physical' && machine.state !== 'deleting' ? <Button variant="ghost" onClick={() => { if (window.confirm(`Destroy ${machine.label}? This cannot be undone.`)) settle(onDestroyMachine(machine.id)); }}>Destroy</Button> : null}
         </CardFooter>
       </Card>)}</SettingRows>
@@ -568,7 +573,7 @@ function MachineSettings({ machines, onUpdateMachine, onCreateSandbox, onControl
       </Panel> : null}
     </Group>
     {setup ? <AddMachinePanel machines={machines} onClose={() => setSetup(false)} />
-    : sandboxSetup ? <Panel title="Create managed cloud machine" description="Creates a Cloudflare container, starts your account’s GitSpace runtime, and waits for its connection. You can keep and personalize this machine. Cloudflare usage charges may apply." footer={<><Button variant="secondary" onClick={() => setSandboxSetup(false)}>Cancel</Button><Button variant="primary" onClick={() => settle(onCreateSandbox().then(() => setSandboxSetup(false)))}>Create cloud machine</Button></>} />
+    : sandboxSetup ? <Panel title="Create temporary cloud machine" description="Creates a Cloudflare container with the standard tools and your account’s GitSpace runtime. Installed packages, machine-local configuration, ignored files, and other files GitSpace has not captured do not survive Stop or replacement. Ask a normal workspace agent to install tools when needed; those changes are temporary. Cloudflare usage charges may apply." footer={<><Button variant="secondary" onClick={() => setSandboxSetup(false)}>Cancel</Button><Button variant="primary" onClick={() => settle(onCreateSandbox().then(() => setSandboxSetup(false)))}>Create cloud machine</Button></>} />
     : <div className="flex flex-wrap items-center gap-2">
       <Button variant="primary" onClick={() => setSetup(true)}>{icon(Terminal)}Add a computer</Button>
       <Button variant="secondary" onClick={() => setSandboxSetup(true)}>{icon(Server01)}Create cloud machine</Button>

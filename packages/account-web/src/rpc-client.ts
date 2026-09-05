@@ -1,6 +1,6 @@
 import { gitspaceContract } from '@gitspace/protocol/rpc-contract';
 import { createRoutedTransport } from '@gitspace/protocol/routed-transport';
-import { batchFetchTransport, createBrowserClient } from 'result-rpc/client';
+import { createBrowserClient, fetchTransport } from 'result-rpc/client';
 import { currentDevice, deviceRejected } from './device-session.js';
 import { createDeviceSignedFetch } from './device.js';
 
@@ -8,11 +8,11 @@ export const homeRpcUrl = '/rpc';
 
 const signedFetch = createDeviceSignedFetch(currentDevice, deviceRejected);
 
-/** Direct client to one machine, signed by this browser's device. Used only where the destination is chosen explicitly (moves). */
+/** Explicit placement operations can restore a repository and its saved agent session. */
 export function createGitSpaceBrowserClient(options: { url: string }) {
   return createBrowserClient({
     contract: gitspaceContract,
-    transport: batchFetchTransport({ url: options.url, fetch: signedFetch, maxItems: 32 }),
+    transport: fetchTransport({ url: options.url, fetch: signedFetch, timeoutMs: 300_000 }),
   });
 }
 

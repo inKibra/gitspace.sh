@@ -8,6 +8,8 @@ export const ACCOUNT_CLOUD_RPC_PATHS: Readonly<Record<string, true>> = {
   'project.list': true, 'devices.list': true, 'devices.revoke': true,
   'providers.list': true, 'providers.apiKey.set': true, 'providers.logout': true,
   'mcp.composio.setup.get': true, 'mcp.composio.setup.set': true, 'mcp.composio.setup.delete': true,
+  'inspector.bootstrap': true,
+  'inspector.availability': true,
 };
 
 /** Runtime metadata has a canonical cloud view only when no machine is online. */
@@ -15,3 +17,18 @@ export const ACCOUNT_RUNTIME_RPC_PATHS: Readonly<Record<string, true>> = {
   'settings.omp.get': true,
   'providers.list': true,
 };
+
+/** Inspector state may be read in the cloud when its workspace has no live holder.
+ * These calls have per-space signed queues, separate from runtime operations. */
+export function isInspectorRpcPath(path: string): boolean {
+  return path.startsWith('inspector.') && path !== 'inspector.bootstrap' && path !== 'inspector.availability';
+}
+
+export function inspectorRpcSpaceId(input: unknown): string | null {
+  if (!input || typeof input !== 'object') return null;
+  const outer = input as Record<string, unknown>;
+  const record = outer.input && typeof outer.input === 'object'
+    ? outer.input as Record<string, unknown>
+    : outer;
+  return typeof record.spaceId === 'string' ? record.spaceId : null;
+}

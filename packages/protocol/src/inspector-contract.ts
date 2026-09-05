@@ -1,5 +1,6 @@
 import { wire } from 'result-rpc';
 import { z } from 'zod';
+import { cloudProjectSummarySchema, cloudWorkspaceDefinitionSchema } from './project-authority.js';
 
 export const INSPECTOR_EVIDENCE_HISTORY_LIMIT = 20 as const;
 
@@ -619,6 +620,8 @@ const asWireCodec = <T>(schema: z.ZodType<T>, id: string) => wire.serializable(
 );
 
 export const InspectorOverviewCodec = asWireCodec(inspectorOverviewSchema, 'gitspace/inspector-overview/v1');
+export const InspectorProjectCodec = asWireCodec(cloudProjectSummarySchema, 'gitspace/inspector-project/v1');
+export const InspectorWorkspaceCodec = asWireCodec(cloudWorkspaceDefinitionSchema, 'gitspace/inspector-workspace/v1');
 export const InspectorIdentityCodec = asWireCodec(inspectorIdentitySchema, 'gitspace/inspector-identity/v1');
 export const GoalRecordViewCodec = asWireCodec(goalRecordViewSchema, 'gitspace/goal-record-view/v1');
 export const WorkflowViewCodec = asWireCodec(workflowViewSchema, 'gitspace/workflow-view/v1');

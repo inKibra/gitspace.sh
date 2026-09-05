@@ -1637,6 +1637,56 @@ export async function assertMachineHasNoOpenSpaces(env: Env, userId: string, cat
   }
 }
 
+async function checkpointAndStopFleetMachine(env: Env, userId: string, catalog: {
+  listSpaces(): Promise<PortableSpaceDefinition[]>;
+  putMachine(machine: FleetMachineDefinition): Promise<FleetMachineDefinition>;
+}, current: FleetMachineDefinition, observed?: FleetMachineDefinition): Promise<FleetMachineDefinition> {
+  const provider = machineProviderFor(env, userId, current);
+  if (provider.id === 'physical') return provider.sleep(current);
+  // Offline intent is committed only after stopping. An interrupted or failed save
+  // must never become permission for a later reconciliation to discard live work.
+  const transition = await catalog.putMachine({
+    ...current, state: 'sleeping', desiredState: 'online',
+    lifecycleRevision: current.lifecycleRevision + 1, operationId: crypto.randomUUID(), error: null,
+  });
+  let preparationAttempted = false;
+  try {
+    observed ??= await provider.status(current);
+    const alreadyStopped = observed.state === 'offline' && observed.desiredState === 'offline';
+    if (!alreadyStopped) {
+      preparationAttempted = true;
+      await provider.prepareReplacement(transition);
+    }
+    // Also check cloud ownership: a stale runtime cannot acknowledge spaces it
+    // never loaded. An already stopped machine cannot save any remaining owners.
+    await assertMachineHasNoOpenSpaces(env, userId, catalog, current.id);
+    const stopped = alreadyStopped ? observed : await provider.sleep(transition);
+    return await catalog.putMachine({
+      ...stopped, desiredState: 'offline', lifecycleRevision: Math.max(transition.lifecycleRevision, stopped.lifecycleRevision) + 1,
+      operationId: null, error: null,
+    });
+  } catch (error) {
+    let failure = error;
+    let recovered = true;
+    if (preparationAttempted) {
+      try {
+        await provider.cancelReplacement(transition);
+        observed = await provider.status(transition);
+      }
+      catch (cancellationError) {
+        recovered = false;
+        failure = new Error(`${error instanceof Error ? error.message : String(error)}; preparation recovery failed: ${cancellationError instanceof Error ? cancellationError.message : String(cancellationError)}`, { cause: error });
+      }
+    }
+    await catalog.putMachine({
+      ...(observed ?? current), state: recovered ? (observed ?? current).state : 'error', desiredState: 'online',
+      lifecycleRevision: Math.max(transition.lifecycleRevision, observed?.lifecycleRevision ?? 0) + 1, operationId: null,
+      error: failure instanceof Error ? failure.message : String(failure),
+    });
+    throw failure;
+  }
+}
+
 
 export async function reconcileFleetMachines(env: Env, userId: string, catalog: {
   listMachines(): Promise<FleetMachineDefinition[]>;
@@ -1647,12 +1697,14 @@ export async function reconcileFleetMachines(env: Env, userId: string, catalog: 
   for (const current of await catalog.listMachines()) {
     if (current.provider === 'physical') continue;
     const provider = machineProviderFor(env, userId, current);
+    let stopping = false;
     try {
       let observed = await provider.status(current);
       if (current.desiredState === 'online' && observed.state !== 'online') observed = await provider.resume(current);
-      else if (current.desiredState === 'offline' && observed.state !== 'offline') {
-        await assertMachineHasNoOpenSpaces(env, userId, catalog, current.id);
-        observed = await provider.sleep(current);
+      else if (current.desiredState === 'offline' && (observed.state !== 'offline' || observed.desiredState !== 'offline')) {
+        stopping = true;
+        await checkpointAndStopFleetMachine(env, userId, catalog, current, observed);
+        continue;
       } else if (current.desiredState === 'removed') {
         await assertMachineHasNoOpenSpaces(env, userId, catalog, current.id);
         await provider.destroy(current);
@@ -1664,7 +1716,7 @@ export async function reconcileFleetMachines(env: Env, userId: string, catalog: 
         await catalog.putMachine({ ...observed, desiredState: current.desiredState, lifecycleRevision: Math.max(current.lifecycleRevision, observed.lifecycleRevision) + 1, operationId: null, error: null });
       }
     } catch (error) {
-      await catalog.putMachine({ ...current, state: 'error', lifecycleRevision: current.lifecycleRevision + 1, operationId: null, error: error instanceof Error ? error.message : String(error) });
+      if (!stopping) await catalog.putMachine({ ...current, state: 'error', lifecycleRevision: current.lifecycleRevision + 1, operationId: null, error: error instanceof Error ? error.message : String(error) });
     }
   }
   return catalog.listMachines();
@@ -1675,18 +1727,19 @@ export function controlFleetMachine(env: Env, userId: string, machineId: string,
 export function controlFleetMachine(env: Env, userId: string, machineId: string, action: 'destroy'): Promise<{ machineId: string; removed: true }>;
 export function controlFleetMachine(env: Env, userId: string, machineId: string, action: 'sleep' | 'resume' | 'destroy'): Promise<FleetMachineDefinition | { machineId: string; removed: true }>;
 export async function controlFleetMachine(env: Env, userId: string, machineId: string, action: 'sleep' | 'resume' | 'destroy'): Promise<FleetMachineDefinition | { machineId: string; removed: true }> {
-  if (action === 'resume' && await accountRegistry(env).sandboxRollout()) throw new Error('Cloud machine replacement has fenced new work');
+  if (action !== 'destroy' && await accountRegistry(env).sandboxRollout()) throw new Error('Cloud machine replacement has fenced machine lifecycle changes');
   const catalog = (env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>).getByName(userId);
   const existing = await catalog.getMachine(machineId);
   if (!existing) {
     if (action === 'destroy') return { machineId, removed: true };
     throw new Error('Machine does not exist');
   }
-  const desiredState = action === 'sleep' ? 'offline' : action === 'resume' ? 'online' : 'removed';
-  if ((action === 'sleep' && existing.state === 'offline' && existing.desiredState === 'offline') || (action === 'resume' && existing.state === 'online' && existing.desiredState === 'online')) return existing;
-  if (action !== 'resume') await assertMachineHasNoOpenSpaces(env, userId, catalog, machineId);
+  if ((action === 'sleep' && existing.state === 'offline' && existing.desiredState === 'offline') || (action === 'resume' && existing.state === 'online' && existing.desiredState === 'online' && existing.error === null)) return existing;
+  if (action === 'sleep') return checkpointAndStopFleetMachine(env, userId, catalog, existing);
+  const desiredState = action === 'resume' ? 'online' : 'removed';
+  if (action === 'destroy') await assertMachineHasNoOpenSpaces(env, userId, catalog, machineId);
   const transition = await catalog.putMachine({
-    ...existing, state: action === 'sleep' ? 'sleeping' : action === 'resume' ? 'resuming' : 'deleting',
+    ...existing, state: action === 'resume' ? 'resuming' : 'deleting',
     desiredState, lifecycleRevision: existing.lifecycleRevision + 1, operationId: existing.operationId ?? crypto.randomUUID(), error: null,
   });
   const provider = machineProviderFor(env, userId, transition);
@@ -1697,7 +1750,7 @@ export async function controlFleetMachine(env: Env, userId: string, machineId: s
       await credentialVault(env, userId).removeManagedDevice(machineId);
       return { machineId, removed: true };
     }
-    const machine = action === 'sleep' ? await provider.sleep(transition) : await provider.resume(transition);
+    const machine = await provider.resume(transition);
     return await catalog.putMachine({ ...machine, desiredState, lifecycleRevision: transition.lifecycleRevision + 1, operationId: null, error: null });
   } catch (error) {
     await catalog.putMachine({ ...transition, state: 'error', lifecycleRevision: transition.lifecycleRevision + 1, operationId: null, error: error instanceof Error ? error.message : String(error) });
@@ -1790,27 +1843,8 @@ export async function provisionManagedSandbox(env: Env, userId: string, controlU
 }
 
 
-async function accountRpcResponse(request: Request, env: Env): Promise<Response> {
-  const userId = request.headers.get('x-gitspace-user');
-  if (!userId || !/^u-[a-f0-9]{32}$/u.test(userId)) {
-    return Response.json(publicError('ACCOUNT_REQUIRED', 'Account identity is missing'), { status: 401 });
-  }
-  const account = await activeAccount(env, userId);
-  const denied = accountAccessResponse(account);
-  if (denied) return denied;
-  const settings = await (env.USER_SETTINGS as DurableObjectNamespace<UserSettingsDO>).getByName(userId).get('account-router');
-  const handle = settings.profile.handle;
-  const hostname = new URL(request.url).hostname.toLowerCase();
-  if (!handle || hostname !== `${handle}.gitspace.sh`) {
-    return Response.json(publicError('ACCOUNT_HOST_MISMATCH', 'Request does not belong to this account hostname'), { status: 403 });
-  }
-  const cloud = await handleAccountCloudRpc(request, env, userId);
-  if (cloud) return cloud;
-  const machines = await (env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>).getByName(userId).listMachines();
-  const candidates = machines.filter((machine) => machine.state === 'online' && machine.desiredState === 'online' && machine.rpcEndpoint);
-  if (candidates.length === 0) {
-    return Response.json(publicError('FLEET_OFFLINE', 'No account machine is available'), { status: 503 });
-  }
+/** Forwards the original signed envelope to the selected online machines. */
+export async function proxyAccountMachineRpc(request: Request, env: Env, userId: string, candidates: FleetMachineDefinition[]): Promise<Response> {
   const body = await request.arrayBuffer();
   for (const machine of candidates) {
     const headers = new Headers(request.headers);
@@ -1834,6 +1868,31 @@ async function accountRpcResponse(request: Request, env: Env): Promise<Response>
   }
   return Response.json(publicError('FLEET_OFFLINE', 'Every account machine is offline'), { status: 503 });
 }
+
+async function accountRpcResponse(request: Request, env: Env): Promise<Response> {
+  const userId = request.headers.get('x-gitspace-user');
+  if (!userId || !/^u-[a-f0-9]{32}$/u.test(userId)) {
+    return Response.json(publicError('ACCOUNT_REQUIRED', 'Account identity is missing'), { status: 401 });
+  }
+  const account = await activeAccount(env, userId);
+  const denied = accountAccessResponse(account);
+  if (denied) return denied;
+  const settings = await (env.USER_SETTINGS as DurableObjectNamespace<UserSettingsDO>).getByName(userId).get('account-router');
+  const handle = settings.profile.handle;
+  const hostname = new URL(request.url).hostname.toLowerCase();
+  if (!handle || hostname !== `${handle}.gitspace.sh`) {
+    return Response.json(publicError('ACCOUNT_HOST_MISMATCH', 'Request does not belong to this account hostname'), { status: 403 });
+  }
+  const cloud = await handleAccountCloudRpc(request, env, userId);
+  if (cloud) return cloud;
+  const machines = await (env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>).getByName(userId).listMachines();
+  const candidates = machines.filter((machine) => machine.state === 'online' && machine.desiredState === 'online' && machine.rpcEndpoint);
+  if (candidates.length === 0) {
+    return Response.json(publicError('FLEET_OFFLINE', 'No account machine is available'), { status: 503 });
+  }
+  return proxyAccountMachineRpc(request, env, userId, candidates);
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);

@@ -1,4 +1,4 @@
-import { FleetCatalogDO, type FleetMachineDefinition } from './fleet-catalog.js';
+import type { FleetCatalogDO, FleetMachineDefinition } from './fleet-catalog.js';
 
 export interface SandboxProvisionerService { fetch(request: Request): Promise<Response> }
 
@@ -49,4 +49,22 @@ export async function controlCloudflareSandboxMachine(input: {
     throw new Error(`Cloudflare Sandbox ${input.action} returned an invalid machine record`);
   }
   return { id: machine.id, label: machine.label, state: machine.state, rpcEndpoint: typeof machine.rpcEndpoint === 'string' ? machine.rpcEndpoint : null, kind: 'sandbox', provider: 'cloudflare-sandbox', notes: machine.notes, desiredState: machine.desiredState, lifecycleRevision: machine.lifecycleRevision, operationId: null, error: null };
+}
+
+export async function controlCloudflareSandboxReplacement(input: {
+  env: Env;
+  userId: string;
+  machineId: string;
+  action: 'prepare-replacement' | 'cancel-replacement';
+  service?: SandboxProvisionerService;
+}): Promise<void> {
+  const service = input.service ?? input.env.SANDBOX_PROVISIONER;
+  if (!service) throw new Error('Cloudflare Sandbox provisioner binding is unavailable');
+  const response = await service.fetch(new Request(`https://sandbox.internal/v1/sandboxes/${encodeURIComponent(input.machineId)}/${input.action}`, {
+    method: 'POST',
+    headers: { 'x-gitspace-user-id': input.userId },
+  }));
+  const payload = await response.json() as { prepared?: unknown; error?: unknown };
+  if (!response.ok) throw new Error(typeof payload.error === 'string' ? payload.error : `Cloudflare Sandbox ${input.action} failed with ${response.status}`);
+  if (payload.prepared !== (input.action === 'prepare-replacement')) throw new Error(`Cloudflare Sandbox ${input.action} returned no acknowledgement`);
 }

@@ -224,7 +224,9 @@ export function SignInFlowView({ flow, providerName, login, onRetry }: { flow: P
       {auth?.type === 'auth' && !done ? <>
         {auth.instructions ? <p className="text-caption text-muted-foreground">{auth.instructions}</p> : null}
         <InputCopy label="Sign-in URL" value={auth.url} />
-        <Button variant="primary" asChild><a href={auth.launchUrl ?? auth.url} target="_blank" rel="noopener noreferrer">Open sign-in page</a></Button>
+        {/* OMP's launchUrl belongs to the machine's loopback interface, not necessarily this browser. */}
+        <Button variant="primary" asChild><a href={auth.url} target="_blank" rel="noopener noreferrer">Open sign-in page</a></Button>
+        {auth.launchUrl && prompt ? <p className="text-caption text-muted-foreground">If sign-in ends at a localhost page that cannot load, copy the full URL from that tab’s address bar and paste it below. Sign-in on the same machine can finish automatically.</p> : null}
       </> : null}
       {progress.length ? <ul className="flex flex-col gap-1 text-caption text-muted-foreground">{progress.map((event, index) => event.type === 'progress' ? <li key={`${index}:${event.message}`}>{event.message}</li> : null)}</ul> : null}
       {prompt?.type === 'prompt' ? <LoginPromptForm key={prompt.promptId} prompt={prompt} onRespond={async (promptId, value) => { await login.respond(promptId, value); setAnswered((current) => [...current, promptId]); }} /> : null}

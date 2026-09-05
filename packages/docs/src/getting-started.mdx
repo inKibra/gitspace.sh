@@ -29,9 +29,17 @@ Complete your profile, then choose a machine during setup. You can also skip thi
 
 ### Use a cloud machine
 
-Choose **Create cloud machine** and confirm. Wait for its state to become **online** before placing work on it. Cloud machines can remain around for ongoing work and personalization. Provider usage charges may apply.
+Choose **Create cloud machine** and confirm. GitSpace creates a temporary machine with the standard tools and your account's runtime. Wait for its state to become **online** before placing work on it. Provider usage charges may apply.
 
 This path does not need the local client.
+
+In **Settings > Machines**, choose **Stop** to save supported workspace state and stop the cloud machine. If saving fails, the machine stays online. Choose **Start** to run a fresh machine environment and restore saved workspaces.
+
+<Warning>
+The cloud machine's disk is temporary. Stop or replacement discards installed packages, machine-local configuration, ignored files, and other files GitSpace has not captured, including files in the machine's home directory. Start restores saved workspaces, not the old disk.
+</Warning>
+
+Once you have a workspace and a configured provider, you can ask its normal agent to install tools. There is no separate setup agent. Treat tool installs and other machine changes as temporary.
 
 ### Connect your own computer
 
@@ -82,7 +90,9 @@ Finish setup, then create a project and a workspace in the browser. Use a reposi
 
 Ask the agent to make a small change. Review its diff, answer any questions, open a terminal, and save an artifact. Close and reopen the workspace, then continue the conversation.
 
-Controlled workspace close and provider replacement use durable checkpoints. Unexpected machine or disk loss can still lose uncheckpointed edits. The unclean-disconnect recovery choice and returning-machine recovery ZIP are not implemented yet. Ignored workspace files are excluded from checkpoints.
+Controlled workspace close, cloud machine Stop, and provider replacement publish durable checkpoints. These save the Git branch, commits, staged and unstaged tracked changes, non-ignored untracked files, agent conversation, and GitSpace artifacts. Ignored files are excluded.
+
+After an unexpected interruption, the last completed checkpoint is the recovery limit; uncheckpointed work may be lost. Automatic recovery from unclean disk loss and a returning-machine recovery ZIP are not implemented yet.
 
 ## Releases and additional machines
 

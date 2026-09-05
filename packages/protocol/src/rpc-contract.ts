@@ -16,6 +16,9 @@ import {
   CreateReviewThreadInputCodec,
   EndJournalPhaseInputCodec,
   InspectorOverviewCodec,
+  InspectorIdentityCodec,
+  InspectorProjectCodec,
+  InspectorWorkspaceCodec,
   JournalEntryViewCodec,
   MarkGuideSectionReadInputCodec,
   PutChangeGuideInputCodec,
@@ -1401,6 +1404,50 @@ export const updateSkillContract = gitspaceRpc
   .errors({ ProjectNotFound: rpcErrors.projectNotFound, SkillConflict: rpcErrors.skillConflict, OperationFailed: rpcErrors.operationFailed })
   .mutation();
 
+/** Canonical inspection context; never materializes a repository or opens a workspace. */
+export const InspectorBootstrapViewCodec = wire.object({
+  identity: InspectorIdentityCodec,
+  project: InspectorProjectCodec,
+  workspace: InspectorWorkspaceCodec,
+  workspaces: wire.array(InspectorWorkspaceCodec),
+  machines: wire.array(FleetMachineViewCodec),
+  placement: wire.nullable(wire.object({
+    state: wire.enum(['open', 'closing', 'closed', 'opening']),
+    machineId: wire.nullable(wire.string),
+    generation: wire.number,
+    updatedAt: wire.string,
+  })),
+  overview: InspectorOverviewCodec,
+  artifacts: wire.array(ArtifactViewCodec),
+  checkpoint: wire.nullable(wire.object({
+    sessionId: wire.string,
+    generation: wire.number,
+    revision: wire.number,
+    lastMachineId: wire.nullable(wire.string),
+    createdAt: wire.string,
+  })),
+  savedTranscript: wire.object({
+    status: wire.enum(['available', 'unavailable', 'none']),
+    reason: wire.nullable(wire.string),
+    events: wire.array(TranscriptEventCodec),
+  }),
+});
+export type InspectorBootstrapView = InputOf<typeof InspectorBootstrapViewCodec>;
+export const inspectorBootstrapContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ projectId: wire.string, workspaceId: wire.nullable(wire.string) }))
+  .output(InspectorBootstrapViewCodec)
+  .errors({ ProjectNotFound: rpcErrors.projectNotFound, WorkspaceNotFound: rpcErrors.workspaceNotFound, OperationFailed: rpcErrors.operationFailed })
+  .query();
+
+/** Read-only live-holder decision; unlike fleet reconciliation, this cannot resume a machine. */
+export const inspectorAvailabilityContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ projectId: wire.string, workspaceId: wire.nullable(wire.string) }))
+  .output(wire.object({ runtimeAvailable: wire.boolean }))
+  .errors({ OperationFailed: rpcErrors.operationFailed })
+  .query();
+
 export const inspectorOverviewContract = gitspaceRpc
   .procedure()
   .input(inspectorSpaceRequestCodec)
@@ -1807,6 +1854,8 @@ export const gitspaceContract = gitspaceRpc.contract({
   },
   skills: { list: listSkillsContract, update: updateSkillContract },
   inspector: {
+    bootstrap: inspectorBootstrapContract,
+    availability: inspectorAvailabilityContract,
     overview: inspectorOverviewContract,
     goal: {
       put: inspectorPutGoalContract,

@@ -1,5 +1,5 @@
 import { authPolicyFor, authProviders } from '@oh-my-pi/pi-catalog/compat/auth';
-import { ACCOUNT_CLOUD_RPC_PATHS, ACCOUNT_RUNTIME_RPC_PATHS } from '@gitspace/protocol/account-rpc';
+import { ACCOUNT_CLOUD_RPC_PATHS, ACCOUNT_RUNTIME_RPC_PATHS, inspectorRpcSpaceId, isInspectorRpcPath } from '@gitspace/protocol/account-rpc';
 import {
   credentialProtocolBase64, requiredCapability, RPC_DEVICE_HEADER, verifyDeviceGrantRecord,
   type DeviceCapability, type GitSpaceRpcContext, type ProviderView,
@@ -21,9 +21,11 @@ import { activeAccount } from './account-access.js';
 import type { AccountRegistryDO } from './account-registry.js';
 import { ComposioPluginGateway } from './composio-plugins.js';
 import type { FleetCatalogDO, FleetMachineDefinition } from './fleet-catalog.js';
-import { controlFleetMachine, provisionManagedSandbox, reconcileFleetMachines, type CredentialVaultDO } from './index.js';
+import { controlFleetMachine, provisionManagedSandbox, proxyAccountMachineRpc, reconcileFleetMachines, type CredentialVaultDO } from './index.js';
 import type { UserProjectIndexDO } from './project-authority.js';
 import type { HandleRegistryDO, UserSettingsDO } from './user-settings.js';
+import type { SpaceAuthorityDO } from './space-authority.js';
+import { inspectorCloudProcedures } from './account-inspector-rpc.js';
 
 const MAX_REQUEST_BYTES = 512 * 1024;
 const MAX_BATCH_ITEMS = 32;
@@ -297,6 +299,7 @@ function accountRouter(env: Env, userId: string, deviceId: string) {
     machines, machine: { events: machineEvents, createSandbox, updateNotes, sleep, resume, destroy }, project: { list: projects },
     devices: { list: devices, revoke }, providers: { list: listProviders, apiKey: { set: setApiKey }, logout },
     mcp: { composio: { setup: { get: getComposio, set: setComposio, delete: deleteComposio } } },
+    inspector: inspectorCloudProcedures(env, userId),
   });
 }
 
@@ -314,7 +317,22 @@ export async function handleAccountCloudRpc(request: Request, env: Env, userId: 
   let items: z.infer<typeof envelopeSchema>;
   try { items = envelopeSchema.parse(parse(new TextDecoder().decode(body))); }
   catch { return transportError(400, 'RPC_ENVELOPE_INVALID', 'RPC request envelope is invalid'); }
-  const cloud = items.filter((item) => Object.hasOwn(ACCOUNT_CLOUD_RPC_PATHS, item.path));
+  const inspector = items.filter((item) => isInspectorRpcPath(item.path));
+  if (inspector.length > 0) {
+    if (inspector.length !== items.length) return transportError(400, 'RPC_MIXED_AUTHORITY_BATCH', 'Inspector and other operations require separate signed batches');
+    const spaceId = inspectorRpcSpaceId(inspector[0]!.input);
+    if (inspector.some((item) => inspectorRpcSpaceId(item.input) !== spaceId)) return transportError(400, 'RPC_MIXED_AUTHORITY_BATCH', 'Inspector workspaces require separate signed batches');
+    if (spaceId) {
+      const placement = await (env.SPACE_AUTHORITY as DurableObjectNamespace<SpaceAuthorityDO>).getByName(`${userId}:${spaceId}`).get();
+      if (placement?.state === 'open' && placement.machineId) {
+        const machine = await (env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>).getByName(userId).getMachine(placement.machineId);
+        if (machine?.state === 'online' && machine.desiredState === 'online' && machine.rpcEndpoint) {
+          return proxyAccountMachineRpc(request, env, userId, [machine]);
+        }
+      }
+    }
+  }
+  const cloud = items.filter((item) => Object.hasOwn(ACCOUNT_CLOUD_RPC_PATHS, item.path) || isInspectorRpcPath(item.path));
   if (cloud.length === 0) return null;
   if (cloud.length !== items.length) return transportError(400, 'RPC_MIXED_AUTHORITY_BATCH', 'Cloud and machine operations must use separate signed batches');
   if (items.some((item) => Object.hasOwn(ACCOUNT_RUNTIME_RPC_PATHS, item.path))) {

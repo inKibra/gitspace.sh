@@ -52,7 +52,11 @@ The account release system manages runtime changes. There is no separate local u
 - Keep review threads, journals, evidence, and change guides with the work.
 - Manage services, events, crons, secrets, plugins, and releases from their account or workspace surfaces.
 
-Cloud machines can remain available and personalized. Closing a workspace and deleting a machine are different operations. Controlled workspace close and provider replacement publish durable checkpoints before releasing ownership. Unexpected disk loss can still lose uncheckpointed work; ignored files are excluded from checkpoints.
+Cloud machines are temporary. In **Settings > Machines**, **Stop** saves supported workspace state before stopping the machine. If saving fails, the machine stays online. **Start** runs a fresh machine environment and restores saved workspaces, not the old machine disk.
+
+Workspace checkpoints save the Git branch, commits, staged and unstaged tracked changes, non-ignored untracked files, agent conversation, and GitSpace artifacts. They do not save installed packages, machine-local configuration, ignored files, or arbitrary files elsewhere on the machine, including its home directory. Ask a normal workspace agent to install tools as needed; those changes are temporary.
+
+Closing a workspace, stopping a cloud machine, and destroying a machine are different operations. Controlled workspace close, Stop, and provider replacement publish durable checkpoints before releasing ownership. After an unexpected interruption, the last completed checkpoint is the recovery limit; uncheckpointed work may be lost. Automatic recovery from unclean disk loss and a returning-machine recovery ZIP are not implemented yet.
 
 ## Security
 

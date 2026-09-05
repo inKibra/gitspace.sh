@@ -30,6 +30,7 @@ import {
   TabsSubtle,
   TabsSubtleItem,
   TabsSubtlePanel,
+  Tooltip,
   ThinkingIndicator,
   ThinkingStep,
   ThinkingStepDetails,
@@ -79,7 +80,7 @@ import {
   Users01,
   XClose,
 } from '@untitledui/icons';
-import { useEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from 'react';
+import { createContext, useContext, useEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from 'react';
 import { glyph } from '../glyph.js';
 import { GitSpaceMarkdown } from '../GitSpaceMarkdown.js';
 import { EmptyState, StatusDot, type AgentScopeView, type WorkspaceView } from '../GitSpaceShell.js';
@@ -119,7 +120,7 @@ function selectOptions(options: readonly { value: string; label: ReactNode }[]):
 export interface InspectorProps {
   overview: InspectorOverview;
   /** The agent scope the Inspector is open for: a workspace, or the project's base space. */
-  scope: AgentScopeView;
+  scope?: AgentScopeView;
   workspaces: readonly WorkspaceView[];
   onSelectWorkspace(workspaceId: string): void;
   onSetRelations?: OverviewViewProps['onSetRelations'];
@@ -138,6 +139,8 @@ export interface InspectorProps {
   loading?: boolean;
   error?: string | null;
   initialView?: InspectorPermanentView;
+  /** False for cloud inspection without an open workspace on an online machine. */
+  runtimeAvailable?: boolean;
   onClose?: () => void;
   onRequestRepositoryFile(path: string, mode: RepositoryMode): void;
   onRequestRepositoryDiff(path: string | null, mode: Exclude<RepositoryMode, 'current'>, baseRef?: string): void;
@@ -165,6 +168,9 @@ interface GuideViewState {
   openedGates: Set<string>;
 }
 const guideViewCache = new Map<string, GuideViewState>();
+const RuntimeAvailability = createContext(true);
+const openWorkspaceFirst = 'Open this workspace on a machine first';
+const runtimeViews: Partial<Record<InspectorPermanentView, true>> = { overview: true, environment: true, subagents: true, files: true, services: true, usage: true };
 
 const permanentTabs: ReadonlyArray<{ id: InspectorPermanentView; label: string }> = [
   { id: 'overview', label: 'Overview' },
@@ -254,7 +260,9 @@ function Placeholder({ children }: { children: ReactNode }) {
 }
 function Padded({ children }: { children: ReactNode }) { return <div className="p-4">{children}</div>; }
 function EvidenceButton({ reference, onOpen }: { reference: EvidenceReference; onOpen: (reference: EvidenceReference) => void }) {
-  return <Button variant="tertiary" size="compact" type="button" onClick={() => onOpen(reference)}>{ic(File02, 14)}{evidenceLabel(reference)}</Button>;
+  const disabled = !useContext(RuntimeAvailability) && reference.kind === 'git';
+  const button = <Button variant="tertiary" size="compact" type="button" disabled={disabled} onClick={() => onOpen(reference)}>{ic(File02, 14)}{evidenceLabel(reference)}</Button>;
+  return disabled ? <Tooltip content={openWorkspaceFirst}><span>{button}</span></Tooltip> : button;
 }
 function EvidenceList({ evidence, onOpen, prefix }: { evidence: readonly EvidenceReference[]; onOpen: (reference: EvidenceReference) => void; prefix: string }) {
   if (!evidence.length) return null;
@@ -567,6 +575,7 @@ function GuideFileDiffBlock({ path, anchorKey, root, baseRef, threads, gateOpene
   onSelectRange(selection: ThreadSelection): void;
 }) {
   const shape = useShape();
+  const runtimeAvailable = useContext(RuntimeAvailability);
   const hostRef = useRef<HTMLDivElement>(null);
   const [near, setNear] = useState(false);
   const [requested, setRequested] = useState(false);
@@ -575,7 +584,7 @@ function GuideFileDiffBlock({ path, anchorKey, root, baseRef, threads, gateOpene
   const [height, setHeight] = useState(120);
   useEffect(() => {
     const host = hostRef.current;
-    if (!host) return;
+    if (!host || !runtimeAvailable) return;
     const observer = new IntersectionObserver(([entry]) => {
       const next = !!entry?.isIntersecting;
       setNear(next);
@@ -583,11 +592,11 @@ function GuideFileDiffBlock({ path, anchorKey, root, baseRef, threads, gateOpene
     }, { root: root.current, rootMargin: '1200px 0px', threshold: 0 });
     observer.observe(host);
     return () => observer.disconnect();
-  }, [root]);
+  }, [root, runtimeAvailable]);
   useEffect(() => {
-    if (!requested || diff || error) return;
+    if (!runtimeAvailable || !requested || diff || error) return;
     void onLoadDiff(path, 'base', baseRef).then(setDiff).catch((cause: unknown) => setError(cause instanceof Error ? cause.message : String(cause)));
-  }, [requested, diff, error, path, baseRef]);
+  }, [requested, diff, error, path, baseRef, runtimeAvailable]);
   useEffect(() => {
     const host = hostRef.current;
     if (!host || !near) return;
@@ -597,6 +606,7 @@ function GuideFileDiffBlock({ path, anchorKey, root, baseRef, threads, gateOpene
   }, [near, diff, gateOpened]);
   const large = diff ? new TextEncoder().encode(diff.patch).byteLength > 60_000 : false;
   // Off-screen blocks keep their last measured height so the walkthrough's scroll position holds while they unmount.
+  if (!runtimeAvailable) return <div data-guide-anchor={anchorKey} className={`${shape.container} flex flex-col overflow-hidden border border-border`}><Tooltip content={openWorkspaceFirst}><span><Button variant="ghost" size="compact" type="button" disabled className="w-full justify-start">{ic(FileCode02, 14)}<span className="truncate font-mono">{path}</span></Button></span></Tooltip><Placeholder>Saved file reference. {openWorkspaceFirst} to inspect its diff.</Placeholder></div>;
   if (diff && !near) return <div ref={hostRef} data-guide-anchor={anchorKey} style={{ height }} />;
   return <div ref={hostRef} data-guide-anchor={anchorKey} className={`${shape.container} flex flex-col overflow-hidden border border-border`}>
     <Button variant="ghost" size="compact" type="button" className="w-full justify-start border-b border-border" onClick={() => onOpenFile(path)}>{ic(FileCode02, 14)}<span className="truncate font-mono">{path}</span></Button>
@@ -729,7 +739,9 @@ function JournalEvidence({ reference, content, status, error, onLoad, onOpen }: 
   onLoad(reference: ArtifactReference): Promise<void>;
   onOpen(reference: EvidenceReference): void;
 }) {
+  const runtimeAvailable = useContext(RuntimeAvailability);
   useEffect(() => { if (reference.kind === 'artifact' && status === undefined) void onLoad(reference); }, [reference, status]);
+  if (!runtimeAvailable && reference.kind === 'git') return <Tooltip content={openWorkspaceFirst}><div><Card size="compact"><CardMedia icon={FileGlyph} /><CardHeader><CardTitle className="truncate">{reference.label}</CardTitle><CardDescription>{reference.path} · {shortHash(reference.commitId)} · saved reference</CardDescription></CardHeader></Card></div></Tooltip>;
   if (reference.kind !== 'artifact') return <Card size="compact" onClick={() => onOpen(reference)} label={`Open ${reference.label}`}><CardMedia icon={FileGlyph} /><CardHeader><CardTitle className="truncate">{reference.label}</CardTitle><CardDescription className="truncate tabular-nums">{reference.kind === 'git' ? `${reference.path} · ${shortHash(reference.commitId)}` : reference.kind === 'command' ? `${reference.command} · exit ${reference.exitCode}` : `Review thread ${reference.threadId}`}</CardDescription></CardHeader></Card>;
   if (reference.mediaType?.startsWith('image/')) return <Card size="compact" onClick={() => onOpen(reference)} label={`Open ${reference.label}`}>{content ? <CardImage src={content.previewUrl} alt={reference.label} /> : <CardMedia icon={ImageGlyph} />}<CardHeader><CardTitle className="truncate">{reference.label}</CardTitle>{!content ? <CardDescription>{status === 'error' ? error ?? 'Image failed to load' : `Loading ${reference.label}…`}</CardDescription> : null}</CardHeader></Card>;
   if ((reference.mediaType === 'text/markdown' || reference.url.endsWith('.md')) && content?.source) return <Card size="compact" onClick={() => onOpen(reference)} label={`Open ${reference.label}`}><CardMedia icon={FileGlyph} /><CardHeader><CardTitle className="truncate">{reference.label}</CardTitle><CardDescription className="line-clamp-3">{content.source.split('\n').filter(Boolean).slice(0, 4).join(' ')}</CardDescription></CardHeader></Card>;
@@ -795,6 +807,7 @@ function JournalSurface({ entries, artifactContent, artifactLoad, artifactErrors
 }
 
 export function Inspector(props: InspectorProps) {
+  const runtimeAvailable = props.runtimeAvailable ?? true;
   const [view, setView] = useState<ActiveView>(props.initialView ?? 'goal');
   const [documents, setDocuments] = useState<InspectorOpenDocument[]>([]);
   const [activeDocumentId, setActiveDocumentId] = useState<string | null>(null);
@@ -813,7 +826,7 @@ export function Inspector(props: InspectorProps) {
   const activeArtifact = activeDocument?.kind === 'artifact' ? artifacts.find((reference) => artifactId(reference) === activeDocument.target) ?? null : null;
   // Usage is a transcript read on the machine: fetch it the first time the tab
   // is shown rather than for every Inspector mount.
-  useEffect(() => { if (view === 'usage') props.usage.load(); }, [view]);
+  useEffect(() => { if (runtimeAvailable && view === 'usage') props.usage.load(); }, [view, runtimeAvailable]);
   const loadArtifact = async (reference: ArtifactReference): Promise<void> => {
     if (artifactLoad[reference.url] === 'loading' || artifactLoad[reference.url] === 'loaded') return;
     setArtifactLoad((current) => ({ ...current, [reference.url]: 'loading' }));
@@ -834,7 +847,7 @@ export function Inspector(props: InspectorProps) {
       openDocument({ id: `artifact:${artifactId(reference)}`, kind: 'artifact', label: reference.label, target: artifactId(reference) });
       void loadArtifact(reference);
     } else if (reference.kind === 'git') {
-      openFile(reference.path, 'current');
+      if (runtimeAvailable) openFile(reference.path, 'current');
     } else if (reference.kind === 'review-thread') {
       const thread = props.threads.find((candidate) => candidate.id === reference.threadId);
       if (thread) { setActiveThread(thread); setThreadSelection(null); }
@@ -903,6 +916,7 @@ export function Inspector(props: InspectorProps) {
   const document = activeDocument ? <div className="flex min-h-0 flex-1 flex-col">
     <header className="flex items-center justify-between gap-3 px-4 pb-2 pt-3">
       <div className="flex min-w-0 flex-col"><strong className="truncate text-body font-medium text-foreground">{activeDocument.kind === 'file' ? activeDocument.target : activeDocument.label}</strong><span className="truncate text-caption text-muted-foreground tabular-nums">{activeDocument.kind === 'file' ? `${activeMode} · generation ${(props.repositoryFile ?? props.repositoryDiff)?.generation ?? '—'}` : activeDocument.kind === 'artifact' && activeArtifact ? `${activeArtifact.hash} · generation ${activeArtifact.generation}` : `${activeDocument.kind} authority record`}</span></div>
+      {!runtimeAvailable && activeDocument.kind === 'artifact' ? <Tooltip content="Open this workspace on a machine before editing artifacts"><span className="shrink-0 text-caption text-muted-foreground">Read-only artifact</span></Tooltip> : null}
       {activeDocument.kind === 'artifact' && activeArtifact ? <Button variant="secondary" size="compact" asChild><a href={activeArtifact.url} target="_blank" rel="noreferrer">{ic(LinkExternal01, 14)}Open</a></Button> : null}
     </header>
     {activeDocument.kind === 'file' ? <div className="flex items-center gap-2 px-4 pb-2"><Kicker>View</Kicker><TabsSubtle size="compact" className="min-w-0 flex-1" selectedIndex={Math.max(0, repositoryModes.findIndex((mode) => mode.id === activeMode))} onSelect={(index) => { const mode = repositoryModes[index]; if (mode) chooseMode(mode.id); }} aria-label="Repository view mode">{repositoryModes.map((mode, index) => <TabsSubtleItem index={index} label={mode.label} key={mode.id} />)}</TabsSubtle></div>
@@ -910,8 +924,9 @@ export function Inspector(props: InspectorProps) {
     <div className="flex min-h-0 flex-1 flex-col border-t border-border">{documentBody}{threadPanel}</div>
   </div> : <Padded><EmptyState icon={ic(File02, 22)} title="Document is no longer available" description="Close this tab or reopen its canonical record from the permanent Inspector surfaces." /></Padded>;
   const renderSurface = (id: InspectorPermanentView): ReactNode => {
+    if (!runtimeAvailable && runtimeViews[id]) return <Padded><EmptyState title="Live workspace unavailable" description={openWorkspaceFirst} /></Padded>;
     switch (id) {
-      case 'overview': return <OverviewView scope={props.scope} workspaces={props.workspaces} onSelectWorkspace={props.onSelectWorkspace} onSetRelations={props.onSetRelations} stackStatus={props.stackStatus} />;
+      case 'overview': return props.scope ? <OverviewView scope={props.scope} workspaces={props.workspaces} onSelectWorkspace={props.onSelectWorkspace} onSetRelations={props.onSetRelations} stackStatus={props.stackStatus} /> : null;
       case 'environment': return props.environment ?? <Padded><EmptyState icon={ic(Tool02, 22)} title="Workspace setup unavailable" description="This machine does not expose the workspace environment contract." /></Padded>;
       case 'goal': return <GoalOverview overview={props.overview} openDocuments={documents.length} onOpenProduct={openProduct} onOpenEvidence={openEvidence} />;
       case 'subagents': return <SubagentsSurface subagents={props.subagents} />;
@@ -928,7 +943,7 @@ export function Inspector(props: InspectorProps) {
         onSelectThread={(thread) => { setActiveThread(thread); setThreadSelection(null); }}
         onSelectRange={(selection) => { setThreadSelection(selection); setActiveThread(null); }}
         onMarkRead={props.onMarkGuideSectionRead}
-        onGenerate={props.onGenerateChangeGuide}
+        onGenerate={runtimeAvailable ? props.onGenerateChangeGuide : undefined}
       />{threadPanel}</>;
       default: return <JournalSurface entries={props.journalEntries} artifactContent={artifactContent} artifactLoad={artifactLoad} artifactErrors={artifactErrors} onLoadArtifact={loadArtifact} onOpenEvidence={openEvidence} />;
     }
@@ -939,10 +954,13 @@ export function Inspector(props: InspectorProps) {
   else if (props.error) body = <Padded><EmptyState icon={ic(AlertCircle, 22)} title="Inspector could not load" description={props.error} /></Padded>;
   else if (view === 'document') body = document;
   else body = permanentTabs.map((tab, index) => <TabsSubtlePanel idPrefix="inspectorTabs" index={index} selectedIndex={tabIndex} className="flex min-h-0 flex-1 flex-col" key={tab.id}>{renderSurface(tab.id)}</TabsSubtlePanel>);
-  return <div className="flex h-full min-h-0 flex-col bg-surface-2" aria-label="Workspace Inspector">
+  return <RuntimeAvailability.Provider value={runtimeAvailable}><div className="flex h-full min-h-0 flex-col bg-surface-2" aria-label="Workspace Inspector">
+    {!runtimeAvailable ? <p className="px-4 pt-3 text-caption text-muted-foreground">Cloud Inspector · Saved records. Live files, processes, terminals, and services are unavailable.</p> : null}
     <div className="flex shrink-0 items-center gap-1 px-2 pb-1 pt-2">
       <TabsSubtle idPrefix="inspectorTabs" size="compact" className="min-w-0 flex-1" selectedIndex={tabIndex} onSelect={(index) => { const tab = permanentTabs[index]; if (tab) selectSurface(tab.id); }} aria-label="Inspector views">
-        {permanentTabs.map((tab, index) => <TabsSubtleItem index={index} label={counts[tab.id] === undefined ? tab.label : `${tab.label} · ${counts[tab.id]}`} key={tab.id} />)}
+        {permanentTabs.map((tab, index) => !runtimeAvailable && runtimeViews[tab.id]
+          ? <Tooltip content={openWorkspaceFirst} key={tab.id}><span><Button variant="ghost" size="compact" role="tab" aria-selected={false} disabled>{tab.label}</Button></span></Tooltip>
+          : <TabsSubtleItem index={index} label={counts[tab.id] === undefined ? tab.label : `${tab.label} · ${counts[tab.id]}`} key={tab.id} />)}
       </TabsSubtle>
       {props.onClose ? <Button variant="ghost" size="icon-compact" type="button" aria-label="Close Inspector" onClick={props.onClose}><XClose width={16} height={16} strokeWidth={1.5} /></Button> : null}
     </div>
@@ -954,5 +972,5 @@ export function Inspector(props: InspectorProps) {
       </span>)}
     </div> : null}
     <div className="flex min-h-0 flex-1 flex-col border-t border-border">{body}</div>
-  </div>;
+  </div></RuntimeAvailability.Provider>;
 }

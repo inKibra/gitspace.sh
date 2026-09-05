@@ -183,7 +183,7 @@ export function MarketingApp() {
             {[
               ['Studio', 'Online', 'docker · production', 'bg-emerald-500'],
               ['Home server', 'Online', 'storage · long-running', 'bg-emerald-500'],
-              ['Cloud machine', 'Sleeping', 'managed · resumes your work', 'bg-amber-500'],
+              ['Cloud machine', 'Stopped', 'temporary · saved workspaces', 'bg-amber-500'],
             ].map(([machine, state, capabilities, tone]) => <div key={machine} className="flex min-h-14 items-center justify-between gap-4 rounded-lg bg-surface-3 px-4 shadow-surface-1">
               <span className="min-w-0"><strong className="block truncate text-body font-medium">{machine}</strong><span className="block truncate font-mono text-[11px] text-muted-foreground">{capabilities}</span></span><span className="flex shrink-0 items-center gap-2 text-caption text-muted-foreground"><span className={`size-1.5 rounded-full ${tone}`} />{state}</span>
             </div>)}

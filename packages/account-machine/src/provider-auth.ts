@@ -32,6 +32,7 @@ export interface ProviderLoginController {
   onAuth(info: OAuthAuthInfo): void;
   onProgress(message: string): void;
   onPrompt(prompt: OAuthPrompt): Promise<string>;
+  onManualCodeInput(): Promise<string>;
 }
 
 /** The slice of OMP's `AuthStorage` the coordinator depends on (test seam). */
@@ -459,6 +460,9 @@ export class ProviderAuthCoordinator {
         onAuth: (info) => this.#push(flow, { type: 'auth', url: info.url, launchUrl: info.launchUrl ?? null, instructions: info.instructions ?? null }),
         onProgress: (message) => this.#push(flow, { type: 'progress', message }),
         onPrompt: (prompt) => this.#prompt(flow, prompt),
+        // The browser may be on a different host. OMP races this supported paste
+        // fallback against its local callback; `done` retires any unanswered prompt.
+        onManualCodeInput: () => this.#prompt(flow, { message: 'Paste the authorization code or full redirect URL' }),
       });
       await this.#onChanged?.();
       this.#push(flow, { type: 'done', ok: true, provider: await this.view(flow.providerId) });

@@ -1,6 +1,6 @@
 import { batchFetchTransport, createBrowserClient, fetchTransport, type ClientTransport } from 'result-rpc/client';
 import { gitspaceContract, type SpacePlacementView } from './rpc-contract.js';
-import { ACCOUNT_CLOUD_RPC_PATHS, ACCOUNT_RUNTIME_RPC_PATHS } from './account-rpc.js';
+import { ACCOUNT_CLOUD_RPC_PATHS, ACCOUNT_RUNTIME_RPC_PATHS, inspectorRpcSpaceId, isInspectorRpcPath } from './account-rpc.js';
 
 /**
  * One client, every machine. Calls naming a space go to the machine that
@@ -64,6 +64,10 @@ export function createRoutedTransport(options: RoutedTransportOptions): RoutedTr
   // Runtime schemas/provider capabilities come from a machine when online,
   // with canonical cloud views when offline. Keep that choice independently signed.
   const runtimeMetadata = batchFetchTransport({ url: options.homeUrl, fetch: options.fetch, maxItems: options.maxItems ?? 32 });
+  const inspectorContext = batchFetchTransport({ url: options.homeUrl, fetch: options.fetch, maxItems: options.maxItems ?? 32 });
+  // Let the account authority choose cloud versus the existing live-machine path
+  // before any provider proxy can wake a stopped machine. Never mix spaces.
+  const inspectorTransports: Record<string, ClientTransport> = {};
   const homeClient = createBrowserClient({ contract: gitspaceContract, transport: home });
   const sessionSpaces: Record<string, string> = {};
   let table: RouteTable | null = null;
@@ -113,8 +117,13 @@ export function createRoutedTransport(options: RoutedTransportOptions): RoutedTr
 
   const resolve = async (path: string, input: unknown): Promise<ClientTransport> => {
     if (path === 'project.create') return projectCreation;
+    if (path === 'inspector.bootstrap' || path === 'inspector.availability') return inspectorContext;
     if (Object.hasOwn(ACCOUNT_RUNTIME_RPC_PATHS, path)) return runtimeMetadata;
     if (Object.hasOwn(ACCOUNT_CLOUD_RPC_PATHS, path)) return account;
+    if (isInspectorRpcPath(path)) {
+      const spaceId = inspectorRpcSpaceId(input) ?? '';
+      return inspectorTransports[spaceId] ??= batchFetchTransport({ url: options.homeUrl, fetch: options.fetch, maxItems: options.maxItems ?? 32 });
+    }
     // Routing reads never recurse into routing.
     if (path === 'placements' || path === 'session.locate') return home;
     const spaceId = spaceIdOf(path, input);

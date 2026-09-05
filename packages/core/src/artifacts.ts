@@ -1,13 +1,15 @@
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, posix } from 'node:path';
 import {
+  artifactManifestSchema,
+  deriveArtifactScopeKey,
+  type ArtifactManifest,
   createRelayAuthorization,
   decryptArtifactBytes,
   encryptArtifactBytes,
 } from '@gitspace/protocol';
 import { and, eq, inArray } from 'drizzle-orm';
 import { Result, TaggedError, type Result as ResultType } from 'better-result';
-import { z } from 'zod';
 import type { GitSpaceDatabase } from './database.js';
 import { artifactBlobs, artifactEntries, artifactScopes, type ArtifactEntry, type ArtifactScope } from './schema.js';
 
@@ -103,20 +105,6 @@ interface ResolvedArtifactPath {
   displayRoot: string;
 }
 
-const artifactManifestSchema = z.object({
-  version: z.literal(1),
-  scopeId: z.string().min(1),
-  generation: z.number().int().nonnegative(),
-  entries: z.array(z.object({
-    path: z.string().min(1).refine((path) =>
-      !path.includes('\0') && !path.includes('\\') && !posix.isAbsolute(path)
-      && path.split('/').every((part) => part !== '' && part !== '.' && part !== '..')),
-    blobHash: z.string().regex(HASH_PATTERN),
-    size: z.number().int().nonnegative(),
-    mediaType: z.string().nullable(),
-  })),
-});
-type ArtifactManifest = z.infer<typeof artifactManifestSchema>;
 
 export class ArtifactAccessDenied extends TaggedError('ArtifactAccessDenied')<{
   url: string;
@@ -218,7 +206,7 @@ export class LocalArtifactResolver {
           }
         }
       }
-      const key = await this.scopeKey(resolved.value.scope.id);
+      const key = await deriveArtifactScopeKey(this.projectKey, resolved.value.scope.id);
       const sealed = await encryptArtifactBytes(bytes, key);
       const hash = await digest(sealed);
       const cachePath = this.cachePath(hash);
@@ -317,7 +305,7 @@ export class LocalArtifactResolver {
       const sealed = await this.store.get(entry.blobHash as `sha256:${string}`);
       if (!sealed) return Result.err(new ArtifactNotFound({ url, message: `Remote artifact ${entry.blobHash} does not exist` }));
       if (await digest(sealed) !== entry.blobHash) throw new Error(`Remote artifact ${entry.blobHash} failed content verification`);
-      const bytes = await decryptArtifactBytes(sealed, await this.scopeKey(resolved.value.scope.id));
+      const bytes = await decryptArtifactBytes(sealed, await deriveArtifactScopeKey(this.projectKey, resolved.value.scope.id));
       const cachePath = this.cachePath(entry.blobHash);
       await atomicWrite(cachePath, bytes);
       const now = new Date().toISOString();
@@ -401,7 +389,7 @@ export class LocalArtifactResolver {
       };
       const sealedManifest = await encryptArtifactBytes(
         new TextEncoder().encode(JSON.stringify(manifest)),
-        await this.scopeKey(scope.id),
+        await deriveArtifactScopeKey(this.projectKey, scope.id),
       );
       const manifestHash = await digest(sealedManifest);
       await this.store.put(manifestHash, sealedManifest);
@@ -607,7 +595,7 @@ export class LocalArtifactResolver {
     const sealed = await this.store.get(scope.manifestHash as `sha256:${string}`);
     if (!sealed) throw new Error(`Artifact manifest ${scope.manifestHash} does not exist`);
     if (await digest(sealed) !== scope.manifestHash) throw new Error(`Artifact manifest ${scope.manifestHash} failed content verification`);
-    const bytes = await decryptArtifactBytes(sealed, await this.scopeKey(scope.id));
+    const bytes = await decryptArtifactBytes(sealed, await deriveArtifactScopeKey(this.projectKey, scope.id));
     const manifest = artifactManifestSchema.parse(JSON.parse(new TextDecoder().decode(bytes)));
     if (manifest.scopeId !== scope.id || manifest.generation !== scope.generation) {
       throw new Error('Artifact manifest does not match its canonical scope and generation');
@@ -618,14 +606,4 @@ export class LocalArtifactResolver {
     return manifest.entries;
   }
 
-  private async scopeKey(scopeId: string): Promise<Uint8Array> {
-    const material = await crypto.subtle.importKey('raw', ownedBuffer(this.projectKey), 'HKDF', false, ['deriveBits']);
-    const bits = await crypto.subtle.deriveBits({
-      name: 'HKDF',
-      hash: 'SHA-256',
-      salt: new TextEncoder().encode('gitspace-artifacts-v1'),
-      info: new TextEncoder().encode(scopeId),
-    }, material, 256);
-    return new Uint8Array(bits);
-  }
 }
