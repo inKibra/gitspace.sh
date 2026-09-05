@@ -16,6 +16,7 @@ export interface CanonicalSessionBlobStore {
 
 export class CloudCanonicalSessionWriter {
   private pending = Promise.resolve();
+  private failure: unknown;
 
   constructor(
     private readonly authority: CanonicalSessionAuthority,
@@ -53,10 +54,18 @@ export class CloudCanonicalSessionWriter {
           expectedRevision: current?.revision ?? 0,
         });
       })
-      .catch(this.onError);
+      .catch((error) => {
+        this.failure = error;
+        this.onError(error);
+      });
   }
 
   async flush(): Promise<void> {
     await this.pending;
+    if (this.failure !== undefined) {
+      const error = this.failure;
+      this.failure = undefined;
+      throw error;
+    }
   }
 }

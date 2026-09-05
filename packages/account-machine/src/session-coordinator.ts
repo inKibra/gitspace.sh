@@ -1,8 +1,10 @@
+import { createHash } from 'node:crypto';
 import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import {
   LocalArtifactResolver,
   agentSessions,
+  artifactScopes,
   type AgentSession,
   type ArtifactCapability,
   type ArtifactScope,
@@ -40,6 +42,7 @@ interface LiveSession {
   runtime: OmpRuntimeSession;
   artifactsDir: string;
   capability: ArtifactCapability;
+  artifactBaseline: Map<string, string>;
   unsubscribe: () => void;
   activityUnsubscribe: () => void;
 }
@@ -114,6 +117,7 @@ export interface CoordinatorPortableAgentSnapshot {
   sessionId: string;
   ompSessionId: string;
   ompSession: Uint8Array;
+  resumePending?: boolean;
 }
 
 export interface CoordinatorPortableArtifactSnapshot {
@@ -134,7 +138,7 @@ export class MachineSessionCoordinator {
   private readonly transcriptUpdateTimers = new Map<string, Timer>();
   private readonly live = new Map<string, LiveSession>();
   private readonly quiesced = new Set<string>();
-  private readonly activePrompts = new Set<string>();
+  private readonly activePrompts = new Map<string, Set<Promise<void>>>();
   private readonly recoveringSessions = new Map<string, boolean>();
 
   constructor(
@@ -187,7 +191,7 @@ export class MachineSessionCoordinator {
         this.database.orm.update(agentSessions).set({ state: 'active', updatedAt: now })
           .where(eq(agentSessions.id, existing.id)).run();
         const record = this.get(existing.id)!;
-        await this.adopt(record, runtime, artifactsDir, target.capability);
+        await this.adopt(record, runtime, artifactsDir, target.capability, materialized.value);
         this.resumeIfPending(existing, runtime, target.capability);
         this.publishCanonicalSession(target.projectId, record.id, true);
         this.events?.append({
@@ -219,7 +223,7 @@ export class MachineSessionCoordinator {
         createdAt: now,
         updatedAt: now,
       }).returning().get();
-      await this.adopt(record, runtime, artifactsDir, target.capability);
+      await this.adopt(record, runtime, artifactsDir, target.capability, materialized.value);
       this.publishCanonicalSession(target.projectId, record.id, true);
       this.events?.append({
         projectId: target.projectId,
@@ -236,9 +240,9 @@ export class MachineSessionCoordinator {
     }
   }
 
-  async recover(): Promise<ResultType<AgentSession[], MachineSessionError>> {
+  async recover(spaceId?: string): Promise<ResultType<AgentSession[], MachineSessionError>> {
     const recoverable = this.database.orm.select().from(agentSessions)
-      .where(inArray(agentSessions.state, ['opening', 'active', 'draining']))
+      .where(and(inArray(agentSessions.state, ['opening', 'active', 'draining']), spaceId ? eq(agentSessions.spaceId, spaceId) : undefined))
       .orderBy(agentSessions.createdAt, agentSessions.id).all();
     const recovered: AgentSession[] = [];
     for (const record of recoverable) {
@@ -271,7 +275,7 @@ export class MachineSessionCoordinator {
           await runtime.dispose();
           continue;
         }
-        await this.adopt(record, runtime, artifactsDir, target.value.capability);
+        await this.adopt(record, runtime, artifactsDir, target.value.capability, materialized.value);
         this.resumeIfPending(record, runtime, target.value.capability);
         this.database.orm.update(agentSessions).set({ state: 'active', updatedAt: new Date().toISOString() })
           .where(eq(agentSessions.id, record.id)).run();
@@ -305,18 +309,19 @@ export class MachineSessionCoordinator {
     const unsubscribeAcknowledgement = live.runtime.subscribe((event) => {
       if (event.type === 'message_start' || event.type === 'agent_start') accept(true);
     });
-    this.activePrompts.add(sessionId);
     let execution: Promise<boolean>;
     try {
       execution = live.runtime.prompt(text, options);
     } catch (error) {
       unsubscribeAcknowledgement();
-      this.activePrompts.delete(sessionId);
       return Result.err(runtimeError('prompt', error, sessionId));
     }
-    void execution.then(async (forwarded) => {
-      accept(forwarded);
-      if (!forwarded) return;
+    const pending = this.activePrompts.get(sessionId) ?? new Set<Promise<void>>();
+    const finalization = execution.then(async (forwarded) => {
+      if (!forwarded) {
+        accept(false);
+        return;
+      }
       const generation = await this.syncSessionArtifacts(live);
       this.events?.append({
         projectId: live.capability.projectId,
@@ -327,14 +332,18 @@ export class MachineSessionCoordinator {
         operation: 'invalidate',
         payload: { generation },
       });
+      accept(true);
     }).catch((error: unknown) => {
       const wasAcknowledged = acknowledged;
       reject(error);
       if (wasAcknowledged) console.error('[gitspace-sessions] accepted prompt failed', sessionId, error);
     }).finally(() => {
       unsubscribeAcknowledgement();
-      this.activePrompts.delete(sessionId);
+      pending.delete(finalization);
+      if (pending.size === 0) this.activePrompts.delete(sessionId);
     });
+    pending.add(finalization);
+    this.activePrompts.set(sessionId, pending);
     try {
       return Result.ok(await acknowledgement.promise);
     } catch (error) {
@@ -527,24 +536,31 @@ export class MachineSessionCoordinator {
   }
 
 
-  async quiesceSpace(spaceId: string): Promise<void> {
+  async quiesceSpace(spaceId: string, requirePortableControls = false): Promise<void> {
     const session = this.list(spaceId)[0];
     const live = session ? this.live.get(session.id) : undefined;
     if (!session || !live) throw runtimeError('quiesce', new Error('Space session is not live'), session?.id);
-    this.quiesced.add(session.id);
-    if (this.activePrompts.has(session.id)) {
-      const interrupted = await live.runtime.handoff();
-      if (interrupted) {
-        this.database.orm.update(agentSessions).set({ resumePending: true, updatedAt: new Date().toISOString() })
-          .where(eq(agentSessions.id, session.id)).run();
+    if (requirePortableControls) {
+      const control = await live.runtime.control();
+      if (control.pendingAsk || control.queue.steering.length > 0 || control.queue.followUp.length > 0) {
+        throw runtimeError('quiesce', new Error('Pending asks and queued prompts must be resolved or cleared before provider replacement; cancel preparation to continue the session'), session.id);
       }
     }
-    while (this.activePrompts.has(session.id)) await Bun.sleep(25);
+    this.quiesced.add(session.id);
+    const interrupted = await live.runtime.handoff();
+    if (interrupted) {
+      this.database.orm.update(agentSessions).set({ resumePending: true, updatedAt: new Date().toISOString() })
+        .where(eq(agentSessions.id, session.id)).run();
+    }
+    await Promise.all(this.activePrompts.get(session.id) ?? []);
   }
 
   resumeSpace(spaceId: string): void {
     const session = this.list(spaceId)[0];
-    if (session) this.quiesced.delete(session.id);
+    if (session && this.quiesced.delete(session.id)) {
+      const live = this.live.get(session.id);
+      if (live) this.resumeIfPending(session, live.runtime, live.capability);
+    }
   }
 
   async capturePortableSpace(spaceId: string): Promise<{
@@ -558,22 +574,18 @@ export class MachineSessionCoordinator {
     if (!this.quiesced.has(session.id)) throw runtimeError('checkpoint', new Error('Space session is not quiesced'), session.id);
     const generation = await this.syncSessionArtifacts(live);
     await live.runtime.persist();
-    const artifactUrl = live.capability.kind === 'workspace' ? 'local://workspace/' : 'local://base/';
-    const listed = this.artifacts.list(live.capability, artifactUrl);
-    if (listed.status === 'error') throw runtimeError('checkpoint artifacts', listed.error, session.id);
-    const files: Array<{ path: string; mediaType: string | null; data: string }> = [];
-    for (const entry of listed.value) {
-      const read = await this.artifacts.read(live.capability, entry.url);
-      if (read.status === 'error') throw runtimeError('checkpoint artifacts', read.error, session.id);
-      files.push({ path: entry.path, mediaType: entry.mediaType, data: Buffer.from(read.value).toString('base64') });
-    }
+    const scope = this.database.orm.select().from(artifactScopes).where(eq(artifactScopes.spaceId, spaceId)).get();
+    if (!scope || scope.generation !== generation || (generation > 0 && !scope.manifestHash)) throw runtimeError('checkpoint artifacts', new Error('Durable artifact scope is missing'), session.id);
+    const verified = await this.artifacts.verifyScope(scope);
+    if (verified.status === 'error') throw runtimeError('checkpoint artifacts', verified.error, session.id);
     return {
       agent: {
         sessionId: session.id,
         ompSessionId: session.ompSessionId,
         ompSession: new Uint8Array(await readFile(session.sessionFile)),
+        resumePending: this.get(session.id)?.resumePending ?? false,
       },
-      artifacts: { generation, manifest: new TextEncoder().encode(JSON.stringify({ version: 1, files })) },
+      artifacts: { generation, manifest: new TextEncoder().encode(JSON.stringify({ version: 2, scope })) },
     };
   }
 
@@ -620,7 +632,7 @@ export class MachineSessionCoordinator {
         sessionFile: join(this.runtimeRoot, 'portable-sessions', `${input.agent.sessionId}.jsonl`),
         state: 'closed',
         lastEventOffset: 0,
-        resumePending: false,
+        resumePending: input.agent.resumePending ?? false,
         activity: { active: false, reasons: [] },
         errorMessage: null,
         createdAt: now,
@@ -634,40 +646,27 @@ export class MachineSessionCoordinator {
     }
     await mkdir(dirname(session.sessionFile), { recursive: true });
     await writeFile(session.sessionFile, input.agent.ompSession);
+    this.liveTranscripts.delete(session.id);
     const transcript = await this.transcript(session.id);
     this.database.orm.update(agentSessions).set({
       state: 'closed',
       lastEventOffset: transcript.length,
+      resumePending: input.agent.resumePending ?? false,
       activity: { active: false, reasons: [] },
       errorMessage: null,
       updatedAt: new Date().toISOString(),
     }).where(eq(agentSessions.id, session.id)).run();
-    const capability: ArtifactCapability = space.kind === 'base'
-      ? { kind: 'project', projectId: space.projectId }
-      : { kind: 'workspace', projectId: space.projectId, workspaceId: space.id };
-    const artifactUrl = space.kind === 'base' ? 'local://base/' : 'local://workspace/';
-    const current = this.artifacts.list(capability, artifactUrl);
-    if (current.status === 'error') throw runtimeError('restore artifacts', current.error, session.id);
-    for (const entry of current.value) {
-      const removed = this.artifacts.remove(capability, entry.url);
-      if (removed.status === 'error') throw runtimeError('restore artifacts', removed.error, session.id);
+    const artifactManifest = JSON.parse(new TextDecoder().decode(input.artifacts.manifest)) as { version: number; scope?: ArtifactScope };
+    if (artifactManifest.version !== 2 || !artifactManifest.scope
+      || artifactManifest.scope.spaceId !== input.spaceId
+      || artifactManifest.scope.generation !== input.artifacts.generation) {
+      throw runtimeError('restore artifacts', new Error('Legacy checkpoint has no durable artifact scope; recovery requires an explicit legacy reset or a new checkpoint from the intact machine'), session.id);
     }
-    const artifactManifest = JSON.parse(new TextDecoder().decode(input.artifacts.manifest)) as {
-      version: number;
-      files: Array<{ path: string; mediaType: string | null; data: string }>;
-    };
-    if (artifactManifest.version !== 1 || !Array.isArray(artifactManifest.files)) throw runtimeError('restore artifacts', new Error('Artifact manifest is invalid'), session.id);
-    for (const file of artifactManifest.files) {
-      const written = await this.artifacts.write(capability, `${artifactUrl}${file.path}`, new Uint8Array(Buffer.from(file.data, 'base64')), file.mediaType ?? undefined);
-      if (written.status === 'error') throw runtimeError('restore artifacts', written.error, session.id);
-    }
-    const committed = await this.artifacts.commit(capability, artifactUrl);
-    if (committed.status === 'error') throw runtimeError('restore artifacts', committed.error, session.id);
-    await this.artifactManifests?.synchronizeArtifactScope(space.projectId, committed.value);
+    const restored = await this.artifacts.restoreScope(artifactManifest.scope);
+    if (restored.status === 'error') throw runtimeError('restore artifacts', restored.error, session.id);
     this.quiesced.delete(session.id);
-    const opened = await this.openSpace(input.spaceId, true);
-    if (opened.status === 'error') throw opened.error;
-    return opened.value;
+    // The controller starts the agent only after both cloud and local ownership commit.
+    return this.get(session.id)!;
   }
 
   async reloadOmpSettings(): Promise<void> {
@@ -734,14 +733,15 @@ export class MachineSessionCoordinator {
   private async materializeArtifacts(
     capability: ArtifactCapability,
     artifactsDir: string,
-  ): Promise<ResultType<void, SessionRuntimeError>> {
-    const base = await this.artifacts.materialize(capability, 'local://base/', join(artifactsDir, 'base'));
+  ): Promise<ResultType<Map<string, string>, SessionRuntimeError>> {
+    const baseline = new Map<string, string>();
+    const base = await this.artifacts.materialize(capability, 'local://base/', join(artifactsDir, 'base'), capability.kind === 'project' ? baseline : undefined);
     if (base.status === 'error') return Result.err(runtimeError('materialize', base.error));
-    if (capability.kind === 'project') return Result.ok(undefined);
-    const workspace = await this.artifacts.materialize(capability, 'local://workspace/', join(artifactsDir, 'workspace'));
+    if (capability.kind === 'project') return Result.ok(baseline);
+    const workspace = await this.artifacts.materialize(capability, 'local://workspace/', join(artifactsDir, 'workspace'), baseline);
     return workspace.status === 'error'
       ? Result.err(runtimeError('materialize', workspace.error))
-      : Result.ok(undefined);
+      : Result.ok(baseline);
   }
 
   private async adopt(
@@ -749,6 +749,7 @@ export class MachineSessionCoordinator {
     runtime: OmpRuntimeSession,
     artifactsDir: string,
     capability: ArtifactCapability,
+    artifactBaseline: Map<string, string>,
   ): Promise<void> {
     let messages: unknown[];
     try {
@@ -781,7 +782,7 @@ export class MachineSessionCoordinator {
     const activityUnsubscribe = runtime.subscribeActivity((activity, errorMessage) => {
       this.updateActivity(record.id, capability, activity, errorMessage);
     });
-    this.live.set(record.id, { recordId: record.id, runtime, artifactsDir, capability, unsubscribe, activityUnsubscribe });
+    this.live.set(record.id, { recordId: record.id, runtime, artifactsDir, capability, artifactBaseline, unsubscribe, activityUnsubscribe });
   }
 
   private updateActivity(
@@ -900,19 +901,30 @@ export class MachineSessionCoordinator {
     const present = new Set(materialized.map((path) => relative(artifactRoot, path).split('\\').join('/')));
     const journal = this.artifacts.list(live.capability, artifactUrl);
     if (journal.status === 'error') throw journal.error;
-    for (const entry of journal.value) {
-      if (present.has(entry.path)) continue;
-      const removed = this.artifacts.remove(live.capability, entry.url);
-      if (removed.status === 'error') throw removed.error;
+    const canonical = new Map(journal.value.map((entry) => [entry.path, entry]));
+    // A session mount is a snapshot, not authority over later Inspector or session writes.
+    for (const [path, hash] of live.artifactBaseline) {
+      if (present.has(path)) continue;
+      const entry = canonical.get(path);
+      if (entry) {
+        const current = await this.artifacts.read(live.capability, entry.url);
+        if (current.status === 'error') throw current.error;
+        if (`sha256:${createHash('sha256').update(current.value).digest('hex')}` !== hash) {
+          throw new Error(`Artifact ${entry.url} changed outside this session; refusing a stale deletion`);
+        }
+        const removed = this.artifacts.remove(live.capability, entry.url);
+        if (removed.status === 'error') throw removed.error;
+      }
+      live.artifactBaseline.delete(path);
     }
     for (const path of materialized) {
       const artifactPath = relative(artifactRoot, path).split('\\').join('/');
-      const written = await this.artifacts.write(
-        live.capability,
-        `${artifactUrl}${artifactPath}`,
-        new Uint8Array(await readFile(path)),
-      );
+      const bytes = await readFile(path);
+      const hash = `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+      if (live.artifactBaseline.get(artifactPath) === hash) continue;
+      const written = await this.artifacts.write(live.capability, `${artifactUrl}${artifactPath}`, bytes);
       if (written.status === 'error') throw written.error;
+      live.artifactBaseline.set(artifactPath, hash);
     }
     const committed = await this.artifacts.commit(live.capability, artifactUrl);
     if (committed.status === 'error') throw committed.error;
@@ -926,6 +938,7 @@ export class MachineSessionCoordinator {
       ? Result.err(runtimeError('close', new Error('Session is not live'), sessionId))
       : Result.ok(undefined);
     try {
+      this.quiesced.add(sessionId);
       const record = this.get(sessionId);
       const activity = record?.activity;
       const transcript = await this.transcript(sessionId);
@@ -935,7 +948,7 @@ export class MachineSessionCoordinator {
         || transcriptNeedsContinuation
         || activity?.reasons.some((reason) => reason.kind === 'turn' || reason.kind === 'compacting') === true;
       const runtimeInterrupted = close ? false : await live.runtime.handoff();
-      while (this.activePrompts.has(sessionId)) await Bun.sleep(25);
+      await Promise.all(this.activePrompts.get(sessionId) ?? []);
       const resumePending = close ? record?.resumePending === true : wasExecuting || runtimeInterrupted;
       this.database.orm.update(agentSessions).set({ state: 'draining', resumePending, updatedAt: new Date().toISOString() })
         .where(eq(agentSessions.id, sessionId)).run();
@@ -945,6 +958,7 @@ export class MachineSessionCoordinator {
       live.activityUnsubscribe();
       await live.runtime.dispose();
       this.live.delete(sessionId);
+      this.quiesced.delete(sessionId);
       this.database.orm.update(agentSessions).set({
         state: close ? 'closed' : 'active',
         resumePending,

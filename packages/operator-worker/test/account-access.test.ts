@@ -98,6 +98,38 @@ describe('account lifecycle authorization', () => {
     expect(await denied.json()).toMatchObject({ error: { code: 'ACCOUNT_UNAVAILABLE' } });
   });
 
+  it('fences new work during a rollout without blocking checkpoint control reads', async () => {
+    const a = await account();
+    const registry = env.ACCOUNTS.getByName('global');
+    const id = crypto.randomUUID();
+    await registry.beginSandboxRollout(id, `registry.cloudflare.com/1234/sandbox@sha256:${'a'.repeat(64)}`);
+    try {
+      for (const operation of ['space.bootstrap', 'space.beginOpen', 'catalog.sandbox.create', 'catalog.machine.resume'] as const) {
+        const response = await SELF.fetch('https://auth.test/v1/control', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(a.signed(operation)) });
+        expect(response.status).toBe(503);
+        expect(await response.json()).toMatchObject({ error: { code: 'SANDBOX_ROLLOUT_IN_PROGRESS' } });
+      }
+      const rpc = await SELF.fetch(`https://auth.test/__sandbox/${a.userId}/sandbox-browser/rpc`, { method: 'POST', body: '{}' });
+      expect(rpc.status).toBe(503);
+      const settings = await SELF.fetch('https://auth.test/v1/control', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(a.signed('settings.get')) });
+      expect(settings.status).toBe(200);
+    } finally {
+      await registry.beginSandboxRolloutRecovery(id, false);
+      await registry.cancelSandboxRollout(id);
+    }
+  });
+
+  it('binds space ownership to the signing machine rather than a payload impersonation', async () => {
+    const a = await account();
+    const spaceId = `signed-space-${crypto.randomUUID()}`;
+    const response = await SELF.fetch('https://auth.test/v1/control', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(a.signed('space.bootstrap', { projectId: 'project', spaceId, machineId: 'impersonated-machine' })),
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ status: 'ok', value: { machineId: 'machine' } });
+  });
+
   it.each(['suspended', 'quarantined'] as const)('blocks %s A on direct APIs while active B retains access', async status => {
     const [a, b] = await Promise.all([account(), account()]);
     expect((await a.requests()).map(response => response.status)).toEqual([200, 200, 200, 200, 200, 200, 200]);

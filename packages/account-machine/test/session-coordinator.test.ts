@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { scheduler } from 'node:timers/promises';
 import {
   GitSpaceDatabase,
   LocalArtifactResolver,
@@ -12,6 +13,7 @@ import {
   type OmpRuntime,
   type OmpRuntimeEvent,
   type OmpRuntimeSession,
+  type OmpSessionControlView,
 } from '../src/index.js';
 
 const roots: string[] = [];
@@ -195,6 +197,36 @@ function artifactKey(): Uint8Array {
 }
 
 describe('MachineSessionCoordinator', () => {
+  it('preserves external artifact additions and edits when an older agent mount synchronizes', async () => {
+    const { root, database, artifacts } = fixture();
+    const capability = { kind: 'workspace' as const, projectId: 'project-a', workspaceId: 'workspace-a' };
+    const original = new TextEncoder().encode('original');
+    const external = new Uint8Array([0, 1, 255, 128, 0]);
+    expect((await artifacts.write(capability, 'local://workspace/shared.bin', original)).status).toBe('ok');
+    expect((await artifacts.commit(capability, 'local://workspace/')).status).toBe('ok');
+    expect(database.possessWorkspace('workspace-a', 'machine-a').status).toBe('ok');
+    const coordinator = new MachineSessionCoordinator(database, artifacts, new FakeOmpRuntime(), 'machine-a', join(root, 'runtime'));
+    const created = await coordinator.create('workspace-a');
+    if (created.status === 'error') throw created.error;
+    expect((await artifacts.write(capability, 'local://workspace/shared.bin', external)).status).toBe('ok');
+    expect((await artifacts.write(capability, 'local://workspace/inspector.bin', external)).status).toBe('ok');
+    expect((await artifacts.commit(capability, 'local://workspace/')).status).toBe('ok');
+    expect((await coordinator.prompt(created.value.id, 'keep external work')).status).toBe('ok');
+    expect((await coordinator.stopForRestart()).status).toBe('ok');
+    try {
+      for (const name of ['shared.bin', 'inspector.bin']) {
+        const result = await artifacts.read(capability, `local://workspace/${name}`);
+        if (result.status === 'error') throw result.error;
+        expect(result.value).toEqual(external);
+      }
+      const generated = await artifacts.read(capability, 'local://workspace/generated.txt');
+      if (generated.status === 'error') throw generated.error;
+      expect(new TextDecoder().decode(generated.value)).toBe('agent:keep external work');
+    } finally {
+      database.close();
+    }
+  });
+
   it('releases a child whose initial message read fails so the session can reopen', async () => {
     const { root, database, artifacts } = fixture();
     expect(database.possessWorkspace('workspace-a', 'machine-a').status).toBe('ok');
@@ -275,6 +307,77 @@ describe('MachineSessionCoordinator', () => {
     reopenedDatabase.close();
   });
 
+  it('joins every accepted prompt finalization before quiescing or disposing a session', async () => {
+    const { root, database, artifacts } = fixture();
+    database.possessWorkspace('workspace-a', 'machine-a');
+    const firstEntered = Promise.withResolvers<void>();
+    const secondEntered = Promise.withResolvers<void>();
+    const firstFinished = Promise.withResolvers<void>();
+    const firstGate = Promise.withResolvers<void>();
+    const secondGate = Promise.withResolvers<void>();
+    let publications = 0;
+    let disposed = false;
+    class AcknowledgedRuntime extends FakeOmpRuntime {
+      override async create(input: Parameters<FakeOmpRuntime['create']>[0]) {
+        const session = await super.create(input);
+        return {
+          ...session,
+          prompt: async (text: string) => {
+            this.emit({ type: 'message_start', role: 'user', text });
+            return session.prompt(text);
+          },
+          dispose: async () => { disposed = true; await session.dispose(); },
+        };
+      }
+    }
+    const coordinator = new MachineSessionCoordinator(
+      database, artifacts, new AcknowledgedRuntime(), 'machine-a', join(root, 'runtime'),
+      undefined, undefined, undefined,
+      {
+        synchronizeArtifactScope: async () => {
+          publications += 1;
+          if (publications === 1) {
+            firstEntered.resolve();
+            await firstGate.promise;
+            firstFinished.resolve();
+          } else if (publications === 2) {
+            secondEntered.resolve();
+            await secondGate.promise;
+          }
+        },
+      },
+    );
+    const opened = await coordinator.openSpace('workspace-a');
+    if (opened.status === 'error') throw opened.error;
+    expect((await coordinator.prompt(opened.value.id, 'first accepted turn')).status).toBe('ok');
+    await firstEntered.promise;
+    expect((await coordinator.prompt(opened.value.id, 'second accepted turn')).status).toBe('ok');
+    await secondEntered.promise;
+    firstGate.resolve();
+    await firstFinished.promise;
+    // Finish the first promise's microtasks; its completion must not erase the second.
+    await scheduler.yield();
+    let quiesced = false;
+    const draining = coordinator.quiesceSpace('workspace-a').then(() => { quiesced = true; });
+    const stopping = coordinator.stopForRestart();
+    try {
+      await scheduler.yield();
+      expect(quiesced).toBe(false);
+      expect(disposed).toBe(false);
+      expect((await coordinator.prompt(opened.value.id, 'late arrival')).status).toBe('error');
+    } finally {
+      secondGate.resolve();
+      await draining;
+      const stopped = await stopping;
+      if (stopped.status === 'error') throw stopped.error;
+    }
+    expect(disposed).toBe(true);
+    const saved = await artifacts.read({ kind: 'workspace', projectId: 'project-a', workspaceId: 'workspace-a' }, 'local://workspace/generated.txt');
+    if (saved.status === 'error') throw saved.error;
+    expect(new TextDecoder().decode(saved.value)).toBe('agent:second accepted turn');
+    database.close();
+  });
+
   it('retains remote and released sessions without starting them until this machine claims the space', async () => {
     const { root, database, artifacts } = fixture();
     database.possessWorkspace('workspace-a', 'machine-a');
@@ -323,6 +426,54 @@ describe('MachineSessionCoordinator', () => {
     expect(await recovered.recover()).toMatchObject({ status: 'ok', value: [{ id: created.value.id }] });
     expect((await recovered.prompt(created.value.id, 'current')).status).toBe('ok');
     await recovered.close(created.value.id);
+    database.close();
+  });
+
+  it('refuses provider checkpointing without consuming pending asks or queued prompts, and canceling that preparation is harmless', async () => {
+    const { root, database, artifacts } = fixture();
+    database.possessWorkspace('workspace-a', 'machine-a');
+    const controls: OmpSessionControlView = {
+      sessionId: 'omp-a', role: null, roleLabel: null, roles: [], provider: null, models: [],
+      model: null, thinking: null, fastMode: false, approvalMode: 'always-ask', context: null,
+      cost: 0, todos: [], queue: { steering: [], followUp: [] }, tree: [], history: [], goal: null,
+      pendingAsk: { id: 'pending-ask', questions: [] },
+    };
+    let interruptions = 0;
+    class PendingRuntime extends FakeOmpRuntime {
+      override async create(input: Parameters<FakeOmpRuntime['create']>[0]) {
+        const session = await super.create(input);
+        return {
+          ...session,
+          control: async () => controls,
+          handoff: async () => { interruptions += 1; return false; },
+          answerAsk: async (id: string) => {
+            if (controls.pendingAsk?.id !== id) throw new Error('Ask was consumed');
+            controls.pendingAsk = null;
+            return controls;
+          },
+          clearQueue: async () => { controls.queue = { steering: [], followUp: [] }; return controls; },
+        };
+      }
+    }
+    const coordinator = new MachineSessionCoordinator(database, artifacts, new PendingRuntime(), 'machine-a', join(root, 'runtime'));
+    const opened = await coordinator.openSpace('workspace-a');
+    if (opened.status === 'error') throw opened.error;
+    await expect(coordinator.quiesceSpace('workspace-a', true)).rejects.toThrow();
+    coordinator.resumeSpace('workspace-a');
+    expect((await coordinator.control(opened.value.id)).pendingAsk?.id).toBe('pending-ask');
+    expect(interruptions).toBe(0);
+    await coordinator.answerAsk(opened.value.id, 'pending-ask', []);
+    controls.queue.followUp.push('queued work');
+    await expect(coordinator.quiesceSpace('workspace-a', true)).rejects.toThrow();
+    coordinator.resumeSpace('workspace-a');
+    expect((await coordinator.control(opened.value.id)).queue.followUp).toEqual(['queued work']);
+    expect(interruptions).toBe(0);
+    await coordinator.clearQueue(opened.value.id);
+    await coordinator.quiesceSpace('workspace-a', true);
+    expect((await coordinator.prompt(opened.value.id, 'must wait')).status).toBe('error');
+    coordinator.resumeSpace('workspace-a');
+    expect((await coordinator.prompt(opened.value.id, 'continued after cancel')).status).toBe('ok');
+    await coordinator.stopForRestart();
     database.close();
   });
 

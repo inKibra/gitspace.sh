@@ -1,5 +1,6 @@
 export * from './browser-relay.js';
 export * from './canonical-settings.js';
+export * from './cloud-artifact-object-store.js';
 export * from './cloud-space-authority.js';
 export * from './checkpoint-transcript.js';
 export * from './coordinator-portable-runtime.js';

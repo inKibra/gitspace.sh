@@ -210,6 +210,7 @@ export interface CloudSpaceRecord {
   manifestKey: string | null;
   manifestHash: string | null;
   errorMessage: string | null;
+  resumeMachineId?: string | null;
   updatedAt: string;
 }
 
@@ -871,7 +872,7 @@ export class CloudSpaceCheckpointAuthority implements SpaceCheckpointAuthority {
     return this.call<{ revision: number; previousRevision: number | null }>('space.beginClose', input);
   }
 
-  async commitClosed(input: { projectId: string; spaceId: string; machineId: string; expectedGeneration: number; revision: number; manifestKey: string; manifestHash: `sha256:${string}` }) {
+  async commitClosed(input: { projectId: string; spaceId: string; machineId: string; expectedGeneration: number; revision: number; manifestKey: string; manifestHash: `sha256:${string}`; resumeOnMachineRestart?: boolean }) {
     await this.call('space.commitClosed', input);
   }
 
@@ -879,7 +880,7 @@ export class CloudSpaceCheckpointAuthority implements SpaceCheckpointAuthority {
     await this.call('space.abortClose', input);
   }
 
-  beginOpen(input: { projectId: string; spaceId: string; machineId: string; expectedGeneration: number }) {
+  beginOpen(input: { projectId: string; spaceId: string; machineId: string; expectedGeneration: number; resumeOnMachineRestart?: boolean }) {
     return this.call<{ revision: number; manifestKey: string; manifestHash: `sha256:${string}` }>('space.beginOpen', input);
   }
 

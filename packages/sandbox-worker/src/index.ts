@@ -26,6 +26,25 @@ export class GitSpaceSandbox extends CloudflareSandbox<Env> {
     return this.record(input, 'offline', previous?.rpcEndpoint ?? null, 'Managed Cloudflare Sandbox is starting or unavailable.', previous?.desiredState === 'online' ? 'online' : 'offline');
   }
 
+  async prepareReplacement(): Promise<Response> {
+    const input = await this.requireEnrollment();
+    const token = input.environment.GITSPACE_CONTROL_TOKEN;
+    if (!token) return Response.json({ error: 'Legacy machine has no replacement control credential; reset or re-enroll it before rollout' }, { status: 409 });
+    return this.containerFetch('http://localhost/__control/prepare-replacement', {
+      method: 'POST', headers: { authorization: `Bearer ${token}` },
+    }, 8081);
+  }
+
+  async cancelReplacement(): Promise<Response> {
+    const input = await this.requireEnrollment();
+    const token = input.environment.GITSPACE_CONTROL_TOKEN;
+    // A legacy machine without this credential could not have acknowledged preparation.
+    if (!token) return Response.json({ prepared: false, machineId: input.machineId });
+    return this.containerFetch('http://localhost/__control/cancel-replacement', {
+      method: 'POST', headers: { authorization: `Bearer ${token}` },
+    }, 8081);
+  }
+
   async resumeMachine(): Promise<SandboxMachineRecord> {
     const input = await this.requireEnrollment();
     return this.startMachine(input);
@@ -44,6 +63,7 @@ export class GitSpaceSandbox extends CloudflareSandbox<Env> {
   }
 
   private async startMachine(input: ManagedEnrollment): Promise<SandboxMachineRecord> {
+    await this.startAndWaitForPorts({ ports: 3000 });
     await this.exposePort(8081, { hostname: this.env.SANDBOX_HOSTNAME, name: 'gitspace-rpc' });
     const controlUrl = input.environment.GITSPACE_CONTROL_URL;
     if (!controlUrl) throw new Error('GitSpace control URL is required');
@@ -85,15 +105,22 @@ export class GitSpaceSandbox extends CloudflareSandbox<Env> {
 }
 async function sandbox(env: Env, userId: string, machineId: string): Promise<GitSpaceSandbox> {
   const namespace = env.Sandbox as DurableObjectNamespace<GitSpaceSandbox>;
-  return getSandbox(namespace, await sandboxObjectId(userId, machineId), { normalizeId: true, labels: { userId, machineId, product: 'gitspace' } });
+  return getSandbox(namespace, await sandboxObjectId(userId, machineId), { normalizeId: true, keepAlive: true, labels: { userId, machineId, product: 'gitspace' } });
 }
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+    const replacement = /^\/v1\/sandboxes\/([^/]+)\/(prepare-replacement|cancel-replacement)$/u.exec(url.pathname);
     const lifecycle = /^\/v1\/sandboxes\/([^/]+)\/(status|sleep|resume|destroy)$/u.exec(url.pathname);
     const rpc = /^\/v1\/sandboxes\/([^/]+)\/rpc$/u.exec(url.pathname);
     try {
+      if (replacement && request.method === 'POST') {
+        const userId = request.headers.get('x-gitspace-user-id');
+        if (!userId) throw new Error('Sandbox user id is required');
+        const stub = await sandbox(env, userId, replacement[1]!);
+        return replacement[2] === 'prepare-replacement' ? stub.prepareReplacement() : stub.cancelReplacement();
+      }
       if (rpc && request.method === 'POST') {
         const userId = request.headers.get('x-gitspace-user-id');
         if (!userId) throw new Error('Sandbox user id is required');

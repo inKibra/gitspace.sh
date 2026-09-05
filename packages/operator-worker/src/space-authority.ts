@@ -12,6 +12,7 @@ export interface SpaceAuthorityRecord {
   manifestKey: string | null;
   manifestHash: string | null;
   errorMessage: string | null;
+  resumeMachineId: string | null;
   updatedAt: string;
 }
 
@@ -25,6 +26,7 @@ interface SpaceRow extends Record<string, SqlStorageValue> {
   manifest_key: string | null;
   manifest_hash: string | null;
   error_message: string | null;
+  resume_machine_id: string | null;
   updated_at: string;
 }
 
@@ -48,6 +50,10 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
           CHECK ((state = 'closed' AND machine_id IS NULL) OR (state != 'closed' AND machine_id IS NOT NULL))
         );
       `);
+      const columns = this.ctx.storage.sql.exec<{ name: string }>('PRAGMA table_info(space_authority)').toArray();
+      if (!columns.some((column) => column.name === 'resume_machine_id')) {
+        this.ctx.storage.sql.exec('ALTER TABLE space_authority ADD COLUMN resume_machine_id TEXT');
+      }
     });
   }
 
@@ -86,17 +92,18 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
     });
   }
 
-  commitClosed(input: { projectId: string; spaceId: string; machineId: string; expectedGeneration: number; revision: number; manifestKey: string; manifestHash: string }): void {
+  commitClosed(input: { projectId: string; spaceId: string; machineId: string; expectedGeneration: number; revision: number; manifestKey: string; manifestHash: string; resumeOnMachineRestart?: boolean }): void {
     this.ctx.storage.transactionSync(() => {
       const row = this.requireIdentity(input);
       requireState(row, 'closing', input.machineId, input.expectedGeneration);
       if (row.checkpoint_revision !== input.revision) throw new Error('Checkpoint revision changed');
       validateManifest(input.manifestKey, input.manifestHash);
       this.ctx.storage.sql.exec(
-        'UPDATE space_authority SET state = ?, machine_id = NULL, generation = generation + 1, manifest_key = ?, manifest_hash = ?, error_message = NULL, updated_at = ? WHERE id = 1',
+        'UPDATE space_authority SET state = ?, machine_id = NULL, generation = generation + 1, manifest_key = ?, manifest_hash = ?, resume_machine_id = ?, error_message = NULL, updated_at = ? WHERE id = 1',
         'closed',
         input.manifestKey,
         input.manifestHash,
+        input.resumeOnMachineRestart === true ? input.machineId : null,
         new Date().toISOString(),
       );
     });
@@ -116,10 +123,11 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
     });
   }
 
-  beginOpen(input: { projectId: string; spaceId: string; machineId: string; expectedGeneration: number }): { revision: number; manifestKey: string; manifestHash: `sha256:${string}` } {
+  beginOpen(input: { projectId: string; spaceId: string; machineId: string; expectedGeneration: number; resumeOnMachineRestart?: boolean }): { revision: number; manifestKey: string; manifestHash: `sha256:${string}` } {
     return this.ctx.storage.transactionSync(() => {
       const row = this.requireIdentity(input);
       if (row.state !== 'closed' || row.machine_id !== null || row.generation !== input.expectedGeneration) throw new Error('Space is not closed at the expected generation');
+      if (input.resumeOnMachineRestart === true && row.resume_machine_id !== input.machineId) throw new Error('Space was not released for this machine restart');
       if (!row.manifest_key || !row.manifest_hash || !/^sha256:[a-f0-9]{64}$/u.test(row.manifest_hash)) throw new Error('Closed space has no valid checkpoint manifest');
       this.ctx.storage.sql.exec(
         'UPDATE space_authority SET state = ?, machine_id = ?, generation = generation + 1, error_message = NULL, updated_at = ? WHERE id = 1',
@@ -136,7 +144,7 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
       const row = this.requireIdentity(input);
       requireState(row, 'opening', input.machineId, input.expectedGeneration + 1);
       if (row.checkpoint_revision !== input.revision) throw new Error('Checkpoint revision changed');
-      this.ctx.storage.sql.exec('UPDATE space_authority SET state = ?, error_message = NULL, updated_at = ? WHERE id = 1', 'open', new Date().toISOString());
+      this.ctx.storage.sql.exec('UPDATE space_authority SET state = ?, resume_machine_id = NULL, error_message = NULL, updated_at = ? WHERE id = 1', 'open', new Date().toISOString());
     });
   }
 
@@ -160,7 +168,7 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
   }
 
   private row(): SpaceRow | undefined {
-    return this.ctx.storage.sql.exec<SpaceRow>('SELECT project_id, space_id, state, machine_id, generation, checkpoint_revision, manifest_key, manifest_hash, error_message, updated_at FROM space_authority WHERE id = 1').toArray()[0];
+    return this.ctx.storage.sql.exec<SpaceRow>('SELECT project_id, space_id, state, machine_id, generation, checkpoint_revision, manifest_key, manifest_hash, resume_machine_id, error_message, updated_at FROM space_authority WHERE id = 1').toArray()[0];
   }
 
   private requireIdentity(input: { projectId: string; spaceId: string }): SpaceRow {
@@ -185,6 +193,7 @@ function record(row: SpaceRow): SpaceAuthorityRecord {
     manifestKey: row.manifest_key,
     manifestHash: row.manifest_hash,
     errorMessage: row.error_message,
+    resumeMachineId: row.resume_machine_id,
     updatedAt: row.updated_at,
   };
 }

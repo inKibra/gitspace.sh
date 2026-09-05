@@ -871,6 +871,28 @@ Execute one by one; each ticket must name the package/replacement unit it owns.
     signature. `CredentialVaultDO` consumes replay nonces before routing
     generation-checked space operations to `SpaceAuthorityDO`; the machine
     implements the same authority interface through `CloudSpaceCheckpointAuthority`.
+    Managed Cloudflare image replacement now uses durable account-scoped
+    ciphertext objects, cloud restart markers, and generation-fenced recovery
+    into an empty machine root. Artifact manifests are restored before agents
+    start. Agent artifact synchronization applies changes against its mounted
+    baseline; an older mount cannot erase newer Inspector additions or edits.
+    Managed containers stay awake until explicitly slept or destroyed. Resume
+    waits for the replacement container's control port before using SDK sessions.
+    For provider image changes, run `bun run rollout` from
+    `packages/sandbox-worker` with `--image <immutable-registry-digest>`,
+    `--account <cloudflare-account-id>`, and `--application <container-app-id>`.
+    Set `GITSPACE_OPERATOR_ACCESS_JWT` and `CLOUDFLARE_API_TOKEN`.
+    The operator route fences new work, drains and checkpoints online machines,
+    waits for provider image convergence, then resumes the recorded machines.
+    Failures retain the rollout ID and admission fence. Repair and retry with
+    the same `--id`; use `--cancel --id` only before replacing the image.
+    Production verification replaced the entire container disk, advanced space
+    generation 3 to 5, preserved HEAD, staged/unstaged/untracked bytes, symlinks,
+    executable modes, binary artifact bytes, and canonical agent/OMP identities.
+    The resumed agent recalled its pre-replacement conversation marker.
+    Ignored files remain excluded. This protects planned, drained replacement,
+    not uncheckpointed edits lost in an abrupt disk failure. Legacy beta cloud
+    machines without complete checkpoints were intentionally reset.
 21. Keep: side-agent read tier; checks/placement; runtime/fleet view;
     browser-relay grant; subagent report/blame capture; worker wedge capture;
     isolinear pilot. Sequence them after the 1.0 substrate they consume.

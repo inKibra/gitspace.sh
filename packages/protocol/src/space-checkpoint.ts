@@ -22,6 +22,7 @@ export const spaceCheckpointManifestSchema = z.object({
     sessionId: storageIdSchema,
     ompSessionId: storageIdSchema,
     ompCheckpointHash: hashSchema,
+    resumePending: z.boolean().default(false),
   }),
   artifacts: z.object({
     manifestHash: hashSchema,

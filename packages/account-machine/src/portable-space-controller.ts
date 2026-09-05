@@ -60,19 +60,23 @@ export class MachinePortableSpaceController implements SpaceLifecycleController 
     }
   }
 
-  async open(spaceId: string, expectedGeneration: number): Promise<void> {
+  async open(spaceId: string, expectedGeneration: number, options: { resumeOnMachineRestart?: boolean; deferAgentStart?: boolean } = {}): Promise<void> {
     const space = await this.materialize(spaceId);
-    const aligned = this.database.alignClosedSpaceProjection(space.id, expectedGeneration);
-    if (aligned.status === 'error') throw aligned.error;
-    const started = this.database.beginSpaceOpen({
-      spaceId: space.id,
-      holderId: this.machineId,
-      expectedGeneration,
-      rootPath: space.rootPath,
-    });
-    if (started.status === 'error') throw started.error;
+    const placement = this.database.getSpacePlacement(space.id);
+    if (!placement || placement.state !== 'closed' || placement.generation > expectedGeneration) {
+      throw new Error(`Space ${space.id} is not closed at a recoverable generation`);
+    }
     try {
-      await this.lifecycle.open(this.descriptor(space, expectedGeneration), new CoordinatorPortableSpaceRuntime(this.sessions, space.id));
+      await this.lifecycle.open(
+        { ...this.descriptor(space, expectedGeneration), resumeOnMachineRestart: options.resumeOnMachineRestart },
+        new CoordinatorPortableSpaceRuntime(this.sessions, space.id),
+        () => {
+          const aligned = this.database.alignClosedSpaceProjection(space.id, expectedGeneration);
+          if (aligned.status === 'error') throw aligned.error;
+          const started = this.database.beginSpaceOpen({ spaceId: space.id, holderId: this.machineId, expectedGeneration, rootPath: space.rootPath });
+          if (started.status === 'error') throw started.error;
+        },
+      );
       const committed = this.database.commitSpaceOpen({ spaceId: space.id, holderId: this.machineId, generation: expectedGeneration + 1 });
       if (committed.status === 'error') throw committed.error;
       this.database.setSpaceClosed(space.id, false);
@@ -80,6 +84,10 @@ export class MachinePortableSpaceController implements SpaceLifecycleController 
       const current = this.database.getSpacePlacement(space.id);
       if (current?.state === 'opening') this.database.failSpaceOpen({ spaceId: space.id, holderId: this.machineId, generation: expectedGeneration + 1 });
       throw error;
+    }
+    if (!options.deferAgentStart) {
+      const opened = await this.sessions.openSpace(space.id);
+      if (opened.status === 'error') throw opened.error;
     }
   }
 

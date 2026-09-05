@@ -5,6 +5,30 @@ import { SpaceAuthorityDO } from '../src/space-authority.js';
 const manifestHash = `sha256:${'a'.repeat(64)}`;
 
 describe('SpaceAuthorityDO', () => {
+  it('only restores the fenced same-machine restart marker and consumes it after opening', async () => {
+    const stub = env.SPACE_AUTHORITY.getByName('space-restart');
+    const identity = { projectId: 'project-a', spaceId: 'space-restart', machineId: 'machine-a' };
+    await runInDurableObject(stub, (instance: SpaceAuthorityDO) => instance.bootstrap(identity));
+    await runInDurableObject(stub, (instance: SpaceAuthorityDO) => instance.beginClose({ ...identity, expectedGeneration: 1 }));
+    await runInDurableObject(stub, (instance: SpaceAuthorityDO) => instance.commitClosed({
+      ...identity, expectedGeneration: 1, revision: 1,
+      manifestKey: 'projects/project-a/spaces/space-restart/checkpoints/1/manifest.enc',
+      manifestHash, resumeOnMachineRestart: true,
+    }));
+    expect(await runInDurableObject(stub, (instance: SpaceAuthorityDO) => instance.get())).toMatchObject({ state: 'closed', generation: 2, resumeMachineId: 'machine-a' });
+    await expect(runInDurableObject(stub, (instance: SpaceAuthorityDO) => instance.beginOpen({
+      ...identity, machineId: 'machine-b', expectedGeneration: 2, resumeOnMachineRestart: true,
+    }))).rejects.toThrow('this machine restart');
+    await expect(runInDurableObject(stub, (instance: SpaceAuthorityDO) => instance.beginOpen({
+      ...identity, expectedGeneration: 1, resumeOnMachineRestart: true,
+    }))).rejects.toThrow('expected generation');
+    await runInDurableObject(stub, (instance: SpaceAuthorityDO) => instance.beginOpen({ ...identity, expectedGeneration: 2, resumeOnMachineRestart: true }));
+    await runInDurableObject(stub, (instance: SpaceAuthorityDO) => instance.commitOpen({ ...identity, expectedGeneration: 2, revision: 1 }));
+    expect(await runInDurableObject(stub, (instance: SpaceAuthorityDO) => instance.get())).toMatchObject({ state: 'open', machineId: 'machine-a', generation: 3, resumeMachineId: null });
+    await expect(runInDurableObject(stub, (instance: SpaceAuthorityDO) => instance.beginOpen({
+      ...identity, expectedGeneration: 2, resumeOnMachineRestart: true,
+    }))).rejects.toThrow('expected generation');
+  });
   it('fences generations across durable close and reopen', async () => {
     const stub = env.SPACE_AUTHORITY.getByName('space-a');
     const initial = await runInDurableObject(stub, (instance: SpaceAuthorityDO) => instance.bootstrap({ projectId: 'project-a', spaceId: 'space-a', machineId: 'machine-a' }));

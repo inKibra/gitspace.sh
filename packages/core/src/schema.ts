@@ -69,13 +69,6 @@ export const deviceGrants = sqliteTable('device_grants', {
 });
 export type DeviceGrantRow = typeof deviceGrants.$inferSelect;
 
-/** Spaces this machine released on shutdown with local files kept; reclaimed on the next start if the cloud placement is still closed at that generation. */
-export const releasedSpaces = sqliteTable('released_spaces', {
-  spaceId: text('space_id').primaryKey().references(() => spaces.id, { onDelete: 'cascade' }),
-  generation: integer('generation').notNull(),
-  releasedAt: text('released_at').notNull(),
-});
-export type ReleasedSpaceRow = typeof releasedSpaces.$inferSelect;
 
 export const artifactScopes = sqliteTable('artifact_scopes', {
   id: text('id').primaryKey(),

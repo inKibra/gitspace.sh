@@ -431,9 +431,22 @@ export class GitSpaceDatabase {
   transferWorkspacePossession(input: { workspaceId: string; fromHolderId: string; toHolderId: string; expectedGeneration: number }): ResultType<WorkspacePossession, CoreInputError | CoreConflict | CoreNotFound> {
     return this.transferSpacePossession({ spaceId: input.workspaceId, fromHolderId: input.fromHolderId, toHolderId: input.toHolderId, expectedGeneration: input.expectedGeneration });
   }
+  invalidateSpacePossession(input: { spaceId: string; holderId: string; expectedGeneration: number }): ResultType<SpacePlacement, CoreConflict> {
+    const changed = this.orm.update(spacePlacements).set({
+      holderId: 'unassigned',
+      state: 'closed',
+      updatedAt: new Date().toISOString(),
+    }).where(and(
+      eq(spacePlacements.spaceId, input.spaceId),
+      eq(spacePlacements.holderId, input.holderId),
+      eq(spacePlacements.generation, input.expectedGeneration),
+    )).returning().get();
+    return changed ? Result.ok(changed) : Result.err(conflict('possession', input.spaceId, 'Space placement changed while fencing local ownership'));
+  }
+
   alignClosedSpaceProjection(spaceId: string, generation: number): ResultType<SpacePlacement, CoreConflict> {
     const current = this.getSpacePlacement(spaceId);
-    if (!current || !Number.isSafeInteger(generation) || generation < 0) {
+    if (!current || !Number.isSafeInteger(generation) || generation < current.generation) {
       return Result.err(conflict('possession', spaceId, 'Closed space projection cannot align to the authority generation'));
     }
     if (current.state === 'closed' && current.holderId === 'unassigned' && current.generation === generation) return Result.ok(current);

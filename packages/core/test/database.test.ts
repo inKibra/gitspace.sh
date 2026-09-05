@@ -83,17 +83,17 @@ describe('GitSpaceDatabase', () => {
     const database = new GitSpaceDatabase(databasePath());
     seed(database);
     expect(database.alignClosedSpaceProjection('workspace-a', 8).status).toBe('ok');
-    expect(database.alignClosedSpaceProjection('workspace-a', 2).status).toBe('ok');
-    expect(database.beginSpaceOpen({ spaceId: 'workspace-a', holderId: 'machine-a', expectedGeneration: 2 }).status).toBe('ok');
+    expect(database.alignClosedSpaceProjection('workspace-a', 2).status).toBe('error');
+    expect(database.beginSpaceOpen({ spaceId: 'workspace-a', holderId: 'machine-a', expectedGeneration: 8 }).status).toBe('ok');
     expect(database.alignClosedSpaceProjection('workspace-a', 10).status).toBe('error');
-    expect(database.commitSpaceOpen({ spaceId: 'workspace-a', holderId: 'machine-a', generation: 3 }).status).toBe('ok');
+    expect(database.commitSpaceOpen({ spaceId: 'workspace-a', holderId: 'machine-a', generation: 9 }).status).toBe('ok');
     expect(database.alignClosedSpaceProjection('workspace-a', 10).status).toBe('error');
-    expect(database.getSpacePlacement('workspace-a')).toMatchObject({ holderId: 'machine-a', state: 'open', generation: 3 });
-    expect(database.beginSpaceClose({ spaceId: 'workspace-a', holderId: 'machine-a', expectedGeneration: 3 }).status).toBe('ok');
+    expect(database.getSpacePlacement('workspace-a')).toMatchObject({ holderId: 'machine-a', state: 'open', generation: 9 });
+    expect(database.beginSpaceClose({ spaceId: 'workspace-a', holderId: 'machine-a', expectedGeneration: 9 }).status).toBe('ok');
     expect(database.alignClosedSpaceProjection('workspace-a', 10).status).toBe('error');
-    expect(database.commitSpaceClosed({ spaceId: 'workspace-a', holderId: 'machine-a', expectedGeneration: 3 }).status).toBe('ok');
-    expect(database.alignClosedSpaceProjection('workspace-a', 6).status).toBe('ok');
-    expect(database.getSpacePlacement('workspace-a')).toMatchObject({ holderId: 'unassigned', state: 'closed', generation: 6 });
+    expect(database.commitSpaceClosed({ spaceId: 'workspace-a', holderId: 'machine-a', expectedGeneration: 9 }).status).toBe('ok');
+    expect(database.alignClosedSpaceProjection('workspace-a', 12).status).toBe('ok');
+    expect(database.getSpacePlacement('workspace-a')).toMatchObject({ holderId: 'unassigned', state: 'closed', generation: 12 });
     database.close();
   });
 

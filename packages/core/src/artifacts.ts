@@ -7,6 +7,7 @@ import {
 } from '@gitspace/protocol';
 import { and, eq, inArray } from 'drizzle-orm';
 import { Result, TaggedError, type Result as ResultType } from 'better-result';
+import { z } from 'zod';
 import type { GitSpaceDatabase } from './database.js';
 import { artifactBlobs, artifactEntries, artifactScopes, type ArtifactEntry, type ArtifactScope } from './schema.js';
 
@@ -102,17 +103,20 @@ interface ResolvedArtifactPath {
   displayRoot: string;
 }
 
-interface ArtifactManifest {
-  version: 1;
-  scopeId: string;
-  generation: number;
-  entries: Array<{
-    path: string;
-    blobHash: string;
-    size: number;
-    mediaType: string | null;
-  }>;
-}
+const artifactManifestSchema = z.object({
+  version: z.literal(1),
+  scopeId: z.string().min(1),
+  generation: z.number().int().nonnegative(),
+  entries: z.array(z.object({
+    path: z.string().min(1).refine((path) =>
+      !path.includes('\0') && !path.includes('\\') && !posix.isAbsolute(path)
+      && path.split('/').every((part) => part !== '' && part !== '.' && part !== '..')),
+    blobHash: z.string().regex(HASH_PATTERN),
+    size: z.number().int().nonnegative(),
+    mediaType: z.string().nullable(),
+  })),
+});
+type ArtifactManifest = z.infer<typeof artifactManifestSchema>;
 
 export class ArtifactAccessDenied extends TaggedError('ArtifactAccessDenied')<{
   url: string;
@@ -429,10 +433,65 @@ export class LocalArtifactResolver {
     }
   }
 
+  async restoreScope(scope: ArtifactScope): Promise<ResultType<ArtifactScope, ArtifactError>> {
+    try {
+      if (!this.database.getSpace(scope.spaceId)) throw new Error(`Artifact space ${scope.spaceId} does not exist`);
+      const entries = await this.scopeManifestEntries(scope);
+      const now = new Date().toISOString();
+      const restored = this.database.orm.transaction((tx) => {
+        const current = tx.select().from(artifactScopes).where(eq(artifactScopes.spaceId, scope.spaceId)).get();
+        if (current && (current.dirty || current.generation > scope.generation
+          || (current.id !== scope.id && (current.generation !== 0 || current.manifestHash !== null))
+          || (current.id === scope.id && current.generation === scope.generation && current.manifestHash !== scope.manifestHash))) {
+          throw new ArtifactConflict({ scopeId: scope.id, message: 'Canonical artifact restore would overwrite divergent local state' });
+        }
+        const owner = tx.select().from(artifactScopes).where(eq(artifactScopes.id, scope.id)).get();
+        if (owner && owner.spaceId !== scope.spaceId) {
+          throw new ArtifactConflict({ scopeId: scope.id, message: 'Canonical artifact scope belongs to another space' });
+        }
+        if (current && current.id !== scope.id) {
+          tx.delete(artifactScopes).where(eq(artifactScopes.id, current.id)).run();
+        }
+        tx.insert(artifactScopes).values(scope).onConflictDoUpdate({
+          target: artifactScopes.id,
+          set: { generation: scope.generation, manifestHash: scope.manifestHash, dirty: false, updatedAt: scope.updatedAt },
+        }).run();
+        tx.delete(artifactEntries).where(eq(artifactEntries.scopeId, scope.id)).run();
+        for (const entry of entries) {
+          tx.insert(artifactEntries).values({
+            ...entry, scopeId: scope.id, generation: scope.generation, updatedAt: scope.updatedAt,
+          }).run();
+          tx.insert(artifactBlobs).values({
+            hash: entry.blobHash, size: entry.size, cachePath: null, state: 'remote', lastAccessedAt: now, createdAt: now,
+          }).onConflictDoNothing().run();
+        }
+        return tx.select().from(artifactScopes).where(eq(artifactScopes.id, scope.id)).get()!;
+      });
+      return Result.ok(restored);
+    } catch (error) {
+      return Result.err(error instanceof ArtifactConflict ? error : storageError('restore scope', error));
+    }
+  }
+
+  async verifyScope(scope: ArtifactScope): Promise<ResultType<void, ArtifactError>> {
+    try {
+      const entries = await this.scopeManifestEntries(scope);
+      for (const hash of new Set(entries.map((entry) => entry.blobHash))) {
+        const sealed = await this.store.get(hash as `sha256:${string}`);
+        if (!sealed) throw new Error(`Artifact blob ${hash} does not exist`);
+        if (await digest(sealed) !== hash) throw new Error(`Artifact blob ${hash} failed content verification`);
+      }
+      return Result.ok(undefined);
+    } catch (error) {
+      return Result.err(storageError('verify scope', error));
+    }
+  }
+
   async materialize(
     capability: ArtifactCapability,
     url: string,
     destination: string,
+    contentHashes?: Map<string, string>,
   ): Promise<ResultType<{ root: string; files: string[] }, ArtifactError>> {
     const listed = this.list(capability, url);
     if (listed.status === 'error') return listed;
@@ -446,6 +505,7 @@ export class LocalArtifactResolver {
       const bytes = await this.read(capability, entry.url);
       if (bytes.status === 'error') return bytes;
       await atomicWrite(target, bytes.value);
+      if (contentHashes) contentHashes.set(relative, await digest(bytes.value));
       files.push(target);
     }
     return Result.ok({ root: destination, files });
@@ -533,6 +593,29 @@ export class LocalArtifactResolver {
   private touchBlob(hash: string): void {
     this.database.orm.update(artifactBlobs).set({ lastAccessedAt: new Date().toISOString() })
       .where(eq(artifactBlobs.hash, hash)).run();
+  }
+
+  private async scopeManifestEntries(scope: ArtifactScope): Promise<ArtifactManifest['entries']> {
+    if (scope.dirty || !Number.isSafeInteger(scope.generation) || scope.generation < 0) {
+      throw new Error('Canonical artifact scope must have a clean, nonnegative generation');
+    }
+    if (scope.manifestHash === null) {
+      if (scope.generation !== 0) throw new Error('Committed artifact scope is missing its manifest hash');
+      return [];
+    }
+    if (!HASH_PATTERN.test(scope.manifestHash)) throw new Error(`Invalid artifact manifest hash ${scope.manifestHash}`);
+    const sealed = await this.store.get(scope.manifestHash as `sha256:${string}`);
+    if (!sealed) throw new Error(`Artifact manifest ${scope.manifestHash} does not exist`);
+    if (await digest(sealed) !== scope.manifestHash) throw new Error(`Artifact manifest ${scope.manifestHash} failed content verification`);
+    const bytes = await decryptArtifactBytes(sealed, await this.scopeKey(scope.id));
+    const manifest = artifactManifestSchema.parse(JSON.parse(new TextDecoder().decode(bytes)));
+    if (manifest.scopeId !== scope.id || manifest.generation !== scope.generation) {
+      throw new Error('Artifact manifest does not match its canonical scope and generation');
+    }
+    if (new Set(manifest.entries.map((entry) => entry.path)).size !== manifest.entries.length) {
+      throw new Error('Artifact manifest contains duplicate paths');
+    }
+    return manifest.entries;
   }
 
   private async scopeKey(scopeId: string): Promise<Uint8Array> {

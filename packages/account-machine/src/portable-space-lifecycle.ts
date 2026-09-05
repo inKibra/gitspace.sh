@@ -66,9 +66,9 @@ export class EncryptedCheckpointBlobStore implements CheckpointBlobStore {
 
 export interface SpaceCheckpointAuthority {
   beginClose(input: { projectId: string; spaceId: string; machineId: string; expectedGeneration: number }): Promise<{ revision: number; previousRevision: number | null }>;
-  commitClosed(input: { projectId: string; spaceId: string; machineId: string; expectedGeneration: number; revision: number; manifestKey: string; manifestHash: `sha256:${string}` }): Promise<void>;
+  commitClosed(input: { projectId: string; spaceId: string; machineId: string; expectedGeneration: number; revision: number; manifestKey: string; manifestHash: `sha256:${string}`; resumeOnMachineRestart?: boolean }): Promise<void>;
   abortClose(input: { projectId: string; spaceId: string; machineId: string; expectedGeneration: number; revision: number; message: string }): Promise<void>;
-  beginOpen(input: { projectId: string; spaceId: string; machineId: string; expectedGeneration: number }): Promise<{ revision: number; manifestKey: string; manifestHash: `sha256:${string}` }>;
+  beginOpen(input: { projectId: string; spaceId: string; machineId: string; expectedGeneration: number; resumeOnMachineRestart?: boolean }): Promise<{ revision: number; manifestKey: string; manifestHash: `sha256:${string}` }>;
   commitOpen(input: { projectId: string; spaceId: string; machineId: string; expectedGeneration: number; revision: number }): Promise<void>;
   failOpen(input: { projectId: string; spaceId: string; machineId: string; expectedGeneration: number; revision: number; message: string }): Promise<void>;
 }
@@ -85,11 +85,12 @@ export interface PortableSpaceRuntime {
     sessionId: string;
     ompSessionId: string;
     ompSession: Uint8Array;
+    resumePending?: boolean;
   }>;
   captureArtifacts(): Promise<{ generation: number; manifest: Uint8Array }>;
   deleteLocalState(): Promise<void>;
   prepareEmptyRepository(): Promise<void>;
-  restoreAgent(input: { sessionId: string; ompSessionId: string; ompSession: Uint8Array }): Promise<void>;
+  restoreAgent(input: { sessionId: string; ompSessionId: string; ompSession: Uint8Array; resumePending?: boolean }): Promise<void>;
   restoreArtifacts(input: { generation: number; manifest: Uint8Array }): Promise<void>;
   activate(): Promise<void>;
 }
@@ -101,6 +102,7 @@ export interface PortableSpaceDescriptor {
   expectedGeneration: number;
   repositoryPath: string;
   portableUntrackedPaths?: string[];
+  resumeOnMachineRestart?: boolean;
   binding: WalgitProjectBinding;
 }
 
@@ -118,7 +120,7 @@ export class PortableSpaceLifecycle {
 
   /** Checkpoint, hand the space back to the cloud, and delete the local copy. */
   async close(space: PortableSpaceDescriptor, runtime: PortableSpaceRuntime): Promise<CloseSpaceResult> {
-    const manifest = await this.release(space, runtime);
+    const manifest = await this.release(space, runtime, false);
     const warnings: string[] = [];
     try {
       await runtime.deleteLocalState();
@@ -129,7 +131,7 @@ export class PortableSpaceLifecycle {
   }
 
   /** Checkpoint and hand the space back to the cloud while keeping every local file, so this machine can reclaim it without a restore. */
-  async release(space: PortableSpaceDescriptor, runtime: PortableSpaceRuntime): Promise<SpaceCheckpointManifest> {
+  async release(space: PortableSpaceDescriptor, runtime: PortableSpaceRuntime, resumeOnMachineRestart = true): Promise<SpaceCheckpointManifest> {
     const identity = { projectId: space.projectId, spaceId: space.spaceId, machineId: space.machineId, expectedGeneration: space.expectedGeneration };
     const operation = await this.authority.beginClose(identity);
     let quiesced = false;
@@ -167,6 +169,7 @@ export class PortableSpaceLifecycle {
           sessionId: agent.sessionId,
           ompSessionId: agent.ompSessionId,
           ompCheckpointHash,
+          resumePending: agent.resumePending ?? false,
         },
         artifacts: { manifestHash: artifactManifestHash, generation: artifacts.generation },
         createdAt: new Date().toISOString(),
@@ -178,6 +181,7 @@ export class PortableSpaceLifecycle {
         revision: operation.revision,
         manifestKey,
         manifestHash,
+        resumeOnMachineRestart,
       });
       return manifest;
     } catch (error) {
@@ -188,10 +192,11 @@ export class PortableSpaceLifecycle {
     }
   }
 
-  async open(space: PortableSpaceDescriptor, runtime: PortableSpaceRuntime): Promise<SpaceCheckpointManifest> {
+  async open(space: PortableSpaceDescriptor, runtime: PortableSpaceRuntime, onClaimed?: () => void): Promise<SpaceCheckpointManifest> {
     const identity = { projectId: space.projectId, spaceId: space.spaceId, machineId: space.machineId, expectedGeneration: space.expectedGeneration };
-    const operation = await this.authority.beginOpen(identity);
+    const operation = await this.authority.beginOpen({ ...identity, resumeOnMachineRestart: space.resumeOnMachineRestart });
     try {
+      onClaimed?.();
       const manifestBytes = await requiredBlob(this.blobs, operation.manifestKey, operation.manifestHash);
       const manifest = spaceCheckpointManifestSchema.parse(JSON.parse(new TextDecoder().decode(manifestBytes)));
       if (manifest.projectId !== space.projectId || manifest.spaceId !== space.spaceId || manifest.revision !== operation.revision) {
@@ -217,6 +222,7 @@ export class PortableSpaceLifecycle {
         sessionId: manifest.agent.sessionId,
         ompSessionId: manifest.agent.ompSessionId,
         ompSession,
+        resumePending: manifest.agent.resumePending,
       });
       await runtime.activate();
       await this.authority.commitOpen({ ...identity, revision: operation.revision });

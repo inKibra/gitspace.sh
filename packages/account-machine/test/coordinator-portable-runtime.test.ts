@@ -7,10 +7,12 @@ import {
   GitSpaceDatabase,
   LocalArtifactResolver,
   MemoryArtifactObjectStore,
-  releasedSpaces,
+  agentSessions,
+  artifactScopes,
 } from '@gitspace/core';
 import {
   CloudDataCheckpointBlobStore,
+  CloudArtifactObjectStore,
   CloudSpaceCheckpointAuthority,
   ClosedSpaceTranscriptReader,
   EncryptedCheckpointBlobStore,
@@ -28,6 +30,8 @@ import {
   type SpaceGitCheckpointRemote,
   type WalgitProjectBinding,
 } from '../src/index.js';
+
+import { eq } from 'drizzle-orm';
 
 const roots: string[] = [];
 const ompEntrypoint = join(import.meta.dir, '../../account-omp/src/runtime.ts');
@@ -51,15 +55,16 @@ function git(cwd: string, ...args: string[]): string {
 }
 
 class PortableOmpRuntime implements OmpRuntime {
-  constructor(private readonly sessionFile: string) {}
+  resumeCalls = 0;
+  constructor(private sessionFile: string) {}
   async create(input: { workingDirectory: string; sessionKey: string; artifactsDir: string }): Promise<OmpRuntimeSession> {
     mkdirSync(dirname(this.sessionFile), { recursive: true });
     writeFileSync(this.sessionFile, `${JSON.stringify({ type: 'session', version: 3, id: 'omp-portable', timestamp: new Date().toISOString(), cwd: input.workingDirectory })}\n`);
     return this.session(input.artifactsDir);
   }
   async open(input: { workingDirectory: string; sessionKey: string; artifactsDir: string; sessionFile: string }): Promise<OmpRuntimeSession> {
-    expect(input.sessionFile).toBe(this.sessionFile);
     expect(readFileSync(input.sessionFile, 'utf8')).toContain('omp-portable');
+    this.sessionFile = input.sessionFile;
     return this.session(input.artifactsDir);
   }
   transcript(sessionFile: string) { return projectOmpTranscript(sessionFile, ompEntrypoint); }
@@ -104,7 +109,7 @@ class PortableOmpRuntime implements OmpRuntime {
       activity: () => ({ activity: { active: false, reasons: [] } }),
       persist: async () => undefined,
       handoff: async () => false,
-      resume: async () => undefined,
+      resume: async () => { this.resumeCalls += 1; },
       dispose: async () => undefined,
       messages: async () => readFileSync(this.sessionFile, 'utf8').split('\n').filter(Boolean)
         .map((line) => JSON.parse(line) as { type: string; message?: unknown })
@@ -153,6 +158,70 @@ class BareRemote implements SpaceGitCheckpointRemote {
 }
 
 describe('CoordinatorPortableSpaceRuntime', () => {
+  it('restores a released workspace after the entire machine root is erased without changing session identity or lowering fences', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'gitspace-erased-machine-'));
+    roots.push(root);
+    const machineRoot = join(root, 'machine');
+    const repository = join(machineRoot, 'project-a', 'workspace-a');
+    const remote = join(root, 'durable-repository.git');
+    mkdirSync(repository, { recursive: true });
+    git(repository, 'init', '-b', 'main');
+    writeFileSync(join(repository, 'tracked.txt'), 'original\n');
+    git(repository, 'add', '.');
+    git(repository, 'commit', '-m', 'original');
+    git(root, 'init', '--bare', remote);
+    const durableBlobs = new FileCheckpointBlobStore(join(root, 'durable-objects'));
+    const artifactKey = new Uint8Array(32).fill(7);
+    const authority = new Authority();
+    const lifecycle = new PortableSpaceLifecycle(authority, new EncryptedCheckpointBlobStore(durableBlobs, artifactKey), new BareRemote(remote));
+    const binding: WalgitProjectBinding = { projectId: 'project-a', bucket: 'bucket', endpoint: 'https://example.invalid', region: 'auto' };
+    const source = new GitSpaceDatabase(join(machineRoot, 'gitspace.db'));
+    source.createProject({ id: 'project-a', name: 'Project', repositoryPath: join(machineRoot, 'project-a', 'base') });
+    source.createWorkspace({ id: 'workspace-a', projectId: 'project-a', name: 'Workspace', branch: 'main', rootPath: repository });
+    source.possessSpace('workspace-a', 'machine-a');
+    const artifacts = new LocalArtifactResolver(source, new CloudArtifactObjectStore('account-a', durableBlobs), join(machineRoot, 'cache'), artifactKey);
+    const coordinator = new MachineSessionCoordinator(source, artifacts, new PortableOmpRuntime(join(machineRoot, 'omp.jsonl')), 'machine-a', join(machineRoot, 'runtime'));
+    const session = await coordinator.openSpace('workspace-a');
+    if (session.status === 'error') throw session.error;
+    const content = `last-turn-${crypto.randomUUID()}`;
+    await coordinator.prompt(session.value.id, content);
+    writeFileSync(join(repository, 'tracked.txt'), 'unstaged final work\n');
+    writeFileSync(join(repository, 'staged.txt'), 'staged final work\n');
+    git(repository, 'add', 'staged.txt');
+    writeFileSync(join(repository, 'untracked.txt'), content);
+    source.orm.update(agentSessions).set({ resumePending: true }).where(eq(agentSessions.id, session.value.id)).run();
+    const controller = new MachinePortableSpaceController(source, coordinator, lifecycle, 'machine-a', () => binding, async () => null, machineRoot);
+    await controller.release(source.getSpace('workspace-a')!, 1);
+    const scope = source.orm.select().from(artifactScopes).all().find((scope) => scope.spaceId === 'workspace-a')!;
+    source.close();
+    rmSync(machineRoot, { recursive: true, force: true });
+
+    mkdirSync(machineRoot);
+    const destination = new GitSpaceDatabase(join(machineRoot, 'gitspace.db'));
+    destination.createProject({ id: 'project-a', name: 'Project', repositoryPath: join(machineRoot, 'project-a', 'base') });
+    destination.createWorkspace({ id: 'workspace-a', projectId: 'project-a', name: 'Workspace', branch: 'main', rootPath: repository });
+    const restoredArtifacts = new LocalArtifactResolver(destination, new CloudArtifactObjectStore('account-a', durableBlobs), join(machineRoot, 'cache'), artifactKey);
+    const restoredRuntime = new PortableOmpRuntime(join(machineRoot, 'unused.jsonl'));
+    const restoredSessions = new MachineSessionCoordinator(destination, restoredArtifacts, restoredRuntime, 'machine-a', join(machineRoot, 'runtime'));
+    const restoredController = new MachinePortableSpaceController(destination, restoredSessions, lifecycle, 'machine-a', () => binding, async () => null, machineRoot);
+    await restoredController.open('workspace-a', 2);
+    expect(destination.getSpace('workspace-a')).toMatchObject({ holderId: 'machine-a', placementState: 'open', generation: 3 });
+    expect(authority.generation).toBe(3);
+    expect(restoredSessions.get(session.value.id)).toMatchObject({ id: session.value.id, ompSessionId: session.value.ompSessionId, state: 'active' });
+    expect(restoredRuntime.resumeCalls).toBe(1);
+    expect(JSON.stringify(await restoredSessions.transcript(session.value.id))).toContain(content);
+    expect(readFileSync(join(repository, 'tracked.txt'), 'utf8')).toBe('unstaged final work\n');
+    expect(readFileSync(join(repository, 'untracked.txt'), 'utf8')).toBe(content);
+    expect(git(repository, 'diff', '--cached', '--name-only')).toBe('staged.txt');
+    expect(destination.orm.select().from(artifactScopes).all().find((entry) => entry.spaceId === 'workspace-a')).toMatchObject({ id: scope.id, generation: scope.generation, manifestHash: scope.manifestHash });
+    const artifact = await restoredArtifacts.read({ kind: 'workspace', projectId: 'project-a', workspaceId: 'workspace-a' }, 'local://workspace/agent.txt');
+    if (artifact.status === 'error') throw artifact.error;
+    expect(new TextDecoder().decode(artifact.value)).toBe(content);
+    destination.invalidateSpacePossession({ spaceId: 'workspace-a', holderId: 'machine-a', expectedGeneration: 3 });
+    await expect(restoredController.open('workspace-a', 2)).rejects.toThrow();
+    expect(destination.getSpace('workspace-a')?.generation).toBe(3);
+    destination.close();
+  });
   it('moves real files and the canonical OMP agent from machine A to machine B', async () => {
     const root = mkdtempSync(join(tmpdir(), 'gitspace-coordinator-portable-'));
     roots.push(root);
@@ -225,6 +294,8 @@ describe('CoordinatorPortableSpaceRuntime', () => {
     expect(listed.status).toBe('ok');
     if (listed.status === 'error') throw listed.error;
     expect(listed.value.map((entry) => entry.path)).toContain('agent.txt');
+    const stopped = await destinationCoordinator.stopForRestart();
+    if (stopped.status === 'error') throw stopped.error;
     database.close();
   });
   it('releases a space with local files kept and only reopens it explicitly', async () => {
@@ -261,7 +332,6 @@ describe('CoordinatorPortableSpaceRuntime', () => {
     await spaces.release(database.getSpace('workspace-a')!, 1);
     expect(authority.state).toBe('closed');
     expect(database.getSpace('workspace-a')).toMatchObject({ placementState: 'closed', holderId: 'unassigned', generation: 2, closedAt: null });
-    expect(database.orm.select().from(releasedSpaces).all()).toEqual([]);
     expect(readFileSync(join(workspaceRoot, 'tracked.txt'), 'utf8')).toBe('changed\n');
     expect(readFileSync(join(workspaceRoot, 'secret.env'), 'utf8')).toBe('stays-local\n');
     expect(existsSync(sessionFile)).toBe(true);
@@ -313,6 +383,8 @@ describe('CoordinatorPortableSpaceRuntime', () => {
     expect(await coordinator.transcript(reclaimed.id)).toHaveLength(1);
     expect((await coordinator.prompt(reclaimed.id, 'after-reclaim')).status).toBe('ok');
     expect(await coordinator.transcript(reclaimed.id)).toHaveLength(2);
+    const stopped = await coordinator.stopForRestart();
+    if (stopped.status === 'error') throw stopped.error;
     database.close();
   });
   it.skipIf(process.env.GITSPACE_LIVE_PORTABLE_TEST !== '1')('closes and reopens through Miniflare R2 and walgit on RustFS', async () => {

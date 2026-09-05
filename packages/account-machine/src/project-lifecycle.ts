@@ -56,6 +56,7 @@ export class ProjectLifecycleManager {
     private readonly authority: ProjectLifecycleAuthority,
     private readonly machineId: string,
     private readonly managedRoot: string,
+    private readonly checkpointSpace?: (spaceId: string) => Promise<void>,
   ) {}
 
   list(lifecycle: 'all' | 'active' | 'archived'): Promise<CloudProjectSummary[]> {
@@ -114,6 +115,7 @@ export class ProjectLifecycleManager {
       });
       await this.authority.bootstrap({ projectId, spaceId: projectId });
       await this.authority.bootstrapInspector({ projectId, spaceId: projectId });
+      await this.checkpointSpace?.(projectId);
       project = await this.authority.setProjectLifecycle(projectId, project.revision, 'active');
       operation = await this.succeeded(projectId, operation);
       return { project, operation };
@@ -192,6 +194,7 @@ export class ProjectLifecycleManager {
       if (possessed.status === 'error') throw possessed.error;
       await this.authority.bootstrap({ projectId: input.projectId, spaceId: workspaceId });
       await this.authority.bootstrapInspector({ projectId: input.projectId, spaceId: workspaceId });
+      await this.checkpointSpace?.(workspaceId);
       definition = await this.authority.putProjectWorkspace(input.projectId, {
         id: definition.id,
         projectId: definition.projectId,

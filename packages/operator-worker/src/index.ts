@@ -2,6 +2,7 @@ import { DurableObject } from 'cloudflare:workers';
 import { ed25519, x25519 } from '@noble/curves/ed25519.js';
 import type { CredentialRefreshResponse, CredentialUploadResponse, SnapshotResponse } from '@oh-my-pi/pi-ai/auth-broker';
 import { z } from 'zod';
+import { handleSandboxRollout } from './sandbox-rollout.js';
 import {
   credentialAccessRequestSchema,
   gitIdentityUpdateSchema,
@@ -1494,6 +1495,7 @@ async function provisionManagedSandbox(env: Env, userId: string, controlUrl: str
         GITSPACE_ROOT_PUBLIC_KEY: rootPublicKey,
         GITSPACE_MACHINE_SIGNING_PRIVATE_KEY: credentialProtocolBase64.encode(signingPrivateKey),
         GITSPACE_ARTIFACT_KEY: await credentialVault(env, userId).artifactKey(userId),
+        GITSPACE_CONTROL_TOKEN: credentialProtocolBase64.encode(crypto.getRandomValues(new Uint8Array(32))),
         GITSPACE_SERVICE_DOMAIN: 'gssh.dev',
         GITSPACE_SERVICE_NAMESPACE: accountSettings.profile.handle,
         GITSPACE_OMP_AGENT_DIR: '/workspace/.omp',
@@ -1616,6 +1618,9 @@ export default {
       }
       const denied = accountAccessResponse(await activeAccount(env, userId));
       if (denied) return new Response(denied.body, { status: denied.status, headers: { ...Object.fromEntries(denied.headers), ...cors } });
+      if (await accountRegistry(env).sandboxRollout()) {
+        return Response.json(publicError('SANDBOX_ROLLOUT_IN_PROGRESS', 'Cloud machines are checkpointing or restarting'), { status: 503, headers: cors });
+      }
       const headers = new Headers(request.headers);
       headers.set('x-gitspace-user-id', userId);
       headers.delete('host');
@@ -1636,6 +1641,8 @@ export default {
           headers: { 'cache-control': 'no-store' },
         });
       }
+      const rolloutResponse = await handleSandboxRollout(request, env);
+      if (rolloutResponse) return rolloutResponse;
       const invites = inviteRegistry(env);
       const accounts = accountRegistry(env);
       if (url.pathname === '/v1/operator/session' && request.method === 'GET') {
@@ -2137,6 +2144,13 @@ export default {
           : 'storage.access';
         const authorized = await authorizeControl(env, body, capability);
         if (authorized.status === 'error') return accountAccessResponse(authorized)!;
+        const rollout = await accountRegistry(env).sandboxRollout();
+        if (rollout && (
+          body.operation === 'space.bootstrap'
+          || body.operation === 'catalog.sandbox.create'
+          || body.operation === 'catalog.machine.resume'
+          || (body.operation === 'space.beginOpen' && !(rollout.recovering && rollout.machines.some(machine => machine.userId === body.userId && machine.machineId === body.machineId)))
+        )) return Response.json(publicError('SANDBOX_ROLLOUT_IN_PROGRESS', 'Cloud machine replacement has fenced new work'), { status: 503, headers: { 'cache-control': 'no-store' } });
         if (body.operation === 'artifacts.key.get') {
           if (Object.keys(body.payload).length !== 0) throw new Error('Artifact key request must have an empty payload');
           const key = await credentialVault(env, body.userId).artifactKey(body.userId);
@@ -2758,7 +2772,7 @@ export default {
             case 'catalog.space.get': value = await catalog.getSpace(String(body.payload.spaceId ?? '')); break;
             case 'catalog.space.list': value = await catalog.listSpaces(); break;
             case 'catalog.machine.put': value = await catalog.putMachine(catalogMachinePayload(body.payload)); break;
-            case 'catalog.machine.list': value = await reconcileFleetMachines(env, body.userId, catalog); break;
+            case 'catalog.machine.list': value = rollout ? await catalog.listMachines() : await reconcileFleetMachines(env, body.userId, catalog); break;
             case 'catalog.sandbox.create': value = await provisionManagedSandbox(env, body.userId, url.origin); break;
             case 'catalog.machine.sleep':
             case 'catalog.machine.resume':
@@ -2842,7 +2856,7 @@ export default {
         if (!spaceId) return Response.json({ status: 'error', error: { code: 'INVALID_SPACE', message: 'Space id is required' } }, { status: 400 });
         const authorityNamespace = env.SPACE_AUTHORITY as DurableObjectNamespace<SpaceAuthorityDO>;
         const authority = authorityNamespace.get(authorityNamespace.idFromName(`${body.userId}:${spaceId}`));
-        const common = { ...body.payload, projectId: String(body.payload.projectId ?? ''), spaceId };
+        const common = { ...body.payload, machineId: body.machineId, projectId: String(body.payload.projectId ?? ''), spaceId };
         let value: unknown;
         switch (body.operation) {
           case 'space.bootstrap': value = await authority.bootstrap(common as Parameters<SpaceAuthorityDO['bootstrap']>[0]); break;

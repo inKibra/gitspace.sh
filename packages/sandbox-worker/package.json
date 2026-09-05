@@ -7,6 +7,7 @@
     "container:prepare": "bun scripts/prepare-container.ts",
     "dev": "bun run container:prepare && wrangler dev",
     "deploy:dry": "bun run container:prepare && wrangler deploy --dry-run",
+    "rollout": "bun scripts/rollout.ts",
     "typecheck": "tsgo --noEmit -p tsconfig.json",
     "test": "vitest run",
     "types": "wrangler types"
