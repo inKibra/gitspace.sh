@@ -179,4 +179,17 @@ describe('PortableSpaceLifecycle', () => {
     expect(authority.manifestKey).toBeUndefined();
   });
 
+  it('resumes access and retains files when draining fails after partial quiescence', async () => {
+    const { root, source, remote, binding } = fixture();
+    const authority = new TestAuthority();
+    const lifecycle = new PortableSpaceLifecycle(authority, new FileCheckpointBlobStore(join(root, 'bucket')), new BareGitRemote(remote));
+    const runtime = new TestRuntime(source, true);
+    runtime.quiesce = async () => { runtime.quiesced = true; throw new Error('Service drain failed'); };
+    await expect(lifecycle.close({ projectId: 'project-a', spaceId: 'space-a', machineId: 'machine-a', expectedGeneration: 1, repositoryPath: source, binding }, runtime)).rejects.toThrow('Service drain failed');
+    expect(runtime.resumed).toBeTrue();
+    expect(authority.state).toBe('open');
+    expect(readFileSync(join(source, 'unstaged.txt'), 'utf8')).toBe('unstaged\n');
+    expect(authority.manifestKey).toBeUndefined();
+  });
+
 });

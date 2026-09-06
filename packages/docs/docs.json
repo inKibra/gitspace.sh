@@ -54,12 +54,12 @@
       {
         "group": "Use GitSpace",
         "icon": "panels-top-left",
-        "pages": ["concepts", "agent-workflow", "remote-access"]
+        "pages": ["concepts", "agent-workflow", "workspace-lifecycle", "remote-access"]
       },
       {
         "group": "Reference",
         "icon": "terminal",
-        "pages": ["cli-reference", "security/remote-access"]
+        "pages": ["cli-reference", "lifecycle-reference", "security/remote-access"]
       }
     ]
   }

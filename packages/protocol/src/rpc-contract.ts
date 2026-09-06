@@ -306,23 +306,39 @@ export const EnvironmentExecutionViewCodec = wire.object({
   label: wire.string,
   command: wire.string,
   hash: wire.string,
+  content: wire.string,
   approval: wire.nullable(wire.enum(['project', 'workspace'])),
-  phase: wire.nullable(wire.enum(['setup', 'select', 'remove'])),
+  phase: wire.nullable(wire.enum(['cloud/provision', 'machine/prepare', 'workspace/materialize', 'workspace/dematerialize', 'cloud/destroy'])),
   fileName: wire.nullable(wire.string),
 });
-export const EnvironmentRunViewCodec = wire.object({
-  id: wire.string,
-  projectId: wire.string,
-  spaceId: wire.string,
-  phase: wire.enum(['checks', 'setup', 'select', 'remove']),
-  status: wire.enum(['running', 'succeeded', 'failed']),
-  terminalName: wire.nullable(wire.string),
-  executionHashes: wire.array(wire.string),
+export const LifecycleRunCodec = wire.object({
+  id: wire.string, projectId: wire.string, spaceId: wire.string,
+  phase: wire.enum(['checks', 'cloud/provision', 'machine/prepare', 'workspace/materialize', 'workspace/dematerialize', 'cloud/destroy']),
+  status: wire.enum(['running', 'succeeded', 'failed', 'abandoned']),
+  terminalName: wire.nullable(wire.string), executionHashes: wire.array(wire.string),
   results: wire.array(wire.object({ id: wire.string, exitCode: wire.number, output: wire.string })),
-  output: wire.string,
-  exitCode: wire.nullable(wire.number),
-  startedAt: wire.string,
-  finishedAt: wire.nullable(wire.string),
+  output: wire.string, exitCode: wire.nullable(wire.number), startedAt: wire.string, finishedAt: wire.nullable(wire.string),
+  profile: wire.string, machineId: wire.string, generation: wire.nullable(wire.number),
+});
+export const LifecycleStateCodec = wire.object({
+  revision: wire.number, projectId: wire.string, spaceId: wire.string,
+  bundleJson: wire.nullable(wire.string), selectedProfile: wire.nullable(wire.string),
+  executions: wire.array(wire.object({
+    id: wire.string, kind: wire.enum(['check', 'script']), label: wire.string, command: wire.string,
+    content: wire.string, hash: wire.string, phase: wire.nullable(wire.enum(['cloud/provision', 'machine/prepare', 'workspace/materialize', 'workspace/dematerialize', 'cloud/destroy'])), fileName: wire.nullable(wire.string),
+  })),
+  values: wire.object({ global: wire.record(wire.string), project: wire.record(wire.string), workspace: wire.record(wire.string) }),
+  approvals: wire.array(wire.object({
+    scope: wire.enum(['project', 'workspace']), executionHash: wire.string, approvedBy: wire.string, approvedAt: wire.string,
+  })),
+  policy: wire.object({ automatic: wire.boolean }), bindings: wire.record(wire.string),
+  provisioned: wire.nullable(wire.object({
+    runId: wire.string, profile: wire.string, executionHashes: wire.array(wire.string), machineId: wire.string, completedAt: wire.string,
+  })),
+  destroyedAt: wire.nullable(wire.string), runs: wire.array(LifecycleRunCodec),
+  claim: wire.nullable(wire.object({
+    runId: wire.string, status: wire.enum(['claimed', 'skipped', 'blocked']), reason: wire.nullable(wire.string), token: wire.nullable(wire.string),
+  })),
 });
 export const WorkspaceEnvironmentViewCodec = wire.object({
   spaceId: wire.string,
@@ -344,8 +360,11 @@ export const WorkspaceEnvironmentViewCodec = wire.object({
     effective: wire.record(wire.string),
   }),
   executions: wire.array(EnvironmentExecutionViewCodec),
-  runs: wire.array(EnvironmentRunViewCodec),
+  runs: wire.array(LifecycleRunCodec),
+  lifecycle: LifecycleStateCodec,
+  migrationRequired: wire.array(wire.string),
 });
+export type WorkspaceEnvironmentView = InputOf<typeof WorkspaceEnvironmentViewCodec>;
 export const EnvironmentExecutionResultCodec = wire.object({
   id: wire.string,
   hash: wire.string,
@@ -787,10 +806,24 @@ export const runWorkspaceEnvironmentChecksContract = gitspaceRpc
 
 export const runWorkspaceEnvironmentPhaseContract = gitspaceRpc
   .procedure()
-  .input(wire.object({ spaceId: wire.string, phase: wire.enum(['setup', 'select', 'remove']) }))
+  .input(wire.object({ spaceId: wire.string, phase: wire.enum(['cloud/provision', 'machine/prepare', 'workspace/materialize', 'workspace/dematerialize', 'cloud/destroy']), rerun: wire.nullable(wire.boolean) }))
   .output(wire.array(EnvironmentExecutionResultCodec))
   .errors({ OperationFailed: rpcErrors.operationFailed })
   .mutation();
+
+export const recoverWorkspaceEnvironmentRunContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ spaceId: wire.string, runId: wire.string }))
+  .output(WorkspaceEnvironmentViewCodec)
+  .errors({ OperationFailed: rpcErrors.operationFailed })
+  .mutation();
+
+export const getWorkspaceEnvironmentRunLogContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ spaceId: wire.string, runId: wire.string, offset: wire.nullable(wire.number) }))
+  .output(wire.object({ output: wire.string, nextOffset: wire.nullable(wire.number) }))
+  .errors({ OperationFailed: rpcErrors.operationFailed })
+  .query();
 
 export const listMcpConnectionsContract = gitspaceRpc
   .procedure()
@@ -1856,6 +1889,8 @@ export const gitspaceContract = gitspaceRpc.contract({
     revokeApproval: revokeWorkspaceEnvironmentApprovalContract,
     runChecks: runWorkspaceEnvironmentChecksContract,
     runPhase: runWorkspaceEnvironmentPhaseContract,
+    recoverRun: recoverWorkspaceEnvironmentRunContract,
+    runLog: getWorkspaceEnvironmentRunLogContract,
   },
   mcp: {
     connections: {

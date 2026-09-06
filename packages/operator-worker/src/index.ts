@@ -10,6 +10,7 @@ import {
   credentialAccessRequestSchema,
   gitIdentityUpdateSchema,
   credentialProtocolBase64,
+  LifecycleMutationSchema,
   ompConfigUpdateSchema,
   sealCredentialForMachine,
   signedControlRequestSchema,
@@ -1694,7 +1695,7 @@ export async function reconcileFleetMachines(env: Env, userId: string, catalog: 
   listMachines(): Promise<FleetMachineDefinition[]>;
   listSpaces(): Promise<PortableSpaceDefinition[]>;
   putMachine(machine: FleetMachineDefinition): Promise<FleetMachineDefinition>;
-  removeMachine(machineId: string): Promise<boolean>;
+  removeMachine(machineId: string, destroyed?: boolean): Promise<boolean>;
 }): Promise<FleetMachineDefinition[]> {
   for (const current of await catalog.listMachines()) {
     if (current.provider === 'physical') continue;
@@ -1710,7 +1711,7 @@ export async function reconcileFleetMachines(env: Env, userId: string, catalog: 
       } else if (current.desiredState === 'removed') {
         await assertMachineHasNoOpenSpaces(env, userId, catalog, current.id);
         await provider.destroy(current);
-        await catalog.removeMachine(current.id);
+        await catalog.removeMachine(current.id, true);
         await credentialVault(env, userId).removeManagedDevice(current.id);
         continue;
       }
@@ -1748,7 +1749,7 @@ export async function controlFleetMachine(env: Env, userId: string, machineId: s
   try {
     if (action === 'destroy') {
       await provider.destroy(transition);
-      await catalog.removeMachine(machineId);
+      await catalog.removeMachine(machineId, true);
       await credentialVault(env, userId).removeManagedDevice(machineId);
       return { machineId, removed: true };
     }
@@ -2513,6 +2514,7 @@ export default {
             || body.operation.startsWith('devices.')
             || body.operation.startsWith('deploy.')
             || body.operation === 'artifacts.key.get'
+            || body.operation.startsWith('project.environment.')
             || body.operation.startsWith('project.mcp.') ? 'space.control'
           : body.operation === 'storage.provision' ? 'storage.provision'
           : 'storage.access';
@@ -2972,6 +2974,40 @@ export default {
           const authority = authorityNamespace.get(authorityNamespace.idFromName(`${body.userId}:${projectId}`));
           let value: unknown;
           switch (body.operation) {
+            case 'project.environment.get':
+            case 'project.environment.mutate':
+            case 'project.environment.runLog': {
+              const spaceId = String(body.payload.spaceId ?? '');
+              const current = await authority.getLifecycleState(spaceId);
+              if (current.projectId !== projectId) throw new Error('Lifecycle project identity mismatch');
+              const projects = (env.USER_PROJECTS as DurableObjectNamespace<UserProjectIndexDO>).getByName(body.userId);
+              if (body.operation === 'project.environment.runLog') {
+                value = await authority.getLifecycleRunLog(spaceId, String(body.payload.runId ?? ''), Number(body.payload.offset ?? 0));
+                break;
+              }
+              let state = current;
+              if (body.operation === 'project.environment.mutate') {
+                const input = LifecycleMutationSchema.parse(body.payload.input);
+                if (input.op === 'approval' || input.op === 'abandon') throw new Error('Lifecycle approval and recovery require an authenticated human browser');
+                if (input.op === 'claim') {
+                  const machine = await (env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>).getByName(body.userId).getMachine(body.machineId);
+                  if (!machine || machine.desiredState !== 'online' || machine.state !== 'online') throw new Error('Lifecycle runner is not an online account machine');
+                  const detachedPreparation = input.generation === null && (input.phase === 'machine/prepare' || input.phase === 'checks');
+                  if (!input.phase.startsWith('cloud/') && !detachedPreparation) {
+                    const placement = await (env.SPACE_AUTHORITY as DurableObjectNamespace<SpaceAuthorityDO>).getByName(`${body.userId}:${spaceId}`).get();
+                    if (!placement || placement.projectId !== projectId || placement.machineId !== body.machineId
+                      || placement.generation !== input.generation || !['open', 'opening', 'closing'].includes(placement.state)) {
+                      throw new Error('Lifecycle runner does not hold the requested checkout generation');
+                    }
+                  }
+                }
+                if (input.op === 'value' && input.scope === 'global') await projects.setEnvironmentValue(input.name, input.value);
+                else state = await authority.mutateLifecycleState(spaceId, input, { machineId: body.machineId, actorId: body.machineId, human: false });
+              }
+              state.values.global = await projects.getEnvironmentValues();
+              value = state;
+              break;
+            }
             case 'project.bootstrap': {
               const project = await authority.bootstrap({
                 id: projectId,

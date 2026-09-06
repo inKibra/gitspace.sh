@@ -14,6 +14,8 @@ export const ACCOUNT_CLOUD_RPC_PATHS: Readonly<Record<string, true>> = {
   'inspector.artifacts.read': true,
   'inspector.artifacts.list': true, 'inspector.artifacts.copyToProject': true,
   'inspector.artifacts.shares.list': true, 'inspector.artifacts.shares.create': true, 'inspector.artifacts.shares.revoke': true,
+  'environment.approve': true, 'environment.revokeApproval': true,
+  'environment.recoverRun': true, 'environment.runLog': true,
 };
 
 /** Runtime metadata has a canonical cloud view only when no machine is online. */
@@ -22,13 +24,13 @@ export const ACCOUNT_RUNTIME_RPC_PATHS: Readonly<Record<string, true>> = {
   'providers.list': true,
 };
 
-/** Inspector state may be read in the cloud when its workspace has no live holder.
- * These calls have per-space signed queues, separate from runtime operations. */
-export function isInspectorRpcPath(path: string): boolean {
-  return path.startsWith('inspector.') && !Object.hasOwn(ACCOUNT_CLOUD_RPC_PATHS, path);
+/** Workspace reads use cloud state when there is no live holder.
+ * Per-space queues remain separate from account mutations and runtime work. */
+export function isSpaceCloudRpcPath(path: string): boolean {
+  return path === 'environment.get' || (path.startsWith('inspector.') && !Object.hasOwn(ACCOUNT_CLOUD_RPC_PATHS, path));
 }
 
-export function inspectorRpcSpaceId(input: unknown): string | null {
+export function spaceCloudRpcSpaceId(input: unknown): string | null {
   if (!input || typeof input !== 'object') return null;
   const outer = input as Record<string, unknown>;
   const record = outer.input && typeof outer.input === 'object'

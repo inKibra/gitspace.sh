@@ -1,6 +1,6 @@
 import { batchFetchTransport, createBrowserClient, fetchTransport, type ClientTransport } from 'result-rpc/client';
 import { gitspaceContract, type SpacePlacementView } from './rpc-contract.js';
-import { ACCOUNT_CLOUD_RPC_PATHS, ACCOUNT_RUNTIME_RPC_PATHS, inspectorRpcSpaceId, isInspectorRpcPath } from './account-rpc.js';
+import { ACCOUNT_CLOUD_RPC_PATHS, ACCOUNT_RUNTIME_RPC_PATHS, spaceCloudRpcSpaceId, isSpaceCloudRpcPath } from './account-rpc.js';
 
 /**
  * One client, every machine. Calls naming a space go to the machine that
@@ -120,8 +120,8 @@ export function createRoutedTransport(options: RoutedTransportOptions): RoutedTr
     if (path === 'inspector.bootstrap' || path === 'inspector.availability') return inspectorContext;
     if (Object.hasOwn(ACCOUNT_RUNTIME_RPC_PATHS, path)) return runtimeMetadata;
     if (Object.hasOwn(ACCOUNT_CLOUD_RPC_PATHS, path)) return account;
-    if (isInspectorRpcPath(path)) {
-      const spaceId = inspectorRpcSpaceId(input) ?? '';
+    if (isSpaceCloudRpcPath(path)) {
+      const spaceId = spaceCloudRpcSpaceId(input) ?? '';
       return inspectorTransports[spaceId] ??= batchFetchTransport({ url: options.homeUrl, fetch: options.fetch, maxItems: options.maxItems ?? 32 });
     }
     // Routing reads never recurse into routing.

@@ -64,6 +64,13 @@
       "when": 1788900000000,
       "tag": "0008_environment_runs",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1789000000000,
+      "tag": "0010_environment_lifecycle_phases",
+      "breakpoints": true
     }
   ]
 }

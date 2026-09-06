@@ -23,16 +23,16 @@ export class MachinePortableSpaceController implements SpaceLifecycleController 
     private readonly definition: (spaceId: string) => Promise<PortableSpaceDefinition | null>,
     private readonly managedSpaceRoot: string,
     private readonly portableUntrackedPaths: (space: MaterializedSpace) => string[] | undefined = () => undefined,
+    private readonly environment?: { prepare(spaceId: string): Promise<void>; dematerialize(spaceId: string): Promise<void>; drain(spaceId: string): Promise<void> },
   ) {}
 
   async close(space: MaterializedSpace, expectedGeneration: number): Promise<void> {
     const started = this.database.beginSpaceClose({ spaceId: space.id, holderId: this.machineId, expectedGeneration });
     if (started.status === 'error') throw started.error;
     try {
-      await this.lifecycle.close(this.descriptor(space, expectedGeneration), new CoordinatorPortableSpaceRuntime(this.sessions, space.id));
+      await this.lifecycle.close(this.descriptor(space, expectedGeneration), this.checkpointRuntime(space.id));
       const committed = this.database.commitSpaceClosed({ spaceId: space.id, holderId: this.machineId, expectedGeneration });
       if (committed.status === 'error') throw committed.error;
-      this.database.setSpaceClosed(space.id, true);
     } catch (error) {
       const current = this.database.getSpacePlacement(space.id);
       if (current?.state === 'closing') this.database.abortSpaceClose({ spaceId: space.id, holderId: this.machineId, expectedGeneration });
@@ -44,7 +44,7 @@ export class MachinePortableSpaceController implements SpaceLifecycleController 
     const started = this.database.beginSpaceClose({ spaceId: space.id, holderId: this.machineId, expectedGeneration });
     if (started.status === 'error') throw started.error;
     try {
-      await this.lifecycle.release(this.descriptor(space, expectedGeneration), new CoordinatorPortableSpaceRuntime(this.sessions, space.id));
+      await this.lifecycle.release(this.descriptor(space, expectedGeneration), this.checkpointRuntime(space.id));
       const committed = this.database.commitSpaceClosed({ spaceId: space.id, holderId: this.machineId, expectedGeneration });
       if (committed.status === 'error') throw committed.error;
     } catch (error) {
@@ -60,7 +60,7 @@ export class MachinePortableSpaceController implements SpaceLifecycleController 
     }
   }
 
-  async open(spaceId: string, expectedGeneration: number, options: { resumeOnMachineRestart?: boolean; deferAgentStart?: boolean } = {}): Promise<void> {
+  async open(spaceId: string, expectedGeneration: number, options: { resumeOnMachineRestart?: boolean; deferAgentStart?: boolean; skipPreparation?: boolean } = {}): Promise<void> {
     const space = await this.materialize(spaceId);
     const placement = this.database.getSpacePlacement(space.id);
     if (!placement || placement.state !== 'closed' || placement.generation > expectedGeneration) {
@@ -85,13 +85,14 @@ export class MachinePortableSpaceController implements SpaceLifecycleController 
       if (current?.state === 'opening') this.database.failSpaceOpen({ spaceId: space.id, holderId: this.machineId, generation: expectedGeneration + 1 });
       throw error;
     }
+    if (!options.skipPreparation) void this.environment?.prepare(space.id);
     if (!options.deferAgentStart) {
       const opened = await this.sessions.openSpace(space.id);
       if (opened.status === 'error') throw opened.error;
     }
   }
 
-  private async materialize(spaceId: string): Promise<MaterializedSpace> {
+  async materialize(spaceId: string): Promise<MaterializedSpace> {
     const current = this.database.getSpace(spaceId);
     if (current) return current;
     const definition = await this.definition(spaceId);
@@ -123,6 +124,13 @@ export class MachinePortableSpaceController implements SpaceLifecycleController 
     const materialized = this.database.getSpace(definition.spaceId);
     if (!materialized) throw new Error(`Portable space ${spaceId} could not be materialized`);
     return materialized;
+  }
+
+  private checkpointRuntime(spaceId: string): CoordinatorPortableSpaceRuntime {
+    return new CoordinatorPortableSpaceRuntime(this.sessions, spaceId, async () => {
+      await this.environment?.dematerialize(spaceId);
+      await this.environment?.drain(spaceId);
+    });
   }
 
   private descriptor(space: MaterializedSpace, expectedGeneration: number): PortableSpaceDescriptor {

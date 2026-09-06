@@ -41,7 +41,7 @@ In **Settings > Machines**, choose **Stop** to save supported workspace state an
 The cloud machine's disk is temporary. Stop or replacement discards installed packages, machine-local configuration, ignored files, and other files GitSpace has not captured, including files in the machine's home directory. Start restores saved workspaces, not the old disk.
 </Warning>
 
-Once you have a workspace and a configured provider, you can ask its normal agent to install tools. There is no separate setup agent. Treat tool installs and other machine changes as temporary.
+Once you have a workspace and a configured provider, ask its normal agent to use the `workspace-lifecycle` skill to plan the repository's tools and local setup. Review its proposed edits before authorizing execution. There is no separate setup agent. Treat machine changes as temporary and keep their approved preparation in the repository.
 
 ### Connect your own computer
 
@@ -107,6 +107,8 @@ Create a workspace in the GitSpace project, or choose **New project** to import 
 Leave **Base branch** empty to detect the repository's default branch. Enter a branch only to override it. Leave the repository address empty to create a new repository with `main` as its default. An invalid address or failed clone does not create a project entry.
 
 Use a repository you can recover elsewhere for your first test.
+
+For repository prerequisites, ask the normal workspace agent to use the built-in `workspace-lifecycle` skill. Review its proposal before approving edits, then grant separate approval for execution in Environment. Selecting or creating a workspace does not run setup. See [Workspace lifecycle](/workspace-lifecycle).
 
 Ask the agent to make a small change. Review its diff, answer any questions, open a terminal, and save an artifact. Close and reopen the workspace, then continue the conversation.
 

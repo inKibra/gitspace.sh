@@ -148,7 +148,6 @@ describe('GitSpace Result RPC', () => {
         }
         const committed = database.commitSpaceClosed({ spaceId: space.id, holderId: 'machine-a', expectedGeneration });
         if (committed.status === 'error') throw committed.error;
-        database.setSpaceClosed(space.id, true);
       },
       release: async (space: MaterializedSpace, expectedGeneration: number) => {
         const started = database.beginSpaceClose({ spaceId: space.id, holderId: 'machine-a', expectedGeneration });

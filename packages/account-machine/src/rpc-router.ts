@@ -113,6 +113,8 @@ import {
   revokeWorkspaceEnvironmentApprovalContract,
   runWorkspaceEnvironmentChecksContract,
   runWorkspaceEnvironmentPhaseContract,
+  recoverWorkspaceEnvironmentRunContract,
+  getWorkspaceEnvironmentRunLogContract,
   updateMachineNotesContract,
   createProjectCronContract,
   deleteProjectCronContract,
@@ -358,6 +360,7 @@ export interface GitSpaceRpcRouterOptions {
   sessions: MachineSessionCoordinator;
   spaces: SpaceLifecycleController;
   terminals: WorkspaceHubTerminalCoordinator;
+  environments?: WorkspaceEnvironmentManager;
   artifacts: LocalArtifactResolver;
   secrets: ProjectSecretsRpc;
   mcp?: MachineMcpRpc;
@@ -525,7 +528,10 @@ function authorityFailureMessage(failure: AuthorityFailure): string {
 
 export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
   const server = serverRpc.context<GitSpaceRpcContext>();
-  const environment = new WorkspaceEnvironmentManager(options.database, options.secrets, options.terminals);
+  const environment = (): WorkspaceEnvironmentManager => {
+    if (!options.environments) throw new Error('Shared workspace lifecycle authority is unavailable');
+    return options.environments;
+  };
   const environmentOutput = (view: WorkspaceEnvironmentView) => ({
     spaceId: view.spaceId,
     projectId: view.projectId,
@@ -540,6 +546,8 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
       fileName: execution.fileName ?? null,
     })),
     runs: view.runs,
+    lifecycle: view.lifecycle,
+    migrationRequired: [...view.migrationRequired],
   });
   const settingsCoordinator = (): CanonicalSettingsCoordinator => {
     if (!options.settings) throw new Error('Canonical settings are unavailable');
@@ -917,8 +925,7 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
       return err(errors.OperationFailed({ operation: 'close space', message: 'Space placement changed before close' }));
     }
     try {
-      await options.spaces.release(space, input.expectedGeneration);
-      await options.terminals.stopOwned(space.id);
+      await options.spaces.close(space, input.expectedGeneration);
       const closed = options.database.getSpace(space.id);
       if (!closed) throw new Error(`Space ${space.id} disappeared after close`);
       return ok(lifecycleView(closed));
@@ -958,6 +965,7 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
       const value = await options.projects.runLifecycleOperation(space.projectId, space.id, 'workspace.archive', ['Checkpoint workspace', 'Archive workspace'], async () => {
         if (space.placementState !== 'closed') await options.spaces.close(space, input.expectedGeneration);
         await options.projects.setWorkspaceLifecycle(space.projectId, space.id, 'archived');
+        options.database.setSpaceClosed(space.id, true);
         return lifecycleView(options.database.getSpace(space.id)!);
       });
       return ok(value);
@@ -1567,49 +1575,49 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
   });
   const getEnvironment = server.implement(getWorkspaceEnvironmentContract).handler(async ({ input, errors }) => {
     try {
-      return ok(environmentOutput(await environment.view(input.spaceId)));
+      return ok(environmentOutput(await environment().view(input.spaceId)));
     } catch (error) {
       return err(errors.OperationFailed({ operation: 'get workspace environment', message: error instanceof Error ? error.message : 'Unable to get workspace environment' }));
     }
   });
   const putEnvironmentBundle = server.implement(putWorkspaceEnvironmentBundleContract).handler(async ({ input, errors }) => {
     try {
-      return ok(environmentOutput(await environment.putBundle(input.spaceId, JSON.parse(input.bundleJson))));
+      return ok(environmentOutput(await environment().putBundle(input.spaceId, JSON.parse(input.bundleJson))));
     } catch (error) {
       return err(errors.OperationFailed({ operation: 'put workspace environment bundle', message: error instanceof Error ? error.message : 'Unable to save workspace environment bundle' }));
     }
   });
   const setEnvironmentProfile = server.implement(setWorkspaceEnvironmentProfileContract).handler(async ({ input, errors }) => {
     try {
-      return ok(environmentOutput(await environment.setProfile(input.spaceId, input.profile)));
+      return ok(environmentOutput(await environment().setProfile(input.spaceId, input.profile)));
     } catch (error) {
       return err(errors.OperationFailed({ operation: 'set workspace environment profile', message: error instanceof Error ? error.message : 'Unable to set workspace environment profile' }));
     }
   });
   const putEnvironmentValue = server.implement(putWorkspaceEnvironmentValueContract).handler(async ({ input, errors }) => {
     try {
-      return ok(environmentOutput(await environment.putValue(input.spaceId, input.scope, input.name, input.value)));
+      return ok(environmentOutput(await environment().putValue(input.spaceId, input.scope, input.name, input.value)));
     } catch (error) {
       return err(errors.OperationFailed({ operation: 'put workspace environment value', message: error instanceof Error ? error.message : 'Unable to save workspace environment value' }));
     }
   });
   const deleteEnvironmentValue = server.implement(deleteWorkspaceEnvironmentValueContract).handler(async ({ input, errors }) => {
     try {
-      return ok(environmentOutput(await environment.deleteValue(input.spaceId, input.scope, input.name)));
+      return ok(environmentOutput(await environment().deleteValue(input.spaceId, input.scope, input.name)));
     } catch (error) {
       return err(errors.OperationFailed({ operation: 'delete workspace environment value', message: error instanceof Error ? error.message : 'Unable to delete workspace environment value' }));
     }
   });
   const approveEnvironmentExecution = server.implement(approveWorkspaceEnvironmentExecutionContract).handler(async ({ input, errors }) => {
     try {
-      return ok(environmentOutput(await environment.approve(input.spaceId, input.scope, input.executionHash)));
+      return ok(environmentOutput(await environment().approve(input.spaceId, input.scope, input.executionHash)));
     } catch (error) {
       return err(errors.OperationFailed({ operation: 'approve workspace environment execution', message: error instanceof Error ? error.message : 'Unable to approve workspace environment execution' }));
     }
   });
   const revokeEnvironmentApproval = server.implement(revokeWorkspaceEnvironmentApprovalContract).handler(async ({ input, errors }) => {
     try {
-      return ok(environmentOutput(await environment.revokeApproval(input.spaceId, input.scope, input.executionHash)));
+      return ok(environmentOutput(await environment().revokeApproval(input.spaceId, input.scope, input.executionHash)));
     } catch (error) {
       return err(errors.OperationFailed({ operation: 'revoke workspace environment approval', message: error instanceof Error ? error.message : 'Unable to revoke workspace environment approval' }));
     }
@@ -1617,17 +1625,25 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
 
   const runEnvironmentChecks = server.implement(runWorkspaceEnvironmentChecksContract).handler(async ({ input, errors }) => {
     try {
-      return ok(await environment.runChecks(input.spaceId));
+      return ok(await environment().runChecks(input.spaceId));
     } catch (error) {
       return err(errors.OperationFailed({ operation: 'run workspace environment checks', message: error instanceof Error ? error.message : 'Unable to run workspace environment checks' }));
     }
   });
-  const runEnvironmentPhase = server.implement(runWorkspaceEnvironmentPhaseContract).handler(async ({ input, errors }) => {
+  const runEnvironmentPhase = server.implement(runWorkspaceEnvironmentPhaseContract).handler(async ({ input, errors, context }) => {
     try {
-      return ok(await environment.runPhase(input.spaceId, input.phase));
+      if (input.phase === 'cloud/destroy' && context.caller?.kind !== 'browser') throw new Error('Resource destruction requires explicit human browser authorization');
+      return ok(await environment().runPhase(input.spaceId, input.phase, input.rerun ?? false));
     } catch (error) {
       return err(errors.OperationFailed({ operation: `run workspace environment ${input.phase}`, message: error instanceof Error ? error.message : `Unable to run workspace environment ${input.phase}` }));
     }
+  });
+  const recoverEnvironmentRun = server.implement(recoverWorkspaceEnvironmentRunContract).handler(async ({ errors }) => {
+    return err(errors.OperationFailed({ operation: 'recover lifecycle run', message: 'Human recovery must use the account gateway, which verifies the previous runner was destroyed' }));
+  });
+  const getEnvironmentRunLog = server.implement(getWorkspaceEnvironmentRunLogContract).handler(async ({ input, errors }) => {
+    try { return ok(await environment().runLog(input.spaceId, input.runId, input.offset ?? 0)); }
+    catch (error) { return err(errors.OperationFailed({ operation: 'read lifecycle log', message: error instanceof Error ? error.message : 'Unable to read lifecycle log' })); }
   });
 
   const listSkills = server.implement(listSkillsContract).handler(async ({ input, errors }) => {
@@ -2318,6 +2334,8 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
       revokeApproval: revokeEnvironmentApproval,
       runChecks: runEnvironmentChecks,
       runPhase: runEnvironmentPhase,
+      recoverRun: recoverEnvironmentRun,
+      runLog: getEnvironmentRunLog,
     },
     mcp: {
       connections: {

@@ -29,7 +29,7 @@ Machines expose capabilities such as available runtimes, isolation, hardware, se
 
 Cloud machines are temporary. **Stop** saves supported workspace state before stopping; if saving fails, the machine stays online. **Start** runs a fresh machine environment and restores saved workspaces. Neither a new machine nor Start restores the old machine disk. Installed packages, machine-local configuration, ignored files, and other files outside GitSpace's checkpoints do not survive Stop or replacement. This includes arbitrary files in the machine's home directory.
 
-Ask a normal workspace agent to install tools when needed. Those changes are temporary; there is no separate setup agent.
+Ask a normal workspace agent to use the built-in `workspace-lifecycle` skill to plan repeatable tool preparation. Approve configuration edits first, then approve execution separately. Machine changes remain temporary; there is no separate setup agent. See [Workspace lifecycle](/workspace-lifecycle).
 
 ## Project
 

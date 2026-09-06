@@ -1,7 +1,8 @@
 import { reduceTranscriptToTurns, type TransportBlock, type TurnBlock } from '@gitspace/blocks';
 import type { DeploymentStatusView, EnvironmentBundle as ProtocolEnvironmentBundle, LaunchProgressView, OmpSettingValue, ProviderLoginEvent, ReleaseTarget, RepositoryDiffView, RepositoryFileView, RepositoryMode, UserSettings } from '@gitspace/protocol';
+import { executionHash } from '@gitspace/protocol';
 import type { ProjectMcpGrantRpcView } from '@gitspace/protocol/mcp-contract';
-import { Button, InputField, InputGroup, ScrollArea, Select, SelectContent, SelectItem, SelectTrigger, SidebarInset, SidebarInsetTopbar, SidebarProvider, ThinkingIndicator, Tooltip } from '@gitspace/ui';
+import { Button, Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, InputField, InputGroup, ScrollArea, Select, SelectContent, SelectItem, SelectTrigger, SidebarInset, SidebarInsetTopbar, SidebarProvider, ThinkingIndicator, Tooltip } from '@gitspace/ui';
 import { Key01, LayoutRight, Terminal } from '@untitledui/icons';
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { ResultRpcProvider, useResultMutation, useResultQuery } from 'result-rpc/react';
@@ -14,7 +15,8 @@ import { applyAppearance } from './appearance.js';
 import type { ProviderLoginFlow, ProvidersSectionProps } from './ProvidersSection.js';
 import { SettingsPage } from './SettingsPage.js';
 import { EnvironmentView } from './environment/EnvironmentView.js';
-import type { EnvironmentCheckDefinition as EnvironmentCheckView, EnvironmentViewModel, LifecyclePhase, LifecycleRun } from './environment/types.js';
+import type { EnvironmentViewModel, LifecyclePhase, LifecycleRun, TrustState } from './environment/types.js';
+import { lifecycleSummary } from './environment/lifecycle.js';
 import { Inspector } from './inspector/index.js';
 import { appendLaunchProgress, converging, launchTrackFrom, RELEASE_TARGETS, shortSha, type LaunchTrack } from './release.js';
 import { ACCOUNT_DIRECTORY_CHANGED, navigateProductUrl, productRouteFromLocation, setProductRoute, type AppView, type ProductRoute } from './routes.js';
@@ -110,51 +112,108 @@ function optionalQueryParameter(name: string): string | null {
   return new URL(window.location.href).searchParams.get(name);
 }
 
-function LiveEnvironment({ projectName, workspaceName, spaceId, workspace }: { projectName: string; workspaceName: string; spaceId: string; workspace: boolean }) {
+const CONFIGURE_ENVIRONMENT_PROMPT = 'Use the workspace-lifecycle skill to help me configure this repository. Inspect the repository and our shared environment ledger, then discuss the local preparation and cloud resources this project needs. Propose the five lifecycle phases and profiles. Do not edit files or run lifecycle scripts until I review the plan; approval to edit is not approval to execute.';
+
+function LiveEnvironmentStatus({ spaceId, onInspect, onConfigure }: { spaceId: string; onInspect(): void; onConfigure?: () => Promise<void> }) {
   const query = useResultQuery(rpcClient.environment.get, { spaceId });
+  const [error, setError] = useState<string | null>(null);
+  const [pending, setPending] = useState(false);
+  useEffect(() => {
+    const timer = setInterval(() => { if (document.visibilityState === 'visible') void query.refetch(); }, 5_000);
+    return () => clearInterval(timer);
+  }, [spaceId]);
+  if (query.state !== 'success') return null;
+  const state = query.value.lifecycle;
+  const configured = state.bundleJson !== null || query.value.executions.length > 0;
+  const summary = lifecycleSummary(state);
+  return <span className="flex min-w-0 items-center gap-1">
+    <Button variant="ghost" size="compact" className={`min-h-10 max-w-48 truncate ${summary.attention ? 'text-destructive' : 'text-muted-foreground'}`} onClick={onInspect}>{summary.label}</Button>
+    {!configured && onConfigure ? <Button variant="ghost" size="compact" className="min-h-10" loading={pending} onClick={() => { setPending(true); setError(null); void onConfigure().catch((cause: unknown) => setError(cause instanceof Error ? cause.message : String(cause))).finally(() => setPending(false)); }}>Configure with agent</Button> : null}
+    {error ? <span role="alert" className="max-w-64 truncate text-caption text-destructive" title={error}>{error}</span> : null}
+  </span>;
+}
+
+function LiveEnvironment({ projectName, workspaceName, spaceId, workspace, generation, machineId, runtimeAvailable, onAskAgent }: { projectName: string; workspaceName: string; spaceId: string; workspace: boolean; generation: number; machineId?: string; runtimeAvailable: boolean; onAskAgent?: (text: string) => Promise<void> }) {
+  const query = useResultQuery(rpcClient.environment.get, { spaceId });
+  const machines = useResultQuery(rpcClient.machines, {}, { enabled: !runtimeAvailable });
+  const [runnerId, setRunnerId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
-  if (query.state === 'pending') return <div className="flex flex-1 items-center justify-center"><ThinkingIndicator aria-label="Loading workspace setup…" /></div>;
-  if (query.state === 'failure') return <EmptyState title="Workspace setup could not load" description={query.error.message} />;
+  const [busy, setBusy] = useState(false);
+  const [readingEvidence, setReadingEvidence] = useState(false);
+  const [evidence, setEvidence] = useState<{ title: string; output: string; approvalHash?: string; runId?: string; nextOffset?: number | null } | null>(null);
+  useEffect(() => {
+    const timer = setInterval(() => { if (document.visibilityState === 'visible') void query.refetch(); }, 3_000);
+    return () => clearInterval(timer);
+  }, [spaceId]);
+  if (query.state === 'pending') return <p className="p-4 text-caption text-muted-foreground" role="status">Loading environment…</p>;
+  if (query.state === 'failure') return <div className="flex flex-col gap-2 p-4"><p role="alert" className="text-caption text-destructive">{query.error.message}</p><Button variant="ghost" size="compact" onClick={() => void query.refetch()}>Retry environment</Button></div>;
+  const runners = machines.state === 'success' ? machines.value.filter((candidate) => candidate.state === 'online' && candidate.desiredState === 'online' && candidate.rpcEndpoint) : [];
+  const runner = runners.find((candidate) => candidate.id === runnerId) ?? runners[0];
   const remote = query.value;
   const bundle = JSON.parse(remote.bundleJson) as ProtocolEnvironmentBundle;
   const mutate = (operation: () => Promise<unknown>): void => {
-    setActionError(null);
-    void operation().then(() => query.refetch()).catch((error: unknown) => setActionError(error instanceof Error ? error.message : String(error)));
+    if (busy) return;
+    setActionError(null); setBusy(true);
+    void operation().then(() => query.refetch()).catch((error: unknown) => setActionError(error instanceof Error ? error.message : String(error))).finally(() => setBusy(false));
   };
   const saveBundle = (next: ProtocolEnvironmentBundle): void => mutate(async () => {
     const result = await rpcClient.environment.putBundle({ spaceId, bundleJson: JSON.stringify(next) });
     if (result.status === 'error') throw result.error;
   });
+  const loadEvidence = (operation: () => Promise<void>): void => {
+    if (readingEvidence) return;
+    setReadingEvidence(true); setActionError(null);
+    void operation().catch((error: unknown) => setActionError(error instanceof Error ? error.message : String(error))).finally(() => setReadingEvidence(false));
+  };
+  const openExecution = (targetId: string, approve: boolean): void => loadEvidence(async () => {
+    const execution = remote.executions.find((item) => item.id === targetId);
+    if (!execution) throw new Error('Execution is no longer present. Refresh the environment.');
+    const content = execution.content;
+    if (await executionHash({ kind: execution.kind, command: content }) !== execution.hash) throw new Error('Script content changed. Refresh and review the new content before approval.');
+    setEvidence({ title: execution.label, output: content, ...(approve ? { approvalHash: execution.hash } : {}) });
+  });
+  const openRunLog = (runId: string, offset: number | null = null): void => loadEvidence(async () => {
+    const result = await rpcClient.environment.runLog({ spaceId, runId, offset });
+    if (result.status === 'error') throw result.error;
+    setEvidence((current) => ({ title: `Run ${runId}`, runId, output: offset !== null && current?.runId === runId ? current.output + result.value.output : result.value.output, nextOffset: result.value.nextOffset }));
+  });
   const openSecrets = (): void => {
     navigateProductUrl(setProductRoute(new URL(window.location.href), 'secrets'));
   };
   const lastRun = (executionHash: string, executionId: string): LifecycleRun => {
-    const run = remote.runs.find((candidate) => candidate.status !== 'running' && candidate.executionHashes.includes(executionHash));
+    const run = remote.lifecycle.runs.find((candidate) => candidate.executionHashes.includes(executionHash));
     if (!run) return { status: 'never' };
+    if (run.status === 'running') return { status: 'running', relativeTime: new Date(run.startedAt).toLocaleString(), output: run.output };
     const startedAt = new Date(run.startedAt).getTime();
     const finishedAt = new Date(run.finishedAt ?? run.startedAt).getTime();
     const output = run.results.find((result) => result.id === executionId)?.output ?? run.output;
     const relativeTime = new Date(run.finishedAt ?? run.startedAt).toLocaleString();
     const duration = `${Math.max(0, finishedAt - startedAt)}ms`;
-    return run.status === 'failed'
+    return run.status === 'failed' || run.status === 'abandoned'
       ? { status: 'failed', relativeTime, duration, output: output || `Exited ${run.exitCode ?? 1}` }
       : { status: 'succeeded', relativeTime, duration, ...(output ? { output } : {}) };
   };
-  const latestChecks = remote.runs.find((run) => run.phase === 'checks' && run.status !== 'running');
+  const latestChecks = remote.lifecycle.runs.find((run) => run.phase === 'checks' && run.machineId === machineId && run.profile === remote.selectedProfile && run.status !== 'running');
+  const trustFor = (execution: typeof remote.executions[number] | undefined): TrustState => {
+    const approval = execution && remote.lifecycle.approvals.find((item) => item.executionHash === execution.hash && item.scope === execution.approval);
+    return approval
+      ? { status: 'approved', commandHash: approval.executionHash, approvedBy: approval.approvedBy, approvedAt: new Date(approval.approvedAt).toLocaleString() }
+      : { status: 'pending', commandHash: execution?.hash ?? '' };
+  };
   const model: EnvironmentViewModel = {
     project: { name: projectName, repository: projectName },
-    workspace: { name: workspaceName, profile: remote.selectedProfile, machineId: 'current' },
+    workspace: { name: workspaceName, profile: remote.selectedProfile, machineId: machineId ?? 'unavailable', generation },
     bundle: {
       default: bundle.defaultProfile,
       checks: Object.fromEntries(Object.entries(bundle.checks).map(([id, definition]) => [id, definition.kind === 'built-in'
-        ? { id, label: definition.label ?? definition.check, source: 'catalog' as const, requirement: definition.requirement, probe: remote.executions.find((item) => item.kind === 'check' && item.id === id)?.command, trust: { status: remote.executions.find((item) => item.kind === 'check' && item.id === id)?.approval ? 'approved' as const : 'pending' as const, commandHash: remote.executions.find((item) => item.kind === 'check' && item.id === id)?.hash ?? '', approvedBy: remote.executions.find((item) => item.kind === 'check' && item.id === id)?.approval ?? undefined, approvedAt: remote.executions.find((item) => item.kind === 'check' && item.id === id)?.approval ? 'inherited approval' : undefined } as EnvironmentCheckView['trust'] }
-        : { id, label: definition.label, source: 'custom' as const, probe: definition.command, trust: { status: remote.executions.find((item) => item.kind === 'check' && item.id === id)?.approval ? 'approved' as const : 'pending' as const, commandHash: remote.executions.find((item) => item.kind === 'check' && item.id === id)?.hash ?? '', approvedBy: remote.executions.find((item) => item.kind === 'check' && item.id === id)?.approval ?? undefined, approvedAt: remote.executions.find((item) => item.kind === 'check' && item.id === id)?.approval ? 'inherited approval' : undefined } as EnvironmentCheckView['trust'] }])),
+        ? { id, label: definition.label ?? definition.check, source: 'catalog' as const, requirement: definition.requirement, probe: remote.executions.find((item) => item.kind === 'check' && item.id === id)?.command, trust: trustFor(remote.executions.find((item) => item.kind === 'check' && item.id === id)) }
+        : { id, label: definition.label, source: 'custom' as const, probe: definition.command, trust: trustFor(remote.executions.find((item) => item.kind === 'check' && item.id === id)) }])),
       profiles: Object.fromEntries(Object.entries(bundle.profiles).map(([name, profile]) => [name, { checks: profile.checks, secrets: profile.secrets, inputs: profile.values, notes: profile.notes ?? '' }])),
       inputs: bundle.values,
     },
     machines: [{
-      id: 'current',
-      label: 'this machine',
+      id: machineId ?? 'unavailable',
+      label: runtimeAvailable ? machineId ?? 'current machine' : 'no active machine',
       platform: navigator.platform.toLowerCase().includes('mac') ? 'darwin' : navigator.platform.toLowerCase().includes('win') ? 'win32' : 'linux',
       current: true,
       capabilities: Object.fromEntries(remote.executions.filter((item) => item.kind === 'check').map((item) => {
@@ -168,9 +227,12 @@ function LiveEnvironment({ projectName, workspaceName, spaceId, workspace }: { p
       path: `${item.phase}/${item.fileName}`,
       command: item.command,
       ...(item.fileName?.match(/\.([a-z][a-z0-9-]*)\.sh$/u)?.[1] ? { profiles: [item.fileName.match(/\.([a-z][a-z0-9-]*)\.sh$/u)![1]!] } : {}),
-      trust: item.approval ? { status: 'approved', approvedBy: item.approval, approvedAt: 'inherited approval', commandHash: item.hash } : { status: 'pending', commandHash: item.hash },
+      trust: trustFor(item),
       lastRun: lastRun(item.hash, item.id),
     })),
+    ledger: remote.lifecycle,
+    configured: remote.lifecycle.bundleJson !== null || remote.executions.length > 0,
+    migrationRequired: remote.migrationRequired,
     secrets: remote.effective.secrets.map((name) => ({ name, source: 'project', granted: remote.configuredSecrets.includes(name), requiredBy: [remote.selectedProfile] })),
     inputValues: Object.entries(remote.values.effective).map(([name, value]) => ({ name, value, source: name in remote.values.workspace ? 'workspace' : 'project' })),
   };
@@ -179,25 +241,50 @@ function LiveEnvironment({ projectName, workspaceName, spaceId, workspace }: { p
     profiles: { ...bundle.profiles, [remote.selectedProfile]: transform(bundle.profiles[remote.selectedProfile]!) },
   });
   return <div className="flex min-h-0 flex-1 flex-col">
-    {actionError ? <p className="border-b border-destructive/30 px-4 py-2 text-caption text-destructive">{actionError}</p> : null}
+    {actionError ? <p role="alert" tabIndex={0} className="max-h-24 shrink-0 overflow-auto whitespace-pre-wrap break-words px-4 py-2 text-caption text-destructive">{actionError}</p> : null}
+    {!runtimeAvailable && !remote.lifecycle.destroyedAt ? <section className="flex flex-col gap-2 px-4 pt-4" aria-label="Cloud lifecycle runner">
+      <p className="text-caption text-muted-foreground">Retire cloud resources on an online machine without opening the workspace agent. Choosing a runner does not execute scripts.</p>
+      {runners.length ? <Select value={runner?.id ?? ''} onValueChange={setRunnerId} disabled={busy}><SelectTrigger aria-label="Cloud lifecycle runner" /><SelectContent>{runners.map((candidate, index) => <SelectItem value={candidate.id} index={index} key={candidate.id}>{candidate.label}</SelectItem>)}</SelectContent></Select> : <p className="text-caption text-muted-foreground">No online runner. Records remain available.</p>}
+    </section> : null}
     <EnvironmentView
       model={model}
+      busy={busy}
+      runtimeAvailable={runtimeAvailable}
+      cloudRunnerAvailable={runtimeAvailable || !!runner}
+      onConfigure={onAskAgent ? () => mutate(() => onAskAgent(CONFIGURE_ENVIRONMENT_PROMPT)) : undefined}
+      onRecoverRun={(runId) => mutate(async () => { const result = await rpcClient.environment.recoverRun({ spaceId, runId }); if (result.status === 'error') throw result.error; })}
+      onOpenRunLog={openRunLog}
       onProfileChange={(profile) => mutate(async () => { const result = await rpcClient.environment.setProfile({ spaceId, profile }); if (result.status === 'error') throw result.error; })}
-      onApprove={(targetId) => { const execution = remote.executions.find((item) => item.id === targetId); if (execution) mutate(async () => { const result = await rpcClient.environment.approve({ spaceId, scope: workspace ? 'workspace' : 'project', executionHash: execution.hash }); if (result.status === 'error') throw result.error; }); }}
+      onApprove={(targetId) => openExecution(targetId, true)}
       onRevoke={(targetId) => { const execution = remote.executions.find((item) => item.id === targetId); if (execution?.approval) mutate(async () => { const result = await rpcClient.environment.revokeApproval({ spaceId, scope: execution.approval!, executionHash: execution.hash }); if (result.status === 'error') throw result.error; }); }}
       onGrantSecret={openSecrets}
       onInputChange={(name, value) => mutate(async () => { const result = await rpcClient.environment.putValue({ spaceId, scope: workspace ? 'workspace' : 'project', name, value }); if (result.status === 'error') throw result.error; })}
-      onFixCheck={() => undefined}
+      onFixCheck={onAskAgent ? (checkId) => mutate(() => onAskAgent(`Inspect the failing environment check ${checkId} using space.environment.get and its durable run logs. Explain the cause and propose a fix; do not grant yourself execution approval.`)) : undefined}
       onUpdateCheck={(checkId, patch) => saveBundle({ ...bundle, checks: { ...bundle.checks, [checkId]: bundle.checks[checkId]?.kind === 'command' ? { kind: 'command', label: patch.label ?? bundle.checks[checkId].label, command: patch.probe ?? bundle.checks[checkId].command } : { ...bundle.checks[checkId]!, label: patch.label, requirement: patch.requirement } } })}
       onDeleteCheck={(checkId) => saveBundle({ ...bundle, checks: Object.fromEntries(Object.entries(bundle.checks).filter(([id]) => id !== checkId)), profiles: Object.fromEntries(Object.entries(bundle.profiles).map(([name, profile]) => [name, { ...profile, checks: profile.checks.filter((id) => id !== checkId) }])) })}
       onAddCheck={(check) => saveBundle({ ...updateProfile((profile) => ({ ...profile, checks: [...new Set([...profile.checks, check.id])] })), checks: { ...bundle.checks, [check.id]: check.source === 'catalog' ? { kind: 'built-in', check: check.id, label: check.label, requirement: check.requirement } : { kind: 'command', command: check.probe ?? '', label: check.label } } })}
       onAddValue={(name, defaultValue) => saveBundle({ ...updateProfile((profile) => ({ ...profile, values: [...new Set([...profile.values, name])] })), values: { ...bundle.values, [name]: defaultValue ? { default: defaultValue } : {} } })}
       onOpenSecrets={openSecrets}
-      onOpenLifecycleFile={() => undefined}
+      onOpenLifecycleFile={(scriptId) => openExecution(scriptId, false)}
       onRunChecks={() => mutate(async () => { const result = await rpcClient.environment.runChecks({ spaceId }); if (result.status === 'error') throw result.error; })}
-      onOpenLifecycleOutput={() => undefined}
-      onRunLifecycle={(phase: LifecyclePhase) => mutate(async () => { const result = await rpcClient.environment.runPhase({ spaceId, phase }); if (result.status === 'error') throw result.error; })}
+      onOpenLifecycleOutput={(scriptId) => { const execution = remote.executions.find((item) => item.id === scriptId); const run = execution && remote.lifecycle.runs.find((item) => item.executionHashes.includes(execution.hash)); if (run) openRunLog(run.id); }}
+      onRunLifecycle={(phase: LifecyclePhase, options) => mutate(async () => {
+        if (phase === 'cloud/destroy' && !options?.retire) throw new Error('Explicit human retirement confirmation is required.');
+        const client = runtimeAvailable ? rpcClient : runner?.rpcEndpoint ? createGitSpaceBrowserClient({ url: runner.rpcEndpoint }) : null;
+        if (!client) throw new Error('Choose an online cloud lifecycle runner.');
+        if (!runtimeAvailable && phase !== 'cloud/destroy') throw new Error('Open the workspace before requesting setup or local preparation.');
+        const result = await client.environment.runPhase({ spaceId, phase, rerun: options?.rerun ?? null });
+        if (result.status === 'error') throw result.error;
+      })}
     />
+    <Dialog open={evidence !== null} onOpenChange={(open) => { if (!open) setEvidence(null); }}>
+      <DialogContent size="sm"><DialogHeader><DialogTitle>{evidence?.approvalHash ? 'Review exact execution content' : evidence?.title}</DialogTitle><DialogDescription>{evidence?.approvalHash ? 'Approves only this content hash. Editing a script requires a new approval; this does not run it or authorize retirement.' : 'Saved lifecycle evidence. Logs remain available after a checkout is removed.'}</DialogDescription></DialogHeader>
+        {evidence?.approvalHash ? <code className="break-all font-mono text-caption text-muted-foreground">{evidence.approvalHash}</code> : null}
+        <pre className="max-h-[55vh] overflow-auto whitespace-pre-wrap break-words font-mono text-caption">{evidence?.output || 'No output recorded.'}</pre>
+        {actionError ? <p role="alert" className="text-caption text-destructive">{actionError}</p> : null}
+        <DialogFooter><Button variant="secondary" onClick={() => setEvidence(null)}>Close</Button>{evidence?.runId && evidence.nextOffset != null ? <Button variant="ghost" loading={readingEvidence} onClick={() => openRunLog(evidence.runId!, evidence.nextOffset!)}>Load more</Button> : null}{evidence?.approvalHash ? <Button variant="primary" disabled={busy} onClick={() => mutate(async () => { const result = await rpcClient.environment.approve({ spaceId, scope: workspace ? 'workspace' : 'project', executionHash: evidence.approvalHash! }); if (result.status === 'error') throw result.error; setEvidence(null); })}>Approve this content</Button> : null}</DialogFooter>
+      </DialogContent>
+    </Dialog>
   </div>;
 }
 
@@ -216,6 +303,8 @@ function LiveInspector({
   onClose,
   onGenerateChangeGuide,
   runtimeAvailable,
+  onAskAgent,
+  initialView,
 }: {
   projectId: string;
   spaceId: string;
@@ -231,6 +320,8 @@ function LiveInspector({
   onClose: () => void;
   onGenerateChangeGuide?: () => Promise<void>;
   runtimeAvailable: boolean;
+  onAskAgent?: (text: string) => Promise<void>;
+  initialView?: 'environment';
 }) {
   const request = { spaceId, expectedGeneration: generation };
   const overview = useResultQuery(rpcClient.inspector.overview, request);
@@ -327,9 +418,10 @@ function LiveInspector({
   return <Inspector
     overview={overview.value}
     runtimeAvailable={runtimeAvailable}
+    initialView={initialView}
     scope={scope}
     workspaces={workspaces}
-    environment={runtimeAvailable && scope ? <LiveEnvironment projectName={scope.projectName} workspaceName={scope.name} spaceId={spaceId} workspace={scope.kind === 'workspace'} /> : undefined}
+    environment={<LiveEnvironment projectName={scope?.projectName ?? projectId} workspaceName={scope?.name ?? spaceId} spaceId={spaceId} workspace={spaceId !== projectId} generation={generation} machineId={scope?.holder.kind === 'held' ? scope.holder.machineId : undefined} runtimeAvailable={runtimeAvailable} onAskAgent={onAskAgent} />}
     onSelectWorkspace={onSelectWorkspace}
     onSetRelations={onSetRelations}
     stackStatus={stackStatus.state === 'success' ? stackStatus.value : null}
@@ -1367,8 +1459,11 @@ function RunningWorkspace({ projectId, workspaceId, onOpenSettings, defaultMachi
           }
         },
       },
-      renderInspector: (onClose) => <LiveInspector
+      renderEnvironmentStatus: (onInspect) => <LiveEnvironmentStatus spaceId={selectedSpaceId} onInspect={onInspect} onConfigure={mainAgent ? async () => { const result = await prompt.mutateAsync({ sessionId: mainAgent.id, text: CONFIGURE_ENVIRONMENT_PROMPT, streamingBehavior: 'followUp', images: [] }); if (result.status === 'error') throw result.error; } : undefined} />,
+      renderInspector: (onClose, initialView) => <LiveInspector
+        initialView={initialView}
         runtimeAvailable
+        onAskAgent={mainAgent ? async (text) => { const result = await prompt.mutateAsync({ sessionId: mainAgent.id, text, streamingBehavior: 'followUp', images: [] }); if (result.status === 'error') throw result.error; } : undefined}
         projectId={projectId}
         spaceId={selectedSpaceId}
         generation={selectedWorkspace?.spaceGeneration ?? value.baseSpace.spaceGeneration}

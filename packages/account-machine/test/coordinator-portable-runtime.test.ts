@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'bun:test';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -298,13 +298,13 @@ describe('CoordinatorPortableSpaceRuntime', () => {
     if (stopped.status === 'error') throw stopped.error;
     database.close();
   });
-  it('releases a space with local files kept and only reopens it explicitly', async () => {
+  it('keeps released files until explicit reopen restores a fresh checkout and retains local leftovers', async () => {
     const root = mkdtempSync(join(tmpdir(), 'gitspace-coordinator-release-'));
     roots.push(root);
-    const workspaceRoot = join(root, 'workspace');
+    const workspaceRoot = join(root, 'managed-spaces', 'workspace');
     const remote = join(root, 'remote.git');
     const sessionFile = join(root, 'sessions', 'omp-portable.jsonl');
-    mkdirSync(workspaceRoot);
+    mkdirSync(workspaceRoot, { recursive: true });
     git(workspaceRoot, 'init', '-b', 'main');
     writeFileSync(join(workspaceRoot, '.gitignore'), 'secret.env\n');
     writeFileSync(join(workspaceRoot, 'tracked.txt'), 'base\n');
@@ -372,12 +372,15 @@ describe('CoordinatorPortableSpaceRuntime', () => {
     expect(projected?.events).toHaveLength(1);
     expect(projected?.events[0]).toMatchObject({ kind: 'message_end', payload: { message: { role: 'assistant' } } });
 
-    // Reclaim: the same machine reopens over its kept files; ignored files survive.
+    // Reclaim restores a fresh checkout; ignored leftovers remain available only in the retained directory.
     await spaces.open('workspace-a', 2);
     expect(database.getSpace('workspace-a')).toMatchObject({ placementState: 'open', holderId: 'machine-a', generation: 3 });
     expect(authority.state).toBe('open');
     expect(readFileSync(join(workspaceRoot, 'tracked.txt'), 'utf8')).toBe('changed\n');
-    expect(readFileSync(join(workspaceRoot, 'secret.env'), 'utf8')).toBe('stays-local\n');
+    expect(existsSync(join(workspaceRoot, 'secret.env'))).toBe(false);
+    const retained = readdirSync(dirname(workspaceRoot)).find((entry) => entry.startsWith('workspace.retained-'));
+    expect(retained).toBeDefined();
+    expect(readFileSync(join(dirname(workspaceRoot), retained!, 'secret.env'), 'utf8')).toBe('stays-local\n');
     const reclaimed = coordinator.get(created.value.id)!;
     expect(reclaimed).toMatchObject({ id: created.value.id, state: 'active' });
     expect(await coordinator.transcript(reclaimed.id)).toHaveLength(1);

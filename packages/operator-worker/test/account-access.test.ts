@@ -69,6 +69,34 @@ async function account(status: 'active' | 'provisioning' | 'failed' | 'missing' 
   return { userId, handle, root, signing, grant, vault, brokerToken, signed, subscription, requests };
 }
 
+it('keeps signed machine lifecycle mutations scoped and unable to self-approve execution', async () => {
+  const fixture = await account();
+  const projectId = 'lifecycle-project';
+  const spaceId = 'lifecycle-workspace';
+  const authority = env.PROJECT_AUTHORITY.getByName(`${fixture.userId}:${projectId}`);
+  await authority.bootstrap({ id: projectId, name: 'Lifecycle', repositoryReference: null, baseBranch: 'main', createdBy: 'machine' });
+  await authority.putWorkspace({ id: spaceId, projectId, kind: 'worktree', name: 'Lifecycle', branch: 'main', phase: null, sourceKind: 'branch', sourceRef: 'main', lifecycle: 'active', goalId: null, expectedRevision: 0 });
+  const request = (operation: ControlOperation, payload: Record<string, unknown>) => SELF.fetch('https://auth.test/v1/control', {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(fixture.signed(operation, payload)),
+  });
+  const denied = await request('project.environment.mutate', { projectId, spaceId, input: { op: 'approval', scope: 'project', executionHash: `sha256:${'a'.repeat(64)}`, approved: true } });
+  expect(await denied.json()).toMatchObject({ status: 'error' });
+  expect((await authority.getLifecycleState(spaceId)).approvals).toEqual([]);
+  const foreign = await request('project.environment.get', { projectId, spaceId: 'another-project-workspace' });
+  expect(await foreign.json()).toMatchObject({ status: 'error' });
+  const saved = await request('project.environment.mutate', { projectId, spaceId, input: { op: 'value', scope: 'global', name: 'REGION', value: 'west' } });
+  expect(await saved.json()).toMatchObject({ status: 'ok', value: { values: { global: { REGION: 'west' } } } });
+  expect(await env.USER_PROJECTS.getByName(fixture.userId).getEnvironmentValues()).toEqual({ REGION: 'west' });
+  await env.FLEET_CATALOG.getByName(fixture.userId).putMachine({ id: 'machine', label: 'Machine', kind: 'physical', provider: 'physical', state: 'online', desiredState: 'online', rpcEndpoint: '/rpc', notes: '', lifecycleRevision: 1, operationId: null, error: null });
+  const stale = await request('project.environment.mutate', { projectId, spaceId, input: { op: 'claim', runId: 'stale', phase: 'workspace/materialize', profile: 'base', executionHashes: [], generation: 99, rerun: false } });
+  expect(await stale.json()).toMatchObject({ status: 'error' });
+  expect((await authority.getLifecycleState(spaceId)).runs).toEqual([]);
+  const detachedCheckout = await request('project.environment.mutate', { projectId, spaceId, input: { op: 'claim', runId: 'detached-checkout', phase: 'workspace/materialize', profile: 'base', executionHashes: [], generation: null, rerun: false } });
+  expect(await detachedCheckout.json()).toMatchObject({ status: 'error' });
+  const detachedPreparation = await request('project.environment.mutate', { projectId, spaceId, input: { op: 'claim', runId: 'detached-prepare', phase: 'machine/prepare', profile: 'base', executionHashes: [], generation: null, rerun: false } });
+  expect(await detachedPreparation.json()).toMatchObject({ status: 'ok', value: { claim: { status: 'claimed' }, runs: [{ phase: 'machine/prepare', machineId: 'machine', generation: null }] } });
+});
+
 function nextSocketEvent(socket: WebSocket): Promise<{ type: 'close' | 'message'; data?: string; code?: number }> {
   const { promise, resolve } = Promise.withResolvers<{ type: 'close' | 'message'; data?: string; code?: number }>();
   const message = (event: MessageEvent) => { socket.removeEventListener('close', close); resolve({ type: 'message', data: String(event.data) }); };

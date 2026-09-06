@@ -5,6 +5,7 @@ import {
   markGuideSectionReadInputSchema, putChangeGuideInputSchema, putGoalInputSchema, putRubricInputSchema,
   putWorkflowInputSchema, resolveReviewThreadInputSchema, setGuideApprovalInputSchema,
   startJournalPhaseInputSchema, waiveWorkflowGateInputSchema,
+  LifecyclePhaseSchema,
   goalDraftSchema, workflowDraftSchema, rubricDraftSchema,
   type CloudWorkspaceDefinition, type InspectorIdentity,
 } from '@gitspace/protocol';
@@ -26,7 +27,21 @@ export interface SpaceWorkspaceControls {
   manage(method: 'setPhase' | 'setRelations' | 'open' | 'close' | 'archive' | 'restore', workspace: CloudWorkspaceDefinition, input: Record<string, unknown>): Promise<unknown>;
   instructionsChanged(projectId: string, spaceId: string): Promise<void>;
   refreshArtifacts(projectId: string, spaceId: string): Promise<void>;
+  environment(method: SpaceEnvironmentMethod, projectId: string, spaceId: string, input: Record<string, unknown>): Promise<unknown>;
 }
+
+const environmentName = z.string().min(1).max(128).regex(/^[A-Z][A-Z0-9_]*$/u);
+const environmentScope = z.enum(['project', 'workspace']);
+export const spaceEnvironmentSchemas = {
+  get: z.object({}).strict(),
+  runLog: z.object({ runId: z.string().min(1), offset: z.number().int().nonnegative().optional() }).strict(),
+  setProfile: z.object({ profile: z.string().min(1).max(64) }).strict(),
+  putValue: z.object({ scope: environmentScope, name: environmentName, value: z.string().max(16_384) }).strict(),
+  deleteValue: z.object({ scope: environmentScope, name: environmentName }).strict(),
+  runChecks: z.object({}).strict(),
+  runPhase: z.object({ phase: LifecyclePhaseSchema.exclude(['cloud/destroy']), rerun: z.boolean().optional() }).strict(),
+};
+export type SpaceEnvironmentMethod = keyof typeof spaceEnvironmentSchemas;
 
 const mutationSchemas = {
   'goal.put': putGoalInputSchema,
@@ -58,6 +73,15 @@ const SPACE_DECLARATION = `{
   close(input: { workspaceId?: string; expectedGeneration: number }): Promise<unknown>;
   archive(input: { workspaceId?: string; expectedRevision: number; expectedGeneration: number }): Promise<unknown>;
   restore(input: { workspaceId?: string; expectedRevision: number; expectedGeneration: number }): Promise<unknown>;
+  environment: {
+    get(input?: { workspaceId?: string }): Promise<unknown>; // same cloud lifecycle ledger and current executions as the UI; closed reads never open a checkout
+    runLog(input: { workspaceId?: string; runId: string; offset?: number }): Promise<{ output: string; nextOffset: number|null }>;
+    setProfile(input: { workspaceId?: string; profile: string }): Promise<unknown>;
+    putValue(input: { workspaceId?: string; scope: 'project'|'workspace'; name: string; value: string }): Promise<unknown>;
+    deleteValue(input: { workspaceId?: string; scope: 'project'|'workspace'; name: string }): Promise<unknown>;
+    runChecks(input?: { workspaceId?: string }): Promise<unknown>;
+    runPhase(input: { workspaceId?: string; phase: 'cloud/provision'|'machine/prepare'|'workspace/materialize'|'workspace/dematerialize'; rerun?: boolean }): Promise<unknown>; // approved content only; explicit provisioning request enables policy. New content approval, recovery, and destructive retirement require the human browser.
+  };
   goal: { get(input?: { workspaceId?: string }): Promise<unknown>; put(input: { workspaceId?: string; expectedRevision: number; goal: object }): Promise<unknown>; attachEvidence(input: { workspaceId?: string; expectedRevision: number; requirementId: string; evidence: object }): Promise<unknown> };
   workflow: { get(input?: { workspaceId?: string }): Promise<unknown>; put(input: { workspaceId?: string; expectedRevision: number; workflow: object }): Promise<unknown>; waiveGate(input: object): Promise<unknown> };
   rubric: { get(input?: { workspaceId?: string }): Promise<unknown>; put(input: { workspaceId?: string; expectedRevision: number; rubric: object }): Promise<unknown>; judge(input: object): Promise<unknown> };
@@ -117,6 +141,13 @@ export function createSpaceEvalNamespace(
       if (method === 'describe') {
         const name = z.string().parse(payload.method);
         if (name === 'create') return z.toJSONSchema(createSchema);
+        if (name.startsWith('environment.')) {
+          const method = name.slice('environment.'.length) as SpaceEnvironmentMethod;
+          if (!Object.hasOwn(spaceEnvironmentSchemas, method)) throw new Error(`No agent input schema for space.${name}; approvals, recovery, and retirement require the human browser`);
+          const schema = spaceEnvironmentSchemas[method];
+          const json = z.toJSONSchema(schema);
+          return { ...json, properties: { ...json.properties, workspaceId: { type: 'string' } } };
+        }
         const schema = mutationSchemas[name as keyof typeof mutationSchemas];
         if (!schema) throw new Error(`No input schema for space.${name}`);
         const json = z.toJSONSchema(schema);
@@ -172,6 +203,13 @@ export function createSpaceEvalNamespace(
       const definition = workspaces.find((workspace) => workspace.id === spaceId && workspace.projectId === projectId);
       if (!definition) throw new Error(`Workspace ${spaceId} does not exist in current project ${projectId}`);
       if (method === 'get') return readWorkspace(spaceId, workspaces);
+      if (method.startsWith('environment.')) {
+        const name = method.slice('environment.'.length) as SpaceEnvironmentMethod;
+        if (!Object.hasOwn(spaceEnvironmentSchemas, name)) throw new Error('Environment approvals, recovery, and retirement require the human browser');
+        if (name === 'runPhase' && payload.phase === 'cloud/destroy') throw new Error('Cloud retirement requires explicit approval in the human browser; agents cannot authorize it');
+        const input = spaceEnvironmentSchemas[name].parse(payload);
+        return requireControls().environment(name, projectId, spaceId, input);
+      }
       if (method === 'setPhase' || method === 'setRelations' || method === 'open' || method === 'close' || method === 'archive' || method === 'restore') {
         if ((method === 'close' || method === 'archive') && spaceId === currentSpaceId) {
           throw new Error('An agent cannot close or archive its own workspace while executing a tool; use another workspace or the UI');

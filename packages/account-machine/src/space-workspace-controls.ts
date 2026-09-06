@@ -5,7 +5,8 @@ import type { CloudSpaceCheckpointAuthority } from './cloud-space-authority.js';
 import type { ProjectLifecycleManager } from './project-lifecycle.js';
 import type { SpaceLifecycleController } from './portable-space-controller.js';
 import type { MachineSessionCoordinator } from './session-coordinator.js';
-import type { SpaceWorkspaceControls } from './space-eval-sdk.js';
+import { spaceEnvironmentSchemas, type SpaceWorkspaceControls } from './space-eval-sdk.js';
+import type { WorkspaceEnvironmentManager } from './workspace-environment.js';
 
 const revision = z.number().int().nonnegative();
 const phase = z.enum(['plan', 'code', 'review', 'ship']);
@@ -18,9 +19,9 @@ export function createSpaceWorkspaceControls(options: {
   spaces: SpaceLifecycleController;
   sessions: MachineSessionCoordinator;
   machineId: string;
-  stopTerminals(spaceId: string): Promise<unknown>;
+  environments: WorkspaceEnvironmentManager;
 }): SpaceWorkspaceControls {
-  const { database, authority, projects, spaces, sessions, machineId } = options;
+  const { database, authority, projects, spaces, sessions, machineId, environments } = options;
   const publish = async (workspace: CloudWorkspaceDefinition, entity: string, payload: Record<string, unknown>) => {
     await authority.appendProjectEvent({ projectId: workspace.projectId, scope: 'workspace', entity,
       entityId: workspace.id, revision: workspace.revision, operation: 'updated', payload: { ...payload, spaceId: workspace.id } });
@@ -28,6 +29,36 @@ export function createSpaceWorkspaceControls(options: {
   return {
     instructionsChanged: (projectId, spaceId) => sessions.instructionsChanged(projectId, spaceId),
     refreshArtifacts: (projectId, spaceId) => sessions.refreshArtifacts(projectId, spaceId),
+    async environment(method, projectId, spaceId, input) {
+      if (method === 'runPhase' && input.phase === 'cloud/destroy') throw new Error('Cloud retirement requires explicit approval in the human browser');
+      const parsed = spaceEnvironmentSchemas[method].parse(input);
+      const local = database.getSpace(spaceId);
+      if (local && local.projectId !== projectId) throw new Error('Workspace project membership changed');
+      const placement = await authority.getSpace(projectId, spaceId);
+      const localAvailable = local && placement?.state === 'open' && placement.machineId === machineId;
+      if (method === 'get') return localAvailable ? environments.view(spaceId) : { projectId, spaceId, lifecycle: await authority.getLifecycleState(projectId, spaceId) };
+      if (method === 'runLog') {
+        const request = spaceEnvironmentSchemas.runLog.parse(parsed);
+        return authority.getLifecycleRunLog(projectId, spaceId, request.runId, request.offset);
+      }
+      if (!localAvailable) throw new Error('Open this workspace on this machine before changing or running its environment');
+      switch (method) {
+        case 'setProfile': return environments.setProfile(spaceId, spaceEnvironmentSchemas.setProfile.parse(parsed).profile);
+        case 'putValue': {
+          const value = spaceEnvironmentSchemas.putValue.parse(parsed);
+          return environments.putValue(spaceId, value.scope, value.name, value.value);
+        }
+        case 'deleteValue': {
+          const value = spaceEnvironmentSchemas.deleteValue.parse(parsed);
+          return environments.deleteValue(spaceId, value.scope, value.name);
+        }
+        case 'runChecks': return environments.runChecks(spaceId);
+        case 'runPhase': {
+          const run = spaceEnvironmentSchemas.runPhase.parse(parsed);
+          return environments.runPhase(spaceId, run.phase, run.rerun ?? false);
+        }
+      }
+    },
     async create(input) {
       const created = await projects.createWorkspace(input);
       const session = await sessions.openSpace(created.workspace.id);
@@ -93,10 +124,9 @@ export function createSpaceWorkspaceControls(options: {
         if (method === 'close' || method === 'archive') {
           if (placement.state !== 'closed') {
             if (!local || local.generation !== expectedGeneration || local.holderId !== machineId) throw new Error('Workspace local ownership changed');
-            if (method === 'archive') await spaces.close(local, expectedGeneration);
-            else await spaces.release(local, expectedGeneration);
-          } else if (method === 'archive' && local) database.setSpaceClosed(spaceId, true);
-          await options.stopTerminals(spaceId);
+            await spaces.close(local, expectedGeneration);
+          }
+          if (method === 'archive' && local) database.setSpaceClosed(spaceId, true);
         } else if (placement.state === 'closed') {
           await spaces.open(spaceId, expectedGeneration);
         } else {

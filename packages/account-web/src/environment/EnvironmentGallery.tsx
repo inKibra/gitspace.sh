@@ -5,7 +5,7 @@ import { glyph } from '../glyph.js';
 import { changedCheckTrust, environmentFixture, secretsPageFixture } from './fixtures.js';
 import { EnvironmentView } from './EnvironmentView.js';
 import { ApproveCheckDialogMock, SecretsPageMock } from './SecretsPageMock.js';
-import type { EnvironmentCheckDefinition, EnvironmentViewModel, SecretsPageViewModel, TrustState } from './types.js';
+import type { EnvironmentCheckDefinition, EnvironmentViewModel, LifecyclePhase, SecretsPageViewModel, TrustState } from './types.js';
 
 const EnvironmentIcon = glyph(LayoutRight);
 const KeyIcon = glyph(Key01);
@@ -59,7 +59,7 @@ export function EnvironmentGallery() {
     }));
     setActivity(`Opened terminal to fix ${checkId}`);
   };
-  const runLifecycle = (phase: 'setup' | 'select' | 'remove'): void => {
+  const runLifecycle = (phase: LifecyclePhase): void => {
     setEnvironment((current) => ({ ...current, lifecycle: current.lifecycle.map((script) => script.phase === phase && (!script.profiles || script.profiles.includes(current.workspace.profile)) && script.trust.status === 'approved' ? { ...script, lastRun: { status: 'succeeded', relativeTime: 'just now', duration: script.id.includes('install') ? '41s' : '0.4s', output: `${phase} completed.` } } : script) }));
     setActivity(`Opened terminal · running ${phase} scripts for ${environment.workspace.profile}`);
   };

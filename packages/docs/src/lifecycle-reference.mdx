@@ -1,0 +1,292 @@
+---
+$schema: https://holocron.so/frontmatter.json
+title: Lifecycle reference
+description: Repository profiles, phase scripts, approvals, durable bindings, and examples.
+icon: file-code
+---
+
+# Lifecycle reference
+
+Repository configuration uses `.gitspace/bundle.json` version 1 and scripts under `.gitspace/lifecycle`. There is no second lifecycle manifest. For the human approval flow, see [Workspace lifecycle](/workspace-lifecycle).
+
+## Bundle
+
+```json
+{
+  "version": 1,
+  "defaultProfile": "base",
+  "profiles": {
+    "base": {
+      "checks": ["bun"],
+      "secrets": [],
+      "values": ["APP_MODE"],
+      "notes": "Local development"
+    },
+    "preview": {
+      "checks": ["github"],
+      "secrets": ["GH_TOKEN"],
+      "values": ["PREVIEW_REPOSITORY"]
+    }
+  },
+  "checks": {
+    "bun": { "kind": "built-in", "check": "bun" },
+    "github": {
+      "kind": "command",
+      "label": "GitHub CLI version",
+      "command": "gh --version"
+    }
+  },
+  "values": {
+    "APP_MODE": { "default": "development", "description": "Application mode" },
+    "PREVIEW_REPOSITORY": { "description": "Existing GitHub owner/repository to adopt" }
+  }
+}
+```
+
+| Field | Rules |
+| --- | --- |
+| `version` | Must be `1` |
+| `defaultProfile` | Existing profile name; defaults to `base` |
+| `profiles` | Must include `base` |
+| Profile `checks`, `secrets`, `values` | Arrays; default to empty. A selected profile adds to `base` rather than replacing it |
+| Profile `notes` | Optional text, up to 2,000 characters |
+| `checks` | Named built-in or command checks. Referenced check IDs must exist |
+| `values` | Named non-secret values with optional `default` and `description`. Referenced value names must exist |
+
+Profile and check IDs start with a lowercase letter and contain lowercase letters, digits, or hyphens, up to 64 characters. Value and secret names start with an uppercase letter and contain uppercase letters, digits, or underscores, up to 128 characters. Unknown fields reject.
+
+Built-in checks are `bun`, `gh`, `git`, `postgres`, `vercel`, and `node`. They run `bun --version`, `gh --version`, `git --version`, `pg_isready`, `vercel whoami`, and `node --version`, respectively. A check name is not an installer. Optional built-in `requirement` text does not enforce a version constraint by itself. Use a command check when you need an exact assertion.
+
+A command check requires `kind: "command"`, a `label`, and a `command`. Checks need execution approval too; read their commands before running them.
+
+Values resolve in this order, from lowest to highest priority: bundle default, global value, project value, workspace value. Only values declared by the effective profile enter the lifecycle environment. Profiles name project secrets; they do not store secret material in the bundle.
+
+## Script paths and ordering
+
+```text
+.gitspace/
+  bundle.json
+  lifecycle/
+    cloud/
+      provision/
+        10-adopt.preview.sh
+      destroy/
+        10-delete.preview.sh
+    machine/
+      prepare/
+        10-tools.sh
+    workspace/
+      materialize/
+        10-dependencies.sh
+        20-config.preview.sh
+      dematerialize/
+        10-flush.sh
+```
+
+The tree above shows allowed locations, not required files. Omit phases that have no work. In particular, do not add a destroy script for a shared resource just to fill out the tree.
+
+Each filename has a numeric prefix, a hyphen, a lowercase name made of letters, digits, or hyphens, an optional `.profile` suffix, and `.sh`. Examples: `10-tools.sh`, `20-config.preview.sh`.
+
+Unqualified scripts and `.base.sh` scripts run for every profile. A script suffixed with another declared profile runs only when that profile is selected. Unknown profiles and malformed filenames reject. Scripts sort by filename, not by numeric value: use equal-width prefixes such as `10`, `20`, and `30`. Selected-profile scripts add to base scripts; they do not override a base file.
+
+| Phase | Successful-run identity |
+| --- | --- |
+| `cloud/provision` | Durable workspace identity. A prior success skips later requests unless the user explicitly requests a rerun, even if the profile or script hashes changed |
+| `machine/prepare` | Account, project, verified machine, profile, and approved script hashes |
+| `workspace/materialize` | Workspace checkout generation and phase. Profile or script changes do not repeat a completed phase without an explicit rerun |
+| `workspace/dematerialize` | Workspace checkout generation and phase. Profile or script changes do not repeat a completed phase without an explicit rerun |
+| `cloud/destroy` | Explicit destruction request for the durable workspace's recorded resources |
+
+`checks` is a run phase for bundle checks, not a script directory. `setup`, `select`, `remove`, and `pre` are not executable lifecycle aliases.
+
+## Approvals and execution
+
+Permission to edit configuration is separate from permission to execute it. The Environment controls approve the SHA-256 hash of a check command or script content at project or workspace scope. A changed command or script needs approval of its new content. Project approval takes precedence when both scopes contain the same hash.
+
+The runtime checks approvals at execution and runs the approved script bytes. It does not treat approval as permission to execute a later file at the same path.
+
+Approval permits repository code to run as the machine user. It is not a sandbox. Hashing an entry script does not pin every helper, package install hook, executable, or remote payload it invokes. Review those dependencies and their effects too. A restricted input environment and log redaction do not prevent a trusted script from reading other files or sending data over the network.
+
+Initial setup is an explicit `cloud/provision` request, including for a local-only repository with no provisioning script. It enables the workspace's automatic local-preparation policy, then runs approved `machine/prepare`, `checks`, `cloud/provision`, and `workspace/materialize` in that order. A failure stops later phases. An empty provisioning phase still records successful local-only setup. Creating or selecting a workspace does not enable the policy.
+
+Automatic preparation on a fresh arrival requires both the policy and a successful provision record. It runs approved `machine/prepare`, `checks`, and `workspace/materialize`, without reprovisioning. Unapproved content waits for the human. A preparation failure leaves the workspace accessible; inspect the local phase results even when provisioning succeeded.
+
+Cloud claims prevent concurrent effects. A failed or abandoned cloud attempt requires explicit recovery or rerun authorization. Do not turn an uncertain result into a retry loop. The recovery control only abandons a claim when the recorded machine has been confirmed destroyed. Offline or asleep is not proof that its process stopped. Recovery does not execute a new run.
+
+Approval, recovery, and `cloud/destroy` require a human browser action. The workspace agent cannot grant itself content approval or invoke destruction.
+
+### Retire after the original machine is gone
+
+Choose an authorized online runner in the browser and explicitly request `cloud/destroy`. If that runner does not hold the workspace checkout, it restores the latest durable checkpoint into an isolated directory and restores the canonical repository origin. The full checkout supplies repository helpers; the destroy entry script comes from the approved cloud execution record.
+
+The runner performs approved `machine/prepare` and checks before destruction. It does not open or claim the workspace's original placement, run materialization, or provision replacement resources. Without a durable checkpoint, it reports the missing prerequisite and executes nothing. If the runner already holds the current checkout, it uses that checkout instead.
+
+Cloud bindings and logs remain available after retirement. GitSpace removes the isolated restore only after it knows the process stopped and the result finished. A failed or uncertain destruction does not erase the records needed to recover.
+
+## Script inputs and outputs
+
+The runner supplies these identity variables as strings:
+
+| Variable | Value |
+| --- | --- |
+| `GITSPACE_PROJECT_ID` | Durable project ID |
+| `GITSPACE_WORKSPACE_ID` | Durable workspace ID; use this for resource identity rather than a machine path |
+| `GITSPACE_MACHINE_ID` | Authorized runner machine ID |
+| `GITSPACE_WORKSPACE_GENERATION` | Current checkout generation |
+| `GITSPACE_ENVIRONMENT_PROFILE` | Selected profile name |
+| `GITSPACE_MACHINE_TOOLS` | Private, stable machine tool directory; install persistent tools here rather than temporary `HOME` |
+
+`GITSPACE_LIFECYCLE_BINDINGS` contains a JSON object of durable, non-secret resource bindings. Parse it as JSON; do not source or evaluate it as shell code.
+
+`GITSPACE_LIFECYCLE_OUTPUT` is a file path supplied by the runner. Write JSON in this form:
+
+```json
+{
+  "bindings": {
+    "previewRepository": "example/preview-workspace",
+    "previewRepositoryId": "123456789"
+  }
+}
+```
+
+The runner observes the output file during execution and merges valid partial bindings into the cloud ledger. It also reads them when the phase finishes, including failure. Write each resource ID as soon as the provider returns it, using a temporary file and an atomic rename over the output path. The input bindings are a phase-start snapshot; later scripts in the same phase must also read the shared output file to see new IDs. Preserve its earlier bindings when adding another resource. Keep the output file within 64 KiB. A resource created before its ID reaches the cloud still needs provider-side reconciliation after interruption.
+
+Bindings are strings for resource IDs, URLs, or `secret:NAME` references. They are not a credential store. A secret reference names a secret; it does not turn the binding into the secret's plaintext value. Use the existing project secret store and declare required secret names in the profile.
+
+Binding names start with a letter and contain letters, digits, underscores, periods, or hyphens, up to 128 characters. Values can contain up to 4,096 characters. Credential-like binding names require a `secret:NAME` reference. Private keys and URLs with embedded credentials reject. These checks catch common mistakes, not every possible secret.
+
+Scripts run on an authorized machine runner, not as arbitrary shell inside a Cloudflare Worker. Each run gets a clean temporary `HOME` and a runner-controlled `PATH`, not the machine daemon's ambient credential environment. `GITSPACE_MACHINE_TOOLS` is a stable, private machine directory; its `bin` directory leads the lifecycle `PATH`. Have `machine/prepare` install persistent tools there, not into temporary `HOME`. The selected profile supplies the allowed project secrets and values. Do not depend on the user's usual dotfiles or home-directory tool configuration.
+
+Lifecycle `.sh` files execute their approved bytes with `/bin/bash`, without login startup files. Command checks use `/bin/sh`. The working directory is the checkout root; `$0` is the script's path in that checkout. Use `$0`, not `BASH_SOURCE`, when locating helpers beside an entry script.
+
+A cloud provisioning success remains separate from individual run attempts. A failed explicit rerun retains the last successful provision and any partial bindings. Closing or evicting the local checkout does not remove those records.
+
+## Agent API and durable logs
+
+Use JavaScript code-mode `eval`. The `space.environment` namespace uses the same environment API as the browser:
+
+```javascript
+const current = await space.environment.get();
+const schema = await space.describe({ method: 'environment.runPhase' });
+```
+
+Discover each method's schema before sending arguments. Available methods are `get`, `setProfile`, `putValue`, `deleteValue`, `runChecks`, `runPhase`, and `runLog`. Workspace targets default to the current workspace where optional. Use the discovered `workspaceId` field for another workspace in the same project, not a session ID.
+
+An authorized phase request names one of the five canonical phases and can set `rerun: true` only for an explicitly authorized rerun. The agent surface excludes `cloud/destroy`. Do not use raw shell to bypass this restriction or a missing content approval.
+
+The environment view includes `lifecycle`, the cloud-owned record of profile, values, approvals, automatic policy, execution definitions and content, bindings, last successful provision, destruction time, and phase runs. Saved script content lets the human inspect what a closed workspace would execute; do not embed secrets in it. Run status is `running`, `succeeded`, `failed`, or `abandoned`. The run stores its machine, profile, hashes, timestamps, results, and output preview.
+
+Full run output lives in durable cloud log chunks, not in an artifact file inside the checkout. The wire `environment.runLog` request accepts `spaceId`, `runId`, and nullable `offset`. It returns `output` and `nextOffset`; a null next offset means the log has ended. The agent wrapper uses its discovered workspace-target schema. Read subsequent chunks rather than treating the preview as the full log.
+
+Closed or offline workspaces retain cloud lifecycle records and logs. Running scripts still requires an authorized online machine. These are account-private records, not public artifact links. The runner redacts known resolved secret values and the cloud applies further sanitization, but redaction is not a guarantee that arbitrary output contains no secrets. Never print credentials or enable shell tracing around them.
+
+The runner also keeps a private, sanitized local spool until upload finishes. After an interrupted run is confirmed stopped, recovery uploads that spool before recording failure. Recovered output is labeled and may repeat lines that reached the cloud before the interruption.
+
+## Local-only example
+
+This example assumes the machine already has Bun and the repository has a committed Bun lockfile. It does not create cloud resources or install machine-wide tools.
+
+`.gitspace/bundle.json`:
+
+```json
+{
+  "version": 1,
+  "defaultProfile": "base",
+  "profiles": { "base": { "checks": ["bun"] } },
+  "checks": { "bun": { "kind": "built-in", "check": "bun" } }
+}
+```
+
+`.gitspace/lifecycle/workspace/materialize/10-dependencies.sh`:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+bun install --frozen-lockfile
+```
+
+Review package install hooks before approving this script. If the repository needs a specific Bun version, add an explicit version assertion or an approved `machine/prepare` script based on its existing CI installation method.
+
+Approve the check and script content, then explicitly initialize setup. No empty cloud hook is needed. On a fresh arrival, materialization recreates ignored dependencies. Close and move do not need a destroy script.
+
+## Cloud example: adopt an existing GitHub repository
+
+Use this for a repository that already exists and may be shared. It performs a real provider lookup, records stable identity, and refuses an identity mismatch. It does not create, replace, or delete the repository.
+
+Start from the local-only bundle above. Add a `preview` profile that names `GH_TOKEN` in `secrets` and `PREVIEW_REPOSITORY` in `values`. Add the value definition under top-level `values`:
+
+```json
+{
+  "version": 1,
+  "defaultProfile": "preview",
+  "profiles": {
+    "base": { "checks": ["bun"] },
+    "preview": {
+      "secrets": ["GH_TOKEN"],
+      "values": ["PREVIEW_REPOSITORY"]
+    }
+  },
+  "checks": { "bun": { "kind": "built-in", "check": "bun" } },
+  "values": {
+    "PREVIEW_REPOSITORY": { "description": "Existing GitHub owner/repository" }
+  }
+}
+```
+
+Set `PREVIEW_REPOSITORY` to the existing `owner/repository` in Environment. Store a GitHub token with access to read that repository as the project secret `GH_TOKEN`. Do not paste the token into a value, binding, or script.
+
+`.gitspace/lifecycle/cloud/provision/10-adopt.preview.sh`:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+bun - <<'JS'
+import { rename } from 'node:fs/promises';
+const output = process.env.GITSPACE_LIFECYCLE_OUTPUT;
+const token = process.env.GH_TOKEN;
+if (!token || !output) throw new Error('Run through the approved lifecycle runner');
+const previous = await Bun.file(output).json();
+const bindings = {
+  ...JSON.parse(process.env.GITSPACE_LIFECYCLE_BINDINGS || '{}'),
+  ...previous.bindings,
+};
+const configured = process.env.PREVIEW_REPOSITORY;
+const repository = bindings.previewRepository || configured;
+if (!repository || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) {
+  throw new Error('Set PREVIEW_REPOSITORY to an existing owner/repository');
+}
+if (bindings.previewRepository && configured && configured !== repository) {
+  throw new Error('Configured repository differs from the recorded binding');
+}
+const response = await fetch(`https://api.github.com/repos/${repository}`, {
+  headers: {
+    Accept: 'application/vnd.github+json',
+    Authorization: `Bearer ${token}`,
+    'X-GitHub-Api-Version': '2022-11-28',
+    'User-Agent': 'gitspace-workspace-lifecycle',
+  },
+});
+if (!response.ok) throw new Error(`Repository lookup failed: HTTP ${response.status}`);
+const resource = await response.json();
+if (!Number.isSafeInteger(resource.id) || typeof resource.full_name !== 'string') {
+  throw new Error('GitHub returned an invalid repository identity');
+}
+if (bindings.previewRepositoryId && bindings.previewRepositoryId !== String(resource.id)) {
+  throw new Error('Repository identity changed; inspect before recovery');
+}
+const pendingOutput = `${output}.${crypto.randomUUID()}.tmp`;
+await Bun.write(pendingOutput, JSON.stringify({
+  bindings: {
+    ...bindings,
+    previewRepository: resource.full_name,
+    previewRepositoryId: String(resource.id),
+  },
+}));
+await rename(pendingOutput, output);
+console.log(`Adopted repository ${resource.full_name} (${resource.id})`);
+JS
+```
+
+Keep the local materialization script from the previous example. Select `preview`, approve the final script content, and separately authorize setup. Later materialization reads the saved bindings rather than adopting or creating resources again.
+
+There is intentionally no `cloud/destroy` script here. Adoption records a resource reference, not permission to delete a shared resource. For a dedicated workspace-owned resource, write a separately reviewed destroy script that verifies the provider resource ID against the recorded binding and deletes only that resource. Never search by a broad name prefix and delete every match. Retirement requires explicit human authorization even when the destroy script already has content approval.

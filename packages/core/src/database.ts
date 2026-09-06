@@ -7,7 +7,7 @@ import { drizzle, type BunSQLiteDatabase } from 'drizzle-orm/bun-sqlite';
 import { migrate } from 'drizzle-orm/bun-sqlite/migrator';
 import { Result, TaggedError, type Result as ResultType } from 'better-result';
 import { z } from 'zod';
-import { dependencyCycle } from '@gitspace/protocol';
+import { dependencyCycle, type LifecycleRunPhase } from '@gitspace/protocol';
 import { emptyRelations, normalizeRelations, type WorkspaceRelations, type WorkspaceRelationsInput } from './relations.js';
 import {
   artifactScopes,
@@ -73,8 +73,8 @@ export interface EnvironmentRun {
   id: string;
   projectId: string;
   spaceId: string;
-  phase: 'checks' | 'setup' | 'select' | 'remove';
-  status: 'running' | 'succeeded' | 'failed';
+  phase: LifecycleRunPhase;
+  status: 'running' | 'succeeded' | 'failed' | 'abandoned';
   terminalName: string | null;
   executionHashes: readonly string[];
   results: ReadonlyArray<{ id: string; exitCode: number; output: string }>;

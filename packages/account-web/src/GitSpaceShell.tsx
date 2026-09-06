@@ -177,7 +177,8 @@ export interface GitSpaceShellProps {
   crons?: ProjectCronsPageProps;
   skills?: SkillsPageProps;
   plugins?: PluginsPageProps;
-  renderInspector?: (onClose: () => void) => ReactNode;
+  renderInspector?: (onClose: () => void, initialView?: 'environment') => ReactNode;
+  renderEnvironmentStatus?: (onInspect: () => void) => ReactNode;
   /** Signed-in user shown in the sidebar footer. */
   user?: { name: string; handle?: string | null };
   /** Machine-local model provider auth state; drives the composer's not-connected notice. */
@@ -583,12 +584,13 @@ function TerminalResizeHandle({ height, onHeight }: { height: number; onHeight: 
 }
 
 // ── Shell ──
-export function GitSpaceShell({ project, projects, workspace, baseSpace, workspaces, mainAgent, turns, transport, artifacts, machines = [], onSend, sessionControls, onSetWorkspacePhase, onSetWorkspaceRelations, sendPending = false, sendError, onSelectWorkspace, onSelectProject, onCloseSpace, onReopenSpace, onArchiveWorkspace, onClaimWorkspace, claimMachines, homeMachineId, defaultMachineId, checkpoint, onMoveWorkspace, onCreateProject, onCreateWorkspace, onArchiveProject, onRestoreProject, onDeleteProject, onDeleteWorkspace, onOpenSettings, activeView, onNavigateView, terminals, secrets, crons, skills, plugins, renderInspector, user, providers, deployment, launchBanner }: GitSpaceShellProps) {
+export function GitSpaceShell({ project, projects, workspace, baseSpace, workspaces, mainAgent, turns, transport, artifacts, machines = [], onSend, sessionControls, onSetWorkspacePhase, onSetWorkspaceRelations, sendPending = false, sendError, onSelectWorkspace, onSelectProject, onCloseSpace, onReopenSpace, onArchiveWorkspace, onClaimWorkspace, claimMachines, homeMachineId, defaultMachineId, checkpoint, onMoveWorkspace, onCreateProject, onCreateWorkspace, onArchiveProject, onRestoreProject, onDeleteProject, onDeleteWorkspace, onOpenSettings, activeView, onNavigateView, terminals, secrets, crons, skills, plugins, renderInspector, renderEnvironmentStatus, user, providers, deployment, launchBanner }: GitSpaceShellProps) {
   const accountSidebar = useContext(AccountSidebarContext);
   // Archive restores from list rows still land on the home machine.
   const restoreHome = onClaimWorkspace ? (spaceId: string) => onClaimWorkspace(spaceId, null) : undefined;
   const [internalView, setInternalView] = useState<AppView>('agent');
   const [inspectorOpen, setInspectorOpen] = useState(false);
+  const [inspectorSection, setInspectorSection] = useState<'environment' | undefined>();
   const [inspectorWidth, setInspectorWidth] = useState(() => {
     if (typeof window === 'undefined') return 440;
     const stored = Number(window.localStorage.getItem('gitspace:inspector-width'));
@@ -675,6 +677,7 @@ export function GitSpaceShell({ project, projects, workspace, baseSpace, workspa
         </nav>
         <div className="flex items-center gap-1">
           {view === 'agent' ? <>
+            {renderEnvironmentStatus?.(() => { setInspectorSection('environment'); setInspectorOpen(true); })}
             <span className="flex items-center gap-2 pr-2 text-caption text-muted-foreground"><StatusDot color={workspace.status.primaryColor} pulse={running || recovering} /><span className="max-md:hidden">{recovering ? 'Recovering agent…' : workspaceStatusLabel(workspace)}</span></span>
             {workspace.kind === 'workspace' && onSetWorkspacePhase ? <Select size="compact" value={workspace.phase} onValueChange={(value) => void onSetWorkspacePhase(workspace.id, value as WorkspaceView['phase'])}><SelectTrigger variant="borderless" aria-label="Workspace phase" />{selectOptions(PHASES.map((phase) => ({ value: phase, label: PHASE_LABEL[phase] })))}</Select> : null}
             {!workspace.closedAt && workspace.holder.kind === 'released' && onReopenSpace ? <Button variant="secondary" size="compact" onClick={() => void onReopenSpace(workspace.id)} leadingIcon={glyph(RefreshCcw01)}>Reopen</Button> : null}
@@ -694,7 +697,7 @@ export function GitSpaceShell({ project, projects, workspace, baseSpace, workspa
                 <AgentCanvas workspace={workspace} mainAgent={mainAgent} sessionControls={sessionControls} turns={turns} transport={transport} onSend={onSend} pending={sendPending || closePendingSpaceId === workspace.id} error={sendError} onReopenSpace={onReopenSpace} onClaimWorkspace={onClaimWorkspace} claimMachines={claimMachines} homeMachineId={homeMachineId} defaultMachineId={defaultMachineId} checkpoint={checkpoint} providers={providers} skills={skills?.skills} banner={launchBanner} />
               </div>
               {inspectorOpen && renderInspector ? <InspectorResizeHandle width={inspectorWidth} onWidth={updateInspectorWidth} /> : null}
-              {inspectorOpen && renderInspector ? <aside className="inspector-pane flex min-w-0 flex-col" aria-label="Inspector">{renderInspector(() => setInspectorOpen(false))}</aside> : null}
+              {inspectorOpen && renderInspector ? <aside className="inspector-pane flex min-w-0 flex-col" aria-label="Inspector">{renderInspector(() => { setInspectorOpen(false); setInspectorSection(undefined); }, inspectorSection)}</aside> : null}
             </div>
             {terminalOpen && terminals ? <><TerminalResizeHandle height={terminalHeight} onHeight={setTerminalHeight} /><section className="min-h-0 min-w-0 overflow-hidden"><WorkspaceTerminals {...terminals} onClose={() => setTerminalOpen(false)} /></section></> : null}
           </div>

@@ -15,6 +15,8 @@ import type {
   ProjectLifecycle,
   ProjectOperationState,
 } from '@gitspace/protocol';
+import { ProjectEnvironmentStore, type LifecycleActor } from './project-environment.js';
+import { LifecycleMutationSchema, type LifecycleMutation, type LifecycleState, type LifecycleRunLog } from '@gitspace/protocol';
 
 interface ProjectIndexRow extends Record<string, SqlStorageValue> {
   project_id: string;
@@ -289,7 +291,8 @@ export class UserProjectIndexDO extends DurableObject<Env> {
         CREATE TABLE IF NOT EXISTS workspace_projects(
           workspace_id TEXT PRIMARY KEY,
           project_id TEXT NOT NULL
-        )
+        );
+        CREATE TABLE IF NOT EXISTS environment_values(name TEXT PRIMARY KEY,value TEXT NOT NULL);
       `);
       for (const column of ['role TEXT', 'source_json TEXT']) {
         try { this.ctx.storage.sql.exec(`ALTER TABLE user_projects ADD COLUMN ${column}`); }
@@ -409,12 +412,26 @@ export class UserProjectIndexDO extends DurableObject<Env> {
     ).toArray()[0];
     return row?.project_id ?? null;
   }
+
+  getEnvironmentValues(): Record<string, string> {
+    return Object.fromEntries(this.ctx.storage.sql.exec<{ name: string; value: string }>('SELECT name,value FROM environment_values').toArray().map((row) => [row.name, row.value]));
+  }
+
+  setEnvironmentValue(name: string, value: string | null): Record<string, string> {
+    LifecycleMutationSchema.parse({ op: 'value', scope: 'global', name, value });
+    if (value === null) this.ctx.storage.sql.exec('DELETE FROM environment_values WHERE name=?', name);
+    else this.ctx.storage.sql.exec('INSERT INTO environment_values(name,value) VALUES(?,?) ON CONFLICT(name) DO UPDATE SET value=excluded.value', name, value);
+    return this.getEnvironmentValues();
+  }
 }
 
 export class ProjectAuthorityDO extends DurableObject<Env> {
+  private readonly environment: ProjectEnvironmentStore;
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
+    this.environment = new ProjectEnvironmentStore(ctx.storage);
     ctx.blockConcurrencyWhile(async () => {
+      this.environment.initialize();
       this.ctx.storage.sql.exec(`
         CREATE TABLE IF NOT EXISTS project(
           project_id TEXT PRIMARY KEY,
@@ -606,6 +623,26 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
     return row ? projectSummary(row) : null;
   }
 
+
+  private requireLifecycleWorkspace(spaceId: string): CloudProjectSummary {
+    const project = this.requireProject();
+    const workspace = this.ctx.storage.sql.exec<WorkspaceRow>('SELECT * FROM workspaces WHERE workspace_id=?', spaceId).toArray()[0];
+    if (!workspace || workspace.project_id !== project.id) throw new Error('Lifecycle workspace does not belong to this project');
+    return project;
+  }
+
+  getLifecycleState(spaceId: string): LifecycleState {
+    return this.environment.get(this.requireLifecycleWorkspace(spaceId).id, spaceId);
+  }
+
+  mutateLifecycleState(spaceId: string, input: LifecycleMutation, actor: LifecycleActor): LifecycleState {
+    return this.environment.mutate(this.requireLifecycleWorkspace(spaceId).id, spaceId, input, actor);
+  }
+
+  getLifecycleRunLog(spaceId: string, runId: string, offset = 0): LifecycleRunLog {
+    this.requireLifecycleWorkspace(spaceId);
+    return this.environment.runLog(spaceId, runId, offset);
+  }
   setProjectLifecycle(expectedRevision: number, lifecycle: ProjectLifecycle): CloudProjectSummary {
     const current = this.requireProject();
     if (current.role === GITSPACE_SOURCE_PROJECT_ROLE && lifecycle !== 'active' && lifecycle !== 'cloud-only') {
@@ -685,6 +722,7 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
     if (current.revision !== expectedRevision) {
       throw new Error(`Workspace revision conflict: expected ${expectedRevision}, actual ${current.revision}`);
     }
+    this.environment.assertRetired(current.project_id, workspaceId);
     this.ctx.storage.sql.exec('DELETE FROM canonical_sessions WHERE workspace_id=?', workspaceId);
     this.ctx.storage.sql.exec('DELETE FROM artifact_scopes WHERE workspace_id=?', workspaceId);
     this.ctx.storage.sql.exec('UPDATE artifact_shares SET revoked_at=? WHERE workspace_id=? AND revoked_at IS NULL', new Date().toISOString(), workspaceId);
@@ -699,6 +737,7 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
     if (project.revision !== expectedRevision) {
       throw new Error(`Project revision conflict: expected ${expectedRevision}, actual ${project.revision}`);
     }
+    for (const workspace of this.listWorkspaces()) this.environment.assertRetired(project.id, workspace.id);
     this.ctx.storage.sql.exec('DELETE FROM canonical_sessions');
     this.ctx.storage.sql.exec('DELETE FROM artifact_scopes');
     this.ctx.storage.sql.exec('UPDATE artifact_shares SET revoked_at=? WHERE revoked_at IS NULL', new Date().toISOString());

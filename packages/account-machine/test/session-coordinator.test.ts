@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'bun:test';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { scheduler } from 'node:timers/promises';
@@ -197,6 +197,57 @@ function artifactKey(): Uint8Array {
 }
 
 describe('MachineSessionCoordinator', () => {
+  it('restores into a fresh repository, preserves unexpected leftovers and installs canonical origin', async () => {
+    const { root, database, artifacts } = fixture();
+    const checkout = join(root, 'fresh');
+    mkdirSync(checkout);
+    writeFileSync(join(checkout, 'unsaved.txt'), 'must survive');
+    const created = database.createProject({ id: 'fresh-project', name: 'Fresh', repositoryPath: checkout, repositoryReference: 'https://github.com/example/canonical.git' });
+    if (created.status === 'error') throw created.error;
+    const coordinator = new MachineSessionCoordinator(database, artifacts, new FakeOmpRuntime(), 'machine-a', join(root, 'runtime'));
+    await coordinator.preparePortableSpaceRepository('fresh-project');
+    expect(existsSync(join(checkout, 'unsaved.txt'))).toBeFalse();
+    const retained = readdirSync(root).find((name) => name.startsWith('fresh.retained-'));
+    expect(retained).toBeDefined();
+    expect(readFileSync(join(root, retained!, 'unsaved.txt'), 'utf8')).toBe('must survive');
+    const origin = Bun.spawnSync(['git', 'remote', 'get-url', 'origin'], { cwd: checkout });
+    expect(origin.exitCode).toBe(0);
+    expect(origin.stdout.toString().trim()).toBe('https://github.com/example/canonical.git');
+    database.close();
+  });
+
+  it('detaches linked worktrees before deleting their shared base without losing staged or local changes', async () => {
+    const { root, database, artifacts } = fixture();
+    const base = join(root, 'repo');
+    const child = join(root, 'linked-child');
+    const git = (cwd: string, args: string[]) => {
+      const result = Bun.spawnSync(['git', ...args], { cwd, env: { ...process.env, GIT_AUTHOR_NAME: 'Test', GIT_AUTHOR_EMAIL: 'test@example.invalid', GIT_COMMITTER_NAME: 'Test', GIT_COMMITTER_EMAIL: 'test@example.invalid' } });
+      if (result.exitCode !== 0) throw new Error(result.stderr.toString());
+      return result.stdout.toString().trim();
+    };
+    git(base, ['init', '-b', 'main']);
+    writeFileSync(join(base, 'tracked.txt'), 'base');
+    git(base, ['add', 'tracked.txt']);
+    git(base, ['commit', '-m', 'initial']);
+    git(base, ['worktree', 'add', '-b', 'linked', child]);
+    const created = database.createWorkspace({ id: 'linked-child', projectId: 'project-a', name: 'Linked', branch: 'linked', rootPath: child });
+    if (created.status === 'error') throw created.error;
+    writeFileSync(join(child, 'tracked.txt'), 'staged');
+    git(child, ['add', 'tracked.txt']);
+    writeFileSync(join(child, 'tracked.txt'), 'unstaged');
+    writeFileSync(join(child, 'local.txt'), 'local');
+    const before = git(child, ['status', '--porcelain=v1']);
+    const coordinator = new MachineSessionCoordinator(database, artifacts, new FakeOmpRuntime(), 'machine-a', join(root, 'runtime'));
+    await coordinator.deletePortableSpaceLocal('project-a');
+    expect(existsSync(base)).toBeFalse();
+    expect(lstatSync(join(child, '.git')).isDirectory()).toBeTrue();
+    expect(git(child, ['status', '--porcelain=v1'])).toBe(before);
+    expect(git(child, ['show', ':tracked.txt'])).toBe('staged');
+    expect(readFileSync(join(child, 'tracked.txt'), 'utf8')).toBe('unstaged');
+    expect(readFileSync(join(child, 'local.txt'), 'utf8')).toBe('local');
+    database.close();
+  });
+
   it('publishes normal-tool artifact writes without waiting for the prompt to end', async () => {
     const { root, database, artifacts } = fixture();
     database.possessWorkspace('workspace-a', 'machine-a');

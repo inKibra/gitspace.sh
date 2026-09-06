@@ -1,5 +1,8 @@
-import { isAbsolute, relative, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { mkdtemp, open, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import type { GitSpaceDatabase } from '@gitspace/core';
+import type { LifecycleRunPhase } from '@gitspace/protocol';
 import {
   daemonClientForProject,
   type DaemonBrokerClient,
@@ -38,6 +41,8 @@ export interface WorkspaceLifecyclePlanStep {
   id: string;
   kind: 'check' | 'script';
   command: string;
+  /** Frozen approved bytes, never re-open a mutable script path during execution. */
+  content?: string;
 }
 
 export interface WorkspaceLifecyclePlanResult {
@@ -163,18 +168,25 @@ export class WorkspaceHubTerminalCoordinator {
 
   async runLifecyclePlan(
     spaceId: string,
-    phase: 'checks' | 'setup' | 'select' | 'remove',
+    phase: LifecycleRunPhase,
     steps: readonly WorkspaceLifecyclePlanStep[],
     env: Record<string, string>,
+    options: { runId?: string; redactNames?: readonly string[]; onOutput?: (output: string) => Promise<void>; directory?: string } = {},
   ): Promise<WorkspaceLifecyclePlanResult> {
-    const scope = await this.scope(spaceId);
-    const name = `gitspace-life-${spaceId.slice(0, 10)}-${phase}-${crypto.randomUUID().slice(0, 8)}`;
+    if (options.directory && phase.startsWith('workspace/')) throw new Error('Workspace hooks cannot run in a detached recovery checkout');
+    const scope = options.directory
+      ? { space: { rootPath: options.directory }, client: await this.clientForProject(options.directory) }
+      : await this.scope(spaceId);
+    const name = `life-${options.runId ?? crypto.randomUUID()}`;
     const marker = (kind: 'START' | 'END', id: string) => `__GITSPACE_${kind}__${Buffer.from(id).toString('base64url')}`;
     const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
     const plan = steps.flatMap((step) => {
       const start = marker('START', step.id);
       const end = marker('END', step.id);
-      const command = step.kind === 'script' ? `sh ${quote(step.command)}` : `sh -lc ${quote(step.command)}`;
+      if (step.kind === 'script' && step.content === undefined) throw new Error('Lifecycle scripts require frozen approved content');
+      const command = step.kind === 'script'
+        ? `/bin/bash -c ${quote(step.content!)} ${quote(step.command)}`
+        : `/bin/sh -c ${quote(step.command)}`;
       return [
         `printf '%s\\n' ${quote(start)}`,
         command,
@@ -183,10 +195,39 @@ export class WorkspaceHubTerminalCoordinator {
         'if [ \"$__gitspace_status\" -ne 0 ]; then exit \"$__gitspace_status\"; fi',
       ];
     }).join('\n');
+    const ownSpool = !env.GITSPACE_LIFECYCLE_OUTPUT;
+    const spoolRoot = ownSpool ? await mkdtemp(join(tmpdir(), 'gitspace-lifecycle-log-')) : dirname(env.GITSPACE_LIFECYCLE_OUTPUT!);
+    const spoolPath = join(spoolRoot, 'runner.log');
+    const spool = await open(spoolPath, 'wx+', 0o600);
+    // Hub itself inherits machine credentials. The child receives only the declared environment;
+    // redact before writing to Hub so terminal scrollback is safe as well as the cloud ledger.
+    const wrapper = `
+      import { openSync, writeFileSync, closeSync } from 'node:fs';
+      const log = openSync(${JSON.stringify(spoolPath)}, 'a');
+      const emit = text => { writeFileSync(log, text); process.stdout.write(text); };
+      const names = ${JSON.stringify(Object.keys(env))};
+      const childEnv = Object.fromEntries(names.map(name => [name, process.env[name] ?? '']));
+      const secrets = ${JSON.stringify(options.redactNames ?? [])}.map(name => childEnv[name]).filter(Boolean).sort((a, b) => b.length - a.length);
+      const retained = Math.max(256, ...secrets.map(value => value.length));
+      const clean = value => secrets.reduce((text, secret) => text.split(secret).join('[redacted]'), value)
+        .replace(/(https?:\\/\\/)[^\\s/@]+:[^\\s/@]+@/g, '$1[redacted]@');
+      const child = Bun.spawn(['/bin/sh', '-c', ${JSON.stringify(`exec 2>&1\n${plan}`)}], {cwd: ${JSON.stringify(scope.space.rootPath)}, env: childEnv, stdin: 'ignore', stdout: 'pipe', stderr: 'pipe'});
+      const pump = async stream => {
+        const decoder = new TextDecoder(); let pending = '';
+        for await (const bytes of stream) {
+          pending = clean(pending + decoder.decode(bytes, {stream: true}));
+          if (pending.length > retained) { emit(pending.slice(0, -retained)); pending = pending.slice(-retained); }
+        }
+        emit(clean(pending + decoder.decode()));
+      };
+      const [, , code] = await Promise.all([pump(child.stdout), pump(child.stderr), child.exited]);
+      closeSync(log);
+      process.exit(code);
+    `;
     const spec: DaemonSpec = {
       name,
-      application: 'sh',
-      args: ['-c', plan],
+      application: process.execPath,
+      args: ['-e', wrapper],
       env,
       cwd: scope.space.rootPath,
       pty: false,
@@ -194,30 +235,94 @@ export class WorkspaceHubTerminalCoordinator {
       persist: false,
       detached: false,
     };
-    const started = await scope.client.request({ op: 'start', spec, owner: `${ownerFor(spaceId, 'lifecycle')}:${phase}` });
-    if (started.op !== 'start') throw new Error(`OMP Hub returned an invalid lifecycle start response for ${phase}`);
-    const waited = await scope.client.request({ op: 'wait', name, for: 'exit', timeoutMs: 3_600_000 });
-    if (waited.op !== 'wait' || waited.timedOut) throw new Error(`Lifecycle ${phase} did not finish within one hour`);
-    const logs = await scope.client.request({ op: 'logs', name, lines: 10_000, head: true, follow: false, renderTerminalRows: false, timeoutMs: 30_000 });
-    if (logs.op !== 'logs') throw new Error(`OMP Hub returned an invalid lifecycle logs response for ${phase}`);
-    const output = logs.terminalText ?? logs.text;
-    const results: Array<{ id: string; exitCode: number; output: string }> = [];
-    for (const step of steps) {
-      const start = `${marker('START', step.id)}\n`;
-      const startAt = output.indexOf(start);
-      if (startAt < 0) continue;
-      const bodyAt = startAt + start.length;
-      const end = `${marker('END', step.id)}:`;
-      const endAt = output.indexOf(end, bodyAt);
-      if (endAt < 0) {
-        results.push({ id: step.id, exitCode: waited.daemon.exitCode ?? 1, output: output.slice(bodyAt).trimEnd() });
-        break;
+    let finished = false;
+    try {
+      const started = await scope.client.request({ op: 'start', spec, owner: `${ownerFor(spaceId, 'lifecycle')}:${phase}` });
+      if (started.op !== 'start') throw new Error(`OMP Hub returned an invalid lifecycle start response for ${phase}`);
+      const deadline = Date.now() + 3_600_000;
+      let output = '';
+      let daemon = started.daemon;
+      let position = 0;
+      const buffer = Buffer.allocUnsafe(65_536);
+      const decoder = new TextDecoder();
+      const stepPreviewLimit = Math.min(16_000, Math.floor(64_000 / Math.max(1, steps.length)));
+      const results: Array<{ id: string; exitCode: number; output: string }> = [];
+      const known = new Set(steps.map((step) => step.id));
+      const markerCarry = Math.max(256, ...steps.map((step) => marker('END', step.id).length + 20));
+      let carry = '';
+      let active: typeof results[number] | undefined;
+      const appendStep = (text: string) => { if (active) active.output = (active.output + text).slice(-stepPreviewLimit); };
+      const consume = (chunk: string, final = false) => {
+        output = (output + chunk).slice(-16_000);
+        carry += chunk;
+        const pattern = /__GITSPACE_(START|END)__([A-Za-z0-9_-]+)(?::(-?\d+))?\n/gu;
+        let consumed = 0;
+        for (const match of carry.matchAll(pattern)) {
+          const id = Buffer.from(match[2]!, 'base64url').toString();
+          if (!known.has(id)) continue;
+          appendStep(carry.slice(consumed, match.index));
+          if (match[1] === 'START') {
+            active = { id, exitCode: 1, output: '' };
+            results.push(active);
+          } else if (active?.id === id) {
+            active.exitCode = Number(match[3]);
+            active.output = active.output.trimEnd();
+            active = undefined;
+          }
+          consumed = match.index + match[0].length;
+        }
+        carry = carry.slice(consumed);
+        const available = final ? carry.length : Math.max(0, carry.length - markerCarry);
+        appendStep(carry.slice(0, available));
+        carry = carry.slice(available);
+      };
+      for (;;) {
+        const waited = await scope.client.request({ op: 'wait', name, for: 'exit', timeoutMs: 1_000 });
+        if (waited.op !== 'wait') throw new Error(`OMP Hub returned an invalid lifecycle wait response for ${phase}`);
+        daemon = waited.daemon;
+        finished = !waited.timedOut;
+        // Hub cursors signal changes, not byte pagination. Read our complete sanitized spool.
+        for (;;) {
+          const { bytesRead } = await spool.read(buffer, 0, buffer.length, position);
+          if (bytesRead === 0) break;
+          position += bytesRead;
+          const chunk = decoder.decode(buffer.subarray(0, bytesRead), { stream: true });
+          consume(chunk);
+          if (chunk) await options.onOutput?.(chunk);
+        }
+        if (finished) {
+          const final = decoder.decode();
+          consume(final, true);
+          if (final) await options.onOutput?.(final);
+          if (active) { active.exitCode = daemon.exitCode ?? 1; active.output = active.output.trimEnd(); }
+          break;
+        }
+        if (Date.now() >= deadline) {
+          const stopped = await scope.client.request({ op: 'stop', name, timeoutMs: 5_000 });
+          if (stopped.op !== 'stop') throw new Error('Unable to confirm lifecycle timeout cancellation');
+          throw new Error(`Lifecycle ${phase} was stopped after one hour`);
+        }
       }
-      const statusEnd = output.indexOf('\n', endAt);
-      const exitCode = Number(output.slice(endAt + end.length, statusEnd < 0 ? undefined : statusEnd));
-      results.push({ id: step.id, exitCode, output: output.slice(bodyAt, endAt).trimEnd() });
+      return { terminalName: name, exitCode: daemon.exitCode ?? 1, output, steps: results };
+    } finally {
+      await spool.close();
+      if (ownSpool && finished) await rm(spoolRoot, { recursive: true, force: true });
     }
-    return { terminalName: name, exitCode: waited.daemon.exitCode ?? 1, output, steps: results };
+  }
+
+  async cancelLifecycleRun(spaceId: string, terminalName: string, directory?: string): Promise<void> {
+    const space = this.database.getSpace(spaceId);
+    if (!space) throw new WorkspaceHubSpaceUnavailable(spaceId);
+    const client = await this.clientForProject(directory ?? space.rootPath);
+    const described = await client.request({ op: 'describe', name: terminalName });
+    if (described.op !== 'describe' || !described.daemon.owner?.startsWith(`${ownerFor(spaceId, 'lifecycle')}:`)) {
+      throw new Error('Cannot prove lifecycle runner ownership; explicit recovery is required');
+    }
+    if (described.daemon.state === 'exited' || described.daemon.state === 'failed') return;
+    const stopped = await client.request({ op: 'stop', name: terminalName, timeoutMs: 5_000 });
+    if (stopped.op !== 'stop') throw new Error('Unable to confirm lifecycle runner stopped');
+    const verified = await client.request({ op: 'describe', name: terminalName });
+    if (verified.op !== 'describe' || (verified.daemon.state !== 'exited' && verified.daemon.state !== 'failed')) throw new Error('Lifecycle runner is still active');
   }
 
   async stopOwned(spaceId: string): Promise<void> {

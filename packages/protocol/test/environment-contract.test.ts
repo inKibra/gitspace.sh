@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import {
   EnvironmentBundleSchema,
+  LifecycleBindingsSchema,
   classifyLifecycleScript,
   executionHash,
   resolveEnvironmentProfile,
@@ -84,5 +85,17 @@ describe('approval and value resolution', () => {
     expect(first).toBe(await executionHash({ kind: 'check', command: 'gh auth status' }));
     expect(first).not.toBe(await executionHash({ kind: 'script', command: 'gh auth status' }));
     expect(first).not.toBe(await executionHash({ kind: 'check', command: 'gh auth status ' }));
+  });
+});
+
+describe('lifecycle bindings', () => {
+  it('persists resource identifiers and references while rejecting plaintext credential channels', () => {
+    expect(LifecycleBindingsSchema.parse({ database: 'db-123', endpoint: 'https://db.example.test', apiToken: 'secret:DATABASE_TOKEN' })).toEqual({
+      database: 'db-123', endpoint: 'https://db.example.test', apiToken: 'secret:DATABASE_TOKEN',
+    });
+    expect(LifecycleBindingsSchema.safeParse({ password: 'plaintext' }).success).toBe(false);
+    expect(LifecycleBindingsSchema.safeParse({ database: 'postgres://user:password@db.example.test/app' }).success).toBe(false);
+    expect(LifecycleBindingsSchema.safeParse({ endpoint: 'https://example.test/?token=plaintext' }).success).toBe(false);
+    expect(LifecycleBindingsSchema.safeParse({ resource: `ghp_${'a'.repeat(30)}` }).success).toBe(false);
   });
 });

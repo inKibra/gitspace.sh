@@ -10,10 +10,15 @@ export class CoordinatorPortableSpaceRuntime implements PortableSpaceRuntime {
   private restoredAgent?: CoordinatorPortableAgentSnapshot;
   private restoredArtifacts?: CoordinatorPortableArtifactSnapshot;
 
-  constructor(private readonly coordinator: MachineSessionCoordinator, private readonly spaceId: string) {}
+  constructor(
+    private readonly coordinator: MachineSessionCoordinator,
+    private readonly spaceId: string,
+    private readonly beforeCheckpoint?: () => Promise<void>,
+  ) {}
 
   async quiesce(): Promise<void> {
     await this.coordinator.quiesceSpace(this.spaceId);
+    await this.beforeCheckpoint?.();
   }
 
   async resumeAfterFailedClose(): Promise<void> {

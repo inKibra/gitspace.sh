@@ -136,8 +136,8 @@ export class PortableSpaceLifecycle {
     const operation = await this.authority.beginClose(identity);
     let quiesced = false;
     try {
-      await runtime.quiesce();
       quiesced = true;
+      await runtime.quiesce();
       const repository = await createGitIntermediateCheckpoint({
         repositoryPath: space.repositoryPath,
         spaceId: space.spaceId,
@@ -186,8 +186,8 @@ export class PortableSpaceLifecycle {
       return manifest;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      await this.authority.abortClose({ ...identity, revision: operation.revision, message });
-      if (quiesced) await runtime.resumeAfterFailedClose();
+      try { await this.authority.abortClose({ ...identity, revision: operation.revision, message }); }
+      finally { if (quiesced) await runtime.resumeAfterFailedClose(); }
       throw error;
     }
   }

@@ -21,6 +21,8 @@ Run the main agent inside the workspace on the machine that owns the checkout. S
 
 Structured agent questions appear as native interactions. Answer the decision directly without searching terminal output for a prompt.
 
+For repository setup, use the built-in `workspace-lifecycle` skill. It inspects the repository and CI, proposes the lifecycle split, and asks permission before editing. Execution needs separate human approval of the final content. Agents use `space.environment` for authorized runs and logs; they cannot grant content approval, recover uncertain runs, or destroy cloud resources. See [Workspace lifecycle](/workspace-lifecycle).
+
 ## Manage workspaces from an agent
 
 Agents use the `space` namespace in JavaScript code-mode `eval`, not a CLI. `space.list()` discovers workspaces in the current project, including closed workspaces and their goals. `space.get({ workspaceId })` reads a specific workspace without opening it.

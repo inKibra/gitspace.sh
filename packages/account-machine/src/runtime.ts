@@ -1,4 +1,5 @@
 import { join } from 'node:path';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import {
   GitSpaceDatabase,
   GitSpaceHandlers,
@@ -29,7 +30,8 @@ import {
 } from './index.js';
 import { installDefaultGitSpaceSkills } from './default-skills.js';
 import { WorkspaceServiceManager } from './workspace-services.js';
-import { credentialProtocolBase64 } from '@gitspace/protocol';
+import { WorkspaceEnvironmentManager } from './workspace-environment.js';
+import { credentialProtocolBase64, spaceCheckpointManifestSchema } from '@gitspace/protocol';
 import { appendFileSync, existsSync } from 'node:fs';
 import { postmortem } from '@oh-my-pi/pi-utils';
 import { CloudProjectEventWriter } from './cloud-project-events.js';
@@ -42,6 +44,7 @@ import { ReleaseFollower } from './release-follower.js';
 import { ompGenerationSelectionSchema } from './omp-runtime.js';
 import { CloudArtifactObjectStore } from './cloud-artifact-object-store.js';
 import { createSpaceWorkspaceControls } from './space-workspace-controls.js';
+import { restoreGitIntermediateCheckpoint } from './git-checkpoint.js';
 import type { SpaceWorkspaceControls } from './space-eval-sdk.js';
 
 function requiredEnvironment(name: string): string {
@@ -178,6 +181,7 @@ export async function startMachineRuntime() {
       manage: async (method, workspace, input) => (await workspaceControls.promise).manage(method, workspace, input),
       instructionsChanged: async (projectId, spaceId) => (await workspaceControls.promise).instructionsChanged(projectId, spaceId),
       refreshArtifacts: async (projectId, spaceId) => (await workspaceControls.promise).refreshArtifacts(projectId, spaceId),
+      environment: async (method, projectId, spaceId, input) => (await workspaceControls.promise).environment(method, projectId, spaceId, input),
     }),
     onError: (error) => console.error('[gitspace-omp]', error),
   });
@@ -290,6 +294,50 @@ export async function startMachineRuntime() {
   const encryptedCheckpointBlobs = new EncryptedCheckpointBlobStore(checkpointBlobs, encryptionKey);
   const lifecycle = new PortableSpaceLifecycle(authority, encryptedCheckpointBlobs, walgit);
   const closedSpaceTranscripts = new ClosedSpaceTranscriptReader(authority, encryptedCheckpointBlobs, (bytes) => omp.checkpointTranscript(bytes));
+  const terminals = new WorkspaceHubTerminalCoordinator(database, machineId);
+  const environments = new WorkspaceEnvironmentManager(database, authority, terminals, authority, {
+    machineId,
+    stateRoot: join(environmentRoot, 'lifecycle-runs'),
+    prepareRunner: async (spaceId, phase) => {
+      const definition = await authority.getSpaceDefinition(spaceId);
+      if (!definition) throw new Error(`Space ${spaceId} does not exist`);
+      const placement = await authority.getSpace(definition.projectId, spaceId);
+      const local = database.getSpace(spaceId);
+      if (placement?.state === 'open' && placement.machineId === machineId && local && existsSync(join(local.rootPath, '.git'))) return undefined;
+      if (phase !== 'cloud/destroy') {
+        if (placement?.state !== 'closed') throw new Error('Setup requires the workspace to be available on this runner');
+        await spaces.open(spaceId, placement.generation, { skipPreparation: true });
+        return undefined;
+      }
+      // Retirement must not steal a live placement or run provisioning/materialization.
+      // Restore the complete saved repository: destroy hooks commonly source helper files.
+      if (!placement?.manifestKey || !placement.manifestHash) throw new Error('Retirement requires a durable repository checkpoint; none exists. Recover the original checkout and save a checkpoint first.');
+      const bytes = await encryptedCheckpointBlobs.get(placement.manifestKey, placement.manifestHash as `sha256:${string}`);
+      if (!bytes) throw new Error('Retirement repository checkpoint is unavailable; restore the saved checkpoint before running destruction');
+      const manifest = spaceCheckpointManifestSchema.parse(JSON.parse(new TextDecoder().decode(bytes)));
+      if (manifest.projectId !== definition.projectId || manifest.spaceId !== spaceId || manifest.revision !== placement.checkpointRevision) throw new Error('Retirement checkpoint does not match the durable workspace identity');
+      await spaces.materialize(spaceId);
+      const parent = join(environmentRoot, 'lifecycle-retirement');
+      await mkdir(parent, { recursive: true, mode: 0o700 });
+      const directory = await mkdtemp(join(parent, 'retire-'));
+      try {
+        const initialized = Bun.spawn(['git', 'init', '-b', manifest.repository.branch], { cwd: directory, stdout: 'ignore', stderr: 'pipe' });
+        const [exitCode, error] = await Promise.all([initialized.exited, new Response(initialized.stderr).text()]);
+        if (exitCode !== 0) throw new Error(`Unable to initialize retirement checkout: ${error}`);
+        await walgit.fetchCheckpoint({ binding: gitBinding(definition.projectId), repositoryPath: directory, checkpointRef: manifest.repository.checkpointRef });
+        await restoreGitIntermediateCheckpoint({ repositoryPath: directory, branch: manifest.repository.branch, checkpoint: manifest.repository });
+        if (definition.repositoryReference) {
+          const origin = Bun.spawn(['git', 'remote', 'add', 'origin', definition.repositoryReference], { cwd: directory, stdout: 'ignore', stderr: 'pipe' });
+          const [originExit, originError] = await Promise.all([origin.exited, new Response(origin.stderr).text()]);
+          if (originExit !== 0) throw new Error(`Unable to restore canonical origin: ${originError}`);
+        }
+        return directory;
+      } catch (error) {
+        await rm(directory, { recursive: true, force: true });
+        throw error;
+      }
+    },
+  });
   const spaces = new MachinePortableSpaceController(
     database,
     sessions,
@@ -298,7 +346,14 @@ export async function startMachineRuntime() {
     gitBinding,
     (spaceId) => authority.getSpaceDefinition(spaceId),
     managedSpaceRoot,
+    undefined,
+    {
+      prepare: (spaceId) => environments.prepare(spaceId),
+      dematerialize: (spaceId) => environments.dematerialize(spaceId),
+      drain: (spaceId) => terminals.stopOwned(spaceId),
+    },
   );
+  await environments.recoverInterruptedRuns();
   const recoverableSpaces = new Set<string>();
   const restoredSpaces = new Set<string>();
   for (const project of database.listProjects()) {
@@ -397,10 +452,8 @@ export async function startMachineRuntime() {
   const projectLifecycle = new ProjectLifecycleManager(database, authority, machineId, managedSpaceRoot, checkpointSpace, (repositoryUrl) => gitIdentity.gitEnvironment(repositoryUrl));
 
   const handlers = new GitSpaceHandlers(database, artifacts, projectEventWriter);
-  const terminals = new WorkspaceHubTerminalCoordinator(database, machineId);
   workspaceControls.resolve(createSpaceWorkspaceControls({
-    database, authority, projects: projectLifecycle, spaces, sessions, machineId,
-    stopTerminals: (spaceId) => terminals.stopOwned(spaceId),
+    database, authority, projects: projectLifecycle, spaces, sessions, machineId, environments,
   }));
   const serviceManager = new WorkspaceServiceManager(
     database,
@@ -451,6 +504,7 @@ export async function startMachineRuntime() {
     machineId,
     spaces,
     terminals,
+    environments,
     serviceManager,
     secrets: authority,
     mcp,

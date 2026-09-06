@@ -2,6 +2,7 @@ import { env, SELF } from 'cloudflare:test';
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { createDeviceBinding, createSignedRpcFetch, credentialProtocolBase64, deriveArtifactScopeKey, encryptArtifactBytes, signDeviceInvite, signRpcRequest, spaceCheckpointManifestKey, spaceOmpCheckpointKey, type DeviceCapability, type DeviceScope } from '@gitspace/protocol';
 import type { ProviderView } from '@gitspace/protocol';
+import { executionHash } from '@gitspace/protocol';
 import { gitspaceContract } from '@gitspace/protocol/rpc-contract';
 import { createRoutedTransport } from '@gitspace/protocol/routed-transport';
 import { createBrowserClient } from 'result-rpc/client';
@@ -32,6 +33,44 @@ async function account(capabilities: DeviceCapability[] = ['rpc.read', 'rpc.writ
 }
 
 const single = (path: string, input: unknown = {}) => ({ v: 1, path, input });
+
+describe('cloud lifecycle inspection and human authorization', () => {
+  it('reads closed workspace history without a machine and grants only reviewed browser content', async () => {
+    const fixture = await account();
+    const projectId = 'lifecycle-project';
+    const spaceId = 'lifecycle-space';
+    const authority = env.PROJECT_AUTHORITY.getByName(`${fixture.userId}:${projectId}`);
+    await authority.bootstrap({ id: projectId, name: 'Lifecycle', repositoryReference: null, baseBranch: 'main', createdBy: 'machine' });
+    await authority.putWorkspace({ id: spaceId, projectId, kind: 'worktree', name: 'Lifecycle', branch: 'feature', phase: null, sourceKind: 'branch', sourceRef: 'feature', lifecycle: 'active', goalId: null, expectedRevision: 0 });
+    await env.USER_PROJECTS.getByName(fixture.userId).putWorkspaceLocation(spaceId, projectId);
+    const content = 'echo provision';
+    const hash = await executionHash({ kind: 'script', command: content });
+    const actor = { machineId: 'removed-machine', actorId: 'removed-machine', human: false };
+    const configure = { op: 'configure' as const, bundleJson: JSON.stringify({ version: 1, profiles: { base: {} } }), executions: [{ id: 'provision', kind: 'script' as const, label: 'Provision', command: 'bash provision.sh', content, hash, phase: 'cloud/provision' as const, fileName: '10-provision.sh' }] };
+    await authority.mutateLifecycleState(spaceId, configure, actor);
+    const approved = await SELF.fetch(fixture.request(single('environment.approve', { spaceId, executionHash: hash, scope: 'workspace' })));
+    expect(approved.status, await approved.clone().text()).toBe(200);
+    expect(parse(await approved.text())).toMatchObject({ status: 'ok', value: { executions: [{ content, approval: 'workspace' }] } });
+    await authority.mutateLifecycleState(spaceId, { op: 'policy', automatic: true }, actor);
+    const running = await authority.mutateLifecycleState(spaceId, { op: 'claim', runId: 'provision', phase: 'cloud/provision', profile: 'base', executionHashes: [hash], generation: null, rerun: false }, actor);
+    await authority.mutateLifecycleState(spaceId, { op: 'finish', runId: 'provision', token: running.claim!.token!, status: 'failed', exitCode: 1, results: [], output: 'cloud error', bindings: { database: 'partial-db' } }, actor);
+    const state = await SELF.fetch(fixture.request(single('environment.get', { spaceId })));
+    expect(state.status, await state.clone().text()).toBe(200);
+    expect(parse(await state.text())).toMatchObject({ status: 'ok', value: { lifecycle: { bindings: { database: 'partial-db' }, runs: [{ status: 'failed', output: 'cloud error' }] } } });
+    expect(await env.FLEET_CATALOG.getByName(fixture.userId).listMachines()).toEqual([]);
+    const log = await SELF.fetch(fixture.request(single('environment.runLog', { spaceId, runId: 'provision', offset: null })));
+    expect(parse(await log.text())).toMatchObject({ status: 'ok', value: { output: 'cloud error', nextOffset: null } });
+    await authority.mutateLifecycleState(spaceId, { ...configure, executions: [{ ...configure.executions[0]!, content: 'different displayed content' }] }, actor);
+    const forged = await SELF.fetch(fixture.request(single('environment.approve', { spaceId, executionHash: hash, scope: 'project' })));
+    expect(parse(await forged.text())).toMatchObject({ status: 'error' });
+  });
+
+  it('rejects API clients granting approval even when they hold account write access', async () => {
+    const fixture = await account(['rpc.read', 'rpc.write'], 'client');
+    const result = await SELF.fetch(fixture.request(single('environment.approve', { spaceId: 'any-space', executionHash: `sha256:${'a'.repeat(64)}`, scope: 'workspace' })));
+    expect(parse(await result.text())).toMatchObject({ status: 'error' });
+  });
+});
 
 describe('account cloud RPC without machines', () => {
   it('loads settings, an empty fleet, and the mandatory cloud-only source project without a machine', async () => {

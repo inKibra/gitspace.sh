@@ -1,5 +1,5 @@
 import { authPolicyFor, authProviders } from '@oh-my-pi/pi-catalog/compat/auth';
-import { ACCOUNT_CLOUD_RPC_PATHS, ACCOUNT_RUNTIME_RPC_PATHS, inspectorRpcSpaceId, isInspectorRpcPath } from '@gitspace/protocol/account-rpc';
+import { ACCOUNT_CLOUD_RPC_PATHS, ACCOUNT_RUNTIME_RPC_PATHS, spaceCloudRpcSpaceId, isSpaceCloudRpcPath } from '@gitspace/protocol/account-rpc';
 import {
   credentialProtocolBase64, requiredCapability, RPC_DEVICE_HEADER, verifyDeviceGrantRecord,
   type DeviceCapability, type GitSpaceRpcContext, type ProviderView,
@@ -28,6 +28,7 @@ import type { HandleRegistryDO, UserSettingsDO } from './user-settings.js';
 import type { SpaceAuthorityDO } from './space-authority.js';
 import { inspectorCloudProcedures } from './account-inspector-rpc.js';
 import { ensureAccountGitSpaceProject } from './gitspace-project.js';
+import { environmentCloudProcedures } from './account-environment-rpc.js';
 
 const MAX_REQUEST_BYTES = 512 * 1024;
 const MAX_BATCH_ITEMS = 32;
@@ -87,6 +88,12 @@ function accountRouter(env: Env, userId: string, deviceId: string) {
     const rootKey = credentialProtocolBase64.decode(root);
     const now = Date.now();
     return records.map((record) => ({ record, verified: verifyDeviceGrantRecord(record, rootKey, now, (id) => byId[id] ?? null) }));
+  };
+  const requireHuman = async () => {
+    const device = (await deviceRecords()).find(({ record }) => record.binding.deviceId === deviceId)?.verified;
+    if (!device || device.kind !== 'browser' || device.scope.kind !== 'user' || !device.capabilities.includes('rpc.write')) {
+      throw new Error('Lifecycle approval and recovery require an authenticated human browser');
+    }
   };
   // Streaming responses outlive the original signature. Recheck canonical revocation,
   // the issuer chain, expiry and the account before disclosing each new snapshot.
@@ -317,6 +324,7 @@ function accountRouter(env: Env, userId: string, deviceId: string) {
     devices: { list: devices, revoke }, providers: { list: listProviders, apiKey: { set: setApiKey }, logout },
     mcp: { composio: { setup: { get: getComposio, set: setComposio, delete: deleteComposio } } },
     inspector: inspectorCloudProcedures(env, userId),
+    environment: environmentCloudProcedures(env, userId, deviceId, requireHuman),
   });
 }
 
@@ -334,11 +342,11 @@ export async function handleAccountCloudRpc(request: Request, env: Env, userId: 
   let items: z.infer<typeof envelopeSchema>;
   try { items = envelopeSchema.parse(parse(new TextDecoder().decode(body))); }
   catch { return transportError(400, 'RPC_ENVELOPE_INVALID', 'RPC request envelope is invalid'); }
-  const inspector = items.filter((item) => isInspectorRpcPath(item.path));
-  if (inspector.length > 0) {
-    if (inspector.length !== items.length) return transportError(400, 'RPC_MIXED_AUTHORITY_BATCH', 'Inspector and other operations require separate signed batches');
-    const spaceId = inspectorRpcSpaceId(inspector[0]!.input);
-    if (inspector.some((item) => inspectorRpcSpaceId(item.input) !== spaceId)) return transportError(400, 'RPC_MIXED_AUTHORITY_BATCH', 'Inspector workspaces require separate signed batches');
+  const spaceReads = items.filter((item) => isSpaceCloudRpcPath(item.path));
+  if (spaceReads.length > 0) {
+    if (spaceReads.length !== items.length) return transportError(400, 'RPC_MIXED_AUTHORITY_BATCH', 'Workspace reads and other operations require separate signed batches');
+    const spaceId = spaceCloudRpcSpaceId(spaceReads[0]!.input);
+    if (spaceReads.some((item) => spaceCloudRpcSpaceId(item.input) !== spaceId)) return transportError(400, 'RPC_MIXED_AUTHORITY_BATCH', 'Workspace reads require separate signed batches');
     if (spaceId) {
       const placement = await (env.SPACE_AUTHORITY as DurableObjectNamespace<SpaceAuthorityDO>).getByName(`${userId}:${spaceId}`).get();
       if (placement?.state === 'open' && placement.machineId) {
@@ -349,7 +357,7 @@ export async function handleAccountCloudRpc(request: Request, env: Env, userId: 
       }
     }
   }
-  const cloud = items.filter((item) => Object.hasOwn(ACCOUNT_CLOUD_RPC_PATHS, item.path) || isInspectorRpcPath(item.path));
+  const cloud = items.filter((item) => Object.hasOwn(ACCOUNT_CLOUD_RPC_PATHS, item.path) || isSpaceCloudRpcPath(item.path));
   if (cloud.length === 0) return null;
   if (cloud.length !== items.length) return transportError(400, 'RPC_MIXED_AUTHORITY_BATCH', 'Cloud and machine operations must use separate signed batches');
   if (items.some((item) => Object.hasOwn(ACCOUNT_RUNTIME_RPC_PATHS, item.path))) {

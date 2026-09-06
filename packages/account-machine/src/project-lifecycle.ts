@@ -396,19 +396,21 @@ export class ProjectLifecycleManager {
       if (!base) throw new Error(`Project ${input.projectId} has no base repository`);
       let sourceRef = input.sourceRef || project.baseBranch;
       if (input.sourceKind === 'base') sourceRef = project.baseBranch;
-      if (sourceWorkspace) sourceRef = sourceWorkspace.branch;
+      if (sourceWorkspace) sourceRef = 'HEAD';
       if (input.sourceKind === 'pull-request') {
         const environment = project.repositoryReference ? await this.gitEnvironment?.(project.repositoryReference) ?? {} : {};
         await runGit(['fetch', 'origin', `pull/${input.sourceRef}/head`], base.rootPath, environment);
         sourceRef = 'FETCH_HEAD';
       }
+      const sourceRoot = sourceWorkspace?.rootPath ?? base.rootPath;
+      const sourceCommit = await runGit(['rev-parse', '--verify', `${sourceRef}^{commit}`], sourceRoot);
+      await runGit(['check-ref-format', '--branch', input.branch]);
       await mkdir(join(this.managedRoot, input.projectId), { recursive: true });
-      try {
-        await runGit(['worktree', 'add', '-b', input.branch, rootPath, sourceRef], base.rootPath);
-      } catch (error) {
-        if (input.sourceKind !== 'branch' || input.branch !== sourceRef) throw error;
-        await runGit(['worktree', 'add', rootPath, input.branch], base.rootPath);
-      }
+      // A portable checkout must not depend on another space's .git directory.
+      await runGit(['clone', '--no-hardlinks', '--no-checkout', '--', sourceRoot, rootPath]);
+      await runGit(['checkout', '-B', input.branch, sourceCommit, '--'], rootPath);
+      if (project.repositoryReference) await runGit(['remote', 'set-url', 'origin', project.repositoryReference], rootPath);
+      else await runGit(['remote', 'remove', 'origin'], rootPath);
       const created = this.database.createWorkspace({ id: workspaceId, projectId: input.projectId, name: input.name, branch: input.branch, phase: input.phase, rootPath });
       if (created.status === 'error') throw created.error;
       if (dependencies.length > 0) {
@@ -436,7 +438,7 @@ export class ProjectLifecycleManager {
       operation = await this.succeeded(input.projectId, operation);
       return { workspace: this.database.getWorkspace(workspaceId)!, operation };
     } catch (error) {
-      await rm(rootPath, { recursive: true, force: true });
+      // A failed checkpoint may contain the only copy of work. Preserve the checkout for recovery.
       await this.failed(input.projectId, operation, error);
       await this.authority.putProjectWorkspace(input.projectId, {
         id: definition.id,
@@ -475,15 +477,17 @@ export class ProjectLifecycleManager {
     return this.runLifecycleOperation(projectId, workspaceId, 'workspace.delete', ['Remove worktree', 'Delete workspace authority'], async () => {
       const workspace = this.database.getWorkspace(workspaceId);
       if (workspace && workspace.placementState !== 'closed') throw new Error('Workspace must be archived before permanent deletion');
+      const definition = (await this.authority.listProjectWorkspaces(projectId)).find((candidate) => candidate.id === workspaceId);
+      if (!definition) return false;
+      // The cloud enforces completed resource retirement before any local data can be removed.
+      if (!await this.authority.removeProjectWorkspace(projectId, workspaceId, expectedRevision ?? definition.revision)) return false;
       if (workspace) {
         const base = this.database.getBaseSpace(projectId);
         if (base) await runGit(['worktree', 'remove', '--force', workspace.rootPath], base.rootPath).catch(() => undefined);
         await rm(workspace.rootPath, { recursive: true, force: true });
         this.database.deleteWorkspace(workspaceId);
       }
-      const definition = (await this.authority.listProjectWorkspaces(projectId)).find((candidate) => candidate.id === workspaceId);
-      if (!definition) return false;
-      return this.authority.removeProjectWorkspace(projectId, workspaceId, expectedRevision ?? definition.revision);
+      return true;
     });
   }
 

@@ -43,6 +43,7 @@ export class FleetCatalogDO extends DurableObject<Env> {
           definition_json TEXT NOT NULL,
           updated_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS destroyed_machines(machine_id TEXT PRIMARY KEY,destroyed_at TEXT NOT NULL);
       `);
     });
   }
@@ -80,6 +81,7 @@ export class FleetCatalogDO extends DurableObject<Env> {
       VALUES (?, ?, ?)
       ON CONFLICT(machine_id) DO UPDATE SET definition_json = excluded.definition_json, updated_at = excluded.updated_at
     `, input.id, JSON.stringify(input), new Date().toISOString());
+    this.ctx.storage.sql.exec('DELETE FROM destroyed_machines WHERE machine_id=?', input.id);
     this.ctx.waitUntil(this.broadcast({ type: 'upsert', machineId: input.id, machine: input }));
     return input;
   }
@@ -92,11 +94,17 @@ export class FleetCatalogDO extends DurableObject<Env> {
     return normalizeMachine(value);
   }
 
-  removeMachine(machineId: string): boolean {
+  removeMachine(machineId: string, destroyed = false): boolean {
     validateId(machineId);
+    if (destroyed) this.ctx.storage.sql.exec('INSERT OR REPLACE INTO destroyed_machines(machine_id,destroyed_at) VALUES(?,?)', machineId, new Date().toISOString());
     const removed = this.ctx.storage.sql.exec('DELETE FROM fleet_machines WHERE machine_id = ?', machineId).rowsWritten > 0;
     if (removed) this.ctx.waitUntil(this.broadcast({ type: 'remove', machineId, machine: null }));
     return removed;
+  }
+
+  wasMachineDestroyed(machineId: string): boolean {
+    validateId(machineId);
+    return this.ctx.storage.sql.exec('SELECT machine_id FROM destroyed_machines WHERE machine_id=?', machineId).toArray().length > 0;
   }
 
   listMachines(): FleetMachineDefinition[] {

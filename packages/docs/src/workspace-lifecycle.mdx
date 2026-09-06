@@ -1,0 +1,90 @@
+---
+$schema: https://holocron.so/frontmatter.json
+title: Workspace lifecycle
+description: Configure repository setup without tying your workspace to one machine.
+icon: workflow
+---
+
+# Workspace lifecycle
+
+Use the normal workspace agent to configure repository setup. The built-in `workspace-lifecycle` skill inspects your repository, proposes changes, and separates permission to edit from permission to execute.
+
+Selecting a project or workspace does not run setup. Creating a workspace does not provision cloud resources.
+
+## Configure a repository
+
+1. Open a workspace on an online machine. Its agent needs a configured model provider.
+2. Ask: **Use the workspace-lifecycle skill to inspect this repository and propose its lifecycle configuration. Do not edit or execute yet.**
+3. Review the proposal. It should name the files to change, required tools, profiles, secret names, existing resource IDs, costs, and any cloud effects.
+4. Approve the repository edits. The agent can now write the agreed configuration and check its syntax. This does not authorize installs, repository checks, provisioning, or teardown.
+5. Review the final diff and the Environment panel. Choose the profile and provide non-secret values. Put credentials in the project's secret store, not the repository or lifecycle bindings.
+6. Approve the exact check and script content in Environment. Give separate authorization to execute setup, then use the Environment setup action or ask the agent to use the shared environment API.
+7. Inspect the recorded run and its logs. If it fails, keep the workspace open and repair the failing step. Do not assume failure means no resource was created.
+
+The skill ships through the existing Skills system and defaults to project and workspace agents. Account skill settings can disable it or change its assignment. There is no separate setup agent.
+
+Content approval allows repository code to run as the machine user. It is not a sandbox. Review helper scripts and package install hooks as well as lifecycle entry scripts. Neither content hashes nor log redaction protect against all behavior of code you authorize.
+
+## Split work by what survives
+
+| Phase | Put this work here | Do not put this work here |
+| --- | --- | --- |
+| `cloud/provision` | Create or adopt resources owned by the durable workspace | Dependency installation in the current checkout |
+| `machine/prepare` | Prepare tools needed on this machine | Workspace-specific generated files |
+| `workspace/materialize` | Install checkout dependencies and rebuild local configuration | Creating a second cloud stack on each arrival |
+| `workspace/dematerialize` | Flush local state and release local leases before leaving | Deleting remote databases, buckets, or deployments |
+| `cloud/destroy` | Delete recorded workspace-owned resources after explicit retirement authorization | Cleanup on selection, close, or move |
+
+Keep long-running services in `.gitspace/services.json` and run them through GitSpace service controls. Lifecycle scripts should finish, not leave unmanaged background processes.
+
+Explicit setup enables the workspace's automatic local-preparation policy. It runs machine preparation, checks, provisioning, and materialization in order, stopping on failure. Later arrivals can run approved local preparation only after provisioning has succeeded. Changed or unapproved content waits for approval. A successful cloud provision belongs to the workspace identity, not a checkout. Moving or editing a script does not automatically provision it again.
+
+## Close, move, and retire
+
+**Close** saves a checkpoint and releases the managed checkout. **Move** saves and removes the source checkout, then restores the same durable workspace on another machine. Neither action authorizes remote destruction. **Retirement** is a separate, explicit decision about cloud resources. Archiving is not retirement.
+
+If the original machine is gone, choose another authorized online runner in the browser for explicit retirement. It needs a durable workspace checkpoint to restore the repository helpers and run approved preparation, checks, and destruction. This does not reopen or reprovision the workspace. An unavailable checkpoint blocks execution, and failed destruction preserves the cloud records for recovery.
+
+Before local removal, GitSpace drains services and runs dematerialization. It must save the checkpoint successfully before deleting the managed checkout. A failed dematerialization or checkpoint blocks deletion, not your access to the workspace. Fix the failure while the local files remain available.
+
+A fresh arrival recreates local state. Do not rely on files left behind on the previous machine, even when you return to it.
+
+| State | What to expect after close or move |
+| --- | --- |
+| Git commits and branch; staged and unstaged tracked changes | Saved by a completed checkpoint |
+| Non-ignored untracked files | Saved by a completed checkpoint |
+| Agent conversation and GitSpace artifacts | Saved with supported workspace state |
+| Profile, values, approvals, script snapshots, bindings, provision identity, run records and logs | Kept in the cloud lifecycle ledger, outside the checkout |
+| Ignored `.env`, `node_modules`, caches, build output | Not checkpointed; recreate during materialization |
+| Machine packages and arbitrary home-directory files | Not workspace state; prepare again where needed |
+| Remote resources | Remain until you explicitly authorize their destruction |
+
+<Warning>
+A checkpoint is not a disk backup. If you keep a database only in an ignored local file, closing or moving the workspace can lose it. Use durable remote storage or an explicit export that the checkpoint captures. Never export secrets into tracked or non-ignored files.
+</Warning>
+
+After an unexpected interruption, the last completed checkpoint remains the recovery limit for local work. An interrupted cloud command may have taken effect without reporting success. Inspect the provider and recorded bindings before authorizing recovery. GitSpace must not retry an uncertain cloud effect in the background.
+
+## Recover a failed setup
+
+Open Environment and read the phase's recorded result and logs. Preparation failure does not gate the workspace page. Use the agent or terminal when its own prerequisites are available.
+
+For local failures, fix the configuration, review changed content, approve it, and run the needed phase. For cloud failures, first inspect the bindings and provider state. Scripts should record each resource ID as soon as the provider returns it, including when a later step fails.
+
+A failed explicit provision rerun does not erase the previous successful provision. Do not rerun just to make a status label green. Decide what the provider needs, then authorize that specific recovery.
+
+## Migrate old hooks
+
+Old `pre`, `setup`, `select`, and `remove` hooks need an explicit migration. They are not aliases for the new phases and must not silently execute.
+
+Ask the skill to inventory each command and propose a split:
+
+- Move cloud creation out of `setup` into `cloud/provision`.
+- Move machine tools into `machine/prepare`.
+- Move checkout-local work from `pre`, `setup`, or `select` into ordered `workspace/materialize` scripts.
+- Move only local flush or lease-release work into `workspace/dematerialize`.
+- Move remote deletion from `remove` into `cloud/destroy`. Never map it to dematerialization: that would delete resources on every move.
+
+Approve the edits, remove the obsolete hooks, and inspect the new script hashes. Adopt existing remote resource IDs before execution. A missing local cache is not evidence that a resource needs to be created again.
+
+See the [lifecycle reference](/lifecycle-reference) for filenames, profiles, script inputs and outputs, and complete local-only and cloud-adoption examples.

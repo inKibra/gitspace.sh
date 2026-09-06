@@ -173,11 +173,11 @@ interface GuideViewState {
 const guideViewCache = new Map<string, GuideViewState>();
 const RuntimeAvailability = createContext(true);
 const openWorkspaceFirst = 'Open this workspace on a machine first';
-const runtimeViews: Partial<Record<InspectorPermanentView, true>> = { overview: true, environment: true, subagents: true, files: true, services: true, usage: true };
+const runtimeViews: Partial<Record<InspectorPermanentView, true>> = { overview: true, subagents: true, files: true, services: true, usage: true };
 
 const permanentTabs: ReadonlyArray<{ id: InspectorPermanentView; label: string }> = [
   { id: 'overview', label: 'Overview' },
-  { id: 'environment', label: 'Setup' },
+  { id: 'environment', label: 'Environment' },
   { id: 'goal', label: 'Goal' },
   { id: 'subagents', label: 'Subagents' },
   { id: 'files', label: 'Files' },
@@ -820,6 +820,7 @@ function JournalSurface({ entries, artifactContent, artifactLoad, artifactErrors
 export function Inspector(props: InspectorProps) {
   const runtimeAvailable = props.runtimeAvailable ?? true;
   const [view, setView] = useState<ActiveView>(props.initialView ?? 'goal');
+  useEffect(() => { if (props.initialView) setView(props.initialView); }, [props.initialView]);
   const [documents, setDocuments] = useState<InspectorOpenDocument[]>([]);
   const [activeDocumentId, setActiveDocumentId] = useState<string | null>(null);
   const [fileModes, setFileModes] = useState<Record<string, RepositoryMode>>({});

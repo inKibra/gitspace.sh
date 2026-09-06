@@ -28,6 +28,10 @@ import {
   type GitIdentityDocument,
   type GitIdentityUpdate,
   type GoalRecordView,
+  type EnvironmentLifecycleAuthority,
+  type LifecycleMutation,
+  type LifecycleState,
+  type LifecycleRunLog,
   type InspectorIdentity,
   type InspectorOverview,
   type JournalEntryView,
@@ -214,7 +218,7 @@ export interface CloudSpaceRecord {
   updatedAt: string;
 }
 
-export class CloudSpaceCheckpointAuthority implements SpaceCheckpointAuthority {
+export class CloudSpaceCheckpointAuthority implements SpaceCheckpointAuthority, EnvironmentLifecycleAuthority {
   constructor(private readonly options: SignedCloudRequestOptions) {}
 
   provisionStorage(gitBucketName: string): Promise<unknown> {
@@ -256,6 +260,18 @@ export class CloudSpaceCheckpointAuthority implements SpaceCheckpointAuthority {
     return this.call('project.get', { projectId });
   }
 
+
+  getLifecycleState(projectId: string, spaceId: string): Promise<LifecycleState> {
+    return this.call('project.environment.get', { projectId, spaceId });
+  }
+
+  mutateLifecycleState(projectId: string, spaceId: string, input: LifecycleMutation): Promise<LifecycleState> {
+    return this.call('project.environment.mutate', { projectId, spaceId, input });
+  }
+
+  getLifecycleRunLog(projectId: string, spaceId: string, runId: string, offset = 0): Promise<LifecycleRunLog> {
+    return this.call('project.environment.runLog', { projectId, spaceId, runId, offset });
+  }
   activateSourceProject(projectId: string, expectedRevision: number, baseBranch: string): Promise<CloudProjectSummary> {
     return this.call('project.activateSource', { projectId, expectedRevision, baseBranch });
   }

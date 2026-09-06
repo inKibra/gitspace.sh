@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { cp, lstat, mkdir, readdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import {
   LocalArtifactResolver,
@@ -593,9 +593,10 @@ export class MachineSessionCoordinator {
   }
 
   async deletePortableSpaceLocal(spaceId: string): Promise<void> {
-    this.assertManagedSpaceRoot(spaceId);
+    await this.assertManagedSpaceRoot(spaceId);
     const space = this.database.getSpace(spaceId);
     if (!space) throw runtimeError('delete local space', new Error('Space does not exist'));
+    await this.detachDependentWorktrees(spaceId);
     const session = this.list(spaceId)[0];
     if (session && session.state !== 'closed') {
       const closed = await this.close(session.id);
@@ -610,12 +611,72 @@ export class MachineSessionCoordinator {
   }
 
   async preparePortableSpaceRepository(spaceId: string): Promise<void> {
+    await this.assertManagedSpaceRoot(spaceId);
     const space = this.database.getSpace(spaceId);
     if (!space) throw runtimeError('prepare space', new Error('Space does not exist'));
+    await this.detachDependentWorktrees(spaceId);
+    // Never reset or reuse leftovers: failed saves and interrupted restores may contain unique work.
+    // Keep them beside the fresh checkout so recovery is possible without exposing stale files to hooks.
+    const existing = await lstat(space.rootPath).catch((error: NodeJS.ErrnoException) => error.code === 'ENOENT' ? null : Promise.reject(error));
+    if (existing) {
+      if (existing.isSymbolicLink()) throw runtimeError('prepare space', new Error('Refusing a symlink checkout'));
+      await rename(space.rootPath, `${space.rootPath}.retained-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`);
+    }
     await mkdir(space.rootPath, { recursive: true });
-    const initialized = Bun.spawn(['git', 'init', '-b', space.branch], { cwd: space.rootPath, stdout: 'ignore', stderr: 'pipe' });
-    const [exitCode, stderr] = await Promise.all([initialized.exited, new Response(initialized.stderr).text()]);
-    if (exitCode !== 0) throw runtimeError('prepare space', new Error(stderr.trim() || `git init exited with ${exitCode}`));
+    await this.portableGit(space.rootPath, ['init', '-b', space.branch]);
+    const repositoryReference = this.database.getProject(space.projectId)?.repositoryReference;
+    if (repositoryReference) await this.portableGit(space.rootPath, ['remote', 'add', 'origin', repositoryReference]);
+  }
+
+  private async portableGit(cwd: string, args: string[]): Promise<string> {
+    const child = Bun.spawn(['git', ...args], { cwd, stdout: 'pipe', stderr: 'pipe' });
+    const [exitCode, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
+    if (exitCode !== 0) throw runtimeError('portable repository', new Error(stderr.trim() || `git ${args[0]} exited with ${exitCode}`));
+    return stdout.trim();
+  }
+
+  private async detachDependentWorktrees(spaceId: string): Promise<void> {
+    const space = this.database.getSpace(spaceId)!;
+    const metadata = await lstat(join(space.rootPath, '.git')).catch((error: NodeJS.ErrnoException) => error.code === 'ENOENT' ? null : Promise.reject(error));
+    if (!metadata?.isDirectory()) return;
+    const common = await realpath(join(space.rootPath, '.git'));
+    const basePath = await realpath(space.rootPath);
+    const registered = await Promise.all(this.database.listSpaces(space.projectId).map(async (candidate) => ({
+      space: candidate,
+      path: await realpath(candidate.rootPath).catch((error: NodeJS.ErrnoException) => error.code === 'ENOENT' ? null : Promise.reject(error)),
+    })));
+    const listing = await this.portableGit(space.rootPath, ['worktree', 'list', '--porcelain']);
+    for (const entry of listing.split('\n').filter((line) => line.startsWith('worktree '))) {
+      const checkout = entry.slice('worktree '.length);
+      const checkoutPath = await realpath(checkout).catch((error: NodeJS.ErrnoException) => error.code === 'ENOENT' ? null : Promise.reject(error));
+      if (!checkoutPath || checkoutPath === basePath) continue;
+      const child = registered.find((candidate) => candidate.path === checkoutPath)?.space;
+      const insideBase = relative(basePath, checkoutPath);
+      if (!child || (insideBase !== '..' && !insideBase.startsWith(`..${sep}`))) throw runtimeError('portable repository', new Error(`Dependent checkout ${checkout} must be moved outside the base into a managed space before removing the base`));
+      await this.assertManagedSpaceRoot(child.id);
+      const gitFile = join(checkout, '.git');
+      const gitDirectory = await this.portableGit(checkout, ['rev-parse', '--absolute-git-dir']);
+      const temporary = join(checkout, `.git-detach-${crypto.randomUUID()}`);
+      const retained = `${gitFile}.retained-${crypto.randomUUID()}`;
+      await cp(common, temporary, { recursive: true, filter: (source) => source !== join(common, 'worktrees') });
+      try {
+        await cp(gitDirectory, temporary, {
+          recursive: true,
+          filter: (source) => !['commondir', 'gitdir'].includes(relative(gitDirectory, source)),
+        });
+        await this.portableGit(checkout, ['config', '--file', join(temporary, 'config'), 'core.bare', 'false']);
+        // Remove a shared core.worktree pointer, if present; an absent value is normal.
+        const config = await readFile(join(temporary, 'config'), 'utf8');
+        if (/^\s*worktree\s*=/mu.test(config)) await this.portableGit(checkout, ['config', '--file', join(temporary, 'config'), '--unset-all', 'core.worktree']);
+        await rename(gitFile, retained);
+        try { await rename(temporary, gitFile); }
+        catch (error) { await rename(retained, gitFile); throw error; }
+        await rm(retained);
+      } catch (error) {
+        await rm(temporary, { recursive: true, force: true });
+        throw error;
+      }
+    }
   }
 
   async restorePortableSpace(input: {
@@ -1178,7 +1239,7 @@ export class MachineSessionCoordinator {
       }).where(eq(agentSessions.id, record.id)).run();
     });
   }
-  private assertManagedSpaceRoot(spaceId: string): void {
+  private async assertManagedSpaceRoot(spaceId: string): Promise<void> {
     const space = this.database.getSpace(spaceId);
     if (!space) throw runtimeError('managed space', new Error('Space does not exist'));
     const root = resolve(this.managedSpaceRoot);
@@ -1186,6 +1247,16 @@ export class MachineSessionCoordinator {
     if (local === '' || local === '..' || local.startsWith(`..${sep}`)) {
       throw runtimeError('managed space', new Error(`Refusing to delete unmanaged space root ${space.rootPath}`));
     }
+    const metadata = await lstat(space.rootPath).catch((error: NodeJS.ErrnoException) => error.code === 'ENOENT' ? null : Promise.reject(error));
+    if (metadata?.isSymbolicLink()) throw runtimeError('managed space', new Error('Refusing a symlink checkout'));
+    const actualRoot = await realpath(root).catch((error: NodeJS.ErrnoException) => error.code === 'ENOENT' ? root : Promise.reject(error));
+    const actualCheckout = await realpath(space.rootPath).catch(async (error: NodeJS.ErrnoException) => {
+      if (error.code !== 'ENOENT') throw error;
+      const parent = await realpath(dirname(space.rootPath)).catch((parentError: NodeJS.ErrnoException) => parentError.code === 'ENOENT' ? dirname(space.rootPath) : Promise.reject(parentError));
+      return join(parent, relative(dirname(space.rootPath), space.rootPath));
+    });
+    const actual = relative(actualRoot, actualCheckout);
+    if (actual === '' || actual === '..' || actual.startsWith(`..${sep}`)) throw runtimeError('managed space', new Error('Checkout resolves outside the managed root'));
   }
   private publishCanonicalSession(projectId: string, sessionId: string, checkpoint = false): void {
     const session = this.get(sessionId);

@@ -52,6 +52,26 @@ describe('WorkspaceHubTerminalCoordinator', () => {
       { id: 'second', exitCode: 0, output: 'second' },
     ]);
 
+    const protectedRun = await coordinator.runLifecyclePlan('workspace-a', 'machine/prepare', [{
+      id: 'protected',
+      kind: 'script',
+      command: '/untrusted/path-is-not-read.sh',
+      content: 'set -euo pipefail; printf provider-; sleep 0.05; printf credential; printf "\\n%s\\n" "${HOME-unset}"',
+    }], { PATH: process.env.PATH ?? '', TOKEN: 'provider-credential' }, { redactNames: ['TOKEN'] });
+    expect(protectedRun.steps).toEqual([{ id: 'protected', exitCode: 0, output: '[redacted]\nunset' }]);
+    const protectedLogs = await coordinator.read('workspace-a', protectedRun.terminalName, null);
+    expect(protectedLogs.data).not.toContain('provider-credential');
+    expect(protectedLogs.data).toContain('[redacted]');
+
+    let completeLog = '';
+    const verbose = await coordinator.runLifecyclePlan('workspace-a', 'checks', [{
+      id: 'verbose', kind: 'check',
+      command: 'i=0; while [ "$i" -lt 60000 ]; do printf "safe-line\\n"; i=$((i+1)); done; printf "complete\\n"',
+    }], { PATH: process.env.PATH ?? '' }, { onOutput: async (output) => { completeLog += output; } });
+    expect(completeLog.split('safe-line\n').length - 1).toBe(60000);
+    expect(verbose.steps.map(({ id, exitCode }) => ({ id, exitCode }))).toEqual([{ id: 'verbose', exitCode: 0 }]);
+    expect(verbose.steps[0]!.output.endsWith('complete')).toBe(true);
+
     const closing = database.beginSpaceClose({ spaceId: 'workspace-a', holderId: 'machine-a', expectedGeneration: 1 });
     if (closing.status === 'error') throw closing.error;
     const closed = database.commitSpaceClosed({ spaceId: 'workspace-a', holderId: 'machine-a', expectedGeneration: 1 });
