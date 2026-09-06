@@ -86,7 +86,7 @@ export class DeviceEnrollmentError extends Error {
  * invite, and register it with the deployment named by the invite. The
  * private key never leaves WebCrypto.
  */
-export async function enrollDevice(token: string): Promise<BrowserDevice> {
+export async function enrollDevice(token: string, accountOrigin?: string): Promise<BrowserDevice> {
   const invite = decodeDeviceInviteToken(token);
   if (!invite) throw new DeviceEnrollmentError('INVALID_TOKEN', 'The enrollment link is not valid');
   if (invite.invite.expiresAt <= Date.now()) throw new DeviceEnrollmentError('EXPIRED', 'The enrollment link has expired');
@@ -95,8 +95,9 @@ export async function enrollDevice(token: string): Promise<BrowserDevice> {
   const unsigned = { version: 1 as const, inviteId: invite.invite.inviteId, deviceId: crypto.randomUUID(), signingPublicKey: publicKey, label: deviceLabel(), boundAt: Date.now() };
   const signature = deviceProtocolBase64.encode(new Uint8Array(await crypto.subtle.sign('Ed25519', keyPair.privateKey, owned(deviceBindingPayload(unsigned)))));
   const binding: DeviceBinding = { ...unsigned, signature };
-  const response = await fetch(new URL('/v1/devices/enroll', invite.invite.enrollUrl), {
+  const response = await fetch(new URL('/v1/devices/enroll', accountOrigin ?? invite.invite.enrollUrl), {
     method: 'POST',
+    redirect: 'error',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ invite, binding } satisfies { invite: SignedDeviceInvite; binding: DeviceBinding }),
   });

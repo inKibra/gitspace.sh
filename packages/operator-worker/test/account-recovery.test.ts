@@ -14,7 +14,7 @@ it('recovers an active account without another invite or provisioning, but rejec
   await accounts.upsertProvisioning({ userId, handle });
   await accounts.markActive({ userId, release: 'existing-release' });
   const path = '/v1/accounts/recover';
-  const recover = (signer = privateKey) => SELF.fetch(`https://gitspace.sh${path}`, {
+  const recover = (signer = privateKey, origin = 'https://gitspace.sh') => SELF.fetch(`${origin}${path}`, {
     method: 'POST',
     headers: { authorization: createRelayAuthorization(signer, path), 'content-type': 'application/json' },
     body: JSON.stringify({ rootPublicKey: credentialProtocolBase64.encode(publicKey), handle }),
@@ -22,6 +22,11 @@ it('recovers an active account without another invite or provisioning, but rejec
   const recovered = await recover();
   expect(recovered.status).toBe(200);
   expect(await recovered.json()).toMatchObject({ status: 'ok', value: { userId, handle, accountUrl: `https://${handle}.gitspace.sh`, relayUrl: `https://${handle}.gssh.dev` } });
+  const accountOrigin = `https://${handle}.gitspace.sh`;
+  expect(await (await recover(privateKey, accountOrigin)).json()).toMatchObject({
+    status: 'ok', value: { userId, handle, accountUrl: accountOrigin, apiUrl: accountOrigin },
+  });
+  expect(await (await recover(privateKey, 'https://another-account.gitspace.sh')).json()).toMatchObject({ error: { code: 'ACCOUNT_HOST_MISMATCH' } });
   expect((await accounts.get(userId))?.tenantRelease).toBe('existing-release');
   expect((await recover(ed25519.utils.randomSecretKey())).status).toBe(401);
   await accounts.setStatus({ userId, status: 'suspended', reason: 'beta hold', actor: 'operator', action: 'suspend' });

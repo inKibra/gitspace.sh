@@ -42,6 +42,7 @@ import { ProvidersSection, type ProvidersSectionProps } from './ProvidersSection
 import { desiredLabel, machineRollup, ompRollup, RELEASE_STATUS_COLOR, RELEASE_TARGET_LABEL, RELEASE_TARGETS, shortSha, type ReleaseRecordView } from './release.js';
 import { AddMachinePanel } from './AddMachinePanel.js';
 import { navigateProductUrl } from './routes.js';
+import { ConnectBrowserDialog, type BrowserConnectionActions } from './ConnectBrowserDialog.js';
 
 // `omp-providers` is the onboarding step for provider sign-in; in settings
 // mode it is reached as `?section=omp-providers`, which opens the OMP section
@@ -60,7 +61,7 @@ export interface OmpSettingView {
   options: readonly string[];
   credential: boolean;
 }
-export interface SettingsPageProps {
+export interface SettingsPageProps extends BrowserConnectionActions {
   mode: 'settings' | 'onboarding';
   settings: UserSettings;
   machines: readonly SettingsMachineView[];
@@ -474,12 +475,25 @@ function BrowserRelayWalkthrough({ open, onOpenChange, relay, onSetup, onStart, 
 }
 
 
+function DeviceRows({ devices, kind, onRevokeDevice, onSignOut }: Pick<SettingsPageProps, 'devices' | 'onRevokeDevice' | 'onSignOut'> & { kind: 'browser' | 'client' }) {
+  if (devices === null) return <EmptyState icon={icon(Monitor01)} title="Loading devices…" />;
+  const matching = devices.filter(device => device.kind === kind);
+  if (matching.length === 0) return <EmptyState icon={icon(kind === 'browser' ? Monitor01 : Key01)} title={kind === 'browser' ? 'No browsers connected' : 'No API clients'} description={kind === 'browser' ? 'Connected browsers each have their own revocable key.' : 'Create a scoped key for scripts and services.'} />;
+  return <SettingRows>{matching.map(device => <SettingRow key={device.deviceId} title={<>{device.label}{device.current ? <Badge color="green">This browser</Badge> : null}</>} description={<>{device.scope === 'user' ? 'Whole account' : device.scope} · enrolled {new Date(device.boundAt).toLocaleString()}{device.expiresAt ? ` · expires ${new Date(device.expiresAt).toLocaleString()}` : ''}{device.revokedAt ? ` · revoked ${new Date(device.revokedAt).toLocaleString()}` : ''}</>}>
+    {device.revokedAt ? <Badge color="gray">Revoked</Badge> : !device.active ? <Badge color="amber">Inactive</Badge> : device.current
+      ? <Button variant="ghost" size="compact" onClick={() => { if (window.confirm('Sign out this browser? Browsers and API clients it authorized also lose access. Use your recovery key to reconnect independently.')) settle(onSignOut()); }}>Sign out</Button>
+      : <Button variant="ghost" size="compact" onClick={() => { if (window.confirm(`Revoke ${device.label}? It${device.kind === 'browser' ? ' and browsers or API clients it authorized' : ''} will lose access within seconds.`)) settle(onRevokeDevice(device.deviceId)); }}>Revoke</Button>}
+  </SettingRow>)}</SettingRows>;
+}
+
 function ConnectionsSettings({
   devices, onRevokeDevice, onSignOut, onCreateApiClient, projects,
   composioSetup, onPutComposioSetup, onDeleteComposioSetup,
   browserRelay, onSetupBrowserRelay, onStartBrowserRelay, onStopBrowserRelay, onTestBrowserRelay,
-}: Pick<SettingsPageProps, 'devices' | 'onRevokeDevice' | 'onSignOut' | 'onCreateApiClient' | 'projects' | 'composioSetup' | 'onPutComposioSetup' | 'onDeleteComposioSetup' | 'browserRelay' | 'onSetupBrowserRelay' | 'onStartBrowserRelay' | 'onStopBrowserRelay' | 'onTestBrowserRelay'>) {
+  canConnectBrowser, onCreateBrowserInvitation, onBrowserInvitationStatus, onCancelBrowserInvitation, onBrowserConnected,
+}: Pick<SettingsPageProps, 'devices' | 'onRevokeDevice' | 'onSignOut' | 'onCreateApiClient' | 'projects' | 'composioSetup' | 'onPutComposioSetup' | 'onDeleteComposioSetup' | 'browserRelay' | 'onSetupBrowserRelay' | 'onStartBrowserRelay' | 'onStopBrowserRelay' | 'onTestBrowserRelay'> & BrowserConnectionActions) {
   const [apiClientOpen, setApiClientOpen] = useState(false);
+  const [browserOpen, setBrowserOpen] = useState(false);
   const [composioOpen, setComposioOpen] = useState(() => typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('setup') === 'composio');
   const [relayGuideOpen, setRelayGuideOpen] = useState(false);
   const [relayPending, setRelayPending] = useState(false);
@@ -520,20 +534,14 @@ function ConnectionsSettings({
       {relayError ? <p role="alert" className="text-caption text-destructive">{relayError}</p> : null}
       <BrowserRelayWalkthrough open={relayGuideOpen} onOpenChange={setRelayGuideOpen} relay={browserRelay} onSetup={onSetupBrowserRelay} onStart={onStartBrowserRelay} onTest={onTestBrowserRelay} />
     </Group>
-    <Group title="Devices">
-      {devices === null
-        ? <EmptyState icon={icon(Monitor01)} title="Loading devices…" />
-        : devices.length === 0
-          ? <EmptyState icon={icon(Monitor01)} title="No devices enrolled" description="Browsers and API clients that hold a signed key for your account appear here." />
-          : <SettingRows>{devices.map((device) => <SettingRow key={device.deviceId} title={<>{device.label}{device.current ? <Badge color="green">This browser</Badge> : null}</>} description={<>{device.kind === 'browser' ? 'Browser' : 'API client'} · {device.scope} · enrolled {new Date(device.boundAt).toLocaleString()}{device.expiresAt ? ` · expires ${new Date(device.expiresAt).toLocaleString()}` : ''}{device.revokedAt ? ` · revoked ${new Date(device.revokedAt).toLocaleString()}` : ''}</>}>
-            {device.revokedAt
-              ? <Badge color="gray">Revoked</Badge>
-              : !device.active
-                ? <Badge color="amber">Inactive</Badge>
-              : device.current
-                ? <Button variant="ghost" size="compact" onClick={() => { if (window.confirm('Sign out this browser? You will need a new enrollment link to reconnect.')) settle(onSignOut()); }}>Sign out</Button>
-                : <Button variant="ghost" size="compact" onClick={() => { if (window.confirm(`Revoke ${device.label}? It will lose access within seconds.`)) settle(onRevokeDevice(device.deviceId)); }}>Revoke</Button>}
-          </SettingRow>)}</SettingRows>}
+    <Group title="Browsers">
+      <DeviceRows devices={devices} kind="browser" onRevokeDevice={onRevokeDevice} onSignOut={onSignOut} />
+      <div className="pt-3"><Button variant="secondary" size="compact" disabled={!canConnectBrowser} onClick={() => setBrowserOpen(true)} leadingIcon={glyph(Monitor01)}>Connect another browser</Button></div>
+      {!canConnectBrowser && devices !== null ? <p className="text-caption text-muted-foreground">This browser cannot grant full account access. Use your recovery key on the other browser instead.</p> : null}
+      {browserOpen ? <ConnectBrowserDialog open={browserOpen} onOpenChange={setBrowserOpen} canConnectBrowser={canConnectBrowser} onCreateBrowserInvitation={onCreateBrowserInvitation} onBrowserInvitationStatus={onBrowserInvitationStatus} onCancelBrowserInvitation={onCancelBrowserInvitation} onBrowserConnected={onBrowserConnected} /> : null}
+    </Group>
+    <Group title="API clients">
+      <DeviceRows devices={devices} kind="client" onRevokeDevice={onRevokeDevice} onSignOut={onSignOut} />
       <div className="pt-3"><Button variant="secondary" size="compact" onClick={() => setApiClientOpen(true)} leadingIcon={glyph(Key01)}>New API client</Button></div>
       <ApiClientDialog open={apiClientOpen} onOpenChange={setApiClientOpen} projects={projects} onCreate={onCreateApiClient} />
     </Group>

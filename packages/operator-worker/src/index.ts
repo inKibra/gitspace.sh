@@ -27,6 +27,8 @@ import {
   deviceBindingSchema,
   deviceGrantExpiresAt,
   signedDeviceInviteSchema,
+  deviceInvitePayload,
+  verifyDeviceInvite,
   verifyDeviceBinding,
   verifyDeviceGrantRecord,
   type DeviceBinding,
@@ -127,6 +129,29 @@ const SUPPORTED_PROVIDERS = new Set(['anthropic', 'openai-codex', 'google-gemini
 const REMOTE_REFRESH_SENTINEL = '__remote__' as const;
 const ACCOUNT_ID_BYTES = 16;
 
+const BROWSER_INVITATION_TTL_MS = 5 * 60_000;
+const browserInvitationCreateSchema = z.strictObject({
+  userId: z.string().regex(/^u-[a-f0-9]{32}$/u),
+  invite: signedDeviceInviteSchema,
+});
+const browserInvitationReferenceSchema = z.strictObject({
+  userId: z.string().regex(/^u-[a-f0-9]{32}$/u),
+  inviteId: z.uuid(),
+});
+interface BrowserInvitationRow extends Record<string, SqlStorageValue> {
+  invite_id: string;
+  creator_device_id: string;
+  invite_payload: string;
+  expires_at: number;
+  status: 'pending' | 'redeemed' | 'cancelled' | 'expired';
+  device_id: string | null;
+}
+interface BrowserInvitationValue {
+  inviteId: string;
+  expiresAt: number;
+  status: BrowserInvitationRow['status'];
+  deviceId: string | null;
+}
 // OMP 18.1.10's write contract, without importing its Bun-only auth-storage runtime.
 const brokerUploadSchema = z.strictObject({
   provider: z.string().trim().min(1).max(160),
@@ -349,6 +374,14 @@ export class CredentialVaultDO extends DurableObject<Env> {
           revoked_at INTEGER,
           updated_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS browser_invitations (
+          invite_id TEXT PRIMARY KEY,
+          creator_device_id TEXT NOT NULL,
+          invite_payload TEXT NOT NULL,
+          expires_at INTEGER NOT NULL,
+          status TEXT NOT NULL CHECK (status IN ('pending', 'redeemed', 'cancelled', 'expired')),
+          device_id TEXT
+        );
         CREATE TABLE IF NOT EXISTS machine_pairings (
           pairing_id TEXT PRIMARY KEY,
           creator_device_id TEXT NOT NULL,
@@ -549,6 +582,69 @@ export class CredentialVaultDO extends DurableObject<Env> {
     return nonce.status === 'error' ? nonce : { status: 'ok', value: { deviceId: device.deviceId } };
   }
 
+  browserInvitationRequest(input: { operation: string; header: string | null; target: string; body: Uint8Array }): CredentialVaultResult<BrowserInvitationValue> {
+    const config = this.config();
+    if (!config || input.body.byteLength > REQUEST_MAX_BYTES) return publicError('INVALID_BROWSER_INVITATION', 'Browser invitation request is invalid');
+    const body = JSON.parse(new TextDecoder().decode(input.body));
+    const parsed = input.operation === 'create' ? browserInvitationCreateSchema.parse(body) : browserInvitationReferenceSchema.parse(body);
+    if (parsed.userId !== config.user_id) return publicError('INVALID_BROWSER_INVITATION', 'Browser invitation belongs to another account');
+    const authorized = this.authorizeBrowserRequest({ ...input, capabilities: ['devices.manage'] });
+    if (authorized.status === 'error') return authorized;
+    const issuer = this.deviceGrant(authorized.value.deviceId)!;
+    if (!issuer.invite.invite.canDelegate) return publicError('RPC_FORBIDDEN', 'Browser may not delegate access');
+    const now = Date.now();
+    if ('invite' in parsed) {
+      const signed = parsed.invite;
+      const invite = signed.invite;
+      if (signed.issuer.kind !== 'device' || signed.issuer.deviceId !== authorized.value.deviceId
+        || invite.userId !== config.user_id || invite.kind !== 'browser' || invite.scope.kind !== 'user') {
+        return publicError('INVALID_DEVICE_INVITE', 'Browser invitation must belong to this account and issuing browser');
+      }
+      const parent = verifyDeviceGrantRecord(issuer, credentialProtocolBase64.decode(config.root_public_key), now, (deviceId) => this.deviceGrant(deviceId), 1);
+      if (!parent || !verifyDeviceInvite(signed, parent.signingPublicKey)
+        || !invite.capabilities.every((capability) => parent.capabilities.includes(capability))) {
+        return publicError('INVALID_DEVICE_INVITE', 'Browser invitation is invalid or exceeds its issuer authority');
+      }
+      if (invite.expiresAt <= now) return publicError('DEVICE_INVITE_EXPIRED', 'Browser invitation has expired');
+      if (invite.issuedAt > now + REQUEST_MAX_SKEW_MS || invite.expiresAt <= invite.issuedAt
+        || invite.expiresAt - invite.issuedAt > BROWSER_INVITATION_TTL_MS || invite.expiresAt > now + BROWSER_INVITATION_TTL_MS) {
+        return publicError('INVALID_DEVICE_INVITE', 'Browser invitation lifetime must not exceed five minutes');
+      }
+      let ancestor: DeviceGrantRecord | null = issuer;
+      let authorityExpiresAt = Infinity;
+      while (ancestor) {
+        authorityExpiresAt = Math.min(authorityExpiresAt, deviceGrantExpiresAt(ancestor) ?? Infinity);
+        ancestor = ancestor.invite.issuer.kind === 'device' ? this.deviceGrant(ancestor.invite.issuer.deviceId) : null;
+      }
+      if (authorityExpiresAt !== Infinity && (invite.grantTtlMs === null || invite.expiresAt + invite.grantTtlMs > authorityExpiresAt)) {
+        return publicError('INVALID_DEVICE_INVITE', 'Browser access may not outlive its issuer authority');
+      }
+      if (this.ctx.storage.sql.exec('SELECT device_id FROM device_grants WHERE invite_id = ?', invite.inviteId).toArray().length
+        || this.browserInvitation(invite.inviteId, now)) {
+        return publicError('DEVICE_INVITE_EXISTS', 'Browser invitation was already registered or redeemed');
+      }
+      this.ctx.storage.sql.exec(
+        "INSERT INTO browser_invitations(invite_id, creator_device_id, invite_payload, expires_at, status) VALUES (?, ?, ?, ?, 'pending')",
+        invite.inviteId, authorized.value.deviceId, credentialProtocolBase64.encode(deviceInvitePayload(invite)), invite.expiresAt,
+      );
+      return { status: 'ok', value: { inviteId: invite.inviteId, expiresAt: invite.expiresAt, status: 'pending', deviceId: null } };
+    }
+    const invitation = this.browserInvitation(parsed.inviteId, now);
+    if (!invitation || invitation.creator_device_id !== authorized.value.deviceId) {
+      return publicError('BROWSER_INVITATION_UNAVAILABLE', 'Browser invitation is unavailable to this browser');
+    }
+    if (input.operation === 'cancel' && invitation.status === 'pending') {
+      this.ctx.storage.sql.exec("UPDATE browser_invitations SET status = 'cancelled' WHERE invite_id = ? AND status = 'pending'", invitation.invite_id);
+      invitation.status = 'cancelled';
+    }
+    return { status: 'ok', value: { inviteId: invitation.invite_id, expiresAt: invitation.expires_at, status: invitation.status, deviceId: invitation.device_id } };
+  }
+
+  private browserInvitation(inviteId: string, now: number): BrowserInvitationRow | null {
+    this.ctx.storage.sql.exec("UPDATE browser_invitations SET status = 'expired' WHERE invite_id = ? AND status = 'pending' AND expires_at <= ?", inviteId, now);
+    return this.ctx.storage.sql.exec<BrowserInvitationRow>('SELECT * FROM browser_invitations WHERE invite_id = ?', inviteId).toArray()[0] ?? null;
+  }
+
   async machinePairingRequest(input: { operation: string; header: string | null; target: string; body: Uint8Array; operatorUrl: string }): Promise<CredentialVaultResult<MachinePairingValue>> {
     return this.ctx.blockConcurrencyWhile(async () => {
       const config = this.config();
@@ -697,10 +793,10 @@ export class CredentialVaultDO extends DurableObject<Env> {
   }
 
   /**
-   * Redeem a root-signed invite with a device binding. First bind wins: the
-   * invite id is unique, so a second redemption - including one from the
-   * worker itself - is rejected. The vault never signs anything here; it only
-   * records what the root and the device already signed.
+   * Redeem a signed invite with a device binding. Delegated browser invites
+   * must also be pending in this vault. First bind wins; registering the
+   * device and consuming that invitation commit together. The vault never
+   * signs anything here; it records what the issuer and device signed.
    */
   enrollDevice(input: { invite: SignedDeviceInvite; binding: DeviceBinding }): CredentialVaultResult<{ deviceId: string; expiresAt: number | null }> {
     const config = this.config();
@@ -716,11 +812,27 @@ export class CredentialVaultDO extends DurableObject<Env> {
     // signature, or a delegating issuer that is itself valid and holds what it hands out.
     const rootPublicKey = credentialProtocolBase64.decode(config.root_public_key);
     if (!verifyDeviceGrantRecord(record, rootPublicKey, now, (deviceId) => this.deviceGrant(deviceId))) return publicError('INVALID_DEVICE_INVITE', 'Device invite is invalid or its issuer cannot delegate it');
+    const invitation = this.browserInvitation(invite.inviteId, now);
+    if (invite.kind === 'browser' && input.invite.issuer.kind === 'device' && !invitation) {
+      return publicError('BROWSER_INVITATION_UNREGISTERED', 'Browser invitation is not registered');
+    }
+    if (invitation) {
+      if (input.invite.issuer.kind !== 'device' || invitation.creator_device_id !== input.invite.issuer.deviceId
+        || invitation.invite_payload !== credentialProtocolBase64.encode(deviceInvitePayload(invite))) {
+        return publicError('INVALID_DEVICE_INVITE', 'Browser invitation does not match its registration');
+      }
+      if (invitation.status === 'cancelled') return publicError('DEVICE_INVITE_CANCELLED', 'Browser invitation was cancelled');
+      if (invitation.status === 'expired') return publicError('DEVICE_INVITE_EXPIRED', 'Browser invitation has expired');
+      if (invitation.status === 'redeemed') return publicError('DEVICE_INVITE_USED', 'Browser invitation was already redeemed');
+    }
     try {
-      this.ctx.storage.sql.exec(
-        'INSERT INTO device_grants(device_id, invite_id, kind, record_json, generation, revoked_at, updated_at) VALUES (?, ?, ?, ?, 1, NULL, ?)',
-        input.binding.deviceId, invite.inviteId, invite.kind, JSON.stringify(record), new Date(now).toISOString(),
-      );
+      this.ctx.storage.transactionSync(() => {
+        this.ctx.storage.sql.exec(
+          'INSERT INTO device_grants(device_id, invite_id, kind, record_json, generation, revoked_at, updated_at) VALUES (?, ?, ?, ?, 1, NULL, ?)',
+          input.binding.deviceId, invite.inviteId, invite.kind, JSON.stringify(record), new Date(now).toISOString(),
+        );
+        if (invitation) this.ctx.storage.sql.exec("UPDATE browser_invitations SET status = 'redeemed', device_id = ? WHERE invite_id = ? AND status = 'pending'", input.binding.deviceId, invite.inviteId);
+      });
     } catch {
       return publicError('DEVICE_INVITE_USED', 'Device invite was already redeemed');
     }
@@ -1435,12 +1547,16 @@ async function accountChannelResponse(request: Request, assets: Fetcher, pathnam
   return new Response('Account asset canonicalization did not resolve', { status: 502 });
 }
 
+function accountHandleForHostname(hostname: string): string | null {
+  const match = /^([a-z0-9](?:[a-z0-9-]{0,28}[a-z0-9])?)\.gitspace\.sh$/u.exec(hostname.toLowerCase());
+  return match && match[1] !== 'api' && match[1] !== 'www' ? match[1]! : null;
+}
+
 /** Serves either the account's selected frontend tree or its bundled channel frontend. */
 async function releaseFrontendResponse(request: Request, env: Env, pathname: string): Promise<Response | null> {
-    const hostname = new URL(request.url).hostname.toLowerCase();
-    const match = /^([a-z0-9](?:[a-z0-9-]{0,28}[a-z0-9])?)\.gitspace\.sh$/u.exec(hostname);
-    if (!match || match[1] === 'api' || match[1] === 'www') return null;
-    const account = await accountRegistry(env).getByHandle(match[1]!);
+    const handle = accountHandleForHostname(new URL(request.url).hostname);
+    if (!handle) return null;
+    const account = await accountRegistry(env).getByHandle(handle);
     if (!account) return new Response('Account not found', { status: 404 });
     const denied = accountAccessResponse(await activeAccount(env, account.userId));
     if (denied) return denied;
@@ -1918,6 +2034,39 @@ export default {
       });
       return new Response(request.method === 'HEAD' ? null : (object as R2ObjectBody).body, { headers });
     }
+    const browserInvitationRoute = /^\/v1\/devices\/browser-invitations\/(create|status|cancel)$/u.exec(url.pathname);
+    if (browserInvitationRoute) {
+      const cors = {
+        'access-control-allow-origin': '*',
+        'access-control-allow-methods': 'POST, OPTIONS',
+        'access-control-allow-headers': `content-type, ${RPC_DEVICE_HEADER}, x-gitspace-user`,
+        'cache-control': 'private, no-store',
+      };
+      if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
+      if (request.method !== 'POST') return new Response('Method not allowed', { status: 405, headers: cors });
+      try {
+        const declared = Number(request.headers.get('content-length'));
+        if (Number.isFinite(declared) && declared > REQUEST_MAX_BYTES) throw new Error('Browser invitation request is too large');
+        const body = new Uint8Array(await request.arrayBuffer());
+        if (body.byteLength > REQUEST_MAX_BYTES) throw new Error('Browser invitation request is too large');
+        const parsed = JSON.parse(new TextDecoder().decode(body)) as { userId?: unknown };
+        if (typeof parsed.userId !== 'string' || !/^u-[a-f0-9]{32}$/u.test(parsed.userId)
+          || request.headers.get('x-gitspace-user') !== parsed.userId) throw new Error('Account identity is invalid');
+        const account = await activeAccount(env, parsed.userId);
+        if (account.status === 'error') {
+          const denied = accountAccessResponse(account)!;
+          return new Response(denied.body, { status: denied.status, headers: { ...Object.fromEntries(denied.headers), ...cors } });
+        }
+        const handle = accountHandleForHostname(url.hostname);
+        if (handle && handle !== account.value.handle) return Response.json(publicError('ACCOUNT_HOST_MISMATCH', 'Request does not belong to this account hostname'), { status: 403, headers: cors });
+        const result = await credentialVault(env, parsed.userId).browserInvitationRequest({
+          operation: browserInvitationRoute[1]!, header: request.headers.get(RPC_DEVICE_HEADER), target: `${url.pathname}${url.search}`, body,
+        });
+        return Response.json(result, { status: result.status === 'ok' ? 200 : 403, headers: cors });
+      } catch (error) {
+        return Response.json(publicError('INVALID_BROWSER_INVITATION', error instanceof Error ? error.message : 'Invalid browser invitation request'), { status: 400, headers: cors });
+      }
+    }
     const pairingRoute = /^\/v1\/machine-pairings\/(create|inspect|approve|cancel|claim|poll)$/u.exec(url.pathname);
     if (pairingRoute) {
       const cors = {
@@ -2160,6 +2309,10 @@ export default {
       const account = await accountRegistry(env).get(userId);
       if (!account || account.handle !== body.handle.trim().toLowerCase()) {
         return Response.json(publicError('ACCOUNT_NOT_FOUND', 'No account matches this recovery key and handle'), { status: 404 });
+      }
+      const handle = accountHandleForHostname(url.hostname);
+      if (handle && handle !== account.handle) {
+        return Response.json(publicError('ACCOUNT_HOST_MISMATCH', 'Request does not belong to this account hostname'), { status: 403 });
       }
       if (account.status === 'provisioning' || account.status === 'failed') {
         return Response.json(publicError('ACCOUNT_INCOMPLETE', 'Account provisioning must be retried with the original invitation'), { status: 409 });
@@ -2475,8 +2628,13 @@ export default {
         const body = await readBoundedJson(request) as { invite?: unknown; binding?: unknown };
         const invite = signedDeviceInviteSchema.parse(body.invite);
         const binding = deviceBindingSchema.parse(body.binding);
-        const denied = accountAccessResponse(await activeAccount(env, invite.invite.userId));
-        if (denied) return new Response(denied.body, { status: denied.status, headers: { ...cors, 'content-type': 'application/json' } });
+        const account = await activeAccount(env, invite.invite.userId);
+        if (account.status === 'error') {
+          const denied = accountAccessResponse(account)!;
+          return new Response(denied.body, { status: denied.status, headers: { ...cors, 'content-type': 'application/json' } });
+        }
+        const handle = accountHandleForHostname(url.hostname);
+        if (handle && handle !== account.value.handle) return Response.json(publicError('ACCOUNT_HOST_MISMATCH', 'Request does not belong to this account hostname'), { status: 403, headers: cors });
         const result = await credentialVault(env, invite.invite.userId).enrollDevice({ invite, binding });
         return Response.json(result, { status: result.status === 'ok' ? 200 : 400, headers: cors });
       } catch (error) {

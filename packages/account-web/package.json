@@ -25,6 +25,7 @@
     "framer-motion": "^13.1.1",
     "ghostty-web": "^0.4.0",
     "katex": "^0.18.5",
+    "qrcode.react": "^4.2.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "rehype-harden": "^1.1.8",

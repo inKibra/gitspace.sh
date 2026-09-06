@@ -3,14 +3,14 @@ import type { DeploymentStatusView, EnvironmentBundle as ProtocolEnvironmentBund
 import { executionHash } from '@gitspace/protocol';
 import type { ProjectMcpGrantRpcView } from '@gitspace/protocol/mcp-contract';
 import { Button, Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, InputField, InputGroup, ScrollArea, Select, SelectContent, SelectItem, SelectTrigger, SidebarInset, SidebarInsetTopbar, SidebarProvider, ThinkingIndicator, Tooltip } from '@gitspace/ui';
-import { Key01, LayoutRight, Terminal } from '@untitledui/icons';
+import { LayoutRight, Terminal } from '@untitledui/icons';
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { ResultRpcProvider, useResultMutation, useResultQuery } from 'result-rpc/react';
 import { EmptyState, GitSpaceShell, PageCanvas, PageHeader, ProjectsView, type GitSpaceShellProps, type ProviderAuthView, type SpaceHolderView } from './GitSpaceShell.js';
 import { LaunchSheet, LaunchedBanner, LAUNCHED_STORAGE_KEY, readLaunchedMark, type LaunchedMark } from './LaunchSheet.js';
 import { createGitSpaceBrowserClient, homeRpcUrl, routedTransport, rpcClient } from './rpc-client.js';
 import { currentDevice, DEVICE_REJECTED_EVENT, deviceRejected, setCurrentDevice } from './device-session.js';
-import { createApiClient, enrollDevice, type ApiClientDraft } from './device.js';
+import { createApiClient, enrollDevice, type ApiClientDraft, type BrowserDevice } from './device.js';
 import { applyAppearance } from './appearance.js';
 import type { ProviderLoginFlow, ProvidersSectionProps } from './ProvidersSection.js';
 import { SettingsPage } from './SettingsPage.js';
@@ -22,6 +22,8 @@ import { appendLaunchProgress, converging, launchTrackFrom, RELEASE_TARGETS, sho
 import { ACCOUNT_DIRECTORY_CHANGED, navigateProductUrl, productRouteFromLocation, setProductRoute, type AppView, type ProductRoute } from './routes.js';
 import { AccountSidebarContext, AppSidebar, type AppSidebarProps, type SidebarProject } from './AppSidebar.js';
 import { TurnTranscript } from './TurnTranscript.js';
+import { accountHandleFromUrl, browserInvitationStatus, canConnectBrowser, cancelBrowserInvitation, createBrowserInvitation, enrollmentTokenForLocation, recoverAccountBrowser } from './browser-enrollment.js';
+import { AccountConnectPage } from './AccountConnectPage.js';
 
 const INSPECTOR_EVENT_ENTITIES: Readonly<Record<string, true>> = {
   goal: true,
@@ -1652,6 +1654,9 @@ function GitSpaceProduct() {
   const destroyMachine = useResultMutation(rpcClient.machine.destroy);
   const devicesQuery = useResultQuery(rpcClient.devices.list, {});
   const revokeDevice = useResultMutation(rpcClient.devices.revoke);
+  const [browserDevice, setBrowserDevice] = useState<BrowserDevice | null>(null);
+  useEffect(() => { void currentDevice().then(setBrowserDevice); }, []);
+  const currentBrowserView = devicesQuery.state === 'success' ? devicesQuery.value.find(device => device.current) : undefined;
   // Settings → Source reads the same status entry LiveWorkspace polls; revert is only offered there.
   const settingsDeploymentQuery = useResultQuery(rpcClient.deployment.status, {}, { enabled: runtimeMetadataEnabled });
   const revertDeployment = useResultMutation(rpcClient.deployment.revert);
@@ -2011,6 +2016,11 @@ function GitSpaceProduct() {
     onRevokeDevice={revokeDeviceAndRefresh}
     onSignOut={signOutThisBrowser}
     onCreateApiClient={mintApiClient}
+    canConnectBrowser={canConnectBrowser(browserDevice, currentBrowserView)}
+    onCreateBrowserInvitation={() => createBrowserInvitation(new URL(window.location.origin), currentBrowserView)}
+    onBrowserInvitationStatus={browserInvitationStatus}
+    onCancelBrowserInvitation={cancelBrowserInvitation}
+    onBrowserConnected={async () => { await devicesQuery.refetch(); }}
     composioSetup={composioSetupQuery.state === 'success' ? composioSetupQuery.value : null}
     onPutComposioSetup={saveComposioSetup}
     onDeleteComposioSetup={removeComposioSetup}
@@ -2043,13 +2053,11 @@ type DeviceGateState =
  */
 function DeviceGate({ children }: { children: ReactNode }) {
   const [state, setState] = useState<DeviceGateState>({ status: 'loading' });
-  const [pasted, setPasted] = useState('');
   const initialized = useRef(false);
   const enrolling = useRef(false);
   const redeem = async (token: string): Promise<void> => {
     if (enrolling.current) return;
     enrolling.current = true;
-    setPasted('');
     const url = new URL(window.location.href);
     const fragment = new URLSearchParams(url.hash.slice(1));
     if (fragment.has('enroll')) {
@@ -2060,11 +2068,29 @@ function DeviceGate({ children }: { children: ReactNode }) {
     window.history.replaceState(null, '', url);
     setState({ status: 'enrolling' });
     try {
-      setCurrentDevice(await enrollDevice(token));
+      const pageUrl = new URL(window.location.href);
+      const checkedToken = enrollmentTokenForLocation(token, pageUrl);
+      setCurrentDevice(await enrollDevice(checkedToken, accountHandleFromUrl(pageUrl) ? pageUrl.origin : undefined));
       setState({ status: 'enrolled' });
     } catch (error) {
       setState({ status: 'unenrolled', error: error instanceof Error ? error.message : 'Enrollment failed' });
     } finally {
+      enrolling.current = false;
+    }
+  };
+  const recover = async (handle: string, key: string): Promise<void> => {
+    if (enrolling.current) return;
+    enrolling.current = true;
+    setState({ status: 'enrolling' });
+    try {
+      const recovery = recoverAccountBrowser(handle, key, new URL(window.location.href));
+      key = '';
+      setCurrentDevice(await recovery);
+      setState({ status: 'enrolled' });
+    } catch (error) {
+      setState({ status: 'unenrolled', error: error instanceof Error ? error.message : 'Account recovery failed' });
+    } finally {
+      key = '';
       enrolling.current = false;
     }
   };
@@ -2078,7 +2104,7 @@ function DeviceGate({ children }: { children: ReactNode }) {
     }
     const onRejected = (event: Event): void => {
       const code = event instanceof CustomEvent ? String(event.detail?.code ?? '') : '';
-      setState({ status: 'unenrolled', error: code === 'SIGNED_OUT' ? 'You signed out of this browser.' : 'This browser’s access was revoked. Reconnect with a new enrollment link.' });
+      setState({ status: 'unenrolled', error: code === 'SIGNED_OUT' ? 'You signed out of this browser.' : 'This browser’s access ended. Use your recovery key or a new enrollment link to reconnect.' });
     };
     window.addEventListener(DEVICE_REJECTED_EVENT, onRejected);
     return () => window.removeEventListener(DEVICE_REJECTED_EVENT, onRejected);
@@ -2087,31 +2113,7 @@ function DeviceGate({ children }: { children: ReactNode }) {
   if (state.status === 'loading' || state.status === 'enrolling') {
     return <main className="flex h-dvh items-center justify-center bg-background"><EmptyState icon={<ThinkingIndicator />} title={state.status === 'enrolling' ? 'Connecting this browser…' : 'Checking this browser…'} description="This browser gets its own revocable key. No local machine is required." /></main>;
   }
-  const submit = (): void => {
-    const trimmed = pasted.trim();
-    let token = trimmed;
-    try {
-      const url = new URL(trimmed);
-      token = new URLSearchParams(url.hash.slice(1)).get('enroll') ?? url.searchParams.get('enroll') ?? trimmed;
-    } catch { /* a bare token */ }
-    if (token) void redeem(token);
-  };
-  return <main className="flex h-dvh items-center justify-center bg-background p-6">
-    <div className="w-full max-w-md">
-      <EmptyState
-        icon={<Key01 width={20} height={20} strokeWidth={1.5} />}
-        title="This browser isn’t connected"
-        description={state.error ?? 'Create an account or use your saved recovery key to connect this browser. You can also paste an enrollment link from a connected device.'}
-        action={<div className="flex w-full flex-col gap-4">
-          <a href="https://gitspace.sh/#start"><Button variant="primary">Create or recover account</Button></a>
-          <form className="flex w-full items-center gap-2" onSubmit={(event) => { event.preventDefault(); submit(); }}>
-            <InputGroup className="flex-1"><InputField index={0} label="Enrollment link" labelHidden value={pasted} placeholder="Paste the enrollment link" onChange={setPasted} /></InputGroup>
-            <Button variant="secondary" type="submit" disabled={!pasted.trim()}>Connect</Button>
-          </form>
-        </div>}
-      />
-    </div>
-  </main>;
+  return <AccountConnectPage error={state.error} onRecover={(handle, key) => { void recover(handle, key); }} onEnroll={value => { void redeem(value); }} />;
 }
 
 export function LiveApp() {

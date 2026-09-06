@@ -128,6 +128,7 @@
         "framer-motion": "^13.1.1",
         "ghostty-web": "^0.4.0",
         "katex": "^0.18.5",
+        "qrcode.react": "^4.2.0",
         "react": "^19.2.8",
         "react-dom": "^19.2.8",
         "rehype-harden": "^1.1.8",
@@ -2316,6 +2317,8 @@
     "puppeteer-core": ["puppeteer-core@25.3.0", "", { "dependencies": { "@puppeteer/browsers": "3.0.6", "chromium-bidi": "16.0.1", "devtools-protocol": "0.0.1638949", "typed-query-selector": "^2.12.2", "webdriver-bidi-protocol": "0.4.2", "ws": "^8.21.0" } }, "sha512-fm+wpUr2oigH1PXZvwgATrM2tYWHMDG8ASzTEe9uukCye4X5Ldx1K5BTHPFKITrIWvQQAQ256d1NpbEveBcKjA=="],
 
     "pusher-js": ["pusher-js@8.6.0", "", { "dependencies": { "tweetnacl": "^1.0.3" } }, "sha512-wShJPfCS/kYkCBVzVW67wa9cnQIgHTszEK2XHNrFkOgGruuGw081aERAxfRjfdFU+WcIt8x6dvbwkTW4iZuQ8Q=="],
+
+    "qrcode.react": ["qrcode.react@4.2.0", "", { "peerDependencies": { "react": "^16.8.0 || ^17.0.0 || ^18.0.0 || ^19.0.0" } }, "sha512-QpgqWi8rD9DsS9EP3z7BT+5lY5SFhsqGjpgW5DY/i3mK4M9DTBNz3ErMi8BWYEfI3L0d8GIbGmcdFAS1uIRGjA=="],
 
     "qs": ["qs@6.16.0", "", { "dependencies": { "es-define-property": "^1.0.1", "side-channel": "^1.1.1" } }, "sha512-h6fhOIaRrID2CbEY2fqs+7t+UXZo+MLAnU5gRIq85uFtdiUPCdsApMlHhXogKVM4HM2DVbIjGNTTYH2OcmP1vA=="],
 

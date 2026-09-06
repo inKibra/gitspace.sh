@@ -23,7 +23,21 @@ The started runtime connects to the account relay. It owns the repositories, wor
 
 ## Connect a browser
 
-Create or recover your account at [gitspace.sh](https://gitspace.sh), then choose **Open GitSpace**. The resulting browser invitation expires after five minutes.
+### From a connected browser
+
+Open **Account > Connections > Browsers > Connect another browser**. Create an invitation, then copy its link or scan its QR code in the new browser. Only a browser with permission to enroll devices can create an invitation.
+
+The link works once and expires after five minutes. Anyone holding it can connect to your account before it expires. **Cancel link** invalidates the link, including copies you already shared. After someone redeems it, revoke that browser from the device list instead.
+
+An invited browser depends on the browser that invited it. Signing out or revoking the sending browser also disables browsers it connected. Recovery-key enrollment does not depend on another browser.
+
+### With your recovery key
+
+Visit your account URL, such as `https://bradleat.gitspace.sh`, in the new browser. Under **Use your recovery key**, enter your saved `gsr_` key and choose **Connect with recovery key**. The page already knows your account handle. This does not create a new account.
+
+The private root key stays in the page while it signs the request and invitation. GitSpace does not send it to the server or save it in browser storage. Recovery clears the key from the form when the attempt finishes.
+
+If you already have an invitation, expand **Already have an enrollment link?** and paste it.
 
 The enrollment token travels in the URL fragment and the app removes it before making the enrollment request. The browser generates a non-extractable Ed25519 key in IndexedDB, redeems the invitation, and receives a revocable device grant. Future requests use that device key.
 
