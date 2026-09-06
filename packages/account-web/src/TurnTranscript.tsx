@@ -12,13 +12,13 @@ function RichContent({ block }: { block: RichContentBlock }) {
     case 'code': return <GitSpaceMarkdown>{`~~~${block.language ?? ''}\n${block.text}\n~~~`}</GitSpaceMarkdown>;
     case 'diff': return <GitSpaceMarkdown>{`~~~diff\n${block.patch}\n~~~`}</GitSpaceMarkdown>;
     case 'diagram': return <GitSpaceMarkdown>{`~~~mermaid\n${block.source}\n~~~`}</GitSpaceMarkdown>;
-    case 'file-tree': return <div className="flex flex-col gap-0.5 font-mono text-caption text-muted-foreground">{block.paths.map((path) => <code key={path}>{path}</code>)}</div>;
+    case 'file-tree': return <div className="flex min-w-0 flex-col gap-0.5 font-mono text-caption text-muted-foreground [overflow-wrap:anywhere]">{block.paths.map((path) => <code key={path}>{path}</code>)}</div>;
     case 'image': return <TranscriptImage alt={block.alt ?? 'Tool output image'} label="Open tool output image" src={block.url} />;
-    case 'artifact-ref': return <a className="inline-flex items-center gap-1 text-body text-foreground underline-offset-4 hover:underline" href={block.url}><Link03 width={14} height={14} strokeWidth={1.5} />{block.label}</a>;
-    case 'table': return <Table>
+    case 'artifact-ref': return <a className="inline-flex min-w-0 max-w-full items-center gap-1 text-body text-foreground underline-offset-4 hover:underline" href={block.url}><Link03 className="shrink-0" width={14} height={14} strokeWidth={1.5} /><span className="min-w-0 [overflow-wrap:anywhere]">{block.label}</span></a>;
+    case 'table': return <div className="min-w-0 max-w-full overflow-x-auto [overflow-wrap:normal]" role="region" aria-label="Tool output table" tabIndex={0}><Table>
       <TableHeader><TableRow>{block.columns.map((column) => <TableHead key={column}>{column}</TableHead>)}</TableRow></TableHeader>
       <TableBody>{block.rows.map((row, index) => <TableRow key={index}>{row.map((cell, cellIndex) => <TableCell key={cellIndex}>{cell}</TableCell>)}</TableRow>)}</TableBody>
-    </Table>;
+    </Table></div>;
   }
 }
 
@@ -105,9 +105,9 @@ const PERMISSION_BADGE: Record<string, 'green' | 'red' | 'amber' | 'gray'> = { p
 
 function Notice({ icon, title, detail, badge }: { icon: ReactNode; title: string; detail?: string; badge?: ReactNode }) {
   const shape = useShape();
-  return <div className={`${shape.container} flex items-start gap-3 bg-surface-3 px-3 py-2.5 shadow-surface-1`}>
+  return <div className={`${shape.container} flex min-w-0 items-start gap-3 bg-surface-3 px-3 py-2.5 shadow-surface-1`}>
     <span className="mt-0.5 shrink-0 text-muted-foreground">{icon}</span>
-    <span className="min-w-0 flex-1"><span className="block text-body text-foreground">{title}</span>{detail ? <span className="block whitespace-pre-line text-caption text-muted-foreground">{detail}</span> : null}</span>
+    <span className="min-w-0 flex-1 [overflow-wrap:anywhere]"><span className="block text-body text-foreground">{title}</span>{detail ? <span className="block whitespace-pre-line text-caption text-muted-foreground">{detail}</span> : null}</span>
     {badge}
   </div>;
 }
@@ -167,7 +167,7 @@ function AskBlockView({ item, onAnswer }: { item: AskBlock; onAnswer?: TurnTrans
       defaultAnswers={Object.fromEntries(item.questions.flatMap((question) => question.answer === undefined ? [] : [[question.id, { questionId: question.id, selectedIds: Array.isArray(question.answer) ? question.answer : [question.answer] }]]))}
       onComplete={onAnswer ? complete : undefined}
     />
-    {error ? <p role="alert" className="mt-2 text-caption text-destructive">{error}</p> : null}
+    {error ? <p role="alert" className="mt-2 text-caption text-destructive [overflow-wrap:anywhere]">{error}</p> : null}
   </div>;
 }
 
@@ -197,15 +197,15 @@ function TurnItemView({ item, active, onAnswer }: { item: TurnItem; active: bool
     case 'preview':
       return <Notice icon={<Link03 width={16} height={16} strokeWidth={1.5} />} title={item.label} detail={`${item.serviceName} · ${item.status}`} badge={item.route ? <Button variant="tertiary" size="compact" asChild><a href={item.route}>Open preview</a></Button> : undefined} />;
     case 'reference':
-      return <Button variant="tertiary" size="compact" type="button" className="self-start" leadingIcon={glyph(GitBranch01)}>{item.label}<span className="text-caption text-muted-foreground">{item.kind}</span></Button>;
+      return <Button variant="tertiary" size="compact" type="button" className="h-auto min-h-7 min-w-0 max-w-full self-start py-1 [&_span]:min-w-0 [&_svg]:shrink-0" leadingIcon={glyph(GitBranch01)}><span className="text-left [overflow-wrap:anywhere]">{item.label} <span className="text-caption text-muted-foreground">{item.kind}</span></span></Button>;
     default:
       return <RichContent block={item} />;
   }
 }
 
 function TransportNotice({ block }: { block: TransportBlock }) {
-  return <p className="flex items-center gap-2 text-caption text-muted-foreground">
-    <span className="status-dot text-muted-foreground" data-pulse={block.status === 'reconnecting' || undefined} />
+  return <p className="flex min-w-0 flex-wrap items-center gap-2 text-caption text-muted-foreground [overflow-wrap:anywhere]">
+    <span className="status-dot shrink-0 text-muted-foreground" data-pulse={block.status === 'reconnecting' || undefined} />
     <span className="text-foreground">{block.title}</span>
     {block.durationMs ? <span className="tabular-nums">{(block.durationMs / 1000).toFixed(1)}s</span> : null}
     {block.detail ? <span>{block.detail}</span> : null}
@@ -214,9 +214,9 @@ function TransportNotice({ block }: { block: TransportBlock }) {
 
 /** The transcript reads like the registry's chat demo: one column, messages stacked with gap-2, reasoning and tools inline between them. */
 export function TurnTranscript({ turns, transport, onAnswer }: TurnTranscriptProps) {
-  return <div className="mx-auto flex w-full max-w-3xl flex-col gap-6 px-6 pb-40 pt-6">
-    {transport.length ? <div className="flex flex-col gap-1">{transport.map((block) => <TransportNotice block={block} key={block.id} />)}</div> : null}
-    {turns.map((turn) => <article className="flex flex-col gap-2" data-status={turn.status} key={turn.id}>
+  return <div className="mx-auto flex min-w-0 w-full max-w-3xl flex-col gap-6 px-6 pb-40 pt-6">
+    {transport.length ? <div className="flex min-w-0 flex-col gap-1">{transport.map((block) => <TransportNotice block={block} key={block.id} />)}</div> : null}
+    {turns.map((turn) => <article className="flex min-w-0 flex-col gap-2" data-status={turn.status} key={turn.id}>
       {turn.user ? <TurnItemView item={turn.user} active={false} /> : null}
       {turn.items.filter((item) => item.type !== 'message' || item.role !== 'user').map((item) => <TurnItemView item={item} active={turn.status === 'running'} onAnswer={onAnswer} key={item.id} />)}
       {turn.sideAgents.length ? <SideAgents agents={turn.sideAgents} /> : null}

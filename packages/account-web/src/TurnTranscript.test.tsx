@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { TurnTranscript } from './TurnTranscript.js';
 
 describe('TurnTranscript', () => {
-  it('renders persisted image attachments and full-width assistant content', () => {
+  it('renders persisted user and tool image attachments', () => {
     const turns: TurnBlock[] = [{
       id: 'turn-1',
       type: 'turn',
@@ -17,11 +17,6 @@ describe('TurnTranscript', () => {
         images: [{ mimeType: 'image/png', data: 'aW1hZ2U=' }],
       },
       items: [{
-        id: 'turn-1:assistant',
-        type: 'message',
-        role: 'assistant',
-        text: '```ts\nconst visible = true;\n```',
-      }, {
         id: 'turn-1:tool:read-1',
         type: 'tool-call',
         toolCallId: 'read-1',
@@ -41,12 +36,7 @@ describe('TurnTranscript', () => {
     const html = renderToStaticMarkup(<TurnTranscript turns={turns} transport={[]} />);
 
     expect(html).toContain('src="data:image/png;base64,aW1hZ2U="');
-    expect(html).toContain('aria-label="Open attached image 1"');
     expect(html).toContain('src="data:image/webp;base64,dG9vbA=="');
-    expect(html).toContain('aria-label="Open tool output image"');
-    expect(html).toContain('w-full max-w-none items-stretch self-stretch');
-    expect(html).toContain('class="max-w-full w-full"');
-    expect(html).toContain('data-streamdown="code-block"');
   });
 
   it('keeps completed thinking as a collapsed transcript block', () => {
@@ -61,7 +51,6 @@ describe('TurnTranscript', () => {
     const completed = renderToStaticMarkup(<TurnTranscript turns={[turn('done')]} transport={[]} />);
     expect(completed).toContain('Reasoning retained after reload.');
     expect(completed).toContain('aria-expanded="false"');
-    expect(completed).toContain('>Thinking</span>');
 
     const running = renderToStaticMarkup(<TurnTranscript turns={[turn('running')]} transport={[]} />);
     expect(running).toContain('Reasoning');

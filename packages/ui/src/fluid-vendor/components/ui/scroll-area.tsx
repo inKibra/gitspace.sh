@@ -56,13 +56,13 @@ const ScrollArea = forwardRef<
             role="group"
             data-slot="scroll-area"
             aria-roledescription="scroll area"
-            className={cn("relative overflow-hidden", className)}
+            className={cn("relative min-w-0 overflow-hidden", className)}
             {...props}
           >
             <div
               data-slot="scroll-area-viewport"
               className={cn(
-                "size-full rounded-[inherit]",
+                "size-full min-w-0 rounded-[inherit]",
                 orientation === "vertical" && "overflow-y-auto",
                 orientation === "horizontal" && "overflow-x-auto",
                 orientation === "both" && "overflow-auto",
@@ -77,16 +77,16 @@ const ScrollArea = forwardRef<
           <ScrollAreaPrimitive.Root
             ref={ref}
             data-slot="scroll-area"
-            className={cn("relative overflow-hidden", className)}
+            className={cn("relative min-w-0 overflow-hidden", className)}
             {...props}
           >
             <ScrollAreaPrimitive.Viewport
               data-slot="scroll-area-viewport"
-              className={cn("size-full rounded-[inherit]", viewportClassName)}
+              className={cn("size-full min-w-0 rounded-[inherit]", viewportClassName)}
             >
-              {/* Content gives Base UI an intrinsic size to measure
-                  horizontal overflow against. */}
-              <ScrollAreaPrimitive.Content>
+              {/* Vertical content follows the viewport width; horizontal
+                  orientations retain Base UI's intrinsic sizing. */}
+              <ScrollAreaPrimitive.Content style={orientation === "vertical" ? { minWidth: 0 } : undefined}>
                 {children}
               </ScrollAreaPrimitive.Content>
             </ScrollAreaPrimitive.Viewport>

@@ -777,20 +777,20 @@ function OfflineWorkspace({ projectId, workspaceId, defaultMachineId, onOpenSett
       setOpening(false);
     }
   };
-  const navigation = <header className="flex shrink-0 flex-wrap items-center gap-2 border-b border-border px-4 py-3">
-    {context.state === 'success' ? <span className="truncate text-body font-medium">{context.value.workspace.name}</span> : null}
-    <div className="ml-auto flex items-center gap-1">
+  const navigation = <header className="flex min-w-0 shrink-0 flex-wrap items-center gap-2 border-b border-border px-4 py-3">
+    {context.state === 'success' ? <span className="min-w-0 flex-1 basis-40 truncate text-body font-medium" title={context.value.workspace.name}>{context.value.workspace.name}</span> : null}
+    <div className="ml-auto flex min-w-0 max-w-full flex-wrap items-center gap-1">
       <Tooltip content="Open this workspace on a machine first"><span><Button variant="ghost" size="icon-compact" aria-label="Open terminals" disabled><Terminal width={16} height={16} strokeWidth={1.5} /></Button></span></Tooltip>
       <Tooltip content="Inspector"><Button variant="ghost" size="icon-compact" aria-label="Open Inspector" aria-pressed={inspectorOpen} onClick={() => setInspectorOpen((open) => !open)}><LayoutRight width={16} height={16} strokeWidth={1.5} /></Button></Tooltip>
       <Button variant="ghost" size="compact" onClick={() => onOpenSettings()}>Account settings</Button>
     </div>
   </header>;
-  if (context.state !== 'success') return <main className="flex min-h-0 flex-1 flex-col bg-background">{navigation}<div className="flex flex-1 items-center justify-center"><EmptyState icon={context.state === 'pending' ? <ThinkingIndicator /> : undefined} title={context.state === 'pending' ? 'Loading saved workspace…' : 'Cloud Inspector unavailable'} description={context.state === 'failure' ? context.error.message : 'Reading canonical workspace records without opening the workspace.'} action={context.state === 'failure' ? <Button variant="ghost" onClick={() => void context.refetch()}>Retry</Button> : undefined} /></div></main>;
+  if (context.state !== 'success') return <main className="flex min-h-0 min-w-0 flex-1 flex-col bg-background">{navigation}<div className="flex min-h-0 min-w-0 flex-1 items-center justify-center overflow-auto"><EmptyState icon={context.state === 'pending' ? <ThinkingIndicator /> : undefined} title={context.state === 'pending' ? 'Loading saved workspace…' : 'Cloud Inspector unavailable'} description={context.state === 'failure' ? context.error.message : 'Reading canonical workspace records without opening the workspace.'} action={context.state === 'failure' ? <Button variant="ghost" onClick={() => void context.refetch()}>Retry</Button> : undefined} /></div></main>;
   const saved = context.value;
-  return <main className="flex min-h-0 flex-1 flex-col bg-background">{navigation}
-    <div className="flex min-h-0 flex-1 max-md:flex-col">
-      <section className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <div className="flex flex-col gap-2 px-6 py-4">
+  return <main className="flex min-h-0 min-w-0 flex-1 flex-col bg-background">{navigation}
+    <div className="flex min-h-0 min-w-0 flex-1 max-md:flex-col">
+      <ScrollArea className="min-h-0 min-w-0 flex-1" viewportClassName="h-full">
+        <div className="flex min-w-0 flex-col gap-2 px-4 py-4 [overflow-wrap:anywhere] sm:px-6">
           <span className="text-caption text-muted-foreground">{saved.project.name} · {saved.workspace.branch}</span>
           <h1 className="text-title font-semibold">{saved.workspace.name}</h1>
           <p className="text-body text-muted-foreground">This workspace is not open on an online machine. Inspect cloud records without starting it.</p>
@@ -803,11 +803,9 @@ function OfflineWorkspace({ projectId, workspaceId, defaultMachineId, onOpenSett
           {!onlineMachines.length ? <p className="text-caption text-muted-foreground">No online machines. Cloud Inspector remains available; manage machines in Account settings when you want to open this workspace.</p> : null}
           {openError ? <p role="alert" className="text-caption text-destructive">{openError}</p> : null}
         </div>
-        <ScrollArea className="min-h-0 flex-1" viewportClassName="h-full">
-          <h2 className="px-6 pb-2 text-caption font-medium text-muted-foreground">Saved transcript</h2>
-          {saved.savedTranscript.status === 'available' ? <TurnTranscript turns={turns} transport={[]} /> : <div className="px-6 py-4"><EmptyState title={saved.savedTranscript.status === 'none' ? 'No saved transcript' : 'Saved transcript unavailable'} description={saved.savedTranscript.reason ?? 'No transcript has been saved for this workspace.'} /></div>}
-        </ScrollArea>
-      </section>
+        <h2 className="px-4 pb-2 text-caption font-medium text-muted-foreground sm:px-6">Saved transcript</h2>
+        {saved.savedTranscript.status === 'available' ? <TurnTranscript turns={turns} transport={[]} /> : <div className="px-4 py-4 sm:px-6"><EmptyState title={saved.savedTranscript.status === 'none' ? 'No saved transcript' : 'Saved transcript unavailable'} description={saved.savedTranscript.reason ?? 'No transcript has been saved for this workspace.'} /></div>}
+      </ScrollArea>
       {inspectorOpen ? <aside className="flex min-h-0 w-[min(55vw,900px)] min-w-0 flex-col border-l border-border max-md:h-1/2 max-md:w-full" aria-label="Inspector">{reviewerId ? <LiveInspector key={saved.identity.spaceId} projectId={projectId} spaceId={saved.identity.spaceId} generation={saved.placement?.generation ?? 0} reviewerId={reviewerId} sessionId={saved.checkpoint?.sessionId ?? null} turns={turns} workspaces={[]} onSelectWorkspace={(id) => selectInspection(projectId, id)} refreshToken={0} runtimeAvailable={false} onClose={() => setInspectorOpen(false)} /> : <EmptyState title="Inspector identity unavailable" description="This browser must be enrolled to inspect workspace records." />}</aside> : null}
     </div>
   </main>;

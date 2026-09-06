@@ -61,7 +61,7 @@ const ChatMessage = forwardRef<HTMLDivElement, ChatMessageProps>(
         transition={spring.moderate}
         style={{ transformOrigin: isUser ? "bottom right" : "bottom left" }}
         className={cn(
-          "group flex flex-col gap-1.5",
+          "group flex min-w-0 flex-col gap-1.5",
           isUser ? "max-w-[80%] items-end self-end" : "w-full max-w-none items-stretch self-stretch",
           className
         )}
@@ -70,7 +70,7 @@ const ChatMessage = forwardRef<HTMLDivElement, ChatMessageProps>(
         {(attachments != null || (files && files.length > 0)) && (
           <div
             className={cn(
-              "flex max-w-full flex-wrap gap-1.5",
+              "flex min-w-0 max-w-full flex-wrap gap-1.5",
               isUser ? "justify-end" : "justify-start"
             )}
           >
@@ -87,7 +87,7 @@ const ChatMessage = forwardRef<HTMLDivElement, ChatMessageProps>(
         {children != null && children !== "" && (
           <div
             className={cn(
-              "whitespace-pre-wrap break-words",
+              "min-w-0 max-w-full whitespace-pre-wrap [overflow-wrap:anywhere]",
               compact ? "py-1.5 text-[13px]" : "py-2 text-[14px]",
               // User keeps the bubble chrome (rounded fill + horizontal padding);
               // the assistant reply is flush-left plain text with no background.
@@ -117,7 +117,7 @@ const ChatMessage = forwardRef<HTMLDivElement, ChatMessageProps>(
           // show their actions alone. User rows read date → icons left-to-right.
           <div
             className={cn(
-              "flex items-center gap-2 px-1 leading-none text-muted-foreground select-none",
+              "flex min-w-0 max-w-full flex-wrap items-center gap-2 px-1 leading-none text-muted-foreground select-none [overflow-wrap:anywhere]",
               compact ? "text-[11px]" : "text-[12px]",
               !isTouch && [
                 "opacity-0 pointer-events-none transition-opacity duration-150",
@@ -128,7 +128,7 @@ const ChatMessage = forwardRef<HTMLDivElement, ChatMessageProps>(
           >
             {showTime && <span className="tabular-nums">{time}</span>}
             {actions != null && (
-              <span className="flex items-center gap-0.5">{actions}</span>
+              <span className="flex min-w-0 max-w-full flex-wrap items-center gap-0.5">{actions}</span>
             )}
           </div>
         )}
