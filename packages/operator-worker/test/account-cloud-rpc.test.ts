@@ -34,7 +34,7 @@ async function account(capabilities: DeviceCapability[] = ['rpc.read', 'rpc.writ
 const single = (path: string, input: unknown = {}) => ({ v: 1, path, input });
 
 describe('account cloud RPC without machines', () => {
-  it('loads canonical settings and an empty fleet/project index in one authorized batch', async () => {
+  it('loads settings, an empty fleet, and the mandatory cloud-only source project without a machine', async () => {
     const fixture = await account();
     const response = await SELF.fetch(fixture.request({ v: 1, batch: [
       { ...single('settings.get'), id: 'settings' },
@@ -47,8 +47,24 @@ describe('account cloud RPC without machines', () => {
       { id: 'settings', response: { status: 'ok', value: { profile: { handle: fixture.handle }, revision: 1 } } },
       { id: 'git', response: { status: 'ok', value: null } },
       { id: 'fleet', response: { status: 'ok', value: [] } },
-      { id: 'projects', response: { status: 'ok', value: [] } },
+      { id: 'projects', response: { status: 'ok', value: [{ role: 'gitspace-source', lifecycle: 'cloud-only' }] } },
     ] });
+  });
+
+  it('repairs the same canonical source project across concurrent onboarding requests without Git authorization', async () => {
+    const fixture = await account();
+    const responses = await Promise.all(Array.from({ length: 3 }, () => SELF.fetch(fixture.request(single('project.ensureGitSpace', { sourceBranch: 'release/test', sourceCommit: 'a'.repeat(40) })))));
+    const projects = await Promise.all(responses.map(async (response) => {
+      expect(response.status).toBe(200);
+      const envelope = parse(await response.text());
+      expect(envelope).toMatchObject({ status: 'ok', value: { role: 'gitspace-source', lifecycle: 'cloud-only' } });
+      return envelope.value;
+    }));
+    expect(new Set(projects.map((project) => project.id)).size).toBe(1);
+    expect(await env.USER_PROJECTS.getByName(fixture.userId).list()).toHaveLength(1);
+    expect(await env.PROJECT_AUTHORITY.getByName(`${fixture.userId}:${projects[0].id}`).listWorkspaces()).toEqual([]);
+    expect(await env.FLEET_CATALOG.getByName(fixture.userId).listMachines()).toEqual([]);
+    expect(await env.USER_SETTINGS.getByName(fixture.userId).getGitIdentity()).toBeNull();
   });
 
   it('opens an empty fleet stream and reports the first machine without reconnecting', async () => {
@@ -273,7 +289,7 @@ describe('machine-independent Inspector', () => {
     const artifact = { spaceId: space.spaceId, expectedGeneration: 2, url: 'local://workspace/review.txt' };
     const written = await worker.fetch(fixture.request(single('inspector.artifacts.write', { ...artifact, mediaType: 'text/plain', base64: btoa('Cloud review evidence') })), cloudEnv);
     expect(parse(await written.text())).toMatchObject({ status: 'error' });
-    const read = await worker.fetch(fixture.request(single('inspector.artifacts.read', artifact)), cloudEnv);
+    const read = await worker.fetch(fixture.request(single('inspector.artifacts.read', { ...artifact, hash: artifactHash })), cloudEnv);
     expect(parse(await read.text())).toMatchObject({ status: 'ok', value: { text: 'Cloud review evidence', mediaType: 'text/plain' } });
     const repository = await worker.fetch(fixture.request(single('inspector.repository.tree', { spaceId: space.spaceId, expectedGeneration: 2, mode: 'working', path: null })), cloudEnv);
     expect(parse(await repository.text())).toMatchObject({ status: 'error' });

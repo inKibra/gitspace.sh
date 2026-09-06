@@ -8,6 +8,9 @@ const resumeResultSchema = z.object({
   stopped: z.boolean(),
   replies: z.array(z.string()),
   history: z.array(z.string()),
+  goalsForRequests: z.array(z.enum(['initial', 'latest'])),
+  uninterruptedAfterEdit: z.boolean(),
+  instructionNotices: z.number().int(),
 });
 
 test('resumes a cancelled partial response without deleting progress or inventing a user message', async () => {
@@ -23,11 +26,14 @@ import { postmortem } from ${JSON.stringify(Bun.resolveSync('@oh-my-pi/pi-utils'
 const root = process.env.HOME;
 const partialSeen = Promise.withResolvers();
 let requests = 0;
+const goalsForRequests = [];
+let instructions = { goal: { projectId: 'project', spaceId: 'workspace', id: 'goal', revision: 1, title: 'initial-goal-marker', summary: '', phase: 'code', requirements: [], updatedBy: 'user' }, workflow: null, rubric: null };
 const server = Bun.serve({ hostname: '127.0.0.1', port: 0, async fetch(request) {
   const path = new URL(request.url).pathname;
   if (request.method === 'GET' && path === '/v1/models') return Response.json({ data: [{ id: 'test', object: 'model', owned_by: 'openai' }] });
   if (request.method !== 'POST' || path !== '/v1/chat/completions') return new Response('Not found', { status: 404 });
-  await request.json();
+  const payload = await request.json();
+  goalsForRequests.push(JSON.stringify(payload).includes('latest-goal-marker') ? 'latest' : 'initial');
   const number = ++requests;
   const text = number === 1 ? 'First answer.' : number === 2 ? 'Partial reply.' : 'Recovered.';
   return new Response(new ReadableStream({ start(controller) {
@@ -55,21 +61,28 @@ await writeFile(join(agentDir, 'config.yml'), JSON.stringify({
   git: { enabled: false }, lsp: { enabled: false }, retry: { maxRetries: 0 },
 }));
 const auth = await AuthStorage.create(join(root, 'auth.sqlite'));
-const runtime = new EmbeddedOmpRuntime({ agentDir, sessionRoot: join(root, 'sessions'), authStorage: async () => auth });
+const runtime = new EmbeddedOmpRuntime({ agentDir, sessionRoot: join(root, 'sessions'), authStorage: async () => auth,
+  spaceNamespace: { declaration: '{}', call: async () => instructions },
+});
 let session;
+let instructionNotices = 0;
 try {
   session = await runtime.create({ projectId: 'project', workspaceId: 'workspace', workingDirectory: workspace, sessionKey: 'space', artifactsDir: join(root, 'artifacts') });
   await session.setModel('openai', 'test');
   await session.prompt('First task.');
   session.subscribe(event => { if (event.type === 'message_update' && JSON.stringify(event).includes('Partial reply.')) partialSeen.resolve(); });
+  session.subscribe(event => { if (event.type === 'message_end' && event.message?.customType === 'gitspace-instructions-changed') instructionNotices += 1; });
   const running = session.prompt('Finish the second task.');
   await partialSeen.promise;
+  instructions = { ...instructions, goal: { ...instructions.goal, revision: 2, title: 'latest-goal-marker' } };
+  await session.instructionsChanged();
+  const uninterruptedAfterEdit = requests === 2 && session.activity().activity.active;
   await session.stop();
   await running;
   const stopped = (await session.messages()).some(message => message.role === 'assistant' && message.stopReason === 'aborted');
   await session.resume();
   const replies = (await session.messages()).filter(message => message.role === 'assistant').map(message => message.content.filter(part => part.type === 'text').map(part => part.text).join(''));
-  console.log('RESUME_RESULT=' + JSON.stringify({ stopped, replies, history: (await session.control()).history.map(entry => entry.text) }));
+  console.log('RESUME_RESULT=' + JSON.stringify({ stopped, replies, history: (await session.control()).history.map(entry => entry.text), goalsForRequests, uninterruptedAfterEdit, instructionNotices }));
 } finally {
   await session?.dispose();
   auth.close();
@@ -88,6 +101,9 @@ try {
       stopped: true,
       replies: ['First answer.', 'Partial reply.', 'Recovered.'],
       history: ['First task.', 'Finish the second task.'],
+      goalsForRequests: ['initial', 'initial', 'latest'],
+      uninterruptedAfterEdit: true,
+      instructionNotices: 1,
     });
   } finally {
     child.kill('SIGKILL');

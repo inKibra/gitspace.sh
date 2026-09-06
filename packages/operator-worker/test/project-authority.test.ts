@@ -184,6 +184,56 @@ describe('ProjectAuthorityDO', () => {
 });
 
 describe('UserProjectIndexDO', () => {
+  it('reserves one cloud-only source definition under concurrent repair and reuses canonical repository identity', async () => {
+    const index = projectEnv.USER_PROJECTS.getByName('source-concurrent');
+    const source = { release: 'channel:test', branch: 'release/test', commit: 'a'.repeat(40) };
+    const ensured = await Promise.all(Array.from({ length: 8 }, () => index.ensureGitSpaceProject(source)));
+    expect(new Set(ensured.map((project) => project.id)).size).toBe(1);
+    expect(await index.list()).toMatchObject([{ lifecycle: 'cloud-only', role: 'gitspace-source', source }]);
+    await runInDurableObject(index, (instance: UserProjectIndexDO) => {
+      expect(() => instance.remove(ensured[0]!.id)).toThrow();
+    });
+
+    const adopted = projectEnv.USER_PROJECTS.getByName('source-existing');
+    await adopted.put({
+      id: 'existing-checkout', name: 'My renamed source', lifecycle: 'active',
+      repositoryReference: 'git@github.com:inKibra/gitspace.sh.git', baseBranch: 'my-source',
+      role: null, source: null, revision: 3, archivedAt: null, updatedAt: new Date(0).toISOString(),
+    });
+    const repaired = await adopted.ensureGitSpaceProject(source);
+    expect(repaired).toMatchObject({ id: 'existing-checkout', name: 'My renamed source', role: 'gitspace-source', lifecycle: 'active', baseBranch: 'my-source' });
+    expect(await adopted.list()).toHaveLength(1);
+    expect(await adopted.ensureGitSpaceProject(source)).toEqual(repaired);
+  });
+
+  it('keeps canonical source workspaces intact when project deletion or archival is attempted', async () => {
+    const index = projectEnv.USER_PROJECTS.getByName('source-protected');
+    const project = await index.ensureGitSpaceProject({ release: null, branch: 'release/test', commit: null });
+    const authority = projectEnv.PROJECT_AUTHORITY.getByName('source-protected-project');
+    const source = await authority.ensureGitSpaceProject(project);
+    const base = await authority.putWorkspace({
+      id: source.id, projectId: source.id, kind: 'base', name: source.name, branch: source.baseBranch,
+      phase: null, sourceKind: 'base', sourceRef: source.baseBranch, lifecycle: 'active', goalId: null, expectedRevision: 0,
+    });
+    await runInDurableObject(authority, (instance: ProjectAuthorityDO) => {
+      expect(() => instance.deleteProject(source.revision)).toThrow();
+      expect(() => instance.setProjectLifecycle(source.revision, 'archived')).toThrow();
+    });
+    expect(await authority.listWorkspaces()).toEqual([base]);
+    expect(await authority.getProject()).toEqual(source);
+  });
+
+  it('fills missing release provenance once without silently repinning a reserved checkout', async () => {
+    const index = projectEnv.USER_PROJECTS.getByName('source-provenance');
+    const unresolved = await index.ensureGitSpaceProject({ release: null, branch: null, commit: null });
+    expect(unresolved.baseBranch).toBe('HEAD');
+    const pinned = await index.ensureGitSpaceProject({ release: 'channel:one', branch: 'release/one', commit: 'a'.repeat(40) });
+    const repeated = await index.ensureGitSpaceProject({ release: 'channel:two', branch: 'release/two', commit: 'b'.repeat(40) });
+    expect(repeated.id).toBe(unresolved.id);
+    expect(repeated.source).toEqual(pinned.source);
+    expect(repeated.baseBranch).toBe('release/one');
+  });
+
   it('indexes projects and locates each workspace authority', async () => {
     const stub = projectEnv.USER_PROJECTS.getByName('user-a');
     await runInDurableObject(stub, (index: UserProjectIndexDO) => index.put({
@@ -192,6 +242,8 @@ describe('UserProjectIndexDO', () => {
       lifecycle: 'active',
       repositoryReference: null,
       baseBranch: 'main',
+      role: null,
+      source: null,
       revision: 2,
       archivedAt: null,
       updatedAt: new Date().toISOString(),

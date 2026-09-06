@@ -21,12 +21,13 @@ export interface OmpChildInit {
   mcpCatalog: OmpMcpCatalog;
   namespaces: { space?: string; mcp?: string };
 }
-export type SessionMethod = Exclude<keyof OmpRuntimeSession, 'id' | 'sessionFile' | 'subscribe' | 'subscribeActivity' | 'activity' | 'reloadSettings'>;
+export type SessionMethod = Exclude<keyof OmpRuntimeSession, 'id' | 'sessionFile' | 'subscribe' | 'subscribeActivity' | 'activity' | 'reloadSettings' | 'instructionsChanged'>;
 export type OmpChildApi = Pick<OmpRuntimeSession, SessionMethod> & {
   health(): Promise<{ protocolVersion: number; platform: string; arch: string; bunVersion: string; pid: number }>;
   initialize(input: OmpChildInit): Promise<{ id: string; sessionFile: string; activity: SessionActivity }>;
   reloadSettings(): Promise<void>;
   reloadAuth(): Promise<void>;
+  instructionsChanged(): Promise<void>;
   refreshMcp(tools: OmpToolDescriptor[], catalog: OmpMcpCatalog): Promise<void>;
   transcript(input: { sessionFile: string } | { bytes: Uint8Array }): Promise<OmpTranscriptEvent[]>;
 };

@@ -10,6 +10,10 @@ export const ACCOUNT_CLOUD_RPC_PATHS: Readonly<Record<string, true>> = {
   'mcp.composio.setup.get': true, 'mcp.composio.setup.set': true, 'mcp.composio.setup.delete': true,
   'inspector.bootstrap': true,
   'inspector.availability': true,
+  'project.ensureGitSpace': true,
+  'inspector.artifacts.read': true,
+  'inspector.artifacts.list': true, 'inspector.artifacts.copyToProject': true,
+  'inspector.artifacts.shares.list': true, 'inspector.artifacts.shares.create': true, 'inspector.artifacts.shares.revoke': true,
 };
 
 /** Runtime metadata has a canonical cloud view only when no machine is online. */
@@ -21,7 +25,7 @@ export const ACCOUNT_RUNTIME_RPC_PATHS: Readonly<Record<string, true>> = {
 /** Inspector state may be read in the cloud when its workspace has no live holder.
  * These calls have per-space signed queues, separate from runtime operations. */
 export function isInspectorRpcPath(path: string): boolean {
-  return path.startsWith('inspector.') && path !== 'inspector.bootstrap' && path !== 'inspector.availability';
+  return path.startsWith('inspector.') && !Object.hasOwn(ACCOUNT_CLOUD_RPC_PATHS, path);
 }
 
 export function inspectorRpcSpaceId(input: unknown): string | null {

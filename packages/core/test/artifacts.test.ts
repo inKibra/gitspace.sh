@@ -45,6 +45,57 @@ const workspaceB = { kind: 'workspace', projectId: 'project-a', workspaceId: 'wo
 const project = { kind: 'project', projectId: 'project-a', currentWorkspaceId: 'workspace-a' } as const;
 
 describe('LocalArtifactResolver', () => {
+  it('merges a concurrent project copy with a local publish without losing either version', async () => {
+    const local = fixture();
+    const remote = fixture();
+    const canonical = new LocalArtifactResolver(remote.database, local.store, join(remote.root, 'shared-cache'), Uint8Array.from({ length: 32 }, (_, index) => index + 1));
+    try {
+      await local.resolver.write(project, 'local://base/keep.txt', new TextEncoder().encode('baseline'));
+      const base = await local.resolver.commit(project, 'local://base/');
+      if (base.status === 'error') throw base.error;
+      const restored = await canonical.restoreScope(base.value);
+      if (restored.status === 'error') throw restored.error;
+      await local.resolver.write(project, 'local://base/agent.txt', new TextEncoder().encode('live project edit'));
+      const own = await local.resolver.commit(project, 'local://base/');
+      if (own.status === 'error') throw own.error;
+      await canonical.write(project, 'local://base/copied.txt', new TextEncoder().encode('workspace copy'));
+      const copied = await canonical.commit(project, 'local://base/');
+      if (copied.status === 'error') throw copied.error;
+      const merged = await local.resolver.reconcileScope({ base: base.value, local: own.value, canonical: copied.value });
+      if (merged.status === 'error') throw merged.error;
+      expect(merged.value.generation).toBe(copied.value.generation + 1);
+      await local.resolver.evictCachedBytes();
+      for (const [path, content] of [['keep.txt', 'baseline'], ['agent.txt', 'live project edit'], ['copied.txt', 'workspace copy']]) {
+        const value = await local.resolver.read(project, `local://base/${path}`);
+        if (value.status === 'error') throw value.error;
+        expect(new TextDecoder().decode(value.value)).toBe(content);
+      }
+    } finally { local.database.close(); remote.database.close(); }
+  });
+
+  it('refuses competing same-path edits during copy reconciliation without overwriting the local version', async () => {
+    const local = fixture();
+    const remote = fixture();
+    const canonical = new LocalArtifactResolver(remote.database, local.store, join(remote.root, 'shared-cache'), Uint8Array.from({ length: 32 }, (_, index) => index + 1));
+    try {
+      await local.resolver.write(project, 'local://base/report.txt', new TextEncoder().encode('baseline'));
+      const base = await local.resolver.commit(project, 'local://base/');
+      if (base.status === 'error') throw base.error;
+      const restored = await canonical.restoreScope(base.value);
+      if (restored.status === 'error') throw restored.error;
+      await local.resolver.write(project, 'local://base/report.txt', new TextEncoder().encode('local edit'));
+      await canonical.write(project, 'local://base/report.txt', new TextEncoder().encode('remote edit'));
+      const own = await local.resolver.commit(project, 'local://base/');
+      const other = await canonical.commit(project, 'local://base/');
+      if (own.status === 'error') throw own.error;
+      if (other.status === 'error') throw other.error;
+      expect((await local.resolver.reconcileScope({ base: base.value, local: own.value, canonical: other.value })).status).toBe('error');
+      const preserved = await local.resolver.read(project, 'local://base/report.txt');
+      if (preserved.status === 'error') throw preserved.error;
+      expect(new TextDecoder().decode(preserved.value)).toBe('local edit');
+    } finally { local.database.close(); remote.database.close(); }
+  });
+
   it('writes, commits, evicts, and lazily restores encrypted workspace bytes', async () => {
     const { database, resolver, store } = fixture();
     const written = await resolver.write(

@@ -256,6 +256,10 @@ export class CloudSpaceCheckpointAuthority implements SpaceCheckpointAuthority {
     return this.call('project.get', { projectId });
   }
 
+  activateSourceProject(projectId: string, expectedRevision: number, baseBranch: string): Promise<CloudProjectSummary> {
+    return this.call('project.activateSource', { projectId, expectedRevision, baseBranch });
+  }
+
   listProjectWorkspaces(projectId: string): Promise<CloudWorkspaceDefinition[]> {
     return this.call('project.workspaces.list', { projectId });
   }
@@ -375,7 +379,13 @@ export class CloudSpaceCheckpointAuthority implements SpaceCheckpointAuthority {
   ): Promise<CanonicalArtifactScope> {
     const current = await this.getArtifactScope(projectId, scope.id);
     if (current && current.generation === scope.generation && current.manifestHash === scope.manifestHash) return current;
-    if (current && current.generation > scope.generation) return current;
+    if (current && current.generation >= scope.generation) {
+      throw new CloudSpaceAuthorityError('ARTIFACT_CONFLICT', 'Canonical artifacts changed; refresh the workspace before publishing.', {
+        scopeId: scope.id,
+        localGeneration: scope.generation,
+        canonicalGeneration: current.generation,
+      });
+    }
     return this.putArtifactScope(projectId, {
       id: scope.id,
       workspaceId: scope.spaceId,

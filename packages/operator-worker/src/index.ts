@@ -4,6 +4,8 @@ import type { CredentialRefreshResponse, CredentialUploadResponse, SnapshotRespo
 import { z } from 'zod';
 import { handleSandboxRollout } from './sandbox-rollout.js';
 import { handleAccountCloudRpc } from './account-cloud-rpc.js';
+import { serveArtifactShare } from './account-inspector-data.js';
+import { ensureAccountGitSpaceProject } from './gitspace-project.js';
 import {
   credentialAccessRequestSchema,
   gitIdentityUpdateSchema,
@@ -1896,6 +1898,7 @@ async function accountRpcResponse(request: Request, env: Env): Promise<Response>
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+    if (url.pathname.startsWith('/shared-artifacts/')) return serveArtifactShare(request, env);
     if (url.pathname.startsWith('/distribution/')) {
       if (request.method !== 'GET' && request.method !== 'HEAD') return new Response('Method not allowed', { status: 405, headers: { allow: 'GET, HEAD' } });
       const stable = /^\/distribution\/v1\/stable\/(?:darwin|linux)-(?:arm64|x64)\.(?:json|txt)$/u.test(url.pathname);
@@ -2271,6 +2274,7 @@ export default {
           throw new Error('Invitation could not be consumed');
         }
         await accountDirectory.markActive({ userId, release: tenant.release });
+        await ensureAccountGitSpaceProject(env, userId);
         activeInvite = undefined;
         return Response.json({
           status: 'ok',
@@ -2420,6 +2424,7 @@ export default {
           }
         }
         await accounts.markActive({ userId: body.userId, release: null });
+        await ensureAccountGitSpaceProject(env, body.userId);
         return Response.json(registered.status === 'ok' ? registered : { status: 'ok', value: { machineId: 'existing', generation: 0 } });
       } catch (error) {
         return Response.json({ status: 'error', error: { code: 'BAD_REQUEST', message: error instanceof Error ? error.message : 'Development bootstrap is invalid' } }, { status: 400 });
@@ -2934,6 +2939,7 @@ export default {
           let value: unknown;
           switch (body.operation) {
             case 'projects.list':
+              await ensureAccountGitSpaceProject(env, body.userId);
               value = await projects.list(
                 body.payload.lifecycle === 'active' || body.payload.lifecycle === 'archived'
                   ? body.payload.lifecycle
@@ -2995,6 +3001,12 @@ export default {
                 Number(body.payload.expectedRevision ?? -1),
                 body.payload.lifecycle as Parameters<ProjectAuthorityDO['setProjectLifecycle']>[1],
               );
+              const namespace = env.USER_PROJECTS as DurableObjectNamespace<UserProjectIndexDO>;
+              value = await namespace.get(namespace.idFromName(body.userId)).put(project);
+              break;
+            }
+            case 'project.activateSource': {
+              const project = await authority.activateSourceProject(Number(body.payload.expectedRevision ?? -1), String(body.payload.baseBranch ?? ''));
               const namespace = env.USER_PROJECTS as DurableObjectNamespace<UserProjectIndexDO>;
               value = await namespace.get(namespace.idFromName(body.userId)).put(project);
               break;

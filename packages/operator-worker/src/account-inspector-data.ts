@@ -1,8 +1,8 @@
 import { posix } from 'node:path';
 import {
-  artifactManifestSchema, credentialProtocolBase64, decryptArtifactBytes, deriveArtifactScopeKey,
+  artifactManifestSchema, credentialProtocolBase64, decryptArtifactBytes, deriveArtifactScopeKey, encryptArtifactBytes,
   spaceCheckpointManifestSchema, spaceOmpCheckpointKey,
-  type ArtifactManifest, type CanonicalArtifactScope, type CloudProjectSummary, type CloudWorkspaceDefinition,
+  type ArtifactCopyRecord, type ArtifactManifest, type ArtifactShareRecord, type CanonicalArtifactScope, type CloudProjectSummary, type CloudWorkspaceDefinition,
   type InspectorBootstrapView, type InspectorIdentity,
 } from '@gitspace/protocol';
 import type { CredentialVaultDO } from './index.js';
@@ -45,8 +45,8 @@ export async function readInspectorContext(env: Env, userId: string, spaceId: st
   return { identity, project, workspace, workspaces, placement, authority, context };
 }
 
-async function digest(bytes: Uint8Array<ArrayBuffer>): Promise<`sha256:${string}`> {
-  const hash = await crypto.subtle.digest('SHA-256', bytes);
+async function digest(bytes: Uint8Array): Promise<`sha256:${string}`> {
+  const hash = await crypto.subtle.digest('SHA-256', bytes as Uint8Array<ArrayBuffer>);
   return `sha256:${Array.from(new Uint8Array(hash), (byte) => byte.toString(16).padStart(2, '0')).join('')}`;
 }
 
@@ -120,9 +120,10 @@ export class InspectorCloudArtifacts {
     return groups.flat();
   }
 
-  async read(url: string) {
+  async read(url: string, hash?: string | null) {
     const resolved = await this.resolve(url);
-    const entry = (await this.entries(resolved.scope)).find((candidate) => candidate.path === resolved.path);
+    const current = (await this.entries(resolved.scope)).find((candidate) => candidate.path === resolved.path);
+    const entry = hash ? { blobHash: hash, mediaType: current?.mediaType ?? null } : current;
     if (!entry) throw new Error('Artifact does not exist');
     const sealed = await readObject(this.env, this.userId, this.objectKey(entry.blobHash), entry.blobHash);
     const bytes = await decryptArtifactBytes(sealed, await deriveArtifactScopeKey(await this.key, resolved.scope.id));
@@ -131,6 +132,138 @@ export class InspectorCloudArtifacts {
       try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); } catch { /* Binary artifact. */ }
     }
     return { url, mediaType: entry.mediaType, base64: Buffer.from(bytes).toString('base64'), text };
+  }
+
+  async catalog() {
+    const [artifacts, scopes] = await Promise.all([this.list(), this.source.authority.listArtifactScopes()]);
+    return { artifacts, scopes: scopes.filter((scope) => scope.workspaceId === this.source.workspace.id || scope.workspaceId === this.source.project.id).map(({ workspaceId, generation }) => ({ workspaceId, generation })) };
+  }
+
+  async copyToProject(files: readonly { url: string; hash: string; destinationPath: string; expectedDestinationHash: string | null }[], expectedProjectGeneration: number) {
+    if (this.source.workspace.kind !== 'worktree') throw new Error('Select workspace artifacts to copy to the project');
+    if (files.length === 0 || files.length > 100) throw new Error('Select between 1 and 100 artifacts');
+    const scopes = await this.source.authority.listArtifactScopes();
+    const source = scopes.find((scope) => scope.workspaceId === this.source.workspace.id);
+    if (!source) throw new Error('Workspace artifacts have not been published yet');
+    const destination = scopes.find((scope) => scope.workspaceId === this.source.project.id) ?? {
+      id: `space:${this.source.project.id}`, workspaceId: this.source.project.id, generation: 0, manifestHash: null, updatedAt: new Date().toISOString(),
+    };
+    if (destination.generation !== expectedProjectGeneration) throw new Error('Project artifacts changed. Refresh and choose destination paths again.');
+    const [sourceEntries, destinationEntries] = await Promise.all([this.entries(source), this.entries(destination)]);
+    const sourceByPath = new Map(sourceEntries.map((entry) => [entry.path, entry]));
+    const destinationByPath = new Map(destinationEntries.map((entry) => [entry.path, entry]));
+    const paths = new Set<string>();
+    const selected = files.map((file) => {
+      const parsed = new URL(file.url);
+      if (parsed.protocol !== 'local:' || parsed.hostname !== 'workspace') throw new Error('Only this workspace’s artifacts can be copied');
+      const path = decodeURIComponent(parsed.pathname).replace(/^\/+/u, '');
+      const entry = sourceByPath.get(path);
+      if (!entry || entry.blobHash !== file.hash) throw new Error(`Selected version of ${path} changed. Refresh and select it again.`);
+      const target = file.destinationPath;
+      if (!target || target.length > 1_024 || target.includes('\\') || /[\u0000-\u001f\u007f]/u.test(target) || target.split('/').some((part) => !part || part === '.' || part === '..')) throw new Error(`Invalid destination path: ${target}`);
+      if (paths.has(target) || [...destinationByPath.keys(), ...paths].some((other) => target !== other && (target.startsWith(`${other}/`) || other.startsWith(`${target}/`)))) {
+        throw new Error(`Destination conflict: ${target}. Choose a different path; no files were copied.`);
+      }
+      const existingHash = destinationByPath.get(target)?.blobHash ?? null;
+      if (existingHash !== file.expectedDestinationHash) {
+        throw new Error(existingHash !== null && file.expectedDestinationHash === null
+          ? `Destination ${target} already exists. Confirm replacing this version or choose another name; no files were copied.`
+          : `Destination ${target} changed after confirmation. Refresh and confirm the current version again; no files were copied.`);
+      }
+      paths.add(target);
+      return { entry, target };
+    });
+    if (selected.reduce((total, { entry }) => total + entry.size, 0) > 32 * 1024 * 1024) throw new Error('Copy batches are limited to 32 MiB');
+    const [sourceKey, destinationKey] = await Promise.all([deriveArtifactScopeKey(await this.key, source.id), deriveArtifactScopeKey(await this.key, destination.id)]);
+    const generation = destination.generation + 1;
+    const createdAt = new Date().toISOString();
+    const copies: ArtifactCopyRecord[] = [];
+    for (const { entry, target } of selected) {
+      const sealed = await readObject(this.env, this.userId, this.objectKey(entry.blobHash), entry.blobHash);
+      const bytes = await decryptArtifactBytes(sealed, sourceKey);
+      if (bytes.byteLength !== entry.size) throw new Error('Artifact size does not match its manifest');
+      const copied = await encryptArtifactBytes(bytes, destinationKey);
+      const hash = await digest(copied);
+      await this.env.DATA.put(`users/${this.userId}/${this.objectKey(hash)}`, copied);
+      destinationByPath.set(target, { path: target, blobHash: hash, size: bytes.byteLength, mediaType: entry.mediaType });
+      copies.push({
+        id: crypto.randomUUID(), sourceScopeId: source.id, sourceWorkspaceId: source.workspaceId,
+        sourceGeneration: source.generation, sourcePath: entry.path, sourceHash: entry.blobHash as `sha256:${string}`,
+        destinationScopeId: destination.id, destinationPath: target, destinationHash: hash, destinationGeneration: generation, createdAt,
+      });
+    }
+    const manifest: ArtifactManifest = { version: 1, scopeId: destination.id, generation, entries: [...destinationByPath.values()].sort((left, right) => left.path.localeCompare(right.path)) };
+    const sealedManifest = await encryptArtifactBytes(new TextEncoder().encode(JSON.stringify(manifest)), destinationKey);
+    const manifestHash = await digest(sealedManifest);
+    await this.env.DATA.put(`users/${this.userId}/${this.objectKey(manifestHash)}`, sealedManifest);
+    await this.source.authority.commitArtifactCopies({ id: destination.id, workspaceId: destination.workspaceId, generation, manifestHash, expectedGeneration: destination.generation }, copies);
+    return this.catalog();
+  }
+
+  async listShares(url: string) {
+    const { scope, path } = await this.resolve(url);
+    return (await this.source.authority.listArtifactShares(scope.workspaceId, path)).map((record) => artifactShareView(this.userId, this.source.project.id, record, url));
+  }
+
+  async createShare(url: string, hash: string, expiresAt: string | null) {
+    const { scope, path } = await this.resolve(url);
+    const entry = (await this.entries(scope)).find((candidate) => candidate.path === path && candidate.blobHash === hash);
+    if (!entry) throw new Error('Selected artifact version changed. Refresh and select it again.');
+    if (expiresAt !== null && (!Number.isFinite(Date.parse(expiresAt)) || Date.parse(expiresAt) <= Date.now())) throw new Error('Choose an expiry in the future');
+    // Verify both address and decryption before publishing a bearer capability.
+    const sealed = await readObject(this.env, this.userId, this.objectKey(hash), hash);
+    const bytes = await decryptArtifactBytes(sealed, await deriveArtifactScopeKey(await this.key, scope.id));
+    if (bytes.byteLength !== entry.size) throw new Error('Artifact size does not match its manifest');
+    const record = await this.source.authority.createArtifactShare({
+      token: Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('base64url'),
+      scopeId: scope.id, workspaceId: scope.workspaceId, path, hash: hash as `sha256:${string}`,
+      size: entry.size, mediaType: entry.mediaType, createdAt: new Date().toISOString(),
+      expiresAt: expiresAt === null ? null : new Date(expiresAt).toISOString(), revokedAt: null,
+    });
+    return artifactShareView(this.userId, this.source.project.id, record, url);
+  }
+
+  async revokeShare(token: string) {
+    return { revoked: await this.source.authority.revokeArtifactShare(token, [this.source.workspace.id, this.source.project.id]) };
+  }
+}
+
+function artifactShareView(userId: string, projectId: string, record: ArtifactShareRecord, artifactUrl: string) {
+  return {
+    id: record.token, url: `/shared-artifacts/${encodeURIComponent(userId)}/${encodeURIComponent(projectId)}/${record.token}`,
+    artifactUrl, hash: record.hash, createdAt: record.createdAt, expiresAt: record.expiresAt,
+  };
+}
+
+/** Bearer delivery is always an attachment, even for HTML/SVG; it never gains account-origin script privileges. */
+export async function serveArtifactShare(request: Request, env: Env): Promise<Response> {
+  const headers = new Headers({
+    'cache-control': 'private, no-store, max-age=0', 'content-security-policy': "sandbox; default-src 'none'; frame-ancestors 'none'",
+    'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer', 'x-robots-tag': 'noindex, nofollow, noarchive',
+  });
+  if (request.method !== 'GET' && request.method !== 'HEAD') return new Response('Method not allowed', { status: 405, headers: { ...Object.fromEntries(headers), allow: 'GET, HEAD' } });
+  const match = /^\/shared-artifacts\/([^/]+)\/([^/]+)\/([A-Za-z0-9_-]{43})$/u.exec(new URL(request.url).pathname);
+  if (!match) return new Response('Not found', { status: 404, headers });
+  try {
+    const userId = decodeURIComponent(match[1]!);
+    const projectId = decodeURIComponent(match[2]!);
+    const authority = (env.PROJECT_AUTHORITY as DurableObjectNamespace<ProjectAuthorityDO>).getByName(`${userId}:${projectId}`);
+    const record = await authority.getArtifactShare(match[3]!);
+    if (!record) return new Response('Link expired or revoked', { status: 404, headers });
+    const projectKey = credentialProtocolBase64.decode(await (env.CREDENTIALS as DurableObjectNamespace<CredentialVaultDO>).getByName(userId).artifactKey(userId));
+    const objectKey = `accounts/${Buffer.from(userId).toString('base64url')}/artifacts/sha256/${record.hash.slice(7)}`;
+    const sealed = await readObject(env, userId, objectKey, record.hash);
+    const bytes = await decryptArtifactBytes(sealed, await deriveArtifactScopeKey(projectKey, record.scopeId));
+    if (bytes.byteLength !== record.size) throw new Error('Shared artifact size mismatch');
+    // Recheck after the asynchronous storage read so revocation/expiry during delivery cannot issue fresh bytes.
+    if (!await authority.getArtifactShare(match[3]!)) return new Response('Link expired or revoked', { status: 404, headers });
+    const filename = record.path.split('/').at(-1) ?? 'artifact';
+    headers.set('content-type', record.mediaType && /^[\w!#$&^.+-]+\/[\w!#$&^.+-]+(?:;[^\r\n]*)?$/u.test(record.mediaType) ? record.mediaType : 'application/octet-stream');
+    headers.set('content-disposition', `attachment; filename="artifact"; filename*=UTF-8''${encodeURIComponent(filename).replace(/['()*]/gu, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`)}`);
+    headers.set('content-length', String(bytes.byteLength));
+    return new Response(request.method === 'HEAD' ? null : bytes as Uint8Array<ArrayBuffer>, { headers });
+  } catch {
+    return new Response('Shared artifact is unavailable', { status: 404, headers });
   }
 }
 

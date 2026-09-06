@@ -274,6 +274,10 @@ export function reduceTranscriptToTurns(events: readonly TranscriptEventInput[])
         continue;
       }
       const turn = ensureTurn(event);
+      if (message.role === 'custom' && message.customType === 'gitspace-instructions-changed' && message.display === true) {
+        turn.items.push({ id: `${turn.id}:instructions:${event.ordinal}`, type: 'interruption', reason: 'rule', title: 'Workspace instructions changed', detail: contentText(message.content), recovered: true });
+        continue;
+      }
       if (message.role === 'assistant' && Array.isArray(message.content)) {
         for (const [index, rawPart] of message.content.entries()) {
           const part = record(rawPart);

@@ -106,8 +106,8 @@ describe('GitSpaceShell', () => {
   it('renders cloud project creation controls and active archived filters', () => {
     const html = renderToStaticMarkup(<ProjectsView
       projects={[
-        { id: 'project-a', name: 'Active Project', lifecycle: 'active', repositoryReference: null, baseBranch: 'main', revision: 2, archivedAt: null, updatedAt: new Date() },
-        { id: 'project-b', name: 'Archived Project', lifecycle: 'archived', repositoryReference: null, baseBranch: 'main', revision: 4, archivedAt: new Date(), updatedAt: new Date() },
+        { id: 'project-a', name: 'Active Project', lifecycle: 'active', repositoryReference: null, baseBranch: 'main', role: null, source: null, revision: 2, archivedAt: null, updatedAt: new Date() },
+        { id: 'project-b', name: 'Archived Project', lifecycle: 'archived', repositoryReference: null, baseBranch: 'main', role: null, source: null, revision: 4, archivedAt: new Date(), updatedAt: new Date() },
       ]}
       workspaces={[]}
       onOpen={() => undefined}

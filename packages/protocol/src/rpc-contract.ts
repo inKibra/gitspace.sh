@@ -129,9 +129,11 @@ export const ProjectViewCodec = wire.object({
 export const ProjectLifecycleViewCodec = wire.object({
   id: wire.string,
   name: wire.string,
-  lifecycle: wire.enum(['provisioning', 'active', 'archiving', 'archived', 'restoring', 'failed', 'deleting']),
+  lifecycle: wire.enum(['cloud-only', 'provisioning', 'active', 'archiving', 'archived', 'restoring', 'failed', 'deleting']),
   repositoryReference: wire.nullable(wire.string),
   baseBranch: wire.string,
+  role: wire.nullable(wire.literal('gitspace-source')),
+  source: wire.nullable(wire.object({ release: wire.nullable(wire.string), branch: wire.nullable(wire.string), commit: wire.nullable(wire.string) })),
   revision: wire.number,
   archivedAt: wire.nullable(wire.date),
   updatedAt: wire.date,
@@ -578,6 +580,14 @@ export const createProjectContract = gitspaceRpc
   .output(wire.object({ project: ProjectLifecycleViewCodec, operation: ProjectOperationViewCodec }))
   .errors({ OperationFailed: rpcErrors.operationFailed })
   .mutation();
+
+export const ensureGitSpaceProjectContract = gitspaceRpc.procedure()
+  .input(wire.object({ sourceBranch: wire.optional(wire.string), sourceCommit: wire.optional(wire.string) }))
+  .output(ProjectLifecycleViewCodec).errors({ OperationFailed: rpcErrors.operationFailed }).mutation();
+export const openProjectContract = gitspaceRpc.procedure()
+  .input(wire.object({ projectId: wire.string }))
+  .output(wire.object({ project: ProjectLifecycleViewCodec, operation: wire.nullable(ProjectOperationViewCodec) }))
+  .errors({ OperationFailed: rpcErrors.operationFailed }).mutation();
 
 export const archiveProjectContract = gitspaceRpc
   .procedure()
@@ -1504,7 +1514,7 @@ export const InspectorArtifactContentCodec = wire.object({
 
 export const inspectorReadArtifactContract = gitspaceRpc
   .procedure()
-  .input(wire.object({ spaceId: wire.string, expectedGeneration: wire.integer({ min: 0 }), url: wire.string }))
+  .input(wire.object({ spaceId: wire.string, expectedGeneration: wire.integer({ min: 0 }), url: wire.string, hash: wire.nullable(wire.string) }))
   .output(InspectorArtifactContentCodec)
   .errors(inspectorReadErrors)
   .query();
@@ -1515,6 +1525,39 @@ export const inspectorWriteArtifactContract = gitspaceRpc
   .output(ArtifactViewCodec)
   .errors(inspectorMutationErrors)
   .mutation();
+
+export const InspectorArtifactCatalogCodec = wire.object({
+  artifacts: wire.array(ArtifactViewCodec),
+  scopes: wire.array(wire.object({ workspaceId: wire.string, generation: wire.integer({ min: 0 }) })),
+});
+export const ArtifactShareViewCodec = wire.object({
+  id: wire.string,
+  url: wire.string,
+  artifactUrl: wire.string,
+  hash: wire.string,
+  createdAt: wire.string,
+  expiresAt: wire.nullable(wire.string),
+});
+export type ArtifactShareView = InputOf<typeof ArtifactShareViewCodec>;
+export const inspectorListArtifactsContract = gitspaceRpc.procedure()
+  .input(wire.object({ spaceId: wire.string, expectedGeneration: wire.integer({ min: 0 }) }))
+  .output(InspectorArtifactCatalogCodec).errors(inspectorReadErrors).query();
+export const inspectorCopyArtifactsContract = gitspaceRpc.procedure()
+  .input(wire.object({
+    spaceId: wire.string, expectedGeneration: wire.integer({ min: 0 }),
+    expectedProjectGeneration: wire.integer({ min: 0 }),
+    files: wire.array(wire.object({ url: wire.string, hash: wire.string, destinationPath: wire.string, expectedDestinationHash: wire.nullable(wire.string) })),
+  }))
+  .output(InspectorArtifactCatalogCodec).errors(inspectorMutationErrors).mutation();
+export const inspectorListArtifactSharesContract = gitspaceRpc.procedure()
+  .input(wire.object({ spaceId: wire.string, expectedGeneration: wire.integer({ min: 0 }), url: wire.string }))
+  .output(wire.array(ArtifactShareViewCodec)).errors(inspectorReadErrors).query();
+export const inspectorCreateArtifactShareContract = gitspaceRpc.procedure()
+  .input(wire.object({ spaceId: wire.string, expectedGeneration: wire.integer({ min: 0 }), url: wire.string, hash: wire.string, expiresAt: wire.nullable(wire.string) }))
+  .output(ArtifactShareViewCodec).errors(inspectorMutationErrors).mutation();
+export const inspectorRevokeArtifactShareContract = gitspaceRpc.procedure()
+  .input(wire.object({ spaceId: wire.string, expectedGeneration: wire.integer({ min: 0 }), id: wire.string }))
+  .output(wire.object({ revoked: wire.boolean })).errors(inspectorMutationErrors).mutation();
 
 export const inspectorRepositoryTreeContract = gitspaceRpc
   .procedure()
@@ -1899,12 +1942,18 @@ export const gitspaceContract = gitspaceRpc.contract({
       file: inspectorRepositoryFileContract,
       diff: inspectorRepositoryDiffContract,
     },
-    artifacts: { read: inspectorReadArtifactContract, write: inspectorWriteArtifactContract },
+    artifacts: {
+      read: inspectorReadArtifactContract, write: inspectorWriteArtifactContract,
+      list: inspectorListArtifactsContract, copyToProject: inspectorCopyArtifactsContract,
+      shares: { list: inspectorListArtifactSharesContract, create: inspectorCreateArtifactShareContract, revoke: inspectorRevokeArtifactShareContract },
+    },
     services: { list: inspectorServicesContract, start: startWorkspaceServiceContract, stop: stopWorkspaceServiceContract },
   },
   project: {
     list: listProjectsContract,
     create: createProjectContract,
+    ensureGitSpace: ensureGitSpaceProjectContract,
+    open: openProjectContract,
     archive: archiveProjectContract,
     restore: restoreProjectContract,
     delete: deleteProjectContract,

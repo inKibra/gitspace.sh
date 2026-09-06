@@ -86,9 +86,9 @@ gitspace doctor
 
 Once a machine is online, connect a provider from the **Providers** step or **Settings > OMP > Providers**. Choose the model settings your agents should use. You can skip provider setup while exploring the account, but an agent needs a configured provider before it can work.
 
-For Codex on a cloud machine, **Open sign-in page** takes you to OpenAI. After approval, your browser may reach a `localhost:1455/auth/callback` page that cannot load. Copy that page's full address into GitSpace's prompt and choose **Continue**. Keep the URL private. On a local machine, the callback can finish automatically.
+For Codex, choose **Sign in** or **Add account**. GitSpace prefers OpenAI's device-code flow: open the sign-in page, enter the displayed code, and approve access. Keep the GitSpace dialog open. It updates when authorization finishes, without a localhost callback or a pasted callback URL.
 
-Codex's browser and device-code sign-in methods share one account list. Choose a method from **Sign in** or **Add account**.
+Codex sign-in methods share one account list. The device flow adds credentials to the same account store used by Codex agents.
 
 ## 4. Configure Git and finish setup
 
@@ -96,7 +96,7 @@ In the **Git** step, set your commit author name and email. Copy the shared publ
 
 GitSpace uses this SSH identity for GitHub imports, including pasted HTTPS browser URLs. It configures the key before the first clone and keeps SSH host verification enabled.
 
-The final setup step enables **Add the GitSpace project** by default. With a machine online, finishing setup imports the source branch used to build your current frontend. You and your agents can then work on GitSpace itself. Turn this off to finish without importing the source. A failed import keeps setup open so you can correct the problem and retry.
+Every account includes the GitSpace source project. Setup creates its cloud definition without an online machine or GitHub authorization. There is no source-project opt-out. The project stays **Cloud only** until you open it on a machine; GitSpace then checks out its recorded source branch and commit. A failed checkout leaves the cloud definition available to retry.
 
 ## 5. Try a small task
 

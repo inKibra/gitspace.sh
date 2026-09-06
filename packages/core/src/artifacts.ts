@@ -282,7 +282,7 @@ export class LocalArtifactResolver {
       : Result.err(new ArtifactNotFound({ url, message: `Artifact ${url} does not exist` }));
   }
 
-  async read(capability: ArtifactCapability, url: string): Promise<ResultType<Uint8Array, ArtifactError>> {
+  async read(capability: ArtifactCapability, url: string, hash?: string | null): Promise<ResultType<Uint8Array, ArtifactError>> {
     const resolved = this.resolve(capability, url);
     if (resolved.status === 'error') return resolved;
     const entry = this.database.orm.select().from(artifactEntries).where(and(
@@ -290,6 +290,11 @@ export class LocalArtifactResolver {
       eq(artifactEntries.path, resolved.value.path),
     )).get();
     if (!entry) return Result.err(new ArtifactNotFound({ url, message: `Artifact ${url} does not exist` }));
+    // A viewer may still hold an immutable version after this path is replaced.
+    if (hash !== undefined && hash !== null) {
+      if (!HASH_PATTERN.test(hash)) return Result.err(new ArtifactAccessDenied({ url, message: 'Artifact hash is invalid' }));
+      entry.blobHash = hash;
+    }
     try {
       const blob = this.database.orm.select().from(artifactBlobs).where(eq(artifactBlobs.hash, entry.blobHash)).get();
       if (blob?.cachePath) {
@@ -395,6 +400,11 @@ export class LocalArtifactResolver {
       await this.store.put(manifestHash, sealedManifest);
       const now = new Date().toISOString();
       const committed = this.database.orm.transaction((tx) => {
+        const currentEntries = tx.select().from(artifactEntries).where(eq(artifactEntries.scopeId, scope.id)).orderBy(artifactEntries.path).all();
+        if (currentEntries.length !== entries.length || currentEntries.some((entry, index) => {
+          const snapshot = entries[index]!;
+          return entry.path !== snapshot.path || entry.blobHash !== snapshot.blobHash || entry.mediaType !== snapshot.mediaType;
+        })) return null;
         const changed = tx.update(artifactScopes).set({
           generation: nextGeneration,
           manifestHash,
@@ -418,6 +428,70 @@ export class LocalArtifactResolver {
         : Result.err(new ArtifactConflict({ scopeId: scope.id, message: 'Artifact scope changed before commit' }));
     } catch (error) {
       return Result.err(storageError('commit', error));
+    }
+  }
+
+  /** Three-way merge after a canonical copy races a local publish. Never treats divergent generations as interchangeable. */
+  async reconcileScope({ base, local, canonical }: {
+    base: ArtifactScope; local: ArtifactScope; canonical: ArtifactScope;
+  }): Promise<ResultType<ArtifactScope, ArtifactError>> {
+    try {
+      if (base.id !== local.id || base.id !== canonical.id || base.spaceId !== local.spaceId || base.spaceId !== canonical.spaceId
+        || base.generation > canonical.generation || base.generation >= local.generation) {
+        throw new ArtifactConflict({ scopeId: local.id, message: 'Artifact reconciliation requires a shared scope and an earlier base version' });
+      }
+      const [baseEntries, localEntries, canonicalEntries] = await Promise.all([
+        this.scopeManifestEntries({ ...base, dirty: false }), this.scopeManifestEntries(local), this.scopeManifestEntries(canonical),
+      ]);
+      type Entry = ArtifactManifest['entries'][number];
+      const same = (left: Entry | undefined, right: Entry | undefined): boolean => left === undefined || right === undefined
+        ? left === right : left.blobHash === right.blobHash && left.size === right.size && left.mediaType === right.mediaType;
+      const before = new Map(baseEntries.map((entry) => [entry.path, entry]));
+      const ours = new Map(localEntries.map((entry) => [entry.path, entry]));
+      const theirs = new Map(canonicalEntries.map((entry) => [entry.path, entry]));
+      const merged: Entry[] = [];
+      for (const path of new Set([...before.keys(), ...ours.keys(), ...theirs.keys()])) {
+        const ancestor = before.get(path);
+        const own = ours.get(path);
+        const remote = theirs.get(path);
+        const selected = same(own, ancestor) ? remote : same(remote, ancestor) || same(own, remote) ? own : null;
+        if (selected === null) throw new ArtifactConflict({ scopeId: local.id, message: `Artifact ${path} changed both locally and in the project; neither version was overwritten` });
+        if (selected) merged.push(selected);
+      }
+      merged.sort((left, right) => left.path.localeCompare(right.path));
+      const paths = new Set(merged.map((entry) => entry.path));
+      for (const entry of merged) {
+        const parts = entry.path.split('/');
+        for (let index = 1; index < parts.length; index++) {
+          if (paths.has(parts.slice(0, index).join('/'))) throw new ArtifactConflict({ scopeId: local.id, message: `Artifact ${entry.path} conflicts with a file at its parent path` });
+        }
+      }
+      const generation = canonical.generation + 1;
+      const manifest: ArtifactManifest = { version: 1, scopeId: local.id, generation, entries: merged };
+      const sealed = await encryptArtifactBytes(new TextEncoder().encode(JSON.stringify(manifest)), await deriveArtifactScopeKey(this.projectKey, local.id));
+      const manifestHash = await digest(sealed);
+      await this.store.put(manifestHash, sealed);
+      const now = new Date().toISOString();
+      const value = this.database.orm.transaction((tx) => {
+        const current = tx.select().from(artifactScopes).where(eq(artifactScopes.id, local.id)).get();
+        const currentEntries = tx.select().from(artifactEntries).where(eq(artifactEntries.scopeId, local.id)).all();
+        if (!current || current.dirty || current.generation !== local.generation || current.manifestHash !== local.manifestHash
+          || currentEntries.length !== localEntries.length || currentEntries.some((entry) => !same(entry, ours.get(entry.path)))) {
+          throw new ArtifactConflict({ scopeId: local.id, message: 'Local artifacts changed during reconciliation; no version was overwritten' });
+        }
+        tx.update(artifactScopes).set({ generation, manifestHash, dirty: false, updatedAt: now }).where(eq(artifactScopes.id, local.id)).run();
+        tx.delete(artifactEntries).where(eq(artifactEntries.scopeId, local.id)).run();
+        for (const entry of merged) {
+          tx.insert(artifactEntries).values({ ...entry, scopeId: local.id, generation, updatedAt: now }).run();
+          tx.insert(artifactBlobs).values({
+            hash: entry.blobHash, size: entry.size, cachePath: null, state: 'remote', lastAccessedAt: now, createdAt: now,
+          }).onConflictDoNothing().run();
+        }
+        return tx.select().from(artifactScopes).where(eq(artifactScopes.id, local.id)).get()!;
+      });
+      return Result.ok(value);
+    } catch (error) {
+      return Result.err(error instanceof ArtifactConflict ? error : storageError('reconcile scope', error));
     }
   }
 

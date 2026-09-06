@@ -12,12 +12,23 @@ const sourceBranch = process.env.GITSPACE_SOURCE_BRANCH?.trim()
   || (process.env.GITHUB_REF_TYPE === 'branch' ? process.env.GITHUB_REF_NAME?.trim() : '')
   || execFileSync('git', ['branch', '--show-current'], { cwd: fileURLToPath(new URL('.', import.meta.url)), encoding: 'utf8' }).trim();
 if (!sourceBranch) throw new Error('Set GITSPACE_SOURCE_BRANCH when building GitSpace from a detached checkout.');
+const sourceCommit = process.env.GITSPACE_SOURCE_COMMIT?.trim()
+  || execFileSync('git', ['rev-parse', 'HEAD'], { cwd: fileURLToPath(new URL('.', import.meta.url)), encoding: 'utf8' }).trim();
+if (!/^[a-f0-9]{40,64}$/iu.test(sourceCommit)) throw new Error('GITSPACE_SOURCE_COMMIT must be a full Git commit hash.');
 
 
 export default defineConfig({
-  define: { 'import.meta.env.VITE_GITSPACE_SOURCE_BRANCH': JSON.stringify(sourceBranch) },
+  define: {
+    'import.meta.env.VITE_GITSPACE_SOURCE_BRANCH': JSON.stringify(sourceBranch),
+    'import.meta.env.VITE_GITSPACE_SOURCE_COMMIT': JSON.stringify(sourceCommit),
+  },
   resolve: { alias: { '@': resolve(fileURLToPath(new URL('.', import.meta.url)), '../ui/src/fluid-vendor') } },
-  plugins: [react(), tailwindcss()],
+  plugins: [react(), tailwindcss(), {
+    name: 'gitspace-source-metadata',
+    generateBundle() {
+      this.emitFile({ type: 'asset', fileName: 'gitspace-source.json', source: JSON.stringify({ release: sourceCommit, branch: sourceBranch, commit: sourceCommit }) });
+    },
+  }],
   server: {
     host: '127.0.0.1',
     port: 4510,

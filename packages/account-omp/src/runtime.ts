@@ -91,6 +91,7 @@ async function startSessionHost(): Promise<void> {
       persist: () => session().persist(),
       handoff: () => session().handoff(),
       reloadSettings: () => session().reloadSettings?.(),
+      instructionsChanged: () => session().instructionsChanged?.(),
       resume: () => session().resume(),
       dispose: async () => { if (live) await live.dispose(); live = null; },
       reloadAuth: async () => { await authStorage?.revalidateCredentials(); },

@@ -41,6 +41,8 @@ import { DeploymentLauncher } from './deployment-launcher.js';
 import { ReleaseFollower } from './release-follower.js';
 import { ompGenerationSelectionSchema } from './omp-runtime.js';
 import { CloudArtifactObjectStore } from './cloud-artifact-object-store.js';
+import { createSpaceWorkspaceControls } from './space-workspace-controls.js';
+import type { SpaceWorkspaceControls } from './space-eval-sdk.js';
 
 function requiredEnvironment(name: string): string {
   const value = process.env[name];
@@ -161,6 +163,7 @@ export async function startMachineRuntime() {
   await installDefaultGitSpaceSkills(ompAgentDir, configuredSkills.filter((skill) => skill.enabled).map((skill) => skill.id));
   const mcp = new MachineMcpCoordinator(authority, machineId);
   const authStorage = sharedAuthStorage(ompAgentDir);
+  const workspaceControls = Promise.withResolvers<SpaceWorkspaceControls>();
   const omp = new ProcessOmpRuntime({
     environmentRoot,
     entrypoint: requiredEnvironment('GITSPACE_OMP_RUNTIME_PATH'),
@@ -170,6 +173,12 @@ export async function startMachineRuntime() {
     mcp,
     skills: configuredSkills,
     spaceAuthority: authority,
+    workspaceControls: () => ({
+      create: async (input) => (await workspaceControls.promise).create(input),
+      manage: async (method, workspace, input) => (await workspaceControls.promise).manage(method, workspace, input),
+      instructionsChanged: async (projectId, spaceId) => (await workspaceControls.promise).instructionsChanged(projectId, spaceId),
+      refreshArtifacts: async (projectId, spaceId) => (await workspaceControls.promise).refreshArtifacts(projectId, spaceId),
+    }),
     onError: (error) => console.error('[gitspace-omp]', error),
   });
   await omp.initialize();
@@ -228,6 +237,7 @@ export async function startMachineRuntime() {
     }
   }
   for (const project of await authority.listProjects('active')) {
+    if (project.lifecycle === 'cloud-only') continue;
     if (!database.getProject(project.id)) {
       const created = database.createProject({
         id: project.id,
@@ -388,6 +398,10 @@ export async function startMachineRuntime() {
 
   const handlers = new GitSpaceHandlers(database, artifacts, projectEventWriter);
   const terminals = new WorkspaceHubTerminalCoordinator(database, machineId);
+  workspaceControls.resolve(createSpaceWorkspaceControls({
+    database, authority, projects: projectLifecycle, spaces, sessions, machineId,
+    stopTerminals: (spaceId) => terminals.stopOwned(spaceId),
+  }));
   const serviceManager = new WorkspaceServiceManager(
     database,
     terminals,

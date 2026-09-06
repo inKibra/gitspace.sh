@@ -80,7 +80,6 @@ describe('ProvidersSection', () => {
     expect(html).toContain('aria-label="Remove same@example.com · Personal"');
     expect(html).toContain('aria-label="Remove same@example.com · Team"');
     expect(html.match(/62% used/g)).toHaveLength(1);
-    expect(html).toContain('aria-haspopup="menu"');
   });
 
   it('renders usage limits with meters, resets, and per-provider usage errors under connected rows', () => {
@@ -149,6 +148,19 @@ describe('SignInFlowView', () => {
     expect(html).not.toContain('Starting sign-in…');
   });
 
+  it('shows device authorization without asking the user to paste a callback', () => {
+    const html = render({
+      flowId: 'device-flow',
+      providerId: 'openai-codex-device',
+      events: [{ type: 'auth', url: 'https://auth.openai.com/codex/device', launchUrl: null, instructions: 'Enter code: ABCD-EFGH' }],
+    });
+    expect(html).toContain('ABCD-EFGH');
+    expect(html).toContain('href="https://auth.openai.com/codex/device"');
+    expect(html).toContain('role="status"');
+    expect(html).not.toContain('id="provider-login-prompt"');
+    expect(html).not.toContain('type="submit"');
+  });
+
   it('renders success and failure terminal states', () => {
     const ok = flow([{ type: 'done', ok: true, provider: anthropic }]);
     const okHtml = render(ok);
@@ -158,7 +170,6 @@ describe('SignInFlowView', () => {
     const failed = flow([{ type: 'auth', url: 'https://example.com', launchUrl: null, instructions: null }, { type: 'done', ok: false, error: 'state mismatch' }]);
     const failedHtml = render(failed);
     expect(failedHtml).toContain('state mismatch');
-    expect(failedHtml).toContain('text-destructive');
     expect(failedHtml).toContain('Retry');
     expect(failedHtml).not.toContain('Open sign-in page');
   });

@@ -222,6 +222,7 @@ export function SignInFlowView({ flow, providerName, login, onRetry }: { flow: P
   const done = flow.events.find((event) => event.type === 'done');
   const prompt = done ? undefined : flow.events.findLast((event) => event.type === 'prompt' && !answered.includes(event.promptId));
   const progress = flow.events.filter((event) => event.type === 'progress');
+  const deviceAuthorization = flow.providerId === 'openai-codex-device';
   const close = (): void => void login.cancel();
   let status: ReactNode = null;
   if (done?.type === 'done') {
@@ -232,13 +233,14 @@ export function SignInFlowView({ flow, providerName, login, onRetry }: { flow: P
     status = <span className="flex items-center gap-2 text-caption text-muted-foreground"><ThinkingIndicator aria-label="Starting sign-in" />Starting sign-in…</span>;
   }
   return <>
-    <DialogHeader><DialogTitle>Sign in to {providerName}</DialogTitle><DialogDescription>The provider authorizes this machine; credentials stay in its OMP credential store.</DialogDescription></DialogHeader>
+    <DialogHeader><DialogTitle>Sign in to {providerName}</DialogTitle><DialogDescription>Approve access on the provider’s site. Keep this dialog open until sign-in completes.</DialogDescription></DialogHeader>
     <div className="flex flex-col gap-4">
       {auth?.type === 'auth' && !done ? <>
-        {auth.instructions ? <p className="text-caption text-muted-foreground">{auth.instructions}</p> : null}
+        {auth.instructions ? <p className={deviceAuthorization ? 'font-mono text-body font-medium tabular-nums text-foreground' : 'text-caption text-muted-foreground'}>{auth.instructions}</p> : null}
         <InputCopy label="Sign-in URL" value={auth.url} />
         {/* OMP's launchUrl belongs to the machine's loopback interface, not necessarily this browser. */}
         <Button variant="primary" asChild><a href={auth.url} target="_blank" rel="noopener noreferrer">Open sign-in page</a></Button>
+        {deviceAuthorization ? <p role="status" aria-live="polite" className="flex items-center gap-2 text-caption text-muted-foreground"><ThinkingIndicator aria-label="Waiting for authorization" />Waiting for authorization. This dialog updates automatically after approval.</p> : null}
         {auth.launchUrl && prompt ? <p className="text-caption text-muted-foreground">If sign-in ends at a localhost page that cannot load, copy the full URL from that tab’s address bar and paste it below. Sign-in on the same machine can finish automatically.</p> : null}
       </> : null}
       {progress.length ? <ul className="flex flex-col gap-1 text-caption text-muted-foreground">{progress.map((event, index) => event.type === 'progress' ? <li key={`${index}:${event.message}`}>{event.message}</li> : null)}</ul> : null}
@@ -273,6 +275,11 @@ export function ProvidersSection({ providers, error, usage, usageStatus, usageEr
     }
     if (provider.loginable && provider.authKind === 'oauth') group.signInMethods.push(provider);
   }
+  // The browser may be on another computer. Codex device authorization completes
+  // without a loopback callback, including when the runtime is a cloud machine.
+  const codex = groups.get('openai-codex');
+  const codexDevice = codex?.signInMethods.find((method) => method.id === 'openai-codex-device' && method.available);
+  if (codex && codexDevice) codex.signInMethods = [codexDevice];
   // Connected accounts first, then providers you can sign in to, then key-only ones.
   const rank = ({ provider, signInMethods }: { provider: ProviderView; signInMethods: readonly ProviderView[] }): number => (provider.hasAuth ? 0 : provider.loginable || signInMethods.length ? 1 : 2);
   const visible = [...groups.values()]

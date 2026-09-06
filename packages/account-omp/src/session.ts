@@ -15,6 +15,8 @@ import {
 import type { CreateAgentSessionResult } from '@oh-my-pi/pi-coding-agent/sdk';
 import manualContinuePrompt from '@oh-my-pi/pi-coding-agent/prompts/system/manual-continue' with { type: 'text' };
 import { OmpAskBridge } from './ask-bridge.js';
+import { INSTRUCTION_CONTEXT_TYPE, INSTRUCTION_NOTICE, WorkspaceInstructionContext, workspaceInstructionText, type WorkspaceInstructions } from './workspace-instructions.js';
+import type { ExtensionAPI } from '@oh-my-pi/pi-coding-agent';
 
 const ROLE_LABELS: Readonly<Record<string, string>> = {
   default: 'Default',
@@ -173,6 +175,29 @@ export class EmbeddedOmpRuntime implements OmpRuntime {
     artifactsDir: string,
   ): Promise<OmpRuntimeSession> {
     let sessionId: string | null = manager.getSessionId();
+    let instructions: WorkspaceInstructionContext | undefined;
+    const instructionExtension = (pi: ExtensionAPI): void => {
+      pi.on('context', async (event, context) => {
+        if (!instructions) return;
+        let snapshot: WorkspaceInstructions;
+        try { snapshot = await instructions.nextTurn(); }
+        catch (error) {
+          // The extension runner reports errors but otherwise continues with stale context.
+          // Fail this provider boundary, after tools settle, instead of running old instructions.
+          context.abort();
+          throw error;
+        }
+        const content = workspaceInstructionText(snapshot);
+        const goalState = result.session.getGoalModeState();
+        if (goalState?.enabled && goalState.goal) {
+          result.session.setGoalModeState({ ...goalState, goal: { ...goalState.goal, objective: content } });
+        }
+        return { messages: [
+          ...event.messages.filter((message) => message.role !== 'custom' || message.customType !== INSTRUCTION_CONTEXT_TYPE),
+          { role: 'custom' as const, customType: INSTRUCTION_CONTEXT_TYPE, content, display: false, timestamp: Date.now() },
+        ] };
+      });
+    };
     const compaction = { onStart: null as (() => void) | null, onEnd: null as (() => void) | null };
     const compactionExtension = (pi: { on(name: string, handler: () => void): void }): void => {
       pi.on('session_before_compact', () => compaction.onStart?.());
@@ -210,7 +235,7 @@ export class EmbeddedOmpRuntime implements OmpRuntime {
         sessionManager: manager,
         hasUI: true,
         interactivePrompts: true,
-        extensions: [compactionExtension],
+        extensions: [compactionExtension, instructionExtension],
         enableMCP: true,
         skills,
         ...(authStorage ? { authStorage } : {}),
@@ -363,6 +388,17 @@ export class EmbeddedOmpRuntime implements OmpRuntime {
       }
       for (const handler of eventHandlers) handler(event);
     };
+    if (this.options.spaceNamespace) {
+      instructions = new WorkspaceInstructionContext(
+        async () => await this.options.spaceNamespace!.call('instructions.get', {}, AbortSignal.timeout(15_000)) as WorkspaceInstructions,
+        () => {
+          const message = { role: 'custom' as const, customType: 'gitspace-instructions-changed', content: INSTRUCTION_NOTICE, display: true, timestamp: Date.now() };
+          // Persist a transcript notice without steering, cancelling tools, or waking an idle agent.
+          manager.appendCustomMessageEntry(message.customType, message.content, message.display);
+          handleEvent({ type: 'message_end', message });
+        },
+      );
+    }
     const sessionUnsubscribe = session.subscribe((event: AgentSessionEvent) => handleEvent(event as unknown as OmpRuntimeEvent));
     const registryUnsubscribe = AgentRegistry.global().onChange(updateSubagentCount);
     updateSubagentCount();
@@ -450,6 +486,7 @@ export class EmbeddedOmpRuntime implements OmpRuntime {
         return () => activityHandlers.delete(handler);
       },
       activity: () => ({ activity: currentActivity(), ...(errorMessage ? { errorMessage } : {}) }),
+      instructionsChanged: async () => { instructions?.changed(); },
       handoff: async () => {
         const interrupted = turnActive || session.isStreaming;
         if (interrupted) await session.abort({ goalReason: 'internal', reason: 'GitSpace machine handoff' });

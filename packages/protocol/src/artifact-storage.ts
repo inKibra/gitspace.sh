@@ -16,6 +16,34 @@ export const artifactManifestSchema = z.object({
 });
 export type ArtifactManifest = z.infer<typeof artifactManifestSchema>;
 
+/** Append-only provenance for an independent copy, not a relationship between live paths. */
+export interface ArtifactCopyRecord {
+  id: string;
+  sourceScopeId: string;
+  sourceWorkspaceId: string;
+  sourceGeneration: number;
+  sourcePath: string;
+  sourceHash: `sha256:${string}`;
+  destinationScopeId: string;
+  destinationPath: string;
+  destinationHash: `sha256:${string}`;
+  destinationGeneration: number;
+  createdAt: string;
+}
+
+export interface ArtifactShareRecord {
+  token: string;
+  scopeId: string;
+  workspaceId: string;
+  path: string;
+  hash: `sha256:${string}`;
+  size: number;
+  mediaType: string | null;
+  createdAt: string;
+  expiresAt: string | null;
+  revokedAt: string | null;
+}
+
 export async function deriveArtifactScopeKey(projectKey: Uint8Array, scopeId: string): Promise<Uint8Array> {
   const material = await crypto.subtle.importKey('raw', new Uint8Array(projectKey).buffer, 'HKDF', false, ['deriveBits']);
   const bits = await crypto.subtle.deriveBits({

@@ -21,6 +21,18 @@ Run the main agent inside the workspace on the machine that owns the checkout. S
 
 Structured agent questions appear as native interactions. Answer the decision directly without searching terminal output for a prompt.
 
+## Manage workspaces from an agent
+
+Agents use the `space` namespace in JavaScript code-mode `eval`, not a CLI. `space.list()` discovers workspaces in the current project, including closed workspaces and their goals. `space.get({ workspaceId })` reads a specific workspace without opening it.
+
+Use `space.describe({ method: 'create' })` to read the input schema, then `space.create(...)` to create a workspace with optional initial Goal, Workflow, and Rubric records. Check the returned `ready` field. If an instruction write fails after creation, the result includes the created workspace identity and completed writes so the agent can repair that workspace instead of creating a duplicate.
+
+The namespace also exposes `setPhase`, `setRelations`, `open`, `close`, `archive`, and `restore`. These use the workspace lifecycle and checkpoint rules. Keep the revision and placement generation from the latest read; stale changes reject. An agent cannot close or archive its own workspace from a running tool. Use another workspace or the browser for that action. This API does not move or delegate agents.
+
+Pass `workspaceId` to `space.goal.get/put`, `space.workflow.get/put`, or `space.rubric.get/put` to edit another workspace in the same project. Closed workspaces stay closed. Writes require the record's `expectedRevision`; use zero only when creating an absent record.
+
+Instruction changes post a notice to the affected agent session without interrupting its current tool or starting an idle turn. The agent reads the latest Goal, Workflow, and Rubric before its next provider request.
+
 ## Preserve decisions
 
 The **Journal** records phase narrative, decisions, artifacts, and state changes. It explains how the workspace reached its current state without asking a reviewer to reconstruct the story from a transcript.
@@ -37,6 +49,16 @@ A completion claim is not proof. Attach evidence that demonstrates each observab
 - An artifact when the output itself is the deliverable.
 
 The **Review** product keeps discussions attached to files, hunks, lines, or the whole workspace. Resolve the concern, not just the thread state.
+
+## Keep and share artifacts
+
+Agents read and write artifacts with ordinary tools through `local://workspace/<path>` and `local://base/<path>`. Workspace agents can read project artifacts but write only their workspace artifacts. Project agents can write project artifacts. Published edits refresh the browser catalog and open artifact views; evidence references still point to their recorded version.
+
+In **Artifacts**, select one or more workspace files and choose **Copy to project artifacts**. Each copy is an independent project file with source provenance. The originals remain. Choose another destination when a file already exists, or explicitly confirm replacement of its displayed version. A newer destination version invalidates that confirmation.
+
+Select one project or workspace artifact and choose **Share** to create a link to that fixed version. Set an optional expiry, copy the link, or revoke it from **Active links**. Later edits do not change the download.
+
+Anyone with the link can download the artifact without signing in. Do not share secrets. GitSpace serves public artifacts as attachments and does not put encryption keys in the URL. Revoking a link stops new downloads, but cannot remove copies someone already downloaded.
 
 ## Explain the change
 

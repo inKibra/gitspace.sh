@@ -34,18 +34,28 @@ function gitSpaceSkill(name: string, description: string, body: string): string 
 }
 
 const SPACE_GOAL = gitSpaceSkill('space-goal', 'Manage typed Goal intent, requirements, evidence, and decisions.', `
-Use JavaScript \`eval\` and the injected \`space.goal\` namespace as the source of truth:
-- \`space.goal.get()\`
-- \`space.goal.put(input)\`
-- \`space.goal.attachEvidence(input)\`
+Use JavaScript \`eval\` and the injected typed cloud authority. All methods default to the current workspace; pass \`workspaceId\` to read or edit another workspace in this project, including one that is closed or running elsewhere. Instruction edits never open it.
 
-Current project and space ids are injected by the host. Keep requirements observable, attach evidence by stable reference, and never mark work accepted without the configured judge or human decision.`);
-const SPACE_CHAIN = gitSpaceSkill('space-chain', 'Reason about related project spaces and their ordered goal chain.', `
-Use \`space.current()\`, \`space.list()\`, and \`space.chain.list()\` inside JavaScript \`eval\`. Stable project and space identities come from the host; never infer a session id is a durable workspace target.`);
+- \`space.goal.get({ workspaceId })\`, \`space.workflow.get({ workspaceId })\`, \`space.rubric.get({ workspaceId })\`
+- \`space.describe({ method: 'goal.put' })\` (or \`workflow.put\`, \`rubric.put\`, \`goal.attachEvidence\`, \`rubric.judge\`) returns the exact input schema.
+- \`space.goal.put({ workspaceId, expectedRevision, goal })\`, \`space.workflow.put({ workspaceId, expectedRevision, workflow })\`, \`space.rubric.put({ workspaceId, expectedRevision, rubric })\`
+- Preserve the revision returned by get; use 0 only to create an absent record. A stale write rejects: reload and reconcile rather than blindly retry.
+
+The host supplies projectId and spaceId; never send a foreign project or infer workspace identity from a session id. Changes become the affected agent's instructions at its next turn boundary, without interrupting tools or starting an idle turn. Keep requirements observable, attach evidence by stable reference, and never claim a human decision or judge result that did not happen.`);
+const SPACE_CHAIN = gitSpaceSkill('space-chain', 'Discover and manage workspaces and their goals within the current project.', `
+Use JavaScript \`eval\` with the injected \`space\` namespace:
+- \`space.current()\` inspects this workspace; \`space.get({ workspaceId })\` inspects an explicit same-project workspace without opening it.
+- \`space.list()\` (also \`space.chain.list()\`) lists canonical definitions, lifecycle, placement state/generation, and goals, including closed workspaces.
+- \`space.create({ name, branch, phase, sourceKind, sourceRef, dependsOn?, goal?, workflow?, rubric? })\` creates a real workspace through the project lifecycle and writes optional initial typed instructions with revision 0. Call \`space.describe({ method: 'create' })\` for draft schemas. All drafts validate before creation. Check \`ready\`: a later authority failure returns \`ready: false\`, the created identity, completed instruction writes, and an error; reconcile that workspace rather than recreating it. phase is plan/code/review/ship; sourceKind is base/branch/workspace/pull-request.
+- \`space.setPhase({ workspaceId, expectedRevision, phase })\` and \`space.setRelations({ workspaceId, expectedRevision, dependsOn, relatedTo, stackedOn })\` manage a workspace held open here. Dependencies enforce phase ceilings and reject cycles or foreign projects.
+- \`space.open({ workspaceId, expectedGeneration })\` and \`space.close({ workspaceId, expectedGeneration })\` use checkpoint-backed lifecycle, not filesystem workarounds.
+- \`space.archive({ workspaceId, expectedGeneration, expectedRevision })\` and \`space.restore({ workspaceId, expectedGeneration, expectedRevision })\` manage archived workspaces.
+
+Use revision and generation from the latest discovery result. Targets default to current where optional. An agent cannot close/archive its own workspace from a running tool; use another workspace or the UI. Do not move or delegate agents, link projects, or invent separate planned-goal objects. Goal, Workflow, and Rubric editing is cloud-only and does not require opening the target.`);
 const SPACE_REVIEW = gitSpaceSkill('space-review', 'Review current files and Git diffs with durable typed threads.', `
 Use repository tools for files and diffs, then use \`space.review.list/create/append/resolve\` inside JavaScript \`eval\` for durable threads. Anchor comments to generation plus Git object identity, and preserve stale threads rather than silently relocating them.`);
 const SPACE_ARTIFACTS = gitSpaceSkill('space-artifacts', 'Publish and attach durable workspace evidence artifacts.', `
-Use \`local://base/<path>\` and \`local://workspace/<path>\` through normal read/write or JavaScript \`eval\` helpers. Project sessions may write base artifacts. Workspace sessions may read base artifacts and write workspace artifacts; the host rejects every other mount or access. Use \`space.artifacts.listScopes()\` and \`space.artifacts.listPromotions()\` for canonical metadata.`);
+Use \`local://base/<path>\` and \`local://workspace/<path>\` through normal read/write or JavaScript \`eval\` helpers. Project sessions may write base artifacts. Workspace sessions may read base artifacts and write workspace artifacts; the host rejects every other mount or access. Successful artifact tool writes publish changes for browser views. Use \`space.artifacts.listScopes()\` and \`space.artifacts.listPromotions()\` for canonical metadata. Copying workspace files into project artifacts and creating or revoking public links are user actions in the browser, not agent APIs. Copies are independent files; do not link or roll up artifact scopes.`);
 const PHASE_JOURNAL = gitSpaceSkill('phase-journal', 'Record phase narrative, decisions, snapshots, and state deltas.', `
 Use \`space.journal.list/startPhase/endPhase/append\` inside JavaScript \`eval\`. Start a typed phase before material work and end it with outcome, decisions, surprises, repository identity, and any revert. Append entries instead of rewriting history.`);
 const WORKSPACE_SERVICES = gitSpaceSkill('workspace-services', 'Declare and run stable-port workspace services through OMP Hub.', `

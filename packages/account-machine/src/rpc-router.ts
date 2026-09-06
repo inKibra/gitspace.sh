@@ -5,6 +5,7 @@ import {
   archiveProjectContract,
   createProjectSessionContract,
   createProjectContract,
+  openProjectContract,
   createWorkspaceContract,
   createSandboxMachineContract,
   createSessionContract,
@@ -322,6 +323,7 @@ export interface SkillsRpc {
 export interface ProjectLifecycleRpc {
   list(lifecycle: 'all' | 'active' | 'archived'): Promise<CloudProjectSummary[]>;
   createProject(input: { name: string; baseBranch: string | null; repositoryUrl: string | null }): Promise<{ project: CloudProjectSummary; operation: CloudProjectOperation }>;
+  openProject(projectId: string): Promise<{ project: CloudProjectSummary; operation: CloudProjectOperation | null }>;
   createWorkspace(input: { projectId: string; name: string; branch: string; phase: 'plan' | 'code' | 'review' | 'ship'; sourceKind: 'base' | 'branch' | 'workspace' | 'pull-request' | 'tag' | 'commit'; sourceRef: string; dependsOn?: readonly string[] }): Promise<{ workspace: { id: string }; operation: CloudProjectOperation }>;
   archiveProject(projectId: string, expectedRevision: number): Promise<CloudProjectSummary>;
   restoreProject(projectId: string, expectedRevision: number): Promise<CloudProjectSummary>;
@@ -834,6 +836,14 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
       return ok({ project: projectLifecycleView(created.project), operation: projectOperationView(created.operation) });
     } catch (error) {
       return err(errors.OperationFailed({ operation: 'create project', message: error instanceof Error ? error.message : 'Unable to create project' }));
+    }
+  });
+  const openProject = server.implement(openProjectContract).handler(async ({ input, errors }) => {
+    try {
+      const opened = await options.projects.openProject(input.projectId);
+      return ok({ project: projectLifecycleView(opened.project), operation: opened.operation ? projectOperationView(opened.operation) : null });
+    } catch (error) {
+      return err(errors.OperationFailed({ operation: 'open project', message: error instanceof Error ? error.message : String(error) }));
     }
   });
   const archiveProject = server.implement(archiveProjectContract).handler(async ({ input, errors }) => {
@@ -1942,6 +1952,7 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
     try {
       const value = await inspectorAuthority().putInspectorGoal({ ...input.input, ...resolved.identity });
       await options.projectEvents.appendProjectEvent({ projectId: resolved.identity.projectId, scope: 'workspace', entity: 'goal', entityId: value.id, revision: value.revision, operation: 'updated', payload: { spaceId: resolved.identity.spaceId } });
+      await options.sessions.instructionsChanged(resolved.identity.projectId, resolved.identity.spaceId);
       return ok(value);
     } catch (error) {
       const failure = authorityFailure(error);
@@ -1957,6 +1968,7 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
     try {
       const value = await inspectorAuthority().attachInspectorRequirementEvidence({ ...input.input, ...resolved.identity });
       await options.projectEvents.appendProjectEvent({ projectId: resolved.identity.projectId, scope: 'workspace', entity: 'goal', entityId: value.id, revision: value.revision, operation: 'updated', payload: { spaceId: resolved.identity.spaceId, requirementId: input.input.requirementId } });
+      await options.sessions.instructionsChanged(resolved.identity.projectId, resolved.identity.spaceId);
       return ok(value);
     } catch (error) {
       const failure = authorityFailure(error);
@@ -1972,6 +1984,7 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
     try {
       const value = await inspectorAuthority().putInspectorWorkflow({ ...input.input, ...resolved.identity });
       await options.projectEvents.appendProjectEvent({ projectId: resolved.identity.projectId, scope: 'workspace', entity: 'workflow', entityId: value.id, revision: value.revision, operation: 'updated', payload: { spaceId: resolved.identity.spaceId } });
+      await options.sessions.instructionsChanged(resolved.identity.projectId, resolved.identity.spaceId);
       return ok(value);
     } catch (error) {
       const failure = authorityFailure(error);
@@ -1987,6 +2000,7 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
     try {
       const value = await inspectorAuthority().waiveInspectorWorkflowGate({ ...input.input, ...resolved.identity });
       await options.projectEvents.appendProjectEvent({ projectId: resolved.identity.projectId, scope: 'workspace', entity: 'workflow', entityId: value.id, revision: value.revision, operation: 'updated', payload: { spaceId: resolved.identity.spaceId, gateId: input.input.gateId } });
+      await options.sessions.instructionsChanged(resolved.identity.projectId, resolved.identity.spaceId);
       return ok(value);
     } catch (error) {
       const failure = authorityFailure(error);
@@ -2002,6 +2016,7 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
     try {
       const value = await inspectorAuthority().putInspectorRubric({ ...input.input, ...resolved.identity });
       await options.projectEvents.appendProjectEvent({ projectId: resolved.identity.projectId, scope: 'workspace', entity: 'rubric', entityId: value.id, revision: value.revision, operation: 'updated', payload: { spaceId: resolved.identity.spaceId } });
+      await options.sessions.instructionsChanged(resolved.identity.projectId, resolved.identity.spaceId);
       return ok(value);
     } catch (error) {
       const failure = authorityFailure(error);
@@ -2017,6 +2032,7 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
     try {
       const value = await inspectorAuthority().appendInspectorRubricJudgment({ ...input.input, ...resolved.identity });
       await options.projectEvents.appendProjectEvent({ projectId: resolved.identity.projectId, scope: 'workspace', entity: 'rubric', entityId: value.id, revision: value.revision, operation: 'append', payload: { spaceId: resolved.identity.spaceId, criterionId: input.input.criterionId } });
+      await options.sessions.instructionsChanged(resolved.identity.projectId, resolved.identity.spaceId);
       return ok(value);
     } catch (error) {
       const failure = authorityFailure(error);
@@ -2154,7 +2170,7 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
       const capability: ArtifactCapability = resolved.space.kind === 'base'
         ? { kind: 'project', projectId: resolved.space.projectId }
         : { kind: 'workspace', projectId: resolved.space.projectId, workspaceId: resolved.space.id };
-      const value = await options.artifacts.read(capability, input.url);
+      const value = await options.artifacts.read(capability, input.url, input.hash);
       if (value.status === 'error') throw value.error;
       let text: string | null = null;
       if (value.value.byteLength <= 2 * 1024 * 1024) {
@@ -2177,7 +2193,7 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
         : { kind: 'workspace', projectId: resolved.space.projectId, workspaceId: resolved.space.id };
       const value = await options.artifacts.write(capability, input.url, bytes, input.mediaType ?? undefined);
       if (value.status === 'error') throw value.error;
-      await options.projectEvents.appendProjectEvent({ projectId: resolved.space.projectId, scope: 'artifact', entity: 'artifact', entityId: value.value.url, revision: resolved.space.generation, operation: 'updated', payload: { spaceId: resolved.space.id } });
+      await options.sessions.publishArtifacts(resolved.space.id);
       return ok(value.value);
     } catch (error) {
       return err(errors.OperationFailed({ operation: 'write Inspector artifact', message: error instanceof Error ? error.message : 'Unable to write Inspector artifact' }));
@@ -2345,7 +2361,7 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
       services: { list: inspectorServices, start: startInspectorService, stop: stopInspectorService },
       artifacts: { read: readInspectorArtifact, write: writeInspectorArtifact },
     },
-    project: { list: listProjects, create: createProject, archive: archiveProject, restore: restoreProject, delete: deleteProject },
+    project: { list: listProjects, create: createProject, open: openProject, archive: archiveProject, restore: restoreProject, delete: deleteProject },
     workspace: { create: createWorkspace, archive: archiveWorkspace, restore: restoreWorkspace, delete: deleteWorkspace, setPhase: setWorkspacePhase, setRelations: setWorkspaceRelations, stackStatus },
     placements,
     browserRelay: {

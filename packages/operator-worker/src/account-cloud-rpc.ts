@@ -12,6 +12,7 @@ import {
   listProjectsContract, listDevicesContract, revokeDeviceContract, listProvidersContract,
   setProviderApiKeyContract, logoutProviderContract, getComposioSetupContract,
   putComposioSetupContract, deleteComposioSetupContract,
+  ensureGitSpaceProjectContract,
 } from '@gitspace/protocol/rpc-contract';
 import { parse } from 'devalue';
 import { contractDigest, err, ok } from 'result-rpc';
@@ -26,6 +27,7 @@ import type { UserProjectIndexDO } from './project-authority.js';
 import type { HandleRegistryDO, UserSettingsDO } from './user-settings.js';
 import type { SpaceAuthorityDO } from './space-authority.js';
 import { inspectorCloudProcedures } from './account-inspector-rpc.js';
+import { ensureAccountGitSpaceProject } from './gitspace-project.js';
 
 const MAX_REQUEST_BYTES = 512 * 1024;
 const MAX_BATCH_ITEMS = 32;
@@ -244,9 +246,16 @@ function accountRouter(env: Env, userId: string, deviceId: string) {
   });
   const projects = server.implement(listProjectsContract).handler(async ({ input, errors }) => {
     try {
+      await ensureAccountGitSpaceProject(env, userId);
       const index = (env.USER_PROJECTS as DurableObjectNamespace<UserProjectIndexDO>).getByName(userId);
       return ok((await index.list(input.lifecycle === 'all' ? undefined : input.lifecycle)).map((project) => ({ ...project, updatedAt: new Date(project.updatedAt), archivedAt: project.archivedAt ? new Date(project.archivedAt) : null })));
     } catch (error) { return err(errors.OperationFailed({ operation: 'list projects', message: message(error) })); }
+  });
+  const ensureGitSpace = server.implement(ensureGitSpaceProjectContract).handler(async ({ input, errors }) => {
+    try {
+      const project = await ensureAccountGitSpaceProject(env, userId, input);
+      return ok({ ...project, updatedAt: new Date(project.updatedAt), archivedAt: project.archivedAt ? new Date(project.archivedAt) : null });
+    } catch (error) { return err(errors.OperationFailed({ operation: 'ensure GitSpace project', message: message(error) })); }
   });
   const devices = server.implement(listDevicesContract).handler(async ({ errors }) => {
     try {
@@ -304,7 +313,7 @@ function accountRouter(env: Env, userId: string, deviceId: string) {
   });
   return server.router({
     settings: { get: getSettings, update: updateSettings, reserveHandle, git: { get: getGit }, omp: { get: getOmp }, events: settingsEvents },
-    machines, machine: { events: machineEvents, createSandbox, updateNotes, sleep, resume, destroy }, project: { list: projects },
+    machines, machine: { events: machineEvents, createSandbox, updateNotes, sleep, resume, destroy }, project: { list: projects, ensureGitSpace },
     devices: { list: devices, revoke }, providers: { list: listProviders, apiKey: { set: setApiKey }, logout },
     mcp: { composio: { setup: { get: getComposio, set: setComposio, delete: deleteComposio } } },
     inspector: inspectorCloudProcedures(env, userId),

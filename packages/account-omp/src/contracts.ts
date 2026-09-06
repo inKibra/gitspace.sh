@@ -37,6 +37,7 @@ export interface OmpRuntimeSession {
   persist(): Promise<void>;
   handoff(): Promise<boolean>;
   reloadSettings?(): Promise<void>;
+  instructionsChanged?(): Promise<void>;
   resume(): Promise<void>;
   dispose(): Promise<void>;
   control(): Promise<OmpSessionControlView>;

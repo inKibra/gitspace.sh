@@ -1,5 +1,8 @@
 import { DurableObject } from 'cloudflare:workers';
+import { GITSPACE_SOURCE_PROJECT_ROLE, GITSPACE_SOURCE_REPOSITORY, isGitSpaceSourceRepository, type GitSpaceSourceProvenance } from '@gitspace/protocol';
 import type {
+  ArtifactCopyRecord,
+  ArtifactShareRecord,
   CanonicalArtifactScope,
   CanonicalArtifactPromotion,
   CanonicalSession,
@@ -22,6 +25,8 @@ interface ProjectIndexRow extends Record<string, SqlStorageValue> {
   revision: number;
   archived_at: string | null;
   updated_at: string;
+  role: typeof GITSPACE_SOURCE_PROJECT_ROLE | null;
+  source_json: string | null;
 }
 
 interface WorkspaceRow extends Record<string, SqlStorageValue> {
@@ -150,6 +155,8 @@ function projectSummary(row: ProjectIndexRow): CloudProjectSummary {
     lifecycle: row.lifecycle,
     repositoryReference: row.repository_reference,
     baseBranch: row.base_branch,
+    role: row.role ?? null,
+    source: row.source_json ? JSON.parse(row.source_json) as GitSpaceSourceProvenance : null,
     revision: row.revision,
     archivedAt: row.archived_at,
     updatedAt: row.updated_at,
@@ -284,6 +291,11 @@ export class UserProjectIndexDO extends DurableObject<Env> {
           project_id TEXT NOT NULL
         )
       `);
+      for (const column of ['role TEXT', 'source_json TEXT']) {
+        try { this.ctx.storage.sql.exec(`ALTER TABLE user_projects ADD COLUMN ${column}`); }
+        catch (error) { if (!(error instanceof Error) || !/duplicate column name/u.test(error.message)) throw error; }
+      }
+      this.ctx.storage.sql.exec('CREATE UNIQUE INDEX IF NOT EXISTS user_project_role ON user_projects(role) WHERE role IS NOT NULL');
     });
   }
 
@@ -297,10 +309,45 @@ export class UserProjectIndexDO extends DurableObject<Env> {
       : project.lifecycle !== 'archived' && project.lifecycle !== 'deleting');
   }
 
+  /** Synchronous reservation makes concurrent account repair choose the same project. */
+  ensureGitSpaceProject(source: GitSpaceSourceProvenance): CloudProjectSummary {
+    const projects = this.list();
+    const reserved = projects.find((project) => project.role === GITSPACE_SOURCE_PROJECT_ROLE);
+    if (reserved) {
+      if (reserved.lifecycle !== 'cloud-only') return reserved;
+      const nextSource = {
+        release: reserved.source?.release ?? source.release ?? null,
+        branch: reserved.source?.branch ?? source.branch ?? null,
+        commit: reserved.source?.commit ?? source.commit ?? null,
+      };
+      if (JSON.stringify(nextSource) === JSON.stringify(reserved.source)) return reserved;
+      return this.put({ ...reserved, baseBranch: nextSource.branch ?? 'HEAD', source: nextSource, revision: reserved.revision + 1 });
+    }
+    const existing = projects.filter((project) => isGitSpaceSourceRepository(project.repositoryReference))
+      .sort((left, right) => Number(right.lifecycle === 'active') - Number(left.lifecycle === 'active') || left.id.localeCompare(right.id))[0];
+    let name = 'GitSpace';
+    for (let suffix = 1; projects.some((project) => project.name === name); suffix++) name = suffix === 1 ? 'GitSpace source' : `GitSpace source ${suffix}`;
+    return this.put({
+      id: existing?.id ?? `gitspace-source-${crypto.randomUUID()}`,
+      name: existing?.name ?? name,
+      lifecycle: existing?.lifecycle === 'active' || existing?.lifecycle === 'archived' ? 'active' : 'cloud-only',
+      repositoryReference: existing?.repositoryReference ?? GITSPACE_SOURCE_REPOSITORY,
+      baseBranch: existing?.baseBranch ?? source.branch ?? 'HEAD',
+      role: GITSPACE_SOURCE_PROJECT_ROLE,
+      source: existing ? { ...source, branch: existing.baseBranch, commit: null } : source,
+      revision: (existing?.revision ?? 0) + 1,
+      archivedAt: null,
+      updatedAt: new Date().toISOString(),
+    });
+  }
+
   put(input: CloudProjectSummary): CloudProjectSummary {
+    const existing = this.list().find((project) => project.id === input.id);
+    if ((existing?.role === GITSPACE_SOURCE_PROJECT_ROLE || input.role === GITSPACE_SOURCE_PROJECT_ROLE)
+      && input.lifecycle !== 'active' && input.lifecycle !== 'cloud-only') throw new Error('The built-in GitSpace project cannot be archived or deleted');
     const updatedAt = new Date().toISOString();
     this.ctx.storage.sql.exec(
-      `INSERT INTO user_projects VALUES(?,?,?,?,?,?,?,?)
+      `INSERT INTO user_projects(project_id,name,lifecycle,repository_reference,base_branch,revision,archived_at,updated_at,role,source_json) VALUES(?,?,?,?,?,?,?,?,?,?)
        ON CONFLICT(project_id) DO UPDATE SET
          name=excluded.name,
          lifecycle=excluded.lifecycle,
@@ -308,7 +355,10 @@ export class UserProjectIndexDO extends DurableObject<Env> {
          base_branch=excluded.base_branch,
          revision=excluded.revision,
          archived_at=excluded.archived_at,
-         updated_at=excluded.updated_at`,
+         updated_at=excluded.updated_at,
+         role=COALESCE(user_projects.role,excluded.role),
+         source_json=COALESCE(excluded.source_json,user_projects.source_json)
+       WHERE excluded.revision >= user_projects.revision`,
       input.id,
       input.name,
       input.lifecycle,
@@ -317,6 +367,8 @@ export class UserProjectIndexDO extends DurableObject<Env> {
       input.revision,
       input.archivedAt,
       updatedAt,
+      input.role ?? null,
+      input.source ? JSON.stringify(input.source) : null,
     );
     const row = this.ctx.storage.sql.exec<ProjectIndexRow>(
       'SELECT * FROM user_projects WHERE project_id=?',
@@ -326,6 +378,8 @@ export class UserProjectIndexDO extends DurableObject<Env> {
   }
 
   remove(projectId: string): boolean {
+    const project = this.list().find((candidate) => candidate.id === projectId);
+    if (project?.role === GITSPACE_SOURCE_PROJECT_ROLE) throw new Error('The built-in GitSpace project cannot be removed. Close its workspaces instead.');
     return this.ctx.storage.sql.exec(
       'DELETE FROM user_projects WHERE project_id=? RETURNING project_id',
       projectId,
@@ -436,6 +490,19 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
           manifest_hash TEXT,
           updated_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS artifact_copies(
+          copy_id TEXT PRIMARY KEY,
+          provenance_json TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS artifact_shares(
+          token TEXT PRIMARY KEY,
+          workspace_id TEXT NOT NULL,
+          path TEXT NOT NULL,
+          expires_at TEXT,
+          revoked_at TEXT,
+          record_json TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS artifact_shares_path ON artifact_shares(workspace_id,path);
         CREATE TABLE IF NOT EXISTS artifact_promotions(
           operation_id TEXT PRIMARY KEY,
           source_workspace_id TEXT NOT NULL,
@@ -472,6 +539,10 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
           PRIMARY KEY(project_id, connection_id)
         );
       `);
+      for (const column of ['role TEXT', 'source_json TEXT']) {
+        try { this.ctx.storage.sql.exec(`ALTER TABLE project ADD COLUMN ${column}`); }
+        catch (error) { if (!(error instanceof Error) || !/duplicate column name/u.test(error.message)) throw error; }
+      }
       try { this.ctx.storage.sql.exec('ALTER TABLE project_mcp_grants ADD COLUMN project_space_enabled INTEGER NOT NULL DEFAULT 1'); } catch {}
       try { this.ctx.storage.sql.exec('ALTER TABLE project_mcp_grants ADD COLUMN workspaces_enabled INTEGER NOT NULL DEFAULT 1'); } catch {}
     });
@@ -486,7 +557,7 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
   }): CloudProjectSummary {
     const now = new Date().toISOString();
     this.ctx.storage.sql.exec(
-      'INSERT OR IGNORE INTO project VALUES(?,?,?,?,?,?,?,?,?)',
+      'INSERT OR IGNORE INTO project(project_id,name,repository_reference,base_branch,lifecycle,revision,archived_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)',
       input.id,
       input.name,
       input.repositoryReference,
@@ -500,15 +571,46 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
     return this.requireProject();
   }
 
+  ensureGitSpaceProject(input: CloudProjectSummary): CloudProjectSummary {
+    if (input.role !== GITSPACE_SOURCE_PROJECT_ROLE || !isGitSpaceSourceRepository(input.repositoryReference)) throw new Error('Invalid built-in GitSpace project identity');
+    const current = this.getProject();
+    if (current && current.id !== input.id) throw new Error('Project identity mismatch');
+    if (!current) {
+      this.bootstrap({ ...input, createdBy: 'account' });
+    } else if (current.role === GITSPACE_SOURCE_PROJECT_ROLE && current.revision >= input.revision) {
+      return current;
+    }
+    this.ctx.storage.sql.exec(
+      'UPDATE project SET role=?,source_json=?,base_branch=?,lifecycle=?,revision=?,archived_at=NULL,updated_at=?',
+      GITSPACE_SOURCE_PROJECT_ROLE, JSON.stringify(input.source), input.baseBranch,
+      current?.lifecycle === 'active' ? 'active' : input.lifecycle,
+      Math.max(current?.revision ?? 0, input.revision), new Date().toISOString(),
+    );
+    return this.requireProject();
+  }
+
+  activateSourceProject(expectedRevision: number, baseBranch: string): CloudProjectSummary {
+    const current = this.requireProject();
+    if (current.role !== GITSPACE_SOURCE_PROJECT_ROLE) throw new Error('Project is not the built-in GitSpace source');
+    if (current.revision !== expectedRevision) throw new Error(`Project revision conflict: expected ${expectedRevision}, actual ${current.revision}`);
+    if (!baseBranch || baseBranch.startsWith('-') || /[\u0000-\u001f\u007f]/u.test(baseBranch)) throw new Error('Invalid source branch');
+    this.ctx.storage.sql.exec('UPDATE project SET base_branch=?,source_json=?,lifecycle=?,revision=revision+1,updated_at=?',
+      baseBranch, JSON.stringify({ ...current.source, branch: baseBranch }), 'active', new Date().toISOString());
+    return this.requireProject();
+  }
+
   getProject(): CloudProjectSummary | null {
     const row = this.ctx.storage.sql.exec<ProjectIndexRow>(
-      'SELECT project_id,name,lifecycle,repository_reference,base_branch,revision,archived_at,updated_at FROM project LIMIT 1',
+      'SELECT * FROM project LIMIT 1',
     ).toArray()[0];
     return row ? projectSummary(row) : null;
   }
 
   setProjectLifecycle(expectedRevision: number, lifecycle: ProjectLifecycle): CloudProjectSummary {
     const current = this.requireProject();
+    if (current.role === GITSPACE_SOURCE_PROJECT_ROLE && lifecycle !== 'active' && lifecycle !== 'cloud-only') {
+      throw new Error('The built-in GitSpace project cannot be archived or deleted. Close its workspaces instead.');
+    }
     if (current.revision !== expectedRevision) {
       throw new Error(`Project revision conflict: expected ${expectedRevision}, actual ${current.revision}`);
     }
@@ -585,6 +687,7 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
     }
     this.ctx.storage.sql.exec('DELETE FROM canonical_sessions WHERE workspace_id=?', workspaceId);
     this.ctx.storage.sql.exec('DELETE FROM artifact_scopes WHERE workspace_id=?', workspaceId);
+    this.ctx.storage.sql.exec('UPDATE artifact_shares SET revoked_at=? WHERE workspace_id=? AND revoked_at IS NULL', new Date().toISOString(), workspaceId);
     this.ctx.storage.sql.exec('DELETE FROM hosted_routes WHERE workspace_id=?', workspaceId);
     this.ctx.storage.sql.exec('DELETE FROM workspaces WHERE workspace_id=?', workspaceId);
     return true;
@@ -592,11 +695,13 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
 
   deleteProject(expectedRevision: number): CloudProjectSummary {
     const project = this.requireProject();
+    if (project.role === GITSPACE_SOURCE_PROJECT_ROLE) throw new Error('The built-in GitSpace project cannot be deleted. Close its workspaces instead.');
     if (project.revision !== expectedRevision) {
       throw new Error(`Project revision conflict: expected ${expectedRevision}, actual ${project.revision}`);
     }
     this.ctx.storage.sql.exec('DELETE FROM canonical_sessions');
     this.ctx.storage.sql.exec('DELETE FROM artifact_scopes');
+    this.ctx.storage.sql.exec('UPDATE artifact_shares SET revoked_at=? WHERE revoked_at IS NULL', new Date().toISOString());
     this.ctx.storage.sql.exec('DELETE FROM artifact_promotions');
     this.ctx.storage.sql.exec('DELETE FROM hosted_routes');
     this.ctx.storage.sql.exec('DELETE FROM workspaces');
@@ -773,6 +878,56 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
       now,
     );
     return this.getArtifactScope(input.id)!;
+  }
+
+  commitArtifactCopies(input: Parameters<ProjectAuthorityDO['putArtifactScope']>[0], copies: ArtifactCopyRecord[]): CanonicalArtifactScope {
+    const project = this.requireProject();
+    if (input.workspaceId !== project.id || input.generation !== input.expectedGeneration + 1 || copies.length === 0) {
+      throw new Error('Copies must advance the project artifact scope once');
+    }
+    return this.ctx.storage.transactionSync(() => {
+      const scope = this.putArtifactScope(input);
+      for (const copy of copies) {
+        if (copy.destinationScopeId !== scope.id || copy.destinationGeneration !== scope.generation) throw new Error('Copy provenance does not match its committed scope');
+        this.ctx.storage.sql.exec('INSERT INTO artifact_copies VALUES(?,?)', copy.id, JSON.stringify(copy));
+      }
+      this.appendEvent({ scope: 'artifact', entity: 'artifact', entityId: scope.id, revision: scope.generation, operation: 'updated', payload: { spaceId: project.id } });
+      return scope;
+    });
+  }
+
+  listArtifactCopies(): ArtifactCopyRecord[] {
+    return this.ctx.storage.sql.exec<{ provenance_json: string }>('SELECT provenance_json FROM artifact_copies ORDER BY copy_id').toArray().map((row) => JSON.parse(row.provenance_json) as ArtifactCopyRecord);
+  }
+
+  createArtifactShare(record: ArtifactShareRecord): ArtifactShareRecord {
+    if (!/^[A-Za-z0-9_-]{43}$/u.test(record.token) || !/^sha256:[a-f0-9]{64}$/u.test(record.hash) || record.revokedAt !== null
+      || (record.expiresAt !== null && (!Number.isFinite(Date.parse(record.expiresAt)) || Date.parse(record.expiresAt) <= Date.now()))) {
+      throw new Error('Artifact share token, hash, or expiry is invalid');
+    }
+    this.ctx.storage.sql.exec('INSERT INTO artifact_shares VALUES(?,?,?,?,?,?)', record.token, record.workspaceId, record.path, record.expiresAt, null, JSON.stringify(record));
+    return record;
+  }
+
+  getArtifactShare(token: string, now = new Date().toISOString()): ArtifactShareRecord | null {
+    const row = this.ctx.storage.sql.exec<{ record_json: string }>(
+      'SELECT record_json FROM artifact_shares WHERE token=? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>?)', token, now,
+    ).toArray()[0];
+    return row ? JSON.parse(row.record_json) as ArtifactShareRecord : null;
+  }
+
+  listArtifactShares(workspaceId: string, path: string): ArtifactShareRecord[] {
+    return this.ctx.storage.sql.exec<{ record_json: string }>(
+      'SELECT record_json FROM artifact_shares WHERE workspace_id=? AND path=? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>?) ORDER BY token',
+      workspaceId, path, new Date().toISOString(),
+    ).toArray().map((row) => JSON.parse(row.record_json) as ArtifactShareRecord);
+  }
+
+  revokeArtifactShare(token: string, workspaceIds: string[]): boolean {
+    const record = this.getArtifactShare(token);
+    if (!record || !workspaceIds.includes(record.workspaceId)) return false;
+    this.ctx.storage.sql.exec('UPDATE artifact_shares SET revoked_at=? WHERE token=? AND revoked_at IS NULL', new Date().toISOString(), token);
+    return true;
   }
 
   getArtifactPromotion(id: string): CanonicalArtifactPromotion | null {

@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
 export const projectLifecycleSchema = z.enum([
+  'cloud-only',
   'provisioning',
   'active',
   'archiving',
@@ -11,7 +12,7 @@ export const projectLifecycleSchema = z.enum([
 ]);
 export type ProjectLifecycle = z.infer<typeof projectLifecycleSchema>;
 
-export const workspaceLifecycleSchema = projectLifecycleSchema;
+export const workspaceLifecycleSchema = projectLifecycleSchema.exclude(['cloud-only']);
 export type WorkspaceLifecycle = z.infer<typeof workspaceLifecycleSchema>;
 
 export const projectOperationStateSchema = z.enum([
@@ -25,12 +26,29 @@ export const projectOperationStateSchema = z.enum([
 ]);
 export type ProjectOperationState = z.infer<typeof projectOperationStateSchema>;
 
+export const GITSPACE_SOURCE_PROJECT_ROLE = 'gitspace-source' as const;
+export const GITSPACE_SOURCE_REPOSITORY = 'https://github.com/inKibra/gitspace.sh.git';
+
+/** Compare repository identity, never a project's display name. */
+export function isGitSpaceSourceRepository(reference: string | null): boolean {
+  return reference !== null && /^(?:(?:https?:\/\/(?:www\.)?github\.com\/)|(?:git@github\.com:)|(?:ssh:\/\/git@github\.com\/))inkibra\/gitspace\.sh(?:\.git)?\/?$/iu.test(reference.trim());
+}
+
+export const gitSpaceSourceProvenanceSchema = z.object({
+  release: z.string().min(1).max(160).nullable(),
+  branch: z.string().min(1).max(512).nullable(),
+  commit: z.string().regex(/^[a-f0-9]{40,64}$/iu).nullable(),
+});
+export type GitSpaceSourceProvenance = z.infer<typeof gitSpaceSourceProvenanceSchema>;
+
 export const cloudProjectSummarySchema = z.object({
   id: z.string().min(1).max(160),
   name: z.string().min(1).max(160),
   lifecycle: projectLifecycleSchema,
   repositoryReference: z.string().min(1).max(2_048).nullable(),
   baseBranch: z.string().min(1).max(512),
+  role: z.literal(GITSPACE_SOURCE_PROJECT_ROLE).nullable().default(null),
+  source: gitSpaceSourceProvenanceSchema.nullable().default(null),
   revision: z.number().int().positive(),
   archivedAt: z.string().datetime().nullable(),
   updatedAt: z.string().datetime(),

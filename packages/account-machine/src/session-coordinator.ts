@@ -11,7 +11,7 @@ import {
   type GitSpaceDatabase,
   type ProjectEventWriter,
 } from '@gitspace/core';
-import type { CanonicalSession, SessionActivity } from '@gitspace/protocol';
+import type { CanonicalArtifactScope, CanonicalSession, SessionActivity } from '@gitspace/protocol';
 import { and, eq, inArray } from 'drizzle-orm';
 import { Result, TaggedError, type Result as ResultType } from 'better-result';
 import type { OmpRuntime, OmpRuntimeEvent, OmpRuntimeSession, OmpSessionControlView, OmpTranscriptEvent } from './omp-runtime.js';
@@ -43,6 +43,7 @@ interface LiveSession {
   artifactsDir: string;
   capability: ArtifactCapability;
   artifactBaseline: Map<string, string>;
+  artifactSync: Promise<number> | null;
   unsubscribe: () => void;
   activityUnsubscribe: () => void;
 }
@@ -130,6 +131,7 @@ export interface CanonicalSessionWriter {
 
 export interface ArtifactManifestAuthority {
   synchronizeArtifactScope(projectId: string, scope: ArtifactScope): Promise<unknown>;
+  listArtifactScopes?(projectId: string): Promise<CanonicalArtifactScope[]>;
 }
 
 
@@ -140,6 +142,7 @@ export class MachineSessionCoordinator {
   private readonly quiesced = new Set<string>();
   private readonly activePrompts = new Map<string, Set<Promise<void>>>();
   private readonly recoveringSessions = new Map<string, boolean>();
+  private readonly artifactPublicationBases = new Map<string, ArtifactScope>();
 
   constructor(
     private readonly database: GitSpaceDatabase,
@@ -673,6 +676,52 @@ export class MachineSessionCoordinator {
     await Promise.all([...this.live.values()].map((session) => session.runtime.reloadSettings?.() ?? Promise.resolve()));
   }
 
+  async instructionsChanged(projectId: string, spaceId: string): Promise<void> {
+    await Promise.all([...this.live.values()].filter((live) =>
+      live.capability.projectId === projectId
+      && (live.capability.kind === 'workspace' ? live.capability.workspaceId : live.capability.projectId) === spaceId,
+    ).map((live) => live.runtime.instructionsChanged?.() ?? Promise.resolve()));
+  }
+
+  async refreshArtifacts(projectId: string, spaceId: string): Promise<void> {
+    const live = [...this.live.values()].find((candidate) => candidate.capability.projectId === projectId
+      && (candidate.capability.kind === 'workspace' ? candidate.capability.workspaceId : candidate.capability.projectId) === spaceId);
+    if (!live) return;
+    const next = (live.artifactSync ?? Promise.resolve(0)).catch(() => 0).then(async () => {
+      await this.refreshCanonicalArtifacts(live);
+      await this.refreshArtifactMount(live, live.capability.kind === 'workspace' ? 'workspace' : 'base', true);
+      if (live.capability.kind === 'workspace') await this.refreshArtifactMount(live, 'base', false);
+      return 0;
+    });
+    live.artifactSync = next;
+    await next;
+  }
+
+  async publishArtifacts(spaceId: string): Promise<void> {
+    const space = this.database.getSpace(spaceId);
+    if (!space) throw new Error(`Artifact space ${spaceId} does not exist`);
+    const capability: ArtifactCapability = space.kind === 'base'
+      ? { kind: 'project', projectId: space.projectId }
+      : { kind: 'workspace', projectId: space.projectId, workspaceId: space.id };
+    const url = space.kind === 'base' ? 'local://base/' : 'local://workspace/';
+    const publish = async (): Promise<number> => {
+      this.rememberArtifactPublicationBase(spaceId);
+      const committed = await this.artifacts.commit(capability, url);
+      if (committed.status === 'error') throw committed.error;
+      const published = await this.publishArtifactScope(space.projectId, committed.value);
+      this.events?.append({ projectId: space.projectId, scope: 'artifact', entity: 'artifact', entityId: url,
+        revision: published.generation, operation: 'updated', payload: { spaceId } });
+      return published.generation;
+    };
+    const live = [...this.live.values()].find((candidate) =>
+      (candidate.capability.kind === 'workspace' ? candidate.capability.workspaceId : candidate.capability.projectId) === spaceId);
+    if (live) {
+      const next = (live.artifactSync ?? Promise.resolve(0)).catch(() => 0).then(publish);
+      live.artifactSync = next;
+      await next;
+    } else await publish();
+  }
+
   async stopForRestart(): Promise<ResultType<void, MachineSessionError>> {
     for (const sessionId of [...this.live.keys()]) {
       const stopped = await this.stopLive(sessionId, false);
@@ -778,11 +827,19 @@ export class MachineSessionCoordinator {
         createdAt,
       })));
     }
-    const unsubscribe = runtime.subscribe((event) => this.appendEvent(record.id, event));
+    const unsubscribe = runtime.subscribe((event) => {
+      this.appendEvent(record.id, event);
+      if (event.type === 'tool_execution_end' || event.type === 'agent_end') {
+        const live = this.live.get(record.id);
+        if (live) void this.syncSessionArtifacts(live).catch((error) => {
+          this.updateActivity(record.id, capability, runtime.activity().activity, `Artifact sync failed: ${error instanceof Error ? error.message : String(error)}`);
+        });
+      }
+    });
     const activityUnsubscribe = runtime.subscribeActivity((activity, errorMessage) => {
       this.updateActivity(record.id, capability, activity, errorMessage);
     });
-    this.live.set(record.id, { recordId: record.id, runtime, artifactsDir, capability, artifactBaseline, unsubscribe, activityUnsubscribe });
+    this.live.set(record.id, { recordId: record.id, runtime, artifactsDir, capability, artifactBaseline, artifactSync: null, unsubscribe, activityUnsubscribe });
   }
 
   private updateActivity(
@@ -893,10 +950,73 @@ export class MachineSessionCoordinator {
     }
   }
 
-  private async syncSessionArtifacts(live: LiveSession): Promise<number> {
+  private syncSessionArtifacts(live: LiveSession): Promise<number> {
+    const previous = live.artifactSync ?? Promise.resolve(0);
+    const next = previous.catch(() => 0).then(() => this.performArtifactSync(live));
+    live.artifactSync = next;
+    return next;
+  }
+
+  private rememberArtifactPublicationBase(spaceId: string): void {
+    if (this.artifactPublicationBases.has(spaceId)) return;
+    const scope = this.database.orm.select().from(artifactScopes).where(eq(artifactScopes.spaceId, spaceId)).get();
+    if (scope) this.artifactPublicationBases.set(spaceId, { ...scope, dirty: false });
+  }
+
+  private async publishArtifactScope(projectId: string, local: ArtifactScope): Promise<ArtifactScope> {
+    try {
+      await this.artifactManifests?.synchronizeArtifactScope(projectId, local);
+      this.artifactPublicationBases.delete(local.spaceId);
+      return local;
+    } catch (error) {
+      const base = this.artifactPublicationBases.get(local.spaceId);
+      const current = (await this.artifactManifests?.listArtifactScopes?.(projectId))?.find((scope) => scope.workspaceId === local.spaceId);
+      if (!base || !current) throw error;
+      if (current.generation === local.generation && current.manifestHash === local.manifestHash) {
+        this.artifactPublicationBases.delete(local.spaceId);
+        return local; // The failed response may still have committed.
+      }
+      if (current.generation < local.generation) throw error;
+      const canonical: ArtifactScope = { id: current.id, spaceId: current.workspaceId, generation: current.generation,
+        manifestHash: current.manifestHash, dirty: false, createdAt: current.updatedAt, updatedAt: current.updatedAt };
+      const reconciled = await this.artifacts.reconcileScope({ base, local, canonical });
+      if (reconciled.status === 'error') throw reconciled.error;
+      this.artifactPublicationBases.set(local.spaceId, canonical);
+      await this.artifactManifests!.synchronizeArtifactScope(projectId, reconciled.value);
+      this.artifactPublicationBases.delete(local.spaceId);
+      return reconciled.value;
+    }
+  }
+
+  private async refreshCanonicalArtifacts(live: LiveSession): Promise<void> {
+    const scopes = await this.artifactManifests?.listArtifactScopes?.(live.capability.projectId);
+    if (!scopes) return;
+    const writableSpace = live.capability.kind === 'workspace' ? live.capability.workspaceId : live.capability.projectId;
+    for (const scope of scopes) {
+      if (scope.workspaceId !== writableSpace && scope.workspaceId !== live.capability.projectId) continue;
+      const local = this.database.orm.select().from(artifactScopes).where(eq(artifactScopes.spaceId, scope.workspaceId)).get();
+      if (local && this.artifactPublicationBases.has(local.spaceId) && !local.dirty
+        && local.manifestHash !== scope.manifestHash && scope.generation >= local.generation) {
+        await this.publishArtifactScope(live.capability.projectId, local);
+        continue;
+      }
+      if (local && local.generation >= scope.generation) {
+        if (local.generation === scope.generation && local.manifestHash !== scope.manifestHash) throw new Error('Canonical artifact scope diverged from the local manifest');
+        continue;
+      }
+      if (local?.dirty) throw new Error('Canonical artifact scope changed while local artifacts were dirty');
+      const restored = await this.artifacts.restoreScope({ id: scope.id, spaceId: scope.workspaceId, generation: scope.generation,
+        manifestHash: scope.manifestHash, dirty: false, createdAt: scope.updatedAt, updatedAt: scope.updatedAt });
+      if (restored.status === 'error') throw restored.error;
+    }
+  }
+
+  private async performArtifactSync(live: LiveSession): Promise<number> {
+    await this.refreshCanonicalArtifacts(live);
     const artifactScope = live.capability.kind === 'workspace' ? 'workspace' : 'base';
     const artifactRoot = join(live.artifactsDir, artifactScope);
     const artifactUrl = `local://${artifactScope}/`;
+    this.rememberArtifactPublicationBase(live.capability.kind === 'workspace' ? live.capability.workspaceId : live.capability.projectId);
     const materialized = await filesUnder(artifactRoot);
     const present = new Set(materialized.map((path) => relative(artifactRoot, path).split('\\').join('/')));
     const journal = this.artifacts.list(live.capability, artifactUrl);
@@ -922,14 +1042,67 @@ export class MachineSessionCoordinator {
       const bytes = await readFile(path);
       const hash = `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
       if (live.artifactBaseline.get(artifactPath) === hash) continue;
+      const canonicalEntry = canonical.get(artifactPath);
+      const baseline = live.artifactBaseline.get(artifactPath);
+      if (canonicalEntry) {
+        const current = await this.artifacts.read(live.capability, canonicalEntry.url);
+        if (current.status === 'error') throw current.error;
+        const currentHash = `sha256:${createHash('sha256').update(current.value).digest('hex')}`;
+        if (currentHash !== baseline && currentHash !== hash) throw new Error(`Artifact ${canonicalEntry.url} changed outside this session; refusing a stale write`);
+      } else if (baseline !== undefined) {
+        throw new Error(`Artifact ${artifactUrl}${artifactPath} was removed outside this session; refusing a stale write`);
+      }
       const written = await this.artifacts.write(live.capability, `${artifactUrl}${artifactPath}`, bytes);
       if (written.status === 'error') throw written.error;
       live.artifactBaseline.set(artifactPath, hash);
     }
     const committed = await this.artifacts.commit(live.capability, artifactUrl);
     if (committed.status === 'error') throw committed.error;
-    await this.artifactManifests?.synchronizeArtifactScope(live.capability.projectId, committed.value);
-    return committed.value.generation;
+    const published = await this.publishArtifactScope(live.capability.projectId, committed.value);
+    await this.refreshArtifactMount(live, artifactScope, true);
+    if (live.capability.kind === 'workspace') await this.refreshArtifactMount(live, 'base', false);
+    this.events?.append({
+      projectId: live.capability.projectId, scope: 'artifact', entity: 'artifact', entityId: artifactUrl,
+      revision: published.generation, operation: 'updated',
+      payload: { spaceId: live.capability.kind === 'workspace' ? live.capability.workspaceId : live.capability.projectId },
+    });
+    return published.generation;
+  }
+
+  private async refreshArtifactMount(live: LiveSession, mount: 'base' | 'workspace', writable: boolean): Promise<void> {
+    const listed = this.artifacts.list(live.capability, `local://${mount}/`);
+    if (listed.status === 'error') throw listed.error;
+    const paths = new Set(listed.value.map((entry) => entry.path));
+    for (const entry of listed.value) {
+      const path = join(live.artifactsDir, mount, entry.path);
+      const bytes = await this.artifacts.read(live.capability, entry.url);
+      if (bytes.status === 'error') throw bytes.error;
+      const canonicalHash = `sha256:${createHash('sha256').update(bytes.value).digest('hex')}`;
+      if (writable) {
+        let current: Buffer | null = null;
+        try { current = await readFile(path); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+        const currentHash = current ? `sha256:${createHash('sha256').update(current).digest('hex')}` : undefined;
+        const baseline = live.artifactBaseline.get(entry.path);
+        // A tool may have written again while its preceding sync uploaded. Never overwrite that work.
+        if (currentHash !== baseline && currentHash !== canonicalHash) continue;
+        if (currentHash === canonicalHash) { live.artifactBaseline.set(entry.path, canonicalHash); continue; }
+      }
+      await mkdir(dirname(path), { recursive: true });
+      await writeFile(path, bytes.value);
+      if (writable) live.artifactBaseline.set(entry.path, canonicalHash);
+    }
+    if (writable) {
+      for (const [path, baseline] of live.artifactBaseline) {
+        if (paths.has(path)) continue;
+        const mounted = join(live.artifactsDir, mount, path);
+        try {
+          const bytes = await readFile(mounted);
+          if (`sha256:${createHash('sha256').update(bytes).digest('hex')}` !== baseline) continue;
+          await rm(mounted);
+        } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+        live.artifactBaseline.delete(path);
+      }
+    }
   }
 
   private async stopLive(sessionId: string, close: boolean): Promise<ResultType<void, MachineSessionError>> {

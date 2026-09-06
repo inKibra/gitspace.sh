@@ -3,6 +3,11 @@ import {
   inspectorAvailabilityContract,
   inspectorReadArtifactContract,
   inspectorWriteArtifactContract,
+  inspectorListArtifactsContract,
+  inspectorCopyArtifactsContract,
+  inspectorListArtifactSharesContract,
+  inspectorCreateArtifactShareContract,
+  inspectorRevokeArtifactShareContract,
   inspectorOverviewContract,
   inspectorJournalContract,
   inspectorReviewThreadsContract,
@@ -315,7 +320,7 @@ export function inspectorCloudProcedures(env: Env, userId: string) {
   const readArtifact = server.implement(inspectorReadArtifactContract).handler(async ({ input, errors }) => {
     try {
       const source = await readInspectorContext(env, userId, input.spaceId, undefined, input.expectedGeneration);
-      return ok(await new InspectorCloudArtifacts(env, userId, source).read(input.url));
+      return ok(await new InspectorCloudArtifacts(env, userId, source).read(input.url, input.hash));
     } catch (error) {
       if (error instanceof InspectorWorkspaceMissing) return err(errors.WorkspaceNotFound({ workspaceId: error.spaceId }));
       if (error instanceof InspectorGenerationConflict) return err(errors.SpaceGenerationConflict({ spaceId: error.spaceId, expected: error.expected, actual: error.actual }));
@@ -325,6 +330,56 @@ export function inspectorCloudProcedures(env: Env, userId: string) {
   });
   const writeArtifact = server.implement(inspectorWriteArtifactContract).handler(({ errors }) =>
     err(errors.InspectorState({ resource: 'artifacts', message: 'Open this workspace on a machine before editing artifacts.' })));
+  const listArtifacts = server.implement(inspectorListArtifactsContract).handler(async ({ input, errors }) => {
+    try {
+      const source = await readInspectorContext(env, userId, input.spaceId, undefined, input.expectedGeneration);
+      return ok(await new InspectorCloudArtifacts(env, userId, source).catalog());
+    } catch (error) {
+      if (error instanceof InspectorWorkspaceMissing) return err(errors.WorkspaceNotFound({ workspaceId: error.spaceId }));
+      if (error instanceof InspectorGenerationConflict) return err(errors.SpaceGenerationConflict({ spaceId: error.spaceId, expected: error.expected, actual: error.actual }));
+      return err(errors.OperationFailed({ operation: 'list artifacts', message: error instanceof Error ? error.message : String(error) }));
+    }
+  });
+  const copyArtifacts = server.implement(inspectorCopyArtifactsContract).handler(async ({ input, errors }) => {
+    try {
+      const source = await readInspectorContext(env, userId, input.spaceId, undefined, input.expectedGeneration);
+      return ok(await new InspectorCloudArtifacts(env, userId, source).copyToProject(input.files, input.expectedProjectGeneration));
+    } catch (error) {
+      if (error instanceof InspectorWorkspaceMissing) return err(errors.WorkspaceNotFound({ workspaceId: error.spaceId }));
+      if (error instanceof InspectorGenerationConflict) return err(errors.SpaceGenerationConflict({ spaceId: error.spaceId, expected: error.expected, actual: error.actual }));
+      return err(errors.OperationFailed({ operation: 'copy artifacts to project', message: error instanceof Error ? error.message : String(error) }));
+    }
+  });
+  const listShares = server.implement(inspectorListArtifactSharesContract).handler(async ({ input, errors }) => {
+    try {
+      const source = await readInspectorContext(env, userId, input.spaceId, undefined, input.expectedGeneration);
+      return ok(await new InspectorCloudArtifacts(env, userId, source).listShares(input.url));
+    } catch (error) {
+      if (error instanceof InspectorWorkspaceMissing) return err(errors.WorkspaceNotFound({ workspaceId: error.spaceId }));
+      if (error instanceof InspectorGenerationConflict) return err(errors.SpaceGenerationConflict({ spaceId: error.spaceId, expected: error.expected, actual: error.actual }));
+      return err(errors.OperationFailed({ operation: 'list artifact shares', message: error instanceof Error ? error.message : String(error) }));
+    }
+  });
+  const createShare = server.implement(inspectorCreateArtifactShareContract).handler(async ({ input, errors }) => {
+    try {
+      const source = await readInspectorContext(env, userId, input.spaceId, undefined, input.expectedGeneration);
+      return ok(await new InspectorCloudArtifacts(env, userId, source).createShare(input.url, input.hash, input.expiresAt));
+    } catch (error) {
+      if (error instanceof InspectorWorkspaceMissing) return err(errors.WorkspaceNotFound({ workspaceId: error.spaceId }));
+      if (error instanceof InspectorGenerationConflict) return err(errors.SpaceGenerationConflict({ spaceId: error.spaceId, expected: error.expected, actual: error.actual }));
+      return err(errors.OperationFailed({ operation: 'share artifact', message: error instanceof Error ? error.message : String(error) }));
+    }
+  });
+  const revokeShare = server.implement(inspectorRevokeArtifactShareContract).handler(async ({ input, errors }) => {
+    try {
+      const source = await readInspectorContext(env, userId, input.spaceId, undefined, input.expectedGeneration);
+      return ok(await new InspectorCloudArtifacts(env, userId, source).revokeShare(input.id));
+    } catch (error) {
+      if (error instanceof InspectorWorkspaceMissing) return err(errors.WorkspaceNotFound({ workspaceId: error.spaceId }));
+      if (error instanceof InspectorGenerationConflict) return err(errors.SpaceGenerationConflict({ spaceId: error.spaceId, expected: error.expected, actual: error.actual }));
+      return err(errors.OperationFailed({ operation: 'revoke artifact share', message: error instanceof Error ? error.message : String(error) }));
+    }
+  });
   const repositoryTree = server.implement(inspectorRepositoryTreeContract).handler(({ errors }) => err(errors.InspectorState({ resource: 'runtime', message: 'Live repository and services are unavailable. Open the workspace explicitly to use this operation.' })));
   const repositoryStatus = server.implement(inspectorRepositoryStatusContract).handler(({ errors }) => err(errors.InspectorState({ resource: 'runtime', message: 'Live repository and services are unavailable. Open the workspace explicitly to use this operation.' })));
   const repositoryFile = server.implement(inspectorRepositoryFileContract).handler(({ errors }) => err(errors.InspectorState({ resource: 'runtime', message: 'Live repository and services are unavailable. Open the workspace explicitly to use this operation.' })));
@@ -342,7 +397,7 @@ export function inspectorCloudProcedures(env: Env, userId: string) {
     journal: { list: journal, startPhase, endPhase, append: appendJournal },
     guide: { put: putGuide, analyze: analyzeGuide, submit: submitGuide, markSectionRead, setApproval },
     review: { list: threads, create: createThread, reply: replyThread, resolve: resolveThread },
-    artifacts: { read: readArtifact, write: writeArtifact },
+    artifacts: { read: readArtifact, write: writeArtifact, list: listArtifacts, copyToProject: copyArtifacts, shares: { list: listShares, create: createShare, revoke: revokeShare } },
     repository: { tree: repositoryTree, status: repositoryStatus, file: repositoryFile, diff: repositoryDiff },
     services: { list: listServices, start: startService, stop: stopService },
   };

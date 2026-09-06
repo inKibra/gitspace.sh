@@ -50,12 +50,18 @@ class MemoryProjectAuthority implements ProjectLifecycleAuthority {
 
   async bootstrapProject(input: { projectId: string; name: string; repositoryReference: string | null; baseBranch: string }) {
     const now = new Date().toISOString();
-    const project: CloudProjectSummary = { id: input.projectId, name: input.name, lifecycle: 'provisioning', repositoryReference: input.repositoryReference, baseBranch: input.baseBranch, revision: 1, archivedAt: null, updatedAt: now };
+    const project: CloudProjectSummary = { id: input.projectId, name: input.name, lifecycle: 'provisioning', repositoryReference: input.repositoryReference, baseBranch: input.baseBranch, role: null, source: null, revision: 1, archivedAt: null, updatedAt: now };
     this.projects.set(project.id, project);
     return project;
   }
 
   async getProject(projectId: string) { return this.projects.get(projectId) ?? null; }
+
+  async activateSourceProject(projectId: string, expectedRevision: number, baseBranch: string) {
+    const current = this.projects.get(projectId)!;
+    this.projects.set(projectId, { ...current, baseBranch, source: { release: current.source?.release ?? null, commit: current.source?.commit ?? null, branch: baseBranch } });
+    return this.setProjectLifecycle(projectId, expectedRevision, 'active');
+  }
 
   async setProjectLifecycle(projectId: string, expectedRevision: number, lifecycle: CloudProjectSummary['lifecycle']) {
     const current = this.projects.get(projectId)!;
@@ -103,6 +109,60 @@ class MemoryProjectAuthority implements ProjectLifecycleAuthority {
 }
 
 describe('ProjectLifecycleManager', () => {
+  it('materializes cloud-only source at the pinned release commit once, then creates normal workspaces', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'gitspace-source-open-'));
+    roots.push(root);
+    const source = seedRepository(root, 'release/test');
+    const commit = git(source, 'rev-parse', 'HEAD');
+    writeFileSync(join(source, 'README.txt'), 'newer branch content\n');
+    git(source, 'add', 'README.txt');
+    git(source, '-c', 'user.name=GitSpace', '-c', 'user.email=gitspace@local.invalid', 'commit', '-m', 'advance branch');
+    const database = new GitSpaceDatabase(join(root, 'gitspace.db'));
+    const authority = new MemoryProjectAuthority();
+    authority.projects.set('source', {
+      id: 'source', name: 'GitSpace', lifecycle: 'cloud-only', repositoryReference: source, baseBranch: 'release/test',
+      role: 'gitspace-source', source: { release: commit, branch: 'release/test', commit },
+      revision: 1, archivedAt: null, updatedAt: new Date(0).toISOString(),
+    });
+    const manager = new ProjectLifecycleManager(database, authority, 'machine-a', join(root, 'spaces'));
+    expect(database.getProject('source')).toBeNull();
+    const [first, second] = await Promise.all([manager.openProject('source'), manager.openProject('source')]);
+    expect(second.operation?.id).toBe(first.operation?.id);
+    expect(first.project.lifecycle).toBe('active');
+    const base = database.getBaseSpace('source')!;
+    expect(git(base.rootPath, 'rev-parse', 'HEAD')).toBe(commit);
+    expect(git(base.rootPath, 'symbolic-ref', '--short', 'HEAD')).toBe('release/test');
+    expect(git(base.rootPath, 'show', 'HEAD:README.txt')).toBe('imported');
+    const workspace = await manager.createWorkspace({ projectId: 'source', name: 'Change', branch: 'change', phase: 'code', sourceKind: 'base', sourceRef: '' });
+    expect(git(workspace.workspace.rootPath, 'rev-parse', 'HEAD')).toBe(commit);
+    expect((await manager.openProject('source')).operation).toBeNull();
+    expect(authority.projects.size).toBe(1);
+    database.close();
+  });
+
+  it('preserves a cloud-only definition and leaves no fake local repository after a failed source clone', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'gitspace-source-failed-'));
+    roots.push(root);
+    const source = seedRepository(root);
+    const database = new GitSpaceDatabase(join(root, 'gitspace.db'));
+    const authority = new MemoryProjectAuthority();
+    authority.projects.set('source', {
+      id: 'source', name: 'GitSpace', lifecycle: 'cloud-only', repositoryReference: join(root, 'missing-repository'), baseBranch: 'trunk',
+      role: 'gitspace-source', source: { release: null, branch: 'trunk', commit: null },
+      revision: 1, archivedAt: null, updatedAt: new Date(0).toISOString(),
+    });
+    const manager = new ProjectLifecycleManager(database, authority, 'machine-a', join(root, 'spaces'));
+    await expect(manager.openProject('source')).rejects.toThrow('git clone failed');
+    expect(database.getProject('source')).toBeNull();
+    expect(database.getBaseSpace('source')).toBeNull();
+    expect(existsSync(join(root, 'spaces', 'source'))).toBe(false);
+    expect(await authority.getProject('source')).toMatchObject({ lifecycle: 'cloud-only', role: 'gitspace-source' });
+    expect(await authority.listProjectWorkspaces('source')).toEqual([]);
+    authority.projects.set('source', { ...authority.projects.get('source')!, repositoryReference: source });
+    expect((await manager.openProject('source')).project.lifecycle).toBe('active');
+    database.close();
+  });
+
   it('creates empty projects and sourced workspaces through durable operations, then permanently deletes archived state', async () => {
     const root = mkdtempSync(join(tmpdir(), 'gitspace-project-lifecycle-'));
     roots.push(root);

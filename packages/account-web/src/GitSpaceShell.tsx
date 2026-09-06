@@ -74,9 +74,11 @@ export interface WorkspaceView {
 export interface ProjectLifecycleView {
   id: string;
   name: string;
-  lifecycle: 'provisioning' | 'active' | 'archiving' | 'archived' | 'restoring' | 'failed' | 'deleting';
+  lifecycle: 'cloud-only' | 'provisioning' | 'active' | 'archiving' | 'archived' | 'restoring' | 'failed' | 'deleting';
   repositoryReference: string | null;
   baseBranch: string;
+  role: 'gitspace-source' | null;
+  source: { release: string | null; branch: string | null; commit: string | null } | null;
   revision: number;
   archivedAt: Date | null;
   updatedAt: Date;
@@ -484,15 +486,16 @@ export function ProjectsView({ projects, workspaces, onOpen, onOpenProject, onCl
         const archived = items.filter((workspace) => !!workspace.closedAt);
         return <section key={project.id} className="flex flex-col gap-3">
           <div className="flex items-center justify-between gap-3">
-            <button type="button" className="flex min-w-0 items-center gap-2 text-left" onClick={() => onOpenProject?.(project.id)}>
+            <button type="button" className="flex min-h-10 min-w-0 items-center gap-2 text-left" onClick={() => onOpenProject?.(project.id)}>
               <span className="truncate text-title font-semibold text-foreground">{project.name}</span>
-              <Badge variant="dot" size="compact" color={project.lifecycle === 'active' ? 'green' : project.lifecycle === 'archived' ? 'gray' : 'amber'}>{project.lifecycle}</Badge>
+              <Badge variant="dot" size="compact" color={project.lifecycle === 'active' ? 'green' : project.lifecycle === 'archived' || project.lifecycle === 'cloud-only' ? 'gray' : 'amber'}>{project.lifecycle === 'cloud-only' ? 'Cloud only' : project.lifecycle}</Badge>
+              {project.role === 'gitspace-source' ? <Badge size="compact" color="gray">Built in</Badge> : null}
             </button>
             <div className="flex items-center gap-1">
               {project.lifecycle === 'active' && onCreateWorkspace ? <Button variant="secondary" size="compact" onClick={() => setWorkspaceDialog(project.id)} leadingIcon={glyph(Plus)}>Workspace</Button> : null}
-              {project.lifecycle === 'active' && onArchiveProject ? <Button variant="ghost" size="compact" disabled={pending} onClick={() => void run(() => onArchiveProject(project.id, project.revision))} leadingIcon={glyph(Archive)}>Archive</Button> : null}
+              {project.role !== 'gitspace-source' && project.lifecycle === 'active' && onArchiveProject ? <Button variant="ghost" size="compact" disabled={pending} onClick={() => void run(() => onArchiveProject(project.id, project.revision))} leadingIcon={glyph(Archive)}>Archive</Button> : null}
               {project.lifecycle === 'archived' && onRestoreProject ? <Button variant="ghost" size="compact" disabled={pending} onClick={() => void run(() => onRestoreProject(project.id, project.revision))} leadingIcon={glyph(RefreshCcw01)}>Restore</Button> : null}
-              {project.lifecycle === 'archived' && onDeleteProject ? <Button variant="ghost" size="compact" disabled={pending} onClick={() => void run(() => onDeleteProject(project.id, project.revision))} leadingIcon={glyph(Trash01)}>Delete</Button> : null}
+              {project.role !== 'gitspace-source' && project.lifecycle === 'archived' && onDeleteProject ? <Button variant="ghost" size="compact" disabled={pending} onClick={() => void run(() => onDeleteProject(project.id, project.revision))} leadingIcon={glyph(Trash01)}>Delete</Button> : null}
             </div>
           </div>
           <CardGroup orientation="inline" border="outlined" separated>
@@ -522,7 +525,7 @@ export function ProjectsView({ projects, workspaces, onOpen, onOpenProject, onCl
               </CardFooter>
             </Card>)}
           </CardGroup>
-          {!items.length ? <p className="text-caption text-muted-foreground">No workspaces yet.</p> : null}
+          {!items.length ? <p className="text-caption text-muted-foreground">{project.lifecycle === 'cloud-only' ? 'Project saved in your account. Open it on a machine to check out the source.' : 'No workspaces yet.'}</p> : null}
         </section>;
       })}
       {!visible.length ? <EmptyState title="No projects" description={filter === 'archived' ? 'Nothing is archived.' : 'Create a project or import a repository to start.'} /> : null}
@@ -624,7 +627,7 @@ export function GitSpaceShell({ project, projects, workspace, baseSpace, workspa
   };
   const openWorkspace = (target: WorkspaceView): void => { onSelectWorkspace?.(target.id); navigate('agent'); };
   const openWorkspaces = workspaces.filter((item) => !item.closedAt);
-  const projectItems = projects ?? [{ id: project.id ?? baseSpace.projectId, name: project.name, lifecycle: 'active' as const, repositoryReference: project.repository || null, baseBranch: baseSpace.branch, revision: 1, archivedAt: null, updatedAt: new Date(0) }];
+  const projectItems = projects ?? [{ id: project.id ?? baseSpace.projectId, name: project.name, lifecycle: 'active' as const, repositoryReference: project.repository || null, baseBranch: baseSpace.branch, role: null, source: null, revision: 1, archivedAt: null, updatedAt: new Date(0) }];
   const sidebarProjects = useMemo(() => {
     const byProject: Record<string, { base: ProjectAgentView; workspaces: WorkspaceView[] }> = { [baseSpace.projectId]: { base: baseSpace, workspaces: [] } };
     for (const item of workspaces) {

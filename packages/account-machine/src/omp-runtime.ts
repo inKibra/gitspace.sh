@@ -6,7 +6,7 @@ import { OMP_IPC_VERSION, OmpRpcPeer, type OmpChildApi, type OmpMachineApi, type
 import type { OmpRuntime, OmpRuntimeEvent, OmpRuntimeSession, OmpTranscriptEvent } from '../../account-omp/src/contracts.js';
 import type { CloudSpaceCheckpointAuthority } from './cloud-space-authority.js';
 import type { MachineMcpCoordinator, ProjectedMcpSession } from './local-mcp.js';
-import { createSpaceEvalNamespace, type OmpEvalNamespace } from './space-eval-sdk.js';
+import { createSpaceEvalNamespace, type OmpEvalNamespace, type SpaceWorkspaceControls } from './space-eval-sdk.js';
 import { z } from 'zod';
 
 export type { OmpRuntime, OmpRuntimeEvent, OmpRuntimeSession, OmpSessionControlView, OmpTranscriptEvent } from '../../account-omp/src/contracts.js';
@@ -27,6 +27,7 @@ export interface ProcessOmpRuntimeOptions {
   mcp?: MachineMcpCoordinator;
   skills?: readonly SkillView[];
   spaceAuthority?: CloudSpaceCheckpointAuthority;
+  workspaceControls?: () => SpaceWorkspaceControls;
   onError?: (error: unknown) => void;
 }
 interface OmpChild {
@@ -304,7 +305,7 @@ export class ProcessOmpRuntime implements OmpRuntime {
       getSessionId: () => sessionId,
       getLocalMounts: (): Record<string, 'read' | 'write'> => input.workspaceId === null ? { base: 'write' } : { base: 'read', workspace: 'write' },
     };
-    if (this.options.spaceAuthority) namespaces.space = createSpaceEvalNamespace(this.options.spaceAuthority, input.projectId, input.workspaceId);
+    if (this.options.spaceAuthority) namespaces.space = createSpaceEvalNamespace(this.options.spaceAuthority, input.projectId, input.workspaceId, this.options.workspaceControls?.());
     if (this.options.mcp) {
       projected = await this.options.mcp.createSession({ projectId: input.projectId, workspaceId: input.workspaceId, workspacePath: input.workingDirectory });
       namespaces.mcp = projected.evalNamespace(localProtocolOptions);
@@ -447,7 +448,7 @@ export class ProcessOmpRuntime implements OmpRuntime {
     const unsubscribeNotifications = projected?.manager.addNotificationListener((server, method, params) => hosted.child.rpc.publish({ type: 'mcpNotification', server, method, params }));
     const unsubscribeCatalog = projected?.manager.addCatalogChangeListener(() => { void refreshMcp().catch((error) => this.options.onError?.(error)); });
     projected?.attach({ refresh: refreshMcp });
-    const invoke = async <K extends SessionMethod | 'reloadSettings'>(method: K, args: Parameters<OmpChildApi[K]>): Promise<Awaited<ReturnType<OmpChildApi[K]>>> => {
+    const invoke = async <K extends SessionMethod | 'reloadSettings' | 'instructionsChanged'>(method: K, args: Parameters<OmpChildApi[K]>): Promise<Awaited<ReturnType<OmpChildApi[K]>>> => {
       if (disposed) throw new Error('OMP session has been disposed');
       await hosted.migrate();
       await ensureChild();
@@ -466,6 +467,7 @@ export class ProcessOmpRuntime implements OmpRuntime {
       activity: () => activity,
       persist: () => invoke('persist', []), handoff: () => invoke('handoff', []), resume: () => invoke('resume', []),
       reloadSettings: () => invoke('reloadSettings', []), dispose: () => hosted.dispose(),
+      instructionsChanged: () => invoke('instructionsChanged', []),
       control: () => invoke('control', []), cycleRole: (direction) => invoke('cycleRole', [direction]),
       setModel: (provider, model) => invoke('setModel', [provider, model]), setThinking: (thinking) => invoke('setThinking', [thinking]),
       setFast: (enabled) => invoke('setFast', [enabled]), setApproval: (approval) => invoke('setApproval', [approval]),

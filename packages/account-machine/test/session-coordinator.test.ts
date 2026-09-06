@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { scheduler } from 'node:timers/promises';
@@ -197,6 +197,120 @@ function artifactKey(): Uint8Array {
 }
 
 describe('MachineSessionCoordinator', () => {
+  it('publishes normal-tool artifact writes without waiting for the prompt to end', async () => {
+    const { root, database, artifacts } = fixture();
+    database.possessWorkspace('workspace-a', 'machine-a');
+    let mount = '';
+    class ToolRuntime extends FakeOmpRuntime {
+      override async create(input: Parameters<FakeOmpRuntime['create']>[0]) {
+        mount = join(input.artifactsDir, 'workspace');
+        return super.create(input);
+      }
+    }
+    const runtime = new ToolRuntime();
+    const refreshed = Promise.withResolvers<void>();
+    const coordinator = new MachineSessionCoordinator(database, artifacts, runtime, 'machine-a', join(root, 'runtime'), {
+      append: (event) => {
+        if (event.scope === 'artifact' && event.entity === 'artifact' && event.payload?.spaceId === 'workspace-a') refreshed.resolve();
+      },
+    });
+    const opened = await coordinator.create('workspace-a');
+    if (opened.status === 'error') throw opened.error;
+    try {
+      mkdirSync(mount, { recursive: true });
+      writeFileSync(join(mount, 'during-turn.txt'), 'tool evidence');
+      runtime.emit({ type: 'tool_execution_end', toolName: 'write', toolCallId: 'write-artifact', isError: false });
+      await refreshed.promise;
+      const visible = await artifacts.read({ kind: 'workspace', projectId: 'project-a', workspaceId: 'workspace-a' }, 'local://workspace/during-turn.txt');
+      if (visible.status === 'error') throw visible.error;
+      expect(new TextDecoder().decode(visible.value)).toBe('tool evidence');
+    } finally {
+      await coordinator.stopForRestart();
+      database.close();
+    }
+  });
+
+  it('imports a fixed cloud copy into an open project before its next tool and preserves it through later edits and checkpointing', async () => {
+    const { root, database, artifacts, store } = fixture();
+    const capability = { kind: 'project' as const, projectId: 'project-a' };
+    await artifacts.write(capability, 'local://base/existing.txt', new TextEncoder().encode('existing'));
+    const initial = await artifacts.commit(capability, 'local://base/');
+    if (initial.status === 'error') throw initial.error;
+    let canonical = initial.value;
+    let racingCopy: (() => Promise<void>) | undefined;
+    database.possessSpace('project-a', 'machine-a');
+    let mount = '';
+    class ProjectRuntime extends FakeOmpRuntime {
+      override async create(input: Parameters<FakeOmpRuntime['create']>[0]) {
+        mount = join(input.artifactsDir, 'base');
+        const session = await super.create(input);
+        return {
+          ...session,
+          prompt: async () => {
+            // This is the next ordinary agent read/write after the boundary refresh.
+            const copied = readFileSync(join(mount, 'copied.txt'), 'utf8');
+            writeFileSync(join(mount, 'edited.txt'), `agent:${copied}`);
+            return true;
+          },
+        };
+      }
+    }
+    const coordinator = new MachineSessionCoordinator(database, artifacts, new ProjectRuntime(), 'machine-a', join(root, 'runtime'),
+      undefined, undefined, undefined, {
+        listArtifactScopes: async () => [{ id: canonical.id, workspaceId: canonical.spaceId, generation: canonical.generation, manifestHash: canonical.manifestHash, updatedAt: canonical.updatedAt }],
+        synchronizeArtifactScope: async (_projectId, scope) => {
+          const copy = racingCopy;
+          racingCopy = undefined;
+          await copy?.();
+          if (canonical.generation >= scope.generation && canonical.manifestHash !== scope.manifestHash) throw new Error('Canonical artifact generation conflict');
+          canonical = scope;
+        },
+      });
+    const opened = await coordinator.createProject('project-a');
+    if (opened.status === 'error') throw opened.error;
+    // A second projection simulates a cloud fixed-version copy, not a write through this holder.
+    const remoteDatabase = new GitSpaceDatabase(join(root, 'remote.db'));
+    remoteDatabase.createProject({ id: 'project-a', name: 'A', repositoryPath: join(root, 'remote-repo'), baseBranch: 'main' });
+    const remote = new LocalArtifactResolver(remoteDatabase, store, join(root, 'remote-cache'), artifactKey());
+    try {
+      const restored = await remote.restoreScope(canonical);
+      if (restored.status === 'error') throw restored.error;
+      const copied = await remote.write(capability, 'local://base/copied.txt', new TextEncoder().encode('fixed-version'));
+      if (copied.status === 'error') throw copied.error;
+      const committed = await remote.commit(capability, 'local://base/');
+      if (committed.status === 'error') throw committed.error;
+      canonical = committed.value;
+      await coordinator.refreshArtifacts('project-a', 'project-a');
+      expect(readFileSync(join(mount, 'copied.txt'), 'utf8')).toBe('fixed-version');
+      // Another independent copy wins the CAS while this holder uploads its next edit.
+      racingCopy = async () => {
+        const written = await remote.write(capability, 'local://base/raced.txt', new TextEncoder().encode('concurrent-copy'));
+        if (written.status === 'error') throw written.error;
+        const copiedScope = await remote.commit(capability, 'local://base/');
+        if (copiedScope.status === 'error') throw copiedScope.error;
+        canonical = copiedScope.value;
+      };
+      const prompted = await coordinator.prompt(opened.value.id, 'Edit copied evidence');
+      if (prompted.status === 'error') throw prompted.error;
+      const stopped = await coordinator.stopForRestart();
+      if (stopped.status === 'error') throw stopped.error;
+      for (const [path, expected] of [['existing.txt', 'existing'], ['copied.txt', 'fixed-version'], ['edited.txt', 'agent:fixed-version'], ['raced.txt', 'concurrent-copy']]) {
+        const saved = await artifacts.read(capability, `local://base/${path}`);
+        if (saved.status === 'error') throw saved.error;
+        expect(new TextDecoder().decode(saved.value)).toBe(expected!);
+      }
+      const checkpoint = await remote.restoreScope(canonical);
+      if (checkpoint.status === 'error') throw checkpoint.error;
+      const retained = await remote.read(capability, 'local://base/edited.txt');
+      if (retained.status === 'error') throw retained.error;
+      expect(new TextDecoder().decode(retained.value)).toBe('agent:fixed-version');
+    } finally {
+      await coordinator.stopForRestart();
+      remoteDatabase.close();
+      database.close();
+    }
+  });
+
   it('preserves external artifact additions and edits when an older agent mount synchronizes', async () => {
     const { root, database, artifacts } = fixture();
     const capability = { kind: 'workspace' as const, projectId: 'project-a', workspaceId: 'workspace-a' };
@@ -352,9 +466,9 @@ describe('MachineSessionCoordinator', () => {
     expect((await coordinator.prompt(opened.value.id, 'first accepted turn')).status).toBe('ok');
     await firstEntered.promise;
     expect((await coordinator.prompt(opened.value.id, 'second accepted turn')).status).toBe('ok');
-    await secondEntered.promise;
     firstGate.resolve();
     await firstFinished.promise;
+    await secondEntered.promise;
     // Finish the first promise's microtasks; its completion must not erase the second.
     await scheduler.yield();
     let quiesced = false;

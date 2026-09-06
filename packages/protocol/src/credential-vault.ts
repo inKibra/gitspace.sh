@@ -75,6 +75,7 @@ export const controlOperationSchema = z.enum([
   'project.bootstrap',
   'project.get',
   'project.setLifecycle',
+  'project.activateSource',
   'project.workspaces.list',
   'project.delete',
   'project.workspaces.put',

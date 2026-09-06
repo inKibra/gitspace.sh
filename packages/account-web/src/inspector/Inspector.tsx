@@ -86,6 +86,7 @@ import { GitSpaceMarkdown } from '../GitSpaceMarkdown.js';
 import { EmptyState, StatusDot, type AgentScopeView, type WorkspaceView } from '../GitSpaceShell.js';
 import { OverviewView, type OverviewViewProps } from './OverviewView.js';
 import { UsageView, type UsageStatus } from './UsageView.js';
+import { ArtifactActions, type ArtifactActionsHandlers } from './ArtifactActions.js';
 
 export type InspectorPermanentView = 'overview' | 'environment' | 'goal' | 'subagents' | 'files' | 'artifacts' | 'services' | 'usage' | 'guide' | 'journal';
 export type InspectorDocumentKind = 'file' | 'diff' | 'artifact' | 'goal' | 'workflow' | 'rubric';
@@ -135,6 +136,8 @@ export interface InspectorProps {
   subagents: readonly SideAgentBlock[];
   usage: InspectorUsageState;
   onRequestArtifact(reference: Extract<EvidenceReference, { kind: 'artifact' }>): Promise<InspectorArtifactContent>;
+  artifactReferences?: readonly Extract<EvidenceReference, { kind: 'artifact' }>[];
+  artifactActions?: ArtifactActionsHandlers;
   reviewerId: string;
   loading?: boolean;
   error?: string | null;
@@ -461,8 +464,8 @@ function MiniAppArtifact({ source, dataReferences, content, onLoad }: {
   const frameRef = useRef<HTMLIFrameElement>(null);
   const [dataUrl, setDataUrl] = useState(dataReferences[0]?.url ?? '');
   const selected = dataReferences.find((reference) => reference.url === dataUrl) ?? null;
-  const dataSource = selected ? content[selected.url]?.source ?? null : null;
-  useEffect(() => { if (selected && !content[selected.url]) void onLoad(selected); }, [selected?.url, content[selected?.url ?? '']]);
+  const dataSource = selected ? content[artifactId(selected)]?.source ?? null : null;
+  useEffect(() => { if (selected && !content[artifactId(selected)]) void onLoad(selected); }, [selected ? artifactId(selected) : '', content]);
   let payload: unknown = null;
   if (dataSource) {
     try { payload = JSON.parse(dataSource); } catch { payload = null; }
@@ -505,14 +508,22 @@ function ArtifactDocument({ reference, content, status, error, mode, dataReferen
   return content.source ? <SourceArtifact source={content.source} /> : <Padded><EmptyState icon={ic(Archive, 22)} title="Preview is unavailable" description="This artifact type has no inline renderer." /></Padded>;
 }
 
-function ArtifactsSurface({ references, onOpen }: { references: readonly EvidenceReference[]; onOpen: (reference: EvidenceReference) => void }) {
-  const artifacts = references.filter((reference): reference is ArtifactReference => reference.kind === 'artifact');
-  if (!artifacts.length) return <Padded><EmptyState icon={ic(Archive, 22)} title="No evidence artifacts" description="Artifacts appear here after canonical requirements, rubric judgments, or journal entries reference them." /></Padded>;
-  return <ScrollArea className="min-h-0 flex-1" viewportClassName="h-full"><div className="p-4"><CardGroup orientation="inline" border="outlined">{artifacts.map((reference) => <Card onClick={() => onOpen(reference)} label={`Open ${reference.label}`} key={artifactId(reference)}>
-    <CardMedia icon={reference.mediaType?.startsWith('image/') ? ImageGlyph : FileGlyph} />
-    <CardHeader><CardTitle className="truncate">{reference.label}</CardTitle><CardDescription className="truncate font-mono">{reference.url}</CardDescription></CardHeader>
-    <CardFooter className="gap-2"><span className="text-caption text-muted-foreground tabular-nums">generation {reference.generation}</span><Button variant="ghost" size="icon-compact" asChild><a href={reference.url} target="_blank" rel="noreferrer" aria-label={`Open ${reference.label} in a new tab`}>{ic(LinkExternal01, 14)}</a></Button></CardFooter>
-  </Card>)}</CardGroup></div></ScrollArea>;
+function ArtifactsSurface({ references, onOpen, actions }: { references: readonly ArtifactReference[]; onOpen: (reference: EvidenceReference) => void; actions?: ArtifactActionsHandlers }) {
+  const [selected, setSelected] = useState<string[]>([]);
+  const selection = references.filter((reference) => selected.includes(reference.url));
+  if (!references.length) return <Padded><EmptyState icon={ic(Archive, 22)} title="No artifacts" description="Published workspace and project files appear here, whether or not they are attached as evidence." /></Padded>;
+  return <ScrollArea className="min-h-0 flex-1" viewportClassName="h-full"><div className="flex flex-col gap-3 p-4">
+    {actions ? <><p className="text-caption text-muted-foreground">Select one or more published workspace files to copy. Select one project or workspace file to share.</p><ArtifactActions selected={selection} actions={actions} /></> : null}
+    <CardGroup orientation="inline" border="outlined">{references.map((reference) => <Card key={artifactId(reference)}>
+      <CardMedia icon={reference.mediaType?.startsWith('image/') ? ImageGlyph : FileGlyph} />
+      <CardHeader><CardTitle className="truncate">{reference.label}</CardTitle><CardDescription className="truncate font-mono">{reference.url}</CardDescription></CardHeader>
+      <CardFooter className="flex-wrap gap-2">
+        {actions ? <Button variant={selected.includes(reference.url) ? 'secondary' : 'ghost'} size="compact" className="min-h-10" aria-pressed={selected.includes(reference.url)} onClick={() => setSelected((current) => current.includes(reference.url) ? current.filter((url) => url !== reference.url) : [...current, reference.url])}>{selected.includes(reference.url) ? 'Selected' : 'Select'}<span className="sr-only"> {reference.label}</span></Button> : null}
+        <Button variant="ghost" size="compact" className="min-h-10" onClick={() => onOpen(reference)}>Open<span className="sr-only"> {reference.label}</span></Button>
+        <span className="text-caption text-muted-foreground tabular-nums">generation {reference.generation}</span>
+      </CardFooter>
+    </Card>)}</CardGroup>
+  </div></ScrollArea>;
 }
 
 function SubagentsSurface({ subagents }: { subagents: readonly SideAgentBlock[] }) {
@@ -796,7 +807,7 @@ function JournalSurface({ entries, artifactContent, artifactLoad, artifactErrors
                 {entry.outcome ? <p className="text-body text-muted-foreground"><span className="font-medium text-foreground">Outcome · </span>{entry.outcome}</p> : null}
                 {entry.decisions.length ? <ul className="flex flex-col gap-1">{entry.decisions.map((decision, decisionIndex) => <li className="flex items-start gap-1.5 text-body text-muted-foreground" key={decisionIndex}><span className="mt-0.5 shrink-0 text-foreground">{ic(Check, 14)}</span>{decision}</li>)}</ul> : null}
                 {entry.delta ? <div className="flex flex-wrap gap-1"><Badge size="compact"><span className="tabular-nums">{entry.delta.requirementsAdvanced.length}</span>&nbsp;requirements advanced</Badge><Badge size="compact"><span className="tabular-nums">{entry.delta.evidenceAdded.length}</span>&nbsp;evidence added</Badge><Badge size="compact"><span className="tabular-nums">{entry.delta.workflowNodesChanged.length}</span>&nbsp;workflow changes</Badge><Badge size="compact"><span className="tabular-nums">{entry.delta.threadsResolved}</span>&nbsp;threads resolved</Badge></div> : null}
-                {entry.evidence.length ? <CardGroup border="outlined">{entry.evidence.map((reference, evidenceIndex) => <JournalEvidence reference={reference} content={reference.kind === 'artifact' ? artifactContent[reference.url] ?? null : null} status={reference.kind === 'artifact' ? artifactLoad[reference.url] : undefined} error={reference.kind === 'artifact' ? artifactErrors[reference.url] : undefined} onLoad={onLoadArtifact} onOpen={onOpenEvidence} key={`${entry.id}:${evidenceIndex}`} />)}</CardGroup> : null}
+                {entry.evidence.length ? <CardGroup border="outlined">{entry.evidence.map((reference, evidenceIndex) => <JournalEvidence reference={reference} content={reference.kind === 'artifact' ? artifactContent[artifactId(reference)] ?? null : null} status={reference.kind === 'artifact' ? artifactLoad[artifactId(reference)] : undefined} error={reference.kind === 'artifact' ? artifactErrors[artifactId(reference)] : undefined} onLoad={onLoadArtifact} onOpen={onOpenEvidence} key={`${entry.id}:${evidenceIndex}`} />)}</CardGroup> : null}
               </div>
             </ThinkingStepDetails>}
           </ThinkingStep>;
@@ -820,25 +831,31 @@ export function Inspector(props: InspectorProps) {
   const [artifactLoad, setArtifactLoad] = useState<Record<string, 'loading' | 'loaded' | 'error'>>({});
   const [artifactErrors, setArtifactErrors] = useState<Record<string, string>>({});
   const evidence = useMemo(() => collectEvidence(props.overview, props.journalEntries), [props.journalEntries, props.overview]);
-  const artifacts = useMemo(() => evidence.filter((reference): reference is ArtifactReference => reference.kind === 'artifact'), [evidence]);
+  const artifacts = useMemo(() => props.artifactReferences ?? evidence.filter((reference): reference is ArtifactReference => reference.kind === 'artifact'), [evidence, props.artifactReferences]);
   const activeDocument = documents.find((document) => document.id === activeDocumentId) ?? null;
   const activeMode = activeDocument ? fileModes[activeDocument.id] ?? 'current' : 'current';
-  const activeArtifact = activeDocument?.kind === 'artifact' ? artifacts.find((reference) => artifactId(reference) === activeDocument.target) ?? null : null;
+  const activeArtifact = activeDocument?.kind === 'artifact'
+    ? activeDocument.target.startsWith('current:')
+      ? artifacts.find((reference) => reference.url === activeDocument.target.slice(8)) ?? null
+      : [...artifacts, ...evidence.filter((reference): reference is ArtifactReference => reference.kind === 'artifact')].find((reference) => artifactId(reference) === activeDocument.target) ?? null
+    : null;
   // Usage is a transcript read on the machine: fetch it the first time the tab
   // is shown rather than for every Inspector mount.
   useEffect(() => { if (runtimeAvailable && view === 'usage') props.usage.load(); }, [view, runtimeAvailable]);
   const loadArtifact = async (reference: ArtifactReference): Promise<void> => {
-    if (artifactLoad[reference.url] === 'loading' || artifactLoad[reference.url] === 'loaded') return;
-    setArtifactLoad((current) => ({ ...current, [reference.url]: 'loading' }));
+    const key = artifactId(reference);
+    if (artifactLoad[key] === 'loading' || artifactLoad[key] === 'loaded') return;
+    setArtifactLoad((current) => ({ ...current, [key]: 'loading' }));
     try {
       const content = await props.onRequestArtifact(reference);
-      setArtifactContent((current) => ({ ...current, [reference.url]: content }));
-      setArtifactLoad((current) => ({ ...current, [reference.url]: 'loaded' }));
+      setArtifactContent((current) => ({ ...current, [key]: content }));
+      setArtifactLoad((current) => ({ ...current, [key]: 'loaded' }));
     } catch (error) {
-      setArtifactErrors((current) => ({ ...current, [reference.url]: error instanceof Error ? error.message : String(error) }));
-      setArtifactLoad((current) => ({ ...current, [reference.url]: 'error' }));
+      setArtifactErrors((current) => ({ ...current, [key]: error instanceof Error ? error.message : String(error) }));
+      setArtifactLoad((current) => ({ ...current, [key]: 'error' }));
     }
   };
+  useEffect(() => { if (activeArtifact) void loadArtifact(activeArtifact); }, [activeArtifact ? artifactId(activeArtifact) : null]);
   const selectSurface = (next: InspectorPermanentView): void => { setView(next); setActiveDocumentId(null); setActiveThread(null); setThreadSelection(null); };
   const openDocument = (document: InspectorOpenDocument): void => { setDocuments((current) => current.some((item) => item.id === document.id) ? current : [...current, document]); setActiveDocumentId(document.id); setView('document'); setActiveThread(null); setThreadSelection(null); };
   const openProduct = (kind: 'goal' | 'workflow' | 'rubric'): void => { const record = kind === 'goal' ? props.overview.goal : kind === 'workflow' ? props.overview.workflow : props.overview.rubric; if (record) openDocument({ id: `${kind}:${record.id}`, kind, label: record.title, target: record.id }); };
@@ -899,9 +916,9 @@ export function Inspector(props: InspectorProps) {
   else if (activeDocument?.kind === 'artifact' && activeArtifact) {
     documentBody = <ArtifactDocument
       reference={activeArtifact}
-      content={artifactContent[activeArtifact.url] ?? null}
-      status={artifactLoad[activeArtifact.url]}
-      error={artifactErrors[activeArtifact.url]}
+      content={artifactContent[artifactId(activeArtifact)] ?? null}
+      status={artifactLoad[artifactId(activeArtifact)]}
+      error={artifactErrors[artifactId(activeArtifact)]}
       mode={artifactModeById[artifactId(activeArtifact)] ?? 'preview'}
       dataReferences={artifacts.filter((reference) => reference.url.endsWith('.data.json'))}
       artifactContent={artifactContent}
@@ -917,7 +934,7 @@ export function Inspector(props: InspectorProps) {
     <header className="flex items-center justify-between gap-3 px-4 pb-2 pt-3">
       <div className="flex min-w-0 flex-col"><strong className="truncate text-body font-medium text-foreground">{activeDocument.kind === 'file' ? activeDocument.target : activeDocument.label}</strong><span className="truncate text-caption text-muted-foreground tabular-nums">{activeDocument.kind === 'file' ? `${activeMode} · generation ${(props.repositoryFile ?? props.repositoryDiff)?.generation ?? '—'}` : activeDocument.kind === 'artifact' && activeArtifact ? `${activeArtifact.hash} · generation ${activeArtifact.generation}` : `${activeDocument.kind} authority record`}</span></div>
       {!runtimeAvailable && activeDocument.kind === 'artifact' ? <Tooltip content="Open this workspace on a machine before editing artifacts"><span className="shrink-0 text-caption text-muted-foreground">Read-only artifact</span></Tooltip> : null}
-      {activeDocument.kind === 'artifact' && activeArtifact ? <Button variant="secondary" size="compact" asChild><a href={activeArtifact.url} target="_blank" rel="noreferrer">{ic(LinkExternal01, 14)}Open</a></Button> : null}
+      {activeDocument.kind === 'artifact' && activeArtifact && props.artifactActions ? <ArtifactActions selected={[activeArtifact]} actions={props.artifactActions} /> : null}
     </header>
     {activeDocument.kind === 'file' ? <div className="flex items-center gap-2 px-4 pb-2"><Kicker>View</Kicker><TabsSubtle size="compact" className="min-w-0 flex-1" selectedIndex={Math.max(0, repositoryModes.findIndex((mode) => mode.id === activeMode))} onSelect={(index) => { const mode = repositoryModes[index]; if (mode) chooseMode(mode.id); }} aria-label="Repository view mode">{repositoryModes.map((mode, index) => <TabsSubtleItem index={index} label={mode.label} key={mode.id} />)}</TabsSubtle></div>
       : activeDocument.kind === 'artifact' && activeArtifact ? <div className="flex items-center gap-2 px-4 pb-2"><Kicker>View</Kicker><TabsSubtle size="compact" selectedIndex={artifactModes.indexOf(activeArtifactMode)} onSelect={(index) => { const mode = artifactModes[index]; if (mode) setArtifactModeById((current) => ({ ...current, [artifactId(activeArtifact)]: mode })); }} aria-label="Artifact view mode">{artifactModes.map((mode, index) => <TabsSubtleItem index={index} label={mode} key={mode} />)}</TabsSubtle></div> : null}
@@ -931,7 +948,11 @@ export function Inspector(props: InspectorProps) {
       case 'goal': return <GoalOverview overview={props.overview} openDocuments={documents.length} onOpenProduct={openProduct} onOpenEvidence={openEvidence} />;
       case 'subagents': return <SubagentsSurface subagents={props.subagents} />;
       case 'files': return <FilesSurface entries={props.repositoryEntries} changedOnly={changedOnly} setChangedOnly={setChangedOnly} onOpen={(entry) => openFile(entry.path, 'current')} />;
-      case 'artifacts': return <ArtifactsSurface references={artifacts} onOpen={openEvidence} />;
+      case 'artifacts': return <ArtifactsSurface references={artifacts} onOpen={(reference) => {
+        if (reference.kind !== 'artifact') return;
+        openDocument({ id: `artifact-current:${reference.url}`, kind: 'artifact', label: reference.label, target: `current:${reference.url}` });
+        void loadArtifact(reference);
+      }} actions={props.artifactActions} />;
       case 'services': return <ServicesSurface services={props.services} onOpenTerminal={(name) => props.onOpenServiceTerminal?.(name)} onStart={props.onStartService} onStop={props.onStopService} />;
       case 'usage': return <UsageView sessionId={props.usage.sessionId} report={props.usage.report} status={props.usage.status} error={props.usage.error} onLoad={props.usage.load} onRefresh={props.usage.refresh} />;
       case 'guide': return <><ChangeGuideSurface
