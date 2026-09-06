@@ -1571,6 +1571,9 @@ async function releaseFrontendResponse(request: Request, env: Env, pathname: str
   if (requested.includes('..')) return new Response('Not found', { status: 404 });
   let path = requested;
   let object = await env.DATA.get(prefix + path);
+  if (!object && env.ASSETS && (requested === 'favicon.png' || requested === 'favicon.ico')) {
+    return accountChannelResponse(request, env.ASSETS, pathname);
+  }
   if (!object && !/\.[a-z0-9]+$/iu.test(requested)) {
     path = 'index.html';
     object = await env.DATA.get(prefix + path);

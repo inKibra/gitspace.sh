@@ -8,8 +8,8 @@
     "href": "https://gitspace.sh/"
   },
   "favicon": {
-    "light": "/logo-light.svg",
-    "dark": "/logo-dark.svg"
+    "light": "/favicon.png",
+    "dark": "/favicon.png"
   },
   "colors": {
     "primary": "#171717"

@@ -303,6 +303,30 @@ describe('tenant releases', () => {
     expect(cycle.headers.get('location')).toBeNull();
   });
 
+  it('supplies the channel favicon to older releases without replacing a release-owned icon', async () => {
+    const { userId, control, origin } = await tenant();
+    await control('deploy.stage', stageInput('legacy-favicon'));
+    await control('deploy.launch', { sha: 'legacy-favicon', targets: ['frontend'] });
+    const channelIcon = new Uint8Array([0, 0, 1, 0, 1, 0]);
+    const runtime = { ...env, ASSETS: {
+      async fetch(request: Request) {
+        return new URL(request.url).pathname === '/__account/favicon.ico'
+          ? new Response(channelIcon, { headers: { 'content-type': 'image/x-icon' } })
+          : new Response('Not found', { status: 404 });
+      },
+    } as Fetcher };
+    const fallback = await worker.fetch(new Request(`${origin}/favicon.ico`), runtime);
+    expect(fallback.status).toBe(200);
+    expect(fallback.headers.get('content-type')).toBe('image/x-icon');
+    expect(new Uint8Array(await fallback.arrayBuffer())).toEqual(channelIcon);
+
+    const releaseIcon = new Uint8Array([0, 0, 1, 0, 2, 0]);
+    await env.DATA.put(`users/${userId}/releases/legacy-favicon/frontend/favicon.ico`, releaseIcon);
+    const owned = await worker.fetch(new Request(`${origin}/favicon.ico`), runtime);
+    expect(owned.headers.get('x-gitspace-frontend-release')).toBe('legacy-favicon');
+    expect(new Uint8Array(await owned.arrayBuffer())).toEqual(releaseIcon);
+  });
+
   it('serves released frontend only on its owning account hostname', async () => {
     const { userId, control, origin } = await tenant();
     const prefix = `users/${userId}/releases/fe333/frontend/`;
