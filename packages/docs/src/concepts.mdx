@@ -13,6 +13,8 @@ A GitSpace account owns its devices, machines, projects, workspaces, settings, a
 
 The account root key is the authority that enrolls machines and browsers. The `gsr_` recovery key is an encoding of that private root key.
 
+The sidebar belongs to the account, not to an agent session. Projects and Account settings remain available when no agent or machine is running. Closing the last open project or workspace leaves the app open, with access to saved cloud records.
+
 ## Browser device
 
 A browser enrolls from the one-time link created by `gitspace open`. It generates a non-extractable Ed25519 key in IndexedDB and signs RPC requests with that key.

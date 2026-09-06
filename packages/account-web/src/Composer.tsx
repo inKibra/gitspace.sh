@@ -5,6 +5,7 @@ import { useMemo, useState, type ReactNode } from 'react';
 import { glyph } from './glyph.js';
 import type { AgentScopeView, GitSpaceShellProps, ProviderAuthView, SessionControlsProps } from './GitSpaceShell.js';
 import { SessionTreeExplorer } from './SessionTreeExplorer.js';
+import { navigateProductUrl, setProductRoute } from './routes.js';
 
 export type SendBehavior = 'steer' | 'followUp';
 
@@ -60,7 +61,7 @@ function ProviderNotice({ provider }: { provider: ProviderAuthView }) {
   const shape = useShape();
   return <div role="status" className={`${shape.container} flex items-center justify-between gap-3 bg-surface-3 px-3 py-2 text-caption shadow-surface-1`}>
     <span className="min-w-0 truncate text-foreground">{provider.name} isn’t connected on this machine</span>
-    <Button variant="tertiary" size="compact" asChild><a href="/settings?section=omp-providers">Connect</a></Button>
+    <Button variant="tertiary" size="compact" asChild><a href="/settings?section=omp-providers" onClick={(event) => { if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return; event.preventDefault(); const url = setProductRoute(new URL(window.location.href), 'settings'); url.searchParams.set('section', 'omp-providers'); navigateProductUrl(url); }}>Connect</a></Button>
   </div>;
 }
 

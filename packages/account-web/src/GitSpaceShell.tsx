@@ -33,8 +33,8 @@ import {
   useShape,
 } from '@gitspace/ui';
 import { Archive, GitBranch01, LayoutRight, Plus, RefreshCcw01, Terminal, Trash01, XClose } from '@untitledui/icons';
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
-import { AppSidebar, type SidebarDeploymentProps } from './AppSidebar.js';
+import { useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import { AccountSidebarContext, AppSidebar, type AppSidebarProps, type SidebarDeploymentProps, type SidebarProject } from './AppSidebar.js';
 import { Composer, type SendBehavior } from './Composer.js';
 import { PluginsPage, type PluginsPageProps } from './PluginsPage.js';
 import { ProjectCronsPage, type ProjectCronsPageProps } from './ProjectCronsPage.js';
@@ -448,7 +448,7 @@ export function CreateWorkspaceDialog({ projectId, workspaces, initialPhase = 'c
 
 export function ProjectsView({ projects, workspaces, onOpen, onOpenProject, onCloseSpace, onReopenSpace, onArchiveWorkspace, onRestoreWorkspace, onCreateProject, onCreateWorkspace, onArchiveProject, onRestoreProject, onDeleteProject, onDeleteWorkspace }: {
   projects: readonly ProjectLifecycleView[];
-  workspaces: WorkspaceView[];
+  workspaces?: WorkspaceView[];
   onOpen: (workspace: WorkspaceView) => void;
   onOpenProject?: (projectId: string) => void;
   onCloseSpace?: GitSpaceShellProps['onCloseSpace'];
@@ -480,7 +480,7 @@ export function ProjectsView({ projects, workspaces, onOpen, onOpenProject, onCl
     </>} />
     <div className="flex flex-col gap-6">
       {visible.map((project) => {
-        const items = workspaces.filter((workspace) => workspace.projectId === project.id);
+        const items = workspaces?.filter((workspace) => workspace.projectId === project.id) ?? [];
         const open = items.filter((workspace) => !workspace.closedAt && workspace.holder.kind !== 'released');
         const runtimeClosed = items.filter((workspace) => !workspace.closedAt && workspace.holder.kind === 'released');
         const archived = items.filter((workspace) => !!workspace.closedAt);
@@ -525,14 +525,14 @@ export function ProjectsView({ projects, workspaces, onOpen, onOpenProject, onCl
               </CardFooter>
             </Card>)}
           </CardGroup>
-          {!items.length ? <p className="text-caption text-muted-foreground">{project.lifecycle === 'cloud-only' ? 'Project saved in your account. Open it on a machine to check out the source.' : 'No workspaces yet.'}</p> : null}
+          {!items.length ? <p className="text-caption text-muted-foreground">{project.lifecycle === 'cloud-only' ? 'Project saved in your account. Open it on a machine to check out the source.' : workspaces === undefined ? 'Choose this project to inspect its saved workspaces.' : 'No workspaces yet.'}</p> : null}
         </section>;
       })}
       {!visible.length ? <EmptyState title="No projects" description={filter === 'archived' ? 'Nothing is archived.' : 'Create a project or import a repository to start.'} /> : null}
     </div>
     {error && !projectDialog && workspaceDialog === null ? <p role="alert" className="pt-4 text-caption text-destructive">{error}</p> : null}
     {onCreateProject ? <CreateProjectDialog open={projectDialog} onOpenChange={(open) => { setProjectDialog(open); if (!open) setError(null); }} pending={pending} error={projectDialog ? error : null} onSubmit={(input) => run(() => onCreateProject(input), () => setProjectDialog(false))} /> : null}
-    {onCreateWorkspace ? <CreateWorkspaceDialog key={workspaceDialog ?? 'closed'} projectId={workspaceDialog} workspaces={workspaces} onOpenChange={(open) => { if (!open) { setWorkspaceDialog(null); setError(null); } }} pending={pending} error={workspaceDialog ? error : null} onSubmit={(input) => run(() => onCreateWorkspace(input), () => setWorkspaceDialog(null))} /> : null}
+    {onCreateWorkspace ? <CreateWorkspaceDialog key={workspaceDialog ?? 'closed'} projectId={workspaceDialog} workspaces={workspaces ?? []} onOpenChange={(open) => { if (!open) { setWorkspaceDialog(null); setError(null); } }} pending={pending} error={workspaceDialog ? error : null} onSubmit={(input) => run(() => onCreateWorkspace(input), () => setWorkspaceDialog(null))} /> : null}
   </PageCanvas>;
 }
 
@@ -584,6 +584,7 @@ function TerminalResizeHandle({ height, onHeight }: { height: number; onHeight: 
 
 // ── Shell ──
 export function GitSpaceShell({ project, projects, workspace, baseSpace, workspaces, mainAgent, turns, transport, artifacts, machines = [], onSend, sessionControls, onSetWorkspacePhase, onSetWorkspaceRelations, sendPending = false, sendError, onSelectWorkspace, onSelectProject, onCloseSpace, onReopenSpace, onArchiveWorkspace, onClaimWorkspace, claimMachines, homeMachineId, defaultMachineId, checkpoint, onMoveWorkspace, onCreateProject, onCreateWorkspace, onArchiveProject, onRestoreProject, onDeleteProject, onDeleteWorkspace, onOpenSettings, activeView, onNavigateView, terminals, secrets, crons, skills, plugins, renderInspector, user, providers, deployment, launchBanner }: GitSpaceShellProps) {
+  const accountSidebar = useContext(AccountSidebarContext);
   // Archive restores from list rows still land on the home machine.
   const restoreHome = onClaimWorkspace ? (spaceId: string) => onClaimWorkspace(spaceId, null) : undefined;
   const [internalView, setInternalView] = useState<AppView>('agent');
@@ -628,40 +629,45 @@ export function GitSpaceShell({ project, projects, workspace, baseSpace, workspa
   const openWorkspace = (target: WorkspaceView): void => { onSelectWorkspace?.(target.id); navigate('agent'); };
   const openWorkspaces = workspaces.filter((item) => !item.closedAt);
   const projectItems = projects ?? [{ id: project.id ?? baseSpace.projectId, name: project.name, lifecycle: 'active' as const, repositoryReference: project.repository || null, baseBranch: baseSpace.branch, role: null, source: null, revision: 1, archivedAt: null, updatedAt: new Date(0) }];
-  const sidebarProjects = useMemo(() => {
-    const byProject: Record<string, { base: ProjectAgentView; workspaces: WorkspaceView[] }> = { [baseSpace.projectId]: { base: baseSpace, workspaces: [] } };
+  const sidebarProjects = useMemo<SidebarProject[]>(() => {
+    const byProject = new Map<string, SidebarProject>((projects ?? []).map((item) => [item.id, { id: item.id, name: item.name, lifecycle: item.lifecycle, workspaces: [] }]));
+    byProject.set(baseSpace.projectId, { ...byProject.get(baseSpace.projectId), id: baseSpace.projectId, name: baseSpace.projectName, base: baseSpace, workspaces: [] });
     for (const item of workspaces) {
-      byProject[item.projectId] ??= { base: { ...baseSpace, id: item.projectId, projectId: item.projectId, projectName: item.projectName, name: item.projectName }, workspaces: [] };
-      byProject[item.projectId].workspaces.push(item);
+      const entry: SidebarProject = byProject.get(item.projectId) ?? { id: item.projectId, name: item.projectName, workspaces: [] };
+      entry.workspaces.push({ id: item.id, projectId: item.projectId, name: item.name, branch: item.branch, closedAt: item.closedAt, runtime: item });
+      byProject.set(item.projectId, entry);
     }
-    return Object.values(byProject);
-  }, [baseSpace, workspaces]);
+    return [...byProject.values()];
+  }, [projects, baseSpace, workspaces]);
   const running = mainAgent?.state === 'running';
   const recovering = mainAgent?.recovering === true;
 
   const unavailable = (title: string) => <PageCanvas><EmptyState title={title} description="This surface is not available for the current machine." /></PageCanvas>;
 
-  return <SidebarProvider className="gitspace-shell" persist={false}>
-    <AppSidebar
-      view={view}
-      onView={navigate}
-      selected={workspace}
-      projects={sidebarProjects}
-      machines={machines}
-      onSelectProject={onSelectProject}
-      onSelectWorkspace={openWorkspace}
-      onClose={requestClose}
-      closePendingSpaceId={closePendingSpaceId}
-      onReopen={onReopenSpace}
-      onArchive={onArchiveWorkspace}
-      onRestore={restoreHome}
-      onNewWorkspace={onCreateWorkspace ? (projectId) => setNewWorkspaceFor({ projectId, phase: 'code' }) : undefined}
-      onNewProject={onCreateProject ? () => setNewProject(true) : undefined}
-      onOpenSettings={onOpenSettings}
-      user={user}
-      deployment={deployment}
-    />
-    <SidebarInset className="overflow-hidden">
+  const sidebar: AppSidebarProps = {
+    view,
+    onView: navigate,
+    selected: { projectId: workspace.projectId, workspaceId: workspace.kind === 'workspace' ? workspace.id : null },
+    projects: sidebarProjects,
+    machines,
+    onSelectProject,
+    onSelectWorkspace: (target) => { onSelectWorkspace?.(target.id); navigate('agent'); },
+    onClose: requestClose,
+    closePendingSpaceId,
+    onReopen: onReopenSpace,
+    onArchive: onArchiveWorkspace,
+    onRestore: restoreHome,
+    onMove: onMoveWorkspace,
+    onNewWorkspace: onCreateWorkspace ? (projectId) => setNewWorkspaceFor({ projectId, phase: 'code' }) : undefined,
+    onNewProject: onCreateProject ? () => setNewProject(true) : undefined,
+    onOpenSettings,
+    user,
+    deployment,
+  };
+  useLayoutEffect(() => { accountSidebar?.(sidebar); });
+  useLayoutEffect(() => () => { accountSidebar?.(null); }, [accountSidebar]);
+  const content = <>
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
       <SidebarInsetTopbar className="pr-3">
         <nav aria-label="Location" className="flex min-w-0 flex-1 items-center gap-2 text-body">
           <span className="flex min-w-0 items-center gap-1.5 text-muted-foreground max-md:hidden"><GitBranch01 width={14} height={14} strokeWidth={1.5} /><span className="truncate">{workspace.projectName}</span><span>/</span><span className="truncate font-mono text-caption">{workspace.branch}</span></span>
@@ -699,7 +705,7 @@ export function GitSpaceShell({ project, projects, workspace, baseSpace, workspa
         : view === 'crons' ? (crons ? <ProjectCronsPage {...crons} /> : unavailable('Project crons unavailable'))
         : view === 'secrets' ? (secrets ? <ProjectSecretsPage {...secrets} /> : unavailable('Project secrets unavailable'))
         : <PageCanvas><PageHeader kicker="Attention" title="Inbox" /><EmptyState title="Nothing needs you" description={`${artifacts.length} artifacts across ${openWorkspaces.length} open workspaces.`} /></PageCanvas>}
-    </SidebarInset>
+    </div>
     {onCreateProject ? <CreateProjectDialog open={newProject} onOpenChange={(open) => { setNewProject(open); if (!open) setCreateError(null); }} pending={createPending} error={newProject ? createError : null} onSubmit={async (input) => {
       setCreatePending(true);
       setCreateError(null);
@@ -710,5 +716,6 @@ export function GitSpaceShell({ project, projects, workspace, baseSpace, workspa
       setCreateError(null);
       try { await onCreateWorkspace(input); setNewWorkspaceFor(null); } catch (failure) { setCreateError(failure instanceof Error ? failure.message : String(failure)); } finally { setCreatePending(false); }
     }} /> : null}
-  </SidebarProvider>;
+  </>;
+  return accountSidebar ? content : <SidebarProvider className="gitspace-shell" persist={false}><AppSidebar {...sidebar} /><SidebarInset className="overflow-hidden">{content}</SidebarInset></SidebarProvider>;
 }

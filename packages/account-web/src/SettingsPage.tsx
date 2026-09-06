@@ -41,6 +41,7 @@ import { EmptyState, PageCanvas, PageHeader } from './GitSpaceShell.js';
 import { ProvidersSection, type ProvidersSectionProps } from './ProvidersSection.js';
 import { desiredLabel, machineRollup, ompRollup, RELEASE_STATUS_COLOR, RELEASE_TARGET_LABEL, RELEASE_TARGETS, shortSha, type ReleaseRecordView } from './release.js';
 import { AddMachinePanel } from './AddMachinePanel.js';
+import { navigateProductUrl } from './routes.js';
 
 // `omp-providers` is the onboarding step for provider sign-in; in settings
 // mode it is reached as `?section=omp-providers`, which opens the OMP section
@@ -634,7 +635,7 @@ function DefaultsSettings({ settings, machines, onChange }: Pick<SettingsPagePro
   const update = (value: Partial<UserSettings['defaults']>) => onChange(replace(settings, 'defaults', { ...settings.defaults, ...value }));
   return <>
     <Group title="Placement"><SettingRows><SettingRow title="Default machine" description="New spaces open here when available."><Select value={settings.defaults.machineId ?? ''} onValueChange={(value) => update({ machineId: value || null })}><SelectTrigger aria-label="Default machine" />{selectOptions([{ value: '', label: 'Automatic' }, ...machines.map((machine) => ({ value: machine.id, label: machine.label }))])}</Select></SettingRow></SettingRows></Group>
-    <Group title="Setup"><SettingRows><SettingRow title="Run setup again" description="Walk through profile, OMP, providers, Git, machine, and defaults from the start."><Button variant="secondary" size="compact" asChild><a href="/settings?mode=onboarding">Open setup</a></Button></SettingRow></SettingRows></Group>
+    <Group title="Setup"><SettingRows><SettingRow title="Run setup again" description="Walk through profile, OMP, providers, Git, machine, and defaults from the start."><Button variant="secondary" size="compact" asChild><a href="/settings?mode=onboarding" onClick={(event) => { if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return; event.preventDefault(); const url = new URL(window.location.href); url.searchParams.set('mode', 'onboarding'); navigateProductUrl(url); }}>Open setup</a></Button></SettingRow></SettingRows></Group>
   </>;
 }
 
@@ -708,6 +709,5 @@ function OnboardingShell(props: SettingsPageProps) {
     </footer>
   </PageCanvas>;
 }
-// Rendered as the whole app (not inside the sidebar shell), so the root owns
-// the viewport column that PageCanvas scrolls within.
-export function SettingsPage(props: SettingsPageProps) { return <div className="flex h-full min-h-0 flex-col bg-background text-foreground">{props.mode === 'onboarding' ? <OnboardingShell {...props} /> : <SettingsShell {...props} />}</div>; }
+// The account frame owns navigation; this column contains the scrolling settings pane.
+export function SettingsPage(props: SettingsPageProps) { return <div className="flex min-h-0 flex-1 flex-col bg-background text-foreground">{props.mode === 'onboarding' ? <OnboardingShell {...props} /> : <SettingsShell {...props} />}</div>; }

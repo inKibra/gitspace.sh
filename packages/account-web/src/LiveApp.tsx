@@ -1,11 +1,11 @@
 import { reduceTranscriptToTurns, type TransportBlock, type TurnBlock } from '@gitspace/blocks';
 import type { DeploymentStatusView, EnvironmentBundle as ProtocolEnvironmentBundle, LaunchProgressView, OmpSettingValue, ProviderLoginEvent, ReleaseTarget, RepositoryDiffView, RepositoryFileView, RepositoryMode, UserSettings } from '@gitspace/protocol';
 import type { ProjectMcpGrantRpcView } from '@gitspace/protocol/mcp-contract';
-import { Button, InputField, InputGroup, ScrollArea, Select, SelectContent, SelectItem, SelectTrigger, ThinkingIndicator, Tooltip } from '@gitspace/ui';
+import { Button, InputField, InputGroup, ScrollArea, Select, SelectContent, SelectItem, SelectTrigger, SidebarInset, SidebarInsetTopbar, SidebarProvider, ThinkingIndicator, Tooltip } from '@gitspace/ui';
 import { Key01, LayoutRight, Terminal } from '@untitledui/icons';
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { ResultRpcProvider, useResultMutation, useResultQuery } from 'result-rpc/react';
-import { EmptyState, GitSpaceShell, ProjectsView, type GitSpaceShellProps, type ProviderAuthView, type SpaceHolderView } from './GitSpaceShell.js';
+import { EmptyState, GitSpaceShell, PageCanvas, PageHeader, ProjectsView, type GitSpaceShellProps, type ProviderAuthView, type SpaceHolderView } from './GitSpaceShell.js';
 import { LaunchSheet, LaunchedBanner, LAUNCHED_STORAGE_KEY, readLaunchedMark, type LaunchedMark } from './LaunchSheet.js';
 import { createGitSpaceBrowserClient, homeRpcUrl, routedTransport, rpcClient } from './rpc-client.js';
 import { currentDevice, DEVICE_REJECTED_EVENT, deviceRejected, setCurrentDevice } from './device-session.js';
@@ -17,7 +17,8 @@ import { EnvironmentView } from './environment/EnvironmentView.js';
 import type { EnvironmentCheckDefinition as EnvironmentCheckView, EnvironmentViewModel, LifecyclePhase, LifecycleRun } from './environment/types.js';
 import { Inspector } from './inspector/index.js';
 import { appendLaunchProgress, converging, launchTrackFrom, RELEASE_TARGETS, shortSha, type LaunchTrack } from './release.js';
-import { productRouteFromLocation, setProductRoute, type AppView, type ProductRoute } from './routes.js';
+import { ACCOUNT_DIRECTORY_CHANGED, navigateProductUrl, productRouteFromLocation, setProductRoute, type AppView, type ProductRoute } from './routes.js';
+import { AccountSidebarContext, AppSidebar, type AppSidebarProps, type SidebarProject } from './AppSidebar.js';
 import { TurnTranscript } from './TurnTranscript.js';
 
 const INSPECTOR_EVENT_ENTITIES: Readonly<Record<string, true>> = {
@@ -125,8 +126,7 @@ function LiveEnvironment({ projectName, workspaceName, spaceId, workspace }: { p
     if (result.status === 'error') throw result.error;
   });
   const openSecrets = (): void => {
-    window.history.pushState({}, '', setProductRoute(new URL(window.location.href), 'secrets'));
-    window.dispatchEvent(new PopStateEvent('popstate'));
+    navigateProductUrl(setProductRoute(new URL(window.location.href), 'secrets'));
   };
   const lastRun = (executionHash: string, executionId: string): LifecycleRun => {
     const run = remote.runs.find((candidate) => candidate.status !== 'running' && candidate.executionHashes.includes(executionHash));
@@ -483,6 +483,76 @@ function LiveInspector({
   />;
 }
 
+function useProductLocation(): URL {
+  const [location, setLocation] = useState(() => new URL(window.location.href));
+  useEffect(() => {
+    const changed = () => setLocation(new URL(window.location.href));
+    window.addEventListener('popstate', changed);
+    return () => window.removeEventListener('popstate', changed);
+  }, []);
+  return location;
+}
+
+function refreshInspection(): void {
+  routedTransport.invalidate();
+  window.dispatchEvent(new Event(ACCOUNT_DIRECTORY_CHANGED));
+}
+
+/** The account frame survives settings, machine availability, and every pane replacement. */
+function AccountFrame({ children }: { children: ReactNode }) {
+  const location = useProductLocation();
+  const route = productRouteFromLocation(location);
+  const projects = useResultQuery(rpcClient.project.list, { lifecycle: 'all' });
+  const settings = useResultQuery(rpcClient.settings.get, {});
+  const [runtimeSidebar, setRuntimeSidebar] = useState<AppSidebarProps | null>(null);
+  const [directory, setDirectory] = useState<Record<string, Pick<SidebarProject, 'workspaces' | 'error'>>>({});
+  const projectId = location.searchParams.get('project');
+  const workspaceId = location.searchParams.get('workspace');
+  const projectValues = projects.state === 'success' ? projects.value : projects.state === 'failure' ? projects.previous ?? [] : [];
+  const selectedProject = projectValues.find((project) => project.id === projectId);
+  const directoryEnabled = selectedProject !== undefined && selectedProject.lifecycle !== 'cloud-only';
+  // Match the inspection pane's query key so its saved context is read only once.
+  const context = useResultQuery(rpcClient.inspector.bootstrap, { projectId: projectId ?? '', workspaceId }, { enabled: directoryEnabled });
+  useEffect(() => {
+    const changed = () => { void projects.refetch(); if (directoryEnabled) void context.refetch(); };
+    window.addEventListener(ACCOUNT_DIRECTORY_CHANGED, changed);
+    return () => window.removeEventListener(ACCOUNT_DIRECTORY_CHANGED, changed);
+  }, [projectId, workspaceId, directoryEnabled]);
+  useEffect(() => {
+    if (!projectId || !directoryEnabled) return;
+    if (context.state === 'success' && context.value.project.id === projectId) {
+      const workspaces = context.value.workspaces.filter((workspace) => workspace.kind !== 'base').map((workspace) => ({ id: workspace.id, projectId: workspace.projectId, name: workspace.name, branch: workspace.branch, closedAt: workspace.archivedAt ? new Date(workspace.archivedAt) : null }));
+      setDirectory((current) => ({ ...current, [projectId]: { workspaces, error: null } }));
+    } else if (context.state === 'failure') {
+      setDirectory((current) => ({ ...current, [projectId]: { workspaces: current[projectId]?.workspaces ?? [], error: context.error.message } }));
+    }
+  }, [projectId, directoryEnabled, context.state, context.state === 'success' ? context.value : null, context.state === 'failure' ? context.error.message : null]);
+  const live = runtimeSidebar?.selected?.projectId === projectId ? runtimeSidebar : null;
+  const sidebarProjects: SidebarProject[] = projectValues.map((project) => {
+    const runtime = live?.projects.find((candidate) => candidate.id === project.id);
+    const saved = directory[project.id];
+    const workspaces = new Map((saved?.workspaces ?? []).map((workspace) => [workspace.id, workspace]));
+    for (const workspace of runtime?.workspaces ?? []) workspaces.set(workspace.id, workspace);
+    return { id: project.id, name: project.name, lifecycle: project.lifecycle, base: runtime?.base, workspaces: [...workspaces.values()], error: saved?.error };
+  });
+  const navigate = (view: ProductRoute, section?: 'source'): void => {
+    const url = setProductRoute(new URL(window.location.href), view);
+    if (section) url.searchParams.set('section', section);
+    else url.searchParams.delete('section');
+    navigateProductUrl(url);
+  };
+  return <AccountSidebarContext.Provider value={setRuntimeSidebar}>
+    <SidebarProvider className="gitspace-shell" persist={false}>
+      <AppSidebar {...live} view={route} onView={navigate} selected={projectId ? { projectId, workspaceId } : null} projects={sidebarProjects} machines={live?.machines ?? []} onSelectProject={(id) => selectInspection(id, null)} onSelectWorkspace={(workspace) => selectInspection(workspace.projectId, workspace.id)} onOpenSettings={(section) => navigate('settings', section)} user={settings.state === 'success' ? { name: settings.value.profile.displayName, handle: settings.value.profile.handle } : undefined} />
+      <SidebarInset className="min-w-0 overflow-hidden">
+        {!live ? <SidebarInsetTopbar><span className="truncate text-body font-medium">{route === 'settings' ? 'Account settings' : projectValues.find((project) => project.id === projectId)?.name ?? 'Your account'}</span></SidebarInsetTopbar> : null}
+        {projects.state === 'failure' ? <div role="alert" className="flex items-center gap-2 px-4 py-2 text-caption text-destructive"><span>Project directory: {projects.error.message}</span><Button variant="ghost" size="compact" onClick={() => void projects.refetch()}>Retry</Button></div> : null}
+        {children}
+      </SidebarInset>
+    </SidebarProvider>
+  </AccountSidebarContext.Provider>;
+}
+
 type LiveWorkspaceProps = { onOpenSettings: (section?: 'source') => void; defaultMachineId: string | null; activeView: AppView; onNavigateView: (view: AppView) => void; user: { name: string; handle: string | null }; providers: readonly ProviderAuthView[] };
 
 function selectInspection(projectId: string, workspaceId: string | null): void {
@@ -490,30 +560,60 @@ function selectInspection(projectId: string, workspaceId: string | null): void {
   url.searchParams.set('project', projectId);
   if (workspaceId) url.searchParams.set('workspace', workspaceId);
   else url.searchParams.delete('workspace');
-  window.location.assign(setProductRoute(url, 'agent'));
+  navigateProductUrl(setProductRoute(url, 'agent'));
 }
 
 function LiveWorkspace(props: LiveWorkspaceProps) {
+  const location = useProductLocation();
   const projects = useResultQuery(rpcClient.project.list, { lifecycle: 'all' });
-  const projectId = optionalQueryParameter('project') ?? (projects.state === 'success' ? projects.value.find((project) => project.lifecycle === 'active' || project.lifecycle === 'cloud-only')?.id ?? '' : '');
-  const workspaceId = optionalQueryParameter('workspace');
+  const projectId = location.searchParams.get('project') ?? '';
+  const workspaceId = location.searchParams.get('workspace');
   const availability = useResultQuery(rpcClient.inspector.availability, { projectId, workspaceId }, { enabled: projectId.length > 0 });
-  if (projects.state === 'failure' || availability.state === 'failure') {
-    const error = projects.state === 'failure' ? projects.error : availability.state === 'failure' ? availability.error : null;
-    return <main className="flex h-dvh items-center justify-center bg-background"><EmptyState title="Workspace directory unavailable" description={error?.message ?? 'Could not read cloud workspace availability.'} action={<Button variant="ghost" onClick={() => { void projects.refetch(); void availability.refetch(); }}>Retry</Button>} /></main>;
-  }
-  if (projects.state !== 'success' || (projectId && availability.state !== 'success')) return <main className="flex h-dvh items-center justify-center bg-background"><EmptyState icon={<ThinkingIndicator />} title="Loading workspace…" description="Checking cloud workspace availability without starting a machine." /></main>;
-  if (!projectId) return <RunningWorkspace {...props} />;
+  useEffect(() => {
+    const changed = () => { void projects.refetch(); if (projectId) void availability.refetch(); };
+    window.addEventListener(ACCOUNT_DIRECTORY_CHANGED, changed);
+    return () => window.removeEventListener(ACCOUNT_DIRECTORY_CHANGED, changed);
+  }, [projectId, workspaceId]);
+  if (projects.state === 'failure') return <PageCanvas><EmptyState title="Project directory unavailable" description={projects.error.message} action={<Button variant="ghost" onClick={() => void projects.refetch()}>Retry</Button>} /></PageCanvas>;
+  if (projects.state !== 'success') return <PageCanvas><EmptyState icon={<ThinkingIndicator />} title="Loading projects…" description="Reading your account without starting a machine." /></PageCanvas>;
+  if (projectId && availability.state === 'success' && availability.value.runtimeAvailable) return <RunningWorkspace key={`${projectId}:${workspaceId ?? ''}`} {...props} projectId={projectId} workspaceId={workspaceId} />;
+  if (props.activeView === 'projects' || (!projectId && props.activeView === 'agent')) return <ProjectsView
+    projects={projects.value}
+    onOpen={(workspace) => selectInspection(workspace.projectId, workspace.id)}
+    onOpenProject={(id) => selectInspection(id, null)}
+    onCreateProject={async (input) => {
+      const result = await rpcClient.project.create(input);
+      if (result.status === 'error') throw result.error;
+      refreshInspection();
+      selectInspection(result.value.project.id, null);
+    }}
+    onArchiveProject={async (id, expectedRevision) => {
+      const result = await rpcClient.project.archive({ projectId: id, expectedRevision });
+      if (result.status === 'error') throw result.error;
+      refreshInspection();
+    }}
+    onRestoreProject={async (id, expectedRevision) => {
+      const result = await rpcClient.project.restore({ projectId: id, expectedRevision });
+      if (result.status === 'error') throw result.error;
+      refreshInspection();
+    }}
+    onDeleteProject={async (id, expectedRevision) => {
+      const result = await rpcClient.project.delete({ projectId: id, expectedRevision });
+      if (result.status === 'error') throw result.error;
+      refreshInspection();
+    }}
+  />;
   const selectedProject = projects.value.find((project) => project.id === projectId);
-  if (selectedProject?.lifecycle === 'cloud-only') return <CloudOnlyProject project={selectedProject} projects={projects.value} defaultMachineId={props.defaultMachineId} onOpenSettings={props.onOpenSettings} />;
-  return availability.state === 'success' && availability.value.runtimeAvailable
-    ? <RunningWorkspace {...props} />
-    : <OfflineWorkspace projectId={projectId} workspaceId={workspaceId} projects={projects.value} defaultMachineId={props.defaultMachineId} onOpenSettings={props.onOpenSettings} />;
+  if (props.activeView !== 'agent') return <PageCanvas><PageHeader title={props.activeView.charAt(0).toUpperCase() + props.activeView.slice(1)} /><EmptyState title="No workspace is open" description="Choose a project to inspect its cloud records. Machine tools become available after you explicitly open a workspace on a machine." action={selectedProject ? <Button variant="secondary" onClick={() => selectInspection(projectId, workspaceId)}>View selected project</Button> : undefined} /></PageCanvas>;
+  if (!selectedProject) return <PageCanvas><EmptyState title="Project not found" description="Choose another project from your account sidebar." /></PageCanvas>;
+  if (selectedProject.lifecycle === 'cloud-only') return <CloudOnlyProject key={projectId} project={selectedProject} defaultMachineId={props.defaultMachineId} onOpenSettings={props.onOpenSettings} />;
+  if (availability.state === 'failure') return <PageCanvas><EmptyState title="Workspace availability unavailable" description={availability.error.message} action={<Button variant="ghost" onClick={() => void availability.refetch()}>Retry</Button>} /></PageCanvas>;
+  if (availability.state !== 'success') return <PageCanvas><EmptyState icon={<ThinkingIndicator />} title="Loading workspace…" description="Checking cloud workspace availability without starting a machine." /></PageCanvas>;
+  return <OfflineWorkspace key={`${projectId}:${workspaceId ?? ''}`} projectId={projectId} workspaceId={workspaceId} defaultMachineId={props.defaultMachineId} onOpenSettings={props.onOpenSettings} />;
 }
 
-function CloudOnlyProject({ project, projects, defaultMachineId, onOpenSettings }: {
+function CloudOnlyProject({ project, defaultMachineId, onOpenSettings }: {
   project: { id: string; name: string; source: { release: string | null; branch: string | null; commit: string | null } | null };
-  projects: readonly { id: string; name: string }[];
   defaultMachineId: string | null;
   onOpenSettings: LiveWorkspaceProps['onOpenSettings'];
 }) {
@@ -529,30 +629,25 @@ function CloudOnlyProject({ project, projects, defaultMachineId, onOpenSettings 
     try {
       const result = await createGitSpaceBrowserClient({ url: machine.rpcEndpoint }).project.open({ projectId: project.id });
       if (result.status === 'error') throw result.error;
-      routedTransport.invalidate();
-      selectInspection(project.id, null);
+      refreshInspection();
     } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); setPending(false); }
   };
-  return <main className="flex h-dvh flex-col bg-background">
-    <header className="flex items-center justify-between gap-3 border-b border-border px-4 py-3">
-      <Select value={project.id} onValueChange={(id) => selectInspection(id, null)}><SelectTrigger aria-label="Project" /><SelectContent>{projects.map((candidate, index) => <SelectItem value={candidate.id} index={index} key={candidate.id}>{candidate.name}</SelectItem>)}</SelectContent></Select>
-      <Button variant="ghost" onClick={() => onOpenSettings()}>Account settings</Button>
-    </header>
+  return <main className="flex min-h-0 flex-1 flex-col bg-background">
     <div className="mx-auto flex w-full max-w-2xl flex-1 flex-col justify-center gap-4 px-6">
       <h1 className="text-title font-semibold">{project.name}</h1>
       <p className="text-body text-muted-foreground">Your built-in GitSpace project is saved in the cloud. Opening it creates a checkout and project workspace on the machine you choose. Nothing runs until you open it.</p>
       <p className="break-all font-mono text-caption text-muted-foreground">Release {project.source?.release ?? 'not pinned'} · {project.source?.branch ?? 'HEAD'}{project.source?.commit ? ` · ${project.source.commit}` : ''}</p>
       {online.length ? <Select value={machine?.id ?? ''} onValueChange={setChosen} disabled={pending}><SelectTrigger aria-label="Open GitSpace on machine" /><SelectContent>{online.map((candidate, index) => <SelectItem value={candidate.id} index={index} key={candidate.id}>{candidate.label}</SelectItem>)}</SelectContent></Select> : <p className="text-body text-muted-foreground">Connect or start a machine in Account settings when you are ready. This project remains available without one.</p>}
       <div><Button variant="primary" disabled={!machine || pending} loading={pending} onClick={() => void open()}>Open GitSpace project</Button></div>
+      <div><Button variant="ghost" onClick={() => onOpenSettings()}>Account settings</Button></div>
       {error || machines.state === 'failure' ? <p role="alert" className="text-caption text-destructive">{error ?? (machines.state === 'failure' ? machines.error.message : null)}</p> : null}
     </div>
   </main>;
 }
 
-function OfflineWorkspace({ projectId, workspaceId, projects, defaultMachineId, onOpenSettings }: {
+function OfflineWorkspace({ projectId, workspaceId, defaultMachineId, onOpenSettings }: {
   projectId: string;
   workspaceId: string | null;
-  projects: readonly { id: string; name: string }[];
   defaultMachineId: string | null;
   onOpenSettings: LiveWorkspaceProps['onOpenSettings'];
 }) {
@@ -582,25 +677,23 @@ function OfflineWorkspace({ projectId, workspaceId, projects, defaultMachineId, 
       const input = { spaceId: context.value.identity.spaceId, expectedGeneration: context.value.placement?.generation ?? 0 };
       const result = context.value.workspace.archivedAt ? await client.workspace.restore(input) : await client.space.reopen(input);
       if (result.status === 'error') throw result.error;
-      routedTransport.invalidate();
-      window.location.reload();
+      refreshInspection();
     } catch (error) {
       setOpenError(error instanceof Error ? error.message : String(error));
       setOpening(false);
     }
   };
   const navigation = <header className="flex shrink-0 flex-wrap items-center gap-2 border-b border-border px-4 py-3">
-    <Select size="compact" value={projectId} onValueChange={(id) => selectInspection(id, null)}><SelectTrigger variant="borderless" aria-label="Project" /><SelectContent>{projects.map((project, index) => <SelectItem value={project.id} index={index} key={project.id}>{project.name}</SelectItem>)}</SelectContent></Select>
-    {context.state === 'success' ? <Select size="compact" value={context.value.identity.spaceId} onValueChange={(id) => selectInspection(projectId, id)}><SelectTrigger variant="borderless" aria-label="Workspace" /><SelectContent>{context.value.workspaces.map((workspace, index) => <SelectItem value={workspace.id} index={index} key={workspace.id}>{workspace.name}</SelectItem>)}</SelectContent></Select> : null}
+    {context.state === 'success' ? <span className="truncate text-body font-medium">{context.value.workspace.name}</span> : null}
     <div className="ml-auto flex items-center gap-1">
       <Tooltip content="Open this workspace on a machine first"><span><Button variant="ghost" size="icon-compact" aria-label="Open terminals" disabled><Terminal width={16} height={16} strokeWidth={1.5} /></Button></span></Tooltip>
       <Tooltip content="Inspector"><Button variant="ghost" size="icon-compact" aria-label="Open Inspector" aria-pressed={inspectorOpen} onClick={() => setInspectorOpen((open) => !open)}><LayoutRight width={16} height={16} strokeWidth={1.5} /></Button></Tooltip>
       <Button variant="ghost" size="compact" onClick={() => onOpenSettings()}>Account settings</Button>
     </div>
   </header>;
-  if (context.state !== 'success') return <main className="flex h-dvh flex-col bg-background">{navigation}<div className="flex flex-1 items-center justify-center"><EmptyState icon={context.state === 'pending' ? <ThinkingIndicator /> : undefined} title={context.state === 'pending' ? 'Loading saved workspace…' : 'Cloud Inspector unavailable'} description={context.state === 'failure' ? context.error.message : 'Reading canonical workspace records without opening the workspace.'} action={context.state === 'failure' ? <Button variant="ghost" onClick={() => void context.refetch()}>Retry</Button> : undefined} /></div></main>;
+  if (context.state !== 'success') return <main className="flex min-h-0 flex-1 flex-col bg-background">{navigation}<div className="flex flex-1 items-center justify-center"><EmptyState icon={context.state === 'pending' ? <ThinkingIndicator /> : undefined} title={context.state === 'pending' ? 'Loading saved workspace…' : 'Cloud Inspector unavailable'} description={context.state === 'failure' ? context.error.message : 'Reading canonical workspace records without opening the workspace.'} action={context.state === 'failure' ? <Button variant="ghost" onClick={() => void context.refetch()}>Retry</Button> : undefined} /></div></main>;
   const saved = context.value;
-  return <main className="flex h-dvh flex-col bg-background">{navigation}
+  return <main className="flex min-h-0 flex-1 flex-col bg-background">{navigation}
     <div className="flex min-h-0 flex-1 max-md:flex-col">
       <section className="flex min-h-0 min-w-0 flex-1 flex-col">
         <div className="flex flex-col gap-2 px-6 py-4">
@@ -626,13 +719,10 @@ function OfflineWorkspace({ projectId, workspaceId, projects, defaultMachineId, 
   </main>;
 }
 
-function RunningWorkspace({ onOpenSettings, defaultMachineId, activeView, onNavigateView, user, providers }: LiveWorkspaceProps) {
-  const requestedProjectId = optionalQueryParameter('project');
-  const workspaceId = optionalQueryParameter('workspace');
+function RunningWorkspace({ projectId, workspaceId, onOpenSettings, defaultMachineId, activeView, onNavigateView, user, providers }: LiveWorkspaceProps & { projectId: string; workspaceId: string | null }) {
   const placementsQuery = useResultQuery(rpcClient.placements, {});
   const homeMachineId = placementsQuery.state === 'success' ? placementsQuery.value.machineId : null;
   const projectsQuery = useResultQuery(rpcClient.project.list, { lifecycle: 'all' });
-  const projectId = requestedProjectId ?? (projectsQuery.state === 'success' ? projectsQuery.value.find((project) => project.lifecycle === 'active')?.id ?? '' : '');
   const bootstrap = useResultQuery(rpcClient.bootstrap, { projectId, workspaceId }, { enabled: projectId.length > 0 });
   const machinesQuery = useResultQuery(rpcClient.machines, {});
   const cronsQuery = useResultQuery(rpcClient.crons.list, { projectId }, { enabled: projectId.length > 0 });
@@ -1008,12 +1098,7 @@ function RunningWorkspace({ onOpenSettings, defaultMachineId, activeView, onNavi
       stack: candidate.stack,
     }));
     const scope: GitSpaceShellProps['workspace'] = workspaces.find((candidate) => candidate.id === selectedWorkspace?.id) ?? baseSpace;
-    const selectWorkspace = (nextWorkspaceId: string): void => {
-      const url = new URL(window.location.href);
-      url.searchParams.set('project', value.workspaces.find((candidate) => candidate.id === nextWorkspaceId)?.projectId ?? projectId);
-      url.searchParams.set('workspace', nextWorkspaceId);
-      window.location.assign(setProductRoute(url, 'agent'));
-    };
+    const selectWorkspace = (nextWorkspaceId: string): void => selectInspection(value.workspaces.find((candidate) => candidate.id === nextWorkspaceId)?.projectId ?? projectId, nextWorkspaceId);
     const setWorkspaceRelations: NonNullable<GitSpaceShellProps['onSetWorkspaceRelations']> = async (targetWorkspaceId, relations) => {
       const result = await rpcClient.workspace.setRelations({ workspaceId: targetWorkspaceId, dependsOn: [...relations.dependsOn], relatedTo: [...relations.relatedTo], stackedOn: relations.stackedOn });
       if (result.status === 'error') throw result.error;
@@ -1316,22 +1401,14 @@ function RunningWorkspace({ onOpenSettings, defaultMachineId, activeView, onNavi
       sendPending: prompt.state === 'pending',
       ...(prompt.state === 'failure' ? { sendError: prompt.error.message } : {}),
       onSelectWorkspace: selectWorkspace,
-      onSelectProject: (nextProjectId: string) => {
-        const url = new URL(window.location.href);
-        url.searchParams.set('project', nextProjectId);
-        url.searchParams.delete('workspace');
-        window.location.assign(setProductRoute(url, 'agent'));
-      },
+      onSelectProject: (nextProjectId: string) => selectInspection(nextProjectId, null),
       onCloseSpace: async (targetSpaceId: string) => {
         const target = targetSpaceId === value.baseSpace.id ? value.baseSpace : value.workspaces.find((candidate) => candidate.id === targetSpaceId);
         if (!target) throw new Error(`Space ${targetSpaceId} is unavailable`);
         const result = await closeSpace.mutateAsync({ spaceId: targetSpaceId, expectedGeneration: target.spaceGeneration });
         if (result.status === 'error') throw result.error;
-        if (targetSpaceId === selectedSpaceId) {
-          routedTransport.invalidate();
-          window.location.reload();
-          return;
-        }
+        refreshInspection();
+        if (targetSpaceId === selectedSpaceId) return;
         await Promise.all([placementsQuery.refetch(), bootstrap.refetch()]);
       },
       onReopenSpace: async (targetSpaceId: string) => {
@@ -1339,7 +1416,7 @@ function RunningWorkspace({ onOpenSettings, defaultMachineId, activeView, onNavi
         if (!target) throw new Error(`Space ${targetSpaceId} is unavailable`);
         const result = await reopenSpace.mutateAsync({ spaceId: targetSpaceId, expectedGeneration: target.spaceGeneration });
         if (result.status === 'error') throw result.error;
-        routedTransport.invalidate();
+        refreshInspection();
         await Promise.all([placementsQuery.refetch(), bootstrap.refetch()]);
       },
       onArchiveWorkspace: async (targetSpaceId: string) => {
@@ -1347,11 +1424,8 @@ function RunningWorkspace({ onOpenSettings, defaultMachineId, activeView, onNavi
         if (!target) throw new Error(`Workspace ${targetSpaceId} is unavailable`);
         const result = await archiveWorkspace.mutateAsync({ spaceId: targetSpaceId, expectedGeneration: target.spaceGeneration });
         if (result.status === 'error') throw result.error;
-        if (targetSpaceId === selectedSpaceId) {
-          routedTransport.invalidate();
-          window.location.reload();
-          return;
-        }
+        refreshInspection();
+        if (targetSpaceId === selectedSpaceId) return;
         await Promise.all([bootstrap.refetch(), projectsQuery.refetch()]);
       },
       onClaimWorkspace: claimSpace,
@@ -1367,30 +1441,28 @@ function RunningWorkspace({ onOpenSettings, defaultMachineId, activeView, onNavi
         const result = await createProject.mutateAsync(input);
         if (result.status === 'error') throw result.error;
         await projectsQuery.refetch();
-        const url = new URL(window.location.href);
-        url.searchParams.set('project', result.value.project.id);
-        url.searchParams.delete('workspace');
-        window.location.assign(setProductRoute(url, 'agent'));
+        refreshInspection();
+        selectInspection(result.value.project.id, null);
       },
       onCreateWorkspace: async (input) => {
         const result = await createWorkspace.mutateAsync({ ...input, dependsOn: [...input.dependsOn] });
         if (result.status === 'error') throw result.error;
         await projectsQuery.refetch();
         if (input.projectId === projectId) await bootstrap.refetch();
-        const url = new URL(window.location.href);
-        url.searchParams.set('project', input.projectId);
-        url.searchParams.set('workspace', result.value.workspace.id);
-        window.location.assign(setProductRoute(url, 'agent'));
+        refreshInspection();
+        selectInspection(input.projectId, result.value.workspace.id);
       },
       onArchiveProject: async (targetProjectId, expectedRevision) => {
         const result = await archiveProject.mutateAsync({ projectId: targetProjectId, expectedRevision });
         if (result.status === 'error') throw result.error;
         await projectsQuery.refetch();
+        refreshInspection();
       },
       onRestoreProject: async (targetProjectId, expectedRevision) => {
         const result = await restoreProject.mutateAsync({ projectId: targetProjectId, expectedRevision });
         if (result.status === 'error') throw result.error;
         await projectsQuery.refetch();
+        refreshInspection();
       },
       onDeleteProject: async (targetProjectId, expectedRevision) => {
         const result = await deleteProject.mutateAsync({ projectId: targetProjectId, expectedRevision });
@@ -1404,16 +1476,16 @@ function RunningWorkspace({ onOpenSettings, defaultMachineId, activeView, onNavi
         if (candidates[0]) url.searchParams.set('project', candidates[0].id);
         else url.searchParams.delete('project');
         url.searchParams.delete('workspace');
-        window.location.assign(setProductRoute(url, 'agent'));
+        refreshInspection();
+        navigateProductUrl(setProductRoute(url, candidates[0] ? 'agent' : 'projects'));
       },
       onDeleteWorkspace: async (targetWorkspaceId) => {
         const result = await deleteWorkspace.mutateAsync({ workspaceId: targetWorkspaceId });
         if (result.status === 'error') throw result.error;
         await projectsQuery.refetch();
+        refreshInspection();
         if (workspaceId === targetWorkspaceId) {
-          const url = new URL(window.location.href);
-          url.searchParams.delete('workspace');
-          window.location.assign(setProductRoute(url, 'agent'));
+          selectInspection(projectId, null);
         } else {
           await bootstrap.refetch();
         }
@@ -1439,43 +1511,12 @@ function RunningWorkspace({ onOpenSettings, defaultMachineId, activeView, onNavi
       </div>
     </div>
   </>;
-  if (projectsQuery.state === 'pending') return <main className="flex h-dvh items-center justify-center bg-background"><EmptyState icon={<ThinkingIndicator />} title="Opening projects…" description="Loading cloud project authority." /></main>;
-  if (projectsQuery.state === 'failure') return <main className="flex h-dvh items-center justify-center bg-background"><EmptyState title="Projects are unavailable" description={projectsQuery.error.message} action={<Button variant="ghost" onClick={() => void projectsQuery.refetch()}>Retry</Button>} /></main>;
-  if (!projectId) return <div className="flex h-dvh flex-col bg-background">
-    <div className="flex justify-end px-6 pt-4"><Button variant="secondary" onClick={() => onOpenSettings()}>Account settings</Button></div>
-    <ProjectsView
-    projects={projectsQuery.value}
-    workspaces={[]}
-    onOpen={() => undefined}
-    onOpenProject={(nextProjectId) => {
-      const url = new URL(window.location.href);
-      url.searchParams.set('project', nextProjectId);
-      window.location.assign(setProductRoute(url, 'agent'));
-    }}
-    onCreateProject={async (input) => {
-      const result = await createProject.mutateAsync(input);
-      if (result.status === 'error') throw result.error;
-      await projectsQuery.refetch();
-      const url = new URL(window.location.href);
-      url.searchParams.set('project', result.value.project.id);
-      window.location.assign(setProductRoute(url, 'agent'));
-    }}
-    onRestoreProject={async (targetProjectId, expectedRevision) => {
-      const result = await restoreProject.mutateAsync({ projectId: targetProjectId, expectedRevision });
-      if (result.status === 'error') throw result.error;
-      await projectsQuery.refetch();
-    }}
-    onDeleteProject={async (targetProjectId, expectedRevision) => {
-      const result = await deleteProject.mutateAsync({ projectId: targetProjectId, expectedRevision });
-      if (result.status === 'error') throw result.error;
-      await projectsQuery.refetch();
-    }}
-    />
-  </div>;
+  if (projectsQuery.state === 'pending') return <PageCanvas><EmptyState icon={<ThinkingIndicator />} title="Opening projects…" description="Loading cloud project authority." /></PageCanvas>;
+  if (projectsQuery.state === 'failure') return <PageCanvas><EmptyState title="Projects are unavailable" description={projectsQuery.error.message} action={<Button variant="ghost" onClick={() => void projectsQuery.refetch()}>Retry</Button>} /></PageCanvas>;
 
-  if (bootstrap.state === 'pending' || recoveryScheduled) return <main className="flex h-dvh items-center justify-center bg-background"><EmptyState icon={<ThinkingIndicator />} title="Opening GitSpace…" description={recoveryScheduled ? 'Reconnecting to the selected machine.' : 'Loading the selected agent.'} /></main>;
-  if (bootstrap.state === 'failure') return <main className="flex h-dvh items-center justify-center bg-background"><EmptyState title="GitSpace is unavailable" description={bootstrap.error.message} action={<Button variant="ghost" onClick={() => { setConnectionRecoveryAttempt(0); routedTransport.invalidate(); void bootstrap.refetch(); }}>Retry</Button>} /></main>;
-  if (!shell) return <main className="flex h-dvh items-center justify-center bg-background"><EmptyState title="Project unavailable" description="The selected project could not be materialized." /></main>;
+  if (bootstrap.state === 'pending' || recoveryScheduled) return <PageCanvas><EmptyState icon={<ThinkingIndicator />} title="Opening GitSpace…" description={recoveryScheduled ? 'Reconnecting to the selected machine.' : 'Loading the selected agent.'} /></PageCanvas>;
+  if (bootstrap.state === 'failure') return <PageCanvas><EmptyState title="GitSpace is unavailable" description={bootstrap.error.message} action={<Button variant="ghost" onClick={() => { setConnectionRecoveryAttempt(0); refreshInspection(); void bootstrap.refetch(); }}>Retry</Button>} /></PageCanvas>;
+  if (!shell) return <PageCanvas><EmptyState title="Project unavailable" description="The selected project is not available on this machine." /></PageCanvas>;
   return <>
     <GitSpaceShell {...shell} providers={providers} />
     {launch ? <LaunchSheet launch={launch} open={launchSheetOpen} onOpenChange={setLaunchSheetOpen} onRetry={() => launchInto(launch.workspaceId, launch.targets).catch((cause: unknown) => {
@@ -1486,15 +1527,16 @@ function RunningWorkspace({ onOpenSettings, defaultMachineId, activeView, onNavi
 }
 
 function GitSpaceProduct() {
-  const [route, setRoute] = useState<ProductRoute>(() => productRouteFromLocation(window.location));
+  const location = useProductLocation();
+  const route = productRouteFromLocation(location);
   const [draft, setDraft] = useState<UserSettings | null>(null);
   const [settingsError, setSettingsError] = useState<string | null>(null);
   // Preview the draft's scheme immediately; saving persists it for every machine.
   useEffect(() => { if (draft) applyAppearance(draft.defaults.appearance); }, [draft?.defaults.appearance]);
   const forceOnboarding = new URL(window.location.href).searchParams.get('mode') === 'onboarding';
   const settingsQuery = useResultQuery(rpcClient.settings.get, {});
-  const productProjectsQuery = useResultQuery(rpcClient.project.list, { lifecycle: 'active' });
-  const selectedProjectId = optionalQueryParameter('project') ?? (productProjectsQuery.state === 'success' ? productProjectsQuery.value[0]?.id ?? '' : '');
+  const productProjectsQuery = useResultQuery(rpcClient.project.list, { lifecycle: 'all' });
+  const selectedProjectId = location.searchParams.get('project') ?? '';
   const workspaceAvailability = useResultQuery(rpcClient.inspector.availability, { projectId: selectedProjectId, workspaceId: optionalQueryParameter('workspace') }, { enabled: selectedProjectId.length > 0 });
   const runtimeMetadataEnabled = route === 'settings' || forceOnboarding || (settingsQuery.state === 'success' && !settingsQuery.value.onboardingComplete) || (workspaceAvailability.state === 'success' && workspaceAvailability.value.runtimeAvailable);
   const machinesQuery = useResultQuery(rpcClient.machines, {}, { enabled: runtimeMetadataEnabled });
@@ -1591,11 +1633,6 @@ function GitSpaceProduct() {
   const loginStream = useRef<AbortController | null>(null);
   useEffect(() => () => loginStream.current?.abort(), []);
   useEffect(() => {
-    const onPopState = () => setRoute(productRouteFromLocation(window.location));
-    window.addEventListener('popstate', onPopState);
-    return () => window.removeEventListener('popstate', onPopState);
-  }, []);
-  useEffect(() => {
     if (settingsQuery.state !== 'success') return;
     setDraft((current) => current?.revision === settingsQuery.value.revision ? current : { ...settingsQuery.value });
   }, [settingsQuery.state, settingsQuery.state === 'success' ? settingsQuery.value.revision : null]);
@@ -1648,8 +1685,7 @@ function GitSpaceProduct() {
     const url = setProductRoute(new URL(window.location.href), next);
     if (section) url.searchParams.set('section', section);
     else url.searchParams.delete('section');
-    window.history[mode === 'push' ? 'pushState' : 'replaceState'](null, '', url);
-    setRoute(next);
+    navigateProductUrl(url, mode);
   };
   const saveSettings = async (next: UserSettings): Promise<void> => {
     if (settingsQuery.state !== 'success') throw new Error('Cloud settings are unavailable');
@@ -1744,11 +1780,10 @@ function GitSpaceProduct() {
       if (ensured.status === 'error') throw ensured.error;
       await productProjectsQuery.refetch();
       await saveSettings({ ...next, onboardingComplete: true });
-      const url = new URL(window.location.href);
-      url.searchParams.set('project', ensured.value.id);
+      const url = setProductRoute(new URL(window.location.href), 'projects');
+      url.searchParams.delete('project');
       url.searchParams.delete('workspace');
-      window.history.replaceState(null, '', url);
-      navigateProduct('agent', 'replace');
+      navigateProductUrl(url, 'replace');
     } catch (error) {
       setSettingsError(error instanceof Error ? error.message : String(error));
       throw error;
@@ -1848,10 +1883,10 @@ function GitSpaceProduct() {
   if (!runtimeMetadataEnabled && settingsQuery.state === 'success' && draft && gitIdentityQuery.state === 'success') return <LiveWorkspace onOpenSettings={(section) => navigateProduct('settings', 'push', section ?? null)} defaultMachineId={draft.defaults.machineId} activeView={route} onNavigateView={(next) => navigateProduct(next)} user={{ name: draft.profile.displayName, handle: draft.profile.handle }} providers={providerViews} />;
   if (settingsQuery.state === 'failure' || ompQuery.state === 'failure' || gitIdentityQuery.state === 'failure') {
     const message = settingsQuery.state === 'failure' ? settingsQuery.error.message : ompQuery.state === 'failure' ? ompQuery.error.message : gitIdentityQuery.state === 'failure' ? gitIdentityQuery.error.message : 'Cloud settings are unavailable';
-    return <main className="flex h-dvh items-center justify-center bg-background"><EmptyState title="GitSpace setup is unavailable" description={message} action={<Button variant="ghost" onClick={() => { void settingsQuery.refetch(); if (runtimeMetadataEnabled) void ompQuery.refetch(); void gitIdentityQuery.refetch(); }}>Retry</Button>} /></main>;
+    return <PageCanvas><EmptyState title="GitSpace setup is unavailable" description={message} action={<Button variant="ghost" onClick={() => { void settingsQuery.refetch(); if (runtimeMetadataEnabled) void ompQuery.refetch(); void gitIdentityQuery.refetch(); }}>Retry</Button>} /></PageCanvas>;
   }
   if (settingsQuery.state === 'pending' || !draft || ompQuery.state === 'pending' || gitIdentityQuery.state === 'pending') {
-    return <main className="flex h-dvh items-center justify-center bg-background"><EmptyState icon={<ThinkingIndicator />} title="Opening your GitSpace account…" description="Loading cloud settings and OMP configuration." /></main>;
+    return <PageCanvas><EmptyState icon={<ThinkingIndicator />} title="Opening your GitSpace account…" description="Loading cloud settings and OMP configuration." /></PageCanvas>;
   }
   const page = (mode: 'settings' | 'onboarding') => <SettingsPage
     mode={mode}
@@ -1890,7 +1925,7 @@ function GitSpaceProduct() {
     onStopBrowserRelay={() => runBrowserRelay('stop')}
     onTestBrowserRelay={() => runBrowserRelay('test')}
     projects={productProjectsQuery.state === 'success' ? productProjectsQuery.value.map((project) => ({ id: project.id, name: project.name })) : []}
-    onBack={() => navigateProduct('agent', 'replace')}
+    onBack={() => navigateProduct(optionalQueryParameter('project') ? 'agent' : 'projects', 'replace')}
     onComplete={completeOnboarding}
     saving={ensureStarterProject.state === 'pending' || updateSettings.state === 'pending' || reserveHandle.state === 'pending' || setOmpSetting.state === 'pending' || updateMachineNotes.state === 'pending' || createSandboxMachine.state === 'pending' || sleepMachine.state === 'pending' || resumeMachine.state === 'pending' || destroyMachine.state === 'pending' || revertDeployment.state === 'pending'}
     error={settingsError}
@@ -1985,5 +2020,5 @@ function DeviceGate({ children }: { children: ReactNode }) {
 }
 
 export function LiveApp() {
-  return <DeviceGate><ResultRpcProvider client={rpcClient}><GitSpaceProduct /></ResultRpcProvider></DeviceGate>;
+  return <DeviceGate><ResultRpcProvider client={rpcClient}><AccountFrame><GitSpaceProduct /></AccountFrame></ResultRpcProvider></DeviceGate>;
 }

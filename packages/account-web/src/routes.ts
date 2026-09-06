@@ -34,3 +34,12 @@ export function setProductRoute(url: URL, route: ProductRoute): URL {
 export function productPath(route: ProductRoute): string {
   return PATH_BY_ROUTE[route];
 }
+
+/** Same-document navigation; subscribers also handle the browser's Back/Forward. */
+export function navigateProductUrl(url: URL, mode: 'push' | 'replace' = 'push'): void {
+  if (mode === 'push' && url.href === window.location.href) return;
+  window.history[mode === 'push' ? 'pushState' : 'replaceState'](null, '', url);
+  window.dispatchEvent(new PopStateEvent('popstate'));
+}
+
+export const ACCOUNT_DIRECTORY_CHANGED = 'gitspace:account-directory-changed';
