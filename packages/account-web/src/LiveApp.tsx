@@ -2,7 +2,7 @@ import { reduceTranscriptToTurns, type TransportBlock, type TurnBlock } from '@g
 import type { DeploymentStatusView, EnvironmentBundle as ProtocolEnvironmentBundle, LaunchProgressView, OmpSettingValue, ProviderLoginEvent, ReleaseTarget, RepositoryDiffView, RepositoryFileView, RepositoryMode, UserSettings } from '@gitspace/protocol';
 import { executionHash } from '@gitspace/protocol';
 import type { ProjectMcpGrantRpcView } from '@gitspace/protocol/mcp-contract';
-import { Button, Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, InputField, InputGroup, ScrollArea, Select, SelectContent, SelectItem, SelectTrigger, SidebarInset, SidebarInsetTopbar, SidebarProvider, ThinkingIndicator, Tooltip } from '@gitspace/ui';
+import { Button, Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, InputField, InputGroup, ScrollArea, Select, SelectContent, SelectItem, SelectTrigger, SidebarInset, SidebarInsetTopbar, SidebarProvider, ThinkingIndicator, Tooltip, useShape } from '@gitspace/ui';
 import { LayoutRight, Terminal } from '@untitledui/icons';
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { ResultRpcProvider, useResultMutation, useResultQuery } from 'result-rpc/react';
@@ -745,6 +745,7 @@ function OfflineWorkspace({ projectId, workspaceId, defaultMachineId, onOpenSett
   defaultMachineId: string | null;
   onOpenSettings: LiveWorkspaceProps['onOpenSettings'];
 }) {
+  const shape = useShape();
   const context = useResultQuery(rpcClient.inspector.bootstrap, { projectId, workspaceId });
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [chosenMachineId, setChosenMachineId] = useState<string | null>(null);
@@ -789,23 +790,28 @@ function OfflineWorkspace({ projectId, workspaceId, defaultMachineId, onOpenSett
   const saved = context.value;
   return <main className="flex min-h-0 min-w-0 flex-1 flex-col bg-background">{navigation}
     <div className="flex min-h-0 min-w-0 flex-1 max-md:flex-col">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       <ScrollArea className="min-h-0 min-w-0 flex-1" viewportClassName="h-full">
         <div className="flex min-w-0 flex-col gap-2 px-4 py-4 [overflow-wrap:anywhere] sm:px-6">
           <span className="text-caption text-muted-foreground">{saved.project.name} · {saved.workspace.branch}</span>
           <h1 className="text-title font-semibold">{saved.workspace.name}</h1>
-          <p className="text-body text-muted-foreground">This workspace is not open on an online machine. Inspect cloud records without starting it.</p>
           {saved.checkpoint ? <p className="text-caption text-muted-foreground tabular-nums">Saved checkpoint · generation {saved.checkpoint.generation} · {new Date(saved.checkpoint.createdAt).toLocaleString()}{saved.checkpoint.lastMachineId ? ` · last on ${machines.find((machine) => machine.id === saved.checkpoint!.lastMachineId)?.label ?? saved.checkpoint.lastMachineId}` : ''}</p> : null}
-          <div className="flex flex-wrap items-center gap-2">
-            {onlineMachines.length ? <Select size="compact" value={machineId ?? ''} onValueChange={setChosenMachineId}><SelectTrigger aria-label="Open on machine" /><SelectContent>{onlineMachines.map((machine, index) => <SelectItem value={machine.id} index={index} key={machine.id}>{machine.label}</SelectItem>)}</SelectContent></Select> : null}
-            <Tooltip content={machineId ? 'Open workspace on the selected machine' : 'Choose an online machine in Account settings'}><span><Button variant="secondary" size="compact" disabled={!machineId || opening} loading={opening} onClick={() => void openWorkspace()}>Open workspace</Button></span></Tooltip>
-            <Button variant="ghost" size="compact" onClick={() => setInspectorOpen(true)}>Inspect workspace</Button>
-          </div>
-          {!onlineMachines.length ? <p className="text-caption text-muted-foreground">No online machines. Cloud Inspector remains available; manage machines in Account settings when you want to open this workspace.</p> : null}
-          {openError ? <p role="alert" className="text-caption text-destructive">{openError}</p> : null}
         </div>
         <h2 className="px-4 pb-2 text-caption font-medium text-muted-foreground sm:px-6">Saved transcript</h2>
         {saved.savedTranscript.status === 'available' ? <TurnTranscript turns={turns} transport={[]} /> : <div className="px-4 py-4 sm:px-6"><EmptyState title={saved.savedTranscript.status === 'none' ? 'No saved transcript' : 'Saved transcript unavailable'} description={saved.savedTranscript.reason ?? 'No transcript has been saved for this workspace.'} /></div>}
       </ScrollArea>
+        <div className="flex shrink-0 justify-center px-4 pb-4 pt-2 sm:px-6">
+          <div className={`${shape.container} flex w-full min-w-0 max-w-xl flex-col gap-2 bg-surface-3 p-3 shadow-surface-3 [overflow-wrap:anywhere]`}>
+            <p className="text-caption text-muted-foreground">{onlineMachines.length ? 'Open this workspace on a machine to continue.' : 'No online machines. Manage machines in Account settings to open this workspace.'}</p>
+            <div className="flex flex-wrap items-center gap-2">
+              {onlineMachines.length ? <Select size="compact" value={machineId ?? ''} onValueChange={setChosenMachineId}><SelectTrigger aria-label="Open on machine" /><SelectContent>{onlineMachines.map((machine, index) => <SelectItem value={machine.id} index={index} key={machine.id}>{machine.label}</SelectItem>)}</SelectContent></Select> : null}
+              <Tooltip content={machineId ? 'Open workspace on the selected machine' : 'Choose an online machine in Account settings'}><span><Button variant="secondary" size="compact" disabled={!machineId || opening} loading={opening} onClick={() => void openWorkspace()}>Open workspace</Button></span></Tooltip>
+              <Button variant="ghost" size="compact" onClick={() => setInspectorOpen(true)}>Inspect workspace</Button>
+            </div>
+            {openError ? <p role="alert" className="text-caption text-destructive">{openError}</p> : null}
+          </div>
+        </div>
+      </div>
       {inspectorOpen ? <aside className="flex min-h-0 w-[min(55vw,900px)] min-w-0 flex-col border-l border-border max-md:h-1/2 max-md:w-full" aria-label="Inspector">{reviewerId ? <LiveInspector key={saved.identity.spaceId} projectId={projectId} spaceId={saved.identity.spaceId} generation={saved.placement?.generation ?? 0} reviewerId={reviewerId} sessionId={saved.checkpoint?.sessionId ?? null} turns={turns} workspaces={[]} onSelectWorkspace={(id) => selectInspection(projectId, id)} refreshToken={0} runtimeAvailable={false} onClose={() => setInspectorOpen(false)} /> : <EmptyState title="Inspector identity unavailable" description="This browser must be enrolled to inspect workspace records." />}</aside> : null}
     </div>
   </main>;
