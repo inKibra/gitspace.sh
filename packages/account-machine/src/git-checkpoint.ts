@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
-import { spaceGitCheckpointRef } from '@gitspace/protocol/space-checkpoint';
+import { spaceGitCheckpointRef } from '@gitspace/protocol-workspace';
 
 export interface GitIntermediateCheckpoint {
   checkpointRef: string;

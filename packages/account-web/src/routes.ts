@@ -1,6 +1,22 @@
 export type AppView = 'agent' | 'kanban' | 'projects' | 'plugins' | 'skills' | 'crons' | 'secrets' | 'inbox';
 export type ProductRoute = AppView | 'settings';
 
+export const PRODUCT_ROUTE_LABELS: Record<ProductRoute, string> = {
+  agent: 'Workspace',
+  kanban: 'Kanban',
+  projects: 'Projects',
+  plugins: 'Plugins',
+  skills: 'Skills',
+  crons: 'Crons',
+  secrets: 'Secrets & values',
+  inbox: 'Inbox',
+  settings: 'Account settings',
+};
+
+export function isGlobalView(route: ProductRoute): route is Exclude<AppView, 'agent'> {
+  return route !== 'agent' && route !== 'settings';
+}
+
 const PATH_BY_ROUTE: Record<ProductRoute, string> = {
   agent: '/',
   kanban: '/kanban',
@@ -28,9 +44,22 @@ export function setProductRoute(url: URL, route: ProductRoute): URL {
   url.searchParams.delete('view');
   url.searchParams.delete('gallery');
   if (route !== 'settings') url.searchParams.delete('mode');
+  if (isGlobalView(route)) {
+    url.searchParams.delete('project');
+    url.searchParams.delete('workspace');
+  }
   return url;
 }
 
 export function productPath(route: ProductRoute): string {
   return PATH_BY_ROUTE[route];
 }
+
+/** Same-document navigation; subscribers also handle the browser's Back/Forward. */
+export function navigateProductUrl(url: URL, mode: 'push' | 'replace' = 'push'): void {
+  if (mode === 'push' && url.href === window.location.href) return;
+  window.history[mode === 'push' ? 'pushState' : 'replaceState'](null, '', url);
+  window.dispatchEvent(new PopStateEvent('popstate'));
+}
+
+export const ACCOUNT_DIRECTORY_CHANGED = 'gitspace:account-directory-changed';

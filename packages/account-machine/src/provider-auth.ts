@@ -13,6 +13,7 @@ import {
   listProvidersWithEnvKey,
   resolveUsedFraction,
   type AuthStorage,
+  type CredentialHealthResult,
   type CredentialOrigin,
   type DisabledCredentialSummary,
   type OAuthAuthInfo,
@@ -48,6 +49,7 @@ export interface AuthStorageLike {
   removeCredential(provider: string, credentialId: number): Promise<boolean>;
   set(provider: string, credential: { type: 'api_key'; key: string }): Promise<void>;
   fetchUsageReports(): Promise<UsageReport[] | null>;
+  checkCredentials(): Promise<CredentialHealthResult[]>;
   invalidateUsageCache(provider?: string): Promise<void>;
 }
 
@@ -354,29 +356,71 @@ export class ProviderAuthCoordinator {
   async usage(providerId: string | null, refresh: boolean): Promise<ProviderUsage> {
     const storage = await this.#authStorage();
     const errors: Array<{ provider: string; message: string }> = [];
+    const aggregateErrors: Array<{ provider: string; message: string }> = [];
     const scope = providerId ?? '*';
     if (refresh) {
       try {
         await storage.invalidateUsageCache(providerId ?? undefined);
       } catch (error) {
-        errors.push({ provider: scope, message: errorMessage(error, 'Unable to invalidate cached usage') });
+        aggregateErrors.push({ provider: scope, message: errorMessage(error, 'Unable to invalidate cached usage') });
       }
     }
     let reports: UsageReport[] = [];
     try {
       reports = (await storage.fetchUsageReports()) ?? [];
     } catch (error) {
-      errors.push({ provider: scope, message: errorMessage(error, 'Unable to fetch provider usage') });
+      aggregateErrors.push({ provider: '*', message: errorMessage(error, 'Unable to fetch provider usage') });
     }
     if (providerId !== null) reports = reports.filter((report) => report.provider === providerId);
-    const accounts = storage
+    const rows = storage
       .listStoredCredentials()
-      .filter((row) => (providerId === null ? storage.usageProviderFor(row.provider) !== undefined : row.provider === providerId))
-      .map(usageAccountIdentity);
+      .filter((row) => (providerId === null ? storage.usageProviderFor(row.provider) !== undefined : row.provider === providerId));
+    const accounts = rows.map(usageAccountIdentity);
+    let unreported = new Set(collectUnreportedAccounts(reports, accounts));
+    const missingRows = rows.filter((row, index) => unreported.has(accounts[index]!) && storage.usageProviderFor(row.provider) !== undefined);
+    const reasons = new Map<number, string>();
+    if (missingRows.length > 0) {
+      try {
+        // A broker's egress can be refused while the same credential works on
+        // this machine. OMP probes its existing usage providers locally and
+        // still refreshes OAuth through the discovered credential store.
+        const health = new Map((await storage.checkCredentials()).map((result) => [result.id, result]));
+        const recovered: UsageReport[] = [];
+        for (const row of missingRows) {
+          const result = health.get(row.id);
+          if (result?.provider !== row.provider) continue;
+          if (result.ok === true && result.report?.provider === row.provider) {
+            // Diagnostic reports omit identity metadata that aggregate usage
+            // normally supplies; retain the probed credential's attribution.
+            const metadata = { ...result.report.metadata };
+            for (const key of ['email', 'accountId', 'orgId'] as const) {
+              if (!metadata[key] && result[key]) metadata[key] = result[key];
+            }
+            recovered.push({ ...result.report, metadata });
+          } else if (result.reason) reasons.set(row.id, result.reason);
+        }
+        // The aggregate may be an OMP cache entry; never mutate its array.
+        if (recovered.length > 0) reports = reports.concat(recovered);
+      } catch (error) {
+        errors.push({ provider: '*', message: errorMessage(error, 'Unable to check missing provider usage') });
+      }
+      unreported = new Set(collectUnreportedAccounts(reports, accounts));
+    }
+    if (unreported.size > 0 || missingRows.length === 0) errors.unshift(...aggregateErrors);
+    for (const [index, row] of rows.entries()) {
+      const account = accounts[index]!;
+      if (!unreported.has(account)) continue;
+      const reason = reasons.get(row.id);
+      if (!reason && errors.some((error) => error.provider === '*')) continue;
+      const message = reason ?? (storage.usageProviderFor(account.provider) === undefined
+        ? 'This provider has no usage reporting endpoint.'
+        : 'OMP returned no usage data. Refresh usage; if it remains unavailable, check this account’s provider sign-in and auth broker.');
+      errors.push({ provider: account.provider, message: `${usageAccountLabel(account)}: ${message}` });
+    }
     return {
       generatedAt: new Date().toISOString(),
       reports: reports.map(usageReportView),
-      accountsWithoutUsage: collectUnreportedAccounts(reports, accounts).map(usageAccountLabel),
+      accountsWithoutUsage: [...unreported].map(usageAccountLabel),
       errors,
     };
   }

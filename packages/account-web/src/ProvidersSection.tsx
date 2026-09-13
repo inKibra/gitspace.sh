@@ -100,12 +100,25 @@ function UsageLimitRow({ limit, now }: { limit: ProviderUsageLimit; now: number 
         </div>}
   </div>;
 }
-function UsageReports({ reports, error, now }: { reports: readonly ProviderUsageReport[]; error: string | null; now: number }) {
-  const labelled = reports.length > 1;
+function UsageReports({ reports, errors, missingAccounts, supported, status, now }: {
+  reports: readonly ProviderUsageReport[];
+  errors: readonly string[];
+  missingAccounts: readonly string[];
+  supported: boolean;
+  status: ProvidersUsageStatus;
+  now: number;
+}) {
+  const labelled = reports.length > 1 || missingAccounts.length > 0;
+  const message = !supported ? 'Usage reporting is not supported for this provider.'
+    : status === 'loading' ? reports.length ? 'Refreshing usage…' : 'Checking usage…'
+    : reports.length || errors.length || missingAccounts.length ? null
+    : status === 'idle' ? 'Usage has not been checked yet.' : 'Usage unavailable.';
   // Wraps under the row (the card is flex-wrap); the inset lines the block up
   // with the header text: media tile (32px) + gap (10px).
   return <div className="flex basis-full flex-col gap-3 pb-3 pl-[42px] pr-3">
-    {error ? <p role="alert" className="text-caption text-destructive">{error}</p> : null}
+    {message ? <p role="status" className="text-caption text-muted-foreground">{message}</p> : null}
+    {supported ? errors.map((error) => <p key={error} role="alert" className="text-caption text-destructive">Usage unavailable: {error}</p>) : null}
+    {supported ? missingAccounts.map((account) => <p key={account} className="text-caption text-muted-foreground">Usage unavailable for {account}.</p>) : null}
     {reports.map((report) => <div key={report.account ?? report.provider} className="flex flex-col gap-2">
       {labelled && report.account ? <span className="text-caption font-medium text-foreground">{report.account}</span> : null}
       {report.limits.map((limit) => <UsageLimitRow key={limit.id} limit={limit} now={now} />)}
@@ -124,11 +137,13 @@ function providerDescription(provider: ProviderView): string {
   return 'Not connected';
 }
 
-function ProviderRow({ provider, signInMethods, reports, usageError, now, pending, onSignIn, onAddKey, onSignOut, index }: {
+function ProviderRow({ provider, signInMethods, reports, usageErrors, missingAccounts, usageStatus, now, pending, onSignIn, onAddKey, onSignOut, index }: {
   provider: ProviderView;
   signInMethods: readonly ProviderView[];
   reports: readonly ProviderUsageReport[];
-  usageError: string | null;
+  usageErrors: readonly string[];
+  missingAccounts: readonly string[];
+  usageStatus: ProvidersUsageStatus;
   now: number;
   pending: string | null;
   onSignIn(providerId: string): void;
@@ -137,7 +152,7 @@ function ProviderRow({ provider, signInMethods, reports, usageError, now, pendin
   index?: number;
 }) {
   const badge = providerBadge(provider);
-  const showUsage = provider.hasAuth && provider.hasUsage && (reports.length > 0 || usageError !== null);
+  const showUsage = provider.hasAuth;
   const signInLabel = provider.accounts.length ? 'Add account' : 'Sign in';
   const signingIn = signInMethods.some((method) => pending === `login:${method.id}`);
   return <Card size="compact" index={index} className={showUsage ? 'flex-wrap' : undefined} data-provider={provider.id}>
@@ -158,7 +173,7 @@ function ProviderRow({ provider, signInMethods, reports, usageError, now, pendin
         : signInMethods.map((method) => <Button key={method.id} variant="secondary" size="compact" type="button" disabled={pending !== null} loading={signingIn} onClick={() => onSignIn(method.id)}>{signInLabel}</Button>)}
       {provider.accounts.map((account) => <Button key={account.id} variant="ghost" size="icon-compact" type="button" aria-label={`Remove ${account.label}`} disabled={pending !== null} loading={pending === `logout:${provider.id}:${account.id}`} onClick={() => onSignOut(account.id)}>{icon(XClose)}</Button>)}
     </CardFooter>
-    {showUsage ? <UsageReports reports={reports} error={usageError} now={now} /> : null}
+    {showUsage ? <UsageReports reports={reports} errors={usageErrors} missingAccounts={missingAccounts} supported={provider.hasUsage} status={usageStatus} now={now} /> : null}
   </Card>;
 }
 
@@ -265,7 +280,9 @@ export function ProvidersSection({ providers, error, usage, usageStatus, usageEr
   const now = Date.now();
   // A login alias shares accounts and usage, but remains a separate sign-in method.
   const groups = new Map<string, { provider: ProviderView; signInMethods: ProviderView[]; index: number }>();
+  const credentialProviders = new Map<string, string>();
   for (const provider of providers) {
+    credentialProviders.set(provider.id, provider.credentialProvider);
     let group = groups.get(provider.credentialProvider);
     if (!group) {
       group = { provider, signInMethods: [], index: groups.size };
@@ -297,7 +314,15 @@ export function ProvidersSection({ providers, error, usage, usageStatus, usageEr
       setPending(null);
     }
   };
-  const usageLabel = usageStatus === 'loading' ? 'Checking usage…' : usageStatus === 'error' ? usageError ?? 'Usage unavailable' : usage ? `Usage as of ${new Date(usage.generatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : null;
+  const reportTimes = usage?.reports.map((report) => Date.parse(report.fetchedAt)).filter(Number.isFinite) ?? [];
+  const reportTime = reportTimes.length ? Math.min(...reportTimes) : null;
+  const incomplete = Boolean(usage?.accountsWithoutUsage.length || usage?.errors.length);
+  const usageLabel = usageStatus === 'loading' ? 'Checking usage…'
+    : usageStatus === 'error' ? usageError ?? 'Usage unavailable'
+    : usage ? reportTime === null ? 'Usage unavailable'
+      : `${incomplete ? 'Partial usage' : 'Usage'} as of ${new Date(reportTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
+    : null;
+  const matchesProvider = (id: string, provider: ProviderView): boolean => (credentialProviders.get(id) ?? id) === provider.credentialProvider;
   return <section className="flex flex-col gap-3" aria-label="Model providers">
     <div className="flex items-center justify-between gap-3">
       <h2 className="text-subtitle font-semibold text-foreground">Providers</h2>
@@ -316,8 +341,13 @@ export function ProvidersSection({ providers, error, usage, usageStatus, usageEr
             key={provider.credentialProvider}
             provider={provider}
             signInMethods={signInMethods}
-            reports={usage?.reports.filter((report) => report.provider === provider.credentialProvider) ?? []}
-            usageError={usage?.errors.find((item) => item.provider === provider.credentialProvider)?.message ?? null}
+            reports={usage?.reports.filter((report) => matchesProvider(report.provider, provider)) ?? []}
+            usageErrors={[...new Set([
+              ...(usage?.errors.filter((item) => item.provider === '*' || matchesProvider(item.provider, provider)).map((item) => item.message) ?? []),
+              ...(usageStatus === 'error' ? [usageError ?? 'Could not fetch usage.'] : []),
+            ])]}
+            missingAccounts={usage?.accountsWithoutUsage.filter((account) => matchesProvider(account.split(': ', 1)[0]!, provider)).map((account) => account.slice(account.indexOf(': ') + 2)) ?? []}
+            usageStatus={usageStatus}
             now={now}
             pending={pending}
             onSignIn={(providerId) => void run(`login:${providerId}`, () => onSignIn(providerId))}

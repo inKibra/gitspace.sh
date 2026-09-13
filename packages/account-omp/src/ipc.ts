@@ -1,9 +1,10 @@
-import type { SessionActivity, SkillView } from '@gitspace/protocol';
+import type { SkillView } from '@gitspace/protocol';
+import type { AgentFailure, SessionActivity } from '@gitspace/protocol-agent';
 import type { CustomTool } from '@oh-my-pi/pi-coding-agent';
 import type { MCPPrompt, MCPResource, MCPResourceTemplate, MCPResourceReadResult, MCPGetPromptResult } from '@oh-my-pi/pi-coding-agent/mcp';
 import type { OmpRuntime, OmpRuntimeEvent, OmpRuntimeSession, OmpTranscriptEvent } from './contracts.js';
 
-export const OMP_IPC_VERSION = 1;
+export const OMP_IPC_VERSION = 2;
 export type OmpToolDescriptor = Pick<CustomTool, 'name' | 'label' | 'description' | 'parameters' | 'strict' | 'hidden' | 'loadMode' | 'deferrable' | 'approval' | 'mcpServerName' | 'mcpToolName'>;
 export type OmpSessionInput = Parameters<OmpRuntime['create']>[0] & { sessionFile?: string };
 export interface OmpMcpCatalog {
@@ -16,15 +17,17 @@ export interface OmpChildInit {
   agentDir: string;
   sessionRoot: string;
   skills: readonly SkillView[];
+  /** The machine supports authoritative skill refreshes through listSkills. */
+  liveSkills?: true;
   input: OmpSessionInput;
   tools: OmpToolDescriptor[];
   mcpCatalog: OmpMcpCatalog;
   namespaces: { space?: string; mcp?: string };
 }
-export type SessionMethod = Exclude<keyof OmpRuntimeSession, 'id' | 'sessionFile' | 'subscribe' | 'subscribeActivity' | 'activity' | 'reloadSettings' | 'instructionsChanged'>;
+export type SessionMethod = Exclude<keyof OmpRuntimeSession, 'id' | 'sessionFile' | 'isAvailable' | 'subscribe' | 'subscribeActivity' | 'activity' | 'reloadSettings' | 'instructionsChanged'>;
 export type OmpChildApi = Pick<OmpRuntimeSession, SessionMethod> & {
   health(): Promise<{ protocolVersion: number; platform: string; arch: string; bunVersion: string; pid: number }>;
-  initialize(input: OmpChildInit): Promise<{ id: string; sessionFile: string; activity: SessionActivity }>;
+  initialize(input: OmpChildInit): Promise<{ id: string; sessionFile: string; activity: SessionActivity; failure: AgentFailure | null }>;
   reloadSettings(): Promise<void>;
   reloadAuth(): Promise<void>;
   instructionsChanged(): Promise<void>;
@@ -37,10 +40,11 @@ export interface OmpMachineApi {
   mcpResources(server: string): Promise<{ resources: MCPResource[]; templates: MCPResourceTemplate[] } | undefined>;
   mcpReadResource(server: string, uri: string): Promise<MCPResourceReadResult | undefined>;
   mcpPrompt(server: string, name: string, args?: Record<string, string>): Promise<MCPGetPromptResult | undefined>;
+  listSkills(): Promise<readonly SkillView[]>;
 }
 export type OmpNotification =
   | { type: 'event'; event: OmpRuntimeEvent }
-  | { type: 'activity'; activity: SessionActivity; errorMessage?: string }
+  | { type: 'activity'; activity: SessionActivity; failure: AgentFailure | null }
   | { type: 'mcpNotification'; server: string; method: string; params: unknown }
   | { type: 'toolUpdate'; callId: string; update: unknown };
 

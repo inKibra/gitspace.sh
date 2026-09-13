@@ -1,10 +1,10 @@
 import { cp, lstat, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { createExecutableArtifactManifest, executableManifestPath, readOmpReleaseMetadata, type ExecutableArtifactManifest } from '@gitspace/account-omp/manifest';
+import { createExecutableArtifactManifest, executableManifestPath, type ExecutableArtifactManifest } from '@gitspace/account-omp/manifest';
 import { workerReleaseMetadataSchema, type OmpReleaseMetadata, type WorkerReleaseMetadata } from '@gitspace/protocol';
 import { z } from 'zod';
 import { hashArtifactPath } from './policies/shared.js';
-import { installedPackageRoot, packageOmpRuntime } from './runtime-packaging.js';
+import { installedPackageRoot, packageOmpRuntimeRecipe } from './runtime-packaging.js';
 
 /**
  * Builders for the four account-owned GitSpace release targets. The
@@ -81,19 +81,17 @@ export interface BuiltExecutableArtifact extends BuiltArtifact {
   manifestHash: `sha256:${string}`;
 }
 
-/** Relocate upstream loaders at build time; never resolve executable dependencies from the host checkout/cache. */
-function executablePackagingPlugin(target: 'machine' | 'omp'): Bun.BunPlugin {
+/** Machine-only native/terminal packaging. OMP uses installed upstream SDK sources without loader overrides. */
+function machinePackagingPlugin(): Bun.BunPlugin {
   return {
-    name: 'gitspace-executable-packaging',
+    name: 'gitspace-machine-packaging',
     setup(build) {
-      if (target === 'machine') {
         build.onResolve({ filter: /^omp-legacy-pi-modules$/u }, () => {
           throw new Error('Machine executable cannot include OMP extension execution');
         });
         build.onLoad({ filter: /[/\\]pi-coding-agent[/\\]src[/\\](?:sdk\.ts|session[/\\]agent-session\.ts)$/u }, ({ path }) => {
           throw new Error(`Machine executable cannot include OMP agent execution: ${path}`);
         });
-      }
       build.onLoad({ filter: /[/\\]pi-natives[/\\]native[/\\]loader-state\.js$/u }, async ({ path }) => {
         const source = await readFile(path, 'utf8');
         const original = 'const ctx = initLoaderContext();';
@@ -111,7 +109,7 @@ function executablePackagingPlugin(target: 'machine' | 'omp'): Bun.BunPlugin {
         const original = 'stripWindowsExtendedLengthPathPrefix(Bun.main)';
         const initial = 'let workerHostMain: string | null = null;';
         if (!source.includes(original) || !source.includes(initial)) throw new Error('Unsupported OMP worker-host contract');
-        const workerPath = `stripWindowsExtendedLengthPathPrefix(gitspaceFileURLToPath(new URL('./${target === 'omp' ? 'omp' : 'machine'}-worker.js', import.meta.url)))`;
+        const workerPath = "stripWindowsExtendedLengthPathPrefix(gitspaceFileURLToPath(new URL('./machine-worker.js', import.meta.url)))";
         return {
           loader: 'ts',
           contents: `import { fileURLToPath as gitspaceFileURLToPath } from 'node:url';\n${source.replace(original, workerPath).replace(initial, `let workerHostMain: string | null = ${workerPath};`)}`,
@@ -157,58 +155,66 @@ async function copyNativeRuntime(root: string, outDir: string): Promise<void> {
   }
 }
 
-async function buildExecutable(root: string, outDir: string, target: 'machine' | 'omp', runtimeLockRoot?: string): Promise<BuiltExecutableArtifact> {
+async function prepareExecutableOutput(outDir: string): Promise<void> {
   await mkdir(outDir, { recursive: true });
   if ((await readdir(outDir)).length !== 0 || await Bun.file(executableManifestPath(outDir)).exists()) {
     throw new Error(`Executable output must be a new empty directory: ${outDir}`);
   }
-  const packaged = target === 'omp' ? await packageOmpRuntime(root, outDir, runtimeLockRoot) : null;
-  const entrypoints: Array<readonly [string, string]> = [
-    [join(root, `packages/account-${target}/src/runtime.ts`), target],
-    target === 'omp'
-      ? [join(packaged!.agentRoot, 'src/cli.ts'), 'omp-worker']
-      : [join(root, 'packages/account-machine/src/terminal-worker.ts'), 'machine-worker'],
-  ];
+}
+
+/** Independently complete machine generation, including authenticated migrations and native runtime. */
+export async function buildMachineBundle(root: string, outDir: string): Promise<BuiltExecutableArtifact> {
+  await prepareExecutableOutput(outDir);
+  const entrypoints = [
+    [join(root, 'packages/account-machine/src/runtime.ts'), 'machine'],
+    [join(root, 'packages/account-machine/src/terminal-worker.ts'), 'machine-worker'],
+  ] as const;
   for (const [entrypoint, name] of entrypoints) {
     const result = await Bun.build({
       entrypoints: [entrypoint],
       target: 'bun',
       outdir: outDir,
       naming: { entry: `${name}.js`, asset: '[name]-[hash].[ext]' },
-      external: packaged?.external ?? [],
-      define: packaged?.define,
-      plugins: [executablePackagingPlugin(target), ...(packaged ? [packaged.legacyPlugin, ...packaged.plugins] : [])],
+      plugins: [machinePackagingPlugin()],
       sourcemap: 'linked',
     });
-    if (!result.success) throw new AggregateError(result.logs, `${target} executable build failed`);
+    if (!result.success) throw new AggregateError(result.logs, 'Machine executable build failed');
   }
-  const profileRoot = join(root, `packages/account-${target}`);
-  const nativeOwner = target === 'machine' ? await installedPackageRoot('@oh-my-pi/pi-coding-agent', profileRoot) : profileRoot;
+  const nativeOwner = await installedPackageRoot('@oh-my-pi/pi-coding-agent', join(root, 'packages/account-machine'));
   await copyNativeRuntime(nativeOwner, outDir);
-  if (target === 'machine') await cp(join(root, 'packages/core/drizzle'), join(outDir, 'drizzle'), { recursive: true });
-  const envelope = await createExecutableArtifactManifest(outDir, target, target === 'omp' ? await readOmpReleaseMetadata(root) : null);
+  await cp(join(root, 'packages/core/drizzle'), join(outDir, 'drizzle'), { recursive: true });
+  const envelope = await createExecutableArtifactManifest(outDir, 'machine');
   return { path: outDir, hash: envelope.manifest.treeHash, ...envelope };
 }
 
-/** Independently complete machine generation, including authenticated migrations and native runtime. */
-export function buildMachineBundle(root: string, outDir: string): Promise<BuiltExecutableArtifact> {
-  return buildExecutable(root, outDir, 'machine');
-}
 
 export interface BuiltOmpArtifact extends BuiltExecutableArtifact {
   metadata: OmpReleaseMetadata;
 }
 
-/** Independent OMP child executable; never includes the machine daemon or its migrations. */
-export async function buildOmpBundle(root: string, outDir: string, runtimeLockRoot?: string): Promise<BuiltOmpArtifact> {
-  const built = await buildExecutable(root, outDir, 'omp', runtimeLockRoot);
-  return { ...built, metadata: built.manifest.omp! };
+/** Authenticate a small GitSpace adapter and exact upstream dependency recipe, not an eagerly bundled SDK graph. */
+export async function buildOmpBundle(root: string, outDir: string): Promise<BuiltOmpArtifact> {
+  await prepareExecutableOutput(outDir);
+  const metadata = await packageOmpRuntimeRecipe(root, outDir);
+  for (const [source, name] of [['runtime', 'omp-adapter'], ['recipe-bootstrap', 'omp']] as const) {
+    const result = await Bun.build({
+      entrypoints: [join(root, `packages/account-omp/src/${source}.ts`)],
+      target: 'bun',
+      outdir: outDir,
+      naming: `${name}.js`,
+      // SDK modules must execute from their complete patched npm sources, including workers, assets and lazy installers.
+      external: ['@oh-my-pi/*'],
+    });
+    if (!result.success) throw new AggregateError(result.logs, `OMP ${name} build failed`);
+  }
+  const envelope = await createExecutableArtifactManifest(outDir, 'omp', metadata);
+  return { path: outDir, hash: envelope.manifest.treeHash, ...envelope, metadata };
 }
 
 /** Bootstrap a host with independently versioned machine and OMP payloads and an embedded initial trust anchor. */
-export async function buildInitialRuntime(root: string, outDir: string, runtimeLockRoot?: string): Promise<{ machine: BuiltExecutableArtifact; omp: BuiltOmpArtifact }> {
+export async function buildInitialRuntime(root: string, outDir: string): Promise<{ machine: BuiltExecutableArtifact; omp: BuiltOmpArtifact }> {
   const machine = await buildMachineBundle(root, join(outDir, 'machine'));
-  const omp = await buildOmpBundle(root, join(outDir, 'omp'), runtimeLockRoot);
+  const omp = await buildOmpBundle(root, join(outDir, 'omp'));
   for (const [source, name] of [['host', 'host-runtime'], ['rpc-probe', 'rpc-probe']] as const) {
     const result = await Bun.build({
       entrypoints: [join(root, `packages/account-machine/src/${source}.ts`)],
@@ -282,15 +288,17 @@ const wranglerSchema = z.object({
   migrations: z.array(z.object({ tag: z.string(), new_sqlite_classes: z.array(z.string()).default([]) })).default([]),
 });
 
-/** Upload metadata for the account tenant relay Worker. */
+/** Provider upload requirements declared by the account application. */
 export async function workerMetadataFromWrangler(root: string): Promise<WorkerReleaseMetadata> {
   const source = await readFile(join(root, 'packages/account-worker/wrangler.jsonc'), 'utf8');
   const config = wranglerSchema.parse(JSON.parse(stripJsonComments(source)));
+  const resources: unknown = JSON.parse(await readFile(join(root, 'packages/account-worker/worker-bindings.json'), 'utf8'));
   return workerReleaseMetadataSchema.parse({
     mainModule: 'worker.mjs',
     compatibilityDate: config.compatibility_date,
     compatibilityFlags: config.compatibility_flags,
     durableObjects: config.durable_objects.bindings.map((binding) => ({ name: binding.name, className: binding.class_name })),
+    resources,
     migrations: config.migrations.map((migration) => ({ tag: migration.tag, newSqliteClasses: migration.new_sqlite_classes })),
   });
 }

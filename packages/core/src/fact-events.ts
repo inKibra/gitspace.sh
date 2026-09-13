@@ -25,9 +25,13 @@ export class FactEventStore {
       payload: input.payload ?? {},
       createdAt: new Date().toISOString(),
     }).returning().get();
+    this.committed();
+    return event;
+  }
+
+  committed(): void {
     for (const wake of this.waiters) wake();
     this.waiters.clear();
-    return event;
   }
 
   latestOffset(projectId: string): number {

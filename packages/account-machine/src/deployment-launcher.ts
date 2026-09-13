@@ -185,7 +185,7 @@ export class DeploymentLauncher {
         artifacts.machine = await this.putExecutable(keys.machine, built);
       }
       if (targets.includes('omp')) {
-        progress('build', 'building hermetic OMP runtime');
+        progress('build', 'building pinned OMP runtime recipe');
         const built = await buildOmpBundle(root, join(buildRoot, 'omp'));
         omp = built.metadata;
         progress('upload', `uploading ${keys.omp}`);

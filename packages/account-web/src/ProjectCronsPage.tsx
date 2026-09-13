@@ -59,8 +59,7 @@ function selectOptions(options: readonly { value: string; label: string }[]): Re
 }
 
 export interface ProjectCronsPageProps {
-  projectId: string;
-  projectName: string;
+  projects: readonly { id: string; name: string }[];
   /** Holder machine per space id, from placements; base space id = project id. */
   holders?: Readonly<Record<string, string>>;
   crons: readonly ProjectCronView[];
@@ -68,10 +67,10 @@ export interface ProjectCronsPageProps {
   loading?: boolean;
   loadError?: string | null;
   onCreateCron(draft: ProjectCronDraft): Promise<ProjectCronView>;
-  onUpdateCron(cronId: string, expectedRevision: number, draft: ProjectCronDraft): Promise<ProjectCronView>;
-  onDeleteCron(cronId: string, expectedRevision: number): Promise<void>;
-  onRunNow(cronId: string): Promise<ProjectCronRunView>;
-  onListRuns(cronId: string): Promise<readonly ProjectCronRunView[]>;
+  onUpdateCron(projectId: string, cronId: string, expectedRevision: number, draft: ProjectCronDraft): Promise<ProjectCronView>;
+  onDeleteCron(projectId: string, cronId: string, expectedRevision: number): Promise<void>;
+  onRunNow(projectId: string, cronId: string): Promise<ProjectCronRunView>;
+  onListRuns(projectId: string, cronId: string): Promise<readonly ProjectCronRunView[]>;
 }
 
 export function projectCronTargetKey(target: ProjectCronTarget): string {
@@ -143,19 +142,20 @@ function TextArea({ value, onChange, className = '', ...rest }: { value: string;
 }
 
 function CronEditor({
-  projectId,
+  projects,
   source,
   options,
   onCancel,
   onSave,
 }: {
-  projectId: string;
+  projects: readonly { id: string; name: string }[];
   source?: ProjectCronView;
   options: readonly ProjectCronTargetOption[];
   onCancel(): void;
   onSave(draft: ProjectCronDraft): Promise<void>;
 }): ReactElement {
-  const initial = editorDraft(projectId, source);
+  const [projectId, setProjectId] = useState(source?.projectId ?? '');
+  const initial = editorDraft(source?.projectId ?? '', source);
   const [name, setName] = useState(initial.name);
   const [schedule, setSchedule] = useState(initial.schedule);
   const [description, setDescription] = useState(initial.description);
@@ -167,10 +167,13 @@ function CronEditor({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const scheduleValid = parseProjectCronSchedule(schedule) !== null;
+  const submittingRef = useRef(false);
+  const projectOptions = options.filter((option) => option.target.projectId === projectId);
 
   const submit = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
-    const target = options.find((option) => projectCronTargetKey(option.target) === targetKey)?.target;
+    if (submittingRef.current) return;
+    const target = projectOptions.find((option) => projectCronTargetKey(option.target) === targetKey)?.target;
     if (!target) {
       setError('Choose an available canonical agent target.');
       return;
@@ -184,6 +187,7 @@ function CronEditor({
       return;
     }
     const normalizeScopes = (value: string): string[] => [...new Set(value.split(/[\n,]/u).map((scope) => scope.trim()).filter(Boolean))];
+    submittingRef.current = true;
     setSubmitting(true);
     setError(null);
     try {
@@ -200,6 +204,7 @@ function CronEditor({
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
+      submittingRef.current = false;
       setSubmitting(false);
     }
   };
@@ -210,13 +215,14 @@ function CronEditor({
       <DialogDescription>{source ? 'Edit schedule' : 'New project schedule'}</DialogDescription>
     </DialogHeader>
     <form id="project-cron-editor" className="flex flex-col gap-4" onSubmit={(event) => void submit(event)}>
+      <Field label="Owning project"><Select value={projectId} disabled={source !== undefined || submitting} onValueChange={(id) => { setProjectId(id); setTargetKey(projectCronTargetKey({ scope: 'project', projectId: id })); }}><SelectTrigger aria-label="Owning project" placeholder="Choose a project" />{selectOptions(projects.map((project) => ({ value: project.id, label: project.name })))}</Select></Field>
       <InputGroup>
         <InputField index={0} label="Name" value={name} onChange={setName} placeholder="project-health" required maxLength={120} autoFocus />
         <InputField index={1} label="Schedule" value={schedule} onChange={setSchedule} placeholder="every 6h" required className="font-mono" error={scheduleValid ? undefined : `'${schedule.trim() || '(empty)'}' will never fire.`} />
       </InputGroup>
       <p className="text-caption text-muted-foreground">{PROJECT_CRON_SCHEDULE_HELP}</p>
       <Field label="Talk to">
-        <Select value={targetKey} onValueChange={setTargetKey}><SelectTrigger aria-label="Talk to" />{selectOptions(options.map((option) => ({ value: projectCronTargetKey(option.target), label: `${option.label}${option.description ? ` · ${option.description}` : ''}` })))}</Select>
+        <Select value={targetKey} disabled={!projectId || submitting} onValueChange={setTargetKey}><SelectTrigger aria-label="Talk to" />{selectOptions(projectOptions.map((option) => ({ value: projectCronTargetKey(option.target), label: `${option.label}${option.description ? ` · ${option.description}` : ''}` })))}</Select>
       </Field>
       <Field label="Description"><TextArea rows={2} maxLength={2_000} value={description} onChange={setDescription} placeholder="What this schedule owns and why it runs" /></Field>
       <Field label="Agent instruction"><TextArea required rows={5} maxLength={16_000} value={prompt} onChange={setPrompt} placeholder="Tell the canonical agent exactly what to do." /></Field>
@@ -229,7 +235,7 @@ function CronEditor({
     </form>
     <DialogFooter>
       <Button variant="secondary" type="button" onClick={onCancel}>Cancel</Button>
-      <Button variant="primary" type="submit" form="project-cron-editor" loading={submitting}>{submitting ? 'Saving…' : source ? 'Save changes' : 'Create cron'}</Button>
+      <Button variant="primary" type="submit" form="project-cron-editor" loading={submitting} disabled={submitting || !projectId}>{submitting ? 'Saving…' : source ? 'Save changes' : 'Create cron'}</Button>
     </DialogFooter>
   </>;
 }
@@ -268,6 +274,7 @@ export function ProjectCronsPage(props: ProjectCronsPageProps): ReactElement {
   const shape = useShape();
   const [items, setItems] = useState<ProjectCronView[]>(() => [...props.crons]);
   const [editor, setEditor] = useState<EditorState | null>(null);
+  const [projectFilter, setProjectFilter] = useState('all');
   const [busyId, setBusyId] = useState<string | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [openHistoryId, setOpenHistoryId] = useState<string | null>(null);
@@ -284,14 +291,14 @@ export function ProjectCronsPage(props: ProjectCronsPageProps): ReactElement {
   useEffect(() => setItems([...props.crons]), [props.crons]);
 
   const targetOptions = useMemo(() => {
-    const projectTarget: ProjectCronTarget = { scope: 'project', projectId: props.projectId };
     const byKey = new Map<string, ProjectCronTargetOption>();
-    byKey.set(projectCronTargetKey(projectTarget), { target: projectTarget, label: `Project agent · ${props.projectName}` });
-    for (const option of props.targetOptions) {
-      if (option.target.projectId === props.projectId) byKey.set(projectCronTargetKey(option.target), option);
+    for (const project of props.projects) {
+      const target: ProjectCronTarget = { scope: 'project', projectId: project.id };
+      byKey.set(projectCronTargetKey(target), { target, label: `Project agent · ${project.name}` });
     }
+    for (const option of props.targetOptions) byKey.set(projectCronTargetKey(option.target), option);
     return [...byKey.values()];
-  }, [props.projectId, props.projectName, props.targetOptions]);
+  }, [props.projects, props.targetOptions]);
 
   const armed = items.filter((cron) => cron.enabled).length;
   const failures = items.filter((cron) => cron.lastRunState === 'failed' || cron.lastRunState === 'blocked').length;
@@ -303,7 +310,7 @@ export function ProjectCronsPage(props: ProjectCronsPageProps): ReactElement {
     setBusyId(cron.id);
     setActionError(null);
     try {
-      const updated = await props.onUpdateCron(cron.id, cron.revision, draft);
+      const updated = await props.onUpdateCron(cron.projectId, cron.id, cron.revision, draft);
       setItems((current) => current.map((item) => item.id === updated.id ? updated : item));
     } catch (cause) {
       handleError(cause);
@@ -313,21 +320,21 @@ export function ProjectCronsPage(props: ProjectCronsPageProps): ReactElement {
   };
 
   const chooseTarget = (cron: ProjectCronView, key: string): Promise<void> => {
-    const target = targetOptions.find((option) => projectCronTargetKey(option.target) === key)?.target;
+    const target = targetOptions.find((option) => option.target.projectId === cron.projectId && projectCronTargetKey(option.target) === key)?.target;
     if (!target || projectCronTargetKey(target) === projectCronTargetKey(cron.target)) return Promise.resolve();
-    return update(cron, { ...editorDraft(props.projectId, cron), target });
+    return update(cron, { ...editorDraft(cron.projectId, cron), target });
   };
 
-  const toggleEnabled = (cron: ProjectCronView): Promise<void> => update(cron, { ...editorDraft(props.projectId, cron), enabled: !cron.enabled });
+  const toggleEnabled = (cron: ProjectCronView): Promise<void> => update(cron, { ...editorDraft(cron.projectId, cron), enabled: !cron.enabled });
 
   const runNow = async (cron: ProjectCronView): Promise<void> => {
     setBusyId(cron.id);
     setActionError(null);
     try {
-      const run = await props.onRunNow(cron.id);
+      const run = await props.onRunNow(cron.projectId, cron.id);
       setItems((current) => current.map((item) => item.id === cron.id ? {
         ...item,
-        state: 'running',
+        state: run.state === 'pending' || run.state === 'running' ? 'running' : run.state === 'blocked' ? 'blocked' : run.state === 'failed' ? 'failed' : item.enabled ? 'armed' : 'paused',
         lastRunAt: run.scheduledFor,
         lastRunState: run.state,
         statusMessage: run.message,
@@ -344,7 +351,8 @@ export function ProjectCronsPage(props: ProjectCronsPageProps): ReactElement {
     }
   };
 
-  const toggleHistory = async (cronId: string): Promise<void> => {
+  const toggleHistory = async (cron: ProjectCronView): Promise<void> => {
+    const cronId = cron.id;
     if (openHistoryId === cronId) {
       setOpenHistoryId(null);
       return;
@@ -354,7 +362,7 @@ export function ProjectCronsPage(props: ProjectCronsPageProps): ReactElement {
     setHistoryLoadingId(cronId);
     setActionError(null);
     try {
-      const runs = await props.onListRuns(cronId);
+      const runs = await props.onListRuns(cron.projectId, cronId);
       setHistoryByCron((current) => new Map(current).set(cronId, runs));
     } catch (cause) {
       handleError(cause);
@@ -368,7 +376,7 @@ export function ProjectCronsPage(props: ProjectCronsPageProps): ReactElement {
     setBusyId(cron.id);
     setActionError(null);
     try {
-      await props.onDeleteCron(cron.id, cron.revision);
+      await props.onDeleteCron(cron.projectId, cron.id, cron.revision);
       setItems((current) => current.filter((item) => item.id !== cron.id));
       setConfirmDeleteId(null);
       if (openHistoryId === cron.id) setOpenHistoryId(null);
@@ -387,7 +395,7 @@ export function ProjectCronsPage(props: ProjectCronsPageProps): ReactElement {
       kicker="Automation"
       title="Crons"
       description="Project-owned schedules talk to the project agent or any workspace’s canonical agent."
-      actions={<Button variant="primary" type="button" onClick={() => setEditor({ kind: 'create' })} leadingIcon={glyph(Plus)}>New cron</Button>}
+      actions={<Button variant="primary" type="button" disabled={!props.projects.length} onClick={() => setEditor({ kind: 'create' })} leadingIcon={glyph(Plus)}>New cron</Button>}
     />
 
     <section aria-label="Project cron summary" className={`${shape.container} mb-6 flex flex-col bg-surface-2 shadow-surface-1`}>
@@ -399,13 +407,14 @@ export function ProjectCronsPage(props: ProjectCronsPageProps): ReactElement {
       <p className="border-t border-border px-5 py-3 text-caption text-muted-foreground">Scheduled in GitSpace Cloud · each run executes on whichever machine holds its target.</p>
     </section>
 
+    <div className="mb-4"><Select value={projectFilter} onValueChange={setProjectFilter}><SelectTrigger aria-label="Filter crons by project" />{selectOptions([{ value: 'all', label: 'All projects' }, ...props.projects.map((project) => ({ value: project.id, label: project.name }))])}</Select></div>
     {props.loadError || actionError ? <p role="alert" className="mb-4 text-caption text-destructive">{props.loadError ?? actionError}</p> : null}
 
     <section aria-label="Project crons">
       {props.loading ? <EmptyState title="Loading schedules…" description="Reading project cron authority." />
-        : items.length === 0 ? <EmptyState title="No project crons" description="Create a schedule to prompt a canonical project or workspace agent." action={<Button variant="secondary" type="button" onClick={() => setEditor({ kind: 'create' })} leadingIcon={glyph(Plus)}>Create the first cron</Button>} />
-        : <CardGroup border="outlined" separated proximityHover={false} className="gap-4">
-          {items.map((cron, index) => {
+        : items.length === 0 ? <EmptyState title="No project crons" description="Create a schedule to prompt a canonical project or workspace agent." action={props.projects.length ? <Button variant="secondary" type="button" onClick={() => setEditor({ kind: 'create' })} leadingIcon={glyph(Plus)}>Create the first cron</Button> : undefined} />
+        : props.projects.filter((project) => projectFilter === 'all' || projectFilter === project.id).map((project) => <section key={project.id} className="mb-6 flex flex-col gap-3" aria-label={`${project.name} crons`}><h2 className="text-subtitle font-semibold">{project.name}</h2>{items.some((cron) => cron.projectId === project.id) ? <CardGroup border="outlined" separated proximityHover={false} className="gap-4">
+          {items.filter((cron) => cron.projectId === project.id).map((cron, index) => {
             const currentTargetKey = projectCronTargetKey(cron.target);
             const currentTargetAvailable = targetOptions.some((option) => projectCronTargetKey(option.target) === currentTargetKey);
             const historyOpen = openHistoryId === cron.id;
@@ -433,7 +442,7 @@ export function ProjectCronsPage(props: ProjectCronsPageProps): ReactElement {
                 <dl className="grid grid-cols-2 gap-x-6 gap-y-3">
                   <div className="col-span-2 flex flex-col gap-1">
                     <dt className="text-caption font-medium text-muted-foreground">Talk to</dt>
-                    <dd><Select disabled={busy} value={currentTargetKey} onValueChange={(value) => void chooseTarget(cron, value)}><SelectTrigger aria-label={`Talk to for ${cron.name}`} />{selectOptions([...(!currentTargetAvailable ? [{ value: currentTargetKey, label: `Unavailable · ${cron.target.scope === 'workspace' ? cron.target.spaceId : cron.target.projectId}` }] : []), ...targetOptions.map((option) => ({ value: projectCronTargetKey(option.target), label: option.label }))])}</Select></dd>
+                    <dd><Select disabled={busy} value={currentTargetKey} onValueChange={(value) => void chooseTarget(cron, value)}><SelectTrigger aria-label={`Talk to for ${cron.name}`} />{selectOptions([...(!currentTargetAvailable ? [{ value: currentTargetKey, label: `Unavailable · ${cron.target.scope === 'workspace' ? cron.target.spaceId : cron.target.projectId}` }] : []), ...targetOptions.filter((option) => option.target.projectId === cron.projectId).map((option) => ({ value: projectCronTargetKey(option.target), label: option.label }))])}</Select></dd>
                   </div>
                   <div className="col-span-2 flex flex-col gap-1">
                     <dt className="text-caption font-medium text-muted-foreground">Description</dt>
@@ -463,7 +472,7 @@ export function ProjectCronsPage(props: ProjectCronsPageProps): ReactElement {
                 {cron.statusMessage ? <p className={`pt-3 text-caption ${attention ? 'text-destructive' : 'text-muted-foreground'}`}>{cron.statusMessage}</p> : null}
               </CardContent>
               <CardFooter>
-                <Button variant="ghost" size="compact" type="button" aria-expanded={historyOpen} onClick={() => void toggleHistory(cron.id)} leadingIcon={glyph(ClockRewind)}>Run history{historyOpen ? <ChevronUp width={14} height={14} strokeWidth={1.5} /> : <ChevronDown width={14} height={14} strokeWidth={1.5} />}</Button>
+                <Button variant="ghost" size="compact" type="button" aria-expanded={historyOpen} onClick={() => void toggleHistory(cron)} leadingIcon={glyph(ClockRewind)}>Run history{historyOpen ? <ChevronUp width={14} height={14} strokeWidth={1.5} /> : <ChevronDown width={14} height={14} strokeWidth={1.5} />}</Button>
               </CardFooter>
               {historyOpen ? <section aria-label={`${cron.name} run history`} className="flex flex-col gap-2 px-4 pt-3">
                 <div className="flex items-center justify-between gap-3"><strong className="text-body font-semibold text-foreground">Run history</strong><span className="text-caption text-muted-foreground">Append-only project authority</span></div>
@@ -471,20 +480,20 @@ export function ProjectCronsPage(props: ProjectCronsPageProps): ReactElement {
               </section> : null}
             </Card>;
           })}
-        </CardGroup>}
+        </CardGroup> : <p className="text-caption text-muted-foreground">No schedules for this project.</p>}</section>)}
     </section>
 
     <Dialog open={editor !== null} onOpenChange={(open) => { if (!open) setEditor(null); }}>
       <DialogContent size="lg">
         <CronEditor
           key={editorView.kind === 'edit' ? `${editorView.cron.id}:${editorView.cron.revision}` : 'create'}
-          projectId={props.projectId}
+          projects={props.projects}
           source={editorView.kind === 'edit' ? editorView.cron : undefined}
           options={targetOptions}
           onCancel={() => setEditor(null)}
           onSave={async (draft) => {
             if (editorView.kind === 'edit') {
-              const updated = await props.onUpdateCron(editorView.cron.id, editorView.cron.revision, draft);
+              const updated = await props.onUpdateCron(editorView.cron.projectId, editorView.cron.id, editorView.cron.revision, draft);
               setItems((current) => current.map((item) => item.id === updated.id ? updated : item));
             } else {
               const created = await props.onCreateCron(draft);

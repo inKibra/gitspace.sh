@@ -103,6 +103,23 @@ export const referenceBlockSchema = base.extend({
   ref: z.string(),
 });
 
+/** A runtime entity/run, with the original observations retained as paged history. */
+export const executionBlockSchema = base.extend({
+  type: z.literal('execution'),
+  executionId: z.string().min(1),
+  kind: z.enum(['job', 'process', 'agent']),
+  label: z.string(),
+  status: z.enum(['queued', 'running', 'blocked', 'done', 'failed', 'cancelled']),
+  startedAt: z.string().optional(),
+  endedAt: z.string().optional(),
+  durationMs: z.number().nonnegative().optional(),
+  agent: z.string().optional(),
+  model: z.string().optional(),
+  summary: z.string().optional(),
+  historyCount: z.number().int().nonnegative(),
+  hasFailures: z.boolean(),
+});
+
 export const turnItemSchema = z.discriminatedUnion('type', [
   messageBlockSchema,
   thinkingBlockSchema,
@@ -113,6 +130,7 @@ export const turnItemSchema = z.discriminatedUnion('type', [
   interruptionBlockSchema,
   previewBlockSchema,
   referenceBlockSchema,
+  executionBlockSchema,
   ...richContentSchema.options,
 ]);
 
@@ -151,6 +169,7 @@ export type MessageImage = z.infer<typeof messageImageSchema>;
 export type RichContentBlock = z.infer<typeof richContentSchema>;
 export type AskBlock = z.infer<typeof askBlockSchema>;
 export type ToolCallBlock = z.infer<typeof toolCallBlockSchema>;
+export type ExecutionBlock = z.infer<typeof executionBlockSchema>;
 export type TurnItem = z.infer<typeof turnItemSchema>;
 export type SideAgentBlock = z.infer<typeof sideAgentBlockSchema>;
 export type TurnBlock = z.infer<typeof turnBlockSchema>;

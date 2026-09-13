@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { executableManifestPath, parseExecutableArtifactManifest, validateExecutableArtifact } from '@gitspace/account-omp/manifest';
+import { prepareOmpRuntimeArtifact } from '../../account-omp/src/runtime-recipe.js';
 import { ompGenerationSelectionSchema, type OmpGenerationSelection } from '../../account-machine/src/omp-runtime.js';
 
 /** Browser-relay and other OMP commands use the same authenticated account selection as agent children. */
@@ -23,7 +24,11 @@ async function selectedOmp(): Promise<OmpGenerationSelection> {
 
 const selection = await selectedOmp();
 await validateExecutableArtifact(selection.path, { target: 'omp', hash: selection.hash, manifestHash: selection.manifestHash });
-const child = Bun.spawn([process.execPath, join(selection.path, 'omp-worker.js'), ...process.argv.slice(2)], {
+const prepared = await prepareOmpRuntimeArtifact(selection.path);
+const entrypoint = prepared === join(selection.path, 'omp.js')
+  ? join(selection.path, 'omp-worker.js')
+  : join(dirname(Bun.resolveSync('@oh-my-pi/pi-coding-agent', dirname(prepared))), 'cli.ts');
+const child = Bun.spawn([process.execPath, entrypoint, ...process.argv.slice(2)], {
   stdin: 'inherit', stdout: 'inherit', stderr: 'inherit', env: process.env,
 });
 process.once('SIGINT', () => child.kill('SIGINT'));

@@ -1,11 +1,13 @@
-import { deriveWorkspaceStatusSummary, determineAgentState, rpcErrors, type WorkspaceAgentState } from '@gitspace/protocol';
+import { rpcErrors } from '@gitspace/protocol';
+import { currentAgentExecutionFailure, currentAgentFailure, determineAgentState } from '@gitspace/protocol-agent';
+import { deriveWorkspaceStatusSummary, type WorkspaceAgentState } from '@gitspace/protocol-workspace';
 import { err, ok } from 'result-rpc';
 import { eq } from 'drizzle-orm';
 import type { ArtifactCapability, LocalArtifactResolver, LocalArtifactEntry } from './artifacts.js';
 import type { GitSpaceDatabase } from './database.js';
 import type { AppendFactEvent } from './fact-events.js';
-import { emptyRelations, emptyStack, validateStack, type WorkspaceRelations, type WorkspaceStack } from './relations.js';
-import { agentSessions, type AgentSession, type Workspace } from './schema.js';
+import { emptyRelations, emptyStack, validateStack, type WorkspaceRelations, type WorkspaceStack } from '@gitspace/protocol-workspace';
+import { agentSessions, factEvents, type AgentSession, type Workspace } from './schema.js';
 
 export interface WorkspaceStackContext {
   relations: Map<string, WorkspaceRelations>;
@@ -20,13 +22,15 @@ function renderState(session: AgentSession) {
   return determineAgentState(
     session.activity,
     session.state === 'closed' ? { closedAt: session.updatedAt } : {},
-    session.errorMessage ?? (session.state === 'failed' ? 'Agent worker failed' : undefined),
+    currentAgentExecutionFailure(session.health),
   );
 }
 
 /** Sink for project facts; on a machine this is the cloud project log writer. */
 export interface ProjectEventWriter {
   append(input: AppendFactEvent): void;
+  /** Called after state and its facts commit in the same local transaction. */
+  committed?(): void;
 }
 
 export class GitSpaceHandlers {
@@ -36,7 +40,7 @@ export class GitSpaceHandlers {
     readonly events: ProjectEventWriter,
   ) {}
 
-  bootstrap(input: { projectId: string; workspaceId: string | null }, transcript: Array<{ sessionId: string; ordinal: number; kind: string; payload: Record<string, unknown>; createdAt: string }> = []) {
+  bootstrap(input: { projectId: string; workspaceId: string | null }) {
     const project = this.database.getProject(input.projectId);
     if (!project) return err(rpcErrors.projectNotFound({ projectId: input.projectId }));
     const baseSpace = this.database.getBaseSpace(project.id);
@@ -81,21 +85,15 @@ export class GitSpaceHandlers {
         scope: selected.kind === 'worktree' ? 'workspace' as const : 'project' as const,
         ompSessionId: mainAgent.ompSessionId,
         state: mainAgent.state,
+        controlsAvailable: false,
         lastEventOffset: mainAgent.lastEventOffset,
         resumePending: mainAgent.resumePending,
         createdAt: new Date(mainAgent.createdAt),
         activity: mainAgent.activity,
         renderState: renderState(mainAgent),
-        errorMessage: mainAgent.errorMessage,
+        health: mainAgent.health,
         updatedAt: new Date(mainAgent.updatedAt),
       } : null,
-      transcript: transcript.map((event) => ({
-        sessionId: event.sessionId,
-        ordinal: event.ordinal,
-        kind: event.kind,
-        payload: event.payload,
-        createdAt: new Date(event.createdAt),
-      })),
       artifacts: [...baseArtifacts.value, ...workspaceArtifacts.value],
     });
   }
@@ -103,27 +101,19 @@ export class GitSpaceHandlers {
   possessSpace(input: { spaceId: string; holderId: string }) {
     const space = this.database.getSpace(input.spaceId);
     if (!space) return err(rpcErrors.workspaceNotFound({ workspaceId: input.spaceId }));
-    const possessed = this.database.possessSpace(input.spaceId, input.holderId);
-    if (possessed.status === 'error') {
-      const current = this.database.getSpacePlacement(input.spaceId);
-      return current
-        ? err(rpcErrors.workspacePossessed({
-            workspaceId: input.spaceId,
-            holderId: current.holderId,
-            generation: current.generation,
-          }))
-        : err(rpcErrors.workspaceNotFound({ workspaceId: input.spaceId }));
-    }
-    this.events.append({
-      projectId: space.projectId,
-      scope: 'workspace',
-      entity: 'space',
-      entityId: space.id,
-      revision: possessed.value.generation,
-      operation: 'updated',
-      payload: { placement: { holderId: possessed.value.holderId, generation: possessed.value.generation } },
+    const result = this.database.orm.transaction((tx) => {
+      const possessed = this.database.possessSpace(input.spaceId, input.holderId);
+      if (possessed.status === 'error') {
+        const current = this.database.getSpacePlacement(input.spaceId);
+        return current
+          ? err(rpcErrors.workspacePossessed({ workspaceId: input.spaceId, holderId: current.holderId, generation: current.generation }))
+          : err(rpcErrors.workspaceNotFound({ workspaceId: input.spaceId }));
+      }
+      tx.insert(factEvents).values({ projectId: space.projectId, scope: 'workspace', entity: 'space', entityId: space.id, revision: possessed.value.generation, operation: 'updated', payload: { placement: { holderId: possessed.value.holderId, generation: possessed.value.generation } }, createdAt: new Date().toISOString() }).run();
+      return ok(possessed.value);
     });
-    return ok(possessed.value);
+    this.events.committed?.();
+    return result;
   }
 
 
@@ -140,7 +130,7 @@ export class GitSpaceHandlers {
       closedAt: space.closedAt ? new Date(space.closedAt) : null,
       possessedBy: space.placementState === 'closed' ? null : space.holderId,
       spaceGeneration: space.generation,
-      status: deriveWorkspaceStatusSummary({ agents: agentState ? [{ state: agentState }] : [] }),
+      status: deriveWorkspaceStatusSummary({ agents: agentState && mainAgent ? [{ state: agentState, failure: currentAgentFailure(mainAgent.health) }] : [] }),
     };
   }
   /** Relations and stack validations for every workspace in a project, computed once so list views share one graph. */
@@ -173,7 +163,7 @@ export class GitSpaceHandlers {
       possessedBy: possession?.holderId ?? null,
       possessionGeneration: possession?.generation ?? null,
       spaceGeneration: workspace.generation,
-      status: deriveWorkspaceStatusSummary({ agents: agentState ? [{ state: agentState }] : [] }),
+      status: deriveWorkspaceStatusSummary({ agents: agentState && mainAgent ? [{ state: agentState, failure: currentAgentFailure(mainAgent.health) }] : [] }),
       relations: stack.relations.get(workspace.id) ?? emptyRelations(),
       stack: stack.stacks.get(workspace.id) ?? emptyStack(),
     };

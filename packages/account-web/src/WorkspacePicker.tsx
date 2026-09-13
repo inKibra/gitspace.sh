@@ -1,11 +1,17 @@
 import { Badge, Card, CardContent, CardDescription, CardGroup, CardHeader, CardTitle, InputField, InputGroup } from '@gitspace/ui';
 import { SearchMd } from '@untitledui/icons';
 import { useState, type ReactNode } from 'react';
-import { PHASE_LABEL, StatusDot, type WorkspaceView } from './GitSpaceShell.js';
+import { workspacePhaseLabel, StatusDot, type WorkspaceView } from './GitSpaceShell.js';
 import { glyph } from './glyph.js';
 
+export type WorkspacePickerItem = Pick<WorkspaceView, 'id' | 'projectId' | 'name' | 'branch' | 'closedAt'> & {
+  phase?: WorkspaceView['phase'] | null;
+  status?: WorkspaceView['status'];
+  freshness?: 'fresh' | 'stale' | 'unknown';
+};
+
 export interface WorkspacePickerProps {
-  workspaces: readonly WorkspaceView[];
+  workspaces: readonly WorkspacePickerItem[];
   /** Ids never offered (the workspace itself, anything already picked). */
   exclude?: readonly string[];
   /** Ids rendered as selected; used by multi-pickers that keep the picked rows in the list. */
@@ -29,7 +35,7 @@ export function WorkspacePicker({ workspaces, exclude = [], selected = [], onPic
   const [query, setQuery] = useState('');
   const needle = query.trim().toLowerCase();
   const matches = workspaces
-    .filter((workspace) => !exclude.includes(workspace.id) && (!needle || `${workspace.name} ${workspace.branch} ${workspace.phase} ${PHASE_LABEL[workspace.phase]}`.toLowerCase().includes(needle)))
+    .filter((workspace) => !exclude.includes(workspace.id) && (!needle || `${workspace.name} ${workspace.branch} ${workspacePhaseLabel(workspace.phase)}`.toLowerCase().includes(needle)))
     .slice(0, limit);
   return <div className="flex flex-col gap-2">
     <InputGroup size="compact">
@@ -39,10 +45,10 @@ export function WorkspacePicker({ workspaces, exclude = [], selected = [], onPic
       ? <CardGroup orientation="inline" border="outlined" separated proximityHover={false}>
         {matches.map((workspace, index) => <Card key={workspace.id} index={index} size="compact" selected={selected.includes(workspace.id)} onClick={() => onPick(workspace.id)} label={`Pick ${workspace.name}`}>
           <CardHeader>
-            <CardTitle><span className="flex items-center gap-2"><StatusDot color={workspace.status.primaryColor} pulse={workspace.status.primaryColor === 'green'} />{workspace.name}</span></CardTitle>
+            <CardTitle><span className="flex items-center gap-2"><StatusDot color={workspace.status?.primaryColor ?? 'dim'} pulse={workspace.status?.primaryColor === 'green' && (!workspace.freshness || workspace.freshness === 'fresh')} />{workspace.name}</span></CardTitle>
             <CardDescription><span className="font-mono">{workspace.branch}</span></CardDescription>
           </CardHeader>
-          <CardContent><Badge variant="dot" size="compact" color="gray">{PHASE_LABEL[workspace.phase]}</Badge></CardContent>
+          <CardContent><Badge variant="dot" size="compact" color="gray">{workspacePhaseLabel(workspace.phase)}</Badge></CardContent>
         </Card>)}
       </CardGroup>
       : <p className="text-caption text-muted-foreground">{empty}</p>}

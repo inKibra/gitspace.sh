@@ -1,15 +1,8 @@
 import { cp, lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
-import { dirname, join, relative, sep } from 'node:path';
-import { pathToFileURL } from 'node:url';
-
-interface RuntimePackage {
-  name: string;
-  version: string;
-  dependencies?: Record<string, string>;
-  optionalDependencies?: Record<string, string>;
-  peerDependencies?: Record<string, string>;
-  peerDependenciesMeta?: Record<string, { optional?: boolean }>;
-}
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { readOmpReleaseMetadata, sha256 } from '@gitspace/account-omp/manifest';
+import type { OmpReleaseMetadata } from '@gitspace/protocol';
 
 export async function installedPackageRoot(name: string, from: string): Promise<string> {
   // Inspect the actual installed graph, not Bun's module cache or its built-in native-addon shims.
@@ -28,244 +21,162 @@ export async function installedPackageRoot(name: string, from: string): Promise<
   }
 }
 
-/** Preserve the installed dependency graph, hoisting only identical package instances. No symlinks escape the artifact. */
-class RuntimeGraphCopier {
-  private readonly destinations = new Map<string, string>();
-
-  constructor(private readonly destination: string) {}
-
-  async copy(name: string, from: string, parent = this.destination, optional = false): Promise<void> {
-    let source: string;
-    try {
-      source = await installedPackageRoot(name, from);
-    } catch (error) {
-      if (optional && ['MODULE_NOT_FOUND', 'ERR_MODULE_NOT_FOUND'].includes((error as NodeJS.ErrnoException).code ?? '')) return;
-      throw error;
-    }
-    let destination = join(this.destination, 'node_modules', name);
-    for (let ancestor = parent;; ancestor = dirname(ancestor)) {
-      const inherited = this.destinations.get(join(ancestor, 'node_modules', name));
-      if (inherited === source) return;
-      if (inherited) {
-        destination = join(parent, 'node_modules', name);
-        break;
-      }
-      if (ancestor === this.destination) break;
-      if (dirname(ancestor) === ancestor) throw new Error(`Executable dependency ${name} escaped its package tree`);
-    }
-    const existing = this.destinations.get(destination);
-    if (existing && existing !== source) throw new Error(`Conflicting executable dependency ${name} at ${destination}`);
-    this.destinations.set(destination, source);
-    const manifest = JSON.parse(await readFile(join(source, 'package.json'), 'utf8')) as RuntimePackage;
-    await mkdir(dirname(destination), { recursive: true });
-    await cp(source, destination, {
-      recursive: true,
-      dereference: true,
-      filter: (path) => {
-        const parts = relative(source, path).split(sep);
-        if (parts.includes('node_modules')) return false;
-        // onnxruntime-node publishes several host binaries in one package.
-        if (name === 'onnxruntime-node' && parts[0] === 'bin' && parts[1]?.startsWith('napi-v')) {
-          if (parts[2] && parts[2] !== process.platform) return false;
-          if (parts[3] && parts[3] !== process.arch) return false;
-        }
-        return true;
-      },
-    });
-    const dependencies = { ...manifest.dependencies, ...manifest.optionalDependencies, ...manifest.peerDependencies };
-    for (const dependency of Object.keys(dependencies).sort()) {
-      const optionalDependency = manifest.optionalDependencies?.[dependency] !== undefined || manifest.peerDependenciesMeta?.[dependency]?.optional === true;
-      await this.copy(dependency, source, destination, optionalDependency);
-    }
-  }
-}
-
-async function packageCudaProviders(outDir: string): Promise<void> {
-  if (process.platform !== 'linux' || process.arch !== 'x64') return;
-  const transformerRoot = await installedPackageRoot('@huggingface/transformers', outDir);
-  const onnxRoot = await installedPackageRoot('onnxruntime-node', transformerRoot);
-  const binaryRoot = join(onnxRoot, 'bin/napi-v6/linux/x64');
-  const providers = ['libonnxruntime_providers_cuda.so', 'libonnxruntime_providers_shared.so', 'libonnxruntime_providers_tensorrt.so'];
-  const present = async () => (await Promise.all(providers.map((name) => lstat(join(binaryRoot, name)).then(
-    (metadata) => metadata.isFile(),
-    (error: NodeJS.ErrnoException) => { if (error.code === 'ENOENT') return false; throw error; },
-  )))).every(Boolean);
-  if (await present()) return;
-  // These are executable provider libraries, not model weights. Use this exact installed ORT release's official installer.
-  const install = Bun.spawn([process.execPath, join(onnxRoot, 'script/install.js')], {
-    cwd: onnxRoot,
-    env: { ...process.env, BUN_BE_BUN: '1', ONNXRUNTIME_NODE_INSTALL: 'cuda12' },
-    stdout: 'pipe', stderr: 'pipe',
-  });
-  const [stdout, stderr, code] = await Promise.all([new Response(install.stdout).text(), new Response(install.stderr).text(), install.exited]);
-  if (code !== 0 || !await present()) throw new Error(`Cannot package ONNX CUDA provider libraries: ${stdout}\n${stderr}`);
-}
-
 function pinnedVersion(value: string | undefined, label: string): string {
   if (!value || !/^\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?$/u.test(value)) throw new Error(`${label} has no exact upstream executable dependency version: ${value}`);
   return value;
 }
 
-function exportedLiteral(source: string, name: string): string {
-  const match = new RegExp(`^export const ${name} = ("[^"\\n]+");$`, 'mu').exec(source);
-  if (!match) throw new Error(`Upstream executable runtime pin ${name} is not a string literal`);
-  return JSON.parse(match[1]!) as string;
+interface LockedPackageMetadata {
+  dependencies?: Record<string, string>;
+  optionalDependencies?: Record<string, string>;
+  peerDependencies?: Record<string, string>;
+  optionalPeers?: string[];
 }
 
-async function installRuntime(path: string, dependencies: Record<string, string>, overrides?: Record<string, string>, lockRoot?: string): Promise<void> {
-  await mkdir(path, { recursive: true });
-  await writeFile(join(path, 'package.json'), JSON.stringify({
-    private: true, type: 'module', dependencies, overrides,
-    trustedDependencies: ['onnxruntime-node', 'sharp'],
-  }));
-  if (lockRoot) {
-    const locked = JSON.parse(await readFile(join(lockRoot, 'package.json'), 'utf8')) as { dependencies: Record<string, string>; overrides?: Record<string, string> };
-    if (JSON.stringify(locked.dependencies) !== JSON.stringify(dependencies) || JSON.stringify(locked.overrides) !== JSON.stringify(overrides)) {
-      throw new Error(`Runtime dependency pins changed; prepare and retain a new release lock set: ${lockRoot}`);
+type LockedPackage = [string, string, LockedPackageMetadata, string];
+interface BunLock {
+  lockfileVersion: number;
+  configVersion: number;
+  workspaces: Record<string, { name: string; dependencies: Record<string, string> }>;
+  patchedDependencies?: Record<string, string>;
+  packages: Record<string, LockedPackage>;
+}
+
+/** Keep the source lock's exact dependency placements, including nested versions and optional metadata. */
+function recipeLockedPackages(source: BunLock, dependencies: Record<string, string>): Record<string, LockedPackage> {
+  const packages: Record<string, LockedPackage> = {};
+  const visit = (name: string, from: string, optional = false): void => {
+    let parent = from;
+    let key: string;
+    for (;;) {
+      key = parent ? `${parent}/${name}` : name;
+      if (source.packages[key]) break;
+      if (!parent) {
+        if (optional) return;
+        throw new Error(`Source bun.lock is missing OMP dependency ${name} from ${from || 'root'}`);
+      }
+      parent = parent.replace(/(?:^|\/)(?:@[^/]+\/)?[^/]+$/u, '');
     }
-    await cp(join(lockRoot, 'bun.lock'), join(path, 'bun.lock'));
+    if (packages[key]) return;
+    const entry = source.packages[key]!;
+    if (entry.length !== 4 || !/^sha(?:256|512)-/u.test(entry[3])) {
+      throw new Error(`OMP dependency ${key} must have a registry integrity in source bun.lock`);
+    }
+    packages[key] = entry;
+    for (const dependency of Object.keys(entry[2].dependencies ?? {})) visit(dependency, key);
+    for (const dependency of Object.keys(entry[2].optionalDependencies ?? {})) visit(dependency, key);
+    for (const dependency of Object.keys(entry[2].peerDependencies ?? {})) {
+      visit(dependency, key, entry[2].optionalPeers?.includes(dependency) ?? false);
+    }
+  };
+  for (const [name, version] of Object.entries(dependencies)) {
+    if (source.packages[name]?.[0] !== `${name}@${version}`) {
+      throw new Error(`Source bun.lock does not pin ${name}@${version}`);
+    }
+    visit(name, '');
   }
-  // This generated manifest contains no devDependencies. Production mode would suppress the provenance lockfile.
-  const install = Bun.spawn([process.execPath, 'install', '--linker=hoisted', '--save-text-lockfile', ...(lockRoot ? ['--frozen-lockfile'] : [])], {
-    cwd: path,
-    env: { ...process.env, BUN_BE_BUN: '1' },
-    stdout: 'pipe', stderr: 'pipe',
-  });
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(install.stdout).text(), new Response(install.stderr).text(), install.exited,
-  ]);
-  if (exitCode !== 0) throw new Error(`Executable side-runtime install failed: ${stdout}\n${stderr}`);
+  return Object.fromEntries(Object.entries(packages).sort(([left], [right]) => left.localeCompare(right)));
 }
 
-async function runtimeDependencyPins(agentRoot: string) {
-  const mnemopiRoot = await installedPackageRoot('@oh-my-pi/pi-mnemopi', agentRoot);
-  const memoryManifest = JSON.parse(await readFile(join(mnemopiRoot, 'package.json'), 'utf8')) as RuntimePackage;
-  const fastembedVersion = pinnedVersion(memoryManifest.peerDependencies?.fastembed, 'fastembed');
-  const ttsSource = await readFile(join(agentRoot, 'src/tts/runtime.ts'), 'utf8');
-  const kokoroPackage = exportedLiteral(ttsSource, 'KOKORO_PACKAGE');
-  const kokoroVersion = pinnedVersion(exportedLiteral(ttsSource, 'KOKORO_VERSION'), kokoroPackage);
-  const onnxPackage = exportedLiteral(ttsSource, 'ONNXRUNTIME_NODE_PACKAGE');
-  const onnxVersion = pinnedVersion(exportedLiteral(ttsSource, 'ONNXRUNTIME_NODE_VERSION'), onnxPackage);
-  return { fastembedVersion, kokoroPackage, kokoroVersion, onnxPackage, onnxVersion };
-}
-
-/** Resolve once for a release; retain these lockfiles and use the same set on every native build runner. */
-export async function prepareRuntimeLocks(root: string, outDir: string): Promise<void> {
-  const agentRoot = await installedPackageRoot('@oh-my-pi/pi-coding-agent', join(root, 'packages/account-omp'));
-  const pins = await runtimeDependencyPins(agentRoot);
-  for (const [name, dependencies, overrides] of [
-    ['memory', { fastembed: pins.fastembedVersion }, undefined],
-    ['tts', { [pins.kokoroPackage]: pins.kokoroVersion }, { [pins.onnxPackage]: pins.onnxVersion }],
-  ] as const) {
-    const path = join(outDir, name);
-    await mkdir(path, { recursive: true });
-    await writeFile(join(path, 'package.json'), JSON.stringify({
-      private: true, type: 'module', dependencies, overrides, trustedDependencies: ['onnxruntime-node', 'sharp'],
-    }), { flag: 'wx' });
-    const install = Bun.spawn([process.execPath, 'install', '--lockfile-only', '--ignore-scripts', '--save-text-lockfile'], {
-      cwd: path, env: { ...process.env, BUN_BE_BUN: '1' }, stdout: 'pipe', stderr: 'pipe',
+/** Publish dependency inputs only. The authenticated recipe is installed into a derived runtime cache on its host. */
+export async function packageOmpRuntimeRecipe(root: string, outDir: string): Promise<OmpReleaseMetadata> {
+  const packageRoot = join(root, 'packages/account-omp');
+  const metadata = await readOmpReleaseMetadata(root);
+  const source = JSON.parse(await readFile(join(packageRoot, 'package.json'), 'utf8')) as {
+    gitspaceOmpPatches?: Record<string, string>;
+  };
+  for (const [name, version] of Object.entries(metadata.packages)) pinnedVersion(version, name);
+  if (!['linux', 'darwin', 'win32'].includes(process.platform) || !['x64', 'arm64'].includes(process.arch)) {
+    throw new Error(`Unsupported OMP runtime platform: ${process.platform}-${process.arch}`);
+  }
+  // Optional dependencies are omitted from the base install. Core native functionality is not optional for GitSpace.
+  const nativePackage = `@oh-my-pi/pi-natives-${process.platform}-${process.arch}`;
+  const dependencies = {
+    ...metadata.packages,
+    [nativePackage]: pinnedVersion(metadata.packages['@oh-my-pi/pi-natives'], '@oh-my-pi/pi-natives'),
+  };
+  const patchedDependencies: Record<string, string> = {};
+  const patches: Array<{ path: string; hash: `sha256:${string}` }> = [];
+  // A sibling of outDir could inherit the checkout's workspace. A fresh OS temp directory cannot.
+  const scratch = await mkdtemp(join(tmpdir(), 'gitspace-omp-recipe-'));
+  try {
+    for (const [specifier, path] of Object.entries(source.gitspaceOmpPatches ?? {}).sort(([left], [right]) => left.localeCompare(right))) {
+      const separator = specifier.lastIndexOf('@');
+      const name = specifier.slice(0, separator);
+      const version = specifier.slice(separator + 1);
+      if (!metadata.packages[name] || metadata.packages[name] !== version) {
+        throw new Error(`OMP patch ${specifier} does not match an exact SDK dependency`);
+      }
+      if (!path.startsWith('patches/') || /[\\:\0]/u.test(path) || path.split('/').some((part) => !part || part === '.' || part === '..')) {
+        throw new Error(`OMP patch must be a relative path inside patches/: ${path}`);
+      }
+      const bytes = await readFile(join(packageRoot, path));
+      const hash = sha256(bytes);
+      if (!metadata.patches.some((patch) => patch.path === `packages/account-omp/${path}` && patch.hash === hash)) {
+        throw new Error(`OMP patch changed while preparing the release: ${path}`);
+      }
+      await mkdir(dirname(join(scratch, path)), { recursive: true });
+      await writeFile(join(scratch, path), bytes, { flag: 'wx' });
+      patchedDependencies[specifier] = path;
+      patches.push({ path, hash });
+    }
+    if (patches.length !== metadata.patches.length) throw new Error('OMP patch map changed while preparing the release');
+    const packageBytes = Buffer.from(`${JSON.stringify({
+      name: 'gitspace-omp-runtime',
+      private: true,
+      type: 'module',
+      dependencies,
+      patchedDependencies,
+    }, null, 2)}\n`);
+    await writeFile(join(scratch, 'package.json'), packageBytes, { flag: 'wx' });
+    const sourceLock = Bun.JSONC.parse(await readFile(join(root, 'bun.lock'), 'utf8')) as BunLock;
+    if (sourceLock.lockfileVersion !== 1 || !sourceLock.packages) throw new Error('Unsupported source bun.lock format');
+    const lockedPackages = recipeLockedPackages(sourceLock, dependencies);
+    const recipeLock: BunLock = {
+      lockfileVersion: sourceLock.lockfileVersion,
+      configVersion: sourceLock.configVersion,
+      workspaces: { '': { name: 'gitspace-omp-runtime', dependencies } },
+      patchedDependencies,
+      packages: lockedPackages,
+    };
+    await writeFile(join(scratch, 'bun.lock'), `${JSON.stringify(recipeLock, null, 2)}\n`, { flag: 'wx' });
+    // Normalize only the projected source lock. A newer registry resolution is a build error, not a silent release change.
+    const install = Bun.spawn([
+      process.execPath, 'install', '--lockfile-only', '--ignore-scripts', '--save-text-lockfile', '--omit=optional', '--linker=hoisted',
+    ], {
+      cwd: scratch, env: { ...process.env, BUN_BE_BUN: '1' }, stdout: 'pipe', stderr: 'pipe',
     });
     const [stdout, stderr, code] = await Promise.all([new Response(install.stdout).text(), new Response(install.stderr).text(), install.exited]);
-    if (code !== 0) throw new Error(`Cannot resolve release runtime lock ${name}: ${stdout}\n${stderr}`);
-  }
-}
-
-export interface PackagedOmpRuntime {
-  agentRoot: string;
-  legacyPlugin: Bun.BunPlugin;
-  plugins: Bun.BunPlugin[];
-  external: string[];
-  define: Record<string, string>;
-}
-
-/** Build-time closure of optional executable code; model weights remain ordinary runtime data. */
-export async function packageOmpRuntime(root: string, outDir: string, runtimeLockRoot?: string): Promise<PackagedOmpRuntime> {
-  const resolutionRoot = join(root, 'packages/account-omp');
-  const agentRoot = await installedPackageRoot('@oh-my-pi/pi-coding-agent', resolutionRoot);
-  const packageRoots: Record<string, string> = {};
-  const canonicalPackageRoots: Record<string, string> = {};
-  for (const [key, name] of Object.entries({ agent: 'pi-agent-core', ai: 'pi-ai', 'coding-agent': 'pi-coding-agent', natives: 'pi-natives', tui: 'pi-tui', utils: 'pi-utils' })) {
-    packageRoots[key] = await installedPackageRoot(`@oh-my-pi/${name}`, resolutionRoot);
-    canonicalPackageRoots[`@oh-my-pi/${name}`] = packageRoots[key]!;
-  }
-  const legacyScript = join(agentRoot, 'scripts/legacy-pi-virtual-module.ts');
-  if (!(await readFile(legacyScript, 'utf8')).includes('collectBundledPiEntries(packageRoots:')) {
-    throw new Error('Installed OMP lacks the executable packaging patch; run bun install --frozen-lockfile in the source workspace');
-  }
-  // This module belongs to the runtime-selected source workspace, not to the builder process's OMP graph.
-  const { createLegacyPiVirtualModulePlugin } = await import(pathToFileURL(legacyScript).href);
-  const legacyPlugin: Bun.BunPlugin = await createLegacyPiVirtualModulePlugin(packageRoots);
-  const graph = new RuntimeGraphCopier(outDir);
-  for (const dependency of ['@huggingface/transformers', 'sherpa-onnx-node', 'puppeteer-core', '@babel/parser']) await graph.copy(dependency, agentRoot);
-  await packageCudaProviders(outDir);
-  for (const asset of ['package.json', 'CHANGELOG.md', 'README.md', 'LICENSE', 'THIRD-PARTY-NOTICES.txt', 'examples']) {
-    await cp(join(agentRoot, asset), join(outDir, asset), { recursive: true, dereference: true });
-  }
-  const { fastembedVersion, kokoroPackage, kokoroVersion, onnxPackage, onnxVersion } = await runtimeDependencyPins(agentRoot);
-  const scratch = await mkdtemp(`${outDir}.runtime-build-`);
-  try {
-    const memorySource = join(scratch, 'memory');
-    await installRuntime(memorySource, { fastembed: fastembedVersion }, undefined, runtimeLockRoot ? join(runtimeLockRoot, 'memory') : undefined);
-    await graph.copy('fastembed', memorySource);
-    await mkdir(join(outDir, 'runtime/memory'), { recursive: true });
-    await cp(join(memorySource, 'package.json'), join(outDir, 'runtime/memory/package.json'));
-    await cp(join(memorySource, 'bun.lock'), join(outDir, 'runtime/memory/bun.lock'));
-    const ttsRoot = join(outDir, 'runtime/tts');
-    const ttsInstall = join(scratch, 'tts');
-    await installRuntime(ttsInstall, { [kokoroPackage]: kokoroVersion }, { [onnxPackage]: onnxVersion }, runtimeLockRoot ? join(runtimeLockRoot, 'tts') : undefined);
-    const ttsGraph = new RuntimeGraphCopier(ttsRoot);
-    await ttsGraph.copy(kokoroPackage, ttsInstall);
-    await writeFile(join(ttsRoot, 'package.json'), await readFile(join(ttsInstall, 'package.json')));
-    await cp(join(ttsInstall, 'bun.lock'), join(ttsRoot, 'bun.lock'));
-    await writeFile(join(outDir, 'runtime-dependencies.json'), JSON.stringify({ fastembed: fastembedVersion, [kokoroPackage]: kokoroVersion, ttsOnnxRuntime: onnxVersion }));
+    if (code !== 0) throw new Error(`Cannot resolve OMP runtime recipe lock: ${stdout}\n${stderr}`);
+    const lockBytes = await readFile(join(scratch, 'bun.lock'));
+    const resolvedLock = Bun.JSONC.parse(lockBytes.toString('utf8')) as BunLock;
+    const provenance = (entry: LockedPackage): string => JSON.stringify([entry[0], entry[1], entry[3]]);
+    const lockedInputs = new Set(Object.values(lockedPackages).map(provenance));
+    if (Object.keys(resolvedLock.workspaces).length !== 1 || !resolvedLock.workspaces['']) {
+      throw new Error('OMP runtime recipe lock inherited unrelated workspaces');
+    }
+    for (const entry of Object.values(resolvedLock.packages)) {
+      if (!lockedInputs.has(provenance(entry))) {
+        throw new Error(`OMP runtime recipe resolved ${entry[0]} outside source bun.lock; update the source dependency lock first`);
+      }
+    }
+    for (const path of ['package.json', 'bun.lock', ...patches.map((patch) => patch.path)]) {
+      await mkdir(dirname(join(outDir, path)), { recursive: true });
+      await cp(join(scratch, path), join(outDir, path));
+    }
+    await writeFile(join(outDir, 'omp-runtime.json'), `${JSON.stringify({
+      version: 1,
+      upstreamVersion: metadata.upstreamVersion,
+      bunVersion: metadata.bunVersion,
+      platform: process.platform,
+      arch: process.arch,
+      adapter: 'omp-adapter.js',
+      packageHash: sha256(packageBytes),
+      lockHash: sha256(lockBytes),
+      patches: patches.sort((left, right) => left.path.localeCompare(right.path)),
+    }, null, 2)}\n`, { flag: 'wx' });
+    return metadata;
   } finally {
     await rm(scratch, { recursive: true, force: true });
   }
-  const docs = await readFile(join(agentRoot, 'dist/docs-index.generated.txt'), 'utf8');
-  if (!docs.includes('\n')) throw new Error('Installed OMP docs corpus is missing or malformed');
-  // Dynamic require() dependencies remain genuine installed packages, with their native/wasm/data files beside them.
-  const external = ['@huggingface/transformers', 'onnxruntime-node', 'fastembed', 'sherpa-onnx-node', 'puppeteer-core', '@babel/parser'];
-  const plugins: Bun.BunPlugin[] = [{
-    name: 'gitspace-packaged-omp-runtime',
-    setup(build) {
-      // Virtual-module resolveDir is not sufficient to select an isolated workspace dependency graph.
-      // Keep canonical imports on the same installed sources that supplied the authenticated registry.
-      build.onResolve({ filter: /^@oh-my-pi\//u }, ({ path: specifier }) => {
-        const separator = specifier.indexOf('/', '@oh-my-pi/'.length);
-        const name = separator === -1 ? specifier : specifier.slice(0, separator);
-        const packageRoot = canonicalPackageRoots[name];
-        if (!packageRoot) return;
-        return { path: Bun.resolveSync(specifier, packageRoot) };
-      });
-      build.onLoad({ filter: /[/\\]pi-coding-agent[/\\]src[/\\]extensibility[/\\]plugins[/\\]legacy-pi-compat\.ts$/u }, async ({ path }) => {
-        const source = await readFile(path, 'utf8');
-        const original = 'const IS_COMPILED_BINARY = isCompiledBinary();';
-        if (!source.includes(original)) throw new Error('Unsupported OMP legacy-module selection contract');
-        return { loader: 'ts', contents: source.replace(original, 'const IS_COMPILED_BINARY = true;') };
-      });
-      build.onLoad({ filter: /[/\\]pi-utils[/\\]src[/\\]runtime-install\.ts$/u }, async ({ path }) => {
-        const source = await readFile(path, 'utf8');
-        const original = 'export async function ensureRuntimeInstalled(options: EnsureRuntimeInstalledOptions): Promise<string> {';
-        if (!source.includes(original)) throw new Error('Unsupported OMP side-runtime installer contract');
-        return { loader: 'ts', contents: source.replace(original, `${original}
-  const packaged = options.install.dependencies;
-  if (Object.keys(packaged).length === 1 && packaged.fastembed === ${JSON.stringify(fastembedVersion)}) return import.meta.dir;
-  if (Object.keys(packaged).length === 1 && packaged[${JSON.stringify(kokoroPackage)}] === ${JSON.stringify(kokoroVersion)}) return path.join(import.meta.dir, 'runtime', 'tts');`) };
-      });
-      build.onLoad({ filter: /[/\\]pi-coding-agent[/\\]src[/\\]tts[/\\]runtime\.ts$/u }, async ({ path }) => {
-        const source = await readFile(path, 'utf8');
-        const original = 'return path.join(path.dirname(getTinyModelsCacheDir()), "tts-runtime", `kokoro-${runtimeKey}`);';
-        if (!source.includes(original)) throw new Error('Unsupported OMP TTS runtime directory contract');
-        return { loader: 'ts', contents: source.replace(original, "return path.join(import.meta.dir, 'runtime', 'tts');") };
-      });
-      build.onLoad({ filter: /[/\\]pi-coding-agent[/\\]src[/\\]subprocess[/\\]worker-runtime\.ts$/u }, async ({ path }) => {
-        const source = await readFile(path, 'utf8');
-        const original = 'const sharpStub = path.join(runtimeDir, "omp-sharp-stub.cjs");\n\tawait Bun.write(sharpStub, "module.exports = {};\\n");\n\tinstallRuntimeModuleResolver({ runtimeNodeModules: nodeModules, stubs: { sharp: sharpStub } });';
-        if (!source.includes(original)) throw new Error('Unsupported OMP inference module resolver contract');
-        // The real sharp dependency graph is shipped, so there is no stub and no write into the immutable artifact.
-        return { loader: 'ts', contents: source.replace(original, 'installRuntimeModuleResolver({ runtimeNodeModules: nodeModules });') };
-      });
-    },
-  }];
-  return { agentRoot, legacyPlugin, plugins, external, define: { 'process.env.PI_DOCS_EMBED': JSON.stringify(docs) } };
 }

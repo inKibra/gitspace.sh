@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import {
   readRepositoryDiff,
   readRepositoryFile,
+  readRepositoryIdentity,
   readRepositoryStatus,
   readRepositoryTree,
   type InspectorRepositoryContext,
@@ -50,12 +51,85 @@ function fixture(): InspectorRepositoryContext & { root: string } {
   writeFileSync(join(repositoryPath, 'untracked.txt'), 'untracked\n');
   writeFileSync(join(root, 'outside-secret.txt'), 'secret that must not be followed\n');
   symlinkSync('../outside-secret.txt', join(repositoryPath, 'outside-link'));
-  return { root, repositoryPath, spaceId: 'space-a', generation: 7, baseRef: 'main' };
+  return { root, repositoryPath, spaceId: 'space-a', generation: 7 };
 }
+
+describe('Portable Inspector Git reads', () => {
+  it('reads ordinary repository views with no base ref or base checkout', async () => {
+    const context = fixture();
+    git(context.repositoryPath, 'branch', '-D', 'main');
+    const headCommit = git(context.repositoryPath, 'rev-parse', 'HEAD');
+
+    expect(await readRepositoryIdentity(context)).toEqual({ headCommit });
+    expect(await readRepositoryStatus({ ...context, mode: 'working' })).toContainEqual(expect.objectContaining({ path: 'file.txt', working: true }));
+    expect(await readRepositoryTree({ ...context, mode: 'current' })).toContainEqual(expect.objectContaining({ path: 'untracked.txt', status: 'untracked' }));
+    expect(await readRepositoryFile({ ...context, mode: 'staged', path: 'file.txt' })).toMatchObject({ content: 'staged\n', commitId: headCommit });
+    const diff = await readRepositoryDiff({ ...context, mode: 'working', path: 'file.txt' });
+    expect(diff).toMatchObject({ baseCommit: headCommit, headCommit });
+    expect(diff.patch).toContain('-staged\n+working\n');
+  });
+
+  it('ignores invalid base refs outside base mode and requires one explicitly in base mode', async () => {
+    const context = fixture();
+    const invalidBase = { ...context, baseRef: '--invalid base' };
+    const headCommit = git(context.repositoryPath, 'rev-parse', 'HEAD');
+
+    expect(await readRepositoryIdentity(invalidBase)).toEqual({ headCommit });
+    expect(await readRepositoryFile({ ...invalidBase, mode: 'current', path: 'file.txt' })).toMatchObject({ content: 'working\n', headCommit });
+    expect(await readRepositoryStatus({ ...invalidBase, mode: 'working' })).toContainEqual(expect.objectContaining({ path: 'file.txt', working: true }));
+    const staged = await readRepositoryDiff({ ...invalidBase, mode: 'staged', path: 'file.txt' });
+    expect(staged.patch).toContain('-head\n+staged\n');
+
+    await expect(readRepositoryStatus({ ...context, mode: 'base' })).rejects.toThrow('Base mode requires a base ref');
+    await expect(readRepositoryTree({ ...context, mode: 'base' })).rejects.toThrow('Base mode requires a base ref');
+    await expect(readRepositoryFile({ ...context, mode: 'base', path: 'file.txt' })).rejects.toThrow('Base mode requires a base ref');
+    await expect(readRepositoryDiff({ ...context, mode: 'base' })).rejects.toThrow('Base mode requires a base ref');
+    await expect(readRepositoryDiff({ ...invalidBase, mode: 'base' })).rejects.toThrow('Base ref is invalid');
+  });
+
+  it('compares a diverged immutable base commit locally after the base checkout is deleted', async () => {
+    const context = fixture();
+    const baseCommit = git(context.repositoryPath, 'rev-parse', 'main');
+    const baseBlob = git(context.repositoryPath, 'rev-parse', 'main:file.txt');
+    const baseCheckout = join(context.root, 'base-repository');
+    git(context.root, 'clone', '--no-local', '--single-branch', '--branch', 'main', '--', context.repositoryPath, baseCheckout);
+    writeFileSync(join(baseCheckout, 'file.txt'), 'advanced base\n');
+    git(baseCheckout, 'add', 'file.txt');
+    git(baseCheckout, 'commit', '-m', 'advance canonical base');
+    const baseRef = git(baseCheckout, 'rev-parse', 'HEAD');
+    git(context.repositoryPath, 'fetch', '--no-tags', '--', baseCheckout, 'refs/heads/main');
+    rmSync(baseCheckout, { recursive: true, force: true });
+    git(context.repositoryPath, 'branch', '-D', 'main');
+    const portable = { ...context, baseRef };
+    const refsBefore = git(context.repositoryPath, 'show-ref');
+    const statusBefore = git(context.repositoryPath, 'status', '--porcelain=v1');
+
+    expect(await readRepositoryTree({ ...portable, mode: 'base' })).toContainEqual(expect.objectContaining({ path: 'file.txt', blobId: baseBlob }));
+    expect(await readRepositoryFile({ ...portable, mode: 'base', path: 'file.txt' })).toMatchObject({ content: 'base\n', commitId: baseCommit });
+    expect(await readRepositoryStatus({ ...portable, mode: 'base' })).toContainEqual(expect.objectContaining({ path: 'file.txt', status: 'modified' }));
+    const diff = await readRepositoryDiff({ ...portable, mode: 'base', path: 'file.txt' });
+    expect(diff.baseCommit).toBe(baseCommit);
+    expect(diff.patch).toContain('-base\n+working\n');
+    expect(diff.files).toContainEqual(expect.objectContaining({ path: 'file.txt', additions: 1, deletions: 1 }));
+    expect(git(context.repositoryPath, 'show-ref')).toBe(refsBefore);
+    expect(git(context.repositoryPath, 'status', '--porcelain=v1')).toBe(statusBefore);
+    expect(git(context.repositoryPath, 'show', ':file.txt')).toBe('staged');
+    expect(await readRepositoryFile({ ...context, mode: 'current', path: 'file.txt' })).toMatchObject({ content: 'working\n' });
+  });
+
+  it('rejects missing revisions and unrelated histories rather than returning empty repository views', async () => {
+    const context = fixture();
+    await expect(readRepositoryDiff({ ...context, baseRef: 'missing-base', mode: 'base' })).rejects.toThrow('missing-base^{commit}');
+    const unrelatedCommit = git(context.repositoryPath, 'commit-tree', 'HEAD^{tree}', '-m', 'unrelated history');
+    await expect(readRepositoryDiff({ ...context, baseRef: unrelatedCommit, mode: 'base' })).rejects.toThrow('git merge-base');
+    git(context.repositoryPath, 'symbolic-ref', 'HEAD', 'refs/heads/missing-head');
+    await expect(readRepositoryStatus({ ...context, mode: 'working' })).rejects.toThrow('HEAD^{commit}');
+  });
+});
 
 describe('Inspector Git reads', () => {
   it('reads current, working, staged, and base identities without changing repository state', async () => {
-    const context = fixture();
+    const context = { ...fixture(), baseRef: 'main' };
     const before = git(context.repositoryPath, 'status', '--porcelain=v1');
     const base = await readRepositoryFile({ ...context, mode: 'base', path: 'file.txt' });
     const staged = await readRepositoryFile({ ...context, mode: 'staged', path: 'file.txt' });
@@ -73,7 +147,7 @@ describe('Inspector Git reads', () => {
   });
 
   it('returns mode-specific status, tree, and parseable patches including untracked files', async () => {
-    const context = fixture();
+    const context = { ...fixture(), baseRef: 'main' };
     const before = git(context.repositoryPath, 'status', '--porcelain=v1');
     const workingStatus = await readRepositoryStatus({ ...context, mode: 'working' });
     const stagedStatus = await readRepositoryStatus({ ...context, mode: 'staged' });

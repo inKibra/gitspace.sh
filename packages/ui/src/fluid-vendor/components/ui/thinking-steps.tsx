@@ -57,7 +57,7 @@ const TriggerRow = forwardRef<HTMLButtonElement, TriggerRowProps>(
 
     return (
       <div
-        className="relative w-fit"
+        className="relative min-w-0 w-fit max-w-full"
         onMouseEnter={() => setIsHovered(true)}
         onMouseLeave={() => setIsHovered(false)}
       >
@@ -75,7 +75,7 @@ const TriggerRow = forwardRef<HTMLButtonElement, TriggerRowProps>(
         <Collapsible.Trigger
           ref={ref}
           className={cn(
-            `relative z-10 flex items-center gap-2.5 ${shape.item} ${sizeClasses.px} ${
+            `relative z-10 flex min-w-0 max-w-full items-center gap-2.5 ${shape.item} ${sizeClasses.px} ${
               sizeClasses.variant === "compact" ? "py-1.5" : "py-2"
             } cursor-pointer outline-none select-none`,
             "focus-visible:ring-1 focus-visible:ring-[color:var(--focus-ring,#6B97FF)] focus-visible:ring-offset-0",
@@ -84,9 +84,9 @@ const TriggerRow = forwardRef<HTMLButtonElement, TriggerRowProps>(
           {...(props as React.ButtonHTMLAttributes<HTMLButtonElement>)}
         >
           {/* Label with dual-layer text (invisible bold layer reserves width) */}
-          <span className={cn("inline-grid text-left", sizeClasses.text)}>
+          <span className={cn("inline-grid min-w-0 text-left [overflow-wrap:anywhere]", sizeClasses.text)}>
             <span
-              className="col-start-1 row-start-1 invisible"
+              className="col-start-1 row-start-1 min-w-0 invisible"
               style={{ fontVariationSettings: fontWeights.semibold }}
               aria-hidden="true"
             >
@@ -94,7 +94,7 @@ const TriggerRow = forwardRef<HTMLButtonElement, TriggerRowProps>(
             </span>
             <span
               className={cn(
-                "col-start-1 row-start-1 transition-[color,font-variation-settings] duration-80",
+                "col-start-1 row-start-1 min-w-0 transition-[color,font-variation-settings] duration-80",
                 highlighted ? "text-foreground" : "text-muted-foreground"
               )}
               style={{
@@ -228,7 +228,7 @@ function CollapsePanel({ open, children }: CollapsePanelProps) {
               <div
                 ref={measureRef}
                 className={cn(
-                  "px-3 pb-3 pt-1 text-muted-foreground",
+                  "min-w-0 px-3 pb-3 pt-1 text-muted-foreground",
                   compactStep ? "text-[12px]" : "text-[13px]"
                 )}
               >
@@ -269,7 +269,7 @@ const ThinkingSteps = forwardRef<HTMLDivElement, ThinkingStepsProps>(
           if (open === undefined) setInternalOpen(next);
           onOpenChange?.(next);
         }}
-        className={cn("w-80 max-w-full", className)}
+        className={cn("min-w-0 w-80 max-w-full", className)}
         {...props}
       >
         <ThinkingStepsOpenContext.Provider value={isOpen}>
@@ -318,7 +318,7 @@ const ThinkingStepsContent = forwardRef<
     <CollapsePanel open={isOpen}>
       <div
         ref={ref}
-        className={cn("flex flex-col", className)}
+        className={cn("flex min-w-0 flex-col", className)}
         {...props}
       >
         {children}
@@ -391,7 +391,7 @@ function ThinkingStep({
     return (
       /* Outer: animates height to create space smoothly */
       <motion.div
-        className={cn("relative z-10 overflow-hidden", className)}
+        className={cn("relative z-10 min-w-0 overflow-hidden", className)}
         initial={{ height: 0 }}
         animate={{ height: stepHeight ?? 0 }}
         transition={spring.slow}
@@ -405,7 +405,7 @@ function ThinkingStep({
           transition={{ duration: 0.24, delay, ease: "easeOut" }}
         >
           {/* Content row — this is the proximity hover target */}
-          <div className={cn("flex gap-2.5 px-2 py-1.5", shape.item)}>
+          <div className={cn("flex min-w-0 gap-2.5 px-2 py-1.5", shape.item)}>
             {/* Icon column with continuous connector line */}
             <div className="flex flex-col items-center shrink-0 w-[14px]">
               <div className="pt-0.5">
@@ -428,7 +428,7 @@ function ThinkingStep({
             </div>
 
             {/* Text content */}
-            <div className="flex-1 flex flex-col gap-1 min-w-0">
+            <div className="flex-1 flex flex-col gap-1 min-w-0 [overflow-wrap:anywhere]">
               <span
                 className={cn(
                   sizeClasses.text,
@@ -477,13 +477,13 @@ function ThinkingStepDetails({
     <Collapsible.Root
       open={open}
       onOpenChange={setOpen}
-      className={cn("mt-1 -ml-3", className)}
+      className={cn("min-w-0 mt-1 -ml-3", className)}
     >
       <TriggerRow open={open} className="py-1 px-3 gap-1.5">
         {summary}
       </TriggerRow>
       <CollapsePanel open={open}>
-        <div className="flex flex-col gap-0.5 pt-0.5">
+        <div className="flex min-w-0 flex-col gap-0.5 pt-0.5">
           {details?.map((item, i) => (
             <span
               key={i}
@@ -513,7 +513,7 @@ const ThinkingStepSources = forwardRef<HTMLDivElement, ThinkingStepSourcesProps>
     return (
       <div
         ref={ref}
-        className={cn("flex flex-wrap gap-1.5 mt-1", className)}
+        className={cn("flex min-w-0 flex-wrap gap-1.5 mt-1", className)}
         {...props}
       >
         {children}
@@ -535,6 +535,7 @@ interface ThinkingStepSourceProps {
 function ThinkingStepSource({ color = "gray", delay = 0, children, className }: ThinkingStepSourceProps) {
   return (
     <motion.span
+      className="min-w-0 max-w-full"
       initial={{ opacity: 0, scale: 0.85, filter: "blur(4px)" }}
       animate={{ opacity: 1, scale: 1, filter: "blur(0px)" }}
       transition={{
@@ -543,7 +544,7 @@ function ThinkingStepSource({ color = "gray", delay = 0, children, className }: 
         filter: { duration: 0.12, delay },
       }}
     >
-      <Badge variant="solid" size="sm" color={color} className={className}>
+      <Badge variant="solid" size="sm" color={color} className={cn("h-auto min-h-5 max-w-full whitespace-normal py-0.5 [overflow-wrap:anywhere] [&>span]:min-w-0", className)}>
         {children}
       </Badge>
     </motion.span>
@@ -567,7 +568,7 @@ function ThinkingStepImage({ src, alt = "", caption, delay = 0, className }: Thi
   const compact = useSize().variant === "compact";
   return (
     <motion.div
-      className={cn("mt-1.5", className)}
+      className={cn("min-w-0 mt-1.5 [overflow-wrap:anywhere]", className)}
       initial={{ opacity: 0, filter: "blur(4px)" }}
       animate={{ opacity: 1, filter: "blur(0px)" }}
       transition={{

@@ -20,7 +20,7 @@ export function sha256(bytes: Uint8Array): `sha256:${string}` {
   return `sha256:${new Bun.CryptoHasher('sha256').update(bytes).digest('hex')}`;
 }
 
-/** Exact dependency and patch envelope compiled into an immutable OMP release. */
+/** Exact upstream dependency and patch inputs for an immutable OMP release. */
 export async function readOmpReleaseMetadata(root: string): Promise<OmpReleaseMetadata> {
   const packageRoot = join(root, 'packages/account-omp');
   const manifest = JSON.parse(await readFile(join(packageRoot, 'package.json'), 'utf8')) as PackageManifest;

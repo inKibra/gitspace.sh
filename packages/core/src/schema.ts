@@ -1,4 +1,4 @@
-import type { SessionActivity } from '@gitspace/protocol';
+import type { AgentHealthState, SessionActivity } from '@gitspace/protocol-agent';
 import { sql } from 'drizzle-orm';
 import { check, index, integer, primaryKey, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core';
 
@@ -117,7 +117,7 @@ export const agentSessions = sqliteTable('agent_sessions', {
   lastEventOffset: integer('last_event_offset').notNull().default(0),
   resumePending: integer('resume_pending', { mode: 'boolean' }).notNull().default(false),
   activity: text('activity_json', { mode: 'json' }).notNull().$type<SessionActivity>().default({ active: false, reasons: [] }),
-  errorMessage: text('error_message'),
+  health: text('health_json', { mode: 'json' }).notNull().$type<AgentHealthState>().default({ revision: 0, issues: {} }),
   ...timestamps,
 }, (table) => [
   uniqueIndex('agent_sessions_omp_session_unique').on(table.ompSessionId),
@@ -128,6 +128,8 @@ export const agentSessions = sqliteTable('agent_sessions', {
 
 export const factEvents = sqliteTable('fact_events', {
   offset: integer('offset').primaryKey({ autoIncrement: true }),
+  eventId: text('event_id').notNull().$defaultFn(() => crypto.randomUUID()),
+  cloudSynced: integer('cloud_synced', { mode: 'boolean' }).notNull().default(false),
   projectId: text('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
   scope: text('scope', { enum: ['machine', 'project', 'workspace', 'session', 'artifact', 'code'] }).notNull(),
   entity: text('entity').notNull(),
@@ -138,6 +140,7 @@ export const factEvents = sqliteTable('fact_events', {
   createdAt: text('created_at').notNull(),
 }, (table) => [
   index('fact_events_project_offset_idx').on(table.projectId, table.offset),
+  uniqueIndex('fact_events_event_id_unique').on(table.eventId),
   check('fact_events_scope_check', sql`${table.scope} IN ('machine', 'project', 'workspace', 'session', 'artifact', 'code')`),
   check('fact_events_operation_check', sql`${table.operation} IN ('created', 'updated', 'removed', 'append', 'invalidate', 'code-version')`),
 ]);

@@ -52,6 +52,14 @@ The account release system manages runtime changes. There is no separate local u
 - Keep review threads, journals, evidence, and change guides with the work.
 - Manage services, events, crons, secrets, plugins, and releases from their account or workspace surfaces.
 
+The transcript groups updates for the same background job, process run, or subagent into one card. Expand it to read the original calls and complete output inline; older history loads in pages. Separate launches and process restarts keep separate cards, even when a name or job ID is reused.
+
+Grouping uses recorded execution identities, not matching command text. Calls with unrelated output or insufficient identity stay visible rather than being folded into the wrong history.
+
+After a runtime handoff, recovery ends when the resumed agent starts executing on an available, owned runtime. Its task can keep running or waiting without locking message input for the rest of the turn.
+
+Session history loads only when you open it. The explorer reads up to 200 entries before and after the selected entry along its branch, with a 256 KiB page limit and a fixed traversal budget. Older and newer windows replace the current window; branch choices load separately. Filtering searches only the loaded prompts. Selecting an entry inspects its neighborhood without changing the running agent. **Resume from here** changes the agent's branch. Closing history releases the loaded window; the full conversation remains saved.
+
 Cloud machines are temporary. In **Settings > Machines**, **Stop** saves supported workspace state before stopping the machine. If saving fails, the machine stays online. **Start** runs a fresh machine environment and restores saved workspaces, not the old machine disk.
 
 Workspace checkpoints save the Git branch, commits, staged and unstaged tracked changes, non-ignored untracked files, agent conversation, and GitSpace artifacts. They do not save installed packages, machine-local configuration, ignored files, or arbitrary files elsewhere on the machine, including its home directory. Ask a normal workspace agent to install tools as needed; those changes are temporary.
@@ -76,6 +84,21 @@ bun run typecheck:packages
 
 `bun run dev` starts the self-development environment. Release builds use the pinned toolchain and native platform workflow in `.github/workflows/publish-distribution.yml`.
 
+### Choose the deployment authority
+
+Use the product's deployment entrypoints, not a new upload or activation script.
+
+| Change | Supported path |
+|---|---|
+| A user's GitSpace account, such as `bradleat.gitspace.sh` | In the GitSpace source workspace's menu, choose **Launch GitSpace from here**. This calls `deployment.launch({ workspaceId, targets })`. `DeploymentLauncher` owns install, build, upload, staging, launch, and project progress events. The release follower and runtime hosts own activation. |
+| Platform/operator-managed releases | Use the existing platform/operator deployment workflow for that component. Tenant Worker deploys and reverts use the authenticated `/__platform/operator/tenants/:tenant/deploy` and `/revert` routes. Native distributions and cloud images use their existing GitHub publication and rollout workflows. |
+
+The account targets are `worker` (the tenant Worker), `machine`, `omp`, and `frontend`. The shared operator/control Worker is not the account's `worker` target. Treat changes to shared platform services as a separate platform deployment.
+
+Account deployment progress comes from `DeploymentLauncher` through `deployment.status` and project `deployment` events. The client uses these for its Source indicator and launch progress sheet. Direct calls to builders, blob storage, or desired-release APIs bypass that progress flow.
+
+Do not manually write runtime-selection files or call `/__environment/launch` as an alternate deployment procedure. Those are implementation details of the product's replacement path. If the supported path fails, diagnose that failure and fix the path rather than bypassing it. **Back to stable** uses the account's `deployment.revert` operation.
+
 Cloud container images build on GitHub through `.github/workflows/publish-container.yml`. Push a `container-*` tag to build and publish that commit.
 
 - Set the repository variable `CLOUDFLARE_ACCOUNT_ID`.
@@ -90,6 +113,14 @@ bun scripts/test-isolated.ts packages/account-machine/test packages/core/test
 ```
 
 Worker packages use their own Vitest/Cloudflare test commands.
+
+### Artifact sync diagnostics
+
+The machine emits `artifact_sync_attempt` and `artifact_sync_request` JSON records to its logs. Find a failed attempt by `sessionId`, then use its `attemptId` to follow the control and blob requests. Each `requestId` is the signed request's nonce.
+
+For these requests, the account Worker emits `artifact_sync_worker_request` records with the same attempt and request IDs. Its final record describes response construction, not delivery to the machine. The machine records failures before headers, while reading the response body, or during HTTP, application, and integrity checks. Records include UTC start time, elapsed milliseconds, and HTTP status and Cloudflare Ray ID when available.
+
+Both machine and Worker releases must include these diagnostics for cross-side correlation. They do not log request payloads, credentials, artifact paths or contents, or raw exception messages. They do not add retries or change sync outcomes.
 
 ## Documentation and license
 

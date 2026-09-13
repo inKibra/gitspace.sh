@@ -29,6 +29,17 @@ export class GitSpaceSandbox extends CloudflareSandbox<Env> {
     return this.record(input, 'offline', previous?.rpcEndpoint ?? null, 'Managed Cloudflare Sandbox is starting or unavailable.', previous?.desiredState === 'online' ? 'online' : 'offline');
   }
 
+  async rpc(request: Request): Promise<Response> {
+    const machine = await this.ctx.storage.get<SandboxMachineRecord>(MACHINE_KEY);
+    const container = this.ctx.container;
+    if (machine?.desiredState !== 'online' || !container?.running) {
+      return Response.json({ error: { code: 'MACHINE_OFFLINE', message: 'The cloud machine is not running. Resume it explicitly before sending RPC.' } }, { status: 503 });
+    }
+    // SDK containerFetch starts stopped containers (and can retry). Inspection
+    // must remain passive even if a holder stops after the fleet snapshot.
+    return container.getTcpPort(8081).fetch(request);
+  }
+
   async prepareReplacement(): Promise<Response> {
     const input = await this.requireEnrollment();
     const token = input.environment.GITSPACE_CONTROL_TOKEN;
@@ -140,16 +151,19 @@ export default {
         const stub = await sandbox(env, userId, rpc[1]!);
         const headers = new Headers(request.headers);
         headers.delete('host');
-        return stub.containerFetch('http://localhost/rpc', {
+        return stub.rpc(new Request('http://localhost/rpc', {
           method: 'POST',
           headers,
-          body: await request.arrayBuffer(),
-        }, 8081);
+          body: request.body,
+          signal: request.signal,
+          redirect: 'manual',
+        }));
       }
       if (url.pathname === '/v1/sandboxes' && request.method === 'POST') {
         const body = await request.json() as Partial<ManagedEnrollment>;
-        if (typeof body.userId !== 'string' || typeof body.machineId !== 'string' || !body.environment || typeof body.environment !== 'object' || Array.isArray(body.environment)) throw new Error('Sandbox request is invalid');
-        const machine = await (await sandbox(env, body.userId, body.machineId)).enrollMachine({ userId: body.userId, machineId: body.machineId, environment: body.environment });
+        const userId = request.headers.get('x-gitspace-user-id');
+        if (!userId || (body.userId !== undefined && body.userId !== userId) || typeof body.machineId !== 'string' || !body.environment || typeof body.environment !== 'object' || Array.isArray(body.environment)) throw new Error('Sandbox request does not match its provider namespace');
+        const machine = await (await sandbox(env, userId, body.machineId)).enrollMachine({ userId, machineId: body.machineId, environment: body.environment });
         return Response.json({ status: 'ok', machine });
       }
       if (lifecycle && request.method === 'POST') {

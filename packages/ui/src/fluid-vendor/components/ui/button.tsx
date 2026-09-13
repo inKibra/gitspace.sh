@@ -191,7 +191,7 @@ const Button = forwardRef<HTMLButtonElement, ButtonProps>(
             bgClass
           )}
         />
-        <span className="relative inline-flex items-center justify-center gap-[inherit]">
+        <span className="relative inline-flex min-w-0 items-center justify-center gap-[inherit]">
           {loading ? (
             <>
               <span className="flex items-center justify-center gap-[inherit] opacity-0">
@@ -241,7 +241,7 @@ const Button = forwardRef<HTMLButtonElement, ButtonProps>(
                   The button's height is fixed (h-*), so this doesn't change
                   layout — it just centers the cap-to-baseline box optically. */}
               <span className={cn(
-                "inline-flex items-center justify-center gap-[inherit] [text-box:trim-both_cap_alphabetic] [&_svg]:shrink-0 [&_svg]:transition-[stroke-width] [&_svg]:duration-80 group-hover:[&_svg]:stroke-[2]",
+                "inline-flex min-w-0 items-center justify-center gap-[inherit] [text-box:trim-both_cap_alphabetic] [&_svg]:shrink-0 [&_svg]:transition-[stroke-width] [&_svg]:duration-80 group-hover:[&_svg]:stroke-[2]",
                 isCompact ? "[&_svg]:size-3.5" : "[&_svg]:size-4"
               )}>{label}</span>
               {TrailingIcon && (

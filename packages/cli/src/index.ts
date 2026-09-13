@@ -40,7 +40,7 @@ interface EnrolledPairing {
   handle: string;
   accountUrl: string;
   relayUrl: string;
-  operatorUrl: string;
+  apiUrl: string;
   rootPublicKey: string;
   machineId: string;
   grant: SignedCredentialAuthorityGrant;
@@ -102,7 +102,7 @@ async function startMachine(): Promise<void> {
   const selectionPath = join(CONFIG_ROOT, 'runtime-selection.json');
   if (!existsSync(selectionPath)) {
     console.log('Downloading the verified machine runtime...');
-    await installRuntime(CONFIG_ROOT, config.apiUrl);
+    await installRuntime(CONFIG_ROOT, 'https://api.gitspace.sh');
   }
   const { path: runtimeRoot } = JSON.parse(await readFile(selectionPath, 'utf8')) as { path: string };
   const bun = join(runtimeRoot, 'bin', 'bun');
@@ -198,7 +198,7 @@ machine.command('setup').description('Link using the pairing command from your a
     }
     const privateKey = credentialProtocolBase64.decode(pending.signingPrivateKey);
     const pairingRequest = async <T>(action: 'claim' | 'poll', payload: object): Promise<T> => {
-      const url = new URL(`/v1/machine-pairings/${action}`, token.operatorUrl);
+      const url = new URL(`/v1/machine-pairings/${action}`, token.apiUrl);
       const body = new TextEncoder().encode(JSON.stringify(payload));
       const response = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', 'x-gitspace-device': signRpcRequest({ deviceId: token.pairingId, signingPrivateKey: privateKey, method: 'POST', path: url.pathname, body }) }, body, signal: AbortSignal.timeout(30_000) });
       const result = await response.json() as { status: string; value: T; error?: { message?: string } };
@@ -211,7 +211,7 @@ machine.command('setup').description('Link using the pairing command from your a
       const result = await pairingRequest<EnrolledPairing | { state: 'pending' }>('poll', { userId: token.userId, pairingId: token.pairingId });
       if (result.state === 'enrolled') {
         if (result.machineId !== pending.machineId || result.userId !== token.userId || result.grant.grant.signingPublicKey !== credentialProtocolBase64.encode(ed25519.getPublicKey(privateKey))) throw new Error('Pairing response does not match this machine');
-        await savePrivateJson(CONFIG_PATH, { version: 3, apiUrl: result.operatorUrl, accountUrl: result.accountUrl, handle: result.handle, userId: result.userId, relayUrl: result.relayUrl, rootPublicKey: result.rootPublicKey, brokerUrl: result.brokerUrl, brokerToken: result.brokerToken, machine: { id: pending.machineId, label: pending.label, signingPrivateKey: pending.signingPrivateKey, exchangePrivateKey: pending.exchangePrivateKey, grant: result.grant } } satisfies MachineConfig);
+        await savePrivateJson(CONFIG_PATH, { version: 3, apiUrl: result.apiUrl, accountUrl: result.accountUrl, handle: result.handle, userId: result.userId, relayUrl: result.relayUrl, rootPublicKey: result.rootPublicKey, brokerUrl: result.brokerUrl, brokerToken: result.brokerToken, machine: { id: pending.machineId, label: pending.label, signingPrivateKey: pending.signingPrivateKey, exchangePrivateKey: pending.exchangePrivateKey, grant: result.grant } } satisfies MachineConfig);
         await rm(PAIRING_PATH, { force: true });
         console.log(`Linked ${pending.label} to ${result.handle}. No account recovery key was stored on this machine.`);
         await startMachine();
@@ -226,9 +226,17 @@ machine.command('stop').description('Stop this machine runtime').action(stopMach
 machine.command('status').description('Show local runtime and relay status').action(async () => {
   const config = await requireConfig();
   const pid = await machinePid();
-  let relay = 'unreachable';
-  try { const response = await fetch(new URL('/health', config.relayUrl), { signal: AbortSignal.timeout(5_000) }); relay = response.ok ? 'online' : `HTTP ${response.status}`; } catch { /* Report unreachable below. */ }
-  console.log(`Machine: ${config.machine.label}\nDaemon: ${pid && processIsRunning(pid) ? `running (pid ${pid})` : 'stopped'}\nRelay: ${relay}\nAccount: ${config.accountUrl}\nLog: ${LOG_PATH}`);
+  const health = async (url: URL): Promise<string> => {
+    try {
+      const response = await fetch(url, { signal: AbortSignal.timeout(5_000) });
+      return response.ok ? 'reachable' : `HTTP ${response.status}`;
+    } catch { return 'unreachable'; }
+  };
+  const [relay, tunnel] = await Promise.all([
+    health(new URL('/health', config.relayUrl)),
+    health(new URL(`/tunnel/${encodeURIComponent(config.machine.id)}/health`, config.relayUrl)),
+  ]);
+  console.log(`Machine: ${config.machine.label}\nDaemon: ${pid && processIsRunning(pid) ? `running (pid ${pid})` : 'stopped'}\nRelay service: ${relay}\nMachine tunnel: ${tunnel}\nAccount: ${config.accountUrl}\nLog: ${LOG_PATH}`);
 });
 machine.command('remove').description('Stop and revoke this computer; retain its local workspace files').action(async () => {
   const config = await requireConfig();

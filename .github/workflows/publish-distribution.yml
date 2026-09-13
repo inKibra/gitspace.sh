@@ -28,27 +28,7 @@ permissions:
   contents: read
 
 jobs:
-  runtime-locks:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: '1.4.0'
-      - name: Install the source dependency graph
-        run: bun install --frozen-lockfile
-      - name: Resolve one common side-runtime lock set
-        run: bun packages/deployment/src/release.ts locks --out "$RUNNER_TEMP/runtime-locks"
-      - name: Retain the common runtime locks
-        uses: actions/upload-artifact@v4
-        with:
-          name: gitspace-runtime-locks
-          path: ${{ runner.temp }}/runtime-locks/
-          if-no-files-found: error
-          retention-days: 90
-
   build:
-    needs: runtime-locks
     strategy:
       fail-fast: false
       matrix:
@@ -79,10 +59,6 @@ jobs:
         run: rustup toolchain install 1.97.1 --profile minimal
       - name: Install the source dependency graph
         run: bun install --frozen-lockfile
-      - uses: actions/download-artifact@v4
-        with:
-          name: gitspace-runtime-locks
-          path: ${{ runner.temp }}/runtime-locks
       - name: Build this native client and complete runtime
         env:
           GITSPACE_RELEASE: ${{ inputs.release || github.ref_name }}
@@ -91,7 +67,6 @@ jobs:
           bun packages/deployment/src/release.ts build \
             --release "$GITSPACE_RELEASE" \
             --platform "$GITSPACE_BUILD_PLATFORM" \
-            --runtime-locks "$RUNNER_TEMP/runtime-locks" \
             --out "$RUNNER_TEMP/distribution"
       - name: Run the standalone client with an empty HOME and no Bun on PATH
         run: |

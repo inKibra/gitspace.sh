@@ -32,6 +32,7 @@ function fixture() {
     manage: async (method) => { operations.push(method); },
     instructionsChanged: async () => undefined,
     refreshArtifacts: async () => undefined,
+    environment: async (method) => { operations.push(`environment.${method}`); },
   };
   return { authority, controls, operations, namespace: createSpaceEvalNamespace(authority, 'project-a', 'workspace-a', controls) };
 }
@@ -82,6 +83,23 @@ describe('Space eval SDK', () => {
     for (const method of ['close', 'archive']) {
       await expect(namespace.call(method, { expectedGeneration: 3, expectedRevision: 1 })).rejects.toThrow('own workspace');
     }
+    expect(operations).toEqual([]);
+  });
+
+  it('denies agent execution approval, destructive retirement, and claim recovery before side effects', async () => {
+    const { namespace, operations } = fixture();
+    for (const method of ['environment.approve', 'environment.revokeApproval', 'environment.recoverRun']) {
+      await expect(namespace.call(method, {})).rejects.toThrow('human browser');
+    }
+    await expect(namespace.call('environment.runPhase', { runId: 'destroy-run', phase: 'cloud/destroy', rerun: true })).rejects.toMatchObject({ code: 'PermissionDenied' });
+    await expect(namespace.call('environment.runPhase', { runId: 'prepare-run', phase: 'machine/prepare', retire: true })).rejects.toThrow();
+    expect(operations).toEqual([]);
+  });
+
+  it('fences environment access to the current project without changing workspace placement', async () => {
+    const { namespace, operations } = fixture();
+    await expect(namespace.call('environment.runPhase', { workspaceId: 'foreign', runId: 'foreign-run', phase: 'cloud/provision' })).rejects.toThrow('does not exist');
+    await expect(namespace.call('environment.get', { projectId: 'foreign' })).rejects.toThrow('current project');
     expect(operations).toEqual([]);
   });
 

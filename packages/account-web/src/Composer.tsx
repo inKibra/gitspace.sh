@@ -5,6 +5,7 @@ import { useMemo, useState, type ReactNode } from 'react';
 import { glyph } from './glyph.js';
 import type { AgentScopeView, GitSpaceShellProps, ProviderAuthView, SessionControlsProps } from './GitSpaceShell.js';
 import { SessionTreeExplorer } from './SessionTreeExplorer.js';
+import { navigateProductUrl, setProductRoute } from './routes.js';
 
 export type SendBehavior = 'steer' | 'followUp';
 
@@ -25,12 +26,14 @@ const STEP_ICON: Record<'pending' | 'in_progress' | 'completed' | 'abandoned' | 
 
 /** The agent's plan, rendered with the registry's reasoning-steps component above the composer. */
 function PlanSteps({ controls }: { controls: SessionControlsProps }) {
+  const shape = useShape();
+  const [open, setOpen] = useState(false);
   const tasks = controls.value.todos.flatMap((phase) => phase.tasks.map((task) => ({ phase: phase.name, ...task })));
   if (!tasks.length) return null;
   const completed = tasks.filter((task) => task.status === 'completed').length;
-  return <ThinkingSteps defaultOpen={false}>
-    <ThinkingStepsHeader>Plan · {completed}/{tasks.length}</ThinkingStepsHeader>
-    <ThinkingStepsContent>
+  return <ThinkingSteps open={open} onOpenChange={setOpen} className={`${shape.container} self-start bg-surface-3 shadow-surface-3 ${open ? 'w-full p-2' : 'w-fit'}`}>
+    <ThinkingStepsHeader className="min-h-10">Plan · {completed}/{tasks.length}</ThinkingStepsHeader>
+    <ThinkingStepsContent className="max-h-[min(calc(var(--app-viewport-height,100dvh)*0.4),24rem)] overflow-y-auto overscroll-contain">
       {tasks.map((task, index) => <ThinkingStep
         key={`${task.phase}:${task.content}`}
         label={task.content}
@@ -60,7 +63,7 @@ function ProviderNotice({ provider }: { provider: ProviderAuthView }) {
   const shape = useShape();
   return <div role="status" className={`${shape.container} flex items-center justify-between gap-3 bg-surface-3 px-3 py-2 text-caption shadow-surface-1`}>
     <span className="min-w-0 truncate text-foreground">{provider.name} isn’t connected on this machine</span>
-    <Button variant="tertiary" size="compact" asChild><a href="/settings?section=omp-providers">Connect</a></Button>
+    <Button variant="tertiary" size="compact" asChild><a href="/settings?section=omp-providers" onClick={(event) => { if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return; event.preventDefault(); const url = setProductRoute(new URL(window.location.href), 'settings'); url.searchParams.set('section', 'omp-providers'); navigateProductUrl(url); }}>Connect</a></Button>
   </div>;
 }
 
@@ -165,9 +168,9 @@ export function Composer({ workspace, controls, providers, skills = [], running,
   const streaming = running;
   const selectedProvider = controls?.value.provider ? providers?.find((provider) => provider.id === controls.value.provider) : undefined;
 
-  return <div className="mx-auto flex w-full max-w-xl flex-col gap-2">
+  return <div className="pointer-events-none mx-auto flex w-full max-w-xl flex-col gap-2 [&>*]:pointer-events-auto">
     {controls ? <PlanSteps controls={controls} /> : null}
-    {controls && showHistory ? <SessionTreeExplorer history={controls.value.history} tree={controls.value.tree} onNavigate={(entryId) => void controls.onNavigateTree(entryId)} onClose={() => setShowHistory(false)} /> : null}
+    {controls?.onReadHistory && showHistory ? <SessionTreeExplorer key={controls.value.sessionId} historyAnchorId={controls.value.historyAnchorId} onReadHistory={controls.onReadHistory} onNavigate={controls.onNavigateTree} onClose={() => setShowHistory(false)} /> : null}
     {message.startsWith('/') && commands.length ? <CommandPalette draft={message} commands={commands} onPick={(command) => { setMessage(''); command.run(); }} /> : null}
     {selectedProvider && !selectedProvider.hasAuth ? <ProviderNotice provider={selectedProvider} /> : null}
     <InputMessage
@@ -211,7 +214,7 @@ export function Composer({ workspace, controls, providers, skills = [], running,
             <MenuItem index={2} icon={icons.shield} label={`Approval: ${{ 'always-ask': 'Always ask', write: 'Ask for writes', yolo: 'Auto-approve' }[controls.value.approvalMode]}`} onSelect={() => { const order: SessionControlView['approvalMode'][] = ['always-ask', 'write', 'yolo']; void controls.onSetApproval(order[(order.indexOf(controls.value.approvalMode) + 1) % order.length]); }} closeOnClick={false} />
             {workspace.kind === 'workspace' && workspace.phase === 'code' ? <MenuItem index={3} icon={icons.rocket} label="Goal mode" checked={!!controls.value.goal} onSelect={() => void controls.onSetGoal(!controls.value.goal)} /> : null}
             <MenuItem index={4} icon={icons['rotate-ccw']} label="Compact context" onSelect={() => void controls.onCompact()} />
-            <MenuItem index={5} icon={icons.clock} label="Session history" onSelect={() => setShowHistory((value) => !value)} />
+            <MenuItem index={5} icon={icons.clock} label="Session history" disabled={!controls.onReadHistory} onSelect={() => setShowHistory((value) => !value)} />
             <MenuItem index={6} icon={icons.brain} label={`Thinking: ${controls.value.thinking ?? 'auto'}`} onSelect={() => { const next = thinkingLevels[(thinkingLevels.indexOf(controls.value.thinking ?? 'auto') + 1) % thinkingLevels.length]; void controls.onSetThinking(next === 'auto' ? null : next); }} closeOnClick={false} className="md:hidden" />
           </DropdownContent>
         </DropdownMenu>

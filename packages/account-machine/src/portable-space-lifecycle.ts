@@ -1,14 +1,17 @@
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, relative, resolve, sep } from 'node:path';
 import {
-  decryptArtifactBytes,
-  encryptArtifactBytes,
+  CHECKPOINT_CHUNK_BYTES,
+  CHUNKED_CHECKPOINT_VERSION,
+  chunkedCheckpointManifestSchema,
   spaceArtifactManifestKey,
   spaceCheckpointManifestKey,
-  spaceCheckpointManifestSchema,
+  parseWorkspaceCheckpoint,
   spaceOmpCheckpointKey,
   type SpaceCheckpointManifest,
-} from '@gitspace/protocol';
+  WorkspaceDomainError,
+} from '@gitspace/protocol-workspace';
+import { decryptArtifactBytes, encryptArtifactBytes } from '@gitspace/protocol';
 import { createGitIntermediateCheckpoint, restoreGitIntermediateCheckpoint } from './git-checkpoint.js';
 import type { WalgitProjectBinding } from './walgit-supervisor.js';
 
@@ -54,13 +57,44 @@ export class EncryptedCheckpointBlobStore implements CheckpointBlobStore {
   }
 
   async put(key: string, bytes: Uint8Array): Promise<`sha256:${string}`> {
-    const sealed = await encryptArtifactBytes(bytes, this.key);
-    return this.inner.put(key, sealed);
+    if (bytes.byteLength <= CHECKPOINT_CHUNK_BYTES) {
+      return this.inner.put(key, await encryptArtifactBytes(bytes, this.key));
+    }
+    const chunks: Array<{ hash: `sha256:${string}`; size: number }> = [];
+    for (let offset = 0; offset < bytes.byteLength; offset += CHECKPOINT_CHUNK_BYTES) {
+      const chunk = bytes.subarray(offset, offset + CHECKPOINT_CHUNK_BYTES);
+      const sealed = await encryptArtifactBytes(chunk, this.key);
+      const hash = hashBytes(sealed);
+      const storedHash = await this.inner.put(`${key}.chunks/${hash.slice(7)}`, sealed);
+      if (storedHash !== hash) throw new Error(`Checkpoint chunk for ${key} failed upload integrity verification`);
+      chunks.push({ hash, size: chunk.byteLength });
+    }
+    const inventory = new TextEncoder().encode(JSON.stringify({ version: 1, size: bytes.byteLength, chunks }));
+    const sealed = await encryptArtifactBytes(inventory, this.key);
+    const envelope = new Uint8Array(1 + sealed.byteLength);
+    envelope[0] = CHUNKED_CHECKPOINT_VERSION;
+    envelope.set(sealed, 1);
+    // Publish last: the authenticated inventory must never reference an incomplete upload.
+    return this.inner.put(key, envelope);
   }
 
   async get(key: string, expectedHash?: string): Promise<Uint8Array | null> {
     const sealed = await this.inner.get(key, expectedHash);
-    return sealed ? decryptArtifactBytes(sealed, this.key) : null;
+    if (!sealed) return null;
+    if (sealed[0] !== CHUNKED_CHECKPOINT_VERSION) return decryptArtifactBytes(sealed, this.key);
+    const inventory = await decryptArtifactBytes(sealed.subarray(1), this.key);
+    const manifest = chunkedCheckpointManifestSchema.parse(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(inventory)));
+    const bytes = new Uint8Array(manifest.size);
+    let offset = 0;
+    for (const chunk of manifest.chunks) {
+      const chunkKey = `${key}.chunks/${chunk.hash.slice(7)}`;
+      const stored = await requiredBlob(this.inner, chunkKey, chunk.hash);
+      const plaintext = await decryptArtifactBytes(stored, this.key);
+      if (plaintext.byteLength !== chunk.size) throw new Error(`Checkpoint chunk ${chunkKey} has an unexpected size`);
+      bytes.set(plaintext, offset);
+      offset += plaintext.byteLength;
+    }
+    return bytes;
   }
 }
 
@@ -136,8 +170,8 @@ export class PortableSpaceLifecycle {
     const operation = await this.authority.beginClose(identity);
     let quiesced = false;
     try {
-      await runtime.quiesce();
       quiesced = true;
+      await runtime.quiesce();
       const repository = await createGitIntermediateCheckpoint({
         repositoryPath: space.repositoryPath,
         spaceId: space.spaceId,
@@ -152,7 +186,7 @@ export class PortableSpaceLifecycle {
       );
       const artifactManifestKey = spaceArtifactManifestKey(space.projectId, space.spaceId, operation.revision, artifacts.generation);
       const artifactManifestHash = await this.blobs.put(artifactManifestKey, artifacts.manifest);
-      const manifest = spaceCheckpointManifestSchema.parse({
+      const manifest = parseWorkspaceCheckpoint({
         version: 1,
         projectId: space.projectId,
         spaceId: space.spaceId,
@@ -185,9 +219,14 @@ export class PortableSpaceLifecycle {
       });
       return manifest;
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      await this.authority.abortClose({ ...identity, revision: operation.revision, message });
-      if (quiesced) await runtime.resumeAfterFailedClose();
+      const failures: unknown[] = [error];
+      try { await this.authority.abortClose({ ...identity, revision: operation.revision, message: error instanceof Error ? error.message : String(error) }); }
+      catch (abortError) { failures.push(abortError); }
+      if (quiesced) {
+        try { await runtime.resumeAfterFailedClose(); }
+        catch (resumeError) { failures.push(resumeError); }
+      }
+      if (failures.length > 1) throw new AggregateError(failures, 'Space checkpoint and rollback failed');
       throw error;
     }
   }
@@ -198,10 +237,7 @@ export class PortableSpaceLifecycle {
     try {
       onClaimed?.();
       const manifestBytes = await requiredBlob(this.blobs, operation.manifestKey, operation.manifestHash);
-      const manifest = spaceCheckpointManifestSchema.parse(JSON.parse(new TextDecoder().decode(manifestBytes)));
-      if (manifest.projectId !== space.projectId || manifest.spaceId !== space.spaceId || manifest.revision !== operation.revision) {
-        throw new Error('Checkpoint manifest does not match the requested space revision');
-      }
+      const manifest = parseWorkspaceCheckpoint(JSON.parse(new TextDecoder().decode(manifestBytes)), { projectId: space.projectId, spaceId: space.spaceId, revision: operation.revision });
       await runtime.prepareEmptyRepository();
       await this.gitRemote.fetchCheckpoint({ binding: space.binding, repositoryPath: space.repositoryPath, checkpointRef: manifest.repository.checkpointRef });
       await restoreGitIntermediateCheckpoint({
@@ -228,11 +264,14 @@ export class PortableSpaceLifecycle {
       await this.authority.commitOpen({ ...identity, revision: operation.revision });
       return manifest;
     } catch (error) {
-      await this.authority.failOpen({
-        ...identity,
-        revision: operation.revision,
-        message: error instanceof Error ? error.message : String(error),
-      });
+      try {
+        await this.authority.failOpen({
+          ...identity, revision: operation.revision,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      } catch (rollbackError) {
+        throw new AggregateError([error, rollbackError], 'Space restore and rollback failed');
+      }
       throw error;
     }
   }
@@ -240,7 +279,7 @@ export class PortableSpaceLifecycle {
 
 async function requiredBlob(store: CheckpointBlobStore, key: string, expectedHash?: string): Promise<Uint8Array> {
   const value = await store.get(key, expectedHash);
-  if (!value) throw new Error(`Checkpoint object ${key} is missing`);
+  if (!value) throw new WorkspaceDomainError({ domain: 'workspace', code: 'WORKSPACE_CHECKPOINT_MISSING', message: `Checkpoint object ${key} is missing`, context: { key } });
   return value;
 }
 

@@ -119,8 +119,9 @@ interface InputMessageProps
   value: string;
   /** Called with the new value on every textarea change. */
   onValueChange: (value: string) => void;
-  /** Fired when the user submits (Enter or the send button) and when a queued
-   *  message auto-dispatches. Receives the trimmed value, the attached files,
+  /** Fired when the user submits (desktop Enter or the send button; touch
+   *  keyboards keep Enter for newlines) and when a queued message
+   *  auto-dispatches. Receives the trimmed value, the attached files,
    *  and — for auto-dispatched queue items — `meta.queuedId` (the originating
    *  QueuedMessage id), so a consumer can e.g. morph the queued item into the
    *  sent message via a shared-layout (`layoutId`) transition. */
@@ -818,7 +819,8 @@ const InputMessage = forwardRef<HTMLDivElement, InputMessageProps>(
 
     const handleKeyDown = useCallback(
       (e: ReactKeyboardEvent<HTMLTextAreaElement>) => {
-        if (e.nativeEvent.isComposing) return;
+        if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
+        if (e.key === "Enter" && isTouch) return;
 
         // Suggested prompts: plain ArrowDown moves the highlight into / down
         // the list, ArrowUp walks it back up (then out, returning to plain
@@ -925,6 +927,7 @@ const InputMessage = forwardRef<HTMLDivElement, InputMessageProps>(
         }
       },
       [
+        isTouch,
         history,
         value,
         historyIndex,
@@ -1245,7 +1248,9 @@ const InputMessage = forwardRef<HTMLDivElement, InputMessageProps>(
                 "text-foreground placeholder:text-muted-foreground",
                 compactStep
                   ? "text-[13px] leading-[18px] px-1.5 py-1.5"
-                  : "text-[14px] leading-5 px-2 py-2"
+                  : "text-[14px] leading-5 px-2 py-2",
+                // Safari zooms focused inputs below 16px; preserve deliberate pinch zoom.
+                "pointer-coarse:text-[16px]"
               )}
               style={{ fontVariationSettings: fontWeights.normal }}
               {...restTextareaProps}
@@ -1263,7 +1268,8 @@ const InputMessage = forwardRef<HTMLDivElement, InputMessageProps>(
                   // sits where typed text will.
                   compactStep
                     ? "text-[13px] leading-[18px] px-1.5 py-1.5"
-                    : "text-[14px] leading-5 px-2 py-2"
+                    : "text-[14px] leading-5 px-2 py-2",
+                  "pointer-coarse:text-[16px]"
                 )}
                 style={{ fontVariationSettings: fontWeights.normal }}
               >

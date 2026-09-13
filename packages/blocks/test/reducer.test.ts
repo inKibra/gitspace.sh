@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import { coalesceTransportEvents, reduceTranscriptToTurns } from '../src/index.js';
 
 describe('reduceTranscriptToTurns', () => {
-  it('groups one main-agent turn and nests completed side agents', () => {
+  it('groups one main-agent turn with a canonical completed execution', () => {
     const turns = reduceTranscriptToTurns([
       { sessionId: 's1', ordinal: 1, kind: 'turn_start', payload: {} },
       { sessionId: 's1', ordinal: 2, kind: 'message_end', payload: { message: { role: 'user', content: [{ type: 'text', text: 'Review this' }] } } },
@@ -22,10 +22,9 @@ describe('reduceTranscriptToTurns', () => {
     ]);
     expect(turns).toHaveLength(1);
     expect(turns[0]).toMatchObject({ status: 'done', user: { text: 'Review this' } });
-    expect(turns[0]?.items.map((item) => item.type)).toEqual(['thinking', 'tool-call', 'message']);
-    expect(turns[0]?.sideAgents).toEqual([
-      expect.objectContaining({ agentId: 'reviewer', status: 'done', summary: 'No defects.' }),
-    ]);
+    expect(turns[0]?.items.map((item) => item.type)).toEqual(['thinking', 'execution', 'message']);
+    expect(turns[0]?.items[1]).toMatchObject({ kind: 'agent', status: 'done', summary: 'No defects.', historyCount: 1 });
+    expect(turns[0]?.sideAgents).toEqual([]);
   });
 
   it('projects supported user images into persisted message attachments', () => {
@@ -178,7 +177,7 @@ describe('reduceTranscriptToTurns', () => {
   });
 
 
-  it('tracks asynchronous task progress and completed hub results as subagents', () => {
+  it('updates asynchronous task progress from a completed Hub result across turns', () => {
     const turns = reduceTranscriptToTurns([
       { sessionId: 's1', ordinal: 1, kind: 'turn_start', payload: {} },
       { sessionId: 's1', ordinal: 2, kind: 'message_end', payload: { message: { role: 'assistant', content: [{ type: 'toolCall', id: 'task-1', name: 'task', arguments: { tasks: [{ task: 'inspect' }] } }] } } },
@@ -186,11 +185,14 @@ describe('reduceTranscriptToTurns', () => {
       { sessionId: 's1', ordinal: 4, kind: 'turn_end', payload: {} },
       { sessionId: 's1', ordinal: 5, kind: 'turn_start', payload: {} },
       { sessionId: 's1', ordinal: 6, kind: 'message_end', payload: { message: { role: 'assistant', content: [{ type: 'toolCall', id: 'hub-1', name: 'hub', arguments: { op: 'wait' } }] } } },
-      { sessionId: 's1', ordinal: 7, kind: 'message_end', payload: { message: { role: 'toolResult', toolCallId: 'hub-1', details: { jobs: [{ id: 'Scout', label: 'Scout', status: 'completed', resolvedModel: 'openai/gpt-5', resultText: '<task-result id=\"Scout\" agent=\"scout\"><output>{\"summary\":\"# README\"}</output></task-result>' }] }, content: [] } } },
+      { sessionId: 's1', ordinal: 7, kind: 'message_end', payload: { message: { role: 'toolResult', toolCallId: 'hub-1', details: { jobs: [{ id: 'Scout', type: 'task', label: 'Scout', status: 'completed', resolvedModel: 'openai/gpt-5', resultText: '<task-result id=\"Scout\" agent=\"scout\"><output>{\"summary\":\"# README\"}</output></task-result>' }] }, content: [] } } },
       { sessionId: 's1', ordinal: 8, kind: 'turn_end', payload: {} },
     ]);
-    expect(turns[0]?.sideAgents[0]).toMatchObject({ agentId: 'Scout', agent: 'scout', model: 'smol', status: 'queued', summary: 'Inspect README' });
-    expect(turns[1]?.sideAgents[0]).toMatchObject({ agentId: 'Scout', agent: 'scout', model: 'openai/gpt-5', status: 'done', summary: '# README' });
+    expect(turns).toHaveLength(1);
+    expect(turns[0]?.sideAgents).toEqual([]);
+    expect(turns[0]?.items).toEqual([expect.objectContaining({
+      type: 'execution', kind: 'agent', agent: 'scout', model: 'openai/gpt-5', status: 'done', summary: '# README', historyCount: 2,
+    })]);
   });
 });
 

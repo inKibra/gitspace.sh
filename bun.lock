@@ -77,9 +77,14 @@
       "version": "0.0.0",
       "dependencies": {
         "@gitspace/account-omp": "workspace:*",
+        "@gitspace/blocks": "workspace:*",
         "@gitspace/core": "workspace:*",
         "@gitspace/deployment": "workspace:*",
         "@gitspace/protocol": "workspace:*",
+        "@gitspace/protocol-agent": "workspace:*",
+        "@gitspace/protocol-environment": "workspace:*",
+        "@gitspace/protocol-sync": "workspace:*",
+        "@gitspace/protocol-workspace": "workspace:*",
         "@oh-my-pi/omptype": "18.1.10",
         "@oh-my-pi/pi-ai": "18.1.10",
         "@oh-my-pi/pi-coding-agent": "18.1.10",
@@ -97,6 +102,7 @@
       "version": "0.0.0",
       "dependencies": {
         "@gitspace/protocol": "workspace:*",
+        "@gitspace/protocol-agent": "workspace:*",
         "@oh-my-pi/omptype": "18.1.10",
         "@oh-my-pi/pi-agent-core": "18.1.10",
         "@oh-my-pi/pi-ai": "18.1.10",
@@ -115,6 +121,10 @@
         "@base-ui/react": "^1.0.0",
         "@gitspace/blocks": "workspace:*",
         "@gitspace/protocol": "workspace:*",
+        "@gitspace/protocol-agent": "workspace:*",
+        "@gitspace/protocol-environment": "workspace:*",
+        "@gitspace/protocol-sync": "workspace:*",
+        "@gitspace/protocol-workspace": "workspace:*",
         "@gitspace/ui": "workspace:*",
         "@noble/curves": "^2.2.0",
         "@pierre/diffs": "1.2.12",
@@ -128,6 +138,7 @@
         "framer-motion": "^13.1.1",
         "ghostty-web": "^0.4.0",
         "katex": "^0.18.5",
+        "qrcode.react": "^4.2.0",
         "react": "^19.2.8",
         "react-dom": "^19.2.8",
         "rehype-harden": "^1.1.8",
@@ -139,6 +150,7 @@
         "@types/react": "^19.2.18",
         "@types/react-dom": "^19.2.4",
         "@vitejs/plugin-react": "^5.0.0",
+        "lucide-react": "^1.39.0",
         "tailwindcss": "^4.1.0",
         "vite": "^7.0.0",
         "vitest": "^4.1.11",
@@ -148,7 +160,23 @@
       "name": "@gitspace/account-worker",
       "version": "0.0.0",
       "dependencies": {
+        "@composio/core": "0.18.0",
+        "@gitspace/blocks": "workspace:*",
         "@gitspace/protocol": "workspace:*",
+        "@gitspace/protocol-agent": "workspace:*",
+        "@gitspace/protocol-environment": "workspace:*",
+        "@gitspace/protocol-sync": "workspace:*",
+        "@gitspace/protocol-workspace": "workspace:*",
+        "@noble/curves": "^2.2.0",
+        "@oh-my-pi/pi-ai": "18.1.10",
+        "@oh-my-pi/pi-catalog": "18.1.10",
+        "devalue": "5.8.2",
+        "result-rpc": "0.5.0",
+        "zod": "^4.4.3",
+      },
+      "devDependencies": {
+        "@msw/cloudflare": "^0.0.1",
+        "msw": "^2.14.0",
       },
     },
     "packages/blocks": {
@@ -178,6 +206,8 @@
       "version": "0.0.0",
       "dependencies": {
         "@gitspace/protocol": "workspace:*",
+        "@gitspace/protocol-agent": "workspace:*",
+        "@gitspace/protocol-workspace": "workspace:*",
         "better-result": "3.0.1",
         "drizzle-orm": "^0.45.2",
         "result-rpc": "0.5.0",
@@ -250,14 +280,9 @@
       "name": "@gitspace/operator-worker",
       "version": "0.0.0",
       "dependencies": {
-        "@composio/core": "0.18.0",
         "@gitspace/protocol": "workspace:*",
         "@noble/curves": "^2.2.0",
-        "@oh-my-pi/pi-ai": "18.1.10",
-        "@oh-my-pi/pi-catalog": "18.1.10",
-        "devalue": "5.8.2",
         "jose": "6.1.3",
-        "result-rpc": "0.5.0",
       },
       "devDependencies": {
         "@msw/cloudflare": "^0.0.1",
@@ -276,6 +301,11 @@
       "name": "@gitspace/protocol",
       "version": "0.0.0",
       "dependencies": {
+        "@gitspace/blocks": "workspace:*",
+        "@gitspace/protocol-agent": "workspace:*",
+        "@gitspace/protocol-environment": "workspace:*",
+        "@gitspace/protocol-sync": "workspace:*",
+        "@gitspace/protocol-workspace": "workspace:*",
         "@noble/curves": "^2.2.0",
         "@noble/hashes": "^2.2.0",
         "better-result": "3.0.1",
@@ -283,11 +313,33 @@
         "zod": "^4.4.3",
       },
     },
-    "packages/relay-deployment": {
-      "name": "@gitspace/relay-deployment",
+    "packages/protocol-agent": {
+      "name": "@gitspace/protocol-agent",
       "version": "0.0.0",
       "dependencies": {
+        "@gitspace/protocol-workspace": "workspace:*",
         "better-result": "3.0.1",
+        "zod": "^4.4.3",
+      },
+    },
+    "packages/protocol-environment": {
+      "name": "@gitspace/protocol-environment",
+      "version": "0.0.0",
+      "dependencies": {
+        "zod": "^4.4.3",
+      },
+    },
+    "packages/protocol-sync": {
+      "name": "@gitspace/protocol-sync",
+      "version": "0.0.0",
+      "dependencies": {
+        "zod": "^4.4.3",
+      },
+    },
+    "packages/protocol-workspace": {
+      "name": "@gitspace/protocol-workspace",
+      "version": "0.0.0",
+      "dependencies": {
         "zod": "^4.4.3",
       },
     },
@@ -337,6 +389,7 @@
     },
   },
   "patchedDependencies": {
+    "result-rpc@0.5.0": "packages/protocol/patches/result-rpc@0.5.0.patch",
     "@oh-my-pi/pi-ai@18.1.10": "packages/account-omp/patches/@oh-my-pi%2Fpi-ai@18.1.10.patch",
     "ghostty-web@0.4.0": "patches/ghostty-web@0.4.0.patch",
     "@oh-my-pi/pi-agent-core@18.1.10": "packages/account-omp/patches/@oh-my-pi%2Fpi-agent-core@18.1.10.patch",
@@ -553,7 +606,13 @@
 
     "@gitspace/protocol": ["@gitspace/protocol@workspace:packages/protocol"],
 
-    "@gitspace/relay-deployment": ["@gitspace/relay-deployment@workspace:packages/relay-deployment"],
+    "@gitspace/protocol-agent": ["@gitspace/protocol-agent@workspace:packages/protocol-agent"],
+
+    "@gitspace/protocol-environment": ["@gitspace/protocol-environment@workspace:packages/protocol-environment"],
+
+    "@gitspace/protocol-sync": ["@gitspace/protocol-sync@workspace:packages/protocol-sync"],
+
+    "@gitspace/protocol-workspace": ["@gitspace/protocol-workspace@workspace:packages/protocol-workspace"],
 
     "@gitspace/sandbox-worker": ["@gitspace/sandbox-worker@workspace:packages/sandbox-worker"],
 
@@ -2316,6 +2375,8 @@
     "puppeteer-core": ["puppeteer-core@25.3.0", "", { "dependencies": { "@puppeteer/browsers": "3.0.6", "chromium-bidi": "16.0.1", "devtools-protocol": "0.0.1638949", "typed-query-selector": "^2.12.2", "webdriver-bidi-protocol": "0.4.2", "ws": "^8.21.0" } }, "sha512-fm+wpUr2oigH1PXZvwgATrM2tYWHMDG8ASzTEe9uukCye4X5Ldx1K5BTHPFKITrIWvQQAQ256d1NpbEveBcKjA=="],
 
     "pusher-js": ["pusher-js@8.6.0", "", { "dependencies": { "tweetnacl": "^1.0.3" } }, "sha512-wShJPfCS/kYkCBVzVW67wa9cnQIgHTszEK2XHNrFkOgGruuGw081aERAxfRjfdFU+WcIt8x6dvbwkTW4iZuQ8Q=="],
+
+    "qrcode.react": ["qrcode.react@4.2.0", "", { "peerDependencies": { "react": "^16.8.0 || ^17.0.0 || ^18.0.0 || ^19.0.0" } }, "sha512-QpgqWi8rD9DsS9EP3z7BT+5lY5SFhsqGjpgW5DY/i3mK4M9DTBNz3ErMi8BWYEfI3L0d8GIbGmcdFAS1uIRGjA=="],
 
     "qs": ["qs@6.16.0", "", { "dependencies": { "es-define-property": "^1.0.1", "side-channel": "^1.1.1" } }, "sha512-h6fhOIaRrID2CbEY2fqs+7t+UXZo+MLAnU5gRIq85uFtdiUPCdsApMlHhXogKVM4HM2DVbIjGNTTYH2OcmP1vA=="],
 

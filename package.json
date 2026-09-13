@@ -39,6 +39,7 @@
     "test:playwright:goal-validation": "playwright test -c playwright.goal-validation.config.ts",
     "check:arch": "node node_modules/.bin/depcruise src --config .dependency-cruiser.cjs --output-type err",
     "check:arch:json": "node node_modules/.bin/depcruise src --config .dependency-cruiser.cjs --output-type json",
+    "check:arch:packages": "bunx --bun depcruise packages/protocol/src packages/protocol-agent/src packages/protocol-environment/src packages/protocol-workspace/src packages/protocol-sync/src packages/platform/src packages/operator-worker/src packages/account-worker/src packages/account-machine/src packages/account-web/src --config .dependency-cruiser.cjs --output-type err",
     "typecheck:coverage": "bun scripts/check-typecheck-coverage.ts"
   },
   "optionalDependencies": {
@@ -133,6 +134,7 @@
     "@oh-my-pi/pi-agent-core@18.1.10": "packages/account-omp/patches/@oh-my-pi%2Fpi-agent-core@18.1.10.patch",
     "@oh-my-pi/pi-coding-agent@18.1.10": "packages/account-omp/patches/@oh-my-pi%2Fpi-coding-agent@18.1.10.patch",
     "@oh-my-pi/pi-ai@18.1.10": "packages/account-omp/patches/@oh-my-pi%2Fpi-ai@18.1.10.patch",
-    "ghostty-web@0.4.0": "patches/ghostty-web@0.4.0.patch"
+    "ghostty-web@0.4.0": "patches/ghostty-web@0.4.0.patch",
+    "result-rpc@0.5.0": "packages/protocol/patches/result-rpc@0.5.0.patch"
   }
 }

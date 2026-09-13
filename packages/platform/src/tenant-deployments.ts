@@ -1,5 +1,5 @@
 import { DurableObject } from 'cloudflare:workers';
-import { workerReleaseMetadataSchema, type WorkerReleaseMetadata } from '@gitspace/protocol';
+import { workerReleaseMetadataSchema, type WorkerReleaseMetadata } from '@gitspace/protocol/deployment';
 
 /** One upload the platform performed for this tenant, in RELEASES bucket terms. */
 export interface TenantDeployRecord {
@@ -91,6 +91,7 @@ export class TenantDeploymentsDO extends DurableObject<Env> {
         CREATE TABLE IF NOT EXISTS tenant_token (
           id INTEGER PRIMARY KEY CHECK (id = 1),
           token_hash TEXT NOT NULL,
+          token_value TEXT NOT NULL,
           rotated_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS tenant_state (
@@ -118,11 +119,6 @@ export class TenantDeploymentsDO extends DurableObject<Env> {
         INSERT OR IGNORE INTO tenant_state(id, applied_migration_tag, active_deploy_id, lease_until, updated_at)
         VALUES (1, NULL, NULL, NULL, '1970-01-01T00:00:00.000Z');
       `);
-      try {
-        ctx.storage.sql.exec('ALTER TABLE tenant_config ADD COLUMN blob_bucket TEXT');
-      } catch {
-        // Existing instances already have the column.
-      }
     });
   }
   configure(rootPublicKey: string, blobBucket: string): { created: boolean; rootPublicKey: string; blobBucket: string } {
@@ -150,18 +146,26 @@ export class TenantDeploymentsDO extends DurableObject<Env> {
   }
 
 
-  /** Mints a fresh token, invalidating the previous one. The raw token is returned exactly once. */
+  /** Provider-scoped credential injected only into this tenant's worker. */
   async rotateToken(): Promise<string> {
     const bytes = crypto.getRandomValues(new Uint8Array(TOKEN_BYTES));
     const token = `gsd_${btoa(String.fromCharCode(...bytes)).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/u, '')}`;
     const hash = await sha256Hex(token);
     this.ctx.storage.sql.exec(
-      `INSERT INTO tenant_token(id, token_hash, rotated_at) VALUES (1, ?, ?)
-       ON CONFLICT(id) DO UPDATE SET token_hash = excluded.token_hash, rotated_at = excluded.rotated_at`,
+      `INSERT INTO tenant_token(id, token_hash, token_value, rotated_at) VALUES (1, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET token_hash = excluded.token_hash, token_value = excluded.token_value, rotated_at = excluded.rotated_at`,
       hash,
+      token,
       new Date().toISOString(),
     );
     return token;
+  }
+
+  async providerToken(): Promise<string> {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      const existing = this.ctx.storage.sql.exec<{ token_value: string }>('SELECT token_value FROM tenant_token WHERE id=1').toArray()[0];
+      return existing?.token_value ?? await this.rotateToken();
+    });
   }
 
   async verifyToken(token: string): Promise<boolean> {

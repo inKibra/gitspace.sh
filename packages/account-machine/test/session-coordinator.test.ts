@@ -1,13 +1,18 @@
 import { afterEach, describe, expect, it } from 'bun:test';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { scheduler } from 'node:timers/promises';
 import {
+  FactEventStore,
   GitSpaceDatabase,
   LocalArtifactResolver,
   MemoryArtifactObjectStore,
 } from '@gitspace/core';
+import { cloudWorkspaceDefinitionSchema } from '@gitspace/protocol';
+import type { AgentFailure, SessionActivity } from '@gitspace/protocol-agent';
+import { createSpaceWorkspaceControls } from '../src/space-workspace-controls.js';
+import { createSpaceEvalNamespace } from '../src/space-eval-sdk.js';
 import {
   MachineSessionCoordinator,
   type OmpRuntime,
@@ -25,17 +30,21 @@ class FakeOmpRuntime implements OmpRuntime {
   readonly created: string[] = [];
   readonly opened: string[] = [];
   readonly history: unknown[];
+  durableEntries: Record<string, unknown>[] = [];
   messagesError: Error | null = null;
+  leafId: string | null | undefined;
   private sessionActive = false;
   private readonly handlers = new Set<(event: OmpRuntimeEvent) => void>();
 
-  constructor(history: unknown[] = []) {
+  constructor(history: unknown[] = [], private planning = false) {
     this.history = [...history];
   }
 
   async create(input: { workingDirectory: string; sessionKey: string; artifactsDir: string }): Promise<OmpRuntimeSession> {
     this.created.push(input.sessionKey);
-    return this.session('omp-a', '/sessions/omp-a.jsonl', input.artifactsDir);
+    const sessionFile = join(dirname(input.artifactsDir), 'omp-a.jsonl');
+    writeFileSync(sessionFile, [JSON.stringify({ type: 'session', version: 3, id: 'omp-a' }), ...this.durableEntries.map((entry) => JSON.stringify(entry)), ''].join('\n'));
+    return this.session('omp-a', sessionFile, input.artifactsDir);
   }
 
   async open(input: { workingDirectory: string; sessionKey: string; artifactsDir: string; sessionFile: string }): Promise<OmpRuntimeSession> {
@@ -56,7 +65,15 @@ class FakeOmpRuntime implements OmpRuntime {
     return {
       id,
       sessionFile,
+      isAvailable: () => this.sessionActive,
       control: async () => { throw new Error('Session controls are not configured in this fixture'); },
+      agentSetup: async () => { throw new Error('Agent setup is not configured in this fixture'); },
+      saveAgentDefinition: async () => { throw new Error('Agent setup is not configured in this fixture'); },
+      historyAnchorId: async () => {
+        if (this.leafId !== undefined) return this.leafId;
+        const id = this.durableEntries.at(-1)?.id;
+        return typeof id === 'string' ? id : null;
+      },
       cycleRole: async () => { throw new Error('Session controls are not configured in this fixture'); },
       setModel: async () => { throw new Error('Session controls are not configured in this fixture'); },
       setThinking: async () => { throw new Error('Session controls are not configured in this fixture'); },
@@ -71,6 +88,7 @@ class FakeOmpRuntime implements OmpRuntime {
       stop: async () => { throw new Error('Session controls are not configured in this fixture'); },
       navigateTree: async () => { throw new Error('Session controls are not configured in this fixture'); },
       prompt: async (text) => {
+        if (this.planning) throw new Error('Plan mode keeps the working tree read-only');
         const workspaceArtifacts = join(artifactsDir, 'workspace');
         mkdirSync(workspaceArtifacts, { recursive: true });
         writeFileSync(join(workspaceArtifacts, 'generated.txt'), `agent:${text}`);
@@ -84,11 +102,12 @@ class FakeOmpRuntime implements OmpRuntime {
         return () => this.handlers.delete(handler);
       },
       subscribeActivity: (handler) => {
-        handler({ active: false, reasons: [] });
+        handler({ active: false, reasons: [] }, null);
         return () => undefined;
       },
-      activity: () => ({ activity: { active: false, reasons: [] } }),
+      activity: () => ({ activity: { active: false, reasons: [] }, failure: null }),
       persist: async () => undefined,
+      setWorkspacePhase: async (phase) => { this.planning = phase === 'plan'; },
       handoff: async () => false,
       resume: async () => undefined,
       dispose: async () => { this.sessionActive = false; },
@@ -107,7 +126,9 @@ class HandoffOmpRuntime implements OmpRuntime {
   private finishPrompt?: () => void;
 
   async create(input: { artifactsDir: string }): Promise<OmpRuntimeSession> {
-    return this.session('/sessions/omp-handoff.jsonl');
+    const sessionFile = join(dirname(input.artifactsDir), 'omp-handoff.jsonl');
+    writeFileSync(sessionFile, `${JSON.stringify({ type: 'session', version: 3, id: 'omp-handoff' })}\n`);
+    return this.session(sessionFile);
   }
 
   async open(input: { sessionFile: string }): Promise<OmpRuntimeSession> {
@@ -122,7 +143,11 @@ class HandoffOmpRuntime implements OmpRuntime {
     return {
       id: 'omp-handoff',
       sessionFile,
+      isAvailable: () => true,
       control: async () => { throw new Error('Session controls are not configured in this fixture'); },
+      agentSetup: async () => { throw new Error('Agent setup is not configured in this fixture'); },
+      saveAgentDefinition: async () => { throw new Error('Agent setup is not configured in this fixture'); },
+      historyAnchorId: async () => null,
       cycleRole: async () => { throw new Error('Session controls are not configured in this fixture'); },
       setModel: async () => { throw new Error('Session controls are not configured in this fixture'); },
       setThinking: async () => { throw new Error('Session controls are not configured in this fixture'); },
@@ -145,9 +170,10 @@ class HandoffOmpRuntime implements OmpRuntime {
         return true;
       },
       subscribe: (handler) => { handlers.add(handler); return () => handlers.delete(handler); },
-      subscribeActivity: (handler) => { handler({ active: false, reasons: [] }); return () => undefined; },
-      activity: () => ({ activity: { active: false, reasons: [] } }),
+      subscribeActivity: (handler) => { handler({ active: false, reasons: [] }, null); return () => undefined; },
+      activity: () => ({ activity: { active: false, reasons: [] }, failure: null }),
       persist: async () => undefined,
+      setWorkspacePhase: async () => undefined,
       handoff: async () => {
         this.finishPrompt?.();
         return true;
@@ -197,6 +223,204 @@ function artifactKey(): Uint8Array {
 }
 
 describe('MachineSessionCoordinator', () => {
+  it('reconciles unlisted nested usage for live and cold sessions without reading symlink escapes', async () => {
+    const { root, database, artifacts } = fixture();
+    database.possessWorkspace('workspace-a', 'machine-a');
+    const runtime = new FakeOmpRuntime();
+    const assistant = (tokens: number, model = 'safe-model') => ({
+      type: 'message', id: `answer-${tokens}`, parentId: null,
+      message: { role: 'assistant', provider: 'test', model, content: [],
+        usage: { input: tokens, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: tokens, cost: { total: 0 } } },
+    });
+    runtime.durableEntries = [
+      assistant(10),
+      { type: 'message', id: 'spawn', parentId: null, message: {
+        role: 'toolResult', details: { results: [], progress: [
+          { id: 'worker', agent: 'task', modelRole: 'slow' },
+          { id: 'escape', agent: 'task' },
+        ] },
+      } },
+    ];
+    const coordinator = new MachineSessionCoordinator(database, artifacts, runtime, 'machine-a', join(root, 'runtime'));
+    try {
+      const created = await coordinator.create('workspace-a');
+      if (created.status === 'error') throw created.error;
+      const childRoot = created.value.sessionFile.replace(/\.jsonl$/u, '');
+      mkdirSync(join(childRoot, 'worker'), { recursive: true });
+      writeFileSync(join(childRoot, 'worker.jsonl'), `${JSON.stringify(assistant(20))}\n`);
+      writeFileSync(join(childRoot, 'worker', 'grandchild.jsonl'), `${JSON.stringify(assistant(30))}\n`);
+      writeFileSync(join(childRoot, 'unlisted.jsonl'), `${JSON.stringify(assistant(40))}\n`);
+      const outside = join(root, 'unrelated-private.jsonl');
+      writeFileSync(outside, `${JSON.stringify(assistant(9000, 'private-model'))}\n`);
+      symlinkSync(outside, join(childRoot, 'escape.jsonl'));
+      const liveReport = await coordinator.sessionUsage(created.value.id);
+      expect(liveReport?.totals.totalTokens).toBe(10);
+      expect(liveReport?.totalsDeep).toMatchObject({ requests: 4, totalTokens: 100 });
+      expect(liveReport?.byModel).toEqual([
+        { provider: 'test', model: 'safe-model', totals: liveReport!.totalsDeep },
+      ]);
+      await coordinator.stopForRestart();
+      const cold = new MachineSessionCoordinator(database, artifacts, new FakeOmpRuntime(), 'machine-a', join(root, 'runtime'));
+      expect(await cold.sessionUsage(created.value.id)).toEqual(liveReport);
+    } finally {
+      await coordinator.stopForRestart();
+      database.close();
+    }
+  });
+
+  it('keeps pre-compaction durable history on adoption and cold reads without discarding the retained live tail', async () => {
+    const { root, database, artifacts } = fixture();
+    expect(database.possessWorkspace('workspace-a', 'machine-a').status).toBe('ok');
+    const runtime = new FakeOmpRuntime([
+      { role: 'user', content: 'recent prompt' },
+      { role: 'assistant', content: [{ type: 'text', text: 'recent answer' }] },
+    ]);
+    const timestamp = '2026-01-01T00:00:00.000Z';
+    runtime.durableEntries = [
+      { type: 'message', id: 'old-user', parentId: null, timestamp, message: { role: 'user', content: 'before compaction' } },
+      { type: 'message', id: 'old-answer', parentId: 'old-user', timestamp, message: { role: 'assistant', content: [{ type: 'text', text: 'older answer' }] } },
+      { type: 'compaction', id: 'compact', parentId: 'old-answer', timestamp, summary: 'compacted context', firstKeptEntryId: 'old-answer', tokensBefore: 10_000 },
+      { type: 'message', id: 'recent-user', parentId: 'compact', timestamp, message: runtime.history[0] },
+      { type: 'message', id: 'recent-answer', parentId: 'recent-user', timestamp, message: runtime.history[1] },
+    ];
+    const coordinator = new MachineSessionCoordinator(database, artifacts, runtime, 'machine-a', join(root, 'runtime'));
+    try {
+      const created = await coordinator.create('workspace-a');
+      if (created.status === 'error') throw created.error;
+      const request = { generation: null, before: null, after: null, around: null };
+      const adopted = await coordinator.transcriptPage(created.value.id, request);
+      expect(adopted.rows.map((row) => row.item.type === 'message' ? row.item.text : null)).toEqual(['before compaction', 'older answer', 'recent prompt', 'recent answer']);
+      const cold = new MachineSessionCoordinator(database, artifacts, new FakeOmpRuntime(), 'machine-a', join(root, 'runtime'));
+      expect(await cold.transcriptPage(created.value.id, request)).toEqual(adopted);
+      runtime.emit({ type: 'message_update', message: { role: 'assistant', content: [{ type: 'text', text: 'not yet persisted' }] } });
+      const active = await coordinator.transcriptPage(created.value.id, request);
+      const history = await coordinator.historyPage(created.value.id, { anchorId: 'old-user', direction: 'around', cursor: null });
+      expect(history.entries.map(entry => entry.preview)).toEqual(['before compaction', 'older answer', 'recent prompt', 'recent answer']);
+      expect(history.entries.filter(entry => entry.current).map(entry => entry.id)).toEqual(['recent-answer']);
+      expect(await coordinator.transcriptPage(created.value.id, request)).toEqual(active);
+      runtime.leafId = null;
+      expect((await coordinator.historyPage(created.value.id, { anchorId: 'old-user', direction: 'around', cursor: null })).entries.some(entry => entry.current)).toBe(false);
+      const tail = active.rows.at(-1)!;
+      expect((await coordinator.stopForRestart()).status).toBe('ok');
+      expect((await coordinator.recover()).status).toBe('ok');
+      const reopened = await coordinator.transcriptPage(created.value.id, request);
+      expect(reopened.generation).not.toBe(active.generation);
+      expect(reopened.rows.at(-1)).toMatchObject({ id: tail.id, ordinal: tail.ordinal, item: { text: 'not yet persisted', pending: true } });
+      expect(reopened.rows[0]!.item).toMatchObject({ text: 'before compaction' });
+      await coordinator.stopForRestart();
+    } finally { database.close(); }
+  });
+
+  it('applies agent phase changes before writes and reconciles a closed session on restore', async () => {
+    const { root, database, artifacts } = fixture();
+    database.setWorkspacePhase('workspace-a', 'plan');
+    database.possessWorkspace('workspace-a', 'machine-a');
+    const runtime = new FakeOmpRuntime();
+    const sessions = new MachineSessionCoordinator(database, artifacts, runtime, 'machine-a', join(root, 'runtime'));
+    const created = await sessions.openSpace('workspace-a');
+    if (created.status === 'error') throw created.error;
+    let definition = cloudWorkspaceDefinitionSchema.parse({
+      id: 'workspace-a', projectId: 'project-a', kind: 'worktree', name: 'A', branch: 'a', phase: 'plan',
+      sourceKind: 'base', sourceRef: 'main', lifecycle: 'active', goalId: null, revision: 1, archivedAt: null,
+      createdAt: '2026-09-01T00:00:00.000Z', updatedAt: '2026-09-01T00:00:00.000Z',
+    });
+    type ControlsOptions = Parameters<typeof createSpaceWorkspaceControls>[0];
+    const authority = {
+      listProjectWorkspaces: async () => [definition],
+      appendProjectEvent: async () => undefined,
+    } as unknown as ControlsOptions['authority'];
+    const controls = createSpaceWorkspaceControls({
+      database, events: new FactEventStore(database), sessions, machineId: 'machine-a', authority,
+      projects: {
+        setWorkspacePhase: async (_projectId: string, _spaceId: string, phase: 'plan' | 'code' | 'review' | 'ship', expectedRevision: number) => {
+          if (expectedRevision !== definition.revision) throw new Error('Workspace revision conflict');
+          definition = { ...definition, phase, revision: definition.revision + 1 };
+          return definition;
+        },
+      } as ControlsOptions['projects'],
+      spaces: {} as ControlsOptions['spaces'],
+      environments: {} as ControlsOptions['environments'],
+    });
+    const namespace = createSpaceEvalNamespace(authority, 'project-a', 'workspace-a', controls);
+    try {
+      expect((await sessions.prompt(created.value.id, 'blocked in plan')).status).toBe('error');
+      await namespace.call('setPhase', { expectedRevision: 1, phase: 'code' });
+      expect((await sessions.prompt(created.value.id, 'code-write')).status).toBe('ok');
+      await expect(namespace.call('setPhase', { expectedRevision: 1, phase: 'plan' })).rejects.toThrow('revision conflict');
+      expect(database.getWorkspace('workspace-a')?.phase).toBe('code');
+      expect((await sessions.prompt(created.value.id, 'after-rejected-change')).status).toBe('ok');
+      await sessions.close(created.value.id);
+      database.setWorkspacePhase('workspace-a', 'plan');
+      await sessions.workspacePhaseChanged('project-a', 'workspace-a');
+      expect(sessions.get(created.value.id)?.state).toBe('closed');
+      expect(runtime.opened).toEqual([]);
+      database.setWorkspacePhase('workspace-a', 'code');
+      // The runtime opens an old plan-mode checkpoint; committed metadata wins.
+      const restored = new MachineSessionCoordinator(database, artifacts, new FakeOmpRuntime([], true), 'machine-a', join(root, 'runtime'));
+      const reopened = await restored.openSpace('workspace-a');
+      if (reopened.status === 'error') throw reopened.error;
+      expect((await restored.prompt(reopened.value.id, 'restored-write')).status).toBe('ok');
+      await restored.close(reopened.value.id);
+      const saved = await artifacts.read({ kind: 'workspace', projectId: 'project-a', workspaceId: 'workspace-a' }, 'local://workspace/generated.txt');
+      if (saved.status === 'error') throw saved.error;
+      expect(new TextDecoder().decode(saved.value)).toBe('agent:restored-write');
+    } finally {
+      await sessions.close(created.value.id);
+      database.close();
+    }
+  });
+
+  it('restores into a fresh repository, preserves unexpected leftovers and installs canonical origin', async () => {
+    const { root, database, artifacts } = fixture();
+    const checkout = join(root, 'fresh');
+    mkdirSync(checkout);
+    writeFileSync(join(checkout, 'unsaved.txt'), 'must survive');
+    const created = database.createProject({ id: 'fresh-project', name: 'Fresh', repositoryPath: checkout, repositoryReference: 'https://github.com/example/canonical.git' });
+    if (created.status === 'error') throw created.error;
+    const coordinator = new MachineSessionCoordinator(database, artifacts, new FakeOmpRuntime(), 'machine-a', join(root, 'runtime'));
+    await coordinator.preparePortableSpaceRepository('fresh-project');
+    expect(existsSync(join(checkout, 'unsaved.txt'))).toBeFalse();
+    const retained = readdirSync(root).find((name) => name.startsWith('fresh.retained-'));
+    expect(retained).toBeDefined();
+    expect(readFileSync(join(root, retained!, 'unsaved.txt'), 'utf8')).toBe('must survive');
+    const origin = Bun.spawnSync(['git', 'remote', 'get-url', 'origin'], { cwd: checkout });
+    expect(origin.exitCode).toBe(0);
+    expect(origin.stdout.toString().trim()).toBe('https://github.com/example/canonical.git');
+    database.close();
+  });
+
+  it('detaches linked worktrees before deleting their shared base without losing staged or local changes', async () => {
+    const { root, database, artifacts } = fixture();
+    const base = join(root, 'repo');
+    const child = join(root, 'linked-child');
+    const git = (cwd: string, args: string[]) => {
+      const result = Bun.spawnSync(['git', ...args], { cwd, env: { ...process.env, GIT_AUTHOR_NAME: 'Test', GIT_AUTHOR_EMAIL: 'test@example.invalid', GIT_COMMITTER_NAME: 'Test', GIT_COMMITTER_EMAIL: 'test@example.invalid' } });
+      if (result.exitCode !== 0) throw new Error(result.stderr.toString());
+      return result.stdout.toString().trim();
+    };
+    git(base, ['init', '-b', 'main']);
+    writeFileSync(join(base, 'tracked.txt'), 'base');
+    git(base, ['add', 'tracked.txt']);
+    git(base, ['commit', '-m', 'initial']);
+    git(base, ['worktree', 'add', '-b', 'linked', child]);
+    const created = database.createWorkspace({ id: 'linked-child', projectId: 'project-a', name: 'Linked', branch: 'linked', rootPath: child });
+    if (created.status === 'error') throw created.error;
+    writeFileSync(join(child, 'tracked.txt'), 'staged');
+    git(child, ['add', 'tracked.txt']);
+    writeFileSync(join(child, 'tracked.txt'), 'unstaged');
+    writeFileSync(join(child, 'local.txt'), 'local');
+    const before = git(child, ['status', '--porcelain=v1']);
+    const coordinator = new MachineSessionCoordinator(database, artifacts, new FakeOmpRuntime(), 'machine-a', join(root, 'runtime'));
+    await coordinator.deletePortableSpaceLocal('project-a');
+    expect(existsSync(base)).toBeFalse();
+    expect(lstatSync(join(child, '.git')).isDirectory()).toBeTrue();
+    expect(git(child, ['status', '--porcelain=v1'])).toBe(before);
+    expect(git(child, ['show', ':tracked.txt'])).toBe('staged');
+    expect(readFileSync(join(child, 'tracked.txt'), 'utf8')).toBe('unstaged');
+    expect(readFileSync(join(child, 'local.txt'), 'utf8')).toBe('local');
+    database.close();
+  });
+
   it('publishes normal-tool artifact writes without waiting for the prompt to end', async () => {
     const { root, database, artifacts } = fixture();
     database.possessWorkspace('workspace-a', 'machine-a');
@@ -364,8 +588,41 @@ describe('MachineSessionCoordinator', () => {
     database.close();
   });
 
+  it('does not advertise or implicitly reopen controls for a disconnected worker object', async () => {
+    const { root, database, artifacts } = fixture();
+    database.possessWorkspace('workspace-a', 'machine-a');
+    let connected = true;
+    class DisconnectingRuntime extends FakeOmpRuntime {
+      override async create(input: { workingDirectory: string; sessionKey: string; artifactsDir: string }) {
+        const session = await super.create(input);
+        return { ...session, isAvailable: () => connected,
+          dispose: async () => { connected = false; await session.dispose(); } };
+      }
+    }
+    const coordinator = new MachineSessionCoordinator(database, artifacts, new DisconnectingRuntime(), 'machine-a', join(root, 'runtime'));
+    try {
+      const opened = await coordinator.openSpace('workspace-a');
+      if (opened.status === 'error') throw opened.error;
+      expect(coordinator.controlsAvailable(opened.value.id)).toBe(true);
+      connected = false;
+      expect(coordinator.controlsAvailable(opened.value.id)).toBe(false);
+      await expect(coordinator.control(opened.value.id)).rejects.toThrow();
+      expect((await coordinator.prompt(opened.value.id, 'must not wake a dead worker')).status).toBe('error');
+      const retried = await coordinator.openSpace('workspace-a', false, 1);
+      if (retried.status === 'error') throw retried.error;
+      expect(retried.value.id).toBe(opened.value.id);
+      expect(coordinator.controlsAvailable(opened.value.id)).toBe(true);
+      await coordinator.stopForRestart();
+    } finally { database.close(); }
+  });
+
   it('requires possession, records OMP events, syncs local artifacts, and recovers after restart', async () => {
     const { root, databasePath, cacheRoot, database, artifacts, store } = fixture();
+    const baseCapability = { kind: 'project' as const, projectId: 'project-a' };
+    const initialBase = await artifacts.write(baseCapability, 'local://base/shared.txt', new TextEncoder().encode('original base'));
+    if (initialBase.status === 'error') throw initialBase.error;
+    const initialBaseCommit = await artifacts.commit(baseCapability, 'local://base/');
+    if (initialBaseCommit.status === 'error') throw initialBaseCommit.error;
     const firstRuntime = new FakeOmpRuntime();
     const first = new MachineSessionCoordinator(database, artifacts, firstRuntime, 'machine-a', join(root, 'runtime'));
 
@@ -393,8 +650,14 @@ describe('MachineSessionCoordinator', () => {
       expect.objectContaining({ ordinal: 2, kind: 'turn_start' }),
       expect.objectContaining({ ordinal: 3, kind: 'message_update', payload: expect.objectContaining({ message: expect.objectContaining({ content: [expect.objectContaining({ text: 'hello' })] }) }) }),
     ]);
+    const streaming = await first.transcriptPage(created.value.id, { generation: null, before: null, after: null, around: null });
+    const streamingRow = streaming.rows.at(-1)!;
+    expect(streamingRow.item).toMatchObject({ type: 'message', text: 'hello', pending: true });
     firstRuntime.emit({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'hello' }] } });
     expect((await first.transcript(created.value.id)).some((event) => event.kind === 'message_update')).toBe(false);
+    const finalized = await first.transcriptPage(created.value.id, { generation: streaming.generation, before: null, after: null, around: null });
+    expect(finalized.rows.at(-1)).toMatchObject({ id: streamingRow.id, ordinal: streamingRow.ordinal, item: { text: 'hello', pending: false } });
+    expect(finalized.revision).toBeGreaterThan(streaming.revision);
     expect((await first.stopForRestart()).status).toBe('ok');
 
     const persisted = await artifacts.read(
@@ -405,6 +668,10 @@ describe('MachineSessionCoordinator', () => {
     if (persisted.status === 'error') throw persisted.error;
     expect(new TextDecoder().decode(persisted.value)).toBe('agent:build it');
 
+    const newerBase = await artifacts.write(baseCapability, 'local://base/shared.txt', new TextEncoder().encode('updated base'));
+    if (newerBase.status === 'error') throw newerBase.error;
+    const newerBaseCommit = await artifacts.commit(baseCapability, 'local://base/');
+    if (newerBaseCommit.status === 'error') throw newerBaseCommit.error;
     database.close();
     const reopenedDatabase = new GitSpaceDatabase(databasePath);
     const reopenedArtifacts = new LocalArtifactResolver(reopenedDatabase, store, cacheRoot, artifactKey());
@@ -414,7 +681,8 @@ describe('MachineSessionCoordinator', () => {
     expect(recovered.status).toBe('ok');
     if (recovered.status === 'error') throw recovered.error;
     expect(recovered.value.map((session) => session.id)).toEqual([created.value.id]);
-    expect(secondRuntime.opened).toEqual(['/sessions/omp-a.jsonl']);
+    expect(secondRuntime.opened).toEqual([created.value.sessionFile]);
+    expect(readFileSync(join(root, 'runtime', 'sessions', created.value.id, 'artifacts', 'base', 'shared.txt'), 'utf8')).toBe('updated base');
     expect(await second.transcript(created.value.id)).toHaveLength(1);
     expect((await second.close(created.value.id)).status).toBe('ok');
     expect(second.get(created.value.id)?.state).toBe('closed');
@@ -548,8 +816,8 @@ describe('MachineSessionCoordinator', () => {
     database.possessWorkspace('workspace-a', 'machine-a');
     const controls: OmpSessionControlView = {
       sessionId: 'omp-a', role: null, roleLabel: null, roles: [], provider: null, models: [],
-      model: null, thinking: null, fastMode: false, approvalMode: 'always-ask', context: null,
-      cost: 0, todos: [], queue: { steering: [], followUp: [] }, tree: [], history: [], goal: null,
+      model: null, thinking: null, fastMode: false, planMode: false, approvalMode: 'always-ask', context: null,
+      cost: 0, todos: [], queue: { steering: [], followUp: [] }, historyAnchorId: null, history: [], goal: null,
       pendingAsk: { id: 'pending-ask', questions: [] },
     };
     let interruptions = 0;
@@ -608,8 +876,6 @@ describe('MachineSessionCoordinator', () => {
 
     const rejected = await coordinator.prompt(created.value.id, 'must not start');
     expect(rejected.status).toBe('error');
-    if (rejected.status === 'ok') throw new Error('Expected quiesced prompt rejection');
-    expect(rejected.error.message).toContain('Session is quiescing');
     expect((await coordinator.close(created.value.id)).status).toBe('ok');
     expect(coordinator.get(created.value.id)).toMatchObject({ state: 'closed', resumePending: true });
     database.close();
@@ -644,5 +910,65 @@ describe('MachineSessionCoordinator', () => {
     ]);
     await second.close(created.value.id);
     reopenedDatabase.close();
+  });
+
+  it('clears recovery when the resumed turn starts, while retaining interruption tracking', async () => {
+    const { root, database, artifacts } = fixture();
+    expect(database.possessWorkspace('workspace-a', 'machine-a').status).toBe('ok');
+    const initialRuntime = new HandoffOmpRuntime();
+    const initial = new MachineSessionCoordinator(database, artifacts, initialRuntime, 'machine-a', join(root, 'runtime'));
+    const created = await initial.create('workspace-a');
+    if (created.status === 'error') throw created.error;
+    await initial.prompt(created.value.id, 'long-running turn');
+    await initial.stopForRestart();
+
+    const begin = Promise.withResolvers<void>();
+    const finish = Promise.withResolvers<void>();
+    const started = Promise.withResolvers<void>();
+    const runtime = new HandoffOmpRuntime();
+    const open = runtime.open.bind(runtime);
+    runtime.open = async (input) => {
+      const session = await open(input);
+      let activity: SessionActivity = { active: false, reasons: [] };
+      let listener: ((activity: SessionActivity, failure: AgentFailure | null) => void) | undefined;
+      return {
+        ...session,
+        activity: () => ({ activity, failure: null }),
+        subscribeActivity: (handler) => {
+          listener = handler;
+          handler(activity, null);
+          return () => { listener = undefined; };
+        },
+        resume: async () => {
+          await begin.promise;
+          activity = { active: true, reasons: [{ kind: 'turn' }] };
+          listener?.(activity, null);
+          started.resolve();
+          await finish.promise;
+          activity = { active: false, reasons: [] };
+          listener?.(activity, null);
+        },
+        handoff: async () => { finish.resolve(); return true; },
+      };
+    };
+    const resumed = new MachineSessionCoordinator(database, artifacts, runtime, 'machine-a', join(root, 'runtime'));
+    try {
+      expect((await resumed.recover()).status).toBe('ok');
+      expect(resumed.get(created.value.id)?.resumePending).toBe(true);
+      begin.resolve();
+      await started.promise;
+      expect(resumed.get(created.value.id)).toMatchObject({
+        state: 'active', resumePending: false, activity: { active: true, reasons: [{ kind: 'turn' }] },
+      });
+      expect(resumed.controlsAvailable(created.value.id)).toBe(true);
+      await resumed.quiesceSpace('workspace-a');
+      expect(resumed.get(created.value.id)?.resumePending).toBe(true);
+      expect(resumed.controlsAvailable(created.value.id)).toBe(false);
+    } finally {
+      begin.resolve();
+      finish.resolve();
+      await resumed.stopForRestart();
+      database.close();
+    }
   });
 });

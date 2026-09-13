@@ -13,6 +13,8 @@ A GitSpace account owns its devices, machines, projects, workspaces, settings, a
 
 The account root key is the authority that enrolls machines and browsers. The `gsr_` recovery key is an encoding of that private root key.
 
+The sidebar belongs to the account, not to an agent session. Projects and Account settings remain available when no agent or machine is running. Closing the last open project or workspace leaves the app open, with access to saved cloud records.
+
 ## Browser device
 
 A browser enrolls from the one-time link created by `gitspace open`. It generates a non-extractable Ed25519 key in IndexedDB and signs RPC requests with that key.
@@ -27,7 +29,7 @@ Machines expose capabilities such as available runtimes, isolation, hardware, se
 
 Cloud machines are temporary. **Stop** saves supported workspace state before stopping; if saving fails, the machine stays online. **Start** runs a fresh machine environment and restores saved workspaces. Neither a new machine nor Start restores the old machine disk. Installed packages, machine-local configuration, ignored files, and other files outside GitSpace's checkpoints do not survive Stop or replacement. This includes arbitrary files in the machine's home directory.
 
-Ask a normal workspace agent to install tools when needed. Those changes are temporary; there is no separate setup agent.
+Ask a normal workspace agent to use the built-in `workspace-lifecycle` skill to plan repeatable tool preparation. Approve configuration edits first, then approve execution separately. Machine changes remain temporary; there is no separate setup agent. See [Workspace lifecycle](/workspace-lifecycle).
 
 ## Project
 
@@ -64,6 +66,12 @@ The shared Cloudflare sandbox service belongs to the platform. Its container ima
 
 An agent session belongs to a workspace and is rendered as a native block transcript in the browser. The browser can show tool calls, structured questions, approvals, artifacts, and output without treating a terminal emulator as the application shell.
 
+Chat opens at the newest messages and loads older blocks as you scroll back. It mounts the visible blocks and a small margin, then evicts distant history as the session grows. The history and complete-content caches each have a 64 MiB background budget and a 384-entry limit. Visible content can exceed those budgets; they do not limit what you can read. Eviction removes browser copies, not saved history.
+
+Messages, tool results, questions, and attachments render in full through the existing transcript controls. Large blocks load automatically as they approach the viewport, without a separate content viewer. New output does not move your reading position. Use **Jump to latest** to resume following it. Full transcript reads remain lossless.
+
+Prompt recall keeps a small set of recent, complete prompts. The history browser loads older prompts and branch entries on demand rather than keeping the whole session in memory.
+
 ## Inspector products
 
 Each workspace can expose the following durable products:
@@ -83,4 +91,6 @@ Opening Inspector does not open a workspace or start a machine. When the workspa
 
 Live files, terminals, processes, services, and usage controls require an open workspace on an online machine. Disabled controls explain that requirement. Artifact files are read-only while closed; supported cloud record edits remain available. Use **Open workspace** to place work on an online machine. If no machine is online, start one explicitly in Account settings first.
 
-For a workspace already open on a running machine, Inspector keeps its existing live behavior.
+An open portable workspace has its own Git repository. Inspector can browse its files and staged or working changes without the project's base checkout.
+
+Base comparisons use the original branch commit from the base space's latest published checkpoint. Inspector fetches any missing Git objects into the inspected workspace and compares changes from the merge base. It does not reopen the base space or include the base space's saved uncommitted changes. If the checkpoint is unavailable, the base comparison reports that error; files and local changes remain available.

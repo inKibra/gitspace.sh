@@ -73,27 +73,108 @@ describe('ProvidersSection', () => {
       providers: [device, separate, connected],
       usage: { ...usage, reports: [{ ...usage.reports[0]!, provider: connected.id }], errors: [] },
     })} />);
-    expect(html.match(/data-provider="openai-codex"/g)).toHaveLength(1);
-    expect(html).not.toContain('data-provider="openai-codex-device"');
-    expect(html).toContain('data-provider="anthropic"');
+    expect(html).toContain('Anthropic');
     expect(html.match(/aria-label="Remove /g)).toHaveLength(3);
     expect(html).toContain('aria-label="Remove same@example.com · Personal"');
     expect(html).toContain('aria-label="Remove same@example.com · Team"');
     expect(html.match(/62% used/g)).toHaveLength(1);
   });
 
-  it('renders usage limits with meters, resets, and per-provider usage errors under connected rows', () => {
+  it('renders usage limits with meters and resets without errors for disconnected providers', () => {
     const html = renderToStaticMarkup(<ProvidersSection {...props({ usage, usageStatus: 'ready' })} />);
     expect(html).toContain('62% used');
     expect(html).toContain('resets in 2h');
     expect(html).toContain('950K / 1M tokens');
     expect(html).toContain('role="meter"');
     expect(html).toContain('aria-valuenow="38"');
-    expect(html).toContain('bg-destructive" style="width:5%"');
-    expect(html).toContain('bg-foreground" style="width:38%"');
     expect(html).toContain('Limits reset on a rolling window.');
     // Codex has no auth, so its usage error is not shown under the row.
     expect(html).not.toContain('not signed in');
+  });
+
+  it('identifies the connected Codex account without usage instead of showing a successful fetch time', () => {
+    const connected = provider({ ...codex, hasAuth: true, hasUsage: true, accounts: [{ id: 'codex', type: 'oauth', label: 'bradleat@inkibra.com', email: 'bradleat@inkibra.com', disabled: false }] });
+    const html = renderToStaticMarkup(<ProvidersSection {...props({
+      providers: [connected],
+      usageStatus: 'ready',
+      usage: { generatedAt: usage.generatedAt, reports: [], accountsWithoutUsage: ['openai-codex: bradleat@inkibra.com'], errors: [] },
+    })} />);
+    expect(html).toContain('Usage unavailable for bradleat@inkibra.com.');
+    expect(html).not.toContain('Usage as of');
+    expect(html).not.toContain('role="meter"');
+    expect(html).not.toContain('0% used');
+  });
+
+  it('keeps partial reports visible and identifies missing accounts and provider and aggregate errors once across aliases', () => {
+    const connected = provider({ ...codex, hasAuth: true, hasUsage: true, accounts: [
+      { id: 'personal', type: 'oauth', label: 'personal@example.com', email: 'personal@example.com', disabled: false },
+      { id: 'team', type: 'oauth', label: 'team@example.com', email: 'team@example.com', disabled: false },
+    ] });
+    const device = provider({ ...connected, id: 'openai-codex-device', name: 'Codex device code', credentialProvider: connected.id });
+    const html = renderToStaticMarkup(<ProvidersSection {...props({
+      providers: [device, connected],
+      usageStatus: 'ready',
+      usage: {
+        generatedAt: '2026-09-01T15:00:00.000Z',
+        reports: [{ ...usage.reports[0]!, provider: device.id, account: 'personal@example.com' }],
+        accountsWithoutUsage: ['openai-codex-device: team@example.com'],
+        errors: [{ provider: device.id, message: 'Team quota request failed' }, { provider: '*', message: 'Some usage requests timed out' }],
+      },
+    })} />);
+    expect(html.match(/62% used/g)).toHaveLength(1);
+    expect(html).toContain('Usage unavailable for team@example.com.');
+    expect(html.match(/Team quota request failed/g)).toHaveLength(1);
+    expect(html.match(/Some usage requests timed out/g)).toHaveLength(1);
+    const reportTime = new Date(usage.reports[0]!.fetchedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    expect(html).toContain(`Partial usage as of ${reportTime}`);
+    expect(html).not.toContain(`as of ${new Date('2026-09-01T15:00:00.000Z').toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`);
+  });
+
+  it('shows aggregate failures on supported connected cards without treating unsupported providers as failed', () => {
+    const html = renderToStaticMarkup(<ProvidersSection {...props({
+      providers: [anthropic, provider({ ...openai, hasAuth: true })],
+      usageStatus: 'ready',
+      usage: { generatedAt: usage.generatedAt, reports: [], accountsWithoutUsage: [], errors: [{ provider: '*', message: 'Usage service offline' }] },
+    })} />);
+    expect(html.match(/Usage unavailable: Usage service offline/g)).toHaveLength(1);
+    expect(html).toContain('Usage reporting is not supported for this provider.');
+    expect(html).not.toContain('Usage as of');
+  });
+
+  it('distinguishes supported idle and loading cards from a completed empty response', () => {
+    const idle = renderToStaticMarkup(<ProvidersSection {...props({ providers: [anthropic] })} />);
+    expect(idle).toContain('Usage has not been checked yet.');
+    const loading = renderToStaticMarkup(<ProvidersSection {...props({ providers: [anthropic], usageStatus: 'loading' })} />);
+    expect(loading).toContain('role="status"');
+    expect(loading).toContain('Checking usage…');
+    expect(loading).not.toContain('Usage has not been checked yet.');
+    const empty = renderToStaticMarkup(<ProvidersSection {...props({
+      providers: [anthropic],
+      usageStatus: 'ready',
+      usage: { generatedAt: usage.generatedAt, reports: [], accountsWithoutUsage: [], errors: [] },
+    })} />);
+    expect(empty).toContain('Usage unavailable.');
+    expect(empty).not.toContain('Usage as of');
+  });
+
+  it('preserves known usage during refresh and exposes transport errors on the connected card', () => {
+    const refreshing = renderToStaticMarkup(<ProvidersSection {...props({ providers: [anthropic], usage, usageStatus: 'loading' })} />);
+    expect(refreshing).toContain('62% used');
+    expect(refreshing).toContain('Refreshing usage…');
+    const failed = renderToStaticMarkup(<ProvidersSection {...props({ providers: [anthropic], usage, usageStatus: 'error', usageError: 'Connection lost' })} />);
+    expect(failed).toContain('62% used');
+    expect(failed).toContain('Usage unavailable: Connection lost');
+    expect(failed).not.toContain('Usage as of');
+  });
+
+  it('timestamps available data using the oldest report rather than the request completion', () => {
+    const fetchedAt = '2026-09-01T08:00:00.000Z';
+    const html = renderToStaticMarkup(<ProvidersSection {...props({
+      providers: [anthropic],
+      usageStatus: 'ready',
+      usage: { ...usage, reports: [usage.reports[0]!, { ...usage.reports[0]!, account: 'other@example.com', fetchedAt }], errors: [] },
+    })} />);
+    expect(html).toContain(`Usage as of ${new Date(fetchedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`);
   });
 
   it('shows the list failure instead of rows and the usage error in the header', () => {

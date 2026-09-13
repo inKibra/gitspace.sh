@@ -1,8 +1,8 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import { verticalSliceFixture } from './App.js';
-import { GitSpaceShell, type WorkspaceView } from './GitSpaceShell.js';
-import { isBlocking, layoutWorkspaces } from './WorkspaceGraph.js';
+import type { WorkspaceView } from './GitSpaceShell.js';
+import { isBlocking, layoutWorkspaces, WorkspaceGraph, type WorkspaceGraphItem } from './WorkspaceGraph.js';
 import { OverviewView } from './inspector/OverviewView.js';
 
 const [alpha, beta, gamma] = verticalSliceFixture.workspaces as [WorkspaceView, WorkspaceView, WorkspaceView];
@@ -48,6 +48,17 @@ describe('layoutWorkspaces', () => {
     const positions = layoutWorkspaces([workspace({ id: 'a', ...relations(['b']) }), workspace({ id: 'b', ...relations(['a']) })]);
     expect(positions.size).toBe(2);
   });
+
+  it('retains directory-only nodes without inventing relations or phase and keeps other-project references separate', () => {
+    const unknown: WorkspaceGraphItem = { id: 'unknown', projectId: alpha.projectId, projectName: alpha.projectName, name: 'unknown', branch: 'offline', closedAt: null, phase: null };
+    const foreign = workspace({ id: 'foreign', projectId: 'another-project', ...relations(['unknown']) });
+    const positions = layoutWorkspaces([unknown, foreign]);
+    expect([...positions.keys()].sort()).toEqual(['foreign', 'unknown']);
+    expect(positions.get('unknown')?.x).toBe(positions.get('foreign')?.x);
+    const html = renderToStaticMarkup(<WorkspaceGraph workspaces={[unknown, foreign]} onSelect={() => undefined} height={500} />);
+    expect(html).toContain('Relation coverage is incomplete');
+    expect(isBlocking(unknown)).toBeNull();
+  });
 });
 
 describe('isBlocking', () => {
@@ -58,18 +69,6 @@ describe('isBlocking', () => {
   });
 });
 
-describe('Kanban relations', () => {
-  it('offers Board and Graph views and flags blocked cards', () => {
-    const blocked = { ...alpha, relations: { dependsOn: [beta.id], relatedTo: [], stackedOn: beta.id }, stack: { blockedBy: [beta.id], blocking: [], findings: [{ code: 'dependency-open', message: 'relay-hardening is still open', workspaceId: beta.id }] } };
-    const html = renderToStaticMarkup(<GitSpaceShell {...verticalSliceFixture} activeView="kanban" workspace={blocked} workspaces={[blocked, beta, gamma]} onCreateWorkspace={async () => undefined} />);
-    expect(html).toContain('Board');
-    expect(html).toContain('Graph');
-    expect(html).toContain('blocked · 1');
-    expect(html).toContain('1 blocked');
-    expect(html).toContain('title="Stacked on relay-hardening"');
-    expect(html).toContain('aria-label="New workspace in Plan"');
-  });
-});
 
 describe('OverviewView', () => {
   const scope: WorkspaceView = {

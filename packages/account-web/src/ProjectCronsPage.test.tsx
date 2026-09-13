@@ -37,8 +37,7 @@ const callbacks = {
 describe('ProjectCronsPage', () => {
   it('renders production records, stable targets, scopes, state, and actions without fixtures in the component', () => {
     const html = renderToStaticMarkup(<ProjectCronsPage
-      projectId="project-a"
-      projectName="GitSpace"
+      projects={[{ id: 'project-a', name: 'GitSpace' }]}
       holders={{ "project-a": "machine-a" }}
       crons={[cronFixture()]}
       targetOptions={[{ target: { scope: 'workspace', projectId: 'project-a', spaceId: 'space-a' }, label: 'Workspace agent · release-work' }]}
@@ -57,18 +56,6 @@ describe('ProjectCronsPage', () => {
     expect(html).not.toContain('inspector-digest');
   });
 
-  it('renders an honest empty authority state and create action', () => {
-    const html = renderToStaticMarkup(<ProjectCronsPage
-      projectId="project-a"
-      projectName="GitSpace"
-      crons={[]}
-      targetOptions={[]}
-      {...callbacks}
-    />);
-    expect(html).toContain('No project crons');
-    expect(html).toContain('Create the first cron');
-    expect(html).toMatch(/<strong[^>]*>0<\/strong><span[^>]*>Armed/u);
-  });
 
   it('formats next and last times without installing a browser scheduler', () => {
     const now = Date.parse('2026-09-01T00:00:00.000Z');

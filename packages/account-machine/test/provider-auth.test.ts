@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import type {
+  CredentialHealthResult,
   CredentialOrigin,
   DisabledCredentialSummary,
   OAuthLoginIdentity,
@@ -14,6 +15,7 @@ interface FakeAuthStorageOptions {
   disabled?: DisabledCredentialSummary[];
   usageProviders?: string[];
   reports?: UsageReport[] | (() => Promise<UsageReport[] | null>);
+  health?: CredentialHealthResult[] | (() => Promise<CredentialHealthResult[]>);
   login?: (provider: string, ctrl: ProviderLoginController, storage: FakeAuthStorage) => Promise<OAuthLoginIdentity | undefined>;
 }
 
@@ -88,6 +90,11 @@ class FakeAuthStorage implements AuthStorageLike {
     const { reports } = this.options;
     if (typeof reports === 'function') return reports();
     return reports ?? [];
+  }
+
+  async checkCredentials(): Promise<CredentialHealthResult[]> {
+    const { health } = this.options;
+    return typeof health === 'function' ? health() : health ?? [];
   }
 
   async invalidateUsageCache(provider?: string): Promise<void> {
@@ -367,7 +374,7 @@ describe('ProviderAuthCoordinator.usage', () => {
     const storage = new FakeAuthStorage({ credentials, usageProviders: ['anthropic', 'openai-codex'], reports: [anthropicReport, codexReport] });
     const usage = await coordinator(storage).usage(null, false);
     expect(storage.invalidated).toEqual([]);
-    expect(usage.errors).toEqual([]);
+    expect(usage.errors).toEqual([{ provider: 'openai-codex', message: expect.stringContaining('b@example.com') }]);
     expect(usage.reports).toEqual([
       {
         provider: 'anthropic',
@@ -402,6 +409,7 @@ describe('ProviderAuthCoordinator.usage', () => {
     const zai = await coordinator(storage).usage('zai', false);
     expect(zai.reports).toEqual([]);
     expect(zai.accountsWithoutUsage).toEqual(['zai: API key']);
+    expect(zai.errors).toEqual([{ provider: 'zai', message: expect.any(String) }]);
   });
 
   it('turns a failed fetch into an error entry instead of throwing', async () => {
@@ -411,5 +419,121 @@ describe('ProviderAuthCoordinator.usage', () => {
     expect(usage.reports).toEqual([]);
     expect(usage.errors).toEqual([{ provider: '*', message: 'broker offline' }]);
     expect(usage.accountsWithoutUsage).toEqual(['anthropic: a@example.com']);
+  });
+
+  it('does not treat an empty aggregate as successful for connected usage accounts', async () => {
+    const storage = new FakeAuthStorage({ credentials, usageProviders: ['openai-codex'] });
+    const usage = await coordinator(storage).usage(null, false);
+    expect(usage.reports).toEqual([]);
+    expect(usage.accountsWithoutUsage).toEqual(['openai-codex: b@example.com']);
+    expect(usage.errors).toEqual([{ provider: 'openai-codex', message: expect.any(String) }]);
+  });
+
+  it('keeps aggregate failure attribution when the view is scoped to one provider', async () => {
+    const storage = new FakeAuthStorage({ credentials, reports: async () => { throw new Error('Codex usage request failed with status 403'); } });
+    const usage = await coordinator(storage).usage('openai-codex', false);
+    expect(usage.errors).toEqual([{ provider: '*', message: 'Codex usage request failed with status 403' }]);
+    expect(usage.accountsWithoutUsage).toEqual(['openai-codex: b@example.com']);
+  });
+
+  it('recovers missing broker usage through the matching OMP credential probe', async () => {
+    const storage = new FakeAuthStorage({
+      credentials,
+      usageProviders: ['openai-codex'],
+      reports: async () => null,
+      health: [{ id: 2, provider: 'openai-codex', type: 'oauth', ok: true, report: { ...codexReport, metadata: { email: 'b@example.com' } } }],
+    });
+    const usage = await coordinator(storage).usage(null, false);
+    expect(usage.reports).toMatchObject([{ provider: 'openai-codex', account: 'b@example.com', limits: [{ id: 'weekly' }] }]);
+    expect(usage.accountsWithoutUsage).toEqual([]);
+    expect(usage.errors).toEqual([]);
+  });
+
+  it('attributes recovered usage to its organization without covering a same-email sibling', async () => {
+    const storage = new FakeAuthStorage({
+      credentials: [
+        { id: 2, provider: 'openai-codex', credential: { type: 'oauth', refresh: 'r', access: 'a', expires: 1, email: 'b@example.com', orgId: 'org-a' }, disabledCause: null },
+        { id: 4, provider: 'openai-codex', credential: { type: 'oauth', refresh: 'r4', access: 'a4', expires: 1, email: 'b@example.com', orgId: 'org-b' }, disabledCause: null },
+      ],
+      usageProviders: ['openai-codex'],
+      health: [
+        { id: 2, provider: 'openai-codex', type: 'oauth', email: 'b@example.com', orgId: 'org-a', ok: true, report: { ...codexReport, metadata: { email: 'b@example.com' } } },
+        { id: 4, provider: 'openai-codex', type: 'oauth', ok: false, reason: 'account unavailable' },
+      ],
+    });
+    const usage = await coordinator(storage).usage(null, false);
+    expect(usage.reports).toMatchObject([{ provider: 'openai-codex', account: 'b@example.com', limits: [{ id: 'weekly' }] }]);
+    expect(usage.accountsWithoutUsage).toEqual(['openai-codex: b@example.com']);
+    expect(usage.errors).toEqual([{ provider: 'openai-codex', message: 'openai-codex: b@example.com: account unavailable' }]);
+  });
+
+  it('does not surface a broker error after the local probe recovers all missing usage', async () => {
+    const storage = new FakeAuthStorage({
+      credentials,
+      usageProviders: ['openai-codex'],
+      reports: async () => { throw new Error('Broker usage request failed with status 403'); },
+      health: [{ id: 2, provider: 'openai-codex', type: 'oauth', ok: true, report: { ...codexReport, metadata: { email: 'b@example.com' } } }],
+    });
+    const usage = await coordinator(storage).usage('openai-codex', true);
+    expect(usage.reports.map((report) => report.account)).toEqual(['b@example.com']);
+    expect(usage.accountsWithoutUsage).toEqual([]);
+    expect(usage.errors).toEqual([]);
+  });
+
+  it('supplements partial aggregates without replacing successes or losing per-account probe failures', async () => {
+    const aggregate = [anthropicReport, { ...codexReport, metadata: { email: 'b@example.com' } }];
+    const storage = new FakeAuthStorage({
+      credentials: [
+        ...credentials,
+        { id: 4, provider: 'openai-codex', credential: { type: 'oauth', refresh: 'r4', access: 'a4', expires: 1, email: 'c@example.com' }, disabledCause: null },
+        { id: 5, provider: 'openai-codex', credential: { type: 'oauth', refresh: 'r5', access: 'a5', expires: 1, email: 'd@example.com' }, disabledCause: null },
+      ],
+      usageProviders: ['anthropic', 'openai-codex'],
+      reports: aggregate,
+      health: [
+        { id: 1, provider: 'anthropic', type: 'oauth', ok: true, report: { ...anthropicReport, limits: [] } },
+        { id: 2, provider: 'openai-codex', type: 'oauth', ok: true, report: { ...codexReport, metadata: { email: 'b@example.com' }, limits: [] } },
+        { id: 4, provider: 'openai-codex', type: 'oauth', ok: false, reason: 'oauth refresh failed: invalid_grant' },
+        { id: 5, provider: 'openai-codex', type: 'oauth', ok: true, report: { ...codexReport, metadata: { email: 'd@example.com' } } },
+      ],
+    });
+    const usage = await coordinator(storage).usage(null, false);
+    expect(usage.reports.map((report) => ({ account: report.account, limits: report.limits.map((limit) => limit.id) }))).toEqual([
+      { account: 'a@example.com', limits: ['5h', 'opus'] },
+      { account: 'b@example.com', limits: ['weekly'] },
+      { account: 'd@example.com', limits: ['weekly'] },
+    ]);
+    expect(usage.accountsWithoutUsage).toEqual(['openai-codex: c@example.com']);
+    expect(usage.errors).toEqual([{ provider: 'openai-codex', message: 'openai-codex: c@example.com: oauth refresh failed: invalid_grant' }]);
+    expect(aggregate.map((report) => report.metadata?.email)).toEqual(['a@example.com', 'b@example.com']);
+  });
+
+  it('ignores probe reports for unrelated credential IDs or providers in a scoped view', async () => {
+    const storage = new FakeAuthStorage({
+      credentials,
+      usageProviders: ['anthropic', 'openai-codex'],
+      health: [
+        { id: 22, provider: 'openai-codex', type: 'oauth', ok: true, report: { ...codexReport, metadata: { email: 'b@example.com' } } },
+        { id: 2, provider: 'anthropic', type: 'oauth', ok: true, report: { ...codexReport, metadata: { email: 'b@example.com' } } },
+        { id: 1, provider: 'anthropic', type: 'oauth', ok: true, report: anthropicReport },
+      ],
+    });
+    const usage = await coordinator(storage).usage('openai-codex', false);
+    expect(usage.reports).toEqual([]);
+    expect(usage.accountsWithoutUsage).toEqual(['openai-codex: b@example.com']);
+    expect(usage.errors).toEqual([{ provider: 'openai-codex', message: expect.any(String) }]);
+  });
+
+  it('preserves aggregate reports and the real diagnostic error when local probing fails', async () => {
+    const storage = new FakeAuthStorage({
+      credentials,
+      usageProviders: ['anthropic', 'openai-codex'],
+      reports: [anthropicReport],
+      health: async () => { throw new Error('Auth broker refresh timed out'); },
+    });
+    const usage = await coordinator(storage).usage(null, false);
+    expect(usage.reports.map((report) => report.provider)).toEqual(['anthropic']);
+    expect(usage.accountsWithoutUsage).toEqual(['openai-codex: b@example.com']);
+    expect(usage.errors).toEqual([{ provider: '*', message: 'Auth broker refresh timed out' }]);
   });
 });

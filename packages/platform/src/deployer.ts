@@ -4,7 +4,7 @@ import {
   type PlatformDeployRequest,
   type PlatformDeployResponse,
   type WorkerReleaseMetadata,
-} from '@gitspace/protocol';
+} from '@gitspace/protocol/deployment';
 import type { TenantDeployRecord, TenantDeploymentsDO, TenantDeploymentState } from './tenant-deployments.js';
 
 export const CLOUDFLARE_API = 'https://api.cloudflare.com/client/v4';
@@ -13,37 +13,9 @@ export const CHANNEL_BUNDLE_KEY = 'channel/worker.mjs';
 export const CHANNEL_METADATA_KEY = 'channel/metadata.json';
 export const CHANNEL_SHA = 'channel';
 
-/**
- * Binding types carried over from the tenant's previous upload. Durable Object
- * namespaces are NOT kept: the release metadata declares them so a build that
- * adds or drops a class is uploaded exactly as its wrangler config says.
- */
-export const KEPT_BINDING_TYPES = [
-  'plain_text',
-  'json',
-  'secret_text',
-  'secret_key',
-  'r2_bucket',
-  'kv_namespace',
-  'd1',
-  'service',
-  'queue',
-  'analytics_engine',
-  'hyperdrive',
-  'dispatch_namespace',
-  'browser',
-  'ai',
-  'vectorize',
-  'workflow',
-  'secrets_store_secret',
-  'ratelimit',
-  'send_email',
-  'mtls_certificate',
-  'version_metadata',
-  'pipelines',
-] as const;
 
-const PROBE_ATTEMPTS = 3;
+// Dispatchers can still serve the predecessor after upload; allow 30 seconds at the production interval.
+const PROBE_ATTEMPTS = 16;
 
 export interface MigrationUpload {
   old_tag?: string;
@@ -60,6 +32,8 @@ export interface ScriptUploadMetadata {
     | { type: 'durable_object_namespace'; name: string; class_name: string }
     | { type: 'r2_bucket'; name: string; bucket_name: string }
     | { type: 'plain_text'; name: string; text: string }
+    | { type: 'secret_text'; name: string; text: string }
+    | { type: 'service'; name: string; service: string }
   >;
   migrations?: MigrationUpload;
   keep_bindings: string[];
@@ -99,37 +73,34 @@ export function migrationDelta(migrations: WorkerReleaseMetadata['migrations'], 
     steps: pending.map((migration) => ({ new_sqlite_classes: migration.newSqliteClasses })),
   };
 }
-
 export function scriptUploadMetadata(
   metadata: WorkerReleaseMetadata,
   migrations: MigrationUpload | null,
   tags: string[],
-  tenant?: { id: string; rootPublicKey: string; blobBucket: string; operatorUrl: string },
+  tenant: { id: string; accountId: string; rootPublicKey: string; blobBucket: string; platformUrl: string; token: string; publicAssetsService: string },
 ): ScriptUploadMetadata {
-  return {
-    main_module: metadata.mainModule,
-    compatibility_date: metadata.compatibilityDate,
-    compatibility_flags: metadata.compatibilityFlags,
-    bindings: [
-      ...metadata.durableObjects.map((binding) => ({
-        type: 'durable_object_namespace' as const,
-        name: binding.name,
-        class_name: binding.className,
-      })),
-      ...(tenant ? [
-        { type: 'r2_bucket' as const, name: 'BLOBS', bucket_name: tenant.blobBucket },
-        { type: 'plain_text' as const, name: 'AUTH_PUBLIC_KEY', text: tenant.rootPublicKey },
-        { type: 'plain_text' as const, name: 'OPERATOR_URL', text: tenant.operatorUrl },
-        { type: 'plain_text' as const, name: 'RELAY_NAME', text: tenant.id },
-        { type: 'plain_text' as const, name: 'AUTH_MAX_SKEW_MS', text: '60000' },
-        { type: 'plain_text' as const, name: 'TUNNEL_HEADER_TIMEOUT_MS', text: '300000' },
-        { type: 'plain_text' as const, name: 'TUNNEL_IDLE_TIMEOUT_MS', text: '300000' },
-      ] : []),
-    ],
-    ...(migrations ? { migrations } : {}),
-    keep_bindings: [...KEPT_BINDING_TYPES],
-    tags,
-  };
+  const bindings: ScriptUploadMetadata['bindings'] = metadata.durableObjects.map(binding => ({ type: 'durable_object_namespace', name: binding.name, class_name: binding.className }));
+  const names = new Set(bindings.map(binding => binding.name));
+  for (const resource of metadata.resources) {
+    if (names.has(resource.name)) throw new Error('Duplicate provider binding: ' + resource.name);
+    names.add(resource.name);
+    if (resource.source === 'object-storage') { bindings.push({ type: 'r2_bucket', name: resource.name, bucket_name: tenant.blobBucket }); continue; }
+    if (resource.source === 'public-assets') { bindings.push({ type: 'service', name: resource.name, service: tenant.publicAssetsService }); continue; }
+    if (resource.source === 'provider-token') { bindings.push({ type: 'secret_text', name: resource.name, text: tenant.token }); continue; }
+    let value: string;
+    switch (resource.source) {
+      case 'object-storage-name': value = tenant.blobBucket; break;
+      case 'tenant-id': value = tenant.id; break;
+      case 'account-id': value = tenant.accountId; break;
+      case 'root-public-key': value = tenant.rootPublicKey; break;
+      case 'platform-url': value = tenant.platformUrl; break;
+      case 'application-url': value = 'https://' + tenant.id + '.gitspace.sh'; break;
+      case 'transport-url': value = 'https://' + tenant.id + '.gssh.dev'; break;
+      case 'literal': if (resource.value === undefined) throw new Error('Literal binding value is required'); value = resource.value; break;
+    }
+    bindings.push({ type: 'plain_text', name: resource.name, text: value });
+  }
+  return { main_module: metadata.mainModule, compatibility_date: metadata.compatibilityDate, compatibility_flags: metadata.compatibilityFlags, bindings, ...(migrations ? { migrations } : {}), keep_bindings: [], tags };
 }
 
 async function sha256Prefixed(bytes: ArrayBuffer): Promise<string> {
@@ -198,6 +169,8 @@ async function probeHealth(env: Env, tenant: string, expectedSha: string): Promi
     try {
       const response = await env.DISPATCHER.get(`tenant-${tenant}`).fetch('https://tenant/healthz');
       version = response.headers.get(WORKER_VERSION_HEADER);
+      // Release this invocation before looking up the next Worker version.
+      await response.body?.cancel();
       const matches = version === expectedSha || (expectedSha === CHANNEL_SHA && version?.startsWith(`${CHANNEL_SHA}:`) === true);
       if (response.ok && matches) return { healthy: true, version };
     } catch (error) {
@@ -247,11 +220,18 @@ async function swap(env: Env, tenant: string, deployments: Deployments, state: T
     return { status: 'error', error: { status: 409, code: 'TENANT_UNCONFIGURED', message: 'Tenant bindings are not configured' } };
   }
   const delta = migrationDelta(candidate.metadata.migrations, state.appliedMigrationTag);
+  const accountKey = Uint8Array.from(atob(tenantConfig.rootPublicKey), character => character.charCodeAt(0));
+  const accountHash = new Uint8Array(await crypto.subtle.digest('SHA-256', accountKey));
+  const accountId = `u-${Array.from(accountHash.subarray(0, 16), byte => byte.toString(16).padStart(2, '0')).join('')}`;
+  const token = await deployments.providerToken();
   const uploadMetadata = scriptUploadMetadata(candidate.metadata, delta, [tenant, candidate.sha], {
     id: tenant,
+    accountId,
+    token,
+    platformUrl: env.PLATFORM_URL,
     rootPublicKey: tenantConfig.rootPublicKey,
     blobBucket: tenantConfig.blobBucket,
-    operatorUrl: env.OPERATOR_URL,
+    publicAssetsService: env.PUBLIC_ASSETS_SERVICE,
   });
   const rejected = await uploadScript(env, tenant, candidate.bundle, uploadMetadata);
   if (rejected) {
@@ -274,7 +254,7 @@ async function swap(env: Env, tenant: string, deployments: Deployments, state: T
       fallback.metadata,
       fallbackDelta,
       [tenant, fallback.sha],
-      { id: tenant, rootPublicKey: tenantConfig.rootPublicKey, blobBucket: tenantConfig.blobBucket, operatorUrl: env.OPERATOR_URL },
+      { id: tenant, accountId, token, platformUrl: env.PLATFORM_URL, rootPublicKey: tenantConfig.rootPublicKey, blobBucket: tenantConfig.blobBucket, publicAssetsService: env.PUBLIC_ASSETS_SERVICE },
     ));
     if (fallbackRejected) {
       console.error(JSON.stringify({ event: 'deploy-revert-rejected', tenant, sha: candidate.sha, message: fallbackRejected.message }));
@@ -310,9 +290,12 @@ export async function deployChannelTenant(env: Env, tenant: string): Promise<Dep
 }
 
 export async function deployTenantWorker(env: Env, tenant: string, request: PlatformDeployRequest): Promise<DeployResult> {
-  const object = await env.DATA.get(request.bundleKey);
-  if (!object) return { status: 'error', error: { status: 404, code: 'BUNDLE_NOT_FOUND', message: `No object at ${request.bundleKey}` } };
-  const bundle = await object.arrayBuffer();
+  const source = await env.DISPATCHER.get(`tenant-${tenant}`).fetch(new Request(
+    `https://${tenant}.gitspace.sh/__platform/objects/${request.bundleKey.split('/').map(encodeURIComponent).join('/')}`,
+    { headers: { authorization: `Bearer ${await env.DEPLOYMENTS.getByName(tenant).providerToken()}` } },
+  ));
+  if (!source.ok) return { status: 'error', error: { status: source.status, code: 'BUNDLE_NOT_FOUND', message: `Tenant object unavailable at ${request.bundleKey}` } };
+  const bundle = await source.arrayBuffer();
   const hash = await sha256Prefixed(bundle);
   if (hash !== request.bundleHash) {
     return { status: 'error', error: { status: 409, code: 'BUNDLE_HASH_MISMATCH', message: `Bundle hashes to ${hash}, expected ${request.bundleHash}` } };

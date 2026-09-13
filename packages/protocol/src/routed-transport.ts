@@ -1,6 +1,6 @@
 import { batchFetchTransport, createBrowserClient, fetchTransport, type ClientTransport } from 'result-rpc/client';
 import { gitspaceContract, type SpacePlacementView } from './rpc-contract.js';
-import { ACCOUNT_CLOUD_RPC_PATHS, ACCOUNT_RUNTIME_RPC_PATHS, inspectorRpcSpaceId, isInspectorRpcPath } from './account-rpc.js';
+import { ACCOUNT_CLOUD_RPC_PATHS, ACCOUNT_RUNTIME_RPC_PATHS, spaceCloudRpcSpaceId, isSpaceCloudRpcPath } from './account-rpc.js';
 
 /**
  * One client, every machine. Calls naming a space go to the machine that
@@ -38,7 +38,7 @@ function spaceIdOf(path: string, input: unknown): string | null {
   const record = input as Record<string, unknown>;
   const candidate = [record.spaceId, record.workspaceId].find((value): value is string => typeof value === 'string');
   if (candidate) return candidate;
-  if (path === 'bootstrap' || path === 'workspace.create' || path === 'session.createProject' || path === 'events') {
+  if (path === 'bootstrap' || path === 'transcript' || path === 'transcriptPage' || path === 'transcriptContent' || path === 'workspace.create' || path === 'session.createProject' || path === 'events') {
     return typeof record.projectId === 'string' ? record.projectId : null;
   }
   return null;
@@ -68,25 +68,29 @@ export function createRoutedTransport(options: RoutedTransportOptions): RoutedTr
   // Let the account authority choose cloud versus the existing live-machine path
   // before any provider proxy can wake a stopped machine. Never mix spaces.
   const inspectorTransports: Record<string, ClientTransport> = {};
-  const homeClient = createBrowserClient({ contract: gitspaceContract, transport: home });
+  const homeClient = createBrowserClient({ contract: gitspaceContract, transport: account });
   const sessionSpaces: Record<string, string> = {};
   let table: RouteTable | null = null;
   let loading: Promise<RouteTable | null> | null = null;
+  let routeGeneration = 0;
 
   const readTable = (): Promise<RouteTable | null> => {
     if (table && Date.now() - table.at < (options.placementsTtlMs ?? PLACEMENTS_TTL_MS)) return Promise.resolve(table);
     loading ??= (async () => {
+      const generation = routeGeneration;
       try {
         const result = await homeClient.placements({});
+        if (generation !== routeGeneration) return readTable();
         if (result.status !== 'ok') return table;
         const bySpace: Record<string, SpacePlacementView> = {};
         for (const space of result.value.spaces) bySpace[space.spaceId] = space;
         table = { at: Date.now(), homeMachineId: result.value.machineId, bySpace };
         return table;
       } catch {
+        if (generation !== routeGeneration) return readTable();
         return table;
       } finally {
-        loading = null;
+        if (generation === routeGeneration) loading = null;
       }
     })();
     return loading;
@@ -117,15 +121,13 @@ export function createRoutedTransport(options: RoutedTransportOptions): RoutedTr
 
   const resolve = async (path: string, input: unknown): Promise<ClientTransport> => {
     if (path === 'project.create') return projectCreation;
-    if (path === 'inspector.bootstrap' || path === 'inspector.availability') return inspectorContext;
+    if (path === 'inspector.bootstrap' || path === 'inspector.transcript' || path === 'inspector.transcriptPage' || path === 'inspector.transcriptContent' || path === 'inspector.availability') return inspectorContext;
     if (Object.hasOwn(ACCOUNT_RUNTIME_RPC_PATHS, path)) return runtimeMetadata;
     if (Object.hasOwn(ACCOUNT_CLOUD_RPC_PATHS, path)) return account;
-    if (isInspectorRpcPath(path)) {
-      const spaceId = inspectorRpcSpaceId(input) ?? '';
+    if (isSpaceCloudRpcPath(path)) {
+      const spaceId = spaceCloudRpcSpaceId(input) ?? '';
       return inspectorTransports[spaceId] ??= batchFetchTransport({ url: options.homeUrl, fetch: options.fetch, maxItems: options.maxItems ?? 32 });
     }
-    // Routing reads never recurse into routing.
-    if (path === 'placements' || path === 'session.locate') return home;
     const spaceId = spaceIdOf(path, input);
     if (spaceId) return transportFor(await urlForSpace(spaceId));
     const sessionId = sessionIdOf(input);
@@ -141,6 +143,6 @@ export function createRoutedTransport(options: RoutedTransportOptions): RoutedTr
       return transport.stream(envelope, requestOptions);
     },
     placements: async () => (await readTable())?.bySpace ?? {},
-    invalidate: () => { table = null; },
+    invalidate: () => { routeGeneration++; table = null; loading = null; },
   };
 }

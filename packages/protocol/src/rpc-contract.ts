@@ -1,4 +1,16 @@
 import { defineErrors, rpc, type InputOf, wire } from 'result-rpc';
+import { EnvironmentFailureSchema, LifecycleRunSchema, LifecycleStateSchema, type EnvironmentFailure, type LifecycleRun, type LifecycleState } from '@gitspace/protocol-environment';
+import {
+  AgentHealthStateSchema, AgentLifecycleStateSchema, AgentSessionRenderStateSchema, SessionActivitySchema,
+  SessionHistoryEntrySchema, SessionHistoryPageRequestSchema, SessionHistoryPageSchema,
+  type AgentHealthState, type AgentLifecycleState, type AgentSessionRenderState, type SessionActivity,
+  type SessionHistoryEntry, type SessionHistoryPageRequest, type SessionHistoryPage,
+} from '@gitspace/protocol-agent';
+import { AgentFailureSchema, AgentIncidentChangeSchema, type AgentFailure, type AgentIncidentChange } from '@gitspace/protocol-agent';
+import { SpaceAuthorityRecordSchema, WorkspaceFailureSchema, WorkspaceRelationsSchema, WorkspacePhaseSchema, type SpaceAuthorityRecord, type WorkspaceFailure, type WorkspaceRelations, type WorkspacePhase } from '@gitspace/protocol-workspace';
+import { z } from 'zod';
+import { StreamCursorCodec, streamCodec } from './stream-codec.js';
+import { TranscriptChunkCodec, TranscriptPageCodec, TranscriptContentPageCodec, TranscriptPageRequestFields, TranscriptContentRequestFields } from './transcript.js';
 import {
   ProjectCronDraftCodec,
   ProjectCronRunViewCodec,
@@ -84,6 +96,21 @@ export const rpcErrors = defineErrors('gitspace', {
   operationFailed: {
     data: wire.object({ operation: wire.string, message: wire.string }),
     httpStatus: 500,
+  },
+  environmentFailure: {
+    data: wire.serializable(
+      (value): value is EnvironmentFailure => EnvironmentFailureSchema.safeParse(value).success,
+      { id: 'gitspace/environment-failure/v1' },
+    ),
+    httpStatus: 409,
+  },
+  agentFailure: {
+    data: wire.serializable((value): value is AgentFailure => AgentFailureSchema.safeParse(value).success, { id: 'gitspace/agent-failure/v1' }),
+    httpStatus: 409,
+  },
+  workspaceFailure: {
+    data: wire.serializable((value): value is WorkspaceFailure => WorkspaceFailureSchema.safeParse(value).success, { id: 'gitspace/workspace-failure/v1' }),
+    httpStatus: 409,
   },
   settingsConflict: {
     data: wire.object({ resource: wire.enum(['user-settings', 'omp-config']), expected: wire.number, actual: wire.number }),
@@ -175,24 +202,20 @@ export const BaseSpaceViewCodec = wire.object({
   spaceGeneration: wire.number,
   status: WorkspaceStatusCodec,
 });
-const ActivityReasonCodec = wire.union([
-  wire.object({ kind: wire.literal('turn') }),
-  wire.object({ kind: wire.literal('compacting') }),
-  wire.object({ kind: wire.literal('retry'), attempt: wire.number, next: wire.number }),
-  wire.object({ kind: wire.literal('human'), questions: wire.number, permissions: wire.number }),
-  wire.object({ kind: wire.literal('queued'), steering: wire.number, followUp: wire.number }),
-  wire.object({ kind: wire.literal('subagents'), count: wire.number }),
-]);
-export const SessionActivityCodec = wire.object({
-  active: wire.boolean,
-  reasons: wire.array(ActivityReasonCodec),
-});
+export const SessionActivityCodec = wire.serializable(
+  (value): value is SessionActivity => SessionActivitySchema.safeParse(value).success,
+  { id: 'gitspace/agent-activity/v1' },
+);
 
-export const WorkspaceRelationsCodec = wire.object({
-  dependsOn: wire.array(wire.string),
-  relatedTo: wire.array(wire.string),
-  stackedOn: wire.nullable(wire.string),
-});
+export const WorkspaceRelationsCodec = wire.serializable(
+  (value): value is WorkspaceRelations => WorkspaceRelationsSchema.safeParse(value).success,
+  { id: 'gitspace/workspace-relations/v1' },
+);
+export const WorkspacePhaseCodec = wire.serializable(
+  (value): value is WorkspacePhase => WorkspacePhaseSchema.safeParse(value).success,
+  { id: 'gitspace/workspace-phase/v1' },
+);
+const workspaceRelationsRequestSchema = WorkspaceRelationsSchema.extend({ workspaceId: z.string() });
 export const StackFindingCodec = wire.object({
   code: wire.string,
   message: wire.string,
@@ -210,7 +233,7 @@ export const WorkspaceViewCodec = wire.object({
   name: wire.string,
   branch: wire.string,
   rootPath: wire.string,
-  phase: wire.enum(['plan', 'code', 'review', 'ship']),
+  phase: WorkspacePhaseCodec,
   closedAt: wire.nullable(wire.date),
   possessedBy: wire.nullable(wire.string),
   spaceGeneration: wire.number,
@@ -299,6 +322,18 @@ export const ProjectSecretMetadataCodec = wire.object({
   updatedAt: wire.string,
   updatedBy: wire.string,
 });
+export const AccountSecretMetadataCodec = wire.object({
+  name: wire.string, revision: wire.number, updatedAt: wire.string, updatedBy: wire.string,
+  grants: wire.array(wire.object({ projectId: wire.string, projectSpaceEnabled: wire.boolean, workspacesEnabled: wire.boolean })),
+});
+export type AccountSecretMetadata = InputOf<typeof AccountSecretMetadataCodec>;
+export const EffectiveSecretMetadataCodec = wire.object({
+  projectId: wire.string, name: wire.string, revision: wire.number, updatedAt: wire.string, updatedBy: wire.string,
+  source: wire.enum(['account', 'project']),
+});
+export type EffectiveSecretMetadata = InputOf<typeof EffectiveSecretMetadataCodec>;
+export const ConfigurationValuesViewCodec = wire.object({ global: wire.record(wire.string), project: wire.record(wire.string) });
+export type ConfigurationValuesView = InputOf<typeof ConfigurationValuesViewCodec>;
 
 export const EnvironmentExecutionViewCodec = wire.object({
   id: wire.string,
@@ -306,24 +341,19 @@ export const EnvironmentExecutionViewCodec = wire.object({
   label: wire.string,
   command: wire.string,
   hash: wire.string,
+  content: wire.string,
   approval: wire.nullable(wire.enum(['project', 'workspace'])),
-  phase: wire.nullable(wire.enum(['setup', 'select', 'remove'])),
+  phase: wire.nullable(wire.enum(['cloud/provision', 'machine/prepare', 'workspace/materialize', 'workspace/dematerialize', 'cloud/destroy'])),
   fileName: wire.nullable(wire.string),
 });
-export const EnvironmentRunViewCodec = wire.object({
-  id: wire.string,
-  projectId: wire.string,
-  spaceId: wire.string,
-  phase: wire.enum(['checks', 'setup', 'select', 'remove']),
-  status: wire.enum(['running', 'succeeded', 'failed']),
-  terminalName: wire.nullable(wire.string),
-  executionHashes: wire.array(wire.string),
-  results: wire.array(wire.object({ id: wire.string, exitCode: wire.number, output: wire.string })),
-  output: wire.string,
-  exitCode: wire.nullable(wire.number),
-  startedAt: wire.string,
-  finishedAt: wire.nullable(wire.string),
-});
+export const LifecycleRunCodec = wire.serializable(
+  (value): value is LifecycleRun => LifecycleRunSchema.safeParse(value).success,
+  { id: 'gitspace/environment-run/v2' },
+);
+export const LifecycleStateCodec = wire.serializable(
+  (value): value is LifecycleState => LifecycleStateSchema.safeParse(value).success,
+  { id: 'gitspace/environment-state/v2' },
+);
 export const WorkspaceEnvironmentViewCodec = wire.object({
   spaceId: wire.string,
   projectId: wire.string,
@@ -337,6 +367,7 @@ export const WorkspaceEnvironmentViewCodec = wire.object({
     notes: wire.array(wire.string),
   }),
   configuredSecrets: wire.array(wire.string),
+  secretMetadata: wire.array(EffectiveSecretMetadataCodec),
   values: wire.object({
     global: wire.record(wire.string),
     project: wire.record(wire.string),
@@ -344,8 +375,10 @@ export const WorkspaceEnvironmentViewCodec = wire.object({
     effective: wire.record(wire.string),
   }),
   executions: wire.array(EnvironmentExecutionViewCodec),
-  runs: wire.array(EnvironmentRunViewCodec),
+  runs: wire.array(LifecycleRunCodec),
+  lifecycle: LifecycleStateCodec,
 });
+export type WorkspaceEnvironmentView = InputOf<typeof WorkspaceEnvironmentViewCodec>;
 export const EnvironmentExecutionResultCodec = wire.object({
   id: wire.string,
   hash: wire.string,
@@ -360,13 +393,23 @@ export const SessionViewCodec = wire.object({
   workspaceId: wire.nullable(wire.string),
   scope: wire.enum(['project', 'workspace']),
   ompSessionId: wire.string,
-  state: wire.enum(['opening', 'active', 'draining', 'closed', 'failed']),
+  state: wire.serializable(
+    (value): value is AgentLifecycleState => AgentLifecycleStateSchema.safeParse(value).success,
+    { id: 'gitspace/agent-lifecycle/v1' },
+  ),
+  controlsAvailable: wire.boolean,
   lastEventOffset: wire.number,
   resumePending: wire.boolean,
   createdAt: wire.date,
   activity: SessionActivityCodec,
-  renderState: wire.enum(['closed', 'dormant', 'waiting', 'running', 'permission-needed', 'retrying', 'archived']),
-  errorMessage: wire.nullable(wire.string),
+  renderState: wire.serializable(
+    (value): value is AgentSessionRenderState => AgentSessionRenderStateSchema.safeParse(value).success,
+    { id: 'gitspace/agent-render-state/v1' },
+  ),
+  health: wire.serializable(
+    (value): value is AgentHealthState => AgentHealthStateSchema.safeParse(value).success,
+    { id: 'gitspace/agent-health/v1' },
+  ),
   updatedAt: wire.date,
 });
 
@@ -402,6 +445,18 @@ const PendingAskAnswerCodec = wire.object({
   customInput: wire.nullable(wire.string),
 });
 export type PendingAskAnswer = InputOf<typeof PendingAskAnswerCodec>;
+export const SessionHistoryEntryCodec = wire.serializable(
+  (value): value is SessionHistoryEntry => SessionHistoryEntrySchema.safeParse(value).success,
+  { id: 'gitspace/agent-history-entry/v1' },
+);
+export const SessionHistoryPageRequestCodec = wire.serializable(
+  (value): value is SessionHistoryPageRequest => SessionHistoryPageRequestSchema.safeParse(value).success,
+  { id: 'gitspace/agent-history-request/v1' },
+);
+export const SessionHistoryPageCodec = wire.serializable(
+  (value): value is SessionHistoryPage => SessionHistoryPageSchema.safeParse(value).success,
+  { id: 'gitspace/agent-history-page/v1' },
+);
 export const SessionControlViewCodec = wire.object({
   sessionId: wire.string,
   role: wire.nullable(wire.string),
@@ -413,6 +468,7 @@ export const SessionControlViewCodec = wire.object({
   thinking: wire.nullable(wire.string),
   fastMode: wire.boolean,
   approvalMode: wire.enum(['always-ask', 'write', 'yolo']),
+  planMode: wire.boolean,
   context: wire.nullable(wire.object({ tokens: wire.number, contextWindow: wire.number, percent: wire.number })),
   cost: wire.number,
   todos: wire.array(SessionTodoPhaseCodec),
@@ -427,29 +483,9 @@ export const SessionControlViewCodec = wire.object({
     timeUsedSeconds: wire.number,
   })),
   history: wire.array(wire.object({ entryId: wire.string, text: wire.string })),
-  tree: wire.array(wire.object({
-    id: wire.string,
-    parentId: wire.nullable(wire.string),
-    role: wire.enum(['user', 'assistant']),
-    preview: wire.string,
-    tools: wire.number,
-    sequence: wire.number,
-    current: wire.boolean,
-    onPath: wire.boolean,
-  })),
+  historyAnchorId: wire.nullable(wire.string),
 });
 export type SessionControlView = InputOf<typeof SessionControlViewCodec>;
-
-export const TranscriptEventCodec = wire.object({
-  sessionId: wire.string,
-  ordinal: wire.number,
-  kind: wire.string,
-  payload: wire.serializable(
-    (value): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value),
-    { id: 'gitspace/transcript-payload/v1' },
-  ),
-  createdAt: wire.date,
-});
 
 export const ArtifactViewCodec = wire.object({
   url: wire.string,
@@ -495,15 +531,15 @@ export const BootstrapViewCodec = wire.object({
   workspaces: wire.array(WorkspaceViewCodec),
   baseSpace: BaseSpaceViewCodec,
   mainAgent: wire.nullable(SessionViewCodec),
-  transcript: wire.array(TranscriptEventCodec),
   artifacts: wire.array(ArtifactViewCodec),
   eventOffset: wire.number,
-  /** Set when `transcript` came from the cloud checkpoint of a closed space (`mainAgent` is null then). */
+  /** Set when history is read from the checkpoint of a closed space (`mainAgent` is null then). */
   checkpoint: wire.nullable(BootstrapCheckpointViewCodec),
 });
 
 export const FactEventCodec = wire.object({
   offset: wire.number,
+  eventId: wire.string,
   projectId: wire.string,
   scope: wire.enum(['machine', 'project', 'workspace', 'session', 'artifact', 'code']),
   entity: wire.string,
@@ -531,37 +567,54 @@ export const gitspaceRpc = rpc.context<GitSpaceRpcContext>();
 export const bootstrapContract = gitspaceRpc
   .procedure()
   .input(wire.object({ projectId: wire.string, workspaceId: wire.nullable(wire.string) }))
-  .output(BootstrapViewCodec)
-  .errors({ ProjectNotFound: rpcErrors.projectNotFound, WorkspaceNotFound: rpcErrors.workspaceNotFound, OperationFailed: rpcErrors.operationFailed })
-  .query();
+  .output(BootstrapViewCodec).errors({ WorkspaceFailure: rpcErrors.workspaceFailure, ProjectNotFound: rpcErrors.projectNotFound, WorkspaceNotFound: rpcErrors.workspaceNotFound, OperationFailed: rpcErrors.operationFailed }).query();
+
+/** Finite, lossless history snapshot; metadata never waits for its contents. */
+export const transcriptContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ projectId: wire.string, workspaceId: wire.nullable(wire.string) }))
+  .output(TranscriptChunkCodec).errors({ WorkspaceFailure: rpcErrors.workspaceFailure, ProjectNotFound: rpcErrors.projectNotFound, WorkspaceNotFound: rpcErrors.workspaceNotFound, OperationFailed: rpcErrors.operationFailed }).subscription();
+
+/** Bounded render history; full transcript streams remain explicit lossless reads. */
+export const transcriptPageContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ projectId: wire.string, workspaceId: wire.nullable(wire.string), ...TranscriptPageRequestFields }))
+  .output(TranscriptPageCodec).errors({ WorkspaceFailure: rpcErrors.workspaceFailure, ProjectNotFound: rpcErrors.projectNotFound, WorkspaceNotFound: rpcErrors.workspaceNotFound, OperationFailed: rpcErrors.operationFailed }).query();
+
+export const transcriptContentContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ projectId: wire.string, workspaceId: wire.nullable(wire.string), ...TranscriptContentRequestFields }))
+  .output(TranscriptContentPageCodec).errors({ WorkspaceFailure: rpcErrors.workspaceFailure, ProjectNotFound: rpcErrors.projectNotFound, WorkspaceNotFound: rpcErrors.workspaceNotFound, OperationFailed: rpcErrors.operationFailed }).query();
+
+export const sessionHistoryPageContract = gitspaceRpc
+  .procedure()
+  .input(wire.serializable(
+    (value): value is SessionHistoryPageRequest & { sessionId: string } =>
+      typeof value === 'object' && value !== null && 'sessionId' in value && typeof value.sessionId === 'string'
+      && SessionHistoryPageRequestSchema.safeParse(value).success,
+    { id: 'gitspace/agent-session-history-request/v1' },
+  ))
+  .output(SessionHistoryPageCodec).errors({ AgentFailure: rpcErrors.agentFailure, SessionNotFound: rpcErrors.sessionNotFound, OperationFailed: rpcErrors.operationFailed }).query();
 
 export const closeSpaceContract = gitspaceRpc
   .procedure()
   .input(wire.object({ spaceId: wire.string, expectedGeneration: wire.number }))
-  .output(SpaceLifecycleViewCodec)
-  .errors({ OperationFailed: rpcErrors.operationFailed })
-  .mutation();
+  .output(SpaceLifecycleViewCodec).errors({ WorkspaceFailure: rpcErrors.workspaceFailure, OperationFailed: rpcErrors.operationFailed }).mutation();
 
 export const reopenSpaceContract = gitspaceRpc
   .procedure()
   .input(wire.object({ spaceId: wire.string, expectedGeneration: wire.number }))
-  .output(SpaceLifecycleViewCodec)
-  .errors({ OperationFailed: rpcErrors.operationFailed })
-  .mutation();
+  .output(SpaceLifecycleViewCodec).errors({ WorkspaceFailure: rpcErrors.workspaceFailure, OperationFailed: rpcErrors.operationFailed }).mutation();
 
 export const archiveWorkspaceContract = gitspaceRpc
   .procedure()
   .input(wire.object({ spaceId: wire.string, expectedGeneration: wire.number }))
-  .output(SpaceLifecycleViewCodec)
-  .errors({ WorkspaceNotFound: rpcErrors.workspaceNotFound, OperationFailed: rpcErrors.operationFailed })
-  .mutation();
+  .output(SpaceLifecycleViewCodec).errors({ WorkspaceFailure: rpcErrors.workspaceFailure, WorkspaceNotFound: rpcErrors.workspaceNotFound, OperationFailed: rpcErrors.operationFailed }).mutation();
 
 export const restoreWorkspaceContract = gitspaceRpc
   .procedure()
   .input(wire.object({ spaceId: wire.string, expectedGeneration: wire.number }))
-  .output(SpaceLifecycleViewCodec)
-  .errors({ WorkspaceNotFound: rpcErrors.workspaceNotFound, OperationFailed: rpcErrors.operationFailed })
-  .mutation();
+  .output(SpaceLifecycleViewCodec).errors({ WorkspaceFailure: rpcErrors.workspaceFailure, WorkspaceNotFound: rpcErrors.workspaceNotFound, OperationFailed: rpcErrors.operationFailed }).mutation();
 
 export const listProjectsContract = gitspaceRpc
   .procedure()
@@ -616,7 +669,7 @@ export const createWorkspaceContract = gitspaceRpc
     projectId: wire.string,
     name: wire.string,
     branch: wire.string,
-    phase: wire.enum(['plan', 'code', 'review', 'ship']),
+    phase: WorkspacePhaseCodec,
     sourceKind: wire.enum(['base', 'branch', 'workspace', 'pull-request', 'tag', 'commit']),
     sourceRef: wire.string,
     /** Extra dependencies beyond the implicit one on a `workspace` source. */
@@ -729,68 +782,109 @@ export const deleteProjectSecretContract = gitspaceRpc
   .errors({ ProjectNotFound: rpcErrors.projectNotFound, OperationFailed: rpcErrors.operationFailed })
   .mutation();
 
+export const listAccountSecretsContract = gitspaceRpc.procedure().input(wire.object({}))
+  .output(wire.array(AccountSecretMetadataCodec)).errors({ OperationFailed: rpcErrors.operationFailed }).query();
+export const putAccountSecretContract = gitspaceRpc.procedure().input(wire.object({ name: wire.string, value: wire.string }))
+  .output(AccountSecretMetadataCodec).errors({ OperationFailed: rpcErrors.operationFailed }).mutation();
+export const deleteAccountSecretContract = gitspaceRpc.procedure().input(wire.object({ name: wire.string }))
+  .output(wire.object({ deleted: wire.boolean })).errors({ OperationFailed: rpcErrors.operationFailed }).mutation();
+export const grantAccountSecretContract = gitspaceRpc.procedure().input(wire.object({
+  name: wire.string, projectId: wire.string, projectSpaceEnabled: wire.boolean, workspacesEnabled: wire.boolean,
+})).output(AccountSecretMetadataCodec).errors({ OperationFailed: rpcErrors.operationFailed }).mutation();
+export const revokeAccountSecretContract = gitspaceRpc.procedure().input(wire.object({ name: wire.string, projectId: wire.string }))
+  .output(AccountSecretMetadataCodec).errors({ OperationFailed: rpcErrors.operationFailed }).mutation();
+export const getConfigurationValuesContract = gitspaceRpc.procedure().input(wire.object({ projectId: wire.optional(wire.string) }))
+  .output(ConfigurationValuesViewCodec).errors({ OperationFailed: rpcErrors.operationFailed }).query();
+export const putConfigurationValueContract = gitspaceRpc.procedure().input(wire.object({
+  scope: wire.enum(['global', 'project']), projectId: wire.optional(wire.string), name: wire.string, value: wire.string,
+})).output(ConfigurationValuesViewCodec).errors({ OperationFailed: rpcErrors.operationFailed }).mutation();
+export const deleteConfigurationValueContract = gitspaceRpc.procedure().input(wire.object({
+  scope: wire.enum(['global', 'project']), projectId: wire.optional(wire.string), name: wire.string,
+})).output(ConfigurationValuesViewCodec).errors({ OperationFailed: rpcErrors.operationFailed }).mutation();
+
 export const getWorkspaceEnvironmentContract = gitspaceRpc
   .procedure()
   .input(wire.object({ spaceId: wire.string }))
   .output(WorkspaceEnvironmentViewCodec)
-  .errors({ OperationFailed: rpcErrors.operationFailed })
+  .errors({ EnvironmentFailure: rpcErrors.environmentFailure, OperationFailed: rpcErrors.operationFailed })
   .query();
 
 export const putWorkspaceEnvironmentBundleContract = gitspaceRpc
   .procedure()
   .input(wire.object({ spaceId: wire.string, bundleJson: wire.string }))
   .output(WorkspaceEnvironmentViewCodec)
-  .errors({ OperationFailed: rpcErrors.operationFailed })
+  .errors({ EnvironmentFailure: rpcErrors.environmentFailure, OperationFailed: rpcErrors.operationFailed })
   .mutation();
 
 export const setWorkspaceEnvironmentProfileContract = gitspaceRpc
   .procedure()
   .input(wire.object({ spaceId: wire.string, profile: wire.string }))
   .output(WorkspaceEnvironmentViewCodec)
-  .errors({ OperationFailed: rpcErrors.operationFailed })
+  .errors({ EnvironmentFailure: rpcErrors.environmentFailure, OperationFailed: rpcErrors.operationFailed })
   .mutation();
 
 export const putWorkspaceEnvironmentValueContract = gitspaceRpc
   .procedure()
   .input(wire.object({ spaceId: wire.string, scope: wire.enum(['global', 'project', 'workspace']), name: wire.string, value: wire.string }))
   .output(WorkspaceEnvironmentViewCodec)
-  .errors({ OperationFailed: rpcErrors.operationFailed })
+  .errors({ EnvironmentFailure: rpcErrors.environmentFailure, OperationFailed: rpcErrors.operationFailed })
   .mutation();
 
 export const deleteWorkspaceEnvironmentValueContract = gitspaceRpc
   .procedure()
   .input(wire.object({ spaceId: wire.string, scope: wire.enum(['global', 'project', 'workspace']), name: wire.string }))
   .output(WorkspaceEnvironmentViewCodec)
-  .errors({ OperationFailed: rpcErrors.operationFailed })
+  .errors({ EnvironmentFailure: rpcErrors.environmentFailure, OperationFailed: rpcErrors.operationFailed })
   .mutation();
 
 export const approveWorkspaceEnvironmentExecutionContract = gitspaceRpc
   .procedure()
   .input(wire.object({ spaceId: wire.string, scope: wire.enum(['project', 'workspace']), executionHash: wire.string }))
   .output(WorkspaceEnvironmentViewCodec)
-  .errors({ OperationFailed: rpcErrors.operationFailed })
+  .errors({ EnvironmentFailure: rpcErrors.environmentFailure, OperationFailed: rpcErrors.operationFailed })
   .mutation();
 
 export const revokeWorkspaceEnvironmentApprovalContract = gitspaceRpc
   .procedure()
   .input(wire.object({ spaceId: wire.string, scope: wire.enum(['project', 'workspace']), executionHash: wire.string }))
   .output(WorkspaceEnvironmentViewCodec)
-  .errors({ OperationFailed: rpcErrors.operationFailed })
+  .errors({ EnvironmentFailure: rpcErrors.environmentFailure, OperationFailed: rpcErrors.operationFailed })
   .mutation();
 
 export const runWorkspaceEnvironmentChecksContract = gitspaceRpc
   .procedure()
-  .input(wire.object({ spaceId: wire.string }))
-  .output(wire.array(EnvironmentExecutionResultCodec))
-  .errors({ OperationFailed: rpcErrors.operationFailed })
+  .input(wire.object({ spaceId: wire.string, runId: wire.string, deadlineAt: wire.optional(wire.string) }))
+  .output(LifecycleRunCodec)
+  .errors({ EnvironmentFailure: rpcErrors.environmentFailure, OperationFailed: rpcErrors.operationFailed })
   .mutation();
 
 export const runWorkspaceEnvironmentPhaseContract = gitspaceRpc
   .procedure()
-  .input(wire.object({ spaceId: wire.string, phase: wire.enum(['setup', 'select', 'remove']) }))
-  .output(wire.array(EnvironmentExecutionResultCodec))
-  .errors({ OperationFailed: rpcErrors.operationFailed })
+  .input(wire.object({ spaceId: wire.string, runId: wire.string, phase: wire.enum(['cloud/provision', 'machine/prepare', 'workspace/materialize', 'workspace/dematerialize', 'cloud/destroy']), rerun: wire.nullable(wire.boolean), deadlineAt: wire.optional(wire.string) }))
+  .output(LifecycleRunCodec)
+  .errors({ EnvironmentFailure: rpcErrors.environmentFailure, OperationFailed: rpcErrors.operationFailed })
   .mutation();
+
+export const cancelWorkspaceEnvironmentRunContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ spaceId: wire.string, runId: wire.string }))
+  .output(LifecycleRunCodec)
+  .errors({ EnvironmentFailure: rpcErrors.environmentFailure, OperationFailed: rpcErrors.operationFailed })
+  .mutation();
+
+export const recoverWorkspaceEnvironmentRunContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ spaceId: wire.string, runId: wire.string }))
+  .output(WorkspaceEnvironmentViewCodec)
+  .errors({ EnvironmentFailure: rpcErrors.environmentFailure, OperationFailed: rpcErrors.operationFailed })
+  .mutation();
+
+export const getWorkspaceEnvironmentRunLogContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ spaceId: wire.string, runId: wire.string, offset: wire.nullable(wire.number) }))
+  .output(wire.object({ output: wire.string, nextOffset: wire.nullable(wire.number) }))
+  .errors({ EnvironmentFailure: rpcErrors.environmentFailure, OperationFailed: rpcErrors.operationFailed })
+  .query();
 
 export const listMcpConnectionsContract = gitspaceRpc
   .procedure()
@@ -963,14 +1057,14 @@ export const setOmpSettingContract = gitspaceRpc
 
 export const machineLifecycleEventsContract = gitspaceRpc
   .procedure()
-  .input(wire.object({}))
-  .output(FleetMachineEventCodec)
+  .input(wire.object({ after: wire.nullable(StreamCursorCodec) }))
+  .output(streamCodec(wire.array(FleetMachineViewCodec)))
   .errors({ OperationFailed: rpcErrors.operationFailed })
   .subscription();
 export const settingsEventsContract = gitspaceRpc
   .procedure()
-  .input(wire.object({}))
-  .output(SettingsChangedEventCodec)
+  .input(wire.object({ after: wire.nullable(StreamCursorCodec) }))
+  .output(streamCodec(wire.object({ user: UserSettingsViewCodec, omp: OmpConfigDocumentCodec, git: wire.nullable(GitIdentityViewCodec) })))
   .errors({ OperationFailed: rpcErrors.operationFailed })
   .subscription();
 
@@ -1125,23 +1219,17 @@ export const listAvailableModelsContract = gitspaceRpc
 export const createSessionContract = gitspaceRpc
   .procedure()
   .input(wire.object({ workspaceId: wire.string }))
-  .output(SessionViewCodec)
-  .errors({ WorkspaceNotFound: rpcErrors.workspaceNotFound, WorkspacePossessed: rpcErrors.workspacePossessed, WorkspaceUnpossessed: rpcErrors.workspaceUnpossessed, OperationFailed: rpcErrors.operationFailed })
-  .mutation();
+  .output(SessionViewCodec).errors({ AgentFailure: rpcErrors.agentFailure, WorkspaceNotFound: rpcErrors.workspaceNotFound, WorkspacePossessed: rpcErrors.workspacePossessed, WorkspaceUnpossessed: rpcErrors.workspaceUnpossessed, OperationFailed: rpcErrors.operationFailed }).mutation();
 
 export const createProjectSessionContract = gitspaceRpc
   .procedure()
   .input(wire.object({ projectId: wire.string }))
-  .output(SessionViewCodec)
-  .errors({ ProjectNotFound: rpcErrors.projectNotFound, OperationFailed: rpcErrors.operationFailed })
-  .mutation();
+  .output(SessionViewCodec).errors({ AgentFailure: rpcErrors.agentFailure, ProjectNotFound: rpcErrors.projectNotFound, OperationFailed: rpcErrors.operationFailed }).mutation();
 
 export const promptSessionContract = gitspaceRpc
   .procedure()
   .input(wire.object({ sessionId: wire.string, text: wire.string, streamingBehavior: wire.enum(['steer', 'followUp']), images: wire.array(wire.object({ data: wire.string, mimeType: wire.string })) }))
-  .output(wire.object({ accepted: wire.boolean }))
-  .errors({ SessionNotFound: rpcErrors.sessionNotFound, SessionBusy: rpcErrors.sessionBusy, OperationFailed: rpcErrors.operationFailed })
-  .mutation();
+  .output(wire.object({ accepted: wire.boolean })).errors({ AgentFailure: rpcErrors.agentFailure, SessionNotFound: rpcErrors.sessionNotFound, SessionBusy: rpcErrors.sessionBusy, OperationFailed: rpcErrors.operationFailed }).mutation();
 
 export const UsageTotalsCodec = wire.object({
   requests: wire.number,
@@ -1156,21 +1244,34 @@ export const UsageTotalsCodec = wire.object({
 export type UsageTotals = InputOf<typeof UsageTotalsCodec>;
 export const SessionUsageReportCodec = wire.object({
   sessionId: wire.string,
-  /** This session only. */
+  /** This session, including its direct completion calls. */
   totals: UsageTotalsCodec,
   /** Including child (subagent) sessions. */
   totalsDeep: UsageTotalsCodec,
   childSessions: wire.number,
+  /** Whole-tree breakdowns, using historical selection and actual response models. */
   byModel: wire.array(wire.object({ provider: wire.string, model: wire.string, totals: UsageTotalsCodec })),
-  byRole: wire.array(wire.object({ role: wire.string, models: wire.array(wire.string), totals: UsageTotalsCodec })),
+  byRole: wire.array(wire.object({ role: wire.nullable(wire.string), models: wire.array(wire.string), totals: UsageTotalsCodec })),
   byAgent: wire.array(wire.object({
     agentId: wire.string,
     agent: wire.string,
-    selection: wire.enum(['role', 'pinned', 'inherited']),
+    selection: wire.enum(['role', 'pinned', 'inherited', 'unknown']),
+    role: wire.nullable(wire.string),
+    provider: wire.string,
+    definitionSource: wire.nullable(wire.string),
+    definitionPath: wire.nullable(wire.string),
+    definitionRevision: wire.nullable(wire.string),
     model: wire.string,
     spawns: wire.number,
     firstAt: wire.nullable(wire.string),
     lastAt: wire.nullable(wire.string),
+    totals: UsageTotalsCodec,
+  })),
+  byCompletion: wire.array(wire.object({
+    kind: wire.string,
+    role: wire.nullable(wire.string),
+    provider: wire.string,
+    model: wire.string,
     totals: UsageTotalsCodec,
   })),
   warnings: wire.array(wire.string),
@@ -1179,105 +1280,114 @@ export type SessionUsageReport = InputOf<typeof SessionUsageReportCodec>;
 export const getSessionUsageContract = gitspaceRpc
   .procedure()
   .input(wire.object({ sessionId: wire.string }))
-  .output(SessionUsageReportCodec)
-  .errors({ SessionNotFound: rpcErrors.sessionNotFound, OperationFailed: rpcErrors.operationFailed })
-  .query();
+  .output(SessionUsageReportCodec).errors({ AgentFailure: rpcErrors.agentFailure, SessionNotFound: rpcErrors.sessionNotFound, OperationFailed: rpcErrors.operationFailed }).query();
+
+export const AgentDefinitionSetupCodec = wire.object({
+  name: wire.string,
+  description: wire.string,
+  source: wire.string,
+  path: wire.string,
+  editable: wire.boolean,
+  content: wire.string,
+  revision: wire.string,
+  modelSelectors: wire.array(wire.string),
+  role: wire.nullable(wire.string),
+  provider: wire.nullable(wire.string),
+  model: wire.nullable(wire.string),
+  selection: wire.enum(['definition', 'settings', 'inherited']),
+  tools: wire.array(wire.string),
+  spawns: wire.nullable(wire.string),
+});
+export type AgentDefinitionSetup = InputOf<typeof AgentDefinitionSetupCodec>;
+export const AgentSetupViewCodec = wire.object({
+  sessionId: wire.string,
+  agents: wire.array(AgentDefinitionSetupCodec),
+});
+export type AgentSetupView = InputOf<typeof AgentSetupViewCodec>;
+const SaveAgentDefinitionFields = {
+  path: wire.string,
+  expectedRevision: wire.nullable(wire.string),
+  content: wire.string,
+} as const;
+export const SaveAgentDefinitionInputCodec = wire.object(SaveAgentDefinitionFields);
+export type SaveAgentDefinitionInput = InputOf<typeof SaveAgentDefinitionInputCodec>;
+export const getSessionAgentsContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ sessionId: wire.string }))
+  .output(AgentSetupViewCodec).errors({ AgentFailure: rpcErrors.agentFailure, SessionNotFound: rpcErrors.sessionNotFound, OperationFailed: rpcErrors.operationFailed }).query();
+export const saveSessionAgentContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ sessionId: wire.string, ...SaveAgentDefinitionFields }))
+  .output(AgentSetupViewCodec).errors({ AgentFailure: rpcErrors.agentFailure, SessionNotFound: rpcErrors.sessionNotFound, OperationFailed: rpcErrors.operationFailed }).mutation();
 
 export const getSessionControlContract = gitspaceRpc
   .procedure()
   .input(wire.object({ sessionId: wire.string }))
-  .output(SessionControlViewCodec)
-  .errors({ SessionNotFound: rpcErrors.sessionNotFound, OperationFailed: rpcErrors.operationFailed })
-  .query();
+  .output(SessionControlViewCodec).errors({ AgentFailure: rpcErrors.agentFailure, SessionNotFound: rpcErrors.sessionNotFound, OperationFailed: rpcErrors.operationFailed }).query();
 export const cycleSessionRoleContract = gitspaceRpc
   .procedure()
   .input(wire.object({ sessionId: wire.string, direction: wire.enum(['forward', 'backward']) }))
-  .output(SessionControlViewCodec)
-  .errors({ SessionNotFound: rpcErrors.sessionNotFound, OperationFailed: rpcErrors.operationFailed })
-  .mutation();
+  .output(SessionControlViewCodec).errors({ AgentFailure: rpcErrors.agentFailure, SessionNotFound: rpcErrors.sessionNotFound, OperationFailed: rpcErrors.operationFailed }).mutation();
 export const setSessionThinkingContract = gitspaceRpc
   .procedure()
   .input(wire.object({ sessionId: wire.string, thinking: wire.nullable(wire.string) }))
-  .output(SessionControlViewCodec)
-  .errors({ SessionNotFound: rpcErrors.sessionNotFound, OperationFailed: rpcErrors.operationFailed })
-  .mutation();
+  .output(SessionControlViewCodec).errors({ AgentFailure: rpcErrors.agentFailure, SessionNotFound: rpcErrors.sessionNotFound, OperationFailed: rpcErrors.operationFailed }).mutation();
 export const setSessionFastContract = gitspaceRpc
   .procedure()
   .input(wire.object({ sessionId: wire.string, enabled: wire.boolean }))
-  .output(SessionControlViewCodec)
-  .errors({ SessionNotFound: rpcErrors.sessionNotFound, OperationFailed: rpcErrors.operationFailed })
-  .mutation();
+  .output(SessionControlViewCodec).errors({ AgentFailure: rpcErrors.agentFailure, SessionNotFound: rpcErrors.sessionNotFound, OperationFailed: rpcErrors.operationFailed }).mutation();
 export const setSessionModelContract = gitspaceRpc
   .procedure()
   .input(wire.object({ sessionId: wire.string, provider: wire.string, model: wire.string }))
-  .output(SessionControlViewCodec)
-  .errors({ SessionNotFound: rpcErrors.sessionNotFound, OperationFailed: rpcErrors.operationFailed })
-  .mutation();
+  .output(SessionControlViewCodec).errors({ AgentFailure: rpcErrors.agentFailure, SessionNotFound: rpcErrors.sessionNotFound, OperationFailed: rpcErrors.operationFailed }).mutation();
 export const setSessionApprovalContract = gitspaceRpc
   .procedure()
   .input(wire.object({ sessionId: wire.string, approvalMode: wire.enum(['always-ask', 'write', 'yolo']) }))
-  .output(SessionControlViewCodec)
-  .errors({ SessionNotFound: rpcErrors.sessionNotFound, OperationFailed: rpcErrors.operationFailed })
-  .mutation();
+  .output(SessionControlViewCodec).errors({ AgentFailure: rpcErrors.agentFailure, SessionNotFound: rpcErrors.sessionNotFound, OperationFailed: rpcErrors.operationFailed }).mutation();
 export const setSessionGoalContract = gitspaceRpc
   .procedure()
   .input(wire.object({ sessionId: wire.string, enabled: wire.boolean, objective: wire.nullable(wire.string) }))
-  .output(SessionControlViewCodec)
-  .errors({ SessionNotFound: rpcErrors.sessionNotFound, OperationFailed: rpcErrors.operationFailed })
-  .mutation();
+  .output(SessionControlViewCodec).errors({ AgentFailure: rpcErrors.agentFailure, SessionNotFound: rpcErrors.sessionNotFound, OperationFailed: rpcErrors.operationFailed }).mutation();
 export const compactSessionContract = gitspaceRpc
   .procedure()
   .input(wire.object({ sessionId: wire.string, instructions: wire.nullable(wire.string) }))
-  .output(SessionControlViewCodec)
-  .errors({ SessionNotFound: rpcErrors.sessionNotFound, OperationFailed: rpcErrors.operationFailed })
-  .mutation();
+  .output(SessionControlViewCodec).errors({ AgentFailure: rpcErrors.agentFailure, SessionNotFound: rpcErrors.sessionNotFound, OperationFailed: rpcErrors.operationFailed }).mutation();
 export const clearSessionQueueContract = gitspaceRpc
   .procedure()
   .input(wire.object({ sessionId: wire.string }))
-  .output(SessionControlViewCodec)
-  .errors({ SessionNotFound: rpcErrors.sessionNotFound, OperationFailed: rpcErrors.operationFailed })
-  .mutation();
+  .output(SessionControlViewCodec).errors({ AgentFailure: rpcErrors.agentFailure, SessionNotFound: rpcErrors.sessionNotFound, OperationFailed: rpcErrors.operationFailed }).mutation();
 export const removeSessionQueuedMessageContract = gitspaceRpc
   .procedure()
   .input(wire.object({ sessionId: wire.string, kind: wire.enum(['steering', 'followUp']), index: wire.integer({ min: 0 }) }))
-  .output(SessionControlViewCodec)
-  .errors({ SessionNotFound: rpcErrors.sessionNotFound, OperationFailed: rpcErrors.operationFailed })
-  .mutation();
+  .output(SessionControlViewCodec).errors({ AgentFailure: rpcErrors.agentFailure, SessionNotFound: rpcErrors.sessionNotFound, OperationFailed: rpcErrors.operationFailed }).mutation();
 export const promoteSessionQueuedMessageContract = gitspaceRpc
   .procedure()
   .input(wire.object({ sessionId: wire.string, index: wire.integer({ min: 0 }) }))
-  .output(SessionControlViewCodec)
-  .errors({ SessionNotFound: rpcErrors.sessionNotFound, OperationFailed: rpcErrors.operationFailed })
-  .mutation();
+  .output(SessionControlViewCodec).errors({ AgentFailure: rpcErrors.agentFailure, SessionNotFound: rpcErrors.sessionNotFound, OperationFailed: rpcErrors.operationFailed }).mutation();
 export const answerSessionAskContract = gitspaceRpc
   .procedure()
   .input(wire.object({ sessionId: wire.string, id: wire.string, answers: wire.array(PendingAskAnswerCodec) }))
-  .output(SessionControlViewCodec)
-  .errors({ SessionNotFound: rpcErrors.sessionNotFound, OperationFailed: rpcErrors.operationFailed })
-  .mutation();
+  .output(SessionControlViewCodec).errors({ AgentFailure: rpcErrors.agentFailure, SessionNotFound: rpcErrors.sessionNotFound, OperationFailed: rpcErrors.operationFailed }).mutation();
 export const stopSessionTurnContract = gitspaceRpc
   .procedure()
   .input(wire.object({ sessionId: wire.string }))
-  .output(SessionControlViewCodec)
-  .errors({ SessionNotFound: rpcErrors.sessionNotFound, OperationFailed: rpcErrors.operationFailed })
-  .mutation();
+  .output(SessionControlViewCodec).errors({ AgentFailure: rpcErrors.agentFailure, SessionNotFound: rpcErrors.sessionNotFound, OperationFailed: rpcErrors.operationFailed }).mutation();
 export const navigateSessionTreeContract = gitspaceRpc
   .procedure()
   .input(wire.object({ sessionId: wire.string, entryId: wire.string }))
-  .output(SessionControlViewCodec)
-  .errors({ SessionNotFound: rpcErrors.sessionNotFound, OperationFailed: rpcErrors.operationFailed })
-  .mutation();
+  .output(SessionControlViewCodec).errors({ AgentFailure: rpcErrors.agentFailure, SessionNotFound: rpcErrors.sessionNotFound, OperationFailed: rpcErrors.operationFailed }).mutation();
 export const setWorkspacePhaseContract = gitspaceRpc
   .procedure()
-  .input(wire.object({ workspaceId: wire.string, phase: wire.enum(['plan', 'code', 'review', 'ship']) }))
-  .output(WorkspaceViewCodec)
-  .errors({ WorkspaceNotFound: rpcErrors.workspaceNotFound, OperationFailed: rpcErrors.operationFailed })
-  .mutation();
+  .input(wire.object({ workspaceId: wire.string, phase: WorkspacePhaseCodec }))
+  .output(WorkspaceViewCodec).errors({ WorkspaceFailure: rpcErrors.workspaceFailure, WorkspaceNotFound: rpcErrors.workspaceNotFound, OperationFailed: rpcErrors.operationFailed }).mutation();
 export const setWorkspaceRelationsContract = gitspaceRpc
   .procedure()
-  .input(wire.object({ workspaceId: wire.string, dependsOn: wire.array(wire.string), relatedTo: wire.array(wire.string), stackedOn: wire.nullable(wire.string) }))
+  .input(wire.serializable(
+    (value): value is z.infer<typeof workspaceRelationsRequestSchema> => workspaceRelationsRequestSchema.safeParse(value).success,
+    { id: 'gitspace/workspace-relations-request/v1' },
+  ))
   .output(WorkspaceViewCodec)
-  .errors({ WorkspaceNotFound: rpcErrors.workspaceNotFound, OperationFailed: rpcErrors.operationFailed })
+  .errors({ WorkspaceFailure: rpcErrors.workspaceFailure, WorkspaceNotFound: rpcErrors.workspaceNotFound, OperationFailed: rpcErrors.operationFailed })
   .mutation();
 /** Git position of a stacked workspace relative to its `stackedOn` parent, computed on the child's holder. */
 export const StackStatusCodec = wire.object({
@@ -1301,15 +1411,19 @@ export const stackStatusContract = gitspaceRpc
 export const subagentTranscriptContract = gitspaceRpc
   .procedure()
   .input(wire.object({ sessionId: wire.string, subagentId: wire.string }))
-  .output(wire.array(TranscriptEventCodec))
-  .errors({ SessionNotFound: rpcErrors.sessionNotFound, OperationFailed: rpcErrors.operationFailed })
-  .query();
+  .output(TranscriptChunkCodec).errors({ AgentFailure: rpcErrors.agentFailure, SessionNotFound: rpcErrors.sessionNotFound, OperationFailed: rpcErrors.operationFailed }).subscription();
 export const subagentTranscriptEventsContract = gitspaceRpc
   .procedure()
   .input(wire.object({ sessionId: wire.string, subagentId: wire.string, afterOrdinal: wire.number }))
-  .output(TranscriptEventCodec)
-  .errors({ SessionNotFound: rpcErrors.sessionNotFound, OperationFailed: rpcErrors.operationFailed })
-  .subscription();
+  .output(TranscriptChunkCodec).errors({ AgentFailure: rpcErrors.agentFailure, SessionNotFound: rpcErrors.sessionNotFound, OperationFailed: rpcErrors.operationFailed }).subscription();
+export const subagentTranscriptPageContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ sessionId: wire.string, subagentId: wire.string, ...TranscriptPageRequestFields }))
+  .output(TranscriptPageCodec).errors({ AgentFailure: rpcErrors.agentFailure, SessionNotFound: rpcErrors.sessionNotFound, OperationFailed: rpcErrors.operationFailed }).query();
+export const subagentTranscriptContentContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ sessionId: wire.string, subagentId: wire.string, ...TranscriptContentRequestFields }))
+  .output(TranscriptContentPageCodec).errors({ AgentFailure: rpcErrors.agentFailure, SessionNotFound: rpcErrors.sessionNotFound, OperationFailed: rpcErrors.operationFailed }).query();
 export const listWorkspaceTerminalsContract = gitspaceRpc
   .procedure()
   .input(wire.object({ spaceId: wire.string }))
@@ -1407,16 +1521,16 @@ const inspectorMutationErrors = {
 
 export const listSkillsContract = gitspaceRpc
   .procedure()
-  .input(wire.object({ projectId: wire.string }))
+  .input(wire.object({}))
   .output(wire.array(SkillViewCodec))
-  .errors({ ProjectNotFound: rpcErrors.projectNotFound, OperationFailed: rpcErrors.operationFailed })
+  .errors({ OperationFailed: rpcErrors.operationFailed })
   .query();
 
 export const updateSkillContract = gitspaceRpc
   .procedure()
-  .input(wire.object({ projectId: wire.string, update: SkillUpdateCodec }))
+  .input(wire.object({ update: SkillUpdateCodec }))
   .output(SkillViewCodec)
-  .errors({ ProjectNotFound: rpcErrors.projectNotFound, SkillConflict: rpcErrors.skillConflict, OperationFailed: rpcErrors.operationFailed })
+  .errors({ SkillConflict: rpcErrors.skillConflict, OperationFailed: rpcErrors.operationFailed })
   .mutation();
 
 /** Canonical inspection context; never materializes a repository or opens a workspace. */
@@ -1444,7 +1558,6 @@ export const InspectorBootstrapViewCodec = wire.object({
   savedTranscript: wire.object({
     status: wire.enum(['available', 'unavailable', 'none']),
     reason: wire.nullable(wire.string),
-    events: wire.array(TranscriptEventCodec),
   }),
 });
 export type InspectorBootstrapView = InputOf<typeof InspectorBootstrapViewCodec>;
@@ -1452,6 +1565,27 @@ export const inspectorBootstrapContract = gitspaceRpc
   .procedure()
   .input(wire.object({ projectId: wire.string, workspaceId: wire.nullable(wire.string) }))
   .output(InspectorBootstrapViewCodec)
+  .errors({ ProjectNotFound: rpcErrors.projectNotFound, WorkspaceNotFound: rpcErrors.workspaceNotFound, OperationFailed: rpcErrors.operationFailed })
+  .query();
+
+export const inspectorTranscriptContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ projectId: wire.string, workspaceId: wire.nullable(wire.string) }))
+  .output(TranscriptChunkCodec)
+  .errors({ ProjectNotFound: rpcErrors.projectNotFound, WorkspaceNotFound: rpcErrors.workspaceNotFound, OperationFailed: rpcErrors.operationFailed })
+  .subscription();
+
+export const inspectorTranscriptPageContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ projectId: wire.string, workspaceId: wire.nullable(wire.string), ...TranscriptPageRequestFields }))
+  .output(TranscriptPageCodec)
+  .errors({ ProjectNotFound: rpcErrors.projectNotFound, WorkspaceNotFound: rpcErrors.workspaceNotFound, OperationFailed: rpcErrors.operationFailed })
+  .query();
+
+export const inspectorTranscriptContentContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ projectId: wire.string, workspaceId: wire.nullable(wire.string), ...TranscriptContentRequestFields }))
+  .output(TranscriptContentPageCodec)
   .errors({ ProjectNotFound: rpcErrors.projectNotFound, WorkspaceNotFound: rpcErrors.workspaceNotFound, OperationFailed: rpcErrors.operationFailed })
   .query();
 
@@ -1515,6 +1649,13 @@ export const InspectorArtifactContentCodec = wire.object({
 export const inspectorReadArtifactContract = gitspaceRpc
   .procedure()
   .input(wire.object({ spaceId: wire.string, expectedGeneration: wire.integer({ min: 0 }), url: wire.string, hash: wire.nullable(wire.string) }))
+  .output(InspectorArtifactContentCodec)
+  .errors(inspectorReadErrors)
+  .query();
+
+export const inspectorReadResourceContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ spaceId: wire.string, expectedGeneration: wire.integer({ min: 0 }), sessionId: wire.nullable(wire.string), url: wire.string }))
   .output(InspectorArtifactContentCodec)
   .errors(inspectorReadErrors)
   .query();
@@ -1713,6 +1854,8 @@ export const SpacePlacementViewCodec = wire.object({
   kind: wire.enum(['base', 'worktree']),
   holderId: wire.string,
   state: wire.string,
+  /** The authority lease generation; status from an older lease must not be reused. */
+  generation: wire.number,
   /** The holder's RPC endpoint, null when it is unknown or the holder is offline. */
   endpoint: wire.nullable(wire.string),
 });
@@ -1721,7 +1864,7 @@ export const placementsContract = gitspaceRpc
   .procedure()
   .input(wire.object({}))
   .output(wire.object({
-    /** The answering machine, so a client can map it back to the URL it already uses. */
+    /** The answering machine, or empty for account authority (every holder uses its own endpoint). */
     machineId: wire.string,
     spaces: wire.array(SpacePlacementViewCodec),
   }))
@@ -1802,13 +1945,47 @@ export const deploymentRevertContract = gitspaceRpc
   .mutation();
 export const machineEventsContract = gitspaceRpc
   .procedure()
-  .input(wire.object({ projectId: wire.string, afterOffset: wire.number }))
-  .output(FactEventCodec)
+  .input(wire.object({ projectId: wire.string, after: wire.nullable(StreamCursorCodec) }))
+  .output(streamCodec(wire.nullable(FactEventCodec)))
   .errors({ ProjectNotFound: rpcErrors.projectNotFound })
   .subscription();
 
+export const projectEventsContract = gitspaceRpc.procedure()
+  .input(wire.object({ projectId: wire.string, after: wire.nullable(StreamCursorCodec) }))
+  .output(streamCodec(wire.object({ entity: wire.string, entityId: wire.nullable(wire.string), eventOffset: StreamCursorCodec })))
+  .errors({ OperationFailed: rpcErrors.operationFailed }).subscription();
+export const projectDirectoryEventsContract = gitspaceRpc.procedure()
+  .input(wire.object({ after: wire.nullable(StreamCursorCodec) }))
+  .output(streamCodec(wire.array(ProjectLifecycleViewCodec)))
+  .errors({ OperationFailed: rpcErrors.operationFailed }).subscription();
+export const environmentEventsContract = gitspaceRpc.procedure()
+  .input(wire.object({ spaceId: wire.string, after: wire.nullable(StreamCursorCodec) }))
+  .output(streamCodec(LifecycleStateCodec))
+  .errors({ EnvironmentFailure: rpcErrors.environmentFailure, OperationFailed: rpcErrors.operationFailed }).subscription();
+export const spaceEventsContract = gitspaceRpc.procedure()
+  .input(wire.object({ spaceId: wire.string, after: wire.nullable(StreamCursorCodec) }))
+  .output(streamCodec(wire.nullable(wire.serializable(
+    (value): value is SpaceAuthorityRecord => SpaceAuthorityRecordSchema.safeParse(value).success,
+    { id: 'gitspace/workspace-authority/v1' },
+  ))))
+  .errors({ WorkspaceFailure: rpcErrors.workspaceFailure, OperationFailed: rpcErrors.operationFailed }).subscription();
+export const recordIncidentContract = gitspaceRpc.procedure()
+  .input(wire.object({ projectId: wire.string, eventId: wire.string, change: wire.serializable(
+    (value): value is AgentIncidentChange => AgentIncidentChangeSchema.safeParse(value).success,
+    { id: 'gitspace/agent-incident-change/v1' },
+  ) }))
+  .output(wire.object({ eventId: wire.string }))
+  .errors({ OperationFailed: rpcErrors.operationFailed }).mutation();
+export const terminalEventsContract = gitspaceRpc.procedure()
+  .input(wire.object({ spaceId: wire.string, name: wire.nullable(wire.string), after: wire.nullable(StreamCursorCodec) }))
+  .output(streamCodec(wire.object({ terminals: wire.array(WorkspaceTerminalViewCodec), output: wire.nullable(WorkspaceTerminalOutputCodec) })))
+  .errors({ OperationFailed: rpcErrors.operationFailed }).subscription();
+
 export const gitspaceContract = gitspaceRpc.contract({
   bootstrap: bootstrapContract,
+  transcript: transcriptContract,
+  transcriptPage: transcriptPageContract,
+  transcriptContent: transcriptContentContract,
   machines: listMachinesContract,
   machine: {
     events: machineLifecycleEventsContract,
@@ -1845,8 +2022,11 @@ export const gitspaceContract = gitspaceRpc.contract({
     list: listProjectSecretsContract,
     put: putProjectSecretContract,
     delete: deleteProjectSecretContract,
+    account: { list: listAccountSecretsContract, put: putAccountSecretContract, delete: deleteAccountSecretContract, grant: grantAccountSecretContract, revoke: revokeAccountSecretContract },
   },
+  configuration: { values: { get: getConfigurationValuesContract, put: putConfigurationValueContract, delete: deleteConfigurationValueContract } },
   environment: {
+    events: environmentEventsContract,
     get: getWorkspaceEnvironmentContract,
     putBundle: putWorkspaceEnvironmentBundleContract,
     setProfile: setWorkspaceEnvironmentProfileContract,
@@ -1856,6 +2036,9 @@ export const gitspaceContract = gitspaceRpc.contract({
     revokeApproval: revokeWorkspaceEnvironmentApprovalContract,
     runChecks: runWorkspaceEnvironmentChecksContract,
     runPhase: runWorkspaceEnvironmentPhaseContract,
+    cancelRun: cancelWorkspaceEnvironmentRunContract,
+    recoverRun: recoverWorkspaceEnvironmentRunContract,
+    runLog: getWorkspaceEnvironmentRunLogContract,
   },
   mcp: {
     connections: {
@@ -1903,6 +2086,9 @@ export const gitspaceContract = gitspaceRpc.contract({
   skills: { list: listSkillsContract, update: updateSkillContract },
   inspector: {
     bootstrap: inspectorBootstrapContract,
+    transcript: inspectorTranscriptContract,
+    transcriptPage: inspectorTranscriptPageContract,
+    transcriptContent: inspectorTranscriptContentContract,
     availability: inspectorAvailabilityContract,
     overview: inspectorOverviewContract,
     goal: {
@@ -1942,6 +2128,7 @@ export const gitspaceContract = gitspaceRpc.contract({
       file: inspectorRepositoryFileContract,
       diff: inspectorRepositoryDiffContract,
     },
+    resources: { read: inspectorReadResourceContract },
     artifacts: {
       read: inspectorReadArtifactContract, write: inspectorWriteArtifactContract,
       list: inspectorListArtifactsContract, copyToProject: inspectorCopyArtifactsContract,
@@ -1950,6 +2137,8 @@ export const gitspaceContract = gitspaceRpc.contract({
     services: { list: inspectorServicesContract, start: startWorkspaceServiceContract, stop: stopWorkspaceServiceContract },
   },
   project: {
+    events: projectEventsContract,
+    directoryEvents: projectDirectoryEventsContract,
     list: listProjectsContract,
     create: createProjectContract,
     ensureGitSpace: ensureGitSpaceProjectContract,
@@ -1959,6 +2148,7 @@ export const gitspaceContract = gitspaceRpc.contract({
     delete: deleteProjectContract,
   },
   space: {
+    events: spaceEventsContract,
     close: closeSpaceContract,
     reopen: reopenSpaceContract,
   },
@@ -1971,15 +2161,18 @@ export const gitspaceContract = gitspaceRpc.contract({
     setRelations: setWorkspaceRelationsContract,
     stackStatus: stackStatusContract,
   },
-  subagents: { transcript: subagentTranscriptContract, events: subagentTranscriptEventsContract },
+  subagents: { transcript: subagentTranscriptContract, events: subagentTranscriptEventsContract, page: subagentTranscriptPageContract, content: subagentTranscriptContentContract },
   placements: placementsContract,
   session: {
+    history: sessionHistoryPageContract,
     locate: locateSessionContract,
     create: createSessionContract,
     createProject: createProjectSessionContract,
     prompt: promptSessionContract,
     control: getSessionControlContract,
     usage: getSessionUsageContract,
+    agents: getSessionAgentsContract,
+    saveAgent: saveSessionAgentContract,
     cycleRole: cycleSessionRoleContract,
     setThinking: setSessionThinkingContract,
     setApproval: setSessionApprovalContract,
@@ -1995,11 +2188,13 @@ export const gitspaceContract = gitspaceRpc.contract({
     stop: stopSessionTurnContract,
   },
   terminals: {
+    events: terminalEventsContract,
     list: listWorkspaceTerminalsContract,
     create: createWorkspaceTerminalContract,
     read: readWorkspaceTerminalContract,
     send: sendWorkspaceTerminalContract,
     stop: stopWorkspaceTerminalContract,
   },
+  incidents: { record: recordIncidentContract },
   events: machineEventsContract,
 });

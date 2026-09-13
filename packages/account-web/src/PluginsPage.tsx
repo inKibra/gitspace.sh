@@ -36,21 +36,22 @@ import {
   useShape,
 } from '@gitspace/ui';
 import { AlertCircle, Cloud01, Link03, Plus, PuzzlePiece01, RefreshCcw01, SearchMd, Server01, Trash01 } from '@untitledui/icons';
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { glyph } from './glyph.js';
 import { EmptyState, PageCanvas, PageHeader } from './GitSpaceShell.js';
 import { ProjectAssignmentMatrix } from './ProjectAssignmentMatrix.js';
 
 export interface PluginsPageProps {
-  projectId: string;
-  projectName: string;
   connections: readonly McpConnectionRpcView[];
   grants: readonly ProjectMcpGrantRpcView[];
   projects: readonly { id: string; name: string }[];
-  tools: readonly DiscoveredMcpToolRpcView[];
+  onDiscover(projectId: string, machineId: string): Promise<readonly DiscoveredMcpToolRpcView[]>;
   machines: readonly { id: string; label: string; state: string }[];
   composioCatalog: ComposioPluginCatalogRpcView;
   loading?: boolean;
+  catalogLoading?: boolean;
+  catalogError?: string;
+  assignmentsLoading?: boolean;
   error?: string;
   onCreate(connection: McpConnectionDraftInput): Promise<void>;
   onUpdate(connectionId: string, expectedRevision: number, connection: McpConnectionDraftInput): Promise<void>;
@@ -61,6 +62,7 @@ export interface PluginsPageProps {
   onUpdateComposioTools(connectionId: string, expectedRevision: number, allowedTools: readonly string[]): Promise<void>;
   onDisconnectComposio(connectionId: string, expectedRevision: number): Promise<void>;
   onSetGrant(projectId: string, connectionId: string, projectSpaceEnabled: boolean, workspacesEnabled: boolean, expectedRevision: number): Promise<void>;
+  onRevokeGrant(projectId: string, connectionId: string, expectedRevision: number): Promise<void>;
   onRefresh(): Promise<void>;
 }
 
@@ -117,23 +119,27 @@ export function PluginsPage(props: PluginsPageProps) {
   const [connectingToolkit, setConnectingToolkit] = useState<string | null>(null);
   const [accountLabel, setAccountLabel] = useState('');
   const [pending, setPending] = useState<string | null>(null);
+  const pendingRef = useRef(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [query, setQuery] = useState('');
-  const [id, setId] = useState('paper-desktop');
+  const [id, setId] = useState('');
   const [expanded, setExpanded] = useState<string | null>(null);
-  const [label, setLabel] = useState('Paper Desktop');
-  const [target, setTarget] = useState<Target>('machine');
+  const [label, setLabel] = useState('');
+  const [target, setTarget] = useState<Target>('workspace');
   const [tab, setTab] = useState(() => props.connections.some((connection) => connection.transport.type !== 'composio') ? 1 : 0);
-  const [machineId, setMachineId] = useState(props.machines[0]?.id ?? '');
+  const [machineId, setMachineId] = useState('');
   const [transport, setTransport] = useState<Transport>('http');
-  const [command, setCommand] = useState('bunx');
-  const [args, setArgs] = useState('["@vendor/mcp-server@1.0.0"]');
-  const [url, setUrl] = useState('http://127.0.0.1:29979/mcp');
+  const [command, setCommand] = useState('');
+  const [args, setArgs] = useState('[]');
+  const [url, setUrl] = useState('');
   const [secretBindings, setSecretBindings] = useState('');
   const [timeoutMs, setTimeoutMs] = useState('30000');
   const [composioTools, setComposioTools] = useState<readonly ComposioPluginToolRpcView[]>([]);
   const [selectedTools, setSelectedTools] = useState<readonly string[]>([]);
   const [toolsLoading, setToolsLoading] = useState(false);
+  const [diagnosticProjectId, setDiagnosticProjectId] = useState('');
+  const [diagnosticMachineId, setDiagnosticMachineId] = useState('');
+  const [discoveredTools, setDiscoveredTools] = useState<readonly DiscoveredMcpToolRpcView[] | null>(null);
 
   const normalizedQuery = query.trim().toLowerCase();
   const customConnections = props.connections.filter((connection) => connection.transport.type !== 'composio');
@@ -141,10 +147,7 @@ export function PluginsPage(props: PluginsPageProps) {
   const visibleCustom = customConnections.filter((connection) => `${connection.label} ${connection.id} ${connection.transport.type}`.toLowerCase().includes(normalizedQuery));
   const visibleComposio = composioConnections.filter((connection) => `${connection.label} ${connection.id} ${connection.transport.type === 'composio' ? connection.transport.toolkit : ''}`.toLowerCase().includes(normalizedQuery));
   const visibleToolkits = props.composioCatalog.toolkits.filter((toolkit) => `${toolkit.name} ${toolkit.slug} ${toolkit.description ?? ''}`.toLowerCase().includes(normalizedQuery));
-  const currentProjectGrants = props.grants.filter((grant) => grant.projectId === props.projectId);
-  const grantByConnection = useMemo(() => new Map(currentProjectGrants.map((grant) => [grant.connectionId, grant])), [props.grants, props.projectId]);
   const expandedConnection = expanded === null ? null : props.connections.find((connection) => connection.id === expanded) ?? null;
-  const expandedDiscoveredTools = expandedConnection ? props.tools.filter((tool) => tool.connectionId === expandedConnection.id) : [];
   const connectedToolkit = connectingToolkit ? props.composioCatalog.toolkits.find((toolkit) => toolkit.slug === connectingToolkit) ?? null : null;
 
   useEffect(() => {
@@ -167,27 +170,28 @@ export function PluginsPage(props: PluginsPageProps) {
   }, [expandedConnection?.id, expandedConnection?.revision]);
 
   const settle = async (key: string, action: () => Promise<void>) => {
+    if (pendingRef.current) return;
+    pendingRef.current = true;
     setPending(key);
     setActionError(null);
     try { await action(); }
     catch (failure) { setActionError(failure instanceof Error ? failure.message : String(failure)); }
-    finally { setPending(null); }
+    finally { pendingRef.current = false; setPending(null); }
   };
 
-  const createCustom = async () => {
+  const createCustom = async () => settle('create-custom', async () => {
     const selectedTarget = target === 'workspace' ? { kind: 'workspace' as const } : { kind: 'machine' as const, machineId };
     if (selectedTarget.kind === 'machine' && !selectedTarget.machineId) throw new Error('Choose the machine that can reach this MCP server.');
     const nextTransport: McpConnectionDraftInput['transport'] = transport === 'stdio'
       ? { type: 'stdio', command: command.trim(), args: JSON.parse(args) as string[], cwd: null, environment: bindings(secretBindings) }
       : { type: transport, url: url.trim(), headers: bindings(secretBindings) };
-    await settle('create-custom', async () => {
-      await props.onCreate({ id: id.trim(), label: label.trim(), enabled: true, target: selectedTarget, transport: nextTransport, timeoutMs: Number(timeoutMs) });
-      setCreatingCustom(false);
-    });
-  };
+    await props.onCreate({ id: id.trim(), label: label.trim(), enabled: true, target: selectedTarget, transport: nextTransport, timeoutMs: Number(timeoutMs) });
+    setCreatingCustom(false);
+  });
 
   const authorizeComposio = async () => {
-    if (!connectedToolkit) return;
+    if (!connectedToolkit || pendingRef.current) return;
+    pendingRef.current = true;
     const popup = window.open('', 'gitspace-composio', 'popup,width=720,height=760');
     setPending(`authorize:${connectedToolkit.slug}`);
     setActionError(null);
@@ -201,13 +205,14 @@ export function PluginsPage(props: PluginsPageProps) {
       popup?.close();
       setActionError(failure instanceof Error ? failure.message : String(failure));
     } finally {
+      pendingRef.current = false;
       setPending(null);
     }
   };
 
   const error = props.error ?? actionError;
   return <PageCanvas>
-    <PageHeader kicker={`GitSpace project · ${props.projectName}`} title="Plugins" description="Connect managed and custom plugins, then choose which project agents may use their tools." />
+    <PageHeader kicker="Account configuration" title="Plugins" description="Manage account connections, then explicitly grant each project access. Runtime diagnostics are separate and never required for management." />
 
     <div className="flex flex-wrap items-center gap-3 pb-4">
       <TabsSubtle selectedIndex={tab} onSelect={setTab} idPrefix="plugins-source" aria-label="Plugin source">
@@ -222,12 +227,12 @@ export function PluginsPage(props: PluginsPageProps) {
     <TabsSubtlePanel index={0} selectedIndex={tab} idPrefix="plugins-source" className="flex flex-col gap-8">
       <section className="flex flex-col gap-3" aria-labelledby="connected-composio-plugins">
         <div><h2 id="connected-composio-plugins" className="text-subtitle font-medium text-foreground">Connected plugins</h2><p className="text-body text-muted-foreground">Authentication creates a plugin connection. Project access and allowed tools remain separate.</p></div>
-        {visibleComposio.length ? <CardGroup orientation="inline" border="outlined" separated>{visibleComposio.map((connection) => {
+        {props.loading ? <EmptyState title="Loading connections…" /> : visibleComposio.length ? <CardGroup orientation="inline" border="outlined" separated>{visibleComposio.map((connection) => {
           if (connection.transport.type !== 'composio') return null;
-          const grant = grantByConnection.get(connection.id);
+          const grantCount = props.grants.filter((grant) => grant.connectionId === connection.id && grant.enabled).length;
           return <Card size="compact" key={connection.id}>
             <CardMedia icon={CloudGlyph} />
-            <CardHeader><CardTitle>{connection.label}</CardTitle><CardDescription>{connection.transport.toolkit} · Composio managed</CardDescription><span className="text-caption tabular-nums text-muted-foreground">{connection.transport.allowedTools.length} allowed tools{grant?.enabled ? ` · enabled for ${props.projectName}` : ''}</span>{connection.statusMessage ? <span className="flex items-center gap-1 text-caption text-destructive"><AlertCircle width={12} height={12} strokeWidth={1.5} />{connection.statusMessage}</span> : null}</CardHeader>
+            <CardHeader><CardTitle>{connection.label}</CardTitle><CardDescription>{connection.transport.toolkit} · Composio managed</CardDescription><span className="text-caption tabular-nums text-muted-foreground">{connection.transport.allowedTools.length} allowed tools · {grantCount} project grants</span>{connection.statusMessage ? <span className="flex items-center gap-1 text-caption text-destructive"><AlertCircle width={12} height={12} strokeWidth={1.5} />{connection.statusMessage}</span> : null}</CardHeader>
             <CardFooter className="gap-2"><Badge color={statusColor(connection.status)}>{connection.status}</Badge>{connection.status === 'connecting' ? <Button variant="ghost" loading={pending === `refresh:${connection.id}`} onClick={() => void settle(`refresh:${connection.id}`, () => props.onRefreshComposio(connection.id))}>Check connection</Button> : null}<Button variant="ghost" onClick={() => setExpanded(connection.id)}>Manage plugin</Button><Button variant="tertiary" size="icon-compact" aria-label={`Disconnect ${connection.label}`} onClick={() => void settle(`disconnect:${connection.id}`, () => props.onDisconnectComposio(connection.id, connection.revision))}><Trash01 width={16} height={16} strokeWidth={1.5} /></Button></CardFooter>
           </Card>;
         })}</CardGroup> : <EmptyState title="No Composio plugins connected" description="Choose a plugin below and connect an account. Connecting alone does not grant an agent access." />}
@@ -235,7 +240,7 @@ export function PluginsPage(props: PluginsPageProps) {
 
       <section className="flex flex-col gap-3" aria-labelledby="available-composio-plugins">
         <div><h2 id="available-composio-plugins" className="text-subtitle font-medium text-foreground">Available plugins</h2><p className="text-body text-muted-foreground">Composio manages authentication and credential refresh. GitSpace controls every project and tool grant.</p></div>
-        {!props.composioCatalog.configured
+        {props.catalogLoading ? <EmptyState title="Loading plugin catalog…" /> : props.catalogError ? <EmptyState title="Plugin catalog unavailable" description={props.catalogError} /> : !props.composioCatalog.configured
           ? <EmptyState icon={<Cloud01 width={22} height={22} strokeWidth={1.5} />} title="Set up Composio to connect plugins" description="Add your Composio API key once in Settings. GitSpace validates and encrypts it for this account." action={<Button variant="primary" asChild><a href="/settings?section=connections&amp;setup=composio">Set up Composio</a></Button>} />
           : visibleToolkits.length ? <CardGroup orientation="inline" border="outlined" separated>{visibleToolkits.map((toolkit) => <Card size="compact" key={toolkit.slug}>
             <CardMedia icon={CloudGlyph} />
@@ -247,18 +252,23 @@ export function PluginsPage(props: PluginsPageProps) {
 
     <TabsSubtlePanel index={1} selectedIndex={tab} idPrefix="plugins-source">
       {props.loading ? <EmptyState title="Loading custom plugins…" /> : visibleCustom.length ? <CardGroup orientation="inline" border="outlined" separated>{visibleCustom.map((connection) => {
-        const grant = grantByConnection.get(connection.id);
-        const connectionTools = props.tools.filter((tool) => tool.connectionId === connection.id);
+        const grantCount = props.grants.filter((grant) => grant.connectionId === connection.id && grant.enabled).length;
         const targetMachineId = connection.target.kind === 'machine' ? connection.target.machineId : null;
         const targetLabel = targetMachineId ? props.machines.find((machine) => machine.id === targetMachineId)?.label ?? targetMachineId : 'Workspace sandbox';
         const transportLabel = connection.transport.type === 'http' ? 'Streamable HTTP' : connection.transport.type;
         return <Card size="compact" key={connection.id}>
           <CardMedia icon={connection.transport.type === 'stdio' ? ServerGlyph : LinkGlyph} />
-          <CardHeader><CardTitle>{connection.label}</CardTitle><CardDescription>{transportLabel} · {targetLabel} · {connection.serverVersion ?? 'Version not reported'}</CardDescription><span className="text-caption tabular-nums text-muted-foreground"><span className="font-mono">{connection.id}</span> · {connectionTools.length} discovered tools{grant?.enabled ? ` · enabled for ${props.projectName}` : ''}</span>{connection.statusMessage ? <span className="flex items-center gap-1 text-caption text-destructive"><AlertCircle width={12} height={12} strokeWidth={1.5} />{connection.statusMessage}</span> : null}</CardHeader>
+          <CardHeader><CardTitle>{connection.label}</CardTitle><CardDescription>{transportLabel} · {targetLabel}</CardDescription><span className="text-caption tabular-nums text-muted-foreground"><span className="font-mono">{connection.id}</span> · {grantCount} project grants</span>{connection.statusMessage ? <span className="flex items-center gap-1 text-caption text-destructive"><AlertCircle width={12} height={12} strokeWidth={1.5} />{connection.statusMessage}</span> : null}</CardHeader>
           <CardFooter className="gap-2"><Badge color={statusColor(connection.status)}>{connection.status}</Badge><Button variant="ghost" onClick={() => setExpanded(connection.id)}>Manage plugin</Button><Switch checked={connection.enabled} label={connection.enabled ? 'Enabled' : 'Disabled'} disabled={pending !== null} onToggle={() => void settle(`connection:${connection.id}`, () => props.onUpdate(connection.id, connection.revision, customConnectionDraft(connection, !connection.enabled)))} /><Button variant="tertiary" size="icon-compact" aria-label={`Delete ${connection.label}`} onClick={() => void settle(`delete:${connection.id}`, () => props.onDelete(connection.id, connection.revision))}><Trash01 width={16} height={16} strokeWidth={1.5} /></Button></CardFooter>
         </Card>;
       })}</CardGroup> : <EmptyState icon={<PuzzlePiece01 width={22} height={22} strokeWidth={1.5} />} title={customConnections.length ? 'No matching custom plugins' : 'No custom plugins connected'} description={customConnections.length ? 'Change the filter to see your custom plugins.' : 'Connect a local stdio, Streamable HTTP, or SSE MCP server.'} action={customConnections.length ? undefined : <Button variant="primary" leadingIcon={PlusGlyph} onClick={() => setCreatingCustom(true)}>Add custom plugin</Button>} />}
     </TabsSubtlePanel>
+    <section aria-label="Runtime diagnostics" className="mt-8 flex flex-col gap-3 border-t border-border pt-6">
+      <h2 className="text-subtitle font-semibold">Runtime diagnostics</h2>
+      <p className="text-body text-muted-foreground">Explicitly discover tools for a project space on an online machine. This may start its MCP servers; it does not open a workspace or change grants.</p>
+      <div className="flex flex-wrap gap-3"><Select value={diagnosticProjectId} disabled={pending !== null} onValueChange={(id) => { setDiagnosticProjectId(id); setDiscoveredTools(null); }}><SelectTrigger aria-label="Diagnostic project" placeholder="Choose project" />{selectOptions(props.projects.map((project) => ({ value: project.id, label: project.name })))}</Select><Select value={diagnosticMachineId} disabled={pending !== null} onValueChange={(id) => { setDiagnosticMachineId(id); setDiscoveredTools(null); }}><SelectTrigger aria-label="Diagnostic machine" placeholder="Choose online machine" />{selectOptions(props.machines.filter((machine) => machine.state === 'online').map((machine) => ({ value: machine.id, label: machine.label })))}</Select><Button variant="secondary" disabled={pending !== null || !diagnosticProjectId || !diagnosticMachineId} loading={pending === 'discover'} onClick={() => void settle('discover', async () => { setDiscoveredTools(null); setDiscoveredTools(await props.onDiscover(diagnosticProjectId, diagnosticMachineId)); })}>Discover runtime tools</Button></div>
+      {discoveredTools ? <><p role="status" className="text-caption tabular-nums text-muted-foreground">{discoveredTools.length} discovered tools · project space {props.projects.find((project) => project.id === diagnosticProjectId)?.name} · {props.machines.find((machine) => machine.id === diagnosticMachineId)?.label}</p>{discoveredTools.map((tool) => <p key={tool.ompToolName} className="text-caption"><code>{tool.ompToolName}</code> · {tool.description ?? tool.name}</p>)}</> : <p className="text-caption text-muted-foreground">Not checked. Connections and assignments remain editable without a machine.</p>}
+    </section>
 
     {error ? <p role="alert" className="mt-4 text-body text-destructive">{error}</p> : null}
 
@@ -268,20 +278,23 @@ export function PluginsPage(props: PluginsPageProps) {
           <div className="flex items-center justify-between gap-3"><div><h3 className="text-body font-medium text-foreground">Allowed tools</h3><p className="text-caption text-muted-foreground">New Composio tools remain denied until selected here.</p></div><div className="flex gap-2"><Button size="compact" variant="ghost" onClick={() => setSelectedTools(composioTools.filter((tool) => tool.readOnly).map((tool) => tool.slug))}>Select read-only</Button><Button size="compact" variant="ghost" onClick={() => setSelectedTools([])}>Clear</Button></div></div>
           {toolsLoading ? <EmptyState title="Loading plugin tools…" /> : composioTools.length ? <CardGroup border="outlined" separated>{composioTools.map((tool) => <Card size="compact" key={tool.slug}><CardHeader><CardTitle>{tool.name}</CardTitle><CardDescription>{tool.description ?? tool.slug}</CardDescription><span className="text-caption text-muted-foreground">{tool.destructive ? 'Destructive' : tool.readOnly ? 'Read only' : 'Write capable'} · <span className="font-mono">{tool.slug}</span></span></CardHeader><CardFooter><Switch checked={selectedTools.includes(tool.slug)} label={selectedTools.includes(tool.slug) ? 'Allowed' : 'Denied'} onToggle={() => setSelectedTools((current) => current.includes(tool.slug) ? current.filter((slug) => slug !== tool.slug) : [...current, tool.slug])} /></CardFooter></Card>)}</CardGroup> : <EmptyState title="No tools available" description={expandedConnection.status === 'ready' ? 'Composio did not return tools for this plugin.' : 'Finish connecting this plugin before choosing tools.'} />}
           <Button variant="secondary" disabled={pending !== null || expandedConnection.status !== 'ready'} loading={pending === `tools:${expandedConnection.id}`} onClick={() => void settle(`tools:${expandedConnection.id}`, () => props.onUpdateComposioTools(expandedConnection.id, expandedConnection.revision, selectedTools))}>Save allowed tools</Button>
-        </div> : expandedDiscoveredTools.length ? <CardGroup border="outlined" separated>{expandedDiscoveredTools.map((tool) => <Card size="compact" key={tool.ompToolName}><CardHeader><CardTitle>{tool.name}</CardTitle><CardDescription>{tool.description ?? 'No description supplied by the MCP server.'}</CardDescription><span className="text-caption text-muted-foreground"><span className="font-mono">{tool.ompToolName}</span> · {tool.destructive ? 'destructive' : tool.readOnly ? 'read only' : 'write capable'}</span></CardHeader></Card>)}</CardGroup> : null}
-        <ProjectAssignmentMatrix projects={props.projects} assignments={props.grants.filter((candidate) => candidate.connectionId === expandedConnection.id).map((candidate) => ({ projectId: candidate.projectId, projectSpaceEnabled: candidate.projectSpaceEnabled, workspacesEnabled: candidate.workspacesEnabled }))} defaultProjectSpaceEnabled={false} defaultWorkspacesEnabled={false} disabled={!expandedConnection.enabled || (expandedConnection.transport.type === 'composio' && expandedConnection.status !== 'ready') || pending !== null} onChange={(assignment) => { const current = props.grants.find((candidate) => candidate.connectionId === expandedConnection.id && candidate.projectId === assignment.projectId); void settle(`grant:${assignment.projectId}:${expandedConnection.id}`, () => props.onSetGrant(assignment.projectId, expandedConnection.id, assignment.projectSpaceEnabled, assignment.workspacesEnabled, current?.revision ?? 0)); }} />
+        </div> : null}
+        <ProjectAssignmentMatrix projects={props.projects} assignments={props.grants.filter((candidate) => candidate.connectionId === expandedConnection.id).map((candidate) => ({ projectId: candidate.projectId, projectSpaceEnabled: candidate.enabled && candidate.projectSpaceEnabled, workspacesEnabled: candidate.enabled && candidate.workspacesEnabled }))} defaultProjectSpaceEnabled={false} defaultWorkspacesEnabled={false} unassignedLabel="Not granted" resetLabel="Revoke" disabled={pending !== null || props.assignmentsLoading} onReset={(projectId) => { const grant = props.grants.find((candidate) => candidate.connectionId === expandedConnection.id && candidate.projectId === projectId); if (grant) void settle(`revoke:${projectId}:${expandedConnection.id}`, () => props.onRevokeGrant(projectId, expandedConnection.id, grant.revision)); }} onChange={(assignment) => { const current = props.grants.find((candidate) => candidate.connectionId === expandedConnection.id && candidate.projectId === assignment.projectId); void settle(`grant:${assignment.projectId}:${expandedConnection.id}`, () => props.onSetGrant(assignment.projectId, expandedConnection.id, assignment.projectSpaceEnabled, assignment.workspacesEnabled, current?.revision ?? 0)); }} />
+        {props.assignmentsLoading ? <p role="status" className="text-caption text-muted-foreground">Loading project grants…</p> : null}
+        {error ? <p role="alert" className="text-caption text-destructive">{error}</p> : null}
         <DialogFooter><Button variant="secondary" onClick={() => setExpanded(null)}>Done</Button></DialogFooter>
       </DialogContent> : null}
     </Dialog>
 
-    <Dialog open={connectedToolkit !== null} onOpenChange={(open) => { if (!open) setConnectingToolkit(null); }}><DialogContent><DialogHeader><DialogTitle>Connect {connectedToolkit?.name ?? 'plugin'}</DialogTitle><DialogDescription>Composio manages the account credential. No agent receives access until you choose tools and assign this plugin.</DialogDescription></DialogHeader><InputGroup><InputField index={0} label="Account label" value={accountLabel} onChange={setAccountLabel} placeholder="Work account" /></InputGroup><DialogFooter><Button variant="secondary" onClick={() => setConnectingToolkit(null)}>Cancel</Button><Button variant="primary" loading={pending?.startsWith('authorize:') === true} onClick={() => void authorizeComposio()}>Continue to authentication</Button></DialogFooter></DialogContent></Dialog>
+    <Dialog open={connectedToolkit !== null} onOpenChange={(open) => { if (!open && pending === null) setConnectingToolkit(null); }}><DialogContent><DialogHeader><DialogTitle>Connect {connectedToolkit?.name ?? 'plugin'}</DialogTitle><DialogDescription>Composio manages the account credential. No agent receives access until you choose tools and assign this plugin.</DialogDescription></DialogHeader><InputGroup><InputField index={0} label="Account label" value={accountLabel} onChange={setAccountLabel} placeholder="Work account" /></InputGroup>{error ? <p role="alert" className="text-caption text-destructive">{error}</p> : null}<DialogFooter><Button variant="secondary" disabled={pending !== null} onClick={() => setConnectingToolkit(null)}>Cancel</Button><Button variant="primary" disabled={pending !== null} loading={pending?.startsWith('authorize:') === true} onClick={() => void authorizeComposio()}>Continue to authentication</Button></DialogFooter></DialogContent></Dialog>
 
-    <Dialog open={creatingCustom} onOpenChange={setCreatingCustom}><DialogContent size="lg"><DialogHeader><DialogTitle>Connect custom plugin</DialogTitle><DialogDescription>Run a local MCP server on a machine or connect a Streamable HTTP or SSE server. Project access is assigned separately.</DialogDescription></DialogHeader><div className="flex flex-col gap-4">
+    <Dialog open={creatingCustom} onOpenChange={(open) => { if (pending === null) setCreatingCustom(open); }}><DialogContent size="lg"><DialogHeader><DialogTitle>Connect custom plugin</DialogTitle><DialogDescription>Run a local MCP server on a machine or connect a Streamable HTTP or SSE server. Project access is assigned separately.</DialogDescription></DialogHeader><div className="flex flex-col gap-4">
       <InputGroup className="w-full"><InputField index={0} label="Connection ID" placeholder="Stable lowercase identifier used by project grants" value={id} onChange={setId} /><InputField index={1} label="Display label" value={label} onChange={setLabel} /></InputGroup>
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2"><Labeled label="Execution target"><Select value={target} onValueChange={(value) => setTarget(value as Target)}><SelectTrigger aria-label="Execution target" />{selectOptions([{ value: 'machine', label: 'Pinned machine' }, { value: 'workspace', label: 'Workspace sandbox' }])}</Select></Labeled>{target === 'machine' ? <Labeled label="Machine"><Select value={machineId} onValueChange={setMachineId}><SelectTrigger aria-label="Machine" />{selectOptions(props.machines.map((machine) => ({ value: machine.id, label: `${machine.label} · ${machine.state}` })))}</Select></Labeled> : null}<Labeled label="Transport"><Select value={transport} onValueChange={(value) => setTransport(value as Transport)}><SelectTrigger aria-label="Transport" />{selectOptions([{ value: 'http', label: 'Streamable HTTP' }, { value: 'stdio', label: 'stdio command' }, { value: 'sse', label: 'SSE' }])}</Select></Labeled></div>
       <InputGroup className="w-full">{transport === 'stdio' ? <InputField index={0} label="Command" placeholder="Pinned bunx/npx package or an absolute executable path" value={command} onChange={setCommand} /> : <InputField index={0} label="MCP URL" placeholder="http://127.0.0.1:29979/mcp" value={url} onChange={setUrl} type="url" />}<InputField index={1} label="Timeout (ms)" type="number" min="0" max="600000" value={timeoutMs} onChange={setTimeoutMs} /></InputGroup>
       {transport === 'stdio' ? <Labeled label="Arguments" description="JSON array. Package versions or commits must be exact."><MultilineField label="Arguments" value={args} onChange={setArgs} /></Labeled> : null}
       <Labeled label={transport === 'stdio' ? 'Environment secret references' : 'Header secret references'} description="One DESTINATION=PROJECT_SECRET binding per line. Values remain write-only."><MultilineField label={transport === 'stdio' ? 'Environment secret references' : 'Header secret references'} value={secretBindings} onChange={setSecretBindings} placeholder={transport === 'stdio' ? 'API_KEY=PLUGIN_API_KEY' : 'Authorization=PLUGIN_AUTHORIZATION'} /></Labeled>
-    </div><DialogFooter><Button variant="secondary" onClick={() => setCreatingCustom(false)}>Cancel</Button><Button variant="primary" disabled={pending !== null} loading={pending === 'create-custom'} onClick={() => void createCustom()}>{pending === 'create-custom' ? 'Connecting…' : 'Connect custom plugin'}</Button></DialogFooter></DialogContent></Dialog>
+      {error ? <p role="alert" className="text-caption text-destructive">{error}</p> : null}
+    </div><DialogFooter><Button variant="secondary" disabled={pending !== null} onClick={() => setCreatingCustom(false)}>Cancel</Button><Button variant="primary" disabled={pending !== null} loading={pending === 'create-custom'} onClick={() => void createCustom()}>{pending === 'create-custom' ? 'Connecting…' : 'Connect custom plugin'}</Button></DialogFooter></DialogContent></Dialog>
   </PageCanvas>;
 }

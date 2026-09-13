@@ -1,33 +1,121 @@
 {
   "$schema": "../../node_modules/wrangler/config-schema.json",
-  "name": "gitspace-relay",
+  "name": "gitspace-account",
   "main": "src/index.ts",
   "compatibility_date": "2026-08-27",
-  "compatibility_flags": ["nodejs_compat"],
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
   "durable_objects": {
     "bindings": [
       {
         "name": "RELAY",
         "class_name": "UserRelayDO"
+      },
+      {
+        "name": "CREDENTIALS",
+        "class_name": "CredentialVaultDO"
+      },
+      {
+        "name": "USER_STORAGE",
+        "class_name": "UserStorageDO"
+      },
+      {
+        "name": "SPACE_AUTHORITY",
+        "class_name": "SpaceAuthorityDO"
+      },
+      {
+        "name": "FLEET_CATALOG",
+        "class_name": "FleetCatalogDO"
+      },
+      {
+        "name": "USER_SETTINGS",
+        "class_name": "UserSettingsDO"
+      },
+      {
+        "name": "PROJECT_SECRETS",
+        "class_name": "ProjectSecretsDO"
+      },
+      {
+        "name": "PROJECT_CRONS",
+        "class_name": "ProjectCronsDO"
+      },
+      {
+        "name": "SPACE_CONTEXT",
+        "class_name": "SpaceContextDO"
+      },
+      {
+        "name": "USER_SKILLS",
+        "class_name": "UserSkillsDO"
+      },
+      {
+        "name": "USER_PROJECTS",
+        "class_name": "UserProjectIndexDO"
+      },
+      {
+        "name": "PROJECT_AUTHORITY",
+        "class_name": "ProjectAuthorityDO"
+      },
+      {
+        "name": "USER_MCP_CONNECTIONS",
+        "class_name": "UserMcpConnectionsDO"
+      },
+      {
+        "name": "TENANT_RELEASES",
+        "class_name": "TenantReleasesDO"
+      },
+      {
+        "name": "HOSTED_ROUTES",
+        "class_name": "HostedRouteRegistryDO"
+      },
+      {
+        "name": "ACCOUNT_STATE",
+        "class_name": "AccountStateDO"
       }
     ]
   },
   "r2_buckets": [
     {
       "binding": "BLOBS",
-      "bucket_name": "gitspace-relay-blobs"
+      "bucket_name": "gitspace-local-tenant"
+    },
+    {
+      "binding": "DATA",
+      "bucket_name": "gitspace-local-tenant"
     }
   ],
   "migrations": [
     {
-      "tag": "v1",
-      "new_sqlite_classes": ["UserRelayDO"]
+      "tag": "account-v1",
+      "new_sqlite_classes": [
+        "UserRelayDO",
+        "CredentialVaultDO",
+        "UserStorageDO",
+        "SpaceAuthorityDO",
+        "FleetCatalogDO",
+        "UserSettingsDO",
+        "ProjectSecretsDO",
+        "ProjectCronsDO",
+        "SpaceContextDO",
+        "UserSkillsDO",
+        "UserProjectIndexDO",
+        "ProjectAuthorityDO",
+        "UserMcpConnectionsDO",
+        "TenantReleasesDO",
+        "HostedRouteRegistryDO",
+        "AccountStateDO"
+      ]
     }
   ],
   "vars": {
-    "AUTH_PUBLIC_KEY": "replace-with-base64-ed25519-public-key",
-    "OPERATOR_URL": "https://api.gitspace.sh",
-    "RELAY_NAME": "default",
+    "AUTH_PUBLIC_KEY": "vOSduG2Ge02PoTK0oGKKFODyStGjBO46mv9TQXdRmLA=",
+    "ACCOUNT_ID": "u-8d3c47723aa85a4d61cac88f960c69b3",
+    "TENANT_ID": "local",
+    "RELAY_NAME": "local",
+    "ACCOUNT_URL": "http://localhost:8788",
+    "RELAY_URL": "http://localhost:8788",
+    "PLATFORM_URL": "http://localhost:8787",
+    "STORAGE_BUCKET": "gitspace-local-tenant",
     "AUTH_MAX_SKEW_MS": 60000,
     "TUNNEL_HEADER_TIMEOUT_MS": 300000,
     "TUNNEL_IDLE_TIMEOUT_MS": 300000
@@ -35,5 +123,11 @@
   "observability": {
     "enabled": true,
     "head_sampling_rate": 1
-  }
+  },
+  "services": [
+    {
+      "binding": "ASSETS",
+      "service": "gitspace-auth"
+    }
+  ]
 }

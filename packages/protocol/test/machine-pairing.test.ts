@@ -68,14 +68,14 @@ describe('delegated machine credential authority', () => {
 
 describe('machine pairing command tokens', () => {
   it('bounds lifetime and rejects redirects to insecure or credential-bearing origins', () => {
-    const input = { version: 1 as const, userId, pairingId: deviceId, token: 'a'.repeat(43), operatorUrl: 'https://api.gitspace.sh', expiresAt: now + 600_000 };
+    const input = { version: 1 as const, userId, pairingId: deviceId, token: 'a'.repeat(43), apiUrl: 'https://account.gitspace.sh', expiresAt: now + 600_000 };
     const encoded = encodeMachinePairingToken(input, now);
     expect(decodeMachinePairingToken(encoded, now)).toEqual(input);
     expect(decodeMachinePairingToken(encoded, now + 600_000)).toBeNull();
     expect(() => encodeMachinePairingToken({ ...input, expiresAt: now + 600_001 }, now)).toThrow();
-    for (const operatorUrl of ['http://api.gitspace.sh', 'https://user:password@api.gitspace.sh', 'https://api.gitspace.sh/path', 'https://api.gitspace.sh?redirect=other']) {
-      expect(() => encodeMachinePairingToken({ ...input, operatorUrl }, now)).toThrow();
+    for (const apiUrl of ['http://account.gitspace.sh', 'https://user:password@account.gitspace.sh', 'https://account.gitspace.sh/path', 'https://account.gitspace.sh?redirect=other']) {
+      expect(() => encodeMachinePairingToken({ ...input, apiUrl }, now)).toThrow();
     }
-    expect(decodeMachinePairingToken(encodeMachinePairingToken({ ...input, operatorUrl: 'http://127.0.0.1:8787' }, now), now)?.operatorUrl).toBe('http://127.0.0.1:8787');
+    expect(decodeMachinePairingToken(encodeMachinePairingToken({ ...input, apiUrl: 'http://127.0.0.1:8787' }, now), now)?.apiUrl).toBe('http://127.0.0.1:8787');
   });
 });

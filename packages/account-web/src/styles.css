@@ -9,7 +9,41 @@ html, body, #root { height: 100%; }
 body { overflow: hidden; }
 
 /* ── Shell ── */
-.gitspace-shell { width: 100vw; height: 100dvh; min-height: 0; }
+/* The shell follows the visual viewport and always protects the top notch.
+   A keyboard can cover the bottom inset; reserve only its visible portion. */
+:root {
+  --app-safe-area-inset-top: env(safe-area-inset-top, 0px);
+  --app-safe-area-inset-bottom: max(0px, calc(env(safe-area-inset-bottom, 0px) - var(--app-viewport-bottom, 0px)));
+  --app-notice-top: calc(var(--app-viewport-top, 0px) + var(--app-safe-area-inset-top) + 0.75rem);
+}
+.gitspace-shell {
+  box-sizing: border-box;
+  width: 100%;
+  height: 100dvh;
+  min-width: 0;
+  min-height: 0;
+  padding: var(--app-safe-area-inset-top) env(safe-area-inset-right, 0px) var(--app-safe-area-inset-bottom) env(safe-area-inset-left, 0px);
+}
+
+@media (pointer: coarse) {
+  /* Fluid's document min-height: 100vh uses the large viewport. A full-screen
+     app must not leave that document available for focus/scroll anchoring. */
+  html, body, #root { min-height: 0; }
+  html { overflow: hidden; }
+  body { position: fixed; inset: 0; }
+  .gitspace-shell {
+    position: absolute;
+    top: var(--app-viewport-top, 0px);
+    left: 0;
+    height: var(--app-viewport-height, 100dvh);
+  }
+}
+
+@media (width < 768px) {
+  /* The desktop inset card's margins survive its hidden peer. The drawer
+     layout instead fills the shell's already-safe rectangle edge to edge. */
+  .gitspace-shell > [data-slot="sidebar-inset"] { margin: 0; border-radius: 0; }
+}
 
 /* ── Workbench: conversation + inspector + terminal dock ── */
 .workspace-workbench {

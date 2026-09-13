@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'bun:test';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { spaceCheckpointManifestKey } from '@gitspace/protocol';
+import { spaceCheckpointManifestKey, spaceOmpCheckpointKey } from '@gitspace/protocol-workspace';
 import {
   EncryptedCheckpointBlobStore,
   FileCheckpointBlobStore,
@@ -31,6 +31,29 @@ function git(cwd: string, ...args: string[]): string {
   });
   if (result.exitCode !== 0) throw new Error(result.stderr.toString());
   return result.stdout.toString().trim();
+}
+
+class CappedCheckpointBlobStore extends FileCheckpointBlobStore {
+  readonly uploads: Array<{ key: string; size: number }> = [];
+  beforePut?: (key: string, bytes: Uint8Array) => void | Promise<void>;
+  afterPut?: (key: string) => void | Promise<void>;
+
+  override async put(key: string, bytes: Uint8Array): Promise<`sha256:${string}`> {
+    if (bytes.byteLength > 64 * 1024 * 1024) throw new Error('Application object exceeds 64 MiB');
+    await this.beforePut?.(key, bytes);
+    const hash = await super.put(key, bytes);
+    this.uploads.push({ key, size: bytes.byteLength });
+    await this.afterPut?.(key);
+    return hash;
+  }
+}
+
+function agentHistory(size: number): Uint8Array {
+  const bytes = new Uint8Array(size);
+  for (let offset = 0; offset < size; offset += 64 * 1024) {
+    bytes.fill((offset / (64 * 1024)) % 251, offset, Math.min(offset + 64 * 1024, size));
+  }
+  return bytes;
 }
 
 class TestAuthority implements SpaceCheckpointAuthority {
@@ -83,14 +106,18 @@ class TestRuntime implements PortableSpaceRuntime {
   restoredAgent?: { sessionId: string; ompSessionId: string; ompSession: Uint8Array };
   restoredArtifacts?: { generation: number; manifest: Uint8Array };
 
-  constructor(private readonly repositoryPath: string, private readonly deleteRepository: boolean) {}
+  constructor(
+    private readonly repositoryPath: string,
+    private readonly deleteRepository: boolean,
+    private readonly ompSession = new TextEncoder().encode('omp checkpoint'),
+  ) {}
   async quiesce() { this.quiesced = true; }
   async resumeAfterFailedClose() { this.quiesced = false; this.resumed = true; }
   async captureAgent() {
     return {
       sessionId: 'session-a',
       ompSessionId: 'omp-a',
-      ompSession: new TextEncoder().encode('omp checkpoint'),
+      ompSession: this.ompSession,
     };
   }
   async captureArtifacts() {
@@ -163,6 +190,134 @@ describe('PortableSpaceLifecycle', () => {
     expect(existsSync(join(target, 'secret.env'))).toBe(false);
   });
 
+  it('closes and restores complete 80 MiB agent history through a 64 MiB object store only after durable uploads', async () => {
+    const { root, source, target, remote, binding } = fixture();
+    const authority = new TestAuthority();
+    const bucket = join(root, 'bucket');
+    const inner = new CappedCheckpointBlobStore(bucket);
+    const ompKey = spaceOmpCheckpointKey('project-a', 'space-a', 1);
+    inner.beforePut = (key) => {
+      expect(authority.state).toBe('closing');
+      expect(authority.manifestKey).toBeUndefined();
+      expect(existsSync(source)).toBe(true);
+      if (key === ompKey) {
+        const chunks = inner.uploads.filter((upload) => upload.key.startsWith(`${ompKey}.chunks/`));
+        expect(chunks).toHaveLength(3);
+        for (const chunk of chunks) expect(existsSync(join(bucket, chunk.key))).toBe(true);
+        expect(existsSync(join(bucket, ompKey))).toBe(false);
+      }
+    };
+    inner.afterPut = () => {
+      expect(authority.state).toBe('closing');
+      expect(existsSync(source)).toBe(true);
+    };
+    const key = new Uint8Array(32).fill(11);
+    const lifecycle = new PortableSpaceLifecycle(authority, new EncryptedCheckpointBlobStore(inner, key), new BareGitRemote(remote));
+    const history = agentHistory(80 * 1024 * 1024 + 19);
+    const expectedHash = new Bun.CryptoHasher('sha256').update(history).digest('hex');
+    const sourceRuntime = new TestRuntime(source, true, history);
+
+    const closed = await lifecycle.close({ projectId: 'project-a', spaceId: 'space-a', machineId: 'machine-a', expectedGeneration: 1, repositoryPath: source, portableUntrackedPaths: ['portable.txt'], binding }, sourceRuntime);
+
+    expect(authority.state).toBe('closed');
+    expect(existsSync(source)).toBe(false);
+    expect(inner.uploads.every((upload) => upload.size <= 64 * 1024 * 1024)).toBe(true);
+    const storedRoot = await inner.get(ompKey, closed.manifest.agent.ompCheckpointHash);
+    expect(storedRoot).not.toBeNull();
+    expect(`sha256:${new Bun.CryptoHasher('sha256').update(storedRoot!).digest('hex')}`).toBe(closed.manifest.agent.ompCheckpointHash);
+
+    const targetRuntime = new TestRuntime(target, false);
+    const restoredLifecycle = new PortableSpaceLifecycle(
+      authority,
+      new EncryptedCheckpointBlobStore(new CappedCheckpointBlobStore(bucket), key),
+      new BareGitRemote(remote),
+    );
+    await restoredLifecycle.open({ projectId: 'project-a', spaceId: 'space-a', machineId: 'machine-b', expectedGeneration: 1, repositoryPath: target, portableUntrackedPaths: ['portable.txt'], binding }, targetRuntime);
+
+    expect(authority.state).toBe('open');
+    expect(targetRuntime.active).toBe(true);
+    const restored = targetRuntime.restoredAgent!.ompSession;
+    expect(restored.byteLength).toBe(history.byteLength);
+    expect(new Bun.CryptoHasher('sha256').update(restored).digest('hex')).toBe(expectedHash);
+    expect(Buffer.compare(
+      Buffer.from(restored.buffer, restored.byteOffset, restored.byteLength),
+      Buffer.from(history.buffer, history.byteOffset, history.byteLength),
+    )).toBe(0);
+  }, 60_000);
+
+  it.each(['chunk', 'root'] as const)('retains open state and local history when encrypted %s publication fails', async (failure) => {
+    const { root, source, remote, binding } = fixture();
+    const expectedStatus = git(source, 'status', '--porcelain=v1');
+    const authority = new TestAuthority();
+    const inner = new CappedCheckpointBlobStore(join(root, 'bucket'));
+    const ompKey = spaceOmpCheckpointKey('project-a', 'space-a', 1);
+    const uploadError = new Error('Injected checkpoint publication failure');
+    inner.beforePut = (key) => {
+      const isChunk = key.startsWith(`${ompKey}.chunks/`);
+      if ((failure === 'chunk' && isChunk && inner.uploads.length === 1) || (failure === 'root' && key === ompKey)) {
+        throw uploadError;
+      }
+    };
+    const lifecycle = new PortableSpaceLifecycle(
+      authority,
+      new EncryptedCheckpointBlobStore(inner, new Uint8Array(32).fill(13)),
+      new BareGitRemote(remote),
+    );
+    const runtime = new TestRuntime(source, true, agentHistory(32 * 1024 * 1024 + 19));
+
+    await expect(lifecycle.close({ projectId: 'project-a', spaceId: 'space-a', machineId: 'machine-a', expectedGeneration: 1, repositoryPath: source, portableUntrackedPaths: ['portable.txt'], binding }, runtime)).rejects.toThrow(uploadError);
+
+    expect(inner.uploads.filter((upload) => upload.key.startsWith(`${ompKey}.chunks/`))).toHaveLength(failure === 'chunk' ? 1 : 2);
+    expect(await inner.get(ompKey)).toBeNull();
+    expect(await inner.get(spaceCheckpointManifestKey('project-a', 'space-a', 1))).toBeNull();
+    expect(authority.state).toBe('open');
+    expect(authority.manifestKey).toBeUndefined();
+    expect(runtime.resumed).toBe(true);
+    expect(runtime.quiesced).toBe(false);
+    expect(existsSync(source)).toBe(true);
+    expect(git(source, 'status', '--porcelain=v1')).toBe(expectedStatus);
+    expect(readFileSync(join(source, 'unstaged.txt'), 'utf8')).toBe('unstaged\n');
+    expect(readFileSync(join(source, 'secret.env'), 'utf8')).toBe('secret\n');
+  }, 60_000);
+
+  it.each(['missing', 'tampered'] as const)('does not activate or commit open with a %s encrypted history chunk', async (failure) => {
+    const { root, source, target, remote, binding } = fixture();
+    const authority = new TestAuthority();
+    const bucket = join(root, 'bucket');
+    const inner = new CappedCheckpointBlobStore(bucket);
+    const key = new Uint8Array(32).fill(17);
+    const lifecycle = new PortableSpaceLifecycle(authority, new EncryptedCheckpointBlobStore(inner, key), new BareGitRemote(remote));
+    await lifecycle.close(
+      { projectId: 'project-a', spaceId: 'space-a', machineId: 'machine-a', expectedGeneration: 1, repositoryPath: source, portableUntrackedPaths: ['portable.txt'], binding },
+      new TestRuntime(source, true, agentHistory(32 * 1024 * 1024 + 19)),
+    );
+    const ompKey = spaceOmpCheckpointKey('project-a', 'space-a', 1);
+    const chunks = inner.uploads.filter((upload) => upload.key.startsWith(`${ompKey}.chunks/`));
+    expect(chunks).toHaveLength(2);
+    const chunkPath = join(bucket, chunks[1]!.key);
+    if (failure === 'missing') {
+      rmSync(chunkPath);
+    } else {
+      const bytes = readFileSync(chunkPath);
+      bytes[bytes.byteLength - 1] ^= 1;
+      writeFileSync(chunkPath, bytes);
+    }
+    const targetRuntime = new TestRuntime(target, false);
+    const restoredLifecycle = new PortableSpaceLifecycle(
+      authority,
+      new EncryptedCheckpointBlobStore(new CappedCheckpointBlobStore(bucket), key),
+      new BareGitRemote(remote),
+    );
+
+    await expect(restoredLifecycle.open({ projectId: 'project-a', spaceId: 'space-a', machineId: 'machine-b', expectedGeneration: 1, repositoryPath: target, portableUntrackedPaths: ['portable.txt'], binding }, targetRuntime)).rejects.toThrow();
+
+    expect(targetRuntime.active).toBe(false);
+    expect(targetRuntime.restoredAgent).toBeUndefined();
+    expect(targetRuntime.restoredArtifacts).toBeUndefined();
+    expect(authority.state).toBe('opening');
+    expect(authority.error).toBeDefined();
+  }, 60_000);
+
   it('returns to open when publication fails and never commits closed state', async () => {
     const { root, source, remote, binding } = fixture();
     const authority = new TestAuthority();
@@ -176,6 +331,19 @@ describe('PortableSpaceLifecycle', () => {
     expect(authority.state).toBe('open');
     expect(runtime.resumed).toBe(true);
     expect(existsSync(source)).toBe(true);
+    expect(authority.manifestKey).toBeUndefined();
+  });
+
+  it('resumes access and retains files when draining fails after partial quiescence', async () => {
+    const { root, source, remote, binding } = fixture();
+    const authority = new TestAuthority();
+    const lifecycle = new PortableSpaceLifecycle(authority, new FileCheckpointBlobStore(join(root, 'bucket')), new BareGitRemote(remote));
+    const runtime = new TestRuntime(source, true);
+    runtime.quiesce = async () => { runtime.quiesced = true; throw new Error('Service drain failed'); };
+    await expect(lifecycle.close({ projectId: 'project-a', spaceId: 'space-a', machineId: 'machine-a', expectedGeneration: 1, repositoryPath: source, binding }, runtime)).rejects.toThrow('Service drain failed');
+    expect(runtime.resumed).toBeTrue();
+    expect(authority.state).toBe('open');
+    expect(readFileSync(join(source, 'unstaged.txt'), 'utf8')).toBe('unstaged\n');
     expect(authority.manifestKey).toBeUndefined();
   });
 

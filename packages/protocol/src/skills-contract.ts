@@ -42,5 +42,6 @@ export const DEFAULT_GITSPACE_SKILLS: readonly Omit<SkillView, 'revision'>[] = [
   { id: 'phase-journal', name: 'phase-journal', description: 'Curated phase narrative, snapshots, and state deltas.', source: 'gitspace', scope: 'project', enabled: true, exceptions: [], assignments: [] },
   { id: 'review-guide-narrator', name: 'review-guide-narrator', description: 'Narrate a Change Guide grounded in the Journal and current diff.', source: 'gitspace', scope: 'workspaces', enabled: true, exceptions: [], assignments: [] },
   { id: 'workspace-services', name: 'workspace-services', description: 'Declare and run stable-port workspace services through OMP Hub.', source: 'gitspace', scope: 'workspaces', enabled: true, exceptions: [], assignments: [] },
+  { id: 'workspace-lifecycle', name: 'workspace-lifecycle', description: 'Inspect repositories and configure approved, portable workspace lifecycle scripts.', source: 'gitspace', scope: 'all', enabled: true, exceptions: [], assignments: [] },
   { id: 'integration-code-mode', name: 'integration-code-mode', description: 'Discover and compose granted MCP tools through bounded JavaScript.', source: 'gitspace', scope: 'all', enabled: true, exceptions: [], assignments: [] },
 ];

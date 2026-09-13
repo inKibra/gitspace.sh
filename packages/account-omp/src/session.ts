@@ -1,6 +1,7 @@
 import { mkdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { computeSessionActivity, type SessionActivity, type SessionStatus, type SkillView } from '@gitspace/protocol';
+import { computeSessionActivity, transitionAgentExecution, type AgentExecutionState, type AgentFailure, type SessionActivity } from '@gitspace/protocol-agent';
+import type { SkillView } from '@gitspace/protocol';
 import {
   AgentRegistry,
   MemorySessionStorage,
@@ -10,11 +11,11 @@ import {
   type AgentSessionEvent,
   type AuthStorage,
   type CustomTool,
-  type SessionTreeNode,
 } from '@oh-my-pi/pi-coding-agent';
 import type { CreateAgentSessionResult } from '@oh-my-pi/pi-coding-agent/sdk';
 import manualContinuePrompt from '@oh-my-pi/pi-coding-agent/prompts/system/manual-continue' with { type: 'text' };
 import { OmpAskBridge } from './ask-bridge.js';
+import { WorkspaceAgentSetup } from './agent-setup.js';
 import { INSTRUCTION_CONTEXT_TYPE, INSTRUCTION_NOTICE, WorkspaceInstructionContext, workspaceInstructionText, type WorkspaceInstructions } from './workspace-instructions.js';
 import type { ExtensionAPI } from '@oh-my-pi/pi-coding-agent';
 
@@ -32,6 +33,9 @@ const ROLE_LABELS: Readonly<Record<string, string>> = {
 };
 import type { MCPManager } from '@oh-my-pi/pi-coding-agent/mcp';
 import type { OmpRuntime, OmpRuntimeEvent, OmpRuntimeSession, OmpSessionControlView, OmpTranscriptEvent } from './contracts.js';
+
+const WORKSPACE_PHASE_CONTEXT_TYPE = 'gitspace-workspace-phase';
+type WorkspacePhase = Parameters<OmpRuntimeSession['setWorkspacePhase']>[0];
 
 export interface OmpEvalNamespace {
   declaration: string;
@@ -52,7 +56,7 @@ export interface EmbeddedOmpRuntimeOptions {
   /** Machine-wide credential store shared with provider sign-in; omitted → one store per session. */
   authStorage?: () => Promise<AuthStorage>;
   mcp?: { createSession(input: {projectId: string; workspaceId: string | null; workspacePath: string}): Promise<SessionMcpBridge> };
-  skills?: readonly SkillView[];
+  skills?: { initial: readonly SkillView[]; refresh?: (signal?: AbortSignal) => Promise<readonly SkillView[]> };
   spaceNamespace?: OmpEvalNamespace;
 }
 
@@ -111,41 +115,35 @@ function transcriptEvents(manager: SessionManager): OmpTranscriptEvent[] {
   }
   return events;
 }
-function sessionTree(manager: SessionManager): OmpSessionControlView['tree'] {
-  const leafId = manager.getLeafId();
-  const branchIds = new Set(manager.getBranch().map((entry) => entry.id));
-  const sequenceById = new Map(manager.getEntries().map((entry, index) => [entry.id, index + 1]));
-  const output: OmpSessionControlView['tree'] = [];
-  const text = (content: unknown): string => {
-    if (typeof content === 'string') return content;
-    if (!Array.isArray(content)) return '';
-    return content.flatMap((part) => part && typeof part === 'object' && 'text' in part && typeof part.text === 'string' ? [part.text] : []).join('');
-  };
-  const walk = (node: SessionTreeNode, parentId: string | null): void => {
-    let nextParent = parentId;
-    if (node.entry.type === 'message' && (node.entry.message.role === 'user' || node.entry.message.role === 'assistant')) {
-      const content = 'content' in node.entry.message ? node.entry.message.content : '';
-      const tools = Array.isArray(content) ? content.filter((part) => part && typeof part === 'object' && 'type' in part && part.type === 'toolCall').length : 0;
-      output.push({
-        id: node.entry.id,
-        parentId,
-        role: node.entry.message.role,
-        preview: text(content).slice(0, 160),
-        tools,
-        sequence: sequenceById.get(node.entry.id) ?? 0,
-        current: node.entry.id === leafId,
-        onPath: branchIds.has(node.entry.id),
-      });
-      nextParent = node.entry.id;
+/** Small prompt recall on the current branch; never build the session tree for controls. */
+function recentPrompts(manager: SessionManager): OmpSessionControlView['history'] {
+  const history: OmpSessionControlView['history'] = [];
+  let id = manager.getLeafId();
+  let characters = 0;
+  for (let visited = 0; id !== null && visited < 4096 && history.length < 64; visited++) {
+    const entry = manager.getEntry(id);
+    if (!entry) break;
+    id = entry.parentId;
+    if (entry.type !== 'message' || entry.message.role !== 'user') continue;
+    const content = entry.message.content;
+    let text = '';
+    if (typeof content === 'string') {
+      if (content.length > 4096) continue;
+      text = content;
+    } else {
+      // Omit oversized prompts, rather than silently recall only part of one.
+      if (content.length > 4096) continue;
+      for (const part of content) {
+        if (part.type !== 'text') continue;
+        if (text.length + part.text.length > 4096) { text = ''; break; }
+        text += part.text;
+      }
     }
-    for (const child of node.children) walk(child, nextParent);
-  };
-  for (const root of manager.getTree()) walk(root, null);
-  if (!output.some((node) => node.current)) {
-    const current = output.filter((node) => node.onPath).sort((left, right) => right.sequence - left.sequence)[0];
-    if (current) current.current = true;
+    if (!text || characters + text.length > 32 * 1024) continue;
+    characters += text.length;
+    history.push({ entryId: entry.id, text });
   }
-  return output;
+  return history.reverse();
 }
 
 export class EmbeddedOmpRuntime implements OmpRuntime {
@@ -154,17 +152,17 @@ export class EmbeddedOmpRuntime implements OmpRuntime {
   transcript(sessionFile: string): Promise<OmpTranscriptEvent[]> { return projectOmpTranscript(sessionFile); }
   checkpointTranscript(bytes: Uint8Array): Promise<OmpTranscriptEvent[]> { return projectOmpCheckpointTranscript(bytes); }
 
-  async create(input: { projectId: string; workspaceId: string | null; workingDirectory: string; sessionKey: string; artifactsDir: string }): Promise<OmpRuntimeSession> {
+  async create(input: { projectId: string; workspaceId: string | null; workingDirectory: string; sessionKey: string; artifactsDir: string; executionFailure?: AgentFailure | null }): Promise<OmpRuntimeSession> {
     const sessionDir = join(this.options.sessionRoot, input.sessionKey);
     await mkdir(sessionDir, { recursive: true });
-    return this.boot(SessionManager.create(input.workingDirectory, sessionDir), input.projectId, input.workspaceId, input.workingDirectory, input.artifactsDir);
+    return this.boot(SessionManager.create(input.workingDirectory, sessionDir), input.projectId, input.workspaceId, input.workingDirectory, input.artifactsDir, input.executionFailure ?? null);
   }
 
-  async open(input: { projectId: string; workspaceId: string | null; workingDirectory: string; sessionKey: string; artifactsDir: string; sessionFile: string }): Promise<OmpRuntimeSession> {
+  async open(input: { projectId: string; workspaceId: string | null; workingDirectory: string; sessionKey: string; artifactsDir: string; executionFailure?: AgentFailure | null; sessionFile: string }): Promise<OmpRuntimeSession> {
     const sessionDir = join(this.options.sessionRoot, input.sessionKey);
     await mkdir(sessionDir, { recursive: true });
     const manager = await SessionManager.open(input.sessionFile, sessionDir, undefined, { initialCwd: input.workingDirectory });
-    return this.boot(manager, input.projectId, input.workspaceId, input.workingDirectory, input.artifactsDir);
+    return this.boot(manager, input.projectId, input.workspaceId, input.workingDirectory, input.artifactsDir, input.executionFailure ?? null);
   }
 
   private async boot(
@@ -173,9 +171,33 @@ export class EmbeddedOmpRuntime implements OmpRuntime {
     workspaceId: string | null,
     workspacePath: string,
     artifactsDir: string,
+    executionFailure: AgentFailure | null,
   ): Promise<OmpRuntimeSession> {
     let sessionId: string | null = manager.getSessionId();
     let instructions: WorkspaceInstructionContext | undefined;
+    let workspacePhase: WorkspacePhase | undefined;
+    const restoredPhase = manager.getEntries().findLast((entry) => entry.type === 'custom' && entry.customType === WORKSPACE_PHASE_CONTEXT_TYPE);
+    if (restoredPhase?.type === 'custom') {
+      const phase = restoredPhase.data;
+      if (phase !== 'plan' && phase !== 'code' && phase !== 'review' && phase !== 'ship') throw new Error('Invalid persisted workspace phase');
+      workspacePhase = phase;
+    }
+    const phaseExtension = (pi: ExtensionAPI): void => {
+      pi.on('context', (event) => {
+        if (!workspacePhase) return;
+        const planning = workspacePhase === 'plan';
+        return { messages: [
+          ...event.messages.filter((message) => message.role !== 'custom'
+            || (message.customType !== WORKSPACE_PHASE_CONTEXT_TYPE
+              && (planning || !message.customType.startsWith('plan-mode-') || message.customType === 'plan-mode-reference'))),
+          { role: 'custom' as const, customType: WORKSPACE_PHASE_CONTEXT_TYPE,
+            content: `Current workspace phase: ${workspacePhase}. This is authoritative over phase labels in earlier messages or Goal records. ${planning
+              ? 'Plan mode is active: the working tree is read-only; draft plans in local://workspace/.'
+              : 'Plan mode is off. Earlier planning-only restrictions no longer apply; use the tools needed for this phase and follow the current workspace instructions.'}`,
+            display: false, timestamp: Date.now() },
+        ] };
+      });
+    };
     const instructionExtension = (pi: ExtensionAPI): void => {
       pi.on('context', async (event, context) => {
         if (!instructions) return;
@@ -204,25 +226,30 @@ export class EmbeddedOmpRuntime implements OmpRuntime {
       pi.on('session_compact', () => compaction.onEnd?.());
     };
     const authStorage = this.options.authStorage ? await this.options.authStorage() : null;
+    let configuredSkills = new Map((this.options.skills?.initial ?? []).map((skill) => [skill.id, skill]));
+    const discoverEffectiveSkills = async (configuration: ReadonlyMap<string, SkillView>) => {
+      const discovered = await discoverSkills(workspacePath, this.options.agentDir, { customDirectories: [join(this.options.agentDir, 'skills')] });
+      return discovered.skills.filter((skill) => {
+        const configured = configuration.get(skill.name);
+        if (!configured) return true;
+        if (!configured.enabled || configured.exceptions.includes(projectId)) return false;
+        const assignment = configured.assignments.find((candidate) => candidate.projectId === projectId);
+        if (assignment) return workspaceId === null ? assignment.projectSpaceEnabled : assignment.workspacesEnabled;
+        return workspaceId === null
+          ? configured.scope === 'project' || configured.scope === 'all'
+          : configured.scope === 'workspaces' || configured.scope === 'all';
+      });
+    };
+    const skills = await discoverEffectiveSkills(configuredSkills);
     let projectedMcp: SessionMcpBridge | null = null;
     if (this.options.mcp) {
       projectedMcp = await this.options.mcp.createSession({ projectId, workspaceId, workspacePath });
     }
-    const discoveredSkills = await discoverSkills(workspacePath, this.options.agentDir);
-    const configuredSkills = new Map((this.options.skills ?? []).map((skill) => [skill.id, skill]));
-    const skills = discoveredSkills.skills.filter((skill) => {
-      const configured = configuredSkills.get(skill.name);
-      if (!configured) return true;
-      if (!configured.enabled || configured.exceptions.includes(projectId)) return false;
-      const assignment = configured.assignments.find((candidate) => candidate.projectId === projectId);
-      if (assignment) return workspaceId === null ? assignment.projectSpaceEnabled : assignment.workspacesEnabled;
-      return workspaceId === null
-        ? configured.scope === 'project' || configured.scope === 'all'
-        : configured.scope === 'workspaces' || configured.scope === 'all';
-    });
+    const writableArtifactMount = workspaceId === null ? 'base' : 'workspace';
     const localProtocolOptions = {
       getArtifactsDir: () => artifactsDir,
       getSessionId: () => sessionId,
+      getDefaultPlanReferencePath: () => `local://${writableArtifactMount}/PLAN.md`,
       getLocalMounts: (): Record<string, 'read' | 'write'> => workspaceId === null
         ? { base: 'write' }
         : { base: 'read', workspace: 'write' },
@@ -235,7 +262,7 @@ export class EmbeddedOmpRuntime implements OmpRuntime {
         sessionManager: manager,
         hasUI: true,
         interactivePrompts: true,
-        extensions: [compactionExtension, instructionExtension],
+        extensions: [compactionExtension, instructionExtension, phaseExtension],
         enableMCP: true,
         skills,
         ...(authStorage ? { authStorage } : {}),
@@ -253,6 +280,7 @@ export class EmbeddedOmpRuntime implements OmpRuntime {
       throw error;
     }
     const { session, eventBus, setToolUIContext } = result;
+    const agentSetup = new WorkspaceAgentSetup(session, workspacePath);
     if (projectedMcp) {
       projectedMcp.attach({ refresh: (tools) => session.refreshMCPTools(tools) });
       try {
@@ -263,13 +291,34 @@ export class EmbeddedOmpRuntime implements OmpRuntime {
         throw error;
       }
     }
+    let skillRefresh: Promise<void> | null = null;
+    const refreshSkillConfiguration = async (signal?: AbortSignal): Promise<void> => {
+      const loadSkills = this.options.skills?.refresh;
+      if (!loadSkills) return;
+      if (skillRefresh) return skillRefresh;
+      skillRefresh = (async () => {
+        const latest = await loadSkills(signal);
+        if (latest.length === configuredSkills.size && latest.every((skill) => configuredSkills.get(skill.id)?.revision === skill.revision)) return;
+        const configuration = new Map(latest.map((skill) => [skill.id, skill]));
+        const nextSkills = await discoverEffectiveSkills(configuration);
+        // Explicit SDK skills are not rediscovered by refreshSkills. Keep the shared
+        // array used by the session, tool contexts and skill:// registry up to date.
+        skills.splice(0, skills.length, ...nextSkills);
+        await session.refreshSkills();
+        configuredSkills = configuration;
+      })();
+      try { await skillRefresh; }
+      finally { skillRefresh = null; }
+    };
+    // This awaited hook runs after tools settle and before the provider prompt is
+    // captured, including queued continuations. A cloud failure stops the boundary.
+    const unsubscribeSkills = session.agent.addBeforeModelCallHook(refreshSkillConfiguration);
     session.settings.override('prewalk.enabled', false);
     session.settings.override('task.prewalk', false);
     if (session.getVibeModeState()?.enabled) {
       await session.removeVibeToolsPreservingActive();
       session.setVibeModeState(undefined);
     }
-    const writableArtifactMount = workspaceId === null ? 'base' : 'workspace';
     const qualifyLocalArtifactPath = (value: string): string => {
       if (!value.startsWith('local://')) return value;
       const relative = value.slice('local://'.length);
@@ -283,8 +332,19 @@ export class EmbeddedOmpRuntime implements OmpRuntime {
       const planFilePath = qualifyLocalArtifactPath(planState.planFilePath);
       if (planFilePath !== planState.planFilePath) session.setPlanModeState({ ...planState, planFilePath });
     }
-    const planReferencePath = session.getPlanReferencePath();
-    session.setPlanReferencePath(qualifyLocalArtifactPath(planReferencePath || 'local://PLAN.md'));
+    const applyWorkspacePhase = (phase: WorkspacePhase): void => {
+      const previous = session.getPlanModeState();
+      if (phase === 'plan') {
+        if (!previous?.enabled) session.setPlanModeState({
+          enabled: true, planFilePath: session.getPlanReferencePath(),
+          workflow: previous?.workflow ?? 'parallel', reentry: previous !== undefined,
+        });
+      } else {
+        session.setPlanProposalHandler(null);
+        session.setPlanModeState(undefined);
+      }
+    };
+    if (workspacePhase) applyWorkspacePhase(workspacePhase);
     let goalPreviousTools: string[] | null = null;
     sessionId = session.sessionId;
     await manager.ensureOnDisk();
@@ -296,14 +356,13 @@ export class EmbeddedOmpRuntime implements OmpRuntime {
     }
 
     const eventHandlers = new Set<(event: OmpRuntimeEvent) => void>();
-    const activityHandlers = new Set<(activity: SessionActivity, errorMessage?: string) => void>();
+    const activityHandlers = new Set<(activity: SessionActivity, failure: AgentFailure | null) => void>();
     const permissions = new Set<string>();
     const pendingQuestions = new Set<string>();
-    let status: SessionStatus = { type: 'idle' };
-    let errorMessage: string | undefined;
-    let turnActive = false;
+    let executionState: AgentExecutionState = { status: { type: 'idle' }, turnActive: false, failure: executionFailure };
     let subagentCount = 0;
-    let backgroundActivityTimer: Timer | undefined;
+    let backgroundCompletion: Promise<void> | null = null;
+    let disposed = false;
     const hasBackgroundWork = (): boolean => {
       const jobs = session.asyncJobManager;
       return !!jobs && (jobs.getRunningJobs().length > 0 || jobs.hasPendingDeliveries());
@@ -311,25 +370,24 @@ export class EmbeddedOmpRuntime implements OmpRuntime {
     const currentActivity = (backgroundWork = hasBackgroundWork()): SessionActivity => {
       const queued = session.getQueuedMessages?.() ?? { steering: [], followUp: [] };
       return computeSessionActivity({
-        statuses: { [session.sessionId]: status.type === 'idle' && backgroundWork ? { type: 'busy' } : status },
+        statuses: { [session.sessionId]: executionState.status },
         pendingPermissions: permissions.size > 0 ? { [session.sessionId]: [...permissions] } : {},
         pendingQuestions: pendingQuestions.size > 0 ? { [session.sessionId]: [...pendingQuestions] } : {},
         queuedMessages: { [session.sessionId]: { steering: [...queued.steering], followUp: [...queued.followUp] } },
-        subagentCounts: subagentCount > 0 ? { [session.sessionId]: subagentCount } : {},
+        subagentCounts: subagentCount > 0 || backgroundWork ? { [session.sessionId]: subagentCount + (backgroundWork ? 1 : 0) } : {},
       }, session.sessionId);
     };
     const publishActivity = (): void => {
       const backgroundWork = hasBackgroundWork();
       const activity = currentActivity(backgroundWork);
-      // Async eval/bash jobs and pending result delivery outlive a provider turn.
-      // Poll only while such work exists, so completion can release a draining child.
-      if (backgroundWork && !backgroundActivityTimer) {
-        backgroundActivityTimer = setTimeout(() => { backgroundActivityTimer = undefined; publishActivity(); }, 250);
-      } else if (!backgroundWork && backgroundActivityTimer) {
-        clearTimeout(backgroundActivityTimer);
-        backgroundActivityTimer = undefined;
+      // Await real job and delivery completion; do not poll the runtime for activity.
+      const jobs = session.asyncJobManager;
+      if (backgroundWork && jobs && !backgroundCompletion) {
+        backgroundCompletion = Promise.allSettled(jobs.getRunningJobs().map((job) => job.promise))
+          .then(async () => { await jobs.drainDeliveries(); })
+          .finally(() => { backgroundCompletion = null; if (!disposed) publishActivity(); });
       }
-      for (const handler of activityHandlers) handler(activity, errorMessage);
+      for (const handler of activityHandlers) handler(activity, executionState.failure);
     };
     const updateSubagentCount = (): void => {
       // Finished agents remain idle/parked in the registry; only running turns pin this generation.
@@ -345,47 +403,17 @@ export class EmbeddedOmpRuntime implements OmpRuntime {
     });
     setToolUIContext(askBridge.context() as never, true);
     const handleEvent = (event: OmpRuntimeEvent): void => {
-      switch (event.type) {
-        case 'agent_start':
-          turnActive = true;
-          status = { type: 'busy' };
-          errorMessage = undefined;
-          publishActivity();
-          break;
-        case 'agent_end':
-          turnActive = false;
-          status = { type: 'idle' };
-          errorMessage = undefined;
-          publishActivity();
-          break;
-        case 'auto_compaction_start':
-          status = { type: 'compacting' };
-          publishActivity();
-          break;
-        case 'auto_compaction_end':
-          status = { type: turnActive ? 'busy' : 'idle' };
-          publishActivity();
-          break;
-        case 'auto_retry_start': {
-          const message = typeof event.errorMessage === 'string' ? event.errorMessage : 'Retrying…';
-          errorMessage = message;
-          status = {
-            type: 'retry',
-            attempt: typeof event.attempt === 'number' ? event.attempt : 1,
-            message,
-            next: Date.now() + (typeof event.delayMs === 'number' ? event.delayMs : 0),
-          };
-          publishActivity();
-          break;
-        }
-        case 'auto_retry_end':
-          status = { type: event.success === true ? (turnActive ? 'busy' : 'idle') : 'idle' };
-          errorMessage = event.success === true ? undefined : typeof event.finalError === 'string' ? event.finalError : errorMessage;
-          publishActivity();
-          break;
-        default:
-          if (event.type === 'message_end' || event.type === 'tool_execution_end') publishActivity();
-      }
+      const message = event.message && typeof event.message === 'object' ? event.message : null;
+      const assistant = message && 'role' in message && message.role === 'assistant';
+      const stopReason = message && 'stopReason' in message ? message.stopReason : undefined;
+      executionState = transitionAgentExecution(executionState, {
+        type: event.type, sessionId: session.sessionId,
+        ...(typeof event.errorMessage === 'string' ? { message: event.errorMessage } : typeof event.finalError === 'string' ? { message: event.finalError } : message && 'errorMessage' in message && typeof message.errorMessage === 'string' ? { message: message.errorMessage } : {}),
+        ...(typeof event.attempt === 'number' ? { attempt: event.attempt } : {}),
+        ...(typeof event.delayMs === 'number' ? { delayMs: event.delayMs } : {}),
+        ...(event.type === 'auto_retry_end' ? { succeeded: event.success === true } : assistant && typeof stopReason === 'string' ? { succeeded: stopReason !== 'error' && stopReason !== 'aborted' } : {}),
+      }, Date.now());
+      publishActivity();
       for (const handler of eventHandlers) handler(event);
     };
     if (this.options.spaceNamespace) {
@@ -404,11 +432,11 @@ export class EmbeddedOmpRuntime implements OmpRuntime {
     updateSubagentCount();
 
     compaction.onStart = () => {
-      status = { type: 'compacting' };
+      executionState = transitionAgentExecution(executionState, { type: 'auto_compaction_start', sessionId: session.sessionId }, Date.now());
       publishActivity();
     };
     compaction.onEnd = () => {
-      status = { type: turnActive ? 'busy' : 'idle' };
+      executionState = transitionAgentExecution(executionState, { type: 'auto_compaction_end', sessionId: session.sessionId }, Date.now());
       publishActivity();
     };
 
@@ -423,7 +451,14 @@ export class EmbeddedOmpRuntime implements OmpRuntime {
     };
     for (const name of ['gitspace:permission.waiting', 'permission-gate:waiting']) bus.on(name, permissionWaiting);
     for (const name of ['gitspace:permission.resolved', 'permission-gate:resolved']) bus.on(name, permissionResolved);
+    let recallLeaf: string | null | undefined;
+    let recallHistory: OmpSessionControlView['history'] = [];
     const control = (): OmpSessionControlView => {
+      const leafId = manager.getLeafId();
+      if (recallLeaf !== leafId) {
+        recallHistory = recentPrompts(manager);
+        recallLeaf = leafId;
+      }
       const roleOrder = session.settings.get('cycleOrder');
       const cycle = session.getRoleModelCycle(roleOrder.length ? roleOrder : ['default', 'smol', 'slow', 'plan']);
       const currentRole = cycle?.models[cycle.currentIndex];
@@ -444,18 +479,19 @@ export class EmbeddedOmpRuntime implements OmpRuntime {
           thinking: entry.thinkingLevel ?? null,
           current: index === cycle?.currentIndex,
         })),
-        tree: sessionTree(manager),
+        historyAnchorId: leafId,
         models: session.getAvailableModels().map((available) => ({ provider: available.provider, id: available.id, name: available.name, contextWindow: available.contextWindow })),
         provider: model?.provider ?? null,
         model: model?.id ?? null,
         thinking: session.configuredThinkingLevel() ?? null,
         fastMode: session.isFastModeEnabled(),
+        planMode: session.getPlanModeState()?.enabled === true,
         approvalMode: session.settings.get('tools.approvalMode'),
         context: usage ? { tokens: usage.tokens, contextWindow: usage.contextWindow, percent: usage.contextWindow > 0 ? usage.tokens / usage.contextWindow * 100 : 0 } : null,
         cost: stats.cost,
         todos: session.getTodoPhases().map((phase) => ({ name: phase.name, tasks: phase.tasks.map((task) => ({ content: task.content, status: task.status, blocker: task.blocker ?? null })) })),
         queue: { steering: [...queued.steering], followUp: [...queued.followUp] },
-        history: session.getUserMessagesForBranching(),
+        history: recallHistory,
         goal: goal ? { id: goal.id, status: goal.status, objective: goal.objective, tokenBudget: goal.tokenBudget ?? null, tokensUsed: goal.tokensUsed, timeUsedSeconds: goal.timeUsedSeconds } : null,
         pendingAsk: askBridge.current(),
       };
@@ -469,11 +505,14 @@ export class EmbeddedOmpRuntime implements OmpRuntime {
     return {
       id: session.sessionId,
       sessionFile,
-      prompt: (text, options) => {
+      isAvailable: () => !disposed,
+      historyAnchorId: async () => manager.getLeafId(),
+      prompt: async (text, options) => {
         const command = text.trim().toLowerCase();
         if (command === '/prewalk' || command.startsWith('/prewalk ') || command === '/vibe' || command.startsWith('/vibe ')) {
           throw new Error('This OMP mode is disabled for GitSpace-managed sessions');
         }
+        await refreshSkillConfiguration();
         return session.prompt(text, options);
       },
       subscribe: (handler) => {
@@ -482,18 +521,32 @@ export class EmbeddedOmpRuntime implements OmpRuntime {
       },
       subscribeActivity: (handler) => {
         activityHandlers.add(handler);
-        handler(currentActivity(), errorMessage);
+        handler(currentActivity(), executionState.failure);
         return () => activityHandlers.delete(handler);
       },
-      activity: () => ({ activity: currentActivity(), ...(errorMessage ? { errorMessage } : {}) }),
+      activity: () => ({ activity: currentActivity(), failure: executionState.failure }),
       instructionsChanged: async () => { instructions?.changed(); },
+      setWorkspacePhase: async (phase) => {
+        if (workspaceId === null) throw new Error('Project base sessions do not have a workspace phase');
+        if (workspacePhase === phase && (session.getPlanModeState()?.enabled === true) === (phase === 'plan')) return;
+        // Guard changes are synchronous; do not abort a provider/tool call or
+        // await the run that may itself be invoking space.setPhase through IPC.
+        applyWorkspacePhase(phase);
+        workspacePhase = phase;
+        manager.appendCustomEntry(WORKSPACE_PHASE_CONTEXT_TYPE, phase);
+        const goal = session.getGoalModeState();
+        manager.appendModeChange(phase === 'plan' ? 'plan' : goal?.enabled ? 'goal' : 'none',
+          phase === 'plan' ? { ...session.getPlanModeState() } : goal?.enabled ? { goal: goal.goal } : undefined);
+        await manager.flush();
+      },
       handoff: async () => {
-        const interrupted = turnActive || session.isStreaming;
+        const interrupted = executionState.turnActive || session.isStreaming;
         if (interrupted) await session.abort({ goalReason: 'internal', reason: 'GitSpace machine handoff' });
         await manager.flush();
         return interrupted;
       },
       resume: async () => {
+        await refreshSkillConfiguration();
         await session.prompt(manualContinuePrompt, { synthetic: true, userInitiated: true });
       },
       persist: () => manager.flush(),
@@ -502,10 +555,11 @@ export class EmbeddedOmpRuntime implements OmpRuntime {
         await activeSettings?.reloadFromDisk?.();
       },
       dispose: async () => {
+        disposed = true;
         askBridge.cancel();
         sessionUnsubscribe();
         registryUnsubscribe();
-        clearTimeout(backgroundActivityTimer);
+        unsubscribeSkills();
         for (const name of ['gitspace:permission.waiting', 'permission-gate:waiting']) bus.off?.(name, permissionWaiting);
         for (const name of ['gitspace:permission.resolved', 'permission-gate:resolved']) bus.off?.(name, permissionResolved);
         await manager.flush();
@@ -513,6 +567,8 @@ export class EmbeddedOmpRuntime implements OmpRuntime {
         await projectedMcp?.dispose();
       },
       control: async () => control(),
+      agentSetup: () => agentSetup.view(),
+      saveAgentDefinition: (input) => agentSetup.save(input),
       cycleRole: async (direction) => {
         const roleOrder = session.settings.get('cycleOrder');
         await session.cycleRoleModels(roleOrder.length ? roleOrder : ['default', 'smol', 'slow', 'plan'], direction);
@@ -529,7 +585,7 @@ export class EmbeddedOmpRuntime implements OmpRuntime {
       setModel: async (provider, modelId) => {
         const model = session.getAvailableModels().find((candidate) => candidate.provider === provider && candidate.id === modelId);
         if (!model) throw new Error(`Model ${provider}/${modelId} is unavailable`);
-        await session.setModel(model);
+        await session.setModelTemporary(model);
         return control();
       },
       setApproval: async (approvalMode) => {

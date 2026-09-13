@@ -1,315 +1,358 @@
-/**
- * Per-session usage attribution, reduced OFFLINE from the OMP session JSONL.
- *
- * Nothing here touches a live worker: the transcript on disk is the record, so
- * the same reducer answers for live, dormant, and closed sessions. File I/O is
- * injected (`readFile`) so the reducer stays pure and testable without a
- * filesystem.
- *
- * JSONL fields consumed:
- * - assistant `message` entries: `message.usage`, `message.provider`, `message.model`, `message.api`
- * - `model_change` entries: `role` (absent → 'default'); sets the role for the assistant messages that follow
- * - `toolResult` entries carrying `message.details.results[]` (task spawns):
- *   `id`, `agent`, `modelOverride` (string | string[]), `modelRole`, `resolvedModel`, `requests`, `usage`
- * - entry `timestamp` for spawn dating
- * Child transcripts live at `<parentStem>/<spawnId>.jsonl`.
- */
-
+/** Offline usage attribution from persisted responses, historical selections, and child transcripts. */
+import { basename, dirname, isAbsolute, resolve } from 'node:path';
 import type { SessionUsageReport, UsageTotals } from '@gitspace/protocol';
 
 export type { SessionUsageReport, UsageTotals };
-
 export type TranscriptReader = (path: string) => Promise<string | null>;
+/** Return absolute immediate .jsonl children; the filesystem adapter must reject symlink escapes. */
+export type TranscriptLister = (directory: string) => Promise<string[]>;
 
 type Selection = SessionUsageReport['byAgent'][number]['selection'];
-/** Wire types are readonly; the accumulators are not. */
 type Totals = { -readonly [K in keyof UsageTotals]: UsageTotals[K] };
+type AgentRow = { -readonly [K in keyof SessionUsageReport['byAgent'][number]]: SessionUsageReport['byAgent'][number][K] };
+type Json = Record<string, unknown>;
+interface Attribution { role: string | null; selection: Selection }
+interface Definition { name: string; source: string | null; path: string | null; revision: string | null }
+interface Spawn {
+  id: string;
+  definition: Definition;
+  attribution: Attribution;
+  at: string | null;
+  usage: Json | null;
+  requests: number;
+  listed: boolean;
+  referenced: boolean;
+}
+interface ModelRow { provider: string; model: string; totals: Totals }
+interface RoleRow { role: string | null; models: Set<string>; totals: Totals }
+interface CompletionRow extends ModelRow { kind: string; role: string | null }
+interface State {
+  readFile: TranscriptReader;
+  listFiles?: TranscriptLister;
+  files: Set<string>;
+  sessions: Set<string>;
+  completions: Set<string>;
+  totalsDeep: Totals;
+  childSessions: number;
+  byModel: Map<string, ModelRow>;
+  byRole: Map<string | null, RoleRow>;
+  byAgent: Map<string, { row: AgentRow; sessions: Set<string> }>;
+  byCompletion: Map<string, CompletionRow>;
+  warnings: Set<string>;
+}
 
-/** Depth guard for the spawn tree (subagents can spawn subagents). */
 const MAX_DEPTH = 8;
+const TOKEN_FIELDS = ['input', 'output', 'cacheRead', 'cacheWrite', 'totalTokens', 'reasoningTokens'] as const;
+const UNKNOWN: Attribution = { role: null, selection: 'unknown' };
 
 export function emptyTotals(): Totals {
   return { requests: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, reasoningTokens: 0, costUsd: 0 };
 }
 
-/** Shape of the SDK `Usage` object as persisted on assistant messages / spawns. */
-interface RawUsage {
-  input?: number;
-  output?: number;
-  cacheRead?: number;
-  cacheWrite?: number;
-  totalTokens?: number;
-  reasoningTokens?: number;
-  cost?: { total?: number };
+function object(value: unknown): Json | null {
+  return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Json : null;
 }
 
-interface RawSpawnResult {
-  id?: string;
-  agent?: string;
-  modelOverride?: string | string[];
-  modelRole?: string;
-  resolvedModel?: string;
-  requests?: number;
-  usage?: RawUsage;
+function string(value: unknown): string | null {
+  return typeof value === 'string' && value.length > 0 ? value : null;
 }
 
-interface ParsedEntry {
-  type?: string;
-  timestamp?: string;
-  message?: {
-    role?: string;
-    provider?: string;
-    model?: string;
-    api?: string;
-    usage?: RawUsage;
-    details?: { results?: RawSpawnResult[] };
-  };
-  /** model_change */
-  role?: string;
+function number(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : 0;
 }
 
-function num(value: unknown): number {
-  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
+function rawUsage(value: unknown): Json | null {
+  const usage = object(value);
+  if (!usage || !TOKEN_FIELDS.some((field) => usage[field] !== undefined)) return null;
+  return TOKEN_FIELDS.every((field) => usage[field] === undefined || (typeof usage[field] === 'number' && Number.isFinite(usage[field]) && usage[field] >= 0)) ? usage : null;
 }
 
-function addUsage(into: Totals, usage: RawUsage | undefined, requests = 1): void {
-  if (!usage) return;
-  into.requests += requests;
-  into.input += num(usage.input);
-  into.output += num(usage.output);
-  into.cacheRead += num(usage.cacheRead);
-  into.cacheWrite += num(usage.cacheWrite);
-  into.totalTokens += num(usage.totalTokens);
-  into.reasoningTokens += num(usage.reasoningTokens);
-  into.costUsd += num(usage.cost?.total);
+function usageTotals(usage: Json, requests = 1): Totals {
+  const totals = emptyTotals();
+  totals.requests = requests;
+  for (const field of TOKEN_FIELDS) totals[field] = number(usage[field]);
+  totals.costUsd = number(object(usage.cost)?.total);
+  return totals;
 }
 
 function mergeTotals(into: Totals, from: UsageTotals): void {
   into.requests += from.requests;
-  into.input += from.input;
-  into.output += from.output;
-  into.cacheRead += from.cacheRead;
-  into.cacheWrite += from.cacheWrite;
-  into.totalTokens += from.totalTokens;
-  into.reasoningTokens += from.reasoningTokens;
+  for (const field of TOKEN_FIELDS) into[field] += from[field];
   into.costUsd += from.costUsd;
 }
 
-function firstOverride(modelOverride: string | string[] | undefined): string | undefined {
-  return Array.isArray(modelOverride) ? modelOverride[0] : modelOverride || undefined;
+function historicalSelection(data: Json): Attribution {
+  return { role: string(data.role), selection: data.selection === 'role' || data.selection === 'pinned' || data.selection === 'inherited' ? data.selection : 'unknown' };
 }
 
-/**
- * Classify HOW a spawn's model was addressed. An explicit `modelRole` or a
- * `pi/<role>` selector is the role indirection; a bare `provider/model` is a
- * hard pin; nothing means the subagent inherited the session/agent default.
- */
-function classifySelection(result: RawSpawnResult): Selection {
-  if (result.modelRole) return 'role';
-  const first = firstOverride(result.modelOverride);
-  if (!first) return 'inherited';
-  return first.startsWith('pi/') ? 'role' : 'pinned';
+function spawnSelection(data: Json): Attribution {
+  const override = Array.isArray(data.modelOverride) ? string(data.modelOverride[0]) : string(data.modelOverride);
+  const role = string(data.modelRole) ?? (override?.startsWith('pi/') ? string(override.slice(3)) : null);
+  return { role, selection: role ? 'role' : override ? 'pinned' : 'unknown' };
 }
 
-/** Child transcript path for a spawn — the `<parentStem>/<spawnId>.jsonl` convention. */
+function validChildId(id: string): boolean {
+  return id.length <= 249 && /^[\p{L}\p{N}_-][\p{L}\p{N}_. -]*$/u.test(id);
+}
+
+/** Child names cannot escape the parent's artifact directory, even when metadata is malformed. */
 export function childSessionFileFor(parentFile: string, spawnId: string): string {
-  return `${parentFile.replace(/\.jsonl$/u, '')}/${spawnId}.jsonl`;
+  if (!validChildId(spawnId) || !parentFile.endsWith('.jsonl')) throw new Error('Invalid child session path');
+  return `${parentFile.slice(0, -6)}/${spawnId}.jsonl`;
 }
 
-interface SpawnRow {
-  id: string;
-  agent: string;
-  selection: Selection;
-  model: string;
-  at: string | null;
-  totals: Totals;
-  childSessionFile: string | null;
+function timestamp(value: unknown): string | null {
+  return typeof value === 'string' && Number.isFinite(Date.parse(value)) ? new Date(value).toISOString() : null;
 }
 
-interface ModelRow { provider: string; model: string; totals: Totals }
-interface RoleRow { role: string; modelSet: Set<string>; totals: Totals }
-
-interface Node {
-  totals: Totals;
-  totalsDeep: Totals;
-  byModel: Map<string, ModelRow>;
-  byRole: Map<string, RoleRow>;
-  spawns: SpawnRow[];
-  children: Map<string, Node>;
-  descendants: number;
-  warnings: string[];
+function newSpawn(id: string): Spawn {
+  return { id, definition: { name: 'unknown', source: null, path: null, revision: null }, attribution: UNKNOWN, at: null, usage: null, requests: 0, listed: false, referenced: false };
 }
 
-async function reduceTranscript(file: string, readFile: TranscriptReader, depth: number): Promise<Node | null> {
-  const text = await readFile(file);
-  if (text === null) return null;
-
-  const totals = emptyTotals();
-  const byModel = new Map<string, ModelRow>();
-  const byRole = new Map<string, RoleRow>();
-  const spawns: SpawnRow[] = [];
-  const warnings: string[] = [];
-  // The SDK treats an absent role as 'default', so this bucket is
-  // "unattributed", not "user chose the default role".
-  let currentRole = 'default';
+function parseEntries(text: string, file: string, state: State): Json[] {
+  const entries: Json[] = [];
+  const ids = new Set<string>();
   let malformed = 0;
-
-  for (const line of text.split('\n')) {
+  for (const [index, line] of text.split('\n').entries()) {
     const trimmed = line.trim();
-    // Line 1 is a fixed-width mutable title slot, not JSON.
-    if (!trimmed.startsWith('{')) continue;
-    let entry: ParsedEntry;
+    if (!trimmed || (index === 0 && !trimmed.startsWith('{'))) continue; // Mutable, non-JSON title slot.
     try {
-      entry = JSON.parse(trimmed) as ParsedEntry;
+      const entry = object(JSON.parse(trimmed));
+      if (!entry || !string(entry.type)) { malformed += 1; continue; }
+      const id = string(entry.id);
+      if (id && entry.type !== 'session') {
+        if (ids.has(id)) continue;
+        ids.add(id);
+      }
+      entries.push(entry);
     } catch {
       malformed += 1;
+    }
+  }
+  if (malformed > 0) state.warnings.add(`${file}: ${malformed} malformed transcript line(s) skipped; usage coverage may be incomplete`);
+  return entries;
+}
+
+function collectSpawns(entries: Json[], file: string, state: State): Map<string, Spawn> {
+  const spawns = new Map<string, Spawn>();
+  for (const entry of entries) {
+    const message = object(entry.message);
+    if (message?.role !== 'toolResult' || (message.toolName !== undefined && message.toolName !== 'task')) continue;
+    const details = object(message.details);
+    if (!details) continue;
+    for (const field of ['progress', 'results']) {
+      const rows = details[field];
+      if (rows === undefined) continue;
+      if (!Array.isArray(rows)) { state.warnings.add(`${file}: malformed task ${field} metadata`); continue; }
+      for (const value of rows) {
+        const data = object(value);
+        const id = string(data?.id);
+        if (!data || !id || !validChildId(id)) { state.warnings.add(`${file}: invalid child session ID in task metadata`); continue; }
+        let spawn = spawns.get(id);
+        if (!spawn) { spawn = newSpawn(id); spawns.set(id, spawn); }
+        spawn.referenced = true;
+        if (spawn.definition.name === 'unknown') spawn.definition.name = string(data.agent) ?? 'unknown';
+        spawn.definition.source ??= string(data.agentSource);
+        const attribution = spawnSelection(data);
+        // Progress captures the initial requested role; a final serving model is not historical attribution.
+        if (spawn.attribution.selection === 'unknown' && attribution.selection !== 'unknown') spawn.attribution = attribution;
+        const at = timestamp(entry.timestamp);
+        if (at && (!spawn.at || at < spawn.at)) spawn.at = at;
+        const usage = rawUsage(data.usage);
+        // Results are cumulative snapshots, not additional requests. Re-delivery must not add them again.
+        if (usage) {
+          const requests = data.requests === undefined ? 1 : number(data.requests);
+          if (!spawn.usage || requests >= spawn.requests) { spawn.usage = usage; spawn.requests = requests; }
+        }
+      }
+    }
+  }
+  return spawns;
+}
+
+function addAgent(state: State, file: string, definition: Definition, attribution: Attribution, provider: string, model: string, totals: UsageTotals, at: string | null): void {
+  const key = JSON.stringify([definition.name, definition.source, definition.path, definition.revision, attribution.role, provider, model]);
+  let bucket = state.byAgent.get(key);
+  if (!bucket) {
+    bucket = {
+      row: { agentId: key, agent: definition.name, definitionSource: definition.source, definitionPath: definition.path, definitionRevision: definition.revision, role: attribution.role, selection: attribution.selection, provider, model, spawns: 0, firstAt: null, lastAt: null, totals: emptyTotals() },
+      sessions: new Set(),
+    };
+    state.byAgent.set(key, bucket);
+  }
+  const row = bucket.row;
+  if (!bucket.sessions.has(file)) { bucket.sessions.add(file); row.spawns += 1; }
+  if (row.selection !== attribution.selection) row.selection = 'unknown';
+  if (at && (!row.firstAt || at < row.firstAt)) row.firstAt = at;
+  if (at && (!row.lastAt || at > row.lastAt)) row.lastAt = at;
+  mergeTotals(row.totals, totals);
+  if (!definition.source || !definition.path || !definition.revision) state.warnings.add('Historical agent definition provenance is missing for some child sessions; current definitions were not substituted');
+}
+
+function addResponse(state: State, own: Totals, file: string, spawn: Spawn | null, definition: Definition, attribution: Attribution, provider: string, model: string, usage: Json, at: string | null, kind?: string, requests = 1): void {
+  const totals = usageTotals(usage, requests);
+  mergeTotals(own, totals);
+  mergeTotals(state.totalsDeep, totals);
+  const modelKey = JSON.stringify([provider, model]);
+  let modelRow = state.byModel.get(modelKey);
+  if (!modelRow) { modelRow = { provider, model, totals: emptyTotals() }; state.byModel.set(modelKey, modelRow); }
+  mergeTotals(modelRow.totals, totals);
+  let roleRow = state.byRole.get(attribution.role);
+  if (!roleRow) { roleRow = { role: attribution.role, models: new Set(), totals: emptyTotals() }; state.byRole.set(attribution.role, roleRow); }
+  roleRow.models.add(`${provider}/${model}`);
+  mergeTotals(roleRow.totals, totals);
+  if (spawn) addAgent(state, file, definition, attribution, provider, model, totals, spawn.at ?? at);
+  if (kind) {
+    const key = JSON.stringify([kind, attribution.role, provider, model]);
+    let row = state.byCompletion.get(key);
+    if (!row) { row = { kind, role: attribution.role, provider, model, totals: emptyTotals() }; state.byCompletion.set(key, row); }
+    mergeTotals(row.totals, totals);
+  }
+  if (attribution.role === null) state.warnings.add('Historical model role was not recorded for some usage; no role was inferred from serving models or current settings');
+  if (provider === 'unknown' || model === 'unknown') state.warnings.add('Actual serving provider/model was not recorded for some usage');
+  if (totals.costUsd === 0) state.warnings.add('Some SDK-recorded costs are zero or unavailable; these amounts are not authoritative account billing');
+}
+
+async function reconcileFiles(file: string, spawns: Map<string, Spawn>, state: State): Promise<void> {
+  if (!state.listFiles) return;
+  const directory = file.slice(0, -6);
+  try {
+    for (const candidate of await state.listFiles(directory)) {
+      if (!isAbsolute(candidate) || candidate.includes('\\') || candidate.includes('\0')) { state.warnings.add(`${file}: unsafe child transcript path rejected`); continue; }
+      const childFile = resolve(candidate);
+      const id = basename(childFile, '.jsonl');
+      if (dirname(childFile) !== directory || !childFile.endsWith('.jsonl') || !validChildId(id)) { state.warnings.add(`${file}: non-immediate or unsafe child transcript path rejected`); continue; }
+      let spawn = spawns.get(id);
+      if (!spawn) { spawn = newSpawn(id); spawns.set(id, spawn); }
+      spawn.listed = true;
+    }
+  } catch {
+    state.warnings.add(`${file}: child transcript directory could not be listed; usage coverage may be incomplete`);
+  }
+}
+
+async function reduceTranscript(file: string, state: State, depth: number, spawn: Spawn | null): Promise<Totals | null> {
+  if (state.files.has(file)) return emptyTotals();
+  state.files.add(file);
+  let text: string | null;
+  try { text = await state.readFile(file); }
+  catch (error) {
+    if (!spawn) throw error;
+    text = null;
+  }
+  if (text === null) {
+    if (!spawn) return null;
+    if (spawn.listed) state.childSessions += 1;
+    state.warnings.add(`${file}: child transcript is missing or unreadable; usage coverage may be incomplete`);
+    if (spawn.usage) {
+      state.warnings.add(`${file}: using a cumulative task result because its transcript is unavailable; actual per-response model attribution is unknown`);
+      addResponse(state, emptyTotals(), file, spawn, spawn.definition, spawn.attribution, 'unknown', 'unknown', spawn.usage, spawn.at, undefined, spawn.requests);
+    } else {
+      addAgent(state, file, spawn.definition, spawn.attribution, 'unknown', 'unknown', emptyTotals(), spawn.at);
+    }
+    return null;
+  }
+  const entries = parseEntries(text, file, state);
+  const sessionId = string(entries.find((entry) => entry.type === 'session')?.id);
+  if (sessionId) {
+    if (state.sessions.has(sessionId)) { state.warnings.add(`${file}: duplicate session transcript ignored`); return emptyTotals(); }
+    state.sessions.add(sessionId);
+  }
+  if (spawn) state.childSessions += 1;
+  if (spawn && !spawn.referenced) state.warnings.add(`${file}: child transcript has no matching parent task metadata`);
+  const own = emptyTotals();
+  let definition = spawn?.definition ?? { name: 'unknown', source: null, path: null, revision: null };
+  let attribution = spawn?.attribution ?? UNKNOWN;
+  let pendingSelection: Attribution | null = null;
+  let sawModelChange = false;
+  let responseCount = 0;
+  const requests = new Set<string>();
+  for (const entry of entries) {
+    if (entry.type === 'session_init' && string(entry.modelRole)) {
+      attribution = { role: string(entry.modelRole), selection: 'role' };
       continue;
     }
-
     if (entry.type === 'model_change') {
-      currentRole = entry.role ?? 'default';
+      if (entry.role === 'fallback') { sawModelChange = true; continue; }
+      if (entry.role === 'temporary') attribution = { role: null, selection: 'pinned' };
+      else if (entry.role !== undefined) attribution = { role: string(entry.role), selection: string(entry.role) ? 'role' : 'unknown' };
+      else if ((sawModelChange || responseCount > 0) && entry.resolvedModelIsFallback !== true) attribution = UNKNOWN;
+      sawModelChange = true;
       continue;
     }
-
-    const message = entry.message;
-    if (!message) continue;
-
-    if (message.role === 'assistant' && message.usage) {
-      const provider = message.provider ?? 'unknown';
-      const model = message.model ?? 'unknown';
-      addUsage(totals, message.usage);
-
-      const modelKey = `${provider}/${model}`;
-      let modelRow = byModel.get(modelKey);
-      if (!modelRow) {
-        modelRow = { provider, model, totals: emptyTotals() };
-        byModel.set(modelKey, modelRow);
+    if (entry.type === 'custom') {
+      const data = object(entry.data);
+      if (data?.version === 1 && (entry.customType === 'gitspace-agent-definition' || entry.customType === 'gitspace-model-selection' || entry.customType === 'gitspace-model-usage')) {
+        if ((data.role !== null && !string(data.role)) || (data.selection !== 'role' && data.selection !== 'pinned' && data.selection !== 'inherited' && data.selection !== 'unknown')) {
+          state.warnings.add(`${file}: malformed historical role/selection metadata; missing attribution remains unknown`);
+        }
       }
-      addUsage(modelRow.totals, message.usage);
-
-      let roleRow = byRole.get(currentRole);
-      if (!roleRow) {
-        roleRow = { role: currentRole, modelSet: new Set(), totals: emptyTotals() };
-        byRole.set(currentRole, roleRow);
+      if (entry.customType === 'gitspace-agent-definition') {
+        if (!data || data.version !== 1 || !string(data.name)) { state.warnings.add(`${file}: malformed historical agent definition record`); continue; }
+        definition = { name: string(data.name)!, source: string(data.source), path: string(data.path), revision: string(data.revision) };
+        attribution = historicalSelection(data);
+      } else if (entry.customType === 'gitspace-model-selection') {
+        if (!data || data.version !== 1) { state.warnings.add(`${file}: malformed historical model selection record`); continue; }
+        attribution = historicalSelection(data);
+        // A controls change while this request runs must not reattribute its eventual response.
+        pendingSelection = attribution;
+      } else if (entry.customType === 'gitspace-model-usage') {
+        const id = string(data?.id);
+        const usage = rawUsage(data?.usage);
+        if (!data || data.version !== 1 || !id || !string(data.kind) || !usage) { state.warnings.add(`${file}: malformed direct completion usage record; usage coverage may be incomplete`); continue; }
+        if (state.completions.has(id)) continue;
+        state.completions.add(id);
+        addResponse(state, own, file, spawn, definition, historicalSelection(data), string(data.provider) ?? 'unknown', string(data.model) ?? 'unknown', usage, timestamp(entry.timestamp), string(data.kind)!);
+        responseCount += 1;
       }
-      roleRow.modelSet.add(modelKey);
-      addUsage(roleRow.totals, message.usage);
       continue;
     }
-
-    // `task` spawns: one row per subagent, already carrying its own usage.
-    const results = message.details?.results;
-    if (message.role === 'toolResult' && Array.isArray(results)) {
-      const at = typeof entry.timestamp === 'string' && Number.isFinite(Date.parse(entry.timestamp)) ? entry.timestamp : null;
-      for (const result of results) {
-        if (!result || typeof result.id !== 'string' || !result.id) continue;
-        const row: SpawnRow = {
-          id: result.id,
-          agent: result.agent ?? 'unknown',
-          selection: classifySelection(result),
-          model: result.resolvedModel ?? firstOverride(result.modelOverride) ?? 'inherited',
-          at,
-          totals: emptyTotals(),
-          childSessionFile: null,
-        };
-        addUsage(row.totals, result.usage, result.requests ?? 1);
-        spawns.push(row);
-      }
+    const message = object(entry.message);
+    if (entry.type !== 'message' || message?.role !== 'assistant') continue;
+    const usage = rawUsage(message.usage);
+    if (!usage) { pendingSelection = null; state.warnings.add(`${file}: assistant response is missing valid usage; usage coverage may be incomplete`); continue; }
+    const responseId = string(message.responseId);
+    if (responseId) {
+      const key = JSON.stringify(['assistant', message.provider, responseId]);
+      if (requests.has(key)) continue;
+      requests.add(key);
     }
+    addResponse(state, own, file, spawn, definition, pendingSelection ?? attribution, string(message.provider) ?? 'unknown', string(message.model) ?? 'unknown', usage, timestamp(entry.timestamp));
+    pendingSelection = null;
+    responseCount += 1;
   }
-
-  if (malformed > 0) warnings.push(`${malformed} malformed transcript line(s) skipped`);
-
-  const children = new Map<string, Node>();
-  let descendants = 0;
-  if (depth < MAX_DEPTH) {
-    for (const spawn of spawns) {
-      const childFile = childSessionFileFor(file, spawn.id);
-      const child = await reduceTranscript(childFile, readFile, depth + 1);
-      if (!child) continue;
-      spawn.childSessionFile = childFile;
-      children.set(childFile, child);
-      descendants += 1 + child.descendants;
-      warnings.push(...child.warnings.map((warning) => `${spawn.id}: ${warning}`));
-    }
-  } else if (spawns.length > 0) {
-    warnings.push(`spawn tree deeper than ${MAX_DEPTH} — not recursed further`);
+  if (spawn && responseCount === 0) addAgent(state, file, definition, attribution, 'unknown', 'unknown', own, spawn.at ?? timestamp(entries.find((entry) => entry.type === 'session')?.timestamp));
+  const spawns = collectSpawns(entries, file, state);
+  await reconcileFiles(file, spawns, state);
+  if (depth >= MAX_DEPTH) {
+    if (spawns.size > 0) state.warnings.add(`${file}: spawn tree exceeds depth ${MAX_DEPTH}; deeper usage was not included`);
+  } else {
+    for (const child of spawns.values()) await reduceTranscript(childSessionFileFor(file, child.id), state, depth + 1, child);
   }
-
-  // Deep totals: this session + every descendant. Built from the CHILD
-  // transcripts where they exist — a detached spawn reports zeroes in the
-  // parent, so trusting those would undercount. A spawn WITHOUT a readable
-  // child transcript is counted from the parent's row, the only record of it.
-  const totalsDeep = emptyTotals();
-  mergeTotals(totalsDeep, totals);
-  for (const child of children.values()) mergeTotals(totalsDeep, child.totalsDeep);
-  for (const spawn of spawns) {
-    if (spawn.childSessionFile) continue;
-    mergeTotals(totalsDeep, spawn.totals);
-  }
-
-  return { totals, totalsDeep, byModel, byRole, spawns, children, descendants, warnings };
-}
-
-type AgentRow = { -readonly [K in keyof SessionUsageReport['byAgent'][number]]: SessionUsageReport['byAgent'][number][K] } & { totals: Totals };
-
-/**
- * Flatten the whole spawn tree into "agent × selection × model" rows. Cost per
- * spawn is the CHILD transcript's own totals when one exists, else the
- * parent's row.
- */
-function rollupByAgent(root: Node): AgentRow[] {
-  const rows = new Map<string, AgentRow>();
-  const visit = (node: Node): void => {
-    for (const spawn of node.spawns) {
-      const key = `${spawn.agent}|${spawn.selection}|${spawn.model}`;
-      let row = rows.get(key);
-      if (!row) {
-        row = { agentId: key, agent: spawn.agent, selection: spawn.selection, model: spawn.model, spawns: 0, firstAt: null, lastAt: null, totals: emptyTotals() };
-        rows.set(key, row);
-      }
-      row.spawns += 1;
-      if (spawn.at) {
-        if (row.firstAt === null || spawn.at < row.firstAt) row.firstAt = spawn.at;
-        if (row.lastAt === null || spawn.at > row.lastAt) row.lastAt = spawn.at;
-      }
-      const child = spawn.childSessionFile ? node.children.get(spawn.childSessionFile) : undefined;
-      mergeTotals(row.totals, child ? child.totals : spawn.totals);
-    }
-    for (const child of node.children.values()) visit(child);
-  };
-  visit(root);
-  return [...rows.values()].sort((a, b) => b.totals.costUsd - a.totals.costUsd);
+  return own;
 }
 
 /**
- * Build the attribution report for one session transcript, recursing into
- * subagent transcripts. Returns null when the root transcript is unreadable.
- *
- * Role attribution uses file order: a `model_change` sets the active role for
- * the assistant messages that follow it. Sessions are a tree (entries carry
- * parentId) so a forked/rewound branch could in principle interleave; file
- * order matches the SDK's own append semantics and is right for the common
- * linear case.
+ * This session's totals include its direct completions; all breakdowns cover the full tree.
+ * Append order supplies historical attribution. A readable child always wins over parent
+ * cumulative results, including empty/zero-usage children. No current settings are consulted.
  */
-export async function buildSessionUsageReport(
-  sessionId: string,
-  sessionFile: string,
-  readFile: TranscriptReader,
-): Promise<SessionUsageReport | null> {
-  const root = await reduceTranscript(sessionFile, readFile, 0);
-  if (!root) return null;
+export async function buildSessionUsageReport(sessionId: string, sessionFile: string, readFile: TranscriptReader, listFiles?: TranscriptLister): Promise<SessionUsageReport | null> {
+  const state: State = { readFile, listFiles, files: new Set(), sessions: new Set(), completions: new Set(), totalsDeep: emptyTotals(), childSessions: 0, byModel: new Map(), byRole: new Map(), byAgent: new Map(), byCompletion: new Map(), warnings: new Set() };
+  if (!sessionFile.endsWith('.jsonl') || sessionFile.includes('\0') || sessionFile.includes('\\')) return null;
+  if (!listFiles) state.warnings.add('Child transcript directory listing is unavailable; unreferenced child sessions may be missing');
+  const totals = await reduceTranscript(resolve(sessionFile), state, 0, null);
+  if (!totals) return null;
   const byCost = (a: { totals: UsageTotals }, b: { totals: UsageTotals }): number => b.totals.costUsd - a.totals.costUsd;
   return {
     sessionId,
-    totals: root.totals,
-    totalsDeep: root.totalsDeep,
-    childSessions: root.descendants,
-    byModel: [...root.byModel.values()].sort(byCost),
-    byRole: [...root.byRole.values()]
-      .map(({ role, modelSet, totals }) => ({ role, models: [...modelSet].sort(), totals }))
-      .sort(byCost),
-    byAgent: rollupByAgent(root),
-    warnings: root.warnings,
+    totals,
+    totalsDeep: state.totalsDeep,
+    childSessions: state.childSessions,
+    byModel: [...state.byModel.values()].sort(byCost),
+    byRole: [...state.byRole.values()].map(({ role, models, totals: roleTotals }) => ({ role, models: [...models].sort(), totals: roleTotals })).sort(byCost),
+    byAgent: [...state.byAgent.values()].map(({ row }) => row).sort(byCost),
+    byCompletion: [...state.byCompletion.values()].sort(byCost),
+    warnings: [...state.warnings],
   };
 }

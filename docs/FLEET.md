@@ -157,41 +157,54 @@ evidence-backed consumer requires it.
 - Singleton = resolution policy ("get or create the workspace's agent"),
   not a hard cap — #125's `named`/`reuse-by-trigger`/`target-existing`.
 
-## 7. Lifecycle v2 (effect targets)
+## 7. Repository lifecycle
 
-Replace pre/setup/select/remove with per-target lifecycles; the path IS the
-declaration:
+The current packages stack uses the existing Environment manager, bundle v1,
+profiles, approvals, and runner. The executable reference lives in
+`packages/docs/src/lifecycle-reference.mdx`; the human setup and migration guide
+lives in `packages/docs/src/workspace-lifecycle.mdx`.
 
-```
+The path declares the phase. Each directory contains ordered scripts such as
+`10-tools.sh` or `20-preview.preview.sh`:
+
+```text
 .gitspace/lifecycle/
-  cloud/provision       once per WORKSPACE IDENTITY; fingerprint stored in
-                        local DB + encrypted portable manifest — NEVER re-runs
-                        on move; probe ("resource exists?") repairs lost cache
-  cloud/destroy         at RETIRE only. The only real teardown.
-  machine/prepare       once per machine; success registers a capability
-  workspace/materialize every arrival — first setup and move-in are the
-                        same thing; idempotency is a contract
-  workspace/dematerialize  drain: stop services, flush, release leases
+  cloud/provision          once per durable workspace; explicit rerun only
+  machine/prepare          account + project + machine + profile + approved hashes
+  workspace/materialize    each fresh checkout generation
+  workspace/dematerialize  local flush/release before checkpoint and eviction
+  cloud/destroy            explicit retirement only
 ```
 
-- **evict ≠ retire**: evict = this machine stops holding it (cloud untouched);
-  retire = explicit verb, destroys cloud, releases bindings. Inferring
-  destruction from absence is prohibited. Careless local delete = evict
-  semantics; the dev stack survives.
-- `cloud/*` steps need credentials + repo ref, not the worktree. They run where
-  identity lives even if the workspace machine is dead.
-- **Bindings**: provision stores non-secret resource IDs/URLs in local SQLite
-  and a client-sealed portable manifest in R2. Secrets are delegated by name.
-  `.env` is derived at materialize from bindings + scoped secrets; never synced
-  or committed. External infrastructure tools use remote state keyed by
-  workspace identity.
-- Migration mapping (conservative): `pre/`→materialize (already deprecated),
-  `setup/`→materialize (cloud bits hand-lifted to provision),
-  `select/`→materialize (ordered after), `remove/`→**cloud/destroy ONLY**
-  (mapping remove→dematerialize would run deletions on every move).
-- Effect-scoped fingerprints are load-bearing: worktree = per (machine,
-  workspace); machine = per machine; cloud = per workspace identity in SQLite
-  + encrypted manifest.
+The cloud ledger owns profiles, values, content approvals, policy, bindings,
+successful provisioning identity, runs, and log chunks. Local SQLite is not
+the provisioning authority. Successful provision does not repeat after a
+move, local cache loss, or a script change. Failed reruns preserve the previous
+success and partial bindings. Uncertain cloud effects require explicit
+recovery, never a background retry.
+
+Creating or selecting a workspace does not run setup. The normal workspace
+agent uses the built-in `workspace-lifecycle` skill to inspect the repository
+and propose configuration. Human approval to edit is separate from approval
+to execute. Explicit setup enables approved automatic local preparation.
+Content approval authorizes repository code as the machine user, not a sandbox.
+
+Close and move drain services, dematerialize, publish a checkpoint, and then
+delete only the managed checkout. A failed dematerialization or checkpoint
+blocks deletion, not access. Ignored files and machine-local packages are
+disposable and must be recreated on arrival. Neither eviction nor archive
+authorizes cloud destruction.
+
+Cloud phases run on an authorized machine, not arbitrary shell in a Worker.
+Bindings hold non-secret IDs or URLs, or named secret references. They live
+outside the checkout and survive local eviction. Adopted/shared resources
+must not acquire a destroy hook merely because their IDs were recorded.
+
+Legacy `pre`, `setup`, `select`, and `remove` hooks require an explicit
+effect-by-effect migration. Split cloud creation into provision, machine
+tools into prepare, and checkout-local work into materialize. Move remote
+deletion only into destroy, never dematerialize. Adopt existing resource IDs
+before execution; there is no silent legacy alias.
 
 
 ## 8. State, declarations, bundle, and identity
@@ -266,6 +279,20 @@ declaration:
 - **Blob replication** = encrypted R2. Artifact packfiles, session JSONL
   segments, and manifests are sealed on the machine. R2 sees ciphertext,
   hashes, size, and timing; never keys or plaintext.
+- **Checkpoint upload size**: application objects have a 64 MiB limit. The
+  machine splits checkpoints larger than 32 MiB into 32 MiB plaintext chunks,
+  encrypts each chunk, and stores it at `<checkpoint-key>.chunks/<ciphertext-hash>`.
+  The final chunk may be shorter. Once every chunk is stored, the machine
+  publishes an encrypted inventory at the original checkpoint key. Envelope
+  byte `2` identifies this format; the encrypted version-1 inventory records
+  the total plaintext size and each chunk's ciphertext hash and plaintext size.
+  Restore verifies the inventory hash, chunk hashes, authentication tags, and
+  byte counts before returning the complete checkpoint. It never truncates
+  history or accepts missing chunks. Existing single-object version-1
+  checkpoints remain readable; chunked checkpoints require an updated machine
+  reader. Failed uploads leave the space open and retain its local files.
+  An oversized individual upload returns `413 OBJECT_TOO_LARGE` with its size
+  and the limit. The machine includes that reason in the close error.
 - **Managed-beta key custody**: checkpoint and artifact encryption uses one
   account-scoped key derived by `CredentialVaultDO`. Enrolled machines obtain
   it through signed, replay-protected `artifacts.key.get` requests with

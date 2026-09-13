@@ -15,11 +15,29 @@ Start with the **Goal**. Record the outcome, constraints, and observable require
 
 Use the **Workflow** when the workspace needs an explicit execution contract. Use the **Rubric** to make review criteria concrete before judging the result.
 
+An agent's default plan file is `local://workspace/PLAN.md`, or `local://base/PLAN.md` for a project agent. New sessions keep that artifact scope. Subagents receive the selected approved plan when it exists; they do not load an unrelated default plan or treat an active draft as approved. No plan file is required to start work.
+
 ## Build with context
 
 Run the main agent inside the workspace on the machine that owns the checkout. Skills, plugins, secrets, and project context are available from the same browser surface.
 
 Structured agent questions appear as native interactions. Answer the decision directly without searching terminal output for a prompt.
+
+For repository setup, use the built-in `workspace-lifecycle` skill. It inspects the repository and CI, proposes the lifecycle split, and asks permission before editing. Execution needs separate human approval of the final content. Agents use `space.environment` for authorized runs and logs; they cannot grant content approval, recover uncertain runs, or destroy cloud resources. See [Workspace lifecycle](/workspace-lifecycle).
+
+## Configure account and project access
+
+**Skills**, **Plugins**, **Secrets**, and **Crons** are account pages. You can manage them with no workspace open and no machine online. Selecting a project does not change an account-level write into a project-level write.
+
+Skills have account defaults and per-project assignments. Set their use in the project's main space separately from their use in its workspaces. Agent sessions refresh those assignments before their next prompt or provider request. A settings change does not wake an idle agent or erase instructions already in its conversation. Existing subagents keep their copied skill lists; new subagents inherit the refreshed list.
+
+Plugins keep connections in the account library. Grant each connection to the projects that need it, with separate project-space and workspace access. Connecting or enabling a plugin does not grant every project access. Tool calls check current grants, connection settings, and secret access, including calls through a cached tool handle. If those checks cannot reach the account, the call fails rather than using stale permission.
+
+Account secrets are shared only through explicit project grants. Each grant chooses project-space access, workspace access, or both. A project secret with the same name overrides the granted account secret. Revoking the account grant removes inherited access but leaves the project's own secret intact. Management pages return secret metadata, not stored plaintext.
+
+Use account values for non-secret defaults and project values for overrides. Lifecycle values resolve from bundle default to account, project, then workspace value. See [Lifecycle reference](/lifecycle-reference) for profile requirements and secret resolution.
+
+Crons list schedules across the account. Choose the owning project when creating one. You can manage schedules and read their history without opening that project; execution still needs an eligible online runner.
 
 ## Manage workspaces from an agent
 

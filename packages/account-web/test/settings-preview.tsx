@@ -13,6 +13,7 @@ const settings = {
   updatedAt: new Date().toISOString(),
   updatedBy: 'local-machine',
 };
+const unavailable = async (): Promise<never> => { throw new Error('This action needs an enrolled account, not the settings preview.'); };
 const root = document.getElementById('root');
 if (!root) throw new Error('preview root missing');
 createRoot(root).render(<SettingsPage
@@ -25,6 +26,28 @@ createRoot(root).render(<SettingsPage
   ]}
   ompSettings={[]}
   ompGeneration={4}
+  models={[]}
+  providers={{ providers: [], usage: null, usageStatus: 'idle', onShow: () => undefined, onRefreshUsage: unavailable, onSignIn: unavailable, onSignOut: unavailable, onSetApiKey: unavailable, login: { flow: null, respond: unavailable, cancel: unavailable } }}
+  devices={[]}
+  onRevokeDevice={unavailable}
+  onSignOut={unavailable}
+  onCreateApiClient={unavailable}
+  canConnectBrowser={false}
+  onCreateBrowserInvitation={unavailable}
+  onBrowserInvitationStatus={unavailable}
+  onCancelBrowserInvitation={unavailable}
+  onBrowserConnected={unavailable}
+  projects={[]}
+  composioSetup={null}
+  onPutComposioSetup={unavailable}
+  onDeleteComposioSetup={unavailable}
+  browserRelay={null}
+  onSetupBrowserRelay={unavailable}
+  onStartBrowserRelay={unavailable}
+  onStopBrowserRelay={unavailable}
+  onTestBrowserRelay={unavailable}
+  deployment={null}
+  onRevertDeployment={unavailable}
   ompSync={{ status: 'synced', message: null }}
   gitIdentity={{ generation: 1, publicKey: 'ssh-ed25519 AAAA preview', fingerprint: 'SHA256:preview', updatedAt: new Date().toISOString(), updatedBy: 'local-machine' }}
   onChange={() => undefined}

@@ -1,16 +1,10 @@
 import type { TransportBlock, TurnBlock } from '@gitspace/blocks';
-import type { AgentSessionRenderState, PendingAskAnswer, SessionControlView } from '@gitspace/protocol';
-import type { WorkspaceStatusColor, WorkspaceStatusSummary } from '@gitspace/protocol/workspace-status';
+import type { PendingAskAnswer, SessionControlView } from '@gitspace/protocol';
+import type { AgentSessionRenderState, SessionHistoryPage, SessionHistoryPageRequest } from '@gitspace/protocol-agent';
+import type { WorkspaceStatusColor, WorkspaceStatusSummary } from '@gitspace/protocol-workspace';
 import {
   Badge,
   Button,
-  Card,
-  CardContent,
-  CardDescription,
-  CardFooter,
-  CardGroup,
-  CardHeader,
-  CardTitle,
   Dialog,
   DialogContent,
   DialogDescription,
@@ -27,25 +21,23 @@ import {
   SidebarInset,
   SidebarInsetTopbar,
   SidebarProvider,
-  TabsSubtle,
-  TabsSubtleItem,
+  ThinkingIndicator,
   Tooltip,
   useShape,
 } from '@gitspace/ui';
-import { Archive, GitBranch01, LayoutRight, Plus, RefreshCcw01, Terminal, Trash01, XClose } from '@untitledui/icons';
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
-import { AppSidebar, type SidebarDeploymentProps } from './AppSidebar.js';
+import { Archive, GitBranch01, LayoutRight, RefreshCcw01, Terminal, XClose } from '@untitledui/icons';
+import { useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import { AccountSidebarContext, AppSidebar, type AppSidebarProps, type SidebarDeploymentProps, type SidebarProject } from './AppSidebar.js';
 import { Composer, type SendBehavior } from './Composer.js';
-import { PluginsPage, type PluginsPageProps } from './PluginsPage.js';
-import { ProjectCronsPage, type ProjectCronsPageProps } from './ProjectCronsPage.js';
-import { ProjectSecretsPage, type ProjectSecretsProps } from './ProjectSecretsPage.js';
 import type { AppView } from './routes.js';
-import { SkillsPage, type SkillsPageProps } from './SkillsPage.js';
+import type { SkillView } from '@gitspace/protocol/skills-contract';
 import { TurnTranscript } from './TurnTranscript.js';
+import { VirtualTranscript } from './VirtualTranscript.js';
+import type { TranscriptHistory } from './useTranscriptHistory.js';
 import { WorkspaceTerminals, type WorkspaceTerminalsProps } from './WorkspaceTerminals.js';
-import { WorkspaceGraph } from './WorkspaceGraph.js';
-import { WorkspacePicker } from './WorkspacePicker.js';
+import { WorkspacePicker, type WorkspacePickerItem } from './WorkspacePicker.js';
 import { glyph } from './glyph.js';
+import { ResourceNavigation, type ResourceRequest } from './ResourceNavigation.js';
 
 /** Where a space lives right now, from the account-wide placement table: held by a machine, released to the cloud, or not yet known. */
 export type SpaceHolderView =
@@ -123,6 +115,7 @@ export interface SessionControlsProps {
   onAnswerAsk(id: string, answers: PendingAskAnswer[]): Promise<void>;
   onStop(): Promise<void>;
   onNavigateTree(entryId: string): Promise<void>;
+  onReadHistory?(request: SessionHistoryPageRequest, signal: AbortSignal): Promise<SessionHistoryPage>;
 }
 
 export interface CreateProjectInput { name: string; baseBranch: string | null; repositoryUrl: string | null }
@@ -135,13 +128,17 @@ export interface GitSpaceShellProps {
   baseSpace: ProjectAgentView;
   workspaces: WorkspaceView[];
   projects?: readonly ProjectLifecycleView[];
-  mainAgent: { id: string; title: string; state: AgentSessionRenderState; model: string; recovering?: boolean } | null;
+  mainAgent: { id: string; title: string; state: AgentSessionRenderState; model: string; recovering?: boolean; controlsAvailable?: boolean; errorMessage?: string | null; failed?: boolean } | null;
   turns: TurnBlock[];
+  transcript?: TranscriptHistory;
+  history?: { loading: boolean; error: string | null; onRetry(): void };
   transport: TransportBlock[];
   artifacts: ArtifactView[];
   machines?: Array<{ id: string; label: string }>;
   onSend?: (text: string, behavior?: SendBehavior, images?: Array<{ data: string; mimeType: string }>) => void | Promise<void>;
   sessionControls?: SessionControlsProps;
+  controlsError?: string;
+  onRetryAgent?: () => Promise<void>;
   onSetWorkspacePhase?: (workspaceId: string, phase: WorkspaceView['phase']) => void | Promise<void>;
   onSetWorkspaceRelations?: (workspaceId: string, relations: WorkspaceView['relations']) => void | Promise<void>;
   sendPending?: boolean;
@@ -169,15 +166,12 @@ export interface GitSpaceShellProps {
   onDeleteProject?: (projectId: string, expectedRevision: number) => void | Promise<void>;
   onDeleteWorkspace?: (workspaceId: string) => void | Promise<void>;
   terminals?: WorkspaceTerminalsProps;
-  secrets?: ProjectSecretsProps;
   /** `section` deep-links a settings tab (the Source pill opens `source`). */
   onOpenSettings?: (section?: 'source') => void;
-  activeView?: AppView;
   onNavigateView?: (view: AppView) => void;
-  crons?: ProjectCronsPageProps;
-  skills?: SkillsPageProps;
-  plugins?: PluginsPageProps;
-  renderInspector?: (onClose: () => void) => ReactNode;
+  skills?: readonly SkillView[];
+  renderInspector?: (onClose: () => void, initialView?: 'environment', resource?: ResourceRequest) => ReactNode;
+  renderEnvironmentStatus?: (onInspect: () => void) => ReactNode;
   /** Signed-in user shown in the sidebar footer. */
   user?: { name: string; handle?: string | null };
   /** Machine-local model provider auth state; drives the composer's not-connected notice. */
@@ -191,25 +185,29 @@ export interface GitSpaceShellProps {
 const STATUS_COLOR: Record<WorkspaceStatusColor, string> = { dim: 'var(--muted-foreground)', green: '#22c55e', blue: '#3b82f6', orange: '#f97316', red: '#ef4444' };
 export const PHASE_LABEL: Record<WorkspaceView['phase'], string> = { plan: 'Plan', code: 'Code', review: 'Review', ship: 'Ship' };
 export const PHASES: readonly WorkspaceView['phase'][] = ['plan', 'code', 'review', 'ship'];
+export function workspacePhaseLabel(phase: WorkspaceView['phase'] | null | undefined): string {
+  return phase === null ? 'Unassigned' : phase === undefined ? 'Phase unknown' : PHASE_LABEL[phase];
+}
 
 function selectOptions(options: readonly { value: string; label: ReactNode; disabled?: boolean }[]): ReactNode {
   return <SelectContent>{options.map((option, index) => <SelectItem value={option.value} index={index} disabled={option.disabled} key={option.value}>{option.label}</SelectItem>)}</SelectContent>;
 }
 
-export function workspaceStatusLabel(space: AgentScopeView): string {
+export function workspaceStatusLabel(space: Pick<AgentScopeView, 'closedAt' | 'holder'> & { status?: AgentScopeView['status'] }): string {
   if (space.closedAt) return 'Archived';
   if (space.holder.kind === 'released') return 'Closed';
-  switch (space.status.primaryColor) {
+  switch (space.status?.primaryColor) {
     case 'green': return 'Working';
     case 'blue': return 'Waiting';
     case 'orange': return 'Needs attention';
     case 'red': return 'Failed';
-    default: return 'Not started';
+    case 'dim': return 'Not started';
+    default: return 'Status unknown';
   }
 }
 
 /** Row suffix: the machine holding the space, or `released` when it is closed in the cloud but not archived. */
-export function spaceHolderLabel(space: AgentScopeView): string | null {
+export function spaceHolderLabel(space: Pick<AgentScopeView, 'closedAt' | 'holder'>): string | null {
   if (space.closedAt) return null;
   switch (space.holder.kind) {
     case 'held': return space.holder.label;
@@ -246,12 +244,27 @@ export function EmptyState({ icon, title, description, action }: { icon?: ReactN
   </section>;
 }
 
+export function TranscriptHistoryNotice({ loading, error, onRetry }: NonNullable<GitSpaceShellProps['history']>) {
+  if (!loading && !error) return null;
+  return <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2 sm:px-6">
+    <div className="min-w-0 flex-1">
+      {loading ? <p role="status" className="flex items-center gap-2 text-caption text-muted-foreground"><ThinkingIndicator size="compact" />Loading transcript history…</p> : null}
+      {error ? <p role="alert" className="text-caption text-destructive [overflow-wrap:anywhere]">Transcript history could not be loaded: {error}</p> : null}
+    </div>
+    {error ? <Button variant="ghost" className="min-h-10" disabled={loading} onClick={onRetry}>Retry transcript</Button> : null}
+  </div>;
+}
+
 // ── Agent canvas ──
-function AgentCanvas({ workspace, mainAgent, sessionControls, turns, transport, onSend, pending, error, onReopenSpace, onClaimWorkspace, claimMachines = [], homeMachineId = null, defaultMachineId = null, checkpoint = null, providers, skills, banner }: {
+function AgentCanvas({ workspace, mainAgent, sessionControls, controlsError, onRetryAgent, turns, transcript, history, transport, onSend, pending, error, onReopenSpace, onClaimWorkspace, claimMachines = [], homeMachineId = null, defaultMachineId = null, checkpoint = null, providers, skills, banner }: {
   workspace: AgentScopeView;
   mainAgent: GitSpaceShellProps['mainAgent'];
   sessionControls?: SessionControlsProps;
+  controlsError?: string;
+  onRetryAgent?: GitSpaceShellProps['onRetryAgent'];
   turns: TurnBlock[];
+  transcript?: TranscriptHistory;
+  history?: GitSpaceShellProps['history'];
   transport: TransportBlock[];
   onSend?: GitSpaceShellProps['onSend'];
   pending: boolean;
@@ -263,7 +276,7 @@ function AgentCanvas({ workspace, mainAgent, sessionControls, turns, transport, 
   defaultMachineId?: GitSpaceShellProps['defaultMachineId'];
   checkpoint?: GitSpaceShellProps['checkpoint'];
   providers?: readonly ProviderAuthView[];
-  skills?: SkillsPageProps['skills'];
+  skills?: readonly SkillView[];
   banner?: ReactNode;
 }) {
   const shape = useShape();
@@ -271,8 +284,25 @@ function AgentCanvas({ workspace, mainAgent, sessionControls, turns, transport, 
   const pendingAsk = sessionControls?.value.pendingAsk ?? null;
   // Released: closed in the cloud with its files kept somewhere; the transcript above is the checkpoint, read-only.
   const released = !workspace.closedAt && workspace.holder.kind === 'released';
-  const idle = !!workspace.closedAt || !mainAgent || mainAgent.state === 'closed' || released;
+  const inactive = mainAgent?.controlsAvailable === false;
+  const idle = !!workspace.closedAt || !mainAgent || mainAgent.state === 'closed' || released || inactive;
   const [chosenMachineId, setChosenMachineId] = useState<string | null>(null);
+  const [opening, setOpening] = useState(false);
+  const [openError, setOpenError] = useState<string | null>(null);
+  const openingRef = useRef(false);
+  const open = async (): Promise<void> => {
+    if (openingRef.current) return;
+    openingRef.current = true;
+    setOpening(true);
+    setOpenError(null);
+    try {
+      if (workspace.closedAt) await onClaimWorkspace?.(workspace.id, null);
+      else if (released && claimMachineId) await onClaimWorkspace?.(workspace.id, claimMachineId);
+      else if (onRetryAgent) await onRetryAgent();
+      else await onReopenSpace?.(workspace.id);
+    } catch (failure) { setOpenError(failure instanceof Error ? failure.message : String(failure)); }
+    finally { openingRef.current = false; setOpening(false); }
+  };
   const claimMachineId = [chosenMachineId, defaultMachineId, homeMachineId, claimMachines[0]?.id ?? null]
     .find((candidate): candidate is string => !!candidate && claimMachines.some((machine) => machine.id === candidate)) ?? null;
   const lastMachine = checkpoint?.lastMachineId ? claimMachines.find((machine) => machine.id === checkpoint.lastMachineId)?.label ?? checkpoint.lastMachineId : null;
@@ -280,36 +310,75 @@ function AgentCanvas({ workspace, mainAgent, sessionControls, turns, transport, 
     ? (workspace.kind === 'project' ? 'Project archived' : 'Workspace archived')
     : released
       ? `Closed${lastMachine ? ` · last on ${lastMachine}` : ''}`
-      : `${workspace.kind === 'project' ? 'Base' : PHASE_LABEL[workspace.phase]} agent not started`;
+      : mainAgent?.failed ? 'Agent failed'
+        : inactive ? mainAgent.recovering ? 'Agent is recovering' : 'Agent is inactive'
+          : `${workspace.kind === 'project' ? 'Base' : PHASE_LABEL[workspace.phase]} agent not started`;
   const idleDetail = workspace.closedAt
     ? 'Files, history, artifacts, and review state are preserved.'
     : released
       ? 'Read-only until it is reopened; local files are retained.'
-      : 'Start this space’s canonical agent.';
+      : mainAgent?.recovering ? 'Restoring the saved session. Prompts become available when recovery finishes.'
+        : inactive ? 'Files and transcript are preserved. Retry when you are ready.' : 'Start this space’s canonical agent.';
+  const virtualTranscript = transcript !== undefined;
   // Chat semantics: open at the newest message and follow new content unless
   // the reader has scrolled up to look at something.
   const viewport = useRef<HTMLDivElement | null>(null);
-  const following = useRef(true);
-  useEffect(() => {
-    const element = viewport.current;
+  const composerOverlay = useRef<HTMLDivElement | null>(null);
+  const [composerOverlayHeight, setComposerOverlayHeight] = useState(0);
+  useLayoutEffect(() => {
+    const element = composerOverlay.current;
     if (!element) return;
-    const onScroll = (): void => { following.current = element.scrollHeight - element.scrollTop - element.clientHeight < 48; };
-    element.addEventListener('scroll', onScroll, { passive: true });
-    return () => element.removeEventListener('scroll', onScroll);
-  }, [workspace.id]);
+    const measure = () => setComposerOverlayHeight(element.offsetHeight);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+  const following = useRef(true);
+  const touchStartTop = useRef<number | null>(null);
+  const onTranscriptScroll = useCallback(() => {
+    const element = viewport.current;
+    if (element) following.current = element.scrollHeight - element.scrollTop - element.clientHeight < 48;
+  }, []);
+  const onTranscriptTouchStart = useCallback(() => {
+    touchStartTop.current = viewport.current?.scrollTop ?? null;
+  }, []);
+  const onTranscriptTouchEnd = useCallback(() => {
+    const start = touchStartTop.current;
+    touchStartTop.current = null;
+    const element = viewport.current;
+    if (!element || start === null) return;
+    if (element.scrollTop !== start) onTranscriptScroll();
+    else if (following.current) element.scrollTop = element.scrollHeight;
+  }, [onTranscriptScroll]);
+  // Touch detection replaces the viewport after mount; bind to the actual node, not the workspace.
+  const bindTranscriptViewport = useCallback((root: HTMLDivElement | null) => {
+    viewport.current?.removeEventListener('scroll', onTranscriptScroll);
+    const element = root?.querySelector<HTMLDivElement>('[data-slot=scroll-area-viewport]') ?? null;
+    viewport.current = virtualTranscript ? null : element;
+    touchStartTop.current = null;
+    if (!element || virtualTranscript) return;
+    element.addEventListener('scroll', onTranscriptScroll, { passive: true });
+    if (following.current) element.scrollTop = element.scrollHeight;
+  }, [onTranscriptScroll, virtualTranscript]);
   useLayoutEffect(() => {
     const element = viewport.current;
-    if (element && following.current) element.scrollTop = element.scrollHeight;
-  }, [turns, transport]);
-  return <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
-    <ScrollArea ref={(element) => { viewport.current = element?.querySelector<HTMLDivElement>('[data-slot=scroll-area-viewport]') ?? null; }} className="min-h-0 flex-1" viewportClassName="h-full">
-      <TurnTranscript turns={turns} transport={transport} onAnswer={pendingAsk && sessionControls ? (answers) => sessionControls.onAnswerAsk(pendingAsk.id, answers) : undefined} />
+    if (!virtualTranscript && element && following.current && touchStartTop.current === null) element.scrollTop = element.scrollHeight;
+  }, [turns, transport, composerOverlayHeight, virtualTranscript]);
+  return <div className="relative flex min-h-0 min-w-0 flex-1 flex-col" style={{ '--composer-overlay-height': `${composerOverlayHeight}px` } as CSSProperties}>
+    {history ? <TranscriptHistoryNotice {...history} /> : null}
+    {mainAgent?.errorMessage || mainAgent?.failed ? <p role="alert" className="shrink-0 whitespace-pre-wrap break-words px-4 py-2 text-caption text-destructive">Agent failure: {mainAgent.errorMessage ?? 'No failure reason was recorded for this session.'}</p> : null}
+    {controlsError ? <p role="alert" className="shrink-0 whitespace-pre-wrap break-words px-4 py-2 text-caption text-destructive">{controlsError}</p> : null}
+    <ScrollArea ref={bindTranscriptViewport} onTouchStartCapture={transcript ? undefined : onTranscriptTouchStart} onTouchEndCapture={transcript ? undefined : onTranscriptTouchEnd} onTouchCancelCapture={transcript ? undefined : onTranscriptTouchEnd} className="min-h-0 flex-1" viewportClassName="h-full">
+      {transcript
+        ? <VirtualTranscript history={transcript} transport={transport} onAnswer={pendingAsk && sessionControls ? (answers) => sessionControls.onAnswerAsk(pendingAsk.id, answers) : undefined} />
+        : <TurnTranscript turns={turns} transport={transport} onAnswer={pendingAsk && sessionControls ? (answers) => sessionControls.onAnswerAsk(pendingAsk.id, answers) : undefined} />}
     </ScrollArea>
     {banner ? <div className="pointer-events-none absolute inset-x-0 top-0 z-10 flex justify-center px-6 pt-3"><div className="pointer-events-auto">{banner}</div></div> : null}
-    <div className="pointer-events-none absolute inset-x-0 bottom-0 flex justify-center px-6 pb-4">
-      <div className="pointer-events-auto w-full max-w-xl">
+    <div ref={composerOverlay} className="pointer-events-none absolute inset-x-0 bottom-0 flex justify-center px-6 pb-4">
+      <div className="w-full max-w-xl">
         {idle
-          ? <div className={`${shape.container} flex items-center gap-3 bg-surface-3 p-3 shadow-surface-3`}>
+          ? <div className={`${shape.container} pointer-events-auto flex items-center gap-3 bg-surface-3 p-3 shadow-surface-3`}>
               <span className="text-muted-foreground"><Archive width={16} height={16} strokeWidth={1.5} /></span>
               <span className="min-w-0 flex-1">
                 <span className="block text-body text-foreground">{idleTitle}</span>
@@ -318,15 +387,11 @@ function AgentCanvas({ workspace, mainAgent, sessionControls, turns, transport, 
               {released && claimMachines.length
                 ? <span className="flex items-center gap-1 text-caption text-muted-foreground">
                     <span className="max-md:hidden">Open on</span>
-                    <Select size="compact" value={claimMachineId ?? ''} onValueChange={(value) => setChosenMachineId(value)}><SelectTrigger variant="borderless" aria-label="Open on machine" />{selectOptions(claimMachines.map((machine) => ({ value: machine.id, label: machine.label })))}</Select>
+                    <Select size="compact" value={claimMachineId ?? ''} disabled={opening} onValueChange={(value) => setChosenMachineId(value)}><SelectTrigger variant="borderless" aria-label="Open on machine" />{selectOptions(claimMachines.map((machine) => ({ value: machine.id, label: machine.label })))}</Select>
                   </span>
                 : null}
-              <Button variant="secondary" size="compact" disabled={released && claimMachines.length > 0 && !claimMachineId} onClick={() => {
-                if (workspace.closedAt) void onClaimWorkspace?.(workspace.id, null);
-                else if (released && claimMachineId) void onClaimWorkspace?.(workspace.id, claimMachineId);
-                else if (released) void onReopenSpace?.(workspace.id);
-                else void onReopenSpace?.(workspace.id);
-              }} leadingIcon={glyph(RefreshCcw01)}>{workspace.closedAt ? 'Restore' : released ? 'Reopen' : 'Start'}</Button>
+              <Button variant="secondary" size="compact" className="min-h-10" loading={opening} disabled={opening || (inactive && !released && !workspace.closedAt && !onRetryAgent) || (released && claimMachines.length > 0 && !claimMachineId)} onClick={() => void open()} leadingIcon={glyph(RefreshCcw01)}>{opening ? onRetryAgent ? 'Retrying agent…' : 'Opening…' : workspace.closedAt ? 'Restore' : released ? 'Reopen' : onRetryAgent ? 'Retry agent' : 'Start'}</Button>
+              {openError ? <p role="alert" className="text-caption text-destructive">{openError}</p> : null}
             </div>
           : <Composer workspace={workspace} controls={sessionControls} providers={providers} skills={skills} running={running} onSend={onSend} pending={pending} recovering={mainAgent?.recovering} error={error} />}
       </div>
@@ -334,56 +399,14 @@ function AgentCanvas({ workspace, mainAgent, sessionControls, turns, transport, 
   </div>;
 }
 
-// ── Kanban ──
-function KanbanView({ workspaces, selectedId, onOpen, onSetRelations, onNewWorkspace }: { workspaces: WorkspaceView[]; selectedId: string | null; onOpen: (workspace: WorkspaceView) => void; onSetRelations?: GitSpaceShellProps['onSetWorkspaceRelations']; onNewWorkspace?: (phase: WorkspaceView['phase']) => void }) {
-  const [graph, setGraph] = useState(false);
-  const blocked = workspaces.filter((workspace) => workspace.stack.blockedBy.length).length;
-  const header = <>
-    <PageHeader kicker="Work" title="Kanban" actions={<span className="text-caption text-muted-foreground tabular-nums">{workspaces.length} workspaces{blocked ? ` · ${blocked} blocked` : ''}</span>} />
-    <TabsSubtle size="compact" className="mb-4 self-start" selectedIndex={graph ? 1 : 0} onSelect={(index) => setGraph(index === 1)} aria-label="Kanban view"><TabsSubtleItem index={0} label="Board" /><TabsSubtleItem index={1} label="Graph" /></TabsSubtle>
-  </>;
-  if (graph) {
-    return <div className="flex min-h-0 flex-1 flex-col">
-      <div className="mx-auto flex w-full max-w-6xl flex-col px-8 pt-8">{header}</div>
-      <div className="mx-auto min-h-0 w-full max-w-6xl flex-1 px-8 pb-8"><WorkspaceGraph workspaces={workspaces} selectedId={selectedId} onSelect={(id) => { const target = workspaces.find((workspace) => workspace.id === id); if (target) onOpen(target); }} onSetRelations={onSetRelations} height="100%" /></div>
-    </div>;
-  }
-  return <PageCanvas className="flex max-w-6xl flex-col">
-    {header}
-    <div className="grid grid-cols-4 gap-4 max-md:grid-cols-1">
-      {PHASES.map((phase) => {
-        const items = workspaces.filter((workspace) => workspace.phase === phase);
-        return <section key={phase} className="flex min-w-0 flex-col gap-2">
-          <header className="flex items-center justify-between gap-1 px-1"><span className="text-caption font-medium text-muted-foreground">{PHASE_LABEL[phase]}</span><span className="flex items-center gap-1"><span className="tabular-nums text-caption text-muted-foreground">{items.length}</span>{onNewWorkspace ? <Tooltip content={`New ${PHASE_LABEL[phase].toLowerCase()} workspace`} side="top"><Button variant="ghost" size="icon-compact" aria-label={`New workspace in ${PHASE_LABEL[phase]}`} onClick={() => onNewWorkspace(phase)}><Plus width={14} height={14} strokeWidth={1.5} /></Button></Tooltip> : null}</span></header>
-          <CardGroup border="outlined">
-            {items.map((workspace, index) => <Card key={workspace.id} index={index} onClick={() => onOpen(workspace)} label={`Open ${workspace.name}`}>
-              <CardHeader>
-                <CardDescription>{workspace.projectName}</CardDescription>
-                <CardTitle>{workspace.name}</CardTitle>
-              </CardHeader>
-              <CardFooter>
-                <span className="flex items-center gap-2 text-caption text-muted-foreground"><StatusDot color={workspace.status.primaryColor} pulse={workspace.status.primaryColor === 'green'} />{workspaceStatusLabel(workspace)}{spaceHolderLabel(workspace) ? <span className="truncate text-muted-foreground/70">· {spaceHolderLabel(workspace)}</span> : null}</span>
-                <span className="ml-auto flex shrink-0 items-center gap-1">
-                  {workspace.relations.stackedOn ? <Badge variant="dot" size="compact" color="blue" title={`Stacked on ${workspaces.find((candidate) => candidate.id === workspace.relations.stackedOn)?.name ?? workspace.relations.stackedOn}`}>stacked</Badge> : null}
-                  {workspace.stack.blockedBy.length ? <Badge size="compact" color="amber">blocked · {workspace.stack.blockedBy.length}</Badge> : null}
-                </span>
-              </CardFooter>
-            </Card>)}
-          </CardGroup>
-        </section>;
-      })}
-    </div>
-  </PageCanvas>;
-}
-
 // ── Projects ──
-function CreateProjectDialog({ open, onOpenChange, onSubmit, pending, error }: { open: boolean; onOpenChange(open: boolean): void; onSubmit(input: CreateProjectInput): Promise<void>; pending: boolean; error: string | null }) {
+export function CreateProjectDialog({ open, onOpenChange, onSubmit, pending, error }: { open: boolean; onOpenChange(open: boolean): void; onSubmit(input: CreateProjectInput): Promise<void>; pending: boolean; error: string | null }) {
   const [form, setForm] = useState<Record<'name' | 'baseBranch' | 'repositoryUrl', string>>({ name: '', baseBranch: '', repositoryUrl: '' });
   const set = (key: keyof typeof form) => (value: string) => setForm((current) => ({ ...current, [key]: value }));
-  return <Dialog open={open} onOpenChange={onOpenChange}>
+  return <Dialog open={open} onOpenChange={(next) => { if (!pending) onOpenChange(next); }}>
     <DialogContent>
       <DialogHeader><DialogTitle>Create or import</DialogTitle><DialogDescription>Paste a repository address to import it, or leave it empty to create a new repository.</DialogDescription></DialogHeader>
-      <form id="create-project-form" className="flex flex-col gap-4" onSubmit={(event) => { event.preventDefault(); void onSubmit({ name: form.name.trim(), baseBranch: form.baseBranch.trim() || null, repositoryUrl: form.repositoryUrl.trim() || null }); }}>
+      <form id="create-project-form" className="flex flex-col gap-4" onSubmit={(event) => { event.preventDefault(); if (!pending) void onSubmit({ name: form.name.trim(), baseBranch: form.baseBranch.trim() || null, repositoryUrl: form.repositoryUrl.trim() || null }); }}>
         <InputGroup>
           <InputField index={0} label="Project name" placeholder="My project" value={form.name} onChange={set('name')} required autoFocus />
           <InputField index={1} label="Repository address (optional)" placeholder="https://github.com/owner/repository" value={form.repositoryUrl} onChange={set('repositoryUrl')} />
@@ -393,14 +416,14 @@ function CreateProjectDialog({ open, onOpenChange, onSubmit, pending, error }: {
         {error ? <p role="alert" className="text-caption text-destructive">{error}</p> : null}
       </form>
       <DialogFooter>
-        <Button variant="secondary" type="button" onClick={() => onOpenChange(false)}>Cancel</Button>
-        <Button type="submit" form="create-project-form" variant="primary" loading={pending}>Create project</Button>
+        <Button variant="secondary" type="button" disabled={pending} onClick={() => onOpenChange(false)}>Cancel</Button>
+        <Button type="submit" form="create-project-form" variant="primary" loading={pending} disabled={pending}>{pending ? 'Creating project…' : 'Create project'}</Button>
       </DialogFooter>
     </DialogContent>
   </Dialog>;
 }
 
-export function CreateWorkspaceDialog({ projectId, workspaces, initialPhase = 'code', onOpenChange, onSubmit, pending, error }: { projectId: string | null; workspaces: readonly WorkspaceView[]; initialPhase?: WorkspaceView['phase']; onOpenChange(open: boolean): void; onSubmit(input: CreateWorkspaceInput): Promise<void>; pending: boolean; error: string | null }) {
+export function CreateWorkspaceDialog({ projectId, workspaces, initialPhase = 'code', onOpenChange, onSubmit, pending, error }: { projectId: string | null; workspaces: readonly WorkspacePickerItem[]; initialPhase?: WorkspaceView['phase']; onOpenChange(open: boolean): void; onSubmit(input: CreateWorkspaceInput): Promise<void>; pending: boolean; error: string | null }) {
   const [form, setForm] = useState<Record<'name' | 'branch' | 'sourceRef', string>>({ name: '', branch: '', sourceRef: '' });
   const [sourceKind, setSourceKind] = useState<CreateWorkspaceInput['sourceKind']>('base');
   const [phase, setPhase] = useState<WorkspaceView['phase']>(initialPhase);
@@ -409,11 +432,11 @@ export function CreateWorkspaceDialog({ projectId, workspaces, initialPhase = 'c
   const candidates = workspaces.filter((workspace) => workspace.projectId === projectId && !workspace.closedAt);
   const source = sourceKind === 'workspace' ? candidates.find((workspace) => workspace.id === form.sourceRef || workspace.name === form.sourceRef) ?? null : null;
   const dependencies = [...(source ? [source] : []), ...dependsOn.flatMap((id) => candidates.find((workspace) => workspace.id === id) ?? [])];
-  const ceiling = dependencies.find((dependency) => PHASES.indexOf(dependency.phase) < PHASES.indexOf(phase));
-  return <Dialog open={projectId !== null} onOpenChange={onOpenChange}>
+  const ceiling = dependencies.find((dependency) => dependency.phase != null && PHASES.indexOf(dependency.phase) < PHASES.indexOf(phase));
+  return <Dialog open={projectId !== null} onOpenChange={(next) => { if (!pending) onOpenChange(next); }}>
     <DialogContent>
       <DialogHeader><DialogTitle>Create from source</DialogTitle><DialogDescription>Start a workspace from a branch, pull request, tag, commit, or another workspace.</DialogDescription></DialogHeader>
-      <form id="create-workspace-form" className="flex flex-col gap-4" onSubmit={(event) => { event.preventDefault(); if (projectId) void onSubmit({ projectId, name: form.name, branch: form.branch, phase, sourceKind, sourceRef: form.sourceRef, dependsOn: dependsOn.filter((id) => id !== source?.id) }); }}>
+      <form id="create-workspace-form" className="flex flex-col gap-4" onSubmit={(event) => { event.preventDefault(); if (projectId && !pending) void onSubmit({ projectId, name: form.name, branch: form.branch, phase, sourceKind, sourceRef: form.sourceRef, dependsOn: dependsOn.filter((id) => id !== source?.id) }); }}>
         <InputGroup>
           <InputField index={0} label="Name" value={form.name} onChange={set('name')} required autoFocus />
           <InputField index={1} label="Branch" placeholder="feature/my-change" value={form.branch} onChange={set('branch')} required />
@@ -435,106 +458,17 @@ export function CreateWorkspaceDialog({ projectId, workspaces, initialPhase = 'c
             </span>)}
           </span>
           <WorkspacePicker workspaces={candidates} exclude={dependencies.map((dependency) => dependency.id)} onPick={(id) => setDependsOn((current) => [...current, id])} label="Add a dependency" placeholder="Search workspaces to depend on" limit={4} empty="No other open workspaces." />
-          {ceiling ? <p className="text-caption text-destructive">{PHASE_LABEL[phase]} is ahead of {ceiling.name} ({PHASE_LABEL[ceiling.phase]}); a workspace cannot pass the phase of what it depends on.</p> : null}
+          {ceiling ? <p className="text-caption text-destructive">{PHASE_LABEL[phase]} is ahead of {ceiling.name} ({workspacePhaseLabel(ceiling.phase)}); a workspace cannot pass the phase of what it depends on.</p> : null}
         </section>
       </form>
       <DialogFooter>
-        <Button variant="secondary" type="button" onClick={() => onOpenChange(false)}>Cancel</Button>
-        <Button type="submit" form="create-workspace-form" variant="primary" loading={pending} disabled={ceiling !== undefined}>Create workspace</Button>
+        <Button variant="secondary" type="button" disabled={pending} onClick={() => onOpenChange(false)}>Cancel</Button>
+        <Button type="submit" form="create-workspace-form" variant="primary" loading={pending} disabled={pending || ceiling !== undefined}>{pending ? 'Creating workspace…' : 'Create workspace'}</Button>
       </DialogFooter>
     </DialogContent>
   </Dialog>;
 }
 
-export function ProjectsView({ projects, workspaces, onOpen, onOpenProject, onCloseSpace, onReopenSpace, onArchiveWorkspace, onRestoreWorkspace, onCreateProject, onCreateWorkspace, onArchiveProject, onRestoreProject, onDeleteProject, onDeleteWorkspace }: {
-  projects: readonly ProjectLifecycleView[];
-  workspaces: WorkspaceView[];
-  onOpen: (workspace: WorkspaceView) => void;
-  onOpenProject?: (projectId: string) => void;
-  onCloseSpace?: GitSpaceShellProps['onCloseSpace'];
-  onReopenSpace?: GitSpaceShellProps['onReopenSpace'];
-  onArchiveWorkspace?: GitSpaceShellProps['onArchiveWorkspace'];
-  onRestoreWorkspace?: (workspaceId: string) => void | Promise<void>;
-  onCreateProject?: GitSpaceShellProps['onCreateProject'];
-  onCreateWorkspace?: GitSpaceShellProps['onCreateWorkspace'];
-  onArchiveProject?: GitSpaceShellProps['onArchiveProject'];
-  onRestoreProject?: GitSpaceShellProps['onRestoreProject'];
-  onDeleteProject?: GitSpaceShellProps['onDeleteProject'];
-  onDeleteWorkspace?: GitSpaceShellProps['onDeleteWorkspace'];
-}) {
-  const [filter, setFilter] = useState<'active' | 'archived' | 'all'>('active');
-  const [projectDialog, setProjectDialog] = useState(false);
-  const [workspaceDialog, setWorkspaceDialog] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [pending, setPending] = useState(false);
-  const visible = projects.filter((project) => filter === 'all' || (filter === 'archived' ? project.lifecycle === 'archived' : project.lifecycle !== 'archived' && project.lifecycle !== 'deleting'));
-  const run = async (action: () => void | Promise<void>, close?: () => void): Promise<void> => {
-    setPending(true);
-    setError(null);
-    try { await action(); close?.(); } catch (failure) { setError(failure instanceof Error ? failure.message : String(failure)); } finally { setPending(false); }
-  };
-  return <PageCanvas>
-    <PageHeader kicker="Repositories" title="Projects" actions={<>
-      <Select value={filter} onValueChange={(value) => setFilter(value as typeof filter)}><SelectTrigger aria-label="Project filter" />{selectOptions([{ value: 'active', label: 'Active' }, { value: 'archived', label: 'Archived' }, { value: 'all', label: 'All' }])}</Select>
-      {onCreateProject ? <Button variant="primary" onClick={() => setProjectDialog(true)} leadingIcon={glyph(Plus)}>New project</Button> : null}
-    </>} />
-    <div className="flex flex-col gap-6">
-      {visible.map((project) => {
-        const items = workspaces.filter((workspace) => workspace.projectId === project.id);
-        const open = items.filter((workspace) => !workspace.closedAt && workspace.holder.kind !== 'released');
-        const runtimeClosed = items.filter((workspace) => !workspace.closedAt && workspace.holder.kind === 'released');
-        const archived = items.filter((workspace) => !!workspace.closedAt);
-        return <section key={project.id} className="flex flex-col gap-3">
-          <div className="flex items-center justify-between gap-3">
-            <button type="button" className="flex min-h-10 min-w-0 items-center gap-2 text-left" onClick={() => onOpenProject?.(project.id)}>
-              <span className="truncate text-title font-semibold text-foreground">{project.name}</span>
-              <Badge variant="dot" size="compact" color={project.lifecycle === 'active' ? 'green' : project.lifecycle === 'archived' || project.lifecycle === 'cloud-only' ? 'gray' : 'amber'}>{project.lifecycle === 'cloud-only' ? 'Cloud only' : project.lifecycle}</Badge>
-              {project.role === 'gitspace-source' ? <Badge size="compact" color="gray">Built in</Badge> : null}
-            </button>
-            <div className="flex items-center gap-1">
-              {project.lifecycle === 'active' && onCreateWorkspace ? <Button variant="secondary" size="compact" onClick={() => setWorkspaceDialog(project.id)} leadingIcon={glyph(Plus)}>Workspace</Button> : null}
-              {project.role !== 'gitspace-source' && project.lifecycle === 'active' && onArchiveProject ? <Button variant="ghost" size="compact" disabled={pending} onClick={() => void run(() => onArchiveProject(project.id, project.revision))} leadingIcon={glyph(Archive)}>Archive</Button> : null}
-              {project.lifecycle === 'archived' && onRestoreProject ? <Button variant="ghost" size="compact" disabled={pending} onClick={() => void run(() => onRestoreProject(project.id, project.revision))} leadingIcon={glyph(RefreshCcw01)}>Restore</Button> : null}
-              {project.role !== 'gitspace-source' && project.lifecycle === 'archived' && onDeleteProject ? <Button variant="ghost" size="compact" disabled={pending} onClick={() => void run(() => onDeleteProject(project.id, project.revision))} leadingIcon={glyph(Trash01)}>Delete</Button> : null}
-            </div>
-          </div>
-          <CardGroup orientation="inline" border="outlined" separated>
-            {open.map((workspace, index) => <Card key={workspace.id} index={index} size="compact" onClick={() => onOpen(workspace)} label={`Open ${workspace.name}`}>
-              <CardHeader>
-                <CardTitle><span className="flex items-center gap-2"><StatusDot color={workspace.status.primaryColor} pulse={workspace.status.primaryColor === 'green'} />{workspace.name}</span></CardTitle>
-                <CardDescription><span className="font-mono">{workspace.branch}</span></CardDescription>
-              </CardHeader>
-              <CardContent><Badge variant="dot" size="compact" color="gray">{PHASE_LABEL[workspace.phase]}</Badge></CardContent>
-              <CardFooter>
-                {onCloseSpace ? <Tooltip content="Close space" side="top"><Button variant="ghost" size="icon-compact" aria-label={`Close ${workspace.name}`} disabled={pending} onClick={() => void run(() => onCloseSpace(workspace.id))}><XClose width={16} height={16} strokeWidth={1.5} /></Button></Tooltip> : null}
-                {onArchiveWorkspace ? <Tooltip content="Archive workspace" side="top"><Button variant="ghost" size="icon-compact" aria-label={`Archive ${workspace.name}`} disabled={pending} onClick={() => void run(() => onArchiveWorkspace(workspace.id))}><Archive width={16} height={16} strokeWidth={1.5} /></Button></Tooltip> : null}
-              </CardFooter>
-            </Card>)}
-            {runtimeClosed.map((workspace, index) => <Card key={workspace.id} index={open.length + index} size="compact" onClick={() => onOpen(workspace)} label={`Open ${workspace.name}`}>
-              <CardHeader><CardTitle><span className="flex items-center gap-2 text-muted-foreground"><XClose width={14} height={14} strokeWidth={1.5} />{workspace.name}</span></CardTitle><CardDescription>Closed · local files retained</CardDescription></CardHeader>
-              {onReopenSpace ? <CardFooter><Tooltip content="Reopen space" side="top"><Button variant="ghost" size="icon-compact" aria-label={`Reopen ${workspace.name}`} disabled={pending} onClick={() => void run(() => onReopenSpace(workspace.id))}><RefreshCcw01 width={16} height={16} strokeWidth={1.5} /></Button></Tooltip></CardFooter> : null}
-            </Card>)}
-            {archived.map((workspace, index) => <Card key={workspace.id} index={open.length + runtimeClosed.length + index} size="compact" onClick={() => onOpen(workspace)} label={`Open ${workspace.name}`}>
-              <CardHeader>
-                <CardTitle><span className="flex items-center gap-2 text-muted-foreground"><Archive width={14} height={14} strokeWidth={1.5} />{workspace.name}</span></CardTitle>
-                <CardDescription>Archived</CardDescription>
-              </CardHeader>
-              <CardFooter>
-                {onRestoreWorkspace ? <Tooltip content="Restore workspace" side="top"><Button variant="ghost" size="icon-compact" aria-label={`Restore ${workspace.name}`} disabled={pending} onClick={() => void run(() => onRestoreWorkspace(workspace.id))}><RefreshCcw01 width={16} height={16} strokeWidth={1.5} /></Button></Tooltip> : null}
-                {onDeleteWorkspace ? <Tooltip content="Delete workspace" side="top"><Button variant="ghost" size="icon-compact" aria-label={`Delete ${workspace.name}`} disabled={pending} onClick={() => void run(() => onDeleteWorkspace(workspace.id))}><Trash01 width={16} height={16} strokeWidth={1.5} /></Button></Tooltip> : null}
-              </CardFooter>
-            </Card>)}
-          </CardGroup>
-          {!items.length ? <p className="text-caption text-muted-foreground">{project.lifecycle === 'cloud-only' ? 'Project saved in your account. Open it on a machine to check out the source.' : 'No workspaces yet.'}</p> : null}
-        </section>;
-      })}
-      {!visible.length ? <EmptyState title="No projects" description={filter === 'archived' ? 'Nothing is archived.' : 'Create a project or import a repository to start.'} /> : null}
-    </div>
-    {error && !projectDialog && workspaceDialog === null ? <p role="alert" className="pt-4 text-caption text-destructive">{error}</p> : null}
-    {onCreateProject ? <CreateProjectDialog open={projectDialog} onOpenChange={(open) => { setProjectDialog(open); if (!open) setError(null); }} pending={pending} error={projectDialog ? error : null} onSubmit={(input) => run(() => onCreateProject(input), () => setProjectDialog(false))} /> : null}
-    {onCreateWorkspace ? <CreateWorkspaceDialog key={workspaceDialog ?? 'closed'} projectId={workspaceDialog} workspaces={workspaces} onOpenChange={(open) => { if (!open) { setWorkspaceDialog(null); setError(null); } }} pending={pending} error={workspaceDialog ? error : null} onSubmit={(input) => run(() => onCreateWorkspace(input), () => setWorkspaceDialog(null))} /> : null}
-  </PageCanvas>;
-}
 
 // ── Resize handles ──
 function InspectorResizeHandle({ width, onWidth }: { width: number; onWidth: (width: number) => void }) {
@@ -583,11 +517,11 @@ function TerminalResizeHandle({ height, onHeight }: { height: number; onHeight: 
 }
 
 // ── Shell ──
-export function GitSpaceShell({ project, projects, workspace, baseSpace, workspaces, mainAgent, turns, transport, artifacts, machines = [], onSend, sessionControls, onSetWorkspacePhase, onSetWorkspaceRelations, sendPending = false, sendError, onSelectWorkspace, onSelectProject, onCloseSpace, onReopenSpace, onArchiveWorkspace, onClaimWorkspace, claimMachines, homeMachineId, defaultMachineId, checkpoint, onMoveWorkspace, onCreateProject, onCreateWorkspace, onArchiveProject, onRestoreProject, onDeleteProject, onDeleteWorkspace, onOpenSettings, activeView, onNavigateView, terminals, secrets, crons, skills, plugins, renderInspector, user, providers, deployment, launchBanner }: GitSpaceShellProps) {
-  // Archive restores from list rows still land on the home machine.
-  const restoreHome = onClaimWorkspace ? (spaceId: string) => onClaimWorkspace(spaceId, null) : undefined;
-  const [internalView, setInternalView] = useState<AppView>('agent');
+export function GitSpaceShell({ projects, workspace, baseSpace, workspaces, mainAgent, turns, transcript, history, transport, machines = [], onSend, sessionControls, controlsError, onRetryAgent, onSetWorkspacePhase, sendPending = false, sendError, onSelectWorkspace, onSelectProject, onCloseSpace, onReopenSpace, onArchiveWorkspace, onClaimWorkspace, claimMachines, homeMachineId, defaultMachineId, checkpoint, onMoveWorkspace, onCreateProject, onCreateWorkspace, onOpenSettings, onNavigateView, terminals, skills, renderInspector, renderEnvironmentStatus, user, providers, deployment, launchBanner }: GitSpaceShellProps) {
+  const accountSidebar = useContext(AccountSidebarContext);
   const [inspectorOpen, setInspectorOpen] = useState(false);
+  const [inspectorSection, setInspectorSection] = useState<'environment' | undefined>();
+  const [resourceRequest, setResourceRequest] = useState<{ spaceId: string; request: ResourceRequest } | null>(null);
   const [inspectorWidth, setInspectorWidth] = useState(() => {
     if (typeof window === 'undefined') return 440;
     const stored = Number(window.localStorage.getItem('gitspace:inspector-width'));
@@ -598,9 +532,24 @@ export function GitSpaceShell({ project, projects, workspace, baseSpace, workspa
   const [newWorkspaceFor, setNewWorkspaceFor] = useState<{ projectId: string; phase: WorkspaceView['phase'] } | null>(null);
   const [newProject, setNewProject] = useState(false);
   const [createPending, setCreatePending] = useState(false);
+  const createPendingRef = useRef(false);
   const [createError, setCreateError] = useState<string | null>(null);
   const [closePendingSpaceId, setClosePendingSpaceId] = useState<string | null>(null);
   const [closeError, setCloseError] = useState<string | null>(null);
+  const [openPendingSpaceId, setOpenPendingSpaceId] = useState<string | null>(null);
+  const openPendingRef = useRef(false);
+  const requestOpen = async (spaceId: string, restore = false): Promise<void> => {
+    if (openPendingRef.current) return;
+    openPendingRef.current = true;
+    setOpenPendingSpaceId(spaceId);
+    setCloseError(null);
+    try {
+      if (restore) await onClaimWorkspace?.(spaceId, null);
+      else await onReopenSpace?.(spaceId);
+    } catch (cause) { setCloseError(cause instanceof Error ? cause.message : String(cause)); }
+    finally { openPendingRef.current = false; setOpenPendingSpaceId(null); }
+  };
+  const restoreHome = onClaimWorkspace ? (spaceId: string) => requestOpen(spaceId, true) : undefined;
   const requestClose = async (spaceId: string): Promise<void> => {
     if (!onCloseSpace || closePendingSpaceId) return;
     setClosePendingSpaceId(spaceId);
@@ -619,96 +568,91 @@ export function GitSpaceShell({ project, projects, workspace, baseSpace, workspa
     setInspectorWidth(next);
     window.localStorage.setItem('gitspace:inspector-width', String(next));
   };
-  const view = activeView ?? internalView;
   const navigate = (nextView: AppView): void => {
-    if (activeView === undefined) setInternalView(nextView);
     onNavigateView?.(nextView);
     if (nextView !== 'agent') { setInspectorOpen(false); setTerminalOpen(false); }
   };
-  const openWorkspace = (target: WorkspaceView): void => { onSelectWorkspace?.(target.id); navigate('agent'); };
-  const openWorkspaces = workspaces.filter((item) => !item.closedAt);
-  const projectItems = projects ?? [{ id: project.id ?? baseSpace.projectId, name: project.name, lifecycle: 'active' as const, repositoryReference: project.repository || null, baseBranch: baseSpace.branch, role: null, source: null, revision: 1, archivedAt: null, updatedAt: new Date(0) }];
-  const sidebarProjects = useMemo(() => {
-    const byProject: Record<string, { base: ProjectAgentView; workspaces: WorkspaceView[] }> = { [baseSpace.projectId]: { base: baseSpace, workspaces: [] } };
+  const sidebarProjects = useMemo<SidebarProject[]>(() => {
+    const byProject = new Map<string, SidebarProject>((projects ?? []).map((item) => [item.id, { id: item.id, name: item.name, lifecycle: item.lifecycle, workspaces: [] }]));
+    byProject.set(baseSpace.projectId, { ...byProject.get(baseSpace.projectId), id: baseSpace.projectId, name: baseSpace.projectName, base: baseSpace, workspaces: [] });
     for (const item of workspaces) {
-      byProject[item.projectId] ??= { base: { ...baseSpace, id: item.projectId, projectId: item.projectId, projectName: item.projectName, name: item.projectName }, workspaces: [] };
-      byProject[item.projectId].workspaces.push(item);
+      const entry: SidebarProject = byProject.get(item.projectId) ?? { id: item.projectId, name: item.projectName, workspaces: [] };
+      entry.workspaces.push({ id: item.id, projectId: item.projectId, name: item.name, branch: item.branch, closedAt: item.closedAt, runtime: item });
+      byProject.set(item.projectId, entry);
     }
-    return Object.values(byProject);
-  }, [baseSpace, workspaces]);
+    return [...byProject.values()];
+  }, [projects, baseSpace, workspaces]);
   const running = mainAgent?.state === 'running';
   const recovering = mainAgent?.recovering === true;
 
-  const unavailable = (title: string) => <PageCanvas><EmptyState title={title} description="This surface is not available for the current machine." /></PageCanvas>;
-
-  return <SidebarProvider className="gitspace-shell" persist={false}>
-    <AppSidebar
-      view={view}
-      onView={navigate}
-      selected={workspace}
-      projects={sidebarProjects}
-      machines={machines}
-      onSelectProject={onSelectProject}
-      onSelectWorkspace={openWorkspace}
-      onClose={requestClose}
-      closePendingSpaceId={closePendingSpaceId}
-      onReopen={onReopenSpace}
-      onArchive={onArchiveWorkspace}
-      onRestore={restoreHome}
-      onNewWorkspace={onCreateWorkspace ? (projectId) => setNewWorkspaceFor({ projectId, phase: 'code' }) : undefined}
-      onNewProject={onCreateProject ? () => setNewProject(true) : undefined}
-      onOpenSettings={onOpenSettings}
-      user={user}
-      deployment={deployment}
-    />
-    <SidebarInset className="overflow-hidden">
+  const sidebar: AppSidebarProps = {
+    view: 'agent',
+    onView: navigate,
+    selected: { projectId: workspace.projectId, workspaceId: workspace.kind === 'workspace' ? workspace.id : null },
+    projects: sidebarProjects,
+    machines,
+    onSelectProject,
+    onSelectWorkspace: (target) => { onSelectWorkspace?.(target.id); navigate('agent'); },
+    onClose: requestClose,
+    closePendingSpaceId,
+    onReopen: onReopenSpace ? requestOpen : undefined,
+    onArchive: onArchiveWorkspace,
+    onRestore: restoreHome,
+    onMove: onMoveWorkspace,
+    onNewWorkspace: onCreateWorkspace ? (projectId) => setNewWorkspaceFor({ projectId, phase: 'code' }) : undefined,
+    onNewProject: onCreateProject ? () => setNewProject(true) : undefined,
+    onOpenSettings,
+    user,
+    deployment,
+  };
+  useLayoutEffect(() => { accountSidebar?.(sidebar); });
+  useLayoutEffect(() => () => { accountSidebar?.(null); }, [accountSidebar]);
+  const content = <ResourceNavigation.Provider value={renderInspector ? (request) => { setResourceRequest({ spaceId: workspace.id, request }); setInspectorSection(undefined); setInspectorOpen(true); } : null}>
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
       <SidebarInsetTopbar className="pr-3">
         <nav aria-label="Location" className="flex min-w-0 flex-1 items-center gap-2 text-body">
           <span className="flex min-w-0 items-center gap-1.5 text-muted-foreground max-md:hidden"><GitBranch01 width={14} height={14} strokeWidth={1.5} /><span className="truncate">{workspace.projectName}</span><span>/</span><span className="truncate font-mono text-caption">{workspace.branch}</span></span>
           {workspace.kind === 'workspace' ? <><span className="text-muted-foreground max-md:hidden">·</span><span className="truncate font-semibold text-foreground">{workspace.name}</span></> : null}
         </nav>
         <div className="flex items-center gap-1">
-          {view === 'agent' ? <>
+            {renderEnvironmentStatus?.(() => { setInspectorSection('environment'); setInspectorOpen(true); })}
             <span className="flex items-center gap-2 pr-2 text-caption text-muted-foreground"><StatusDot color={workspace.status.primaryColor} pulse={running || recovering} /><span className="max-md:hidden">{recovering ? 'Recovering agent…' : workspaceStatusLabel(workspace)}</span></span>
             {workspace.kind === 'workspace' && onSetWorkspacePhase ? <Select size="compact" value={workspace.phase} onValueChange={(value) => void onSetWorkspacePhase(workspace.id, value as WorkspaceView['phase'])}><SelectTrigger variant="borderless" aria-label="Workspace phase" />{selectOptions(PHASES.map((phase) => ({ value: phase, label: PHASE_LABEL[phase] })))}</Select> : null}
-            {!workspace.closedAt && workspace.holder.kind === 'released' && onReopenSpace ? <Button variant="secondary" size="compact" onClick={() => void onReopenSpace(workspace.id)} leadingIcon={glyph(RefreshCcw01)}>Reopen</Button> : null}
+            {!workspace.closedAt && workspace.holder.kind === 'released' && onReopenSpace ? <Button variant="secondary" size="compact" loading={openPendingSpaceId === workspace.id} disabled={openPendingSpaceId !== null} onClick={() => void requestOpen(workspace.id)} leadingIcon={glyph(RefreshCcw01)}>{openPendingSpaceId === workspace.id ? 'Opening…' : 'Reopen'}</Button> : null}
             {!workspace.closedAt && workspace.holder.kind !== 'released' && onCloseSpace ? <Button variant="ghost" size="compact" loading={closePendingSpaceId === workspace.id} disabled={closePendingSpaceId !== null} onClick={() => void requestClose(workspace.id)} leadingIcon={glyph(XClose)}>{closePendingSpaceId === workspace.id ? running ? 'Stopping agent…' : 'Closing…' : running ? 'Stop and close' : 'Close'}</Button> : null}
             {sessionControls?.value.context ? <Tooltip content={`${Math.round(sessionControls.value.context.tokens).toLocaleString()} of ${Math.round(sessionControls.value.context.contextWindow).toLocaleString()} tokens`} side="bottom"><span className="tabular-nums px-2 text-caption text-muted-foreground">{Math.round(sessionControls.value.context.percent)}%</span></Tooltip> : null}
             {terminals ? <Tooltip content="Terminals" side="bottom"><Button variant="ghost" size="icon-compact" aria-label="Open terminals" aria-pressed={terminalOpen} onClick={() => setTerminalOpen((value) => !value)}><Terminal width={16} height={16} strokeWidth={1.5} /></Button></Tooltip> : null}
             {renderInspector ? <Tooltip content="Inspector" side="bottom"><Button variant="ghost" size="icon-compact" aria-label="Open Inspector" aria-pressed={inspectorOpen} onClick={() => setInspectorOpen((value) => !value)}><LayoutRight width={16} height={16} strokeWidth={1.5} /></Button></Tooltip> : null}
-          </> : null}
         </div>
       </SidebarInsetTopbar>
       {closeError ? <p role="alert" className="shrink-0 px-4 py-1 text-right text-caption text-destructive">{closeError}</p> : null}
+      {openPendingSpaceId ? <p role="status" className="shrink-0 px-4 py-1 text-right text-caption text-muted-foreground">Opening workspace and checking canonical cloud state…</p> : null}
 
-      {view === 'agent'
-        ? <div className="workspace-workbench" data-terminal-open={terminalOpen && !!terminals || undefined} style={{ '--inspector-width': `${inspectorWidth}px`, '--terminal-height': `${terminalHeight}px` } as CSSProperties}>
+      <div className="workspace-workbench" data-terminal-open={terminalOpen && !!terminals || undefined} style={{ '--inspector-width': `${inspectorWidth}px`, '--terminal-height': `${terminalHeight}px` } as CSSProperties}>
             <div className="workspace-content">
               <div className="conversation-stage">
-                <AgentCanvas workspace={workspace} mainAgent={mainAgent} sessionControls={sessionControls} turns={turns} transport={transport} onSend={onSend} pending={sendPending || closePendingSpaceId === workspace.id} error={sendError} onReopenSpace={onReopenSpace} onClaimWorkspace={onClaimWorkspace} claimMachines={claimMachines} homeMachineId={homeMachineId} defaultMachineId={defaultMachineId} checkpoint={checkpoint} providers={providers} skills={skills?.skills} banner={launchBanner} />
+                <AgentCanvas key={workspace.id} workspace={workspace} mainAgent={mainAgent} sessionControls={sessionControls} controlsError={controlsError} onRetryAgent={onRetryAgent} turns={turns} transcript={transcript} history={history} transport={transport} onSend={onSend} pending={sendPending || closePendingSpaceId === workspace.id} error={sendError} onReopenSpace={onReopenSpace} onClaimWorkspace={onClaimWorkspace} claimMachines={claimMachines} homeMachineId={homeMachineId} defaultMachineId={defaultMachineId} checkpoint={checkpoint} providers={providers} skills={skills} banner={launchBanner} />
               </div>
               {inspectorOpen && renderInspector ? <InspectorResizeHandle width={inspectorWidth} onWidth={updateInspectorWidth} /> : null}
-              {inspectorOpen && renderInspector ? <aside className="inspector-pane flex min-w-0 flex-col" aria-label="Inspector">{renderInspector(() => setInspectorOpen(false))}</aside> : null}
+              {inspectorOpen && renderInspector ? <aside className="inspector-pane flex min-w-0 flex-col" aria-label="Inspector">{renderInspector(() => { setInspectorOpen(false); setInspectorSection(undefined); setResourceRequest(null); }, inspectorSection, resourceRequest?.spaceId === workspace.id ? resourceRequest.request : undefined)}</aside> : null}
             </div>
             {terminalOpen && terminals ? <><TerminalResizeHandle height={terminalHeight} onHeight={setTerminalHeight} /><section className="min-h-0 min-w-0 overflow-hidden"><WorkspaceTerminals {...terminals} onClose={() => setTerminalOpen(false)} /></section></> : null}
           </div>
-        : view === 'kanban' ? <KanbanView workspaces={openWorkspaces} selectedId={workspace.kind === 'workspace' ? workspace.id : null} onOpen={openWorkspace} onSetRelations={onSetWorkspaceRelations} onNewWorkspace={onCreateWorkspace ? (phase) => setNewWorkspaceFor({ projectId: workspace.projectId, phase }) : undefined} />
-        : view === 'projects' ? <ProjectsView projects={projectItems} workspaces={workspaces} onOpen={openWorkspace} onOpenProject={onSelectProject} onCloseSpace={requestClose} onReopenSpace={onReopenSpace} onArchiveWorkspace={onArchiveWorkspace} onRestoreWorkspace={restoreHome} onCreateProject={onCreateProject} onCreateWorkspace={onCreateWorkspace} onArchiveProject={onArchiveProject} onRestoreProject={onRestoreProject} onDeleteProject={onDeleteProject} onDeleteWorkspace={onDeleteWorkspace} />
-        : view === 'plugins' ? (plugins ? <PluginsPage {...plugins} /> : unavailable('Plugins unavailable'))
-        : view === 'skills' ? (skills ? <SkillsPage {...skills} /> : unavailable('Skills unavailable'))
-        : view === 'crons' ? (crons ? <ProjectCronsPage {...crons} /> : unavailable('Project crons unavailable'))
-        : view === 'secrets' ? (secrets ? <ProjectSecretsPage {...secrets} /> : unavailable('Project secrets unavailable'))
-        : <PageCanvas><PageHeader kicker="Attention" title="Inbox" /><EmptyState title="Nothing needs you" description={`${artifacts.length} artifacts across ${openWorkspaces.length} open workspaces.`} /></PageCanvas>}
-    </SidebarInset>
+    </div>
     {onCreateProject ? <CreateProjectDialog open={newProject} onOpenChange={(open) => { setNewProject(open); if (!open) setCreateError(null); }} pending={createPending} error={newProject ? createError : null} onSubmit={async (input) => {
+      if (createPendingRef.current) return;
+      createPendingRef.current = true;
       setCreatePending(true);
       setCreateError(null);
-      try { await onCreateProject(input); setNewProject(false); } catch (failure) { setCreateError(failure instanceof Error ? failure.message : String(failure)); } finally { setCreatePending(false); }
+      try { await onCreateProject(input); setNewProject(false); } catch (failure) { setCreateError(failure instanceof Error ? failure.message : String(failure)); } finally { createPendingRef.current = false; setCreatePending(false); }
     }} /> : null}
     {onCreateWorkspace ? <CreateWorkspaceDialog key={newWorkspaceFor ? `${newWorkspaceFor.projectId}:${newWorkspaceFor.phase}` : 'closed'} projectId={newWorkspaceFor?.projectId ?? null} initialPhase={newWorkspaceFor?.phase} workspaces={workspaces} onOpenChange={(open) => { if (!open) { setNewWorkspaceFor(null); setCreateError(null); } }} pending={createPending} error={createError} onSubmit={async (input) => {
+      if (createPendingRef.current) return;
+      createPendingRef.current = true;
       setCreatePending(true);
       setCreateError(null);
-      try { await onCreateWorkspace(input); setNewWorkspaceFor(null); } catch (failure) { setCreateError(failure instanceof Error ? failure.message : String(failure)); } finally { setCreatePending(false); }
+      try { await onCreateWorkspace(input); setNewWorkspaceFor(null); } catch (failure) { setCreateError(failure instanceof Error ? failure.message : String(failure)); } finally { createPendingRef.current = false; setCreatePending(false); }
     }} /> : null}
-  </SidebarProvider>;
+  </ResourceNavigation.Provider>;
+  return accountSidebar ? content : <SidebarProvider className="gitspace-shell" persist={false}><AppSidebar {...sidebar} /><SidebarInset className="overflow-hidden">{content}</SidebarInset></SidebarProvider>;
 }

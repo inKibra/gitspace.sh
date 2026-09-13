@@ -13,6 +13,9 @@ import { z } from 'zod';
 const idSchema = z.string().min(1).max(160);
 const hashSchema = z.templateLiteral(['sha256:', z.string().regex(/^[a-f0-9]{64}$/u)]);
 
+export const tenantIdSchema = z.string().regex(/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u)
+  .refine((name) => name !== 'api' && name !== 'platform', 'Tenant name is reserved for provider routing');
+
 export const releaseTargetSchema = z.enum(['worker', 'machine', 'omp', 'frontend']);
 export type ReleaseTarget = z.infer<typeof releaseTargetSchema>;
 
@@ -31,11 +34,25 @@ export const workerReleaseMetadataSchema = z.object({
   compatibilityDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/u),
   compatibilityFlags: z.array(z.string().min(1).max(80)).max(32),
   durableObjects: z.array(z.object({ name: idSchema, className: idSchema })).max(64),
+  resources: z.array(z.object({
+    name: idSchema,
+    source: z.enum(['object-storage', 'object-storage-name', 'tenant-id', 'account-id', 'root-public-key', 'provider-token', 'platform-url', 'application-url', 'transport-url', 'public-assets', 'literal']),
+    value: z.string().max(4096).optional(),
+  })).max(64),
   /** Ordered migration tags; the platform applies only the ones after the tenant's current tag. */
   migrations: z.array(z.object({ tag: idSchema, newSqliteClasses: z.array(idSchema).max(32) })).max(64),
+}).superRefine((metadata, context) => {
+  const names = new Set<string>();
+  for (const binding of [...metadata.durableObjects, ...metadata.resources]) {
+    if (names.has(binding.name)) context.addIssue({ code: 'custom', message: `Duplicate provider binding ${binding.name}` });
+    names.add(binding.name);
+  }
+  for (const resource of metadata.resources) {
+    if (resource.source === 'literal' && resource.value === undefined) context.addIssue({ code: 'custom', message: `Literal provider binding ${resource.name} requires a value` });
+  }
 });
 
-/** Reproducibility envelope for the account-owned, hermetic OMP runtime bundle. */
+/** Reproducibility envelope for the account-owned OMP pin and patch set. */
 export const ompReleaseMetadataSchema = z.object({
   upstreamVersion: z.string().min(1).max(80),
   bunVersion: z.string().min(1).max(80),
@@ -52,7 +69,7 @@ const executableFilePathSchema = z.string().min(1).max(2_048).refine(
 /** Fits below the 64 MiB signed application-object limit, including transport overhead. */
 export const EXECUTABLE_CHUNK_BYTES = 32 * 1024 * 1024;
 
-/** Authenticated inventory of a complete host-specific executable generation. */
+/** Authenticated host-specific payload: complete machine files or an OMP runtime recipe. */
 export const executableArtifactManifestSchema = z.object({
   version: z.literal(1),
   target: z.enum(['machine', 'omp']),
@@ -153,6 +170,7 @@ export const deploymentStatusSchema = z.object({
   current: z.object({
     /** Worker version string as reported by the tenant's own `/healthz`. */
     worker: z.object({ sha: z.string().nullable(), version: z.string().nullable() }),
+    /** Last acknowledgements for machines still in the fleet, including offline members; release results retain removed-machine history. */
     machines: z.record(idSchema, z.object({ sha: z.string().nullable(), ompSha: z.string().nullable(), generation: z.string().nullable() })),
   }),
   releases: z.array(releaseRecordSchema),

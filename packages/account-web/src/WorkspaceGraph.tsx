@@ -2,12 +2,19 @@ import { Badge, badgeColors, useShape } from '@gitspace/ui';
 import { Background, BaseEdge, Controls, getBezierPath, Handle, MarkerType, Position, ReactFlow, useEdgesState, useNodesState, type Connection, type Edge, type EdgeProps, type Node, type NodeProps } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { memo, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
-import { EmptyState, PHASE_LABEL, StatusDot, type WorkspaceView } from './GitSpaceShell.js';
+import { EmptyState, workspacePhaseLabel, StatusDot, type WorkspaceView } from './GitSpaceShell.js';
+import type { WorkspacePickerItem } from './WorkspacePicker.js';
 
 export type WorkspaceRelations = WorkspaceView['relations'];
 export type SetWorkspaceRelations = (workspaceId: string, relations: WorkspaceRelations) => void | Promise<void>;
+export interface WorkspaceGraphItem extends WorkspacePickerItem {
+  projectName: string;
+  relations?: WorkspaceRelations;
+  stack?: WorkspaceView['stack'];
+  statusLabel?: string;
+}
 export interface WorkspaceGraphProps {
-  workspaces: readonly WorkspaceView[];
+  workspaces: readonly WorkspaceGraphItem[];
   selectedId?: string | null;
   onSelect(workspaceId: string): void;
   /** Absent → the graph is read-only: no connecting, no edge deletion. */
@@ -16,11 +23,11 @@ export interface WorkspaceGraphProps {
 }
 
 type RelationKind = 'dependsOn' | 'relatedTo';
-type WorkspaceNodeType = Node<{ workspace: WorkspaceView }, 'workspace'>;
+type WorkspaceNodeType = Node<{ workspace: WorkspaceGraphItem }, 'workspace'>;
 type RelationEdge = Edge<{ kind: RelationKind; span: number; stacked: boolean }, 'relation'>;
 
 const NODE_WIDTH = 220;
-const NODE_HEIGHT = 96;
+const NODE_HEIGHT = 176;
 const COLUMN_GAP = 96;
 const ROW_GAP = 24;
 /** Vertical pull per skipped column so a long edge dips into the row gap instead of crossing the nodes between its ends. */
@@ -50,7 +57,7 @@ export function useRelationWriter(onSetRelations: SetWorkspaceRelations | undefi
  * name, so the picture never depends on fetch order. Phase is a badge, not a
  * position. Cycles cannot be written, but a stale one is still laid out.
  */
-export function layoutWorkspaces(workspaces: readonly WorkspaceView[]): Map<string, { x: number; y: number }> {
+export function layoutWorkspaces(workspaces: readonly WorkspaceGraphItem[]): Map<string, { x: number; y: number }> {
   const byId = new Map(workspaces.map((workspace) => [workspace.id, workspace]));
   const ranks = new Map<string, number>();
   const visiting = new Set<string>();
@@ -60,14 +67,14 @@ export function layoutWorkspaces(workspaces: readonly WorkspaceView[]): Map<stri
     if (visiting.has(id)) return 0;
     visiting.add(id);
     let depth = 0;
-    for (const dependencyId of byId.get(id)!.relations.dependsOn) {
-      if (byId.has(dependencyId)) depth = Math.max(depth, rank(dependencyId) + 1);
+    for (const dependencyId of byId.get(id)!.relations?.dependsOn ?? []) {
+      if (byId.get(dependencyId)?.projectId === byId.get(id)!.projectId) depth = Math.max(depth, rank(dependencyId) + 1);
     }
     visiting.delete(id);
     ranks.set(id, depth);
     return depth;
   };
-  const columns = new Map<number, WorkspaceView[]>();
+  const columns = new Map<number, WorkspaceGraphItem[]>();
   for (const workspace of [...workspaces].sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id))) {
     const depth = rank(workspace.id);
     let column = columns.get(depth);
@@ -77,8 +84,8 @@ export function layoutWorkspaces(workspaces: readonly WorkspaceView[]): Map<stri
   const positions = new Map<string, { x: number; y: number }>();
   for (const depth of [...columns.keys()].sort((a, b) => a - b)) {
     const column = columns.get(depth)!;
-    const barycenter = (workspace: WorkspaceView): number => {
-      const rows = workspace.relations.dependsOn.flatMap((id) => positions.get(id)?.y ?? []);
+    const barycenter = (workspace: WorkspaceGraphItem): number => {
+      const rows = (workspace.relations?.dependsOn ?? []).flatMap((id) => positions.get(id)?.y ?? []);
       return rows.length ? rows.reduce((sum, y) => sum + y, 0) / rows.length : Number.POSITIVE_INFINITY;
     };
     const ordered = column.map((workspace) => ({ workspace, center: barycenter(workspace) }))
@@ -88,34 +95,37 @@ export function layoutWorkspaces(workspaces: readonly WorkspaceView[]): Map<stri
   return positions;
 }
 
-/** A dependency blocks while it is open and not yet shipped — the same rule the stack validator applies. */
-export function isBlocking(dependency: WorkspaceView): boolean { return !dependency.closedAt && dependency.phase !== 'ship'; }
+/** Unknown or unassigned phase cannot establish whether an open dependency blocks. */
+export function isBlocking(dependency: WorkspaceGraphItem): boolean | null {
+  return dependency.closedAt ? false : dependency.phase == null ? null : dependency.phase !== 'ship';
+}
 
-function relationEdges(workspaces: readonly WorkspaceView[], positions: ReadonlyMap<string, { x: number; y: number }>, deletable: boolean): RelationEdge[] {
+function relationEdges(workspaces: readonly WorkspaceGraphItem[], positions: ReadonlyMap<string, { x: number; y: number }>, deletable: boolean): RelationEdge[] {
   const byId = new Map(workspaces.map((workspace) => [workspace.id, workspace]));
   const column = (id: string): number => Math.round((positions.get(id)?.x ?? 0) / (NODE_WIDTH + COLUMN_GAP));
   const edges: RelationEdge[] = [];
   const related = new Set<string>();
   for (const workspace of workspaces) {
+    if (!workspace.relations) continue;
     // Edges flow from the dependency into the dependent, the same direction as onConnect (drag from a workspace to the one that builds on it).
     for (const dependencyId of workspace.relations.dependsOn) {
       const dependency = byId.get(dependencyId);
-      if (!dependency) continue;
+      if (!dependency || dependency.projectId !== workspace.projectId) continue;
       const blocking = isBlocking(dependency);
       const stacked = workspace.relations.stackedOn === dependencyId;
       const color = blocking ? badgeColors.amber : stacked ? badgeColors.blue : 'var(--muted-foreground)';
       const span = Math.abs(column(workspace.id) - column(dependencyId));
       // The stack parent is drawn heavier than an ordinary dependency; ordinary dependencies stay hairline.
-      edges.push({ id: `dep:${workspace.id}:${dependencyId}`, source: dependencyId, target: workspace.id, type: 'relation', animated: blocking, deletable, data: { kind: 'dependsOn', span, stacked }, style: { stroke: color, strokeWidth: stacked ? 3 : 1.5 }, markerEnd: { type: MarkerType.ArrowClosed, color } });
+      edges.push({ id: `dep:${workspace.id}:${dependencyId}`, source: dependencyId, target: workspace.id, type: 'relation', animated: blocking === true, deletable, ariaLabel: `${dependency.name} → ${workspace.name}${blocking === null ? ' · blocking status unknown' : ''}`, data: { kind: 'dependsOn', span, stacked }, style: { stroke: color, strokeWidth: stacked ? 3 : 1.5 }, markerEnd: { type: MarkerType.ArrowClosed, color } });
     }
     for (const otherId of workspace.relations.relatedTo) {
       const other = byId.get(otherId);
-      if (!other || otherId === workspace.id) continue;
+      if (!other || other.projectId !== workspace.projectId || otherId === workspace.id) continue;
       const key = [workspace.id, otherId].sort().join(':');
       if (related.has(key)) continue;
       related.add(key);
       const span = Math.abs(column(workspace.id) - column(otherId));
-      edges.push({ id: `rel:${workspace.id}:${otherId}`, source: workspace.id, target: otherId, type: 'relation', deletable, data: { kind: 'relatedTo', span, stacked: false }, style: { stroke: 'var(--muted-foreground)', strokeWidth: 1, strokeDasharray: '4 4' } });
+      edges.push({ id: `rel:${workspace.id}:${otherId}`, source: workspace.id, target: otherId, type: 'relation', deletable: deletable && !!other.relations, data: { kind: 'relatedTo', span, stacked: false }, style: { stroke: 'var(--muted-foreground)', strokeWidth: 1, strokeDasharray: '4 4' } });
     }
   }
   return edges;
@@ -133,15 +143,18 @@ const edgeTypes = { relation: RelationEdgeView };
 const WorkspaceNode = memo(function WorkspaceNode({ data, selected, isConnectable }: NodeProps<WorkspaceNodeType>) {
   const shape = useShape();
   const { workspace } = data;
-  const blocked = workspace.stack.blockedBy.length;
+  const blocked = workspace.stack?.blockedBy.length ?? 0;
   return <div className={`${shape.container} flex flex-col gap-1.5 bg-surface-3 p-3 text-left shadow-surface-2 ${selected ? 'ring-1 ring-[color:var(--focus-ring,#6B97FF)]' : ''}`} style={{ width: NODE_WIDTH }}>
     <Handle type="target" position={Position.Left} isConnectable={isConnectable} style={HANDLE_STYLE} />
-    <span className="flex min-w-0 items-center gap-2"><StatusDot color={workspace.status.primaryColor} pulse={workspace.status.primaryColor === 'green'} /><strong className="truncate text-body font-medium text-foreground">{workspace.name}</strong></span>
+    <span className="flex min-w-0 items-center gap-2"><StatusDot color={workspace.status?.primaryColor ?? 'dim'} pulse={workspace.status?.primaryColor === 'green' && (!workspace.freshness || workspace.freshness === 'fresh')} /><strong className="truncate text-body font-medium text-foreground">{workspace.name}</strong></span>
+    <span className="truncate text-caption text-muted-foreground">{workspace.projectName}</span>
+    {workspace.statusLabel ? <span className="text-caption text-muted-foreground">{workspace.statusLabel}</span> : null}
     <code className="truncate font-mono text-caption text-muted-foreground">{workspace.branch}</code>
     <span className="flex flex-wrap items-center gap-1">
-      <Badge variant="dot" size="compact" color="gray">{PHASE_LABEL[workspace.phase]}</Badge>
-      {workspace.relations.stackedOn ? <Badge variant="dot" size="compact" color="blue">stacked</Badge> : null}
+      <Badge variant="dot" size="compact" color="gray">{workspacePhaseLabel(workspace.phase)}</Badge>
+      {workspace.relations?.stackedOn ? <Badge variant="dot" size="compact" color="blue">stacked</Badge> : null}
       {blocked ? <Badge size="compact" color="amber">blocked · {blocked}</Badge> : null}
+      {!workspace.relations ? <Badge size="compact" color="gray">Relations unknown</Badge> : workspace.freshness && workspace.freshness !== 'fresh' ? <Badge size="compact" color="gray">Last recorded relations</Badge> : null}
     </span>
     <Handle type="source" position={Position.Right} isConnectable={isConnectable} style={HANDLE_STYLE} />
   </div>;
@@ -153,7 +166,7 @@ export function WorkspaceGraph({ workspaces, selectedId = null, onSelect, onSetR
   const open = useMemo(() => workspaces.filter((workspace) => !workspace.closedAt), [workspaces]);
   const byId = useMemo(() => new Map(open.map((workspace) => [workspace.id, workspace])), [open]);
   const positions = useMemo(() => layoutWorkspaces(open), [open]);
-  const computedNodes = useMemo<WorkspaceNodeType[]>(() => open.map((workspace) => ({ id: workspace.id, type: 'workspace', position: positions.get(workspace.id)!, data: { workspace }, selected: workspace.id === selectedId, deletable: false, draggable: false, sourcePosition: Position.Right, targetPosition: Position.Left })), [open, positions, selectedId]);
+  const computedNodes = useMemo<WorkspaceNodeType[]>(() => open.map((workspace) => ({ id: workspace.id, type: 'workspace', position: positions.get(workspace.id)!, data: { workspace }, selected: workspace.id === selectedId, connectable: editable && !!workspace.relations, deletable: false, draggable: false, sourcePosition: Position.Right, targetPosition: Position.Left })), [open, positions, selectedId, editable]);
   const computedEdges = useMemo(() => relationEdges(open, positions, editable), [editable, open, positions]);
   const [nodes, setNodes, onNodesChange] = useNodesState(computedNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(computedEdges);
@@ -166,7 +179,8 @@ export function WorkspaceGraph({ workspaces, selectedId = null, onSelect, onSetR
   // Drag source = the dependency, drop target = the workspace that builds on it.
   const connect = (connection: Connection): void => {
     const dependent = byId.get(connection.target);
-    if (!dependent || connection.source === connection.target || dependent.relations.dependsOn.includes(connection.source)) return;
+    const dependency = byId.get(connection.source);
+    if (!dependent?.relations || !dependency || dependency.projectId !== dependent.projectId || connection.source === connection.target || dependent.relations.dependsOn.includes(connection.source)) return;
     apply([[dependent.id, { ...dependent.relations, dependsOn: [...dependent.relations.dependsOn, connection.source] }]]);
   };
   const removeEdges = (removed: RelationEdge[]): void => {
@@ -188,6 +202,7 @@ export function WorkspaceGraph({ workspaces, selectedId = null, onSelect, onSetR
 
   if (!open.length) return <div style={{ height }}><EmptyState title="No open workspaces" description="Create a workspace to start mapping dependencies." /></div>;
   return <div className="flex flex-col gap-2" style={{ height }}>
+    {open.some((workspace) => !workspace.relations || workspace.freshness && workspace.freshness !== 'fresh') ? <p className="text-caption text-muted-foreground">Relation coverage is incomplete or last recorded. Every saved workspace is shown; missing edges do not mean there are no dependencies.</p> : null}
     {/* FLUID-GAP: node graph canvas — @xyflow/react draws the canvas, edges, and controls; node chrome is composed from Fluid parts above. */}
     <div className="min-h-0 flex-1 bg-surface-1">
       <ReactFlow<WorkspaceNodeType, RelationEdge>
@@ -221,7 +236,7 @@ export function WorkspaceGraph({ workspaces, selectedId = null, onSelect, onSetR
         <Controls showInteractive={false} />
       </ReactFlow>
     </div>
-    {editable ? <p className="text-caption text-muted-foreground">Drag from a workspace to the one that builds on it. Select an edge and press Delete to remove it. Heavy edges are stack parents.</p> : null}
+    {editable ? <p className="text-caption text-muted-foreground">Drag between workspaces with known relations in the same project to add a dependency. Select an edge and press Delete to remove it. Heavy edges are stack parents.</p> : null}
     {error ? <p role="alert" className="text-caption text-destructive">{error}</p> : null}
   </div>;
 }

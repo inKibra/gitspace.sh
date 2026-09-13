@@ -2,7 +2,8 @@ import { afterEach, describe, expect, it } from 'bun:test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { GitSpaceDatabase, artifactScopes } from '../src/index.js';
+import { eq } from 'drizzle-orm';
+import { GitSpaceDatabase, artifactScopes, spacePlacements } from '../src/index.js';
 
 const roots: string[] = [];
 afterEach(() => {
@@ -94,6 +95,83 @@ describe('GitSpaceDatabase', () => {
     expect(database.commitSpaceClosed({ spaceId: 'workspace-a', holderId: 'machine-a', expectedGeneration: 9 }).status).toBe('ok');
     expect(database.alignClosedSpaceProjection('workspace-a', 12).status).toBe('ok');
     expect(database.getSpacePlacement('workspace-a')).toMatchObject({ holderId: 'unassigned', state: 'closed', generation: 12 });
+    database.close();
+  });
+
+  it('re-adopts a fenced checkout without acquiring a new lease', () => {
+    const database = new GitSpaceDatabase(databasePath());
+    seed(database);
+    expect(database.alignClosedSpaceProjection('workspace-a', 4).status).toBe('ok');
+    expect(database.possessWorkspace('workspace-a', 'machine-a').status).toBe('ok');
+    expect(database.invalidateSpacePossession({ spaceId: 'workspace-a', holderId: 'machine-a', expectedGeneration: 5 }).status).toBe('ok');
+    const acquiredAt = '2025-01-01T00:00:00.000Z';
+    const updatedAt = '2025-01-02T00:00:00.000Z';
+    database.orm.update(spacePlacements).set({ acquiredAt, updatedAt }).where(eq(spacePlacements.spaceId, 'workspace-a')).run();
+    const fenced = database.getSpacePlacement('workspace-a')!;
+    expect(database.getWorkspacePossession('workspace-a')).toBeNull();
+
+    const adopted = database.adoptOpenSpaceProjection({
+      spaceId: 'workspace-a', holderId: 'machine-a', expectedGeneration: 5, rootPath: fenced.rootPath,
+    });
+    if (adopted.status === 'error') throw adopted.error;
+    expect(adopted.value).toEqual({ ...fenced, state: 'open', holderId: 'machine-a', updatedAt: adopted.value.updatedAt });
+    expect(adopted.value.updatedAt).not.toBe(updatedAt);
+    expect(database.getWorkspacePossession('workspace-a')).toEqual(adopted.value);
+    expect(database.getWorkspace('workspace-a')).toMatchObject({
+      holderId: 'machine-a', placementState: 'open', generation: 5, rootPath: fenced.rootPath,
+    });
+    database.close();
+  });
+
+  it('rejects stale authority, changed checkout paths and invalid adoption inputs without changing the fenced projection', () => {
+    const database = new GitSpaceDatabase(databasePath());
+    seed(database);
+    const unclaimed = database.getSpacePlacement('workspace-a')!;
+    expect(database.adoptOpenSpaceProjection({
+      spaceId: 'workspace-a', holderId: 'machine-a', expectedGeneration: 0, rootPath: unclaimed.rootPath,
+    }).status).toBe('error');
+    expect(database.getSpacePlacement('workspace-a')).toEqual(unclaimed);
+    expect(database.possessWorkspace('workspace-a', 'machine-a').status).toBe('ok');
+    expect(database.invalidateSpacePossession({ spaceId: 'workspace-a', holderId: 'machine-a', expectedGeneration: 1 }).status).toBe('ok');
+    expect(database.alignClosedSpaceProjection('workspace-a', 5).status).toBe('ok');
+    const fenced = database.getSpacePlacement('workspace-a')!;
+    const input = { spaceId: 'workspace-a', holderId: 'machine-a', expectedGeneration: 5, rootPath: fenced.rootPath };
+    for (const override of [
+      { expectedGeneration: 4 },
+      { expectedGeneration: 6 },
+      { rootPath: '/repos/gitspace/workspaces/replaced' },
+      { holderId: 'unassigned' },
+      { holderId: '' },
+      { holderId: 'x'.repeat(161) },
+    ]) {
+      const rejected = database.adoptOpenSpaceProjection({ ...input, ...override });
+      expect(rejected.status).toBe('error');
+      if (rejected.status === 'error') expect(rejected.error._tag).toBe('CoreConflict');
+      expect(database.getSpacePlacement('workspace-a')).toEqual(fenced);
+      expect(database.getWorkspacePossession('workspace-a')).toBeNull();
+    }
+    database.close();
+  });
+
+  it.each([
+    { state: 'closed', holderId: 'machine-b' },
+    { state: 'opening', holderId: 'unassigned' },
+    { state: 'closing', holderId: 'unassigned' },
+    { state: 'open', holderId: 'unassigned' },
+    { state: 'open', holderId: 'machine-a' },
+    { state: 'open', holderId: 'machine-b' },
+  ] as const)('does not adopt a $state projection held by $holderId', ({ state, holderId }) => {
+    const database = new GitSpaceDatabase(databasePath());
+    seed(database);
+    expect(database.alignClosedSpaceProjection('workspace-a', 5).status).toBe('ok');
+    database.orm.update(spacePlacements).set({ state, holderId }).where(eq(spacePlacements.spaceId, 'workspace-a')).run();
+    const before = database.getSpacePlacement('workspace-a')!;
+    const possessionBefore = database.getWorkspacePossession('workspace-a');
+    expect(database.adoptOpenSpaceProjection({
+      spaceId: 'workspace-a', holderId: 'machine-a', expectedGeneration: 5, rootPath: before.rootPath,
+    }).status).toBe('error');
+    expect(database.getSpacePlacement('workspace-a')).toEqual(before);
+    expect(database.getWorkspacePossession('workspace-a')).toEqual(possessionBefore);
     database.close();
   });
 

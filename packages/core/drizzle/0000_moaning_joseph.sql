@@ -6,7 +6,7 @@ CREATE TABLE `agent_sessions` (
 	`state` text NOT NULL,
 	`last_event_offset` integer DEFAULT 0 NOT NULL,
 	`activity_json` text DEFAULT '{"active":false,"reasons":[]}' NOT NULL,
-	`error_message` text,
+	`health_json` text DEFAULT '{"revision":0,"issues":{}}' NOT NULL,
 	`created_at` text NOT NULL,
 	`updated_at` text NOT NULL,
 	FOREIGN KEY (`space_id`) REFERENCES `spaces`(`id`) ON UPDATE no action ON DELETE cascade,
@@ -72,6 +72,8 @@ CREATE TABLE `artifact_scopes` (
 CREATE UNIQUE INDEX `artifact_scopes_space_unique` ON `artifact_scopes` (`space_id`);--> statement-breakpoint
 CREATE TABLE `fact_events` (
 	`offset` integer PRIMARY KEY AUTOINCREMENT NOT NULL,
+	`event_id` text NOT NULL,
+	`cloud_synced` integer DEFAULT false NOT NULL,
 	`project_id` text NOT NULL,
 	`scope` text NOT NULL,
 	`entity` text NOT NULL,
@@ -86,6 +88,7 @@ CREATE TABLE `fact_events` (
 );
 --> statement-breakpoint
 CREATE INDEX `fact_events_project_offset_idx` ON `fact_events` (`project_id`,`offset`);--> statement-breakpoint
+CREATE UNIQUE INDEX `fact_events_event_id_unique` ON `fact_events` (`event_id`);--> statement-breakpoint
 CREATE TABLE `projects` (
 	`id` text PRIMARY KEY NOT NULL,
 	`name` text NOT NULL,

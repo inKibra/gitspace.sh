@@ -23,7 +23,21 @@ The started runtime connects to the account relay. It owns the repositories, wor
 
 ## Connect a browser
 
-Create or recover your account at [gitspace.sh](https://gitspace.sh), then choose **Open GitSpace**. The resulting browser invitation expires after five minutes.
+### From a connected browser
+
+Open **Account > Connections > Browsers > Connect another browser**. Create an invitation, then copy its link or scan its QR code in the new browser. Only a browser with permission to enroll devices can create an invitation.
+
+The link works once and expires after five minutes. Anyone holding it can connect to your account before it expires. **Cancel link** invalidates the link, including copies you already shared. After someone redeems it, revoke that browser from the device list instead.
+
+An invited browser depends on the browser that invited it. Signing out or revoking the sending browser also disables browsers it connected. Recovery-key enrollment does not depend on another browser.
+
+### With your recovery key
+
+Visit your account URL, such as `https://bradleat.gitspace.sh`, in the new browser. Under **Use your recovery key**, enter your saved `gsr_` key and choose **Connect with recovery key**. The page already knows your account handle. This does not create a new account.
+
+The private root key stays in the page while it signs the request and invitation. GitSpace does not send it to the server or save it in browser storage. Recovery clears the key from the form when the attempt finishes.
+
+If you already have an invitation, expand **Already have an enrollment link?** and paste it.
 
 The enrollment token travels in the URL fragment and the app removes it before making the enrollment request. The browser generates a non-extractable Ed25519 key in IndexedDB, redeems the invitation, and receives a revocable device grant. Future requests use that device key.
 
@@ -46,6 +60,12 @@ Signed response to the browser
 
 The browser uses the account Worker for account-scoped state and the relay tunnel for machine-scoped operations. Machine placement therefore remains part of the workspace model.
 
+## Account access and billing
+
+Routine requests check device permissions and account and tenant access state. They do not read GitSpace platform credit balances. Access restrictions still apply, including suspension and quarantine. Requests fail closed when the account or tenant access authority is unavailable.
+
+GitSpace records worker-request usage in the background on a best-effort basis. A billing outage does not block ordinary requests, but it can leave usage unrecorded. [Issue #147](https://github.com/inKibra/gitspace.sh/issues/147) tracks durable usage delivery, automatic overage enforcement, and shutdown policy.
+
 ## Important security boundary
 
 Signed requests provide device authentication and tamper detection. They do not, by themselves, hide the RPC body from the Worker or relay that routes it.
@@ -61,4 +81,6 @@ gitspace machine status
 gitspace doctor
 ```
 
-`machine status` reports the local daemon and relay. `doctor` checks machine enrollment, bundled runtime components, Git/OpenSSH prerequisites, and account connectivity. Account release controls manage subsequent runtime changes.
+`machine status` reports the local daemon and probes the relay service and this machine's tunnel separately. A reachable relay does not prove that the machine tunnel works. `doctor` checks machine enrollment, bundled runtime components, Git/OpenSSH prerequisites, and account connectivity. Account release controls manage subsequent runtime changes.
+
+If an open request loses its response, the machine may still be restoring the workspace. Refresh the recorded cloud state before another attempt. GitSpace does not replay an open request after a tunnel failure. A project that still says cloud-only may have a clone in progress; that label alone does not make another open safe.

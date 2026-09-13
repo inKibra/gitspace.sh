@@ -4,6 +4,8 @@ import type { Terminal as GhosttyTerminalType } from 'ghostty-web';
 import { Component, useEffect, useMemo, useRef, useState, type ErrorInfo, type ReactNode } from 'react';
 import { glyph } from './glyph.js';
 import { EmptyState } from './GitSpaceShell.js';
+import type { StreamEvent } from '@gitspace/protocol-sync';
+import { useSynchronizedResource } from './SynchronizationProvider.js';
 
 export type WorkspaceTerminalKind = 'user' | 'agent' | 'lifecycle' | 'service';
 export type WorkspaceTerminalState = 'starting' | 'running' | 'ready' | 'restarting' | 'stopping' | 'exited' | 'failed';
@@ -31,9 +33,9 @@ export interface WorkspaceTerminalOutput {
 }
 
 export interface WorkspaceTerminalsProps {
-  list(): Promise<readonly WorkspaceTerminalView[]>;
+  spaceId: string;
+  events(name: string | null, after: number | null, signal: AbortSignal): AsyncIterable<{ status: 'ok'; value: StreamEvent<{ terminals: readonly WorkspaceTerminalView[]; output: WorkspaceTerminalOutput | null }> } | { status: 'error'; error: Error }>;
   create(): Promise<WorkspaceTerminalView>;
-  read(name: string, cursor: number | null): Promise<WorkspaceTerminalOutput>;
   send(name: string, data: string): Promise<void>;
   onClose?: () => void;
   stop(name: string): Promise<void>;
@@ -409,52 +411,23 @@ class TerminalErrorBoundary extends Component<{ children: ReactNode; resetKey: s
 
 
 export function WorkspaceTerminals(props: WorkspaceTerminalsProps) {
-  const { list, create: createTerminal, read, send, stop: stopTerminal } = props;
-  const [terminals, setTerminals] = useState<WorkspaceTerminalView[]>([]);
+  const { spaceId, events, create: createTerminal, send, stop: stopTerminal } = props;
+  const [terminals, setTerminals] = useState<readonly WorkspaceTerminalView[]>([]);
   const [selectedName, setSelectedName] = useState<string | null>(null);
-  const [output, setOutput] = useState<WorkspaceTerminalOutput | null>(null);
+  const synchronized = useSynchronizedResource(`terminals:${spaceId}:${selectedName ?? ''}`, (after, signal) => events(selectedName, after, signal));
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const pendingInput = useRef<Array<{ name: string; chunks: string[]; send: WorkspaceTerminalsProps['send'] }>>([]);
   const sendingInput = useRef(false);
   const selected = useMemo(() => terminals.find((terminal) => terminal.name === selectedName) ?? terminals[0] ?? null, [terminals, selectedName]);
+  const output = synchronized.value?.output && synchronized.value.output.name === selected?.name ? synchronized.value.output : null;
 
   useEffect(() => {
-    let disposed = false;
-    const refresh = async (): Promise<void> => {
-      try {
-        const next = await list();
-        if (disposed) return;
-        setTerminals([...next]);
-        setSelectedName((current) => current && next.some((terminal) => terminal.name === current) ? current : next[0]?.name ?? null);
-      } catch (cause) {
-        if (!disposed) setError(cause instanceof Error ? cause.message : String(cause));
-      }
-    };
-    void refresh();
-    const timer = window.setInterval(() => void refresh(), 2_000);
-    return () => { disposed = true; window.clearInterval(timer); };
-  }, [list]);
-
-  useEffect(() => {
-    if (!selected) { setOutput(null); return; }
-    let disposed = false;
-    let cursor: number | null = null;
-    const refresh = async (): Promise<void> => {
-      try {
-        const next = await read(selected.name, cursor);
-        if (disposed) return;
-        cursor = next.cursor;
-        setOutput(next);
-        setError(null);
-      } catch (cause) {
-        if (!disposed) setError(cause instanceof Error ? cause.message : String(cause));
-      }
-    };
-    void refresh();
-    const timer = window.setInterval(() => void refresh(), 750);
-    return () => { disposed = true; window.clearInterval(timer); };
-  }, [read, selected?.name]);
+    const next = synchronized.value?.terminals;
+    if (!next) return;
+    setTerminals(next);
+    setSelectedName((current) => current && next.some((terminal) => terminal.name === current) ? current : next[0]?.name ?? null);
+  }, [synchronized.cursor]);
 
   const create = async (): Promise<void> => {
     setCreating(true);
@@ -498,8 +471,7 @@ export function WorkspaceTerminals(props: WorkspaceTerminalsProps) {
     if (!selected || !isRunning(selected.state)) return;
     try {
       await stopTerminal(selected.name);
-      const next = await list();
-      setTerminals([...next]);
+      setTerminals((current) => current.filter((terminal) => terminal.name !== selected.name));
       setError(null);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -535,5 +507,6 @@ export function WorkspaceTerminals(props: WorkspaceTerminalsProps) {
       <TerminalErrorBoundary resetKey={selected.name} onError={(cause) => setError(cause.message)}><HubGhosttyTerminal data={output?.data ?? ''} disabled={!isRunning(selected.state)} onData={sendInput} onError={(cause) => setError(cause.message)} /></TerminalErrorBoundary>
     </> : <div className="flex min-h-0 flex-1 items-center justify-center p-6"><EmptyState icon={<TerminalSquare width={24} height={24} strokeWidth={1.5} />} title="No terminals" description="Open a terminal in this workspace to start an OMP Hub PTY." action={newTerminal} /></div>}
     {error ? <div className="shrink-0 bg-destructive-light px-3 py-1.5 text-caption text-destructive" role="alert">{error}</div> : null}
+    {synchronized.transportError ? <div className="shrink-0 px-3 py-1.5 text-caption text-muted-foreground" role="status">Terminal delivery disconnected. Last received output is retained; reconnecting.</div> : null}
   </section>;
 }

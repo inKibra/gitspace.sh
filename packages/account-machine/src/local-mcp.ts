@@ -10,6 +10,7 @@ import {
   type ComposioPluginTool,
   type ComposioSetup,
   type DiscoveredMcpTool,
+  type EffectiveSecretMetadata,
   type McpAuditEvent,
   type McpConnection,
   type McpConnectionDraft,
@@ -44,7 +45,8 @@ export interface MachineMcpAuthority {
   listProjectMcpGrants(projectId: string): Promise<ProjectMcpGrant[]>;
   putProjectMcpGrant(projectId: string, connectionId: string, enabled: boolean, projectSpaceEnabled: boolean, workspacesEnabled: boolean, expectedRevision: number): Promise<ProjectMcpGrant>;
   deleteProjectMcpGrant(projectId: string, connectionId: string, expectedRevision: number): Promise<{ projectId: string; connectionId: string; deleted: boolean }>;
-  materializeProjectSecrets(projectId: string, names: string[]): Promise<Record<string, string>>;
+  materializeProjectSecrets(projectId: string, names: string[], workspaceId: string | null): Promise<Record<string, string>>;
+  listEffectiveSecrets(projectId: string, workspaceId: string | null): Promise<EffectiveSecretMetadata[]>;
   appendMcpAudit(event: Omit<McpAuditEvent, 'id' | 'principalId' | 'machineId' | 'createdAt'>): Promise<McpAuditEvent>;
 }
 
@@ -231,7 +233,9 @@ export class ProjectedMcpSession {
   readonly manager: MCPManager;
   private readonly projected = new Map<string, ProjectedConnection>();
   private readonly unsubscribeStatus: () => void;
-  private readonly protectedTools = new WeakSet<object>();
+  private readonly toolExecutions = new WeakMap<CustomTool, { execute: CustomTool['execute']; secrets: readonly string[] }>();
+  private configuration: string | null = null;
+  private refreshing: Promise<void> | null = null;
   private refreshTarget: SessionRefreshTarget | null = null;
   private disposed = false;
 
@@ -283,11 +287,41 @@ export class ProjectedMcpSession {
   }
 
   async reload(): Promise<void> {
-    if (this.disposed) return;
+    await this.refresh(true);
+  }
+
+  async refresh(force = false): Promise<void> {
+    if (this.disposed) throw new Error('MCP session has been disposed');
+    if (this.refreshing) {
+      await this.refreshing;
+      return this.refresh(force);
+    }
+    this.refreshing = (async () => {
+      const [connections, grants, secrets] = await Promise.all([
+        this.coordinator.authority.listMcpConnections(),
+        this.coordinator.authority.listProjectMcpGrants(this.projectId),
+        this.coordinator.authority.listEffectiveSecrets(this.projectId, this.workspaceId),
+      ]);
+      if (this.disposed) throw new Error('MCP session has been disposed');
+      // Status observations also bump connection revisions; only runtime configuration
+      // belongs in this fingerprint, otherwise every call would reconnect its server.
+      const configuration = JSON.stringify({
+        connections: connections.map(({ id, label, enabled, target, transport, timeoutMs }) => ({ id, label, enabled, target, transport, timeoutMs })).sort((left, right) => left.id.localeCompare(right.id)),
+        grants: grants.map(({ connectionId, enabled, projectSpaceEnabled, workspacesEnabled }) => ({ connectionId, enabled, projectSpaceEnabled, workspacesEnabled })).sort((left, right) => left.connectionId.localeCompare(right.connectionId)),
+        secrets: secrets.map(({ name, revision, source, projectId }) => ({ name, revision, source, projectId })).sort((left, right) => left.name.localeCompare(right.name)),
+      });
+      if (!force && configuration === this.configuration) return;
+      this.configuration = null;
+      await this.applyConfiguration(connections, grants);
+      this.configuration = configuration;
+    })();
+    try { await this.refreshing; }
+    finally { this.refreshing = null; }
+  }
+
+  private async applyConfiguration(connections: McpConnection[], grants: ProjectMcpGrant[]): Promise<void> {
     await this.manager.disconnectAll();
     this.projected.clear();
-    const connections = await this.coordinator.authority.listMcpConnections();
-    const grants = await this.coordinator.authority.listProjectMcpGrants(this.projectId);
     const connectionById = new Map(connections.map((connection) => [connection.id, connection]));
     const configs: Record<string, MCPServerConfig> = {};
 
@@ -324,7 +358,7 @@ export class ProjectedMcpSession {
             : { type: 'sse', url: materialized.url, headers: visibleHeaders, timeout: materialized.timeoutMs };
         } else {
           const names = secretNames(connection);
-          const values = names.length === 0 ? {} : await this.coordinator.authority.materializeProjectSecrets(this.projectId, names);
+          const values = names.length === 0 ? {} : await this.coordinator.authority.materializeProjectSecrets(this.projectId, names, this.workspaceId);
           projected.secrets = Object.values(values);
           configs[name] = ompConfig(connection, this.workspacePath, values);
           projected.visibleConfig = ompVisibleConfig(connection, this.workspacePath);
@@ -346,18 +380,33 @@ export class ProjectedMcpSession {
     const connection = this.manager.getConnection(projected.serverName);
     redactSecretsInPlace(connection?.tools, projected.secrets);
     for (const tool of this.manager.getTools()) {
-      if (tool.mcpServerName !== projected.serverName || this.protectedTools.has(tool)) continue;
+      if (tool.mcpServerName !== projected.serverName || this.toolExecutions.has(tool)) continue;
       let description = tool.description;
       for (const secret of projected.secrets) if (secret) description = description.replaceAll(secret, '[redacted]');
       tool.description = description;
       redactSecretsInPlace(tool.parameters, projected.secrets);
-      const execute = tool.execute.bind(tool);
+      this.toolExecutions.set(tool, { execute: tool.execute.bind(tool), secrets: projected.secrets });
       tool.execute = async (...args: Parameters<typeof tool.execute>) => {
-        const result = await execute(...args);
-        redactSecretsInPlace(result, projected.secrets);
-        return result;
+        args[4]?.throwIfAborted();
+        await this.refresh();
+        const current = this.manager.getTools().find((candidate) => candidate.mcpServerName === tool.mcpServerName && candidate.mcpToolName === tool.mcpToolName);
+        if (!current) throw new Error(`MCP tool ${tool.name} is unavailable in this project session`);
+        return this.executeCurrentTool(current, args);
       };
-      this.protectedTools.add(tool);
+    }
+  }
+
+  private async executeCurrentTool(tool: CustomTool, args: Parameters<CustomTool['execute']>) {
+    if (this.disposed) throw new Error('MCP session has been disposed');
+    args[4]?.throwIfAborted();
+    const current = this.toolExecutions.get(tool);
+    if (!current) throw new Error(`MCP tool ${tool.name} is unavailable in this project session`);
+    try {
+      const result = await current.execute(...args);
+      redactSecretsInPlace(result, current.secrets);
+      return result;
+    } catch (error) {
+      throw new Error(redact(error, current.secrets) ?? 'MCP tool call failed');
     }
   }
   descriptors(): DiscoveredMcpTool[] {
@@ -394,6 +443,8 @@ export class ProjectedMcpSession {
   }
 
   private async callEvalNamespace(method: string, rawArgs: unknown, localProtocolOptions: unknown, signal?: AbortSignal): Promise<unknown> {
+    signal?.throwIfAborted();
+    await this.refresh();
     const args = rawArgs && typeof rawArgs === 'object' ? rawArgs as Record<string, unknown> : {};
     const descriptors = this.descriptors();
     if (method === 'list') return descriptors;
@@ -424,7 +475,7 @@ export class ProjectedMcpSession {
     this.recordToolEvent({ type: 'tool_execution_start', toolName: tool.name });
     try {
       const context = { localProtocolOptions } as never;
-      const result = await tool.execute(`eval:${crypto.randomUUID()}`, callArgs, undefined, context, signal);
+      const result = await this.executeCurrentTool(tool, [`eval:${crypto.randomUUID()}`, callArgs, undefined, context, signal]);
       this.recordToolEvent({ type: 'tool_execution_end', toolName: tool.name, result });
       return normalizeMcpEvalResult(result);
     } catch (error) {
@@ -461,7 +512,8 @@ export class ProjectedMcpSession {
     this.refreshTarget = null;
     this.unsubscribeStatus();
     this.coordinator.detach(this);
-    await this.manager.disconnectAll();
+    try { await this.refreshing; }
+    finally { await this.manager.disconnectAll(); }
   }
 }
 
@@ -585,8 +637,8 @@ export class MachineMcpCoordinator {
   }
 
   async discover(projectId: string, workspaceId: string | null, workspacePath: string): Promise<DiscoveredMcpTool[]> {
-    const live = this.sessionsByProject.get(projectId)?.values().next().value as ProjectedMcpSession | undefined;
-    if (live) {
+    for (const live of this.sessionsByProject.get(projectId) ?? []) {
+      if (live.workspaceId !== workspaceId || live.workspacePath !== workspacePath) continue;
       await live.reload();
       return live.descriptors();
     }

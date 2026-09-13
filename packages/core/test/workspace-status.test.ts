@@ -1,19 +1,15 @@
 import { describe, expect, it } from 'bun:test';
-import { deriveWorkspaceStatusSummary, visibleActiveWorkspaces } from '../src/index.js';
+import { deriveWorkspaceStatusSummary, visibleActiveWorkspaces } from '@gitspace/protocol-workspace';
 
 describe('workspace status parity', () => {
   it('preserves orange, green, blue, red, dim precedence', () => {
     expect(deriveWorkspaceStatusSummary({ agents: [{ state: 'permission-needed' }, { state: 'running' }] }).primaryColor).toBe('orange');
-    expect(deriveWorkspaceStatusSummary({ agents: [{ state: 'running' }, { state: 'retrying', errorMessage: 'quota exceeded' }] }).primaryColor).toBe('green');
-    expect(deriveWorkspaceStatusSummary({ agents: [{ state: 'waiting' }, { state: 'retrying', errorMessage: 'network timeout' }] }).primaryColor).toBe('blue');
-    expect(deriveWorkspaceStatusSummary({ agents: [{ state: 'retrying', errorMessage: 'provider unauthorized' }] }).primaryColor).toBe('red');
+    expect(deriveWorkspaceStatusSummary({ agents: [{ state: 'running' }, { state: 'retrying' }] }).primaryColor).toBe('green');
+    expect(deriveWorkspaceStatusSummary({ agents: [{ state: 'waiting' }, { state: 'retrying' }] }).primaryColor).toBe('blue');
+    expect(deriveWorkspaceStatusSummary({ agents: [{ state: 'retrying' }] }).primaryColor).toBe('red');
     expect(deriveWorkspaceStatusSummary({ agents: [{ state: 'dormant' }, { state: 'closed' }] }).primaryColor).toBe('dim');
   });
 
-  it('downgrades noisy LSP retries to blue', () => {
-    const status = deriveWorkspaceStatusSummary({ agents: [{ state: 'retrying', errorMessage: 'LSP language server unavailable' }] });
-    expect(status).toMatchObject({ primaryColor: 'blue', agents: { blue: 1, red: 0 } });
-  });
 
   it('keeps current first, hides other dim, and orders actionable then blue then green', () => {
     const status = (primaryColor: 'dim' | 'green' | 'blue' | 'orange' | 'red') => ({

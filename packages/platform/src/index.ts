@@ -1,4 +1,7 @@
-import { credentialProtocolBase64, platformDeployRequestSchema, platformRevertRequestSchema, verifyRelayAuthorization } from '@gitspace/protocol';
+import { credentialProtocolBase64 } from '@gitspace/protocol/credential-vault';
+import { verifyRelayAuthorization } from '@gitspace/protocol/relay';
+import { platformDeployRequestSchema, platformRevertRequestSchema, tenantIdSchema } from '@gitspace/protocol/deployment';
+import { CloudflareR2PlatformClient } from './storage-provider.js';
 import { CreditLedgerDO, isCreditLedgerRecord, type CreditLedgerRecord } from './credit-ledger.js';
 import { deployChannelTenant, deployTenantWorker, revertTenantWorker, type DeployResult } from './deployer.js';
 import { TenantControlDO } from './tenant-control.js';
@@ -7,12 +10,12 @@ export { CreditLedgerDO } from './credit-ledger.js';
 export { TenantDeploymentsDO } from './tenant-deployments.js';
 export { TenantControlDO } from './tenant-control.js';
 
-const TENANT_SLUG = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u;
 const CREDIT_ADMIN_PATH = /^\/__platform\/credits\/([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)$/u;
 const TOKEN_ADMIN_PATH = /^\/__platform\/admin\/tenants\/([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)\/token$/u;
 const TENANT_DEPLOY_PATH = /^\/__platform\/tenants\/([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)\/(deploy|revert)$/u;
 const TENANT_BOOTSTRAP_PATH = /^\/__platform\/bootstrap\/([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)$/u;
 const OPERATOR_TENANT_PATH = /^\/__platform\/operator\/tenants\/([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)$/u;
+const OPERATOR_TENANT_ACCESS_PATH = /^\/__platform\/operator\/tenants\/([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)\/access$/u;
 const OPERATOR_DEPLOY_PATH = /^\/__platform\/operator\/tenants\/([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)\/(deploy|revert)$/u;
 
 interface TenantDispatchTarget {
@@ -26,8 +29,8 @@ function tenantFromHostname(hostname: string, suffix: string): TenantDispatchTar
   if (!normalized.endsWith(expectedSuffix)) return null;
   const label = normalized.slice(0, -expectedSuffix.length);
   const service = /^.+--.+--([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)-srv$/u.exec(label);
-  if (service) return { tenant: service[1]!, service: true };
-  return TENANT_SLUG.test(label) ? { tenant: label, service: false } : null;
+  if (service) return tenantIdSchema.safeParse(service[1]).success ? { tenant: service[1]!, service: true } : null;
+  return tenantIdSchema.safeParse(label).success ? { tenant: label, service: false } : null;
 }
 
 function platformError(status: number, code: string, message: string): Response {
@@ -62,57 +65,36 @@ async function accountIdForRoot(rootPublicKey: string): Promise<string> {
 
 async function deploymentAccess(env: Env, tenant: string): Promise<Response | null> {
   try {
-    const [control, credits] = await Promise.all([
-      env.TENANT_CONTROL.getByName(tenant).get(),
-      env.CREDITS.getByName(tenant).getAccount(),
-    ]);
-    if (control.status !== 'active' || (credits.status === 'ok' && credits.value.status !== 'active')) {
+    const control = await env.TENANT_CONTROL.getByName(tenant).get();
+    if (control.status !== 'active') {
       return platformError(423, 'TENANT_UNAVAILABLE', 'Tenant is suspended or quarantined');
     }
-    if (credits.status === 'error' && credits.error.code !== 'ACCOUNT_UNCONFIGURED') throw new Error('Credit authority unavailable');
     return null;
   } catch {
     return platformError(503, 'TENANT_AUTHORITY_UNAVAILABLE', 'Tenant authorization authority is unavailable');
   }
 }
-
-
 async function handleTenantBootstrap(request: Request, env: Env, tenant: string): Promise<Response> {
   if (request.method !== 'POST') return platformError(405, 'METHOD_NOT_ALLOWED', 'Tenant bootstrap supports POST');
-  if (!env.PLATFORM_BOOTSTRAP_TOKEN || request.headers.get('authorization') !== `Bearer ${env.PLATFORM_BOOTSTRAP_TOKEN}`) {
-    return platformError(401, 'BOOTSTRAP_UNAUTHORIZED', 'Tenant bootstrap credential is missing or invalid');
-  }
-  let body: { rootPublicKey?: unknown; blobBucket?: unknown };
+  if (!env.PLATFORM_BOOTSTRAP_TOKEN || request.headers.get('authorization') !== 'Bearer ' + env.PLATFORM_BOOTSTRAP_TOKEN) return platformError(401, 'BOOTSTRAP_UNAUTHORIZED', 'Bootstrap authorization is required');
+  if (!tenantIdSchema.safeParse(tenant).success) return platformError(400, 'INVALID_TENANT', 'Tenant name is invalid or reserved');
   try {
-    body = await request.json() as { rootPublicKey?: unknown; blobBucket?: unknown };
-  } catch {
-    return platformError(400, 'INVALID_BOOTSTRAP', 'Tenant bootstrap body is invalid');
-  }
-  if (typeof body.rootPublicKey !== 'string' || typeof body.blobBucket !== 'string') {
-    return platformError(400, 'INVALID_BOOTSTRAP', 'Tenant root public key and relay bucket are required');
-  }
-  if (!/^gsp-relay-[a-z0-9](?:[a-z0-9-]{0,50}[a-z0-9])?$/u.test(body.blobBucket)) {
-    return platformError(400, 'INVALID_BOOTSTRAP', 'Tenant relay bucket name is invalid');
-  }
-  const denied = await deploymentAccess(env, tenant);
-  if (denied) return denied;
-  const deployments = env.DEPLOYMENTS.getByName(tenant);
-  try {
-    await deployments.configure(body.rootPublicKey, body.blobBucket);
-  } catch (error) {
-    return platformError(409, 'TENANT_PROVISIONING_FAILED', error instanceof Error ? error.message : 'Tenant configuration failed');
-  }
-  const current = await deployments.getState();
-  const deployed: DeployResult = current.active
-    ? { status: 'ok', value: { sha: current.active.sha, healthy: current.active.healthy, revertedTo: null, appliedMigrationTag: current.appliedMigrationTag } }
-    : await deployChannelTenant(env, tenant);
-  if (deployed.status === 'error') return platformError(deployed.error.status, deployed.error.code, deployed.error.message);
-  return Response.json({
-    tenant,
-    relayUrl: `https://${tenant}${env.TENANT_HOST_SUFFIX}`,
-    accountUrl: `https://${tenant}.gitspace.sh`,
-    deployment: deployed.value,
-  });
+    const body = await request.json() as { rootPublicKey?: unknown };
+    if (typeof body.rootPublicKey !== 'string') return platformError(400, 'INVALID_BOOTSTRAP', 'Root public key is required');
+    const accountId = await accountIdForRoot(body.rootPublicKey);
+    const blobBucket = 'gsp-relay-' + accountId;
+    const denied = await deploymentAccess(env, tenant);
+    if (denied) return denied;
+    const deployments = env.DEPLOYMENTS.getByName(tenant);
+    await deployments.configure(body.rootPublicKey, blobBucket);
+    const storage = new CloudflareR2PlatformClient({ accountId: env.CF_ACCOUNT_ID, apiToken: env.CF_API_TOKEN, parentAccessKeyId: env.R2_PARENT_ACCESS_KEY_ID });
+    await storage.ensureBucket({ bucketName: blobBucket });
+    await deployments.providerToken();
+    const current = await deployments.getState();
+    const deployed: DeployResult = current.active ? { status: 'ok', value: { sha: current.active.sha, healthy: current.active.healthy, revertedTo: null, appliedMigrationTag: current.appliedMigrationTag } } : await deployChannelTenant(env, tenant);
+    if (deployed.status === 'error') return platformError(deployed.error.status, deployed.error.code, deployed.error.message);
+    return Response.json({ tenant, relayUrl: 'https://' + tenant + env.TENANT_HOST_SUFFIX, accountUrl: 'https://' + tenant + '.gitspace.sh', deployment: deployed.value });
+  } catch (error) { return platformError(409, 'TENANT_PROVISIONING_FAILED', error instanceof Error ? error.message : 'Tenant provisioning failed'); }
 }
 
 
@@ -214,6 +196,34 @@ async function meterDeploy(env: Env, tenant: string, sha: string): Promise<void>
   if (applied.status === 'error') console.error(JSON.stringify({ event: 'deploy-metering-failed', tenant, code: applied.error.code }));
 }
 
+/** Account for dispatched requests without making credit availability an access policy. */
+async function meterDispatch(env: Env, tenant: string): Promise<void> {
+  try {
+    const credits = env.CREDITS.getByName(tenant);
+    const account = await credits.getAccount();
+    if (account.status === 'error') {
+      if (account.error.code !== 'ACCOUNT_UNCONFIGURED') {
+        console.error(JSON.stringify({ event: 'credit-settlement-failed', tenant, code: account.error.code }));
+      }
+      return;
+    }
+    const now = new Date().toISOString();
+    const applied = await credits.applyUsage({
+      id: `dispatch:${crypto.randomUUID()}`,
+      resource: 'worker-request',
+      quantity: '1',
+      rateVersion: 'cloudflare-2026-08-27',
+      debitMicros: Number(env.DISPATCH_SETTLEMENT_MICROS),
+      windowStart: now,
+      windowEnd: now,
+      createdAt: now,
+    });
+    if (applied.status === 'error') console.error(JSON.stringify({ event: 'credit-settlement-failed', tenant, code: applied.error.code }));
+  } catch (error) {
+    console.error(JSON.stringify({ event: 'credit-settlement-failed', tenant, message: error instanceof Error ? error.message : String(error) }));
+  }
+}
+
 /** Tenant-authenticated worker swap: `deploy` a staged release or `revert` to the previous release / our channel. */
 async function handleTenantDeployment(request: Request, env: Env, tenant: string, action: 'deploy' | 'revert', operator = false): Promise<Response> {
   if (request.method !== 'POST') return platformError(405, 'METHOD_NOT_ALLOWED', 'Tenant deployment supports POST');
@@ -264,9 +274,17 @@ async function handleTenantDeployment(request: Request, env: Env, tenant: string
   return Response.json(result.value);
 }
 
-async function handleOperatorTenant(request: Request, env: Env, tenant: string): Promise<Response> {
+async function handleOperatorTenant(request: Request, env: Env, tenant: string, accessOnly = false): Promise<Response> {
   if (!env.PLATFORM_BOOTSTRAP_TOKEN || request.headers.get('authorization') !== `Bearer ${env.PLATFORM_BOOTSTRAP_TOKEN}`) {
     return platformError(401, 'OPERATOR_UNAUTHORIZED', 'Platform operator authorization is required');
+  }
+  if (accessOnly) {
+    if (request.method !== 'GET') return platformError(405, 'METHOD_NOT_ALLOWED', 'Platform operator tenant access supports GET');
+    try {
+      return Response.json({ control: await env.TENANT_CONTROL.getByName(tenant).get() }, { headers: { 'cache-control': 'private, no-store' } });
+    } catch {
+      return platformError(503, 'TENANT_AUTHORITY_UNAVAILABLE', 'Tenant authorization authority is unavailable');
+    }
   }
   const control = env.TENANT_CONTROL.getByName(tenant);
   const credits = env.CREDITS.getByName(tenant);
@@ -314,22 +332,42 @@ async function handleOperatorTenant(request: Request, env: Env, tenant: string):
   return platformError(400, 'INVALID_OPERATOR_ACTION', 'Tenant action must be suspend, quarantine, or restore');
 }
 
-async function resolveHostedRoute(request: Request, env: Env, tenant: string): Promise<{ machineId: string; rpcEndpoint: string } | Response> {
-  const hostname = new URL(request.url).hostname.toLowerCase();
-  const lookup = new URL('/__platform/hosted-route', 'https://gitspace-auth');
-  lookup.searchParams.set('hostname', hostname);
-  const response = await env.AUTH.fetch(new Request(lookup, {
-    headers: { authorization: `Bearer ${env.PLATFORM_BOOTSTRAP_TOKEN}` },
-  }));
-  if (!response.ok) {
-    console.error(JSON.stringify({ event: 'hosted-route-lookup-failed', hostname, status: response.status, body: await response.text() }));
-    return platformError(response.status === 404 ? 404 : 502, 'SERVICE_ROUTE_UNAVAILABLE', 'Workspace service route is unavailable');
+
+
+async function handleTenantResource(request: Request, env: Env, tenant: string, path: string): Promise<Response> {
+  const deployments = env.DEPLOYMENTS.getByName(tenant);
+  const token = path.startsWith('/provider/') ? request.headers.get('x-gitspace-provider-token') : /^Bearer (\S+)$/u.exec(request.headers.get('authorization') ?? '')?.[1];
+  if (!token || !await deployments.verifyToken(token)) return platformError(401, 'TENANT_UNAUTHORIZED', 'Tenant resource token is invalid');
+  const denied = await deploymentAccess(env, tenant);
+  if (denied) return denied;
+  const config = await deployments.tenantConfig();
+  if (!config) return platformError(409, 'TENANT_UNPROVISIONED', 'Tenant resource namespace is missing');
+  if (path === '/state' && request.method === 'GET') {
+    const [control, deployment] = await Promise.all([env.TENANT_CONTROL.getByName(tenant).get(), deployments.getState()]);
+    return Response.json({ control, deployment: { active: deployment.active?.sha ?? null } }, { headers: { 'cache-control': 'private, no-store' } });
   }
-  const body = await response.json() as { tenant?: unknown; machineId?: unknown; rpcEndpoint?: unknown };
-  if (body.tenant !== tenant || typeof body.machineId !== 'string' || typeof body.rpcEndpoint !== 'string') {
-    return platformError(404, 'SERVICE_ROUTE_NOT_FOUND', 'Workspace service route is not registered for this account');
+  if (path === '/storage' && request.method === 'GET') return Response.json({ bucket: config.blobBucket, endpoint: 'https://' + env.CF_ACCOUNT_ID + '.r2.cloudflarestorage.com', region: 'auto' });
+  if (path === '/storage/credentials' && request.method === 'POST') {
+    try {
+      const body = await request.json() as { prefixes?: unknown; ttlSeconds?: unknown; permission?: unknown };
+      if (!Array.isArray(body.prefixes) || !body.prefixes.every((value): value is string => typeof value === 'string') || body.prefixes.length > 100) return platformError(400, 'INVALID_STORAGE_SCOPE', 'Storage prefixes are invalid');
+      if (body.permission !== undefined && body.permission !== 'object-read-only' && body.permission !== 'object-read-write') return platformError(400, 'INVALID_STORAGE_PERMISSION', 'Storage permission is invalid');
+      const client = new CloudflareR2PlatformClient({ accountId: env.CF_ACCOUNT_ID, apiToken: env.CF_API_TOKEN, parentAccessKeyId: env.R2_PARENT_ACCESS_KEY_ID });
+      const credentials = await client.mintTemporaryCredentials({ bucketName: config.blobBucket, prefixes: body.prefixes, ttlSeconds: Number(body.ttlSeconds ?? 3600), permission: body.permission });
+      return Response.json(credentials, { headers: { 'cache-control': 'private, no-store' } });
+    } catch (error) { return platformError(400, 'STORAGE_CREDENTIALS_FAILED', error instanceof Error ? error.message : 'Storage credentials failed'); }
   }
-  return { machineId: body.machineId, rpcEndpoint: body.rpcEndpoint };
+  if (path.startsWith('/provider/compute/')) {
+    const userId = await accountIdForRoot(config.rootPublicKey);
+    const headers = new Headers(request.headers);
+    headers.delete('x-gitspace-provider-token');
+    headers.set('x-gitspace-user-id', userId);
+    headers.delete('host');
+    const url = new URL(request.url);
+    const target = 'https://compute.internal' + path.slice('/provider/compute'.length) + url.search;
+    return env.COMPUTE.fetch(new Request(target, { method: request.method, headers, body: request.body, redirect: 'manual' }));
+  }
+  return platformError(404, 'RESOURCE_NOT_FOUND', 'Tenant resource route does not exist');
 }
 
 export default {
@@ -337,6 +375,8 @@ export default {
     const url = new URL(request.url);
     if (url.pathname === '/__platform/health') return Response.json({ status: 'ok' });
 
+    const resource = /^\/__platform\/tenants\/([a-z0-9-]+)(\/(?:state|storage|provider)(?:\/.*)?)$/u.exec(url.pathname);
+    if (resource && tenantIdSchema.safeParse(resource[1]).success) return handleTenantResource(request, env, resource[1]!, resource[2]!);
     const adminMatch = CREDIT_ADMIN_PATH.exec(url.pathname);
     if (adminMatch) return handleCreditAdmin(request, env, adminMatch[1]!);
     const tokenMatch = TOKEN_ADMIN_PATH.exec(url.pathname);
@@ -347,119 +387,32 @@ export default {
     if (deployMatch) return handleTenantDeployment(request, env, deployMatch[1]!, deployMatch[2] === 'deploy' ? 'deploy' : 'revert');
     const operatorDeployMatch = OPERATOR_DEPLOY_PATH.exec(url.pathname);
     if (operatorDeployMatch) return handleTenantDeployment(request, env, operatorDeployMatch[1]!, operatorDeployMatch[2] === 'deploy' ? 'deploy' : 'revert', true);
+    const operatorAccessMatch = OPERATOR_TENANT_ACCESS_PATH.exec(url.pathname);
+    if (operatorAccessMatch) return handleOperatorTenant(request, env, operatorAccessMatch[1]!, true);
     const operatorTenantMatch = OPERATOR_TENANT_PATH.exec(url.pathname);
     if (operatorTenantMatch) return handleOperatorTenant(request, env, operatorTenantMatch[1]!);
 
-    const target = tenantFromHostname(url.hostname, env.TENANT_HOST_SUFFIX);
+    const target = tenantFromHostname(url.hostname, env.TENANT_HOST_SUFFIX) ?? tenantFromHostname(url.hostname, '.gitspace.sh');
     if (!target) return platformError(404, 'TENANT_NOT_FOUND', 'Tenant hostname is not registered');
     const tenant = target.tenant;
-    const credits = env.CREDITS.getByName(tenant);
-    const tenantControl = env.TENANT_CONTROL.getByName(tenant);
-    const tenantControlState = await tenantControl.get();
-    if (tenantControlState.status !== 'active') {
-      return platformError(423, `TENANT_${tenantControlState.status.toUpperCase()}`, tenantControlState.reason ?? `Tenant is ${tenantControlState.status}`);
-    }
-    const account = await credits.getAccount();
-    const reservationId = account.status === 'ok' ? crypto.randomUUID() : null;
-    if (account.status === 'error' && account.error.code !== 'ACCOUNT_UNCONFIGURED') {
-      return platformError(402, account.error.code, account.error.message);
-    }
-    if (reservationId) {
-      const reserved = await credits.reserveDispatch({
-        id: reservationId,
-        amountMicros: Number(env.DISPATCH_RESERVATION_MICROS),
-        expiresAt: Date.now() + Number(env.RESERVATION_TTL_MS),
-      });
-      if (reserved.status === 'error') {
-        if (reserved.error.code === 'INSUFFICIENT_CREDITS') {
-          await credits.quarantine('Credit balance exhausted below required risk reserve');
-          await tenantControl.set({ status: 'quarantined', reason: 'Credit balance exhausted below required risk reserve' });
-          return platformError(402, reserved.error.code, reserved.error.message);
-        }
-        return reserved.error.code === 'ACCOUNT_QUARANTINED'
-          ? platformError(423, reserved.error.code, reserved.error.message)
-          : platformError(402, reserved.error.code, reserved.error.message);
+    try {
+      const tenantControlState = await env.TENANT_CONTROL.getByName(tenant).get();
+      if (tenantControlState.status !== 'active') {
+        return platformError(423, `TENANT_${tenantControlState.status.toUpperCase()}`, tenantControlState.reason ?? `Tenant is ${tenantControlState.status}`);
       }
-    }
-    if (!target.service && request.headers.get('upgrade')?.toLowerCase() === 'websocket') {
-      if (reservationId) {
-        const now = new Date().toISOString();
-        const settled = await credits.settleDispatch({
-          reservationId,
-          ledger: {
-            id: `dispatch:${reservationId}`,
-            resource: 'worker-request',
-            quantity: '1',
-            rateVersion: 'cloudflare-2026-08-27',
-            debitMicros: Number(env.DISPATCH_SETTLEMENT_MICROS),
-            windowStart: now,
-            windowEnd: now,
-            createdAt: now,
-          },
-        });
-        if (settled.status === 'error') return platformError(402, settled.error.code, settled.error.message);
-      }
-      return env.DISPATCHER.get(`tenant-${tenant}`).fetch(request);
+    } catch {
+      return platformError(503, 'TENANT_AUTHORITY_UNAVAILABLE', 'Tenant authorization authority is unavailable');
     }
 
     let response: Response;
     try {
-      let dispatchRequest = request;
-      let directServiceRequest: Request | null = null;
-      if (target.service) {
-        const route = await resolveHostedRoute(request, env, tenant);
-        if (route instanceof Response) return route;
-        const headers = new Headers(request.headers);
-        headers.set('x-forwarded-host', url.hostname);
-        headers.set('x-gitspace-signed-target', `${url.pathname}${url.search}`);
-        const machineEndpoint = new URL(route.rpcEndpoint);
-        if (machineEndpoint.hostname === `${tenant}${env.TENANT_HOST_SUFFIX}`) {
-          const tunneled = new URL(request.url);
-          tunneled.pathname = `/tunnel/${encodeURIComponent(route.machineId)}${url.pathname}`;
-          dispatchRequest = new Request(tunneled, { method: request.method, headers, body: request.body, redirect: 'manual' });
-        } else {
-          const direct = new URL(request.url);
-          direct.protocol = machineEndpoint.protocol;
-          direct.host = machineEndpoint.host;
-          directServiceRequest = new Request(direct, { method: request.method, headers, body: request.body, redirect: 'manual' });
-        }
-      }
-      if (directServiceRequest) {
-        response = await fetch(directServiceRequest);
-      } else {
-        const userWorker = env.DISPATCHER.get(
-          `tenant-${tenant}`,
-          {},
-          {
-            limits: {
-              cpuMs: Number(env.DEFAULT_CPU_MS),
-              subRequests: Number(env.DEFAULT_SUBREQUESTS),
-            },
-          },
-        );
-        response = await userWorker.fetch(dispatchRequest);
-      }
-      if (response.webSocket) {
-        if (reservationId) {
-          const now = new Date().toISOString();
-          ctx.waitUntil(credits.settleDispatch({
-            reservationId,
-            ledger: {
-              id: `dispatch:${reservationId}`,
-              resource: 'worker-request',
-              quantity: '1',
-              rateVersion: 'cloudflare-2026-08-27',
-              debitMicros: Number(env.DISPATCH_SETTLEMENT_MICROS),
-              windowStart: now,
-              windowEnd: now,
-              createdAt: now,
-            },
-          }).then((settled) => {
-            if (settled.status === 'error') console.error(JSON.stringify({ event: 'credit-settlement-failed', tenant, code: settled.error.code }));
-          }));
-        }
-        return response;
-      }
+      const userWorker = request.headers.get('upgrade')?.toLowerCase() === 'websocket'
+        ? env.DISPATCHER.get('tenant-' + tenant)
+        : env.DISPATCHER.get('tenant-' + tenant, {}, { limits: { cpuMs: Number(env.DEFAULT_CPU_MS), subRequests: Number(env.DEFAULT_SUBREQUESTS) } });
+      const headers = new Headers(request.headers);
+      headers.delete('x-gitspace-provider-token');
+      headers.delete('x-gitspace-tenant');
+      response = await userWorker.fetch(new Request(request, { headers }));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       console.error(JSON.stringify({ event: 'tenant-dispatch-failed', tenant, hostname: url.hostname, path: url.pathname, message }));
@@ -468,21 +421,7 @@ export default {
         : platformError(502, 'RELAY_DISPATCH_FAILED', 'Tenant relay dispatch failed');
     }
 
-    if (reservationId) {
-      const now = new Date().toISOString();
-      const ledger: CreditLedgerRecord = {
-        id: `dispatch:${reservationId}`,
-        resource: 'worker-request',
-        quantity: '1',
-        rateVersion: 'cloudflare-2026-08-27',
-        debitMicros: Number(env.DISPATCH_SETTLEMENT_MICROS),
-        windowStart: now,
-        windowEnd: now,
-        createdAt: now,
-      };
-      const settled = await credits.settleDispatch({ reservationId, ledger });
-      if (settled.status === 'error') console.error(JSON.stringify({ event: 'credit-settlement-failed', tenant, code: settled.error.code }));
-    }
+    ctx.waitUntil(meterDispatch(env, tenant));
     return response;
   },
 } satisfies ExportedHandler<Env>;

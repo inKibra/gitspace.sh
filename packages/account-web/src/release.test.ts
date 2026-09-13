@@ -1,7 +1,7 @@
 import type { DeploymentStatusView } from '@gitspace/protocol';
 import { describe, expect, it } from 'vitest';
 import { deploymentStatusFixture } from './App.js';
-import { converging, machineConvergence } from './release.js';
+import { converging, machineConvergence, machineRollup, ompRollup } from './release.js';
 
 function splitReleaseStatus(): DeploymentStatusView {
   const record = deploymentStatusFixture.releases[0]!;
@@ -52,5 +52,29 @@ describe('independent target convergence', () => {
     };
     expect(converging(status)).toBe(false);
     expect(machineConvergence(status)).toEqual({ applied: 0, total: 1 });
+  });
+
+  it('converges after a pending machine leaves the current fleet while preserving its historical release results', () => {
+    let status = splitReleaseStatus();
+    status = {
+      ...status,
+      current: { ...status.current, machines: { pending: { sha: 'previous-machine', ompSha: 'previous-omp', generation: 'previous' } } },
+      releases: status.releases.map((record) => ({
+        ...record,
+        status: {
+          ...record.status,
+          machines: record.sha === status.desired.machine ? { ...record.status.machines, pending: 'pending' } : record.status.machines,
+          omps: record.sha === status.desired.omp ? { ...record.status.omps, pending: 'failed' } : record.status.omps,
+        },
+      })),
+    };
+    expect(converging(status)).toBe(true);
+    expect(machineConvergence(status)).toEqual({ applied: 1, total: 2 });
+
+    status = { ...status, current: { ...status.current, machines: {} } };
+    expect(converging(status)).toBe(false);
+    expect(machineConvergence(status)).toEqual({ applied: 1, total: 1 });
+    expect(machineRollup(status.releases[0]!).status).toBe('pending');
+    expect(ompRollup(status.releases[1]!).status).toBe('failed');
   });
 });

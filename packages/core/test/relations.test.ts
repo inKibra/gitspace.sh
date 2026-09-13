@@ -8,13 +8,8 @@ import {
   GitSpaceHandlers,
   LocalArtifactResolver,
   MemoryArtifactObjectStore,
-  normalizeRelations,
-  phaseCeilingViolation,
-  stackChecks,
-  validateStack,
-  type StackWorkspace,
-  type WorkspaceRelations,
 } from '../src/index.js';
+import { normalizeRelations, phaseCeilingViolation, validateStack, type StackWorkspace, type WorkspaceRelations } from '@gitspace/protocol-workspace';
 
 function relations(overrides: Partial<WorkspaceRelations> = {}): WorkspaceRelations {
   return { dependsOn: [], relatedTo: [], stackedOn: null, ...overrides };
@@ -25,9 +20,6 @@ function node(id: string, overrides: Partial<StackWorkspace> = {}): StackWorkspa
 }
 
 describe('validateStack', () => {
-  it('declares the checks as code', () => {
-    expect(stackChecks.map((check) => check.name)).toEqual(['dependency-open', 'dependency-archived', 'phase-ceiling', 'cycle']);
-  });
 
   it('blocks a chain while dependencies stay open and indexes the inverse', () => {
     const stacks = validateStack([
@@ -175,15 +167,15 @@ describe('space relations persistence', () => {
     const many = database.setSpaceRelations('b', { dependsOn: [], relatedTo: [], stackedOn: ['a', 'c'] as unknown as string });
     expect(many.status).toBe('error');
     if (many.status === 'ok') throw new Error('expected error');
-    expect(many.error._tag).toBe('CoreInputError');
+    expect(many.error.code).toBe('WORKSPACE_RELATIONS_INVALID');
     const self = database.setSpaceRelations('b', { dependsOn: [], relatedTo: [], stackedOn: 'b' });
     expect(self.status).toBe('error');
     if (self.status === 'ok') throw new Error('expected error');
-    expect(self.error._tag).toBe('CoreInputError');
+    expect(self.error.code).toBe('WORKSPACE_RELATIONS_INVALID');
     const unknown = database.setSpaceRelations('b', { dependsOn: [], relatedTo: [], stackedOn: 'nope' });
     expect(unknown.status).toBe('error');
     if (unknown.status === 'ok') throw new Error('expected error');
-    expect(unknown.error).toMatchObject({ _tag: 'CoreNotFound', id: 'nope' });
+    expect(unknown.error).toMatchObject({ code: 'WORKSPACE_NOT_FOUND', context: { relatedId: 'nope' } });
     expect(database.getSpaceRelations('b')).toEqual(relations());
     database.close();
   });
@@ -195,7 +187,7 @@ describe('space relations persistence', () => {
     const loop = database.setSpaceRelations('a', { dependsOn: ['c'], relatedTo: [], stackedOn: null });
     expect(loop.status).toBe('error');
     if (loop.status === 'ok') throw new Error('expected error');
-    expect(loop.error).toMatchObject({ _tag: 'CoreInputError', message: 'Dependency cycle: a → c → b → a' });
+    expect(loop.error).toMatchObject({ code: 'WORKSPACE_DEPENDENCY_CYCLE', context: { workspaceId: 'a', cycle: 'a,c,b,a' } });
     expect(database.getSpaceRelations('a')).toEqual(relations());
     // Re-saving an existing acyclic edge set is not a cycle with itself.
     expect(database.setSpaceRelations('c', { dependsOn: ['b'], relatedTo: ['a'], stackedOn: null }).status).toBe('ok');
@@ -207,11 +199,11 @@ describe('space relations persistence', () => {
     const self = database.setSpaceRelations('a', { dependsOn: ['a'], relatedTo: [], stackedOn: null });
     expect(self.status).toBe('error');
     if (self.status === 'ok') throw new Error('expected error');
-    expect(self.error._tag).toBe('CoreInputError');
+    expect(self.error.code).toBe('WORKSPACE_RELATIONS_INVALID');
     const foreign = database.setSpaceRelations('a', { dependsOn: ['x'], relatedTo: [], stackedOn: null });
     expect(foreign.status).toBe('error');
     if (foreign.status === 'ok') throw new Error('expected error');
-    expect(foreign.error).toMatchObject({ _tag: 'CoreNotFound', id: 'x' });
+    expect(foreign.error).toMatchObject({ code: 'WORKSPACE_NOT_FOUND', context: { relatedId: 'x' } });
     const base = database.setSpaceRelations('a', { dependsOn: [], relatedTo: ['p1'], stackedOn: null });
     expect(base.status).toBe('error');
     const missing = database.setSpaceRelations('nope', { dependsOn: [], relatedTo: [], stackedOn: null });

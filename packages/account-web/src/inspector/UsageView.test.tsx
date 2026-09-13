@@ -1,50 +1,69 @@
+// @vitest-environment happy-dom
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import type { SessionUsageReport } from '@gitspace/protocol';
 import { UsageView } from './UsageView.js';
 
-function totals(overrides: Partial<SessionUsageReport['totals']> = {}): SessionUsageReport['totals'] {
-  return { requests: 3, input: 12_000, output: 2_500, cacheRead: 40_000, cacheWrite: 1_000, totalTokens: 55_500, reasoningTokens: 400, costUsd: 0.4321, ...overrides };
+function totals(requests: number, input: number, costUsd: number): SessionUsageReport['totals'] {
+  return { requests, input, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: input, reasoningTokens: 0, costUsd };
 }
 function reportFixture(): SessionUsageReport {
   return {
-    sessionId: 'session-a',
-    totals: totals(),
-    totalsDeep: totals({ requests: 7, totalTokens: 120_000, costUsd: 1.25 }),
-    childSessions: 2,
-    byModel: [{ provider: 'anthropic', model: 'claude-fable-5-1', totals: totals() }],
-    byRole: [{ role: 'default', models: ['claude-fable-5-1'], totals: totals() }],
-    byAgent: [{ agentId: 'agent-1', agent: 'scout', selection: 'pinned', model: 'claude-haiku', spawns: 2, firstAt: '2026-09-01T08:00:00.000Z', lastAt: '2026-09-02T09:30:00.000Z', totals: totals({ costUsd: 0.0042, totalTokens: 900 }) }],
-    warnings: ['1 child transcript was missing; parent spawn usage was used instead.'],
+    sessionId: 'session-a', totals: totals(1, 100, 0.1), totalsDeep: totals(3, 300, 0.6), childSessions: 2,
+    byModel: [{ provider: 'provider', model: 'historical-model', totals: totals(3, 300, 0.6) }],
+    byRole: [{ role: 'smol', models: ['historical-model'], totals: totals(1, 100, 0.2) }, { role: null, models: ['historical-model'], totals: totals(2, 200, 0.4) }],
+    byAgent: [
+      { agentId: 'agent-1', agent: 'scout', selection: 'role', role: 'smol', provider: 'provider', model: 'historical-model', definitionSource: 'project', definitionPath: '.omp/agents/scout.md', definitionRevision: 'recorded-revision', spawns: 1, firstAt: null, lastAt: null, totals: totals(1, 100, 0.2) },
+      { agentId: 'agent-2', agent: 'legacy', selection: 'unknown', role: null, provider: 'provider', model: 'historical-model', definitionSource: null, definitionPath: null, definitionRevision: null, spawns: 1, firstAt: null, lastAt: null, totals: totals(1, 100, 0.3) },
+    ],
+    byCompletion: [{ kind: 'completion', role: null, provider: 'provider', model: 'historical-model', totals: totals(1, 100, 0.1) }], warnings: [],
   };
 }
 const noop = (): void => undefined;
+function rendered(status: 'ready' | 'loading' | 'error', error?: string): HTMLDivElement {
+  const container = document.createElement('div');
+  container.innerHTML = renderToStaticMarkup(<UsageView sessionId="session-a" report={reportFixture()} status={status} error={error} onLoad={noop} onRefresh={noop} />);
+  return container;
+}
+function section(container: HTMLElement, title: string): HTMLElement {
+  const found = [...container.querySelectorAll('section')].find((node) => node.querySelector('h3')?.textContent === title);
+  if (!found) throw new Error(`Missing usage section: ${title}`);
+  return found;
+}
 
 describe('UsageView', () => {
-  it('renders totals, buckets, and every breakdown from a ready report', () => {
-    const html = renderToStaticMarkup(<UsageView sessionId="session-a" report={reportFixture()} status="ready" onLoad={noop} onRefresh={noop} />);
-    expect(html).toContain('Session usage');
-    expect(html).toContain('aria-label="Refresh usage"');
-    expect(html).toContain('$0.43');
-    expect(html).toContain('$1.25');
-    expect(html).toContain('2 sub-sessions');
-    expect(html).toContain('Cache read');
-    expect(html).toContain('By provider · model');
-    expect(html).toContain('claude-fable-5-1');
-    expect(html).toContain('By role');
-    expect(html).toContain('By subagent');
-    expect(html).toContain('pinned');
-    expect(html).toContain('$0.0042');
-    expect(html).toContain('child transcript was missing');
+  it('shows the combined tree while keeping root, child, and direct-call scope distinct', () => {
+    const container = rendered('ready');
+    const firstCost = container.textContent?.indexOf('$0.60') ?? -1;
+    expect(firstCost).toBeGreaterThan(-1);
+    expect(firstCost).toBeLessThan(container.textContent!.indexOf('$0.10'));
+    const scopes = [...section(container, 'Session scope').querySelectorAll('tbody tr')].map((row) => row.textContent);
+    expect(scopes[0]).toContain('$0.10');
+    expect(scopes[1]).toContain('$0.50');
+    const bucket = section(container, 'Token buckets · entire tree').querySelector('tbody tr');
+    expect(bucket?.textContent).toContain('300');
+    const definitions = section(container, 'By agent definition');
+    expect(definitions.querySelectorAll('tbody tr')).toHaveLength(2);
+    expect(definitions.textContent).not.toContain('completion');
+    expect(section(container, 'Direct model calls').textContent).toContain('$0.10');
   });
-  it('shows a retry action on error and a load action while idle', () => {
-    const error = renderToStaticMarkup(<UsageView sessionId="session-a" report={null} status="error" error="transcript unreadable" onLoad={noop} onRefresh={noop} />);
-    expect(error).toContain('transcript unreadable');
-    expect(error).toContain('Retry');
-    const idle = renderToStaticMarkup(<UsageView sessionId="session-a" report={null} status="idle" onLoad={noop} onRefresh={noop} />);
-    expect(idle).toContain('Load usage');
-    const none = renderToStaticMarkup(<UsageView sessionId={null} report={null} status="idle" onLoad={noop} onRefresh={noop} />);
-    expect(none).toContain('No live session');
-    expect(none).not.toContain('Refresh usage');
+
+  it('keeps historical role and actual model together and does not guess missing provenance', () => {
+    const rows = [...section(rendered('ready'), 'By agent definition').querySelectorAll('tbody tr')];
+    expect(rows[0]?.textContent).toContain('Role: smol');
+    expect(rows[0]?.textContent).toContain('historical-model');
+    expect(rows[0]?.textContent).toContain('.omp/agents/scout.md');
+    expect(rows[1]?.textContent).toContain('Not recorded');
+    expect(rows[1]?.textContent).not.toContain('default');
+  });
+
+  it('retains a loaded report through refresh and exposes its refresh error alongside the figures', () => {
+    const loading = rendered('loading');
+    expect(section(loading, 'By agent definition').textContent).toContain('historical-model');
+    expect(loading.querySelector<HTMLButtonElement>('[aria-label="Refresh usage"]')?.disabled).toBe(true);
+    const failed = rendered('error', 'transcript unreadable');
+    expect(section(failed, 'By agent definition').textContent).toContain('historical-model');
+    expect(failed.querySelector('[role="alert"]')?.textContent).toContain('transcript unreadable');
+    expect(failed.querySelector<HTMLButtonElement>('[aria-label="Refresh usage"]')?.disabled).toBe(false);
   });
 });

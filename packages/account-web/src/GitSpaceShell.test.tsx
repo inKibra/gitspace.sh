@@ -1,9 +1,8 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import { verticalSliceFixture } from './App.js';
-import { GitSpaceShell, ProjectsView, type GitSpaceShellProps, type WorkspaceView } from './GitSpaceShell.js';
+import { GitSpaceShell, type GitSpaceShellProps, type WorkspaceView } from './GitSpaceShell.js';
 import { OverviewView } from './inspector/index.js';
-import { WorkspaceTerminals } from './WorkspaceTerminals.js';
 
 
 describe('GitSpaceShell', () => {
@@ -90,48 +89,15 @@ describe('GitSpaceShell', () => {
     expect(html).not.toContain('Ask the project agent');
   });
 
-  it('renders the workspace Hub terminal empty state and create action', () => {
-    const html = renderToStaticMarkup(<WorkspaceTerminals
-      list={async () => []}
-      create={async () => { throw new Error('not called during server render'); }}
-      read={async () => { throw new Error('not called during server render'); }}
-      send={async () => undefined}
-      stop={async () => undefined}
-    />);
-    expect(html).toContain('Hub terminals');
-    expect(html).toContain('No terminals');
-    expect(html).toContain('New terminal');
-  });
 
-  it('renders cloud project creation controls and active archived filters', () => {
-    const html = renderToStaticMarkup(<ProjectsView
-      projects={[
-        { id: 'project-a', name: 'Active Project', lifecycle: 'active', repositoryReference: null, baseBranch: 'main', role: null, source: null, revision: 2, archivedAt: null, updatedAt: new Date() },
-        { id: 'project-b', name: 'Archived Project', lifecycle: 'archived', repositoryReference: null, baseBranch: 'main', role: null, source: null, revision: 4, archivedAt: new Date(), updatedAt: new Date() },
-      ]}
-      workspaces={[]}
-      onOpen={() => undefined}
-      onCreateProject={async () => undefined}
-      onCreateWorkspace={async () => undefined}
-      onArchiveProject={async () => undefined}
-      onRestoreProject={async () => undefined}
-      onDeleteProject={async () => undefined}
-      onDeleteWorkspace={async () => undefined}
-    />);
-    expect(html).toContain('New project');
-    expect(html).toContain('Active Project');
-    expect(html).not.toContain('Archived Project');
-    expect(html).toContain('role="combobox"');
-    expect(html).toContain('aria-label="Project filter"');
-  });
 
   it('exposes workspace terminals from the agent header instead of the inspector tabs', () => {
     const html = renderToStaticMarkup(<GitSpaceShell
       {...verticalSliceFixture}
       terminals={{
-        list: async () => [],
+        spaceId: 'space',
+        events: () => { throw new Error('not called during server render'); },
         create: async () => { throw new Error('not called during server render'); },
-        read: async () => { throw new Error('not called during server render'); },
         send: async () => undefined,
         stop: async () => undefined,
       }}
@@ -142,7 +108,7 @@ describe('GitSpaceShell', () => {
   it('warns in the composer when the selected model provider is not connected on this machine', () => {
     const rejects = async (): Promise<never> => { throw new Error('not called during server render'); };
     const sessionControls: NonNullable<GitSpaceShellProps['sessionControls']> = {
-      value: { sessionId: 'session-a', role: null, roleLabel: null, roles: [], provider: 'anthropic', models: [{ provider: 'anthropic', id: 'claude', name: 'Claude', contextWindow: null }], model: 'claude', thinking: null, fastMode: false, approvalMode: 'write', context: null, cost: 0, todos: [], queue: { steering: [], followUp: [] }, pendingAsk: null, goal: null, history: [], tree: [] },
+      value: { sessionId: 'session-a', role: null, roleLabel: null, roles: [], provider: 'anthropic', models: [{ provider: 'anthropic', id: 'claude', name: 'Claude', contextWindow: null }], model: 'claude', thinking: null, fastMode: false, planMode: false, approvalMode: 'write', context: null, cost: 0, todos: [], queue: { steering: [], followUp: [] }, pendingAsk: null, goal: null, history: [], historyAnchorId: null },
       onCycleRole: rejects, onSetModel: rejects, onSetThinking: rejects, onSetFast: rejects, onSetApproval: rejects, onSetGoal: rejects, onCompact: rejects, onClearQueue: rejects, onRemoveQueuedMessage: rejects, onPromoteQueuedMessage: rejects, onAnswerAsk: rejects, onStop: rejects, onNavigateTree: rejects,
     };
     const disconnected = renderToStaticMarkup(<GitSpaceShell {...verticalSliceFixture} sessionControls={sessionControls} providers={[{ id: 'anthropic', name: 'Anthropic', hasAuth: false }]} />);

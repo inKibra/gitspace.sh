@@ -6,7 +6,7 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { createGzip } from 'node:zlib';
 import { buildInitialRuntime, workspaceSha } from './builders.js';
-import { prepareRuntimeLocks } from './runtime-packaging.js';
+import { prepareOmpRuntimeArtifact } from '../../account-omp/src/runtime-recipe.js';
 import { OMP_IPC_VERSION, OmpRpcPeer, type OmpChildApi } from '../../account-omp/src/ipc.js';
 import {
   DISTRIBUTION_BUN_VERSION,
@@ -160,8 +160,10 @@ async function minimumGlibc(root: string, files: DistributionFile[], client: str
 async function probeOmpRuntime(runtime: string, scratch: string): Promise<void> {
   const home = join(scratch, 'probe-home');
   await mkdir(home);
+  const cacheRoot = join(scratch, 'probe-omp-cache');
+  const entrypoint = await prepareOmpRuntimeArtifact(join(runtime, 'omp'), { cacheRoot });
   const rpc = new OmpRpcPeer<OmpChildApi, Record<string, never>>((message) => child.send(message), {});
-  const child = Bun.spawn([join(runtime, 'bin/bun'), join(runtime, 'omp/omp.js')], {
+  const child = Bun.spawn([join(runtime, 'bin/bun'), entrypoint], {
     cwd: runtime,
     env: { HOME: home, XDG_CONFIG_HOME: home, TMPDIR: home, PATH: `${join(runtime, 'bin')}:/usr/bin:/bin:/usr/sbin:/sbin` },
     stdout: 'inherit', stderr: 'inherit',
@@ -180,18 +182,16 @@ async function probeOmpRuntime(runtime: string, scratch: string): Promise<void> 
   }
 }
 
-export async function buildDistribution(options: { release: string; output: string; runtimeLocks: string; platform?: string }): Promise<string> {
+export async function buildDistribution(options: { release: string; output: string; platform?: string }): Promise<string> {
   requireBun();
   const platform = currentDistributionPlatform();
   if (options.platform && options.platform !== platform) {
-    throw new Error(`Cannot build ${options.platform} on ${platform}: OMP, ONNX, sherpa, sharp, walgit and Bun must match the native runner. Use macos-15 (darwin-arm64), macos-15-intel (darwin-x64), ubuntu-24.04 (linux-x64), or ubuntu-24.04-arm (linux-arm64).`);
+    throw new Error(`Cannot build ${options.platform} on ${platform}: native SDK addons, walgit and Bun must match the native runner. Use macos-15 (darwin-arm64), macos-15-intel (darwin-x64), ubuntu-24.04 (linux-x64), or ubuntu-24.04-arm (linux-arm64).`);
   }
   if (platform.startsWith('linux-')) currentGlibcVersion();
   const release = distributionReleaseSchema.parse(options.release);
   const revision = await workspaceSha(ROOT);
   const output = resolve(options.output);
-  const locks = resolve(options.runtimeLocks);
-  for (const name of ['memory', 'tts']) await readFile(join(locks, name, 'bun.lock'));
   await mkdir(dirname(output), { recursive: true });
   const staging = await mkdtemp(join(dirname(output), '.distribution-build-'));
   try {
@@ -201,7 +201,7 @@ export async function buildDistribution(options: { release: string; output: stri
     const client = join(artifacts, 'gitspace');
     const bun = await packageBun(platform, staging);
     await compileClient(platform, bun, client);
-    const initial = await buildInitialRuntime(ROOT, runtime, locks);
+    const initial = await buildInitialRuntime(ROOT, runtime);
     await mkdir(join(runtime, 'bin'));
     // A genuine private Bun preserves process.execPath for machine/OMP/worker children; no global runtime or special execution environment is required.
     await cp(bun, join(runtime, 'bin/bun'));
@@ -229,10 +229,7 @@ export async function buildDistribution(options: { release: string; output: stri
       schemaVersion: 1, release, platform, sourceRevision: revision, bunVersion: Bun.version,
       bunAsset: BUN_ASSETS[platform],
       sourceLock: await digest(join(ROOT, 'bun.lock')),
-      runtimeLocks: Object.fromEntries(await Promise.all(['memory', 'tts'].map(async (name) => [name, {
-        package: JSON.parse(await readFile(join(locks, name, 'package.json'), 'utf8')) as unknown,
-        lock: await readFile(join(locks, name, 'bun.lock'), 'utf8'),
-      }]))),
+      ompRecipe: JSON.parse(await readFile(join(runtime, 'omp/omp-runtime.json'), 'utf8')) as unknown,
       walgit: { repository: 'https://github.com/tobi/walgit.git', revision: WALGIT_REVISION, rustVersion: RUST_VERSION },
       machine: { treeHash: initial.machine.hash, manifestHash: initial.machine.manifestHash },
       omp: { treeHash: initial.omp.hash, manifestHash: initial.omp.manifestHash, metadata: initial.omp.metadata },
@@ -314,13 +311,7 @@ if (import.meta.main) {
     if (!value || value.startsWith('--')) throw new Error(`${name} requires a value`);
     return value;
   };
-  if (operation === 'locks') {
-    requireBun();
-    const output = option('--out');
-    if (!output) throw new Error('Usage: bun packages/deployment/src/release.ts locks --out <retained-lock-directory>');
-    await prepareRuntimeLocks(ROOT, resolve(output));
-    console.log(`Retain and distribute this exact runtime lock set to every native runner: ${resolve(output)}`);
-  } else if (operation === 'client') {
+  if (operation === 'client') {
     const output = option('--out');
     if (!output) throw new Error('Usage: bun packages/deployment/src/release.ts client --out <client-path>');
     await buildClient(resolve(output));
@@ -328,15 +319,14 @@ if (import.meta.main) {
   } else if (operation === 'build') {
     const release = option('--release');
     const output = option('--out');
-    const runtimeLocks = option('--runtime-locks');
-    if (!release || !output || !runtimeLocks) throw new Error('Usage: bun packages/deployment/src/release.ts build --release <immutable-id> --runtime-locks <retained-lock-directory> --out <new-platform-directory> [--platform <native-platform>]');
-    console.log(await buildDistribution({ release, output, runtimeLocks, platform: option('--platform') }));
+    if (!release || !output) throw new Error('Usage: bun packages/deployment/src/release.ts build --release <immutable-id> --out <new-platform-directory> [--platform <native-platform>]');
+    console.log(await buildDistribution({ release, output, platform: option('--platform') }));
   } else if (operation === 'publish') {
     const directory = option('--from');
     if (!directory) throw new Error('Usage: bun packages/deployment/src/release.ts publish --from <platform-directory> [--activate]');
     await publishDistribution(resolve(directory), args.includes('--activate'));
     console.log(args.includes('--activate') ? 'Release published and platform channel activated.' : 'Immutable release published; channel unchanged. Repeat with --activate after acceptance.');
   } else {
-    throw new Error('Expected locks, client, build, or publish. Native runners: darwin-arm64 (macos-15), darwin-x64 (macos-15-intel), linux-x64 (ubuntu-24.04), linux-arm64 (ubuntu-24.04-arm).');
+    throw new Error('Expected client, build, or publish. Native runners: darwin-arm64 (macos-15), darwin-x64 (macos-15-intel), linux-x64 (ubuntu-24.04), linux-arm64 (ubuntu-24.04-arm).');
   }
 }

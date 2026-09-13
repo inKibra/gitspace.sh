@@ -156,6 +156,15 @@ function SidebarSheet({ side, open, onClose, children }: SidebarSheetProps) {
                 style={{
                   ...(baseStyle as CSSProperties | undefined),
                   width: widthMobile,
+                  // This body portal shares an app's visual viewport, when
+                  // supplied, but reserves its safe areas at its own boundary.
+                  top: "var(--app-viewport-top, 0px)",
+                  bottom: "auto",
+                  height: "var(--app-viewport-height, 100dvh)",
+                  paddingTop: "var(--app-safe-area-inset-top, env(safe-area-inset-top, 0px))",
+                  paddingRight: "env(safe-area-inset-right, 0px)",
+                  paddingBottom: "var(--app-safe-area-inset-bottom, env(safe-area-inset-bottom, 0px))",
+                  paddingLeft: "env(safe-area-inset-left, 0px)",
                 }}
                 initial={{ x: offscreen }}
                 // spring.moderate: critically damped, so the panel decelerates
@@ -216,7 +225,7 @@ const Sidebar = forwardRef<HTMLDivElement, SidebarProps>(
           data-variant={variant}
           data-side={side}
           className={cn(
-            "peer sticky top-0 flex h-svh shrink-0 flex-col",
+            "peer sticky top-0 flex h-dvh max-h-full shrink-0 flex-col",
             side === "right" && "order-last",
             className
           )}

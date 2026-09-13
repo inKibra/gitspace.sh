@@ -13,7 +13,9 @@ function sandbox() {
   const records = new Map<string, unknown>([['gitspace:managed-enrollment', {
     userId: 'user-a', machineId: 'sandbox-a', environment: { GITSPACE_CONTROL_URL: 'https://api.example' },
   }]]);
-  const runtime = new GitSpaceSandbox({ storage: {
+  const fetch = vi.fn(async (_request: Request) => Response.json({ error: { code: 'RPC_DRAINING' } }, { status: 503 }));
+  const container = { running: true, getTcpPort: vi.fn(() => ({ fetch })) };
+  const runtime = new GitSpaceSandbox({ container, storage: {
     get: async (key: string) => records.get(key),
     put: async (key: string, value: unknown) => { records.set(key, value); },
   } } as never, { SANDBOX_HOSTNAME: 'sandbox.example' } as never);
@@ -25,7 +27,7 @@ function sandbox() {
     startProcess: vi.fn(async () => {}),
   };
   Object.assign(runtime, methods);
-  return { runtime, records, methods };
+  return { runtime, records, methods, container, fetch };
 }
 
 describe('managed runtime startup', () => {
@@ -55,6 +57,28 @@ describe('managed runtime startup', () => {
     expect(await runtime.statusMachine()).toMatchObject({ state: 'offline', desiredState: 'offline' });
     expect(methods.exec).not.toHaveBeenCalled();
     expect(methods.getProcess).not.toHaveBeenCalled();
+    expect(methods.startAndWaitForPorts).not.toHaveBeenCalled();
+  });
+
+  it('never starts a holder that stopped after the directory reported it online', async () => {
+    const { runtime, records, container, fetch, methods } = sandbox();
+    records.set('gitspace:machine-record', { id: 'sandbox-a', state: 'online', desiredState: 'online' });
+    container.running = false;
+    const response = await runtime.rpc(new Request('http://localhost/rpc', { method: 'POST', body: 'signed read' }));
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({ error: { code: 'MACHINE_OFFLINE' } });
+    expect(fetch).not.toHaveBeenCalled();
+    expect(methods.startAndWaitForPorts).not.toHaveBeenCalled();
+    expect(methods.exec).not.toHaveBeenCalled();
+  });
+
+  it('preserves a live host rejection without the SDK replaying or restarting the RPC', async () => {
+    const { runtime, records, fetch, methods } = sandbox();
+    records.set('gitspace:machine-record', { id: 'sandbox-a', state: 'online', desiredState: 'online' });
+    const response = await runtime.rpc(new Request('http://localhost/rpc', { method: 'POST', body: 'signed mutation' }));
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({ error: { code: 'RPC_DRAINING' } });
+    expect(fetch).toHaveBeenCalledOnce();
     expect(methods.startAndWaitForPorts).not.toHaveBeenCalled();
   });
 });

@@ -1,4 +1,5 @@
-import { transitiveDependents, type StackStatus } from '@gitspace/protocol';
+import type { StackStatus } from '@gitspace/protocol';
+import { transitiveDependents } from '@gitspace/protocol-workspace';
 import {
   Badge,
   Button,

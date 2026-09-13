@@ -75,7 +75,11 @@ describe('OMP release pipeline', () => {
     expect(envelope.byteLength).toBe(record.artifacts.omp!.size);
     const manifest = executableArtifactManifestSchema.parse(JSON.parse(new TextDecoder().decode(envelope)));
     expect(manifest.files.some((file) => file.path.startsWith('drizzle/') || file.path === 'machine.js')).toBe(false);
-    expect(manifest.files.some((file) => file.path.endsWith('.node'))).toBe(true);
+    expect(manifest.files.some((file) => file.path.endsWith('.node') || file.path.split('/').includes('node_modules'))).toBe(false);
+    expect(manifest.files.map((file) => file.path)).toEqual(expect.arrayContaining([
+      'omp.js', 'omp-adapter.js', 'package.json', 'bun.lock', 'omp-runtime.json',
+    ]));
+    expect(manifest.files.reduce((bytes, file) => bytes + file.size, 0)).toBeLessThan(5 * 1024 * 1024);
     for (const file of manifest.files) {
       const bytes = new Uint8Array(file.size);
       let offset = 0;
@@ -87,6 +91,12 @@ describe('OMP release pipeline', () => {
       }
       expect(sha256(bytes)).toBe(file.hash);
       expect(offset).toBe(file.size);
+      if (file.path === 'omp-runtime.json') {
+        const recipe = JSON.parse(new TextDecoder().decode(bytes));
+        expect(recipe.packageHash).toBe(manifest.files.find((entry) => entry.path === 'package.json')!.hash);
+        expect(recipe.lockHash).toBe(manifest.files.find((entry) => entry.path === 'bun.lock')!.hash);
+        expect(recipe.upstreamVersion).toBe(record.omp!.upstreamVersion);
+      }
     }
     expect(objects.has(keys.machine)).toBe(false);
   }, 120_000);

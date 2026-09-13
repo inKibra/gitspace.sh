@@ -1,4 +1,5 @@
 import { GitSpaceMarkdownRenderer } from './GitSpaceMarkdownRenderer.js';
+import { ResourceLinkSurface } from './ResourceNavigation.js';
 
 export interface GitSpaceMarkdownProps {
   children: string;
@@ -7,5 +8,5 @@ export interface GitSpaceMarkdownProps {
 }
 
 export function GitSpaceMarkdown(props: GitSpaceMarkdownProps) {
-  return <GitSpaceMarkdownRenderer {...props} />;
+  return <ResourceLinkSurface><GitSpaceMarkdownRenderer {...props} /></ResourceLinkSurface>;
 }

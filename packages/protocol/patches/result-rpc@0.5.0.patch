@@ -1,0 +1,60 @@
+diff --git a/dist/client/client.js b/dist/client/client.js
+index 8e5b9ae29883760341e55dd1bf5ec9f8a8580281..b4c21fefcc9736424d9f12ee7919955281f4a7e9 100644
+--- a/dist/client/client.js
++++ b/dist/client/client.js
+@@ -60,6 +60,8 @@ const createSkewMonitor = (contract, onEvent) => {
+ 	};
+ 	return {
+ 		reconcile: (result, serverContract) => {
++			// Gateway failures have no RPC contract to negotiate.
++			if (!result.isOk() && ClientHttpFailure.is(result.error)) return result;
+ 			if (typeof serverContract !== "string" || serverContract.trim().length === 0) return err(ClientProtocolViolation({ reason: "version" }));
+ 			if (!mismatch(serverContract)) return result;
+ 			if (!result.isOk() && STALE_RECLASSIFIABLE_TAGS.has(result.error._tag)) return err(ClientStale({ reclassifiedFrom: result.error._tag }));
+@@ -198,15 +200,15 @@ const subscribeProcedure = (procedure, path, input, transport, onEvent, skew, op
+ 				await response.body.cancel();
+ 			} catch {}
+ 		};
+-		const handshake = skew.reconcileStream(response.contract);
+-		if (!handshake.isOk()) {
++		if (response.status < 200 || response.status >= 300 || !isStreamContentType(response.contentType) || !response.body) {
+ 			await cancelBody();
+-			yield handshake;
++			yield err(response.status >= 400 ? ClientHttpFailure({ status: response.status }) : ClientProtocolViolation({ reason: "content-type" }));
+ 			return;
+ 		}
+-		if (response.status < 200 || response.status >= 300 || !isStreamContentType(response.contentType) || !response.body) {
++		const handshake = skew.reconcileStream(response.contract);
++		if (!handshake.isOk()) {
+ 			await cancelBody();
+-			yield err(response.status >= 400 ? ClientHttpFailure({ status: response.status }) : ClientProtocolViolation({ reason: "content-type" }));
++			yield handshake;
+ 			return;
+ 		}
+ 		const reader = response.body.getReader();
+@@ -228,10 +230,6 @@ const subscribeProcedure = (procedure, path, input, transport, onEvent, skew, op
+ 				if (signal.aborted) throw cancelled;
+ 				if (chunk.done) sourceClosed = true;
+ 				buffer += decoder.decode(chunk.value, { stream: !chunk.done });
+-				if (new TextEncoder().encode(buffer).byteLength > 1048576) {
+-					yield err(ClientProtocolViolation({ reason: "envelope" }));
+-					return;
+-				}
+ 				const lines = buffer.split("\n");
+ 				buffer = lines.pop() ?? "";
+ 				for (const line of lines) {
+@@ -247,6 +245,13 @@ const subscribeProcedure = (procedure, path, input, transport, onEvent, skew, op
+ 					yield result;
+ 					if (!result.isOk()) return;
+ 				}
++				// HTTP reads may contain many frames; deserialize caps each complete
++				// frame above. Only the unfinished frame belongs to this buffer cap.
++				if (new TextEncoder().encode(buffer).byteLength > 1048576) {
++					yield err(ClientProtocolViolation({ reason: "envelope" }));
++					return;
++				}
+ 				if (chunk.done) {
+-					yield err(ClientProtocolViolation({ reason: "envelope" }));
++					// EOF without a terminal frame is an interrupted transport.
++					yield err(ClientNetworkFailure({ retryable: false }));
+ 					return;

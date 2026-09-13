@@ -1,6 +1,6 @@
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { projectRepositoryPrefix } from '@gitspace/protocol/space-checkpoint';
+import { projectRepositoryPrefix } from '@gitspace/protocol-workspace';
 
 export interface WalgitTemporaryCredentials {
   accessKeyId: string;
@@ -118,7 +118,7 @@ export class WalgitSupervisor {
     checkpointRef: string;
   }): Promise<void> {
     const url = await this.ensureRunning(input.binding);
-    await git(input.repositoryPath, ['fetch', projectRemote(url, input.binding.projectId), `${input.checkpointRef}:${input.checkpointRef}`]);
+    await git(input.repositoryPath, ['fetch', '--no-write-fetch-head', projectRemote(url, input.binding.projectId), `${input.checkpointRef}:${input.checkpointRef}`]);
   }
 
   async stopProject(projectId: string): Promise<void> {

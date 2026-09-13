@@ -1,17 +1,11 @@
 import { useEffect, useState } from 'react';
 import { Badge, Button, Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle, InputCopy } from '@gitspace/ui';
-import { credentialAuthorityGrantPayload, encodeMachinePairingToken, type DeviceGrantRecord } from '@gitspace/protocol';
+import { credentialAuthorityGrantPayload, encodeMachinePairingToken, type DeviceGrantRecord, type MachinePairingToken } from '@gitspace/protocol';
 import { credentialProtocolBase64, type CredentialAuthorityGrant, type SignedCredentialAuthorityGrant } from '@gitspace/protocol/credential-vault';
 import { createDeviceSignedFetch, DeviceRejectedError, loadDevice } from './device.js';
 import type { SettingsMachineView } from './SettingsPage.js';
 
-interface Pairing {
-  pairingId: string;
-  token: string;
-  expiresAt: number;
-  userId: string;
-  operatorUrl: string;
-}
+type Pairing = Omit<MachinePairingToken, 'version'>;
 interface PairingStatus {
   pairingId: string;
   state: 'created' | 'claimed' | 'approved' | 'enrolled' | 'cancelled';
@@ -24,7 +18,7 @@ const signedFetch = createDeviceSignedFetch(loadDevice, code => { throw new Devi
 async function requestPairing<T>(action: string, payload: object, signal?: AbortSignal): Promise<T> {
   const device = await loadDevice();
   if (!device) throw new Error('Reconnect this browser to your account before adding a machine.');
-  const response = await signedFetch(new URL(`/v1/machine-pairings/${action}`, device.enrollUrl), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...payload, userId: device.userId }), signal });
+  const response = await signedFetch(new URL(`/v1/machine-pairings/${action}`, window.location.origin), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...payload, userId: device.userId }), signal });
   const result = await response.json() as { status: string; value: T; error?: { message?: string } };
   if (!response.ok || result.status !== 'ok') throw new Error(result.error?.message ?? `Pairing request failed (HTTP ${response.status})`);
   return result.value;
@@ -64,8 +58,8 @@ export function AddMachinePanel({ machines, onClose }: { machines: readonly Sett
     try {
       const device = await loadDevice();
       if (!device?.canDelegate) throw new Error('This browser cannot authorize machines. Recover your account in the browser to obtain an account-wide device grant.');
-      const created = await requestPairing<Omit<Pairing, 'userId' | 'operatorUrl'>>('create', {});
-      setPairing({ ...created, userId: device.userId, operatorUrl: new URL(device.enrollUrl).origin + '/' });
+      const created = await requestPairing<Omit<Pairing, 'userId' | 'apiUrl'>>('create', {});
+      setPairing({ ...created, userId: device.userId, apiUrl: new URL('/', window.location.origin).href });
       setStatus(null);
       setExpired(false);
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not create pairing command'); }

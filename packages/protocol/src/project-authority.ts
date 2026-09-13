@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { AgentHealthStateSchema, AgentLifecycleStateSchema, SessionActivitySchema } from '@gitspace/protocol-agent';
 
 export const projectLifecycleSchema = z.enum([
   'cloud-only',
@@ -104,21 +105,12 @@ export const canonicalSessionSchema = z.object({
   workspaceId: z.string().min(1).max(160),
   ompSessionId: z.string().min(1).max(160),
   machineId: z.string().min(1).max(160).nullable(),
-  state: z.enum(['opening', 'active', 'draining', 'closed', 'failed']),
+  state: AgentLifecycleStateSchema,
   sessionObjectKey: z.string().min(1).max(2_048).nullable(),
   sessionObjectHash: z.string().regex(/^sha256:[a-f0-9]{64}$/u).nullable(),
   sessionFormatVersion: z.string().min(1).max(64).nullable(),
-  activity: z.object({
-    active: z.boolean(),
-    reasons: z.array(z.discriminatedUnion('kind', [
-      z.object({ kind: z.literal('turn') }),
-      z.object({ kind: z.literal('compacting') }),
-      z.object({ kind: z.literal('retry'), attempt: z.number().int(), next: z.number() }),
-      z.object({ kind: z.literal('human'), questions: z.number().int(), permissions: z.number().int() }),
-      z.object({ kind: z.literal('queued'), steering: z.number().int(), followUp: z.number().int() }),
-      z.object({ kind: z.literal('subagents'), count: z.number().int() }),
-    ])),
-  }),
+  activity: SessionActivitySchema,
+  health: AgentHealthStateSchema,
   revision: z.number().int().positive(),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
@@ -163,6 +155,7 @@ export type HostedServiceRoute = z.infer<typeof hostedServiceRouteSchema>;
 
 export const projectEventSchema = z.object({
   offset: z.number().int().positive(),
+  eventId: z.string().min(1).max(256),
   scope: z.enum(['machine', 'project', 'workspace', 'session', 'artifact', 'code']),
   entity: z.string().min(1).max(160),
   entityId: z.string().min(1).max(160),

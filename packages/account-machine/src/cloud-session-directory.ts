@@ -24,6 +24,10 @@ export class CloudCanonicalSessionWriter {
     private readonly onError: (error: unknown) => void,
   ) {}
 
+  get(projectId: string, sessionId: string): Promise<CanonicalSession | null> {
+    return this.authority.getCanonicalSession(projectId, sessionId);
+  }
+
   put(projectId: string, machineId: string, session: AgentSession, checkpoint = false): void {
     this.pending = this.pending
       .then(async () => {
@@ -51,6 +55,7 @@ export class CloudCanonicalSessionWriter {
           sessionObjectHash,
           sessionFormatVersion: sessionObjectKey ? 'omp-jsonl-1' : null,
           activity: session.activity,
+          health: session.health,
           expectedRevision: current?.revision ?? 0,
         });
       })

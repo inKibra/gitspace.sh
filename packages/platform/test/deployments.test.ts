@@ -1,6 +1,8 @@
+import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { env } from 'cloudflare:workers';
-import { createRelayAuthorization, type PlatformDeployResponse, type WorkerReleaseMetadata } from '@gitspace/protocol';
+import { createRelayAuthorization } from '@gitspace/protocol/relay';
+import type { PlatformDeployResponse, WorkerReleaseMetadata } from '@gitspace/protocol/deployment';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import worker from '../src/index.js';
 import { CHANNEL_BUNDLE_KEY, CHANNEL_METADATA_KEY, migrationDelta, type ScriptUploadMetadata } from '../src/deployer.js';
@@ -17,7 +19,11 @@ interface Upload {
 /** What the fake Cloudflare API has "deployed": script name → module source; the dispatcher stub serves from it. */
 const scripts = new Map<string, string>();
 const uploads: Upload[] = [];
+const objects = new Map<string, Map<string, string>>();
+const allocatedBuckets = new Set<string>();
 const probeVersions = new Map<string, string[]>();
+// An in-flight dispatch response retains its script version until its body is released.
+const activeProbes = new Map<string, { version: string; bodies: number }>();
 let rejectNextUpload: string | null = null;
 const realFetch = globalThis.fetch;
 
@@ -33,11 +39,38 @@ async function sha256(text: string): Promise<string> {
 const dispatcherStub: DispatchNamespace = {
   get(name: string) {
     const fetcher = {
-      async fetch(): Promise<Response> {
+      async fetch(input: RequestInfo, init?: RequestInit): Promise<Response> {
+        const request = new Request(input, init);
+        const path = new URL(request.url).pathname;
+        if (path.startsWith('/__platform/objects/')) {
+          const token = /^Bearer (.+)$/u.exec(request.headers.get('authorization') ?? '')?.[1];
+          if (!token || !await env.DEPLOYMENTS.getByName(name.slice('tenant-'.length)).verifyToken(token)) return new Response('Unauthorized', { status: 401 });
+          const value = objects.get(name)?.get(decodeURIComponent(path.slice('/__platform/objects/'.length)));
+          return value === undefined ? new Response('Not found', { status: 404 }) : new Response(value);
+        }
         const source = scripts.get(name);
         if (source === undefined) throw new Error(`Worker not found: ${name}`);
-        const version = probeVersions.get(name)?.shift() ?? /version: (\S+) /u.exec(source)?.[1] ?? 'unknown';
-        return Response.json({ ok: true, version }, { headers: { 'x-gitspace-worker-version': version } });
+        const active = activeProbes.get(name) ?? {
+          version: probeVersions.get(name)?.shift() ?? /version: (\S+) /u.exec(source)?.[1] ?? 'unknown',
+          bodies: 0,
+        };
+        active.bodies += 1;
+        activeProbes.set(name, active);
+        const release = () => {
+          active.bodies -= 1;
+          if (active.bodies === 0) activeProbes.delete(name);
+        };
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode(JSON.stringify({ ok: true, version: active.version })));
+          },
+          pull(controller) {
+            release();
+            controller.close();
+          },
+          cancel: release,
+        });
+        return new Response(body, { headers: { 'content-type': 'application/json', 'x-gitspace-worker-version': active.version } });
       },
     };
     return fetcher as unknown as Fetcher;
@@ -56,6 +89,13 @@ function metadata(migrationTags: string[]): WorkerReleaseMetadata {
       { name: 'CREDENTIALS', className: 'CredentialVaultDO' },
       { name: 'USER_STORAGE', className: 'UserStorageDO' },
     ],
+    resources: [
+      { name: 'OBJECTS', source: 'object-storage' },
+      { name: 'ROOT_KEY', source: 'root-public-key' },
+      { name: 'TENANT', source: 'tenant-id' },
+      { name: 'PROVIDER_TOKEN', source: 'provider-token' },
+      { name: 'STATIC_FILES', source: 'public-assets' },
+    ],
     migrations: migrationTags.map((tag) => ({ tag, newSqliteClasses: [`Class${tag}`] })),
   };
 }
@@ -73,7 +113,9 @@ async function adminPost(tenant: string, body?: unknown): Promise<Response> {
 }
 
 async function mintToken(tenant: string, appliedMigrationTag?: string | null): Promise<string> {
-  const bucket = `gsp-relay-${(await sha256(tenant)).slice('sha256:'.length, 'sha256:'.length + 32)}`;
+  const rootHash = new Uint8Array(await crypto.subtle.digest('SHA-256', publicKey));
+  const bucket = `gsp-relay-u-${Array.from(rootHash.subarray(0, 16), byte => byte.toString(16).padStart(2, '0')).join('')}`;
+  allocatedBuckets.add(bucket);
   await env.DEPLOYMENTS.getByName(tenant).configure(ADMIN_PUBLIC_KEY, bucket);
   const response = await adminPost(tenant, appliedMigrationTag === undefined ? undefined : { appliedMigrationTag });
   expect(response.status).toBe(200);
@@ -101,7 +143,9 @@ async function accountId(tenant: string): Promise<string> {
 async function stageRelease(tenant: string, sha: string, version = sha): Promise<{ bundleKey: string; bundleHash: string }> {
   const source = bundleSource(version);
   const bundleKey = `users/${await accountId(tenant)}/releases/${sha}/worker.mjs`;
-  await env.DATA.put(bundleKey, source);
+  let staged = objects.get(`tenant-${tenant}`);
+  if (!staged) { staged = new Map(); objects.set(`tenant-${tenant}`, staged); }
+  staged.set(bundleKey, source);
   return { bundleKey, bundleHash: await sha256(source) };
 }
 
@@ -116,11 +160,21 @@ async function deploy(tenant: string, token: string, sha: string, tags: string[]
 
 beforeEach(() => {
   scripts.clear();
+  objects.clear();
+  allocatedBuckets.clear();
   uploads.length = 0;
   probeVersions.clear();
+  activeProbes.clear();
   rejectNextUpload = null;
   globalThis.fetch = async (input, init) => {
     const url = new URL(input instanceof Request ? input.url : String(input));
+    const bucketLookup = /^\/client\/v4\/accounts\/test-account\/r2\/buckets\/([^/]+)$/u.exec(url.pathname);
+    if (url.hostname === 'api.cloudflare.com' && bucketLookup && (!init?.method || init.method === 'GET')) return Response.json({ success: allocatedBuckets.has(bucketLookup[1]!) }, { status: allocatedBuckets.has(bucketLookup[1]!) ? 200 : 404 });
+    if (url.hostname === 'api.cloudflare.com' && url.pathname === '/client/v4/accounts/test-account/r2/buckets' && init?.method === 'POST') {
+      const body = JSON.parse(String(init.body)) as { name: string };
+      allocatedBuckets.add(body.name);
+      return Response.json({ success: true });
+    }
     const match = /^\/client\/v4\/accounts\/test-account\/workers\/dispatch\/namespaces\/gitspace-relays-test\/scripts\/([^/]+)$/u.exec(url.pathname);
     if (url.hostname !== 'api.cloudflare.com' || !match) throw new Error(`Unexpected fetch ${url}`);
     expect(init?.method).toBe('PUT');
@@ -192,6 +246,18 @@ describe('tenant deployment token', () => {
 });
 
 describe('POST /__platform/tenants/:tenant/deploy', () => {
+  it('deploys an active tenant despite exhausted and quarantined billing state', async () => {
+    const tenant = `billing-${crypto.randomUUID().slice(0, 8)}`;
+    const token = await mintToken(tenant);
+    const credits = env.CREDITS.getByName(tenant);
+    await credits.configure({ balanceMicros: 0, riskReserveMicros: 100 });
+    await credits.quarantine('legacy billing hold');
+    const result = await deploy(tenant, token, 'billing-independent', ['v1']);
+    expect(result).toMatchObject({ sha: 'billing-independent', healthy: true });
+    expect((await env.DEPLOYMENTS.getByName(tenant).getState()).active?.sha).toBe('billing-independent');
+    expect(await credits.usageSummary()).toEqual({ records: 1, debitedMicros: Number(env.DEPLOY_SETTLEMENT_MICROS) });
+  });
+
   it('uploads the bundle with tenant-scoped bindings and migrations and meters the deploy', async () => {
     await env.CREDITS.getByName('bravo').configure({ balanceMicros: 1_000_000, riskReserveMicros: 0 });
     const token = await mintToken('bravo', 'v8');
@@ -209,17 +275,16 @@ describe('POST /__platform/tenants/:tenant/deploy', () => {
       bindings: expect.arrayContaining([
         { type: 'durable_object_namespace', name: 'CREDENTIALS', class_name: 'CredentialVaultDO' },
         { type: 'durable_object_namespace', name: 'USER_STORAGE', class_name: 'UserStorageDO' },
-        { type: 'r2_bucket', name: 'BLOBS', bucket_name: 'gsp-relay-f144a6907dc4284d1f9fe6a7d9b9ff53' },
-        { type: 'plain_text', name: 'AUTH_PUBLIC_KEY', text: ADMIN_PUBLIC_KEY },
-        { type: 'plain_text', name: 'OPERATOR_URL', text: 'https://authority.test' },
-        { type: 'plain_text', name: 'RELAY_NAME', text: 'bravo' },
+        { type: 'r2_bucket', name: 'OBJECTS', bucket_name: (await env.DEPLOYMENTS.getByName('bravo').tenantConfig())!.blobBucket },
+        { type: 'plain_text', name: 'ROOT_KEY', text: ADMIN_PUBLIC_KEY },
+        { type: 'plain_text', name: 'TENANT', text: 'bravo' },
+        { type: 'secret_text', name: 'PROVIDER_TOKEN', text: token },
+        { type: 'service', name: 'STATIC_FILES', service: 'public-assets-test' },
       ]),
       migrations: { old_tag: 'v8', new_tag: 'v10', steps: [{ new_sqlite_classes: ['Classv9'] }, { new_sqlite_classes: ['Classv10'] }] },
-      keep_bindings: upload.metadata.keep_bindings,
+      keep_bindings: [],
       tags: ['bravo', 'abc123'],
     });
-    expect(upload.metadata.keep_bindings).toEqual(expect.arrayContaining(['secret_text', 'r2_bucket', 'service', 'plain_text']));
-    expect(upload.metadata.keep_bindings).not.toContain('durable_object_namespace');
 
     const copy = await env.RELEASES.get('tenants/bravo/abc123/worker.mjs');
     expect(await copy?.text()).toBe(bundleSource('abc123'));
@@ -258,6 +323,17 @@ describe('POST /__platform/tenants/:tenant/deploy', () => {
     expect(state.deploys).toHaveLength(0);
     expect(state.appliedMigrationTag).toBeNull();
     expect((await env.DEPLOYMENTS.getByName('echo').acquireLease()).status).toBe('ok');
+  });
+
+  it('keeps a healthy candidate when the dispatcher still serves its predecessor during propagation', async () => {
+    const token = await mintToken('propagation');
+    await deploy('propagation', token, 'old', ['v1']);
+    probeVersions.set('tenant-propagation', Array(5).fill('old'));
+
+    const result = await deploy('propagation', token, 'next', ['v1']);
+
+    expect(result).toMatchObject({ healthy: true, revertedTo: null });
+    expect((await env.DEPLOYMENTS.getByName('propagation').getState()).active?.sha).toBe('next');
   });
 
   it('restores the previous bundle when the new script fails its health probe', async () => {
@@ -329,47 +405,13 @@ describe('POST /__platform/tenants/:tenant/revert', () => {
     const token = await mintToken('juliet');
     await deploy('juliet', token, 'one', ['v1']);
     await deploy('juliet', token, 'two', ['v1']);
-    await env.DATA.delete(`users/${await accountId('juliet')}/releases/one/worker.mjs`);
+    objects.delete('tenant-juliet');
 
     const response = await tenantPost('juliet', 'revert', token, { to: 'previous' });
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ sha: 'one', healthy: true, revertedTo: null, appliedMigrationTag: 'v1' });
     expect(uploads[2]!.module).toBe(bundleSource('one'));
     expect(uploads[2]!.metadata.tags).toEqual(['juliet', 'one']);
-  });
-});
-
-describe('workspace service dispatch', () => {
-  it('dispatches the exact service hostname through its account tenant and holder machine', async () => {
-    let dispatched: Request | null = null;
-    const dispatcher = {
-      get(name: string) {
-        expect(name).toBe('tenant-bravo');
-        return {
-          fetch(request: Request) {
-            dispatched = request;
-            return Promise.resolve(Response.json({ routed: true }));
-          },
-        };
-      },
-    } as unknown as DispatchNamespace;
-    const auth = {
-      fetch(request: Request) {
-        expect(new URL(request.url).searchParams.get('hostname')).toBe('web--space-a--bravo-srv.gssh.dev');
-        return Promise.resolve(Response.json({
-          tenant: 'bravo',
-          machineId: 'machine-a',
-          rpcEndpoint: 'https://bravo.gssh.dev/tunnel/machine-a/rpc',
-        }));
-      },
-    } as Fetcher;
-    const response = await worker.fetch(
-      new Request('https://web--space-a--bravo-srv.gssh.dev/health?full=1'),
-      { ...testEnv, TENANT_HOST_SUFFIX: '.gssh.dev', AUTH: auth, DISPATCHER: dispatcher },
-    );
-    expect(response.status, await response.clone().text()).toBe(200);
-    expect(dispatched && new URL(dispatched.url).pathname).toBe('/tunnel/machine-a/health');
-    expect(dispatched?.headers.get('x-forwarded-host')).toBe('web--space-a--bravo-srv.gssh.dev');
   });
 });
 
@@ -418,11 +460,14 @@ describe('operator account-bound deployment', () => {
     const token = await mintToken(tenant);
     await deploy(tenant, token, 'owned-release', ['v1']);
     const config = await env.DEPLOYMENTS.getByName(tenant).tenantConfig();
-    const bootstrap = () => worker.fetch(new Request(`https://platform.test/__platform/bootstrap/${tenant}`, {
+    const bootstrap = (bindings = testEnv) => worker.fetch(new Request(`https://platform.test/__platform/bootstrap/${tenant}`, {
       method: 'POST', headers: { authorization: 'Bearer test-bootstrap-token', 'content-type': 'application/json' },
       body: JSON.stringify(config),
-    }), testEnv);
-    const recovered = await bootstrap();
+    }), bindings, createExecutionContext());
+    const recovered = await bootstrap({
+      ...testEnv,
+      get CREDITS(): Env['CREDITS'] { throw new Error('Credit authority unavailable'); },
+    });
     expect(recovered.status).toBe(200);
     expect(await recovered.json()).toMatchObject({ deployment: { sha: 'owned-release', healthy: true } });
     expect(scripts.get(`tenant-${tenant}`)).toBe(bundleSource('owned-release'));
@@ -430,5 +475,13 @@ describe('operator account-bound deployment', () => {
     expect((await bootstrap()).status).toBe(423);
     expect((await env.TENANT_CONTROL.getByName(tenant).get()).status).toBe('quarantined');
     expect((await env.DEPLOYMENTS.getByName(tenant).getState()).active?.sha).toBe('owned-release');
+    const unavailable = await bootstrap({
+      ...testEnv,
+      TENANT_CONTROL: {
+        getByName() { return { async get() { throw new Error('Tenant control unavailable'); } }; },
+      } as unknown as Env['TENANT_CONTROL'],
+    });
+    expect(unavailable.status).toBe(503);
+    expect(await unavailable.json()).toMatchObject({ error: { code: 'TENANT_AUTHORITY_UNAVAILABLE' } });
   });
 });

@@ -5,13 +5,13 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./agent-activity": "./src/agent-activity.ts",
     "./account-rpc": "./src/account-rpc.ts",
     "./credential-vault": "./src/credential-vault.ts",
     "./device-grant": "./src/device-grant.ts",
     "./machine-pairing": "./src/machine-pairing.ts",
     "./client": "./src/client.ts",
     "./routed-transport": "./src/routed-transport.ts",
+    "./relay": "./src/relay.ts",
     "./deployment": "./src/deployment.ts",
     "./cron-contract": "./src/cron-contract.ts",
     "./inspector-contract": "./src/inspector-contract.ts",
@@ -19,15 +19,20 @@
     "./skills-contract": "./src/skills-contract.ts",
     "./project-authority": "./src/project-authority.ts",
     "./rpc-contract": "./src/rpc-contract.ts",
-    "./rpc-crypto": "./src/rpc-crypto.ts",
-    "./space-checkpoint": "./src/space-checkpoint.ts",
-    "./workspace-status": "./src/workspace-status.ts"
+    "./resource-uri": "./src/resource-uri.ts",
+    "./transcript": "./src/transcript.ts",
+    "./rpc-crypto": "./src/rpc-crypto.ts"
   },
   "scripts": {
     "typecheck": "tsgo --noEmit -p tsconfig.json",
     "test": "bun test"
   },
   "dependencies": {
+    "@gitspace/blocks": "workspace:*",
+    "@gitspace/protocol-agent": "workspace:*",
+    "@gitspace/protocol-environment": "workspace:*",
+    "@gitspace/protocol-workspace": "workspace:*",
+    "@gitspace/protocol-sync": "workspace:*",
     "@noble/curves": "^2.2.0",
     "@noble/hashes": "^2.2.0",
     "better-result": "3.0.1",

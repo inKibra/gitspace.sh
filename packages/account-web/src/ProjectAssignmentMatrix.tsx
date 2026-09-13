@@ -1,4 +1,4 @@
-import { Switch, Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@gitspace/ui';
+import { Button, Switch, Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@gitspace/ui';
 
 export interface ProjectAssignmentValue {
   projectId: string;
@@ -12,16 +12,20 @@ export interface ProjectAssignmentMatrixProps {
   defaultProjectSpaceEnabled: boolean;
   defaultWorkspacesEnabled: boolean;
   disabled?: boolean;
+  unassignedLabel?: string;
+  resetLabel?: string;
+  onReset?(projectId: string): void;
   onChange(assignment: ProjectAssignmentValue): void;
 }
 
-export function ProjectAssignmentMatrix({ projects, assignments, defaultProjectSpaceEnabled, defaultWorkspacesEnabled, disabled = false, onChange }: ProjectAssignmentMatrixProps) {
+export function ProjectAssignmentMatrix({ projects, assignments, defaultProjectSpaceEnabled, defaultWorkspacesEnabled, disabled = false, unassignedLabel = 'Inherited default', resetLabel = 'Use default', onReset, onChange }: ProjectAssignmentMatrixProps) {
   return <Table>
     <TableHeader>
       <TableRow>
         <TableHead>Project</TableHead>
         <TableHead className="w-36">Project space</TableHead>
         <TableHead className="w-36">Workspaces</TableHead>
+        {onReset ? <TableHead><span className="sr-only">Assignment actions</span></TableHead> : null}
       </TableRow>
     </TableHeader>
     <TableBody>
@@ -32,7 +36,7 @@ export function ProjectAssignmentMatrix({ projects, assignments, defaultProjectS
           <TableCell>
             <div className="flex min-w-0 flex-col">
               <span className="truncate text-foreground">{project.name}</span>
-              <span className="text-caption text-muted-foreground">{assignment ? 'Custom assignment' : 'Inherited default'}</span>
+              <span className="text-caption text-muted-foreground">{assignment ? 'Custom assignment' : unassignedLabel}</span>
             </div>
           </TableCell>
           <TableCell>
@@ -41,6 +45,7 @@ export function ProjectAssignmentMatrix({ projects, assignments, defaultProjectS
           <TableCell>
             <Switch checked={value.workspacesEnabled} disabled={disabled} label={value.workspacesEnabled ? 'On' : 'Off'} onToggle={() => onChange({ ...value, workspacesEnabled: !value.workspacesEnabled })} />
           </TableCell>
+          {onReset ? <TableCell>{assignment ? <Button variant="ghost" disabled={disabled} onClick={() => onReset(project.id)}>{resetLabel}</Button> : null}</TableCell> : null}
         </TableRow>;
       })}
     </TableBody>

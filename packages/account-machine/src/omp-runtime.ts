@@ -1,7 +1,9 @@
 import { cp, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { executableArtifactManifestSchema, executableManifestPath, validateExecutableArtifact } from '@gitspace/account-omp/manifest';
-import type { SessionActivity, SkillView } from '@gitspace/protocol';
+import { prepareOmpRuntimeArtifact } from '@gitspace/account-omp/runtime-recipe';
+import type { SkillView } from '@gitspace/protocol';
+import { AgentDomainError, type AgentFailure, type SessionActivity } from '@gitspace/protocol-agent';
 import { OMP_IPC_VERSION, OmpRpcPeer, type OmpChildApi, type OmpMachineApi, type OmpNotification, type OmpSessionInput, type OmpToolDescriptor, type OmpMcpCatalog, type SessionMethod } from '../../account-omp/src/ipc.js';
 import type { OmpRuntime, OmpRuntimeEvent, OmpRuntimeSession, OmpTranscriptEvent } from '../../account-omp/src/contracts.js';
 import type { CloudSpaceCheckpointAuthority } from './cloud-space-authority.js';
@@ -17,7 +19,7 @@ export const ompGenerationSelectionSchema = z.object({
   manifestHash: z.string().regex(/^sha256:[a-f0-9]{64}$/u),
 });
 export type OmpGenerationSelection = z.infer<typeof ompGenerationSelectionSchema>;
-export interface OmpGenerationStatus { sha: string | null; hash: string; draining: number; failure?: { sha: string; error: string } }
+export interface OmpGenerationStatus { sha: string | null; hash: string; draining: number; pendingMachineCommit?: true; failure?: { sha: string; error: string } }
 export interface ProcessOmpRuntimeOptions {
   environmentRoot: string;
   entrypoint: string;
@@ -25,7 +27,7 @@ export interface ProcessOmpRuntimeOptions {
   agentDir: string;
   sessionRoot: string;
   mcp?: MachineMcpCoordinator;
-  skills?: readonly SkillView[];
+  skills?: () => Promise<readonly SkillView[]>;
   spaceAuthority?: CloudSpaceCheckpointAuthority;
   workspaceControls?: () => SpaceWorkspaceControls;
   onError?: (error: unknown) => void;
@@ -60,7 +62,7 @@ function spawnChild(
     onDisconnect: () => {
       disconnected = true;
       rpc.close();
-      if (!closing) notify({ type: 'activity', activity: { active: false, reasons: [] }, errorMessage: 'OMP process disconnected; resume will reopen its persisted session' });
+      if (!closing) notify({ type: 'activity', activity: { active: false, reasons: [] }, failure: { domain: 'agent', code: 'AGENT_DISCONNECTED', message: 'OMP process disconnected; retry will reopen its persisted session', context: {} } });
     },
   });
   void child.exited.then((code) => { disconnected = true; rpc.close(new Error(`OMP child ${child.pid} exited (${code})`)); });
@@ -89,12 +91,14 @@ const noCallbacks = {
   mcpResources: async () => { throw new Error('No session MCP in OMP health/transcript process'); },
   mcpReadResource: async () => { throw new Error('No session MCP in OMP health/transcript process'); },
   mcpPrompt: async () => { throw new Error('No session MCP in OMP health/transcript process'); },
+  listSkills: async () => { throw new Error('No session skills in OMP health/transcript process'); },
 };
 
 async function projectTranscript(input: { sessionFile: string } | { bytes: Uint8Array }, entrypoint?: string): Promise<OmpTranscriptEvent[]> {
   const path = entrypoint ?? process.env.GITSPACE_OMP_RUNTIME_PATH;
   if (!path) throw new Error('GITSPACE_OMP_RUNTIME_PATH is required for OMP transcript projection');
-  const child = spawnChild(path, noCallbacks);
+  const prepared = basename(path) === 'omp.js' ? await prepareOmpRuntimeArtifact(dirname(path)) : path;
+  const child = spawnChild(prepared, noCallbacks);
   try { await health(child); return await child.rpc.call('transcript', [input], AbortSignal.timeout(30_000)); }
   finally { await child.close(); }
 }
@@ -110,26 +114,46 @@ export class ProcessOmpRuntime implements OmpRuntime {
   private selected: OmpGenerationSelection | null = null;
   private channelSelection: OmpGenerationSelection | null = null;
   private previousSelection: OmpGenerationSelection | null = null;
+  private pendingMachineCommit = false;
   private failure: OmpGenerationStatus['failure'];
   private readonly sessions = new Set<HostedSession>();
   private readonly projections = new Map<string, { child: Promise<OmpChild>; readers: number }>();
   private activation: Promise<unknown> = Promise.resolve();
+  private readonly preparedEntrypoints = new Map<string, string>();
   constructor(private readonly options: ProcessOmpRuntimeOptions) {}
 
-  async initialize(): Promise<void> {
+  async initialize(initialSelection?: OmpGenerationSelection): Promise<void> {
     const path = dirname(this.options.entrypoint);
     const manifest = executableArtifactManifestSchema.parse(JSON.parse(await readFile(executableManifestPath(path), 'utf8')));
     this.channelSelection = { path, hash: manifest.treeHash, sha: null, manifestHash: this.options.manifestHash };
     let selection: OmpGenerationSelection;
-    try {
-      selection = ompGenerationSelectionSchema.parse(JSON.parse(await readFile(join(this.options.environmentRoot, 'omp-selection.json'), 'utf8')));
-    } catch (error) {
-      if (!(error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT')) throw error;
-      selection = await this.stageChannel();
+    if (initialSelection) {
+      selection = ompGenerationSelectionSchema.parse(initialSelection);
+    } else {
+      try {
+        selection = ompGenerationSelectionSchema.parse(JSON.parse(await readFile(join(this.options.environmentRoot, 'omp-selection.json'), 'utf8')));
+      } catch (error) {
+        if (!(error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT')) throw error;
+        selection = await this.stageChannel();
+      }
     }
     await this.verify(selection);
-    await this.persistSelection(selection);
+    // A successor must become healthy without changing the OMP needed by the rollback machine.
+    if (!initialSelection) await this.persistSelection(selection);
     this.selected = selection;
+    this.pendingMachineCommit = initialSelection !== undefined;
+  }
+
+  /** Called only after the stable host confirms this machine generation committed. */
+  commitInitialSelection(): Promise<void> {
+    const operation = this.activation.then(async () => {
+      if (!this.selected) throw new Error('OMP runtime has not initialized');
+      if (!this.pendingMachineCommit) return;
+      await this.persistSelection(this.selected);
+      this.pendingMachineCommit = false;
+    });
+    this.activation = operation.catch(() => undefined);
+    return operation;
   }
 
   async activateChannel(): Promise<OmpGenerationStatus> {
@@ -166,19 +190,29 @@ export class ProcessOmpRuntime implements OmpRuntime {
 
   private async verify(selection: OmpGenerationSelection): Promise<void> {
     await validateExecutableArtifact(selection.path, { target: 'omp', hash: selection.hash, manifestHash: selection.manifestHash });
-    const child = spawnChild(join(selection.path, 'omp.js'), noCallbacks);
+    // Cold package installation and cache integrity checks precede the child IPC deadline.
+    const entrypoint = await prepareOmpRuntimeArtifact(selection.path);
+    const child = spawnChild(entrypoint, noCallbacks);
     try { await health(child); } finally { await child.close(); }
+    this.preparedEntrypoints.set(JSON.stringify([selection.path, selection.manifestHash]), entrypoint);
+  }
+
+  private verifiedEntrypoint(selection: OmpGenerationSelection): string {
+    const entrypoint = this.preparedEntrypoints.get(JSON.stringify([selection.path, selection.manifestHash]));
+    if (!entrypoint) throw new Error('OMP generation has not been verified');
+    return entrypoint;
   }
 
   status(): OmpGenerationStatus {
     if (!this.selected) throw new Error('OMP runtime has not initialized');
-    return { sha: this.selected.sha, hash: this.selected.hash, draining: [...this.sessions].filter((session) => session.generation.hash !== this.selected!.hash).length, ...(this.failure ? { failure: this.failure } : {}) };
+    return { sha: this.selected.sha, hash: this.selected.hash, draining: [...this.sessions].filter((session) => session.generation.hash !== this.selected!.hash).length, ...(this.pendingMachineCommit ? { pendingMachineCommit: true as const } : {}), ...(this.failure ? { failure: this.failure } : {}) };
   }
 
   activate(input: OmpGenerationSelection): Promise<OmpGenerationStatus> {
     const operation = this.activation.then(async () => {
       const previous = this.selected;
       if (!previous) throw new Error('OMP runtime has not initialized');
+      if (this.pendingMachineCommit) throw new Error('OMP activation must wait for the machine generation to commit');
       input = ompGenerationSelectionSchema.parse(input);
       await this.verify(input);
       await this.persistSelection(input);
@@ -239,7 +273,7 @@ export class ProcessOmpRuntime implements OmpRuntime {
   private async project(input: { sessionFile: string } | { bytes: Uint8Array }, selection: OmpGenerationSelection): Promise<OmpTranscriptEvent[]> {
     let projection = this.projections.get(selection.hash);
     if (!projection) {
-      const child = spawnChild(join(selection.path, 'omp.js'), noCallbacks);
+      const child = spawnChild(this.verifiedEntrypoint(selection), noCallbacks);
       projection = {
         readers: 0,
         child: health(child).then(() => child).catch(async (error) => { await child.close(); throw error; }),
@@ -280,6 +314,7 @@ export class ProcessOmpRuntime implements OmpRuntime {
       this.selected = null;
       await Promise.all([...this.projections.values()].map((projection) => projection.child.then((child) => child.close(), () => undefined)));
       this.projections.clear();
+      this.preparedEntrypoints.clear();
     }
   }
 
@@ -290,8 +325,9 @@ export class ProcessOmpRuntime implements OmpRuntime {
   private async boot(input: OmpSessionInput): Promise<OmpRuntimeSession> {
     if (!this.selected) throw new Error('OMP runtime has not initialized');
     const events = new Set<(event: OmpRuntimeEvent) => void>();
-    const activities = new Set<(activity: SessionActivity, errorMessage?: string) => void>();
-    let activity: { activity: SessionActivity; errorMessage?: string } = { activity: { active: false, reasons: [] } };
+    const activities = new Set<(activity: SessionActivity, failure: AgentFailure | null) => void>();
+    let executionFailure = input.executionFailure ?? null;
+    let activity: { activity: SessionActivity; failure: AgentFailure | null } = { activity: { active: false, reasons: [] }, failure: executionFailure };
     let projected: ProjectedMcpSession | null = null;
     let sessionId = '';
     let sessionFile = input.sessionFile;
@@ -340,13 +376,14 @@ export class ProcessOmpRuntime implements OmpRuntime {
         projected?.recordToolEvent(notification.event);
         for (const handler of events) handler(notification.event);
       } else if (notification.type === 'activity') {
-        activity = { activity: notification.activity, ...(notification.errorMessage ? { errorMessage: notification.errorMessage } : {}) };
-        for (const handler of activities) handler(activity.activity, activity.errorMessage);
+        activity = { activity: notification.activity, failure: notification.failure };
+        if (notification.failure?.code !== 'AGENT_DISCONNECTED') executionFailure = notification.failure;
+        for (const handler of activities) handler(activity.activity, activity.failure);
         migrateWhenIdle();
       }
     };
     const start = async (generation: OmpGenerationSelection): Promise<OmpChild> => {
-      const child = spawnChild(join(generation.path, 'omp.js'), {
+      const child = spawnChild(this.verifiedEntrypoint(generation), {
         namespace: async ([request], signal) => {
           const namespace = namespaces[request.namespace];
           if (!namespace) throw new Error(`Namespace ${request.namespace} is unavailable`);
@@ -357,24 +394,31 @@ export class ProcessOmpRuntime implements OmpRuntime {
           if (!tool) throw new Error(`MCP tool ${request.name} is unavailable`);
           return tool.execute(request.callId, request.args as Record<string, unknown>, (update) => child.rpc.publish({ type: 'toolUpdate', callId: request.callId, update }), { localProtocolOptions } as never, signal);
         },
-        mcpResources: async ([server]) => { await projected?.manager.ensureServerResources(server); return projected?.manager.getServerResources(server); },
-        mcpReadResource: ([server, uri], signal) => projected?.manager.readServerResource(server, uri, { signal }),
-        mcpPrompt: ([server, name, args], signal) => projected?.manager.executePrompt(server, name, args, { signal }),
+        mcpResources: async ([server]) => { await projected?.refresh(); await projected?.manager.ensureServerResources(server); return projected?.manager.getServerResources(server); },
+        mcpReadResource: async ([server, uri], signal) => { await projected?.refresh(); return projected?.manager.readServerResource(server, uri, { signal }); },
+        mcpPrompt: async ([server, name, args], signal) => { await projected?.refresh(); return projected?.manager.executePrompt(server, name, args, { signal }); },
+        listSkills: () => this.options.skills?.() ?? [],
       }, notify);
       try {
         await health(child);
         const opened = await child.rpc.call('initialize', [{
-          agentDir: this.options.agentDir, sessionRoot: this.options.sessionRoot, skills: this.options.skills ?? [],
-          input: { ...input, ...(sessionFile ? { sessionFile } : {}) }, tools: descriptors(), mcpCatalog: catalog(),
+          agentDir: this.options.agentDir, sessionRoot: this.options.sessionRoot,
+          skills: await this.options.skills?.() ?? [], liveSkills: true,
+          input: { ...input, executionFailure, ...(sessionFile ? { sessionFile } : {}) }, tools: descriptors(), mcpCatalog: catalog(),
           namespaces: { ...(namespaces.space ? { space: namespaces.space.declaration } : {}), ...(namespaces.mcp ? { mcp: namespaces.mcp.declaration } : {}) },
         }], AbortSignal.timeout(120_000));
         sessionId = opened.id;
         sessionFile = opened.sessionFile;
-        activity = { activity: opened.activity };
+        activity = { activity: opened.activity, failure: opened.failure };
         return child;
-      } catch (error) { await child.close(); throw error; }
+      } catch (error) {
+        try { await child.close(); }
+        catch (cleanupError) { throw new AggregateError([error, cleanupError], 'OMP startup and child cleanup failed'); }
+        throw error;
+      }
     };
     const ensureChild = async (): Promise<void> => {
+      if (disposed) throw new Error('OMP session has been disposed');
       if (migration) await migration;
       if (hosted.child.alive()) return;
       migration = start(hosted.generation).then((child) => { hosted.child = child; });
@@ -383,7 +427,11 @@ export class ProcessOmpRuntime implements OmpRuntime {
     let initial: OmpChild;
     const initialGeneration = this.selected;
     try { initial = await start(initialGeneration); }
-    catch (error) { await projected?.dispose(); throw error; }
+    catch (error) {
+      try { await projected?.dispose(); }
+      catch (cleanupError) { throw new AggregateError([error, cleanupError], 'OMP startup and resource cleanup failed'); }
+      throw error;
+    }
     hosted = {
       generation: initialGeneration,
       child: initial,
@@ -450,8 +498,9 @@ export class ProcessOmpRuntime implements OmpRuntime {
     projected?.attach({ refresh: refreshMcp });
     const invoke = async <K extends SessionMethod | 'reloadSettings' | 'instructionsChanged'>(method: K, args: Parameters<OmpChildApi[K]>): Promise<Awaited<ReturnType<OmpChildApi[K]>>> => {
       if (disposed) throw new Error('OMP session has been disposed');
+      if (!hosted.child.alive()) throw new AgentDomainError(activity.failure ?? { domain: 'agent', code: 'AGENT_DISCONNECTED', message: 'OMP worker is disconnected; retry the agent to reopen its persisted session', context: { sessionId } });
       await hosted.migrate();
-      await ensureChild();
+      if (!hosted.child.alive()) throw new AgentDomainError(activity.failure ?? { domain: 'agent', code: 'AGENT_DISCONNECTED', message: 'OMP worker disconnected during the operation', context: { sessionId } });
       operations += 1;
       try { return await hosted.child.rpc.call(method, args); }
       finally {
@@ -461,14 +510,19 @@ export class ProcessOmpRuntime implements OmpRuntime {
     };
     return {
       id: sessionId, sessionFile: sessionFile!,
+      isAvailable: () => !disposed && hosted.child.alive(),
       prompt: (text, options) => invoke('prompt', [text, options]),
       subscribe: (handler) => { events.add(handler); return () => events.delete(handler); },
-      subscribeActivity: (handler) => { activities.add(handler); handler(activity.activity, activity.errorMessage); return () => activities.delete(handler); },
+      subscribeActivity: (handler) => { activities.add(handler); handler(activity.activity, activity.failure); return () => activities.delete(handler); },
       activity: () => activity,
       persist: () => invoke('persist', []), handoff: () => invoke('handoff', []), resume: () => invoke('resume', []),
       reloadSettings: () => invoke('reloadSettings', []), dispose: () => hosted.dispose(),
       instructionsChanged: () => invoke('instructionsChanged', []),
+      setWorkspacePhase: (phase) => invoke('setWorkspacePhase', [phase]),
       control: () => invoke('control', []), cycleRole: (direction) => invoke('cycleRole', [direction]),
+      agentSetup: () => invoke('agentSetup', []),
+      saveAgentDefinition: (input) => invoke('saveAgentDefinition', [input]),
+      historyAnchorId: () => invoke('historyAnchorId', []),
       setModel: (provider, model) => invoke('setModel', [provider, model]), setThinking: (thinking) => invoke('setThinking', [thinking]),
       setFast: (enabled) => invoke('setFast', [enabled]), setApproval: (approval) => invoke('setApproval', [approval]),
       setGoal: (goal) => invoke('setGoal', [goal]), compact: (instructions) => invoke('compact', [instructions]),

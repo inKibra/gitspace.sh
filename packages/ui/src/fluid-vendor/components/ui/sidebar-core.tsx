@@ -664,7 +664,8 @@ const SidebarShell = forwardRef<HTMLDivElement, SidebarShellProps>(
           // No bare `group` here: an unnamed group on the whole rail would
           // fire every descendant's group-hover (Button fills, icon strokes)
           // on rail hover. Named groups (menu-item etc.) handle row states.
-          "peer shrink-0 sticky top-0 h-svh",
+          // Follow browser chrome, but never outgrow a bounded app shell.
+          "peer shrink-0 sticky top-0 h-dvh max-h-full",
           // While peek is armed the 0-width shell must not clip the edge
           // strip or the overlay card — and the shell must rise above the
           // inset (a later sibling) so the card paints over it. Pinning from

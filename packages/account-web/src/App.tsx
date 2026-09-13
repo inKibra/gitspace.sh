@@ -1,8 +1,7 @@
 import type { DeploymentStatusView } from '@gitspace/protocol';
-import type { WorkspaceStatusSummary } from '@gitspace/protocol/workspace-status';
+import type { WorkspaceStatusSummary } from '@gitspace/protocol-workspace';
 import type { SidebarDeploymentProps } from './AppSidebar.js';
-import { GitSpaceShell, type GitSpaceShellProps, type WorkspaceView } from './GitSpaceShell.js';
-import { LaunchSheet } from './LaunchSheet.js';
+import type { GitSpaceShellProps, WorkspaceView } from './GitSpaceShell.js';
 import { launchTrackFrom, type LaunchTrack } from './release.js';
 
 const status = (primaryColor: WorkspaceStatusSummary['primaryColor']): WorkspaceStatusSummary => ({
@@ -101,9 +100,3 @@ export const sidebarDeploymentFixture: SidebarDeploymentProps = {
   onRevert: () => undefined,
 };
 
-export function App() {
-  return <>
-    <GitSpaceShell {...verticalSliceFixture} deployment={sidebarDeploymentFixture} />
-    <LaunchSheet launch={launchTrackFixture} open onOpenChange={() => undefined} onRetry={() => undefined} />
-  </>;
-}

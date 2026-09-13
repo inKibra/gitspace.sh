@@ -95,9 +95,9 @@ export function MarketingApp() {
     try {
       const { handle: accountHandle } = identity;
       const rootPublicKey = credentialProtocolBase64.encode(ed25519.getPublicKey(rootPrivateKey));
-      const requestAccount = async (path: string, payload: Record<string, string>) => {
+      const requestAccount = async (path: string, payload: Record<string, string>, baseUrl = window.location.origin) => {
         if (rootKeyRef.current !== rootPrivateKey) throw new Error('Resume with your saved recovery key to open this account.');
-        const response = await fetch(path, {
+        const response = await fetch(new URL(path, baseUrl), {
           method: 'POST',
           cache: 'no-store',
           headers: {
@@ -116,18 +116,16 @@ export function MarketingApp() {
         || (result.response.status === 409 && result.body.error.code === 'ACCOUNT_INCOMPLETE')
       )) {
         if (!invitation) throw new Error('Enter your invitation to finish creating this account.');
-        const vaultKey = sha256.create().update(new TextEncoder().encode('gitspace-vault-v1\n')).update(rootPrivateKey).digest();
-        try {
-          result = await requestAccount('/v1/accounts/bootstrap', {
-            handle: accountHandle,
-            invite: invitation,
-            rootPublicKey,
-            vaultKey: credentialProtocolBase64.encode(vaultKey),
-          });
-        } finally {
-          vaultKey.fill(0);
-        }
+        result = await requestAccount('/v1/accounts/bootstrap', { handle: accountHandle, invite: invitation, rootPublicKey });
       }
+      if (!result.response.ok || result.body.status === 'error') throw new Error(result.body.status === 'error' ? result.body.error.message : `Account allocation failed with HTTP ${result.response.status}`);
+      // Allocation is trusted platform work; application keys/state initialize
+      // only at the tenant origin. Repeating this step after recovery is safe
+      // when a previous allocation succeeded but tenant initialization did not.
+      const vaultKey = sha256.create().update(new TextEncoder().encode('gitspace-vault-v1\n')).update(rootPrivateKey).digest();
+      try {
+        result = await requestAccount('/v1/accounts/bootstrap', { handle: accountHandle, rootPublicKey, vaultKey: credentialProtocolBase64.encode(vaultKey) }, result.body.value.apiUrl);
+      } finally { vaultKey.fill(0); }
       const { response, body } = result;
       if (!response.ok || body.status === 'error') throw new Error(body.status === 'error' ? body.error.message : `Account request failed with HTTP ${response.status}`);
       if (rootKeyRef.current !== rootPrivateKey) throw new Error('Resume with your saved recovery key to open this account.');

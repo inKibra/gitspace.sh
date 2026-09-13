@@ -10,7 +10,6 @@
   "scripts": {
     "typecheck": "tsgo --noEmit -p tsconfig.json",
     "test": "bun test",
-    "release:locks": "bun src/release.ts locks",
     "release:build": "bun src/release.ts build",
     "release:publish": "bun src/release.ts publish"
   },

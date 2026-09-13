@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { dependencyCycle, dependencyPath, transitiveDependents } from '../src/dependency-graph.js';
+import { dependencyCycle, dependencyPath, transitiveDependents } from '@gitspace/protocol-workspace';
 
 // c → b → a: c depends on b, b depends on a.
 const edges = new Map<string, readonly string[]>([['b', ['a']], ['c', ['b']], ['d', ['a']]]);

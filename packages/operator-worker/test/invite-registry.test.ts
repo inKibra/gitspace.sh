@@ -95,7 +95,6 @@ describe('operator invitation admission', () => {
     const account = {
       handle: `closed-${crypto.randomUUID().slice(0, 8)}`,
       rootPublicKey: credentialProtocolBase64.encode(ed25519.getPublicKey(rootPrivateKey)),
-      vaultKey: credentialProtocolBase64.encode(crypto.getRandomValues(new Uint8Array(32))),
     };
     const headers = { authorization: createRelayAuthorization(rootPrivateKey, path), 'content-type': 'application/json' };
 

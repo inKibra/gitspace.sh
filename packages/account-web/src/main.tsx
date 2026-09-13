@@ -4,6 +4,7 @@ import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { LiveApp } from './LiveApp.js';
 import { restoreAppearance } from './appearance.js';
+import { observeAppViewport } from './app-viewport.js';
 import { DesignSystemGallery } from './design-gallery/DesignSystemGallery.js';
 import { EnvironmentGallery } from './environment/EnvironmentGallery.js';
 import '@gitspace/ui/fluid-theme.css';
@@ -16,6 +17,8 @@ if (!root) throw new Error('GitSpace root element is missing');
 // the preset pins the rounded shape and default size, and icons resolve to
 // Untitled UI through the registry's named icon slots.
 restoreAppearance();
+const releaseViewport = observeAppViewport();
+import.meta.hot?.dispose(releaseViewport);
 createRoot(root).render(
   <StrictMode>
     <MotionConfig reducedMotion="user">

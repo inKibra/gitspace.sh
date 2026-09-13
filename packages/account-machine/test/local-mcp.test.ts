@@ -6,6 +6,7 @@ import type {
   ComposioPluginCatalog,
   ComposioPluginTool,
   DiscoveredMcpTool,
+  EffectiveSecretMetadata,
   McpAuditEvent,
   McpConnection,
   McpConnectionDraft,
@@ -51,6 +52,8 @@ class FakeMcpAuthority implements MachineMcpAuthority {
   readonly audit: Array<Omit<McpAuditEvent, 'principalId' | 'machineId'>> = [];
   readonly secretValues: Record<string, string> = {};
   composioMaterialization: ComposioMcpMaterialization | null = null;
+  secretMetadata: EffectiveSecretMetadata[] | null = null;
+  unavailable = false;
 
   async listMcpConnections(): Promise<McpConnection[]> { return structuredClone(this.connections); }
   async createMcpConnection(draft: McpConnectionDraft): Promise<McpConnection> {
@@ -123,7 +126,15 @@ class FakeMcpAuthority implements MachineMcpAuthority {
     this.grants = this.grants.filter((candidate) => candidate.projectId !== projectId || candidate.connectionId !== connectionId || candidate.revision !== expectedRevision);
     return { projectId, connectionId, deleted: before !== this.grants.length };
   }
-  async materializeProjectSecrets(_projectId: string, names: string[]): Promise<Record<string, string>> {
+  async listEffectiveSecrets(projectId: string, _workspaceId: string | null): Promise<EffectiveSecretMetadata[]> {
+    if (this.unavailable) throw new Error('Cloud configuration unavailable');
+    return this.secretMetadata ?? Object.keys(this.secretValues).map((name) => ({
+      projectId, name, revision: 1, source: 'project' as const, updatedAt: '2026-08-31T00:00:00.000Z', updatedBy: 'user-a',
+    }));
+  }
+  async materializeProjectSecrets(projectId: string, names: string[], workspaceId: string | null): Promise<Record<string, string>> {
+    const authorized = await this.listEffectiveSecrets(projectId, workspaceId);
+    if (names.some((name) => !authorized.some((secret) => secret.name === name))) throw new Error('Secret is not authorized');
     return Object.fromEntries(names.map((name) => [name, this.secretValues[name]!]).filter((entry) => entry[1] !== undefined));
   }
   async appendMcpAudit(event: Omit<McpAuditEvent, 'id' | 'principalId' | 'machineId' | 'createdAt'>): Promise<McpAuditEvent> {
@@ -138,23 +149,25 @@ afterEach(() => {
   for (const server of servers.splice(0)) server.stop(true);
 });
 
-function startHttpServer(requiredAuthorization?: string) {
+function startHttpServer(requiredAuthorization?: string | (() => string), calls?: string[]) {
   const server = Bun.serve({
     port: 0,
     async fetch(request) {
+      const authorization = typeof requiredAuthorization === 'function' ? requiredAuthorization() : requiredAuthorization;
       if (request.method === 'GET') return new Response(null, { status: 405 });
-      if (requiredAuthorization && request.headers.get('authorization') !== requiredAuthorization) {
+      if (authorization && request.headers.get('authorization') !== authorization) {
         return new Response('Unauthorized', { status: 401 });
       }
       if (request.method === 'DELETE') return new Response(null, { status: 200 });
       const message = await request.json() as { id?: string | number; method?: string; params?: Record<string, unknown> };
       if (message.id === undefined) return new Response(null, { status: 202 });
+      if (message.method === 'tools/call') calls?.push(request.headers.get('authorization') ?? '');
       const result = message.method === 'initialize'
         ? { protocolVersion: '2025-11-25', capabilities: { tools: {} }, serverInfo: { name: 'gitspace-fake-http', version: '1.0.0' } }
         : message.method === 'tools/list'
           ? { tools: [{ name: 'paper_echo', description: 'Echo over HTTP', inputSchema: { type: 'object', properties: { value: { type: 'string' } } }, annotations: { readOnlyHint: true, destructiveHint: false } }] }
           : message.method === 'tools/call'
-            ? { content: [{ type: 'text', text: requiredAuthorization ?? String((message.params?.arguments as Record<string, unknown> | undefined)?.value ?? '') }] }
+            ? { content: [{ type: 'text', text: authorization ?? String((message.params?.arguments as Record<string, unknown> | undefined)?.value ?? '') }] }
             : {};
       return Response.json({ jsonrpc: '2.0', id: message.id, result }, {
         headers: { 'mcp-session-id': 'test-session' },
@@ -187,7 +200,7 @@ describe('MachineMcpCoordinator', () => {
       expect(JSON.stringify(result)).toContain('hello');
 
       authority.grants = [{ ...authority.grants[0]!, enabled: false, revision: 2 }];
-      await projected.reload();
+      await expect(tool!.execute('revoked-call', { value: 'must not execute' }, undefined, {} as never)).rejects.toThrow('unavailable');
       expect(projected.descriptors()).toEqual([]);
       expect(projected.manager.getTools()).toEqual([]);
     } finally {
@@ -218,7 +231,7 @@ describe('MachineMcpCoordinator', () => {
       expect(authority.audit.filter((event) => event.type === 'tool-invocation')).toHaveLength(2);
 
       authority.grants = [{ ...authority.grants[0]!, enabled: false, revision: 2 }];
-      await projected.reload();
+      await expect(namespace.call('call', { name: 'stdio.echo', args: { value: 'must not execute' } })).rejects.toThrow('unavailable');
       expect(await namespace.call('list', {})).toEqual([]);
     } finally {
       await projected.dispose();
@@ -249,6 +262,44 @@ describe('MachineMcpCoordinator', () => {
       const result = await tool.execute('call-http', { value: 'hello' }, undefined, {} as never);
       expect(JSON.stringify(result)).not.toContain(secret);
       expect((await coordinator.connectionStatus('http'))?.status).toBe('ready');
+    } finally {
+      await projected.dispose();
+    }
+  });
+
+  it('refreshes effective secret overrides and rotations before invoking cached tools, and fails closed on cloud outage or revocation', async () => {
+    const authority = new FakeMcpAuthority();
+    let authorization = 'Bearer account-secret';
+    const calls: string[] = [];
+    const server = startHttpServer(() => authorization, calls);
+    authority.secretValues.MCP_TOKEN = authorization;
+    authority.secretMetadata = [{
+      projectId: 'project-a', name: 'MCP_TOKEN', source: 'account', revision: 1,
+      updatedAt: '2026-08-31T00:00:00.000Z', updatedBy: 'user-a',
+    }];
+    authority.connections = [connection({
+      id: 'effective-http', label: 'Effective HTTP', target: { kind: 'workspace' },
+      transport: { type: 'http', url: server.url.href, headers: [{ name: 'Authorization', secret: { source: 'project', name: 'MCP_TOKEN' } }] },
+    })];
+    authority.grants = [grant('effective-http')];
+    const projected = await new MachineMcpCoordinator(authority, 'machine-a').createSession({ projectId: 'project-a', workspaceId: 'workspace-a', workspacePath: import.meta.dir });
+    try {
+      const tool = projected.tools().find((candidate) => candidate.mcpToolName === 'paper_echo')!;
+      await tool.execute('account', {}, undefined, {} as never);
+      authorization = 'Bearer project-override';
+      authority.secretValues.MCP_TOKEN = authorization;
+      authority.secretMetadata = [{ ...authority.secretMetadata[0]!, source: 'project' }];
+      await tool.execute('project-override', {}, undefined, {} as never);
+      authorization = 'Bearer rotated-project-secret';
+      authority.secretValues.MCP_TOKEN = authorization;
+      authority.secretMetadata = [{ ...authority.secretMetadata[0]!, revision: 2 }];
+      await tool.execute('rotated-project', {}, undefined, {} as never);
+      authority.unavailable = true;
+      await expect(tool.execute('outage', {}, undefined, {} as never)).rejects.toThrow('Cloud configuration unavailable');
+      authority.unavailable = false;
+      authority.secretMetadata = [];
+      await expect(tool.execute('revoked', {}, undefined, {} as never)).rejects.toThrow('unavailable');
+      expect(calls).toEqual(['Bearer account-secret', 'Bearer project-override', 'Bearer rotated-project-secret']);
     } finally {
       await projected.dispose();
     }

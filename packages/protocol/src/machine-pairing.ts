@@ -6,7 +6,7 @@ export const machinePairingTokenSchema = z.strictObject({
   userId: z.string().regex(/^u-[a-f0-9]{32}$/u),
   pairingId: z.uuid(),
   token: z.string().regex(/^[A-Za-z0-9_-]{43}$/u),
-  operatorUrl: z.string().url().max(2_048).refine((value) => {
+  apiUrl: z.string().url().max(2_048).refine((value) => {
     const url = new URL(value);
     return !url.username && !url.password && !url.search && !url.hash && url.pathname === '/'
       && (url.protocol === 'https:' || (url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)));

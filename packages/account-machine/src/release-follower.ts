@@ -11,6 +11,7 @@ import {
 import type { DeploymentStatus, ReleaseArtifact, ReleaseRecord } from '@gitspace/protocol';
 import { z } from 'zod';
 import { environmentLaunchResponseSchema, environmentStatusSchema, type EnvironmentLaunchRequest, type EnvironmentStatus } from './replacement-environment.js';
+import type { OmpGenerationSelection } from './omp-runtime.js';
 
 /**
  * Convergence on the tenant's desired release. Executables are authenticated
@@ -42,12 +43,14 @@ export interface ReleaseFollowerOmpStatus {
   sha: string | null;
   hash: string;
   draining: number;
+  pendingMachineCommit?: true;
   failure?: { sha: string; error: string };
 }
 
 export interface ReleaseFollowerOmp {
   activate(input: { path: string; hash: string; sha: string; manifestHash: string }): Promise<ReleaseFollowerOmpStatus>;
   activateChannel(): Promise<ReleaseFollowerOmpStatus>;
+  commitInitialSelection(): Promise<void>;
   status(): ReleaseFollowerOmpStatus;
 }
 
@@ -103,6 +106,17 @@ export class ReleaseFollower {
 
   constructor(private readonly options: ReleaseFollowerOptions) {}
 
+  /** Only the desired successor may boot with OMP bytes not yet saved for rollback. */
+  async initialOmpSelection(): Promise<OmpGenerationSelection | undefined> {
+    if (!this.options.runningMachineSha || !this.options.generation || !this.options.hostUrl || !this.options.controlToken) return;
+    const status = await this.options.authority.deploymentStatus();
+    if (this.options.runningMachineSha !== status.desired.machine) return;
+    const record = status.releases.find((release) => release.sha === status.desired.omp);
+    if (!record?.artifacts.omp) return;
+    const { path, manifest } = await this.downloadExecutable(record.artifacts.omp, 'omp');
+    return { path, hash: manifest.treeHash, sha: record.sha, manifestHash: record.artifacts.omp.hash };
+  }
+
   /** Report only committed machine generations and independently drained OMP generations. */
   async start(): Promise<void> {
     this.timer = setInterval(() => { void this.nudge(); }, this.options.intervalMs ?? 20_000);
@@ -126,6 +140,13 @@ export class ReleaseFollower {
   private async converge(): Promise<void> {
     if (this.stopped) return;
     const status = await this.options.authority.deploymentStatus();
+    let host: EnvironmentStatus | undefined;
+    if (this.options.omp?.status().pendingMachineCommit) {
+      if (!this.options.hostUrl || !this.options.controlToken || !this.options.generation) return;
+      host = await this.hostStatus();
+      if (host.machineHash !== this.options.generation || host.machineReleaseSha !== this.options.runningMachineSha) return;
+      await this.options.omp.commitInitialSelection();
+    }
     const failure = this.options.omp?.status().failure;
     if (failure) await this.reportFailure(failure.sha, 'omp', failure.error);
     await this.reportOmpApplied();
@@ -155,7 +176,7 @@ export class ReleaseFollower {
       await this.reportMachineApplied();
       return;
     }
-    const host = await this.hostStatus();
+    host ??= await this.hostStatus();
     await this.reportMachineApplied(host);
     if (desired.machine !== null && host.lastLaunch?.sha === desired.machine && host.lastLaunch.target === 'machine' && host.lastLaunch.status === 'failed') {
       await this.reportFailure(desired.machine, 'machine', host.lastLaunch.error ?? 'Host rolled the release back');
@@ -184,7 +205,7 @@ export class ReleaseFollower {
 
   private async reportOmpApplied(): Promise<void> {
     const running = this.options.omp?.status();
-    if (!running || running.draining !== 0) return;
+    if (!running || running.pendingMachineCommit || running.draining !== 0) return;
     const identity = `${running.sha ?? 'channel'}:${running.hash}`;
     if (this.reportedOmp === identity) return;
     if (running.sha === null) await this.options.authority.reportMachineChannelApplied({ target: 'omp', generation: running.hash });

@@ -10,10 +10,16 @@ export class CoordinatorPortableSpaceRuntime implements PortableSpaceRuntime {
   private restoredAgent?: CoordinatorPortableAgentSnapshot;
   private restoredArtifacts?: CoordinatorPortableArtifactSnapshot;
 
-  constructor(private readonly coordinator: MachineSessionCoordinator, private readonly spaceId: string) {}
+  constructor(
+    private readonly coordinator: MachineSessionCoordinator,
+    private readonly spaceId: string,
+    private readonly beforeCheckpoint?: () => Promise<void>,
+    private readonly beforeActivate?: () => Promise<void>,
+  ) {}
 
   async quiesce(): Promise<void> {
-    await this.coordinator.quiesceSpace(this.spaceId);
+    await this.coordinator.quiesceSpace(this.spaceId, true);
+    await this.beforeCheckpoint?.();
   }
 
   async resumeAfterFailedClose(): Promise<void> {
@@ -46,6 +52,7 @@ export class CoordinatorPortableSpaceRuntime implements PortableSpaceRuntime {
 
   async activate(): Promise<void> {
     if (!this.restoredAgent || !this.restoredArtifacts) throw new Error('Portable space state is incomplete');
+    await this.beforeActivate?.();
     await this.coordinator.restorePortableSpace({
       spaceId: this.spaceId,
       agent: this.restoredAgent,

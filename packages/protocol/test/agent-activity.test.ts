@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { computeSessionActivity, determineAgentState, type SessionActivity, type WorkspaceAgentActivityState } from '../src/index.js';
+import { computeSessionActivity, determineAgentState, type SessionActivity, type WorkspaceAgentActivityState } from '@gitspace/protocol-agent';
 
 const stateWith = (overrides: WorkspaceAgentActivityState): WorkspaceAgentActivityState => ({
   statuses: {}, pendingPermissions: {}, pendingQuestions: {}, queuedMessages: {}, subagentCounts: {}, ...overrides,
@@ -47,7 +47,7 @@ describe('determineAgentState parity', () => {
     expect(determineAgentState({ active: true, reasons: [{ kind: 'turn' }] }, {}, undefined)).toBe('running');
     expect(determineAgentState({ active: true, reasons: [{ kind: 'compacting' }] }, {}, undefined)).toBe('running');
     expect(determineAgentState({ active: true, reasons: [{ kind: 'human', questions: 1, permissions: 0 }] }, {}, undefined)).toBe('permission-needed');
-    expect(determineAgentState(idle, {}, 'boom')).toBe('retrying');
+    expect(determineAgentState(idle, {}, { domain: 'agent', code: 'AGENT_EXECUTION_FAILED', message: 'boom', context: {} })).toBe('retrying');
   });
 
   it('keeps queued and side-agent-only activity waiting instead of green', () => {

@@ -13,6 +13,22 @@
     "deploy:dry": "wrangler deploy --dry-run --config wrangler.jsonc"
   },
   "dependencies": {
-    "@gitspace/protocol": "workspace:*"
+    "@composio/core": "0.18.0",
+    "@gitspace/blocks": "workspace:*",
+    "@gitspace/protocol": "workspace:*",
+    "@gitspace/protocol-agent": "workspace:*",
+    "@gitspace/protocol-environment": "workspace:*",
+    "@gitspace/protocol-workspace": "workspace:*",
+    "@gitspace/protocol-sync": "workspace:*",
+    "@noble/curves": "^2.2.0",
+    "@oh-my-pi/pi-catalog": "18.1.10",
+    "@oh-my-pi/pi-ai": "18.1.10",
+    "devalue": "5.8.2",
+    "result-rpc": "0.5.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@msw/cloudflare": "^0.0.1",
+    "msw": "^2.14.0"
   }
 }

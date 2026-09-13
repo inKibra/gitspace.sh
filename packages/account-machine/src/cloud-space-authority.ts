@@ -1,3 +1,5 @@
+import { z } from 'zod';
+import { SpaceAuthorityRecordSchema, WorkspaceDomainError, WorkspaceFailureSchema, type SpaceAuthorityRecord } from '@gitspace/protocol-workspace';
 import {
   createSignedControlRequest,
   type AppendJournalEntryInput,
@@ -63,6 +65,11 @@ import {
   type WorkflowView,
 } from '@gitspace/protocol';
 import type { CheckpointBlobStore, SpaceCheckpointAuthority } from './portable-space-lifecycle.js';
+import type { AccountSecretMetadata, EffectiveSecretMetadata, ConfigurationValuesView } from '@gitspace/protocol/rpc-contract';
+import { withCloudRequestDiagnostics } from './cloud-request-diagnostics.js';
+import { EnvironmentError, EnvironmentFailureSchema, LifecycleStateSchema, type EnvironmentLifecycleAuthority, type LifecycleMutation, type LifecycleState, type LifecycleRunLog } from '@gitspace/protocol-environment';
+import { applyStreamEvent, initialStreamState } from '@gitspace/protocol-sync';
+import { decodeSseChanges } from '@gitspace/protocol-sync/sse';
 
 export class CloudSpaceAuthorityError extends Error {
   constructor(readonly code: string, message: string, readonly details: Record<string, unknown> = {}) {
@@ -140,36 +147,126 @@ function projectCronView(value: ProjectCronView): ProjectCronView {
   };
 }
 
+const uploadRetryCodes: Record<string, true> = {
+  ECONNRESET: true, ECONNREFUSED: true, ECONNABORTED: true, EPIPE: true,
+  ETIMEDOUT: true, EAI_AGAIN: true, ENETDOWN: true, ENETUNREACH: true,
+  EHOSTUNREACH: true, ERR_NETWORK: true, ERR_SOCKET_CLOSED: true,
+  UND_ERR_CONNECT_TIMEOUT: true, UND_ERR_SOCKET: true,
+  ConnectionClosed: true, ConnectionRefused: true, Timeout: true, FailedToOpenSocket: true,
+};
+
+function retryableUploadError(error: unknown): boolean {
+  if (error instanceof CloudSpaceAuthorityError) {
+    const status = error.details.status;
+    return typeof status === 'number' && (status === 408 || status === 429 || (status >= 500 && status <= 599));
+  }
+  for (let cause = error, depth = 0; cause instanceof Error && depth < 5; cause = cause.cause, depth += 1) {
+    if (cause.name === 'AbortError') return false;
+    if ('code' in cause && typeof cause.code === 'string' && Object.hasOwn(uploadRetryCodes, cause.code)) return true;
+  }
+  return false;
+}
+
+const controlErrorMaxBytes = 8 * 1024;
+const controlErrorResponseSchema = z.object({
+  status: z.literal('error'),
+  error: z.union([EnvironmentFailureSchema, z.object({
+    code: z.string().min(1).max(128),
+    message: z.string().min(1).max(2048),
+    size: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
+    maxBytes: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
+    declaredSize: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).nullable().optional(),
+  })]),
+});
+
+async function readControlError(response: Response): Promise<z.infer<typeof controlErrorResponseSchema>['error'] | null> {
+  if (!response.body) return null;
+  const reader = response.body.getReader();
+  // A server that sends headers but stalls its body must not block the failure or retry.
+  const deadline = setTimeout(() => { void reader.cancel().catch(() => undefined); }, 1_000);
+  try {
+    if (Number(response.headers.get('content-length')) > controlErrorMaxBytes) return null;
+    const bytes = new Uint8Array(controlErrorMaxBytes);
+    let length = 0;
+    for (;;) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      if (chunk.value.byteLength > controlErrorMaxBytes - length) return null;
+      bytes.set(chunk.value, length);
+      length += chunk.value.byteLength;
+    }
+    const parsed = controlErrorResponseSchema.safeParse(JSON.parse(new TextDecoder().decode(bytes.subarray(0, length))));
+    return parsed.success ? parsed.data.error : null;
+  } catch {
+    // A broken error body must not replace the HTTP status or change its retry policy.
+    return null;
+  } finally {
+    clearTimeout(deadline);
+    void reader.cancel().catch(() => undefined);
+    reader.releaseLock();
+  }
+}
 
 export class CloudDataCheckpointBlobStore implements CheckpointBlobStore {
   constructor(private readonly options: SignedCloudRequestOptions) {}
 
   async put(key: string, bytes: Uint8Array): Promise<`sha256:${string}`> {
     const hash = hashBytes(bytes);
-    const request = signedRequest(this.options, 'data.put', { key, hash, size: bytes.byteLength });
-    const response = await (this.options.fetcher ?? fetch)(objectUrl(this.options.baseUrl, key), {
-      method: 'PUT',
-      headers: {
-        'content-length': String(bytes.byteLength),
-        'content-type': 'application/octet-stream',
-        'x-gitspace-control': encodedRequest(request),
-      },
-      body: ownedBuffer(bytes),
-    });
-    if (!response.ok) throw new CloudSpaceAuthorityError('DATA_PUT_FAILED', `Application object upload ${key} failed with ${response.status}`, { key, status: response.status });
-    return hash;
+    const url = objectUrl(this.options.baseUrl, key);
+    // Copy once; every attempt uploads the same content with exponential backoff.
+    const body = ownedBuffer(bytes);
+    for (let attempt = 0; ; attempt += 1) {
+      // The object is immutable, but replay protection requires a fresh signed nonce.
+      const request = signedRequest(this.options, 'data.put', { key, hash, size: body.byteLength });
+      try {
+        return await withCloudRequestDiagnostics(request, async (diagnostics) => {
+          const response = await (this.options.fetcher ?? fetch)(url, {
+            method: 'PUT',
+            headers: {
+              'content-length': String(body.byteLength),
+              'content-type': 'application/octet-stream',
+              'x-gitspace-control': encodedRequest(request),
+              ...diagnostics.headers,
+            },
+            body,
+          });
+          diagnostics.response = response;
+          diagnostics.stage = 'http';
+          if (!response.ok) {
+            const serverError = await readControlError(response);
+            throw new CloudSpaceAuthorityError(
+              'DATA_PUT_FAILED',
+              `Application object upload ${key} failed with ${response.status}${serverError ? `: ${serverError.code}: ${serverError.message}` : ''}`,
+              { ...serverError, key, status: response.status },
+            );
+          }
+          await response.body?.cancel().catch(() => undefined);
+          return hash;
+        });
+      } catch (error) {
+        if (attempt >= 4 || !retryableUploadError(error)) throw error;
+        // Five attempts total; preserve the last transport or HTTP error.
+        await Bun.sleep(250 * 2 ** attempt);
+      }
+    }
   }
 
   async get(key: string, expectedHash?: string): Promise<Uint8Array | null> {
     const request = signedRequest(this.options, 'data.get', { key, ...(expectedHash ? { hash: expectedHash } : {}) });
-    const response = await (this.options.fetcher ?? fetch)(objectUrl(this.options.baseUrl, key), {
-      headers: { 'x-gitspace-control': encodedRequest(request) },
+    return withCloudRequestDiagnostics(request, async (diagnostics) => {
+      const response = await (this.options.fetcher ?? fetch)(objectUrl(this.options.baseUrl, key), {
+        headers: { 'x-gitspace-control': encodedRequest(request), ...diagnostics.headers },
+      });
+      diagnostics.response = response;
+      diagnostics.stage = 'http';
+      if (response.status === 404) return null;
+      if (!response.ok) throw new CloudSpaceAuthorityError('DATA_GET_FAILED', `Application object download failed with ${response.status}`);
+      diagnostics.stage = 'response-body';
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      diagnostics.stage = 'integrity';
+      if (expectedHash && hashBytes(bytes) !== expectedHash) throw new CloudSpaceAuthorityError('DATA_INTEGRITY_FAILED', `Application object ${key} failed integrity verification`);
+      return bytes;
     });
-    if (response.status === 404) return null;
-    if (!response.ok) throw new CloudSpaceAuthorityError('DATA_GET_FAILED', `Application object download failed with ${response.status}`);
-    const bytes = new Uint8Array(await response.arrayBuffer());
-    if (expectedHash && hashBytes(bytes) !== expectedHash) throw new CloudSpaceAuthorityError('DATA_INTEGRITY_FAILED', `Application object ${key} failed integrity verification`);
-    return bytes;
   }
 }
 
@@ -199,22 +296,8 @@ export interface FleetMachineDefinition {
   error: string | null;
 }
 
-/** Mirror of the auth worker's `SpaceAuthorityRecord`: closed spaces have no machine and carry the manifest of their last checkpoint. */
-export interface CloudSpaceRecord {
-  projectId: string;
-  spaceId: string;
-  state: 'open' | 'closing' | 'closed' | 'opening';
-  machineId: string | null;
-  generation: number;
-  checkpointRevision: number;
-  manifestKey: string | null;
-  manifestHash: string | null;
-  errorMessage: string | null;
-  resumeMachineId?: string | null;
-  updatedAt: string;
-}
 
-export class CloudSpaceCheckpointAuthority implements SpaceCheckpointAuthority {
+export class CloudSpaceCheckpointAuthority implements SpaceCheckpointAuthority, EnvironmentLifecycleAuthority {
   constructor(private readonly options: SignedCloudRequestOptions) {}
 
   provisionStorage(gitBucketName: string): Promise<unknown> {
@@ -256,6 +339,94 @@ export class CloudSpaceCheckpointAuthority implements SpaceCheckpointAuthority {
     return this.call('project.get', { projectId });
   }
 
+
+  getLifecycleState(projectId: string, spaceId: string): Promise<LifecycleState> {
+    return this.call('project.environment.get', { projectId, spaceId });
+  }
+
+  mutateLifecycleState(projectId: string, spaceId: string, input: LifecycleMutation): Promise<LifecycleState> {
+    return this.call('project.environment.mutate', { projectId, spaceId, input });
+  }
+
+  async watchLifecycleState(
+    projectId: string,
+    spaceId: string,
+    onState: (state: LifecycleState) => void,
+    signal: AbortSignal,
+    onFailure?: (error: unknown) => Promise<void>,
+  ): Promise<void> {
+    let state = initialStreamState<LifecycleState>(`environment:${spaceId}`);
+    let retryDelay = 250;
+    while (!signal.aborted) {
+      const connection = new AbortController();
+      const abort = () => connection.abort(signal.reason);
+      signal.addEventListener('abort', abort, { once: true });
+      if (signal.aborted) abort();
+      let response: Response | undefined;
+      try {
+        const request = signedRequest(this.options, 'project.environment.watch', { projectId, spaceId, after: state.resync ? null : state.cursor });
+        const headerDeadline = setTimeout(() => connection.abort(new Error('Environment stream connection timed out')), 30_000);
+        try {
+          response = await withCloudRequestDiagnostics(request, async (diagnostics) => {
+            const value = await (this.options.fetcher ?? fetch)(new URL('/v1/control', this.options.baseUrl), {
+              method: 'POST',
+              headers: { 'content-type': 'application/json', accept: 'text/event-stream', ...diagnostics.headers },
+              body: JSON.stringify(request),
+              signal: connection.signal,
+            });
+            diagnostics.response = value;
+            return value;
+          });
+        } finally {
+          clearTimeout(headerDeadline);
+        }
+        if (!response.ok) {
+          const error = await readControlError(response);
+          const failure = EnvironmentFailureSchema.safeParse(error);
+          if (failure.success) throw new EnvironmentError(failure.data.code, failure.data.message, failure.data.context);
+          throw new CloudSpaceAuthorityError(error?.code ?? 'STREAM_FAILED', error?.message ?? `Environment stream failed with ${response.status}`, { status: response.status });
+        }
+        if (!response.body || response.headers.get('content-type')?.split(';')[0]?.trim() !== 'text/event-stream') {
+          throw new CloudSpaceAuthorityError('STREAM_PROTOCOL_INVALID', 'Environment authority did not return an SSE stream', { status: response.status });
+        }
+        for await (const event of decodeSseChanges(response.body, LifecycleStateSchema, signal)) {
+          const previous = state;
+          state = applyStreamEvent(state, event);
+          if (event.type === 'resync') continue;
+          if (state.resync) break;
+          if (state !== previous && state.value) onState(state.value);
+          retryDelay = 250;
+        }
+        if (!signal.aborted) throw new Error('Environment synchronization connection closed');
+      } catch (error) {
+        if (signal.aborted) return;
+        if (error instanceof EnvironmentError
+          || error instanceof CloudSpaceAuthorityError && typeof error.details.status === 'number'
+          && error.details.status < 500 && error.details.status !== 408 && error.details.status !== 429) throw error;
+        await onFailure?.(error);
+      } finally {
+        signal.removeEventListener('abort', abort);
+        connection.abort();
+        await response?.body?.cancel().catch(() => undefined);
+      }
+      if (signal.aborted) return;
+      await new Promise<void>((resolve) => {
+        const finish = () => {
+          clearTimeout(timer);
+          signal.removeEventListener('abort', finish);
+          resolve();
+        };
+        const timer = setTimeout(finish, retryDelay);
+        signal.addEventListener('abort', finish, { once: true });
+        if (signal.aborted) finish();
+      });
+      retryDelay = Math.min(10_000, retryDelay * 2);
+    }
+  }
+
+  getLifecycleRunLog(projectId: string, spaceId: string, runId: string, offset = 0): Promise<LifecycleRunLog> {
+    return this.call('project.environment.runLog', { projectId, spaceId, runId, offset });
+  }
   activateSourceProject(projectId: string, expectedRevision: number, baseBranch: string): Promise<CloudProjectSummary> {
     return this.call('project.activateSource', { projectId, expectedRevision, baseBranch });
   }
@@ -588,9 +759,21 @@ export class CloudSpaceCheckpointAuthority implements SpaceCheckpointAuthority {
     return this.call('secrets.delete', { projectId, name });
   }
 
-  materializeProjectSecrets(projectId: string, names: string[]): Promise<Record<string, string>> {
-    return this.call('secrets.materialize', { projectId, names });
+  materializeProjectSecrets(projectId: string, names: string[], workspaceId: string | null): Promise<Record<string, string>> {
+    return this.call('secrets.materialize', { projectId, names, workspaceId });
   }
+
+  listEffectiveSecrets(projectId: string, workspaceId: string | null): Promise<EffectiveSecretMetadata[]> {
+    return this.call('secrets.effective.list', { projectId, workspaceId });
+  }
+  listAccountSecrets(): Promise<AccountSecretMetadata[]> { return this.call('secrets.account.list', {}); }
+  putAccountSecret(input: { name: string; value: string }): Promise<AccountSecretMetadata> { return this.call('secrets.account.put', input); }
+  deleteAccountSecret(name: string): Promise<{ deleted: boolean }> { return this.call('secrets.account.delete', { name }); }
+  grantAccountSecret(input: { name: string; projectId: string; projectSpaceEnabled: boolean; workspacesEnabled: boolean }): Promise<AccountSecretMetadata> { return this.call('secrets.account.grant', input); }
+  revokeAccountSecret(name: string, projectId: string): Promise<AccountSecretMetadata> { return this.call('secrets.account.revoke', { name, projectId }); }
+  getConfigurationValues(input: { projectId?: string }): Promise<ConfigurationValuesView> { return this.call('configuration.values.get', input); }
+  putConfigurationValue(input: { scope: 'global' | 'project'; projectId?: string; name: string; value: string }): Promise<ConfigurationValuesView> { return this.call('configuration.values.put', input); }
+  deleteConfigurationValue(input: { scope: 'global' | 'project'; projectId?: string; name: string }): Promise<ConfigurationValuesView> { return this.call('configuration.values.delete', input); }
 
   listMcpConnections(): Promise<McpConnection[]> {
     return this.call('mcp.connections.list', {});
@@ -903,8 +1086,8 @@ export class CloudSpaceCheckpointAuthority implements SpaceCheckpointAuthority {
   }
 
   /** Cloud placement record without opening: who holds the space, its generation, and the closed checkpoint manifest. */
-  getSpace(projectId: string, spaceId: string): Promise<CloudSpaceRecord | null> {
-    return this.call<CloudSpaceRecord | null>('space.get', { projectId, spaceId });
+  async getSpace(projectId: string, spaceId: string): Promise<SpaceAuthorityRecord | null> {
+    return SpaceAuthorityRecordSchema.nullable().parse(await this.call('space.get', { projectId, spaceId }));
   }
 
   stageRelease(input: StageReleaseInput): Promise<ReleaseRecord> {
@@ -935,19 +1118,28 @@ export class CloudSpaceCheckpointAuthority implements SpaceCheckpointAuthority {
 
   private async call<T = unknown>(operation: ControlOperation, payload: Record<string, unknown>): Promise<T> {
     const request = signedRequest(this.options, operation, payload);
-    const response = await (this.options.fetcher ?? fetch)(new URL('/v1/control', this.options.baseUrl), {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(request),
+    return withCloudRequestDiagnostics(request, async (diagnostics) => {
+      const response = await (this.options.fetcher ?? fetch)(new URL('/v1/control', this.options.baseUrl), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...diagnostics.headers },
+        body: JSON.stringify(request),
+      });
+      diagnostics.response = response;
+      diagnostics.stage = 'response-body';
+      const body = await response.json() as { status?: unknown; value?: unknown; error?: { code?: unknown; message?: unknown; [key: string]: unknown } };
+      diagnostics.stage = response.ok ? 'application' : 'http';
+      if (!response.ok || body.status !== 'ok') {
+        const environment = EnvironmentFailureSchema.safeParse(body.error);
+        if (environment.success) throw new EnvironmentError(environment.data.code, environment.data.message, environment.data.context);
+        const domainFailure = WorkspaceFailureSchema.safeParse(body.error);
+        if (domainFailure.success) throw new WorkspaceDomainError(domainFailure.data);
+        throw new CloudSpaceAuthorityError(
+          typeof body.error?.code === 'string' ? body.error.code : 'CONTROL_FAILED',
+          typeof body.error?.message === 'string' ? body.error.message : `Control operation failed with ${response.status}`,
+          body.error ?? {},
+        );
+      }
+      return body.value as T;
     });
-    const body = await response.json() as { status?: unknown; value?: unknown; error?: { code?: unknown; message?: unknown; [key: string]: unknown } };
-    if (!response.ok || body.status !== 'ok') {
-      throw new CloudSpaceAuthorityError(
-        typeof body.error?.code === 'string' ? body.error.code : 'CONTROL_FAILED',
-        typeof body.error?.message === 'string' ? body.error.message : `Control operation failed with ${response.status}`,
-        body.error ?? {},
-      );
-    }
-    return body.value as T;
   }
 }

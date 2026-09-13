@@ -3,7 +3,7 @@ import { parsePatchFiles, type DiffLineAnnotation, type FileDiffOptions, type Se
 import { FileTree, useFileTree } from '@pierre/trees/react';
 import type { GitStatusEntry } from '@pierre/trees';
 import { Background, Controls, MarkerType, Position, ReactFlow, type Edge, type Node } from '@xyflow/react';
-import type { SideAgentBlock } from '@gitspace/blocks';
+import type { ExecutionBlock, SideAgentBlock } from '@gitspace/blocks';
 import {
   Accordion,
   AccordionContent,
@@ -60,7 +60,7 @@ import type {
   WorkflowNode,
   WorkflowView,
 } from '@gitspace/protocol';
-import type { WorkspaceStatusColor } from '@gitspace/protocol/workspace-status';
+import type { WorkspaceStatusColor } from '@gitspace/protocol-workspace';
 import {
   AlertCircle,
   Archive,
@@ -86,10 +86,12 @@ import { GitSpaceMarkdown } from '../GitSpaceMarkdown.js';
 import { EmptyState, StatusDot, type AgentScopeView, type WorkspaceView } from '../GitSpaceShell.js';
 import { OverviewView, type OverviewViewProps } from './OverviewView.js';
 import { UsageView, type UsageStatus } from './UsageView.js';
+import { AgentSetupView, type InspectorAgentSetupState } from './AgentSetupView.js';
 import { ArtifactActions, type ArtifactActionsHandlers } from './ArtifactActions.js';
+import { ResourceNavigation, type ResourceRequest } from '../ResourceNavigation.js';
 
-export type InspectorPermanentView = 'overview' | 'environment' | 'goal' | 'subagents' | 'files' | 'artifacts' | 'services' | 'usage' | 'guide' | 'journal';
-export type InspectorDocumentKind = 'file' | 'diff' | 'artifact' | 'goal' | 'workflow' | 'rubric';
+export type InspectorPermanentView = 'overview' | 'environment' | 'goal' | 'agents' | 'subagents' | 'files' | 'artifacts' | 'services' | 'usage' | 'guide' | 'journal';
+export type InspectorDocumentKind = 'file' | 'diff' | 'artifact' | 'resource' | 'goal' | 'workflow' | 'rubric';
 export interface InspectorOpenDocument {
   id: string;
   kind: InspectorDocumentKind;
@@ -133,10 +135,13 @@ export interface InspectorProps {
   journalEntries: readonly JournalEntryView[];
   threads: readonly ReviewThreadView[];
   services: readonly ServiceView[];
-  subagents: readonly SideAgentBlock[];
+  subagents: readonly (ExecutionBlock | SideAgentBlock)[];
   usage: InspectorUsageState;
+  agentSetup: InspectorAgentSetupState;
   onRequestArtifact(reference: Extract<EvidenceReference, { kind: 'artifact' }>): Promise<InspectorArtifactContent>;
   artifactReferences?: readonly Extract<EvidenceReference, { kind: 'artifact' }>[];
+  resourceRequest?: ResourceRequest;
+  onRequestResource?(uri: string): Promise<InspectorArtifactContent>;
   artifactActions?: ArtifactActionsHandlers;
   reviewerId: string;
   loading?: boolean;
@@ -173,12 +178,13 @@ interface GuideViewState {
 const guideViewCache = new Map<string, GuideViewState>();
 const RuntimeAvailability = createContext(true);
 const openWorkspaceFirst = 'Open this workspace on a machine first';
-const runtimeViews: Partial<Record<InspectorPermanentView, true>> = { overview: true, environment: true, subagents: true, files: true, services: true, usage: true };
+const runtimeViews: Partial<Record<InspectorPermanentView, true>> = { overview: true, agents: true, subagents: true, files: true, services: true, usage: true };
 
 const permanentTabs: ReadonlyArray<{ id: InspectorPermanentView; label: string }> = [
   { id: 'overview', label: 'Overview' },
-  { id: 'environment', label: 'Setup' },
+  { id: 'environment', label: 'Environment' },
   { id: 'goal', label: 'Goal' },
+  { id: 'agents', label: 'Agent setup' },
   { id: 'subagents', label: 'Subagents' },
   { id: 'files', label: 'Files' },
   { id: 'artifacts', label: 'Artifacts' },
@@ -187,6 +193,7 @@ const permanentTabs: ReadonlyArray<{ id: InspectorPermanentView; label: string }
   { id: 'guide', label: 'Change Guide' },
   { id: 'journal', label: 'Journal' },
 ];
+const agentSetupTabIndex = permanentTabs.findIndex((tab) => tab.id === 'agents');
 const repositoryModes: ReadonlyArray<{ id: RepositoryMode; label: string }> = [
   { id: 'current', label: 'Current' },
   { id: 'working', label: 'Working diff' },
@@ -488,24 +495,65 @@ function ArtifactDocument({ reference, content, status, error, mode, dataReferen
   artifactContent: Readonly<Record<string, InspectorArtifactContent>>;
   onRequest(reference: ArtifactReference): Promise<void>;
 }) {
-  const shape = useShape();
+  // Pinned evidence and transcript resources share the same preview renderers below.
   if (status === 'loading' || status === undefined) return <div className="flex flex-1 items-center justify-center p-6"><ThinkingIndicator aria-label={`Loading ${reference.label}…`} /></div>;
   if (status === 'error') return <Padded><EmptyState icon={ic(AlertCircle, 22)} title="Artifact could not load" description={error ?? 'The artifact read failed.'} action={<Button variant="secondary" size="compact" type="button" onClick={() => void onRequest(reference)}>Retry</Button>} /></Padded>;
   if (!content) return <Padded><EmptyState icon={ic(Archive, 22)} title="Artifact bytes are unavailable" description="The authority returned no readable content." /></Padded>;
+  return <ArtifactPreview reference={reference} content={content} mode={mode} dataReferences={dataReferences} artifactContent={artifactContent} onRequest={onRequest} />;
+}
+
+function ArtifactPreview({ reference, content, mode, dataReferences, artifactContent, onRequest }: {
+  reference: Pick<ArtifactReference, 'url' | 'label' | 'mediaType'>;
+  content: InspectorArtifactContent;
+  mode: 'preview' | 'source';
+  dataReferences: readonly ArtifactReference[];
+  artifactContent: Readonly<Record<string, InspectorArtifactContent>>;
+  onRequest(reference: ArtifactReference): Promise<void>;
+}) {
+  const shape = useShape();
   if (mode === 'source') return content.source !== null ? <SourceArtifact source={content.source} /> : <Padded><EmptyState icon={ic(File02, 22)} title="Source is unavailable" description="This binary artifact has no text source." /></Padded>;
   const mediaType = content.mediaType ?? reference.mediaType;
   if (mediaType?.startsWith('image/')) return <PreviewFrame><img src={content.previewUrl} alt={reference.label} className={`${shape.container} max-h-full max-w-full bg-surface-3 object-contain shadow-surface-1`} /></PreviewFrame>;
-  if ((reference.url.endsWith('.gssh.html') || mediaType === 'text/html') && content.source) return <MiniAppArtifact source={content.source} dataReferences={dataReferences} content={artifactContent} onLoad={onRequest} />;
+  if ((reference.url.endsWith('.gssh.html') || mediaType === 'text/html') && content.source !== null) return <MiniAppArtifact source={content.source} dataReferences={dataReferences} content={artifactContent} onLoad={onRequest} />;
   if (mediaType === 'application/pdf') return <PreviewFrame><iframe src={content.previewUrl} title={reference.label} className={`${shape.container} h-full min-h-90 w-full bg-surface-3 shadow-surface-1`} /></PreviewFrame>;
   if (mediaType?.startsWith('audio/')) return <PreviewFrame><audio controls src={content.previewUrl} /></PreviewFrame>;
   if (mediaType?.startsWith('video/')) return <PreviewFrame><video controls src={content.previewUrl} className="max-h-full max-w-full" /></PreviewFrame>;
-  if ((mediaType === 'application/json' || reference.url.endsWith('.json')) && content.source) {
+  if ((mediaType === 'application/json' || reference.url.endsWith('.json')) && content.source !== null) {
     let pretty = content.source;
     try { pretty = JSON.stringify(JSON.parse(content.source), null, 2); } catch { /* Render original text. */ }
     return <SourceArtifact source={pretty} />;
   }
-  if ((mediaType === 'text/markdown' || reference.url.endsWith('.md')) && content.source) return <MarkdownArtifact source={content.source} />;
-  return content.source ? <SourceArtifact source={content.source} /> : <Padded><EmptyState icon={ic(Archive, 22)} title="Preview is unavailable" description="This artifact type has no inline renderer." /></Padded>;
+  if ((mediaType === 'text/markdown' || reference.url.endsWith('.md')) && content.source !== null) return <MarkdownArtifact source={content.source} />;
+  return content.source !== null ? <SourceArtifact source={content.source} /> : <Padded><EmptyState icon={ic(Archive, 22)} title="Preview is unavailable" description="This artifact type has no inline renderer." /></Padded>;
+}
+
+function ResourceDocument({ uri, mode, onRequest, dataReferences, artifactContent, onRequestArtifact }: {
+  uri: string;
+  mode: 'preview' | 'source';
+  onRequest: InspectorProps['onRequestResource'];
+  dataReferences: readonly ArtifactReference[];
+  artifactContent: Readonly<Record<string, InspectorArtifactContent>>;
+  onRequestArtifact(reference: ArtifactReference): Promise<void>;
+}) {
+  const [attempt, setAttempt] = useState(0);
+  const [result, setResult] = useState<{ content: InspectorArtifactContent } | { error: string } | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    setResult(null);
+    void (async () => {
+      try {
+        if (!onRequest) throw new Error('Resource reads are unavailable for this workspace.');
+        const content = await onRequest(uri);
+        if (!cancelled) setResult({ content });
+      } catch (error) {
+        if (!cancelled) setResult({ error: error instanceof Error ? error.message : String(error) });
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [uri, attempt]);
+  if (!result) return <div className="flex flex-1 items-center justify-center p-6"><ThinkingIndicator aria-label={`Loading ${uri}…`} /></div>;
+  if ('error' in result) return <Padded><EmptyState icon={ic(AlertCircle, 22)} title="Resource could not load" description={`${uri}: ${result.error}`} action={<Button variant="secondary" size="compact" type="button" onClick={() => setAttempt((value) => value + 1)}>Retry</Button>} /></Padded>;
+  return <ArtifactPreview reference={{ url: uri, label: uri, mediaType: result.content.mediaType }} content={result.content} mode={mode} dataReferences={dataReferences} artifactContent={artifactContent} onRequest={onRequestArtifact} />;
 }
 
 function ArtifactsSurface({ references, onOpen, actions }: { references: readonly ArtifactReference[]; onOpen: (reference: EvidenceReference) => void; actions?: ArtifactActionsHandlers }) {
@@ -526,10 +574,10 @@ function ArtifactsSurface({ references, onOpen, actions }: { references: readonl
   </div></ScrollArea>;
 }
 
-function SubagentsSurface({ subagents }: { subagents: readonly SideAgentBlock[] }) {
+function SubagentsSurface({ subagents }: { subagents: readonly (ExecutionBlock | SideAgentBlock)[] }) {
   if (!subagents.length) return <Padded><EmptyState icon={ic(Users01, 22)} title="No delegated work" description="Subagents from the canonical agent transcript appear here while they run and after they yield." /></Padded>;
   return <ScrollArea className="min-h-0 flex-1" viewportClassName="h-full"><div className="p-4"><CardGroup border="outlined">{subagents.map((agent) => <Card key={agent.id}>
-    <CardHeader><CardMedia icon={UsersGlyph} /><CardTitle>{agent.label}</CardTitle><CardDescription>{agent.agent ?? 'subagent'} · {agent.status}</CardDescription><CardAction><Tone value={agent.status} /></CardAction></CardHeader>
+    <CardHeader><CardMedia icon={UsersGlyph} /><CardTitle>{agent.label}</CardTitle><CardDescription>{[agent.agent ?? 'subagent', agent.model, agent.status].filter(Boolean).join(' · ')}</CardDescription><CardAction className="flex flex-wrap gap-1"><Tone value={agent.status} />{agent.type === 'execution' && agent.hasFailures && agent.status !== 'failed' ? <Badge variant="dot" color="red">Failure in history</Badge> : null}</CardAction></CardHeader>
     {agent.summary ? <CardContent><GitSpaceMarkdown>{agent.summary}</GitSpaceMarkdown></CardContent> : null}
   </Card>)}</CardGroup></div></ScrollArea>;
 }
@@ -820,6 +868,8 @@ function JournalSurface({ entries, artifactContent, artifactLoad, artifactErrors
 export function Inspector(props: InspectorProps) {
   const runtimeAvailable = props.runtimeAvailable ?? true;
   const [view, setView] = useState<ActiveView>(props.initialView ?? 'goal');
+  const [agentSetupDirty, setAgentSetupDirty] = useState(false);
+  useEffect(() => { if (props.initialView) setView(props.initialView); }, [props.initialView]);
   const [documents, setDocuments] = useState<InspectorOpenDocument[]>([]);
   const [activeDocumentId, setActiveDocumentId] = useState<string | null>(null);
   const [fileModes, setFileModes] = useState<Record<string, RepositoryMode>>({});
@@ -842,6 +892,7 @@ export function Inspector(props: InspectorProps) {
   // Usage is a transcript read on the machine: fetch it the first time the tab
   // is shown rather than for every Inspector mount.
   useEffect(() => { if (runtimeAvailable && view === 'usage') props.usage.load(); }, [view, runtimeAvailable]);
+  useEffect(() => { if (runtimeAvailable && view === 'agents') props.agentSetup.load(); }, [view, runtimeAvailable, props.agentSetup.sessionId]);
   const loadArtifact = async (reference: ArtifactReference): Promise<void> => {
     const key = artifactId(reference);
     if (artifactLoad[key] === 'loading' || artifactLoad[key] === 'loaded') return;
@@ -859,6 +910,8 @@ export function Inspector(props: InspectorProps) {
   const selectSurface = (next: InspectorPermanentView): void => { setView(next); setActiveDocumentId(null); setActiveThread(null); setThreadSelection(null); };
   const openDocument = (document: InspectorOpenDocument): void => { setDocuments((current) => current.some((item) => item.id === document.id) ? current : [...current, document]); setActiveDocumentId(document.id); setView('document'); setActiveThread(null); setThreadSelection(null); };
   const openProduct = (kind: 'goal' | 'workflow' | 'rubric'): void => { const record = kind === 'goal' ? props.overview.goal : kind === 'workflow' ? props.overview.workflow : props.overview.rubric; if (record) openDocument({ id: `${kind}:${record.id}`, kind, label: record.title, target: record.id }); };
+  const openResource = ({ uri }: ResourceRequest): void => openDocument({ id: `resource:${uri}`, kind: 'resource', label: fileName(uri), target: uri });
+  useEffect(() => { if (props.resourceRequest) openResource(props.resourceRequest); }, [props.resourceRequest]);
   const openEvidence = (reference: EvidenceReference): void => {
     if (reference.kind === 'artifact') {
       openDocument({ id: `artifact:${artifactId(reference)}`, kind: 'artifact', label: reference.label, target: artifactId(reference) });
@@ -913,6 +966,7 @@ export function Inspector(props: InspectorProps) {
   if (activeDocument?.kind === 'goal' && props.overview.goal) documentBody = <ProductGoal goal={props.overview.goal} onOpenEvidence={openEvidence} />;
   else if (activeDocument?.kind === 'workflow' && props.overview.workflow) documentBody = <WorkflowDocument workflow={props.overview.workflow} />;
   else if (activeDocument?.kind === 'rubric' && props.overview.rubric) documentBody = <RubricDocument rubric={props.overview.rubric} onOpenEvidence={openEvidence} onSubmit={props.onSubmitHumanJudgment} />;
+  else if (activeDocument?.kind === 'resource') documentBody = <ResourceDocument key={activeDocument.target} uri={activeDocument.target} mode={artifactModeById[activeDocument.id] ?? 'preview'} onRequest={props.onRequestResource} dataReferences={artifacts.filter((reference) => reference.url.endsWith('.data.json'))} artifactContent={artifactContent} onRequestArtifact={loadArtifact} />;
   else if (activeDocument?.kind === 'artifact' && activeArtifact) {
     documentBody = <ArtifactDocument
       reference={activeArtifact}
@@ -929,7 +983,7 @@ export function Inspector(props: InspectorProps) {
   } else if (activeDocument) {
     documentBody = <Padded><EmptyState icon={ic(FileCode02, 22)} title="Loading repository view" description="The selected file mode will render when its generation-pinned response arrives." /></Padded>;
   }
-  const activeArtifactMode = activeArtifact ? artifactModeById[artifactId(activeArtifact)] ?? 'preview' : 'preview';
+  const activeArtifactMode = activeArtifact ? artifactModeById[artifactId(activeArtifact)] ?? 'preview' : activeDocument?.kind === 'resource' ? artifactModeById[activeDocument.id] ?? 'preview' : 'preview';
   const document = activeDocument ? <div className="flex min-h-0 flex-1 flex-col">
     <header className="flex items-center justify-between gap-3 px-4 pb-2 pt-3">
       <div className="flex min-w-0 flex-col"><strong className="truncate text-body font-medium text-foreground">{activeDocument.kind === 'file' ? activeDocument.target : activeDocument.label}</strong><span className="truncate text-caption text-muted-foreground tabular-nums">{activeDocument.kind === 'file' ? `${activeMode} · generation ${(props.repositoryFile ?? props.repositoryDiff)?.generation ?? '—'}` : activeDocument.kind === 'artifact' && activeArtifact ? `${activeArtifact.hash} · generation ${activeArtifact.generation}` : `${activeDocument.kind} authority record`}</span></div>
@@ -937,7 +991,7 @@ export function Inspector(props: InspectorProps) {
       {activeDocument.kind === 'artifact' && activeArtifact && props.artifactActions ? <ArtifactActions selected={[activeArtifact]} actions={props.artifactActions} /> : null}
     </header>
     {activeDocument.kind === 'file' ? <div className="flex items-center gap-2 px-4 pb-2"><Kicker>View</Kicker><TabsSubtle size="compact" className="min-w-0 flex-1" selectedIndex={Math.max(0, repositoryModes.findIndex((mode) => mode.id === activeMode))} onSelect={(index) => { const mode = repositoryModes[index]; if (mode) chooseMode(mode.id); }} aria-label="Repository view mode">{repositoryModes.map((mode, index) => <TabsSubtleItem index={index} label={mode.label} key={mode.id} />)}</TabsSubtle></div>
-      : activeDocument.kind === 'artifact' && activeArtifact ? <div className="flex items-center gap-2 px-4 pb-2"><Kicker>View</Kicker><TabsSubtle size="compact" selectedIndex={artifactModes.indexOf(activeArtifactMode)} onSelect={(index) => { const mode = artifactModes[index]; if (mode) setArtifactModeById((current) => ({ ...current, [artifactId(activeArtifact)]: mode })); }} aria-label="Artifact view mode">{artifactModes.map((mode, index) => <TabsSubtleItem index={index} label={mode} key={mode} />)}</TabsSubtle></div> : null}
+      : (activeDocument.kind === 'artifact' && activeArtifact) || activeDocument.kind === 'resource' ? <div className="flex items-center gap-2 px-4 pb-2"><Kicker>View</Kicker><TabsSubtle size="compact" selectedIndex={artifactModes.indexOf(activeArtifactMode)} onSelect={(index) => { const mode = artifactModes[index]; if (mode) setArtifactModeById((current) => ({ ...current, [activeArtifact ? artifactId(activeArtifact) : activeDocument.id]: mode })); }} aria-label="Artifact view mode">{artifactModes.map((mode, index) => <TabsSubtleItem index={index} label={mode} key={mode} />)}</TabsSubtle></div> : null}
     <div className="flex min-h-0 flex-1 flex-col border-t border-border">{documentBody}{threadPanel}</div>
   </div> : <Padded><EmptyState icon={ic(File02, 22)} title="Document is no longer available" description="Close this tab or reopen its canonical record from the permanent Inspector surfaces." /></Padded>;
   const renderSurface = (id: InspectorPermanentView): ReactNode => {
@@ -946,6 +1000,7 @@ export function Inspector(props: InspectorProps) {
       case 'overview': return props.scope ? <OverviewView scope={props.scope} workspaces={props.workspaces} onSelectWorkspace={props.onSelectWorkspace} onSetRelations={props.onSetRelations} stackStatus={props.stackStatus} /> : null;
       case 'environment': return props.environment ?? <Padded><EmptyState icon={ic(Tool02, 22)} title="Workspace setup unavailable" description="This machine does not expose the workspace environment contract." /></Padded>;
       case 'goal': return <GoalOverview overview={props.overview} openDocuments={documents.length} onOpenProduct={openProduct} onOpenEvidence={openEvidence} />;
+      case 'agents': return null;
       case 'subagents': return <SubagentsSurface subagents={props.subagents} />;
       case 'files': return <FilesSurface entries={props.repositoryEntries} changedOnly={changedOnly} setChangedOnly={setChangedOnly} onOpen={(entry) => openFile(entry.path, 'current')} />;
       case 'artifacts': return <ArtifactsSurface references={artifacts} onOpen={(reference) => {
@@ -974,8 +1029,8 @@ export function Inspector(props: InspectorProps) {
   if (props.loading) body = <div className="flex flex-1 items-center justify-center p-6"><ThinkingIndicator aria-label="Loading Inspector authority state…" /></div>;
   else if (props.error) body = <Padded><EmptyState icon={ic(AlertCircle, 22)} title="Inspector could not load" description={props.error} /></Padded>;
   else if (view === 'document') body = document;
-  else body = permanentTabs.map((tab, index) => <TabsSubtlePanel idPrefix="inspectorTabs" index={index} selectedIndex={tabIndex} className="flex min-h-0 flex-1 flex-col" key={tab.id}>{renderSurface(tab.id)}</TabsSubtlePanel>);
-  return <RuntimeAvailability.Provider value={runtimeAvailable}><div className="flex h-full min-h-0 flex-col bg-surface-2" aria-label="Workspace Inspector">
+  else body = permanentTabs.map((tab, index) => tab.id === 'agents' ? null : <TabsSubtlePanel idPrefix="inspectorTabs" index={index} selectedIndex={tabIndex} className="flex min-h-0 flex-1 flex-col" key={tab.id}>{renderSurface(tab.id)}</TabsSubtlePanel>);
+  return <ResourceNavigation.Provider value={openResource}><RuntimeAvailability.Provider value={runtimeAvailable}><div className="flex h-full min-h-0 flex-col bg-surface-2" aria-label="Workspace Inspector">
     {!runtimeAvailable ? <p className="px-4 pt-3 text-caption text-muted-foreground">Cloud Inspector · Saved records. Live files, processes, terminals, and services are unavailable.</p> : null}
     <div className="flex shrink-0 items-center gap-1 px-2 pb-1 pt-2">
       <TabsSubtle idPrefix="inspectorTabs" size="compact" className="min-w-0 flex-1" selectedIndex={tabIndex} onSelect={(index) => { const tab = permanentTabs[index]; if (tab) selectSurface(tab.id); }} aria-label="Inspector views">
@@ -983,7 +1038,7 @@ export function Inspector(props: InspectorProps) {
           ? <Tooltip content={openWorkspaceFirst} key={tab.id}><span><Button variant="ghost" size="compact" role="tab" aria-selected={false} disabled>{tab.label}</Button></span></Tooltip>
           : <TabsSubtleItem index={index} label={counts[tab.id] === undefined ? tab.label : `${tab.label} · ${counts[tab.id]}`} key={tab.id} />)}
       </TabsSubtle>
-      {props.onClose ? <Button variant="ghost" size="icon-compact" type="button" aria-label="Close Inspector" onClick={props.onClose}><XClose width={16} height={16} strokeWidth={1.5} /></Button> : null}
+      {props.onClose ? <Button variant="ghost" size="icon-compact" type="button" aria-label="Close Inspector" onClick={() => { if (!agentSetupDirty || window.confirm('Close Inspector and discard unsaved agent definition edits?')) props.onClose?.(); }}><XClose width={16} height={16} strokeWidth={1.5} /></Button> : null}
     </div>
     {documents.length ? <div className="flex shrink-0 items-center gap-1 overflow-x-auto px-2 pb-1">
       <Kicker>Open</Kicker>
@@ -992,6 +1047,11 @@ export function Inspector(props: InspectorProps) {
         <Button variant="ghost" size="icon-compact" type="button" aria-label={`Close ${item.label}`} onClick={() => closeDocument(item.id)}>{ic(XClose, 14)}</Button>
       </span>)}
     </div> : null}
-    <div className="flex min-h-0 flex-1 flex-col border-t border-border">{body}</div>
-  </div></RuntimeAvailability.Provider>;
+    <div className="flex min-h-0 flex-1 flex-col border-t border-border">
+      <div role="tabpanel" id={`inspectorTabs-panel-${agentSetupTabIndex}`} aria-labelledby={`inspectorTabs-tab-${agentSetupTabIndex}`} hidden={view !== 'agents'} className={view === 'agents' ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}>
+        {runtimeAvailable ? <AgentSetupView key={props.agentSetup.sessionId} state={props.agentSetup} onDirtyChange={setAgentSetupDirty} /> : <Padded><EmptyState title="Live workspace unavailable" description={openWorkspaceFirst} /></Padded>}
+      </div>
+      {view !== 'agents' ? body : null}
+    </div>
+  </div></RuntimeAvailability.Provider></ResourceNavigation.Provider>;
 }

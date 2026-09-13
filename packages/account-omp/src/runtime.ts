@@ -1,4 +1,3 @@
-import { declareWorkerHostEntry } from '@oh-my-pi/pi-utils/worker-host';
 import { postmortem } from '@oh-my-pi/pi-utils';
 import { MCPManager, type MCPRequestOptions } from '@oh-my-pi/pi-coding-agent/mcp';
 import { discoverAuthStorage, type AuthStorage, type CustomTool } from '@oh-my-pi/pi-coding-agent';
@@ -70,7 +69,12 @@ async function startSessionHost(): Promise<void> {
         const runtime = new EmbeddedOmpRuntime({
           agentDir: input.agentDir,
           sessionRoot: input.sessionRoot,
-          skills: input.skills,
+          skills: {
+            initial: input.skills,
+            ...(input.liveSkills ? {
+              refresh: (signal?: AbortSignal) => rpc.call('listSkills', [], signal ? AbortSignal.any([signal, AbortSignal.timeout(15_000)]) : AbortSignal.timeout(15_000)),
+            } : {}),
+          },
           authStorage: async () => authStorage!,
           mcp: { createSession: async () => bridge },
           ...(input.namespaces.space ? { spaceNamespace: {
@@ -82,8 +86,8 @@ async function startSessionHost(): Promise<void> {
           ? await runtime.open({ ...input.input, sessionFile: input.input.sessionFile })
           : await runtime.create(input.input);
         live.subscribe((event) => rpc.publish({ type: 'event', event }));
-        live.subscribeActivity((activity, errorMessage) => rpc.publish({ type: 'activity', activity, ...(errorMessage ? { errorMessage } : {}) }));
-        return { id: live.id, sessionFile: live.sessionFile, activity: live.activity().activity };
+        live.subscribeActivity((activity, failure) => rpc.publish({ type: 'activity', activity, failure }));
+        return { id: live.id, sessionFile: live.sessionFile, ...live.activity() };
       },
       refreshMcp: async ([descriptors, nextCatalog]) => { catalog = nextCatalog; tools = descriptors.map(remoteTool); await refresh?.(tools); },
       transcript: async ([input]) => 'bytes' in input ? projectOmpCheckpointTranscript(input.bytes) : projectOmpTranscript(input.sessionFile),
@@ -92,10 +96,14 @@ async function startSessionHost(): Promise<void> {
       handoff: () => session().handoff(),
       reloadSettings: () => session().reloadSettings?.(),
       instructionsChanged: () => session().instructionsChanged?.(),
+      setWorkspacePhase: ([phase]) => session().setWorkspacePhase(phase),
       resume: () => session().resume(),
       dispose: async () => { if (live) await live.dispose(); live = null; },
       reloadAuth: async () => { await authStorage?.revalidateCredentials(); },
       control: () => session().control(),
+      agentSetup: () => session().agentSetup(),
+      saveAgentDefinition: ([input]) => session().saveAgentDefinition(input),
+      historyAnchorId: () => session().historyAnchorId(),
       cycleRole: ([direction]) => session().cycleRole(direction),
       setModel: ([provider, model]) => session().setModel(provider, model),
       setThinking: ([thinking]) => session().setThinking(thinking),
@@ -141,5 +149,4 @@ async function startSessionHost(): Promise<void> {
   });
 }
 
-declareWorkerHostEntry();
 await startSessionHost();

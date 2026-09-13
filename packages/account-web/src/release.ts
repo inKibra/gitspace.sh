@@ -39,6 +39,7 @@ function fleetRollup(label: string, entries: ReleaseStatus[]): { status: Release
     : { status: 'pending', text: `${label} · ${applied}/${entries.length} applied` };
 }
 
+/** Historical outcomes for this release, including machines that have since left the fleet. */
 export function machineRollup(record: ReleaseRecordView): { status: ReleaseStatus; text: string } {
   return fleetRollup('Machines', Object.values(record.status.machines));
 }
@@ -49,8 +50,8 @@ export function ompRollup(record: ReleaseRecordView): { status: ReleaseStatus; t
 
 /**
  * Whether the fleet is still moving toward `desired`: a launched target has
- * not applied yet, or a machine that reported in still runs another sha and
- * has not failed the swap. Drives the status poll while a launch is in flight.
+ * not applied yet, or a current fleet member that reported in still runs another
+ * sha and has not failed the swap. Historical results do not add fleet members.
  */
 export function converging(status: DeploymentStatusView): boolean {
   for (const target of ['worker', 'frontend'] as const) {
@@ -147,7 +148,7 @@ export function launchPhaseLabel(entry: LaunchLogEntry): string {
   return LAUNCH_PHASE_LABEL[entry.phase] ?? `${entry.phase}…`;
 }
 
-/** Machines whose machine and OMP generations both match their independent selections. */
+/** Current fleet machines whose machine and OMP generations both match their independent selections. */
 export function machineConvergence(status: DeploymentStatusView): { applied: number; total: number } {
   let applied = status.thisMachine.sha === status.desired.machine
     && status.thisMachine.ompSha === status.desired.omp

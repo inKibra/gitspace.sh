@@ -9,6 +9,9 @@ import { createExecutableArtifactManifest, executableManifestPath, sha256 } from
 import type { DeploymentStatus, ReleaseRecord } from '@gitspace/protocol';
 import { EXECUTABLE_CHUNK_BYTES } from '@gitspace/protocol/deployment';
 import { ReleaseFollower, releaseObjectKeys, type EnvironmentLaunchRequest, type EnvironmentStatus } from '../src/index.js';
+import { ProcessOmpRuntime } from '../src/omp-runtime.js';
+import type { OmpGenerationSelection } from '../src/omp-runtime.js';
+import { OMP_IPC_VERSION } from '../../account-omp/src/ipc.js';
 
 const roots: string[] = [];
 const servers: Server[] = [];
@@ -138,10 +141,154 @@ async function executable(sha: string, target: 'machine' | 'omp', files: Record<
       offset += chunk.size;
     }
   }
-  return { manifest, objects, artifact: { key, hash: manifestHash, size: bytes.byteLength } };
+  return { path, manifest, objects, artifact: { key, hash: manifestHash, size: bytes.byteLength } };
+}
+
+async function ompExecutable(sha: string, protocolVersion = OMP_IPC_VERSION) {
+  const built = await executable(sha, 'omp', { 'omp.js': `
+// OMP fixture: ${sha}
+import { OmpRpcPeer } from ${JSON.stringify(new URL('../../account-omp/src/ipc.ts', import.meta.url).pathname)};
+const rpc = new OmpRpcPeer(message => process.send(message), {
+  health: async () => ({ protocolVersion: ${protocolVersion}, platform: process.platform, arch: process.arch, bunVersion: Bun.version, pid: process.pid }),
+});
+process.on('message', message => rpc.receive(message));
+process.on('disconnect', () => process.exit(0));
+` });
+  return { ...built, selection: { path: built.path, hash: built.manifest.treeHash, manifestHash: built.artifact.hash, sha } };
+}
+
+function ompRuntime(root: string, channel: OmpGenerationSelection) {
+  return new ProcessOmpRuntime({
+    environmentRoot: root, entrypoint: join(channel.path, 'omp.js'), manifestHash: channel.manifestHash,
+    agentDir: join(root, 'agent'), sessionRoot: join(root, 'sessions'),
+  });
 }
 
 describe('release follower', () => {
+  it('boots successor OMP without replacing rollback bytes until the host commits both machine identities', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'gitspace-omp-successor-'));
+    roots.push(root);
+    const old = await ompExecutable('old-omp', OMP_IPC_VERSION - 1);
+    const next = await ompExecutable('new-omp');
+    const saved = JSON.stringify(old.selection);
+    const selectionPath = join(root, 'omp-selection.json');
+    await writeFile(selectionPath, saved);
+    const record = release('new-omp', null, null, next.artifact);
+    // The predecessor can reject the new IPC before launching the successor machine.
+    record.status.omps['machine-a'] = 'failed';
+    const authority = fakeAuthority({
+      desired: { worker: null, machine: 'new-machine', omp: 'new-omp', frontend: null, updatedAt: new Date().toISOString() },
+      current: { worker: { sha: null, version: null }, machines: {} },
+      releases: [record, release('new-machine', null, null)],
+    });
+    const host = fakeHost('applied');
+    const generation = hashOf(new TextEncoder().encode('new-machine'));
+    host.status.machineHash = hashOf(new TextEncoder().encode('old-machine'));
+    host.status.machineReleaseSha = 'old-machine';
+    const runtime = ompRuntime(root, old.selection);
+    const follower = new ReleaseFollower({
+      authority, blobs: { get: async (key) => next.objects[key] ?? null },
+      machineId: 'machine-a', environmentRoot: root, hostUrl: host.url, controlToken: host.token,
+      runningMachineSha: 'new-machine', generation, omp: runtime, onError: (error) => { throw error; },
+    });
+    const candidate = await follower.initialOmpSelection();
+    await runtime.initialize(candidate);
+    expect(runtime.status()).toMatchObject({ sha: 'new-omp', hash: next.manifest.treeHash });
+    expect(await readFile(selectionPath, 'utf8')).toBe(saved);
+    await follower.nudge();
+    await expect(runtime.activate(old.selection)).rejects.toThrow();
+    expect(authority.reports).toEqual([]);
+    expect(await readFile(selectionPath, 'utf8')).toBe(saved);
+
+    host.status.machineHash = generation;
+    await follower.nudge();
+    expect(authority.reports).toEqual([]);
+    expect(await readFile(selectionPath, 'utf8')).toBe(saved);
+    host.status.machineHash = null;
+    host.status.machineReleaseSha = 'new-machine';
+    await follower.nudge();
+    expect(authority.reports).toEqual([]);
+    expect(await readFile(selectionPath, 'utf8')).toBe(saved);
+
+    host.status.machineHash = generation;
+    await follower.nudge();
+    await follower.nudge();
+    follower.stop();
+    expect(JSON.parse(await readFile(selectionPath, 'utf8'))).toEqual(candidate);
+    expect(authority.reports).toEqual([
+      { sha: 'new-omp', target: 'omp', generation: next.manifest.treeHash, status: 'applied' },
+      { sha: 'new-machine', target: 'machine', generation, status: 'applied' },
+    ]);
+    expect(record.status.omps['machine-a']).toBe('applied');
+    const restarted = ompRuntime(root, old.selection);
+    await restarted.initialize();
+    expect(restarted.status()).toMatchObject({ sha: 'new-omp', hash: next.manifest.treeHash });
+  });
+
+  it('preserves the saved OMP after failed candidate verification and boots rollback without adopting desired OMP', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'gitspace-omp-rollback-'));
+    roots.push(root);
+    const old = await ompExecutable('old-omp');
+    const incompatible = await ompExecutable('incompatible-omp', OMP_IPC_VERSION - 1);
+    const saved = JSON.stringify(old.selection);
+    const selectionPath = join(root, 'omp-selection.json');
+    await writeFile(selectionPath, saved);
+    const authority = fakeAuthority({
+      desired: { worker: null, machine: 'new-machine', omp: 'incompatible-omp', frontend: null, updatedAt: new Date().toISOString() },
+      current: { worker: { sha: null, version: null }, machines: {} },
+      releases: [release('incompatible-omp', null, null, incompatible.artifact)],
+    });
+    const host = fakeHost('applied');
+    const options = {
+      authority, machineId: 'machine-a', environmentRoot: root, hostUrl: host.url, controlToken: host.token,
+      generation: hashOf(new TextEncoder().encode('machine')), onError: (error: unknown) => { throw error; },
+    };
+    const successor = new ReleaseFollower({
+      ...options, runningMachineSha: 'new-machine', blobs: { get: async (key) => incompatible.objects[key] ?? null },
+    });
+    const candidate = await successor.initialOmpSelection();
+    await expect(ompRuntime(root, old.selection).initialize(candidate)).rejects.toThrow('incompatible');
+    expect(await readFile(selectionPath, 'utf8')).toBe(saved);
+
+    const rollback = new ReleaseFollower({
+      ...options, runningMachineSha: 'old-machine',
+      blobs: { get: async () => { throw new Error('Rollback must not download desired OMP'); } },
+    });
+    const initial = await rollback.initialOmpSelection();
+    expect(initial).toBeUndefined();
+    const runtime = ompRuntime(root, old.selection);
+    await runtime.initialize(initial);
+    expect(runtime.status()).toMatchObject({ sha: 'old-omp', hash: old.manifest.treeHash });
+  });
+
+  it('persists standalone OMP activation without waiting for a machine commit', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'gitspace-omp-standalone-'));
+    roots.push(root);
+    const old = await ompExecutable('old-omp');
+    const next = await ompExecutable('next-omp');
+    const selectionPath = join(root, 'omp-selection.json');
+    await writeFile(selectionPath, JSON.stringify(old.selection));
+    const authority = fakeAuthority({
+      desired: { worker: null, machine: null, omp: 'next-omp', frontend: null, updatedAt: new Date().toISOString() },
+      current: { worker: { sha: null, version: null }, machines: {} },
+      releases: [release('old-omp', null, null, old.artifact), release('next-omp', null, null, next.artifact)],
+    });
+    const runtime = ompRuntime(root, old.selection);
+    const follower = new ReleaseFollower({
+      authority, blobs: { get: async (key) => next.objects[key] ?? null },
+      machineId: 'machine-a', environmentRoot: root, hostUrl: null, controlToken: null,
+      runningMachineSha: null, generation: null, omp: runtime, onError: (error) => { throw error; },
+    });
+    await runtime.initialize(await follower.initialOmpSelection());
+    await follower.nudge();
+    follower.stop();
+    expect(authority.reports).toContainEqual({ sha: 'next-omp', target: 'omp', generation: next.manifest.treeHash, status: 'applied' });
+    expect(JSON.parse(await readFile(selectionPath, 'utf8'))).toMatchObject({ sha: 'next-omp', hash: next.manifest.treeHash, manifestHash: next.artifact.hash });
+    const restarted = ompRuntime(root, old.selection);
+    await restarted.initialize();
+    expect(restarted.status()).toMatchObject({ sha: 'next-omp', hash: next.manifest.treeHash });
+  });
+
   it('downloads the machine bundle and migrations, verifies them, and asks the host to swap', async () => {
     const root = mkdtempSync(join(tmpdir(), 'gitspace-follower-'));
     roots.push(root);
@@ -240,6 +387,7 @@ describe('release follower', () => {
       runningMachineSha: 'machine456', generation: null,
       omp: {
         activateChannel: async () => { throw new Error('No channel activation expected'); },
+        commitInitialSelection: async () => { throw new Error('No machine commit expected'); },
         status: () => running,
         activate: async (input) => {
           activations.push(input);
@@ -285,6 +433,7 @@ describe('release follower', () => {
       runningMachineSha: 'custom-machine', generation: null,
       omp: {
         status: () => running,
+        commitInitialSelection: async () => { throw new Error('No machine commit expected'); },
         activate: async () => { throw new Error('No custom activation expected'); },
         activateChannel: async () => {
           running = { sha: null, hash: 'channel-omp-tree', draining: 1 };
@@ -396,6 +545,7 @@ describe('release follower', () => {
       omp: {
         status: () => ({ sha: null, hash: 'old', draining: 0 }),
         activateChannel: async () => { throw new Error('No channel activation expected'); },
+        commitInitialSelection: async () => { throw new Error('No machine commit expected'); },
         activate: async () => { throw new Error('must not activate'); },
       },
     });
