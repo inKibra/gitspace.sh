@@ -1,5 +1,11 @@
-FROM rust:1.97.1-bullseye AS walgit-builder
-RUN apt-get update && apt-get install -y --no-install-recommends protobuf-compiler libprotobuf-dev cmake clang pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
+FROM rust:1.97.1-bullseye AS rust-toolchain
+
+# Match the sandbox's glibc 2.35 without relying on retired Bullseye packages.
+FROM ubuntu:22.04 AS walgit-builder
+COPY --from=rust-toolchain /usr/local/cargo /usr/local/cargo
+COPY --from=rust-toolchain /usr/local/rustup /usr/local/rustup
+ENV CARGO_HOME=/usr/local/cargo RUSTUP_HOME=/usr/local/rustup PATH=/usr/local/cargo/bin:$PATH
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates git build-essential protobuf-compiler libprotobuf-dev cmake clang pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
 WORKDIR /walgit
 # Keep in sync with deployment/src/release.ts; newer packfile-format writers need a coordinated migration.
 RUN git init . && git remote add origin https://github.com/tobi/walgit.git && git fetch --depth 1 origin 6465bf578d0bc9686019bc6d4537861ab162ee6a && git checkout --detach FETCH_HEAD && test "$(git rev-parse HEAD)" = 6465bf578d0bc9686019bc6d4537861ab162ee6a
@@ -43,6 +49,6 @@ COPY --from=builder /runtime-layers/14/ /opt/gitspace/
 COPY --from=builder /runtime-layers/15/ /opt/gitspace/
 # Native ABI compatibility includes the exact Bun version used by the builder.
 COPY --from=builder /usr/local/bin/bun /usr/local/bin/bun
-# Build against glibc 2.31, below the sandbox's 2.35; never copy a host-linked binary.
+# Build against the sandbox's glibc 2.35; never copy a host-linked binary.
 COPY --from=walgit-builder /walgit/target/release/walgit /usr/local/bin/walgit
 RUN /usr/local/bin/walgit --version && /usr/local/bin/walgit --help >/dev/null
