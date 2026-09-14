@@ -36,7 +36,7 @@ export const workerReleaseMetadataSchema = z.object({
   durableObjects: z.array(z.object({ name: idSchema, className: idSchema })).max(64),
   resources: z.array(z.object({
     name: idSchema,
-    source: z.enum(['object-storage', 'object-storage-name', 'tenant-id', 'account-id', 'root-public-key', 'provider-token', 'platform-url', 'application-url', 'transport-url', 'public-assets', 'literal']),
+    source: z.enum(['object-storage', 'object-storage-name', 'tenant-id', 'account-id', 'root-public-key', 'provider-token', 'platform-url', 'platform-service', 'application-url', 'transport-url', 'public-assets', 'literal']),
     value: z.string().max(4096).optional(),
   })).max(64),
   /** Ordered migration tags; the platform applies only the ones after the tenant's current tag. */

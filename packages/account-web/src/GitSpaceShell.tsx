@@ -423,7 +423,7 @@ export function CreateProjectDialog({ open, onOpenChange, onSubmit, pending, err
   </Dialog>;
 }
 
-export function CreateWorkspaceDialog({ projectId, workspaces, initialPhase = 'code', onOpenChange, onSubmit, pending, error }: { projectId: string | null; workspaces: readonly WorkspacePickerItem[]; initialPhase?: WorkspaceView['phase']; onOpenChange(open: boolean): void; onSubmit(input: CreateWorkspaceInput): Promise<void>; pending: boolean; error: string | null }) {
+export function CreateWorkspaceDialog({ projectId, workspaces, initialPhase = 'plan', onOpenChange, onSubmit, pending, error }: { projectId: string | null; workspaces: readonly WorkspacePickerItem[]; initialPhase?: WorkspaceView['phase']; onOpenChange(open: boolean): void; onSubmit(input: CreateWorkspaceInput): Promise<void>; pending: boolean; error: string | null }) {
   const [form, setForm] = useState<Record<'name' | 'branch' | 'sourceRef', string>>({ name: '', branch: '', sourceRef: '' });
   const [sourceKind, setSourceKind] = useState<CreateWorkspaceInput['sourceKind']>('base');
   const [phase, setPhase] = useState<WorkspaceView['phase']>(initialPhase);
@@ -599,7 +599,7 @@ export function GitSpaceShell({ projects, workspace, baseSpace, workspaces, main
     onArchive: onArchiveWorkspace,
     onRestore: restoreHome,
     onMove: onMoveWorkspace,
-    onNewWorkspace: onCreateWorkspace ? (projectId) => setNewWorkspaceFor({ projectId, phase: 'code' }) : undefined,
+    onNewWorkspace: onCreateWorkspace ? (projectId) => setNewWorkspaceFor({ projectId, phase: 'plan' }) : undefined,
     onNewProject: onCreateProject ? () => setNewProject(true) : undefined,
     onOpenSettings,
     user,

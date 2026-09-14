@@ -28,7 +28,7 @@ async function fixture() {
   const index = env.USER_PROJECTS.getByName(userId);
   await index.put(await authority.setProjectLifecycle(project.revision, 'active'));
   for (const [id, kind] of [[projectId, 'base'], [workspaceId, 'worktree']] as const) {
-    await authority.putWorkspace({ id, projectId, kind, name: kind, branch: 'main', phase: kind === 'base' ? null : 'code', sourceKind: 'base', sourceRef: 'main', lifecycle: 'active', goalId: null, expectedRevision: 0 });
+    await authority.putWorkspace({ id, projectId, kind, name: kind, branch: 'main', phase: kind === 'base' ? null : 'code', sourceKind: 'base', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0 });
     await index.putWorkspaceLocation(id, projectId);
   }
   const key = credentialProtocolBase64.decode(await vault.artifactKey(userId));

@@ -45,6 +45,14 @@ Agents use the `space` namespace in JavaScript code-mode `eval`, not a CLI. `spa
 
 Use `space.describe({ method: 'create' })` to read the input schema, then `space.create(...)` to create a workspace with optional initial Goal, Workflow, and Rubric records. Check the returned `ready` field. If an instruction write fails after creation, the result includes the created workspace identity and completed writes so the agent can repair that workspace instead of creating a duplicate.
 
+New workspaces start in Plan when `phase` is omitted. The browser creation dialog also defaults to Plan; selecting another phase explicitly (including creation from a board column) keeps that choice, subject to dependency phase ceilings. Existing and restored workspace phases are unchanged. Initial Goal and Workflow drafts remain separate typed instructions and are not rewritten by the workspace phase default.
+
+For a remote branch, use `sourceKind: 'branch'` with a reference such as `origin/develop` or `refs/remotes/origin/develop`. GitSpace fetches that source with the project's repository credentials; it does not require a cached tracking reference or an open base checkout.
+
+For another workspace, use `sourceKind: 'workspace'` and its workspace ID as `sourceRef`. A locally held, open source contributes its actual committed HEAD. A closed or remotely held source contributes its latest published checkpoint's committed HEAD, even when its checkout is absent. Creation does not open or transfer the source, change its branch, or include uncommitted changes. The source remains the new workspace's dependency and stacked-on parent, with dependency phase ceilings enforced from the canonical catalog.
+
+Source resolution and destination branch validation happen before publishing the new workspace. An invalid source or branch does not leave a new failed workspace entry.
+
 The namespace also exposes `setPhase`, `setRelations`, `open`, `close`, `archive`, and `restore`. These use the workspace lifecycle and checkpoint rules. Keep the revision and placement generation from the latest read; stale changes reject. An agent cannot close or archive its own workspace from a running tool. Use another workspace or the browser for that action. This API does not move or delegate agents.
 
 Pass `workspaceId` to `space.goal.get/put`, `space.workflow.get/put`, or `space.rubric.get/put` to edit another workspace in the same project. Closed workspaces stay closed. Writes require the record's `expectedRevision`; use zero only when creating an absent record.

@@ -102,6 +102,24 @@ async function tenant() {
 }
 
 describe('tenant releases', () => {
+  it('recovers a pending Worker acknowledgement from the active generation without clearing machine failures', async () => {
+    const { userId, control } = await tenant();
+    const releases = env.TENANT_RELEASES.getByName(userId);
+    await control('deploy.stage', stageInput('worker-reset'));
+    await releases.launch({ sha: 'worker-reset', targets: ['worker', 'machine'] });
+    await control('deploy.machineApplied', { sha: 'worker-reset', target: 'machine', generation: 'replacement', status: 'failed', error: 'Machine health check failed' });
+    const before = deploymentStatusSchema.parse(await control('deploy.status', {}));
+    expect(before.releases[0]!.status.worker).toBe('pending');
+    network.use(http.get(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/state`, () => HttpResponse.json({ control: { status: 'active' }, deployment: { active: 'worker-reset' } })));
+    const recovered = deploymentStatusSchema.parse(await control('deploy.status', {}));
+    expect(recovered.releases[0]).toMatchObject({
+      status: { worker: 'applied', machines: { 'machine-a': 'failed' } },
+      error: 'Machine health check failed',
+    });
+    const persisted = await releases.status(userId, { sha: null, version: null });
+    expect(persisted.releases[0]!.status.worker).toBe('applied');
+  });
+
   it('keeps other targets launchable but fails the Worker target when platform deployment is unavailable', async () => {
     const { control } = await tenant();
     network.use(http.post(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/deploy`, () => new HttpResponse(null, { status: 503 })));

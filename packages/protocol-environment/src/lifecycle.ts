@@ -306,6 +306,7 @@ export function transitionLifecycle(facts: LifecycleTransitionFacts, candidate: 
       if (input.incidents) record.run.incidents = [...record.run.incidents, ...input.incidents.filter((incident) => !record!.run.incidents.some((entry) => entry.id === incident.id))];
       const output = sanitizeLifecycleOutput(input.output);
       record.run.output = (record.run.output + output).slice(-LIFECYCLE_PREVIEW_LIMIT);
+      if (input.results) record.run.results = input.results.map((result) => ({ ...result, output: sanitizeLifecycleOutput(result.output).slice(-LIFECYCLE_PREVIEW_LIMIT) }));
       log = { runId: input.runId, output };
       if (input.bindings) state.bindings = { ...state.bindings, ...input.bindings };
       break;
@@ -321,7 +322,7 @@ export function transitionLifecycle(facts: LifecycleTransitionFacts, candidate: 
       if (output && !record.run.output.endsWith(output) && !output.endsWith(record.run.output)) log = { runId: input.runId, output };
       else if (!record.run.output && output) log = { runId: input.runId, output };
       record.run = { ...record.run, status, failure, finishedAt: now, exitCode: failure ? input.exitCode || 1 : 0,
-        results: input.results.map((result) => ({ ...result, output: sanitizeLifecycleOutput(result.output).slice(-LIFECYCLE_PREVIEW_LIMIT) })), output: output ? output.slice(-LIFECYCLE_PREVIEW_LIMIT) : record.run.output };
+        results: (input.results.length ? input.results : record.run.results).map((result) => ({ ...result, output: sanitizeLifecycleOutput(result.output).slice(-LIFECYCLE_PREVIEW_LIMIT) })), output: output ? output.slice(-LIFECYCLE_PREVIEW_LIMIT) : record.run.output };
       if (failure) record.run.incidents = [...record.run.incidents, { id: `${record.run.id}:failure`, kind: 'domain', occurredAt: now, message: failure.message, failure }];
       record.token = null;
       state.bindings = { ...state.bindings, ...input.bindings };

@@ -77,7 +77,7 @@ export function scriptUploadMetadata(
   metadata: WorkerReleaseMetadata,
   migrations: MigrationUpload | null,
   tags: string[],
-  tenant: { id: string; accountId: string; rootPublicKey: string; blobBucket: string; platformUrl: string; token: string; publicAssetsService: string },
+  tenant: { id: string; accountId: string; rootPublicKey: string; blobBucket: string; platformUrl: string; platformService: string; token: string; publicAssetsService: string },
 ): ScriptUploadMetadata {
   const bindings: ScriptUploadMetadata['bindings'] = metadata.durableObjects.map(binding => ({ type: 'durable_object_namespace', name: binding.name, class_name: binding.className }));
   const names = new Set(bindings.map(binding => binding.name));
@@ -86,6 +86,7 @@ export function scriptUploadMetadata(
     names.add(resource.name);
     if (resource.source === 'object-storage') { bindings.push({ type: 'r2_bucket', name: resource.name, bucket_name: tenant.blobBucket }); continue; }
     if (resource.source === 'public-assets') { bindings.push({ type: 'service', name: resource.name, service: tenant.publicAssetsService }); continue; }
+    if (resource.source === 'platform-service') { bindings.push({ type: 'service', name: resource.name, service: tenant.platformService }); continue; }
     if (resource.source === 'provider-token') { bindings.push({ type: 'secret_text', name: resource.name, text: tenant.token }); continue; }
     let value: string;
     switch (resource.source) {
@@ -118,7 +119,7 @@ async function uploadScript(env: Env, tenant: string, bundle: ArrayBuffer, metad
   const form = new FormData();
   form.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }), 'metadata.json');
   form.append(metadata.main_module, new Blob([bundle], { type: 'application/javascript+module' }), metadata.main_module);
-  const url = `${CLOUDFLARE_API}/accounts/${env.CF_ACCOUNT_ID}/workers/dispatch/namespaces/${env.DISPATCH_NAMESPACE}/scripts/tenant-${tenant}`;
+  const url = `${CLOUDFLARE_API}/accounts/${env.CF_ACCOUNT_ID}/workers/dispatch/namespaces/${env.DISPATCH_NAMESPACE}/scripts/${env.DISPATCH_NAMESPACE}-tenant-${tenant}`;
   let response: Response;
   try {
     response = await fetch(url, { method: 'PUT', headers: { authorization: `Bearer ${env.CF_API_TOKEN}` }, body: form });
@@ -167,7 +168,7 @@ async function probeHealth(env: Env, tenant: string, expectedSha: string): Promi
       await promise;
     }
     try {
-      const response = await env.DISPATCHER.get(`tenant-${tenant}`).fetch('https://tenant/healthz');
+      const response = await env.DISPATCHER.get(`${env.DISPATCH_NAMESPACE}-tenant-${tenant}`).fetch('https://tenant/healthz');
       version = response.headers.get(WORKER_VERSION_HEADER);
       // Release this invocation before looking up the next Worker version.
       await response.body?.cancel();
@@ -229,6 +230,7 @@ async function swap(env: Env, tenant: string, deployments: Deployments, state: T
     accountId,
     token,
     platformUrl: env.PLATFORM_URL,
+    platformService: env.PLATFORM_SERVICE_NAME,
     rootPublicKey: tenantConfig.rootPublicKey,
     blobBucket: tenantConfig.blobBucket,
     publicAssetsService: env.PUBLIC_ASSETS_SERVICE,
@@ -254,7 +256,7 @@ async function swap(env: Env, tenant: string, deployments: Deployments, state: T
       fallback.metadata,
       fallbackDelta,
       [tenant, fallback.sha],
-      { id: tenant, accountId, token, platformUrl: env.PLATFORM_URL, rootPublicKey: tenantConfig.rootPublicKey, blobBucket: tenantConfig.blobBucket, publicAssetsService: env.PUBLIC_ASSETS_SERVICE },
+      { id: tenant, accountId, token, platformUrl: env.PLATFORM_URL, platformService: env.PLATFORM_SERVICE_NAME, rootPublicKey: tenantConfig.rootPublicKey, blobBucket: tenantConfig.blobBucket, publicAssetsService: env.PUBLIC_ASSETS_SERVICE },
     ));
     if (fallbackRejected) {
       console.error(JSON.stringify({ event: 'deploy-revert-rejected', tenant, sha: candidate.sha, message: fallbackRejected.message }));
@@ -290,7 +292,7 @@ export async function deployChannelTenant(env: Env, tenant: string): Promise<Dep
 }
 
 export async function deployTenantWorker(env: Env, tenant: string, request: PlatformDeployRequest): Promise<DeployResult> {
-  const source = await env.DISPATCHER.get(`tenant-${tenant}`).fetch(new Request(
+  const source = await env.DISPATCHER.get(`${env.DISPATCH_NAMESPACE}-tenant-${tenant}`).fetch(new Request(
     `https://${tenant}.gitspace.sh/__platform/objects/${request.bundleKey.split('/').map(encodeURIComponent).join('/')}`,
     { headers: { authorization: `Bearer ${await env.DEPLOYMENTS.getByName(tenant).providerToken()}` } },
   ));

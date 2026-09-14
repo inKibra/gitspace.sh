@@ -24,18 +24,14 @@ import { WORKER_VERSION_HEADER } from '@gitspace/protocol/deployment';
 import application, { CredentialVaultDO } from './application.js';
 import { HostedRouteRegistryDO } from './hosted-route-registry.js';
 import { FleetCatalogDO } from './fleet-catalog.js';
+import { forwardTunnelRequest, relayRequest, tunnelTarget, INTERNAL_NONCE, INTERNAL_TIMESTAMP, INTERNAL_TUNNEL_MACHINE, INTERNAL_TUNNEL_PATH, INTERNAL_SIGNED_TARGET } from './relay-request.js';
 export * from './application.js';
 
 declare const GITSPACE_WORKER_SHA: string | undefined;
 const WORKER_VERSION = typeof GITSPACE_WORKER_SHA === 'string' ? GITSPACE_WORKER_SHA : 'channel';
 
-const INTERNAL_NONCE = 'x-gitspace-auth-nonce';
-const INTERNAL_TIMESTAMP = 'x-gitspace-auth-timestamp';
 const INTERNAL_ROLE = 'x-gitspace-role';
 const INTERNAL_ENDPOINT_ID = 'x-gitspace-endpoint-id';
-const INTERNAL_TUNNEL_MACHINE = 'x-gitspace-tunnel-machine';
-const INTERNAL_TUNNEL_PATH = 'x-gitspace-tunnel-path';
-const INTERNAL_SIGNED_TARGET = 'x-gitspace-signed-target';
 const MACHINE_GRANT_HEADER = 'x-gitspace-machine-grant';
 const INTERNAL_HEADERS: Record<string, true> = {
   [INTERNAL_NONCE]: true,
@@ -46,7 +42,6 @@ const INTERNAL_HEADERS: Record<string, true> = {
   [INTERNAL_TUNNEL_PATH]: true,
   [INTERNAL_SIGNED_TARGET]: true,
 };
-const ENDPOINT_ID = /^[A-Za-z0-9._-]{1,128}$/u;
 const ARTIFACT_PATH = /^\/artifacts\/([a-f0-9]{64})$/u;
 const MAX_ARTIFACT_BYTES = 8 * 1024 * 1024;
 const MACHINE_LEASE_MS = 30_000;
@@ -121,13 +116,6 @@ function filteredHeaders(headers: Headers, requestDirection: boolean): Array<[st
   return result;
 }
 
-function tunnelTarget(url: URL): { machineId: string; path: string } | null {
-  const match = /^\/tunnel\/([^/]+)(\/.*)?$/u.exec(url.pathname);
-  if (!match) return null;
-  const machineId = decodeURIComponent(match[1]!);
-  if (!ENDPOINT_ID.test(machineId)) return null;
-  return { machineId, path: `${match[2] ?? '/'}${url.search}` };
-}
 
 function authorizedRootRequest(request: Request, env: Env): Response | { nonce: string; timestamp: number; target: string } {
   const url = new URL(request.url);
@@ -178,12 +166,6 @@ async function authorizedMachineRequest(request: Request, env: Env, machineId: s
 }
 
 
-function relayRequest(request: Request, authorization: { nonce: string; timestamp: number }, headers: Headers): Request {
-  headers.set(INTERNAL_NONCE, authorization.nonce);
-  headers.set(INTERNAL_TIMESTAMP, String(authorization.timestamp));
-  headers.delete('authorization');
-  return new Request(request, { headers });
-}
 
 async function artifactDigest(bytes: ArrayBuffer): Promise<{ hex: string; digest: ArrayBuffer }> {
   const digest = await crypto.subtle.digest('SHA-256', bytes);
@@ -685,11 +667,10 @@ export default {
         },
       });
     }
+    if (tunnel) return forwardTunnelRequest(request, env, tunnel);
 
     let authorization: Response | { nonce: string; timestamp: number; target: string };
-    if (tunnel) {
-      authorization = { nonce: crypto.randomUUID(), timestamp: Date.now(), target: `${url.pathname}${url.search}` };
-    } else if (url.pathname === '/ws') {
+    if (url.pathname === '/ws') {
       const role = url.searchParams.get('role');
       const id = url.searchParams.get('id');
       authorization = role === 'machine'
@@ -739,35 +720,8 @@ export default {
       if (!parsed.success) return jsonError(400, 'INVALID_ENDPOINT', 'Invalid relay role or endpoint id');
       headers.set(INTERNAL_ROLE, parsed.data.role);
       headers.set(INTERNAL_ENDPOINT_ID, parsed.data.id);
-    } else if (tunnel) {
-      headers.set(INTERNAL_TUNNEL_MACHINE, tunnel.machineId);
-      headers.set(INTERNAL_TUNNEL_PATH, tunnel.path);
-      headers.set(INTERNAL_SIGNED_TARGET, request.headers.get(INTERNAL_SIGNED_TARGET) ?? `${url.pathname}${url.search}`);
     }
 
-    const forwarded = relayRequest(request, authorization, headers);
-    if (!tunnel || !forwarded.body) return stub.fetch(forwarded);
-    // DO request cancellation does not propagate through a service binding's upload.
-    // Retain the incoming reader so an early relay response also stops the caller's upload.
-    const upload = forwarded.body.getReader();
-    let cancelled = false;
-    const body = new ReadableStream<Uint8Array>({
-      async pull(controller) {
-        const result = await upload.read();
-        if (cancelled) return;
-        if (result.done) controller.close();
-        else controller.enqueue(result.value);
-      },
-      async cancel() {
-        cancelled = true;
-        await upload.cancel();
-      },
-    });
-    try {
-      return await stub.fetch(new Request(forwarded, { body }));
-    } finally {
-      await upload.cancel().catch(() => {});
-      upload.releaseLock();
-    }
+    return stub.fetch(relayRequest(request, authorization, headers));
   },
 } satisfies ExportedHandler<Env>;

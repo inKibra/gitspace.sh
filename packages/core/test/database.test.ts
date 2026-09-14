@@ -35,17 +35,24 @@ function seed(database: GitSpaceDatabase): void {
 }
 
 describe('GitSpaceDatabase', () => {
-  it('applies Drizzle migrations and restores project state after reopen', () => {
+  it('persists default Plan and explicit Code workspaces without rewriting phases on reopen', () => {
     const path = databasePath();
     const first = new GitSpaceDatabase(path);
     seed(first);
+    expect(first.getWorkspace('workspace-a')?.phase).toBe('plan');
+    const explicit = first.createWorkspace({ id: 'workspace-b', projectId: 'project-a', name: 'Code', branch: 'code', rootPath: '/repos/gitspace/workspaces/code', phase: 'code' });
+    if (explicit.status === 'error') throw explicit.error;
+    expect(explicit.value.phase).toBe('code');
+    first.setWorkspacePhase('workspace-a', 'review');
     first.checkpoint();
     first.close();
 
     const reopened = new GitSpaceDatabase(path);
     expect(reopened.getProject('project-a')).toMatchObject({ name: 'GitSpace', baseBranch: 'develop' });
-    expect(reopened.getWorkspace('workspace-a')).toMatchObject({ projectId: 'project-a', phase: 'code' });
-    expect(reopened.orm.select().from(artifactScopes).all()).toHaveLength(2);
+    expect(reopened.getWorkspace('workspace-a')).toMatchObject({ projectId: 'project-a', phase: 'review' });
+    expect(reopened.getWorkspace('workspace-b')?.phase).toBe('code');
+    expect(reopened.getBaseSpace('project-a')?.phase).toBeNull();
+    expect(reopened.orm.select().from(artifactScopes).all()).toHaveLength(3);
     reopened.close();
   });
 

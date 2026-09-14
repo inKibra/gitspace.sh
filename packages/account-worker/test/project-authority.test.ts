@@ -28,6 +28,7 @@ describe('ProjectAuthorityDO', () => {
       phase: 'code',
       sourceKind: 'branch',
       sourceRef: 'feature/a',
+      sourceCommit: 'a'.repeat(40),
       lifecycle: 'active',
       goalId: null,
       expectedRevision: 0,
@@ -40,6 +41,39 @@ describe('ProjectAuthorityDO', () => {
     }))).rejects.toThrow();
     expect(await runInDurableObject(stub, (authority: ProjectAuthorityDO) => authority.listWorkspaces()))
       .toMatchObject([{ id: 'workspace-a', name: 'Workspace A' }]);
+    let retained = workspace;
+    for (const lifecycle of ['archived', 'active'] as const) {
+      retained = await runInDurableObject(stub, (authority: ProjectAuthorityDO) => authority.putWorkspace({
+        ...retained, name: 'Renamed workspace', branch: 'renamed', phase: 'review', lifecycle, expectedRevision: retained.revision,
+      }));
+      expect(retained).toMatchObject({ sourceCommit: workspace.sourceCommit, sourceKind: 'branch', sourceRef: 'feature/a', lifecycle });
+    }
+    for (const sourceCommit of ['b'.repeat(40), null, undefined]) {
+      await expect(runInDurableObject(stub, (authority: ProjectAuthorityDO) => authority.putWorkspace({
+        ...retained, sourceCommit, name: 'Invalid mutation', expectedRevision: retained.revision,
+      } as Parameters<ProjectAuthorityDO['putWorkspace']>[0]))).rejects.toThrow('immutable');
+      expect(await runInDurableObject(stub, (authority: ProjectAuthorityDO) => authority.listWorkspaces())).toEqual([retained]);
+    }
+  });
+
+  it('keeps legacy stored provenance unknown through canonical updates even when sourceRef looks like a commit', async () => {
+    const stub = projectEnv.PROJECT_AUTHORITY.getByName('legacy-workspace-provenance');
+    const [legacy] = await runInDurableObject(stub, (authority: ProjectAuthorityDO, state) => {
+      authority.bootstrap({ id: 'legacy-project', name: 'Legacy', repositoryReference: null, baseBranch: 'main', createdBy: 'machine-a' });
+      state.storage.sql.exec(
+        `INSERT INTO workspaces(workspace_id,project_id,kind,name,branch,phase,source_kind,source_ref,lifecycle,goal_id,revision,archived_at,created_at,updated_at)
+         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        'legacy-workspace', 'legacy-project', 'worktree', 'Legacy', 'feature', 'code', 'commit', 'c'.repeat(40),
+        'active', null, 1, null, '2026-09-01T00:00:00.000Z', '2026-09-01T00:00:00.000Z',
+      );
+      return authority.listWorkspaces();
+    });
+    expect(legacy).toMatchObject({ sourceCommit: null, sourceKind: 'commit', sourceRef: 'c'.repeat(40) });
+    const updated = await runInDurableObject(stub, (authority: ProjectAuthorityDO) => authority.putWorkspace({
+      ...legacy!, phase: 'review', lifecycle: 'archived', expectedRevision: legacy!.revision,
+    }));
+    expect(updated).toMatchObject({ sourceCommit: null, sourceKind: 'commit', sourceRef: 'c'.repeat(40), lifecycle: 'archived' });
+    expect(await runInDurableObject(stub, (authority: ProjectAuthorityDO) => authority.listWorkspaces())).toEqual([updated]);
   });
 
   it('persists durable operations and append-only project events', async () => {
@@ -191,7 +225,7 @@ describe('ProjectAuthorityDO', () => {
     }));
     const workspace = await runInDurableObject(stub, (authority: ProjectAuthorityDO) => authority.putWorkspace({
       id: 'workspace-delete', projectId: project.id, kind: 'worktree', name: 'Delete', branch: 'delete',
-      phase: 'code', sourceKind: 'base', sourceRef: 'main', lifecycle: 'archived', goalId: null, expectedRevision: 0,
+      phase: 'code', sourceKind: 'base', sourceRef: 'main', sourceCommit: null, lifecycle: 'archived', goalId: null, expectedRevision: 0,
     }));
     expect(await runInDurableObject(stub, (authority: ProjectAuthorityDO) => authority.removeWorkspace(workspace.id, workspace.revision))).toBe(true);
     const tombstone = await runInDurableObject(stub, (authority: ProjectAuthorityDO) => authority.deleteProject(project.revision));
@@ -230,7 +264,7 @@ describe('UserProjectIndexDO', () => {
     const source = await authority.ensureGitSpaceProject(project);
     const base = await authority.putWorkspace({
       id: source.id, projectId: source.id, kind: 'base', name: source.name, branch: source.baseBranch,
-      phase: null, sourceKind: 'base', sourceRef: source.baseBranch, lifecycle: 'active', goalId: null, expectedRevision: 0,
+      phase: null, sourceKind: 'base', sourceRef: source.baseBranch, sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0,
     });
     await runInDurableObject(authority, (instance: ProjectAuthorityDO) => {
       expect(() => instance.deleteProject(source.revision)).toThrow();

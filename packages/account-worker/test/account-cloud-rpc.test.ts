@@ -1,7 +1,7 @@
 import { env, SELF } from 'cloudflare:test';
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { createDeviceBinding, createSignedRpcFetch, credentialProtocolBase64, deriveArtifactScopeKey, encryptArtifactBytes, signDeviceInvite, signRpcRequest, type DeviceCapability, type DeviceScope } from '@gitspace/protocol';
-import { spaceCheckpointManifestKey, spaceGitCheckpointRef, spaceOmpCheckpointKey, type SpaceCheckpointManifest } from '@gitspace/protocol-workspace';
+import { CHECKPOINT_CHUNK_BYTES, CHUNKED_CHECKPOINT_VERSION, spaceCheckpointManifestKey, spaceGitCheckpointRef, spaceOmpCheckpointKey, type SpaceCheckpointManifest } from '@gitspace/protocol-workspace';
 import type { ProviderView } from '@gitspace/protocol';
 import { executionHash } from '@gitspace/protocol-environment';
 import { gitspaceContract, rpcErrors } from '@gitspace/protocol/rpc-contract';
@@ -78,7 +78,7 @@ describe('cloud lifecycle inspection and human authorization', () => {
     const spaceId = 'lifecycle-space';
     const authority = env.PROJECT_AUTHORITY.getByName(`${fixture.userId}:${projectId}`);
     await authority.bootstrap({ id: projectId, name: 'Lifecycle', repositoryReference: null, baseBranch: 'main', createdBy: 'machine' });
-    await authority.putWorkspace({ id: spaceId, projectId, kind: 'worktree', name: 'Lifecycle', branch: 'feature', phase: null, sourceKind: 'branch', sourceRef: 'feature', lifecycle: 'active', goalId: null, expectedRevision: 0 });
+    await authority.putWorkspace({ id: spaceId, projectId, kind: 'worktree', name: 'Lifecycle', branch: 'feature', phase: null, sourceKind: 'branch', sourceRef: 'feature', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0 });
     await env.USER_PROJECTS.getByName(fixture.userId).putWorkspaceLocation(spaceId, projectId);
     const content = 'echo provision';
     const hash = await executionHash({ kind: 'script', command: content });
@@ -374,7 +374,7 @@ async function inspectorWorkspace(userId: string) {
   const project = await authority.bootstrap({ id: projectId, name: 'Saved inspection', repositoryReference: null, baseBranch: 'main', createdBy: 'human' });
   await env.USER_PROJECTS.getByName(userId).put(await authority.setProjectLifecycle(project.revision, 'active'));
   for (const [id, kind] of [[projectId, 'base'], [spaceId, 'worktree']] as const) {
-    await authority.putWorkspace({ id, projectId, kind, name: kind === 'base' ? 'Project' : 'Review', branch: kind === 'base' ? 'main' : 'review', phase: kind === 'base' ? null : 'review', sourceKind: 'base', sourceRef: 'main', lifecycle: 'active', goalId: null, expectedRevision: 0 });
+    await authority.putWorkspace({ id, projectId, kind, name: kind === 'base' ? 'Project' : 'Review', branch: kind === 'base' ? 'main' : 'review', phase: kind === 'base' ? null : 'review', sourceKind: 'base', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0 });
     await env.USER_PROJECTS.getByName(userId).putWorkspaceLocation(id, projectId);
   }
   await authority.putArtifactScope({ id: `artifacts-${spaceId}`, workspaceId: spaceId, expectedGeneration: 0, generation: 0, manifestHash: null });
@@ -429,6 +429,47 @@ async function publishInspectorSession(fixture: { userId: string }, space: { pro
 }
 
 describe('bounded saved Inspector transcripts', () => {
+  it('reads an encrypted chunked canonical session and rejects an incomplete checkpoint', async () => {
+    const fixture = await account(['rpc.read']);
+    const space = await inspectorWorkspace(fixture.userId);
+    const published = await publishInspectorSession(fixture, space, [
+      { type: 'message', id: 'answer', parentId: null, timestamp: '2026-09-01T12:00:00.000Z', message: { role: 'assistant', content: 'Full checkpoint survived' } },
+    ]);
+    const key = credentialProtocolBase64.decode(await env.CREDENTIALS.getByName(fixture.userId).artifactKey(fixture.userId));
+    const snapshot = new Uint8Array(CHECKPOINT_CHUNK_BYTES + published.snapshot.byteLength + 1).fill(32);
+    snapshot[CHECKPOINT_CHUNK_BYTES] = 10;
+    snapshot.set(published.snapshot, CHECKPOINT_CHUNK_BYTES + 1);
+    const objectKey = `projects/${space.projectId}/sessions/canonical/chunked.checkpoint`;
+    const hash = async (bytes: Uint8Array): Promise<`sha256:${string}`> => `sha256:${Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), (byte) => byte.toString(16).padStart(2, '0')).join('')}`;
+    const chunks: Array<{ hash: `sha256:${string}`; size: number }> = [];
+    let lastChunk = new Uint8Array();
+    let lastKey = '';
+    for (let offset = 0; offset < snapshot.byteLength; offset += CHECKPOINT_CHUNK_BYTES) {
+      const plaintext = snapshot.subarray(offset, offset + CHECKPOINT_CHUNK_BYTES);
+      const sealed = await encryptArtifactBytes(plaintext, key);
+      const digest = await hash(sealed);
+      lastKey = `users/${fixture.userId}/${objectKey}.chunks/${digest.slice(7)}`;
+      await env.DATA.put(lastKey, sealed, { customMetadata: { sha256: digest } });
+      chunks.push({ hash: digest, size: plaintext.byteLength });
+      lastChunk = sealed;
+    }
+    const inventory = await encryptArtifactBytes(new TextEncoder().encode(JSON.stringify({ version: 1, size: snapshot.byteLength, chunks })), key);
+    const envelope = new Uint8Array(inventory.byteLength + 1);
+    envelope[0] = CHUNKED_CHECKPOINT_VERSION;
+    envelope.set(inventory, 1);
+    const objectHash = await hash(envelope);
+    await env.DATA.put(`users/${fixture.userId}/${objectKey}`, envelope, { customMetadata: { sha256: objectHash } });
+    await space.authority.putCanonicalSession({ id: published.sessionId, workspaceId: space.spaceId, ompSessionId: published.ompSessionId, machineId: null, state: 'closed', sessionObjectKey: objectKey, sessionObjectHash: objectHash, sessionFormatVersion: 'omp-checkpoint-1', activity: { active: false, reasons: [] }, health: { revision: 0, issues: {} }, expectedRevision: 1 });
+    await env.DATA.delete(lastKey);
+    const client = inspectorClient(fixture);
+    const error = await collectInspectorTranscript(client, space.projectId, space.spaceId).then(() => null, (failure: unknown) => failure);
+    expect(rpcErrors.operationFailed.is(error)).toBe(true);
+    await env.DATA.put(lastKey, lastChunk, { customMetadata: { sha256: chunks.at(-1)!.hash } });
+    expect(await collectInspectorTranscript(client, space.projectId, space.spaceId)).toMatchObject([
+      { sessionId: published.sessionId, payload: { message: { content: 'Full checkpoint survived' } } },
+    ]);
+  });
+
   it('serves repeat pages without loading the saved source and resets after canonical publication changes', async () => {
     const fixture = await account(['rpc.read']);
     const space = await inspectorWorkspace(fixture.userId);

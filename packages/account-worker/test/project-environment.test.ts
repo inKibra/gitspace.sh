@@ -9,7 +9,7 @@ const human = { actorId: 'browser', machineId: 'browser', human: true };
 async function ledger() {
   const authority = (env.PROJECT_AUTHORITY as DurableObjectNamespace<ProjectAuthorityDO>).getByName(`environment-${crypto.randomUUID()}`);
   await authority.bootstrap({ id: 'project', name: 'Project', repositoryReference: null, baseBranch: 'main', createdBy: 'machine-a' });
-  await authority.putWorkspace({ id: 'workspace', projectId: 'project', kind: 'worktree', name: 'Workspace', branch: 'feature', phase: null, sourceKind: 'branch', sourceRef: 'feature', lifecycle: 'active', goalId: null, expectedRevision: 0 });
+  await authority.putWorkspace({ id: 'workspace', projectId: 'project', kind: 'worktree', name: 'Workspace', branch: 'feature', phase: null, sourceKind: 'branch', sourceRef: 'feature', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0 });
   await authority.mutateLifecycleState('workspace', { op: 'configure', bundleJson: JSON.stringify({ version: 1, profiles: { base: {} } }), executions: [{ id: 'prepare', kind: 'script', phase: 'machine/prepare', label: 'Prepare', command: '01-prepare.sh', fileName: '01-prepare.sh', content: 'echo prepare', hash }] }, machine);
   await authority.mutateLifecycleState('workspace', { op: 'approval', scope: 'project', executionHash: hash, approved: true }, human);
   return authority;
@@ -46,12 +46,18 @@ describe('durable environment authority', () => {
     await mutate(authority, { op: 'append', runId: 'partial', token, output, bindings: { resource: 'allocated-before-crash' } });
     let offset: number | null = 0;
     let full = '';
+    let cursor = 0;
     do {
       const page = await authority.getLifecycleRunLog('workspace', 'partial', offset);
       full += page.output;
       offset = page.nextOffset;
+      cursor = page.cursor;
     } while (offset !== null);
     expect(full).toBe(output.replace('do-not-store', '[REDACTED]'));
+    await mutate(authority, { op: 'append', runId: 'partial', token, output: 'later output\n' });
+    const resumed = await authority.getLifecycleRunLog('workspace', 'partial', cursor);
+    expect(resumed.output).toBe('later output\n');
+    expect((await authority.getLifecycleRunLog('workspace', 'partial', resumed.cursor)).output).toBe('');
     const denied = await authority.mutateLifecycleState('workspace', { op: 'abandon', runId: 'partial' }, human);
     expect(denied).toMatchObject({ status: 'error', failure: { code: 'PermissionDenied' } });
     const recovered = await mutate(authority, { op: 'abandon', runId: 'partial' }, { ...human, destroyedMachineId: machine.machineId });

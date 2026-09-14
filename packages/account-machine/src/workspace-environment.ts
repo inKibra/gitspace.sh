@@ -7,12 +7,13 @@ import {
   executionHash, loadEnvironmentBundle, parseEnvironmentBundleJson, parseLifecycleBindingsJson, resolveEnvironmentProfile,
   resolveExecutionApproval, selectLifecycleScripts, BUILT_IN_CHECKS, LIFECYCLE_PHASES,
   effectiveEnvironmentValues, assertEnvironmentExecutionReady, shouldPrepareEnvironment, environmentPreparationPhases,
-  EnvironmentError, environmentFailure, isLifecycleRunActive, lifecycleStopReason, sanitizeLifecycleOutput, assertLifecycleRequestIdentity, parseLifecycleRunRequest,
+  EnvironmentError, environmentFailure, isLifecycleRunActive, lifecycleStopReason, sanitizeLifecycleOutput, assertLifecycleRequestIdentity, parseLifecycleRunRequest, LifecycleLogReader,
   type ApprovalSource, type EffectiveEnvironmentProfile, type EnvironmentBundle, type LifecycleMutation, type LifecycleIncident, type EnvironmentValueScope, type EnvironmentApprovalScope,
   type EnvironmentLifecycleAuthority, type LifecyclePhase, type LifecycleRun, type LifecycleRunPhase, type LifecycleState, type LifecycleRunRequest,
 } from '@gitspace/protocol-environment';
 import type { EffectiveSecretMetadata } from '@gitspace/protocol';
 import type { WorkspaceLifecyclePlanResult, WorkspaceLifecyclePlanStep } from './workspace-hub.js';
+import type { ProjectLifecycleAuthority } from './project-lifecycle.js';
 
 
 export interface EnvironmentExecutionView {
@@ -68,7 +69,7 @@ export class WorkspaceEnvironmentManager {
     private readonly database: GitSpaceDatabase,
     private readonly secrets: EnvironmentSecretMaterializer | undefined,
     private readonly runner: EnvironmentLifecycleRunner | undefined,
-    private readonly authority: EnvironmentLifecycleAuthority,
+    private readonly authority: EnvironmentLifecycleAuthority & Pick<ProjectLifecycleAuthority, 'listProjectWorkspaces'>,
     private readonly options: { machineId: string; stateRoot: string; prepareRunner?: (spaceId: string, phase: LifecyclePhase) => Promise<string | undefined> },
   ) {}
 
@@ -343,7 +344,7 @@ export class WorkspaceEnvironmentManager {
       request?.accepted(acceptedRun);
       if (isLifecycleRunActive(acceptedRun)) throw new EnvironmentError('RunConflict', 'Operation is already executing; observe its durable state', { runId });
       if (acceptedRun.status !== 'succeeded') throw new EnvironmentError(acceptedRun.failure?.code ?? 'ExecutionFailed', acceptedRun.failure?.message ?? 'Previous operation failed; explicit retry requires a new run identity', acceptedRun.failure?.context ?? { runId });
-      return acceptedRun.results.map((result) => ({ id: result.id, hash: planned.find((entry) => entry.id === result.id)?.hash ?? '', exitCode: result.exitCode, stdout: result.output, stderr: '' }));
+      return acceptedRun.results.flatMap((result) => result.exitCode === null ? [] : [{ id: result.id, hash: planned.find((entry) => entry.id === result.id)?.hash ?? '', exitCode: result.exitCode, stdout: result.output, stderr: '' }]);
     }
     if (state.claim?.status !== 'claimed' || !state.claim.token) throw new EnvironmentError('RunConflict', state.claim?.reason ?? 'Lifecycle execution is awaiting approval or recovery');
       this.active.set(runId, { projectId: current.projectId, spaceId, terminalName, ...(workingDirectory ? { directory: workingDirectory } : {}) });
@@ -373,6 +374,7 @@ export class WorkspaceEnvironmentManager {
     let result: WorkspaceLifecyclePlanResult | undefined;
     let failure: unknown;
     let logPending = '';
+    const scriptLog = new LifecycleLogReader({ ids: planned.map((execution) => execution.id), outputLimit: Math.min(16_000, Math.floor(64_000 / Math.max(1, planned.length))) });
     let redactions: string[] = [];
     let retainedLogCharacters = 256;
     let incidentWrite: Promise<void> | undefined;
@@ -398,6 +400,7 @@ export class WorkspaceEnvironmentManager {
       }
     });
     try {
+      const definition = (await this.authority.listProjectWorkspaces(current.projectId)).find((workspace) => workspace.id === spaceId && workspace.projectId === current.projectId);
       secretValues = secretNames.length ? await this.secrets?.materializeProjectSecrets(current.projectId, secretNames, space.kind === 'base' ? null : space.id) ?? {} : {};
       redactions = Object.values(secretValues).filter(Boolean).sort((left, right) => right.length - left.length);
       retainedLogCharacters = Math.max(256, ...redactions.map((value) => value.length));
@@ -416,6 +419,7 @@ export class WorkspaceEnvironmentManager {
         GIT_TERMINAL_PROMPT: '0',
         GITSPACE_PROJECT_ID: current.projectId, GITSPACE_WORKSPACE_ID: spaceId, GITSPACE_MACHINE_ID: this.options.machineId,
         GITSPACE_WORKSPACE_GENERATION: workingDirectory ? '' : String(space.generation), GITSPACE_ENVIRONMENT_PROFILE: current.selectedProfile,
+        GITSPACE_WORKSPACE_SOURCE_COMMIT: definition?.sourceCommit ?? '',
         GITSPACE_LIFECYCLE_BINDINGS: JSON.stringify(state.bindings), GITSPACE_LIFECYCLE_OUTPUT: join(directory, 'output.json'),
       };
       await this.authority.mutateLifecycleState(current.projectId, spaceId, { op: 'start', runId, token });
@@ -457,7 +461,9 @@ export class WorkspaceEnvironmentManager {
           const safeLength = Math.max(0, sanitized.length - retained);
           logPending = sanitized.slice(safeLength);
           for (let offset = 0; offset < safeLength; offset += 16_000) {
-            await this.authority.mutateLifecycleState(current.projectId, spaceId, { op: 'append', runId, token, output: sanitized.slice(offset, Math.min(safeLength, offset + 16_000)), incidents: pending.incidents }).catch(retainTransportFailure);
+            const chunk = sanitized.slice(offset, Math.min(safeLength, offset + 16_000));
+            scriptLog.push(chunk, { at: new Date().toISOString() });
+            await this.authority.mutateLifecycleState(current.projectId, spaceId, { op: 'append', runId, token, output: chunk, results: scriptLog.results, incidents: pending.incidents }).catch(retainTransportFailure);
           }
         },
       });
@@ -486,11 +492,13 @@ export class WorkspaceEnvironmentManager {
     const sanitize = (output: string) => sanitizeLifecycleOutput(output, redactions);
     const finalLog = sanitize(logPending);
     for (let offset = 0; offset < finalLog.length; offset += 16_000) {
-      await this.authority.mutateLifecycleState(current.projectId, spaceId, { op: 'append', runId, token, output: finalLog.slice(offset, offset + 16_000), incidents: pending.incidents }).catch(retainTransportFailure);
+      const chunk = finalLog.slice(offset, offset + 16_000);
+      scriptLog.push(chunk, { at: new Date().toISOString(), final: offset + 16_000 >= finalLog.length });
+      await this.authority.mutateLifecycleState(current.projectId, spaceId, { op: 'append', runId, token, output: chunk, results: scriptLog.results, incidents: pending.incidents }).catch(retainTransportFailure);
     }
     const exitCode = failure ? 1 : result?.exitCode ?? 1;
     const output = sanitize([result?.output ?? '', failure ? failure instanceof Error ? failure.message : String(failure) : ''].filter(Boolean).join('\n'));
-    const results = result?.steps.map((step) => ({ ...step, output: sanitize(step.output) })) ?? [];
+    const results = (scriptLog.results.length ? scriptLog.results : result?.steps ?? []).map((step) => ({ ...step, output: sanitize(step.output) }));
     const domainFailure = environmentFailure(failure);
     const completion: NonNullable<PendingLifecycleRun['completion']> = {
       op: 'finish', runId, token, status: domainFailure?.code === 'DeadlineExceeded' ? 'timed-out' : domainFailure?.code === 'Cancelled' ? 'cancelled' : exitCode === 0 ? 'succeeded' : 'failed',
@@ -535,7 +543,7 @@ export class WorkspaceEnvironmentManager {
     await rm(journal);
     await rm(directory, { recursive: true, force: true });
     if (finalRun.failure) throw new EnvironmentError(finalRun.failure.code, finalRun.failure.message, finalRun.failure.context);
-    return results.map((step) => ({ id: step.id, hash: planned.find((execution) => execution.id === step.id)!.hash, exitCode: step.exitCode, stdout: step.output, stderr: '' }));
+    return results.flatMap((step) => step.exitCode === null ? [] : [{ id: step.id, hash: planned.find((execution) => execution.id === step.id)!.hash, exitCode: step.exitCode, stdout: step.output, stderr: '' }]);
   }
 
 
@@ -546,10 +554,12 @@ export class WorkspaceEnvironmentManager {
       await this.authority.mutateLifecycleState(pending.projectId, pending.spaceId, { op: 'append', runId: pending.runId, token: pending.token, output: '\n[Recovered local lifecycle log; previously streamed output may repeat]\n', incidents: pending.incidents });
       const buffer = Buffer.allocUnsafe(16_000);
       const decoder = new TextDecoder();
+      const scriptLog = new LifecycleLogReader({ outputLimit: 500 });
       for (;;) {
         const { bytesRead } = await spool.read(buffer);
         const output = bytesRead ? decoder.decode(buffer.subarray(0, bytesRead), { stream: true }) : decoder.decode();
-        if (output) await this.authority.mutateLifecycleState(pending.projectId, pending.spaceId, { op: 'append', runId: pending.runId, token: pending.token, output });
+        scriptLog.push(output, { final: bytesRead === 0 });
+        if (output) await this.authority.mutateLifecycleState(pending.projectId, pending.spaceId, { op: 'append', runId: pending.runId, token: pending.token, output, results: scriptLog.results });
         if (bytesRead === 0) break;
       }
     } finally { await spool.close(); }

@@ -1,12 +1,14 @@
 import { describe, expect, it } from 'bun:test';
 import {
   INSPECTOR_EVIDENCE_HISTORY_LIMIT,
+  InspectorWorkspaceCodec,
   changeGuideViewSchema,
   goalRecordViewSchema,
   reviewThreadViewSchema,
   waiveWorkflowGateInputSchema,
   workflowViewSchema,
 } from '../src/inspector-contract.js';
+import { cloudWorkspaceDefinitionSchema } from '../src/project-authority.js';
 
 const at = '2026-08-31T12:00:00.000Z';
 const commit = 'a'.repeat(40);
@@ -20,6 +22,25 @@ const artifact = {
 };
 
 describe('Inspector contracts', () => {
+  it('round-trips immutable workspace provenance without inventing it for legacy definitions', () => {
+    const legacy = {
+      id: 'workspace-a', projectId: 'project-a', kind: 'worktree', name: 'Workspace', branch: 'feature', phase: 'code',
+      sourceKind: 'commit', sourceRef: commit, lifecycle: 'active', goalId: null, revision: 1, archivedAt: null,
+      createdAt: at, updatedAt: at,
+    };
+    expect(cloudWorkspaceDefinitionSchema.parse(legacy)).toMatchObject({ sourceCommit: null, sourceKind: 'commit', sourceRef: commit });
+    const recorded = InspectorWorkspaceCodec.decode({ ...legacy, sourceCommit: commit });
+    expect(recorded).toMatchObject({ ok: true, value: { sourceCommit: commit } });
+    if (!recorded.ok) return;
+    const encoded = InspectorWorkspaceCodec.encode(recorded.value);
+    expect(encoded.ok).toBe(true);
+    if (!encoded.ok) return;
+    expect(InspectorWorkspaceCodec.decode(encoded.value)).toEqual(recorded);
+    for (const sourceCommit of ['main', commit.slice(0, 12), 'a'.repeat(41)]) {
+      expect(InspectorWorkspaceCodec.decode({ ...legacy, sourceCommit }).ok).toBe(false);
+    }
+  });
+
   it('accepts ordered typed goal evidence and enforces the bounded history', () => {
     const goal = {
       projectId: 'project-a',

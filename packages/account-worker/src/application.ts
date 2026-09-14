@@ -101,6 +101,7 @@ import { HostedRouteRegistryDO } from './hosted-route-registry.js';
 import { AccountStateDO } from './account-state.js';
 import type { SpaceAuthorityResult } from '@gitspace/protocol-workspace';
 import { tenantPlatformJson, tenantProvider } from './tenant-platform.js';
+import { forwardTunnelRequest, tunnelTarget } from './relay-request.js';
 import { accountAccessResponse, machineBrokerToken, verifyMachineBrokerToken, activeAccount, authorizeControl } from './account-access.js';
 import { machineProviderFor } from './machine-providers.js';
 import {
@@ -1392,6 +1393,7 @@ interface PlatformConfig {
   tenant: string;
   userId: string;
   token: string;
+  fetcher: Pick<Fetcher, 'fetch'>;
 }
 async function tenantWorkerVersion(env: Env, userId: string): Promise<WorkerVersion> {
   if (userId !== env.ACCOUNT_ID) throw new Error('Tenant identity does not match');
@@ -1402,12 +1404,12 @@ async function tenantWorkerVersion(env: Env, userId: string): Promise<WorkerVers
 async function platformConfig(env: Env, userId: string): Promise<PlatformConfig> {
   const account = await activeAccount(env, userId);
   if (account.status === 'error') throw new Error(account.error.message);
-  return { url: env.PLATFORM_URL, tenant: env.TENANT_ID, userId, token: env.PLATFORM_TOKEN };
+  return { url: env.PLATFORM_URL, tenant: env.TENANT_ID, userId, token: env.PLATFORM_TOKEN, fetcher: env.PLATFORM_SERVICE ?? { fetch } };
 }
 
 async function platformCall(platform: PlatformConfig, action: 'deploy' | 'revert', body: PlatformDeployRequest | { to: 'previous' | 'channel' }): Promise<{ status: ReleaseStatus; error: string | null }> {
   try {
-    const response = await fetch(`${platform.url}/__platform/tenants/${encodeURIComponent(platform.tenant)}/${action}`, {
+    const response = await platform.fetcher.fetch(`${platform.url}/__platform/tenants/${encodeURIComponent(platform.tenant)}/${action}`, {
       method: 'POST',
       headers: { authorization: `Bearer ${platform.token}`, 'content-type': 'application/json' },
       body: JSON.stringify({ ...body, accountId: platform.userId }),
@@ -2021,7 +2023,10 @@ export async function proxyAccountMachineRpc(request: Request, env: Env, userId:
     signal: request.signal,
     redirect: 'manual',
   });
-  return managedSandbox ? tenantProvider(env).fetch(upstream) : fetch(upstream);
+  if (managedSandbox) return tenantProvider(env).fetch(upstream);
+  const endpoint = new URL(upstream.url);
+  const tunnel = endpoint.origin === new URL(env.RELAY_URL).origin ? tunnelTarget(endpoint) : null;
+  return tunnel ? forwardTunnelRequest(upstream, env, tunnel) : fetch(upstream);
 }
 
 async function accountRpcResponse(request: Request, env: Env): Promise<Response> {

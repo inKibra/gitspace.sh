@@ -6,7 +6,7 @@ import { getDaemonRuntimeDir } from '@oh-my-pi/pi-utils';
 import { streamCursorSchema, type StreamEvent } from '@gitspace/protocol-sync';
 import { TerminalSnapshotJournal, type TerminalSnapshot } from './terminal-stream.js';
 import type { GitSpaceDatabase } from '@gitspace/core';
-import { DEFAULT_LIFECYCLE_TIMEOUT_MS, type LifecycleRunPhase } from '@gitspace/protocol-environment';
+import { DEFAULT_LIFECYCLE_TIMEOUT_MS, LifecycleLogReader, type LifecycleRun, type LifecycleRunPhase } from '@gitspace/protocol-environment';
 import {
   daemonClientForProject,
   type DaemonBrokerClient,
@@ -53,7 +53,7 @@ export interface WorkspaceLifecyclePlanResult {
   terminalName: string;
   exitCode: number;
   output: string;
-  steps: ReadonlyArray<{ id: string; exitCode: number; output: string }>;
+  steps: LifecycleRun['results'];
 }
 
 export class WorkspaceHubSpaceUnavailable extends Error {
@@ -366,35 +366,10 @@ export class WorkspaceHubTerminalCoordinator {
       const buffer = Buffer.allocUnsafe(65_536);
       const decoder = new TextDecoder();
       const stepPreviewLimit = Math.min(16_000, Math.floor(64_000 / Math.max(1, steps.length)));
-      const results: Array<{ id: string; exitCode: number; output: string }> = [];
-      const known = new Set(steps.map((step) => step.id));
-      const markerCarry = Math.max(256, ...steps.map((step) => marker('END', step.id).length + 20));
-      let carry = '';
-      let active: typeof results[number] | undefined;
-      const appendStep = (text: string) => { if (active) active.output = (active.output + text).slice(-stepPreviewLimit); };
+      const scriptLog = new LifecycleLogReader({ ids: steps.map((step) => step.id), outputLimit: stepPreviewLimit });
       const consume = (chunk: string, final = false) => {
         output = (output + chunk).slice(-16_000);
-        carry += chunk;
-        const pattern = /__GITSPACE_(START|END)__([A-Za-z0-9_-]+)(?::(-?\d+))?\n/gu;
-        let consumed = 0;
-        for (const match of carry.matchAll(pattern)) {
-          const id = Buffer.from(match[2]!, 'base64url').toString();
-          if (!known.has(id)) continue;
-          appendStep(carry.slice(consumed, match.index));
-          if (match[1] === 'START') {
-            active = { id, exitCode: 1, output: '' };
-            results.push(active);
-          } else if (active?.id === id) {
-            active.exitCode = Number(match[3]);
-            active.output = active.output.trimEnd();
-            active = undefined;
-          }
-          consumed = match.index + match[0].length;
-        }
-        carry = carry.slice(consumed);
-        const available = final ? carry.length : Math.max(0, carry.length - markerCarry);
-        appendStep(carry.slice(0, available));
-        carry = carry.slice(available);
+        scriptLog.push(chunk, { final });
       };
       let logChanged = true;
       let notify: (() => void) | undefined;
@@ -427,13 +402,12 @@ export class WorkspaceHubTerminalCoordinator {
             const final = decoder.decode();
             consume(final, true);
             if (final) await options.onOutput?.(final);
-            if (active) { active.exitCode = daemon.exitCode ?? 1; active.output = active.output.trimEnd(); }
             break;
           }
           if (!logChanged) await changed.promise;
         }
       } finally { spoolWatcher.close(); waitController.abort(); }
-      return { terminalName: name, exitCode: daemon.exitCode ?? 1, output, steps: results };
+      return { terminalName: name, exitCode: daemon.exitCode ?? 1, output, steps: scriptLog.results.map((step) => ({ ...step, output: step.output.trimEnd() })) };
     } finally {
       await spool.close();
       if (ownSpool && finished) await rm(spoolRoot, { recursive: true, force: true });

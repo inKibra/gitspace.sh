@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { spaceCheckpointManifestKey, spaceCheckpointManifestSchema, type SpaceCheckpointManifest } from '@gitspace/protocol-workspace';
 import type { SpaceAuthorityRecord } from '@gitspace/protocol-workspace';
 import { createGitIntermediateCheckpoint } from '../src/git-checkpoint.js';
-import { createInspectorBaseResolver, type InspectorBaseResolverOptions } from '../src/inspector-base.js';
+import { createPublishedSpaceHeadResolver, type PublishedSpaceHeadResolverOptions } from '../src/inspector-base.js';
 import { EncryptedCheckpointBlobStore, type CheckpointBlobStore } from '../src/portable-space-lifecycle.js';
 
 const roots: string[] = [];
@@ -86,26 +86,26 @@ async function fixture() {
   const remote = {
     fetches: 0,
     beforeFetch: undefined as (() => Promise<void>) | undefined,
-    async fetchCheckpoint(input: Parameters<InspectorBaseResolverOptions['gitRemote']['fetchCheckpoint']>[0]) {
+    async fetchCheckpoint(input: Parameters<PublishedSpaceHeadResolverOptions['gitRemote']['fetchCheckpoint']>[0]) {
       this.fetches += 1;
       await this.beforeFetch?.();
       git(input.repositoryPath, 'fetch', remotePath, `${input.checkpointRef}:${input.checkpointRef}`);
     },
   };
-  const options: InspectorBaseResolverOptions = {
+  const options: PublishedSpaceHeadResolverOptions = {
     authority,
     blobs,
     gitRemote: remote,
     binding: (projectId) => ({ projectId, bucket: 'account-storage', endpoint: 'https://storage.invalid', region: 'auto' }),
   };
-  const input = { projectId: 'project-a', baseSpaceId: 'base-a', baseBranch: 'main', repositoryPath: target };
+  const input = { projectId: 'project-a', spaceId: 'base-a', branch: 'main', repositoryPath: target };
 
   async function saveManifest(manifest: unknown, revision: number): Promise<void> {
-    const manifestKey = spaceCheckpointManifestKey(input.projectId, input.baseSpaceId, revision);
+    const manifestKey = spaceCheckpointManifestKey(input.projectId, input.spaceId, revision);
     const manifestHash = await blobs.put(manifestKey, new TextEncoder().encode(JSON.stringify(manifest)));
     authority.record = {
       projectId: input.projectId,
-      spaceId: input.baseSpaceId,
+      spaceId: input.spaceId,
       state: 'closed',
       machineId: null,
       generation: revision,
@@ -121,12 +121,12 @@ async function fixture() {
   }
 
   async function publish(revision: number): Promise<SpaceCheckpointManifest> {
-    const checkpoint = await createGitIntermediateCheckpoint({ repositoryPath: source, spaceId: input.baseSpaceId, revision });
+    const checkpoint = await createGitIntermediateCheckpoint({ repositoryPath: source, spaceId: input.spaceId, revision });
     git(source, 'push', remotePath, `${checkpoint.checkpointRef}:${checkpoint.checkpointRef}`);
     const manifest = spaceCheckpointManifestSchema.parse({
       version: 1,
       projectId: input.projectId,
-      spaceId: input.baseSpaceId,
+      spaceId: input.spaceId,
       revision,
       previousRevision: revision === 1 ? null : revision - 1,
       repository: checkpoint,
@@ -139,7 +139,7 @@ async function fixture() {
   }
 
   const manifest = await publish(1);
-  return { root, source, target, blobs, authority, remote, options, input, manifest, publish, saveManifest, resolveBase: createInspectorBaseResolver(options) };
+  return { root, source, target, blobs, authority, remote, options, input, manifest, publish, saveManifest, resolveBase: createPublishedSpaceHeadResolver(options) };
 }
 
 function checkoutState(repositoryPath: string) {
@@ -158,7 +158,7 @@ describe('Inspector saved base resolver', () => {
     const f = await fixture();
     const encrypted = new EncryptedCheckpointBlobStore(f.blobs, new Uint8Array(32).fill(7));
     f.authority.record!.manifestHash = await encrypted.put(f.authority.record!.manifestKey!, new TextEncoder().encode(JSON.stringify(f.manifest)));
-    const resolveBase = createInspectorBaseResolver({ ...f.options, blobs: encrypted });
+    const resolveBase = createPublishedSpaceHeadResolver({ ...f.options, blobs: encrypted });
     const before = checkoutState(f.target);
     rmSync(f.source, { recursive: true, force: true });
 
@@ -212,7 +212,7 @@ describe('Inspector saved base resolver', () => {
     const f = await fixture();
     const record = { ...f.authority.record! };
     f.authority.record = null;
-    await expect(f.resolveBase(f.input)).rejects.toThrow(/base.*unavailable/i);
+    await expect(f.resolveBase(f.input)).rejects.toThrow(/source.*unavailable/i);
     f.authority.record = { ...record, checkpointRevision: 0, manifestKey: null, manifestHash: null };
     await expect(f.resolveBase(f.input)).rejects.toThrow(/no published repository checkpoint/i);
     f.authority.record = record;
@@ -234,10 +234,10 @@ describe('Inspector saved base resolver', () => {
     ];
     for (const manifest of invalid) {
       await f.saveManifest(manifest, 1);
-      await expect(f.resolveBase(f.input)).rejects.toThrow(/base.*unavailable/i);
+      await expect(f.resolveBase(f.input)).rejects.toThrow(/source.*unavailable/i);
     }
     await f.saveManifest(f.manifest, 1);
-    await expect(f.resolveBase({ ...f.input, baseBranch: 'new-default' })).rejects.toThrow(/branch.*does not match/i);
+    await expect(f.resolveBase({ ...f.input, branch: 'new-default' })).rejects.toThrow(/branch.*does not match/i);
     expect(f.remote.fetches).toBe(0);
   });
 

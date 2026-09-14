@@ -46,7 +46,7 @@ import { ompGenerationSelectionSchema } from './omp-runtime.js';
 import { CloudArtifactObjectStore } from './cloud-artifact-object-store.js';
 import { createSpaceWorkspaceControls } from './space-workspace-controls.js';
 import { restoreGitIntermediateCheckpoint } from './git-checkpoint.js';
-import { createInspectorBaseResolver } from './inspector-base.js';
+import { createPublishedSpaceHeadResolver } from './inspector-base.js';
 import type { SpaceWorkspaceControls } from './space-eval-sdk.js';
 
 function requiredEnvironment(name: string): string {
@@ -164,6 +164,7 @@ export async function startMachineRuntime() {
   };
   const authority = new CloudSpaceCheckpointAuthority(controlOptions);
   const checkpointBlobs = new CloudDataCheckpointBlobStore(controlOptions);
+  const canonicalSessionBlobs = new EncryptedCheckpointBlobStore(checkpointBlobs, encryptionKey);
   const artifacts = new LocalArtifactResolver(
     database,
     new CloudArtifactObjectStore(controlOptions.userId, checkpointBlobs),
@@ -173,7 +174,7 @@ export async function startMachineRuntime() {
   const projectEventWriter = new CloudProjectEventWriter(authority, database, (error) => {
     console.error('[gitspace-project-events]', error);
   });
-  const canonicalSessionWriter = new CloudCanonicalSessionWriter(authority, checkpointBlobs, (error) => {
+  const canonicalSessionWriter = new CloudCanonicalSessionWriter(authority, canonicalSessionBlobs, (error) => {
     console.error('[gitspace-canonical-sessions]', error);
   });
   const gitIdentity = new SharedGitIdentityCoordinator(
@@ -253,6 +254,7 @@ export async function startMachineRuntime() {
   await settings.start();
   const browserRelay = new BrowserRelaySupervisor({
     environmentRoot,
+    agentDir: ompAgentDir,
     onError: (error) => console.error('[gitspace-browser-relay]', error),
   });
   if ((await browserRelay.status()).installed) {
@@ -447,7 +449,11 @@ export async function startMachineRuntime() {
       if (!recoverableSpaces.has(session.workspaceId) || sessions.get(session.id)) continue;
       try {
         if (!session.sessionObjectKey || !session.sessionObjectHash) throw new Error('Canonical session has no durable session object');
-        const bytes = await checkpointBlobs.get(session.sessionObjectKey, session.sessionObjectHash);
+        if (session.sessionFormatVersion !== null && session.sessionFormatVersion !== 'omp-jsonl-1' && session.sessionFormatVersion !== 'omp-checkpoint-1') {
+          throw new Error(`Unsupported canonical session format ${session.sessionFormatVersion}`);
+        }
+        const store = session.sessionFormatVersion === 'omp-checkpoint-1' ? canonicalSessionBlobs : checkpointBlobs;
+        const bytes = await store.get(session.sessionObjectKey, session.sessionObjectHash);
         if (!bytes) throw new Error(`Canonical session object ${session.sessionObjectKey} does not exist`);
         await sessions.materializeCanonicalSession(session, bytes);
       } catch (error) {
@@ -489,7 +495,8 @@ export async function startMachineRuntime() {
     await spaces.open(space.id, space.generation + 1, { resumeOnMachineRestart: true });
     await canonicalSessionWriter.flush();
   };
-  const projectLifecycle = new ProjectLifecycleManager(database, authority, machineId, managedSpaceRoot, checkpointSpace, (repositoryUrl) => gitIdentity.gitEnvironment(repositoryUrl));
+  const resolvePublishedHead = createPublishedSpaceHeadResolver({ authority, blobs: encryptedCheckpointBlobs, gitRemote: walgit, binding: gitBinding });
+  const projectLifecycle = new ProjectLifecycleManager(database, authority, machineId, managedSpaceRoot, checkpointSpace, (repositoryUrl) => gitIdentity.gitEnvironment(repositoryUrl), resolvePublishedHead);
 
   const handlers = new GitSpaceHandlers(database, artifacts, projectEventWriter);
   workspaceControls.resolve(createSpaceWorkspaceControls({
@@ -541,12 +548,8 @@ export async function startMachineRuntime() {
     crons: authority,
     skills: authority,
     inspector: authority,
-    resolveInspectorBaseCommit: createInspectorBaseResolver({
-      authority,
-      blobs: encryptedCheckpointBlobs,
-      gitRemote: walgit,
-      binding: gitBinding,
-    }),
+    resolveInspectorBaseCommit: ({ projectId, baseSpaceId, baseBranch, repositoryPath }) =>
+      resolvePublishedHead({ projectId, spaceId: baseSpaceId, branch: baseBranch, repositoryPath }),
     projectEvents: authority,
     projects: projectLifecycle,
     machines: () => authority.listMachineDefinitions(),

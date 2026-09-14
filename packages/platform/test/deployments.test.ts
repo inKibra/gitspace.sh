@@ -11,7 +11,6 @@ const { secretKey, publicKey } = ed25519.keygen();
 const ADMIN_PUBLIC_KEY = btoa(String.fromCharCode(...publicKey));
 
 interface Upload {
-  scriptName: string;
   metadata: ScriptUploadMetadata;
   module: string;
 }
@@ -44,7 +43,7 @@ const dispatcherStub: DispatchNamespace = {
         const path = new URL(request.url).pathname;
         if (path.startsWith('/__platform/objects/')) {
           const token = /^Bearer (.+)$/u.exec(request.headers.get('authorization') ?? '')?.[1];
-          if (!token || !await env.DEPLOYMENTS.getByName(name.slice('tenant-'.length)).verifyToken(token)) return new Response('Unauthorized', { status: 401 });
+          if (!token || !await env.DEPLOYMENTS.getByName(name.slice(`${env.DISPATCH_NAMESPACE}-tenant-`.length)).verifyToken(token)) return new Response('Unauthorized', { status: 401 });
           const value = objects.get(name)?.get(decodeURIComponent(path.slice('/__platform/objects/'.length)));
           return value === undefined ? new Response('Not found', { status: 404 }) : new Response(value);
         }
@@ -143,8 +142,8 @@ async function accountId(tenant: string): Promise<string> {
 async function stageRelease(tenant: string, sha: string, version = sha): Promise<{ bundleKey: string; bundleHash: string }> {
   const source = bundleSource(version);
   const bundleKey = `users/${await accountId(tenant)}/releases/${sha}/worker.mjs`;
-  let staged = objects.get(`tenant-${tenant}`);
-  if (!staged) { staged = new Map(); objects.set(`tenant-${tenant}`, staged); }
+  let staged = objects.get(`${env.DISPATCH_NAMESPACE}-tenant-${tenant}`);
+  if (!staged) { staged = new Map(); objects.set(`${env.DISPATCH_NAMESPACE}-tenant-${tenant}`, staged); }
   staged.set(bundleKey, source);
   return { bundleKey, bundleHash: await sha256(source) };
 }
@@ -193,7 +192,7 @@ beforeEach(() => {
       return Response.json({ success: false, errors: [{ code: 10021, message }], result: null }, { status: 400 });
     }
     const module = await modulePart.text();
-    uploads.push({ scriptName: match[1]!, metadata: parsed as ScriptUploadMetadata, module });
+    uploads.push({ metadata: parsed as ScriptUploadMetadata, module });
     scripts.set(match[1]!, module);
     return Response.json({ success: true, errors: [], result: { id: match[1] } });
   };
@@ -266,7 +265,6 @@ describe('POST /__platform/tenants/:tenant/deploy', () => {
 
     expect(uploads).toHaveLength(1);
     const upload = uploads[0]!;
-    expect(upload.scriptName).toBe('tenant-bravo');
     expect(upload.module).toBe(bundleSource('abc123'));
     expect(upload.metadata).toEqual({
       main_module: 'worker.mjs',
@@ -328,7 +326,7 @@ describe('POST /__platform/tenants/:tenant/deploy', () => {
   it('keeps a healthy candidate when the dispatcher still serves its predecessor during propagation', async () => {
     const token = await mintToken('propagation');
     await deploy('propagation', token, 'old', ['v1']);
-    probeVersions.set('tenant-propagation', Array(5).fill('old'));
+    probeVersions.set(`${env.DISPATCH_NAMESPACE}-tenant-propagation`, Array(5).fill('old'));
 
     const result = await deploy('propagation', token, 'next', ['v1']);
 
@@ -349,7 +347,7 @@ describe('POST /__platform/tenants/:tenant/deploy', () => {
     const restore = uploads[2]!;
     expect(restore.module).toBe(bundleSource('good'));
     expect(restore.metadata.migrations).toBeUndefined();
-    expect(scripts.get('tenant-foxtrot')).toBe(bundleSource('good'));
+    expect(scripts.get(`${env.DISPATCH_NAMESPACE}-tenant-foxtrot`)).toBe(bundleSource('good'));
 
     const state = await env.DEPLOYMENTS.getByName('foxtrot').getState();
     expect(state.active?.sha).toBe('good');
@@ -378,7 +376,7 @@ describe('POST /__platform/tenants/:tenant/revert', () => {
     await env.RELEASES.put(CHANNEL_METADATA_KEY, JSON.stringify(metadata(['v1', 'v2'])));
     const token = await mintToken('hotel', 'v2');
     await deploy('hotel', token, 'h1', ['v1', 'v2']);
-    probeVersions.set('tenant-hotel', ['h1']);
+    probeVersions.set(`${env.DISPATCH_NAMESPACE}-tenant-hotel`, ['h1']);
 
     const response = await tenantPost('hotel', 'revert', token, { to: 'channel' });
     expect(response.status).toBe(200);
@@ -388,7 +386,7 @@ describe('POST /__platform/tenants/:tenant/revert', () => {
     expect(upload.module).toBe(bundleSource('channel:1.2.3'));
     expect(upload.metadata.tags).toEqual(['hotel', 'channel']);
     expect(upload.metadata.migrations).toBeUndefined();
-    expect(scripts.get('tenant-hotel')).toBe(bundleSource('channel:1.2.3'));
+    expect(scripts.get(`${env.DISPATCH_NAMESPACE}-tenant-hotel`)).toBe(bundleSource('channel:1.2.3'));
     const state = await env.DEPLOYMENTS.getByName('hotel').getState();
     expect(state.active?.sha).toBe('channel:1.2.3');
   });
@@ -405,7 +403,7 @@ describe('POST /__platform/tenants/:tenant/revert', () => {
     const token = await mintToken('juliet');
     await deploy('juliet', token, 'one', ['v1']);
     await deploy('juliet', token, 'two', ['v1']);
-    objects.delete('tenant-juliet');
+    objects.delete(`${env.DISPATCH_NAMESPACE}-tenant-juliet`);
 
     const response = await tenantPost('juliet', 'revert', token, { to: 'previous' });
     expect(response.status).toBe(200);
@@ -443,14 +441,14 @@ describe('operator account-bound deployment', () => {
     expect((await post(a, 'deploy', aRequest)).status).toBe(423);
     expect((await post(a, 'revert', { accountId: aId, to: 'channel' })).status).toBe(423);
     expect((await post(b, 'deploy', bRequest)).status).toBe(200);
-    expect(scripts.get(`tenant-${a}`)).toBe(bundleSource('account-a'));
-    expect(scripts.get(`tenant-${b}`)).toBe(bundleSource('account-b'));
+    expect(scripts.get(`${env.DISPATCH_NAMESPACE}-tenant-${a}`)).toBe(bundleSource('account-a'));
+    expect(scripts.get(`${env.DISPATCH_NAMESPACE}-tenant-${b}`)).toBe(bundleSource('account-b'));
 
     await env.RELEASES.put(CHANNEL_BUNDLE_KEY, bundleSource('channel:isolated'));
     await env.RELEASES.put(CHANNEL_METADATA_KEY, JSON.stringify(metadata(['v1'])));
     expect((await post(b, 'revert', { accountId: bId, to: 'channel' })).status).toBe(200);
-    expect(scripts.get(`tenant-${b}`)).toBe(bundleSource('channel:isolated'));
-    expect(scripts.get(`tenant-${a}`)).toBe(bundleSource('account-a'));
+    expect(scripts.get(`${env.DISPATCH_NAMESPACE}-tenant-${b}`)).toBe(bundleSource('channel:isolated'));
+    expect(scripts.get(`${env.DISPATCH_NAMESPACE}-tenant-${a}`)).toBe(bundleSource('account-a'));
     expect(await env.DEPLOYMENTS.getByName(a).getState()).toEqual(aState);
     expect((await env.DEPLOYMENTS.getByName(b).getState()).active?.sha).toBe('channel:isolated');
   });
@@ -470,7 +468,7 @@ describe('operator account-bound deployment', () => {
     });
     expect(recovered.status).toBe(200);
     expect(await recovered.json()).toMatchObject({ deployment: { sha: 'owned-release', healthy: true } });
-    expect(scripts.get(`tenant-${tenant}`)).toBe(bundleSource('owned-release'));
+    expect(scripts.get(`${env.DISPATCH_NAMESPACE}-tenant-${tenant}`)).toBe(bundleSource('owned-release'));
     await env.TENANT_CONTROL.getByName(tenant).set({ status: 'quarantined', reason: 'hold' });
     expect((await bootstrap()).status).toBe(423);
     expect((await env.TENANT_CONTROL.getByName(tenant).get()).status).toBe('quarantined');

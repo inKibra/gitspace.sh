@@ -25,6 +25,7 @@ interface Env {
   ACCOUNT_URL: string;
   RELAY_URL: string;
   PLATFORM_URL: string;
+  PLATFORM_SERVICE?: Fetcher;
   PLATFORM_TOKEN: string;
   STORAGE_BUCKET: string;
   AUTH_MAX_SKEW_MS: string | number;

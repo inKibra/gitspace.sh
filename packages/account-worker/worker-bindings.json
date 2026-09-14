@@ -36,6 +36,10 @@
     "source": "platform-url"
   },
   {
+    "name": "PLATFORM_SERVICE",
+    "source": "platform-service"
+  },
+  {
     "name": "PLATFORM_TOKEN",
     "source": "provider-token"
   },

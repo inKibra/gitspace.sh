@@ -42,7 +42,7 @@ const goal = { id: 'goal', title: 'Task', summary: 'Implement the task', phase: 
 describe('Space eval SDK', () => {
   it('validates every initial instruction draft before creating a workspace', async () => {
     const { namespace, operations } = fixture();
-    await expect(namespace.call('create', { name: 'New', branch: 'new', phase: 'code', sourceKind: 'base', sourceRef: 'main', goal, workflow: { id: 'invalid' } })).rejects.toThrow();
+    await expect(namespace.call('create', { name: 'New', branch: 'new', sourceKind: 'base', sourceRef: 'main', goal, workflow: { id: 'invalid' } })).rejects.toThrow();
     expect(operations).toEqual([]);
     expect(await namespace.call('goal.get', { workspaceId: 'workspace-b' })).toBeNull();
   });
@@ -51,11 +51,11 @@ describe('Space eval SDK', () => {
     const { namespace, authority, operations } = fixture();
     authority.putInspectorWorkflow = async () => { throw new Error('Workflow authority unavailable'); };
     const created = await namespace.call('create', {
-      name: 'New', branch: 'new', phase: 'code', sourceKind: 'base', sourceRef: 'main', goal,
+      name: 'New', branch: 'new', sourceKind: 'base', sourceRef: 'main', goal,
       workflow: { id: 'workflow', title: 'Workflow', description: '', nodes: [], edges: [], updatedBy: 'agent' },
     });
     expect(created).toMatchObject({ identity: { projectId: 'project-a', spaceId: 'workspace-b' }, ready: false, initialized: ['goal'], error: { operation: 'workflow.put' } });
-    expect(await namespace.call('goal.get', { workspaceId: 'workspace-b' })).toMatchObject({ title: 'Task', revision: 1 });
+    expect(await namespace.call('goal.get', { workspaceId: 'workspace-b' })).toMatchObject({ title: 'Task', phase: 'code', revision: 1 });
     expect(operations).toEqual(['create']);
   });
 

@@ -608,8 +608,8 @@ export const reopenSpaceContract = gitspaceRpc
 
 export const archiveWorkspaceContract = gitspaceRpc
   .procedure()
-  .input(wire.object({ spaceId: wire.string, expectedGeneration: wire.number }))
-  .output(SpaceLifecycleViewCodec).errors({ WorkspaceFailure: rpcErrors.workspaceFailure, WorkspaceNotFound: rpcErrors.workspaceNotFound, OperationFailed: rpcErrors.operationFailed }).mutation();
+  .input(wire.object({ projectId: wire.string, spaceId: wire.string, expectedRevision: wire.number, expectedGeneration: wire.nullable(wire.number) }))
+  .output(InspectorWorkspaceCodec).errors({ WorkspaceFailure: rpcErrors.workspaceFailure, WorkspaceNotFound: rpcErrors.workspaceNotFound, OperationFailed: rpcErrors.operationFailed }).mutation();
 
 export const restoreWorkspaceContract = gitspaceRpc
   .procedure()
@@ -669,7 +669,7 @@ export const createWorkspaceContract = gitspaceRpc
     projectId: wire.string,
     name: wire.string,
     branch: wire.string,
-    phase: WorkspacePhaseCodec,
+    phase: wire.optional(WorkspacePhaseCodec),
     sourceKind: wire.enum(['base', 'branch', 'workspace', 'pull-request', 'tag', 'commit']),
     sourceRef: wire.string,
     /** Extra dependencies beyond the implicit one on a `workspace` source. */
@@ -882,7 +882,7 @@ export const recoverWorkspaceEnvironmentRunContract = gitspaceRpc
 export const getWorkspaceEnvironmentRunLogContract = gitspaceRpc
   .procedure()
   .input(wire.object({ spaceId: wire.string, runId: wire.string, offset: wire.nullable(wire.number) }))
-  .output(wire.object({ output: wire.string, nextOffset: wire.nullable(wire.number) }))
+  .output(wire.object({ output: wire.string, nextOffset: wire.nullable(wire.number), cursor: wire.number }))
   .errors({ EnvironmentFailure: rpcErrors.environmentFailure, OperationFailed: rpcErrors.operationFailed })
   .query();
 

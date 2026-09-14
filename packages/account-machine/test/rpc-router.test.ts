@@ -11,15 +11,16 @@ import {
   type FactEvent,
   type MaterializedSpace,
 } from '@gitspace/core';
-import { createDeviceBinding, createEncryptedRpcFetch, createSignedRpcFetch, credentialProtocolBase64, gitspaceContract, rpcErrors, signDeviceInvite, type DeviceCapability, type DeviceGrantRecord, type ProjectEvent } from '@gitspace/protocol';
+import { createDeviceBinding, createEncryptedRpcFetch, createSignedRpcFetch, credentialProtocolBase64, gitspaceContract, rpcErrors, signDeviceInvite, type CloudProjectOperation, type CloudWorkspaceDefinition, type DeviceCapability, type DeviceGrantRecord, type ProjectEvent } from '@gitspace/protocol';
 import { decodeTranscriptChunks, type TranscriptChunk, type TranscriptEvent } from '@gitspace/protocol/transcript';
 import { applyStreamEvent, initialStreamState } from '@gitspace/protocol-sync';
 import { WorkspaceDomainError } from '@gitspace/protocol-workspace';
-import { emptyLifecycleState, isLifecycleRunActive, transitionLifecycle, type EnvironmentLifecycleAuthority, type LifecycleRunRecord, type LifecycleState } from '@gitspace/protocol-environment';
+import { emptyLifecycleState, isLifecycleRunActive, transitionLifecycle, type LifecycleRunRecord, type LifecycleState } from '@gitspace/protocol-environment';
 import { WorkspaceEnvironmentManager } from '../src/workspace-environment.js';
 import type { WorkspaceLifecyclePlanResult } from '../src/workspace-hub.js';
 import { CloudProjectEventWriter } from '../src/cloud-project-events.js';
 import { DeviceRegistry } from '../src/device-registry.js';
+import { ProjectLifecycleManager, type ProjectLifecycleAuthority } from '../src/project-lifecycle.js';
 import { createSignedRpcHandler } from '../src/signed-rpc.js';
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { createBrowserClient, fetchTransport } from 'result-rpc/client';
@@ -151,6 +152,92 @@ class RpcFakeOmpRuntime implements OmpRuntime {
 }
 
 describe('GitSpace Result RPC', () => {
+  it('archives a failed canonical workspace over HTTP without creating a local placement', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'gitspace-archive-rpc-'));
+    roots.push(root);
+    const database = new GitSpaceDatabase(join(root, 'gitspace.db'));
+    const artifacts = new LocalArtifactResolver(database, new MemoryArtifactObjectStore(), join(root, 'cache'), new Uint8Array(32));
+    const events = new FactEventStore(database);
+    const handlers = new GitSpaceHandlers(database, artifacts, events);
+    const sessions = new MachineSessionCoordinator(database, artifacts, new RpcFakeOmpRuntime(), 'machine-a', join(root, 'runtime'), events);
+    const now = new Date(0).toISOString();
+    let definition: CloudWorkspaceDefinition = {
+      id: 'failed-workspace', projectId: 'cloud-project', kind: 'worktree', name: 'Failed creation',
+      branch: 'failed-creation', phase: 'code', sourceKind: 'base', sourceRef: 'main', sourceCommit: null,
+      lifecycle: 'failed', goalId: null, revision: 2, createdAt: now, updatedAt: now, archivedAt: null,
+    };
+    const operations = new Map<string, CloudProjectOperation>();
+    const unavailable = async (): Promise<never> => { throw new Error('Not configured in archive fixture'); };
+    const authority: ProjectLifecycleAuthority = {
+      bootstrap: unavailable, bootstrapInspector: unavailable, bootstrapProject: unavailable,
+      activateSourceProject: unavailable, setProjectLifecycle: unavailable, deleteProject: unavailable,
+      removeProjectWorkspace: unavailable,
+      listProjects: async () => [],
+      getProject: async (projectId) => projectId === definition.projectId ? {
+        id: projectId, name: 'Cloud project', lifecycle: 'active', repositoryReference: null, baseBranch: 'main',
+        role: null, source: null, revision: 1, archivedAt: null, updatedAt: now,
+      } : null,
+      getSpace: async () => null,
+      listProjectWorkspaces: async (projectId) => projectId === definition.projectId ? [{ ...definition }] : [],
+      putProjectWorkspace: async (projectId, input) => {
+        if (projectId !== definition.projectId || input.id !== definition.id || input.expectedRevision !== definition.revision) {
+          throw new Error('Workspace revision conflict');
+        }
+        const { expectedRevision, ...workspace } = input;
+        definition = {
+          ...workspace, revision: expectedRevision + 1, createdAt: definition.createdAt, updatedAt: now,
+          archivedAt: workspace.lifecycle === 'archived' ? now : null,
+        };
+        return { ...definition };
+      },
+      createProjectOperation: async (_projectId, input) => {
+        const operation: CloudProjectOperation = {
+          ...input, id: crypto.randomUUID(), state: 'queued', revision: 1,
+          steps: input.steps.map((step) => ({ ...step, state: 'queued', message: null, updatedAt: now })),
+          claimToken: null, leaseExpiresAt: null, error: null, createdAt: now, updatedAt: now,
+        };
+        operations.set(operation.id, operation);
+        return operation;
+      },
+      updateProjectOperation: async (_projectId, input) => {
+        const current = operations.get(input.id);
+        if (!current || current.revision !== input.expectedRevision) throw new Error('Operation revision conflict');
+        const operation: CloudProjectOperation = {
+          ...current, state: input.state, steps: input.steps, error: input.error, revision: current.revision + 1,
+        };
+        operations.set(operation.id, operation);
+        return operation;
+      },
+    };
+    const projects = new ProjectLifecycleManager(database, authority, 'machine-a', join(root, 'spaces'));
+    const rpc = createGitSpaceRpcHandler({
+      database, handlers, artifacts, sessions, factEvents: events, projects, machineId: 'machine-a',
+      terminals: {} as WorkspaceHubTerminalCoordinator,
+      spaces: { close: unavailable, release: unavailable, open: unavailable },
+      serviceManager: { list: async () => [], start: unavailable, stop: unavailable },
+      secrets: { listProjectSecrets: async () => [], putProjectSecret: unavailable, deleteProjectSecret: unavailable },
+      projectEvents: { appendProjectEvent: unavailable, listProjectEvents: async () => [], latestProjectEventOffset: async () => 0 },
+      machines: async () => [], spacePlacements: async () => [],
+    });
+    const http = startGitSpaceRpcHttpServer({ handler: rpc.handler });
+    const client = createBrowserClient({ contract: gitspaceContract, transport: fetchTransport({ url: `${http.url}/rpc` }) });
+    try {
+      const archived = await client.workspace.archive({
+        projectId: 'cloud-project', spaceId: 'failed-workspace', expectedRevision: 2, expectedGeneration: null,
+      });
+      if (archived.status === 'error') throw archived.error;
+      expect(archived.value).toMatchObject({
+        id: 'failed-workspace', projectId: 'cloud-project', lifecycle: 'archived', revision: 3, archivedAt: now,
+      });
+      expect((await authority.listProjectWorkspaces('cloud-project'))[0]?.lifecycle).toBe('archived');
+      expect(database.getSpace('failed-workspace')).toBeNull();
+      expect(database.getProject('cloud-project')).toBeNull();
+    } finally {
+      await http.stop();
+      database.close();
+    }
+  });
+
   it('recovers complete large live, child, and closed snapshots through bounded HTTP streams', async () => {
     const root = mkdtempSync(join(tmpdir(), 'gitspace-transcript-rpc-'));
     roots.push(root);
@@ -206,7 +293,7 @@ describe('GitSpace Result RPC', () => {
       },
       projects: {
         list: async () => [], createProject: unavailable, openProject: unavailable, createWorkspace: unavailable,
-        archiveProject: unavailable, restoreProject: unavailable, deleteProject: unavailable, deleteWorkspace: unavailable,
+        archiveWorkspace: unavailable, archiveProject: unavailable, restoreProject: unavailable, deleteProject: unavailable, deleteWorkspace: unavailable,
         setWorkspaceLifecycle: unavailable, setWorkspacePhase: unavailable, runLifecycleOperation: unavailable,
       },
       machines: async () => [],
@@ -366,7 +453,7 @@ describe('GitSpace Result RPC', () => {
     mkdirSync(workspaceRoot, { recursive: true });
     mkdirSync(join(root, 'repo'), { recursive: true });
     expect(database.createWorkspace({
-      id: 'workspace-a', projectId: 'project-a', name: 'agent-blame', branch: 'develop', rootPath: workspaceRoot,
+      id: 'workspace-a', projectId: 'project-a', name: 'agent-blame', branch: 'develop', rootPath: workspaceRoot, phase: 'code',
     }).status).toBe('ok');
     const artifacts = new LocalArtifactResolver(
       database,
@@ -473,6 +560,7 @@ describe('GitSpace Result RPC', () => {
       createProject: async () => { throw new Error('not configured'); },
       openProject: async () => { throw new Error('not configured'); },
       createWorkspace: async () => { throw new Error('not configured'); },
+      archiveWorkspace: async (): Promise<never> => { throw new Error('not configured'); },
       archiveProject: async () => { throw new Error('not configured'); },
       restoreProject: async () => { throw new Error('not configured'); },
       deleteProject: async () => false,
@@ -525,10 +613,11 @@ describe('GitSpace Result RPC', () => {
     let runnerStarted = Promise.withResolvers<void>();
     let execution = Promise.withResolvers<WorkspaceLifecyclePlanResult>();
     const stopRequested = Promise.withResolvers<void>();
-    const lifecycleAuthority: EnvironmentLifecycleAuthority = {
+    const lifecycleAuthority: ConstructorParameters<typeof WorkspaceEnvironmentManager>[3] = {
+      listProjectWorkspaces: async () => [],
       getLifecycleState: async () => structuredClone(lifecycle),
       getLifecycleRunLog: async (_projectId, _spaceId, runId) => ({
-        output: lifecycle.runs.find((run) => run.id === runId)?.output ?? '', nextOffset: null,
+        output: lifecycle.runs.find((run) => run.id === runId)?.output ?? '', nextOffset: null, cursor: 1,
       }),
       mutateLifecycleState: async (_projectId, _spaceId, input) => {
         const transition = transitionLifecycle({
@@ -866,7 +955,7 @@ describe('GitSpace Result RPC', () => {
     expect(workspaceTranscript).toMatchObject([{ sessionId: created.value.id, kind: 'message_end', payload: { text: 'done:ship it' }, createdAt: expect.any(Date) }]);
     expect(refreshed.value.artifacts.map((artifact) => artifact.path)).toContain('rpc.txt');
 
-    expect(database.createWorkspace({ id: 'workspace-b', projectId: 'project-a', name: 'stacked', branch: 'stacked', rootPath: join(root, 'repo', 'workspaces', 'b') }).status).toBe('ok');
+    expect(database.createWorkspace({ id: 'workspace-b', projectId: 'project-a', name: 'stacked', branch: 'stacked', rootPath: join(root, 'repo', 'workspaces', 'b'), phase: 'code' }).status).toBe('ok');
     const related = await client.workspace.setRelations({ workspaceId: 'workspace-b', dependsOn: [], relatedTo: [], stackedOn: 'workspace-a' });
     expect(related.status).toBe('ok');
     if (related.status === 'error') throw related.error;
@@ -925,10 +1014,8 @@ describe('GitSpace Result RPC', () => {
     expect((await client.space.reopen({ spaceId: 'workspace-a', expectedGeneration: 2 })).status).toBe('error');
     expect((await client.space.reopen({ spaceId: 'workspace-a', expectedGeneration: 3 })).status).toBe('ok');
 
-    const closed = await client.workspace.archive({ spaceId: 'workspace-a', expectedGeneration: 3 });
-    expect(closed.status).toBe('ok');
-    if (closed.status === 'error') throw closed.error;
-    expect(closed.value).toMatchObject({ id: 'workspace-a', kind: 'worktree', state: 'archived', machineId: null, generation: 4 });
+    await spaces.close(database.getSpace('workspace-a')!, 3);
+    database.setSpaceClosed('workspace-a', true);
 
     // Closed metadata stays readable without projecting or opening the checkpoint transcript.
     const closedBootstrap = await client.bootstrap({ projectId: 'project-a', workspaceId: 'workspace-a' });
@@ -1145,7 +1232,7 @@ describe('GitSpace Result RPC', () => {
       projectEvents: { appendProjectEvent: unavailable, listProjectEvents: async () => [], latestProjectEventOffset: async () => 0 },
       projects: {
         list: async () => [], createProject: unavailable, openProject: unavailable, createWorkspace: unavailable,
-        archiveProject: unavailable, restoreProject: unavailable, deleteProject: unavailable, deleteWorkspace: unavailable,
+        archiveWorkspace: unavailable, archiveProject: unavailable, restoreProject: unavailable, deleteProject: unavailable, deleteWorkspace: unavailable,
         setWorkspaceLifecycle: unavailable, setWorkspacePhase: unavailable, runLifecycleOperation: unavailable,
       },
       machines: async () => [], spacePlacements: async () => [],

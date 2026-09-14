@@ -46,7 +46,7 @@ const ToolIcon = glyph(Tool02);
 const TrashIcon = glyph(Trash01);
 
 const TRUST_COLOR: Record<TrustState['status'], NonNullable<BadgeProps['color']>> = { approved: 'green', pending: 'amber', changed: 'red' };
-const RUN_COLOR: Record<LifecycleRun['status'], NonNullable<BadgeProps['color']>> = { succeeded: 'green', failed: 'red', running: 'blue', never: 'gray' };
+const RUN_COLOR: Record<LifecycleRun['status'], NonNullable<BadgeProps['color']>> = { succeeded: 'green', failed: 'red', running: 'blue', interrupted: 'amber', 'not-started': 'gray', never: 'gray' };
 
 function profileDefinition(profileName: string, profiles: Record<string, EnvironmentProfileDefinition>): EnvironmentProfileDefinition {
   const base = profiles.base ?? { checks: [], secrets: [], inputs: [], notes: '' };
@@ -178,11 +178,11 @@ function LifecycleCard({ script, disabled, onApprove, onRevoke, onOpenFile, onOp
   return <Card size="compact" index={index}>
     <CardHeader>
       <CardTitle>{onOpenFile ? <Button variant="ghost" size="compact" className="-ml-2 min-h-10 justify-start break-all font-mono" leadingIcon={FileIcon} onClick={onOpenFile}>{script.path.replace(`${script.phase}/`, '')}</Button> : <code className="break-all font-mono text-caption">{script.path}</code>}</CardTitle>
-      <CardDescription><span className="flex flex-wrap items-center gap-1.5">{run.status === 'never' ? 'Never run' : <span className={run.status === 'failed' ? 'text-destructive' : undefined}>{run.status} · <span className="tabular-nums">{run.relativeTime}{'duration' in run ? ` · ${run.duration}` : ''}</span></span>}<Badge size="compact" color={script.profiles ? 'blue' : 'gray'}>{script.profiles ? `${script.profiles.join(', ')} only` : 'all profiles'}</Badge></span></CardDescription>
+      <CardDescription><span className="flex flex-wrap items-center gap-1.5">{run.status === 'never' ? 'Never run' : <span className={run.status === 'failed' ? 'text-destructive' : undefined}>{run.status === 'not-started' ? 'Not started' : run.status}{'exitCode' in run && run.exitCode != null ? ` · exit ${run.exitCode}` : ''} · <span className="tabular-nums">{run.relativeTime}{'duration' in run && run.duration ? ` · ${run.duration}` : ''}</span></span>}<Badge size="compact" color={script.profiles ? 'blue' : 'gray'}>{script.profiles ? `${script.profiles.join(', ')} only` : 'all profiles'}</Badge></span></CardDescription>
     </CardHeader>
     {script.trust.status === 'changed' ? <CardContent><CommandDiff trust={script.trust} /></CardContent> : null}
     <CardFooter className="flex-wrap gap-1.5">
-      <Badge size="compact" color={RUN_COLOR[run.status]}>{run.status}</Badge>
+      <Badge size="compact" color={RUN_COLOR[run.status]}>{run.status === 'not-started' ? 'not started' : run.status}</Badge>
       {trustBadge(script.trust)}
       <Button variant={script.trust.status === 'approved' ? 'ghost' : 'secondary'} size="compact" className="min-h-10" disabled={disabled} onClick={script.trust.status === 'approved' ? onRevoke : onApprove}>{script.trust.status === 'approved' ? 'Revoke' : 'Review & approve'}</Button>
       {run.status !== 'never' && onOpenOutput ? <Button variant="ghost" size="compact" className="min-h-10" leadingIcon={TerminalIcon} onClick={onOpenOutput}>View log</Button> : null}
@@ -298,17 +298,21 @@ export function EnvironmentView({ model, busy = false, runtimeAvailable = true, 
 
       {model.ledger ? <section className="flex flex-col gap-3" aria-label="Lifecycle history">
         <h3 className="text-caption font-medium text-muted-foreground">Run history · <span className="tabular-nums">{model.ledger.runs.length}</span></h3>
-        {!model.ledger.runs.length ? <p className="text-caption text-muted-foreground">No runs recorded.</p> : model.ledger.runs.map((run) => <details key={run.id} className={`${shape.container} bg-surface-2 px-3 shadow-surface-1`}>
+        {!model.ledger.runs.length ? <p className="text-caption text-muted-foreground">No runs recorded.</p> : model.ledger.runs.map((run) => {
+          const executions = model.executions?.filter((execution) => run.executionHashes.includes(execution.hash)) ?? [];
+          const scripts = [...executions, ...run.results.filter((result) => !executions.some((execution) => execution.id === result.id)).map((result) => ({ id: result.id, label: result.id }))];
+          return <details key={run.id} className={`${shape.container} bg-surface-2 px-3 shadow-surface-1`}>
           <summary className="min-h-10 cursor-pointer py-3 text-caption"><span className="font-medium">{run.phase}</span> · {run.status} · <span className="tabular-nums">{new Date(run.startedAt).toLocaleString()}</span></summary>
           <div className="flex min-w-0 flex-col gap-2 pb-3">
             <p className="break-all text-caption text-muted-foreground">{run.profile} · {run.machineId} · <span className="tabular-nums">checkout {run.generation ?? 'not scoped'}{run.exitCode !== null ? ` · exit ${run.exitCode}` : ''}</span></p>
             <code className="break-all text-caption text-muted-foreground">{run.id}</code>
-            {run.output ? <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words font-mono text-caption">{run.output}</pre> : <p className="text-caption text-muted-foreground">No output recorded.</p>}
-            <div className="flex flex-wrap gap-2">{onOpenRunLog ? <Button variant="ghost" size="compact" className="min-h-10" onClick={() => onOpenRunLog(run.id)}>Read full log</Button> : null}{isLifecycleRunActive(run) && onRecoverRun ? <Button variant="ghost" size="compact" className="min-h-10" disabled={busy} onClick={() => setRecovery(run.id)}>Recover interrupted run…</Button> : null}{isLifecycleRunActive(run) && run.status !== 'cancelling' && onCancelRun ? <Button variant="ghost" size="compact" className="min-h-10" disabled={busy} onClick={() => onCancelRun(run.id)}>Cancel run</Button> : null}</div>
+            {onOpenRunLog ? scripts.length ? <ul className="flex flex-col gap-1" aria-label="Script logs">{scripts.map((script) => <li key={script.id} className="flex min-w-0 flex-wrap items-center justify-between gap-2"><span className="break-all font-mono text-caption">{script.label}</span><Button variant="ghost" size="compact" className="min-h-10" leadingIcon={TerminalIcon} aria-label={`View log for ${script.label}`} onClick={() => onOpenRunLog(run.id, { id: script.id, label: script.label })}>View log</Button></li>)}</ul> : <p className="text-caption text-muted-foreground">No script execution was recorded for this run.</p> : null}
+            <div className="flex flex-wrap gap-2">{isLifecycleRunActive(run) && onRecoverRun ? <Button variant="ghost" size="compact" className="min-h-10" disabled={busy} onClick={() => setRecovery(run.id)}>Recover interrupted run…</Button> : null}{isLifecycleRunActive(run) && run.status !== 'cancelling' && onCancelRun ? <Button variant="ghost" size="compact" className="min-h-10" disabled={busy} onClick={() => onCancelRun(run.id)}>Cancel run</Button> : null}</div>
             {run.failure ? <p role="status" className="text-caption text-destructive">{run.failure.message}</p> : null}
             {run.incidents.length ? <ul className="flex flex-col gap-1 text-caption text-muted-foreground" aria-label="Run incidents">{run.incidents.map((incident) => <li key={incident.id}><time dateTime={incident.occurredAt}>{new Date(incident.occurredAt).toLocaleString()}</time> · {incident.kind} · {incident.message}</li>)}</ul> : null}
           </div>
-        </details>)}
+        </details>;
+        })}
       </section> : null}
 
       <p className="text-caption text-muted-foreground">Machine compatibility and placement live under <strong className="font-medium text-foreground">Machines</strong>, not in this workspace editor.</p>

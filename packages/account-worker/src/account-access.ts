@@ -1,7 +1,7 @@
 import { signedControlRequestSchema, type SignedControlRequest } from '@gitspace/protocol';
+import { tenantPlatformJson } from './tenant-platform.js';
 import type { AccountStateDO, AccountRecord } from './account-state.js';
 import type { CredentialVaultDO, CredentialVaultResult } from './application.js';
-import { tenantPlatformJson } from './tenant-platform.js';
 /** The bearer is bound to one account, machine, and enrollment generation. */
 export async function machineBrokerToken(secret: string, userId: string, machineId: string, generation: number): Promise<string> {
   if (!secret || !userId || !machineId || machineId.length > 160 || !Number.isSafeInteger(generation) || generation < 1) throw new Error('Broker identity is invalid');
@@ -30,7 +30,7 @@ export async function verifyMachineBrokerToken(secret: string, userId: string, a
 }
 
 
-/** Provider identity is immutable; tenant code never receives a cross-account authority. */
+/** Tenant ownership is immutable; platform control also fences existing subscriptions. */
 export async function activeAccount(env: Env, userId: string): Promise<CredentialVaultResult<AccountRecord>> {
   if (userId !== env.ACCOUNT_ID) return { status: 'error', error: { code: 'ACCOUNT_UNAVAILABLE', message: 'Account does not own this tenant' } };
   try {

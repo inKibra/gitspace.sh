@@ -70,7 +70,8 @@ export class ProjectEnvironmentStore {
     const rows = this.storage.sql.exec<{ offset: number; output: string }>(
       'SELECT offset,output FROM lifecycle_logs WHERE run_id=? AND offset>=? ORDER BY offset LIMIT ?', runId, offset, LOG_PAGE_SIZE + 1,
     ).toArray();
-    return { output: rows.slice(0, LOG_PAGE_SIZE).map((row) => row.output).join(''), nextOffset: rows[LOG_PAGE_SIZE]?.offset ?? null };
+    const page = rows.slice(0, LOG_PAGE_SIZE);
+    return { output: page.map((row) => row.output).join(''), nextOffset: rows[LOG_PAGE_SIZE]?.offset ?? null, cursor: page.length ? page[page.length - 1]!.offset + 1 : offset };
   }
 
   mutate(projectId: string, spaceId: string, input: LifecycleMutation, actor: LifecycleActor): LifecycleState {

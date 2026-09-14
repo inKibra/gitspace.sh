@@ -618,8 +618,9 @@ export class CloudSpaceCheckpointAuthority implements SpaceCheckpointAuthority, 
       name: definition.name,
       branch: definition.branch,
       phase: definition.phase,
-      sourceKind: definition.kind === 'base' ? 'base' : 'branch',
-      sourceRef: definition.branch,
+      sourceKind: current?.sourceKind ?? (definition.kind === 'base' ? 'base' : 'branch'),
+      sourceRef: current?.sourceRef ?? definition.branch,
+      sourceCommit: current?.sourceCommit ?? null,
       lifecycle: 'active',
       goalId: null,
       expectedRevision: current?.revision ?? 0,
@@ -1094,8 +1095,21 @@ export class CloudSpaceCheckpointAuthority implements SpaceCheckpointAuthority, 
     return this.call<ReleaseRecord>('deploy.stage', input);
   }
 
-  launchRelease(sha: string, targets: ReleaseTarget[]): Promise<{ record: ReleaseRecord; desired: TenantDesired }> {
-    return this.call('deploy.launch', { sha, targets });
+  async launchRelease(sha: string, targets: ReleaseTarget[]): Promise<{ record: ReleaseRecord; desired: TenantDesired }> {
+    try {
+      return await this.call('deploy.launch', { sha, targets });
+    } catch (error) {
+      // Updating the Worker can reset its own response after selecting the release.
+      // Read the outcome instead of repeating a deployment with external effects.
+      const status = await this.deploymentStatus().catch(() => null);
+      const record = status?.releases.find((release) => release.sha === sha);
+      if (!status || !record || record.error !== null || targets.length === 0
+        || !targets.every((target) => status.desired[target] === sha)
+        || (targets.includes('worker') && (status.current.worker.sha !== sha || record.status.worker === 'failed'))) {
+        throw error;
+      }
+      return { record, desired: status.desired };
+    }
   }
 
   deploymentStatus(): Promise<DeploymentStatus> {

@@ -175,7 +175,7 @@ export class GitSpaceDatabase {
         name: nameSchema,
         branch: branchSchema,
         rootPath: pathSchema,
-        phase: WorkspacePhaseSchema.default('code'),
+        phase: WorkspacePhaseSchema.default('plan'),
       }).parse(input);
     } catch (error) {
       return Result.err(inputError(error));

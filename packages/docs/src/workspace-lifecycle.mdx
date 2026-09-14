@@ -39,6 +39,8 @@ Keep long-running services in `.gitspace/services.json` and run them through Git
 
 Explicit setup enables the workspace's automatic local-preparation policy. It runs machine preparation, checks, provisioning, and materialization in order, stopping on failure. Later arrivals can run approved local preparation only after provisioning has succeeded. Changed or unapproved content waits for approval. A successful cloud provision belongs to the workspace identity, not a checkout. Moving or editing a script does not automatically provision it again.
 
+A direct `workspace/materialize` request runs local reconstruction only; it never creates or adopts cloud resources first. If a materialization script requires recorded ownership bindings, establish them through approved `cloud/provision` or adoption before materializing. Do not bypass ownership checks or copy another workspace's bindings to make setup pass.
+
 ## Close, move, and retire
 
 **Close** saves a checkpoint and releases the managed checkout. **Move** saves and removes the source checkout, then restores the same durable workspace on another machine. Neither action authorizes remote destruction. **Retirement** is a separate, explicit decision about cloud resources. Archiving is not retirement.
@@ -68,6 +70,8 @@ After an unexpected interruption, the last completed checkpoint remains the reco
 ## Recover a failed setup
 
 Open Environment and read the phase's recorded result and logs. Preparation failure does not gate the workspace page. Use the agent or terminal when its own prerequisites are available.
+
+**View log** opens one script's output and exit status at a time. Scroll down to load more, or use **Copy selected script** to load and copy that script's complete recorded output. Running scripts copy output recorded so far. A later script failure does not change an earlier script's successful result; a script without a recorded exit is not reported as a confirmed failure. Older unframed logs may offer only a clearly labeled saved preview, not a complete-copy action.
 
 For local failures, fix the configuration, review changed content, approve it, and run the needed phase. For cloud failures, first inspect the bindings and provider state. Scripts should record each resource ID as soon as the provider returns it, including when a later step fails.
 

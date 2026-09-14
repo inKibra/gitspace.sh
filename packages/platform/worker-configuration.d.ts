@@ -7,9 +7,11 @@ interface Env {
   TENANT_CONTROL: DurableObjectNamespace<import('./src/index').TenantControlDO>;
   TENANT_HOST_SUFFIX: string;
   PLATFORM_URL: string;
+  PLATFORM_SERVICE_NAME: string;
   PUBLIC_ASSETS_SERVICE: string;
   CF_ACCOUNT_ID: string;
   CF_API_TOKEN: string;
+  R2_API_TOKEN: string;
   R2_PARENT_ACCESS_KEY_ID: string;
   PLATFORM_BOOTSTRAP_TOKEN: string;
   ADMIN_PUBLIC_KEY: string;

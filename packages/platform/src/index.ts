@@ -87,7 +87,7 @@ async function handleTenantBootstrap(request: Request, env: Env, tenant: string)
     if (denied) return denied;
     const deployments = env.DEPLOYMENTS.getByName(tenant);
     await deployments.configure(body.rootPublicKey, blobBucket);
-    const storage = new CloudflareR2PlatformClient({ accountId: env.CF_ACCOUNT_ID, apiToken: env.CF_API_TOKEN, parentAccessKeyId: env.R2_PARENT_ACCESS_KEY_ID });
+    const storage = new CloudflareR2PlatformClient({ accountId: env.CF_ACCOUNT_ID, apiToken: env.R2_API_TOKEN, parentAccessKeyId: env.R2_PARENT_ACCESS_KEY_ID });
     await storage.ensureBucket({ bucketName: blobBucket });
     await deployments.providerToken();
     const current = await deployments.getState();
@@ -352,7 +352,7 @@ async function handleTenantResource(request: Request, env: Env, tenant: string, 
       const body = await request.json() as { prefixes?: unknown; ttlSeconds?: unknown; permission?: unknown };
       if (!Array.isArray(body.prefixes) || !body.prefixes.every((value): value is string => typeof value === 'string') || body.prefixes.length > 100) return platformError(400, 'INVALID_STORAGE_SCOPE', 'Storage prefixes are invalid');
       if (body.permission !== undefined && body.permission !== 'object-read-only' && body.permission !== 'object-read-write') return platformError(400, 'INVALID_STORAGE_PERMISSION', 'Storage permission is invalid');
-      const client = new CloudflareR2PlatformClient({ accountId: env.CF_ACCOUNT_ID, apiToken: env.CF_API_TOKEN, parentAccessKeyId: env.R2_PARENT_ACCESS_KEY_ID });
+      const client = new CloudflareR2PlatformClient({ accountId: env.CF_ACCOUNT_ID, apiToken: env.R2_API_TOKEN, parentAccessKeyId: env.R2_PARENT_ACCESS_KEY_ID });
       const credentials = await client.mintTemporaryCredentials({ bucketName: config.blobBucket, prefixes: body.prefixes, ttlSeconds: Number(body.ttlSeconds ?? 3600), permission: body.permission });
       return Response.json(credentials, { headers: { 'cache-control': 'private, no-store' } });
     } catch (error) { return platformError(400, 'STORAGE_CREDENTIALS_FAILED', error instanceof Error ? error.message : 'Storage credentials failed'); }
@@ -407,8 +407,8 @@ export default {
     let response: Response;
     try {
       const userWorker = request.headers.get('upgrade')?.toLowerCase() === 'websocket'
-        ? env.DISPATCHER.get('tenant-' + tenant)
-        : env.DISPATCHER.get('tenant-' + tenant, {}, { limits: { cpuMs: Number(env.DEFAULT_CPU_MS), subRequests: Number(env.DEFAULT_SUBREQUESTS) } });
+        ? env.DISPATCHER.get(`${env.DISPATCH_NAMESPACE}-tenant-${tenant}`)
+        : env.DISPATCHER.get(`${env.DISPATCH_NAMESPACE}-tenant-${tenant}`, {}, { limits: { cpuMs: Number(env.DEFAULT_CPU_MS), subRequests: Number(env.DEFAULT_SUBREQUESTS) } });
       const headers = new Headers(request.headers);
       headers.delete('x-gitspace-provider-token');
       headers.delete('x-gitspace-tenant');

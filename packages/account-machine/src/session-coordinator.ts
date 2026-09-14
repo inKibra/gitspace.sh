@@ -34,6 +34,7 @@ interface SessionArtifacts {
   capability: ArtifactCapability;
   artifactBaseline: Map<string, string>;
   artifactSync: Promise<number> | null;
+  queuedArtifactSync: Promise<number> | null;
 }
 
 interface LiveSession extends SessionArtifacts {
@@ -1071,6 +1072,8 @@ export class MachineSessionCoordinator {
     const live = [...this.live.values()].find((candidate) => candidate.capability.projectId === projectId
       && (candidate.capability.kind === 'workspace' ? candidate.capability.workspaceId : candidate.capability.projectId) === spaceId);
     if (!live) return;
+    // Explicit reconciliation separates the sync requests before and after it.
+    live.queuedArtifactSync = null;
     const next = (live.artifactSync ?? Promise.resolve(0)).catch(() => 0).then(async () => {
       await this.refreshCanonicalArtifacts(live);
       await this.refreshArtifactMount(live, live.capability.kind === 'workspace' ? 'workspace' : 'base', true);
@@ -1100,6 +1103,7 @@ export class MachineSessionCoordinator {
     const live = [...this.live.values()].find((candidate) =>
       (candidate.capability.kind === 'workspace' ? candidate.capability.workspaceId : candidate.capability.projectId) === spaceId);
     if (live) {
+      live.queuedArtifactSync = null;
       const next = (live.artifactSync ?? Promise.resolve(0)).catch(() => 0).then(publish);
       live.artifactSync = next;
       await next;
@@ -1210,7 +1214,7 @@ export class MachineSessionCoordinator {
         if (mount === writable) artifactBaseline.set(entry.path, hash);
       }
     }
-    const state = { recordId, artifactsDir, capability, artifactBaseline, artifactSync: null };
+    const state = { recordId, artifactsDir, capability, artifactBaseline, artifactSync: null, queuedArtifactSync: null };
     await this.persistArtifactBaseline(state);
     this.retainedArtifacts.set(recordId, state);
     return state;
@@ -1242,7 +1246,7 @@ export class MachineSessionCoordinator {
       this.appendEvent(record.id, event);
       if (event.type === 'tool_execution_end' || event.type === 'agent_end') {
         const live = this.live.get(record.id);
-        if (live && live.runtime === runtime) void this.syncSessionArtifacts(live).catch(() => { /* The sync operation already persisted its typed incident. */ });
+        if (live && live.runtime === runtime) void this.syncSessionArtifacts(live);
       }
     });
     let activityUnsubscribe: () => void;
@@ -1254,14 +1258,14 @@ export class MachineSessionCoordinator {
       unsubscribe();
       throw error;
     }
-    this.live.set(record.id, { recordId: record.id, runtime, generation, artifactsDir, capability, artifactBaseline, artifactSync: null, unsubscribe, activityUnsubscribe });
+    this.live.set(record.id, { recordId: record.id, runtime, generation, artifactsDir, capability, artifactBaseline, artifactSync: null, queuedArtifactSync: null, unsubscribe, activityUnsubscribe });
     this.retainedArtifacts.delete(record.id);
     // Register before applying authority metadata so concurrent phase edits reach us.
     if (capability.kind === 'workspace') await this.workspacePhaseChanged(capability.projectId, capability.workspaceId);
   }
 
   private updateActivity(sessionId: string, capability: ArtifactCapability, runtime: OmpRuntimeSession, generation: number, activity: SessionActivity, failure: AgentFailure | null = null): void {
-    const current = this.get(sessionId);
+    let current = this.get(sessionId);
     const live = this.live.get(sessionId);
     if (!current || (live && live.runtime !== runtime)) return;
     const placement = this.database.getSpacePlacement(current.spaceId);
@@ -1270,8 +1274,9 @@ export class MachineSessionCoordinator {
     if (resumeAccepted({ activity, recovering: this.recoveringSessions.has(sessionId), controlsAvailable: this.controlsAvailable(sessionId) })) {
       this.recoveringSessions.delete(sessionId);
       this.completeResume(sessionId, capability);
+      current = this.get(sessionId)!;
     }
-    let health = this.get(sessionId)!.health;
+    let health = current.health;
     const changes: AgentIncidentChange[] = [];
     const observe = (issue: AgentIssue, observed: AgentFailure | null): void => {
       if (JSON.stringify(currentAgentFailure(health, issue)) === JSON.stringify(observed)) return;
@@ -1342,8 +1347,10 @@ export class MachineSessionCoordinator {
   }
 
   private syncSessionArtifacts(live: SessionArtifacts): Promise<number> {
+    if (live.queuedArtifactSync) return live.queuedArtifactSync;
     const previous = live.artifactSync ?? Promise.resolve(0);
     const next = previous.catch(() => 0).then(async () => {
+      if (live.queuedArtifactSync === next) live.queuedArtifactSync = null;
       const spaceId = live.capability.kind === 'workspace' ? live.capability.workspaceId : live.capability.projectId;
       const token = this.beginOperation(spaceId, 'artifact-sync');
       try {
@@ -1355,7 +1362,11 @@ export class MachineSessionCoordinator {
         throw error;
       }
     });
+    live.queuedArtifactSync = next;
     live.artifactSync = next;
+    // One rejection handler per sync, not per coalesced background trigger.
+    // Foreground callers still await the original rejecting promise.
+    void next.catch(() => { /* The sync operation already persisted its typed incident. */ });
     return next;
   }
 

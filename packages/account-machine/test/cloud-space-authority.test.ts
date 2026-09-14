@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { createServer } from 'node:http';
-import { signedControlRequestSchema, verifySignedControlRequest } from '@gitspace/protocol';
+import { signedControlRequestSchema, verifySignedControlRequest, type DeploymentStatus } from '@gitspace/protocol';
 import { CloudDataCheckpointBlobStore, CloudSpaceCheckpointAuthority } from '../src/cloud-space-authority.js';
 
 it('signs each space authority operation with the enrolled machine key', async () => {
@@ -22,6 +22,53 @@ it('signs each space authority operation with the enrolled machine key', async (
   expect(request.operation).toBe('space.beginClose');
   expect(request.payload).toMatchObject({ projectId: 'project-a', spaceId: 'space-a', expectedGeneration: 3 });
   expect(verifySignedControlRequest(request, ed25519.getPublicKey(privateKey))).toBe(true);
+});
+
+describe('interrupted release acknowledgement', () => {
+  it.each(['applied', 'wrong-worker', 'partial-selection', 'failed'] as const)('reconciles a lost response only for a confirmed release: %s', async (outcome) => {
+    const sha = 'release-after-worker-swap';
+    const status: DeploymentStatus = {
+      desired: { worker: sha, machine: outcome === 'partial-selection' ? null : sha, omp: null, frontend: null, updatedAt: new Date().toISOString() },
+      current: { worker: { sha: outcome === 'wrong-worker' ? 'previous' : sha, version: sha }, machines: {} },
+      releases: [{
+        sha, label: sha, workspaceId: 'space-a', builtBy: 'machine-a', createdAt: new Date().toISOString(),
+        artifacts: { worker: null, machine: null, omp: null, frontend: null }, worker: null, omp: null,
+        status: { worker: outcome === 'failed' ? 'failed' : 'applied', frontend: 'skipped', machines: {}, omps: {} },
+        error: outcome === 'failed' ? 'Worker health check failed' : null,
+      }],
+    };
+    let mutations = 0;
+    const server = createServer(async (request, response) => {
+      const chunks: Buffer[] = [];
+      for await (const chunk of request) chunks.push(Buffer.from(chunk));
+      const signed = signedControlRequestSchema.parse(JSON.parse(Buffer.concat(chunks).toString()));
+      if (signed.operation === 'deploy.launch') {
+        mutations++;
+        request.socket.destroy();
+        return;
+      }
+      response.setHeader('content-type', 'application/json');
+      response.end(JSON.stringify({ status: 'ok', value: status }));
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address() as { port: number };
+    const authority = new CloudSpaceCheckpointAuthority({
+      baseUrl: `http://127.0.0.1:${address.port}`, userId: 'user-a', machineId: 'machine-a',
+      signingPrivateKey: new Uint8Array(32).fill(5),
+    });
+    try {
+      const launched = authority.launchRelease(sha, ['worker', 'machine']);
+      if (outcome === 'applied') {
+        expect(await launched).toMatchObject({ record: { sha, status: { worker: 'applied' } }, desired: { worker: sha, machine: sha } });
+      } else {
+        await expect(launched).rejects.toThrow();
+      }
+      expect(mutations).toBe(1);
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
 });
 
 describe('cloud application data store', () => {

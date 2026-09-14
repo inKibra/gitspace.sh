@@ -1,5 +1,5 @@
 import { DurableObject } from 'cloudflare:workers';
-import { GITSPACE_SOURCE_PROJECT_ROLE, GITSPACE_SOURCE_REPOSITORY, isGitSpaceSourceRepository, type GitSpaceSourceProvenance } from '@gitspace/protocol';
+import { cloudWorkspaceDefinitionSchema, GITSPACE_SOURCE_PROJECT_ROLE, GITSPACE_SOURCE_REPOSITORY, isGitSpaceSourceRepository, type GitSpaceSourceProvenance } from '@gitspace/protocol';
 import { AgentHealthStateSchema, SessionActivitySchema } from '@gitspace/protocol-agent';
 import type {
   ArtifactCopyRecord,
@@ -42,6 +42,7 @@ interface WorkspaceRow extends Record<string, SqlStorageValue> {
   phase: CloudWorkspaceDefinition['phase'];
   source_kind: CloudWorkspaceDefinition['sourceKind'];
   source_ref: string;
+  source_commit: string | null;
   lifecycle: CloudWorkspaceDefinition['lifecycle'];
   goal_id: string | null;
   revision: number;
@@ -179,6 +180,7 @@ function workspaceDefinition(row: WorkspaceRow): CloudWorkspaceDefinition {
     phase: row.phase,
     sourceKind: row.source_kind,
     sourceRef: row.source_ref,
+    sourceCommit: row.source_commit ?? null,
     lifecycle: row.lifecycle,
     goalId: row.goal_id,
     revision: row.revision,
@@ -588,6 +590,8 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
         try { this.ctx.storage.sql.exec(`ALTER TABLE project ADD COLUMN ${column}`); }
         catch (error) { if (!(error instanceof Error) || !/duplicate column name/u.test(error.message)) throw error; }
       }
+      try { this.ctx.storage.sql.exec('ALTER TABLE workspaces ADD COLUMN source_commit TEXT'); }
+      catch (error) { if (!(error instanceof Error) || !/duplicate column name/u.test(error.message)) throw error; }
       try { this.ctx.storage.sql.exec('ALTER TABLE project_mcp_grants ADD COLUMN project_space_enabled INTEGER NOT NULL DEFAULT 1'); } catch {}
       try { this.ctx.storage.sql.exec('ALTER TABLE project_mcp_grants ADD COLUMN workspaces_enabled INTEGER NOT NULL DEFAULT 1'); } catch {}
     });
@@ -753,16 +757,22 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
     if ((current?.revision ?? 0) !== input.expectedRevision) {
       throw new Error(`Workspace revision conflict: expected ${input.expectedRevision}, actual ${current?.revision ?? 0}`);
     }
+    const sourceCommit = cloudWorkspaceDefinitionSchema.shape.sourceCommit.parse(input.sourceCommit);
+    if (current?.source_commit != null && current.source_commit !== sourceCommit) {
+      throw new Error('Workspace source commit is immutable');
+    }
     const now = new Date().toISOString();
     const revision = (current?.revision ?? 0) + 1;
     this.ctx.storage.sql.exec(
-      `INSERT INTO workspaces VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      `INSERT INTO workspaces(workspace_id,project_id,kind,name,branch,phase,source_kind,source_ref,lifecycle,goal_id,revision,archived_at,created_at,updated_at,source_commit)
+       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
        ON CONFLICT(workspace_id) DO UPDATE SET
          name=excluded.name,
          branch=excluded.branch,
          phase=excluded.phase,
          source_kind=excluded.source_kind,
          source_ref=excluded.source_ref,
+         source_commit=excluded.source_commit,
          lifecycle=excluded.lifecycle,
          goal_id=excluded.goal_id,
          revision=excluded.revision,
@@ -782,6 +792,7 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
       input.lifecycle === 'archived' ? now : null,
       current?.created_at ?? now,
       now,
+      sourceCommit,
     );
     return workspaceDefinition(this.ctx.storage.sql.exec<WorkspaceRow>(
       'SELECT * FROM workspaces WHERE workspace_id=?',

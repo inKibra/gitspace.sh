@@ -7,7 +7,7 @@ import type { WorkspaceStatusSummary } from '@gitspace/protocol-workspace';
 import { AccountWorkPages, type AccountWorkPagesProps } from './AccountWorkPages.js';
 import { verticalSliceFixture } from './App.js';
 import type { SidebarWorkspace } from './AppSidebar.js';
-import type { ProjectLifecycleView } from './GitSpaceShell.js';
+import { CreateWorkspaceDialog, type ProjectLifecycleView } from './GitSpaceShell.js';
 import type { Directory } from './useAccountDirectory.js';
 
 const stamp = '2026-09-12T00:00:00.000Z';
@@ -19,7 +19,7 @@ const idle: WorkspaceStatusSummary = { primaryColor: 'dim', agents: { green: 0, 
 function saved(id: string, projectId: string, phase: CloudWorkspaceDefinition['phase'], options: Partial<SidebarWorkspace> = {}): SidebarWorkspace {
   return {
     id, projectId, name: id, branch: `feature/${id}`, closedAt: null,
-    definition: { id, projectId, name: id, branch: `feature/${id}`, phase, kind: 'worktree', sourceKind: 'base', sourceRef: '', lifecycle: 'active', goalId: null, revision: 1, archivedAt: null, createdAt: stamp, updatedAt: stamp },
+    definition: { id, projectId, name: id, branch: `feature/${id}`, phase, kind: 'worktree', sourceKind: 'base', sourceRef: '', sourceCommit: null, lifecycle: 'active', goalId: null, revision: 1, archivedAt: null, createdAt: stamp, updatedAt: stamp },
     summary: { holder: { kind: 'unknown' }, closedAt: null, freshness: 'unknown', detail: 'Holder is offline' },
     ...options,
   };
@@ -94,6 +94,25 @@ it('requires a project choice on board creation and submits the chosen project a
   });
   await act(() => { document.body.querySelector<HTMLFormElement>('#create-workspace-form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); });
   expect(create).toHaveBeenCalledWith(expect.objectContaining({ projectId: 'beta', phase: 'plan', name: 'chosen-work', branch: 'feature/chosen-work' }));
+});
+
+it.each([
+  { initialPhase: undefined, expectedPhase: 'plan', expectedLabel: 'Plan' },
+  { initialPhase: 'code' as const, expectedPhase: 'code', expectedLabel: 'Code' },
+])('shows and submits $expectedLabel when initialPhase is $initialPhase', async ({ initialPhase, expectedPhase, expectedLabel }) => {
+  const create = vi.fn();
+  await act(() => root.render(<CreateWorkspaceDialog projectId="alpha" workspaces={[]} initialPhase={initialPhase} pending={false} error={null} onOpenChange={vi.fn()} onSubmit={create} />));
+  expect(document.body.querySelector('[aria-label="Phase"]')?.textContent).toContain(expectedLabel);
+  await act(() => {
+    const inputs = document.body.querySelectorAll<HTMLInputElement>('#create-workspace-form input');
+    const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!;
+    for (const [index, value] of ['new-work', 'feature/new-work'].entries()) {
+      setValue.call(inputs[index], value);
+      inputs[index]!.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+  });
+  await act(() => { document.body.querySelector<HTMLFormElement>('#create-workspace-form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); });
+  expect(create).toHaveBeenCalledWith(expect.objectContaining({ projectId: 'alpha', name: 'new-work', branch: 'feature/new-work', phase: expectedPhase }));
 });
 
 it('preserves released and archived workspace actions with their actual targets and project revisions', async () => {

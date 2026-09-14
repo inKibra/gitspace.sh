@@ -65,6 +65,7 @@ export const cloudWorkspaceDefinitionSchema = z.object({
   phase: z.enum(['plan', 'code', 'review', 'ship']).nullable(),
   sourceKind: z.enum(['base', 'branch', 'workspace', 'pull-request', 'tag', 'commit']),
   sourceRef: z.string().max(2_048),
+  sourceCommit: z.string().regex(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u).nullable().default(null),
   lifecycle: workspaceLifecycleSchema,
   goalId: z.string().min(1).max(160).nullable(),
   revision: z.number().int().positive(),

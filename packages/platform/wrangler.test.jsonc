@@ -60,8 +60,10 @@
     "DISPATCH_NAMESPACE": "gitspace-relays-test",
     "CF_ACCOUNT_ID": "test-account",
     "CF_API_TOKEN": "test-api-token",
+    "R2_API_TOKEN": "test-r2-api-token",
     "PLATFORM_BOOTSTRAP_TOKEN": "test-bootstrap-token",
     "PLATFORM_URL": "https://platform.test",
+    "PLATFORM_SERVICE_NAME": "gitspace-platform-test",
     "PUBLIC_ASSETS_SERVICE": "public-assets-test",
     "R2_PARENT_ACCESS_KEY_ID": "test-parent-access-key"
   }

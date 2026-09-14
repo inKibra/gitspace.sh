@@ -68,12 +68,12 @@ const SPACE_DECLARATION = `{
   get(input: { workspaceId: string }): Promise<unknown>;
   list(): Promise<unknown[]>; // canonical definitions, placement/status, and goals, including closed workspaces
   describe(input: { method: string }): Promise<object>; // canonical JSON input schema; omit projectId/spaceId, use optional workspaceId
-  create(input: { name: string; branch: string; phase: 'plan'|'code'|'review'|'ship'; sourceKind: 'base'|'branch'|'workspace'|'pull-request'; sourceRef: string; dependsOn?: string[]; goal?: object; workflow?: object; rubric?: object }): Promise<unknown>; // describe({method:'create'}) provides exact typed draft schemas; ready:false includes identity and partial initialization error
+  create(input: { name: string; branch: string; phase?: 'plan'|'code'|'review'|'ship'; sourceKind: 'base'|'branch'|'workspace'|'pull-request'; sourceRef: string; dependsOn?: string[]; goal?: object; workflow?: object; rubric?: object }): Promise<unknown>; // phase defaults to plan; describe({method:'create'}) provides exact typed draft schemas; ready:false includes identity and partial initialization error
   setPhase(input: { workspaceId?: string; expectedRevision: number; phase: 'plan'|'code'|'review'|'ship' }): Promise<unknown>;
   setRelations(input: { workspaceId?: string; expectedRevision: number; dependsOn: string[]; relatedTo: string[]; stackedOn: string|null }): Promise<unknown>;
   open(input: { workspaceId?: string; expectedGeneration: number }): Promise<unknown>;
   close(input: { workspaceId?: string; expectedGeneration: number }): Promise<unknown>;
-  archive(input: { workspaceId?: string; expectedRevision: number; expectedGeneration: number }): Promise<unknown>;
+  archive(input: { workspaceId?: string; expectedRevision: number; expectedGeneration: number|null }): Promise<unknown>;
   restore(input: { workspaceId?: string; expectedRevision: number; expectedGeneration: number }): Promise<unknown>;
   environment: {
     get(input?: { workspaceId?: string }): Promise<unknown>; // same cloud lifecycle ledger and current executions as the UI; closed reads never open a checkout
@@ -97,7 +97,7 @@ const SPACE_DECLARATION = `{
 
 const createSchema = z.object({
   name: z.string().trim().min(1).max(160), branch: z.string().min(1).max(512),
-  phase: WorkspacePhaseSchema,
+  phase: WorkspacePhaseSchema.default('plan'),
   sourceKind: z.enum(['base', 'branch', 'workspace', 'pull-request']), sourceRef: z.string(),
   dependsOn: z.array(z.string().min(1)).optional(),
   goal: goalDraftSchema.optional(), workflow: workflowDraftSchema.optional(), rubric: rubricDraftSchema.optional(),
@@ -143,7 +143,7 @@ export function createSpaceEvalNamespace(
       if (suppliedSpace !== undefined) throw new Error('Use workspaceId to target a workspace; spaceId is supplied by the host');
       if (method === 'describe') {
         const name = z.string().parse(payload.method);
-        if (name === 'create') return z.toJSONSchema(createSchema);
+        if (name === 'create') return z.toJSONSchema(createSchema, { io: 'input' });
         if (name.startsWith('environment.')) {
           const method = name.slice('environment.'.length) as SpaceEnvironmentMethod;
           if (!Object.hasOwn(spaceEnvironmentSchemas, method)) throw new Error(`No agent input schema for space.${name}; approvals, recovery, and retirement require the human browser`);

@@ -8,6 +8,7 @@ import { network } from './network.js';
 
 describe('account fleet router', () => {
   it('skips observed-offline machines but never replays an unknown mutation outcome elsewhere', async () => {
+    const relayUrl = 'https://remote-relay.test';
     const accountId = env.ACCOUNT_ID;
     const settings = (env.USER_SETTINGS as DurableObjectNamespace<UserSettingsDO>).getByName(accountId);
     await settings.setHandle('test', 0, env.TENANT_ID);
@@ -23,18 +24,18 @@ describe('account fleet router', () => {
       operationId: null,
       error: null,
     };
-    await catalog.putMachine({ ...base, id: 'machine-0-offline', state: 'offline', rpcEndpoint: `${env.RELAY_URL}/tunnel/machine-0-offline/rpc` });
-    await catalog.putMachine({ ...base, id: 'machine-a', rpcEndpoint: `${env.RELAY_URL}/tunnel/machine-a/rpc` });
-    await catalog.putMachine({ ...base, id: 'machine-b', rpcEndpoint: `${env.RELAY_URL}/tunnel/machine-b/rpc` });
+    await catalog.putMachine({ ...base, id: 'machine-0-offline', state: 'offline', rpcEndpoint: `${relayUrl}/tunnel/machine-0-offline/rpc` });
+    await catalog.putMachine({ ...base, id: 'machine-a', rpcEndpoint: `${relayUrl}/tunnel/machine-a/rpc` });
+    await catalog.putMachine({ ...base, id: 'machine-b', rpcEndpoint: `${relayUrl}/tunnel/machine-b/rpc` });
 
     const attempts: string[] = [];
     network.use(
-      http.post(`${env.RELAY_URL}/tunnel/machine-0-offline/rpc`, () => new HttpResponse(null, { status: 522 })),
-      http.post(`${env.RELAY_URL}/tunnel/machine-a/rpc`, ({ request }) => {
+      http.post(`${relayUrl}/tunnel/machine-0-offline/rpc`, () => new HttpResponse(null, { status: 522 })),
+      http.post(`${relayUrl}/tunnel/machine-a/rpc`, ({ request }) => {
         attempts.push(new URL(request.url).pathname);
         return HttpResponse.json({ error: { code: 'MACHINE_UNAVAILABLE', message: 'The remote outcome may be unknown' } }, { status: 503 });
       }),
-      http.post(`${env.RELAY_URL}/tunnel/machine-b/rpc`, ({ request }) => {
+      http.post(`${relayUrl}/tunnel/machine-b/rpc`, ({ request }) => {
         attempts.push(new URL(request.url).pathname);
         expect(request.headers.get('x-gitspace-signed-target')).toBe('/rpc');
         return HttpResponse.json({ status: 'ok', value: { machineId: 'machine-b' } });

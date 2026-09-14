@@ -9,7 +9,7 @@ import { createResourcePreview, parseResourceUri } from '@gitspace/protocol/reso
 import type { CredentialVaultDO } from './application.js';
 import type { ProjectAuthorityDO, UserProjectIndexDO } from './project-authority.js';
 import type { SpaceAuthorityDO } from './space-authority.js';
-import { parseWorkspaceCheckpoint, spaceOmpCheckpointKey, type SpaceAuthorityRecord } from '@gitspace/protocol-workspace';
+import { CHUNKED_CHECKPOINT_VERSION, chunkedCheckpointManifestSchema, parseWorkspaceCheckpoint, spaceOmpCheckpointKey, type SpaceAuthorityRecord } from '@gitspace/protocol-workspace';
 import type { SpaceContextDO } from './space-context.js';
 import { SavedTranscriptIndex } from './saved-transcript-index.js';
 import type { TranscriptContentRequest, TranscriptPageRequest } from '@gitspace/blocks';
@@ -332,6 +332,11 @@ async function savedInspectorSource(env: Env, userId: string, source: InspectorC
     let ompSessionId = canonical?.ompSessionId;
     let objectKey = canonical?.sessionObjectKey;
     let objectHash = canonical?.sessionObjectHash;
+    if (canonical?.sessionFormatVersion === 'omp-checkpoint-1') {
+      key = credentialProtocolBase64.decode(await (env.CREDENTIALS as DurableObjectNamespace<CredentialVaultDO>).getByName(userId).artifactKey(userId));
+    } else if (canonical?.sessionFormatVersion != null && canonical.sessionFormatVersion !== 'omp-jsonl-1') {
+      throw new Error(`Unsupported canonical session format ${canonical.sessionFormatVersion}`);
+    }
     if (placement?.manifestKey && placement.manifestHash) {
       key = credentialProtocolBase64.decode(await (env.CREDENTIALS as DurableObjectNamespace<CredentialVaultDO>).getByName(userId).artifactKey(userId));
       const bytes = await decryptArtifactBytes(await readObject(env, userId, placement.manifestKey, placement.manifestHash), key);
@@ -364,14 +369,30 @@ export async function readSavedInspectorMetadata(env: Env, userId: string, sourc
   return { checkpoint, savedTranscript };
 }
 
+async function readSavedSnapshot(env: Env, userId: string, snapshot: SavedInspectorTranscriptSource): Promise<Uint8Array> {
+  const stored = await readObject(env, userId, snapshot.objectKey, snapshot.objectHash);
+  if (!snapshot.key) return stored;
+  if (stored[0] !== CHUNKED_CHECKPOINT_VERSION) return decryptArtifactBytes(stored, snapshot.key);
+  const inventory = await decryptArtifactBytes(stored.subarray(1), snapshot.key);
+  const manifest = chunkedCheckpointManifestSchema.parse(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(inventory)));
+  const bytes = new Uint8Array(manifest.size);
+  let offset = 0;
+  for (const chunk of manifest.chunks) {
+    const chunkKey = `${snapshot.objectKey}.chunks/${chunk.hash.slice(7)}`;
+    const sealed = await readObject(env, userId, chunkKey, chunk.hash);
+    const plaintext = await decryptArtifactBytes(sealed, snapshot.key);
+    if (plaintext.byteLength !== chunk.size) throw new Error(`Checkpoint chunk ${chunkKey} has an unexpected size`);
+    bytes.set(plaintext, offset);
+    offset += plaintext.byteLength;
+  }
+  return bytes;
+}
+
 export async function readSavedInspectorTranscript(env: Env, userId: string, source: InspectorCloudContext): Promise<TranscriptEvent[]> {
   const { savedTranscript, snapshot } = await savedInspectorSource(env, userId, source);
   if (savedTranscript.status === 'none') return [];
   if (!snapshot) throw new Error(savedTranscript.reason ?? 'The saved conversation could not be read.');
-  // Canonical snapshots are raw; lifecycle checkpoints are encrypted. In both
-  // cases verify the content-addressed bytes before projecting any event.
-  const stored = await readObject(env, userId, snapshot.objectKey, snapshot.objectHash);
-  const bytes = snapshot.key ? await decryptArtifactBytes(stored, snapshot.key) : stored;
+  const bytes = await readSavedSnapshot(env, userId, snapshot);
   return savedTranscriptEvents(bytes, snapshot.sessionId, snapshot.ompSessionId);
 }
 
@@ -383,8 +404,7 @@ async function savedTranscriptIndex(env: Env, userId: string, source: InspectorC
     snapshot?.key ?? null,
     async () => {
       if (!snapshot) return [];
-      const stored = await readObject(env, userId, snapshot.objectKey, snapshot.objectHash);
-      const bytes = snapshot.key ? await decryptArtifactBytes(stored, snapshot.key) : stored;
+      const bytes = await readSavedSnapshot(env, userId, snapshot);
       return savedTranscriptEvents(bytes, snapshot.sessionId, snapshot.ompSessionId);
     });
 }

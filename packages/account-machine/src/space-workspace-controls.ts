@@ -75,6 +75,14 @@ export function createSpaceWorkspaceControls(options: {
       const projectId = workspace.projectId;
       const local = database.getSpace(spaceId);
       if (local && local.projectId !== projectId) throw new Error('Workspace project membership changed');
+      if (method === 'archive') {
+        const updated = await projects.archiveWorkspace({
+          projectId, spaceId, expectedRevision: revision.parse(input.expectedRevision),
+          expectedGeneration: revision.nullable().parse(input.expectedGeneration),
+        }, (space, generation) => spaces.close(space, generation));
+        await publish(updated, 'workspace', { lifecycle: updated.lifecycle });
+        return { ...updated, placement: await authority.getSpace(projectId, spaceId) };
+      }
       if (method === 'setPhase' || method === 'setRelations') {
         if (!local || local.kind !== 'worktree' || local.holderId !== machineId || local.placementState !== 'open') {
           throw new Error('Phase and relation changes require a workspace held open on this machine');
@@ -110,18 +118,17 @@ export function createSpaceWorkspaceControls(options: {
         throw new Error('Workspace is transitioning or held on another machine');
       }
       if (method === 'open' && workspace.lifecycle === 'archived') throw new Error('Archived workspaces must be restored before opening');
-      if (method === 'archive' || method === 'restore') {
-        if (workspace.kind === 'base') throw new Error('Archive and restore target workspaces, not the project base');
+      if (method === 'restore') {
+        if (workspace.kind === 'base') throw new Error('Restore targets workspaces, not the project base');
         const expectedRevision = revision.parse(input.expectedRevision);
         if (workspace.revision !== expectedRevision) throw new Error(`Workspace revision conflict: expected ${expectedRevision}, actual ${workspace.revision}`);
       }
       return projects.runLifecycleOperation(projectId, spaceId, `workspace.${method}`, [`${method} workspace`], async () => {
-        if (method === 'close' || method === 'archive') {
+        if (method === 'close') {
           if (placement.state !== 'closed') {
             if (!local || local.generation !== expectedGeneration || local.holderId !== machineId) throw new Error('Workspace local ownership changed');
             await spaces.close(local, expectedGeneration);
           }
-          if (method === 'archive' && local) database.setSpaceClosed(spaceId, true);
         } else if (placement.state === 'closed') {
           await spaces.open(spaceId, expectedGeneration);
         } else {
@@ -129,8 +136,8 @@ export function createSpaceWorkspaceControls(options: {
           if (opened.status === 'error') throw opened.error;
           if (method === 'restore') database.setSpaceClosed(spaceId, false);
         }
-        const updated = method === 'archive' || method === 'restore'
-          ? await projects.setWorkspaceLifecycle(projectId, spaceId, method === 'archive' ? 'archived' : 'active', revision.parse(input.expectedRevision))
+        const updated = method === 'restore'
+          ? await projects.setWorkspaceLifecycle(projectId, spaceId, 'active', revision.parse(input.expectedRevision))
           : workspace;
         await publish(updated, 'workspace', { lifecycle: updated.lifecycle });
         return { ...updated, placement: await authority.getSpace(projectId, spaceId) };

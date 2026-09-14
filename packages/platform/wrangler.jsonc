@@ -86,6 +86,7 @@
     "DISPATCH_NAMESPACE": "gitspace-relays",
     "CF_ACCOUNT_ID": "2ed07d2f77ecb2aa43ca99a9c970597c",
     "PLATFORM_URL": "https://platform.gssh.dev",
+    "PLATFORM_SERVICE_NAME": "gitspace-platform",
     "PUBLIC_ASSETS_SERVICE": "gitspace-auth"
   },
   "observability": {

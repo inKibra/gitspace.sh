@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { GitSpaceDatabase } from '@gitspace/core';
+import { cloudWorkspaceDefinitionSchema, type CloudWorkspaceDefinition } from '@gitspace/protocol';
 import { transitionLifecycle, type EnvironmentLifecycleAuthority, type LifecycleMutation, type LifecycleState, type LifecycleRunRecord } from '@gitspace/protocol-environment';
 import { WorkspaceEnvironmentManager, type EnvironmentLifecycleRunner } from '../src/workspace-environment.js';
 
@@ -14,6 +15,8 @@ afterEach(() => {
 });
 
 class Ledger implements EnvironmentLifecycleAuthority {
+  readonly workspaces: CloudWorkspaceDefinition[] = [];
+  async listProjectWorkspaces() { return structuredClone(this.workspaces); }
   readonly bindingWritten = Promise.withResolvers<void>();
   private readonly records = new Map<string, LifecycleRunRecord>();
   private readonly listeners = new Set<(state: LifecycleState) => void>();
@@ -24,7 +27,7 @@ class Ledger implements EnvironmentLifecycleAuthority {
   };
   async getLifecycleState() { return structuredClone(this.state); }
   async getLifecycleRunLog(_projectId: string, _spaceId: string, runId: string) {
-    return { output: this.state.runs.find((run) => run.id === runId)?.output ?? '', nextOffset: null };
+    return { output: this.state.runs.find((run) => run.id === runId)?.output ?? '', nextOffset: null, cursor: 1 };
   }
   async mutateLifecycleState(_projectId: string, _spaceId: string, input: LifecycleMutation) {
     if (input.op === 'value' && input.scope === 'global') {
@@ -65,6 +68,11 @@ function fixture(script: string, phase = 'cloud/provision') {
   const possessed = database.possessWorkspace('workspace-a', 'machine-a');
   if (possessed.status === 'error') throw possessed.error;
   const ledger = new Ledger();
+  ledger.workspaces.push(cloudWorkspaceDefinitionSchema.parse({
+    id: 'workspace-a', projectId: 'project-a', kind: 'worktree', name: 'Workspace', branch: 'feature', phase: 'code',
+    sourceKind: 'branch', sourceRef: 'main', lifecycle: 'active', goalId: null, revision: 1, archivedAt: null,
+    createdAt: '2026-09-01T00:00:00.000Z', updatedAt: '2026-09-01T00:00:00.000Z',
+  }));
   let materializations = 0;
   let beforeRun: (() => void) | undefined;
   const runner: EnvironmentLifecycleRunner = {
@@ -73,10 +81,12 @@ function fixture(script: string, phase = 'cloud/provision') {
       if (steps.some((step) => step.kind === 'script')) beforeRun?.();
       const results: Array<{ id: string; exitCode: number; output: string }> = [];
       for (const step of steps) {
+        await options?.onOutput?.(`__GITSPACE_START__${Buffer.from(step.id).toString('base64url')}\n`);
         const child = Bun.spawn(['/bin/sh', '-c', `exec 2>&1\n${step.content ?? step.command}`], { cwd: options?.directory ?? checkout, env, stdout: 'pipe', stderr: 'pipe' });
         const [exitCode, output] = await Promise.all([child.exited, new Response(child.stdout).text()]);
         results.push({ id: step.id, exitCode, output });
         await options?.onOutput?.(output);
+        await options?.onOutput?.(`__GITSPACE_END__${Buffer.from(step.id).toString('base64url')}:${exitCode}\n`);
         if (exitCode !== 0) return { terminalName: 'runner', exitCode, output, steps: results };
       }
       return { terminalName: 'runner', exitCode: 0, output: results.map((result) => result.output).join(''), steps: results };
@@ -97,6 +107,45 @@ async function approveActive(manager: WorkspaceEnvironmentManager, ledger: Ledge
 }
 
 describe('WorkspaceEnvironmentManager', () => {
+  it.each([false, true])('uses only recorded source provenance despite changed local HEAD and inherited overrides (legacy=%s)', async (legacy) => {
+    const context = fixture('printf "%s" "$GITSPACE_WORKSPACE_SOURCE_COMMIT" > source-commit.txt\n', 'workspace/materialize');
+    const git = (...args: string[]) => {
+      const result = Bun.spawnSync(['git', ...args], { cwd: context.checkout, stdout: 'pipe', stderr: 'pipe' });
+      if (result.exitCode !== 0) throw new Error(result.stderr.toString());
+      return result.stdout.toString().trim();
+    };
+    git('init', '-b', 'main');
+    git('-c', 'user.name=GitSpace', '-c', 'user.email=gitspace@local.invalid', 'commit', '--allow-empty', '-m', 'source');
+    const sourceCommit = git('rev-parse', 'HEAD');
+    Object.assign(context.ledger.workspaces[0]!, { sourceKind: 'commit', sourceRef: sourceCommit, sourceCommit: legacy ? null : sourceCommit });
+    git('switch', '-c', 'later-branch');
+    git('-c', 'user.name=GitSpace', '-c', 'user.email=gitspace@local.invalid', 'commit', '--allow-empty', '-m', 'later work');
+    expect(git('rev-parse', 'HEAD')).not.toBe(sourceCommit);
+    await approveActive(context.manager, context.ledger);
+    const inherited = process.env.GITSPACE_WORKSPACE_SOURCE_COMMIT;
+    process.env.GITSPACE_WORKSPACE_SOURCE_COMMIT = 'spoofed-inherited-source';
+    try {
+      await context.manager.runPhase('workspace-a', 'workspace/materialize');
+      expect(readFileSync(join(context.checkout, 'source-commit.txt'), 'utf8')).toBe(legacy ? '' : sourceCommit);
+    } finally {
+      if (inherited === undefined) delete process.env.GITSPACE_WORKSPACE_SOURCE_COMMIT;
+      else process.env.GITSPACE_WORKSPACE_SOURCE_COMMIT = inherited;
+    }
+  });
+
+  it.each(['values', 'secrets'] as const)('rejects declared %s that try to spoof reserved source provenance before running scripts', async (kind) => {
+    const context = fixture('printf "%s" "$GITSPACE_WORKSPACE_SOURCE_COMMIT" > spoofed.txt\n');
+    const name = 'GITSPACE_WORKSPACE_SOURCE_COMMIT';
+    await context.manager.putBundle('workspace-a', {
+      version: 1, profiles: { base: { [kind]: [name] } },
+      ...(kind === 'values' ? { values: { [name]: { default: 'spoofed-declared-source' } } } : {}),
+    });
+    await approveActive(context.manager, context.ledger);
+    await expect(context.manager.runPhase('workspace-a', 'cloud/provision')).rejects.toMatchObject({ code: 'InvalidConfiguration' });
+    expect(existsSync(join(context.checkout, 'spoofed.txt'))).toBe(false);
+    expect(context.materializations()).toBe(0);
+  });
+
 
   it('resolves inherited profiles and scoped values while excluding scripts for other profiles', async () => {
     const context = fixture('printf "%s:%s" "$PORT" "$DEVICE"\n');

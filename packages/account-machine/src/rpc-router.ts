@@ -181,6 +181,7 @@ import {
   type DiscoveredMcpTool,
   type CloudProjectOperation,
   type CloudProjectSummary,
+  type CloudWorkspaceDefinition,
   type CreateReviewThreadInput,
   type EndJournalPhaseInput,
   type GoalRecordView,
@@ -227,6 +228,7 @@ import { agentFailure, currentAgentExecutionFailure, determineAgentState, Sessio
 import { assertLifecycleCommandAuthorized, environmentFailure, EnvironmentError, parseEnvironmentBundleJson } from '@gitspace/protocol-environment';
 import type { MachineSessionCoordinator } from './session-coordinator.js';
 import type { SpaceLifecycleController } from './portable-space-controller.js';
+import type { ArchiveWorkspaceInput } from './project-lifecycle.js';
 import type { ClosedSpaceCheckpointMetadata, ClosedSpaceTranscript } from './checkpoint-transcript.js';
 import {
   WorkspaceHubSpaceUnavailable,
@@ -347,7 +349,8 @@ export interface ProjectLifecycleRpc {
   list(lifecycle: 'all' | 'active' | 'archived'): Promise<CloudProjectSummary[]>;
   createProject(input: { name: string; baseBranch: string | null; repositoryUrl: string | null }): Promise<{ project: CloudProjectSummary; operation: CloudProjectOperation }>;
   openProject(projectId: string): Promise<{ project: CloudProjectSummary; operation: CloudProjectOperation | null }>;
-  createWorkspace(input: { projectId: string; name: string; branch: string; phase: 'plan' | 'code' | 'review' | 'ship'; sourceKind: 'base' | 'branch' | 'workspace' | 'pull-request' | 'tag' | 'commit'; sourceRef: string; dependsOn?: readonly string[] }): Promise<{ workspace: { id: string }; operation: CloudProjectOperation }>;
+  createWorkspace(input: { projectId: string; name: string; branch: string; phase?: 'plan' | 'code' | 'review' | 'ship'; sourceKind: 'base' | 'branch' | 'workspace' | 'pull-request' | 'tag' | 'commit'; sourceRef: string; dependsOn?: readonly string[] }): Promise<{ workspace: { id: string }; operation: CloudProjectOperation }>;
+  archiveWorkspace(input: ArchiveWorkspaceInput, close: (space: MaterializedSpace, expectedGeneration: number) => Promise<unknown>): Promise<CloudWorkspaceDefinition>;
   archiveProject(projectId: string, expectedRevision: number): Promise<CloudProjectSummary>;
   restoreProject(projectId: string, expectedRevision: number): Promise<CloudProjectSummary>;
   deleteProject(projectId: string, expectedRevision: number): Promise<boolean>;
@@ -1102,18 +1105,8 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
   });
 
   const archiveWorkspace = server.implement(archiveWorkspaceContract).handler(async ({ input, errors }) => {
-    const space = options.database.getSpace(input.spaceId);
-    if (!space) return err(errors.WorkspaceNotFound({ workspaceId: input.spaceId }));
-    if (space.placementState !== 'closed' && (space.holderId !== options.machineId || space.generation !== input.expectedGeneration)) {
-      return err(errors.OperationFailed({ operation: 'archive workspace', message: 'Space placement changed before archive' }));
-    }
     try {
-      const value = await options.projects.runLifecycleOperation(space.projectId, space.id, 'workspace.archive', ['Checkpoint workspace', 'Archive workspace'], async () => {
-        if (space.placementState !== 'closed') await options.spaces.close(space, input.expectedGeneration);
-        await options.projects.setWorkspaceLifecycle(space.projectId, space.id, 'archived');
-        options.database.setSpaceClosed(space.id, true);
-        return lifecycleView(options.database.getSpace(space.id)!);
-      });
+      const value = await options.projects.archiveWorkspace(input, (space, expectedGeneration) => options.spaces.close(space, expectedGeneration));
       return ok(value);
     } catch (error) {
       return err(errors.OperationFailed({ operation: 'archive workspace', message: error instanceof Error ? error.message : 'Unable to archive workspace' }));

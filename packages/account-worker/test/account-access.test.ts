@@ -74,7 +74,7 @@ it('keeps signed machine lifecycle mutations scoped and unable to self-approve e
   const spaceId = 'lifecycle-workspace';
   const authority = env.PROJECT_AUTHORITY.getByName(`${fixture.userId}:${projectId}`);
   await authority.bootstrap({ id: projectId, name: 'Lifecycle', repositoryReference: null, baseBranch: 'main', createdBy: 'machine' });
-  await authority.putWorkspace({ id: spaceId, projectId, kind: 'worktree', name: 'Lifecycle', branch: 'main', phase: null, sourceKind: 'branch', sourceRef: 'main', lifecycle: 'active', goalId: null, expectedRevision: 0 });
+  await authority.putWorkspace({ id: spaceId, projectId, kind: 'worktree', name: 'Lifecycle', branch: 'main', phase: null, sourceKind: 'branch', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0 });
   const request = (operation: ControlOperation, payload: Record<string, unknown>) => SELF.fetch('https://auth.test/v1/control', {
     method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(fixture.signed(operation, payload)),
   });

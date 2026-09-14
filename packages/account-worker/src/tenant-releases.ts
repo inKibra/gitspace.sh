@@ -209,6 +209,15 @@ export class TenantReleasesDO extends DurableObject<Env> {
     for (const machine of fleet) {
       if (machine.desiredState !== 'removed') currentIds.add(machine.id);
     }
+    const desired = this.desired();
+    // Self-update may interrupt the acknowledgement after the platform activated it.
+    if (worker.sha !== null && worker.sha === desired.worker) {
+      const record = this.findRelease(worker.sha);
+      if (record?.status.worker === 'pending') {
+        record.status.worker = 'applied';
+        this.saveRecord(record);
+      }
+    }
     const machines: DeploymentStatus['current']['machines'] = {};
     for (const row of this.ctx.storage.sql.exec<MachineRow>('SELECT machine_id, sha, omp_sha, generation FROM machines ORDER BY machine_id').toArray()) {
       if (!currentIds.has(row.machine_id)) continue;
@@ -216,7 +225,7 @@ export class TenantReleasesDO extends DurableObject<Env> {
     }
     const releases = this.ctx.storage.sql.exec<ReleaseRow>('SELECT record_json FROM releases ORDER BY created_at DESC, sha').toArray()
       .map((row) => releaseRecordSchema.parse(JSON.parse(row.record_json)));
-    return deploymentStatusSchema.parse({ desired: this.desired(), current: { worker, machines }, releases });
+    return deploymentStatusSchema.parse({ desired, current: { worker, machines }, releases });
   }
 
   /** The frontend tree to serve, or null when the tenant runs our channel build. */

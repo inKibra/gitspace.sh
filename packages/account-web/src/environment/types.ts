@@ -58,9 +58,10 @@ export interface EnvironmentMachine {
 
 export type LifecyclePhase = ProtocolLifecyclePhase;
 export type LifecycleRun =
-  | { status: 'succeeded'; relativeTime: string; duration: string; output?: string }
-  | { status: 'failed'; relativeTime: string; duration: string; output: string }
+  | { status: 'succeeded'; relativeTime: string; duration?: string; output?: string; exitCode?: number }
+  | { status: 'failed'; relativeTime: string; duration?: string; output: string; exitCode?: number }
   | { status: 'running'; relativeTime: string; output?: string }
+  | { status: 'interrupted' | 'not-started'; relativeTime: string; output?: string }
   | { status: 'never' };
 
 export interface LifecycleScript {
@@ -124,6 +125,7 @@ export interface EnvironmentViewModel {
   bundle: EnvironmentBundle;
   machines: readonly EnvironmentMachine[];
   lifecycle: readonly LifecycleScript[];
+  executions?: readonly { id: string; label: string; hash: string }[];
   ledger?: LifecycleLedger;
   configured?: boolean;
   secrets: readonly EnvironmentSecret[];
@@ -138,7 +140,7 @@ export interface EnvironmentViewProps {
   onConfigure?(): void;
   onRecoverRun?(runId: string): void;
   onCancelRun?(runId: string): void;
-  onOpenRunLog?(runId: string): void;
+  onOpenRunLog?(runId: string, script: { id: string; label: string }): void;
   onProfileChange(profile: string): void;
   onApprove(targetId: string): void;
   onRevoke(targetId: string): void;

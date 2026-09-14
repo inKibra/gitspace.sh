@@ -104,7 +104,7 @@ export function AccountWorkPages(props: AccountWorkPagesProps) {
       onSelectProject: (id) => current.current.onOpenProject(id),
       onSelectWorkspace: (workspace) => current.current.onOpenWorkspace(workspace.projectId, workspace.id),
       onNewProject: canCreateProject ? () => setNewProject(true) : undefined,
-      onNewWorkspace: canCreateWorkspace ? (projectId) => { setNewWorkspacePhase('code'); setNewWorkspaceProject(projectId); } : undefined,
+      onNewWorkspace: canCreateWorkspace ? (projectId) => { setNewWorkspacePhase('plan'); setNewWorkspaceProject(projectId); } : undefined,
     });
   }, [accountSidebar, view, projects, directory, canCreateProject, canCreateWorkspace]);
   useLayoutEffect(() => () => { accountSidebar?.(null); }, [accountSidebar]);
@@ -120,7 +120,7 @@ export function AccountWorkPages(props: AccountWorkPagesProps) {
         <DialogFooter><Button variant="secondary" onClick={clearCreate}>Cancel</Button></DialogFooter>
       </DialogContent>
     </Dialog>
-    {actions.onCreateWorkspace && newWorkspaceProject ? <CreateWorkspaceDialog key={`${newWorkspaceProject}:${newWorkspacePhase}`} projectId={newWorkspaceProject} workspaces={workspaces} initialPhase={newWorkspacePhase ?? 'code'} pending={pending} error={error} onOpenChange={(next) => { if (!next) clearCreate(); }} onSubmit={async (input) => {
+    {actions.onCreateWorkspace && newWorkspaceProject ? <CreateWorkspaceDialog key={`${newWorkspaceProject}:${newWorkspacePhase}`} projectId={newWorkspaceProject} workspaces={workspaces} initialPhase={newWorkspacePhase ?? 'plan'} pending={pending} error={error} onOpenChange={(next) => { if (!next) clearCreate(); }} onSubmit={async (input) => {
       if (pendingRef.current) return;
       pendingRef.current = true; setPending(true); setError(null);
       try { await actions.onCreateWorkspace!(input); clearCreate(); onRefresh(); }

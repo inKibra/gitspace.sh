@@ -1,6 +1,6 @@
 import { executionAgentId, transcriptRowsToTurns, type ExecutionBlock, type SideAgentBlock, type TransportBlock, type TurnBlock } from '@gitspace/blocks';
 import type { DeploymentStatusView, InspectorBootstrapView, LaunchProgressView, OmpSettingValue, ProviderLoginEvent, ReleaseTarget, RepositoryDiffView, RepositoryFileView, RepositoryMode, UserSettings } from '@gitspace/protocol';
-import { executionHash, projectEnvironmentState, lifecycleSummary, lifecycleRunOutcome, isLifecycleRunActive, latestLifecycleRun, latestExecutionRun, type EnvironmentBundle as ProtocolEnvironmentBundle } from '@gitspace/protocol-environment';
+import { executionHash, projectEnvironmentState, lifecycleSummary, lifecycleExecutionOutcome, isLifecycleRunActive, latestLifecycleRun, latestExecutionRun, type EnvironmentBundle as ProtocolEnvironmentBundle } from '@gitspace/protocol-environment';
 import { currentAgentFailure } from '@gitspace/protocol-agent';
 import type { ProjectMcpGrantRpcView } from '@gitspace/protocol/mcp-contract';
 import type { ProjectCronView } from '@gitspace/protocol/cron-contract';
@@ -9,7 +9,7 @@ import { LayoutRight, Terminal } from '@untitledui/icons';
 import { createContext, useContext, useEffect, useMemo, useRef, useState, type ComponentProps, type ContextType, type ReactNode } from 'react';
 import { isTaggedError } from 'result-rpc';
 import { ResultRpcProvider, useResultMutation, useResultQuery, useResultRuntime } from 'result-rpc/react';
-import { EmptyState, GitSpaceShell, PageCanvas, PageHeader, TranscriptHistoryNotice, type GitSpaceShellProps, type ProviderAuthView, type SpaceHolderView } from './GitSpaceShell.js';
+import { CreateWorkspaceDialog, EmptyState, GitSpaceShell, PageCanvas, PageHeader, TranscriptHistoryNotice, type GitSpaceShellProps, type ProviderAuthView, type SpaceHolderView } from './GitSpaceShell.js';
 import { AccountWorkPages } from './AccountWorkPages.js';
 import { LaunchSheet, LaunchedBanner, LAUNCHED_STORAGE_KEY, readLaunchedMark, type LaunchedMark } from './LaunchSheet.js';
 import { createGitSpaceBrowserClient, homeRpcUrl, routedTransport, rpcClient } from './rpc-client.js';
@@ -19,6 +19,7 @@ import { applyAppearance } from './appearance.js';
 import type { ProviderLoginFlow, ProvidersSectionProps } from './ProvidersSection.js';
 import { SettingsPage } from './SettingsPage.js';
 import { EnvironmentView } from './environment/EnvironmentView.js';
+import { LifecycleLogDialog } from './environment/LifecycleLogDialog.js';
 import type { EnvironmentViewModel, LifecyclePhase, LifecycleRun, TrustState } from './environment/types.js';
 import { Inspector } from './inspector/index.js';
 import { appendLaunchProgress, launchTrackFrom, RELEASE_TARGETS, shortSha, type LaunchTrack } from './release.js';
@@ -180,7 +181,8 @@ function LiveEnvironment({ projectName, workspaceName, spaceId, workspace, gener
   const [actionError, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [readingEvidence, setReadingEvidence] = useState(false);
-  const [evidence, setEvidence] = useState<{ title: string; output: string; approvalHash?: string; runId?: string; nextOffset?: number | null } | null>(null);
+  const [evidence, setEvidence] = useState<{ title: string; output: string; approvalHash?: string } | null>(null);
+  const [logSelection, setLogSelection] = useState<{ runId: string; script: { id: string; label: string } } | null>(null);
   if (!read.value) return read.error ? <div className="flex flex-col gap-2 p-4"><p role="alert" className="text-caption text-destructive">{read.error.message}</p><Button variant="ghost" size="compact" onClick={() => void query.refetch()}>Retry environment</Button></div> : <p className="p-4 text-caption text-muted-foreground" role="status">Loading environment…</p>;
   const runners = (machineValues ?? []).filter((candidate) => candidate.state === 'online' && candidate.desiredState === 'online' && candidate.rpcEndpoint);
   const runner = runners.find((candidate) => candidate.id === runnerId) ?? runners[0];
@@ -207,29 +209,23 @@ function LiveEnvironment({ projectName, workspaceName, spaceId, workspace, gener
     if (await executionHash({ kind: execution.kind, command: content }) !== execution.hash) throw new Error('Script content changed. Refresh and review the new content before approval.');
     setEvidence({ title: execution.label, output: content, ...(approve ? { approvalHash: execution.hash } : {}) });
   });
-  const openRunLog = (runId: string, offset: number | null = null): void => loadEvidence(async () => {
-    const result = await rpcClient.environment.runLog({ spaceId, runId, offset });
-    if (result.status === 'error') throw result.error;
-    setEvidence((current) => ({ title: `Run ${runId}`, runId, output: offset !== null && current?.runId === runId ? current.output + result.value.output : result.value.output, nextOffset: result.value.nextOffset }));
-  });
+  const openRunLog = (runId: string, script: { id: string; label: string }): void => setLogSelection({ runId, script });
   const openSecrets = (): void => {
     navigateProductUrl(setProductRoute(new URL(window.location.href), 'secrets'));
   };
   const lastRun = (executionHash: string, executionId: string): LifecycleRun => {
     const run = latestExecutionRun(remote.lifecycle, executionHash, { profile: remote.selectedProfile, machineId });
     if (!run) return { status: 'never' };
-    if (isLifecycleRunActive(run)) return { status: 'running', relativeTime: new Date(run.startedAt).toLocaleString(), output: run.output };
-    const startedAt = new Date(run.startedAt).getTime();
-    const finishedAt = new Date(run.finishedAt ?? run.startedAt).getTime();
-    const output = run.results.find((result) => result.id === executionId)?.output ?? run.output;
-    const relativeTime = new Date(run.finishedAt ?? run.startedAt).toLocaleString();
-    const duration = `${Math.max(0, finishedAt - startedAt)}ms`;
-    return lifecycleRunOutcome(run) === 'failed'
-      ? { status: 'failed', relativeTime, duration, output: output || `Exited ${run.exitCode ?? 1}` }
-      : { status: 'succeeded', relativeTime, duration, ...(output ? { output } : {}) };
+    const step = run.results.find((result) => result.id === executionId);
+    const status = lifecycleExecutionOutcome(run, executionId);
+    const relativeTime = new Date(step?.finishedAt ?? step?.startedAt ?? run.startedAt).toLocaleString();
+    if (status === 'not-started' || status === 'running' || status === 'interrupted') return { status, relativeTime, ...(step?.output ? { output: step.output } : {}) };
+    const duration = step?.startedAt && step.finishedAt ? `${Math.max(0, Date.parse(step.finishedAt) - Date.parse(step.startedAt))}ms` : undefined;
+    return { status, relativeTime, ...(duration ? { duration } : {}), output: step?.output ?? '', ...(step?.exitCode != null ? { exitCode: step.exitCode } : {}) };
   };
   const checksRun = latestLifecycleRun(remote.lifecycle, 'checks', { machineId, profile: remote.selectedProfile });
   const latestChecks = checksRun && !isLifecycleRunActive(checksRun) ? checksRun : undefined;
+  const selectedLogRun = logSelection && remote.lifecycle.runs.find((run) => run.id === logSelection.runId);
   const trustFor = (execution: typeof remote.executions[number] | undefined): TrustState => {
     const approval = execution && remote.lifecycle.approvals.find((item) => item.executionHash === execution.hash && item.scope === execution.approval);
     return approval
@@ -254,7 +250,7 @@ function LiveEnvironment({ projectName, workspaceName, spaceId, workspace, gener
       current: true,
       capabilities: Object.fromEntries(remote.executions.filter((item) => item.kind === 'check').map((item) => {
         const result = latestChecks?.results.find((candidate) => candidate.id === item.id);
-        return [item.id, result ? { status: result.exitCode === 0 ? 'pass' as const : 'fail' as const, output: result.output || `Exited ${result.exitCode}` } : { status: 'unprobed' as const }];
+        return [item.id, result?.exitCode != null ? { status: result.exitCode === 0 ? 'pass' as const : 'fail' as const, output: result.output || `Exited ${result.exitCode}` } : { status: 'unprobed' as const }];
       })),
     }],
     lifecycle: remote.executions.filter((item) => item.kind === 'script').map((item) => ({
@@ -266,6 +262,7 @@ function LiveEnvironment({ projectName, workspaceName, spaceId, workspace, gener
       trust: trustFor(item),
       lastRun: lastRun(item.hash, item.id),
     })),
+    executions: remote.executions,
     ledger: remote.lifecycle,
     configured: remote.lifecycle.bundleJson !== null || remote.executions.length > 0,
     secrets: remote.effective.secrets.map((name) => ({ name, source: remote.secretMetadata.find((secret) => secret.name === name)?.source === 'account' ? 'user' : 'project', granted: remote.configuredSecrets.includes(name), requiredBy: [remote.selectedProfile] })),
@@ -306,7 +303,7 @@ function LiveEnvironment({ projectName, workspaceName, spaceId, workspace, gener
       onOpenSecrets={openSecrets}
       onOpenLifecycleFile={(scriptId) => openExecution(scriptId, false)}
       onRunChecks={() => mutate(async () => { const result = await rpcClient.environment.runChecks({ spaceId, runId: crypto.randomUUID() }); if (result.status === 'error') throw result.error; })}
-      onOpenLifecycleOutput={(scriptId) => { const execution = remote.executions.find((item) => item.id === scriptId); const run = execution && remote.lifecycle.runs.find((item) => item.executionHashes.includes(execution.hash)); if (run) openRunLog(run.id); }}
+      onOpenLifecycleOutput={(scriptId) => { const execution = remote.executions.find((item) => item.id === scriptId); const run = execution && latestExecutionRun(remote.lifecycle, execution.hash, { profile: remote.selectedProfile, machineId }); if (run && execution) openRunLog(run.id, { id: execution.id, label: execution.label }); }}
       onRunLifecycle={(phase: LifecyclePhase, options) => mutate(async () => {
         if (phase === 'cloud/destroy' && !options?.retire) throw new Error('Explicit human retirement confirmation is required.');
         const client = runtimeAvailable ? rpcClient : runner?.rpcEndpoint ? createGitSpaceBrowserClient({ url: runner.rpcEndpoint }) : null;
@@ -316,12 +313,13 @@ function LiveEnvironment({ projectName, workspaceName, spaceId, workspace, gener
         if (result.status === 'error') throw result.error;
       })}
     />
+    {selectedLogRun && logSelection ? <LifecycleLogDialog key={`${spaceId}:${selectedLogRun.id}:${logSelection.script.id}`} run={selectedLogRun} script={logSelection.script} revision={remote.lifecycle.revision} loadPage={async (runId, offset, signal) => { const result = await rpcClient.environment.runLog({ spaceId, runId, offset }, { signal }); if (result.status === 'error') throw result.error; return result.value; }} onClose={() => setLogSelection(null)} /> : null}
     <Dialog open={evidence !== null} onOpenChange={(open) => { if (!open) setEvidence(null); }}>
       <DialogContent size="sm"><DialogHeader><DialogTitle>{evidence?.approvalHash ? 'Review exact execution content' : evidence?.title}</DialogTitle><DialogDescription>{evidence?.approvalHash ? 'Approves only this content hash. Editing a script requires a new approval; this does not run it or authorize retirement.' : 'Saved lifecycle evidence. Logs remain available after a checkout is removed.'}</DialogDescription></DialogHeader>
         {evidence?.approvalHash ? <code className="break-all font-mono text-caption text-muted-foreground">{evidence.approvalHash}</code> : null}
         <pre className="max-h-[55vh] overflow-auto whitespace-pre-wrap break-words font-mono text-caption">{evidence?.output || 'No output recorded.'}</pre>
         {actionError ? <p role="alert" className="text-caption text-destructive">{actionError}</p> : null}
-        <DialogFooter><Button variant="secondary" onClick={() => setEvidence(null)}>Close</Button>{evidence?.runId && evidence.nextOffset != null ? <Button variant="ghost" loading={readingEvidence} onClick={() => openRunLog(evidence.runId!, evidence.nextOffset!)}>Load more</Button> : null}{evidence?.approvalHash ? <Button variant="primary" disabled={busy} onClick={() => mutate(async () => { const result = await rpcClient.environment.approve({ spaceId, scope: workspace ? 'workspace' : 'project', executionHash: evidence.approvalHash! }); if (result.status === 'error') throw result.error; setEvidence(null); })}>Approve this content</Button> : null}</DialogFooter>
+        <DialogFooter><Button variant="secondary" onClick={() => setEvidence(null)}>Close</Button>{evidence?.approvalHash ? <Button variant="primary" disabled={busy} onClick={() => mutate(async () => { const result = await rpcClient.environment.approve({ spaceId, scope: workspace ? 'workspace' : 'project', executionHash: evidence.approvalHash! }); if (result.status === 'error') throw result.error; setEvidence(null); })}>Approve this content</Button> : null}</DialogFooter>
       </DialogContent>
     </Dialog>
   </div>;
@@ -707,6 +705,10 @@ function AccountFrame({ children }: { children: ReactNode }) {
   const [runtimeSidebar, setRuntimeSidebar] = useState<AppSidebarProps | null>(null);
   const [sidebarActionError, setSidebarActionError] = useState<string | null>(null);
   const [closePendingSpaceId, setClosePendingSpaceId] = useState<string | null>(null);
+  const [newWorkspaceProject, setNewWorkspaceProject] = useState<string | null>(null);
+  const [createPending, setCreatePending] = useState(false);
+  const createPendingRef = useRef(false);
+  const [createError, setCreateError] = useState<string | null>(null);
   const projectId = location.searchParams.get('project');
   const workspaceId = location.searchParams.get('workspace');
   const retainedProjects = useRetainedQueryValue(projects, 'account-projects');
@@ -756,6 +758,7 @@ function AccountFrame({ children }: { children: ReactNode }) {
         onReopen={(spaceId) => runSidebarAction(() => actions.onReopenSpace(spaceId))}
         onArchive={(spaceId) => runSidebarAction(() => actions.onArchiveWorkspace(spaceId))}
         onRestore={(spaceId) => runSidebarAction(() => actions.onClaimWorkspace(spaceId, null))}
+        onNewWorkspace={(id) => { setCreateError(null); setNewWorkspaceProject(id); }}
       />
       <SidebarInset className="min-w-0 overflow-hidden">
         {!live ? <SidebarInsetTopbar><nav aria-label="Location" className="min-w-0"><span aria-current="page" className="truncate text-body font-medium">{frameView === 'agent' ? projectValues.find((project) => project.id === projectId)?.name ?? 'Your account' : PRODUCT_ROUTE_LABELS[frameView]}</span></nav></SidebarInsetTopbar> : null}
@@ -763,6 +766,13 @@ function AccountFrame({ children }: { children: ReactNode }) {
         {sidebarActionError ? <div role="alert" className="flex items-center gap-2 px-4 py-2 text-caption text-destructive"><span>Workspace action: {sidebarActionError}</span><Button variant="ghost" size="compact" onClick={() => setSidebarActionError(null)}>Dismiss</Button></div> : null}
         {children}
       </SidebarInset>
+      <CreateWorkspaceDialog key={newWorkspaceProject ?? 'closed'} projectId={newWorkspaceProject} workspaces={sidebarProjects.flatMap((project) => project.workspaces.map((workspace) => ({ ...workspace, phase: workspace.definition?.phase ?? workspace.runtime?.phase ?? null })))} pending={createPending} error={createError} onOpenChange={(open) => { if (!open && !createPendingRef.current) { setNewWorkspaceProject(null); setCreateError(null); } }} onSubmit={async (input) => {
+        if (createPendingRef.current) return;
+        createPendingRef.current = true; setCreatePending(true); setCreateError(null);
+        try { await actions.onCreateWorkspace(input); setNewWorkspaceProject(null); }
+        catch (cause) { setCreateError(cause instanceof Error ? cause.message : String(cause)); }
+        finally { createPendingRef.current = false; setCreatePending(false); }
+      }} />
     </SidebarProvider>
   </AccountDirectoryContext.Provider></AccountSidebarContext.Provider></AccountWorkActionsContext.Provider>;
 }
@@ -1568,9 +1578,12 @@ function RunningWorkspace({ projectId, workspaceId, onOpenSettings, defaultMachi
       },
       onReopenSpace: (targetSpaceId: string) => claimSpace(targetSpaceId, null),
       onArchiveWorkspace: async (targetSpaceId: string) => {
-        const target = value.workspaces.find((candidate) => candidate.id === targetSpaceId);
-        if (!target) throw new Error(`Workspace ${targetSpaceId} is unavailable`);
-        const result = await archiveWorkspace.mutateAsync({ spaceId: targetSpaceId, expectedGeneration: target.spaceGeneration });
+        const canonical = await rpcClient.inspector.bootstrap({ projectId: value.project.id, workspaceId: targetSpaceId });
+        if (canonical.status === 'error') throw canonical.error;
+        const result = await archiveWorkspace.mutateAsync({
+          projectId: canonical.value.workspace.projectId, spaceId: targetSpaceId,
+          expectedRevision: canonical.value.workspace.revision, expectedGeneration: canonical.value.placement?.generation ?? null,
+        });
         if (result.status === 'error') throw result.error;
         refreshInspection();
         if (targetSpaceId === selectedSpaceId) return;
@@ -1694,6 +1707,8 @@ function GitSpaceProduct() {
   const ompDocument = useRetainedQueryValue(ompConfiguration, 'omp-document');
   const ompValue = ompRead && ompDocument ? { ...ompRead, document: ompDocument } : ompRead;
   const gitIdentityValue = useRetainedQueryValue(gitIdentityQuery, 'git-identity');
+  const settingsOmpValue = ompValue ?? { schema: [], document: ompDocument ?? { generation: 0, content: '', checksum: '', updatedAt: new Date(0).toISOString(), updatedBy: 'unavailable' }, sync: { status: 'error' as const, message: ompQuery.state === 'failure' ? ompQuery.error.message : 'OMP settings are unavailable' } };
+  const settingsGitIdentityValue = gitIdentityValue ?? null;
   const updateSettings = useResultMutation(rpcClient.settings.update);
   const reserveHandle = useResultMutation(rpcClient.settings.reserveHandle);
   const setOmpSetting = useResultMutation(rpcClient.settings.omp.set);
@@ -1998,12 +2013,11 @@ function GitSpaceProduct() {
     <LiveWorkspace onOpenSettings={(section) => navigateProduct('settings', 'push', section ?? null)} defaultMachineId={draft.defaults.machineId} onNavigateView={(next) => navigateProduct(next)} user={{ name: draft.profile.displayName, handle: draft.profile.handle }} providers={providerViews} />
     {settingsQuery.state === 'failure' ? <div role="alert" className="fixed inset-x-0 top-[var(--app-notice-top)] z-50 mx-auto w-fit max-w-full rounded-lg bg-surface-3 px-3 py-2 text-caption text-foreground shadow-surface-3">Account settings: {settingsQuery.error.message}<Button variant="ghost" size="compact" onClick={() => void settingsQuery.refetch()}>Retry</Button></div> : null}
   </>;
-  if ((!settingsValue && settingsQuery.state === 'failure') || (!ompValue && ompQuery.state === 'failure') || (!gitIdentityValue && gitIdentityQuery.state === 'failure')) {
-    const message = settingsQuery.state === 'failure' ? settingsQuery.error.message : ompQuery.state === 'failure' ? ompQuery.error.message : gitIdentityQuery.state === 'failure' ? gitIdentityQuery.error.message : 'Cloud settings are unavailable';
-    return <PageCanvas><EmptyState title="GitSpace setup is unavailable" description={message} action={<Button variant="ghost" onClick={() => { void settingsQuery.refetch(); if (runtimeMetadataEnabled) void ompQuery.refetch(); void gitIdentityQuery.refetch(); }}>Retry</Button>} /></PageCanvas>;
+  if (!settingsValue && settingsQuery.state === 'failure') {
+    return <PageCanvas><EmptyState title="GitSpace setup is unavailable" description={settingsQuery.error.message} action={<Button variant="ghost" onClick={() => void settingsQuery.refetch()}>Retry</Button>} /></PageCanvas>;
   }
-  if (!settingsValue || !draft || !ompValue || !gitIdentityValue) {
-    return <PageCanvas><EmptyState icon={<ThinkingIndicator />} title="Opening your GitSpace account…" description="Loading cloud settings and OMP configuration." /></PageCanvas>;
+  if (!settingsValue || !draft) {
+    return <PageCanvas><EmptyState icon={<ThinkingIndicator />} title="Opening your GitSpace account…" description="Loading cloud settings." /></PageCanvas>;
   }
   const reads = [
     ['Account settings', settingsQuery], ['OMP settings', ompQuery], ['Git identity', gitIdentityQuery], ['Machines', machinesQuery],
@@ -2016,12 +2030,12 @@ function GitSpaceProduct() {
     mode={mode}
     settings={draft}
     machines={machinesValue ?? []}
-    ompSettings={ompValue.schema}
+    ompSettings={settingsOmpValue.schema}
     models={modelsValue?.models ?? []}
-    ompGeneration={ompValue.document.generation}
+    ompGeneration={settingsOmpValue.document.generation}
     providers={providersSection}
-    ompSync={ompValue.sync}
-    gitIdentity={gitIdentityValue}
+    ompSync={settingsOmpValue.sync}
+    gitIdentity={settingsGitIdentityValue}
     onChange={(next) => {
       setDraft(next);
       // Appearance is a toggle, not a form field: previewing without saving
@@ -2234,7 +2248,10 @@ function useAccountWorkActions(account: NonNullable<ContextType<typeof AccountDi
     onClaimWorkspace: claimSpace,
     onArchiveWorkspace: async (spaceId) => {
       const canonical = await inspectTarget(spaceId);
-      await mutate(rpcClient.workspace.archive({ spaceId, expectedGeneration: canonical.placement?.generation ?? 0 }));
+      await mutate(rpcClient.workspace.archive({
+        projectId: canonical.workspace.projectId, spaceId,
+        expectedRevision: canonical.workspace.revision, expectedGeneration: canonical.placement?.generation ?? null,
+      }));
     },
     onArchiveProject: async (projectId, expectedRevision) => { await mutate(rpcClient.project.archive({ projectId, expectedRevision })); },
     onRestoreProject: async (projectId, expectedRevision) => { await mutate(rpcClient.project.restore({ projectId, expectedRevision })); },

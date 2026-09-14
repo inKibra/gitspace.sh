@@ -167,7 +167,10 @@ export function parseLifecycleRunRequest(source: unknown): LifecycleRunRequest {
 }
 const executionHashSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/u);
 const lifecycleValuesSchema = z.record(environmentNameSchema, z.string().max(16_384));
-const lifecycleResultsSchema = z.array(z.object({ id: lifecycleIdSchema, exitCode: z.number().int(), output: z.string().max(524_288) }).strict()).max(128);
+const lifecycleResultsSchema = z.array(z.object({
+  id: lifecycleIdSchema, exitCode: z.number().int().nullable(), output: z.string().max(524_288),
+  startedAt: z.string().datetime().optional(), finishedAt: z.string().datetime().nullable().optional(),
+}).strict()).max(128);
 export const LifecycleExecutionSchema = z.object({
   id: lifecycleIdSchema, kind: z.enum(['check', 'script']), label: z.string().max(256),
   command: z.string().max(65_536), hash: executionHashSchema, phase: LifecyclePhaseSchema.nullable(),
@@ -248,7 +251,7 @@ export const LifecycleMutationSchema = z.discriminatedUnion('op', [
     rerun: z.boolean(), deadlineAt: z.string().datetime().optional(), terminalName: z.string().max(256).nullable().optional(),
     ownershipToken: lifecycleIdSchema.optional(),
   }).strict(),
-  z.object({ op: z.literal('append'), runId: lifecycleIdSchema, token: lifecycleIdSchema, output: z.string().max(524_288), bindings: LifecycleBindingsSchema.optional(), incidents: z.array(LifecycleIncidentSchema).optional() }).strict(),
+  z.object({ op: z.literal('append'), runId: lifecycleIdSchema, token: lifecycleIdSchema, output: z.string().max(524_288), results: lifecycleResultsSchema.optional(), bindings: LifecycleBindingsSchema.optional(), incidents: z.array(LifecycleIncidentSchema).optional() }).strict(),
   z.object({
     op: z.literal('finish'), runId: lifecycleIdSchema, token: lifecycleIdSchema, status: z.enum(['succeeded', 'failed', 'cancelled', 'timed-out', 'interrupted']),
     incidents: z.array(LifecycleIncidentSchema).optional(),
@@ -264,7 +267,7 @@ export type LifecycleState = z.infer<typeof LifecycleStateSchema>;
 export type EnvironmentValueScope = Extract<LifecycleMutation, { op: 'value' }>['scope'];
 export type EnvironmentApprovalScope = Extract<LifecycleMutation, { op: 'approval' }>['scope'];
 export type LifecycleRun = z.infer<typeof LifecycleRunSchema>;
-export interface LifecycleRunLog { output: string; nextOffset: number | null }
+export interface LifecycleRunLog { output: string; nextOffset: number | null; cursor: number }
 export interface EnvironmentLifecycleAuthority {
   getLifecycleState(projectId: string, spaceId: string): Promise<LifecycleState>;
   mutateLifecycleState(projectId: string, spaceId: string, input: LifecycleMutation): Promise<LifecycleState>;

@@ -302,21 +302,17 @@ describe('OMP native auth broker adapter', () => {
     const request = await writer(userId);
     const snapshot = await (await request('snapshot')).json() as SnapshotResponse;
     const id = snapshot.credentials[0]!.id;
-    const entered = Promise.withResolvers<void>();
-    const release = Promise.withResolvers<void>();
     network.use(http.post('https://auth.openai.com/oauth/token', async () => {
-      entered.resolve();
-      await release.promise;
+      // Mutate while the upstream refresh is pending, without transferring a
+      // deferred promise between the test request and MSW's fetch context.
+      const disabled = await request(`credential/${id}/disable`, { cause: 'deleted by user' });
+      expect(disabled.status).toBe(200);
+      await disabled.text();
       return HttpResponse.json({ access_token: 'late-access', refresh_token: 'late-refresh', expires_in: 3600 });
     }));
-    const refreshing = request(`credential/${id}/refresh`, {});
-    await entered.promise;
-    try {
-      expect((await request(`credential/${id}/disable`, { cause: 'deleted by user' })).status).toBe(200);
-    } finally {
-      release.resolve();
-    }
-    expect((await refreshing).ok).toBe(false);
+    const refreshed = await request(`credential/${id}/refresh`, {});
+    expect(refreshed.ok).toBe(false);
+    await refreshed.text();
     expect((await (await request('snapshot')).json() as SnapshotResponse).credentials).toEqual([]);
   });
 });
