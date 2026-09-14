@@ -1,7 +1,10 @@
 FROM rust:1.97.1-bullseye AS walgit-builder
 RUN apt-get update && apt-get install -y --no-install-recommends protobuf-compiler libprotobuf-dev cmake clang pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
 WORKDIR /walgit
-RUN git init . && git remote add origin https://github.com/tobi/walgit.git && git fetch --depth 1 origin 6d8fa54ba0f83072a1a50317bb6c8c1afa5a3cd1 && git checkout --detach FETCH_HEAD
+# Keep in sync with deployment/src/release.ts; newer packfile-format writers need a coordinated migration.
+RUN git init . && git remote add origin https://github.com/tobi/walgit.git && git fetch --depth 1 origin 6465bf578d0bc9686019bc6d4537861ab162ee6a && git checkout --detach FETCH_HEAD && test "$(git rev-parse HEAD)" = 6465bf578d0bc9686019bc6d4537861ab162ee6a
+COPY patches/walgit/conditional-multipart.patch /tmp/conditional-multipart.patch
+RUN git apply -- /tmp/conditional-multipart.patch
 COPY --from=oven/bun:1.4.0 /usr/local/bin/bun /usr/local/bin/bun
 RUN cd web && bun install --frozen-lockfile && bun run build
 RUN cargo build --locked --release -p walgit-cli && strip --strip-debug target/release/walgit

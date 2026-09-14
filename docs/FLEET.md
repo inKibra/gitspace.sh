@@ -476,6 +476,21 @@ before execution; there is no silent legacy alias.
   registered online only after its readiness log, TCP port, and RPC query pass.
   Sleep or destroy is rejected while the machine owns an open space; destroy
   removes the fleet record and managed grant only after provider teardown.
+- WalGit ships with the rebuilt GitSpace runtime, not an independent upstream
+  auto-update. Host releases and sandbox images both pin `6465bf578d0b`, which
+  includes [S3 transient-error classification](https://github.com/tobi/walgit/pull/18).
+  Keep the pins in `packages/deployment/src/release.ts` and
+  `packages/sandbox-worker/Dockerfile` synchronized. This is the last revision
+  before the packfile migration: [newer format writers require stopping
+  incompatible writers](https://github.com/tobi/walgit/pull/53), so upgrading to
+  current upstream `main` requires a coordinated storage migration.
+  Both builds apply `patches/walgit/conditional-multipart.patch`; native release
+  provenance records the applied patch's SHA-256 and size. Shared S3 configuration
+  uses a 64 MiB threshold and 16 MiB parts, with two concurrent part uploads.
+  Immutable creates use `If-None-Match: *` on multipart completion; CAS updates
+  remain conditional single PUTs. Qualify conditional completion against each
+  deployed S3-compatible backend. A machine/OMP source update alone does not
+  replace the bundled native WalGit executable.
 - Cloud cards show exact ownership/cost/trust facts: deployment target,
   account/platform owner, relay artifact hash, RelayDO migration, R2 encryption
   state, hosted credit reserve, and whether tunnel traffic is plaintext at

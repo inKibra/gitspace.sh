@@ -1,0 +1,300 @@
+diff --git a/crates/walgit-store/src/s3.rs b/crates/walgit-store/src/s3.rs
+index d788cc2..7366bf3 100644
+--- a/crates/walgit-store/src/s3.rs
++++ b/crates/walgit-store/src/s3.rs
+@@ -28,14 +28,10 @@
+ //!
+ //! ## Multipart upload
+ //!
+-//! Objects above `cfg.multipart_threshold` use `CreateMultipartUpload` +
+-//! `UploadPart` + `CompleteMultipartUpload`. `CreateMultipartUpload` does NOT
+-//! support `If-None-Match`/`If-Match` in the S3 API, so multipart is only
+-//! used for `PutMode::Overwrite`. For walgit's immutable pack objects
+-//! (`PutMode::Create`) we use single-shot PUT when the object is large,
+-//! accepting the (tiny) risk of concurrent create races. CAS-rewritten
+-//! objects (manifests, leases, bundle lists) are always small → single-shot
+-//! PUT with conditional headers.
++//! Objects above `cfg.multipart_threshold` use multipart for Create and Overwrite.
++//! Create applies `If-None-Match: *` at completion, not at initiation.
++//! Two parts upload concurrently, bounding memory and the size of each retry.
++//! CAS updates retain single-shot PUT with their conditional headers.
+ //!
+ //! ## rustfs compatibility (tested with rustfs/rustfs:latest)
+ //!
+@@ -369,11 +365,9 @@ impl ObjectStore for S3Store {
+     async fn put(&self, key: &str, body: PutBody, opts: PutOptions) -> Result<ObjectMeta> {
+         let (s3_body, len) = body_to_s3(body).await?;
+ 
+-        // Multipart only for Overwrite (CreateMultipartUpload has no
+-        // conditional header support in the S3 API). Create/Update always
+-        // use single-shot PUT.
++        // Conditional creation is enforced at completion. CAS updates stay single PUT.
+         let use_multipart =
+-            len > self.multipart_threshold && matches!(opts.mode, PutMode::Overwrite);
++            len > self.multipart_threshold && !matches!(opts.mode, PutMode::Update(_));
+ 
+         if use_multipart {
+             return self.multipart_put(key, s3_body, len, &opts).await;
+@@ -832,7 +826,7 @@ struct ListState {
+     buffer: std::vec::IntoIter<Result<ObjectMeta>>,
+ }
+ 
+-// ---- multipart upload (Overwrite only) ---------------------------------
++// ---- bounded multipart upload -----------------------------------------
+ 
+ impl S3Store {
+     async fn multipart_put(
+@@ -842,6 +836,7 @@ impl S3Store {
+         len: u64,
+         opts: &PutOptions,
+     ) -> Result<ObjectMeta> {
++        use futures::TryStreamExt;
+         use tokio::io::AsyncReadExt;
+ 
+         let mut create = self
+@@ -867,91 +862,89 @@ impl S3Store {
+             .to_owned();
+ 
+         let part_size = self.multipart_part_size;
+-        let mut part_number = 1i32;
+-        let mut uploaded_parts: Vec<aws_sdk_s3::types::CompletedPart> = Vec::new();
+-        let mut remaining = len;
+-
+-        let mut reader = body.into_async_read();
+-
+-        while remaining > 0 {
+-            let this_part = part_size.min(remaining);
+-            let to_read = usize::try_from(this_part).map_err(StoreError::other)?;
+-            let mut buf = vec![0u8; to_read];
+-            let mut read_total = 0;
+-
+-            while read_total < to_read {
+-                let n = match reader
+-                    .read(buf.get_mut(read_total..).ok_or_else(|| {
+-                        StoreError::other(anyhow::anyhow!("multipart read exceeded buffer"))
+-                    })?)
+-                    .await
+-                {
+-                    Ok(n) => n,
+-                    Err(e) => {
+-                        let _ = self.abort_multipart(key, &upload_id).await;
+-                        return Err(StoreError::other(anyhow::anyhow!("multipart read: {e}")));
+-                    }
+-                };
+-                if n == 0 {
+-                    break;
++        let parts = futures::stream::try_unfold(
++            (body.into_async_read(), len, 1i32),
++            move |(mut reader, remaining, number)| async move {
++                if remaining == 0 {
++                    return Ok::<_, StoreError>(None);
+                 }
+-                read_total += n;
++                let size = remaining.min(part_size);
++                let mut buf = vec![0u8; usize::try_from(size).map_err(StoreError::other)?];
++                reader
++                    .read_exact(&mut buf)
++                    .await
++                    .map_err(StoreError::other)?;
++                Ok(Some((
++                    (number, Bytes::from(buf)),
++                    (reader, remaining - size, number + 1),
++                )))
++            },
++        )
++        .map_ok(|(number, bytes)| {
++            let upload_id = &upload_id;
++            async move {
++                let size = bytes.len();
++                let part = self
++                    .client
++                    .upload_part()
++                    .bucket(&self.bucket)
++                    .key(key)
++                    .upload_id(upload_id)
++                    .part_number(number)
++                    .content_length(i64::try_from(size).map_err(StoreError::other)?)
++                    .body(S3ByteStream::from(bytes))
++                    .send()
++                    .await
++                    .map_err(|error| classify_error("s3 upload part", &error))?;
++                let etag = part
++                    .e_tag()
++                    .ok_or_else(|| StoreError::other(anyhow::anyhow!("no ETag from UploadPart")))?;
++                Ok(aws_sdk_s3::types::CompletedPart::builder()
++                    .part_number(number)
++                    .e_tag(etag)
++                    .build())
+             }
+-
+-            if read_total == 0 {
+-                break;
++        })
++        .try_buffer_unordered(2)
++        .try_collect::<Vec<_>>()
++        .await;
++        let mut parts = match parts {
++            Ok(parts) => parts,
++            Err(error) => {
++                let _ = self.abort_multipart(key, &upload_id).await;
++                return Err(error);
+             }
+-            buf.truncate(read_total);
+-            let actual = read_total as u64;
+-
+-            let part = match self
+-                .client
+-                .upload_part()
+-                .bucket(&self.bucket)
+-                .key(key)
+-                .upload_id(&upload_id)
+-                .part_number(part_number)
+-                .body(S3ByteStream::from(Bytes::from(buf)))
+-                .content_length(i64::try_from(actual).map_err(StoreError::other)?)
+-                .send()
+-                .await
+-            {
+-                Ok(p) => p,
+-                Err(e) => {
+-                    let _ = self.abort_multipart(key, &upload_id).await;
+-                    return Err(classify_error("s3 upload part", &e));
+-                }
+-            };
+-
+-            let etag = part.e_tag().unwrap_or("").to_owned();
+-            uploaded_parts.push(
+-                aws_sdk_s3::types::CompletedPart::builder()
+-                    .e_tag(etag)
+-                    .part_number(part_number)
+-                    .build(),
+-            );
+-
+-            remaining -= actual;
+-            part_number += 1;
+-        }
++        };
++        // Uploads finish out of order; completion must describe the original byte order.
++        parts.sort_unstable_by_key(|part| part.part_number());
+ 
+         let completed = aws_sdk_s3::types::CompletedMultipartUpload::builder()
+-            .set_parts(Some(uploaded_parts))
++            .set_parts(Some(parts))
+             .build();
+ 
+-        let resp = match self
++        let mut complete = self
+             .client
+             .complete_multipart_upload()
+             .bucket(&self.bucket)
+             .key(key)
+             .upload_id(&upload_id)
+-            .multipart_upload(completed)
+-            .send()
+-            .await
+-        {
++            .multipart_upload(completed);
++        if matches!(opts.mode, PutMode::Create) {
++            complete = complete.if_none_match("*");
++        }
++        let resp = match complete.send().await {
+             Ok(r) => r,
+             Err(e) => {
+                 let _ = self.abort_multipart(key, &upload_id).await;
++                if matches!(
++                    err_code(&e),
++                    Some("PreconditionFailed" | "ConditionalRequestConflict")
++                ) {
++                    return Err(StoreError::PreconditionFailed {
++                        key: key.into(),
++                        current: None,
++                    });
++                }
+                 return Err(classify_error("s3 complete multipart", &e));
+             }
+         };
+@@ -994,8 +987,8 @@ fn static_credentials(
+ // 4. 304 Not Modified: HTTP 304 with ETag header, empty body.
+ // 5. ListObjectsV2: StartAfter, ContinuationToken, IsTruncated/NextToken OK.
+ // 6. DeleteObject: idempotent for absent keys (204).
+-// 7. Multipart: CreateMultipartUpload + UploadPart + CompleteMultipartUpload
+-//    supported. No conditional headers on Create/Complete (same as real S3).
++// 7. Multipart Create requires If-None-Match: * on CompleteMultipartUpload.
++//    Qualify this conditional-completion behavior for the deployed rustfs version.
+ // 8. ETags: quoted, MD5 for single-PUT, compound for multipart. Quotes
+ //    stripped consistently in our Version.
+ // 9. force_path_style: required for rustfs local dev.
+diff --git a/crates/walgit-store/tests/contract.rs b/crates/walgit-store/tests/contract.rs
+index 768b860..3f2b4c6 100644
+--- a/crates/walgit-store/tests/contract.rs
++++ b/crates/walgit-store/tests/contract.rs
+@@ -53,6 +53,7 @@ pub async fn run_contract(store: DynStore, prefix: &str) {
+     test_list(&store, &p("list")).await;
+     test_large_streamed_roundtrip(&store, &p("large")).await;
+     test_multipart_path(&store, &p("multi")).await;
++    test_multipart_create_wins_once(&store, &p("multi-create")).await;
+     test_compose(&store, &p("compose")).await;
+ }
+ 
+@@ -668,6 +669,50 @@ async fn test_multipart_path(store: &DynStore, key: &str) {
+     let _ = store.delete(key, None).await;
+ }
+ 
++/// Large concurrent creates must never overwrite the winner, including at multipart completion.
++async fn test_multipart_create_wins_once(store: &DynStore, key: &str) {
++    let first = Bytes::from(vec![0x31; 6 * 1024 * 1024]);
++    let second = Bytes::from(vec![0x72; 6 * 1024 * 1024]);
++    let options = PutOptions {
++        mode: PutMode::Create,
++        ..Default::default()
++    };
++    let (left, right) = futures::future::join(
++        store.put(key, PutBody::Bytes(first.clone()), options.clone()),
++        store.put(key, PutBody::Bytes(second.clone()), options),
++    )
++    .await;
++    let expected = match (left, right) {
++        (Ok(_), Err(StoreError::PreconditionFailed { .. })) => first.clone(),
++        (Err(StoreError::PreconditionFailed { .. }), Ok(_)) => second,
++        results => panic!("exactly one large create must win: {results:?}"),
++    };
++
++    let stale_update = store
++        .put(
++            key,
++            PutBody::Bytes(first),
++            PutOptions {
++                mode: PutMode::Update(walgit_store::Version::new("stale")),
++                ..Default::default()
++            },
++        )
++        .await;
++    assert!(matches!(
++        stale_update,
++        Err(StoreError::PreconditionFailed { .. })
++    ));
++    let (_, actual) = collect_body(
++        store
++            .get(key, GetOptions::default())
++            .await
++            .expect("read the winning large create"),
++    )
++    .await;
++    assert_eq!(actual, expected, "the winner must remain byte-exact");
++    store.delete(key, None).await.expect("cleanup large create");
++}
++
+ // ---- test wrappers -----------------------------------------------------
+ 
+ #[tokio::test]
+diff --git a/docs/ROUNDTRIPS.md b/docs/ROUNDTRIPS.md
+index b8c930b..df22c4d 100644
+--- a/docs/ROUNDTRIPS.md
++++ b/docs/ROUNDTRIPS.md
+@@ -42,6 +42,7 @@ right shape. This document is the thinking tool; apply it to every protocol chan
+ | Any read (`info/refs`, ls-refs, web refs/resolve) | 1 cond GET (or 0 within `freshness_ttl`) | 1 | `sync.rs::freshness_check` |
+ | Cold Refs sync | 1 manifest GET → 1 round (checkpoint refs ∥ log tail segments) | no checkpoint: 1 + tail (2 with one segment); checkpoint: 2 + tail | `registry.rs::open`, `sync.rs` |
+ | Push request / publish (`process_batch`) | 1 freshness GET → pack PUT ∥ idx PUT ∥ log PUT (1 round) → manifest CAS (1 round) | request: 5; already-synced publish: 4 | `publish.rs` |
++| Large S3 pack upload (`Create` or `Overwrite`, above multipart threshold) | was 1 PUT; now initiate → at most 2 parts in flight → complete: `2 + ceil(N / 2)` rounds for `N` parts | `N + 2`; no happy-path HEAD; failed parts use SDK retries, failed uploads are aborted | `walgit-store/src/s3.rs::multipart_put`; immutable Create is conditional at completion, CAS Update stays single PUT |
+ | Compaction publish | same shape as push | — | `publish.rs::publish_compact_impl` |
+ | Checkpoint | 1 cond GET (freshness) → refs PUT ∥ checkpoint PUT → manifest CAS | 3 rounds, 4 requests (was 6/6 until 2026-08-22: a bundle-list GET before the checkpoint PUT and a log GET for provenance times sat in the chain; times now come from the writer's own applied state, `bundle_key` is no longer looked up) | `checkpoint.rs` |
+ | Settings publish (D24) | refs sync (conditional GET) → log slot PUT → manifest CAS; readers pay nothing extra (settings ride inline on the manifest) | 3 rounds; read: 0 | `publish.rs::publish_settings_impl` |
