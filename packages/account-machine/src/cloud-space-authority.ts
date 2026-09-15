@@ -67,7 +67,7 @@ import {
 } from '@gitspace/protocol';
 import type { CheckpointBlobStore, SpaceCheckpointAuthority } from './portable-space-lifecycle.js';
 import type { AccountSecretMetadata, EffectiveSecretMetadata, ConfigurationValuesView } from '@gitspace/protocol/rpc-contract';
-import { withCloudRequestDiagnostics } from './cloud-request-diagnostics.js';
+import { cloudResponseRay, withCloudRequestDiagnostics } from './cloud-request-diagnostics.js';
 import { EnvironmentError, EnvironmentFailureSchema, LifecycleStateSchema, type EnvironmentLifecycleAuthority, type LifecycleMutation, type LifecycleState, type LifecycleRunLog } from '@gitspace/protocol-environment';
 import { applyStreamEvent, initialStreamState } from '@gitspace/protocol-sync';
 import { decodeSseChanges } from '@gitspace/protocol-sync/sse';
@@ -261,7 +261,17 @@ export class CloudDataCheckpointBlobStore implements CheckpointBlobStore {
       diagnostics.response = response;
       diagnostics.stage = 'http';
       if (response.status === 404) return null;
-      if (!response.ok) throw new CloudSpaceAuthorityError('DATA_GET_FAILED', `Application object download failed with ${response.status}`);
+      if (!response.ok) {
+        const serverError = await readControlError(response);
+        const cfRay = cloudResponseRay(response);
+        // Carry safe correlation in the Error message too: release reports retain only that string.
+        throw new CloudSpaceAuthorityError(
+          'DATA_GET_FAILED',
+          `Application object download ${key} failed with ${response.status}${serverError ? `: ${serverError.code}: ${serverError.message}` : ''}`
+            + ` (machine=${request.machineId} operation=${request.operation} request=${request.nonce}${cfRay ? ` cf-ray=${cfRay}` : ''})`,
+          { ...serverError, key, status: response.status, machineId: request.machineId, operation: request.operation, requestId: request.nonce, ...(cfRay ? { cfRay } : {}) },
+        );
+      }
       diagnostics.stage = 'response-body';
       const bytes = new Uint8Array(await response.arrayBuffer());
       diagnostics.stage = 'integrity';

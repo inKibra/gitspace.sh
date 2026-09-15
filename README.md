@@ -125,7 +125,7 @@ Cloud container images build on GitHub through `.github/workflows/publish-contai
 - Set the repository variable `CLOUDFLARE_ACCOUNT_ID`.
 - Set `CLOUDFLARE_API_TOKEN` with registry write access. For a one-off run, fresh `CLOUDFLARE_REGISTRY_USERNAME` and `CLOUDFLARE_REGISTRY_PASSWORD` secrets also work; these credentials expire.
 - The workflow checks packaged Bun, walgit, and OMP before uploading. Its `cloud-container-reference` artifact records the immutable image digest and source commit.
-- Publication does not change running machines. Deploy the digest through `packages/sandbox-worker/scripts/rollout.ts`, which checkpoints machines before replacing the provider image.
+- Publication does not change running machines. Select the digest through the account's cloud-machine image controls. Each machine checkpoints and transfers independently; changing one machine's image does not roll the others.
 
 Bun's module mocks leak between test files in a shared process. Use isolated processes for trusted machine/core results, for example:
 
@@ -134,6 +134,14 @@ bun scripts/test-isolated.ts packages/account-machine/test packages/core/test
 ```
 
 Worker packages use their own Vitest/Cloudflare test commands.
+
+### Rolling runtime diagnostics
+
+Native replacement requires the old process to acknowledge retained workspace ownership before termination. The host keeps its deployment journal in `deployment.db`, outside the runtime database rollback set; runtime snapshots include committed SQLite WAL pages. Failed candidate startup must stop before the old database is restored.
+
+Cloud VM stop and image replacement discard the ephemeral disk. Running machines must acknowledge a checkpoint before Stop; explicit destructive removal remains separate. Inspection and checkpoint control do not automatically boot a stopped VM.
+
+Worker uploads enable persisted invocation and application logs with query-string redaction. Follow `cloud_image_operation` and `cloud_image_provider_request` in the tenant Worker, `sandbox.lifecycle` in the selected provider Worker, and `native_replacement` in the machine host. Correlate machine, image operation, native generation, request ID, and Cloudflare Ray ID where available. A native readiness event is not proof that every workspace restored; the cloud image admission barrier remains until the recorded workspaces reopen.
 
 ### Artifact sync diagnostics
 

@@ -60,7 +60,7 @@ OMP runs in child processes, separate from the machine daemon. During an OMP upd
 
 Runtime releases carry an authenticated file inventory and compatibility requirements for the operating system, architecture, Bun version, and machine protocol. Activation checks the complete payload against its content hashes, including native modules. Replacement plans retain rollback state until all targets commit.
 
-The shared Cloudflare sandbox service belongs to the platform. Its container image supplies the operating system, tools, and initial runtime. Replacing that image can stop existing containers; it is a separate operation from releasing account code inside them. Checkpoint work before platform image maintenance.
+The account selects cloud images independently for each machine, plus a default for new machines. The platform supplies provider infrastructure; changing one machine's selected image does not update the others. An image supplies the operating system, tools, and initial runtime, so replacing it is separate from updating account code inside the running VM. Image replacement checkpoints the source, confirms it has stopped, and keeps admission closed until the replacement restores the previously open workspaces. Stopping a Cloudflare VM discards its ephemeral disk; status and checkpoint-control requests must not silently start a fresh VM.
 
 ## Agent session
 

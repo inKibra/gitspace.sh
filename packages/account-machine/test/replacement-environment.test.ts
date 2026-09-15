@@ -1,9 +1,10 @@
-import { afterEach, describe, expect, it } from 'bun:test';
+import { afterEach, describe, expect, it, spyOn } from 'bun:test';
+import { Database } from 'bun:sqlite';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { hashArtifactPath } from '@gitspace/deployment';
+import { createDeploymentPlan, DeploymentJournal, hashArtifactPath } from '@gitspace/deployment';
 import { ReplacementEnvironment, environmentLaunchResponseSchema, environmentStatusSchema } from '../src/index.js';
 import { nativeHostAbi } from '@gitspace/account-omp/manifest';
 import { nativeFileDigest } from '../../deployment/src/native-runtime.js';
@@ -101,7 +102,7 @@ describe('replacement environment host routes', () => {
       const server = Bun.serve({
         hostname: '127.0.0.1',
         port: 0,
-        fetch: () => Response.json({ status: 'ok' }),
+        fetch: (request) => Response.json(new URL(request.url).pathname === '/__control/retire' ? { stopMode: 'replace' } : { status: 'ok' }),
       });
       console.log('GitSpace RPC ready at http://127.0.0.1:' + server.port + '/rpc');
     `);
@@ -229,7 +230,7 @@ describe('replacement environment host routes', () => {
         sha: process.env.GITSPACE_MACHINE_RELEASE_SHA ?? null,
         legacySha: process.env.GITSPACE_RELEASE_SHA ?? null,
       }));
-      const server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => Response.json({ status: 'ok' }) });
+      const server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: (request) => Response.json(new URL(request.url).pathname === '/__control/retire' ? { stopMode: 'replace' } : { status: 'ok' }) });
       console.log('GitSpace RPC ready at http://127.0.0.1:' + server.port + '/rpc');
     `);
     await nativeFixture(candidate);
@@ -269,7 +270,7 @@ describe('replacement environment host routes', () => {
       await mkdir(path);
       await writeFile(join(path, 'machine.js'), `
         await Bun.write(process.env.GITSPACE_ENVIRONMENT_ROOT + '/executed-code', ${JSON.stringify(label)});
-        const server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => Response.json({ status: 'ok' }) });
+        const server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: (request) => Response.json(new URL(request.url).pathname === '/__control/retire' ? { stopMode: 'replace' } : { status: 'ok' }) });
         console.log('GitSpace RPC ready at http://127.0.0.1:' + server.port + '/rpc');
       `);
       await nativeFixture(path);
@@ -318,7 +319,7 @@ describe('replacement environment host routes', () => {
       ompAgentDir: join(root, 'omp'), controlToken: 'control-token',
     });
     environments.push(environment);
-    for (const [label, healthy] of [['previous', true], ['next', false]] as const) {
+    for (const [label, healthy] of [['previous', true], ['next', false], ['updated', true]] as const) {
       const path = join(root, label);
       await nativeFixture(path);
       await writeFile(join(path, 'machine.js'), `
@@ -331,7 +332,9 @@ describe('replacement environment host routes', () => {
         await Bun.write(root + '/observed-state', db.query('SELECT value FROM native_rollback_test').get().value);
         db.close();
         await Bun.write(root + '/observed-pid', String(process.pid));
-        const server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('health', { status: ${healthy ? 200 : 500} }) });
+        const server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: (request) => new URL(request.url).pathname === '/__control/retire'
+          ? Response.json({ stopMode: 'replace' })
+          : new Response('health', { status: ${healthy ? 200 : 500} }) });
         console.log('GitSpace RPC ready at http://127.0.0.1:' + server.port + '/rpc');
       `);
     }
@@ -360,5 +363,185 @@ describe('replacement environment host routes', () => {
     })).rejects.toThrow();
     expect(environment.status().machineHash).toBe(previousHash);
     expect(await readFile(join(root, 'observed-state'), 'utf8')).toBe('preserved');
+    // Rollback must leave the stable host journal usable for the next replacement.
+    const updated = join(root, 'updated');
+    const updatedHash = await hashArtifactPath(updated);
+    await environment.deploy({
+      artifacts: [{ entrypoint: 'machine-daemon', path: updated, hash: updatedHash, dependsOn: [] }],
+      releaseSha: 'updated', revision: 'updated', dirty: false,
+    });
+    expect(environment.status()).toMatchObject({ machineHash: updatedHash, machineReleaseSha: 'updated' });
+    expect(await readFile(join(root, 'observed-state'), 'utf8')).toBe('preserved');
+  });
+
+  it('includes committed WAL pages in a runtime database checkpoint', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'gitspace-native-wal-'));
+    roots.push(root);
+    const environment = new ReplacementEnvironment({
+      id: 'wal-checkpoint', root, repositoryRoot: root, rpcPort: 0, webPort: 0,
+      machineId: 'machine-a', artifactKey: new Uint8Array(32).fill(1),
+      ompAgentDir: join(root, 'omp'), controlToken: 'control-token',
+    });
+    environments.push(environment);
+    const database = new Database(join(root, 'gitspace.db'));
+    try {
+      database.exec('PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0; CREATE TABLE possession(space TEXT, holder TEXT, generation INTEGER);');
+      database.query('INSERT INTO possession VALUES (?, ?, ?)').run('space-a', 'machine-a', 3);
+      const checkpoint = await environment.machineHost.checkpointDatabase();
+      const snapshot = new Database(join(checkpoint, 'gitspace.db'), { readonly: true });
+      try {
+        expect(snapshot.query('SELECT * FROM possession').all()).toEqual([{ space: 'space-a', holder: 'machine-a', generation: 3 }]);
+      } finally {
+        snapshot.close();
+        await environment.machineHost.releaseDatabaseCheckpoint(checkpoint);
+      }
+    } finally {
+      database.close();
+    }
+  });
+
+  it('preserves an interrupted deployment journal when separating it from runtime rollback state', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'gitspace-native-journal-'));
+    roots.push(root);
+    const path = join(root, 'frontend');
+    await mkdir(path);
+    await writeFile(join(path, 'index.html'), 'retained frontend');
+    const plan = await createDeploymentPlan({
+      source: { projectId: 'gitspace', revision: 'migration', dirty: false },
+      target: { environmentId: 'journal-migration', kind: 'sandbox', expectedGeneration: 'none|none' },
+      candidateArtifacts: [{ entrypoint: 'frontend', path, hash: await hashArtifactPath(path), dependsOn: [] }],
+      currentHashes: {}, authority: { kind: 'sandbox', environmentId: 'journal-migration' },
+    });
+    if (plan.status === 'error') throw plan.error;
+    const legacy = new DeploymentJournal(join(root, 'gitspace.db'));
+    const begun = legacy.begin(plan.value);
+    if (begun.status === 'error') throw begun.error;
+    legacy.recordStep(plan.value.id, 'frontend', 0, 'committed');
+    const interrupted = legacy.transition(plan.value.id, 'finalizing');
+    const steps = legacy.steps(plan.value.id);
+    legacy.close();
+    const environment = new ReplacementEnvironment({
+      id: 'journal-migration', root, repositoryRoot: root, rpcPort: 0, webPort: 0,
+      machineId: 'machine-a', artifactKey: new Uint8Array(32).fill(1),
+      ompAgentDir: join(root, 'omp'), controlToken: 'control-token',
+    });
+    environments.push(environment);
+    const migrated = new DeploymentJournal(join(root, 'deployment.db'));
+    try {
+      expect(migrated.load(plan.value.id)).toEqual(interrupted);
+      expect(migrated.steps(plan.value.id)).toEqual(steps);
+      const checkpoint = await environment.machineHost.checkpointDatabase();
+      await environment.machineHost.restoreDatabase(checkpoint);
+      await environment.machineHost.releaseDatabaseCheckpoint(checkpoint);
+      migrated.transition(plan.value.id, 'committed');
+      expect(migrated.load(plan.value.id)?.state).toBe('committed');
+    } finally {
+      migrated.close();
+    }
+  });
+
+  it('keeps the predecessor reachable when retirement does not acknowledge retained ownership', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'gitspace-native-retire-'));
+    roots.push(root);
+    const environment = new ReplacementEnvironment({
+      id: 'retire-refusal', root, repositoryRoot: root, rpcPort: 0, webPort: 0,
+      machineId: 'machine-a', artifactKey: new Uint8Array(32).fill(1),
+      ompAgentDir: join(root, 'omp'), controlToken: 'control-token',
+    });
+    environments.push(environment);
+    const previous = join(root, 'previous');
+    await nativeFixture(previous);
+    await writeFile(join(previous, 'machine.js'), `
+      await Bun.write(process.env.GITSPACE_ENVIRONMENT_ROOT + '/pid', String(process.pid));
+      const server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: (request) => new URL(request.url).pathname === '/__control/retire'
+        ? Response.json({ error: 'Checkpoint preparation is active' }, { status: 409 })
+        : Response.json({ status: 'ok' }) });
+      console.log('GitSpace RPC ready at http://127.0.0.1:' + server.port + '/rpc');
+    `);
+    const hash = await hashArtifactPath(previous);
+    const artifact = { entrypoint: 'machine-daemon' as const, path: previous, hash, dependsOn: [] };
+    await environment.deploy({ artifacts: [artifact], releaseSha: 'previous', revision: 'previous', dirty: false });
+    const pid = await readFile(join(root, 'pid'), 'utf8');
+    await expect(environment.deploy({ artifacts: [artifact], releaseSha: 'next', revision: 'next', dirty: false })).rejects.toThrow('retirement failed');
+    expect(environment.status()).toMatchObject({ machineHash: hash, machineReleaseSha: 'previous' });
+    expect(await readFile(join(root, 'pid'), 'utf8')).toBe(pid);
+    // This notification crosses the stable RPC proxy, proving admissions were restored.
+    await environment.publishCodeVersion(hash);
+  });
+
+  it('keeps a predecessor alive and fenced when graceful shutdown times out', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'gitspace-native-shutdown-'));
+    roots.push(root);
+    const environment = new ReplacementEnvironment({
+      id: 'shutdown-timeout', root, repositoryRoot: root, rpcPort: 0, webPort: 0,
+      machineId: 'machine-a', artifactKey: new Uint8Array(32).fill(1),
+      ompAgentDir: join(root, 'omp'), controlToken: 'control-token',
+    });
+    environments.push(environment);
+    const previous = join(root, 'previous');
+    await nativeFixture(previous);
+    await writeFile(join(previous, 'machine.js'), `
+      process.on('SIGTERM', () => {});
+      await Bun.write(process.env.GITSPACE_ENVIRONMENT_ROOT + '/pid', String(process.pid));
+      const server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: (request) => Response.json(
+        new URL(request.url).pathname === '/__control/retire' ? { stopMode: 'replace' } : { status: 'ok' }) });
+      console.log('GitSpace RPC ready at http://127.0.0.1:' + server.port + '/rpc');
+    `);
+    const hash = await hashArtifactPath(previous);
+    const artifact = { entrypoint: 'machine-daemon' as const, path: previous, hash, dependsOn: [] };
+    await environment.deploy({ artifacts: [artifact], releaseSha: 'previous', revision: 'previous', dirty: false });
+    const pid = Number(await readFile(join(root, 'pid'), 'utf8'));
+    const originalSetTimeout = globalThis.setTimeout;
+    const deadline = spyOn(globalThis, 'setTimeout').mockImplementation(
+      (handler, delay, ...args) => originalSetTimeout(handler, delay === 120_000 ? 30 : delay, ...args),
+    );
+    try {
+      await expect(environment.deploy({ artifacts: [artifact], releaseSha: 'next', revision: 'next', dirty: false })).rejects.toThrow();
+      expect(process.kill(pid, 0)).toBe(true);
+      expect(Number(await readFile(join(root, 'pid'), 'utf8'))).toBe(pid);
+      expect(environment.status()).toMatchObject({ machineHash: hash, machineReleaseSha: 'previous' });
+      await expect(environment.publishCodeVersion(hash)).rejects.toThrow();
+    } finally {
+      deadline.mockRestore();
+      process.kill(pid, 'SIGKILL');
+    }
+  });
+
+  it('reaps a live candidate that closes stdout before readiness before rolling back its database', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'gitspace-native-readiness-'));
+    roots.push(root);
+    const environment = new ReplacementEnvironment({
+      id: 'readiness-failure', root, repositoryRoot: root, rpcPort: 0, webPort: 0,
+      machineId: 'machine-a', artifactKey: new Uint8Array(32).fill(1),
+      ompAgentDir: join(root, 'omp'), controlToken: 'control-token',
+    });
+    environments.push(environment);
+    const previous = join(root, 'previous');
+    await nativeFixture(previous);
+    await writeFile(join(previous, 'machine.js'), `
+      const server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: (request) => Response.json(new URL(request.url).pathname === '/__control/retire' ? { stopMode: 'replace' } : { status: 'ok' }) });
+      console.log('GitSpace RPC ready at http://127.0.0.1:' + server.port + '/rpc');
+    `);
+    const hash = await hashArtifactPath(previous);
+    await environment.deploy({
+      artifacts: [{ entrypoint: 'machine-daemon', path: previous, hash, dependsOn: [] }],
+      releaseSha: 'previous', revision: 'previous', dirty: false,
+    });
+    const candidate = join(root, 'candidate');
+    await nativeFixture(candidate);
+    await writeFile(join(candidate, 'machine.js'), `
+      import { closeSync } from 'node:fs';
+      await Bun.write(process.env.GITSPACE_ENVIRONMENT_ROOT + '/failed-pid', String(process.pid));
+      closeSync(1);
+      Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('not ready') });
+    `);
+    await expect(environment.deploy({
+      artifacts: [{ entrypoint: 'machine-daemon', path: candidate, hash: await hashArtifactPath(candidate), dependsOn: [] }],
+      releaseSha: 'candidate', revision: 'candidate', dirty: false,
+    })).rejects.toThrow('readiness failed');
+    const pid = Number(await readFile(join(root, 'failed-pid'), 'utf8'));
+    expect(() => process.kill(pid, 0)).toThrow();
+    expect(environment.status()).toMatchObject({ machineHash: hash, machineReleaseSha: 'previous' });
+    await environment.publishCodeVersion(hash);
   });
 });

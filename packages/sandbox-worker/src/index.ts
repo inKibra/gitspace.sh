@@ -23,11 +23,78 @@ interface ImageState {
 export class GitSpaceSandbox extends CloudflareSandbox<ProviderEnv> {
   private machineStart: Promise<SandboxMachineRecord> | null = null;
   private providerControl: Promise<unknown> = Promise.resolve();
+  private lifecycleOperation: { name: string; id: string } | null = null;
+  private runtimeGeneration: string | null = null;
+  private runtimeHealthy: boolean | null = null;
 
-  private controlled<T>(action: () => Promise<T>): Promise<T> {
-    const result = this.providerControl.then(action, action);
+  private controlled<T>(operation: string, action: () => Promise<T>): Promise<T> {
+    const run = async () => {
+      this.lifecycleOperation = { name: operation, id: crypto.randomUUID() };
+      try {
+        if (operation !== 'status') await this.lifecycle('begin');
+        const result = await action();
+        if (operation !== 'status') await this.lifecycle('complete');
+        return result;
+      } catch (error) {
+        try { await this.lifecycle('failed', this.lifecycleError(error)); }
+        finally { throw error; }
+      } finally {
+        this.lifecycleOperation = null;
+      }
+    };
+    const result = this.providerControl.then(run, run);
     this.providerControl = result.then(() => undefined, () => undefined);
     return result;
+  }
+
+  private lifecycleError(error: unknown): Record<string, string | null> {
+    // SDK errors may embed commands and their environment. Never log their message, stack, or context.
+    const code = error && typeof error === 'object' && 'code' in error ? error.code : null;
+    return { error: error instanceof Error ? 'Error' : typeof error,
+      errorCode: typeof code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/u.test(code) ? code : null };
+  }
+
+  private async lifecycle(stage: string, details: Record<string, string | number | boolean | null> = {}): Promise<void> {
+    let input: ManagedEnrollment | undefined;
+    let state: ImageState | undefined;
+    let diagnosticsError: Record<string, string | null> | null = null;
+    try {
+      [input, state] = await Promise.all([
+        this.ctx.storage.get<ManagedEnrollment>(ENROLLMENT_KEY),
+        this.imageState(),
+      ]);
+    } catch (error) {
+      // Diagnostics must not block VM cleanup or turn a completed lifecycle action into a failure.
+      diagnosticsError = this.lifecycleError(error);
+    }
+    const event = { event: 'sandbox.lifecycle', machineId: input?.machineId ?? null,
+      sandboxId: this.ctx.id?.toString() ?? null, image: this.env.PROVIDER_IMAGE ?? null,
+      operation: this.lifecycleOperation?.name ?? null, operationId: this.lifecycleOperation?.id ?? null,
+      imageOperationId: state?.operationId ?? null, transferOperationId: state?.transferOperationId ?? null,
+      generation: this.runtimeGeneration, stage, running: this.ctx.container?.running ?? false,
+      prepared: state?.prepared ?? null, checkpointPrepared: state?.checkpointPrepared ?? null, runtimeStarted: state?.runtimeStarted ?? null,
+      retired: state?.retired ?? null,
+      ...(diagnosticsError ? { diagnosticsError: 'metadata-unavailable', diagnosticsErrorCode: diagnosticsError.errorCode } : {}),
+      ...details };
+    if ('error' in details || diagnosticsError) console.error(event);
+    else console.info(event);
+  }
+
+  override async onStart(): Promise<void> {
+    await super.onStart();
+    // The SDK calls onStart after its port check, even when the VM was already running.
+    await this.lifecycle('vm.port-ready');
+  }
+
+  override async onStop(params?: Parameters<CloudflareSandbox<ProviderEnv>['onStop']>[0]): Promise<void> {
+    await this.lifecycle('vm.stopped', { exitCode: params?.exitCode ?? null, reason: params?.reason ?? null });
+    this.runtimeHealthy = false;
+    this.runtimeGeneration = null;
+    await super.onStop(params);
+  }
+
+  override onError(error: unknown): void {
+    this.ctx.waitUntil(this.lifecycle('vm.error', this.lifecycleError(error)));
   }
   private async imageState(): Promise<ImageState> {
     return await this.ctx.storage.get<ImageState>(IMAGE_STATE_KEY) ?? {
@@ -36,20 +103,39 @@ export class GitSpaceSandbox extends CloudflareSandbox<ProviderEnv> {
     };
   }
   private async healthy(): Promise<boolean> {
-    if (!this.ctx.container?.running) return false;
-    try {
-      const response = await this.ctx.container.getTcpPort(8081).fetch(new Request('http://localhost/health', { signal: AbortSignal.timeout(5_000) }));
-      return response.ok && (await response.json() as { status?: string }).status === 'ok';
-    } catch { return false; }
+    let healthy = false;
+    let generation: string | null = null;
+    let details: Record<string, string | number | boolean | null> = {};
+    if (this.ctx.container?.running) {
+      try {
+        const response = await this.ctx.container.getTcpPort(8081).fetch(new Request('http://localhost/health', { signal: AbortSignal.timeout(5_000) }));
+        details = { httpStatus: response.status };
+        if (response.ok) {
+          const body = await response.json() as { status?: string; generation?: unknown };
+          healthy = body.status === 'ok' && this.ctx.container?.running === true;
+          if (typeof body.generation === 'string' && /^[a-zA-Z0-9._:-]{1,128}$/u.test(body.generation)) generation = body.generation;
+        }
+      } catch (error) { details = this.lifecycleError(error); }
+    }
+    if (this.runtimeHealthy !== healthy || this.runtimeGeneration !== generation) {
+      this.runtimeHealthy = healthy;
+      this.runtimeGeneration = generation;
+      await this.lifecycle(healthy ? 'runtime.ready' : 'runtime.not-ready', details);
+    }
+    return healthy;
   }
 
   async preflightImage(): Promise<Response> {
-    return this.controlled(async () => {
+    return this.controlled('image-preflight', async () => {
       try {
         const check = await this.exec('command -v bun >/dev/null && bun --version >/dev/null && test -r /opt/gitspace/host.js && test -r /opt/gitspace/rpc-probe.js', { timeout: 30_000 });
         if (!check.success || check.exitCode !== 0) return Response.json({ status: 'error', error: { code: 'IMAGE_BOOTSTRAP_MISSING', message: 'Image must provide compatible Bun, /opt/gitspace/host.js, and /opt/gitspace/rpc-probe.js' } }, { status: 409 });
         return Response.json({ status: 'ok' });
-      } finally { await this.destroy(); }
+      } finally {
+        await this.lifecycle('vm.destroy-requested', { machineId: 'sandbox-image-preflight' });
+        await this.destroy();
+        await this.lifecycle('vm.destroy-returned', { machineId: 'sandbox-image-preflight' });
+      }
     });
   }
 
@@ -60,7 +146,7 @@ export class GitSpaceSandbox extends CloudflareSandbox<ProviderEnv> {
   }
 
   async stageEnrollment(input: ManagedEnrollment, operationId: string): Promise<Response> {
-    return this.controlled(async () => {
+    return this.controlled('stage-enrollment', async () => {
       const previous = await this.imageState();
       if (previous.retired) throw new Error('Retired image instance cannot accept enrollment');
       const existing = await this.ctx.storage.get<ManagedEnrollment>(ENROLLMENT_KEY);
@@ -76,7 +162,7 @@ export class GitSpaceSandbox extends CloudflareSandbox<ProviderEnv> {
   }
 
   async exportPreparedEnrollment(operationId: string): Promise<Response> {
-    return this.controlled(async () => {
+    return this.controlled('export-enrollment', async () => {
       const input = await this.requireEnrollment();
       const state = await this.imageState();
       this.requirePreparedTransfer(state, operationId);
@@ -93,22 +179,24 @@ export class GitSpaceSandbox extends CloudflareSandbox<ProviderEnv> {
   }
 
   async retirePrepared(operationId: string): Promise<Response> {
-    return this.controlled(async () => {
+    return this.controlled('retire-image', async () => {
       const input = await this.requireEnrollment();
       const state = await this.imageState();
       this.requirePreparedTransfer(state, operationId);
       state.retired = true;
       state.transferOperationId = operationId;
       await this.ctx.storage.put(IMAGE_STATE_KEY, state);
+      await this.lifecycle('vm.destroy-requested');
       await this.destroy();
       if (this.ctx.container?.running) throw new Error('Source container has not stopped');
+      await this.lifecycle('vm.destroy-confirmed');
       await this.record(input, 'offline', null, 'Checkpointed machine handed off to its selected image.', 'online');
       return Response.json({ status: 'ok', value: { machineId: input.machineId, retired: true } });
     });
   }
 
   async discardCandidate(operationId: string | null, recoveryOperationId: string): Promise<Response> {
-    return this.controlled(async () => {
+    return this.controlled('discard-image', async () => {
       const input = await this.requireEnrollment();
       const state = await this.imageState();
       if (state.operationId !== operationId) throw new Error('Candidate image operation changed');
@@ -118,8 +206,10 @@ export class GitSpaceSandbox extends CloudflareSandbox<ProviderEnv> {
       state.retired = true;
       state.transferOperationId = recoveryOperationId;
       await this.ctx.storage.put(IMAGE_STATE_KEY, state);
+      await this.lifecycle('vm.destroy-requested');
       await this.destroy();
       if (this.ctx.container?.running) throw new Error('Candidate container has not stopped');
+      await this.lifecycle('vm.destroy-confirmed');
       state.prepared = true;
       state.discardReceipt = { machineId: input.machineId, operationId, recoveryOperationId, stopped: true };
       await this.ctx.storage.put(IMAGE_STATE_KEY, state);
@@ -129,7 +219,7 @@ export class GitSpaceSandbox extends CloudflareSandbox<ProviderEnv> {
   }
 
   async enrollMachine(input: ManagedEnrollment): Promise<SandboxMachineRecord> {
-    return this.controlled(async () => {
+    return this.controlled('enroll', async () => {
       const existing = await this.ctx.storage.get<ManagedEnrollment>(ENROLLMENT_KEY);
       if (existing) {
         if (existing.userId !== input.userId || existing.machineId !== input.machineId) throw new Error('Machine enrollment identity changed');
@@ -144,7 +234,7 @@ export class GitSpaceSandbox extends CloudflareSandbox<ProviderEnv> {
   }
 
   async statusMachine(): Promise<SandboxMachineRecord> {
-    return this.controlled(async () => {
+    return this.controlled('status', async () => {
       const input = await this.requireEnrollment();
       const previous = await this.ctx.storage.get<SandboxMachineRecord>(MACHINE_KEY);
       const state = await this.imageState();
@@ -171,7 +261,7 @@ export class GitSpaceSandbox extends CloudflareSandbox<ProviderEnv> {
   }
 
   async prepareReplacement(): Promise<Response> {
-    return this.controlled(async () => {
+    return this.controlled('prepare-replacement', async () => {
       const input = await this.requireEnrollment();
       const state = await this.imageState();
       if (state.inherited && state.runtimeStarted === false) {
@@ -180,41 +270,52 @@ export class GitSpaceSandbox extends CloudflareSandbox<ProviderEnv> {
       if (state.retired) throw new Error('Machine is already retired; reconcile its image operation');
       const token = input.environment.GITSPACE_CONTROL_TOKEN;
       if (!token) return Response.json({ error: 'Machine has no replacement control credential' }, { status: 409 });
-      const response = await this.containerFetch('http://localhost/__control/prepare-replacement', {
-        method: 'POST', headers: { authorization: `Bearer ${token}` },
-      }, 8081);
+      const response = await this.replacementControl('prepare-replacement', token);
       if (response.ok) {
         const result = await response.clone().json() as { prepared?: boolean; machineId?: string };
         if (result.prepared !== true || result.machineId !== input.machineId) throw new Error('Machine returned an invalid preparation receipt');
         state.prepared = true;
         state.checkpointPrepared = true;
         await this.ctx.storage.put(IMAGE_STATE_KEY, state);
+        await this.lifecycle('checkpoint.prepared');
       }
       return response;
     });
   }
 
   async cancelReplacement(): Promise<Response> {
-    return this.controlled(async () => {
+    return this.controlled('cancel-replacement', async () => {
       const input = await this.requireEnrollment();
       const state = await this.imageState();
       if (state.retired || state.inherited) throw new Error('Image handoff cannot be cancelled on this container');
       const token = input.environment.GITSPACE_CONTROL_TOKEN;
       if (!token) return Response.json({ prepared: false, machineId: input.machineId });
-      const response = await this.containerFetch('http://localhost/__control/cancel-replacement', {
-        method: 'POST', headers: { authorization: `Bearer ${token}` },
-      }, 8081);
+      const response = await this.replacementControl('cancel-replacement', token);
       if (response.ok) {
+        const result = await response.clone().json() as { prepared?: boolean; machineId?: string };
+        if (result.prepared !== false || result.machineId !== input.machineId) throw new Error('Machine returned an invalid cancellation receipt');
         state.prepared = false;
         state.checkpointPrepared = false;
         await this.ctx.storage.put(IMAGE_STATE_KEY, state);
+        await this.lifecycle('checkpoint.cancelled');
       }
       return response;
     });
   }
 
+  private async replacementControl(action: 'prepare-replacement' | 'cancel-replacement', token: string): Promise<Response> {
+    const container = this.ctx.container;
+    if (!container?.running) return Response.json({ error: 'The cloud machine is stopped; replacement control cannot start a new VM' }, { status: 409 });
+    // Control acts on this disk only. SDK containerFetch may boot another VM or replay a rejected request.
+    const response = await container.getTcpPort(8081).fetch(new Request(`http://localhost/__control/${action}`, {
+      method: 'POST', headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(300_000),
+    }));
+    await this.lifecycle('checkpoint.response', { httpStatus: response.status });
+    return response;
+  }
+
   async resumeMachine(): Promise<SandboxMachineRecord> {
-    return this.controlled(async () => {
+    return this.controlled('resume', async () => {
       const input = await this.requireEnrollment();
       const state = await this.imageState();
       if (state.retired || state.checkpointPrepared) throw new Error('Prepared source must be cancelled or handed off before resuming');
@@ -237,8 +338,14 @@ export class GitSpaceSandbox extends CloudflareSandbox<ProviderEnv> {
   }
 
   async sleepMachine(): Promise<SandboxMachineRecord> {
-    return this.controlled(async () => {
+    return this.controlled('sleep', async () => {
       const input = await this.requireEnrollment();
+      const state = await this.imageState();
+      // Sleeping discards the VM's ephemeral disk, not just its native process.
+      if (this.ctx.container?.running && !state.checkpointPrepared && !(state.inherited && state.runtimeStarted === false)) {
+        throw new Error('Cloud machine must checkpoint before sleeping');
+      }
+      await this.lifecycle('vm.stop-requested', { signal: 'SIGTERM' });
       await this.stop('SIGTERM');
       // SDK stop sends the signal; a queued resume must not race the VM's eventual exit.
       const deadline = Date.now() + 120_000;
@@ -248,8 +355,8 @@ export class GitSpaceSandbox extends CloudflareSandbox<ProviderEnv> {
         setTimeout(pause.resolve, 500);
         await pause.promise;
       }
-      const state = await this.imageState();
-      state.prepared = false;
+      await this.lifecycle('vm.stop-confirmed');
+      state.prepared = state.inherited && state.runtimeStarted === false;
       state.checkpointPrepared = false;
       await this.ctx.storage.put(IMAGE_STATE_KEY, state);
       return this.record(input, 'offline', null, 'Temporary cloud machine stopped.', 'offline');
@@ -257,15 +364,17 @@ export class GitSpaceSandbox extends CloudflareSandbox<ProviderEnv> {
   }
 
   async destroyMachine(machineId: string): Promise<{ machineId: string }> {
-    return this.controlled(async () => {
+    return this.controlled('destroy', async () => {
       if (!/^sandbox-[a-z0-9-]{1,64}$/u.test(machineId)) throw new Error('Sandbox machine id is invalid');
       const input = await this.ctx.storage.get<ManagedEnrollment>(ENROLLMENT_KEY);
       if (input && input.machineId !== machineId) throw new Error('Machine destruction identity changed');
       const state = await this.imageState();
       state.retired = true;
       await this.ctx.storage.put(IMAGE_STATE_KEY, state);
+      await this.lifecycle('vm.destroy-requested', { machineId });
       await this.destroy();
       if (this.ctx.container?.running) throw new Error('Cloud machine has not stopped');
+      await this.lifecycle('vm.destroy-confirmed', { machineId });
       await this.ctx.storage.delete([ENROLLMENT_KEY, MACHINE_KEY]);
       return { machineId };
     });
@@ -279,24 +388,31 @@ export class GitSpaceSandbox extends CloudflareSandbox<ProviderEnv> {
   private async launchMachine(input: ManagedEnrollment): Promise<SandboxMachineRecord> {
     const state = await this.imageState();
     if (state.retired) throw new Error('Retired image instance cannot be restarted');
+    // Enrollment retries share this path with resume and must not bypass a prepared source's fence.
+    if (state.checkpointPrepared) throw new Error('Prepared source must be cancelled or handed off before resuming');
     // A custom ENTRYPOINT/CMD can run tenant code before host.js. Fence even an uncertain VM-start request.
     state.runtimeStarted = true;
     await this.ctx.storage.put(IMAGE_STATE_KEY, state);
+    await this.lifecycle('vm.start-requested');
     await this.startAndWaitForPorts({ ports: 3000 });
+    await this.lifecycle('vm.sdk-ready');
     await this.exposePort(8081, { hostname: this.env.SANDBOX_HOSTNAME, name: 'gitspace-rpc' });
     const controlUrl = input.environment.GITSPACE_CONTROL_URL;
     if (!controlUrl) throw new Error('GitSpace control URL is required');
     const rpcEndpoint = new URL(`/__sandbox/${encodeURIComponent(input.userId)}/${encodeURIComponent(input.machineId)}/rpc`, controlUrl).toString();
     const existing = await this.getProcess('gitspace-machine');
+    await this.lifecycle('host.observed', { processStatus: existing?.status ?? null, exitCode: existing?.exitCode ?? null });
     if (existing?.status !== 'running') {
       // A previous concurrent launch may have replaced the SDK process record
       // while the original host still owns its port (including during startup).
       if (!await this.healthy()) {
+        await this.lifecycle('host.start-requested');
         await this.startProcess('bun /opt/gitspace/host.js', {
           processId: 'gitspace-machine',
           autoCleanup: false,
           env: { ...input.environment, GITSPACE_PUBLIC_RPC_URL: rpcEndpoint },
         });
+        await this.lifecycle('host.start-accepted');
       }
     }
     return this.record(input, 'offline', rpcEndpoint, 'Managed Cloudflare Sandbox is starting.', 'online');

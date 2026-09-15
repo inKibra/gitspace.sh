@@ -131,6 +131,11 @@ export async function withArtifactSyncDiagnostics<T>(sessionId: string, run: () 
   });
 }
 
+export function cloudResponseRay(response: Response | undefined): string | undefined {
+  const ray = response?.headers.get('cf-ray');
+  return ray && /^[a-f0-9]{16,32}(?:-[A-Z]{3})?$/iu.test(ray) ? ray : undefined;
+}
+
 export async function withCloudRequestDiagnostics<T>(
   request: Pick<SignedControlRequest, 'nonce' | 'operation'>,
   run: (diagnostics: CloudRequestDiagnostics) => Promise<T>,
@@ -151,14 +156,13 @@ export async function withCloudRequestDiagnostics<T>(
   };
   const finish = (outcome: 'success' | 'failure', error?: unknown): void => {
     try {
-      const ray = diagnostics.response?.headers.get('cf-ray');
       emit({
         ...record,
         elapsedMs: performance.now() - started,
         stage: diagnostics.stage,
         outcome,
         status: diagnostics.response?.status,
-        cfRay: ray && /^[a-f0-9]{16,32}(?:-[A-Z]{3})?$/iu.test(ray) ? ray : undefined,
+        cfRay: cloudResponseRay(diagnostics.response),
       }, error);
     } catch {
       // Response metadata collection is diagnostic only.

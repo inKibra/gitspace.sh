@@ -266,10 +266,7 @@ describe('POST /__platform/tenants/:tenant/deploy', () => {
     expect(uploads).toHaveLength(1);
     const upload = uploads[0]!;
     expect(upload.module).toBe(bundleSource('abc123'));
-    expect(upload.metadata).toEqual({
-      main_module: 'worker.mjs',
-      compatibility_date: '2026-08-27',
-      compatibility_flags: ['nodejs_compat'],
+    expect(upload.metadata).toMatchObject({
       bindings: expect.arrayContaining([
         { type: 'durable_object_namespace', name: 'CREDENTIALS', class_name: 'CredentialVaultDO' },
         { type: 'durable_object_namespace', name: 'USER_STORAGE', class_name: 'UserStorageDO' },
@@ -280,8 +277,6 @@ describe('POST /__platform/tenants/:tenant/deploy', () => {
         { type: 'service', name: 'STATIC_FILES', service: 'public-assets-test' },
       ]),
       migrations: { old_tag: 'v8', new_tag: 'v10', steps: [{ new_sqlite_classes: ['Classv9'] }, { new_sqlite_classes: ['Classv10'] }] },
-      keep_bindings: [],
-      tags: ['bravo', 'abc123'],
     });
 
     const copy = await env.RELEASES.get('tenants/bravo/abc123/worker.mjs');

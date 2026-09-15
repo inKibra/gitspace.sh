@@ -430,7 +430,14 @@ export async function startMachineRuntime() {
       } else if (currentProjection) {
         recoverableSpaces.add(space.id);
       } else if (cloud?.machineId === machineId) {
-        console.error(`[gitspace-recovery] ${space.id} unavailable: cloud ${cloud.state} generation ${cloud.generation}, local generation ${space.generation}; ${cloud.manifestKey ? `checkpoint revision ${cloud.checkpointRevision} predates the uncheckpointed disk loss and is not current work` : 'no durable repository checkpoint exists'}. Restore the intact machine or explicitly reset legacy rehearsal data.`);
+        console.error(JSON.stringify({
+          event: 'space_projection_unavailable', machineId, operation: 'startup', stage: 'projection-fence',
+          generation: process.env.GITSPACE_GENERATION_HASH ?? null, spaceId: space.id,
+          cloudState: cloud.state, cloudGeneration: cloud.generation,
+          localState: space.placementState, localHolderId: space.holderId, localGeneration: space.generation,
+          hasCheckout: existsSync(join(space.rootPath, '.git')), checkpointRevision: cloud.manifestKey ? cloud.checkpointRevision : null,
+          error: 'The local checkout and ownership generation do not establish current possession. A saved checkpoint cannot establish that missing or stale local work is safe to replace.',
+        }));
       }
     }
   }
@@ -626,7 +633,7 @@ export async function startMachineRuntime() {
         }
         if (cloud.state !== 'open' || space.holderId !== machineId || space.placementState !== 'open'
           || space.generation !== cloud.generation || !existsSync(join(space.rootPath, '.git'))) {
-          throw new Error(`Space ${space.id} has uncheckpointed or stale local state; provider replacement is unsafe. Restore the intact machine or explicitly reset legacy rehearsal data.`);
+          throw new Error(`Machine ${machineId} native generation ${process.env.GITSPACE_GENERATION_HASH ?? 'unknown'} prepare-replacement projection-fence: space=${space.id} local=${space.placementState}/${space.holderId}/${space.generation} cloud=${cloud.state}/${cloud.machineId}/${cloud.generation} hasCheckout=${existsSync(join(space.rootPath, '.git'))}; uncheckpointed or stale local state makes provider replacement unsafe`);
         }
         held.push(space);
       }

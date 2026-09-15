@@ -12,15 +12,20 @@ import worker, { GitSpaceSandbox } from '../src/index.js';
 
 function sandbox() {
   const records = new Map<string, unknown>([['gitspace:managed-enrollment', {
-    userId: 'user-a', machineId: 'sandbox-a', environment: { GITSPACE_CONTROL_URL: 'https://api.example' },
+    userId: 'user-a', machineId: 'sandbox-a', environment: { GITSPACE_CONTROL_URL: 'https://api.example', GITSPACE_CONTROL_TOKEN: 'test-control' },
   }]]);
   let healthy = false;
-  const fetch = vi.fn(async (request: Request) => new URL(request.url).pathname === '/health' && healthy
-    ? Response.json({ status: 'ok' })
-    : Response.json({ error: { code: 'RPC_DRAINING' } }, { status: 503 }));
+  const fetch = vi.fn(async (request: Request) => {
+    const path = new URL(request.url).pathname;
+    if (path === '/health' && healthy) return Response.json({ status: 'ok', generation: 'generation-a' });
+    if (path === '/__control/prepare-replacement') return Response.json({ prepared: true, machineId: 'sandbox-a' });
+    if (path === '/__control/cancel-replacement') return Response.json({ prepared: false, machineId: 'sandbox-a' });
+    return Response.json({ error: { code: 'RPC_DRAINING' } }, { status: 503 });
+  });
   const container = { running: true, getTcpPort: vi.fn(() => ({ fetch })) };
+  const get = vi.fn(async (key: string) => structuredClone(records.get(key)));
   const runtime = new GitSpaceSandbox({ container, storage: {
-    get: async (key: string) => structuredClone(records.get(key)),
+    get,
     put: async (key: string | Record<string, unknown>, value?: unknown) => {
       for (const [name, entry] of typeof key === 'string' ? [[key, value]] : Object.entries(key)) records.set(name as string, structuredClone(entry));
     },
@@ -40,7 +45,7 @@ function sandbox() {
     stop: vi.fn(async () => { container.running = false; healthy = false; }),
   };
   Object.assign(runtime, methods);
-  return { runtime, records, methods, container, fetch };
+  return { runtime, records, methods, container, fetch, get };
 }
 
 describe('managed runtime startup', () => {
@@ -65,19 +70,62 @@ describe('managed runtime startup', () => {
   });
 
   it('resumes after a successful checkpoint and normal sleep', async () => {
-    const { runtime, records } = sandbox();
-    const enrollment = records.get('gitspace:managed-enrollment') as Parameters<GitSpaceSandbox['stageEnrollment']>[0];
-    enrollment.environment.GITSPACE_CONTROL_TOKEN = 'test-control';
-    records.set('gitspace:managed-enrollment', enrollment);
-    Object.assign(runtime, { containerFetch: async () => Response.json({ prepared: true, machineId: 'sandbox-a' }) });
+    const { runtime } = sandbox();
     await runtime.resumeMachine();
     expect((await runtime.prepareReplacement()).status).toBe(200);
     expect(await runtime.sleepMachine()).toMatchObject({ state: 'offline', desiredState: 'offline' });
     expect(await runtime.resumeMachine()).toMatchObject({ state: 'online', desiredState: 'online' });
   });
 
+  it('does not let enrollment retries restart a checkpointed source', async () => {
+    const { runtime, records, container, methods } = sandbox();
+    const enrollment = records.get('gitspace:managed-enrollment') as Parameters<GitSpaceSandbox['enrollMachine']>[0];
+    expect((await runtime.prepareReplacement()).status).toBe(200);
+    container.running = false;
+    await expect(runtime.enrollMachine(enrollment)).rejects.toThrow('Prepared source');
+    expect(container.running).toBe(false);
+    expect(methods.startProcess).not.toHaveBeenCalled();
+    expect(await (await runtime.exportPreparedEnrollment(crypto.randomUUID())).json()).toMatchObject({ machineId: 'sandbox-a' });
+  });
+
+  it.each(['prepareReplacement', 'cancelReplacement'] as const)('does not boot a stopped VM for %s', async (action) => {
+    const { runtime, container } = sandbox();
+    container.running = false;
+    Object.assign(runtime, { containerFetch: async () => {
+      container.running = true;
+      return Response.json({ prepared: action === 'prepareReplacement', machineId: 'sandbox-a' });
+    } });
+    expect((await runtime[action]()).status).toBe(409);
+    expect(container.running).toBe(false);
+  });
+
+  it('does not clear checkpoint authority on a cancellation receipt from another machine', async () => {
+    const { runtime, fetch } = sandbox();
+    expect((await runtime.prepareReplacement()).status).toBe(200);
+    fetch.mockResolvedValueOnce(Response.json({ prepared: false, machineId: 'sandbox-other' }));
+    await expect(runtime.cancelReplacement()).rejects.toThrow('invalid cancellation receipt');
+    await expect(runtime.resumeMachine()).rejects.toThrow('Prepared source');
+  });
+
+  it('refuses to sleep a running VM without a durable checkpoint', async () => {
+    const { runtime, container, methods } = sandbox();
+    await expect(runtime.sleepMachine()).rejects.toThrow('must checkpoint');
+    expect(container.running).toBe(true);
+    expect(methods.stop).not.toHaveBeenCalled();
+  });
+
+  it('keeps a never-started staged image recoverable after sleep without checkpointing tenant state', async () => {
+    const { runtime, records } = sandbox();
+    const enrollment = records.get('gitspace:managed-enrollment') as Parameters<GitSpaceSandbox['stageEnrollment']>[0];
+    records.clear();
+    await runtime.stageEnrollment(enrollment, crypto.randomUUID());
+    expect(await runtime.sleepMachine()).toMatchObject({ state: 'offline', desiredState: 'offline' });
+    expect(await (await runtime.exportPreparedEnrollment(crypto.randomUUID())).json()).toMatchObject({ machineId: 'sandbox-a' });
+  });
+
   it('waits for a stopped VM before acknowledging sleep or accepting a queued resume', async () => {
     const { runtime, methods, container } = sandbox();
+    expect((await runtime.prepareReplacement()).status).toBe(200);
     methods.stop.mockImplementationOnce(async () => {});
     vi.useFakeTimers();
     try {
@@ -120,6 +168,46 @@ describe('managed runtime startup', () => {
     expect(methods.exec).not.toHaveBeenCalled();
     expect(methods.getProcess).not.toHaveBeenCalled();
     expect(methods.startAndWaitForPorts).not.toHaveBeenCalled();
+  });
+
+  it('does not report a stopped VM online from a late health response', async () => {
+    const { runtime, records, container, fetch } = sandbox();
+    records.set('gitspace:machine-record', { id: 'sandbox-a', state: 'online', desiredState: 'online', rpcEndpoint: 'https://api.example/rpc' });
+    fetch.mockImplementationOnce(async () => {
+      container.running = false;
+      return Response.json({ status: 'ok', generation: 'generation-a' });
+    });
+    expect(await runtime.statusMachine()).toMatchObject({ state: 'offline' });
+  });
+
+  it('does not fail a runtime start when diagnostic metadata cannot be read', async () => {
+    const { runtime, get } = sandbox();
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      get.mockRejectedValueOnce(new Error('Diagnostic metadata unavailable'));
+      expect(await runtime.resumeMachine()).toMatchObject({ state: 'online', desiredState: 'online' });
+      expect(error).toHaveBeenCalledWith(expect.objectContaining({ stage: 'begin', diagnosticsError: 'metadata-unavailable' }));
+    } finally {
+      error.mockRestore();
+    }
+  });
+
+  it('keeps SDK startup error secrets out of lifecycle diagnostics', async () => {
+    const { runtime, methods } = sandbox();
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      methods.startProcess.mockRejectedValueOnce(new Error('SDK request failed: GITSPACE_CONTROL_TOKEN=private-enrollment-secret'));
+      await expect(runtime.resumeMachine()).rejects.toThrow('SDK request failed');
+      const events = [...info.mock.calls, ...error.mock.calls].map(([event]) => event);
+      expect(events).toContainEqual(expect.objectContaining({ event: 'sandbox.lifecycle', machineId: 'sandbox-a', operation: 'resume', stage: 'host.start-requested' }));
+      expect(events).toContainEqual(expect.objectContaining({ event: 'sandbox.lifecycle', machineId: 'sandbox-a', operation: 'resume', stage: 'failed', error: 'Error' }));
+      expect(JSON.stringify(events)).not.toContain('private-enrollment-secret');
+      expect(JSON.stringify(events)).not.toContain('test-control');
+    } finally {
+      info.mockRestore();
+      error.mockRestore();
+    }
   });
 
   it('never starts a holder that stopped after the directory reported it online', async () => {

@@ -9,12 +9,28 @@ import { controlCloudflareSandboxMachine, controlCloudflareSandboxReplacement } 
 import { tenantProvider } from './tenant-platform.js';
 
 export async function cloudImageProviderCall(env: Env, path: string, body?: object): Promise<unknown> {
-  const response = await tenantProvider(env).fetch(new Request(`https://sandbox.internal${path}`, {
-    method: 'POST', headers: { 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined,
-  }));
-  const payload = await response.json() as { status?: string; value?: unknown; error?: { code?: string; message?: string } | string };
-  if (!response.ok || payload.status !== 'ok') throw new Error(typeof payload.error === 'string' ? payload.error : payload.error?.message ?? `Cloud image provider request failed (HTTP ${response.status})`);
-  return payload.value;
+  const requestId = crypto.randomUUID();
+  const started = Date.now();
+  let status: number | undefined;
+  let cfRay: string | null = null;
+  console.info(JSON.stringify({ event: 'cloud_image_provider_request', requestId, path, outcome: 'start' }));
+  try {
+    const response = await tenantProvider(env).fetch(new Request(`https://sandbox.internal${path}`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-gitspace-request-id': requestId },
+      body: body ? JSON.stringify(body) : undefined,
+    }));
+    status = response.status;
+    cfRay = response.headers.get('cf-ray');
+    const payload = await response.json() as { status?: string; value?: unknown; error?: { code?: string; message?: string } | string };
+    if (!response.ok || payload.status !== 'ok') throw new Error(typeof payload.error === 'string' ? payload.error : payload.error?.message ?? `Cloud image provider request failed (HTTP ${response.status})`);
+    console.info(JSON.stringify({ event: 'cloud_image_provider_request', requestId, path, outcome: 'success', status, cfRay, elapsedMs: Date.now() - started }));
+    return payload.value;
+  } catch (error) {
+    // Provider response bodies can include arbitrary image output. Keep correlation
+    // and transport evidence in logs, not enrollment material or raw payloads.
+    console.error(JSON.stringify({ event: 'cloud_image_provider_request', requestId, path, outcome: 'failure', status, cfRay, elapsedMs: Date.now() - started, errorName: error instanceof Error ? error.name : 'UnknownError' }));
+    throw error;
+  }
 }
 
 export async function resolveCloudImage(env: Env, selection: CloudImageSelection): Promise<CloudImageChoice> {
@@ -42,12 +58,15 @@ export async function runCloudImageOperation(env: Env, store: CloudImageOperatio
   const machineId = state.machineId;
   const path = `/v1/sandboxes/${encodeURIComponent(machineId)}`;
   const authorities = env.SPACE_AUTHORITY as DurableObjectNamespace<SpaceAuthorityDO>;
+  const attemptStarted = Date.now();
+  console.info(JSON.stringify({ event: 'cloud_image_operation', machineId, operationId: operation.id, phase: operation.phase, barrier: operation.barrier, outcome: 'start' }));
   const save = (phase: NonNullable<CloudImageState['operation']>['phase'], barrier = operation.barrier) => {
     operation.phase = phase;
     operation.barrier = barrier;
     operation.updatedAt = Date.now();
     operation.error = null;
     state = store.saveCloudImage({ ...state, operation });
+    console.info(JSON.stringify({ event: 'cloud_image_operation', machineId, operationId: operation.id, phase, barrier, resumeSpaceIds: operation.resumeSpaceIds, elapsedMs: Date.now() - attemptStarted, outcome: phase === 'complete' || phase === 'cancelled' ? 'success' : 'transition' }));
   };
   const placements = async () => Promise.all((await store.listSpaces()).map(async ({ spaceId }) => ({ spaceId, placement: await authorities.getByName(`${env.ACCOUNT_ID}:${spaceId}`).get() })));
   try {
@@ -158,6 +177,7 @@ export async function runCloudImageOperation(env: Env, store: CloudImageOperatio
       save('cancelled', false);
     }
   } catch (error) {
+    console.error(JSON.stringify({ event: 'cloud_image_operation', machineId, operationId: operation.id, phase: operation.phase, barrier: operation.barrier, resumeSpaceIds: operation.resumeSpaceIds, elapsedMs: Date.now() - attemptStarted, outcome: 'failure', errorName: error instanceof Error ? error.name : 'UnknownError' }));
     operation.error = error instanceof Error ? error.message : String(error);
     operation.updatedAt = Date.now();
     store.saveCloudImage({ ...state, operation });

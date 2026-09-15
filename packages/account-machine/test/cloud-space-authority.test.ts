@@ -102,6 +102,59 @@ describe('cloud application data store', () => {
     expect(operations).toEqual(['data.put', 'data.get']);
   });
 
+  it('retains bounded server download errors and safe request correlation in release-report messages', async () => {
+    const key = 'releases/native/machine.manifest.json';
+    const cfRay = 'a123456789abcdef-SJC';
+    let requestId = '';
+    let signedHeader = '';
+    const store = new CloudDataCheckpointBlobStore({
+      baseUrl: 'https://control.example', userId: 'user-a', machineId: 'machine-a',
+      signingPrivateKey: new Uint8Array(32).fill(5),
+      fetcher: (async (_input, init) => {
+        signedHeader = new Headers(init?.headers).get('x-gitspace-control')!;
+        requestId = JSON.parse(Buffer.from(signedHeader, 'base64url').toString()).nonce;
+        return Response.json({
+          status: 'error',
+          error: { code: 'BAD_REQUEST', message: 'Application object request is invalid', authorization: signedHeader, stack: 'private stack' },
+        }, { status: 400, headers: { 'cf-ray': cfRay, 'set-cookie': 'secret-cookie' } });
+      }) as typeof fetch,
+    });
+    const failure = await store.get(key).catch((error: unknown) => error);
+    expect(failure).toMatchObject({
+      code: 'DATA_GET_FAILED',
+      details: { key, status: 400, code: 'BAD_REQUEST', message: 'Application object request is invalid', machineId: 'machine-a', operation: 'data.get', requestId, cfRay },
+    });
+    // Release acknowledgement retains Error.message, not the structured details.
+    const message = (failure as Error).message;
+    for (const context of [key, '400', 'BAD_REQUEST', 'Application object request is invalid', 'machine-a', 'data.get', requestId, cfRay]) {
+      expect(message).toContain(context);
+    }
+    const diagnostic = JSON.stringify(failure);
+    for (const secret of [signedHeader, 'private stack', 'secret-cookie']) {
+      expect(diagnostic).not.toContain(secret);
+      expect(message).not.toContain(secret);
+    }
+  });
+
+  it('retains HTTP download failures without retaining oversized bodies or untrusted ray headers', async () => {
+    let canceled = false;
+    const store = new CloudDataCheckpointBlobStore({
+      baseUrl: 'https://control.example', userId: 'user-a', machineId: 'machine-a',
+      signingPrivateKey: new Uint8Array(32).fill(5),
+      fetcher: (async () => new Response(new ReadableStream<Uint8Array>({
+        pull(controller) { controller.enqueue(new TextEncoder().encode('private-response'.repeat(1_000))); },
+        cancel() { canceled = true; },
+      }), { status: 400, headers: { 'cf-ray': 'secret-token' } })) as typeof fetch,
+    });
+    const failure = await store.get('releases/native/machine.manifest.json').catch((error: unknown) => error);
+    expect(failure).toMatchObject({ code: 'DATA_GET_FAILED', details: { status: 400, operation: 'data.get' } });
+    expect(canceled).toBe(true);
+    for (const secret of ['private-response', 'secret-token']) {
+      expect(JSON.stringify(failure)).not.toContain(secret);
+      expect((failure as Error).message).not.toContain(secret);
+    }
+  });
+
   it('recovers a stored upload whose response connection was lost, without replaying its signature', async () => {
     const privateKey = new Uint8Array(32).fill(5);
     const nonces = new Set<string>();

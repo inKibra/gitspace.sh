@@ -1,3 +1,4 @@
+import { Database } from 'bun:sqlite';
 import { cp, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join, resolve, sep } from 'node:path';
@@ -113,8 +114,9 @@ interface FrontendHostControl {
 
 interface RunningGeneration {
   pointer: MachineGenerationPointer;
-  process: ReturnType<typeof Bun.spawn>;
+  process: Bun.Subprocess;
   url: string;
+  stopping?: true;
 }
 
 function processEnvironment(extra: Record<string, string>, releaseSha: string | null): Record<string, string> {
@@ -126,6 +128,36 @@ function processEnvironment(extra: Record<string, string>, releaseSha: string | 
   delete environment.GITSPACE_RELEASE_SHA;
   if (releaseSha !== null) environment.GITSPACE_MACHINE_RELEASE_SHA = releaseSha;
   return environment;
+}
+
+function openHostDeploymentJournal(root: string): DeploymentJournal {
+  const path = join(root, 'deployment.db');
+  const journal = new DeploymentJournal(path);
+  if (!existsSync(join(root, 'gitspace.db'))) return journal;
+  const database = new Database(path, { strict: true });
+  try {
+    database.query('ATTACH DATABASE ? AS runtime').run(join(root, 'gitspace.db'));
+    const tables = database.query<{ name: string }, []>(
+      "SELECT name FROM runtime.sqlite_master WHERE type = 'table' AND name IN ('deployment_runs', 'deployment_steps')",
+    ).all();
+    if (tables.length === 0) return journal;
+    if (tables.length !== 2) throw new Error('Legacy deployment journal is incomplete');
+    // Commit the destination first. If interrupted before removing the old tables,
+    // retry copies missing rows without overwriting newer recovery state here.
+    database.transaction(() => {
+      database.exec('INSERT INTO deployment_runs SELECT * FROM runtime.deployment_runs WHERE true ON CONFLICT(id) DO NOTHING');
+      database.exec('INSERT INTO deployment_steps SELECT * FROM runtime.deployment_steps WHERE true ON CONFLICT(run_id, attempt, entrypoint) DO NOTHING');
+    })();
+    database.transaction(() => {
+      database.exec('DROP TABLE runtime.deployment_steps; DROP TABLE runtime.deployment_runs;');
+    })();
+    return journal;
+  } catch (error) {
+    journal.close();
+    throw error;
+  } finally {
+    database.close();
+  }
 }
 
 async function forwardReader(reader: ReadableStreamDefaultReader<Uint8Array>, decoder: TextDecoder, prefix: string): Promise<void> {
@@ -144,35 +176,42 @@ async function forwardStream(stream: ReadableStream<Uint8Array>, prefix: string)
   await forwardReader(stream.getReader(), new TextDecoder(), prefix);
 }
 
-async function waitForReady(process: ReturnType<typeof Bun.spawn>, hash: string): Promise<string> {
+async function waitForReady(process: Bun.Subprocess, hash: string): Promise<string> {
   const reader = (process.stdout as ReadableStream<Uint8Array>).getReader();
   const decoder = new TextDecoder();
   let buffered = '';
-  return new Promise((resolveReady, reject) => {
-    const pump = async (): Promise<void> => {
-      try {
-        while (true) {
-          const chunk = await reader.read();
-          if (chunk.done) throw new Error(`Machine generation ${hash} exited before readiness`);
-          buffered += decoder.decode(chunk.value, { stream: true });
-          const lines = buffered.split('\n');
-          buffered = lines.pop() ?? '';
-          for (const line of lines) {
-            console.log(`[machine ${hash.slice(7, 15)}] ${line}`);
-            const match = /GitSpace RPC ready at (http:\/\/[^/]+)\/rpc/u.exec(line);
-            if (match) {
-              resolveReady(match[1]!);
-              void forwardReader(reader, decoder, `[machine ${hash.slice(7, 15)}] `);
-              return;
-            }
-          }
+  let forwarding = false;
+  let deadline: Timer | undefined;
+  const pump = async (): Promise<string> => {
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) throw new Error(`Machine generation ${hash} closed stdout before readiness`);
+      buffered += decoder.decode(chunk.value, { stream: true });
+      const lines = buffered.split('\n');
+      buffered = lines.pop() ?? '';
+      for (const line of lines) {
+        console.log(`[machine ${hash.slice(7, 15)}] ${line}`);
+        const match = /GitSpace RPC ready at (http:\/\/[^/]+)\/rpc/u.exec(line);
+        if (match) {
+          forwarding = true;
+          void forwardReader(reader, decoder, `[machine ${hash.slice(7, 15)}] `);
+          return match[1]!;
         }
-      } catch (error) {
-        reject(error);
       }
-    };
-    void pump();
-  });
+    }
+  };
+  try {
+    return await Promise.race([
+      pump(),
+      process.exited.then((code) => { throw new Error(`Machine generation ${hash} exited with ${code} before readiness`); }),
+      new Promise<never>((_resolve, reject) => {
+        deadline = setTimeout(() => reject(new Error(`Machine generation ${hash} did not become ready within 120000ms`)), 120_000);
+      }),
+    ]);
+  } finally {
+    clearTimeout(deadline);
+    if (!forwarding) void reader.cancel().catch(() => undefined);
+  }
 }
 
 class MachineHost implements MachineReplacementHost {
@@ -204,7 +243,13 @@ class MachineHost implements MachineReplacementHost {
   async stopAdmissions(): Promise<void> { this.accepting = false; }
   async drainRpc(): Promise<void> {}
   async drainWorkers(): Promise<void> {
-    if (this.current) await this.stopGeneration(this.current);
+    try {
+      if (this.current) await this.stopGeneration(this.current);
+    } catch (error) {
+      // Only a predecessor that has not received SIGTERM can safely resume admissions.
+      if (this.activeUrl && this.current && !this.running.get(this.current.socketPath)?.stopping) this.accepting = true;
+      throw error;
+    }
   }
   async currentGeneration(): Promise<MachineGenerationPointer | null> { return this.current; }
 
@@ -212,7 +257,15 @@ class MachineHost implements MachineReplacementHost {
     const checkpoint = join(this.options.root, 'checkpoints', crypto.randomUUID());
     await mkdir(checkpoint, { recursive: true });
     const databasePath = join(this.options.root, 'gitspace.db');
-    if (existsSync(databasePath)) await cp(databasePath, join(checkpoint, 'gitspace.db'));
+    if (existsSync(databasePath)) {
+      const database = new Database(databasePath, { readonly: true, strict: true });
+      try {
+        // A byte copy misses committed WAL pages when another connection remains open.
+        database.query('VACUUM INTO ?').run(join(checkpoint, 'gitspace.db'));
+      } finally {
+        database.close();
+      }
+    }
     return checkpoint;
   }
 
@@ -239,7 +292,7 @@ class MachineHost implements MachineReplacementHost {
   async probeSuccessor(next: MachineGenerationPointer): Promise<void> {
     const generation = this.running.get(next.socketPath);
     if (!generation) throw new Error(`Machine generation ${next.hash} is not running`);
-    const response = await fetch(new URL('/health', generation.url));
+    const response = await fetch(new URL('/health', generation.url), { signal: AbortSignal.timeout(30_000) });
     if (!response.ok) throw new Error(`Machine generation health failed with ${response.status}`);
   }
 
@@ -260,18 +313,55 @@ class MachineHost implements MachineReplacementHost {
   async stopGeneration(generation: MachineGenerationPointer, mode: 'replace' | 'release' = 'replace'): Promise<void> {
     const running = this.running.get(generation.socketPath);
     if (!running) return;
-    if (mode === 'replace') {
+    console.info(JSON.stringify({
+      event: 'native_replacement', machineId: this.options.machineId, operation: 'stop',
+      generation: generation.hash, mode, stage: 'shutdown', outcome: 'start',
+    }));
+    if (mode === 'replace' && !running.stopping && running.process.exitCode === null) {
       try {
-        await fetch(new URL('/__control/retire', running.url), {
+        const response = await fetch(new URL('/__control/retire', running.url), {
           method: 'POST',
           headers: { authorization: `Bearer ${this.options.controlToken}` },
+          signal: AbortSignal.timeout(30_000),
         });
+        if (!response.ok) throw new Error(`Retirement answered HTTP ${response.status}`);
+        const acknowledged = z.object({ stopMode: z.literal('replace') }).safeParse(await response.json());
+        if (!acknowledged.success) throw new Error('Retirement did not acknowledge retained workspace ownership');
       } catch (error) {
-        console.error(`[machine ${generation.hash.slice(7, 15)}] retire failed`, error);
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(JSON.stringify({
+          event: 'native_replacement', machineId: this.options.machineId, operation: 'retire',
+          generation: generation.hash, stage: 'retirement', outcome: 'failure', error: message,
+        }));
+        throw new Error(`Machine ${this.options.machineId} generation ${generation.hash} retirement failed: ${message}`, { cause: error });
       }
     }
-    running.process.kill('SIGTERM');
-    await running.process.exited;
+    let deadline: Timer | undefined;
+    try {
+      if (!running.stopping && running.process.exitCode === null) {
+        running.process.kill('SIGTERM');
+        running.stopping = true;
+      }
+      const exitCode = await Promise.race([
+        running.process.exited,
+        new Promise<never>((_resolve, reject) => {
+          deadline = setTimeout(() => reject(new Error('Graceful shutdown did not finish within 120000ms; the generation remains fenced and no replacement may start')), 120_000);
+        }),
+      ]);
+      console.info(JSON.stringify({
+        event: 'native_replacement', machineId: this.options.machineId, operation: 'stop',
+        generation: generation.hash, mode, stage: 'shutdown', outcome: 'exited', exitCode,
+      }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(JSON.stringify({
+        event: 'native_replacement', machineId: this.options.machineId, operation: 'stop',
+        generation: generation.hash, mode, stage: 'shutdown', outcome: 'failure', error: message,
+      }));
+      throw new Error(`Machine ${this.options.machineId} generation ${generation.hash} shutdown failed: ${message}`, { cause: error });
+    } finally {
+      clearTimeout(deadline);
+    }
     this.running.delete(generation.socketPath);
     if (this.current?.socketPath === generation.socketPath) this.activeUrl = null;
   }
@@ -321,9 +411,22 @@ class MachineHost implements MachineReplacementHost {
       stderr: 'pipe',
     });
     void forwardStream(process.stderr as ReadableStream<Uint8Array>, `[machine ${pointer.hash.slice(7, 15)}] `);
-    const generation = { pointer, process, url: await waitForReady(process, pointer.hash) };
-    this.running.set(pointer.socketPath, generation);
-    return generation;
+    try {
+      const generation = { pointer, process, url: await waitForReady(process, pointer.hash) };
+      this.running.set(pointer.socketPath, generation);
+      return generation;
+    } catch (error) {
+      // A failed startup must not keep writing the shared disk during rollback.
+      // It has no admitted RPCs or acknowledged retirement endpoint yet.
+      if (process.exitCode === null) process.kill('SIGKILL');
+      await process.exited;
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(JSON.stringify({
+        event: 'native_replacement', machineId: this.options.machineId, operation: 'start',
+        generation: pointer.hash, releaseSha, stage: 'readiness', outcome: 'failure', error: message,
+      }));
+      throw new Error(`Machine ${this.options.machineId} generation ${pointer.hash} readiness failed: ${message}`, { cause: error });
+    }
   }
 }
 
@@ -409,6 +512,7 @@ export class ReplacementEnvironment {
 
   constructor(readonly options: ReplacementEnvironmentOptions) {
     if (options.artifactKey.byteLength !== 32) throw new RangeError('Environment artifact key must be 32 bytes');
+    this.journal = openHostDeploymentJournal(options.root);
     this.frontend = new FrontendHost(options, {
       launch: (input) => this.launch(input),
       channel: (input) => this.channel(input),
@@ -418,7 +522,6 @@ export class ReplacementEnvironment {
     this.machine = new MachineHost(options, this.hostUrl);
     this.machineHost = this.machine;
     this.frontendHost = this.frontend;
-    this.journal = new DeploymentJournal(join(options.root, 'gitspace.db'));
     this.engine = new DeploymentEngine(this.journal, [
       new MachineReplacementDriver(options.root, this.machine),
       new FrontendReplacementDriver(options.root, this.frontend),
@@ -522,7 +625,16 @@ export class ReplacementEnvironment {
     });
     if (plan.status === 'error') throw plan.error;
     const executed = await this.engine.execute(plan.value);
-    if (executed.status === 'error') throw executed.error;
+    if (executed.status === 'error') {
+      console.error(JSON.stringify({
+        event: 'native_replacement', machineId: this.options.machineId, operation: 'replace',
+        operationId: executed.error.deploymentId, stage: executed.error.phase ?? 'execute',
+        generation: changed.find((artifact) => artifact.entrypoint === executed.error.entrypoint)?.hash ?? null,
+        activeGeneration: this.machineHash, releaseSha: input.releaseSha,
+        outcome: 'failure', error: executed.error.message,
+      }));
+      throw executed.error;
+    }
     for (const [target, artifact] of channelCandidates) this.channelArtifacts.set(target, artifact);
     for (const artifact of changed) {
       if (artifact.entrypoint === 'machine-daemon') {
