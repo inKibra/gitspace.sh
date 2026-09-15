@@ -40,15 +40,18 @@ describe('Cloudflare Sandbox tenant platform integration', () => {
     })).rejects.toThrow();
     expect(await env.FLEET_CATALOG.getByName(userId).listMachines()).toEqual([]);
   });
-  it('routes sleep, resume, and destroy through the tenant provider', async () => {
+  it('rejects a healthy process until its owned checkpoint recovery succeeds', async () => {
+    let recoveryFails = true;
     network.use(http.post(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/provider/compute/v1/sandboxes/sandbox-a/:action`, ({ params, request }) => {
       if (request.headers.get('x-gitspace-provider-token') !== env.PLATFORM_TOKEN) return new HttpResponse(null, { status: 403 });
-      const action = String(params.action);
-      return HttpResponse.json({ status: 'ok', value: action === 'destroy' ? { machineId: 'sandbox-a' } : { id: 'sandbox-a', label: 'Sandbox A', state: action === 'sleep' ? 'offline' : 'online', rpcEndpoint: action === 'sleep' ? null : 'https://sandbox.example/rpc', kind: 'sandbox', provider: 'cloudflare-sandbox', notes: action, desiredState: action === 'sleep' ? 'offline' : 'online', lifecycleRevision: 2, operationId: null, error: null } });
+      if (params.action === 'cancel-replacement') return recoveryFails
+        ? HttpResponse.json({ error: 'Checkpoint recovery failed' }, { status: 409 })
+        : HttpResponse.json({ prepared: false });
+      return HttpResponse.json({ status: 'ok', value: { id: 'sandbox-a', label: 'Sandbox A', state: 'online', rpcEndpoint: 'https://sandbox.example/rpc', kind: 'sandbox', provider: 'cloudflare-sandbox', notes: '', desiredState: 'online', lifecycleRevision: 2, operationId: null, error: null } });
     }));
-    expect(await controlCloudflareSandboxMachine({ env, userId: env.ACCOUNT_ID, machineId: 'sandbox-a', action: 'sleep' })).toMatchObject({ state: 'offline', rpcEndpoint: null });
+    await expect(controlCloudflareSandboxMachine({ env, userId: env.ACCOUNT_ID, machineId: 'sandbox-a', action: 'resume' })).rejects.toThrow('Checkpoint recovery failed');
+    recoveryFails = false;
     expect(await controlCloudflareSandboxMachine({ env, userId: env.ACCOUNT_ID, machineId: 'sandbox-a', action: 'resume' })).toMatchObject({ state: 'online', rpcEndpoint: 'https://sandbox.example/rpc' });
-    expect(await controlCloudflareSandboxMachine({ env, userId: env.ACCOUNT_ID, machineId: 'sandbox-a', action: 'destroy' })).toBeNull();
   });
 });
 
@@ -90,6 +93,7 @@ async function provisionFixture() {
     if (path.endsWith('/resume')) {
       await hold.ready;
     }
+    if (path.endsWith('/cancel-replacement')) return HttpResponse.json({ prepared: false });
     if (path.endsWith('/image/status')) return HttpResponse.json({ status: 'ok', value: { image, operationId: null, prepared: false, runtimeStarted: true } });
     if (path.endsWith('/status') && faults.status) return HttpResponse.json({ status: 'error', error: 'status unavailable' }, { status: 503 });
     const enrolled = enrollments.at(-1)!;

@@ -54,6 +54,9 @@ export async function controlCloudflareSandboxMachine(input: {
   if (!machine || machine.id !== input.machineId || machine.kind !== 'sandbox' || machine.provider !== 'cloudflare-sandbox' || (machine.state !== 'online' && machine.state !== 'offline') || typeof machine.label !== 'string' || typeof machine.notes !== 'string' || (machine.desiredState !== 'online' && machine.desiredState !== 'offline') || typeof machine.lifecycleRevision !== 'number') {
     throw new Error(`Cloudflare Sandbox ${input.action} returned an invalid machine record`);
   }
+  if (input.action === 'resume' && machine.state === 'online') {
+    await controlCloudflareSandboxReplacement({ env: input.env, userId: input.userId, machineId: input.machineId, action: 'cancel-replacement', service });
+  }
   return { id: machine.id, label: machine.label, state: machine.state, rpcEndpoint: typeof machine.rpcEndpoint === 'string' ? machine.rpcEndpoint : null, kind: 'sandbox', provider: 'cloudflare-sandbox', notes: machine.notes, desiredState: machine.desiredState, lifecycleRevision: machine.lifecycleRevision, operationId: null, error: null };
 }
 

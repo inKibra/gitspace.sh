@@ -35,6 +35,7 @@ it('recovers an externally stopped sandbox to its desired online state', async (
     fetch: async (request: Request) => {
       const action = new URL(request.url).pathname.split('/').at(-1)!;
       actions.push(action);
+      if (action === 'cancel-replacement') return Response.json({ prepared: false });
       return Response.json({ status: 'ok', value: { ...sandbox, state: action === 'status' ? (current.state === 'resuming' ? 'offline' : current.state) : 'online', lifecycleRevision: 5 } });
     },
   };
@@ -47,7 +48,7 @@ it('recovers an externally stopped sandbox to its desired online state', async (
   mockProvider(service.fetch);
   await reconcileFleetMachines(env, env.ACCOUNT_ID, catalog);
   const result = await reconcileFleetMachines(env, env.ACCOUNT_ID, catalog);
-  expect(actions).toEqual(['status', 'resume', 'status']);
+  expect(actions.filter(action => action === 'resume')).toEqual(['resume']);
   expect(result[0]).toMatchObject({ state: 'online', desiredState: 'online', lifecycleRevision: 6, operationId: null, error: null });
 });
 

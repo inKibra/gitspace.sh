@@ -654,7 +654,7 @@ export async function startMachineRuntime() {
     return { prepared: true, machineId, spaces: checkpoints };
   };
   const cancelReplacement = async () => {
-    if (!preparingReplacement) return { prepared: false, machineId };
+    // Restart checkpoints outlive this process, including a partially failed startup.
     for (const project of database.listProjects()) {
       for (const space of database.listSpaces(project.id)) {
         const cloud = await authority.getSpace(project.id, space.id);
