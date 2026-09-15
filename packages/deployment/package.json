@@ -14,6 +14,7 @@
     "release:publish": "bun src/release.ts publish"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "3.1132.0",
     "@gitspace/account-omp": "workspace:*",
     "@gitspace/protocol": "workspace:*",
     "@noble/curves": "^2.2.0",

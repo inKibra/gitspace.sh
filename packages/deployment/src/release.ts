@@ -1,4 +1,9 @@
 import { createHash } from 'node:crypto';
+import {
+  AbortMultipartUploadCommand, CompleteMultipartUploadCommand, CreateMultipartUploadCommand,
+  GetObjectCommand, PutObjectCommand, S3Client, S3ServiceException, UploadPartCommand,
+  type CompletedPart,
+} from '@aws-sdk/client-s3';
 import { createReadStream, createWriteStream } from 'node:fs';
 import { chmod, cp, lstat, mkdir, mkdtemp, open, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, relative, resolve, sep } from 'node:path';
@@ -230,7 +235,11 @@ function requiredEnvironment(name: string): string {
   return value;
 }
 
-export async function publishDistribution(directory: string, activate: boolean): Promise<void> {
+export async function publishDistribution(directory: string, activate: boolean, options: {
+  client?: S3Client;
+  bucket?: string;
+  signal?: AbortSignal;
+} = {}): Promise<void> {
   const manifestPath = join(directory, 'manifest.json');
   const manifestBytes = await readFile(manifestPath);
   const manifest = distributionManifestSchema.parse(JSON.parse(manifestBytes.toString('utf8')));
@@ -241,35 +250,187 @@ export async function publishDistribution(directory: string, activate: boolean):
   }
   const expectedText = `gitspace-distribution-v1\n${manifest.release}\n${manifest.client.sha256}\n`;
   if (await readFile(join(directory, 'channel.txt'), 'utf8') !== expectedText) throw new Error('Installer channel does not match the release');
-  const bucket = new Bun.S3Client({
-    bucket: process.env.R2_BUCKET ?? 'gitspace-data', region: 'auto',
+  const client = options.client ?? new S3Client({
+    region: 'auto', forcePathStyle: true, maxAttempts: 1,
     endpoint: `https://${requiredEnvironment('CLOUDFLARE_ACCOUNT_ID')}.r2.cloudflarestorage.com`,
-    accessKeyId: requiredEnvironment('R2_ACCESS_KEY_ID'), secretAccessKey: requiredEnvironment('R2_SECRET_ACCESS_KEY'),
+    credentials: { accessKeyId: requiredEnvironment('R2_ACCESS_KEY_ID'), secretAccessKey: requiredEnvironment('R2_SECRET_ACCESS_KEY') },
+    // SHA-256 is checked locally and on readback; do not add optional streaming checksums.
+    requestChecksumCalculation: 'WHEN_REQUIRED', responseChecksumValidation: 'WHEN_REQUIRED',
   });
+  const Bucket = options.bucket ?? process.env.R2_BUCKET ?? 'gitspace-data';
   const prefix = `distribution/v1/releases/${manifest.release}/${manifest.platform}/`;
-  const publishedManifest = bucket.file(`${prefix}manifest.json`);
-  const published = await publishedManifest.exists();
-  if (published && !Buffer.from(await publishedManifest.arrayBuffer()).equals(manifestBytes)) {
-    throw new Error(`Published release ${manifest.release}/${manifest.platform} is immutable; choose a new release id`);
-  }
-  for (const [name, expected, type] of [
-    ['gitspace', manifest.client, 'application/octet-stream'],
-    ['runtime.bin.gz', manifest.runtime, 'application/gzip'],
-    ['provenance.json', manifest.provenance, 'application/json'],
-  ] as const) {
-    const path = join(directory, name);
-    const actual = await digest(path);
-    if (actual.sha256 !== expected.sha256 || actual.size !== expected.size) throw new Error(`Release artifact integrity check failed: ${name}`);
-    if (!published) {
-      // Bun's S3 client uses bounded multipart uploads for large runtime payloads.
-      await bucket.file(`${prefix}${name}`).write(Bun.file(path), { type });
+  const signal = options.signal ?? AbortSignal.timeout(10 * 60_000);
+  type Digest = { sha256: string; size: number };
+  async function request<T>(
+    operation: string, key: string, bytes: number | null,
+    run: (deadline: AbortSignal) => Promise<T>, operationSignal = signal,
+  ): Promise<T> {
+    const started = performance.now();
+    const deadline = AbortSignal.any([operationSignal, AbortSignal.timeout(60_000)]);
+    const report = (outcome: string) => console.log(JSON.stringify({
+      event: 'distribution_publish', platform: manifest.platform, operation, key, bytes,
+      elapsedMs: Math.round(performance.now() - started), outcome,
+    }));
+    report('start');
+    const heartbeat = setInterval(() => report('pending'), 10_000);
+    try {
+      const result = await run(deadline);
+      report('success');
+      return result;
+    } catch (error) {
+      report(deadline.aborted ? 'aborted' : 'failure');
+      const metadata = error instanceof S3ServiceException ? error.$metadata : undefined;
+      const detail = deadline.aborted ? 'deadline exceeded or cancelled'
+        : error instanceof S3ServiceException ? `${error.name}; HTTP ${metadata?.httpStatusCode ?? 'unknown'}; request ${metadata?.requestId ?? 'unknown'}`
+          : error instanceof Error ? `${error.name}: ${error.message}` : 'UnknownError';
+      // Do not print signed requests, credentials, or unfiltered S3 error bodies.
+      throw new Error(`Distribution ${operation} ${key}: ${detail}`);
+    } finally {
+      clearInterval(heartbeat);
     }
   }
-  if (!published) await publishedManifest.write(manifestBytes, { type: 'application/json' });
-  if (activate) {
-    // Immutable assets first. Each platform channel is switched only after its entire release is uploaded.
-    await bucket.file(`distribution/v1/stable/${manifest.platform}.json`).write(JSON.stringify(channel), { type: 'application/json' });
-    await bucket.file(`distribution/v1/stable/${manifest.platform}.txt`).write(expectedText, { type: 'text/plain' });
+  async function remoteDigest(Key: string, expectedSize: number): Promise<Digest | null> {
+    return request('GetObject', Key, expectedSize, async (deadline) => {
+      let response;
+      try {
+        response = await client.send(new GetObjectCommand({ Bucket, Key }), { abortSignal: deadline });
+      } catch (error) {
+        if (error instanceof S3ServiceException && error.$metadata.httpStatusCode === 404) return null;
+        throw error;
+      }
+      if (!response.Body) throw new Error('Distribution response has no body');
+      const hash = createHash('sha256');
+      let size = 0;
+      // Aborting only the SDK command does not cover consuming its response body.
+      await response.Body.transformToWebStream().pipeTo(new WritableStream<Uint8Array>({
+        write(chunk) {
+          size += chunk.byteLength;
+          if (size > expectedSize) throw new Error('Distribution response exceeds its declared size');
+          hash.update(chunk);
+        },
+      }), { signal: deadline });
+      return { sha256: hash.digest('hex'), size };
+    });
+  }
+  function verify(key: string, actual: Digest, expected: Digest): void {
+    if (actual.sha256 !== expected.sha256 || actual.size !== expected.size) {
+      throw new Error(`Distribution integrity mismatch for ${key}; release objects are immutable`);
+    }
+  }
+  async function put(Key: string, body: Buffer | string | { path: string }, ContentType: string, bytes: number, immutable: boolean): Promise<void> {
+    const partSize = 8 * 1024 * 1024;
+    const condition = immutable ? { IfNoneMatch: '*' } : {};
+    if (typeof body === 'string' || Buffer.isBuffer(body) || bytes <= partSize) {
+      await request('PutObject', Key, bytes, async (deadline) => {
+        const Body = typeof body === 'string' || Buffer.isBuffer(body) ? body : createReadStream(body.path, { signal: deadline });
+        try {
+          await client.send(new PutObjectCommand({ Bucket, Key, Body, ContentType, ContentLength: bytes, ...condition }), { abortSignal: deadline });
+        } catch (error) {
+          if (!(immutable && error instanceof S3ServiceException && error.$metadata.httpStatusCode === 412)) throw error;
+        } finally {
+          if (Body instanceof Readable) Body.destroy();
+        }
+      });
+      return;
+    }
+    const { UploadId } = await request('CreateMultipartUpload', Key, null, (deadline) =>
+      client.send(new CreateMultipartUploadCommand({ Bucket, Key, ContentType }), { abortSignal: deadline }));
+    if (!UploadId) throw new Error(`Distribution multipart upload for ${Key} returned no upload id`);
+    const controller = new AbortController();
+    const uploadSignal = AbortSignal.any([signal, controller.signal]);
+    const parts: CompletedPart[] = [];
+    const partCount = Math.ceil(bytes / partSize);
+    let nextPart = 1;
+    const workers = Array.from({ length: Math.min(4, partCount) }, async () => {
+      while (nextPart <= partCount) {
+        uploadSignal.throwIfAborted();
+        const PartNumber = nextPart++;
+        const start = (PartNumber - 1) * partSize;
+        const end = Math.min(bytes, start + partSize) - 1;
+        const { ETag } = await request(`UploadPart ${PartNumber}/${partCount}`, Key, end - start + 1, async (deadline) => {
+          const Body = createReadStream(body.path, { start, end, signal: deadline });
+          try {
+            return await client.send(new UploadPartCommand({
+              Bucket, Key, UploadId, PartNumber, Body, ContentLength: end - start + 1,
+            }), { abortSignal: deadline });
+          } finally {
+            Body.destroy();
+          }
+        }, uploadSignal);
+        if (!ETag) throw new Error(`Distribution multipart upload ${Key} part ${PartNumber} returned no ETag`);
+        parts.push({ PartNumber, ETag });
+      }
+    });
+    async function abortMultipart(): Promise<void> {
+      // Cleanup needs its own budget even when the caller's deadline has expired.
+      await request('AbortMultipartUpload', Key, null, async (deadline) => {
+        try {
+          await client.send(new AbortMultipartUploadCommand({ Bucket, Key, UploadId }), { abortSignal: deadline });
+        } catch (error) {
+          if (!(error instanceof S3ServiceException && error.$metadata.httpStatusCode === 404)) throw error;
+        }
+      }, AbortSignal.timeout(10_000));
+    }
+    let completed = false;
+    try {
+      await Promise.all(workers);
+      parts.sort((left, right) => (left.PartNumber ?? 0) - (right.PartNumber ?? 0));
+      completed = await request('CompleteMultipartUpload', Key, null, async (deadline) => {
+        try {
+          await client.send(new CompleteMultipartUploadCommand({
+            Bucket, Key, UploadId, MultipartUpload: { Parts: parts }, ...condition,
+          }), { abortSignal: deadline });
+          return true;
+        } catch (error) {
+          if (immutable && error instanceof S3ServiceException && error.$metadata.httpStatusCode === 412) return false;
+          throw error;
+        }
+      });
+    } catch (error) {
+      controller.abort();
+      await Promise.allSettled(workers);
+      try { await abortMultipart(); } catch (cleanupError) {
+        throw new AggregateError([error, cleanupError], `Distribution upload and multipart cleanup failed for ${Key}`);
+      }
+      throw error;
+    }
+    if (!completed) await abortMultipart();
+  }
+  try {
+    const publishedKey = `${prefix}manifest.json`;
+    const published = await remoteDigest(publishedKey, expectedManifest.size);
+    if (published) verify(publishedKey, published, expectedManifest);
+    for (const [name, expected, type] of [
+      ['gitspace', manifest.client, 'application/octet-stream'],
+      ['runtime.bin.gz', manifest.runtime, 'application/gzip'],
+      ['provenance.json', manifest.provenance, 'application/json'],
+    ] as const) {
+      const path = join(directory, name);
+      verify(path, await digest(path), expected);
+      const key = `${prefix}${name}`;
+      let remote = await remoteDigest(key, expected.size);
+      if (!remote) {
+        if (published) throw new Error(`Published distribution object ${key} is missing`);
+        await put(key, { path }, type, expected.size, true);
+        remote = await remoteDigest(key, expected.size);
+      }
+      if (!remote) throw new Error(`Distribution object ${key} is missing after upload`);
+      verify(key, remote, expected);
+    }
+    if (!published) {
+      await put(publishedKey, manifestBytes, 'application/json', expectedManifest.size, true);
+      const committed = await remoteDigest(publishedKey, expectedManifest.size);
+      if (!committed) throw new Error(`Distribution manifest ${publishedKey} is missing after upload`);
+      verify(publishedKey, committed, expectedManifest);
+    }
+    if (activate) {
+      // Immutable assets are verified before either platform channel can change.
+      const channelText = JSON.stringify(channel);
+      await put(`distribution/v1/stable/${manifest.platform}.json`, channelText, 'application/json', Buffer.byteLength(channelText), false);
+      await put(`distribution/v1/stable/${manifest.platform}.txt`, expectedText, 'text/plain', Buffer.byteLength(expectedText), false);
+    }
+  } finally {
+    if (!options.client) client.destroy();
   }
 }
 
