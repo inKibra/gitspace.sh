@@ -3198,7 +3198,8 @@ const worker = {
             case 'catalog.space.get': value = await catalog.getSpace(String(body.payload.spaceId ?? '')); break;
             case 'catalog.space.list': value = await catalog.listSpaces(); break;
             case 'catalog.machine.put': value = await catalog.putMachine(catalogMachinePayload(body.payload)); break;
-            case 'catalog.machine.list': value = await reconcileFleetMachines(env, body.userId, catalog); break;
+            // Native startup reads this snapshot before readiness; provider reconciliation would wait on startup itself.
+            case 'catalog.machine.list': value = await catalog.listMachines(); break;
             case 'catalog.sandbox.create': value = await provisionManagedSandbox(env, body.userId, env.ACCOUNT_URL, body.payload.image === undefined ? undefined : cloudImageSelectionSchema.parse(body.payload.image)); break;
             case 'catalog.machine.sleep':
             case 'catalog.machine.resume':

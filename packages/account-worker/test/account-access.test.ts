@@ -68,6 +68,24 @@ async function account() {
   return { userId, handle, root, signing, grant, vault, brokerToken, signed, subscription, requests };
 }
 
+it('serves startup catalog snapshots without waiting for or changing provider readiness', async () => {
+  const fixture = await account();
+  const catalog = env.FLEET_CATALOG.getByName(fixture.userId);
+  const machine = { id: 'sandbox-restarting', label: 'Restarting', kind: 'sandbox' as const, provider: 'cloudflare-sandbox' as const, state: 'resuming' as const, desiredState: 'online' as const, rpcEndpoint: '/rpc', notes: '', lifecycleRevision: 3, operationId: 'restart', error: null };
+  await catalog.putMachine(machine);
+  let providerRequests = 0;
+  network.use(http.post(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/provider/compute/*`, () => {
+    providerRequests += 1;
+    return HttpResponse.json({ status: 'error', error: 'Provider is not ready' }, { status: 503 });
+  }));
+  const response = await SELF.fetch('https://auth.test/v1/control', {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(fixture.signed('catalog.machine.list')),
+  });
+  expect(await response.json()).toMatchObject({ status: 'ok', value: [machine] });
+  expect(await catalog.getMachine(machine.id)).toEqual(machine);
+  expect(providerRequests).toBe(0);
+});
+
 it('keeps signed machine lifecycle mutations scoped and unable to self-approve execution', async () => {
   const fixture = await account();
   const projectId = 'lifecycle-project';
