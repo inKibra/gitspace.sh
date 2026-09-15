@@ -5,8 +5,7 @@ import { z } from 'zod';
 import { cloudImageChoiceSchema, cloudImageOperationActive, cloudImageOperationCancellable, cloudImageProviderStatusSchema, cloudImageSelectionSchema, cloudImageStateSchema, type CloudImageChoice, type CloudImageSelection, type CloudImageState } from '@gitspace/protocol/cloud-image';
 import { cloudImageProviderCall, prepareCloudImage, resolveCloudImage, runCloudImageOperation } from './sandbox-rollout.js';
 import { controlCloudflareSandboxMachine, createCloudflareSandboxMachine } from './sandbox-provisioner.js';
-import type { UserProjectIndexDO } from './user-project-index.js';
-import type { ProjectAuthorityDO } from './project-authority.js';
+import type { ProjectAuthorityDO, UserProjectIndexDO } from './project-authority.js';
 
 export interface PortableSpaceDefinition {
   projectId: string;
