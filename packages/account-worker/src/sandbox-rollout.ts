@@ -30,7 +30,7 @@ export async function prepareCloudImage(env: Env, image: string): Promise<void> 
 
 export interface CloudImageOperationStore {
   saveCloudImage(state: CloudImageState): CloudImageState;
-  listSpaces(): PortableSpaceDefinition[];
+  listSpaces(): Promise<PortableSpaceDefinition[]>;
   getMachine(machineId: string): FleetMachineDefinition | null;
   putMachine(machine: FleetMachineDefinition): FleetMachineDefinition;
 }
@@ -49,8 +49,16 @@ export async function runCloudImageOperation(env: Env, store: CloudImageOperatio
     operation.error = null;
     state = store.saveCloudImage({ ...state, operation });
   };
-  const placements = async () => Promise.all(store.listSpaces().map(async ({ spaceId }) => ({ spaceId, placement: await authorities.getByName(`${env.ACCOUNT_ID}:${spaceId}`).get() })));
+  const placements = async () => Promise.all((await store.listSpaces()).map(async ({ spaceId }) => ({ spaceId, placement: await authorities.getByName(`${env.ACCOUNT_ID}:${spaceId}`).get() })));
   try {
+    if (operation.phase === 'resuming' || operation.phase === 'confirming' || operation.phase === 'cancelling') {
+      // Canonical restart markers survive an interrupted or incomplete recovery intent.
+      const previousCount = operation.resumeSpaceIds.length;
+      for (const { spaceId, placement } of await placements()) {
+        if (placement?.state === 'closed' && placement.resumeMachineId === machineId && !operation.resumeSpaceIds.includes(spaceId)) operation.resumeSpaceIds.push(spaceId);
+      }
+      if (operation.resumeSpaceIds.length !== previousCount) save(operation.phase, true);
+    }
     if (operation.phase === 'staging') {
       if (!state.desiredImage) state.desiredImage = (await resolveCloudImage(env, state.selection)).image;
       save('staging', !!operation.recoveryOf);

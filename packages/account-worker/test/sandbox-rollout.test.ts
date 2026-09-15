@@ -13,7 +13,10 @@ async function fixture() {
   const catalog = env.FLEET_CATALOG.getByName(env.ACCOUNT_ID);
   await catalog.putMachine(sandbox);
   await catalog.putMachine({ ...sandbox, id: 'sandbox-b', label: 'B' });
-  await catalog.putSpace({ projectId: 'project-a', projectName: 'A', repositoryReference: null, baseBranch: 'main', spaceId: 'space-a', kind: 'worktree', name: 'A', branch: 'work', phase: 'code' });
+  const projectAuthority = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:project-a`);
+  const project = await projectAuthority.bootstrap({ id: 'project-a', name: 'A', repositoryReference: null, baseBranch: 'main', createdBy: sandbox.id });
+  await env.USER_PROJECTS.getByName(env.ACCOUNT_ID).put(await projectAuthority.setProjectLifecycle(project.revision, 'active'));
+  await projectAuthority.putWorkspace({ id: 'space-a', projectId: 'project-a', kind: 'worktree', name: 'A', branch: 'work', phase: 'code', sourceKind: 'branch', sourceRef: 'work', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0 });
   const authority = env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:space-a`);
   const identity = { projectId: 'project-a', spaceId: 'space-a', machineId: sandbox.id };
   await authority.bootstrap(identity);
@@ -58,6 +61,8 @@ async function fixture() {
     }
     if (path === '/v1/sandboxes/sandbox-a/resume' || path === '/v1/sandboxes/sandbox-a/cancel-replacement') {
       resource.runtimeStarted = true;
+      const operation = (await env.FLEET_CATALOG.getByName(env.ACCOUNT_ID).cloudImage(sandbox.id))?.operation;
+      if (!operation?.resumeSpaceIds.includes('space-a')) return HttpResponse.json({ status: 'error', error: 'Workspace admission remains closed' }, { status: 503 });
       if (!faults.restore) {
         const placement = await authority.get();
         if (placement?.state === 'closed') {
@@ -110,6 +115,21 @@ it('never replaces after checkpoint failure and releases admission only after ca
   await f.catalog.retryCloudImage({ ...f.input, cancel: true });
   await expect.poll(() => f.catalog.cloudImage(sandbox.id)).toMatchObject({ currentImage: originalImage, operation: { phase: 'cancelled', barrier: false, error: null } });
   expect(await f.authority.get()).toMatchObject({ state: 'open', machineId: sandbox.id, generation: 3 });
+});
+
+it('recovers canonical restart checkpoints when interrupted intent omitted their identities', async () => {
+  const f = await fixture();
+  f.faults.restore = true;
+  await f.catalog.startCloudImage(f.input);
+  await expect.poll(() => f.catalog.cloudImage(sandbox.id)).toMatchObject({ operation: { phase: 'confirming', barrier: true, error: expect.any(String) } });
+  const interrupted = await f.catalog.cloudImage(sandbox.id);
+  if (!interrupted?.operation) throw new Error('Recovery intent is missing');
+  await f.catalog.saveCloudImage({ ...interrupted, operation: { ...interrupted.operation, resumeSpaceIds: [] } });
+  f.faults.restore = false;
+  await f.catalog.retryCloudImage(f.input);
+  await expect.poll(() => f.catalog.cloudImage(sandbox.id)).toMatchObject({ operation: { phase: 'complete', barrier: false, error: null } });
+  expect(await f.authority.get()).toMatchObject({ state: 'open', machineId: sandbox.id, generation: 3 });
+  expect(f.calls.filter(path => path === '/v1/sandboxes/sandbox-a/image')).toEqual(['/v1/sandboxes/sandbox-a/image']);
 });
 
 it('retains an uncertain switch barrier and recovers the same operation without replacing again', async () => {

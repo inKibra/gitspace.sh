@@ -22,11 +22,7 @@ describe('machine provider lifecycle contract', () => {
   });
 
   it('blocks destroy while the machine still owns an open space', async () => {
-    const userId = env.ACCOUNT_ID;
-    const catalog = env.FLEET_CATALOG.getByName(userId);
-    await catalog.putMachine(sandbox);
-    await catalog.putSpace({ projectId: 'project-a', projectName: 'Project A', repositoryReference: null, baseBranch: 'main', spaceId: 'project-a', kind: 'base', name: 'Project A', branch: 'main', phase: null });
-    await env.SPACE_AUTHORITY.getByName(`${userId}:project-a`).bootstrap({ projectId: 'project-a', spaceId: 'project-a', machineId: 'sandbox-a' });
+    const { userId, catalog } = await openSpaceMachine();
     await expect(controlFleetMachine(env, userId, sandbox.id, 'destroy')).rejects.toThrow(/still owns open space/u);
     expect(await catalog.getMachine(sandbox.id)).toEqual(sandbox);
   });
@@ -59,7 +55,10 @@ async function openSpaceMachine(desiredState: 'online' | 'offline' = 'online') {
   const userId = env.ACCOUNT_ID;
   const catalog = env.FLEET_CATALOG.getByName(userId);
   await catalog.putMachine({ ...sandbox, desiredState });
-  await catalog.putSpace({ projectId: 'project-a', projectName: 'Project A', repositoryReference: null, baseBranch: 'main', spaceId: 'project-a', kind: 'base', name: 'Project A', branch: 'main', phase: null });
+  const projectAuthority = env.PROJECT_AUTHORITY.getByName(`${userId}:project-a`);
+  const project = await projectAuthority.bootstrap({ id: 'project-a', name: 'Project A', repositoryReference: null, baseBranch: 'main', createdBy: sandbox.id });
+  await env.USER_PROJECTS.getByName(userId).put(await projectAuthority.setProjectLifecycle(project.revision, 'active'));
+  await projectAuthority.putWorkspace({ id: 'project-a', projectId: 'project-a', kind: 'base', name: 'Project A', branch: 'main', phase: null, sourceKind: 'base', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0 });
   const authority = env.SPACE_AUTHORITY.getByName(`${userId}:project-a`);
   const identity = { projectId: 'project-a', spaceId: 'project-a', machineId: sandbox.id };
   await authority.bootstrap(identity);

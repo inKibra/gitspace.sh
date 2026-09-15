@@ -5,6 +5,8 @@ import { z } from 'zod';
 import { cloudImageChoiceSchema, cloudImageOperationActive, cloudImageOperationCancellable, cloudImageProviderStatusSchema, cloudImageSelectionSchema, cloudImageStateSchema, type CloudImageChoice, type CloudImageSelection, type CloudImageState } from '@gitspace/protocol/cloud-image';
 import { cloudImageProviderCall, prepareCloudImage, resolveCloudImage, runCloudImageOperation } from './sandbox-rollout.js';
 import { controlCloudflareSandboxMachine, createCloudflareSandboxMachine } from './sandbox-provisioner.js';
+import type { UserProjectIndexDO } from './user-project-index.js';
+import type { ProjectAuthorityDO } from './project-authority.js';
 
 export interface PortableSpaceDefinition {
   projectId: string;
@@ -310,9 +312,17 @@ export class FleetCatalogDO extends DurableObject<Env> {
     return row ? JSON.parse(row.definition_json) as PortableSpaceDefinition : null;
   }
 
-  listSpaces(): PortableSpaceDefinition[] {
-    return this.ctx.storage.sql.exec<{ definition_json: string }>('SELECT definition_json FROM space_definitions ORDER BY project_id, space_id').toArray()
-      .map((row) => JSON.parse(row.definition_json) as PortableSpaceDefinition);
+  async listSpaces(): Promise<PortableSpaceDefinition[]> {
+    const projects = await (this.env.USER_PROJECTS as DurableObjectNamespace<UserProjectIndexDO>).getByName(this.env.ACCOUNT_ID).list();
+    const definitions = await Promise.all(projects.map(async project => ({
+      project,
+      workspaces: await (this.env.PROJECT_AUTHORITY as DurableObjectNamespace<ProjectAuthorityDO>).getByName(`${this.env.ACCOUNT_ID}:${project.id}`).listWorkspaces(),
+    })));
+    return definitions.flatMap(({ project, workspaces }) => workspaces.map(workspace => ({
+      projectId: project.id, projectName: project.name, repositoryReference: project.repositoryReference,
+      baseBranch: project.baseBranch, spaceId: workspace.id, kind: workspace.kind,
+      name: workspace.name, branch: workspace.branch, phase: workspace.phase,
+    })));
   }
 
   putMachine(input: FleetMachineDefinition): FleetMachineDefinition {
