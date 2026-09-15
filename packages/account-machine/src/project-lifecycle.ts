@@ -701,6 +701,26 @@ export class ProjectLifecycleManager {
     const current = (await this.authority.listProjectWorkspaces(projectId)).find((workspace) => workspace.id === workspaceId);
     if (!current) throw new Error(`Workspace ${workspaceId} does not exist in project authority`);
     if (expectedRevision !== undefined && current.revision !== expectedRevision) throw new Error(`Workspace revision conflict: expected ${expectedRevision}, actual ${current.revision}`);
+    if (lifecycle === 'active') {
+      const placement = await this.authority.getSpace(projectId, workspaceId);
+      if (!placement) throw new Error(`Workspace ${workspaceId} has no placement to recover`);
+      if (placement.publishedRevision === 0) {
+        const local = this.database.getSpace(workspaceId);
+        if (placement.state !== 'open' || placement.machineId !== this.machineId ||
+            !local || local.placementState !== 'open' || local.holderId !== this.machineId ||
+            local.generation !== placement.generation) {
+          throw new Error('Initial checkpoint recovery requires the matching locally held open generation');
+        }
+        if (!this.checkpointSpace) throw new Error('Initial checkpoint recovery is unavailable');
+        // Release publishes without removing the retained checkout; reopen before activation.
+        await this.checkpointSpace(workspaceId);
+        const recovered = await this.authority.getSpace(projectId, workspaceId);
+        if (!recovered || recovered.publishedRevision === 0 || !recovered.manifestKey ||
+            recovered.state !== 'open' || recovered.machineId !== this.machineId) {
+          throw new Error('Initial checkpoint recovery did not publish and reopen the workspace');
+        }
+      }
+    }
     return this.authority.putProjectWorkspace(projectId, {
       id: current.id,
       projectId: current.projectId,

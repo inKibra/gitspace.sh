@@ -1115,10 +1115,10 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
   const restoreWorkspace = server.implement(restoreWorkspaceContract).handler(async ({ input, errors }) => {
     const space = options.database.getSpace(input.spaceId);
     if (!space) return err(errors.WorkspaceNotFound({ workspaceId: input.spaceId }));
-    if (space.placementState !== 'closed' && space.holderId !== options.machineId) {
-      return err(errors.OperationFailed({ operation: 'restore workspace', message: 'Space is active on another machine' }));
+    if (space.placementState !== 'closed' && (space.placementState !== 'open' || space.holderId !== options.machineId)) {
+      return err(errors.OperationFailed({ operation: 'restore workspace', message: 'Space is transitioning or active on another machine' }));
     }
-    if (space.placementState === 'closed' && space.generation !== input.expectedGeneration) {
+    if (space.generation !== input.expectedGeneration) {
       return err(errors.OperationFailed({ operation: 'restore workspace', message: 'Space placement changed before restore' }));
     }
     try {
@@ -1130,9 +1130,9 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
         } else {
           await options.spaces.open(input.spaceId, input.expectedGeneration);
         }
+        await options.projects.setWorkspaceLifecycle(space.projectId, space.id, 'active');
         const opened = options.database.getSpace(input.spaceId);
         if (!opened) throw new Error(`Workspace ${input.spaceId} is unavailable after restore`);
-        await options.projects.setWorkspaceLifecycle(opened.projectId, opened.id, 'active');
         return lifecycleView(opened);
       });
       return ok(value);

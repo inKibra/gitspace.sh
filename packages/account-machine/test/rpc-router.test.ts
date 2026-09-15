@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -1195,6 +1195,23 @@ describe('GitSpace Result RPC', () => {
     expect(stagedDiff.status).toBe('ok');
     if (stagedDiff.status === 'error') throw stagedDiff.error;
     expect(stagedDiff.value.patch).toContain('-workspace\n+staged\n');
+
+    const beforeRecovery = database.getSpace('workspace-a')!;
+    expect((await client.workspace.restore({
+      spaceId: beforeRecovery.id, expectedGeneration: beforeRecovery.generation - 1,
+    })).status).toBe('error');
+    expect(database.getSpace(beforeRecovery.id)?.generation).toBe(beforeRecovery.generation);
+    projectAuthority.setWorkspaceLifecycle = async () => {
+      await spaces.release(beforeRecovery, beforeRecovery.generation);
+      await spaces.open(beforeRecovery.id, beforeRecovery.generation + 1);
+      return undefined;
+    };
+    expect(await client.workspace.restore({
+      spaceId: beforeRecovery.id, expectedGeneration: beforeRecovery.generation,
+    })).toMatchObject({
+      status: 'ok', value: { state: 'active', machineId: 'machine-a', generation: beforeRecovery.generation + 2 },
+    });
+    expect(readFileSync(join(workspaceRoot, 'portable.txt'), 'utf8')).toBe('staged\n');
 
     expect((await sessions.close(created.value.id)).status).toBe('ok');
     expect((await sessions.close(projectAgent.value.id)).status).toBe('ok');

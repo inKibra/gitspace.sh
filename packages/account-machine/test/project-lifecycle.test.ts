@@ -177,6 +177,43 @@ function checkpointedPlacement(placement: SpaceAuthorityRecord): SpaceAuthorityR
   }, now);
 }
 
+describe('ProjectLifecycleManager.setWorkspaceLifecycle', () => {
+  it.each(['failed', 'active'] as const)('retries the initial checkpoint before activating a %s retained workspace', async (lifecycle) => {
+    const fixture = archiveFixture(lifecycle);
+    const { root, database, authority, definition, input } = fixture;
+    const local = fixture.materialize();
+    mkdirSync(local.rootPath, { recursive: true });
+    writeFileSync(join(local.rootPath, 'retained.txt'), 'unpublished work\n');
+    await authority.bootstrap(input);
+    let storageAvailable = false;
+    const manager = new ProjectLifecycleManager(database, authority, 'machine-a', join(root, 'spaces'), async () => {
+      if (!storageAvailable) throw new Error('s3 put error: dispatch failure');
+      await fixture.close(database.getSpace(local.id)!, local.generation);
+      const held = database.possessSpace(local.id, 'machine-a');
+      if (held.status === 'error') throw held.error;
+      authority.spaces.set(local.id, {
+        ...authority.spaces.get(local.id)!, state: 'open', machineId: 'machine-a',
+        generation: database.getSpace(local.id)!.generation,
+      });
+    });
+    try {
+      await expect(manager.setWorkspaceLifecycle(input.projectId, local.id, 'active', definition.revision)).rejects.toThrow('s3 put error');
+      expect(authority.workspaces.get(local.id)).toEqual(definition);
+      expect(readFileSync(join(local.rootPath, 'retained.txt'), 'utf8')).toBe('unpublished work\n');
+      storageAvailable = true;
+      const restored = await manager.setWorkspaceLifecycle(input.projectId, local.id, 'active', definition.revision);
+      expect(restored).toMatchObject({ lifecycle: 'active', goalId: definition.goalId, sourceCommit: definition.sourceCommit });
+      expect(await authority.getSpace(input.projectId, local.id)).toMatchObject({
+        state: 'open', machineId: 'machine-a', publishedRevision: 1,
+        generation: database.getSpace(local.id)!.generation,
+      });
+      expect(readFileSync(join(local.rootPath, 'retained.txt'), 'utf8')).toBe('unpublished work\n');
+    } finally {
+      database.close();
+    }
+  });
+});
+
 describe('ProjectLifecycleManager.archiveWorkspace', () => {
   it('archives a cloud-only failed creation without inventing a projection, placement, or checkout', async () => {
     const { root, database, authority, manager, definition, input } = archiveFixture();
@@ -447,6 +484,8 @@ describe('ProjectLifecycleManager', () => {
     try {
       const { project } = await manager.createProject({ name: 'Provenance', baseBranch: 'trunk', repositoryUrl: source });
       const { workspace } = await manager.createWorkspace({ projectId: project.id, name: 'Feature', branch: 'feature', sourceKind: 'branch', sourceRef: 'origin/trunk' });
+      const placement = authority.spaces.get(workspace.id)!;
+      authority.spaces.set(workspace.id, { ...placement, checkpointRevision: 1, publishedRevision: 1, manifestKey: 'provenance-checkpoint', manifestHash: `sha256:${'1'.repeat(64)}` });
       expect(git(workspace.rootPath, 'rev-parse', 'HEAD')).not.toBe(sourceCommit);
       expect(authority.workspaces.get(workspace.id)).toMatchObject({ sourceCommit, sourceKind: 'branch', sourceRef: 'origin/trunk', lifecycle: 'active' });
       expect(await manager.setWorkspacePhase(project.id, workspace.id, 'review')).toMatchObject({ phase: 'review', sourceCommit });

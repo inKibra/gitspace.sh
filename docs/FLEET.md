@@ -897,6 +897,12 @@ Execute one by one; each ticket must name the package/replacement unit it owns.
     Destructive close also requires the repository root to be beneath the
     machine's managed-space root; self-development source checkouts and other
     externally owned paths fail closed before deletion.
+    Activating a retained creation with no published initial checkpoint first
+    retries the retained-checkout release/open path, fenced by local and
+    authoritative ownership and generation—even if its definition already says
+    active. Only a published, reopened checkpoint permits activation; storage
+    failure leaves the definition unchanged.
+    Restore returns the post-recovery generation and does not delete the checkout.
     The move demo adds a user-scoped `FleetCatalogDO`, separate per-machine
     SQLite projections, and client-orchestrated source close plus target open.
     `bun run demo:move` runs two isolated machines behind one browser transport
