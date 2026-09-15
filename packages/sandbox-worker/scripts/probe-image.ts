@@ -2,6 +2,16 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { OMP_IPC_VERSION, OmpRpcPeer, type OmpChildApi } from '../../account-omp/src/ipc.js';
+import { validateExecutableArtifact } from '../../account-omp/src/manifest.js';
+import { prepareMachineNativeRuntime } from '../../deployment/src/native-runtime.js';
+
+const machinePath = '/opt/gitspace/machine';
+const hash = process.env.GITSPACE_PROBE_MACHINE_HASH;
+const manifestHash = process.env.GITSPACE_PROBE_MACHINE_MANIFEST_HASH;
+if (!hash || !manifestHash) throw new Error('Run the probe compiled into the image with its initial machine trust anchors');
+await validateExecutableArtifact(machinePath, { target: 'machine', hash, manifestHash });
+const walgit = await prepareMachineNativeRuntime(machinePath);
+console.log(JSON.stringify({ walgit: 'ready', path: walgit, machineHash: hash }));
 
 const home = await mkdtemp(join(tmpdir(), 'gitspace-image-probe-'));
 const rpc = new OmpRpcPeer<OmpChildApi, Record<string, never>>((message) => child.send(message), {});

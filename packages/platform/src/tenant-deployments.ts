@@ -1,5 +1,6 @@
 import { DurableObject } from 'cloudflare:workers';
 import { workerReleaseMetadataSchema, type WorkerReleaseMetadata } from '@gitspace/protocol/deployment';
+import { TenantComputeProvider } from './compute-provider.js';
 
 /** One upload the platform performed for this tenant, in RELEASES bucket terms. */
 export interface TenantDeployRecord {
@@ -84,6 +85,7 @@ function toRecord(row: DeployRow): TenantDeployRecord {
  * and the upload history the revert paths walk.
  */
 export class TenantDeploymentsDO extends DurableObject<Env> {
+  private computeProvider: TenantComputeProvider | null = null;
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     ctx.blockConcurrencyWhile(async () => {
@@ -121,6 +123,14 @@ export class TenantDeploymentsDO extends DurableObject<Env> {
       `);
     });
   }
+  async compute(tenant: string, accountId: string, request: Request): Promise<Response> {
+    if (this.computeProvider && (this.computeProvider.tenant !== tenant || this.computeProvider.accountId !== accountId)) {
+      throw new Error('Compute namespace identity does not match this tenant');
+    }
+    this.computeProvider ??= new TenantComputeProvider(this.ctx.storage, this.env, tenant, accountId);
+    return this.computeProvider.fetch(request);
+  }
+
   configure(rootPublicKey: string, blobBucket: string): { created: boolean; rootPublicKey: string; blobBucket: string } {
     if (!/^[A-Za-z0-9+/]{43}=$/u.test(rootPublicKey)) throw new Error('Tenant root public key is invalid');
     if (!/^gsp-relay-[a-z0-9](?:[a-z0-9-]{0,50}[a-z0-9])?$/u.test(blobBucket)) throw new Error('Tenant relay bucket is invalid');

@@ -99,6 +99,27 @@ Account deployment progress comes from `DeploymentLauncher` through `deployment.
 
 Do not manually write runtime-selection files or call `/__environment/launch` as an alternate deployment procedure. Those are implementation details of the product's replacement path. If the supported path fails, diagnose that failure and fix the path rather than bypassing it. **Back to stable** uses the account's `deployment.revert` operation.
 
+For the first upgrade from a machine whose launcher predates native packaging,
+keep its existing host running and use the CLI's source-recovery entrypoint
+**before** replacing the host or cloud image:
+
+```bash
+gitspace machine recover --source /path/to/held/gitspace-checkout --workspace <workspace-id>
+# The same product command from an installed source checkout:
+bun packages/cli/src/index.ts machine recover --source . --workspace <workspace-id>
+```
+
+Run it from a native shell or linked provider console, not a managed terminal
+that replacement will drain. Recovery reads the current workspace database in
+readonly mode, then runs the ordinary `DeploymentLauncher` build/upload/stage/
+launch transaction with the source checkout's own builders. It stages only the
+tenant's machine target and waits for the old host's normal health/rollback
+result; it does not change host/runtime selections, stop the host, or replace
+tenant code with stock code. The first native build needs the real pinned
+toolchain or verified build cache described in [FLEET.md](docs/FLEET.md), not an
+untracked or older global WalGit binary. After success, ordinary **Launch GitSpace
+from here** handles subsequent native changes through workspace-owned builds.
+
 Cloud container images build on GitHub through `.github/workflows/publish-container.yml`. Push a `container-*` tag to build and publish that commit.
 
 - Set the repository variable `CLOUDFLARE_ACCOUNT_ID`.

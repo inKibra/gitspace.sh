@@ -24,6 +24,12 @@ createRoot(root).render(<SettingsPage
     { id: 'sandbox-a', label: 'Cloudflare build-a', state: 'resuming', kind: 'sandbox', provider: 'cloudflare-sandbox', notes: 'GitSpace runtime starting.', desiredState: 'online', lifecycleRevision: 2, operationId: 'resume-a', error: null },
     { id: 'sandbox-b', label: 'Cloudflare build-b', state: 'error', kind: 'sandbox', provider: 'cloudflare-sandbox', notes: 'Build isolation.', desiredState: 'online', lifecycleRevision: 4, operationId: null, error: 'Sandbox runtime exited before the RPC probe became ready.' },
   ]}
+  cloudImages={[]}
+  cloudImageDefault={null}
+  cloudImageError={null}
+  onChangeCloudImage={unavailable}
+  onRecoverCloudImage={unavailable}
+  onSetCloudImageDefault={unavailable}
   ompSettings={[]}
   ompGeneration={4}
   models={[]}

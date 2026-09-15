@@ -1,6 +1,7 @@
 import { env, SELF } from 'cloudflare:test';
 import { ed25519 } from '@noble/curves/ed25519.js';
-import { createDeviceBinding, createSignedRpcFetch, credentialProtocolBase64, deriveArtifactScopeKey, encryptArtifactBytes, signDeviceInvite, signRpcRequest, type DeviceCapability, type DeviceScope } from '@gitspace/protocol';
+import { createDeviceBinding, createSignedRpcFetch, credentialProtocolBase64, deriveArtifactScopeKey, encodeApiKey, encryptArtifactBytes, signDeviceInvite, signRpcRequest, type DeviceCapability, type DeviceScope } from '@gitspace/protocol';
+import { createGitSpaceClient } from '@gitspace/protocol/client';
 import { CHECKPOINT_CHUNK_BYTES, CHUNKED_CHECKPOINT_VERSION, spaceCheckpointManifestKey, spaceGitCheckpointRef, spaceOmpCheckpointKey, type SpaceCheckpointManifest } from '@gitspace/protocol-workspace';
 import type { ProviderView } from '@gitspace/protocol';
 import { executionHash } from '@gitspace/protocol-environment';
@@ -284,16 +285,15 @@ describe('account cloud RPC without machines', () => {
     const content = 'modelRoles:\n  default: openai/gpt-4o\n';
     const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(content)));
     await env.USER_SETTINGS.getByName(fixture.userId).updateOmp('bootstrap', { expectedGeneration: 0, content, checksum: `sha256:${Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('')}` });
-    const fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {
-      const request = new Request(input, init);
-      const headers = new Headers(request.headers);
-      headers.set('x-gitspace-user', fixture.userId);
-      return SELF.fetch(new Request(request, { headers }));
-    }) as typeof fetch;
-    const client = createBrowserClient({ contract: gitspaceContract, transport: createRoutedTransport({
-      homeUrl: `https://${fixture.handle}.gitspace.sh/rpc`,
-      fetch: createSignedRpcFetch({ deviceId: fixture.deviceId, signingPrivateKey: fixture.signingPrivateKey, fetch: fetcher }),
-    }) });
+    const client = createGitSpaceClient({
+      key: encodeApiKey({
+        version: 2, userId: fixture.userId, deviceId: fixture.deviceId,
+        signingPrivateKey: credentialProtocolBase64.encode(fixture.signingPrivateKey),
+        rpcUrl: `https://${fixture.handle}.gitspace.sh/rpc`,
+        enrollUrl: `https://${fixture.handle}.gitspace.sh`,
+      }),
+      fetch: ((input, init) => SELF.fetch(new Request(input, init))) as typeof fetch,
+    });
     const [settings, omp, machine] = await Promise.all([
       client.settings.get({}), client.settings.omp.get({}), client.browserRelay.status({}),
     ]);
@@ -305,6 +305,49 @@ describe('account cloud RPC without machines', () => {
   it('does not turn a project-scoped API key into account access', async () => {
     const fixture = await account(['rpc.read'], 'client', { kind: 'project', projectId: 'project-a' });
     expect((await SELF.fetch(fixture.request(single('settings.get')))).status).toBe(403);
+  });
+
+  it('requires deployment control for cloud images and rejects a foreign account or machine before provider work', async () => {
+    const reader = await account(['rpc.read', 'fleet.control']);
+    const input = { machineId: 'sandbox-foreign', operationId: crypto.randomUUID(), selection: { kind: 'custom', image: `ghcr.io/tenant/custom@sha256:${'a'.repeat(64)}` } };
+    expect((await SELF.fetch(reader.request(single('machine.image.set', input)))).status).toBe(403);
+    const custom = { image: input.selection };
+    expect((await SELF.fetch(reader.request(single('machine.createSandbox', custom)))).status).toBe(403);
+    expect((await SELF.fetch(reader.request(single('machine.createSandbox', { image: { kind: 'platform-default' } })))).status).toBe(403);
+    expect((await SELF.fetch(reader.request({ v: 1, batch: [
+      { id: 'machines', path: 'machines', input: {} }, { id: 'create', path: 'machine.createSandbox', input: custom },
+    ] }))).status).toBe(403);
+    const owner = await account(['rpc.read', 'deployment.control']);
+    expect((await SELF.fetch(owner.request(single('machine.createSandbox', custom)))).status).toBe(403);
+    const foreign = owner.request(single('machine.image.set', input));
+    foreign.headers.set('x-gitspace-user', `u-${'f'.repeat(32)}`);
+    expect((await SELF.fetch(foreign)).status).toBe(403);
+    const missing = await SELF.fetch(owner.request(single('machine.image.set', input)));
+    expect(parse(await missing.text())).toMatchObject({ status: 'error' });
+    expect(await env.FLEET_CATALOG.getByName(owner.userId).listCloudImages()).toEqual([]);
+  });
+
+  it('admits explicit sandbox images only with both grants and keeps omitted images fleet-only', async () => {
+    const reader = await account(['fleet.control']);
+    const owner = await account(['fleet.control', 'deployment.control']);
+    const custom = { image: { kind: 'custom', image: `ghcr.io/tenant/custom@sha256:${'a'.repeat(64)}` } } as const;
+    // No storage has been provisioned: authorized requests reach the real creation
+    // prerequisite and fail without creating a machine or contacting the provider.
+    for (const [fixture, input] of [
+      [reader, {}],
+      [owner, custom],
+      [owner, { image: { kind: 'platform-default' } }],
+    ] as const) {
+      const result = await inspectorClient(fixture).machine.createSandbox(input);
+      expect(result.status === 'error' && rpcErrors.operationFailed.is(result.error)).toBe(true);
+    }
+    const scoped = await account(['fleet.control', 'deployment.control'], 'client', { kind: 'project', projectId: 'project-a' });
+    expect((await SELF.fetch(scoped.request(single('machine.createSandbox', custom)))).status).toBe(403);
+    expect((await SELF.fetch(scoped.request(single('machine.createSandbox')))).status).toBe(403);
+    const foreign = owner.request(single('machine.createSandbox', custom));
+    foreign.headers.set('x-gitspace-user', `u-${'f'.repeat(32)}`);
+    expect((await SELF.fetch(foreign)).status).toBe(403);
+    expect(await env.FLEET_CATALOG.getByName(owner.userId).listMachines()).toEqual([]);
   });
 
   it('stores provider keys in the canonical broker but never discloses them in RPC views', async () => {
@@ -391,14 +434,11 @@ interface InspectorAccount {
 
 function inspectorClient(fixture: InspectorAccount, fetchResponse: (request: Request) => Promise<Response> = (request) => SELF.fetch(request)) {
   const fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {
-    const request = new Request(input, init);
-    const headers = new Headers(request.headers);
-    headers.set('x-gitspace-user', fixture.userId);
-    return fetchResponse(new Request(request, { headers }));
+    return fetchResponse(new Request(input, init));
   }) as typeof fetch;
   return createBrowserClient({ contract: gitspaceContract, transport: createRoutedTransport({
     homeUrl: `https://${fixture.handle}.gitspace.sh/rpc`,
-    fetch: createSignedRpcFetch({ deviceId: fixture.deviceId, signingPrivateKey: fixture.signingPrivateKey, fetch: fetcher }),
+    fetch: createSignedRpcFetch({ deviceId: fixture.deviceId, userId: fixture.userId, signingPrivateKey: fixture.signingPrivateKey, fetch: fetcher }),
   }) });
 }
 

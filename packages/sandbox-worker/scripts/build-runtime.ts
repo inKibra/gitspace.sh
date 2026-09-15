@@ -63,6 +63,15 @@ export async function partitionRuntime(root: string, output: string, slots: numb
 if (import.meta.main) {
   const slots = Number(process.env.GITSPACE_RUNTIME_LAYER_COUNT);
   if (!Number.isInteger(slots) || slots < 1) throw new Error('GITSPACE_RUNTIME_LAYER_COUNT is required');
-  await buildInitialRuntime(process.cwd(), '/out');
+  const initial = await buildInitialRuntime(process.cwd(), '/out');
+  const probe = await Bun.build({
+    entrypoints: [join(process.cwd(), 'packages/sandbox-worker/scripts/probe-image.ts')],
+    target: 'bun', outdir: '/out', naming: 'probe-image.js',
+    define: {
+      'process.env.GITSPACE_PROBE_MACHINE_HASH': JSON.stringify(initial.machine.hash),
+      'process.env.GITSPACE_PROBE_MACHINE_MANIFEST_HASH': JSON.stringify(initial.machine.manifestHash),
+    },
+  });
+  if (!probe.success) throw new AggregateError(probe.logs, 'Container native/OMP probe build failed');
   console.log(JSON.stringify({ runtimeLayers: await partitionRuntime('/out', '/runtime-layers', slots) }));
 }

@@ -1,3 +1,4 @@
+import type { CloudImageSelection } from '@gitspace/protocol/cloud-image';
 import {
   listAccountSecretsContract,
   putAccountSecretContract,
@@ -408,7 +409,7 @@ export interface GitSpaceRpcRouterOptions {
   checkpointTranscript?(projectId: string, spaceId: string): Promise<ClosedSpaceTranscript | null>;
   checkpointTranscriptPage?(projectId: string, spaceId: string, request: TranscriptPageRequest): Promise<TranscriptPage | null>;
   checkpointTranscriptContent?(projectId: string, spaceId: string, request: TranscriptContentRequest): Promise<TranscriptContentPage | null>;
-  createSandbox?(): Promise<FleetMachineRpcView>;
+  createSandbox?(image?: CloudImageSelection): Promise<FleetMachineRpcView>;
   updateMachine?(machineId: string, notes: string): Promise<FleetMachineRpcView>;
   controlMachine?(action: 'sleep' | 'resume', machineId: string): Promise<FleetMachineRpcView>;
   destroyMachine?(machineId: string): Promise<{ machineId: string; removed: boolean }>;
@@ -1212,10 +1213,10 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
     }
   });
 
-  const createSandbox = server.implement(createSandboxMachineContract).handler(async ({ errors }) => {
+  const createSandbox = server.implement(createSandboxMachineContract).handler(async ({ input, errors }) => {
     if (!options.createSandbox) return err(errors.OperationFailed({ operation: 'create sandbox', message: 'Sandbox provisioning is unavailable' }));
     try {
-      return ok(await options.createSandbox());
+      return ok(await options.createSandbox(input.image));
     } catch (error) {
       return err(errors.OperationFailed({ operation: 'create sandbox', message: error instanceof Error ? error.message : 'Unable to create sandbox' }));
     }

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import type { AvailableModel, BrowserRelayStatus, ComposioSetupRpcView, DeploymentStatusView, DeviceCapability, DeviceView, OmpSettingValue, UserSettings } from '@gitspace/protocol';
+import { cloudImageOperationActive, cloudImageOperationCancellable, cloudImageSelectionSchema, type CloudImageChoice, type CloudImageSelection, type CloudImageState } from '@gitspace/protocol/cloud-image';
 import type { ApiClientDraft } from './device.js';
 import {
   Accordion,
@@ -75,7 +76,13 @@ export interface SettingsPageProps extends BrowserConnectionActions {
   onSave: (settings: UserSettings) => Promise<void>;
   onSetOmpSetting: (path: string, value: OmpSettingValue) => Promise<void>;
   onUpdateMachine: (machineId: string, notes: string) => Promise<void>;
-  onCreateSandbox: () => Promise<void>;
+  onCreateSandbox: (image?: CloudImageSelection) => Promise<void>;
+  cloudImages: readonly CloudImageState[];
+  cloudImageDefault: CloudImageChoice | null;
+  cloudImageError: string | null;
+  onChangeCloudImage: (machineId: string, selection: CloudImageSelection, previousOperationId?: string, discardUncheckpointedCandidate?: boolean) => Promise<void>;
+  onRecoverCloudImage: (machineId: string, operationId: string, cancel: boolean) => Promise<void>;
+  onSetCloudImageDefault: (selection: CloudImageSelection) => Promise<void>;
   onControlMachine: (action: 'sleep' | 'resume', machineId: string) => Promise<void>;
   onDestroyMachine: (machineId: string) => Promise<void>;
   /** Enrolled browsers and API clients; null while loading. */
@@ -303,6 +310,7 @@ const API_CLIENT_CAPABILITIES: ReadonlyArray<{ id: DeviceCapability; label: stri
   { id: 'rpc.write', label: 'Write', description: 'Create and change workspaces, settings, crons' },
   { id: 'session.prompt', label: 'Talk to agents', description: 'Prompt, steer, and answer' },
   { id: 'fleet.control', label: 'Fleet', description: 'Create, stop, start, destroy machines' },
+  { id: 'deployment.control', label: 'Deployment', description: 'Select cloud images and control GitSpace runtime releases (account scope required)' },
 ];
 
 /** Mints a delegated API client; the key is shown once, then only its device row remains. */
@@ -548,46 +556,111 @@ function ConnectionsSettings({
   </>;
 }
 
-function MachineSettings({ machines, onUpdateMachine, onCreateSandbox, onControlMachine, onDestroyMachine }: Pick<SettingsPageProps, 'machines' | 'onUpdateMachine' | 'onCreateSandbox' | 'onControlMachine' | 'onDestroyMachine'>) {
+function CloudImagePicker({ value, onChange }: { value: CloudImageSelection; onChange(value: CloudImageSelection): void }) {
+  return <div className="space-y-3">
+    <Select value={value.kind} onValueChange={(kind) => onChange(kind === 'custom' ? { kind, image: '' } : { kind: 'platform-default' })}>
+      <SelectTrigger aria-label="Cloud image source" />{selectOptions([{ value: 'platform-default', label: 'Platform default (pin current digest)' }, { value: 'custom', label: 'Custom immutable OCI image' }])}
+    </Select>
+    {value.kind === 'custom' ? <TextField label="Immutable OCI image" value={value.image} placeholder="registry.example.com/team/image@sha256:…" onChange={(image) => onChange({ kind: 'custom', image })} /> : null}
+    <p className="text-caption text-muted-foreground">Any registry image with compatible GitSpace provider and control interfaces is supported; inheriting our base is optional. Use an immutable @sha256 digest. Image choice does not change your separately selected GitSpace runtime release.</p>
+    {value.kind === 'custom' && value.image && !cloudImageSelectionSchema.safeParse(value).success ? <p role="alert" className="text-caption text-destructive">Enter a registry-qualified image with a 64-character lowercase SHA-256 digest, not a tag.</p> : null}
+  </div>;
+}
+
+function MachineSettings({ machines, onUpdateMachine, onCreateSandbox, onControlMachine, onDestroyMachine, cloudImages, cloudImageDefault, cloudImageError, onChangeCloudImage, onRecoverCloudImage, onSetCloudImageDefault }: Pick<SettingsPageProps, 'machines' | 'onUpdateMachine' | 'onCreateSandbox' | 'onControlMachine' | 'onDestroyMachine' | 'cloudImages' | 'cloudImageDefault' | 'cloudImageError' | 'onChangeCloudImage' | 'onRecoverCloudImage' | 'onSetCloudImageDefault'>) {
   const shape = useShape();
   const [setup, setSetup] = useState(false);
   const [sandboxSetup, setSandboxSetup] = useState(false);
   const [editing, setEditing] = useState<string | null>(null);
   const [notes, setNotes] = useState('');
+  const [imageTarget, setImageTarget] = useState<string | null>(null);
+  const [imageRecovery, setImageRecovery] = useState<{ machineId: string; operationId: string } | null>(null);
+  const [discardCandidate, setDiscardCandidate] = useState(false);
+  const [selection, setSelection] = useState<CloudImageSelection>({ kind: 'platform-default' });
+  const [useAccountImage, setUseAccountImage] = useState(true);
+  const [pending, setPending] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const editingMachine = machines.find((machine) => machine.id === editing) ?? null;
+  const run = async (key: string, action: () => Promise<void>) => {
+    setPending(key); setActionError(null);
+    try { await action(); } catch (error) { setActionError(error instanceof Error ? error.message : String(error)); }
+    finally { setPending(null); }
+  };
   return <>
+    {cloudImageError || actionError ? <p role="alert" className="text-caption text-destructive">{actionError ?? cloudImageError}</p> : null}
+    <Group title="Cloud image default">
+      <p className="text-caption text-muted-foreground">New cloud machines use this account-owned, pinned image. Changing this default never replaces an existing machine or silently follows a platform update.</p>
+      <p className="break-all font-mono text-caption">{cloudImageDefault?.image ?? 'Loading pinned account image…'}</p>
+      <Button variant="secondary" disabled={pending !== null} onClick={() => { setImageTarget('default'); setSelection({ kind: 'platform-default' }); }}>Choose account image</Button>
+    </Group>
     <Group title="Your machines">
       <p className="text-caption text-muted-foreground">Cloud machines are temporary. Stop saves supported workspace state before discarding the machine disk. Start runs a fresh machine environment and restores saved workspaces, not installed packages or machine-local configuration.</p>
-      <p className="text-caption text-muted-foreground">GitSpace does not save ignored files or other files outside its workspace checkpoints, including files in the machine&apos;s home directory. After an unexpected interruption, the last completed checkpoint is the recovery limit; uncheckpointed work may be lost. You can ask a normal workspace agent to install tools, but those changes are temporary.</p>
-      {machines.length ? <SettingRows>{machines.map((machine) => <Card key={machine.id} size="compact">
-        <CardMedia icon={machine.kind === 'sandbox' ? ICONS.server : ICONS.monitor} />
-        <CardHeader>
-          <CardTitle>{machine.label}</CardTitle>
-          <CardDescription>{machine.kind === 'sandbox' ? 'Temporary cloud machine' : <span className="font-mono">{machine.id}</span>}{machine.notes ? <> · {machine.notes}</> : null}</CardDescription>
-          {machine.error ? <p role="alert" className="text-caption text-destructive">{machine.error}</p> : null}
-        </CardHeader>
-        <CardFooter>
-          <Badge color={machine.state === 'online' ? 'green' : machine.state === 'error' ? 'amber' : 'gray'}>{machine.state === 'sleeping' ? 'stopping' : machine.state === 'resuming' ? 'starting' : machine.provider !== 'physical' && machine.state === 'offline' && machine.desiredState === 'offline' ? 'stopped' : machine.state}</Badge>
-          <Button variant="ghost" onClick={() => { setEditing(machine.id); setNotes(machine.notes); }}>Notes</Button>
-          {machine.provider !== 'physical' && (machine.state === 'online' || machine.state === 'offline' || machine.state === 'error') ? <Button variant="ghost" onClick={() => {
-            if (machine.state === 'online' && !window.confirm(`Stop ${machine.label}?\n\nGitSpace saves supported workspace state before stopping. If saving fails, the machine stays online.\n\nStopping discards installed packages, machine-local configuration, ignored files, and other files GitSpace has not captured, including files in the machine's home directory. Start restores saved workspaces in a fresh machine environment, not the old disk.`)) return;
-            settle(onControlMachine(machine.state === 'online' ? 'sleep' : 'resume', machine.id));
-          }}>{machine.state === 'online' ? 'Stop' : 'Start'}</Button> : null}
-          {machine.provider !== 'physical' && machine.state !== 'deleting' ? <Button variant="ghost" onClick={() => { if (window.confirm(`Destroy ${machine.label}? This cannot be undone.`)) settle(onDestroyMachine(machine.id)); }}>Destroy</Button> : null}
-        </CardFooter>
-      </Card>)}</SettingRows>
-        : <EmptyState icon={icon(Server01, 20)} title="No machines connected" description="Create a cloud machine or connect your own computer. You can also finish account setup and add capacity later." />}
+      <p className="text-caption text-muted-foreground">GitSpace does not save ignored files or other files outside its workspace checkpoints, including files in the machine&apos;s home directory. After an unexpected interruption, the last completed checkpoint is the recovery limit; uncheckpointed work may be lost. Bake persistent tools into your selected image.</p>
+      {machines.length ? <SettingRows>{machines.map((machine) => {
+        const image = cloudImages.find((item) => item.machineId === machine.id);
+        const active = cloudImageOperationActive(image);
+        return <Card key={machine.id} size="compact">
+          <CardMedia icon={machine.kind === 'sandbox' ? ICONS.server : ICONS.monitor} />
+          <CardHeader>
+            <CardTitle>{machine.label}</CardTitle>
+            <CardDescription>{machine.kind === 'sandbox' ? 'Temporary cloud machine' : <span className="font-mono">{machine.id}</span>}{machine.notes ? <> · {machine.notes}</> : null}</CardDescription>
+            {machine.error ? <p role="alert" className="text-caption text-destructive">{machine.error}</p> : null}
+            {machine.kind === 'sandbox' ? <div className="space-y-1 text-caption">
+              <p className="break-all">Last confirmed image: <span className="font-mono">{image?.currentImage ?? 'Not yet confirmed'}</span></p>
+              {image?.desiredImage && image.desiredImage !== image.currentImage ? <p className="break-all">Desired image: <span className="font-mono">{image.desiredImage}</span></p> : null}
+              {image?.operation ? <p role="status">Image operation: {image.operation.phase}{image.operation.barrier ? ' · New work blocked on this machine until recovery completes' : ''}</p> : null}
+              {image?.operation?.discardApproval ? <p className="text-caption text-destructive">{image.operation.discardReceipt ? 'Candidate stop was verified after explicit discard approval. Only completed workspace checkpoints are recoverable.' : 'Discard of uncheckpointed candidate work is explicitly authorized if checkpointing fails.'}</p> : null}
+              {image?.operation?.error ? <p role="alert" className="text-destructive">{image.operation.error}</p> : null}
+              {active && image?.operation ? <div className="flex flex-wrap gap-2">
+                <Button variant="secondary" size="compact" disabled={pending !== null} onClick={() => void run(machine.id, () => onRecoverCloudImage(machine.id, image.operation!.id, false))}>Continue / retry recovery</Button>
+                {cloudImageOperationCancellable(image) ? <Button variant="ghost" size="compact" disabled={pending !== null} onClick={() => void run(machine.id, () => onRecoverCloudImage(machine.id, image.operation!.id, true))}>Cancel and recover original</Button> : <Button variant="secondary" size="compact" disabled={pending !== null} onClick={() => {
+                  setImageTarget(machine.id); setImageRecovery({ machineId: machine.id, operationId: image.operation!.id });
+                  setDiscardCandidate(false);
+                  setSelection(image.currentImage ? { kind: 'custom', image: image.currentImage } : { kind: 'platform-default' });
+                }}>Recover with another image</Button>}
+              </div> : null}
+            </div> : null}
+          </CardHeader>
+          <CardFooter>
+            <Badge color={machine.state === 'online' ? 'green' : machine.state === 'error' ? 'amber' : 'gray'}>{machine.state === 'sleeping' ? 'stopping' : machine.state === 'resuming' ? 'starting' : machine.provider !== 'physical' && machine.state === 'offline' && machine.desiredState === 'offline' ? 'stopped' : machine.state}</Badge>
+            <Button variant="ghost" onClick={() => { setEditing(machine.id); setNotes(machine.notes); }}>Notes</Button>
+            {machine.kind === 'sandbox' ? <Button variant="ghost" disabled={active || pending !== null || machine.state !== 'online'} onClick={() => { setImageTarget(machine.id); setImageRecovery(null); setSelection({ kind: 'platform-default' }); }}>Change image</Button> : null}
+            {machine.provider !== 'physical' && (machine.state === 'online' || machine.state === 'offline' || machine.state === 'error') ? <Button variant="ghost" disabled={active || pending !== null} onClick={() => {
+              if (machine.state === 'online' && !window.confirm(`Stop ${machine.label}?\n\nGitSpace saves supported workspace state before stopping. If saving fails, the machine stays online.\n\nStopping discards installed packages, machine-local configuration, ignored files, and other files GitSpace has not captured, including files in the machine's home directory. Start restores saved workspaces in a fresh machine environment, not the old disk.`)) return;
+              void run(machine.id, () => onControlMachine(machine.state === 'online' ? 'sleep' : 'resume', machine.id));
+            }}>{machine.state === 'online' ? 'Stop' : 'Start'}</Button> : null}
+            {machine.provider !== 'physical' && machine.state !== 'deleting' ? <Button variant="ghost" disabled={active || pending !== null} onClick={() => { if (window.confirm(`Destroy ${machine.label}? This cannot be undone.`)) void run(machine.id, () => onDestroyMachine(machine.id)); }}>Destroy</Button> : null}
+          </CardFooter>
+        </Card>;
+      })}</SettingRows> : <EmptyState icon={icon(Server01, 20)} title="No machines connected" description="Create a cloud machine or connect your own computer. You can also finish account setup and add capacity later." />}
       {editingMachine ? <Panel title={`Machine notes · ${editingMachine.label}`} description="Shared purpose, tools, constraints, and credential boundaries." footer={<><Button variant="secondary" onClick={() => setEditing(null)}>Cancel</Button><Button variant="primary" onClick={() => settle(onUpdateMachine(editingMachine.id, notes).then(() => setEditing(null)))}>Save notes</Button></>}>
-        {/* FLUID-GAP: multi-line textarea (no textarea in the registry) */}
         <textarea aria-label="Machine notes" rows={4} value={notes} className={`${shape.input} w-full border border-border bg-surface-2 p-2 text-body text-foreground`} onChange={(event) => setNotes(event.currentTarget.value)} />
       </Panel> : null}
     </Group>
+    {imageTarget ? <Panel title={imageTarget === 'default' ? 'Choose account cloud image' : `Change image · ${machines.find(machine => machine.id === imageTarget)?.label ?? imageTarget}`} description={imageTarget === 'default' ? 'Verify the provider can prepare this image before saving it for future machines.' : 'Only this machine will checkpoint, replace its ephemeral disk, and recover saved workspaces. Ignored files and machine-local changes are not preserved.'} footer={<><Button variant="secondary" disabled={pending !== null} onClick={() => setImageTarget(null)}>Close</Button><Button variant="primary" loading={pending === 'image'} disabled={pending !== null || !cloudImageSelectionSchema.safeParse(selection).success} onClick={() => void run('image', async () => {
+      if (imageTarget === 'default') await onSetCloudImageDefault(selection);
+      else {
+        if (!window.confirm(imageRecovery?.machineId === imageTarget && discardCandidate
+          ? 'Allow discarding uncheckpointed work on the currently routed candidate if saving fails?\n\nGitSpace will verify that candidate has stopped, fence its old workspace generations, and restore the last completed checkpoints using the selected image. Uncheckpointed candidate edits and machine-local files will be lost. This cannot be undone.'
+          : 'Replace this machine’s ephemeral disk after checkpointing supported workspace state?')) return;
+        await onChangeCloudImage(imageTarget, selection, imageRecovery?.machineId === imageTarget ? imageRecovery.operationId : undefined, discardCandidate);
+      }
+      setImageTarget(null);
+      setImageRecovery(null);
+    })}>{imageTarget === 'default' ? 'Verify and pin default' : imageRecovery?.machineId === imageTarget ? 'Recover using selected image' : 'Checkpoint and change image'}</Button></>}>
+      <CloudImagePicker value={selection} onChange={setSelection} />
+      {imageRecovery?.machineId === imageTarget ? <div className="space-y-3">
+        <p role="status" className="text-caption">The admission barrier stays in place. GitSpace prepares this image and checkpoints the actual candidate before replacing it. Only a candidate whose container provably never started can reuse its inherited checkpoint without checkpointing candidate work.</p>
+        <Switch label="Allow discarding uncheckpointed candidate work if saving fails" checked={discardCandidate} disabled={pending !== null} onToggle={() => setDiscardCandidate(value => !value)} />
+        <p className="text-caption text-destructive">Leave this off to preserve candidate work. If the failed image cannot run its checkpoint control interface, explicit discard is the last-resort recovery path: stop the candidate, fence stale writers, and restore only its last completed workspace checkpoints. Uncheckpointed edits, ignored files, installed tools, and other machine-local changes cannot be recovered.</p>
+      </div> : null}
+    </Panel> : null}
     {setup ? <AddMachinePanel machines={machines} onClose={() => setSetup(false)} />
-    : sandboxSetup ? <Panel title="Create temporary cloud machine" description="Creates a Cloudflare container with the standard tools and your account’s GitSpace runtime. Installed packages, machine-local configuration, ignored files, and other files GitSpace has not captured do not survive Stop or replacement. Ask a normal workspace agent to install tools when needed; those changes are temporary. Cloudflare usage charges may apply." footer={<><Button variant="secondary" onClick={() => setSandboxSetup(false)}>Cancel</Button><Button variant="primary" onClick={() => settle(onCreateSandbox().then(() => setSandboxSetup(false)))}>Create cloud machine</Button></>} />
-    : <div className="flex flex-wrap items-center gap-2">
-      <Button variant="primary" onClick={() => setSetup(true)}>{icon(Terminal)}Add a computer</Button>
-      <Button variant="secondary" onClick={() => setSandboxSetup(true)}>{icon(Server01)}Create cloud machine</Button>
-    </div>}
+      : sandboxSetup ? <Panel title="Create temporary cloud machine" description="Create a Cloudflare container using a pinned image. Runtime data not captured by workspace checkpoints is temporary. Cloudflare usage charges may apply." footer={<><Button variant="secondary" disabled={pending !== null} onClick={() => setSandboxSetup(false)}>Cancel</Button><Button variant="primary" loading={pending === 'create'} disabled={pending !== null || (!useAccountImage && !cloudImageSelectionSchema.safeParse(selection).success)} onClick={() => void run('create', async () => { await onCreateSandbox(useAccountImage ? undefined : selection); setSandboxSetup(false); })}>Create cloud machine</Button></>}>
+        <Switch label="Use pinned account image" checked={useAccountImage} disabled={pending !== null} onToggle={() => setUseAccountImage((value) => !value)} />
+        {useAccountImage ? <p className="break-all font-mono text-caption">{cloudImageDefault?.image ?? 'Resolving account image…'}</p> : <CloudImagePicker value={selection} onChange={setSelection} />}
+      </Panel>
+      : <div className="flex flex-wrap items-center gap-2"><Button variant="primary" onClick={() => setSetup(true)}>{icon(Terminal)}Add a computer</Button><Button variant="secondary" onClick={() => { setSandboxSetup(true); setUseAccountImage(true); setSelection({ kind: 'platform-default' }); }}>{icon(Server01)}Create cloud machine</Button></div>}
   </>;
 }
 function HostnameSettings({ settings }: Pick<SettingsPageProps, 'settings'>) {

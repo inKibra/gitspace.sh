@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { CloudImageSelection } from '@gitspace/protocol/cloud-image';
 import { SpaceAuthorityRecordSchema, WorkspaceDomainError, WorkspaceFailureSchema, type SpaceAuthorityRecord } from '@gitspace/protocol-workspace';
 import {
   createSignedControlRequest,
@@ -677,8 +678,8 @@ export class CloudSpaceCheckpointAuthority implements SpaceCheckpointAuthority, 
     return this.call('catalog.machine.list', {});
   }
 
-  createSandboxMachine(): Promise<FleetMachineDefinition> {
-    return this.call('catalog.sandbox.create', {});
+  createSandboxMachine(image?: CloudImageSelection): Promise<FleetMachineDefinition> {
+    return this.call('catalog.sandbox.create', image === undefined ? {} : { image });
   }
   sleepMachine(machineId: string): Promise<FleetMachineDefinition> {
     return this.call('catalog.machine.sleep', { machineId });

@@ -21,10 +21,6 @@ import {
 } from './distribution.js';
 
 const ROOT = resolve(import.meta.dir, '../../..');
-// Includes S3 retry classification; later packfile-format writers require a coordinated migration.
-const WALGIT_REVISION = '6465bf578d0bc9686019bc6d4537861ab162ee6a';
-const WALGIT_PATCH = 'patches/walgit/conditional-multipart.patch';
-const RUST_VERSION = '1.97.1';
 const COMPILE_TARGETS: Record<DistributionPlatform, Bun.Build.CompileTarget> = {
   'darwin-arm64': 'bun-darwin-arm64',
   'darwin-x64': 'bun-darwin-x64-baseline',
@@ -113,37 +109,6 @@ async function inventory(root: string, directory = root): Promise<DistributionFi
   return files;
 }
 
-async function packageWalgit(scratch: string, destination: string): Promise<{ sha256: string; size: number }> {
-  for (const binary of ['git', 'cargo', 'protoc', 'cmake', 'clang', 'pkg-config']) {
-    if (!Bun.which(binary)) throw new Error(`Native release build requires ${binary}. Install the C/C++ build tools, protobuf compiler/development headers, OpenSSL development headers, and rustup toolchain ${RUST_VERSION} on this runner.`);
-  }
-  const source = join(scratch, 'walgit');
-  await mkdir(source);
-  await command(['git', 'init', '.'], source);
-  await command(['git', 'remote', 'add', 'origin', 'https://github.com/tobi/walgit.git'], source);
-  await command(['git', 'fetch', '--depth', '1', 'origin', WALGIT_REVISION], source);
-  await command(['git', 'checkout', '--detach', 'FETCH_HEAD'], source);
-  if (await command(['git', 'rev-parse', 'HEAD'], source) !== WALGIT_REVISION) throw new Error('walgit source revision mismatch');
-  const patch = join(scratch, 'conditional-multipart.patch');
-  await cp(join(ROOT, WALGIT_PATCH), patch);
-  const patchDigest = await digest(patch);
-  await command(['git', 'apply', '--', patch], source);
-  await command([process.execPath, 'install', '--frozen-lockfile'], join(source, 'web'));
-  await command([process.execPath, 'run', 'build'], join(source, 'web'));
-  await command(['cargo', `+${RUST_VERSION}`, 'build', '--locked', '--release', '-p', 'walgit-cli'], source, {
-    CARGO_INCREMENTAL: '0',
-    CARGO_ENCODED_RUSTFLAGS: `--remap-path-prefix=${source}=/gitspace-build/walgit`,
-  });
-  await cp(join(source, 'target/release/walgit'), destination);
-  await chmod(destination, 0o755);
-  await command([destination, '--version'], scratch);
-  if (process.platform === 'darwin') {
-    const libraries = (await command(['otool', '-L', destination], scratch)).split('\n').slice(1).map((line) => line.trim().split(' ')[0]!);
-    const external = libraries.filter((path) => path && !path.startsWith('/usr/lib/') && !path.startsWith('/System/Library/'));
-    if (external.length) throw new Error(`WalGit depends on unbundled macOS libraries: ${external.join(', ')}`);
-  }
-  return patchDigest;
-}
 
 /** Read every shipped ELF's version requirements, rather than claiming the build host's libc is the ABI floor. */
 async function minimumGlibc(root: string, files: DistributionFile[], client: string): Promise<string | null> {
@@ -221,7 +186,6 @@ export async function buildDistribution(options: { release: string; output: stri
       '',
     ].join('\n'), { mode: 0o755 });
     await probeOmpRuntime(runtime, staging);
-    const walgitPatch = await packageWalgit(staging, join(runtime, 'bin/walgit'));
     const files = await inventory(runtime);
     const glibc = await minimumGlibc(runtime, files, client);
     const payload = join(artifacts, 'runtime.bin.gz');
@@ -237,7 +201,7 @@ export async function buildDistribution(options: { release: string; output: stri
       bunAsset: BUN_ASSETS[platform],
       sourceLock: await digest(join(ROOT, 'bun.lock')),
       ompRecipe: JSON.parse(await readFile(join(runtime, 'omp/omp-runtime.json'), 'utf8')) as unknown,
-      walgit: { repository: 'https://github.com/tobi/walgit.git', revision: WALGIT_REVISION, rustVersion: RUST_VERSION, patch: { path: WALGIT_PATCH, ...walgitPatch } },
+      native: JSON.parse(await readFile(join(runtime, 'machine/machine-native.json'), 'utf8')) as unknown,
       machine: { treeHash: initial.machine.hash, manifestHash: initial.machine.manifestHash },
       omp: { treeHash: initial.omp.hash, manifestHash: initial.omp.manifestHash, metadata: initial.omp.metadata },
     };

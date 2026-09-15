@@ -125,25 +125,28 @@ describe('account lifecycle authorization', () => {
     expect(await denied.json()).toMatchObject({ error: { code: 'ACCOUNT_UNAVAILABLE' } });
   });
 
-  it('fences new work during a rollout without blocking checkpoint control reads', async () => {
+  it('fences only the image operation machine and its recovering spaces while retaining control reads', async () => {
     const a = await account();
-    const accountState = env.ACCOUNT_STATE.getByName('account');
-    const id = crypto.randomUUID();
-    await accountState.beginSandboxRollout(id, `registry.cloudflare.com/1234/sandbox@sha256:${'a'.repeat(64)}`);
-    try {
-      for (const operation of ['space.bootstrap', 'space.beginOpen', 'catalog.sandbox.create', 'catalog.machine.resume'] as const) {
-        const response = await SELF.fetch('https://auth.test/v1/control', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(a.signed(operation)) });
-        expect(response.status).toBe(503);
-        expect(await response.json()).toMatchObject({ error: { code: 'SANDBOX_ROLLOUT_IN_PROGRESS' } });
-      }
-      const rpc = await SELF.fetch(`https://auth.test/__sandbox/${a.userId}/sandbox-browser/rpc`, { method: 'POST', body: '{}' });
-      expect(rpc.status).toBe(503);
-      const settings = await SELF.fetch('https://auth.test/v1/control', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(a.signed('settings.get')) });
-      expect(settings.status).toBe(200);
-    } finally {
-      await accountState.beginSandboxRolloutRecovery(id, false);
-      await accountState.cancelSandboxRollout(id);
+    const catalog = env.FLEET_CATALOG.getByName(a.userId);
+    const image = `ghcr.io/tenant/image@sha256:${'a'.repeat(64)}`;
+    await catalog.saveCloudImage({ machineId: 'machine', currentImage: image, desiredImage: image, selection: { kind: 'custom', image }, operation: { id: crypto.randomUUID(), phase: 'checkpointing', barrier: true, startedAt: Date.now(), updatedAt: Date.now(), error: null, resumeSpaceIds: ['recovering-space'] } });
+    for (const operation of ['space.bootstrap', 'space.beginOpen'] as const) {
+      const response = await SELF.fetch('https://auth.test/v1/control', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(a.signed(operation, { projectId: 'project', spaceId: 'new-space' })) });
+      expect(response.status).toBe(503);
+      expect(await response.json()).toMatchObject({ error: { code: 'CLOUD_IMAGE_IN_PROGRESS' } });
     }
+    const settings = await SELF.fetch('https://auth.test/v1/control', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(a.signed('settings.get')) });
+    expect(settings.status).toBe(200);
+    // An unrelated machine's admission is not gated by this machine's image state.
+    const state = (await catalog.cloudImage('machine'))!;
+    await catalog.saveCloudImage({ ...state, machineId: 'sandbox-browser' });
+    await catalog.saveCloudImage({ ...state, operation: { ...state.operation!, phase: 'complete', barrier: false } });
+    const bootstrap = await SELF.fetch('https://auth.test/v1/control', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(a.signed('space.bootstrap', { projectId: 'project', spaceId: 'unrelated-space' })) });
+    expect(bootstrap.status).toBe(200);
+    const steal = await SELF.fetch('https://auth.test/v1/control', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(a.signed('space.beginOpen', { projectId: 'project', spaceId: 'recovering-space' })) });
+    expect(steal.status).toBe(503);
+    const rpc = await SELF.fetch(`https://auth.test/__sandbox/${a.userId}/sandbox-browser/rpc`, { method: 'POST', body: '{}' });
+    expect(rpc.status).toBe(503);
   });
 
   it('binds space ownership to the signing machine rather than a payload impersonation', async () => {

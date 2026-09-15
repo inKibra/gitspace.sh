@@ -49,9 +49,7 @@ jobs:
       - name: Exercise packaged Bun, walgit, and OMP with a clean home
         run: |
           test "$(docker run --rm --entrypoint bun "$IMAGE" --version)" = '1.4.0'
-          docker run --rm --entrypoint walgit "$IMAGE" --version
-          docker run --rm --mount "type=bind,source=$GITHUB_WORKSPACE,target=/probe,readonly" \
-            --entrypoint bun "$IMAGE" /probe/packages/sandbox-worker/scripts/probe-image.ts
+          docker run --rm --entrypoint bun "$IMAGE" /opt/gitspace/probe-image.js
       - name: Authenticate only for publication
         env:
           API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -78,7 +76,7 @@ jobs:
           jq -n --arg image "$reference" --arg tag "$IMAGE" --arg revision "$GITHUB_SHA" \
             --arg run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
             '{image: $image, tag: $tag, revision: $revision, run: $run}' > image-provenance.json
-          printf 'Published `%s`\n\nPublication only. Use the checkpointed sandbox rollout procedure to deploy it.\n' "$reference" >> "$GITHUB_STEP_SUMMARY"
+          printf 'Published `%s`\n\nPublication only. Select this digest through the account-owned, checkpointed machine image replacement flow to activate it.\n' "$reference" >> "$GITHUB_STEP_SUMMARY"
       - name: Retain immutable image reference and provenance
         uses: actions/upload-artifact@v4
         with:

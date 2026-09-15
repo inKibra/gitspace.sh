@@ -5,6 +5,7 @@ import { workerReleaseMetadataSchema, type OmpReleaseMetadata, type WorkerReleas
 import { z } from 'zod';
 import { hashArtifactPath } from './policies/shared.js';
 import { installedPackageRoot, packageOmpRuntimeRecipe } from './runtime-packaging.js';
+import { packageMachineNativeRuntime } from './native-build.js';
 
 /**
  * Builders for the four account-owned GitSpace release targets. The
@@ -183,7 +184,8 @@ export async function buildMachineBundle(root: string, outDir: string): Promise<
   const nativeOwner = await installedPackageRoot('@oh-my-pi/pi-coding-agent', join(root, 'packages/account-machine'));
   await copyNativeRuntime(nativeOwner, outDir);
   await cp(join(root, 'packages/core/drizzle'), join(outDir, 'drizzle'), { recursive: true });
-  const envelope = await createExecutableArtifactManifest(outDir, 'machine');
+  const native = await packageMachineNativeRuntime(root, outDir);
+  const envelope = await createExecutableArtifactManifest(outDir, 'machine', null, native.abi);
   return { path: outDir, hash: envelope.manifest.treeHash, ...envelope };
 }
 
@@ -232,6 +234,7 @@ export async function buildInitialRuntime(root: string, outDir: string): Promise
     "import { fileURLToPath } from 'node:url';",
     "process.env.GITSPACE_OMP_RUNTIME_PATH = fileURLToPath(new URL('./omp/omp.js', import.meta.url));",
     `process.env.GITSPACE_OMP_MANIFEST_HASH = ${JSON.stringify(omp.manifestHash)};`,
+    `process.env.GITSPACE_INITIAL_MACHINE_MANIFEST_HASH = ${JSON.stringify(machine.manifestHash)};`,
     "// The initial trust environment must be set before the host module evaluates.",
     "await import('./host-runtime.js');",
     '',

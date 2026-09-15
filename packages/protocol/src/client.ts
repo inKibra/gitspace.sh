@@ -13,7 +13,7 @@ export interface GitSpaceClientOptions {
 
 export class InvalidApiKeyError extends Error {
   constructor() {
-    super('The GitSpace API key is malformed');
+    super('The GitSpace API key is malformed or obsolete. Create a new key in Settings → Connections.');
     this.name = 'InvalidApiKeyError';
   }
 }
@@ -31,7 +31,7 @@ export function createGitSpaceClient(options: GitSpaceClientOptions) {
     contract: gitspaceContract,
     transport: createRoutedTransport({
       homeUrl: options.url ?? key.rpcUrl,
-      fetch: createSignedRpcFetch({ deviceId: key.deviceId, signingPrivateKey: deviceProtocolBase64.decode(key.signingPrivateKey), ...(options.fetch ? { fetch: options.fetch } : {}) }),
+      fetch: createSignedRpcFetch({ deviceId: key.deviceId, userId: key.userId, signingPrivateKey: deviceProtocolBase64.decode(key.signingPrivateKey), ...(options.fetch ? { fetch: options.fetch } : {}) }),
     }),
   });
 }

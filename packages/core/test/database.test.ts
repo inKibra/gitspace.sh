@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'bun:test';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { eq } from 'drizzle-orm';
@@ -35,6 +35,27 @@ function seed(database: GitSpaceDatabase): void {
 }
 
 describe('GitSpaceDatabase', () => {
+  it('inspects recovery state without migrations, writes, or creating a missing database', () => {
+    const path = databasePath();
+    const writer = new GitSpaceDatabase(path);
+    seed(writer);
+    writer.checkpoint();
+    writer.close();
+    const before = readFileSync(path);
+    const reader = new GitSpaceDatabase(path, { readonly: true, migrationsFolder: '/nonexistent-recovery-migrations' });
+    try {
+      expect(reader.getWorkspace('workspace-a')?.phase).toBe('plan');
+      expect(() => reader.setWorkspacePhase('workspace-a', 'code')).toThrow();
+      expect(reader.getWorkspace('workspace-a')?.phase).toBe('plan');
+    } finally {
+      reader.close();
+    }
+    expect(readFileSync(path).equals(before)).toBe(true);
+    const absent = `${path}.missing`;
+    expect(() => new GitSpaceDatabase(absent, { readonly: true })).toThrow();
+    expect(existsSync(absent)).toBe(false);
+  });
+
   it('persists default Plan and explicit Code workspaces without rewriting phases on reopen', () => {
     const path = databasePath();
     const first = new GitSpaceDatabase(path);

@@ -1,10 +1,13 @@
 import { createHash } from 'node:crypto';
 import { lstat, open, readdir, readFile, writeFile } from 'node:fs/promises';
 import { join, relative, sep } from 'node:path';
+import { release } from 'node:os';
 import {
   EXECUTABLE_CHUNK_BYTES,
   executableArtifactManifestSchema,
   ompReleaseMetadataSchema,
+  nativeAbiSchema,
+  type NativeAbi,
   type ExecutableArtifactManifest,
   type OmpReleaseMetadata,
 } from '@gitspace/protocol/deployment';
@@ -48,12 +51,35 @@ export function executableManifestPath(path: string): string {
   return `${path}.manifest.json`;
 }
 
+export function nativeHostAbi(): NativeAbi {
+  const report = process.report?.getReport() as { header?: { glibcVersionRuntime?: string } };
+  const minimumVersion = process.platform === 'linux' ? report?.header?.glibcVersionRuntime : release();
+  if (!minimumVersion) throw new Error('Native runtime requires glibc; musl is not supported');
+  return nativeAbiSchema.parse({ platform: process.platform, arch: process.arch, minimumVersion });
+}
+
+export function validateNativeAbi(abi: NativeAbi): void {
+  const host = nativeHostAbi();
+  const actual = host.minimumVersion.split('.').map(Number);
+  const required = abi.minimumVersion.split('.').map(Number);
+  let compatible = true;
+  for (let index = 0; index < Math.max(actual.length, required.length); index++) {
+    if ((actual[index] ?? 0) === (required[index] ?? 0)) continue;
+    compatible = (actual[index] ?? 0) > (required[index] ?? 0);
+    break;
+  }
+  if (host.platform !== abi.platform || host.arch !== abi.arch || !compatible) {
+    throw new Error(`Native ABI ${abi.platform}-${abi.arch} >=${abi.minimumVersion} is incompatible with ${host.platform}-${host.arch} ${host.minimumVersion}`);
+  }
+}
+
 export function executableArtifactCompatibility(): ExecutableArtifactManifest['compatibility'] {
   return executableArtifactManifestSchema.shape.compatibility.parse({
     platform: process.platform,
     arch: process.arch,
     bunVersion: Bun.version,
     protocolVersion: 1,
+    ...(process.platform === 'linux' || process.platform === 'darwin' ? { nativeAbi: nativeHostAbi() } : {}),
   });
 }
 
@@ -64,6 +90,7 @@ export function validateExecutableCompatibility(manifest: ExecutableArtifactMani
       throw new Error(`Executable ${field} ${manifest.compatibility[field]} is incompatible with host ${host[field]}`);
     }
   }
+  if (manifest.compatibility.nativeAbi) validateNativeAbi(manifest.compatibility.nativeAbi);
 }
 
 /** Reject links and special files rather than hashing a different tree from the one Bun loads. */
@@ -107,6 +134,7 @@ export async function createExecutableArtifactManifest(
   path: string,
   target: ExecutableArtifactManifest['target'],
   omp: OmpReleaseMetadata | null = null,
+  nativeAbi?: NativeAbi,
 ): Promise<{ manifest: ExecutableArtifactManifest; manifestHash: `sha256:${string}` }> {
   const files: ExecutableArtifactManifest['files'] = [];
   const tree = createHash('sha256');
@@ -132,7 +160,7 @@ export async function createExecutableArtifactManifest(
     version: 1,
     target,
     entrypoint: `${target}.js`,
-    compatibility: executableArtifactCompatibility(),
+    compatibility: { ...executableArtifactCompatibility(), ...(nativeAbi ? { nativeAbi } : {}) },
     treeHash: `sha256:${tree.digest('hex')}`,
     files,
     omp,

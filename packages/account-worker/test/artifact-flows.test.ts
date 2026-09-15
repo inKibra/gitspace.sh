@@ -48,12 +48,9 @@ async function fixture() {
   };
   const origin = `https://${handle}.gitspace.sh`;
   const fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {
-    const request = new Request(input, init);
-    const headers = new Headers(request.headers);
-    headers.set('x-gitspace-user', userId);
-    return worker.fetch(new Request(request, { headers }), env);
+    return worker.fetch(new Request(input, init), env);
   }) as typeof fetch;
-  const client = createBrowserClient({ contract: gitspaceContract, transport: createRoutedTransport({ homeUrl: `${origin}/rpc`, fetch: createSignedRpcFetch({ deviceId: binding.deviceId, signingPrivateKey: deviceKey, fetch: fetcher }) }) });
+  const client = createBrowserClient({ contract: gitspaceContract, transport: createRoutedTransport({ homeUrl: `${origin}/rpc`, fetch: createSignedRpcFetch({ deviceId: binding.deviceId, userId, signingPrivateKey: deviceKey, fetch: fetcher }) }) });
   return { client, authority, projectId, workspaceId, publish, origin };
 }
 

@@ -476,21 +476,87 @@ before execution; there is no silent legacy alias.
   registered online only after its readiness log, TCP port, and RPC query pass.
   Sleep or destroy is rejected while the machine owns an open space; destroy
   removes the fleet record and managed grant only after provider teardown.
-- WalGit ships with the rebuilt GitSpace runtime, not an independent upstream
-  auto-update. Host releases and sandbox images both pin `6465bf578d0b`, which
-  includes [S3 transient-error classification](https://github.com/tobi/walgit/pull/18).
-  Keep the pins in `packages/deployment/src/release.ts` and
-  `packages/sandbox-worker/Dockerfile` synchronized. This is the last revision
-  before the packfile migration: [newer format writers require stopping
-  incompatible writers](https://github.com/tobi/walgit/pull/53), so upgrading to
-  current upstream `main` requires a coordinated storage migration.
-  Both builds apply `patches/walgit/conditional-multipart.patch`; native release
-  provenance records the applied patch's SHA-256 and size. Shared S3 configuration
-  uses a 64 MiB threshold and 16 MiB parts, with two concurrent part uploads.
-  Immutable creates use `If-None-Match: *` on multipart completion; CAS updates
-  remain conditional single PUTs. Qualify conditional completion against each
-  deployed S3-compatible backend. A machine/OMP source update alone does not
-  replace the bundled native WalGit executable.
+- WalGit is selected by the tenant's machine release, independently of OMP and
+  the cloud image. `packages/account-machine/native.json` is the explicit source
+  declaration: `{ "version": 1, "walgit": { "source": "pinned-walgit" } }`
+  builds and includes the maintained binary. `source: "release"` instead takes
+  `artifact: { location, sha256, size, abi }`: `location` is a checkout-relative
+  file, an absolute regular file, or an HTTPS URL (no redirects), authenticated
+  by its exact SHA-256 and byte count. `source: "environment"` takes an absolute
+  `path`, `sha256`, `size`, and `abi`; that host/image-provided executable is
+  verified but never copied over or replaced. There is no PATH lookup or
+  `GITSPACE_WALGIT_BINARY` precedence. Missing declarations fail the build.
+- Native `abi` is `{ platform: "linux" | "darwin", arch: "x64" | "arm64",
+  minimumVersion }`. Linux requires glibc, not musl; builders inspect every
+  shipped machine ELF/addon to record its actual GLIBC floor. Darwin
+  conservatively requires the build host's Darwin kernel version. Machine
+  bundles remain host-specific because they also contain pi-natives; exact Bun,
+  OS, architecture and ABI are checked rather than relabeling a host build for
+  another platform. Custom payload declarations must match the build target.
+- `native-build.ts` is the single maintained helper for source deployments,
+  native distributions and Docker. It pins WalGit
+  `6465bf578d0bc9686019bc6d4537861ab162ee6a`, which includes
+  [S3 transient-error classification](https://github.com/tobi/walgit/pull/18),
+  and snapshots/applies `patches/walgit/conditional-multipart.patch`. The
+  executable, patch snapshot and exact source/toolchain/patch provenance become
+  part of the machine's authenticated, chunked complete tree. A machine source
+  release therefore updates its selected WalGit through the existing account
+  release flow; an OMP-only release does not. This is the last revision before
+  [the incompatible packfile migration](https://github.com/tobi/walgit/pull/53);
+  moving the stock pin requires a coordinated storage migration.
+- Native compilation needs Bun 1.4.0, rustup toolchain 1.97.1, Git, C/C++ build
+  tools, protobuf compiler/development headers, cmake, clang, pkg-config,
+  OpenSSL development headers, and binutils on Linux. Docker installs them on
+  Ubuntu 22.04 to match the sandbox ABI; native distribution CI uses one runner
+  per target. The helper caches successful verified builds under
+  `GITSPACE_NATIVE_CACHE` or `~/.cache/gitspace/native`, keyed by source, patch,
+  toolchain, OS and architecture. An ordinary source deployment on a managed
+  machine first reuses the selected generation only if its authenticated tree,
+  exact pin and patch provenance, payload bytes and patch snapshot all match.
+  This path needs no compiler or published native-download service. A changed
+  patch/pin or a different custom binary needs its declared payload or the real
+  compilation prerequisites; an installed older binary is never substituted.
+- `machine-native.json` binds the selection to its immutable generation.
+  Release-managed tools live at `<generation>/native/walgit`; environment tools
+  remain at their declared path. The host verifies and executes `--version`
+  before draining a healthy predecessor, then verifies again before starting
+  the selected machine. The successor checks before opening its database.
+  Existing checkpoint, health gate, pointer commit and rollback mechanics
+  preserve state on failed activation. Native distribution/bootstrap and cloud
+  images no longer supply a fixed global WalGit path.
+- First upgrade from a host whose launcher predates native packaging uses the
+  product recovery command **before replacing the host/image**:
+  `gitspace machine recover --source <held-GitSpace-checkout> --workspace <id>`.
+  From this source checkout the same CLI is
+  `bun packages/cli/src/index.ts machine recover --source <checkout> --workspace <id>`.
+  Run outside a managed agent/terminal that the old machine will drain; a native
+  shell or linked provider console is suitable. Keep the old host running.
+  The recovery command uses its installed Bun and machine authority, reads the
+  held workspace through genuine readonly SQLite (no create, migrations or
+  persistent initialization), closes that reader, and invokes the same
+  `DeploymentLauncher` transaction. It emits ordinary account project
+  deployment progress, stages/launches only the selected source's `machine`
+  target, and waits for the existing host's applied/failed health report.
+  It never rewrites runtime/host selection, stops the host, launches an internal
+  replacement directly, or substitutes stock code for selected tenant code.
+  Failure leaves the predecessor under the existing rollback contract. For
+  this initial build, use real compilation prerequisites or the maintained
+  verified cache; the old image's unverified global binary is not reused.
+- `DeploymentLauncher` runs a fresh Bun subprocess importing builders from the
+  selected source checkout on every build. Packaging changes and transitive
+  source edits no longer depend on the launcher's compiled builder version or
+  module cache. Install/build/upload/stage/launch and project progress remain
+  one account-managed operation. After recovery succeeds, ordinary **Launch
+  GitSpace from here** uses this path, and the host/image can be upgraded through
+  its supported publication/replacement flow. Missing native contracts still
+  fail closed if this prerequisite recovery is skipped; there is no indefinite
+  legacy-binary shim, stock-code fallback, or implicit storage migration.
+- Shared S3 configuration uses a 64 MiB threshold and 16 MiB parts, with two
+  concurrent part uploads. Immutable creates use `If-None-Match: *` on multipart
+  completion; CAS updates remain conditional single PUTs. Qualify conditional
+  completion against each deployed S3-compatible backend. Container publication
+  runs `/opt/gitspace/probe-image.js`, which authenticates the initial machine
+  tree and checks its selected WalGit and OMP. Publication does not activate it.
 - Cloud cards show exact ownership/cost/trust facts: deployment target,
   account/platform owner, relay artifact hash, RelayDO migration, R2 encryption
   state, hosted credit reserve, and whether tunnel traffic is plaintext at
@@ -926,14 +992,54 @@ Execute one by one; each ticket must name the package/replacement unit it owns.
     baseline; an older mount cannot erase newer Inspector additions or edits.
     Managed containers stay awake until explicitly slept or destroyed. Resume
     waits for the replacement container's control port before using SDK sessions.
-    For provider image changes, run `bun run rollout` from
-    `packages/sandbox-worker` with `--image <immutable-registry-digest>`,
-    `--account <cloudflare-account-id>`, and `--application <container-app-id>`.
-    Set `GITSPACE_OPERATOR_ACCESS_JWT` and `CLOUDFLARE_API_TOKEN`.
-    The operator route fences new work, drains and checkpoints online machines,
-    waits for provider image convergence, then resumes the recorded machines.
-    Failures retain the rollout ID and admission fence. Repair and retry with
-    the same `--id`; use `--cancel --id` only before replacing the image.
+    Provider image choice is tenant-owned in Settings → Machines. Choose a
+    platform default or any compatible registry-qualified OCI image pinned
+    `@sha256:<64 lowercase hex>`. The account default pins the resolved digest
+    for future provisioning; it never follows platform changes automatically.
+    Each existing machine has its own Change image action and durable progress,
+    failure, retry, and safe-cancellation controls. Image and native/runtime
+    release selection remain independent; inheriting our image is optional.
+    The account SDK exposes `machine.createSandbox({ image?: selection })`,
+    `machine.image.defaults.get/set`, `machine.image.list/events`,
+    `machine.image.set({ machineId, operationId, selection })`, and
+    `machine.image.retry/cancel({ machineId, operationId })`. Selection is
+    `{ kind: 'platform-default' }` or `{ kind: 'custom', image: digest }`;
+    omission at provisioning uses the account's pinned default.
+    Image mutations require an account-scoped `deployment.control` device grant.
+    Create SDK keys in Settings → Connections on the tenant's own origin.
+    Version-2 keys include the account identity required by account RPC;
+    recreate older keys that lack it. `createGitSpaceClient({ key })` signs
+    requests and supplies that identity without caller-added routing headers.
+    The platform's `CF_API_TOKEN` needs **Workers Scripts Write** and
+    **Workers Containers Write** for its Cloudflare account. The provider uses
+    that credential to provision immutable Worker/container slots; it never
+    passes the credential into tenant image Workers or containers.
+    The account pre-stages the provider image before fencing the selected
+    machine, checkpoints its workspaces, selects only that machine's provider
+    deployment with the operation UUID, resumes it, and verifies the running
+    digest plus restored workspace identities before lifting admission.
+    Registry rejection leaves the existing image untouched. Checkpoint and
+    recovery failures remain durable. Retry with the same operation UUID;
+    cancellation is refused once a provider switch may have happened. No
+    shared container application or another tenant's machine is updated.
+    A bad immutable candidate is not a retry-only dead end: choose **Recover
+    with another image** (preselected to the last confirmed digest), or call
+    `machine.image.recover({ machineId, operationId, recoveryOperationId,
+    selection, discardUncheckpointedCandidate?: boolean })`. The new UUID
+    supersedes the failed operation without lifting its admission barrier.
+    Recovery prepares the selected image and checkpoints the actual candidate.
+    A provider may reuse inherited source checkpoints only with durable proof
+    that no candidate container start was attempted, including custom
+    ENTRYPOINT/CMD execution—not merely a failed readiness probe. Ambiguous
+    start/pull failures require checkpointing or explicit discard. If a started
+    candidate cannot checkpoint, recovery remains
+    blocked unless the user explicitly enables discard and confirms data loss.
+    That consent records the authenticated device and time. The provider must
+    return an idempotent stopped-candidate receipt bound to the old and recovery
+    UUIDs before account authority fences stale workspace generations and
+    restores their last committed manifests. This last resort loses
+    uncheckpointed candidate work; it never claims that work was preserved.
+    Failed stop receipts or incomplete workspace recovery retain the barrier.
     Production verification replaced the entire container disk, advanced space
     generation 3 to 5, preserved HEAD, staged/unstaged/untracked bytes, symlinks,
     executable modes, binary artifact bytes, and canonical agent/OMP identities.

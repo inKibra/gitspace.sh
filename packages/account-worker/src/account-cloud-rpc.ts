@@ -3,8 +3,9 @@ import { ACCOUNT_CLOUD_RPC_PATHS, ACCOUNT_RUNTIME_RPC_PATHS, spaceCloudRpcSpaceI
 import { decodeChangeStream, type StreamEvent } from '@gitspace/protocol-sync';
 import { AgentIncidentChangeSchema } from '@gitspace/protocol-agent';
 import type { LifecycleState } from '@gitspace/protocol-environment';
+import type { CloudImageState } from '@gitspace/protocol/cloud-image';
 import {
-  credentialProtocolBase64, requiredCapability, RPC_DEVICE_HEADER, verifyDeviceGrantRecord,
+  credentialProtocolBase64, requiredCapability, requiresImageSelectionControl, RPC_DEVICE_HEADER, verifyDeviceGrantRecord,
   type DeviceCapability, type GitSpaceRpcContext, type ProviderView, type CloudProjectSummary,
 } from '@gitspace/protocol';
 import {
@@ -12,6 +13,8 @@ import {
   getGitIdentityContract, getOmpSettingsContract, settingsEventsContract, listMachinesContract,
   machineLifecycleEventsContract, createSandboxMachineContract, updateMachineNotesContract,
   sleepMachineContract, resumeMachineContract, destroyMachineContract,
+  listCloudImagesContract, cloudImageEventsContract, getCloudImageDefaultContract, setCloudImageDefaultContract,
+  setCloudImageContract, retryCloudImageContract, cancelCloudImageContract, recoverCloudImageContract,
   listProjectsContract, listDevicesContract, revokeDeviceContract, listProvidersContract,
   setProviderApiKeyContract, logoutProviderContract, getComposioSetupContract,
   putComposioSetupContract, deleteComposioSetupContract,
@@ -22,7 +25,6 @@ import { parse } from 'devalue';
 import { contractDigest, err, ok } from 'result-rpc';
 import { createFetchHandler, serverRpc } from 'result-rpc/server';
 import { z } from 'zod';
-import type { AccountStateDO } from './account-state.js';
 import { ComposioPluginGateway } from './composio-plugins.js';
 import type { FleetCatalogDO, FleetMachineDefinition } from './fleet-catalog.js';
 import { controlFleetMachine, provisionManagedSandbox, proxyAccountMachineRpc, reconcileFleetMachines, type CredentialVaultDO } from './application.js';
@@ -80,7 +82,6 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
   const vault = (env.CREDENTIALS as DurableObjectNamespace<CredentialVaultDO>).getByName(userId);
   const settings = (env.USER_SETTINGS as DurableObjectNamespace<UserSettingsDO>).getByName(userId);
   const catalog = (env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>).getByName(userId);
-  const accounts = (env.ACCOUNT_STATE as DurableObjectNamespace<AccountStateDO>).getByName(userId);
   const deviceRecords = async () => {
     const [root, records] = await Promise.all([vault.rootPublicKey(), vault.listDeviceGrants()]);
     if (!root) throw new Error('Account credential authority is not configured');
@@ -104,9 +105,7 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
       throw new Error('Device subscription authorization ended');
     }
   };
-  const fleet = async () => await accounts.sandboxRollout()
-    ? catalog.listMachines()
-    : reconcileFleetMachines(env, userId, catalog);
+  const fleet = async () => reconcileFleetMachines(env, userId, catalog);
   const readDirectory = async () => {
     const [projects, machines] = await Promise.all([
       (env.USER_PROJECTS as DurableObjectNamespace<UserProjectIndexDO>).getByName(userId).list(),
@@ -244,11 +243,47 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
       }
     } catch (error) { if (!signal.aborted) yield err(errors.OperationFailed({ operation: 'subscribe to machines', message: message(error) })); }
   });
-  const createSandbox = server.implement(createSandboxMachineContract).handler(async ({ errors }) => {
+  const createSandbox = server.implement(createSandboxMachineContract).handler(async ({ input, errors }) => {
     try {
-      if (await accounts.sandboxRollout()) throw new Error('Cloud machine replacement has fenced new work');
-      return ok(await provisionManagedSandbox(env, userId, 'https://api.gitspace.sh'));
+      return ok(await provisionManagedSandbox(env, userId, env.ACCOUNT_URL, input.image));
     } catch (error) { return err(errors.OperationFailed({ operation: 'create sandbox', message: message(error) })); }
+  });
+  const images = server.implement(listCloudImagesContract).handler(async ({ errors }) => {
+    try { return ok(await catalog.listCloudImages()); }
+    catch (error) { return err(errors.OperationFailed({ operation: 'list cloud images', message: message(error) })); }
+  });
+  const imageEvents = server.implement(cloudImageEventsContract).stream(async function* ({ input, signal, errors }) {
+    try {
+      await requireSubscription();
+      for await (const event of changes<CloudImageState[]>(await catalog.watchCloudImages(input.after), signal)) {
+        await requireSubscription();
+        yield ok(event);
+      }
+    } catch (error) { if (!signal.aborted) yield err(errors.OperationFailed({ operation: 'subscribe to cloud images', message: message(error) })); }
+  });
+  const imageDefault = server.implement(getCloudImageDefaultContract).handler(async ({ errors }) => {
+    try { return ok(await catalog.cloudImageDefault()); }
+    catch (error) { return err(errors.OperationFailed({ operation: 'get cloud image default', message: message(error) })); }
+  });
+  const setImageDefault = server.implement(setCloudImageDefaultContract).handler(async ({ input, errors }) => {
+    try { return ok(await catalog.setCloudImageDefault(input.selection)); }
+    catch (error) { return err(errors.OperationFailed({ operation: 'set cloud image default', message: message(error) })); }
+  });
+  const setImage = server.implement(setCloudImageContract).handler(async ({ input, errors }) => {
+    try { return ok(await catalog.startCloudImage({ ...input, userId })); }
+    catch (error) { return err(errors.OperationFailed({ operation: 'change cloud image', message: message(error) })); }
+  });
+  const retryImage = server.implement(retryCloudImageContract).handler(async ({ input, errors }) => {
+    try { return ok(await catalog.retryCloudImage({ ...input, userId })); }
+    catch (error) { return err(errors.OperationFailed({ operation: 'retry cloud image', message: message(error) })); }
+  });
+  const cancelImage = server.implement(cancelCloudImageContract).handler(async ({ input, errors }) => {
+    try { return ok(await catalog.retryCloudImage({ ...input, userId, cancel: true })); }
+    catch (error) { return err(errors.OperationFailed({ operation: 'cancel cloud image', message: message(error) })); }
+  });
+  const recoverImage = server.implement(recoverCloudImageContract).handler(async ({ input, errors }) => {
+    try { return ok(await catalog.recoverCloudImage({ ...input, userId, approvedBy: deviceId })); }
+    catch (error) { return err(errors.OperationFailed({ operation: 'recover with another cloud image', message: message(error) })); }
   });
   const sleep = server.implement(sleepMachineContract).handler(async ({ input, errors }) => {
     try { return ok(await controlFleetMachine(env, userId, input.machineId, 'sleep')); }
@@ -406,7 +441,7 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
     placements, session: { locate: locateSession },
     secrets: configuration.secrets, configuration: configuration.configuration, skills: configuration.skills, crons: configuration.crons,
     settings: { get: getSettings, update: updateSettings, reserveHandle, git: { get: getGit }, omp: { get: getOmp }, events: settingsEvents },
-    machines, machine: { events: machineEvents, createSandbox, updateNotes, sleep, resume, destroy }, project: { list: projects, ensureGitSpace, events: projectEvents, directoryEvents },
+    machines, machine: { events: machineEvents, createSandbox, updateNotes, sleep, resume, destroy, image: { list: images, events: imageEvents, set: setImage, retry: retryImage, cancel: cancelImage, recover: recoverImage, defaults: { get: imageDefault, set: setImageDefault } } }, project: { list: projects, ensureGitSpace, events: projectEvents, directoryEvents },
     space: { events: spaceEvents }, incidents: { record: recordIncident },
     devices: { list: devices, revoke }, providers: { list: listProviders, apiKey: { set: setApiKey }, logout },
     mcp: { ...configuration.mcp, composio: { ...configuration.mcp.composio, setup: { get: getComposio, put: setComposio, delete: deleteComposio } } },
@@ -458,6 +493,7 @@ export async function handleAccountCloudRpc(request: Request, env: Env, userId: 
     if (!procedure) return transportError(404, 'RPC_PROCEDURE_UNKNOWN', `Unknown procedure ${item.path}`);
     const capability = requiredCapability(item.path, procedure._def.kind);
     if (!capabilities.includes(capability)) capabilities.push(capability);
+    if (requiresImageSelectionControl(item.path, item.input) && !capabilities.includes('deployment.control')) capabilities.push('deployment.control');
   }
   const url = new URL(request.url);
   const vault = (env.CREDENTIALS as DurableObjectNamespace<CredentialVaultDO>).getByName(userId);

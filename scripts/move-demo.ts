@@ -12,7 +12,6 @@ import { machineBrokerToken } from '../packages/operator-worker/src/account-acce
 const repositoryRoot = dirname(import.meta.dir);
 const root = process.env.GITSPACE_MOVE_DEMO_ROOT ?? join(repositoryRoot, '.gitspace', 'environments', 'move-demo');
 const rustfsBinary = process.env.GITSPACE_RUSTFS_BINARY ?? join(repositoryRoot, '.gitspace', 'environments', 'self-sandbox', 'bin', 'rustfs');
-const walgitBinary = process.env.GITSPACE_WALGIT_BINARY ?? join(repositoryRoot, '.gitspace', 'environments', 'self-sandbox', 'bin', 'walgit');
 const gitEndpoint = 'http://127.0.0.1:4513';
 const controlUrl = 'http://127.0.0.1:4512';
 const accessKeyId = 'GITSPACEDEMO';
@@ -131,7 +130,6 @@ async function startMachine(input: { id: string; port: number; artifact: string;
       GITSPACE_GIT_REGION: 'us-east-1',
       GITSPACE_GIT_ACCESS_KEY_ID: accessKeyId,
       GITSPACE_GIT_SECRET_ACCESS_KEY: secretAccessKey,
-      GITSPACE_WALGIT_BINARY: walgitBinary,
       GITSPACE_MANAGED_SPACE_ROOT: managedRoot,
       ...(input.workspace ? {
         GITSPACE_BOOTSTRAP_PROJECT_ID: 'demo-project',
@@ -160,7 +158,7 @@ async function buildFrontend(): Promise<string> {
 
 await rm(root, { recursive: true, force: true });
 await mkdir(root, { recursive: true });
-if (!existsSync(rustfsBinary) || !existsSync(walgitBinary)) throw new Error('RustFS and walgit binaries are required; run the portable development setup first');
+if (!existsSync(rustfsBinary)) throw new Error('RustFS is required; run the portable development setup first');
 const rustfsData = join(root, 'rustfs');
 await mkdir(rustfsData, { recursive: true });
 const rustfs = Bun.spawn([rustfsBinary, 'server', '--address', '127.0.0.1:4513', rustfsData], { cwd: root, env: environment({ RUSTFS_ACCESS_KEY: accessKeyId, RUSTFS_SECRET_KEY: secretAccessKey }), stdout: 'inherit', stderr: 'inherit' });

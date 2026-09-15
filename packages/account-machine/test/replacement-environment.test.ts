@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { hashArtifactPath } from '@gitspace/deployment';
 import { ReplacementEnvironment, environmentLaunchResponseSchema, environmentStatusSchema } from '../src/index.js';
+import { nativeHostAbi } from '@gitspace/account-omp/manifest';
+import { nativeFileDigest } from '../../deployment/src/native-runtime.js';
 
 const roots: string[] = [];
 const environments: ReplacementEnvironment[] = [];
@@ -12,6 +14,16 @@ afterEach(async () => {
   for (const environment of environments.splice(0)) await environment.close();
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
+
+async function nativeFixture(path: string): Promise<void> {
+  await mkdir(join(path, 'native'), { recursive: true });
+  const binary = join(path, 'native/walgit');
+  await writeFile(binary, '#!/bin/sh\necho walgit-test\n', { mode: 0o755 });
+  await writeFile(join(path, 'machine-native.json'), JSON.stringify({
+    version: 1, bunVersion: Bun.version, abi: nativeHostAbi(),
+    walgit: { source: 'release', path: 'native/walgit', ...await nativeFileDigest(binary), provenance: null },
+  }));
+}
 
 describe('replacement environment host routes', () => {
   it('swaps a frontend release through /__environment/launch and reports it in /__environment/status', async () => {
@@ -93,6 +105,7 @@ describe('replacement environment host routes', () => {
       });
       console.log('GitSpace RPC ready at http://127.0.0.1:' + server.port + '/rpc');
     `);
+    await nativeFixture(candidate);
     const hash = await hashArtifactPath(candidate);
     await environment.deploy({
       artifacts: [{ entrypoint: 'machine-daemon', path: candidate, hash, dependsOn: [] }],
@@ -219,6 +232,7 @@ describe('replacement environment host routes', () => {
       const server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => Response.json({ status: 'ok' }) });
       console.log('GitSpace RPC ready at http://127.0.0.1:' + server.port + '/rpc');
     `);
+    await nativeFixture(candidate);
     const hash = await hashArtifactPath(candidate);
     const artifact = { entrypoint: 'machine-daemon' as const, path: candidate, hash, dependsOn: [] };
     await environment.deploy({ artifacts: [artifact], releaseSha: null, revision: 'channel', dirty: false });
@@ -258,6 +272,7 @@ describe('replacement environment host routes', () => {
         const server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => Response.json({ status: 'ok' }) });
         console.log('GitSpace RPC ready at http://127.0.0.1:' + server.port + '/rpc');
       `);
+      await nativeFixture(path);
     }
     const channelPath = join(root, 'channel');
     const selectedPath = join(root, 'selected');
@@ -292,5 +307,58 @@ describe('replacement environment host routes', () => {
     await environment.bootMachine(channelPath);
     expect(await readFile(join(root, 'executed-code'), 'utf8')).toBe('channel');
     expect(environment.status().machineReleaseSha).toBeNull();
+  });
+
+  it('rejects incompatible natives before drain and restores state when successor health fails', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'gitspace-native-rollback-'));
+    roots.push(root);
+    const environment = new ReplacementEnvironment({
+      id: 'native-rollback', root, repositoryRoot: root, rpcPort: 0, webPort: 0,
+      machineId: 'machine-a', artifactKey: new Uint8Array(32).fill(1),
+      ompAgentDir: join(root, 'omp'), controlToken: 'control-token',
+    });
+    environments.push(environment);
+    for (const [label, healthy] of [['previous', true], ['next', false]] as const) {
+      const path = join(root, label);
+      await nativeFixture(path);
+      await writeFile(join(path, 'machine.js'), `
+        import { Database } from 'bun:sqlite';
+        const root = process.env.GITSPACE_ENVIRONMENT_ROOT;
+        const db = new Database(root + '/gitspace.db');
+        db.run('CREATE TABLE IF NOT EXISTS native_rollback_test(value TEXT)');
+        if (${healthy}) db.run(\"INSERT INTO native_rollback_test SELECT 'preserved' WHERE NOT EXISTS (SELECT 1 FROM native_rollback_test)\");
+        else db.run(\"UPDATE native_rollback_test SET value = 'failed-successor'\");
+        await Bun.write(root + '/observed-state', db.query('SELECT value FROM native_rollback_test').get().value);
+        db.close();
+        await Bun.write(root + '/observed-pid', String(process.pid));
+        const server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('health', { status: ${healthy ? 200 : 500} }) });
+        console.log('GitSpace RPC ready at http://127.0.0.1:' + server.port + '/rpc');
+      `);
+    }
+    const previous = join(root, 'previous');
+    const next = join(root, 'next');
+    const previousHash = await hashArtifactPath(previous);
+    await environment.deploy({
+      artifacts: [{ entrypoint: 'machine-daemon', path: previous, hash: previousHash, dependsOn: [] }],
+      releaseSha: 'previous', revision: 'previous', dirty: false,
+    });
+    const pid = await readFile(join(root, 'observed-pid'), 'utf8');
+    const nativePath = join(next, 'machine-native.json');
+    const native = JSON.parse(await readFile(nativePath, 'utf8'));
+    await writeFile(nativePath, JSON.stringify({ ...native, abi: { ...native.abi, arch: process.arch === 'x64' ? 'arm64' : 'x64' } }));
+    await expect(environment.deploy({
+      artifacts: [{ entrypoint: 'machine-daemon', path: next, hash: await hashArtifactPath(next), dependsOn: [] }],
+      releaseSha: 'incompatible', revision: 'incompatible', dirty: false,
+    })).rejects.toThrow('incompatible');
+    expect(await readFile(join(root, 'observed-pid'), 'utf8')).toBe(pid);
+    expect(environment.status().machineHash).toBe(previousHash);
+
+    await writeFile(nativePath, JSON.stringify(native));
+    await expect(environment.deploy({
+      artifacts: [{ entrypoint: 'machine-daemon', path: next, hash: await hashArtifactPath(next), dependsOn: [] }],
+      releaseSha: 'unhealthy', revision: 'unhealthy', dirty: false,
+    })).rejects.toThrow();
+    expect(environment.status().machineHash).toBe(previousHash);
+    expect(await readFile(join(root, 'observed-state'), 'utf8')).toBe('preserved');
   });
 });

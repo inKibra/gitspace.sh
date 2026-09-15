@@ -9,6 +9,7 @@ import {
 import { AgentFailureSchema, AgentIncidentChangeSchema, type AgentFailure, type AgentIncidentChange } from '@gitspace/protocol-agent';
 import { SpaceAuthorityRecordSchema, WorkspaceFailureSchema, WorkspaceRelationsSchema, WorkspacePhaseSchema, type SpaceAuthorityRecord, type WorkspaceFailure, type WorkspaceRelations, type WorkspacePhase } from '@gitspace/protocol-workspace';
 import { z } from 'zod';
+import { CloudImageChoiceCodec, CloudImageSelectionCodec, CloudImageStateCodec } from './cloud-image.js';
 import { StreamCursorCodec, streamCodec } from './stream-codec.js';
 import { TranscriptChunkCodec, TranscriptPageCodec, TranscriptContentPageCodec, TranscriptPageRequestFields, TranscriptContentRequestFields } from './transcript.js';
 import {
@@ -1043,10 +1044,19 @@ export const discoverProjectMcpToolsContract = gitspaceRpc
 
 export const createSandboxMachineContract = gitspaceRpc
   .procedure()
-  .input(wire.object({}))
+  .input(wire.object({ image: wire.optional(CloudImageSelectionCodec) }))
   .output(FleetMachineViewCodec)
   .errors({ OperationFailed: rpcErrors.operationFailed })
   .mutation();
+
+export const listCloudImagesContract = gitspaceRpc.procedure().input(wire.object({})).output(wire.array(CloudImageStateCodec)).errors({ OperationFailed: rpcErrors.operationFailed }).query();
+export const cloudImageEventsContract = gitspaceRpc.procedure().input(wire.object({ after: wire.nullable(StreamCursorCodec) })).output(streamCodec(wire.array(CloudImageStateCodec))).errors({ OperationFailed: rpcErrors.operationFailed }).subscription();
+export const getCloudImageDefaultContract = gitspaceRpc.procedure().input(wire.object({})).output(CloudImageChoiceCodec).errors({ OperationFailed: rpcErrors.operationFailed }).query();
+export const setCloudImageDefaultContract = gitspaceRpc.procedure().input(wire.object({ selection: CloudImageSelectionCodec })).output(CloudImageChoiceCodec).errors({ OperationFailed: rpcErrors.operationFailed }).mutation();
+export const setCloudImageContract = gitspaceRpc.procedure().input(wire.object({ machineId: wire.string, operationId: wire.string, selection: CloudImageSelectionCodec })).output(CloudImageStateCodec).errors({ OperationFailed: rpcErrors.operationFailed }).mutation();
+export const retryCloudImageContract = gitspaceRpc.procedure().input(wire.object({ machineId: wire.string, operationId: wire.string })).output(CloudImageStateCodec).errors({ OperationFailed: rpcErrors.operationFailed }).mutation();
+export const cancelCloudImageContract = gitspaceRpc.procedure().input(wire.object({ machineId: wire.string, operationId: wire.string })).output(CloudImageStateCodec).errors({ OperationFailed: rpcErrors.operationFailed }).mutation();
+export const recoverCloudImageContract = gitspaceRpc.procedure().input(wire.object({ machineId: wire.string, operationId: wire.string, recoveryOperationId: wire.string, selection: CloudImageSelectionCodec, discardUncheckpointedCandidate: wire.optional(wire.boolean) })).output(CloudImageStateCodec).errors({ OperationFailed: rpcErrors.operationFailed }).mutation();
 
 export const setOmpSettingContract = gitspaceRpc
   .procedure()
@@ -1994,6 +2004,7 @@ export const gitspaceContract = gitspaceRpc.contract({
     sleep: sleepMachineContract,
     resume: resumeMachineContract,
     destroy: destroyMachineContract,
+    image: { list: listCloudImagesContract, events: cloudImageEventsContract, set: setCloudImageContract, retry: retryCloudImageContract, cancel: cancelCloudImageContract, recover: recoverCloudImageContract, defaults: { get: getCloudImageDefaultContract, set: setCloudImageDefaultContract } },
   },
   settings: {
     get: getUserSettingsContract,

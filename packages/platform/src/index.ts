@@ -365,7 +365,7 @@ async function handleTenantResource(request: Request, env: Env, tenant: string, 
     headers.delete('host');
     const url = new URL(request.url);
     const target = 'https://compute.internal' + path.slice('/provider/compute'.length) + url.search;
-    return env.COMPUTE.fetch(new Request(target, { method: request.method, headers, body: request.body, redirect: 'manual' }));
+    return deployments.compute(tenant, userId, new Request(target, { method: request.method, headers, body: request.body, redirect: 'manual' }));
   }
   return platformError(404, 'RESOURCE_NOT_FOUND', 'Tenant resource route does not exist');
 }

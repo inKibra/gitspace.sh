@@ -57,6 +57,10 @@ export function useAccountMachines() {
   const snapshot = useSynchronizedResource('machines', (after, signal) => rpcClient.machine.events({ after }, { signal }));
   return readSnapshot(snapshot, (value) => value);
 }
+export function useAccountCloudImages() {
+  const snapshot = useSynchronizedResource('cloud-images', (after, signal) => rpcClient.machine.image.events({ after }, { signal }));
+  return readSnapshot(snapshot, (value) => value);
+}
 export function useAccountProjects() {
   const snapshot = useSynchronizedResource('projects', (after, signal) => rpcClient.project.directoryEvents({ after }, { signal }));
   return readSnapshot(snapshot, (value) => value);

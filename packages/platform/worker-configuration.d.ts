@@ -2,6 +2,11 @@ interface Env {
   RELEASES: R2Bucket;
   DISPATCHER: DispatchNamespace;
   COMPUTE: Fetcher;
+  COMPUTE_TEMPLATE_SCRIPT: string;
+  COMPUTE_DEFAULT_IMAGE: string;
+  COMPUTE_SANDBOX_HOSTNAME: string;
+  COMPUTE_MAX_MACHINES: string | number;
+  COMPUTE_MAX_IMAGE_DEPLOYMENTS: string | number;
   CREDITS: DurableObjectNamespace<import('./src/index').CreditLedgerDO>;
   DEPLOYMENTS: DurableObjectNamespace<import('./src/index').TenantDeploymentsDO>;
   TENANT_CONTROL: DurableObjectNamespace<import('./src/index').TenantControlDO>;

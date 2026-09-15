@@ -55,6 +55,8 @@ function conflict(resource: CoreConflict['resource'], id: string, error: unknown
 
 export interface GitSpaceDatabaseOptions {
   migrationsFolder?: string;
+  /** Recovery inspection must not create a database, migrate it, or change persistent pragmas. */
+  readonly?: boolean;
 }
 
 
@@ -63,11 +65,11 @@ export class GitSpaceDatabase {
   private readonly sqlite: Database;
 
   constructor(databasePath: string, options: GitSpaceDatabaseOptions = {}) {
-    if (databasePath !== ':memory:') mkdirSync(dirname(databasePath), { recursive: true });
-    this.sqlite = new Database(databasePath, { create: true, strict: true });
-    this.sqlite.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
+    if (!options.readonly && databasePath !== ':memory:') mkdirSync(dirname(databasePath), { recursive: true });
+    this.sqlite = new Database(databasePath, { create: !options.readonly, readonly: options.readonly ?? false, strict: true });
+    if (!options.readonly) this.sqlite.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
     this.orm = drizzle(this.sqlite, { schema });
-    migrate(this.orm, {
+    if (!options.readonly) migrate(this.orm, {
       migrationsFolder: options.migrationsFolder ?? fileURLToPath(new URL('../drizzle', import.meta.url)),
     });
   }

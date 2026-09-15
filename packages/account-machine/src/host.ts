@@ -38,7 +38,7 @@ const environment = new ReplacementEnvironment({
   controlToken: process.env.GITSPACE_CONTROL_TOKEN ?? crypto.randomUUID(),
 });
 
-await environment.bootMachine(join(bundleRoot, 'machine'));
+await environment.bootMachine(join(bundleRoot, 'machine'), requiredEnvironment('GITSPACE_INITIAL_MACHINE_MANIFEST_HASH'));
 const relayUrl = process.env.GITSPACE_RELAY_URL;
 const relay = relayUrl ? new MachineRelayConnector({
   relayUrl,

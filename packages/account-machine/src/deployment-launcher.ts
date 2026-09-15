@@ -1,19 +1,42 @@
 import { readdir, readFile, rm } from 'node:fs/promises';
 import { join, relative } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import type { AppendFactEvent, GitSpaceDatabase } from '@gitspace/core';
 import { executableManifestPath, readExecutableFile, sha256, validateExecutableArtifact } from '@gitspace/account-omp/manifest';
-import {
-  buildFrontendTree,
-  buildOmpBundle,
-  buildMachineBundle,
-  buildWorkerBundle,
-  workerMetadataFromWrangler,
-  workspaceSha,
-  type BuiltExecutableArtifact,
-} from '@gitspace/deployment';
-import type { ReleaseArtifact, ReleaseRecord, ReleaseTarget, StageReleaseInput, TenantDesired } from '@gitspace/protocol';
+import { hashArtifactPath, workspaceSha } from '@gitspace/deployment';
+import type { BuiltArtifact, BuiltOmpArtifact, BuiltExecutableArtifact } from '@gitspace/deployment';
+import { workerReleaseMetadataSchema, type ReleaseArtifact, type ReleaseRecord, type ReleaseTarget, type StageReleaseInput, type TenantDesired, type WorkerReleaseMetadata } from '@gitspace/protocol';
 import { releaseObjectKeys, type FrontendManifest } from './release-follower.js';
 
+
+/** Build code belongs to the selected source tree, not the currently running machine generation. */
+export async function buildWorkspaceTarget<T extends BuiltArtifact>(
+  root: string, sha: string, target: ReleaseTarget, output: string,
+): Promise<T & { worker?: WorkerReleaseMetadata }> {
+  const resultPath = `${output}.build.json`;
+  const builder = pathToFileURL(join(root, 'packages/deployment/src/builders.ts')).href;
+  const script = `
+    // This specifier is the runtime-selected tenant workspace, not this launcher's bundled modules.
+    const builders = await import(${JSON.stringify(builder)});
+    const root = ${JSON.stringify(root)};
+    const output = ${JSON.stringify(output)};
+    const target = ${JSON.stringify(target)};
+    let built;
+    if (target === 'worker') built = { ...await builders.buildWorkerBundle(root, ${JSON.stringify(sha)}, output), worker: await builders.workerMetadataFromWrangler(root) };
+    else if (target === 'machine') built = await builders.buildMachineBundle(root, output);
+    else if (target === 'omp') built = await builders.buildOmpBundle(root, output);
+    else built = await builders.buildFrontendTree(root, output);
+    await Bun.write(${JSON.stringify(resultPath)}, JSON.stringify(built));
+  `;
+  // A fresh process prevents module-cache reuse after source edits and isolates builder globals.
+  const child = Bun.spawn([process.execPath, '--eval', script], { cwd: root, stdout: 'inherit', stderr: 'inherit' });
+  if (await child.exited !== 0) throw new Error(`Workspace-owned ${target} build failed; inspect the deployment build output`);
+  try {
+    return JSON.parse(await readFile(resultPath, 'utf8')) as T & { worker?: WorkerReleaseMetadata };
+  } finally {
+    await rm(resultPath, { force: true });
+  }
+}
 /**
  * "Launch into": build GitSpace from a workspace held on this machine, put the
  * bundles in the tenant's data bucket, stage the release, and point the
@@ -44,7 +67,7 @@ export interface ProjectFactEvents {
 }
 
 export interface DeploymentLauncherOptions {
-  database: GitSpaceDatabase;
+  database: Pick<GitSpaceDatabase, 'getWorkspace'>;
   machineId: string;
   authority: ReleaseAuthority;
   blobs: ReleaseBlobWriter;
@@ -155,7 +178,7 @@ export class DeploymentLauncher {
     const buildRoot = join(this.options.buildRoot, sha);
     try {
       progress('install', `bun install --frozen-lockfile in ${root}`);
-      const install = Bun.spawn(['bun', 'install', '--frozen-lockfile'], {
+      const install = Bun.spawn([process.execPath, 'install', '--frozen-lockfile'], {
         cwd: root,
         stdout: 'inherit',
         stderr: 'pipe',
@@ -173,27 +196,28 @@ export class DeploymentLauncher {
 
       if (targets.includes('worker')) {
         progress('build', 'building tenant worker');
-        const built = await buildWorkerBundle(root, sha, join(buildRoot, 'worker'));
-        worker = await workerMetadataFromWrangler(root);
+        const built = await buildWorkspaceTarget<BuiltArtifact>(root, sha, 'worker', join(buildRoot, 'worker'));
+        worker = workerReleaseMetadataSchema.parse(built.worker);
         progress('upload', `uploading ${keys.worker}`);
         artifacts.worker = await this.putFile(keys.worker, built.path);
       }
       if (targets.includes('machine')) {
         progress('build', 'building machine daemon');
-        const built = await buildMachineBundle(root, join(buildRoot, 'machine'));
+        const built = await buildWorkspaceTarget<BuiltExecutableArtifact>(root, sha, 'machine', join(buildRoot, 'machine'));
         progress('upload', `uploading ${keys.machine}`);
         artifacts.machine = await this.putExecutable(keys.machine, built);
       }
       if (targets.includes('omp')) {
         progress('build', 'building pinned OMP runtime recipe');
-        const built = await buildOmpBundle(root, join(buildRoot, 'omp'));
+        const built = await buildWorkspaceTarget<BuiltOmpArtifact>(root, sha, 'omp', join(buildRoot, 'omp'));
         omp = built.metadata;
         progress('upload', `uploading ${keys.omp}`);
         artifacts.omp = await this.putExecutable(keys.omp, built);
       }
       if (targets.includes('frontend')) {
         progress('build', 'building frontend');
-        const built = await buildFrontendTree(root, join(buildRoot, 'frontend'));
+        const built = await buildWorkspaceTarget<BuiltArtifact>(root, sha, 'frontend', join(buildRoot, 'frontend'));
+        const hash = await hashArtifactPath(built.path);
         const files = await filesUnder(built.path);
         progress('upload', `uploading ${files.length} frontend files under ${keys.frontend}`);
         const manifest: FrontendManifest = { files: [] };
@@ -206,7 +230,7 @@ export class DeploymentLauncher {
           size += bytes.byteLength;
         }
         await this.options.blobs.put(keys.frontendManifest, new TextEncoder().encode(JSON.stringify(manifest)));
-        artifacts.frontend = { key: keys.frontend, hash: built.hash, size };
+        artifacts.frontend = { key: keys.frontend, hash, size };
       }
 
       progress('stage', 'staging release');

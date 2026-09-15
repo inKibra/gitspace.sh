@@ -1,65 +1,157 @@
-import type { AccountStateDO } from './account-state.js';
-import type { FleetCatalogDO } from './fleet-catalog.js';
+import { z } from 'zod';
+import {
+  cloudImageDiscardReceiptSchema, cloudImagePreparedSchema, cloudImageProviderStatusSchema, cloudImageReferenceSchema,
+  type CloudImageChoice, type CloudImageSelection, type CloudImageState,
+} from '@gitspace/protocol/cloud-image';
+import type { FleetMachineDefinition, PortableSpaceDefinition } from './fleet-catalog.js';
+import type { SpaceAuthorityDO } from './space-authority.js';
+import { controlCloudflareSandboxMachine, controlCloudflareSandboxReplacement } from './sandbox-provisioner.js';
 import { tenantProvider } from './tenant-platform.js';
 
+export async function cloudImageProviderCall(env: Env, path: string, body?: object): Promise<unknown> {
+  const response = await tenantProvider(env).fetch(new Request(`https://sandbox.internal${path}`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined,
+  }));
+  const payload = await response.json() as { status?: string; value?: unknown; error?: { code?: string; message?: string } | string };
+  if (!response.ok || payload.status !== 'ok') throw new Error(typeof payload.error === 'string' ? payload.error : payload.error?.message ?? `Cloud image provider request failed (HTTP ${response.status})`);
+  return payload.value;
+}
 
-/** Called only after an account deployment capability has been verified. */
-export async function handleSandboxRollout(request: Request, env: Env): Promise<Response | null> {
-  const path = new URL(request.url).pathname;
-  if (!path.startsWith('/v1/operator/sandboxes/rollout')) return null;
-  const registry = (env.ACCOUNT_STATE as DurableObjectNamespace<AccountStateDO>).getByName('account');
-  const catalogs = env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>;
-  if (path === '/v1/operator/sandboxes/rollout' && request.method === 'GET') {
-    return Response.json({ status: 'ok', value: await registry.sandboxRollout() }, { headers: { 'cache-control': 'no-store' } });
-  }
-  if (request.method !== 'POST') return new Response('Method not allowed', { status: 405 });
-  const body = await request.json() as { id?: unknown; image?: unknown };
-  if (typeof body.id !== 'string' || !/^[a-zA-Z0-9-]{1,80}$/u.test(body.id)) return Response.json({ error: 'Invalid rollout id' }, { status: 400 });
-  if (!['/v1/operator/sandboxes/rollout/prepare', '/v1/operator/sandboxes/rollout/finish', '/v1/operator/sandboxes/rollout/cancel'].includes(path)) return new Response('Not found', { status: 404 });
+export async function resolveCloudImage(env: Env, selection: CloudImageSelection): Promise<CloudImageChoice> {
+  const image = selection.kind === 'custom' ? selection.image
+    : z.object({ image: cloudImageReferenceSchema }).parse(await cloudImageProviderCall(env, '/v1/images/default')).image;
+  return { kind: selection.kind, image };
+}
+
+export async function prepareCloudImage(env: Env, image: string): Promise<void> {
+  const prepared = cloudImagePreparedSchema.parse(await cloudImageProviderCall(env, '/v1/images/prepare', { image }));
+  if (prepared.image !== image) throw new Error('Provider prepared a different image');
+}
+
+export interface CloudImageOperationStore {
+  saveCloudImage(state: CloudImageState): CloudImageState;
+  listSpaces(): PortableSpaceDefinition[];
+  getMachine(machineId: string): FleetMachineDefinition | null;
+  putMachine(machine: FleetMachineDefinition): FleetMachineDefinition;
+}
+
+/** Resumes from durable intent. In particular, a lost switch response is never permission to cancel. */
+export async function runCloudImageOperation(env: Env, store: CloudImageOperationStore, initial: CloudImageState): Promise<void> {
+  let state = initial;
+  const operation = state.operation!;
+  const machineId = state.machineId;
+  const path = `/v1/sandboxes/${encodeURIComponent(machineId)}`;
+  const authorities = env.SPACE_AUTHORITY as DurableObjectNamespace<SpaceAuthorityDO>;
+  const save = (phase: NonNullable<CloudImageState['operation']>['phase'], barrier = operation.barrier) => {
+    operation.phase = phase;
+    operation.barrier = barrier;
+    operation.updatedAt = Date.now();
+    operation.error = null;
+    state = store.saveCloudImage({ ...state, operation });
+  };
+  const placements = async () => Promise.all(store.listSpaces().map(async ({ spaceId }) => ({ spaceId, placement: await authorities.getByName(`${env.ACCOUNT_ID}:${spaceId}`).get() })));
   try {
-    if (path.endsWith('/prepare')) {
-      if (typeof body.image !== 'string' || !/^registry\.cloudflare\.com\/[a-f0-9]+\/[a-z0-9-]+@sha256:[a-f0-9]{64}$/u.test(body.image)) return Response.json({ error: 'An immutable container image is required' }, { status: 400 });
-      const existing = await registry.beginSandboxRollout(body.id, body.image);
-      if (existing.prepared) return Response.json({ status: 'ok', value: existing });
-      for (const { userId } of await registry.sandboxRolloutAccounts()) {
-        for (const machine of await catalogs.getByName(userId).listMachines()) {
-          if (machine.provider !== 'cloudflare-sandbox' || machine.desiredState !== 'online') continue;
-          await registry.recordSandboxPrepared(body.id, [{ userId, machineId: machine.id }]);
-          const response = await tenantProvider(env).fetch(new Request(`https://sandbox.internal/v1/sandboxes/${encodeURIComponent(machine.id)}/prepare-replacement`, {
-            method: 'POST', headers: { 'x-gitspace-user-id': userId },
-          }));
-          if (!response.ok) throw new Error(`Machine ${machine.id} did not acknowledge a durable checkpoint (HTTP ${response.status}); rollout remains blocked`);
-          const result = await response.json() as { prepared?: boolean };
-          if (result.prepared !== true) throw new Error(`Machine ${machine.id} returned no preparation acknowledgement`);
+    if (operation.phase === 'staging') {
+      if (!state.desiredImage) state.desiredImage = (await resolveCloudImage(env, state.selection)).image;
+      save('staging', !!operation.recoveryOf);
+      await prepareCloudImage(env, state.desiredImage);
+      const provider = cloudImageProviderStatusSchema.parse(await cloudImageProviderCall(env, `${path}/image/status`));
+      if (!operation.recoveryOf) state.currentImage = provider.image;
+      // Commit the admission barrier before asking the source to quiesce and checkpoint.
+      save('checkpointing', true);
+    }
+    if (operation.phase === 'checkpointing') {
+      for (const { spaceId, placement } of await placements()) {
+        if (placement?.machineId === machineId || placement?.resumeMachineId === machineId) {
+          if (!operation.resumeSpaceIds.includes(spaceId)) operation.resumeSpaceIds.push(spaceId);
         }
       }
-      return Response.json({ status: 'ok', value: await registry.markSandboxRolloutPrepared(body.id) });
-    }
-    const rollout = await registry.sandboxRollout();
-    if (!rollout || rollout.id !== body.id) throw new Error('Rollout identity does not match');
-    if (path.endsWith('/finish')) {
-      // The operator script verifies Cloudflare's applied image before releasing this barrier.
-      if (body.image !== rollout.image) throw new Error('Applied image does not match the prepared rollout');
-      await registry.beginSandboxRolloutRecovery(body.id, true);
-      for (const machine of rollout.machines) {
-        const response = await tenantProvider(env).fetch(new Request(`https://sandbox.internal/v1/sandboxes/${encodeURIComponent(machine.machineId)}/resume`, {
-          method: 'POST', headers: { 'x-gitspace-user-id': machine.userId },
-        }));
-        if (!response.ok) throw new Error(`Image rollout finished but machine ${machine.machineId} needs resume (HTTP ${response.status})`);
+      save('checkpointing', true);
+      try {
+        // The provider may reuse the inherited checkpoint only when its durable
+        // runtimeStarted=false proves no container start was attempted, including ENTRYPOINT/CMD.
+        // Otherwise this must checkpoint the actual candidate, not its predecessor.
+        await controlCloudflareSandboxReplacement({ env, userId: env.ACCOUNT_ID, machineId, action: 'prepare-replacement' });
+        for (const { spaceId, placement } of await placements()) {
+          if (placement?.machineId === machineId && placement.state !== 'closed') throw new Error(`Machine still owns uncheckpointed workspace ${spaceId}`);
+          if (placement?.resumeMachineId === machineId && !operation.resumeSpaceIds.includes(spaceId)) operation.resumeSpaceIds.push(spaceId);
+          if (operation.resumeSpaceIds.includes(spaceId) && (!placement || placement.state !== 'closed' || !placement.manifestHash)) throw new Error(`Workspace ${spaceId} has no durable closed checkpoint`);
+        }
+        // This is the point of no cancellation: selection may succeed without a response.
+        save('replacing', true);
+      } catch (error) {
+        if (!operation.recoveryOf || !operation.discardApproval) throw error;
+        // Explicit discard can return only to real previously committed manifests.
+        // Never stop the candidate first and then discover recovery is impossible.
+        for (const spaceId of operation.resumeSpaceIds) {
+          const placement = await authorities.getByName(`${env.ACCOUNT_ID}:${spaceId}`).get();
+          if (!placement?.manifestKey || !placement.manifestHash || placement.publishedRevision < 1
+            || (placement.machineId !== machineId && placement.resumeMachineId !== machineId)) throw new Error(`Workspace ${spaceId} has no owned committed checkpoint for explicit discard recovery`);
+        }
+        const provider = cloudImageProviderStatusSchema.parse(await cloudImageProviderCall(env, `${path}/image/status`));
+        if (!provider.operationId) throw new Error('Provider cannot bind a stopped-candidate receipt to this failed image operation');
+        operation.discardOperationId = provider.operationId;
+        save('discarding', true);
       }
-      await registry.finishSandboxRollout(body.id);
-      return Response.json({ status: 'ok', value: { finished: true } });
     }
-    await registry.beginSandboxRolloutRecovery(body.id, false);
-    for (const machine of rollout.machines) {
-      const response = await tenantProvider(env).fetch(new Request(`https://sandbox.internal/v1/sandboxes/${encodeURIComponent(machine.machineId)}/cancel-replacement`, {
-        method: 'POST', headers: { 'x-gitspace-user-id': machine.userId },
-      }));
-      if (!response.ok) throw new Error(`Machine ${machine.machineId} could not cancel preparation; rollout remains blocked`);
+    if (operation.phase === 'discarding') {
+      if (!operation.discardApproval || !operation.discardOperationId) throw new Error('Explicit candidate discard approval or identity is missing');
+      const receipt = cloudImageDiscardReceiptSchema.parse(await cloudImageProviderCall(env, `${path}/image/discard`, { operationId: operation.discardOperationId, recoveryOperationId: operation.id }));
+      if (receipt.machineId !== machineId || receipt.operationId !== operation.discardOperationId || receipt.recoveryOperationId !== operation.id) throw new Error('Provider stop receipt does not match the approved candidate recovery');
+      operation.discardReceipt = receipt;
+      save('fencing', true);
     }
-    await registry.cancelSandboxRollout(body.id);
-    return Response.json({ status: 'ok', value: { cancelled: true } });
+    if (operation.phase === 'fencing') {
+      if (!operation.discardApproval || !operation.discardReceipt) throw new Error('Recovery requires explicit approval and a verified stopped-candidate receipt');
+      for (const spaceId of operation.resumeSpaceIds) {
+        const authority = authorities.getByName(`${env.ACCOUNT_ID}:${spaceId}`);
+        const placement = await authority.get();
+        if (!placement) throw new Error(`Recovery workspace ${spaceId} is unavailable`);
+        const recovered = await authority.recoverStoppedImage({ userId: env.ACCOUNT_ID, expectedGeneration: placement.generation, receipt: operation.discardReceipt });
+        if (recovered.status === 'error') throw new Error(recovered.failure.message);
+      }
+      save('replacing', true);
+    }
+    if (operation.phase === 'replacing') {
+      const provider = cloudImageProviderStatusSchema.parse(await cloudImageProviderCall(env, `${path}/image/status`));
+      if (provider.operationId !== operation.id || provider.image !== state.desiredImage) {
+        if (!provider.prepared) throw new Error('Provider has not acknowledged source preparation; image selection remains fenced');
+        await cloudImageProviderCall(env, `${path}/image`, { image: state.desiredImage, operationId: operation.id });
+      }
+      save('resuming', true);
+    }
+    if (operation.phase === 'resuming' || operation.phase === 'confirming') {
+      save('resuming', true);
+      const resumed = await controlCloudflareSandboxMachine({ env, userId: env.ACCOUNT_ID, machineId, action: 'resume' });
+      if (!resumed || resumed.state !== 'online') throw new Error('Replacement machine is not ready; retry recovery');
+      save('confirming', true);
+      const provider = cloudImageProviderStatusSchema.parse(await cloudImageProviderCall(env, `${path}/image/status`));
+      if (provider.image !== state.desiredImage || provider.operationId !== operation.id || provider.prepared) throw new Error('Provider has not confirmed the selected image is running and ready');
+      for (const spaceId of operation.resumeSpaceIds) {
+        const placement = await authorities.getByName(`${env.ACCOUNT_ID}:${spaceId}`).get();
+        if (placement?.state !== 'open' || placement.machineId !== machineId) throw new Error(`Workspace ${spaceId} has not recovered on the replacement machine; retry recovery`);
+      }
+      const current = store.getMachine(machineId)!;
+      store.putMachine({ ...resumed, notes: current.notes, lifecycleRevision: Math.max(current.lifecycleRevision, resumed.lifecycleRevision) + 1 });
+      state.currentImage = provider.image;
+      save('complete', false);
+    }
+    if (operation.phase === 'cancelling') {
+      await controlCloudflareSandboxReplacement({ env, userId: env.ACCOUNT_ID, machineId, action: 'cancel-replacement' });
+      const provider = cloudImageProviderStatusSchema.parse(await cloudImageProviderCall(env, `${path}/image/status`));
+      if (provider.prepared || provider.operationId === operation.id || provider.image !== state.currentImage) throw new Error('Cancellation cannot confirm the original image; admission remains fenced');
+      const resumed = await controlCloudflareSandboxMachine({ env, userId: env.ACCOUNT_ID, machineId, action: 'status' });
+      if (!resumed || resumed.state !== 'online') throw new Error('Original machine is not ready after cancellation');
+      for (const spaceId of operation.resumeSpaceIds) {
+        const placement = await authorities.getByName(`${env.ACCOUNT_ID}:${spaceId}`).get();
+        if (placement?.state !== 'open' || placement.machineId !== machineId) throw new Error(`Workspace ${spaceId} still needs cancellation recovery`);
+      }
+      state.desiredImage = state.currentImage;
+      save('cancelled', false);
+    }
   } catch (error) {
-    return Response.json({ status: 'error', error: { code: 'SANDBOX_ROLLOUT_BLOCKED', message: error instanceof Error ? error.message : 'Sandbox rollout failed' } }, { status: 409, headers: { 'cache-control': 'no-store' } });
+    operation.error = error instanceof Error ? error.message : String(error);
+    operation.updatedAt = Date.now();
+    store.saveCloudImage({ ...state, operation });
   }
 }

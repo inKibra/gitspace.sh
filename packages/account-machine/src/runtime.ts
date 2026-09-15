@@ -1,4 +1,4 @@
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import {
   GitSpaceDatabase,
@@ -48,6 +48,8 @@ import { createSpaceWorkspaceControls } from './space-workspace-controls.js';
 import { restoreGitIntermediateCheckpoint } from './git-checkpoint.js';
 import { createPublishedSpaceHeadResolver } from './inspector-base.js';
 import type { SpaceWorkspaceControls } from './space-eval-sdk.js';
+import { prepareMachineNativeRuntime } from '../../deployment/src/native-runtime.js';
+import { sourceWalgit } from '../../deployment/src/native-build.js';
 
 function requiredEnvironment(name: string): string {
   const value = process.env[name];
@@ -116,6 +118,12 @@ export function reconcileOpenSpaceProjection(
 
 
 export async function startMachineRuntime() {
+  const nativeRoot = process.env.GITSPACE_MACHINE_RUNTIME_PATH ?? import.meta.dir;
+  const packaged = Boolean(process.env.GITSPACE_MACHINE_RUNTIME_PATH) || await Bun.file(join(nativeRoot, 'machine-native.json')).exists();
+  const walgitBinary = packaged
+    ? await prepareMachineNativeRuntime(nativeRoot)
+    : await sourceWalgit(resolve(import.meta.dir, '../../..'));
+  if (packaged) process.env.GITSPACE_MACHINE_RUNTIME_PATH = nativeRoot;
   const environmentRoot = requiredEnvironment('GITSPACE_ENVIRONMENT_ROOT');
   const machineId = requiredEnvironment('GITSPACE_MACHINE_ID');
   const database = new GitSpaceDatabase(join(environmentRoot, 'gitspace.db'), {
@@ -325,7 +333,7 @@ export async function startMachineRuntime() {
     region: gitStorage.region,
   });
   const walgit = new WalgitSupervisor({
-    binaryPath: requiredEnvironment('GITSPACE_WALGIT_BINARY'),
+    binaryPath: walgitBinary,
     runtimeRoot: join(environmentRoot, 'runtime'),
     credentials: async (binding) => localGitEndpoint
       ? {
@@ -578,7 +586,7 @@ export async function startMachineRuntime() {
       if (!current) throw new Error(`Machine ${targetMachineId} does not exist`);
       return authority.putMachineDefinition({ ...current, notes });
     },
-    createSandbox: () => authority.createSandboxMachine(),
+    createSandbox: (image) => authority.createSandboxMachine(image),
     controlMachine: (action, targetMachineId) => action === 'sleep' ? authority.sleepMachine(targetMachineId) : authority.resumeMachine(targetMachineId),
     destroyMachine: (targetMachineId) => authority.destroyMachine(targetMachineId),
     settings,

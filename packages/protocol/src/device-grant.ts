@@ -328,10 +328,17 @@ export function verifyRpcSignature(header: SignedRpcHeader, input: Omit<RpcSigna
 /** The capability a procedure needs, derived from its kind unless the path is special-cased. */
 export function requiredCapability(procedurePath: string, kind: 'query' | 'mutation' | 'subscription'): DeviceCapability {
   if (procedurePath === 'session.prompt' || procedurePath.startsWith('session.answer') || procedurePath === 'session.steer') return 'session.prompt';
+  if (procedurePath.startsWith('machine.image.') && kind === 'mutation') return 'deployment.control';
   if (procedurePath.startsWith('machine.') && kind === 'mutation') return 'fleet.control';
   if (procedurePath.startsWith('devices.') && kind === 'mutation') return 'devices.manage';
   if (procedurePath.startsWith('deployment.') && kind === 'mutation') return 'deployment.control';
   return kind === 'mutation' ? 'rpc.write' : 'rpc.read';
+}
+
+/** An explicit boot image changes executable deployment content, even when selecting the platform default. */
+export function requiresImageSelectionControl(procedurePath: string, input: unknown): boolean {
+  return procedurePath === 'machine.createSandbox' && input !== null && typeof input === 'object'
+    && (input as Record<string, unknown>).image !== undefined;
 }
 
 /** Scope check on a procedure input: a scoped grant may only name its own project/workspace. */
@@ -345,8 +352,8 @@ export function inputWithinScope(scope: DeviceScope, input: unknown, workspacePr
   return workspaceId !== null && workspaceProject?.(workspaceId) === scope.projectId;
 }
 
-/** Fetch wrapper that signs every request with a raw Ed25519 device key (Bun/Node clients and tests). */
-export function createSignedRpcFetch(options: { deviceId: string; signingPrivateKey: Uint8Array; fetch?: typeof globalThis.fetch }): typeof globalThis.fetch {
+/** Signs device requests; account RPCs also require the account identity used for grant lookup. */
+export function createSignedRpcFetch(options: { deviceId: string; userId?: string; signingPrivateKey: Uint8Array; fetch?: typeof globalThis.fetch }): typeof globalThis.fetch {
   const baseFetch = options.fetch ?? globalThis.fetch;
   const signedFetch = async (input: Parameters<typeof globalThis.fetch>[0], init?: Parameters<typeof globalThis.fetch>[1]): Promise<Response> => {
     const original = new Request(input, init);
@@ -354,6 +361,7 @@ export function createSignedRpcFetch(options: { deviceId: string; signingPrivate
     const url = new URL(original.url);
     const headers = new Headers(original.headers);
     headers.set(RPC_DEVICE_HEADER, signRpcRequest({ deviceId: options.deviceId, method: original.method, path: `${url.pathname}${url.search}`, body, signingPrivateKey: options.signingPrivateKey }));
+    if (options.userId) headers.set('x-gitspace-user', options.userId);
     return baseFetch(new Request(original.url, { method: original.method, headers, body: body.length > 0 ? body : null, signal: original.signal }));
   };
   // Bun's fetch type carries `preconnect`; the wrapper is only ever called.
@@ -366,7 +374,8 @@ export function createSignedRpcFetch(options: { deviceId: string; signingPrivate
  * Settings → Devices like any other device.
  */
 export const apiKeySchema = z.object({
-  version: z.literal(1),
+  version: z.literal(2),
+  userId: idSchema,
   deviceId: z.uuid(),
   signingPrivateKey: keySchema,
   rpcUrl: z.string().url().max(2_048),

@@ -33,7 +33,6 @@ const gitBucketName = 'gsp-u-local-user';
 const gitSecretAccessKey = new Bun.CryptoHasher('sha256').update(`${environmentRoot}:git-secret`).digest('hex');
 const rustfsBinary = process.env.GITSPACE_RUSTFS_BINARY ?? join(environmentRoot, 'bin', 'rustfs');
 const ompAgentDir = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), '.omp', 'agent');
-const walgitBinary = process.env.GITSPACE_WALGIT_BINARY ?? join(environmentRoot, 'bin', 'walgit');
 const controlUrl = 'http://127.0.0.1:4512';
 const gitEndpoint = 'http://127.0.0.1:4513';
 const controlToken = crypto.randomUUID();
@@ -63,7 +62,6 @@ const environment = new ReplacementEnvironment({
     GITSPACE_GIT_ACCESS_KEY_ID: gitAccessKeyId,
     GITSPACE_GIT_SECRET_ACCESS_KEY: gitSecretAccessKey,
     GITSPACE_MANAGED_SPACE_ROOT: join(environmentRoot, 'managed'),
-    GITSPACE_WALGIT_BINARY: walgitBinary,
     GITSPACE_SERVICE_DOMAIN: 'gssh.dev',
     GITSPACE_SERVICE_NAMESPACE: 'gitspace',
   },
@@ -166,7 +164,6 @@ async function bootstrapDevelopmentControlPlane(): Promise<void> {
 
 await mkdir(environmentRoot, { recursive: true });
 if (!existsSync(rustfsBinary)) throw new Error(`RustFS binary is required at ${rustfsBinary}; set GITSPACE_RUSTFS_BINARY`);
-if (!existsSync(walgitBinary)) throw new Error(`walgit binary is required at ${walgitBinary}; set GITSPACE_WALGIT_BINARY`);
 const rustfsData = join(environmentRoot, 'rustfs');
 await mkdir(rustfsData, { recursive: true });
 const rustfs = Bun.spawn([rustfsBinary, 'server', '--address', '127.0.0.1:4513', rustfsData], {

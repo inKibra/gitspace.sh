@@ -69,6 +69,14 @@ const executableFilePathSchema = z.string().min(1).max(2_048).refine(
 /** Fits below the 64 MiB signed application-object limit, including transport overhead. */
 export const EXECUTABLE_CHUNK_BYTES = 32 * 1024 * 1024;
 
+/** Native generations are host-specific, including libc (Linux) or Darwin kernel ABI. */
+export const nativeAbiSchema = z.object({
+  platform: z.enum(['linux', 'darwin']),
+  arch: z.enum(['x64', 'arm64']),
+  minimumVersion: z.string().regex(/^\d+\.\d+(?:\.\d+)?$/u),
+}).strict();
+export type NativeAbi = z.infer<typeof nativeAbiSchema>;
+
 /** Authenticated host-specific payload: complete machine files or an OMP runtime recipe. */
 export const executableArtifactManifestSchema = z.object({
   version: z.literal(1),
@@ -79,6 +87,8 @@ export const executableArtifactManifestSchema = z.object({
     arch: z.enum(['x64', 'arm64']),
     bunVersion: z.string().min(1).max(80),
     protocolVersion: z.literal(1),
+    /** Older manifests predate native dependency selection. New builders always record this. */
+    nativeAbi: nativeAbiSchema.optional(),
   }),
   treeHash: hashSchema,
   files: z.array(z.object({

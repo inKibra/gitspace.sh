@@ -14,6 +14,8 @@ import {
   type MachineReplacementHost,
 } from '@gitspace/deployment';
 import { z } from 'zod';
+import { prepareMachineNativeRuntime } from '../../deployment/src/native-runtime.js';
+import { executableManifestPath, parseExecutableArtifactManifest, validateExecutableArtifact } from '@gitspace/account-omp/manifest';
 
 const machineSelectionSchema = z.object({
   version: z.literal(1),
@@ -284,9 +286,11 @@ class MachineHost implements MachineReplacementHost {
   private async ensureGeneration(pointer: MachineGenerationPointer): Promise<RunningGeneration> {
     const existing = this.running.get(pointer.socketPath);
     if (existing) return existing;
+    if (await hashArtifactPath(pointer.artifactPath) !== pointer.hash) throw new Error('Machine generation integrity mismatch before start');
+    await prepareMachineNativeRuntime(pointer.artifactPath);
     const bootstrap = this.options.bootstrap;
     const releaseSha = this.releaseShas.get(pointer.socketPath) ?? null;
-    const process = Bun.spawn(['bun', join(pointer.artifactPath, 'machine.js')], {
+    const process = Bun.spawn([globalThis.process.execPath, join(pointer.artifactPath, 'machine.js')], {
       cwd: this.options.repositoryRoot,
       env: processEnvironment({
         ...this.options.environment,
@@ -297,6 +301,7 @@ class MachineHost implements MachineReplacementHost {
         GITSPACE_OMP_AGENT_DIR: this.options.ompAgentDir,
         GITSPACE_MIGRATIONS_FOLDER: join(pointer.artifactPath, 'drizzle'),
         GITSPACE_GENERATION_HASH: pointer.hash,
+        GITSPACE_MACHINE_RUNTIME_PATH: pointer.artifactPath,
         GITSPACE_CONTROL_TOKEN: this.options.controlToken,
         GITSPACE_HOST_URL: this.hostUrl,
         GITSPACE_RPC_HOST: '127.0.0.1',
@@ -432,10 +437,19 @@ export class ReplacementEnvironment {
   }
 
   /** Restore an account-selected machine without briefly running the bundled channel. */
-  async bootMachine(channelPath: string): Promise<void> {
+  async bootMachine(channelPath: string, manifestHash?: string): Promise<void> {
     if (this.machineHash !== null) throw new Error('Machine bootstrap requires an unstarted machine host');
+    let channelHash: `sha256:${string}`;
+    if (manifestHash) {
+      const manifest = parseExecutableArtifactManifest(await readFile(executableManifestPath(channelPath)), { target: 'machine', manifestHash });
+      await validateExecutableArtifact(channelPath, { target: 'machine', hash: manifest.treeHash, manifestHash });
+      channelHash = manifest.treeHash;
+    } else {
+      // Local/test environments supply artifacts directly; production hosts pass their embedded trust anchor.
+      channelHash = await hashArtifactPath(channelPath);
+    }
     const channel: DeploymentArtifact = {
-      entrypoint: 'machine-daemon', path: channelPath, hash: await hashArtifactPath(channelPath), dependsOn: [],
+      entrypoint: 'machine-daemon', path: channelPath, hash: channelHash, dependsOn: [],
     };
     let selection: z.infer<typeof machineSelectionSchema> | null = null;
     try {
@@ -471,6 +485,12 @@ export class ReplacementEnvironment {
         : artifact.hash !== this.frontendHash || input.releaseSha !== this.frontendReleaseSha
     ));
     if (changed.length === 0) return { changed };
+    // Reject missing, tampered or incompatible native payloads before stopping a healthy predecessor.
+    for (const artifact of changed) {
+      if (artifact.entrypoint !== 'machine-daemon') continue;
+      if (await hashArtifactPath(artifact.path) !== artifact.hash) throw new Error('Machine candidate integrity mismatch');
+      await prepareMachineNativeRuntime(artifact.path);
+    }
     const machineChanged = changed.some((artifact) => artifact.entrypoint === 'machine-daemon');
     const frontendChanged = changed.some((artifact) => artifact.entrypoint === 'frontend');
     const channelCandidates: Array<[EnvironmentChannelRequest['target'], DeploymentArtifact]> = [];

@@ -123,7 +123,7 @@ export interface ApiClientDraft {
  * key binds to it, the vault records the pair, and the private key is
  * returned exactly once as a `gsk_` string. Nothing here touches the root key.
  */
-export async function createApiClient(device: BrowserDevice, draft: ApiClientDraft): Promise<string> {
+export async function createApiClient(device: BrowserDevice, draft: ApiClientDraft, accountOrigin?: string): Promise<string> {
   if (!device.canDelegate || !device.userId) throw new DeviceEnrollmentError('CANNOT_DELEGATE', 'This browser cannot create API clients; re-enroll it with a delegating link');
   const invite: DeviceInvite = {
     version: 1, userId: device.userId, inviteId: crypto.randomUUID(), kind: 'client', label: draft.label, scope: draft.scope, capabilities: draft.capabilities,
@@ -136,10 +136,10 @@ export async function createApiClient(device: BrowserDevice, draft: ApiClientDra
     inviteId: invite.inviteId, deviceId: crypto.randomUUID(), signingPublicKey: deviceProtocolBase64.encode(ed25519.getPublicKey(clientPrivateKey)),
     label: draft.label, boundAt: Date.now(), signingPrivateKey: clientPrivateKey,
   });
-  const response = await fetch(new URL('/v1/devices/enroll', device.enrollUrl), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ invite: signed, binding }) });
+  const response = await fetch(new URL('/v1/devices/enroll', accountOrigin ?? device.enrollUrl), { method: 'POST', redirect: 'error', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ invite: signed, binding }) });
   const result = await response.json() as { status: 'ok' } | { status: 'error'; error: { code: string; message: string } };
   if (result.status !== 'ok') throw new DeviceEnrollmentError(result.error.code, result.error.message);
-  return encodeApiKey({ version: 1, deviceId: binding.deviceId, signingPrivateKey: deviceProtocolBase64.encode(clientPrivateKey), rpcUrl: draft.rpcUrl, enrollUrl: device.enrollUrl });
+  return encodeApiKey({ version: 2, userId: device.userId, deviceId: binding.deviceId, signingPrivateKey: deviceProtocolBase64.encode(clientPrivateKey), rpcUrl: draft.rpcUrl, enrollUrl: device.enrollUrl });
 }
 
 /** Thrown by the signed fetch when no device is enrolled or the machine no longer accepts it. */

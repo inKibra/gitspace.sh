@@ -1,30 +1,21 @@
 FROM rust:1.97.1-bullseye AS rust-toolchain
 
-# Match the sandbox's glibc 2.35 without relying on retired Bullseye packages.
-FROM ubuntu:22.04 AS walgit-builder
+# Build every native dependency on the sandbox's glibc, using the same maintained
+# pinned-source helper and authenticated machine tree as native distributions.
+FROM ubuntu:22.04 AS builder
 COPY --from=rust-toolchain /usr/local/cargo /usr/local/cargo
 COPY --from=rust-toolchain /usr/local/rustup /usr/local/rustup
-ENV CARGO_HOME=/usr/local/cargo RUSTUP_HOME=/usr/local/rustup PATH=/usr/local/cargo/bin:$PATH
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates git build-essential protobuf-compiler libprotobuf-dev cmake clang pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
-WORKDIR /walgit
-# Keep in sync with deployment/src/release.ts; newer packfile-format writers need a coordinated migration.
-RUN git init . && git remote add origin https://github.com/tobi/walgit.git && git fetch --depth 1 origin 6465bf578d0bc9686019bc6d4537861ab162ee6a && git checkout --detach FETCH_HEAD && test "$(git rev-parse HEAD)" = 6465bf578d0bc9686019bc6d4537861ab162ee6a
-COPY patches/walgit/conditional-multipart.patch /tmp/conditional-multipart.patch
-RUN git apply -- /tmp/conditional-multipart.patch
 COPY --from=oven/bun:1.4.0 /usr/local/bin/bun /usr/local/bin/bun
-RUN cd web && bun install --frozen-lockfile && bun run build
-RUN cargo build --locked --release -p walgit-cli && strip --strip-debug target/release/walgit
-
-FROM oven/bun:1.4.0 AS builder
+ENV CARGO_HOME=/usr/local/cargo RUSTUP_HOME=/usr/local/rustup PATH=/usr/local/cargo/bin:$PATH
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates git build-essential protobuf-compiler libprotobuf-dev cmake clang pkg-config libssl-dev binutils unzip && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY package.json bun.lock ./
 COPY packages ./packages
 COPY patches ./patches
-RUN apt-get update && apt-get install -y --no-install-recommends binutils && rm -rf /var/lib/apt/lists/*
 RUN bun install --filter @gitspace/account-machine --filter @gitspace/account-omp --filter @gitspace/deployment --frozen-lockfile
-# The host bootstrap embeds the initial OMP manifest digest. Both payloads have
-# their own native addons, source maps and authenticated sidecar inventory.
-RUN GITSPACE_RUNTIME_LAYER_COUNT=16 bun packages/sandbox-worker/scripts/build-runtime.ts
+# Cache is keyed by source pin, patch digest, toolchains, OS and architecture.
+# The binary and patch snapshot remain inside the authenticated machine tree.
+RUN --mount=type=cache,target=/native-cache GITSPACE_NATIVE_CACHE=/native-cache GITSPACE_RUNTIME_LAYER_COUNT=16 bun packages/sandbox-worker/scripts/build-runtime.ts
 
 FROM docker.io/cloudflare/sandbox:0.12.9
 USER root
@@ -49,6 +40,5 @@ COPY --from=builder /runtime-layers/14/ /opt/gitspace/
 COPY --from=builder /runtime-layers/15/ /opt/gitspace/
 # Native ABI compatibility includes the exact Bun version used by the builder.
 COPY --from=builder /usr/local/bin/bun /usr/local/bin/bun
-# Build against the sandbox's glibc 2.35; never copy a host-linked binary.
-COPY --from=walgit-builder /walgit/target/release/walgit /usr/local/bin/walgit
-RUN /usr/local/bin/walgit --version && /usr/local/bin/walgit --help >/dev/null
+# No image-global WalGit: the selected machine owns native/walgit and its provenance.
+RUN /opt/gitspace/machine/native/walgit --version && /opt/gitspace/machine/native/walgit --help >/dev/null

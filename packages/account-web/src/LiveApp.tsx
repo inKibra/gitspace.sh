@@ -4,6 +4,7 @@ import { executionHash, projectEnvironmentState, lifecycleSummary, lifecycleExec
 import { currentAgentFailure } from '@gitspace/protocol-agent';
 import type { ProjectMcpGrantRpcView } from '@gitspace/protocol/mcp-contract';
 import type { ProjectCronView } from '@gitspace/protocol/cron-contract';
+import type { CloudImageSelection } from '@gitspace/protocol/cloud-image';
 import { Button, Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, InputField, InputGroup, ScrollArea, Select, SelectContent, SelectItem, SelectTrigger, SidebarInset, SidebarInsetTopbar, SidebarProvider, ThinkingIndicator, Tooltip, useShape } from '@gitspace/ui';
 import { LayoutRight, Terminal } from '@untitledui/icons';
 import { createContext, useContext, useEffect, useMemo, useRef, useState, type ComponentProps, type ContextType, type ReactNode } from 'react';
@@ -38,7 +39,7 @@ import { invalidatesRead, useRetainedRead, useRetainedQueryValue } from './useRe
 import { useLiveSessionControls } from './useLiveSessionControls.js';
 import { ResourceNavigation, type ResourceRequest } from './ResourceNavigation.js';
 import { loadInspectorResource } from './resource-content.js';
-import { SynchronizationProvider, useAccountSettings, useAccountGitIdentity, useAccountOmpConfiguration, useAccountMachines, useAccountProjects, useEnvironmentSynchronization, useEventRefresh, useProjectSynchronization, useRuntimeSynchronization, useSpaceSynchronization, useSynchronizationOwner, useSynchronizedEvents } from './SynchronizationProvider.js';
+import { SynchronizationProvider, useAccountSettings, useAccountGitIdentity, useAccountOmpConfiguration, useAccountMachines, useAccountCloudImages, useAccountProjects, useEnvironmentSynchronization, useEventRefresh, useProjectSynchronization, useRuntimeSynchronization, useSpaceSynchronization, useSynchronizationOwner, useSynchronizedEvents } from './SynchronizationProvider.js';
 import type { SynchronizationOwner } from './synchronization.js';
 import { recordActionIncident } from './incident-outbox.js';
 
@@ -1698,6 +1699,15 @@ function GitSpaceProduct() {
   const runtimeMetadataEnabled = route === 'settings' || forceOnboarding || (settingsValue !== undefined && !settingsValue.onboardingComplete) || workspaceAvailabilityValue?.runtimeAvailable === true;
   const machinesQuery = useAccountMachines();
   const machinesValue = useRetainedQueryValue(machinesQuery, 'machines');
+  const cloudImagesQuery = useAccountCloudImages();
+  const cloudImagesValue = useRetainedQueryValue(cloudImagesQuery, 'cloud-images');
+  const imageDefaultQuery = useResultQuery(rpcClient.machine.image.defaults.get, {}, { enabled: runtimeMetadataEnabled });
+  const imageDefaultValue = useRetainedQueryValue(imageDefaultQuery, 'cloud-image-default');
+  const setCloudImage = useResultMutation(rpcClient.machine.image.set);
+  const retryCloudImage = useResultMutation(rpcClient.machine.image.retry);
+  const cancelCloudImage = useResultMutation(rpcClient.machine.image.cancel);
+  const recoverWithCloudImage = useResultMutation(rpcClient.machine.image.recover);
+  const setCloudImageDefault = useResultMutation(rpcClient.machine.image.defaults.set);
   const onlineMachineIds = (machinesValue ?? []).filter((machine) => machine.state === 'online' && machine.desiredState === 'online' && machine.rpcEndpoint).map((machine) => machine.id).sort().join(',');
   const runtimeAvailable = runtimeMetadataEnabled && onlineMachineIds.length > 0;
   const ompQuery = useResultQuery(rpcClient.settings.omp.get, {}, { enabled: runtimeMetadataEnabled });
@@ -1765,7 +1775,8 @@ function GitSpaceProduct() {
   const mintApiClient = async (draft: ApiClientDraft): Promise<string> => {
     const device = await currentDevice();
     if (!device) throw new Error('This browser is not enrolled');
-    const key = await createApiClient(device, draft);
+    const pageUrl = new URL(window.location.href);
+    const key = await createApiClient(device, draft, accountHandleFromUrl(pageUrl) ? pageUrl.origin : undefined);
     await devicesQuery.refetch();
     return key;
   };
@@ -1861,14 +1872,32 @@ function GitSpaceProduct() {
     }
     await machinesQuery.refetch();
   };
-  const createSandbox = async (): Promise<void> => {
+  const createSandbox = async (image?: CloudImageSelection): Promise<void> => {
     setSettingsError(null);
-    const result = await createSandboxMachine.mutateAsync({});
+    const result = await createSandboxMachine.mutateAsync({ image });
     if (result.status === 'error') {
       setSettingsError(result.error.message);
       throw result.error;
     }
     await machinesQuery.refetch();
+  };
+  const changeCloudImage = async (machineId: string, selection: CloudImageSelection, previousOperationId?: string, discardUncheckpointedCandidate?: boolean): Promise<void> => {
+    setSettingsError(null);
+    const result = previousOperationId
+      ? await recoverWithCloudImage.mutateAsync({ machineId, selection, operationId: previousOperationId, recoveryOperationId: crypto.randomUUID(), discardUncheckpointedCandidate })
+      : await setCloudImage.mutateAsync({ machineId, selection, operationId: crypto.randomUUID() });
+    if (result.status === 'error') { setSettingsError(result.error.message); throw result.error; }
+  };
+  const recoverCloudImage = async (machineId: string, operationId: string, cancel: boolean): Promise<void> => {
+    setSettingsError(null);
+    const result = await (cancel ? cancelCloudImage : retryCloudImage).mutateAsync({ machineId, operationId });
+    if (result.status === 'error') { setSettingsError(result.error.message); throw result.error; }
+  };
+  const saveCloudImageDefault = async (selection: CloudImageSelection): Promise<void> => {
+    setSettingsError(null);
+    const result = await setCloudImageDefault.mutateAsync({ selection });
+    if (result.status === 'error') { setSettingsError(result.error.message); throw result.error; }
+    await imageDefaultQuery.refetch();
   };
   const controlMachine = async (action: 'sleep' | 'resume', machineId: string): Promise<void> => {
     setSettingsError(null);
@@ -2023,6 +2052,7 @@ function GitSpaceProduct() {
     ['Account settings', settingsQuery], ['OMP settings', ompQuery], ['Git identity', gitIdentityQuery], ['Machines', machinesQuery],
     ['Devices', devicesQuery], ['Source', settingsDeploymentQuery], ['Composio setup', composioSetupQuery], ['Browser relay', browserRelayQuery],
     ['Projects', productProjectsQuery], ['Models', modelsQuery],
+    ['Cloud images', cloudImagesQuery], ['Cloud image default', imageDefaultQuery],
   ] as const;
   const page = (mode: 'settings' | 'onboarding') => <>
     {reads.map(([label, query]) => query.state === 'failure' ? <p key={label} role="alert" className="px-8 py-1 text-caption text-destructive">{label}: {query.error.message}<Button variant="ghost" size="compact" onClick={() => void query.refetch()}>Retry</Button></p> : null)}
@@ -2046,6 +2076,12 @@ function GitSpaceProduct() {
     onSetOmpSetting={updateOmp}
     onUpdateMachine={saveMachineNotes}
     onCreateSandbox={createSandbox}
+    cloudImages={cloudImagesValue ?? []}
+    cloudImageDefault={imageDefaultValue ?? null}
+    cloudImageError={cloudImagesQuery.state === 'failure' ? cloudImagesQuery.error.message : imageDefaultQuery.state === 'failure' ? imageDefaultQuery.error.message : null}
+    onChangeCloudImage={changeCloudImage}
+    onRecoverCloudImage={recoverCloudImage}
+    onSetCloudImageDefault={saveCloudImageDefault}
     onControlMachine={controlMachine}
     onDestroyMachine={removeMachine}
     deployment={settingsDeploymentValue ?? null}

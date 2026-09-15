@@ -2,7 +2,7 @@
 import { chmod, mkdir, open, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { closeSync, existsSync, openSync, statSync } from 'node:fs';
 import { homedir, hostname } from 'node:os';
-import { delimiter, join } from 'node:path';
+import { delimiter, join, resolve } from 'node:path';
 import { ed25519, x25519 } from '@noble/curves/ed25519.js';
 import { createRelayAuthorization, createSignedControlRequest, decodeMachinePairingToken, signRpcRequest } from '@gitspace/protocol';
 import { credentialProtocolBase64, type SignedCredentialAuthorityGrant } from '@gitspace/protocol/credential-vault';
@@ -106,8 +106,7 @@ async function startMachine(): Promise<void> {
   }
   const { path: runtimeRoot } = JSON.parse(await readFile(selectionPath, 'utf8')) as { path: string };
   const bun = join(runtimeRoot, 'bin', 'bun');
-  const walgit = join(runtimeRoot, 'bin', 'walgit');
-  if (!existsSync(bun) || !existsSync(walgit)) throw new Error('The installed runtime is incomplete. Run gitspace doctor to inspect the installation; your workspace data has not been changed.');
+  if (!existsSync(bun) || !existsSync(join(runtimeRoot, 'machine/machine-native.json'))) throw new Error('The installed runtime is incomplete. Run gitspace doctor to inspect the installation; your workspace data has not been changed.');
   const artifactKey = await accountArtifactKey(config);
   const environmentRoot = join(CONFIG_ROOT, 'machine');
   await mkdir(environmentRoot, { recursive: true, mode: 0o700 });
@@ -136,7 +135,6 @@ async function startMachine(): Promise<void> {
       OMP_AUTH_BROKER_URL: config.brokerUrl,
       OMP_AUTH_BROKER_TOKEN: config.brokerToken,
       GITSPACE_MANAGED_SPACE_ROOT: process.env.GITSPACE_MANAGED_SPACE_ROOT ?? join(homedir(), 'gitspace', 'spaces'),
-      GITSPACE_WALGIT_BINARY: walgit,
     },
   });
   closeSync(log);
@@ -223,6 +221,44 @@ machine.command('setup').description('Link using the pairing command from your a
   });
 machine.command('start').description('Start the installed account-managed runtime').action(startMachine);
 machine.command('stop').description('Stop this machine runtime').action(stopMachine);
+machine.command('recover').description('Build and health-gate a tenant machine release from its held source workspace, keeping the existing host')
+  .requiredOption('--source <path>', 'GitSpace source checkout held by this machine')
+  .requiredOption('--workspace <id>', 'Account workspace id of that checkout')
+  .action(async (options: { source: string; workspace: string }) => {
+    const source = resolve(options.source);
+    const entrypoint = join(source, 'packages/account-machine/src/source-recovery.ts');
+    if (!existsSync(entrypoint)) throw new Error('Recovery requires a GitSpace source checkout containing the source-recovery entrypoint');
+    const config = await loadConfig();
+    let bun: string;
+    let environment = { ...process.env };
+    if (config) {
+      const pid = await machinePid();
+      if (!pid || !processIsRunning(pid)) throw new Error('Start the existing machine host before source recovery. Recovery does not replace or restart the host.');
+      const installed = JSON.parse(await readFile(join(CONFIG_ROOT, 'runtime-selection.json'), 'utf8')) as { path: string };
+      bun = join(installed.path, 'bin/bun');
+      environment = {
+        ...environment,
+        GITSPACE_ENVIRONMENT_ROOT: join(CONFIG_ROOT, 'machine'),
+        GITSPACE_MACHINE_ID: config.machine.id,
+        GITSPACE_MACHINE_SIGNING_PRIVATE_KEY: config.machine.signingPrivateKey,
+        GITSPACE_CONTROL_URL: config.apiUrl,
+        GITSPACE_USER_ID: config.userId,
+      };
+    } else {
+      // Provider consoles already carry the linked machine environment; no local enrollment is invented.
+      for (const name of ['GITSPACE_ENVIRONMENT_ROOT', 'GITSPACE_MACHINE_ID', 'GITSPACE_MACHINE_SIGNING_PRIVATE_KEY', 'GITSPACE_CONTROL_URL', 'GITSPACE_USER_ID']) {
+        if (!environment[name]) throw new Error(`Recovery needs a linked machine or its provider-console environment (${name} is missing)`);
+      }
+      const installedBun = Bun.which('bun');
+      if (!installedBun) throw new Error('The linked machine runtime must provide Bun for source recovery');
+      bun = installedBun;
+    }
+    console.log('Preparing source recovery dependencies; the current host and tenant selection remain active.');
+    const install = Bun.spawn([bun, 'install', '--frozen-lockfile'], { cwd: source, env: environment, stdout: 'inherit', stderr: 'inherit' });
+    if (await install.exited !== 0) throw new Error('Recovery source dependency installation failed; the existing host was not changed');
+    const recovery = Bun.spawn([bun, entrypoint, options.workspace, source], { cwd: source, env: environment, stdout: 'inherit', stderr: 'inherit' });
+    if (await recovery.exited !== 0) throw new Error('Source recovery did not confirm activation; inspect the account deployment progress. This command did not replace the host.');
+  });
 machine.command('status').description('Show local runtime and relay status').action(async () => {
   const config = await requireConfig();
   const pid = await machinePid();
@@ -259,7 +295,10 @@ program.command('doctor').description('Check this machine installation and accou
   for (const tool of ['git', 'ssh', 'ssh-agent', 'ssh-add', 'ssh-keygen']) checks.push([tool, Bun.which(tool) ? 'ok' : 'fail', Bun.which(tool) ?? 'Install Git and the OpenSSH client']);
   try {
     const selection = JSON.parse(await readFile(join(CONFIG_ROOT, 'runtime-selection.json'), 'utf8')) as { path: string };
-    for (const executable of ['bun', 'walgit']) { const path = join(selection.path, 'bin', executable); checks.push([executable, existsSync(path) ? 'ok' : 'fail', path]); }
+    const bun = join(selection.path, 'bin/bun');
+    checks.push(['bun', existsSync(bun) ? 'ok' : 'fail', bun]);
+    const native = join(selection.path, 'machine/machine-native.json');
+    checks.push(['native selection', existsSync(native) ? 'ok' : 'warn', existsSync(native) ? native : 'Legacy bootstrap: recover the tenant machine from source before upgrading its host']);
     checks.push(['omp', existsSync(join(selection.path, 'omp', 'omp.js')) ? 'ok' : 'fail', 'Account-managed packaged OMP']);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;

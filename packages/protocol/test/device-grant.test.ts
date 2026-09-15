@@ -12,7 +12,6 @@ import {
   signRpcRequest,
   verifyDeviceGrantRecord,
   verifyRpcSignature,
-  encodeApiKey,
   decodeApiKey,
   scopeContains,
   type DeviceGrantRecord,
@@ -125,11 +124,9 @@ describe('device grants', () => {
     expect(scopeContains({ kind: 'workspace', workspaceId: 'w' }, { kind: 'workspace', workspaceId: 'w' })).toBe(true);
   });
 
-  it('round-trips API keys', () => {
-    const key = { version: 1 as const, deviceId: '44444444-4444-4444-8444-444444444444', signingPrivateKey: deviceProtocolBase64.encode(new Uint8Array(32).fill(11)), rpcUrl: 'http://127.0.0.1:4510/rpc', enrollUrl: 'https://control.example' };
-    const encoded = encodeApiKey(key);
-    expect(encoded.startsWith('gsk_')).toBe(true);
-    expect(decodeApiKey(encoded)).toEqual(key);
+  it('rejects malformed keys and keys without account routing identity', () => {
+    const obsolete = { version: 1, deviceId: '44444444-4444-4444-8444-444444444444', signingPrivateKey: deviceProtocolBase64.encode(new Uint8Array(32).fill(11)), rpcUrl: 'http://127.0.0.1:4510/rpc', enrollUrl: 'https://control.example' };
+    expect(decodeApiKey(`gsk_${Buffer.from(JSON.stringify(obsolete)).toString('base64url')}`)).toBeNull();
     expect(decodeApiKey('sk_nope')).toBeNull();
   });
 });

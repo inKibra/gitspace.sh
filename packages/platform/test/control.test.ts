@@ -142,26 +142,17 @@ describe('tenant resource authorization', () => {
     }
   });
 
-  it('replaces caller-supplied compute namespace headers with the root-bound account identity', async () => {
+  it('rejects foreign-account allocation even when a tenant spoofs compute namespace headers', async () => {
     const tenant = `compute-${crypto.randomUUID().slice(0, 8)}`;
     const publicKey = ed25519.keygen().publicKey;
     await env.DEPLOYMENTS.getByName(tenant).configure(btoa(String.fromCharCode(...publicKey)), `gsp-relay-${tenant}`);
     const token = await env.DEPLOYMENTS.getByName(tenant).providerToken();
-    const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', publicKey));
-    const accountId = `u-${Array.from(digest.subarray(0, 16), byte => byte.toString(16).padStart(2, '0')).join('')}`;
-    const bindings: Env = {
-      ...env,
-      COMPUTE: {
-        async fetch(request: Request) {
-          if (request.headers.get('x-gitspace-user-id') !== accountId || request.headers.has('x-gitspace-provider-token')) return new Response('Namespace escaped', { status: 403 });
-          return Response.json({ allocated: true });
-        },
-      } as Fetcher,
-    };
-    const response = await worker.fetch(new Request(`https://platform.test/__platform/tenants/${tenant}/provider/compute/resources`, {
-      method: 'POST', headers: { 'x-gitspace-provider-token': token, 'x-gitspace-user-id': 'foreign-account' }, body: '{}',
-    }), bindings, createExecutionContext());
-    expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ allocated: true });
+    const response = await worker.fetch(new Request(`https://platform.test/__platform/tenants/${tenant}/provider/compute/v1/sandboxes`, {
+      method: 'POST',
+      headers: { 'x-gitspace-provider-token': token, 'x-gitspace-user-id': 'foreign-account', 'content-type': 'application/json' },
+      body: JSON.stringify({ machineId: 'sandbox-foreign', userId: 'foreign-account', environment: {} }),
+    }), env, createExecutionContext());
+    expect(response.status).toBe(403);
+    expect(await response.json()).toMatchObject({ error: { code: 'COMPUTE_ACCOUNT_MISMATCH' } });
   });
 });

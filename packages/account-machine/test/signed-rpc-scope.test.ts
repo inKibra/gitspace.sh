@@ -1,7 +1,7 @@
 import { expect, it } from 'bun:test';
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { stringify } from 'devalue';
-import { RPC_DEVICE_HEADER, signRpcRequest, type DeviceScope, type VerifiedDevice } from '@gitspace/protocol';
+import { RPC_DEVICE_HEADER, signRpcRequest, type DeviceCapability, type DeviceScope, type VerifiedDevice } from '@gitspace/protocol';
 import { createSignedRpcHandler } from '../src/signed-rpc.js';
 
 it('authorizes environment mutations against the scope being changed, not just the selected workspace', async () => {
@@ -36,4 +36,36 @@ it('authorizes environment mutations against the scope being changed, not just t
   expect((await invoke('events', { projectId: 'project-b', after: 12 })).status).toBe(403);
   scope = { kind: 'user' };
   expect((await invoke('environment.putValue', { spaceId: 'own', scope: 'global', name: 'X', value: 'one' })).status).toBe(204);
+});
+
+it('requires fleet and deployment control before dispatching sandbox creation with an explicit image', async () => {
+  const key = ed25519.utils.randomSecretKey();
+  const id = crypto.randomUUID();
+  let capabilities: DeviceCapability[] = ['fleet.control'];
+  let scope: DeviceScope = { kind: 'user' };
+  const handler = createSignedRpcHandler({
+    handler: async () => new Response(null, { status: 204 }),
+    lookupDevice: async () => ({ deviceId: id, kind: 'client', label: 'fleet operator', scope, capabilities, canDelegate: false, signingPublicKey: ed25519.getPublicKey(key), generation: 1, boundAt: Date.now(), expiresAt: null } satisfies VerifiedDevice),
+    procedureKind: path => path === 'machine.createSandbox' ? 'mutation' : null,
+    workspaceProject: () => null,
+  });
+  const invoke = async (inputs: Record<string, unknown>[]) => {
+    const batch = inputs.map(input => ({ path: 'machine.createSandbox', input }));
+    const body = new TextEncoder().encode(stringify(inputs.length === 1 ? { v: 1, ...batch[0] } : { v: 1, batch }));
+    return handler(new Request('https://machine.test/rpc', { method: 'POST', body, headers: { [RPC_DEVICE_HEADER]: signRpcRequest({ deviceId: id, method: 'POST', path: '/rpc', body, signingPrivateKey: key }) } }));
+  };
+  const custom = { image: { kind: 'custom', image: `ghcr.io/tenant/custom@sha256:${'a'.repeat(64)}` } };
+  const platform = { image: { kind: 'platform-default' } };
+  expect((await invoke([custom])).status).toBe(403);
+  expect((await invoke([platform])).status).toBe(403);
+  expect((await invoke([{}, custom])).status).toBe(403);
+  expect((await invoke([{}])).status).toBe(204);
+  capabilities = ['deployment.control'];
+  expect((await invoke([custom])).status).toBe(403);
+  capabilities = ['fleet.control', 'deployment.control'];
+  expect((await invoke([custom])).status).toBe(204);
+  expect((await invoke([platform])).status).toBe(204);
+  scope = { kind: 'project', projectId: 'project-a' };
+  expect((await invoke([custom])).status).toBe(403);
+  expect((await invoke([{}])).status).toBe(403);
 });

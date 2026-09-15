@@ -2,7 +2,8 @@ import { DurableObject } from 'cloudflare:workers';
 import { ed25519, x25519 } from '@noble/curves/ed25519.js';
 import type { CredentialRefreshResponse, CredentialUploadResponse, SnapshotResponse } from '@oh-my-pi/pi-ai/auth-broker';
 import { z } from 'zod';
-import { handleSandboxRollout } from './sandbox-rollout.js';
+import { cloudImageProviderCall, resolveCloudImage } from './sandbox-rollout.js';
+import { cloudImageOperationActive, cloudImageProviderStatusSchema, cloudImageSelectionSchema, type CloudImageSelection } from '@gitspace/protocol/cloud-image';
 import { handleAccountCloudRpc } from './account-cloud-rpc.js';
 import { serveArtifactShare } from './account-inspector-data.js';
 import { ensureAccountGitSpaceProject } from './gitspace-project.js';
@@ -96,7 +97,6 @@ import { SpaceAuthorityDO } from './space-authority.js';
 import { UserStorageDO } from './storage.js';
 import { FleetCatalogDO, type FleetMachineDefinition, type PortableSpaceDefinition } from './fleet-catalog.js';
 import { HandleUnavailable, SettingsRevisionConflict, UserSettingsDO } from './user-settings.js';
-import { controlCloudflareSandboxMachine, createCloudflareSandboxMachine } from './sandbox-provisioner.js';
 import { HostedRouteRegistryDO } from './hosted-route-registry.js';
 import { AccountStateDO } from './account-state.js';
 import type { SpaceAuthorityResult } from '@gitspace/protocol-workspace';
@@ -1850,6 +1850,15 @@ async function checkpointAndStopFleetMachine(env: Env, userId: string, catalog: 
 }
 
 
+async function confirmProvisionedCloudImage(env: Env, userId: string, machine: FleetMachineDefinition): Promise<void> {
+  const catalog = (env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>).getByName(userId);
+  const image = await catalog.cloudImage(machine.id);
+  if (!image || image.operation || image.currentImage !== null || image.desiredImage === null) return;
+  const provider = cloudImageProviderStatusSchema.parse(await cloudImageProviderCall(env, `/v1/sandboxes/${encodeURIComponent(machine.id)}/image/status`));
+  if (machine.state !== 'online' || provider.image !== image.desiredImage || provider.prepared) throw new Error('Provisioned machine has not confirmed its selected image is ready');
+  await catalog.saveCloudImage({ ...image, currentImage: provider.image });
+}
+
 export async function reconcileFleetMachines(env: Env, userId: string, catalog: {
   listMachines(): Promise<FleetMachineDefinition[]>;
   listSpaces(): Promise<PortableSpaceDefinition[]>;
@@ -1858,22 +1867,26 @@ export async function reconcileFleetMachines(env: Env, userId: string, catalog: 
 }): Promise<FleetMachineDefinition[]> {
   for (const current of await catalog.listMachines()) {
     if (current.provider === 'physical') continue;
+    if (await (env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>).getByName(userId).hasPendingSandbox(current.id)) continue;
+    if (cloudImageOperationActive(await (env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>).getByName(userId).cloudImage(current.id))) continue;
     const provider = machineProviderFor(env, userId, current);
     let stopping = false;
     try {
+      if (current.desiredState === 'removed') {
+        await assertMachineHasNoOpenSpaces(env, userId, catalog, current.id);
+        await credentialVault(env, userId).removeManagedDevice(current.id);
+        await provider.destroy(current);
+        await catalog.removeMachine(current.id, true);
+        continue;
+      }
       let observed = await provider.status(current);
       if (current.desiredState === 'online' && observed.state !== 'online') observed = await provider.resume(current);
       else if (current.desiredState === 'offline' && (observed.state !== 'offline' || observed.desiredState !== 'offline')) {
         stopping = true;
         await checkpointAndStopFleetMachine(env, userId, catalog, current, observed);
         continue;
-      } else if (current.desiredState === 'removed') {
-        await assertMachineHasNoOpenSpaces(env, userId, catalog, current.id);
-        await provider.destroy(current);
-        await catalog.removeMachine(current.id, true);
-        await credentialVault(env, userId).removeManagedDevice(current.id);
-        continue;
       }
+      if (observed.state === 'online') await confirmProvisionedCloudImage(env, userId, observed);
       if (current.state !== observed.state || current.rpcEndpoint !== observed.rpcEndpoint || current.operationId !== null || current.error !== null) {
         await catalog.putMachine({ ...observed, desiredState: current.desiredState, lifecycleRevision: Math.max(current.lifecycleRevision, observed.lifecycleRevision) + 1, operationId: null, error: null });
       }
@@ -1889,12 +1902,19 @@ export function controlFleetMachine(env: Env, userId: string, machineId: string,
 export function controlFleetMachine(env: Env, userId: string, machineId: string, action: 'destroy'): Promise<{ machineId: string; removed: true }>;
 export function controlFleetMachine(env: Env, userId: string, machineId: string, action: 'sleep' | 'resume' | 'destroy'): Promise<FleetMachineDefinition | { machineId: string; removed: true }>;
 export async function controlFleetMachine(env: Env, userId: string, machineId: string, action: 'sleep' | 'resume' | 'destroy'): Promise<FleetMachineDefinition | { machineId: string; removed: true }> {
-  if (action !== 'destroy' && await accountState(env).sandboxRollout()) throw new Error('Cloud machine replacement has fenced machine lifecycle changes');
+  if (userId !== env.ACCOUNT_ID) throw new Error('Machine belongs to another account');
   const catalog = (env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>).getByName(userId);
+  if (cloudImageOperationActive(await catalog.cloudImage(machineId))) throw new Error('Recover or cancel this machine’s cloud image operation before changing its lifecycle');
   const existing = await catalog.getMachine(machineId);
   if (!existing) {
     if (action === 'destroy') return { machineId, removed: true };
     throw new Error('Machine does not exist');
+  }
+  if (action === 'resume') {
+    const provisioning = await catalog.resumeSandboxProvisioning(userId, machineId);
+    if (provisioning) return provisioning;
+  } else if (action === 'sleep' && await catalog.hasPendingSandbox(machineId)) {
+    throw new Error('Finish sandbox provisioning before sleeping the machine');
   }
   if ((action === 'sleep' && existing.state === 'offline' && existing.desiredState === 'offline') || (action === 'resume' && existing.state === 'online' && existing.desiredState === 'online' && existing.error === null)) return existing;
   if (action === 'sleep') return checkpointAndStopFleetMachine(env, userId, catalog, existing);
@@ -1907,106 +1927,76 @@ export async function controlFleetMachine(env: Env, userId: string, machineId: s
   const provider = machineProviderFor(env, userId, transition);
   try {
     if (action === 'destroy') {
+      await credentialVault(env, userId).removeManagedDevice(machineId);
       await provider.destroy(transition);
       await catalog.removeMachine(machineId, true);
-      await credentialVault(env, userId).removeManagedDevice(machineId);
       return { machineId, removed: true };
     }
     const machine = await provider.resume(transition);
+    await confirmProvisionedCloudImage(env, userId, machine);
     return await catalog.putMachine({ ...machine, desiredState, lifecycleRevision: transition.lifecycleRevision + 1, operationId: null, error: null });
   } catch (error) {
     await catalog.putMachine({ ...transition, state: 'error', lifecycleRevision: transition.lifecycleRevision + 1, operationId: null, error: error instanceof Error ? error.message : String(error) });
     throw error;
   }
 }
-export async function provisionManagedSandbox(env: Env, userId: string, controlUrl: string): Promise<FleetMachineDefinition> {
+export async function provisionManagedSandbox(env: Env, userId: string, controlUrl: string, imageSelection?: CloudImageSelection): Promise<FleetMachineDefinition> {
+  if (userId !== env.ACCOUNT_ID) throw new Error('Machine belongs to another account');
   const storageNamespace = env.USER_STORAGE as DurableObjectNamespace<UserStorageDO>;
   await storageNamespace.getByName(userId).requireReady(userId);
+  const catalog = (env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>).getByName(userId);
+  const choice = imageSelection ? await resolveCloudImage(env, cloudImageSelectionSchema.parse(imageSelection)) : await catalog.cloudImageDefault();
+  const vault = credentialVault(env, userId);
+  const rootPublicKey = await vault.rootPublicKey();
+  if (!rootPublicKey) throw new Error('Vault is not configured');
+  if (!env.GITSPACE_OMP_BROKER_TOKEN) throw new Error('Account credential broker is not configured');
   const machineId = `sandbox-${crypto.randomUUID().slice(0, 8)}`;
+  const accountSettings = await (env.USER_SETTINGS as DurableObjectNamespace<UserSettingsDO>).getByName(userId).get(machineId);
+  if (!accountSettings.profile.handle) throw new Error('Account tenant is not provisioned');
+  const artifactKey = await vault.artifactKey(userId);
   const signingPrivateKey = crypto.getRandomValues(new Uint8Array(32));
   const exchangePrivateKey = crypto.getRandomValues(new Uint8Array(32));
-  const vault = credentialVault(env, userId);
   const registered = await vault.registerManagedDevice({
-    userId,
-    machineId,
+    userId, machineId,
     signingPublicKey: credentialProtocolBase64.encode(ed25519.getPublicKey(signingPrivateKey)),
     exchangePublicKey: credentialProtocolBase64.encode(x25519.getPublicKey(exchangePrivateKey)),
     capabilities: ['storage.access', 'space.control', 'credential.access', 'credential.manage'],
   });
   if (registered.status === 'error') throw new Error(registered.error.message);
-  // Sandboxes are worker-provisioned, so the worker hands them the root key to
-  // pin; their trust in it is the same trust that installed their machine key.
-  const rootPublicKey = await vault.rootPublicKey();
-  if (!rootPublicKey) throw new Error('Vault is not configured');
-  const accountSettings = await (env.USER_SETTINGS as DurableObjectNamespace<UserSettingsDO>).getByName(userId).get(machineId);
-  if (!accountSettings.profile.handle) throw new Error('Account tenant is not provisioned');
-  const catalogNamespace = env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>;
-  const catalog = catalogNamespace.getByName(userId);
-  const operationId = crypto.randomUUID();
-  await catalog.putMachine({
-    id: machineId,
-    label: `Cloudflare ${machineId.slice('sandbox-'.length)}`,
-    state: 'provisioning',
-    rpcEndpoint: null,
-    kind: 'sandbox',
-    provider: 'cloudflare-sandbox',
-    notes: 'Provisioning Cloudflare Sandbox machine runtime.',
-    desiredState: 'online',
-    lifecycleRevision: 1,
-    operationId,
-    error: null,
+  // The tenant commits this complete enrollment and immutable image before
+  // acknowledging. Slow preparation/boot belongs to its durable background run.
+  return catalog.beginSandboxProvisioning({
+    userId, machineId, choice,
+    environment: {
+      GITSPACE_ENVIRONMENT_ROOT: '/workspace/gitspace',
+      GITSPACE_MACHINE_ID: machineId,
+      GITSPACE_MACHINE_LABEL: `Cloudflare ${machineId.slice('sandbox-'.length)}`,
+      GITSPACE_CONTROL_URL: controlUrl,
+      OMP_AUTH_BROKER_URL: `${controlUrl.replace(/\/+$/u, '')}/omp/users/${encodeURIComponent(userId)}`,
+      OMP_AUTH_BROKER_TOKEN: await machineBrokerToken(env.GITSPACE_OMP_BROKER_TOKEN, userId, machineId, registered.value.generation),
+      GITSPACE_USER_ID: userId,
+      // Worker provisioning pins the same root that installed the machine key.
+      GITSPACE_ROOT_PUBLIC_KEY: rootPublicKey,
+      GITSPACE_MACHINE_SIGNING_PRIVATE_KEY: credentialProtocolBase64.encode(signingPrivateKey),
+      GITSPACE_ARTIFACT_KEY: artifactKey,
+      GITSPACE_CONTROL_TOKEN: credentialProtocolBase64.encode(crypto.getRandomValues(new Uint8Array(32))),
+      GITSPACE_SERVICE_DOMAIN: 'gssh.dev',
+      GITSPACE_SERVICE_NAMESPACE: accountSettings.profile.handle,
+      GITSPACE_OMP_AGENT_DIR: '/workspace/.omp',
+      GITSPACE_MANAGED_SPACE_ROOT: '/workspace/spaces',
+      GITSPACE_MIGRATIONS_FOLDER: '/opt/gitspace/drizzle',
+      GITSPACE_RPC_PORT: '8081',
+      GITSPACE_RPC_HOST: '0.0.0.0',
+    },
   });
-  try {
-    if (!env.GITSPACE_OMP_BROKER_TOKEN) throw new Error('Account credential broker is not configured');
-    const created = await createCloudflareSandboxMachine({
-      env,
-      userId,
-      machineId,
-      environment: {
-        GITSPACE_ENVIRONMENT_ROOT: '/workspace/gitspace',
-        GITSPACE_MACHINE_ID: machineId,
-        GITSPACE_MACHINE_LABEL: `Cloudflare ${machineId.slice('sandbox-'.length)}`,
-        GITSPACE_CONTROL_URL: controlUrl,
-        OMP_AUTH_BROKER_URL: `${controlUrl.replace(/\/+$/u, '')}/omp/users/${encodeURIComponent(userId)}`,
-        OMP_AUTH_BROKER_TOKEN: await machineBrokerToken(env.GITSPACE_OMP_BROKER_TOKEN, userId, machineId, registered.value.generation),
-        GITSPACE_USER_ID: userId,
-        GITSPACE_ROOT_PUBLIC_KEY: rootPublicKey,
-        GITSPACE_MACHINE_SIGNING_PRIVATE_KEY: credentialProtocolBase64.encode(signingPrivateKey),
-        GITSPACE_ARTIFACT_KEY: await credentialVault(env, userId).artifactKey(userId),
-        GITSPACE_CONTROL_TOKEN: credentialProtocolBase64.encode(crypto.getRandomValues(new Uint8Array(32))),
-        GITSPACE_SERVICE_DOMAIN: 'gssh.dev',
-        GITSPACE_SERVICE_NAMESPACE: accountSettings.profile.handle,
-        GITSPACE_OMP_AGENT_DIR: '/workspace/.omp',
-        GITSPACE_MANAGED_SPACE_ROOT: '/workspace/spaces',
-        GITSPACE_MIGRATIONS_FOLDER: '/opt/gitspace/drizzle',
-        GITSPACE_RPC_PORT: '8081',
-        GITSPACE_RPC_HOST: '0.0.0.0',
-        GITSPACE_WALGIT_BINARY: '/usr/local/bin/walgit',
-      },
-    });
-    return await catalog.putMachine({ ...created, lifecycleRevision: 2, operationId: null, error: null });
-  } catch (error) {
-    await vault.removeManagedDevice(machineId);
-    await catalog.putMachine({
-      id: machineId,
-      label: `Cloudflare ${machineId.slice('sandbox-'.length)}`,
-      state: 'error',
-      rpcEndpoint: null,
-      kind: 'sandbox',
-      provider: 'cloudflare-sandbox',
-      notes: 'Cloudflare Sandbox provisioning failed.',
-      desiredState: 'online',
-      lifecycleRevision: 2,
-      operationId: null,
-      error: error instanceof Error ? error.message : String(error),
-    });
-    throw error;
-  }
 }
 
 
 /** Forward once: a transport error cannot prove that the signed operation did not run. */
 export async function proxyAccountMachineRpc(request: Request, env: Env, userId: string, machine: FleetMachineDefinition): Promise<Response> {
+  if (machine.provider === 'cloudflare-sandbox' && (await (env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>).getByName(userId).cloudImage(machine.id))?.operation?.barrier) {
+    return Response.json(publicError('CLOUD_IMAGE_IN_PROGRESS', 'This cloud machine is checkpointing or recovering'), { status: 503, headers: { 'cache-control': 'private, no-store' } });
+  }
   const headers = new Headers(request.headers);
   headers.delete('x-gitspace-user');
   headers.delete('host');
@@ -2056,15 +2046,6 @@ async function accountRpcResponse(request: Request, env: Env): Promise<Response>
 const worker = {
   async fetch(request: Request, env: Env, diagnostics?: SyncRequestDiagnostics): Promise<Response> {
     const url = new URL(request.url);
-    if (url.pathname.startsWith('/v1/operator/sandboxes/rollout')) {
-      const userId = request.headers.get('x-gitspace-user');
-      if (userId !== env.ACCOUNT_ID) return new Response('Unauthorized', { status: 401 });
-      const body = request.method === 'GET' ? new Uint8Array() : new Uint8Array(await request.clone().arrayBuffer());
-      const authorized = await credentialVault(env, userId).authorizeAccountDeviceRequest({ header: request.headers.get(RPC_DEVICE_HEADER), target: url.pathname + url.search, body, capabilities: ['deployment.control'] });
-      if (authorized.status === 'error') return Response.json(authorized, { status: 401 });
-      const result = await handleSandboxRollout(request, env);
-      if (result) return result;
-    }
     if (url.pathname.startsWith('/shared-artifacts/')) return serveArtifactShare(request, env);
 
     const browserInvitationRoute = /^\/v1\/devices\/browser-invitations\/(create|status|cancel)$/u.exec(url.pathname);
@@ -2151,8 +2132,8 @@ const worker = {
       }
       const denied = accountAccessResponse(await activeAccount(env, userId));
       if (denied) return new Response(denied.body, { status: denied.status, headers: { ...Object.fromEntries(denied.headers), ...cors } });
-      if (await accountState(env).sandboxRollout()) {
-        return Response.json(publicError('SANDBOX_ROLLOUT_IN_PROGRESS', 'Cloud machines are checkpointing or restarting'), { status: 503, headers: cors });
+      if ((await (env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>).getByName(userId).cloudImage(machineId))?.operation?.barrier) {
+        return Response.json(publicError('CLOUD_IMAGE_IN_PROGRESS', 'This cloud machine is checkpointing or recovering'), { status: 503, headers: cors });
       }
       const headers = new Headers(request.headers);
       headers.set('x-gitspace-user-id', userId);
@@ -2482,13 +2463,16 @@ const worker = {
         const authorized = await authorizeControl(env, body, capability);
         if (authorized.status === 'error') return accountAccessResponse(authorized)!;
         if (diagnostics) diagnostics.stage = 'rollout';
-        const rollout = await accountState(env).sandboxRollout();
-        if (rollout && (
-          body.operation === 'space.bootstrap'
-          || body.operation === 'catalog.sandbox.create'
-          || body.operation === 'catalog.machine.resume'
-          || (body.operation === 'space.beginOpen' && !(rollout.recovering && rollout.machines.some(machine => machine.userId === body.userId && machine.machineId === body.machineId)))
-        )) return Response.json(publicError('SANDBOX_ROLLOUT_IN_PROGRESS', 'Cloud machine replacement has fenced new work'), { status: 503, headers: { 'cache-control': 'no-store' } });
+        if (body.operation === 'space.bootstrap' || body.operation === 'space.beginOpen') {
+          const spaceId = String(body.payload.spaceId ?? '');
+          for (const image of await (env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>).getByName(body.userId).listCloudImages()) {
+            const operation = image.operation;
+            if (!operation?.barrier || (image.machineId !== body.machineId && !operation.resumeSpaceIds.includes(spaceId))) continue;
+            const recovering = image.machineId === body.machineId && ['resuming', 'confirming', 'cancelling'].includes(operation.phase)
+              && body.operation === 'space.beginOpen' && operation.resumeSpaceIds.includes(spaceId);
+            if (!recovering) return Response.json(publicError('CLOUD_IMAGE_IN_PROGRESS', 'This machine or workspace is fenced for cloud image recovery'), { status: 503, headers: { 'cache-control': 'no-store' } });
+          }
+        }
         if (diagnostics) diagnostics.stage = 'processing';
         if (body.operation === 'artifacts.key.get') {
           if (Object.keys(body.payload).length !== 0) throw new Error('Artifact key request must have an empty payload');
@@ -3214,8 +3198,8 @@ const worker = {
             case 'catalog.space.get': value = await catalog.getSpace(String(body.payload.spaceId ?? '')); break;
             case 'catalog.space.list': value = await catalog.listSpaces(); break;
             case 'catalog.machine.put': value = await catalog.putMachine(catalogMachinePayload(body.payload)); break;
-            case 'catalog.machine.list': value = rollout ? await catalog.listMachines() : await reconcileFleetMachines(env, body.userId, catalog); break;
-            case 'catalog.sandbox.create': value = await provisionManagedSandbox(env, body.userId, env.ACCOUNT_URL); break;
+            case 'catalog.machine.list': value = await reconcileFleetMachines(env, body.userId, catalog); break;
+            case 'catalog.sandbox.create': value = await provisionManagedSandbox(env, body.userId, env.ACCOUNT_URL, body.payload.image === undefined ? undefined : cloudImageSelectionSchema.parse(body.payload.image)); break;
             case 'catalog.machine.sleep':
             case 'catalog.machine.resume':
             case 'catalog.machine.destroy':

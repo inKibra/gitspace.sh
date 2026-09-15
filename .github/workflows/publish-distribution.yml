@@ -59,6 +59,11 @@ jobs:
         run: rustup toolchain install 1.97.1 --profile minimal
       - name: Install the source dependency graph
         run: bun install --frozen-lockfile
+      - name: Restore verified native source builds
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/gitspace/native
+          key: native-walgit-${{ matrix.target }}-${{ hashFiles('packages/deployment/src/native-build.ts', 'packages/deployment/src/native-runtime.ts', 'patches/walgit/*.patch') }}
       - name: Build this native client and complete runtime
         env:
           GITSPACE_RELEASE: ${{ inputs.release || github.ref_name }}

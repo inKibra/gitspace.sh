@@ -55,10 +55,10 @@ export const distributionManifestSchema = z.object({
       if (paths.has(parts.join('/'))) context.addIssue({ code: 'custom', message: `Runtime file is also a directory: ${name}` });
     }
   }
-  for (const required of ['host.js', 'host-runtime.js', 'rpc-probe.js', 'omp-launcher.js', 'bin/bun', 'bin/omp', 'bin/walgit', 'machine/machine.js', 'machine/machine-worker.js', 'machine.manifest.json', 'omp/omp.js', 'omp/omp-adapter.js', 'omp/omp-runtime.json', 'omp/package.json', 'omp/bun.lock', 'omp.manifest.json']) {
+  for (const required of ['host.js', 'host-runtime.js', 'rpc-probe.js', 'omp-launcher.js', 'bin/bun', 'bin/omp', 'machine/machine.js', 'machine/machine-worker.js', 'machine/machine-native.json', 'machine/native/walgit', 'machine.manifest.json', 'omp/omp.js', 'omp/omp-adapter.js', 'omp/omp-runtime.json', 'omp/package.json', 'omp/bun.lock', 'omp.manifest.json']) {
     if (!paths.has(required)) context.addIssue({ code: 'custom', message: `Runtime is missing ${required}` });
   }
-  for (const binary of ['bin/bun', 'bin/omp', 'bin/walgit']) {
+  for (const binary of ['bin/bun', 'bin/omp', 'machine/native/walgit']) {
     if (manifest.runtime.files.find((file) => file.path === binary)?.mode !== 0o755) {
       context.addIssue({ code: 'custom', message: `${binary} must be executable` });
     }

@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSy
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { serializeTitleSlot } from '@oh-my-pi/pi-coding-agent/session/session-title-slot';
+import { sourceWalgit } from '../../deployment/src/native-build.js';
 import {
   FactEventStore,
   GitSpaceDatabase,
@@ -709,7 +710,7 @@ describe('CoordinatorPortableSpaceRuntime', () => {
       region: 'us-east-1',
     };
     const walgit = new WalgitSupervisor({
-      binaryPath: process.env.GITSPACE_WALGIT_BINARY!,
+      binaryPath: await sourceWalgit(join(import.meta.dir, '../../..')),
       runtimeRoot: join(root, 'walgit-runtime'),
       credentials: async () => ({
         accessKeyId: process.env.GITSPACE_GIT_ACCESS_KEY_ID!,

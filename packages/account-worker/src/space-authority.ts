@@ -1,6 +1,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import { abortSpaceClose, beginSpaceClose, beginSpaceOpen, bootstrapSpaceAuthority, commitSpaceClosed, commitSpaceOpen, failSpaceOpen, SpaceAuthorityRecordSchema, WorkspaceDomainError, type SpaceAuthorityMutation, type SpaceAuthorityRecord, type SpaceAuthorityResult, type VerifiedSpaceAuthorityIdentity } from '@gitspace/protocol-workspace';
 import { DurableChangeLog } from './durable-stream.js';
+import { cloudImageDiscardReceiptSchema, type CloudImageDiscardReceipt } from '@gitspace/protocol/cloud-image';
 
 export class SpaceAuthorityDO extends DurableObject<Env> {
   private readonly changes: DurableChangeLog;
@@ -15,6 +16,7 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
         resume_machine_id TEXT,
         record_json TEXT NOT NULL
       )`);
+      this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS image_recovery_receipts(operation_id TEXT PRIMARY KEY,receipt_json TEXT NOT NULL)');
     });
   }
 
@@ -78,6 +80,28 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
 
   failOpen(input: SpaceAuthorityMutation & { revision: number; message: string }): SpaceAuthorityResult<void> {
     return this.commit(() => this.save(failSpaceOpen(this.get(), input, new Date().toISOString())));
+  }
+
+  /** Account-only recovery after a provider-verified stop and explicit discard approval.
+   * No signed machine-control operation exposes this capability. */
+  recoverStoppedImage(input: { userId: string; expectedGeneration: number; receipt: CloudImageDiscardReceipt }): SpaceAuthorityResult<SpaceAuthorityRecord> {
+    if (input.userId !== this.env.ACCOUNT_ID) throw new Error('Image recovery belongs to another account');
+    const receipt = cloudImageDiscardReceiptSchema.parse(input.receipt);
+    return this.commit(() => {
+      const current = this.get();
+      if (!current) throw new Error('Image recovery workspace does not exist');
+      const prior = this.ctx.storage.sql.exec<{ receipt_json: string }>('SELECT receipt_json FROM image_recovery_receipts WHERE operation_id=?', receipt.recoveryOperationId).toArray()[0];
+      if (prior) {
+        if (prior.receipt_json !== JSON.stringify(receipt)) throw new Error('Image recovery receipt identity changed');
+        return current;
+      }
+      if (current.generation !== input.expectedGeneration || (current.machineId !== receipt.machineId && current.resumeMachineId !== receipt.machineId)) throw new Error('Image recovery workspace ownership or generation changed');
+      if (!current.manifestKey || !current.manifestHash || current.publishedRevision < 1) throw new Error('Image recovery requires a previously committed workspace checkpoint');
+      const recovered: SpaceAuthorityRecord = { ...current, state: 'closed', machineId: null, resumeMachineId: receipt.machineId, generation: current.generation + 1, revision: current.revision + 1, updatedAt: new Date().toISOString(), failures: { open: null, close: null } };
+      this.save(recovered);
+      this.ctx.storage.sql.exec('INSERT INTO image_recovery_receipts(operation_id,receipt_json) VALUES(?,?)', receipt.recoveryOperationId, JSON.stringify(receipt));
+      return recovered;
+    });
   }
 
   get(): SpaceAuthorityRecord | null {

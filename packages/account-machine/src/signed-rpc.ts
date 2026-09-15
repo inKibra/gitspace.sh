@@ -2,6 +2,7 @@ import {
   decodeSignedRpcHeader,
   inputWithinScope,
   requiredCapability,
+  requiresImageSelectionControl,
   RPC_DEVICE_HEADER,
   RPC_SIGNATURE_MAX_SKEW_MS,
   verifyRpcSignature,
@@ -90,6 +91,7 @@ export function createSignedRpcHandler(options: SignedRpcHandlerOptions) {
       if (!kind) return transportError(404, 'RPC_PROCEDURE_UNKNOWN', `Unknown procedure ${item.path}`);
       const capability = requiredCapability(item.path, kind);
       if (!device.capabilities.includes(capability)) return transportError(403, 'RPC_FORBIDDEN', `${item.path} requires ${capability}`);
+      if (requiresImageSelectionControl(item.path, item.input) && !device.capabilities.includes('deployment.control')) return transportError(403, 'RPC_FORBIDDEN', `${item.path} requires deployment.control`);
       if (!inputWithinScope(device.scope, item.input, options.workspaceProject)) return transportError(403, 'RPC_OUT_OF_SCOPE', `${item.path} is outside this device's scope`);
       if (item.path.startsWith('environment.') && item.input && typeof item.input === 'object') {
         const input = item.input as Record<string, unknown>;

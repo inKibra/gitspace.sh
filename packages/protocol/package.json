@@ -6,6 +6,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./account-rpc": "./src/account-rpc.ts",
+    "./cloud-image": "./src/cloud-image.ts",
     "./credential-vault": "./src/credential-vault.ts",
     "./device-grant": "./src/device-grant.ts",
     "./machine-pairing": "./src/machine-pairing.ts",
