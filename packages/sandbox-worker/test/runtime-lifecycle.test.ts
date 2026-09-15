@@ -76,6 +76,25 @@ describe('managed runtime startup', () => {
     expect(await runtime.resumeMachine()).toMatchObject({ state: 'online', desiredState: 'online' });
   });
 
+  it('waits for a stopped VM before acknowledging sleep or accepting a queued resume', async () => {
+    const { runtime, methods, container } = sandbox();
+    methods.stop.mockImplementationOnce(async () => {});
+    vi.useFakeTimers();
+    try {
+      let acknowledged = false;
+      const sleeping = runtime.sleepMachine().then((record) => { acknowledged = true; return record; });
+      const resuming = runtime.resumeMachine();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(acknowledged).toBe(false);
+      container.running = false;
+      await vi.advanceTimersByTimeAsync(500);
+      expect(await sleeping).toMatchObject({ state: 'offline', desiredState: 'offline' });
+      expect(await resuming).toMatchObject({ state: 'online', desiredState: 'online' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('destroys an unenrolled allocation idempotently and rejects late enrollment', async () => {
     const { runtime, records, container } = sandbox();
     const enrollment = records.get('gitspace:managed-enrollment');

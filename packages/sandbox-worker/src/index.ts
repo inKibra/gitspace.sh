@@ -240,6 +240,14 @@ export class GitSpaceSandbox extends CloudflareSandbox<ProviderEnv> {
     return this.controlled(async () => {
       const input = await this.requireEnrollment();
       await this.stop('SIGTERM');
+      // SDK stop sends the signal; a queued resume must not race the VM's eventual exit.
+      const deadline = Date.now() + 120_000;
+      while (this.ctx.container?.running) {
+        if (Date.now() >= deadline) throw new Error('Cloud machine has not stopped; its checkpoint remains prepared');
+        const pause = Promise.withResolvers<void>();
+        setTimeout(pause.resolve, 500);
+        await pause.promise;
+      }
       const state = await this.imageState();
       state.prepared = false;
       state.checkpointPrepared = false;
