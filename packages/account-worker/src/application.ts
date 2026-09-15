@@ -1916,7 +1916,7 @@ export async function controlFleetMachine(env: Env, userId: string, machineId: s
   } else if (action === 'sleep' && await catalog.hasPendingSandbox(machineId)) {
     throw new Error('Finish sandbox provisioning before sleeping the machine');
   }
-  if ((action === 'sleep' && existing.state === 'offline' && existing.desiredState === 'offline') || (action === 'resume' && existing.state === 'online' && existing.desiredState === 'online' && existing.error === null)) return existing;
+  if (action === 'sleep' && existing.state === 'offline' && existing.desiredState === 'offline') return existing;
   if (action === 'sleep') return checkpointAndStopFleetMachine(env, userId, catalog, existing);
   const desiredState = action === 'resume' ? 'online' : 'removed';
   if (action === 'destroy') await assertMachineHasNoOpenSpaces(env, userId, catalog, machineId);

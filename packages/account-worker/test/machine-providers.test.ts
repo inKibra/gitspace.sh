@@ -66,6 +66,22 @@ async function openSpaceMachine(desiredState: 'online' | 'offline' = 'online') {
   return { userId, catalog, authority, identity };
 }
 
+it('does not acknowledge resume from a stale online catalog entry', async () => {
+  const catalog = env.FLEET_CATALOG.getByName(env.ACCOUNT_ID);
+  await catalog.putMachine(sandbox);
+  let ready = false;
+  mockProvider(async (request) => {
+    if (new URL(request.url).pathname.endsWith('/cancel-replacement')) return Response.json({ prepared: false });
+    return ready
+      ? Response.json({ status: 'ok', value: sandbox })
+      : Response.json({ error: 'Runtime has no admitted generation' }, { status: 503 });
+  });
+  await expect(controlFleetMachine(env, env.ACCOUNT_ID, sandbox.id, 'resume')).rejects.toThrow('Runtime has no admitted generation');
+  expect(await catalog.getMachine(sandbox.id)).toMatchObject({ state: 'error', desiredState: 'online' });
+  ready = true;
+  expect(await controlFleetMachine(env, env.ACCOUNT_ID, sandbox.id, 'resume')).toMatchObject({ state: 'online', operationId: null, error: null });
+});
+
 it('checkpoints an open workspace before stopping and preserves its restart checkpoint', async () => {
   const { userId, catalog, authority, identity } = await openSpaceMachine();
   const actions: string[] = [];
