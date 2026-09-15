@@ -29,7 +29,8 @@ export async function buildWorkspaceTarget<T extends BuiltArtifact>(
     await Bun.write(${JSON.stringify(resultPath)}, JSON.stringify(built));
   `;
   // A fresh process prevents module-cache reuse after source edits and isolates builder globals.
-  const child = Bun.spawn([process.execPath, '--eval', script], { cwd: root, stdout: 'inherit', stderr: 'inherit' });
+  // Bun caches its implicit child environment before the runtime resolves its native selection.
+  const child = Bun.spawn([process.execPath, '--eval', script], { cwd: root, env: { ...process.env }, stdout: 'inherit', stderr: 'inherit' });
   if (await child.exited !== 0) throw new Error(`Workspace-owned ${target} build failed; inspect the deployment build output`);
   try {
     return JSON.parse(await readFile(resultPath, 'utf8')) as T & { worker?: WorkerReleaseMetadata };
