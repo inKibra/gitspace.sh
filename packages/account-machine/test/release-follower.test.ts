@@ -289,6 +289,37 @@ describe('release follower', () => {
     expect(restarted.status()).toMatchObject({ sha: 'next-omp', hash: next.manifest.treeHash });
   });
 
+  it('resumes tenant release activation after checkpoint cancellation', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'gitspace-follower-resume-'));
+    roots.push(root);
+    const old = await ompExecutable('before-checkpoint');
+    const next = await ompExecutable('after-cancellation');
+    const status: DeploymentStatus = {
+      desired: { worker: null, machine: null, omp: old.selection.sha, frontend: null, updatedAt: new Date().toISOString() },
+      current: { worker: { sha: null, version: null }, machines: {} },
+      releases: [release(old.selection.sha, null, null, old.artifact), release(next.selection.sha, null, null, next.artifact)],
+    };
+    const runtime = ompRuntime(root, old.selection);
+    const follower = new ReleaseFollower({
+      authority: fakeAuthority(status), blobs: { get: async (key) => next.objects[key] ?? old.objects[key] ?? null },
+      machineId: 'machine-a', environmentRoot: root, hostUrl: null, controlToken: null,
+      runningMachineSha: null, generation: null, omp: runtime, onError: (error) => { throw error; },
+    });
+    await runtime.initialize();
+    try {
+      await follower.start();
+      follower.stop();
+      status.desired.omp = next.selection.sha;
+      await follower.nudge();
+      expect(runtime.status().sha).toBe(old.selection.sha);
+      await follower.start();
+      expect(runtime.status().sha).toBe(next.selection.sha);
+    } finally {
+      follower.stop();
+      await runtime.dispose();
+    }
+  });
+
   it('downloads the machine bundle and migrations, verifies them, and asks the host to swap', async () => {
     const root = mkdtempSync(join(tmpdir(), 'gitspace-follower-'));
     roots.push(root);

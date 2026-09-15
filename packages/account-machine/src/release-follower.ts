@@ -119,6 +119,8 @@ export class ReleaseFollower {
 
   /** Report only committed machine generations and independently drained OMP generations. */
   async start(): Promise<void> {
+    if (this.timer) return;
+    this.stopped = false;
     this.timer = setInterval(() => { void this.nudge(); }, this.options.intervalMs ?? 20_000);
     await this.nudge();
   }
@@ -126,6 +128,7 @@ export class ReleaseFollower {
   stop(): void {
     this.stopped = true;
     clearInterval(this.timer);
+    this.timer = undefined;
   }
 
   /** One convergence pass now; a pass already in flight is awaited instead of doubled. */
