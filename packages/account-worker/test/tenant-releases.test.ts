@@ -120,6 +120,28 @@ describe('tenant releases', () => {
     expect(persisted.releases[0]!.status.worker).toBe('applied');
   });
 
+  it('keeps the deployed frontend and Worker launchable when machine recovery stages the same revision', async () => {
+    const { userId, control, origin } = await tenant();
+    const releases = env.TENANT_RELEASES.getByName(userId);
+    const input = stageInput('split-targets');
+    const html = '<!doctype html><title>retained frontend</title>';
+    await env.DATA.put(`users/${userId}/releases/split-targets/frontend/index.html`, html);
+    await control('deploy.stage', { ...input, artifacts: { ...input.artifacts, machine: null, omp: null }, omp: null });
+    await releases.launch({ sha: input.sha, targets: ['worker', 'frontend'] });
+    await releases.setWorkerStatus(input.sha, 'applied', null);
+    await control('deploy.stage', {
+      ...input, artifacts: { worker: null, machine: input.artifacts.machine, omp: null, frontend: null },
+      worker: null, omp: null,
+    });
+    await control('deploy.launch', { sha: input.sha, targets: ['machine'] });
+    expect(await (await SELF.fetch(new Request(`${origin}/`))).text()).toBe(html);
+    const status = deploymentStatusSchema.parse(await control('deploy.status', {}));
+    expect(status.desired).toMatchObject({ worker: input.sha, frontend: input.sha, machine: input.sha });
+    expect(status.releases[0]?.status).toMatchObject({ worker: 'applied', frontend: 'applied' });
+    const relaunched = await releases.launch({ sha: input.sha, targets: ['worker'] });
+    expect(relaunched?.record.status.worker).toBe('pending');
+  });
+
   it('keeps other targets launchable but fails the Worker target when platform deployment is unavailable', async () => {
     const { control } = await tenant();
     network.use(http.post(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/deploy`, () => new HttpResponse(null, { status: 503 })));

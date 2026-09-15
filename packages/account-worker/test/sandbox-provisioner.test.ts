@@ -65,7 +65,7 @@ async function provisionFixture() {
   const calls: string[] = [];
   const enrollments: Array<{ userId: string; machineId: string; image: string; environment: Record<string, string> }> = [];
   const faults = { prepare: false, lostResponse: false, status: false };
-  const hold = { prepare: null as Promise<void> | null, enroll: null as Promise<void> | null };
+  const hold = { prepare: null as Promise<void> | null, enroll: null as Promise<void> | null, ready: null as Promise<void> | null };
   let destroyed = false;
   network.use(http.post(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/provider/compute/*`, async ({ request }) => {
     const path = new URL(request.url).pathname.split('/provider/compute')[1]!;
@@ -87,10 +87,13 @@ async function provisionFixture() {
       // from the assertion output or the public fleet record.
       if (faults.lostResponse || destroyed) return HttpResponse.json({ status: 'error', error: enrollments[0]!.environment.GITSPACE_MACHINE_SIGNING_PRIVATE_KEY }, { status: 503 });
     }
+    if (path.endsWith('/resume')) {
+      await hold.ready;
+    }
     if (path.endsWith('/image/status')) return HttpResponse.json({ status: 'ok', value: { image, operationId: null, prepared: false, runtimeStarted: true } });
     if (path.endsWith('/status') && faults.status) return HttpResponse.json({ status: 'error', error: 'status unavailable' }, { status: 503 });
     const enrolled = enrollments.at(-1)!;
-    const machine = { id: enrolled.machineId, label: 'Provider runtime', state: 'online', rpcEndpoint: 'https://provider.example/rpc', kind: 'sandbox', provider: 'cloudflare-sandbox', notes: enrolled.environment.GITSPACE_MACHINE_SIGNING_PRIVATE_KEY, desiredState: 'online', lifecycleRevision: 1, operationId: null, error: null };
+    const machine = { id: enrolled.machineId, label: 'Provider runtime', state: path === '/v1/sandboxes' ? 'offline' : 'online', rpcEndpoint: 'https://provider.example/rpc', kind: 'sandbox', provider: 'cloudflare-sandbox', notes: enrolled.environment.GITSPACE_MACHINE_SIGNING_PRIVATE_KEY, desiredState: 'online', lifecycleRevision: 1, operationId: null, error: null };
     return HttpResponse.json({ status: 'ok', [path === '/v1/sandboxes' ? 'machine' : 'value']: machine });
   }));
   return { userId, vault, catalog, calls, enrollments, faults, hold };
@@ -122,6 +125,21 @@ it('acknowledges durable private enrollment before preflight and fences prematur
   expect(await f.catalog.hasPendingSandbox(machine.id)).toBe(false);
   const visible = JSON.stringify(await f.catalog.listMachines());
   expect(visible.includes(f.enrollments[0]!.environment.GITSPACE_MACHINE_SIGNING_PRIVATE_KEY!)).toBe(false);
+});
+
+it('keeps accepted enrollment private and admission closed until the runtime is healthy', async () => {
+  const f = await provisionFixture();
+  const ready = Promise.withResolvers<void>();
+  f.hold.ready = ready.promise;
+  const machine = await provisionManagedSandbox(env, f.userId, env.ACCOUNT_URL);
+  try {
+    await expect.poll(() => f.calls.includes(`/v1/sandboxes/${machine.id}/resume`)).toBe(true);
+    expect(await f.catalog.getMachine(machine.id)).toMatchObject({ state: 'provisioning', rpcEndpoint: null });
+    expect(await f.catalog.cloudImage(machine.id)).toMatchObject({ currentImage: null, desiredImage: image });
+    expect(await f.catalog.hasPendingSandbox(machine.id)).toBe(true);
+  } finally { ready.resolve(); }
+  await expect.poll(() => f.catalog.getMachine(machine.id)).toMatchObject({ state: 'online', error: null });
+  expect(await f.catalog.hasPendingSandbox(machine.id)).toBe(false);
 });
 
 it('keeps provider-accepted failures durable and explicit Start reuses the same enrollment and immutable image', async () => {

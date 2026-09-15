@@ -113,12 +113,24 @@ export class TenantReleasesDO extends DurableObject<Env> {
 
   stage(inputValue: StageReleaseInput, builtBy: string): ReleaseRecord {
     const input = stageReleaseInputSchema.parse(inputValue);
+    const previous = this.findRelease(input.sha);
     const record = releaseRecordSchema.parse({
       ...input,
-      builtBy,
-      createdAt: new Date().toISOString(),
-      status: { worker: 'pending', frontend: 'pending', machines: {}, omps: {} },
-      error: null,
+      label: previous?.label ?? input.label,
+      workspaceId: previous ? previous.workspaceId : input.workspaceId,
+      // Targets are independently staged; null must not erase a serving sibling.
+      artifacts: {
+        worker: input.artifacts.worker ?? previous?.artifacts.worker ?? null,
+        machine: input.artifacts.machine ?? previous?.artifacts.machine ?? null,
+        omp: input.artifacts.omp ?? previous?.artifacts.omp ?? null,
+        frontend: input.artifacts.frontend ?? previous?.artifacts.frontend ?? null,
+      },
+      worker: input.worker ?? previous?.worker ?? null,
+      omp: input.omp ?? previous?.omp ?? null,
+      builtBy: previous?.builtBy ?? builtBy,
+      createdAt: previous?.createdAt ?? new Date().toISOString(),
+      status: previous?.status ?? { worker: 'pending', frontend: 'pending', machines: {}, omps: {} },
+      error: previous?.error ?? null,
     });
     this.ctx.storage.sql.exec(
       'INSERT INTO releases(sha, created_at, record_json) VALUES (?, ?, ?) ON CONFLICT(sha) DO UPDATE SET created_at = excluded.created_at, record_json = excluded.record_json',

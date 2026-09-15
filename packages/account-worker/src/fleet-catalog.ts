@@ -267,6 +267,11 @@ export class FleetCatalogDO extends DurableObject<Env> {
         machine = await controlCloudflareSandboxMachine({ env: this.env, userId: enrollment.userId, machineId, action: 'status' });
       }
       if (!active()) return;
+      // Enrollment acknowledges process start, not host readiness.
+      if (machine?.state === 'offline') {
+        machine = await controlCloudflareSandboxMachine({ env: this.env, userId: enrollment.userId, machineId, action: 'resume' });
+        if (!active()) return;
+      }
       const provider = cloudImageProviderStatusSchema.parse(await cloudImageProviderCall(this.env, `/v1/sandboxes/${encodeURIComponent(machineId)}/image/status`));
       if (!active()) return;
       if (!machine || machine.state !== 'online' || provider.image !== enrollment.choice.image || provider.prepared) throw new Error('Sandbox is not ready');
