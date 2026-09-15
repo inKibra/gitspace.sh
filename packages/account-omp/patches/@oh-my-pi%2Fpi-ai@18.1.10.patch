@@ -1,0 +1,463 @@
+diff --git a/dist/types/registry/oauth/anthropic-refresh.d.ts b/dist/types/registry/oauth/anthropic-refresh.d.ts
+new file mode 100644
+--- /dev/null
++++ b/dist/types/registry/oauth/anthropic-refresh.d.ts
+@@ -0,0 +1,9 @@
++import type { FetchImpl } from "../../types.js";
++export interface AnthropicRefreshTokenResponse {
++    access_token: string;
++    refresh_token: string;
++    expires_in: number;
++    account?: { uuid?: string; email_address?: string };
++    organization?: { uuid?: string; name?: string };
++}
++export declare function refreshAnthropicTokenPortable(refreshToken: string, fetchOverride?: FetchImpl): Promise<AnthropicRefreshTokenResponse>;
+diff --git a/dist/types/registry/oauth/cursor-refresh.d.ts b/dist/types/registry/oauth/cursor-refresh.d.ts
+new file mode 100644
+--- /dev/null
++++ b/dist/types/registry/oauth/cursor-refresh.d.ts
+@@ -0,0 +1,8 @@
++import type { FetchImpl } from "../../types.js";
++import type { OAuthCredentials } from "./types.js";
++export declare class CursorRefreshError extends Error {
++    readonly status: number;
++    readonly responseBody: string;
++    constructor(status: number, responseBody: string);
++}
++export declare function refreshCursorTokenPortable(apiKeyOrRefreshToken: string, fetchOverride?: FetchImpl): Promise<OAuthCredentials>;
+diff --git a/dist/types/registry/oauth/cursor.d.ts b/dist/types/registry/oauth/cursor.d.ts
+--- a/dist/types/registry/oauth/cursor.d.ts
++++ b/dist/types/registry/oauth/cursor.d.ts
+@@ -1,3 +1,4 @@
++import type { FetchImpl } from "../../types.js";
+ import type { OAuthController, OAuthCredentials } from "./types.js";
+ export interface CursorAuthParams {
+     verifier: string;
+@@ -12,7 +13,7 @@
+ }>;
+ export declare function loginCursor(onAuthUrl: (url: string) => void, onPollStart?: () => void): Promise<OAuthCredentials>;
+ export declare function loginCursorHook(callbacks: OAuthController): Promise<OAuthCredentials>;
+-export declare function refreshCursorToken(apiKeyOrRefreshToken: string): Promise<OAuthCredentials>;
++export declare function refreshCursorToken(apiKeyOrRefreshToken: string, fetchOverride?: FetchImpl): Promise<OAuthCredentials>;
+ export declare function refreshCursorHook(credentials: OAuthCredentials): Promise<OAuthCredentials>;
+ export declare function extractCursorAccessTokenUserId(accessToken: string): string | undefined;
+ export declare function isCursorTokenExpiringSoon(token: string, thresholdSeconds?: number): boolean;
+diff --git a/dist/types/registry/oauth/google-antigravity-refresh.d.ts b/dist/types/registry/oauth/google-antigravity-refresh.d.ts
+new file mode 100644
+--- /dev/null
++++ b/dist/types/registry/oauth/google-antigravity-refresh.d.ts
+@@ -0,0 +1,3 @@
++import type { FetchImpl } from "../../types.js";
++import type { OAuthCredentials } from "./types.js";
++export declare function refreshAntigravityTokenPortable(refreshToken: string, projectId: string, fetchOverride?: FetchImpl): Promise<OAuthCredentials>;
+diff --git a/dist/types/registry/oauth/google-gemini-cli-refresh.d.ts b/dist/types/registry/oauth/google-gemini-cli-refresh.d.ts
+new file mode 100644
+--- /dev/null
++++ b/dist/types/registry/oauth/google-gemini-cli-refresh.d.ts
+@@ -0,0 +1,3 @@
++import type { FetchImpl } from "../../types.js";
++import type { OAuthCredentials } from "./types.js";
++export declare function refreshGoogleCloudTokenPortable(refreshToken: string, projectId: string, fetchOverride?: FetchImpl): Promise<OAuthCredentials>;
+diff --git a/dist/types/registry/oauth/openai-codex-refresh.d.ts b/dist/types/registry/oauth/openai-codex-refresh.d.ts
+new file mode 100644
+--- /dev/null
++++ b/dist/types/registry/oauth/openai-codex-refresh.d.ts
+@@ -0,0 +1,7 @@
++import type { FetchImpl } from "../../types.js";
++export interface OpenAICodexRefreshTokenResponse {
++    access_token: string;
++    refresh_token: string;
++    expires_in: number;
++}
++export declare function refreshOpenAICodexTokenPortable(refreshToken: string, fetchOverride?: FetchImpl): Promise<OpenAICodexRefreshTokenResponse>;
+diff --git a/dist/types/registry/oauth/worker-refresh.d.ts b/dist/types/registry/oauth/worker-refresh.d.ts
+new file mode 100644
+--- /dev/null
++++ b/dist/types/registry/oauth/worker-refresh.d.ts
+@@ -0,0 +1,17 @@
++import type { FetchImpl } from "../../types.js";
++export declare function googleOAuthClient(provider: "google-gemini-cli" | "google-antigravity"): { clientId: string; clientSecret: string };
++export declare class WorkerOAuthRefreshError extends Error {
++    readonly provider: string;
++    readonly kind: "network" | "rejected" | "invalid-response";
++    readonly status: number | undefined;
++    readonly responseBody: string;
++    constructor(provider: string, kind: "network" | "rejected" | "invalid-response", status: number | undefined, responseBody: string);
++}
++export declare function requestWorkerOAuthToken(input: {
++    provider: string;
++    url: string;
++    headers: HeadersInit;
++    body: BodyInit;
++    fetchOverride?: FetchImpl;
++    timeoutMs?: number;
++}): Promise<Record<string, unknown>>;
+diff --git a/src/registry/oauth/anthropic-refresh.ts b/src/registry/oauth/anthropic-refresh.ts
+new file mode 100644
+--- /dev/null
++++ b/src/registry/oauth/anthropic-refresh.ts
+@@ -0,0 +1,42 @@
++import type { FetchImpl } from "../../types";
++import { WorkerOAuthRefreshError, requestWorkerOAuthToken } from "./worker-refresh";
++
++const CLIENT_ID = atob("OWQxYzI1MGEtZTYxYi00NGQ5LTg4ZWQtNTk0NGQxOTYyZjVl");
++
++export interface AnthropicRefreshTokenResponse {
++	access_token: string;
++	refresh_token: string;
++	expires_in: number;
++	account?: { uuid?: string; email_address?: string };
++	organization?: { uuid?: string; name?: string };
++}
++
++export async function refreshAnthropicTokenPortable(
++	refreshToken: string,
++	fetchOverride?: FetchImpl,
++): Promise<AnthropicRefreshTokenResponse> {
++	const data = await requestWorkerOAuthToken({
++		provider: "anthropic",
++		url: "https://api.anthropic.com/v1/oauth/token",
++		headers: {
++			"content-type": "application/json",
++			"anthropic-beta": "oauth-2025-04-20",
++			"user-agent": "anthropic-sdk-typescript/0.94.0 userOAuthProvider",
++		},
++		body: JSON.stringify({ grant_type: "refresh_token", client_id: CLIENT_ID, refresh_token: refreshToken }),
++		fetchOverride,
++	});
++	if (typeof data.access_token !== "string" || typeof data.expires_in !== "number" || !Number.isFinite(data.expires_in) || data.expires_in <= 0) {
++		throw new WorkerOAuthRefreshError("anthropic", "invalid-response", 200, "missing token fields");
++	}
++	if (data.refresh_token !== undefined && typeof data.refresh_token !== "string") {
++		throw new WorkerOAuthRefreshError("anthropic", "invalid-response", 200, "invalid refresh token");
++	}
++	return {
++		access_token: data.access_token,
++		refresh_token: data.refresh_token || refreshToken,
++		expires_in: data.expires_in,
++		...(data.account && typeof data.account === "object" ? { account: data.account as AnthropicRefreshTokenResponse["account"] } : {}),
++		...(data.organization && typeof data.organization === "object" ? { organization: data.organization as AnthropicRefreshTokenResponse["organization"] } : {}),
++	};
++}
+diff --git a/src/registry/oauth/cursor-refresh.ts b/src/registry/oauth/cursor-refresh.ts
+new file mode 100644
+--- /dev/null
++++ b/src/registry/oauth/cursor-refresh.ts
+@@ -0,0 +1,53 @@
++import type { FetchImpl } from "../../types";
++import type { OAuthCredentials } from "./types";
++
++const CURSOR_REFRESH_URL = "https://api2.cursor.sh/auth/exchange_user_api_key";
++
++export class CursorRefreshError extends Error {
++	constructor(readonly status: number, readonly responseBody: string) {
++		super(`Cursor token refresh failed with status ${status}`);
++		this.name = "CursorRefreshError";
++	}
++}
++
++function decodeCursorAccessTokenPayload(token: string): unknown | undefined {
++	const parts = token.split(".");
++	if (parts.length !== 3 || !parts[1]) return undefined;
++	try {
++		return JSON.parse(atob(parts[1].replace(/-/g, "+").replace(/_/g, "/")));
++	} catch {
++		return undefined;
++	}
++}
++
++function getTokenExpiry(token: string): number {
++	const decoded = decodeCursorAccessTokenPayload(token);
++	if (decoded && typeof decoded === "object" && "exp" in decoded && typeof decoded.exp === "number") {
++		return decoded.exp * 1000 - 5 * 60 * 1000;
++	}
++	return Date.now() + 3600 * 1000;
++}
++
++export async function refreshCursorTokenPortable(
++	apiKeyOrRefreshToken: string,
++	fetchOverride?: FetchImpl,
++): Promise<OAuthCredentials> {
++	const response = await (fetchOverride ?? fetch)(CURSOR_REFRESH_URL, {
++		method: "POST",
++		headers: {
++			Authorization: `Bearer ${apiKeyOrRefreshToken}`,
++			"Content-Type": "application/json",
++		},
++		body: "{}",
++	});
++	if (!response.ok) throw new CursorRefreshError(response.status, await response.text());
++	const data = (await response.json()) as { accessToken?: unknown; refreshToken?: unknown };
++	if (typeof data.accessToken !== "string" || (data.refreshToken !== undefined && typeof data.refreshToken !== "string")) {
++		throw new CursorRefreshError(response.status, "invalid token response");
++	}
++	return {
++		access: data.accessToken,
++		refresh: data.refreshToken || apiKeyOrRefreshToken,
++		expires: getTokenExpiry(data.accessToken),
++	};
++}
+diff --git a/src/registry/oauth/cursor.ts b/src/registry/oauth/cursor.ts
+--- a/src/registry/oauth/cursor.ts
++++ b/src/registry/oauth/cursor.ts
+@@ -1,10 +1,11 @@
+ import * as AIError from "../../error";
++import type { FetchImpl } from "../../types";
++import { CursorRefreshError, refreshCursorTokenPortable } from "./cursor-refresh";
+ import { generatePKCE } from "./pkce";
+ import type { OAuthController, OAuthCredentials } from "./types";
+ 
+ const CURSOR_LOGIN_URL = "https://cursor.com/loginDeepControl";
+ const CURSOR_POLL_URL = "https://api2.cursor.sh/auth/poll";
+-const CURSOR_REFRESH_URL = "https://api2.cursor.sh/auth/exchange_user_api_key";
+ 
+ const POLL_MAX_ATTEMPTS = 150;
+ const POLL_BASE_DELAY = 1000;
+@@ -113,36 +114,22 @@
+ 	);
+ }
+ 
+-export async function refreshCursorToken(apiKeyOrRefreshToken: string): Promise<OAuthCredentials> {
+-	const response = await fetch(CURSOR_REFRESH_URL, {
+-		method: "POST",
+-		headers: {
+-			Authorization: `Bearer ${apiKeyOrRefreshToken}`,
+-			"Content-Type": "application/json",
+-		},
+-		body: "{}",
+-	});
+-
+-	if (!response.ok) {
+-		const error = await response.text();
+-		throw new AIError.OAuthError(`Cursor token refresh failed: ${error}`, {
+-			kind: "token-refresh",
+-			provider: "cursor",
+-		});
++export async function refreshCursorToken(
++	apiKeyOrRefreshToken: string,
++	fetchOverride?: FetchImpl,
++): Promise<OAuthCredentials> {
++	try {
++		return await refreshCursorTokenPortable(apiKeyOrRefreshToken, fetchOverride);
++	} catch (error) {
++		if (error instanceof CursorRefreshError) {
++			throw new AIError.OAuthError(`Cursor token refresh failed: ${error.responseBody}`, {
++				kind: "token-refresh",
++				provider: "cursor",
++				status: error.status,
++			});
++		}
++		throw error;
+ 	}
+-
+-	const data = (await response.json()) as {
+-		accessToken: string;
+-		refreshToken: string;
+-	};
+-
+-	const expiresAt = getTokenExpiry(data.accessToken);
+-
+-	return {
+-		access: data.accessToken,
+-		refresh: data.refreshToken || apiKeyOrRefreshToken,
+-		expires: expiresAt,
+-	};
+ }
+ 
+ export async function refreshCursorHook(credentials: OAuthCredentials): Promise<OAuthCredentials> {
+diff --git a/src/registry/oauth/google-antigravity-refresh.ts b/src/registry/oauth/google-antigravity-refresh.ts
+new file mode 100644
+--- /dev/null
++++ b/src/registry/oauth/google-antigravity-refresh.ts
+@@ -0,0 +1,30 @@
++import type { FetchImpl } from "../../types";
++import type { OAuthCredentials } from "./types";
++import { WorkerOAuthRefreshError, googleOAuthClient, requestWorkerOAuthToken } from "./worker-refresh";
++
++export async function refreshAntigravityTokenPortable(
++	refreshToken: string,
++	projectId: string,
++	fetchOverride?: FetchImpl,
++): Promise<OAuthCredentials> {
++	const { clientId, clientSecret } = googleOAuthClient("google-antigravity");
++	const data = await requestWorkerOAuthToken({
++		provider: "google-antigravity",
++		url: "https://oauth2.googleapis.com/token",
++		headers: { "content-type": "application/x-www-form-urlencoded" },
++		body: new URLSearchParams({ client_id: clientId, client_secret: clientSecret, refresh_token: refreshToken, grant_type: "refresh_token" }),
++		fetchOverride,
++	});
++	if (typeof data.access_token !== "string" || typeof data.expires_in !== "number" || !Number.isFinite(data.expires_in) || data.expires_in <= 0) {
++		throw new WorkerOAuthRefreshError("google-antigravity", "invalid-response", 200, "missing token fields");
++	}
++	if (data.refresh_token !== undefined && typeof data.refresh_token !== "string") {
++		throw new WorkerOAuthRefreshError("google-antigravity", "invalid-response", 200, "invalid refresh token");
++	}
++	return {
++		refresh: data.refresh_token || refreshToken,
++		access: data.access_token,
++		expires: Date.now() + data.expires_in * 1000 - 5 * 60 * 1000,
++		projectId,
++	};
++}
+diff --git a/src/registry/oauth/google-gemini-cli-refresh.ts b/src/registry/oauth/google-gemini-cli-refresh.ts
+new file mode 100644
+--- /dev/null
++++ b/src/registry/oauth/google-gemini-cli-refresh.ts
+@@ -0,0 +1,30 @@
++import type { FetchImpl } from "../../types";
++import type { OAuthCredentials } from "./types";
++import { WorkerOAuthRefreshError, googleOAuthClient, requestWorkerOAuthToken } from "./worker-refresh";
++
++export async function refreshGoogleCloudTokenPortable(
++	refreshToken: string,
++	projectId: string,
++	fetchOverride?: FetchImpl,
++): Promise<OAuthCredentials> {
++	const { clientId, clientSecret } = googleOAuthClient("google-gemini-cli");
++	const data = await requestWorkerOAuthToken({
++		provider: "google-gemini-cli",
++		url: "https://oauth2.googleapis.com/token",
++		headers: { "content-type": "application/x-www-form-urlencoded" },
++		body: new URLSearchParams({ client_id: clientId, client_secret: clientSecret, refresh_token: refreshToken, grant_type: "refresh_token" }),
++		fetchOverride,
++	});
++	if (typeof data.access_token !== "string" || typeof data.expires_in !== "number" || !Number.isFinite(data.expires_in) || data.expires_in <= 0) {
++		throw new WorkerOAuthRefreshError("google-gemini-cli", "invalid-response", 200, "missing token fields");
++	}
++	if (data.refresh_token !== undefined && typeof data.refresh_token !== "string") {
++		throw new WorkerOAuthRefreshError("google-gemini-cli", "invalid-response", 200, "invalid refresh token");
++	}
++	return {
++		refresh: data.refresh_token || refreshToken,
++		access: data.access_token,
++		expires: Date.now() + data.expires_in * 1000 - 5 * 60 * 1000,
++		projectId,
++	};
++}
+diff --git a/src/registry/oauth/openai-codex-refresh.ts b/src/registry/oauth/openai-codex-refresh.ts
+new file mode 100644
+--- /dev/null
++++ b/src/registry/oauth/openai-codex-refresh.ts
+@@ -0,0 +1,29 @@
++import type { FetchImpl } from "../../types";
++import { WorkerOAuthRefreshError, requestWorkerOAuthToken } from "./worker-refresh";
++
++export interface OpenAICodexRefreshTokenResponse {
++	access_token: string;
++	refresh_token: string;
++	expires_in: number;
++}
++
++export async function refreshOpenAICodexTokenPortable(
++	refreshToken: string,
++	fetchOverride?: FetchImpl,
++): Promise<OpenAICodexRefreshTokenResponse> {
++	const data = await requestWorkerOAuthToken({
++		provider: "openai-codex",
++		url: "https://auth.openai.com/oauth/token",
++		headers: { "content-type": "application/x-www-form-urlencoded" },
++		body: new URLSearchParams({
++			grant_type: "refresh_token",
++			refresh_token: refreshToken,
++			client_id: "app_EMoamEEZ73f0CkXaXp7hrann",
++		}),
++		fetchOverride,
++	});
++	if (typeof data.access_token !== "string" || typeof data.refresh_token !== "string" || typeof data.expires_in !== "number" || !Number.isFinite(data.expires_in) || data.expires_in <= 0) {
++		throw new WorkerOAuthRefreshError("openai-codex", "invalid-response", 200, "missing token fields");
++	}
++	return { access_token: data.access_token, refresh_token: data.refresh_token, expires_in: data.expires_in };
++}
+diff --git a/src/registry/oauth/worker-refresh.ts b/src/registry/oauth/worker-refresh.ts
+new file mode 100644
+--- /dev/null
++++ b/src/registry/oauth/worker-refresh.ts
+@@ -0,0 +1,87 @@
++import { authPolicyFor } from "@oh-my-pi/pi-catalog/compat/auth";
++import type { FetchImpl } from "../../types";
++
++const MAX_RESPONSE_BYTES = 64 * 1024;
++
++/** Read public Google OAuth client metadata from the same catalog as the native auth engine. */
++export function googleOAuthClient(provider: "google-gemini-cli" | "google-antigravity"): { clientId: string; clientSecret: string } {
++	const login = authPolicyFor(provider)?.login;
++	if (login?.kind !== "oauth-code" || !login.clientId?.value || !login.clientSecret?.value) {
++		throw new Error(`Missing OAuth client metadata for ${provider}`);
++	}
++	return {
++		clientId: login.clientId.encoding === "base64" ? atob(login.clientId.value) : login.clientId.value,
++		clientSecret: login.clientSecret.encoding === "base64" ? atob(login.clientSecret.value) : login.clientSecret.value,
++	};
++}
++
++export class WorkerOAuthRefreshError extends Error {
++	constructor(
++		readonly provider: string,
++		readonly kind: "network" | "rejected" | "invalid-response",
++		readonly status: number | undefined,
++		readonly responseBody: string,
++	) {
++		super(`${provider} OAuth refresh ${kind}`);
++		this.name = "WorkerOAuthRefreshError";
++	}
++}
++
++async function boundedText(response: Response): Promise<string> {
++	const declared = Number(response.headers.get("content-length"));
++	if (Number.isFinite(declared) && declared > MAX_RESPONSE_BYTES) throw new Error("response too large");
++	if (!response.body) return "";
++	const reader = response.body.getReader();
++	const decoder = new TextDecoder();
++	let size = 0;
++	let text = "";
++	try {
++		while (true) {
++			const chunk = await reader.read();
++			if (chunk.done) return text + decoder.decode();
++			size += chunk.value.byteLength;
++			if (size > MAX_RESPONSE_BYTES) {
++				await reader.cancel();
++				throw new Error("response too large");
++			}
++			text += decoder.decode(chunk.value, { stream: true });
++		}
++	} finally {
++		reader.releaseLock();
++	}
++}
++
++export async function requestWorkerOAuthToken(input: {
++	provider: string;
++	url: string;
++	headers: HeadersInit;
++	body: BodyInit;
++	fetchOverride?: FetchImpl;
++	timeoutMs?: number;
++}): Promise<Record<string, unknown>> {
++	let response: Response;
++	try {
++		response = await (input.fetchOverride ?? fetch)(input.url, {
++			method: "POST",
++			headers: input.headers,
++			body: input.body,
++			signal: AbortSignal.timeout(input.timeoutMs ?? 15_000),
++		});
++	} catch {
++		throw new WorkerOAuthRefreshError(input.provider, "network", undefined, "");
++	}
++	let text: string;
++	try {
++		text = await boundedText(response);
++	} catch {
++		throw new WorkerOAuthRefreshError(input.provider, "invalid-response", response.status, "response too large");
++	}
++	if (!response.ok) throw new WorkerOAuthRefreshError(input.provider, "rejected", response.status, text);
++	try {
++		const parsed = JSON.parse(text) as unknown;
++		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("not an object");
++		return parsed as Record<string, unknown>;
++	} catch {
++		throw new WorkerOAuthRefreshError(input.provider, "invalid-response", response.status, text);
++	}
++}

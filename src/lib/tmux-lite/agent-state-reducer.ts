@@ -1,4 +1,5 @@
 import type { AgentStateUpdateDelta, WorkspaceAgentState } from './agent-event-manager.js';
+import type { Block } from '../../blocks/index.js';
 
 function cloneWorkspaceState(state: WorkspaceAgentState): WorkspaceAgentState {
   return {
@@ -39,8 +40,15 @@ export function applyAgentDeltaToAgentState(
   if (delta.type === 'agent_state_snapshot') {
     return { ...delta.workspaces };
   }
-  if (delta.type === 'agent_oauth_event') {
-    return current; // transient flow event — not part of workspace state
+  if (delta.type === 'agent_workspace_snapshot') {
+    return { ...current, [delta.workspaceId]: delta.workspace };
+  }
+  if (
+    delta.type === 'agent_oauth_event'
+    || delta.type === 'agent_transcript_delta'
+    || delta.type === 'agent_recap'
+  ) {
+    return current; // transient pane/flow events — not part of workspace state
   }
   const state = current[delta.workspaceId] ?? createEmptyWorkspaceState(delta.workspaceId);
   const nextWorkspace = cloneWorkspaceState(state);
@@ -127,4 +135,27 @@ export function applyAgentDeltaToAgentState(
       break;
   }
   return next;
+}
+
+type TranscriptDelta = Extract<AgentStateUpdateDelta, { type: 'agent_transcript_delta' }>;
+
+export function applyTranscriptDelta(current: Block[], delta: TranscriptDelta): Block[] {
+  if (delta.committed) return [];
+  const byId = new Map(current.map((block) => [block.id, block]));
+  for (const block of delta.upserts) byId.set(block.id, block);
+  for (const append of delta.appends) {
+    const block = byId.get(append.id);
+    if (!block || !block.data || typeof block.data !== 'object') continue;
+    const data = block.data as Record<string, unknown>;
+    const previous = data[append.field];
+    if (typeof previous !== 'string') continue;
+    byId.set(append.id, {
+      ...block,
+      data: { ...data, [append.field]: previous + append.text },
+    });
+  }
+  return delta.order.flatMap((id) => {
+    const block = byId.get(id);
+    return block ? [block] : [];
+  });
 }

@@ -1,0 +1,30 @@
+interface Env {
+  RELEASES: R2Bucket;
+  DISPATCHER: DispatchNamespace;
+  COMPUTE: Fetcher;
+  COMPUTE_TEMPLATE_SCRIPT: string;
+  COMPUTE_DEFAULT_IMAGE: string;
+  COMPUTE_SANDBOX_HOSTNAME: string;
+  COMPUTE_MAX_MACHINES: string | number;
+  COMPUTE_MAX_IMAGE_DEPLOYMENTS: string | number;
+  CREDITS: DurableObjectNamespace<import('./src/index').CreditLedgerDO>;
+  DEPLOYMENTS: DurableObjectNamespace<import('./src/index').TenantDeploymentsDO>;
+  TENANT_CONTROL: DurableObjectNamespace<import('./src/index').TenantControlDO>;
+  TENANT_HOST_SUFFIX: string;
+  PLATFORM_URL: string;
+  PLATFORM_SERVICE_NAME: string;
+  PUBLIC_ASSETS_SERVICE: string;
+  CF_ACCOUNT_ID: string;
+  CF_API_TOKEN: string;
+  R2_API_TOKEN: string;
+  R2_PARENT_ACCESS_KEY_ID: string;
+  PLATFORM_BOOTSTRAP_TOKEN: string;
+  ADMIN_PUBLIC_KEY: string;
+  DISPATCH_NAMESPACE: string;
+  DEFAULT_CPU_MS: string | number;
+  DEFAULT_SUBREQUESTS: string | number;
+  ADMIN_AUTH_MAX_SKEW_MS: string | number;
+  DISPATCH_SETTLEMENT_MICROS: string | number;
+  DEPLOY_SETTLEMENT_MICROS: string | number;
+  DEPLOY_PROBE_DELAY_MS: string | number;
+}

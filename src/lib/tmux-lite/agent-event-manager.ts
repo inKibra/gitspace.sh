@@ -83,6 +83,7 @@ import { computeSessionActivity } from '../../agents/agent-runtime-types.js';
 
 export type AgentStateUpdateDelta =
   | { type: 'agent_state_snapshot'; workspaces: Record<string, WorkspaceAgentState> }
+  | { type: 'agent_workspace_snapshot'; workspaceId: string; workspace: WorkspaceAgentState }
   | { type: 'agent_session_status'; workspaceId: string; sessionId: string; status: SessionStatus }
   | { type: 'agent_permission_added'; workspaceId: string; sessionId: string; permission: Permission }
   | { type: 'agent_permission_removed'; workspaceId: string; sessionId: string; permissionId: string }
@@ -95,11 +96,25 @@ export type AgentStateUpdateDelta =
   | { type: 'agent_session_deleted'; workspaceId: string; sessionId: string }
   | { type: 'agent_todo_update'; workspaceId: string; sessionId: string; phases: TodoPhase[] }
   | { type: 'agent_model_update'; workspaceId: string; sessionId: string; modelInfo: AgentModelInfo }
-  | { type: 'agent_transcript_live'; workspaceId: string; sessionId: string; blocks: Block[]; committed: boolean }
+  | {
+      type: 'agent_transcript_delta';
+      workspaceId: string;
+      sessionId: string;
+      upserts: Block[];
+      appends: AgentTranscriptAppend[];
+      order: string[];
+      committed: boolean;
+    }
   /** Idle recap: a transient, NEVER-persisted line shown at the tail of the
    *  transcript. `text: null` withdraws it (the session went busy again). */
   | { type: 'agent_recap'; workspaceId: string; sessionId: string; text: string | null }
   | { type: 'agent_oauth_event'; event: AgentOAuthEvent };
+
+export interface AgentTranscriptAppend {
+  id: string;
+  field: 'text' | 'body';
+  text: string;
+}
 
 
 const LAST_MESSAGE_MAX_CHARS = 120;
@@ -118,6 +133,92 @@ const ERROR_MESSAGE_MAX_CHARS = 4000;
 const QUEUED_MESSAGE_MAX_CHARS = 2000;
 const QUEUED_MESSAGE_MAX_COUNT = 20;
 const TODO_PHASES_MAX = 200;
+const LIVE_TEXT_MAX_CHARS = 32_768;
+const LIVE_STRUCTURED_PREVIEW_MAX_CHARS = 16_384;
+const LIVE_COLLECTION_MAX_ITEMS = 200;
+const LIVE_TRUNCATION_NOTICE = '\n\n[Live payload truncated; full content loads when the turn completes.]';
+
+function truncateLiveText(text: string): string {
+  if (text.length <= LIVE_TEXT_MAX_CHARS) return text;
+  return text.slice(0, LIVE_TEXT_MAX_CHARS) + LIVE_TRUNCATION_NOTICE;
+}
+
+function boundStructuredLiveValue(value: unknown): unknown {
+  if (value === undefined) return undefined;
+  let json: string;
+  try {
+    json = JSON.stringify(value) ?? String(value);
+  } catch {
+    json = String(value);
+  }
+  if (json.length <= LIVE_STRUCTURED_PREVIEW_MAX_CHARS) return value;
+  return {
+    truncated: true,
+    originalChars: json.length,
+    preview: json.slice(0, LIVE_STRUCTURED_PREVIEW_MAX_CHARS) + LIVE_TRUNCATION_NOTICE,
+  };
+}
+
+function boundLiveBlock(block: Block): Block {
+  if (!block.data || typeof block.data !== 'object' || block.type === 'image') return block;
+  const data = block.data as Record<string, unknown>;
+  let changed = false;
+  const next: Record<string, unknown> = { ...data };
+
+  for (const field of ['text', 'body'] as const) {
+    const value = data[field];
+    if (typeof value !== 'string') continue;
+    const bounded = truncateLiveText(value);
+    if (bounded !== value) {
+      next[field] = bounded;
+      changed = true;
+    }
+  }
+
+  if (block.type === 'tool-call') {
+    for (const field of ['args', 'details'] as const) {
+      const bounded = boundStructuredLiveValue(data[field]);
+      if (bounded !== data[field]) {
+        next[field] = bounded;
+        changed = true;
+      }
+    }
+    for (const field of ['input', 'result'] as const) {
+      const value = data[field];
+      if (!Array.isArray(value)) continue;
+      const bounded = value.slice(0, LIVE_COLLECTION_MAX_ITEMS).map((child) => boundLiveBlock(child as Block));
+      if (value.length > LIVE_COLLECTION_MAX_ITEMS || bounded.some((child, index) => child !== value[index])) {
+        next[field] = bounded;
+        changed = true;
+      }
+    }
+  } else if (block.type === 'subagent' && Array.isArray(data.lines) && data.lines.length > LIVE_COLLECTION_MAX_ITEMS) {
+    next.lines = data.lines.slice(-LIVE_COLLECTION_MAX_ITEMS);
+    changed = true;
+  } else if (block.type === 'diff' && Array.isArray(data.lines) && data.lines.length > LIVE_COLLECTION_MAX_ITEMS) {
+    next.lines = data.lines.slice(0, LIVE_COLLECTION_MAX_ITEMS);
+    changed = true;
+  }
+
+  return changed ? { ...block, data: next } : block;
+}
+
+function appendOnlyChange(previous: Block, next: Block): AgentTranscriptAppend | null {
+  if (previous.id !== next.id || previous.type !== next.type) return null;
+  if (!previous.data || typeof previous.data !== 'object' || !next.data || typeof next.data !== 'object') return null;
+  const previousData = previous.data as Record<string, unknown>;
+  const nextData = next.data as Record<string, unknown>;
+  for (const field of ['text', 'body'] as const) {
+    const before = previousData[field];
+    const after = nextData[field];
+    if (typeof before !== 'string' || typeof after !== 'string' || !after.startsWith(before) || after === before) continue;
+    const previousRest = { ...previousData, [field]: undefined };
+    const nextRest = { ...nextData, [field]: undefined };
+    if (!jsonEqual(previousRest, nextRest)) continue;
+    return { id: next.id, field, text: after.slice(before.length) };
+  }
+  return null;
+}
 
 /** Cap an array of message strings for display; logs once if it trimmed a lot. */
 function capMessageList(messages: readonly string[], where: string): string[] {
@@ -176,6 +277,7 @@ export class AgentEventManager {
   private errorSeq = 0;
   private readonly pendingLastMessageDeltas = new Map<string, LastMessageDelta>();
   private readonly pendingLastMessageTimers = new Map<string, TimerHandle>();
+  private readonly liveTranscriptBlocks = new Map<string, Block[]>();
 
   constructor(options: AgentEventManagerOptions = {}) {
     this.lastMessageEmitIntervalMs = resolveLastMessageEmitIntervalMs(options.lastMessageEmitIntervalMs);
@@ -263,9 +365,7 @@ export class AgentEventManager {
       }
     }
 
-    if (changed) {
-      this.emit({ type: 'agent_state_snapshot', workspaces: this.getSnapshot() });
-    }
+    if (changed) this.emitWorkspaceSnapshot(workspaceId);
   }
 
   async reconcileWorkspace(_workspaceId: string): Promise<void> {
@@ -304,6 +404,7 @@ export class AgentEventManager {
    *  (status, pendings, queued, error) describes a LIVE worker, so it must not
    *  outlive one — a closed card would otherwise render a frozen busy/error. */
   private retireSession(workspaceId: string, sessionId: string, kind: 'closed' | 'dormant'): void {
+    this.liveTranscriptBlocks.delete(`${workspaceId}\0${sessionId}`);
     const state = this.workspaceStates.get(workspaceId);
     if (!state) return;
     const index = state.sessions.findIndex((session) => session.id === sessionId);
@@ -328,7 +429,7 @@ export class AgentEventManager {
     delete state.subagentCounts[sessionId];
     this.clearLastMessageThrottle(workspaceId, sessionId);
     this.previousStatuses.delete(`${workspaceId}:${sessionId}`);
-    this.emit({ type: 'agent_state_snapshot', workspaces: this.getSnapshot() });
+    this.emitWorkspaceSnapshot(workspaceId);
   }
 
   markSessionOpen(workspaceId: string, sessionId: string): void {
@@ -342,14 +443,14 @@ export class AgentEventManager {
         if (newIndex !== -1) {
           state.sessions[newIndex] = { ...state.sessions[newIndex]!, closedAt: undefined, dormantSince: undefined };
         }
-        this.emit({ type: 'agent_state_snapshot', workspaces: this.getSnapshot() });
+        this.emitWorkspaceSnapshot(workspaceId);
       }
       return;
     }
     const existing = state.sessions[index]!;
     if (!existing.closedAt && !existing.dormantSince) return;
     state.sessions[index] = { ...existing, closedAt: undefined, dormantSince: undefined };
-    this.emit({ type: 'agent_state_snapshot', workspaces: this.getSnapshot() });
+    this.emitWorkspaceSnapshot(workspaceId);
   }
 
   setExternalStatus(workspaceId: string, sessionId: string, status: SessionStatus): void {
@@ -368,7 +469,51 @@ export class AgentEventManager {
 
   /** Broadcast the live transcript suffix for a session (transient — not stored). */
   emitTranscriptLive(workspaceId: string, sessionId: string, blocks: Block[], committed: boolean): void {
-    this.emit({ type: 'agent_transcript_live', workspaceId, sessionId, blocks, committed });
+    const key = `${workspaceId}\0${sessionId}`;
+    const previous = this.liveTranscriptBlocks.get(key);
+    if (committed) {
+      this.liveTranscriptBlocks.delete(key);
+      if (!previous) return;
+      this.emit({
+        type: 'agent_transcript_delta',
+        workspaceId,
+        sessionId,
+        upserts: [],
+        appends: [],
+        order: [],
+        committed: true,
+      });
+      return;
+    }
+
+    const bounded = blocks.map(boundLiveBlock);
+    const previousById = new Map((previous ?? []).map((block) => [block.id, block]));
+    const upserts: Block[] = [];
+    const appends: AgentTranscriptAppend[] = [];
+    for (const block of bounded) {
+      const prior = previousById.get(block.id);
+      if (!prior) {
+        upserts.push(block);
+        continue;
+      }
+      if (jsonEqual(prior, block)) continue;
+      const append = appendOnlyChange(prior, block);
+      if (append) appends.push(append);
+      else upserts.push(block);
+    }
+    const order = bounded.map((block) => block.id);
+    const previousOrder = (previous ?? []).map((block) => block.id);
+    this.liveTranscriptBlocks.set(key, bounded);
+    if (upserts.length === 0 && appends.length === 0 && jsonEqual(order, previousOrder)) return;
+    this.emit({
+      type: 'agent_transcript_delta',
+      workspaceId,
+      sessionId,
+      upserts,
+      appends,
+      order,
+      committed: false,
+    });
   }
 
   /** Broadcast (or withdraw, with `null`) the idle recap. Transient by design:
@@ -446,7 +591,7 @@ export class AgentEventManager {
       };
     }
     if (jsonEqual(previousQueued, state.queuedMessages[sessionId])) return;
-    this.emit({ type: 'agent_state_snapshot', workspaces: this.getSnapshot() });
+    this.emitWorkspaceSnapshot(workspaceId);
   }
 
   setExternalSubagentCount(workspaceId: string, sessionId: string, count: number): void {
@@ -459,7 +604,7 @@ export class AgentEventManager {
     } else {
       state.subagentCounts[sessionId] = next;
     }
-    this.emit({ type: 'agent_state_snapshot', workspaces: this.getSnapshot() });
+    this.emitWorkspaceSnapshot(workspaceId);
   }
 
   /** Canonical activity for a session in this workspace. Delegates to
@@ -538,10 +683,11 @@ export class AgentEventManager {
     delete state.pendingQuestions[sessionId];
     delete state.errorMessages[sessionId];
     this.previousStatuses.delete(`${workspaceId}:${sessionId}`);
-    this.emit({ type: 'agent_state_snapshot', workspaces: this.getSnapshot() });
+    this.emitWorkspaceSnapshot(workspaceId);
   }
 
   markSessionArchived(workspaceId: string, sessionId: string): void {
+    this.liveTranscriptBlocks.delete(`${workspaceId}\0${sessionId}`);
     const state = this.workspaceStates.get(workspaceId);
     if (!state) return;
     state.sessions = state.sessions.filter((session) => session.id !== sessionId);
@@ -562,7 +708,7 @@ export class AgentEventManager {
       this.archivedSessionIds.set(workspaceId, archived);
     }
     archived.add(sessionId);
-    this.emit({ type: 'agent_state_snapshot', workspaces: this.getSnapshot() });
+    this.emitWorkspaceSnapshot(workspaceId);
   }
 
   markSessionRestored(workspaceId: string, sessionId: string, title: string): void {
@@ -578,9 +724,15 @@ export class AgentEventManager {
     } else {
       state.sessions.push({ id: sessionId, title, dormantSince: new Date().toISOString() });
     }
-    this.emit({ type: 'agent_state_snapshot', workspaces: this.getSnapshot() });
+    this.emitWorkspaceSnapshot(workspaceId);
   }
 
+
+  private emitWorkspaceSnapshot(workspaceId: string): void {
+    const workspace = this.workspaceStates.get(workspaceId);
+    if (!workspace) return;
+    this.emit({ type: 'agent_workspace_snapshot', workspaceId, workspace });
+  }
 
   private emitLastMessage(delta: LastMessageDelta): void {
     if (this.lastMessageEmitIntervalMs === 0) {

@@ -1,0 +1,70 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "gitspace-credit-platform-test",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-27",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "CREDITS",
+        "class_name": "CreditLedgerDO"
+      },
+      {
+        "name": "DEPLOYMENTS",
+        "class_name": "TenantDeploymentsDO"
+      },
+      {
+        "name": "TENANT_CONTROL",
+        "class_name": "TenantControlDO"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "CreditLedgerDO"
+      ]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": [
+        "TenantDeploymentsDO"
+      ]
+    },
+    {
+      "tag": "v3",
+      "new_sqlite_classes": [
+        "TenantControlDO"
+      ]
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "RELEASES",
+      "bucket_name": "gitspace-platform-releases-test"
+    }
+  ],
+  "vars": {
+    "TENANT_HOST_SUFFIX": "-test.invalid",
+    "DEFAULT_CPU_MS": 50,
+    "DEFAULT_SUBREQUESTS": 20,
+    "ADMIN_PUBLIC_KEY": "test",
+    "ADMIN_AUTH_MAX_SKEW_MS": 60000,
+    "DISPATCH_SETTLEMENT_MICROS": 1,
+    "DEPLOY_SETTLEMENT_MICROS": 1000,
+    "DEPLOY_PROBE_DELAY_MS": 5,
+    "DISPATCH_NAMESPACE": "gitspace-relays-test",
+    "CF_ACCOUNT_ID": "test-account",
+    "CF_API_TOKEN": "test-api-token",
+    "R2_API_TOKEN": "test-r2-api-token",
+    "PLATFORM_BOOTSTRAP_TOKEN": "test-bootstrap-token",
+    "PLATFORM_URL": "https://platform.test",
+    "PLATFORM_SERVICE_NAME": "gitspace-platform-test",
+    "PUBLIC_ASSETS_SERVICE": "public-assets-test",
+    "R2_PARENT_ACCESS_KEY_ID": "test-parent-access-key"
+  }
+}

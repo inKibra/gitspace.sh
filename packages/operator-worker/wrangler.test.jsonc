@@ -1,0 +1,47 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "gitspace-operator-test",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-27",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "vars": {
+    "ACCESS_TEAM_DOMAIN": "https://gitspace-test.cloudflareaccess.com",
+    "ACCESS_AUD": "test-access-audience",
+    "OPERATOR_EMAIL": "operator@example.com",
+    "PLATFORM_URL": "https://platform.test",
+    "PLATFORM_BOOTSTRAP_TOKEN": "test-platform-bootstrap-token"
+  },
+  "r2_buckets": [
+    {
+      "binding": "DISTRIBUTION",
+      "bucket_name": "gitspace-distribution-test"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "INVITES",
+        "class_name": "InviteRegistryDO"
+      },
+      {
+        "name": "ACCOUNTS",
+        "class_name": "AccountRegistryDO"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "operator-v1",
+      "new_sqlite_classes": [
+        "InviteRegistryDO",
+        "AccountRegistryDO"
+      ]
+    }
+  ],
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  }
+}

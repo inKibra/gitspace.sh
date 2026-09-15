@@ -1,0 +1,96 @@
+---
+$schema: https://holocron.so/frontmatter.json
+title: Core concepts
+description: Accounts, devices, machines, projects, workspaces, and agent sessions.
+icon: boxes
+---
+
+# Core concepts
+
+## Account
+
+A GitSpace account owns its devices, machines, projects, workspaces, settings, and product state. Each account has a permanent handle and its own account Worker, relay endpoint, state, and storage.
+
+The account root key is the authority that enrolls machines and browsers. The `gsr_` recovery key is an encoding of that private root key.
+
+The sidebar belongs to the account, not to an agent session. Projects and Account settings remain available when no agent or machine is running. Closing the last open project or workspace leaves the app open, with access to saved cloud records.
+
+## Browser device
+
+A browser enrolls from the one-time link created by `gitspace open`. It generates a non-extractable Ed25519 key in IndexedDB and signs RPC requests with that key.
+
+Browser grants are revocable. Enrolling a new browser does not require sharing another browser's private key.
+
+## Machine
+
+A machine is a physical computer or managed sandbox that can materialize workspaces and run their agents. A physical machine runs the runtime started by `gitspace machine start`.
+
+Machines expose capabilities such as available runtimes, isolation, hardware, services, and credential scopes. Placement uses those capabilities to keep work on an eligible machine. GitSpace also reports machine state such as online, offline, starting, stopping, or error so the fleet view can direct attention.
+
+Cloud machines are temporary. **Stop** saves supported workspace state before stopping; if saving fails, the machine stays online. **Start** runs a fresh machine environment and restores saved workspaces. Neither a new machine nor Start restores the old machine disk. Installed packages, machine-local configuration, ignored files, and other files outside GitSpace's checkpoints do not survive Stop or replacement. This includes arbitrary files in the machine's home directory.
+
+Ask a normal workspace agent to use the built-in `workspace-lifecycle` skill to plan repeatable tool preparation. Approve configuration edits first, then approve execution separately. Machine changes remain temporary; there is no separate setup agent. See [Workspace lifecycle](/workspace-lifecycle).
+
+## Project
+
+A project groups work for one repository. It is the stable parent for that repository's workspaces.
+
+## Workspace
+
+A workspace is an isolated, durable unit of change. Closed agent workspaces remain in cloud storage. Opening one materializes or moves it onto an eligible machine for work; closing it returns the durable state to cloud storage instead of occupying that machine indefinitely.
+
+A completed workspace checkpoint saves the Git branch, commits, staged and unstaged tracked changes, non-ignored untracked files, agent conversation, and GitSpace artifacts. It is not a backup of the whole machine. After an unexpected interruption, the last completed checkpoint is the recovery limit; uncheckpointed work may be lost. Automatic recovery from unclean disk loss and a returning-machine recovery ZIP are not implemented yet.
+
+Workspace phases are:
+
+| Phase | Purpose |
+| --- | --- |
+| `plan` | Define intent, requirements, and approach. |
+| `code` | Implement and verify the change. |
+| `review` | Read the diff, evidence, review threads, and change guide. |
+| `ship` | Release the work and watch its operational state. |
+
+A workspace can move between eligible machines. Placement remains explicit because the selected machine owns the active checkout and runs the work. A GitSpace workspace can also modify and release the account's own GitSpace code.
+
+## Account releases
+
+The account selects four release targets independently: Worker, frontend, machine, and OMP. Updating one target keeps the others on their selected releases. Settings shows each selection and the versions that machines actually run.
+
+OMP runs in child processes, separate from the machine daemon. During an OMP update, active turns keep their old process. Idle sessions move to the verified replacement. The release stays pending while old sessions drain. A machine update preserves the selected OMP release, but replaces the machine process after draining it.
+
+Runtime releases carry an authenticated file inventory and compatibility requirements for the operating system, architecture, Bun version, and machine protocol. Activation checks the complete payload against its content hashes, including native modules. Replacement plans retain rollback state until all targets commit.
+
+The account selects cloud images independently for each machine, plus a default for new machines. The platform supplies provider infrastructure; changing one machine's selected image does not update the others. An image supplies the operating system, tools, and initial runtime, so replacing it is separate from updating account code inside the running VM. Image replacement checkpoints the source, confirms it has stopped, and keeps admission closed until the replacement restores the previously open workspaces. Stopping a Cloudflare VM discards its ephemeral disk; status and checkpoint-control requests must not silently start a fresh VM.
+
+## Agent session
+
+An agent session belongs to a workspace and is rendered as a native block transcript in the browser. The browser can show tool calls, structured questions, approvals, artifacts, and output without treating a terminal emulator as the application shell.
+
+Chat opens at the newest messages and loads older blocks as you scroll back. It mounts the visible blocks and a small margin, then evicts distant history as the session grows. The history and complete-content caches each have a 64 MiB background budget and a 384-entry limit. Visible content can exceed those budgets; they do not limit what you can read. Eviction removes browser copies, not saved history.
+
+Messages, tool results, questions, and attachments render in full through the existing transcript controls. Large blocks load automatically as they approach the viewport, without a separate content viewer. New output does not move your reading position. Use **Jump to latest** to resume following it. Full transcript reads remain lossless.
+
+Prompt recall keeps a small set of recent, complete prompts. The history browser loads older prompts and branch entries on demand rather than keeping the whole session in memory.
+
+## Inspector products
+
+Each workspace can expose the following durable products:
+
+- **Goal** for intent and observable requirements.
+- **Workflow** for the current execution contract.
+- **Rubric** for how the result will be judged.
+- **Journal** for phase narrative, decisions, and state snapshots.
+- **Review** for evidence-backed threads on the change.
+- **Change Guide** for a reviewable explanation of the final diff.
+- **Artifacts** for files and proof produced by the work.
+- **Services** for running processes and previews.
+
+These products stay attached to the workspace instead of disappearing when an agent session ends.
+
+Opening Inspector does not open a workspace or start a machine. When the workspace is closed or its machine is offline, Inspector reads saved cloud records: goals, workflow, rubric, journal, review, Change Guide, and referenced artifacts. The workspace page shows its saved checkpoint and conversation when available, not a live session.
+
+Live files, terminals, processes, services, and usage controls require an open workspace on an online machine. Disabled controls explain that requirement. Artifact files are read-only while closed; supported cloud record edits remain available. Use **Open workspace** to place work on an online machine. If no machine is online, start one explicitly in Account settings first.
+
+An open portable workspace has its own Git repository. Inspector can browse its files and staged or working changes without the project's base checkout.
+
+Base comparisons use the original branch commit from the base space's latest published checkpoint. Inspector fetches any missing Git objects into the inspected workspace and compares changes from the merge base. It does not reopen the base space or include the base space's saved uncommitted changes. If the checkpoint is unavailable, the base comparison reports that error; files and local changes remain available.

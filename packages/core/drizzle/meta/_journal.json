@@ -1,0 +1,55 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1787910180432,
+      "tag": "0000_moaning_joseph",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1787943274074,
+      "tag": "0001_panoramic_frightful_four",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1787945000000,
+      "tag": "0002_drop_transcript_events",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1787950000000,
+      "tag": "0003_space_relations",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1788400000000,
+      "tag": "0004_device_grants",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1788500000000,
+      "tag": "0005_space_relations_stacked",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1788600000000,
+      "tag": "0006_released_spaces",
+      "breakpoints": true
+    }
+  ]
+}

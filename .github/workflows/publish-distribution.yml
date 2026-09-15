@@ -1,0 +1,173 @@
+name: Publish Native Distribution
+
+on:
+  push:
+    tags: ['distribution-*']
+  workflow_dispatch:
+    inputs:
+      release:
+        description: 'New immutable release id (for example 1.0.0-rc.1); builds the selected workflow ref'
+        required: true
+        type: string
+      publish:
+        description: 'Upload all four immutable platform releases to R2 (does not activate channels)'
+        required: true
+        type: boolean
+        default: false
+      activate:
+        description: 'Publish and activate all four stable platform channels after every native build succeeds'
+        required: true
+        type: boolean
+        default: false
+      artifacts_run:
+        description: 'Reuse artifacts from this workflow run instead of rebuilding; publication only, never activation'
+        required: false
+        type: string
+      platform:
+        description: 'Platform to publish; channel activation requires all'
+        required: true
+        type: choice
+        default: all
+        options: [all, darwin-arm64, darwin-x64, linux-arm64, linux-x64]
+
+concurrency:
+  group: native-distribution
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  build:
+    if: ${{ !inputs.artifacts_run }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: darwin-arm64
+            runner: macos-15
+          - target: darwin-x64
+            runner: macos-15-intel
+          - target: linux-x64
+            runner: ubuntu-24.04
+          - target: linux-arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.0'
+      - name: Install Linux native build prerequisites
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y binutils clang cmake libprotobuf-dev libssl-dev pkg-config protobuf-compiler unzip
+      - name: Install macOS native build prerequisites
+        if: runner.os == 'macOS'
+        run: brew install protobuf cmake pkg-config openssl@3
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal
+      - name: Install the source dependency graph
+        run: bun install --frozen-lockfile
+      - name: Restore verified native source builds
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/gitspace/native
+          key: native-walgit-${{ matrix.target }}-${{ hashFiles('packages/deployment/src/native-build.ts', 'packages/deployment/src/native-runtime.ts', 'patches/walgit/*.patch') }}
+      - name: Build this native client and complete runtime
+        env:
+          GITSPACE_RELEASE: ${{ inputs.release || github.ref_name }}
+          GITSPACE_BUILD_PLATFORM: ${{ matrix.target }}
+        run: |
+          bun packages/deployment/src/release.ts build \
+            --release "$GITSPACE_RELEASE" \
+            --platform "$GITSPACE_BUILD_PLATFORM" \
+            --out "$RUNNER_TEMP/distribution"
+      - name: Run the standalone client with an empty HOME and no Bun on PATH
+        run: |
+          mkdir -p "$RUNNER_TEMP/empty-home"
+          env -i HOME="$RUNNER_TEMP/empty-home" PATH=/usr/bin:/bin "$RUNNER_TEMP/distribution/gitspace" --version
+      - name: Retain native release artifacts and provenance
+        uses: actions/upload-artifact@v4
+        with:
+          name: gitspace-native-${{ matrix.target }}
+          path: ${{ runner.temp }}/distribution/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 90
+
+  publish:
+    if: ${{ !cancelled() && (inputs.publish || inputs.activate) && (needs.build.result == 'success' || (inputs.artifacts_run != '' && needs.build.result == 'skipped')) }}
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET: ${{ vars.GITSPACE_DISTRIBUTION_BUCKET || 'gitspace-data' }}
+      RETAINED_RUN: ${{ inputs.artifacts_run }}
+      PUBLICATION_PLATFORM: ${{ inputs.platform || 'all' }}
+      ACTIVATE_CHANNELS: ${{ inputs.activate }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate publication scope
+        run: |
+          if [ -n "$RETAINED_RUN" ] && [[ ! "$RETAINED_RUN" =~ ^[0-9]+$ ]]; then
+            echo "::error::artifacts_run must be a numeric workflow run id"
+            exit 1
+          fi
+          if [ "$ACTIVATE_CHANNELS" = true ] && { [ -n "$RETAINED_RUN" ] || [ "$PUBLICATION_PLATFORM" != all ]; }; then
+            echo "::error::Channel activation requires a fresh successful build of all four platforms"
+            exit 1
+          fi
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.0'
+      - name: Install release tooling
+        run: bun install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: gitspace-native-${{ (!inputs.platform || inputs.platform == 'all') && '*' || inputs.platform }}
+          path: ${{ runner.temp }}/native-releases
+          run-id: ${{ inputs.artifacts_run || github.run_id }}
+          github-token: ${{ github.token }}
+      - name: Publish selected immutable releases without changing channels
+        run: |
+          platforms=(darwin-arm64 darwin-x64 linux-arm64 linux-x64)
+          if [ "$PUBLICATION_PLATFORM" != all ]; then platforms=("$PUBLICATION_PLATFORM"); fi
+          for platform in "${platforms[@]}"; do
+            bun packages/deployment/src/release.ts publish --from "$RUNNER_TEMP/native-releases/gitspace-native-$platform"
+          done
+
+  activate:
+    if: inputs.activate
+    needs: publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: distribution-production
+    # Configure required reviewers on this environment if production activation needs a second approval.
+    env:
+      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET: ${{ vars.GITSPACE_DISTRIBUTION_BUCKET || 'gitspace-data' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.0'
+      - name: Install release tooling
+        run: bun install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: gitspace-native-*
+          path: ${{ runner.temp }}/native-releases
+      - name: Activate the verified platform channels
+        run: |
+          for platform in darwin-arm64 darwin-x64 linux-arm64 linux-x64; do
+            bun packages/deployment/src/release.ts publish --from "$RUNNER_TEMP/native-releases/gitspace-native-$platform" --activate
+          done

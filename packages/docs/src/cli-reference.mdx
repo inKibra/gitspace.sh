@@ -1,0 +1,56 @@
+---
+$schema: https://holocron.so/frontmatter.json
+title: CLI reference
+description: Link and operate a computer from your browser-managed GitSpace account.
+icon: terminal
+---
+
+# CLI reference
+
+The `gitspace` client connects a computer to an existing account. Create and recover accounts at [gitspace.sh](https://gitspace.sh). Manage projects, workspaces, agents, and releases in the web app.
+
+Cloud-only use does not require this client.
+
+## Machine
+
+| Command | Purpose |
+| --- | --- |
+| `gitspace machine setup --pair <token>` | Pair through browser approval, download the verified runtime, and start it. |
+| `gitspace machine setup --pair <token> --label <label>` | Pair with a custom machine name. |
+| `gitspace machine start` | Start the installed account-managed runtime, or finish its initial download if setup was interrupted. |
+| `gitspace machine stop` | Ask the local runtime to stop. It does not force-kill a process that takes too long. |
+| `gitspace machine status` | Show the local process, separate relay-service and machine-tunnel probes, account URL, and log path. |
+| `gitspace machine remove` | Stop and revoke this computer, retaining its local workspace files and runtime installation. |
+
+Generate the pairing token in **Settings > Machines > Add a computer**. It expires after ten minutes. Confirm the machine name and signing key in that browser before approving it.
+
+Local identity and runtime state live under `~/.config/gitspace/`. The daemon log is `~/.config/gitspace/machine.log`. The local identity contains machine keys, not the account root recovery key.
+
+## Browser
+
+| Command | Purpose |
+| --- | --- |
+| `gitspace open` | Open the linked account URL in a browser. |
+| `gitspace open --print` | Print that account URL. |
+
+These commands do not create browser invitations. Use **Account > Connections > Browsers > Connect another browser** in a connected browser, or fill in **Use your recovery key** on your account page. See [Connect machines and browsers](/remote-access).
+
+## Diagnostics
+
+| Command | Purpose |
+| --- | --- |
+| `gitspace doctor` | Check machine enrollment, installed runtime components, Git/OpenSSH tools, and account connectivity. |
+| `gitspace --help` | Show the command tree. |
+| `gitspace --version` | Show the installed client version. |
+
+Git and the OpenSSH client are system prerequisites. Bun and walgit come with the prebuilt machine runtime. GitSpace installs the pinned OMP SDK when it first activates an OMP recipe, then reuses its local cache. That first install needs access to the package registry. You do not need a source checkout or local build tools.
+
+## Software releases
+
+The account release system manages Worker, frontend, machine, and OMP versions. The local client has no account login, logout, or standalone update command. Pair a computer through the browser and use the account release controls for runtime changes.
+
+Each OMP release contains an exact SDK version, a dependency lock derived from the source lockfile, GitSpace patches, and the SDK adapter. The machine verifies these inputs and assembles a separate runtime before switching to it. An install failure leaves the previous generation available for rollback.
+
+Runtime installations live under `~/.cache/gitspace/omp-runtimes/`. Operators can override this path with `GITSPACE_OMP_RUNTIME_CACHE`. Each input set gets its own cache entry; the machine rejects incomplete or changed entries instead of overwriting a running generation.
+
+Optional local inference, memory embedding, and speech dependencies install on first use and remain in OMP's feature caches. They are not part of every release upload.

@@ -185,3 +185,71 @@ the OMP SDK; dashboards canvas (agent-authored + agentation + artifact); crons &
 (capability scope, ship-live); review-mode diffs; project home + two-step artifact rail;
 fonts = **Inter** (UI, `cv01`/`ss03`) + **JetBrains Mono** (code). Use it as the visual reference
 when implementing the surfaces.
+
+## 6. Inspector usage and workspace agent setup (2026-09-12)
+
+Inspector has an **Agent setup** view for the definitions the active workspace
+session resolves. It shows the loaded source, path, revision, model selectors,
+current role, and current model. This preview uses saved files and current
+settings, not the editor draft or past runs.
+
+Edit repository definitions in `.omp/agents/*.md`. An inherited definition is
+read-only here; **Create workspace override** copies it into the checkout.
+A repository definition replaces an inherited definition with the same name.
+Existing per-agent model settings still take precedence over the definition's
+model selector. **Settings → OMP → Agents** keeps its existing behavior.
+
+Saving writes the working-tree file without staging or committing it. The
+runtime validates the definition, rejects stale revisions and paths outside
+the repository agent directory, and publishes the file atomically. Refreshing
+or encountering an error does not discard a draft. The UI offers the latest
+source for comparison before a conflicting draft can use the new revision.
+Fresh agent starts use the saved definition; agents already running keep their
+loaded definition.
+
+The existing **Usage** view shows combined session-tree totals and separate
+root and child totals. Model and role breakdowns cover the whole tree.
+Agent rows group the recorded definition revision, historical role, and actual
+serving provider/model. A child that uses multiple models can appear in several
+rows, so those row-level session counts must not be added together.
+
+Usage reads reconcile task progress and results with the child transcript
+directory, including nested and zero-usage sessions. Direct completion calls
+appear separately but already count in the totals. New SDK records retain
+their usage before output extraction, including failed structured responses.
+Old transcripts cannot supply direct-call usage or provenance they never
+recorded. Missing historical fields stay unknown; the report does not replace
+them with today's settings. Missing files and incomplete coverage produce
+warnings. SDK-recorded cost is not authoritative account billing.
+
+The implementation lives in `packages/account-web/src/inspector`,
+`packages/account-machine/src/session-usage-report.ts`, and
+`packages/account-omp/src/agent-setup.ts`, with the SDK changes in the pinned
+patch under `packages/account-omp/patches`. Agent setup uses
+`session.agents` and `session.saveAgent`; historical reports use
+`session.usage`. No Runs view is added.
+
+## 7. Global Navigate pages (2026-09-12)
+
+Every destination under **Navigate** is a global, top-level page: Kanban,
+Projects, Plugins, Skills, Crons, Secrets & values, and Inbox. None belongs to
+the selected workspace. Opening one removes the previous project and workspace
+from the URL. The account frame shows the page name in its location bar.
+Explicit workspace links select that workspace; Back returns to the global page.
+
+Kanban, Projects, and Inbox share the account directory with the sidebar.
+They do not read their scope from the selected workspace's bootstrap.
+Saved cloud definitions supply workspace identity, phase, and archive state.
+Runtime data supplies status and relations only when its holder and generation
+match the current placement. Offline and released workspaces remain visible.
+Archived workspaces stay in Projects, not active Kanban.
+
+Board creation asks which project owns the new workspace. Graph view keeps
+nodes with unavailable runtime data and marks missing relation coverage.
+Inbox shows recorded waits and errors across project agents, workspace agents,
+services, and terminals. Missing or stale status is explicit, not an empty
+inbox presented as proof that nothing needs attention.
+
+The workspace shell renders only the workspace surface. Account routing owns
+the global pages, their breadcrumbs, and cross-project actions. Reading these
+pages does not reopen a workspace or start an agent.

@@ -1,0 +1,37 @@
+interface Env {
+  RELAY: DurableObjectNamespace<import('./src/index').UserRelayDO>;
+  CREDENTIALS: DurableObjectNamespace<import('./src/index').CredentialVaultDO>;
+  USER_STORAGE: DurableObjectNamespace<import('./src/index').UserStorageDO>;
+  SPACE_AUTHORITY: DurableObjectNamespace<import('./src/index').SpaceAuthorityDO>;
+  FLEET_CATALOG: DurableObjectNamespace<import('./src/index').FleetCatalogDO>;
+  USER_SETTINGS: DurableObjectNamespace<import('./src/index').UserSettingsDO>;
+  PROJECT_SECRETS: DurableObjectNamespace<import('./src/index').ProjectSecretsDO>;
+  PROJECT_CRONS: DurableObjectNamespace<import('./src/index').ProjectCronsDO>;
+  SPACE_CONTEXT: DurableObjectNamespace<import('./src/index').SpaceContextDO>;
+  USER_SKILLS: DurableObjectNamespace<import('./src/index').UserSkillsDO>;
+  USER_PROJECTS: DurableObjectNamespace<import('./src/index').UserProjectIndexDO>;
+  PROJECT_AUTHORITY: DurableObjectNamespace<import('./src/index').ProjectAuthorityDO>;
+  USER_MCP_CONNECTIONS: DurableObjectNamespace<import('./src/index').UserMcpConnectionsDO>;
+  TENANT_RELEASES: DurableObjectNamespace<import('./src/index').TenantReleasesDO>;
+  HOSTED_ROUTES: DurableObjectNamespace<import('./src/index').HostedRouteRegistryDO>;
+  ACCOUNT_STATE: DurableObjectNamespace<import('./src/index').AccountStateDO>;
+  DATA: R2Bucket;
+  BLOBS: R2Bucket;
+  ASSETS: Fetcher;
+  AUTH_PUBLIC_KEY: string;
+  ACCOUNT_ID: string;
+  TENANT_ID: string;
+  RELAY_NAME: string;
+  ACCOUNT_URL: string;
+  RELAY_URL: string;
+  PLATFORM_URL: string;
+  PLATFORM_SERVICE?: Fetcher;
+  PLATFORM_TOKEN: string;
+  STORAGE_BUCKET: string;
+  AUTH_MAX_SKEW_MS: string | number;
+  TUNNEL_HEADER_TIMEOUT_MS: string | number;
+  TUNNEL_IDLE_TIMEOUT_MS: string | number;
+  GITSPACE_OMP_BROKER_TOKEN: string;
+  COMPOSIO_API_KEY?: string;
+  GITSPACE_DEV_BOOTSTRAP_TOKEN?: string;
+}
