@@ -1,0 +1,107 @@
+---
+$schema: https://holocron.so/frontmatter.json
+title: Agent workflow
+description: Keep intent, implementation, evidence, and operation attached to one workspace.
+icon: bot
+---
+
+# Agent workflow
+
+GitSpace treats agent work as a lifecycle, not a chat window.
+
+## Plan
+
+Start with the **Goal**. Record the outcome, constraints, and observable requirements before implementation changes the shape of the problem.
+
+Use the **Workflow** when the workspace needs an explicit execution contract. Use the **Rubric** to make review criteria concrete before judging the result.
+
+An agent's default plan file is `local://workspace/PLAN.md`, or `local://base/PLAN.md` for a project agent. New sessions keep that artifact scope. Subagents receive the selected approved plan when it exists; they do not load an unrelated default plan or treat an active draft as approved. No plan file is required to start work.
+
+## Build with context
+
+Run the main agent inside the workspace on the machine that owns the checkout. Skills, plugins, secrets, and project context are available from the same browser surface.
+
+Structured agent questions appear as native interactions. Answer the decision directly without searching terminal output for a prompt.
+
+For repository setup, use the built-in `workspace-lifecycle` skill. It inspects the repository and CI, proposes the lifecycle split, and asks permission before editing. Execution needs separate human approval of the final content. Agents use `space.environment` for authorized runs and logs; they cannot grant content approval, recover uncertain runs, or destroy cloud resources. See [Workspace lifecycle](/workspace-lifecycle).
+
+### Context compaction
+
+The workspace header and sidebar show **Compacting context** for manual compaction, automatic maintenance before or after a turn, and running background compaction. Method, model, and automatic retry details appear when available. Finishing an assistant turn does not clear maintenance that is still running. The indicator clears when the remaining compaction work succeeds, fails, or is cancelled; a completed background result waiting to be applied is not running work. Human-attention and failure states retain their priority.
+
+Each native V1/V2 compaction request has a six-minute deadline, including its Codex stream watchdogs. Ordinary model-request deadlines are unchanged. A deadline retains its timeout cause rather than becoming a generic WebSocket transport failure, and cancelling a request does not replay it through transport fallback.
+
+## Configure account and project access
+
+**Skills**, **Plugins**, **Secrets**, and **Crons** are account pages. You can manage them with no workspace open and no machine online. Selecting a project does not change an account-level write into a project-level write.
+
+Skills have account defaults and per-project assignments. Set their use in the project's main space separately from their use in its workspaces. Agent sessions refresh those assignments before their next prompt or provider request. A settings change does not wake an idle agent or erase instructions already in its conversation. Existing subagents keep their copied skill lists; new subagents inherit the refreshed list.
+
+Plugins keep connections in the account library. Grant each connection to the projects that need it, with separate project-space and workspace access. Connecting or enabling a plugin does not grant every project access. Tool calls check current grants, connection settings, and secret access, including calls through a cached tool handle. If those checks cannot reach the account, the call fails rather than using stale permission.
+
+Account secrets are shared only through explicit project grants. Each grant chooses project-space access, workspace access, or both. A project secret with the same name overrides the granted account secret. Revoking the account grant removes inherited access but leaves the project's own secret intact. Management pages return secret metadata, not stored plaintext.
+
+Use account values for non-secret defaults and project values for overrides. Lifecycle values resolve from bundle default to account, project, then workspace value. See [Lifecycle reference](/lifecycle-reference) for profile requirements and secret resolution.
+
+Crons list schedules across the account. Choose the owning project when creating one. You can manage schedules and read their history without opening that project; execution still needs an eligible online runner.
+
+## Manage workspaces from an agent
+
+Agents use the `space` namespace in JavaScript code-mode `eval`, not a CLI. `space.list()` discovers workspaces in the current project, including closed workspaces and their goals. `space.get({ workspaceId })` reads a specific workspace without opening it.
+
+Use `space.describe({ method: 'create' })` to read the input schema, then `space.create(...)` to create a workspace with optional initial Goal, Workflow, and Rubric records. Check the returned `ready` field. If an instruction write fails after creation, the result includes the created workspace identity and completed writes so the agent can repair that workspace instead of creating a duplicate.
+
+New workspaces start in Plan when `phase` is omitted. The browser creation dialog also defaults to Plan; selecting another phase explicitly (including creation from a board column) keeps that choice, subject to dependency phase ceilings. Existing and restored workspace phases are unchanged. Initial Goal and Workflow drafts remain separate typed instructions and are not rewritten by the workspace phase default.
+
+For a remote branch, use `sourceKind: 'branch'` with a reference such as `origin/develop` or `refs/remotes/origin/develop`. GitSpace fetches that source with the project's repository credentials; it does not require a cached tracking reference or an open base checkout.
+
+For another workspace, use `sourceKind: 'workspace'` and its workspace ID as `sourceRef`. A locally held, open source contributes its actual committed HEAD. A closed or remotely held source contributes its latest published checkpoint's committed HEAD, even when its checkout is absent. Creation does not open or transfer the source, change its branch, or include uncommitted changes. The source remains the new workspace's dependency and stacked-on parent, with dependency phase ceilings enforced from the canonical catalog.
+
+Source resolution and destination branch validation happen before publishing the new workspace. An invalid source or branch does not leave a new failed workspace entry.
+
+The namespace also exposes `setPhase`, `setRelations`, `open`, `close`, `archive`, and `restore`. These use the workspace lifecycle and checkpoint rules. Keep the revision and placement generation from the latest read; stale changes reject. An agent cannot close or archive its own workspace from a running tool. Use another workspace or the browser for that action. This API does not move or delegate agents.
+
+Pass `workspaceId` to `space.goal.get/put`, `space.workflow.get/put`, or `space.rubric.get/put` to edit another workspace in the same project. Closed workspaces stay closed. Writes require the record's `expectedRevision`; use zero only when creating an absent record.
+
+Instruction changes post a notice to the affected agent session without interrupting its current tool or starting an idle turn. The agent reads the latest Goal, Workflow, and Rubric before its next provider request.
+
+## Preserve decisions
+
+The **Journal** records phase narrative, decisions, artifacts, and state changes. It explains how the workspace reached its current state without asking a reviewer to reconstruct the story from a transcript.
+
+Use the journal for durable reasoning. Keep temporary narration in the agent session.
+
+## Verify with evidence
+
+A completion claim is not proof. Attach evidence that demonstrates each observable requirement:
+
+- A browser run for a web behavior.
+- Runtime output for a service or CLI behavior.
+- A focused test for a permanent contract that cannot be exercised directly.
+- An artifact when the output itself is the deliverable.
+
+The **Review** product keeps discussions attached to files, hunks, lines, or the whole workspace. Resolve the concern, not just the thread state.
+
+## Keep and share artifacts
+
+Agents read and write artifacts with ordinary tools through `local://workspace/<path>` and `local://base/<path>`. Workspace agents can read project artifacts but write only their workspace artifacts. Project agents can write project artifacts. Published edits refresh the browser catalog and open artifact views; evidence references still point to their recorded version.
+
+In **Artifacts**, select one or more workspace files and choose **Copy to project artifacts**. Each copy is an independent project file with source provenance. The originals remain. Choose another destination when a file already exists, or explicitly confirm replacement of its displayed version. A newer destination version invalidates that confirmation.
+
+Select one project or workspace artifact and choose **Share** to create a link to that fixed version. Set an optional expiry, copy the link, or revoke it from **Active links**. Later edits do not change the download.
+
+Anyone with the link can download the artifact without signing in. Do not share secrets. GitSpace serves public artifacts as attachments and does not put encryption keys in the URL. Revoking a link stops new downloads, but cannot remove copies someone already downloaded.
+
+## Explain the change
+
+The **Change Guide** turns the current diff, goal, journal, and evidence into a review path. It should explain the behavior, important code paths, tradeoffs, and proof. It is not a generated file list.
+
+## Operate the result
+
+Shipping code does not make the workspace irrelevant. Keep services, events, release state, unresolved review threads, and rollback information with the workspace until the work is quiet.
+
+Move the workspace through `plan`, `code`, `review`, and `ship`. Archive or release it only after the operational state agrees with the completion claim.
+
+## Direct attention across the fleet
+
+The fleet view distinguishes work that is active, waiting, failed, or needs attention. Machine placement appears with the workspace, so you know where the code and runtime live before taking control or moving the work.

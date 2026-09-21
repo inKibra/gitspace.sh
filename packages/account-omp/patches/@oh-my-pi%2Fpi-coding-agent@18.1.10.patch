@@ -1,0 +1,2515 @@
+diff --git a/dist/types/config/model-resolver.d.ts b/dist/types/config/model-resolver.d.ts
+index 03aeeee675332b2e2ac18126d2b05b15c95ccf2d..6eb75ef85fdea3c042cd0be63d3ceb7d32f3980c 100644
+--- a/dist/types/config/model-resolver.d.ts
++++ b/dist/types/config/model-resolver.d.ts
+@@ -135,6 +135,7 @@ export interface AgentModelPatternResolutionOptions {
+ export interface AgentModelSelection {
+     /** Expanded model patterns to spawn with. */
+     patterns: string[];
++    selection: "request" | "settings" | "definition" | "inherited";
+     /** Role alias the patterns came from (`@task` -> `task`), when the source named one. */
+     role: string | undefined;
+ }
+@@ -398,4 +399,5 @@ export declare function findSmolModel(modelRegistry: ModelLookupRegistry, savedM
+  * @returns The best available slow model, or undefined if none found
+  */
+ export declare function findSlowModel(modelRegistry: ModelLookupRegistry, savedModel?: string): Promise<Model<Api> | undefined>;
++export declare function assertRoleOnlyModelSelector(value: string | string[] | undefined, settings?: Settings): void;
+ export {};
+diff --git a/dist/types/eval/types.d.ts b/dist/types/eval/types.d.ts
+index 344d9b02f047a7d8ee6feb80f800ae88c8700d1a..20fc377d74c6b3086d5f8cabbc22279784430ae9 100644
+--- a/dist/types/eval/types.d.ts
++++ b/dist/types/eval/types.d.ts
+@@ -68,6 +68,7 @@ export interface EvalToolDetails {
+     async?: {
+         state: "running" | "completed" | "failed";
+         jobId: string;
++        startedAt?: number;
+         type: "eval";
+     };
+ }
+diff --git a/dist/types/internal-urls/local-protocol.d.ts b/dist/types/internal-urls/local-protocol.d.ts
+--- a/dist/types/internal-urls/local-protocol.d.ts
++++ b/dist/types/internal-urls/local-protocol.d.ts
+@@ -1,7 +1,16 @@
+ import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext, UrlCompletion } from "./types.js";
++export type LocalMountAccess = "read" | "write";
++export interface EvalNamespaceDefinition {
++    declaration: string;
++    call(method: string, args: unknown, signal?: AbortSignal): Promise<unknown>;
++}
+ export interface LocalProtocolOptions {
+     getArtifactsDir?: () => string | null;
+     getSessionId?: () => string | null;
++    getLocalMounts?: () => Record<string, LocalMountAccess>;
++    /** Host-selected plan reference for new/reset sessions; empty disables implicit plan loading. */
++    getDefaultPlanReferencePath?: () => string;
++    getEvalNamespaces?: () => Record<string, EvalNamespaceDefinition>;
+ }
+ /** Resolve the session-scoped local:// root, shortening long Windows artifact paths before writes hit MAX_PATH. */
+ export declare function resolveLocalRoot(options: LocalProtocolOptions, platform?: NodeJS.Platform): string;
+@@ -14,7 +23,7 @@ export declare function resolveLocalRoot(options: LocalProtocolOptions, platform
+  */
+ export declare function copyLocalArtifacts(sourceRoot: string, destinationRoot: string): Promise<void>;
+ /** Resolve a local:// URL to an on-disk path under the active session's local root. */
+-export declare function resolveLocalUrlToPath(input: string | InternalUrl, options: LocalProtocolOptions, platform?: NodeJS.Platform): string;
++export declare function resolveLocalUrlToPath(input: string | InternalUrl, options: LocalProtocolOptions, platform?: NodeJS.Platform, access?: LocalMountAccess): string;
+ /**
+  * On-disk roots the eval helpers (`read`/`write`) substitute for
+  * internal-URL schemes so e.g. `write("local://x.md")` lands where a later
+@@ -25,6 +34,7 @@ export declare function resolveLocalUrlToPath(input: string | InternalUrl, optio
+  * re-plumbing the worker boundary.
+  */
+ export declare function buildEvalUrlRoots(options: LocalProtocolOptions): Record<string, string>;
++export declare function buildEvalUrlPolicies(options: LocalProtocolOptions): Record<string, Record<string, LocalMountAccess>>;
+ /**
+  * Resolve a local:// URL to a regular on-disk file, applying the same
+  * realpath + containment guarantees as {@link LocalProtocolHandler.resolve}
+diff --git a/dist/types/launch/protocol.d.ts b/dist/types/launch/protocol.d.ts
+index 25e555ee8d47b727705aa8bf42d0ff1b344eadbe..3317bd9e99e43bbabf837478f9f3eedc75893bfa 100644
+--- a/dist/types/launch/protocol.d.ts
++++ b/dist/types/launch/protocol.d.ts
+@@ -117,6 +117,7 @@ export type DaemonRpcResult = {
+ } | {
+     op: "logs";
+     name: string;
++    daemon?: DaemonSnapshot;
+     text: string;
+     /** Virtual PTY rows reconstructed by the broker for terminal display. */
+     terminalRows?: string[];
+diff --git a/dist/types/session/agent-session-types.d.ts b/dist/types/session/agent-session-types.d.ts
+index 7fd568422586a3d168add481f988ce0727d902cf..ca7bdc4d52c24a9e035e6abe046463821f9a9a96 100644
+--- a/dist/types/session/agent-session-types.d.ts
++++ b/dist/types/session/agent-session-types.d.ts
+@@ -1,6 +1,7 @@
+ import type { Agent, AgentMessage, AgentTool, AgentToolContext, StreamFn, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+ import type { Context, Effort, ImageContent, Message, MessageAttribution, Model, OAuthAccountSummary, ServiceTierByFamily, SimpleStreamOptions, ToolChoice } from "@oh-my-pi/pi-ai";
+ import type { postmortem } from "@oh-my-pi/pi-utils";
++import type { LocalProtocolOptions } from "../internal-urls/index.js";
+ import type { AdvisorConfig } from "../advisor/index.js";
+ import type { AsyncJob, AsyncJobDeliveryState, AsyncJobManager } from "../async/index.js";
+ import type { EffectiveExtensionRoots } from "../capability/types.js";
+@@ -101,6 +102,7 @@ export interface AgentSessionConfig {
+     };
+     sessionManager: SessionManager;
+     settings: Settings;
++    localProtocolOptions?: LocalProtocolOptions;
+     /**
+      * Live extension-root policy inherited from the owning session. Subagents use
+      * this provider so explicit roots, discovery mode, configured roots, and
+diff --git a/dist/types/session/agent-session.d.ts b/dist/types/session/agent-session.d.ts
+index c55844cb2f282616605e385234ee3888f0d84ce3..008f98a2942d1df4ea08eb65ea7c6e9e0677167f 100644
+--- a/dist/types/session/agent-session.d.ts
++++ b/dist/types/session/agent-session.d.ts
+@@ -645,6 +645,7 @@ export declare class AgentSession {
+      * Steps over agent-authored queued messages (advisor cards, hidden/internal steers).
+      */
+     popLastQueuedMessage(): RestoredQueuedMessage | undefined;
++    removeQueuedMessage(kind: "steering" | "followUp", index: number): string | undefined;
+     get skillsSettings(): SkillsSettings | undefined;
+     /** Skills loaded by SDK (empty if --no-skills or skills: [] was passed) */
+     get skills(): readonly Skill[];
+diff --git a/dist/types/session/async-job-delivery.d.ts b/dist/types/session/async-job-delivery.d.ts
+index ab2615e95cb8e16e632e471b6e23f1fdc1c6cbb9..b6c3b63f05c080ef9794126962e94adb59903679 100644
+--- a/dist/types/session/async-job-delivery.d.ts
++++ b/dist/types/session/async-job-delivery.d.ts
+@@ -29,6 +29,9 @@ type AsyncResultJobDetails = {
+     type?: AsyncJobType;
+     label?: string;
+     durationMs?: number;
++    startedAt?: number;
++    status?: AsyncJob["status"];
++    agentUrlId?: string;
+     /** Full structured payload (source/mode/status/data/error), when the job used an output schema. */
+     schema?: StructuredSubagentOutput;
+ };
+diff --git a/dist/types/session/model-usage.d.ts b/dist/types/session/model-usage.d.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..89c7fb2979cb67c8f44d9c99187bbd0f4c78e75e
+--- /dev/null
++++ b/dist/types/session/model-usage.d.ts
+@@ -0,0 +1,16 @@
++import type { Usage } from "@oh-my-pi/pi-ai";
++import type { SessionManager } from "./session-manager.js";
++export interface HistoricalModelSelection {
++    role: string | null;
++    selection: "role" | "pinned" | "inherited" | "unknown";
++}
++export interface DirectModelUsage extends HistoricalModelSelection {
++    version: 1;
++    id: string;
++    kind: "completion";
++    provider: string;
++    model: string;
++    usage: Usage;
++}
++/** Follow the active branch without inferring semantic roles from model identity. */
++export declare function getHistoricalModelSelection(manager: SessionManager): HistoricalModelSelection;
+diff --git a/dist/types/task/discovery.d.ts b/dist/types/task/discovery.d.ts
+index 26939125ad5404a7f6bc45656d8048914d39ae35..239e88bf002f38eef165773bf7ea6a1d0a587409 100644
+--- a/dist/types/task/discovery.d.ts
++++ b/dist/types/task/discovery.d.ts
+@@ -4,6 +4,7 @@ import type { AgentDefinition } from "./types.js";
+ export interface DiscoveryResult {
+     agents: AgentDefinition[];
+     projectAgentsDir: string | null;
++    diagnostics?: Array<{ path: string; message: string }>;
+ }
+ /**
+  * Discover agents from filesystem and merge with bundled agents.
+diff --git a/dist/types/task/types.d.ts b/dist/types/task/types.d.ts
+index 8f9d6568ce91376297dabcbe757903cdde6d5b47..020c0ae30cea3295ebf7487d6b044089ff06ecac 100644
+--- a/dist/types/task/types.d.ts
++++ b/dist/types/task/types.d.ts
+@@ -301,6 +301,9 @@ export interface AgentDefinition {
+     advisor?: boolean | string;
+     source: AgentSource;
+     filePath?: string;
++    /** Exact source parsed at discovery and its SHA256 revision. */
++    content?: string;
++    revision?: string;
+ }
+ /** Details extracted from a subagent `yield` tool call for final-result assembly and task rendering. */
+ export interface YieldItem {
+diff --git a/dist/types/tools/bash.d.ts b/dist/types/tools/bash.d.ts
+index 26ab106ae9987871e0a283e06dc0db9e3f683513..ebefbabc07c04ab05f5a05a737dbfe971fadf2f2 100644
+--- a/dist/types/tools/bash.d.ts
++++ b/dist/types/tools/bash.d.ts
+@@ -93,6 +93,7 @@ export interface BashToolDetails {
+     async?: {
+         state: "running" | "completed" | "failed";
+         jobId: string;
++        startedAt?: number;
+         type: "bash";
+     };
+ }
+diff --git a/dist/types/tools/hub/types.d.ts b/dist/types/tools/hub/types.d.ts
+index d72f73324927e272943341773378c10526e863df..30a0bea99ca66d0c39784021e6240b670770a7d1 100644
+--- a/dist/types/tools/hub/types.d.ts
++++ b/dist/types/tools/hub/types.d.ts
+@@ -45,6 +45,7 @@ export interface JobSnapshot {
+     status: "running" | "completed" | "failed" | "cancelled";
+     label: string;
+     durationMs: number;
++    startedAt?: number;
+     /** Effective task model selector, including an explicit reasoning suffix when configured. */
+     resolvedModel?: string;
+     resultText?: string;
+diff --git a/dist/types/tools/index.d.ts b/dist/types/tools/index.d.ts
+index 55de3155dd069795b658b131a993371bd28d8155..b380e554606458144fe2f5cdf1026252abb8980e 100644
+--- a/dist/types/tools/index.d.ts
++++ b/dist/types/tools/index.d.ts
+@@ -22,6 +22,7 @@ import type { AgentRegistry } from "../registry/agent-registry.js";
+ import type { ArtifactManager } from "../session/artifacts.js";
+ import type { ClientBridge } from "../session/client-bridge.js";
+ import type { CustomMessage } from "../session/messages.js";
++import type { DirectModelUsage, HistoricalModelSelection } from "../session/model-usage.js";
+ import type { UsageStatistics } from "../session/session-entries.js";
+ import type { SessionManager } from "../session/session-manager.js";
+ import type { ToolChoiceQueue } from "../session/tool-choice-queue.js";
+@@ -294,6 +295,8 @@ export interface ToolSession {
+     getModelString?: () => string | undefined;
+     /** Get the current session model string, regardless of how it was chosen */
+     getActiveModelString?: () => string | undefined;
++    getModelSelection?: () => HistoricalModelSelection;
++    recordDirectModelUsage?: (record: DirectModelUsage) => Promise<void>;
+     /** Get the current session model object (provider/api capabilities), regardless of how it was chosen. */
+     getActiveModel?: () => Model | undefined;
+     /** Get the session's live per-family service tiers (undefined = none). Source of truth for subagent `tier.subagent: inherit`. */
+diff --git a/scripts/legacy-pi-virtual-module.ts b/scripts/legacy-pi-virtual-module.ts
+index 913a3a934709e4338747072b949204821ff6b261..316c91820fd219175857f9475f711ad443942039 100644
+--- a/scripts/legacy-pi-virtual-module.ts
++++ b/scripts/legacy-pi-virtual-module.ts
+@@ -100,7 +100,7 @@ function shimSpecifier(file: string): string {
+  * Named wildcard exports are expanded from source; root catch-alls stay out to
+  * avoid importing CLI entrypoints and other non-extension surfaces.
+  */
+-export async function collectBundledPiEntries(): Promise<BundledPiEntry[]> {
++export async function collectBundledPiEntries(packageRoots: Record<string, string> = {}): Promise<BundledPiEntry[]> {
+ 	const entries: BundledPiEntry[] = [];
+ 	const seenKeys = new Set<string>();
+ 	const seenBindings = new Set<string>();
+@@ -115,7 +115,7 @@ export async function collectBundledPiEntries(): Promise<BundledPiEntry[]> {
+ 	}
+ 
+ 	for (const pkg of BUNDLED_PACKAGES) {
+-		const packageRoot = path.join(repoRoot, "packages", pkg.dir);
++		const packageRoot = packageRoots[pkg.dir] ?? path.join(repoRoot, "packages", pkg.dir);
+ 		const manifestPath = path.join(packageRoot, "package.json");
+ 		const manifest: unknown = await Bun.file(manifestPath).json();
+ 		if (!isRecord(manifest) || typeof manifest.name !== "string") {
+@@ -193,8 +193,8 @@ export function __renderLegacyPiVirtualModule(entries: readonly BundledPiEntry[]
+  * memory. Literal dynamic imports retain every compile-time edge without
+  * evaluating unrelated host modules during extension bootstrap.
+  */
+-export async function createLegacyPiVirtualModulePlugin(): Promise<Bun.BunPlugin> {
+-	const source = __renderLegacyPiVirtualModule(await collectBundledPiEntries());
++export async function createLegacyPiVirtualModulePlugin(packageRoots: Record<string, string> = {}): Promise<Bun.BunPlugin> {
++	const source = __renderLegacyPiVirtualModule(await collectBundledPiEntries(packageRoots));
+ 	return {
+ 		name: "omp:legacy-pi-modules",
+ 		setup(build) {
+@@ -202,7 +202,7 @@ export async function createLegacyPiVirtualModulePlugin(): Promise<Bun.BunPlugin
+ 				path: LEGACY_PI_MODULES_SPECIFIER,
+ 				namespace: VIRTUAL_NAMESPACE,
+ 			}));
+-			build.onLoad({ filter: /.*/, namespace: VIRTUAL_NAMESPACE }, () => ({ contents: source, loader: "ts" }));
++			build.onLoad({ filter: /.*/, namespace: VIRTUAL_NAMESPACE }, () => ({ contents: source, loader: "ts", resolveDir: packageDir }));
+ 		},
+ 	};
+ }
+diff --git a/src/cli/usage-cli.ts b/src/cli/usage-cli.ts
+index 99f6b044a9dae843af91af4e69fa72715e4c5831..89fe0166bac3805712b346d9eda41e58cbf4e942 100644
+--- a/src/cli/usage-cli.ts
++++ b/src/cli/usage-cli.ts
+@@ -22,7 +22,7 @@ import type { ClientUsageClientSummary } from "@oh-my-pi/pi-ai/usage";
+ import { formatDuration, formatNumber, sanitizeText } from "@oh-my-pi/pi-utils";
+ import chalk from "@oh-my-pi/pi-utils/chalk";
+ import { ModelRegistry } from "../config/model-registry";
+-import { discoverAuthStorage } from "../sdk";
++import { discoverAuthStorage } from "../session/auth-broker-config";
+ import { resolveAuthBrokerConfig } from "../session/auth-broker-config";
+ 
+ const BAR_WIDTH = 28;
+diff --git a/src/config/model-resolver.ts b/src/config/model-resolver.ts
+index 1fdc18bc5cb7533984ca4af163b2a5f747853009..3306ea1497e9341efa4e9417d682ec05a93d715a 100644
+--- a/src/config/model-resolver.ts
++++ b/src/config/model-resolver.ts
+@@ -40,6 +40,7 @@ import { isAuthenticated, kNoAuth, type ModelRegistry } from "./model-registry";
+ import {
+ 	DEFAULT_MODEL_ROLE_ALIAS,
+ 	formatModelRoleAlias,
++	getKnownRoleIds,
+ 	LEGACY_MODEL_ROLE_ALIAS_PREFIX,
+ 	MODEL_ROLE_ALIAS_PREFIX,
+ 	MODEL_ROLE_IDS,
+@@ -1269,6 +1270,7 @@ export interface AgentModelPatternResolutionOptions {
+ interface EffectiveAgentModelSelection {
+ 	source?: string | string[];
+ 	patterns: string[];
++	selection: "request" | "settings" | "definition" | "inherited";
+ }
+ 
+ function resolveEffectiveAgentModelSelection(
+@@ -1278,12 +1280,12 @@ function resolveEffectiveAgentModelSelection(
+ 
+ 	const requestPatterns = resolveConfiguredModelPatterns(requestModel, settings);
+ 	if (requestPatterns.length > 0) {
+-		return { source: requestModel, patterns: requestPatterns };
++		return { source: requestModel, patterns: requestPatterns, selection: "request" };
+ 	}
+ 
+ 	const overridePatterns = resolveConfiguredModelPatterns(settingsOverride, settings);
+ 	if (overridePatterns.length > 0) {
+-		return { source: settingsOverride, patterns: overridePatterns };
++		return { source: settingsOverride, patterns: overridePatterns, selection: "settings" };
+ 	}
+ 
+ 	const normalizedAgentPatterns = normalizeModelPatternList(agentModel);
+@@ -1295,14 +1297,14 @@ function resolveEffectiveAgentModelSelection(
+ 			singleAgentPattern === formatModelRoleAlias("task") ||
+ 			singleAgentPattern === `${LEGACY_MODEL_ROLE_ALIAS_PREFIX}task`
+ 		) {
+-			return { source: agentModel, patterns: configuredAgentPatterns };
++			return { source: agentModel, patterns: configuredAgentPatterns, selection: "definition" };
+ 		}
+-		if (!agentInheritsSessionModel) return { source: agentModel, patterns: configuredAgentPatterns };
++		if (!agentInheritsSessionModel) return { source: agentModel, patterns: configuredAgentPatterns, selection: "definition" };
+ 	}
+ 
+ 	const fallback =
+ 		activeModelPattern?.trim() || fallbackModelPattern?.trim() || settings?.getModelRole("default")?.trim() || "";
+-	return { patterns: resolveConfiguredModelPatterns(fallback, settings) };
++	return { patterns: resolveConfiguredModelPatterns(fallback, settings), selection: "inherited" };
+ }
+ 
+ /** Effective agent model patterns paired with the pre-expansion role alias behind them. */
+@@ -1311,6 +1313,7 @@ export interface AgentModelSelection {
+ 	patterns: string[];
+ 	/** Role alias the patterns came from (`@task` -> `task`), when the source named one. */
+ 	role: string | undefined;
++	selection: EffectiveAgentModelSelection["selection"];
+ }
+ 
+ /**
+@@ -1320,8 +1323,8 @@ export interface AgentModelSelection {
+  * discards, and deriving the two halves separately is how they drift apart.
+  */
+ export function resolveAgentModelSelection(options: AgentModelPatternResolutionOptions): AgentModelSelection {
+-	const { source, patterns } = resolveEffectiveAgentModelSelection(options);
+-	return { patterns, role: resolveExplicitModelRole(source, options.settings) };
++	const { source, patterns, selection } = resolveEffectiveAgentModelSelection(options);
++	return { patterns, role: resolveExplicitModelRole(source, options.settings), selection };
+ }
+ 
+ /** Effective agent model patterns alone, for callers with no interest in role identity. */
+@@ -2339,3 +2342,48 @@ export async function findSlowModel(
+ 	// 3. Fallback to first available (same as default)
+ 	return availableModels[0];
+ }
++
++/**
++ * GITSPACE PATCH — agents address models by ROLE, never by model id.
++ *
++ * Throws when `value` names a concrete model (`openai-codex/gpt-5.5`) rather
++ * than a role (`pi/smol`, optionally with a `:thinking` suffix). Roles are the
++ * single place an operator binds capability→model; a hardcoded model id in an
++ * agent-authored spawn silently opts out of that config, rots when model ids
++ * change (gpt-5.5 → gpt-5.6-luna), and makes spend unattributable to a role.
++ *
++ * Deliberately NOT wired into `resolveAgentModelPatterns` itself: that resolver
++ * also serves human surfaces (the agent dashboard) and agent-definition
++ * frontmatter, where naming a concrete model is legitimate. This guard is for
++ * the agent-facing spawn path only.
++ *
++ * `undefined` is allowed — it means "inherit", which is the desired default.
++ */
++export function assertRoleOnlyModelSelector(value: string | string[] | undefined, settings?: Settings): void {
++	const patterns = normalizeModelPatternList(value);
++	if (patterns.length === 0) return;
++
++	// Every role the operator can see under settings > Models > model roles:
++	// non-hidden built-ins PLUS custom roles introduced via cycleOrder,
++	// modelRoles or modelTags. Deliberately NOT limited to roles that already
++	// have a model bound, nor to the quick-cycle subset — an agent may name any
++	// role the operator has, bound or not.
++	const knownRoles = settings ? getKnownRoleIds(settings) : (MODEL_ROLE_IDS as string[]);
++	const known = new Set(knownRoles);
++
++	const offenders = patterns.filter(pattern => {
++		const trimmed = pattern.trim();
++		const prefix = [MODEL_ROLE_ALIAS_PREFIX, LEGACY_MODEL_ROLE_ALIAS_PREFIX].find(candidate => trimmed.startsWith(candidate));
++		if (!prefix) return true;
++		const { base } = splitThinkingSuffix(trimmed, prefix.length, MAX_THINKING_SUFFIX_OPTIONS);
++		return !known.has(base.slice(prefix.length));
++	});
++	if (offenders.length === 0) return;
++
++	throw new Error(
++		`model must name a role, not a model id. Got ${offenders.map(o => JSON.stringify(o)).join(", ")}. ` +
++			`Available roles: ${knownRoles.map(role => `pi/${role}`).join(", ")}. ` +
++			`Roles are bound to models in settings, so this stays correct when models change. ` +
++			`Omit \`model\` to inherit the session's model, or use \`agent=<name>\` to pick a named subagent.`,
++	);
++}
+diff --git a/src/eval/agent-bridge.ts b/src/eval/agent-bridge.ts
+index ae444988a026ee17c07efecfc0812eb4baff6700..5f4343b0b04edd988ba41860dce4bbfaa5718af6 100644
+--- a/src/eval/agent-bridge.ts
++++ b/src/eval/agent-bridge.ts
+@@ -1,6 +1,8 @@
+ /**
+  * Host-side handler for the eval `agent()` helper.
+  */
++import { assertRoleOnlyModelSelector } from "../config/model-resolver";
++import { resolveSpawnPolicy } from "../task/spawn-policy";
+ import { type } from "@oh-my-pi/omptype";
+ import { MAIN_AGENT_ID } from "../registry/agent-registry";
+ import { createEvalCustomTools, describeEvalTools } from "../task/eval-tools";
+@@ -28,6 +30,7 @@ export const EVAL_AGENT_BRIDGE_NAME = "__agent__";
+ const agentArgsSchema = type({
+ 	prompt: "string>0",
+ 	"agent?": "string>0",
++	"model?": "string | string[]",
+ 	"label?": "string",
+ 	"schema?": "unknown",
+ 	"schemaMode?": "'permissive' | 'strict'",
+@@ -41,6 +44,7 @@ const agentArgsSchema = type({
+ interface EvalAgentArgs {
+ 	prompt: string;
+ 	agent?: string;
++	model?: string | string[];
+ 	label?: string;
+ 	schema?: unknown;
+ 	schemaMode?: StructuredSubagentSchemaMode;
+@@ -165,6 +169,16 @@ async function buildEvalAgentResult(execution: StructuredSubagentResult): Promis
+ /** Register a background subagent and return its handle immediately. */
+ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOptions): Promise<EvalAgentHandleResult> {
+ 	const parsed = parseAgentArgs(args);
++	const spawnDefaultAgent = resolveSpawnPolicy(options.session.getSessionSpawns()).defaultAgent;
++	const agentName = parsed.agent ?? spawnDefaultAgent;
++	assertRoleOnlyModelSelector(parsed.model, options.session.settings);
++	if (parsed.model !== undefined && agentName !== spawnDefaultAgent) {
++		throw new ToolError(
++			`agent() takes either agent="${agentName}" or model=, not both. ` +
++				`A named agent already carries its own model configuration; passing model= would override it. ` +
++				`Drop model= to use ${agentName}'s configured model, or drop agent= to run the default worker at that role.`,
++		);
++	}
+ 	const turnBudget = options.session.getTurnBudget?.();
+ 	if (turnBudget?.hard && turnBudget.total !== null && turnBudget.spent >= turnBudget.total) {
+ 		throw new ToolError(
+@@ -193,6 +207,7 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
+ 			invocationKind: "eval",
+ 			assignment: parsed.prompt,
+ 			...(parsed.agent !== undefined ? { agent: parsed.agent } : {}),
++			...(parsed.model !== undefined ? { model: parsed.model } : {}),
+ 			...(Object.hasOwn(parsed, "schema") ? { outputSchema: parsed.schema } : {}),
+ 			...(parsed.schemaMode !== undefined ? { schemaMode: parsed.schemaMode } : {}),
+ 			...(isolation ? { isolation } : {}),
+@@ -216,6 +231,7 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
+ 						invocationKind: "eval",
+ 						assignment: parsed.prompt,
+ 						...(parsed.agent !== undefined ? { agent: parsed.agent } : {}),
++						...(parsed.model !== undefined ? { model: parsed.model } : {}),
+ 						...(Object.hasOwn(parsed, "schema") ? { outputSchema: parsed.schema } : {}),
+ 						...(parsed.schemaMode !== undefined ? { schemaMode: parsed.schemaMode } : {}),
+ 						identity: { id, label: parsed.label },
+diff --git a/src/eval/backend.ts b/src/eval/backend.ts
+index 50022d241bde63a83af475b2271148dfd5ecd376..d827de90e7b386d31d47195608f1e017da234190 100644
+--- a/src/eval/backend.ts
++++ b/src/eval/backend.ts
+@@ -1,4 +1,4 @@
+-import { buildEvalUrlRoots, type LocalProtocolOptions } from "../internal-urls";
++import { buildEvalUrlPolicies, buildEvalUrlRoots, type EvalNamespaceDefinition, type LocalProtocolOptions } from "../internal-urls";
+ import type { ToolSession } from "../tools";
+ import type { BackendProbeOptions } from "./probe";
+ import type { EvalDisplayOutput, EvalLanguage, EvalStatusEvent } from "./types";
+@@ -70,3 +70,15 @@ export function resolveEvalUrlRoots(session: ToolSession): Record<string, string
+ 	};
+ 	return buildEvalUrlRoots(options);
+ }
++
++export function resolveEvalUrlPolicies(session: ToolSession): Record<string, Record<string, "read" | "write">> {
++	const options: LocalProtocolOptions = session.localProtocolOptions ?? {
++		getArtifactsDir: () => session.getArtifactsDir?.() ?? null,
++		getSessionId: () => session.getSessionId?.() ?? null,
++	};
++	return buildEvalUrlPolicies(options);
++}
++
++export function resolveEvalNamespaces(session: ToolSession): Record<string, EvalNamespaceDefinition> {
++	return session.localProtocolOptions?.getEvalNamespaces?.() ?? {};
++}
+diff --git a/src/eval/completion-bridge.ts b/src/eval/completion-bridge.ts
+index af3ec86a8d75937108ec2b62a168e229ad13aa00..d2859a501400e24bb62291961cd1e2e9253d47af 100644
+--- a/src/eval/completion-bridge.ts
++++ b/src/eval/completion-bridge.ts
+@@ -26,6 +26,7 @@ import {
+ 	resolveModelFromString,
+ } from "../config/model-resolver";
+ import { MAIN_AGENT_ID } from "../registry/agent-registry";
++import type { HistoricalModelSelection } from "../session/model-usage";
+ import type { ToolSession } from "../tools";
+ import { ToolError } from "../tools/tool-errors";
+ import type { JsStatusEvent } from "./js/shared/types";
+@@ -101,7 +102,7 @@ export function releaseCompletionHandles(ownerId: string): void {
+  * active model and falls back to the `@default` role; `smol`/`slow` resolve
+  * their respective role patterns. Returns `undefined` when nothing matches.
+  */
+-function resolveTierModel(tier: CompletionTier, session: ToolSession): Model<Api> | undefined {
++function resolveTierModel(tier: CompletionTier, session: ToolSession): { model: Model<Api>; attribution: HistoricalModelSelection } | undefined {
+ 	const modelRegistry = session.modelRegistry;
+ 	if (!modelRegistry) return undefined;
+ 	const available = modelRegistry.getAvailable();
+@@ -116,9 +117,11 @@ function resolveTierModel(tier: CompletionTier, session: ToolSession): Model<Api
+ 
+ 	if (tier === "default") {
+ 		const activePattern = session.getActiveModelString?.() ?? session.getModelString?.();
+-		return resolve(activePattern) ?? resolve(TIER_TO_PATTERN.default);
++		const active = resolve(activePattern);
++		if (active) return { model: active, attribution: session.getModelSelection?.() ?? { role: null, selection: "inherited" } };
+ 	}
+-	return resolve(TIER_TO_PATTERN[tier]);
++	const model = resolve(TIER_TO_PATTERN[tier]);
++	return model ? { model, attribution: { role: tier, selection: "role" } } : undefined;
+ }
+ 
+ /**
+@@ -135,6 +138,8 @@ function reasoningForTier(tier: CompletionTier, model: Model<Api>): Effort | und
+ }
+ 
+ async function executeCompletion(
++	id: string,
++	attribution: HistoricalModelSelection,
+ 	prompt: string,
+ 	finalTier: CompletionTier,
+ 	system: string | undefined,
+@@ -178,6 +183,12 @@ async function executeCompletion(
+ 		},
+ 		{ telemetry, oneshotKind: "eval_completion" },
+ 	);
++	// Capture every response once, including empty/invalid structured/error output.
++	// Ordinary assistant messages already have native usage and do not pass here.
++	await session.recordDirectModelUsage?.({
++		version: 1, id, kind: "completion", ...attribution,
++		provider: response.provider, model: response.model, usage: response.usage,
++	});
+ 
+ 	if (response.stopReason === "error") {
+ 		throw new ToolError(response.errorMessage ?? "completion() request failed.");
+@@ -224,8 +235,8 @@ export async function runEvalCompletion(
+ 	}
+ 	const { prompt, model: modelTier, system, schema } = parsed;
+ 	const finalTier: CompletionTier = modelTier ?? "default";
+-	const model = resolveTierModel(finalTier, options.session);
+-	if (!model) {
++	const resolved = resolveTierModel(finalTier, options.session);
++	if (!resolved) {
+ 		throw new ToolError(
+ 			`completion() could not resolve a model for the "${finalTier}" tier. Configure modelRoles.${finalTier === "default" ? "default" : finalTier} or ensure a provider is available.`,
+ 		);
+@@ -242,7 +253,7 @@ export async function runEvalCompletion(
+ 		settled: false,
+ 	};
+ 	completionHandles.set(id, entry);
+-	entry.promise = executeCompletion(prompt, finalTier, system, schema, model, options.session, signal)
++	entry.promise = executeCompletion(id, resolved.attribution, prompt, finalTier, system, schema, resolved.model, options.session, signal)
+ 		.then(
+ 			result => {
+ 				entry.result = result;
+diff --git a/src/eval/executor-base.ts b/src/eval/executor-base.ts
+index d610b96389bac4b69590eb28b4ec0236ac3ef8d9..6dbdf9aa307ed03ead5bd914cdd22310f4732b72 100644
+--- a/src/eval/executor-base.ts
++++ b/src/eval/executor-base.ts
+@@ -281,6 +281,7 @@ export const MANAGED_KERNEL_ENV_KEYS = [
+ 	"PI_TOOL_BRIDGE_TOKEN",
+ 	"PI_TOOL_BRIDGE_SESSION",
+ 	"PI_EVAL_LOCAL_ROOTS",
++	"PI_EVAL_LOCAL_POLICIES",
+ ] as const;
+ 
+ interface ManagedKernelEnvOptions {
+@@ -289,6 +290,7 @@ interface ManagedKernelEnvOptions {
+ 	bridgeSessionId?: string;
+ 	bridge?: { url: string; token: string };
+ 	localRoots?: Record<string, string>;
++	localPolicies?: Record<string, Record<string, "read" | "write">>;
+ }
+ interface ManagedKernelEnvPolicy {
+ 	sparse?: boolean;
+@@ -304,6 +306,7 @@ export function buildManagedKernelEnvPatch(
+ 	policy?: ManagedKernelEnvPolicy,
+ ): KernelEnvPatch {
+ 	const localRoots = options.localRoots;
++	const localPolicies = options.localPolicies;
+ 	if (policy?.sparse) {
+ 		const patch: Record<string, string | undefined> = {};
+ 		if (options.sessionFile) patch.PI_SESSION_FILE = options.sessionFile;
+@@ -314,6 +317,7 @@ export function buildManagedKernelEnvPatch(
+ 			patch.PI_TOOL_BRIDGE_SESSION = options.bridgeSessionId ?? "";
+ 		}
+ 		if (localRoots) patch.PI_EVAL_LOCAL_ROOTS = JSON.stringify(localRoots);
++		if (localPolicies) patch.PI_EVAL_LOCAL_POLICIES = JSON.stringify(localPolicies);
+ 		return patch;
+ 	}
+ 	return {
+@@ -323,6 +327,7 @@ export function buildManagedKernelEnvPatch(
+ 		PI_TOOL_BRIDGE_TOKEN: options.bridge?.token ?? null,
+ 		PI_TOOL_BRIDGE_SESSION: options.bridge && options.bridgeSessionId ? options.bridgeSessionId : null,
+ 		PI_EVAL_LOCAL_ROOTS: localRoots && Object.keys(localRoots).length > 0 ? JSON.stringify(localRoots) : null,
++		PI_EVAL_LOCAL_POLICIES: localPolicies && Object.keys(localPolicies).length > 0 ? JSON.stringify(localPolicies) : null,
+ 	};
+ }
+ 
+diff --git a/src/eval/js/context-manager.ts b/src/eval/js/context-manager.ts
+index 233b6c514af8be2f5399d04a829be8894eff66d6..3d442adca777bb03710f9579dbff2ff9ace5eef2 100644
+--- a/src/eval/js/context-manager.ts
++++ b/src/eval/js/context-manager.ts
+@@ -6,6 +6,7 @@ import {
+ 	workerEnvFromParent,
+ } from "../../subprocess/worker-client";
+ import type { ToolSession } from "../../tools";
++import type { EvalNamespaceDefinition } from "../../internal-urls";
+ import { ToolAbortError, ToolError } from "../../tools/tool-errors";
+ import { safeSend as safeSendIpc } from "../../utils/ipc";
+ import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../bridge-timeout";
+@@ -56,6 +57,7 @@ interface PendingRun {
+ 	runState: VmRunState;
+ 	toolSession: ToolSession;
+ 	resolve(value: { value: unknown }): void;
++	evalNamespaces: Record<string, EvalNamespaceDefinition>;
+ 	reject(error: Error): void;
+ 	toolCalls: Map<string, AbortController>;
+ 	/**
+@@ -141,6 +143,8 @@ export async function executeInVmContext(options: {
+ 	cwd: string;
+ 	session: ToolSession;
+ 	localRoots?: Record<string, string>;
++	localPolicies?: Record<string, Record<string, "read" | "write">>;
++	evalNamespaces?: Record<string, EvalNamespaceDefinition>;
+ 	reset?: boolean;
+ 	code: string;
+ 	filename: string;
+@@ -180,7 +184,13 @@ export async function executeInVmContext(options: {
+ 	}
+ 	const session = await acquireSession(
+ 		sessionKey,
+-		{ cwd: options.cwd, sessionId: options.sessionId, localRoots: options.localRoots },
++		{
++			cwd: options.cwd,
++			sessionId: options.sessionId,
++			localRoots: options.localRoots,
++			localPolicies: options.localPolicies,
++			evalNamespaces: Object.keys(options.evalNamespaces ?? {}),
++		},
+ 		options.timeoutMs,
+ 		options.ownerId,
+ 	);
+@@ -380,6 +390,8 @@ async function runOnce(
+ 		cwd: string;
+ 		session: ToolSession;
+ 		localRoots?: Record<string, string>;
++		localPolicies?: Record<string, Record<string, "read" | "write">>;
++		evalNamespaces?: Record<string, EvalNamespaceDefinition>;
+ 		code: string;
+ 		filename: string;
+ 		runState: VmRunState;
+@@ -391,6 +403,7 @@ async function runOnce(
+ 		runId,
+ 		runState: options.runState,
+ 		toolSession: options.session,
++		evalNamespaces: options.evalNamespaces ?? {},
+ 		resolve,
+ 		reject,
+ 		toolCalls: new Map(),
+@@ -437,6 +450,8 @@ async function runOnce(
+ 				cwd: options.cwd,
+ 				sessionId: options.sessionId,
+ 				localRoots: options.localRoots,
++				localPolicies: options.localPolicies,
++				evalNamespaces: Object.keys(options.evalNamespaces ?? {}),
+ 				preludes: javascriptPreludeSources(options.session),
+ 			},
+ 		});
+@@ -624,6 +639,13 @@ function trackDeferPhase(pending: PendingRun, event: JsStatusEvent): void {
+ 	pending.deferDrained = undefined;
+ }
+ 
++function parseNamespaceCall(args: unknown): { namespace: string; method: string; args: unknown } | null {
++	if (!args || typeof args !== "object") return null;
++	const value = args as Record<string, unknown>;
++	if (typeof value.namespace !== "string" || typeof value.method !== "string") return null;
++	return { namespace: value.namespace, method: value.method, args: value.args };
++}
++
+ async function handleToolCall(session: JsSession, msg: Extract<WorkerOutbound, { type: "tool-call" }>): Promise<void> {
+ 	const pending = session.pending.get(msg.runId);
+ 	if (!pending) {
+@@ -645,20 +667,24 @@ async function handleToolCall(session: JsSession, msg: Extract<WorkerOutbound, {
+ 	const ctrl = new AbortController();
+ 	pending.toolCalls.set(msg.id, ctrl);
+ 	try {
+-		const value = await callSessionTool(msg.name, msg.args, {
+-			session: pending.toolSession,
+-			signal: ctrl.signal,
+-			emitStatus: (event: JsStatusEvent) => {
+-				trackDeferPhase(pending, event);
+-				pending.runState.onDisplay?.({ type: "status", event });
+-			},
+-		});
++		const namespaceCall = msg.name === "__eval_namespace__" ? parseNamespaceCall(msg.args) : null;
++		const definition = namespaceCall ? pending.evalNamespaces[namespaceCall.namespace] : undefined;
++		if (namespaceCall && !definition) throw new ToolError(`Eval namespace ${namespaceCall.namespace} is unavailable`);
++		const value = namespaceCall
++			? await definition!.call(namespaceCall.method, namespaceCall.args, ctrl.signal)
++			: await callSessionTool(msg.name, msg.args, {
++					session: pending.toolSession,
++					signal: ctrl.signal,
++					emitStatus: (event: JsStatusEvent) => {
++						trackDeferPhase(pending, event);
++						pending.runState.onDisplay?.({ type: "status", event });
++					},
++				});
+ 		safeSend(session, { type: "tool-reply", id: msg.id, reply: { ok: true, value } });
+ 	} catch (error) {
+ 		safeSend(session, { type: "tool-reply", id: msg.id, reply: { ok: false, error: toErrorPayload(error) } });
+ 	} finally {
+ 		pending.toolCalls.delete(msg.id);
+-		// Last call of a run whose worker result was withheld: settle it now.
+ 		const held = pending.heldResult;
+ 		if (held && !pending.settled && !pending.aborted && pending.toolCalls.size === 0) {
+ 			finishPending(pending, held);
+diff --git a/src/eval/js/executor.ts b/src/eval/js/executor.ts
+index d515b08cb475bd16c564a7a2d8aa4b5331f8b336..19bbfedf03ec04533b6652de138d0a4bc76caeed 100644
+--- a/src/eval/js/executor.ts
++++ b/src/eval/js/executor.ts
+@@ -1,4 +1,5 @@
+ import { DEFAULT_MAX_BYTES, OutputSink } from "../../session/streaming-output";
++import type { EvalNamespaceDefinition } from "../../internal-urls";
+ import type { ToolSession } from "../../tools";
+ import { resolveOutputMaxColumns, resolveOutputSinkHeadBytes } from "../../tools/output-meta";
+ import { isEvalTimeoutControlEvent } from "../bridge-timeout";
+@@ -28,6 +29,8 @@ export interface JsExecutorOptions {
+ 	session: ToolSession;
+ 	/** On-disk roots the helpers substitute for internal-URL schemes (e.g. `local://`). */
+ 	localRoots?: Record<string, string>;
++	localPolicies?: Record<string, Record<string, "read" | "write">>;
++	evalNamespaces?: Record<string, EvalNamespaceDefinition>;
+ }
+ 
+ export interface JsResult {
+@@ -106,6 +109,8 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
+ 			cwd: options.cwd ?? options.session.cwd,
+ 			session: options.session,
+ 			localRoots: options.localRoots,
++			localPolicies: options.localPolicies,
++			evalNamespaces: options.evalNamespaces,
+ 			reset: options.reset,
+ 			code,
+ 			filename: `js-cell-${crypto.randomUUID()}.js`,
+diff --git a/src/eval/js/index.ts b/src/eval/js/index.ts
+index cad5f44897d493336a77ec9ceb54cc3f6b2ce48a..0edc6fa050bc365b34649613cffa47e43ff589ad 100644
+--- a/src/eval/js/index.ts
++++ b/src/eval/js/index.ts
+@@ -3,6 +3,8 @@ import {
+ 	type ExecutorBackend,
+ 	type ExecutorBackendExecOptions,
+ 	type ExecutorBackendResult,
++	resolveEvalNamespaces,
++	resolveEvalUrlPolicies,
+ 	resolveEvalUrlRoots,
+ } from "../backend";
+ import { namespaceSessionId as sharedNamespace, toExecutorBackendResult } from "../backend-helpers";
+@@ -49,6 +51,8 @@ export default {
+ 			onStatus: opts.onStatus,
+ 			session: opts.session,
+ 			localRoots: resolveEvalUrlRoots(opts.session),
++			localPolicies: resolveEvalUrlPolicies(opts.session),
++			evalNamespaces: resolveEvalNamespaces(opts.session),
+ 		});
+ 		return toExecutorBackendResult(result);
+ 	},
+diff --git a/src/eval/js/shared/helpers.ts b/src/eval/js/shared/helpers.ts
+index 0cbbb0fbde4a82916958a7b1a0b74e788a018744..aebef32e84826c484948c23bd0586f2cb3a26458 100644
+--- a/src/eval/js/shared/helpers.ts
++++ b/src/eval/js/shared/helpers.ts
+@@ -22,6 +22,7 @@ export interface HelperContext {
+ 	 * to `<root>/x.md` before any filesystem op; unknown schemes are rejected.
+ 	 */
+ 	localRoots(): Record<string, string>;
++	localPolicies(): Record<string, Record<string, "read" | "write">>;
+ 	emitStatus(event: JsStatusEvent): void;
+ }
+ 
+@@ -115,12 +116,19 @@ function resolveHelperPath(ctx: HelperContext, rawPath: string, op: "read" | "wr
+ 	if (!root) {
+ 		throw new ToolError(`Protocol paths are not supported by ${op}(): ${rawPath}`);
+ 	}
+-	return resolveUnderRoot(scheme, root, match[2], rawPath);
++	return resolveUnderRoot(scheme, root, match[2], rawPath, op, ctx.localPolicies()[scheme]);
+ }
+ 
+ /** Resolve an internal-URL relative path under its root, mirroring the host
+  *  local-protocol handler: decode, reject absolute/traversal, confine to root. */
+-function resolveUnderRoot(scheme: string, root: string, rawRelative: string, rawPath: string): string {
++function resolveUnderRoot(
++	scheme: string,
++	root: string,
++	rawRelative: string,
++	rawPath: string,
++	op: "read" | "write",
++	mounts?: Record<string, "read" | "write">,
++): string {
+ 	let relative: string;
+ 	try {
+ 		relative = decodeURIComponent(rawRelative.replaceAll("\\", "/"));
+@@ -128,7 +136,10 @@ function resolveUnderRoot(scheme: string, root: string, rawRelative: string, raw
+ 		throw new ToolError(`Invalid URL encoding in ${scheme}:// path: ${rawPath}`);
+ 	}
+ 	const rootPath = path.resolve(root);
+-	if (relative === "") return rootPath;
++	if (relative === "") {
++		if (op === "write" && mounts) throw new ToolError(`${scheme}:// root is not writable`);
++		return rootPath;
++	}
+ 	if (path.isAbsolute(relative)) {
+ 		throw new ToolError(`Absolute paths are not allowed in ${scheme}:// URLs: ${rawPath}`);
+ 	}
+@@ -136,6 +147,12 @@ function resolveUnderRoot(scheme: string, root: string, rawRelative: string, raw
+ 	if (normalized.startsWith("..") || normalized.includes("/../") || normalized.includes("/..")) {
+ 		throw new ToolError(`Path traversal (..) is not allowed in ${scheme}:// URLs: ${rawPath}`);
+ 	}
++	if (mounts) {
++		const mount = normalized.replaceAll("\\", "/").split("/", 1)[0] ?? "";
++		const granted = mounts[mount];
++		if (!granted) throw new ToolError(`${scheme}://${normalized} is outside the authorized artifact mounts`);
++		if (op === "write" && granted !== "write") throw new ToolError(`${scheme}://${mount}/ is read-only in this session`);
++	}
+ 	const resolved = path.resolve(rootPath, normalized);
+ 	if (resolved !== rootPath && !resolved.startsWith(`${rootPath}${path.sep}`)) {
+ 		throw new ToolError(`${scheme}:// path escapes its root: ${rawPath}`);
+diff --git a/src/eval/js/shared/prelude.txt b/src/eval/js/shared/prelude.txt
+index dbc410b0fee43426c045feeca96c558ed95b3930..d07976eef5e319dac67bf1dac81a8f99316447e8 100644
+--- a/src/eval/js/shared/prelude.txt
++++ b/src/eval/js/shared/prelude.txt
+@@ -253,8 +253,8 @@ if (!globalThis.__omp_js_prelude_loaded__) {
+ 			"agent",
+ 			opts,
+ 			rest,
+-			["agent", "label", "schema", "isolated", "apply", "merge", "schemaMode", "tools"],
+-			"{ agent, label, schema, schemaMode, isolated, apply, merge, tools }",
++			["agent", "model", "label", "schema", "isolated", "apply", "merge", "schemaMode", "tools"],
++			"{ agent, model, label, schema, schemaMode, isolated, apply, merge, tools }",
+ 		);
+ 		const result = await globalThis.__omp_call_tool__("__agent__", { prompt, ...options });
+ 		if (!result || typeof result.id !== "string") throw new Error("agent() did not return a handle");
+@@ -421,6 +421,28 @@ if (!globalThis.__omp_js_prelude_loaded__) {
+ 		},
+ 	};
+ 
++	const namespaceProxy = (namespace, path = []) =>
++		new Proxy(() => undefined, {
++			get(_target, prop) {
++				if (prop === "then") return undefined;
++				if (typeof prop !== "string") return undefined;
++				return namespaceProxy(namespace, [...path, prop]);
++			},
++			apply(_target, _thisArg, args) {
++				if (path.length === 0) throw new TypeError(`${namespace} is a namespace, not a function`);
++				const value = args.length <= 1 ? args[0] : args;
++				return globalThis.__omp_call_tool__("__eval_namespace__", {
++					namespace,
++					method: path.join("."),
++					args: value ?? {},
++				});
++			},
++		});
++
++	for (const namespace of globalThis.__omp_eval_namespaces__ ?? []) {
++		globalThis[namespace] = namespaceProxy(namespace);
++	}
++
+ 	globalThis.console = consoleBridge;
+ 	globalThis.print = consoleBridge.log;
+ 	globalThis.display = display;
+diff --git a/src/eval/js/shared/runtime.ts b/src/eval/js/shared/runtime.ts
+index b80b576e366fd9beb52f20c9fd6e638ec10355e0..a9f28647a3443096bc5075d4eb759a263823d695 100644
+--- a/src/eval/js/shared/runtime.ts
++++ b/src/eval/js/shared/runtime.ts
+@@ -71,6 +71,8 @@ export interface RuntimeOptions {
+ 	 * `{ local: "/…/artifacts/local" }`). Stable for the worker's lifetime.
+ 	 */
+ 	localRoots?: Record<string, string>;
++	localPolicies?: Record<string, Record<string, "read" | "write">>;
++	evalNamespaces?: string[];
+ }
+ 
+ // Strict base64: characters from the standard alphabet plus optional `=` padding, and a
+@@ -202,6 +204,7 @@ export class JsRuntime {
+ 	#env: Map<string, string>;
+ 	#als = new AsyncLocalStorage<RunContext>();
+ 	#moduleLoader: LocalModuleLoader;
++	#localPolicies: Record<string, Record<string, "read" | "write">>;
+ 	#localRoots: Record<string, string>;
+ 
+ 	constructor(opts: RuntimeOptions) {
+@@ -210,14 +213,16 @@ export class JsRuntime {
+ 		this.sessionId = opts.sessionId;
+ 		this.#env = new Map();
+ 		this.#moduleLoader = new LocalModuleLoader(this.sessionId);
++		this.#localPolicies = opts.localPolicies ?? {};
+ 		this.#localRoots = opts.localRoots ?? {};
+ 		this.helpers = createHelpers({
+ 			cwd: () => this.#activeCwd(),
+ 			env: this.#env,
++			localPolicies: () => this.#localPolicies,
+ 			localRoots: () => this.#localRoots,
+ 			emitStatus: event => this.#activeHooks("emitStatus")?.onDisplay({ type: "status", event }),
+ 		});
+-		this.#install(opts.extraGlobals);
++		this.#install(opts.extraGlobals, opts.evalNamespaces);
+ 	}
+ 
+ 	get cwd(): string {
+@@ -445,13 +450,14 @@ export class JsRuntime {
+ 		return dynamicRequire;
+ 	}
+ 
+-	#install(extraGlobals: Record<string, unknown> | undefined): void {
++	#install(extraGlobals: Record<string, unknown> | undefined, evalNamespaces: string[] = []): void {
+ 		// Constructing a runtime while another same-realm runtime is mid-run would
+ 		// silently replace the live runtime's globals (Object.assign + prelude eval
+ 		// below). Fail before any global/stack mutation; WorkerCore reports it as
+ 		// init-failed instead of corrupting the active run.
+ 		assertCanUseGlobalOwner(this.#globalOwner, "initialize a JS runtime");
+ 		const injected: Record<string, unknown> = {
++			__omp_eval_namespaces__: evalNamespaces,
+ 			__omp_session__: this.#session,
+ 			__omp_helpers__: this.helpers,
+ 			__omp_call_tool__: async (name: string, args: unknown) => {
+@@ -525,6 +531,7 @@ export class JsRuntime {
+ 		const allGlobalKeys = new Set<string>([
+ 			...Object.keys(injected),
+ 			...Object.keys(extraGlobals ?? {}),
++			...evalNamespaces,
+ 			...PRELUDE_GLOBAL_KEYS,
+ 		]);
+ 
+diff --git a/src/eval/js/worker-core.ts b/src/eval/js/worker-core.ts
+index 30528423386976590fdf3bf7c3115fbabf0ce4f9..2d079763981f1825e0e4be8ba6a3973ba7451c2e 100644
+--- a/src/eval/js/worker-core.ts
++++ b/src/eval/js/worker-core.ts
+@@ -258,6 +258,8 @@ export class WorkerCore {
+ 			initialCwd: snapshot.cwd,
+ 			sessionId: snapshot.sessionId,
+ 			localRoots: snapshot.localRoots,
++			localPolicies: snapshot.localPolicies,
++			evalNamespaces: snapshot.evalNamespaces,
+ 		});
+ 		return this.#runtime;
+ 	}
+diff --git a/src/eval/js/worker-protocol.ts b/src/eval/js/worker-protocol.ts
+index 9ac675f9ac969657fb86bb120d78a834eb45014d..8a9604d235c9b757e20887962c0433ef4353c0ca 100644
+--- a/src/eval/js/worker-protocol.ts
++++ b/src/eval/js/worker-protocol.ts
+@@ -17,6 +17,8 @@ export interface SessionSnapshot {
+ 	 * accept `local://…` paths instead of writing a literal `local:/` directory.
+ 	 */
+ 	localRoots?: Record<string, string>;
++	localPolicies?: Record<string, Record<string, "read" | "write">>;
++	evalNamespaces?: string[];
+ 	/** Enabled host-capability snippets projected for this JavaScript cell. */
+ 	preludes?: EvalPreludeSource[];
+ }
+diff --git a/src/eval/py/executor.ts b/src/eval/py/executor.ts
+index 07902016fb23c3caf2c627b7fbc96a08a631b2d9..d77ef515797b098c709e3277eca14c91fd661746 100644
+--- a/src/eval/py/executor.ts
++++ b/src/eval/py/executor.ts
+@@ -104,6 +104,7 @@ export interface PythonExecutorOptions {
+ 	 * where `read local://x` resolves instead of a literal `local:/` directory.
+ 	 */
+ 	localRoots?: Record<string, string>;
++	localPolicies?: Record<string, Record<string, "read" | "write">>;
+ 	/**
+ 	 * ToolSession used to resolve host-side `tool.<name>(args)` calls made from
+ 	 * the Python prelude's bridge proxy. When omitted, the bridge env vars are
+diff --git a/src/eval/py/index.ts b/src/eval/py/index.ts
+index 2f795697d380c2f360b9b8c5f43bb480781737d6..dcb2d9fd5bfc390d3ac5bad4955be631b88f702f 100644
+--- a/src/eval/py/index.ts
++++ b/src/eval/py/index.ts
+@@ -4,6 +4,7 @@ import {
+ 	type ExecutorBackendExecOptions,
+ 	type ExecutorBackendResult,
+ 	resolveEvalUrlRoots,
++	resolveEvalUrlPolicies,
+ } from "../backend";
+ import {
+ 	readSetting,
+@@ -64,6 +65,7 @@ export default {
+ 			sessionFile: opts.sessionFile,
+ 			artifactsDir: opts.session.getArtifactsDir?.() ?? undefined,
+ 			localRoots: resolveEvalUrlRoots(opts.session),
++			localPolicies: resolveEvalUrlPolicies(opts.session),
+ 			kernelOwnerId: identity.kernelOwnerId,
+ 			reset: opts.reset,
+ 			onChunk: opts.onChunk,
+diff --git a/src/eval/py/prelude.py b/src/eval/py/prelude.py
+index 664d48f70f57e1cc3e57baa51127ea0207098481..b799727ac95e85d7b25b82f6b1bd475e79f0c651 100644
+--- a/src/eval/py/prelude.py
++++ b/src/eval/py/prelude.py
+@@ -79,7 +79,7 @@ if "__omp_prelude_loaded__" not in globals():
+             return result["text"]
+         return result
+ 
+-    def _resolve_omp_path(path: str | Path) -> Path:
++    def _resolve_omp_path(path: str | Path, operation: str = "read") -> Path:
+         """Map a helper path to a real filesystem Path.
+ 
+         A `scheme://…` whose scheme has an injected on-disk root (e.g.
+@@ -101,6 +101,18 @@ if "__omp_prelude_loaded__" not in globals():
+         if not root:
+             raise ValueError(f"Protocol paths are not supported by this helper: {path}")
+         relative = unquote(match.group(2).replace("\\", "/"))
++        try:
++            policies = json.loads(os.environ.get("PI_EVAL_LOCAL_POLICIES") or "{}")
++        except (ValueError, TypeError):
++            policies = {}
++        mounts = policies.get(scheme) if isinstance(policies, dict) else None
++        if isinstance(mounts, dict):
++            mount = relative.split("/", 1)[0]
++            granted = mounts.get(mount)
++            if not granted:
++                raise ValueError(f"{scheme}://{relative} is outside the authorized artifact mounts")
++            if operation == "write" and granted != "write":
++                raise ValueError(f"{scheme}://{mount}/ is read-only in this session")
+         # Mirror the host `path.resolve`/`resolveLocalUrlToPath`: normalize and
+         # make absolute WITHOUT realpath'ing symlinks (Path.resolve would turn
+         # /tmp into /private/tmp and diverge from the read-side resolution).
+@@ -137,7 +149,7 @@ if "__omp_prelude_loaded__" not in globals():
+ 
+     def write(path: str | Path, content: str) -> Path:
+         """Write file contents (create parents)."""
+-        p = _resolve_omp_path(path)
++        p = _resolve_omp_path(path, "write")
+         p.parent.mkdir(parents=True, exist_ok=True)
+         p.write_text(content, encoding="utf-8")
+         _emit_status("write", path=str(p), chars=len(content))
+@@ -806,6 +818,7 @@ if "__omp_prelude_loaded__" not in globals():
+         prompt,
+         *,
+         agent=None,
++        model=None,
+         label=None,
+         schema=None,
+         schema_mode=None,
+@@ -818,6 +831,8 @@ if "__omp_prelude_loaded__" not in globals():
+         args = {"prompt": prompt}
+         if agent is not None:
+             args["agent"] = agent
++        if model is not None:
++            args["model"] = model
+         if label is not None:
+             args["label"] = label
+         if schema is not None:
+diff --git a/src/eval/types.ts b/src/eval/types.ts
+index 4a9b6241d8670084992fa2c91a132760fd19849c..95263c0150d4e0c3c36b0c89a78cfc3694af65b5 100644
+--- a/src/eval/types.ts
++++ b/src/eval/types.ts
+@@ -60,6 +60,7 @@ export interface EvalToolDetails {
+ 	async?: {
+ 		state: "running" | "completed" | "failed";
+ 		jobId: string;
++		startedAt?: number;
+ 		type: "eval";
+ 	};
+ }
+diff --git a/src/extensibility/custom-tools/loader.ts b/src/extensibility/custom-tools/loader.ts
+index 7183fa225550b592726fe18dce788673b5446432..6d8bf8d209e46178990c77d98f7479bcf3d6b4b7 100644
+--- a/src/extensibility/custom-tools/loader.ts
++++ b/src/extensibility/custom-tools/loader.ts
+@@ -18,9 +18,12 @@ import { getAllPluginToolPaths } from "../../extensibility/plugins/loader";
+ // Runtime self-reference: dereference this namespace only inside loader functions to keep the index.ts cycle safe.
+ import * as PiCodingAgent from "../../index";
+ import * as typebox from "../legacy-typebox";
++import { installLegacyPiSpecifierShim } from "../plugins/legacy-pi-compat";
+ import { createNoOpUIContext, resolvePath, withHostGuard } from "../utils";
+ import type { CustomToolAPI, CustomToolFactory, LoadedCustomTool, ToolLoadError } from "./types";
+ 
++installLegacyPiSpecifierShim();
++
+ interface LoadToolResult {
+ 	tools: LoadedCustomTool[];
+ 	errors: ToolLoadError[];
+diff --git a/src/extensibility/hooks/loader.ts b/src/extensibility/hooks/loader.ts
+index a671d96a980521602ccaff78ba1c79bb7753394d..2b225582e0df995b4ec732bce07e1448147974c2 100644
+--- a/src/extensibility/hooks/loader.ts
++++ b/src/extensibility/hooks/loader.ts
+@@ -12,10 +12,13 @@ import { loadCapability } from "../../discovery";
+ import * as PiCodingAgent from "../../index";
+ import type { CustomMessagePayload } from "../../session/messages";
+ import * as typebox from "../legacy-typebox";
++import { installLegacyPiSpecifierShim } from "../plugins/legacy-pi-compat";
+ import { resolvePath, withHostGuard } from "../utils";
+ import { execCommand } from "./runner";
+ import type { ExecOptions, HookAPI, HookFactory, HookMessageRenderer, RegisteredCommand } from "./types";
+ 
++installLegacyPiSpecifierShim();
++
+ /**
+  * Generic handler function type.
+  */
+diff --git a/src/extensibility/plugins/loader.ts b/src/extensibility/plugins/loader.ts
+index fedfa53a5d8987841c71304e9b78702c572b74c4..0e60008cbcccd71fef95690bd62621750a531193 100644
+--- a/src/extensibility/plugins/loader.ts
++++ b/src/extensibility/plugins/loader.ts
+@@ -9,7 +9,6 @@ import * as path from "node:path";
+ import { getPluginsDir, getPluginsLockfile, isEnoent, logger } from "@oh-my-pi/pi-utils";
+ import { getConfigDirPaths } from "../../config";
+ import { registerPluginCacheInvalidator, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
+-import { installLegacyPiSpecifierShim } from "./legacy-pi-compat";
+ import { normalizePluginRuntimeConfig } from "./runtime-config";
+ import type { InstalledPlugin, PluginManifest, PluginRuntimeConfig, ProjectPluginOverrides } from "./types";
+ 
+@@ -18,8 +17,6 @@ export interface ScopedInstalledPlugin extends InstalledPlugin {
+ 	scope: "user" | "project";
+ }
+ 
+-installLegacyPiSpecifierShim();
+-
+ const enabledPluginsCache = new Map<string, Promise<ScopedInstalledPlugin[]>>();
+ 
+ function enabledPluginsCacheKey(cwd: string, home?: string): string {
+diff --git a/src/internal-urls/local-protocol.ts b/src/internal-urls/local-protocol.ts
+index 487fd9e41d01d77786464a0060804acc2522b6eb..5adac4f357eb3d525f8f8d3622afdbfe20a12f0b 100644
+--- a/src/internal-urls/local-protocol.ts
++++ b/src/internal-urls/local-protocol.ts
+@@ -9,9 +9,20 @@ import { parseInternalUrl } from "./parse";
+ import { validateRelativePath } from "./skill-protocol";
+ import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext, UrlCompletion } from "./types";
+ 
++export type LocalMountAccess = "read" | "write";
++
++export interface EvalNamespaceDefinition {
++	declaration: string;
++	call(method: string, args: unknown, signal?: AbortSignal): Promise<unknown>;
++}
++
+ export interface LocalProtocolOptions {
+ 	getArtifactsDir?: () => string | null;
+ 	getSessionId?: () => string | null;
++	getLocalMounts?: () => Record<string, LocalMountAccess>;
++	/** Host-selected plan reference for new/reset sessions; empty disables implicit plan loading. */
++	getDefaultPlanReferencePath?: () => string;
++	getEvalNamespaces?: () => Record<string, EvalNamespaceDefinition>;
+ }
+ 
+ function parseLocalUrl(input: string): InternalUrl {
+@@ -190,8 +201,14 @@ async function listFilesRecursively(rootPath: string): Promise<string[]> {
+ 	return files.sort((a, b) => a.localeCompare(b));
+ }
+ 
+-async function buildListing(url: InternalUrl, localRoot: string): Promise<InternalResource> {
+-	const files = await listFilesRecursively(localRoot);
++function visibleLocalFiles(files: string[], options: LocalProtocolOptions): string[] {
++	const mounts = options.getLocalMounts?.();
++	if (!mounts) return files;
++	return files.filter(file => Boolean(mounts[file.split("/", 1)[0] ?? ""]));
++}
++
++async function buildListing(url: InternalUrl, localRoot: string, options: LocalProtocolOptions): Promise<InternalResource> {
++	const files = visibleLocalFiles(await listFilesRecursively(localRoot), options);
+ 	const listing = files.length === 0 ? "(empty)" : files.map(file => `- [${file}](local://${file})`).join("\n");
+ 	const content =
+ 		`# Local\n\n` +
+@@ -243,7 +260,10 @@ function extractRelativePath(url: InternalUrl): string {
+ export function resolveLocalRoot(options: LocalProtocolOptions, platform: NodeJS.Platform = process.platform): string {
+ 	const artifactsDir = options.getArtifactsDir?.();
+ 	if (artifactsDir) {
+-		const candidate = path.resolve(artifactsDir, "local");
++		// GitSpace patch: local:// maps to the artifacts mount ROOT (no "local"
++		// subdir) so local://x === <workspace>/.gitspace/artifacts/x, matching the
++		// `space artifacts` CLI. getArtifactsDir already returns the mount.
++		const candidate = path.resolve(artifactsDir);
+ 		if (platform === "win32" && candidate.length >= WINDOWS_LOCAL_ROOT_MAX_CHARS) {
+ 			return shortLocalRoot(options);
+ 		}
+@@ -295,20 +315,38 @@ async function copyLocalArtifactEntries(sourceDir: string, destinationDir: strin
+ 	}
+ }
+ 
+-/** Resolve a local:// URL to an on-disk path under the active session's local root. */
++function assertLocalMountAccess(relativePath: string, options: LocalProtocolOptions, access: LocalMountAccess): void {
++	const mounts = options.getLocalMounts?.();
++	if (!mounts) return;
++	const mount = relativePath.split("/", 1)[0] ?? "";
++	const granted = mounts[mount];
++	if (!granted) {
++		throw new Error(`local://${relativePath} is outside the authorized artifact mounts`);
++	}
++	if (access === "write" && granted !== "write") {
++		throw new Error(`local://${mount}/ is read-only in this session`);
++	}
++}
++
++/** Resolve a local:// URL to an on-disk path under the active session's authorized artifact mounts. */
+ export function resolveLocalUrlToPath(
+ 	input: string | InternalUrl,
+ 	options: LocalProtocolOptions,
+ 	platform: NodeJS.Platform = process.platform,
++	access: LocalMountAccess = "read",
+ ): string {
+ 	const url = typeof input === "string" ? parseLocalUrl(input) : input;
+ 	const localRoot = path.resolve(resolveLocalRoot(options, platform));
+ 	const relativePath = extractRelativePath(url);
+ 
+ 	if (!relativePath) {
++		if (access === "write" && options.getLocalMounts) {
++			throw new Error("The local:// root is not writable; select an authorized mount");
++		}
+ 		return localRoot;
+ 	}
+ 
++	assertLocalMountAccess(relativePath, options, access);
+ 	const resolved = path.resolve(localRoot, relativePath);
+ 	ensureWithinRoot(resolved, localRoot);
+ 	return resolved;
+@@ -327,6 +365,12 @@ export function buildEvalUrlRoots(options: LocalProtocolOptions): Record<string,
+ 	return { local: resolveLocalRoot(options) };
+ }
+ 
++/** Serializable mount policy consumed by eval language helpers. */
++export function buildEvalUrlPolicies(options: LocalProtocolOptions): Record<string, Record<string, LocalMountAccess>> {
++	const mounts = options.getLocalMounts?.();
++	return mounts ? { local: mounts } : {};
++}
++
+ const LOCAL_WRITE_NOTE = "Use write path local://<file> to persist large intermediate artifacts across turns.";
+ 
+ type ResolvedLocalTarget =
+@@ -356,6 +400,7 @@ async function resolveLocalTarget(url: InternalUrl, opts: LocalProtocolOptions):
+ 	}
+ 
+ 	const relativePath = extractRelativePath(url);
++	if (relativePath) assertLocalMountAccess(relativePath, opts, "read");
+ 	const targetPath = relativePath ? path.resolve(resolvedRoot, relativePath) : resolvedRoot;
+ 	ensureWithinRoot(targetPath, resolvedRoot);
+ 
+@@ -500,7 +545,7 @@ export class LocalProtocolHandler implements ProtocolHandler {
+ 			};
+ 		}
+ 		if (resolved.kind === "listing") {
+-			return buildListing(url, resolved.root);
++			return buildListing(url, resolved.root, opts);
+ 		}
+ 		if (resolved.kind === "directory") {
+ 			return buildDirectoryResource(url.href, resolved.path, [LOCAL_WRITE_NOTE]);
+@@ -514,7 +559,7 @@ export class LocalProtocolHandler implements ProtocolHandler {
+ 		if (!opts) return [];
+ 		const localRoot = path.resolve(resolveLocalRoot(opts));
+ 		try {
+-			const files = await listFilesRecursively(localRoot);
++			const files = visibleLocalFiles(await listFilesRecursively(localRoot), opts);
+ 			return files.map(value => ({ value }));
+ 		} catch (err) {
+ 			if (isEnoent(err)) return [];
+diff --git a/src/launch/broker.ts b/src/launch/broker.ts
+index 9a4397b42600636213a058d33c1cad042bce24ea..c07e1f9f91928483287429b4080cee3dce8dbf38 100644
+--- a/src/launch/broker.ts
++++ b/src/launch/broker.ts
+@@ -1039,6 +1039,7 @@ class DaemonBroker {
+ 			timedOut = !changed;
+ 		}
+ 		const lines = Math.max(1, Math.min(1_000, Math.floor(operation.lines)));
++		const snapshot = { ...record.snapshot };
+ 		const output = record.log
+ 			? await record.log.read(operation.head, lines, record.snapshot.outputBytes, operation.grep)
+ 			: await DaemonLog.readFiles(
+@@ -1057,6 +1058,7 @@ class DaemonBroker {
+ 		return {
+ 			op: "logs",
+ 			name: record.snapshot.name,
++			daemon: snapshot,
+ 			text: output.text,
+ 			terminalRows,
+ 			terminalText:
+diff --git a/src/launch/protocol.ts b/src/launch/protocol.ts
+index befa630ac4b4656bded948c223604a226d843949..0ad72d2526446f3aaa87ae16cc3cdbbd29ba680d 100644
+--- a/src/launch/protocol.ts
++++ b/src/launch/protocol.ts
+@@ -102,6 +102,7 @@ export type DaemonRpcResult =
+ 	| {
+ 			op: "logs";
+ 			name: string;
++			daemon?: DaemonSnapshot;
+ 			text: string;
+ 			/** Virtual PTY rows reconstructed by the broker for terminal display. */
+ 			terminalRows?: string[];
+@@ -419,6 +420,7 @@ export function parseDaemonRpcResult(operation: DaemonOperation, value: unknown)
+ 			return {
+ 				op: "logs",
+ 				name: stringValue(source.name, "result.name"),
++				daemon: source.daemon === undefined ? undefined : parseDaemonSnapshot(source.daemon),
+ 				text: typeof source.text === "string" ? source.text : "",
+ 				terminalRows:
+ 					source.terminalRows === undefined ? undefined : stringArray(source.terminalRows, "result.terminalRows"),
+diff --git a/src/plan-mode/plan-handoff.ts b/src/plan-mode/plan-handoff.ts
+index 862ce45bd8fd1325cacaa3848d5393d5039f759a..c2533d04db8e8496ac89fe7e3774757cccf79621 100644
+--- a/src/plan-mode/plan-handoff.ts
++++ b/src/plan-mode/plan-handoff.ts
+@@ -1,6 +1,11 @@
+ import { isEnoent } from "@oh-my-pi/pi-utils";
+ import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
+ 
++/** A host's plan reference belongs to the same local namespace inherited by its children. */
++export function defaultPlanReferencePath(options: LocalProtocolOptions): string {
++	return options.getDefaultPlanReferencePath?.() ?? "local://PLAN.md";
++}
++
+ /** The session's active plan, resolved for handoff into a subagent's context. */
+ export interface OverallPlanReference {
+ 	/** The `local://` reference path (e.g. `local://my-feature.md`), kept for display. */
+@@ -13,8 +18,8 @@ export interface OverallPlanReference {
+  * Load the session's active overall plan for subagent handoff.
+  *
+  * Returns the plan referenced by `planReferencePath` when it exists on disk with
+- * non-empty content, or `undefined` when there is no plan (the file is absent or
+- * empty). This mirrors `AgentSession.#buildPlanReferenceMessage`'s gating so a
++ * non-empty content, or `undefined` when no reference is selected or the file is absent or
++ * empty. This mirrors `AgentSession.#buildPlanReferenceMessage`'s gating so a
+  * subagent sees exactly the plan the main agent treats as its active reference.
+  *
+  * Callers MUST skip this during plan mode itself — read-only plan exploration
+@@ -24,6 +29,7 @@ export async function loadOverallPlanReference(
+ 	planReferencePath: string,
+ 	localProtocolOptions: LocalProtocolOptions,
+ ): Promise<OverallPlanReference | undefined> {
++	if (!planReferencePath) return undefined;
+ 	const resolved = resolveLocalUrlToPath(planReferencePath, localProtocolOptions);
+ 	let content: string;
+ 	try {
+diff --git a/src/prompts/system/workflow-notice.md b/src/prompts/system/workflow-notice.md
+index b8c0ac7433345129b8bffb258515153d60dfbd8a..4cf7ffc0fed678c74fc75ee195e5971fbaa6dc8f 100644
+--- a/src/prompts/system/workflow-notice.md
++++ b/src/prompts/system/workflow-notice.md
+@@ -18,7 +18,7 @@ State persists across `eval` calls. Every call provides:
+ - `workpool(agent=None, *, name=None, context=None{{#if evalTools}}, tools=None{{/if}})`: pool of keep-alive workers bounded by live `task.maxConcurrency`. `.push(*items)` returns item ids; each item goes to the least context-loaded idle worker, a new worker while capacity remains, or a busy worker's round-robin queue. `eval.workpool.freshAgents=true` instead spawns a new agent per item. `.status()` reports counts/workers; `.peek()` returns a non-consuming batch snapshot; `.close()` drops queued work.
+   - The pool name is its background job id and label. Push all items while it is active; its first full drain settles and closes that pool job. New phase/wave after drain → create a new named pool.
+   - Results auto-deliver. Need to block? Leave `eval`, then call `hub` with `op:"wait", ids:["<pool-name>"]`; re-issue until settled. NEVER block the kernel with `pool.wait()`.
+-- `agent(prompt, *, agent=None, label=None, schema=None, isolated=None, apply=None, merge=None{{#if evalTools}}, tools=None{{/if}})`: immediate `AgentHandle`; use for a small fixed dependency graph or when the parent needs validated `schema` data. `.wait()` returns text/data; `.handle` is `agent://<id>`. Unwaited results auto-deliver.
++- `agent(prompt, *, agent=None, model=None, label=None, schema=None, isolated=None, apply=None, merge=None{{#if evalTools}}, tools=None{{/if}})`: immediate `AgentHandle`; use for a small fixed dependency graph or when the parent needs validated `schema` data. Choose either a discovered `agent` or a model role (`model="pi/smol"`), never a concrete model ID; omit both to inherit the default agent's configured model. `.wait()` returns text/data; `.handle` is `agent://<id>`. Unwaited results auto-deliver.
+ - `completion(prompt, *, model="default", system=None, schema=None)`: immediate `CompletionHandle` for a tool-free one-shot call. Tiers: `"smol"`, `"default"`, `"slow"`.
+ - `wait(handles, timeout=None, *, raise_errors=True)`: ordered barrier for agent/completion handles only; `raise_errors=False` keeps an error in its slot.
+ {{#if evalTools}}- `@tool` (Python) / `tool(fn, {…})` (JS): kernel-local tool exposed via `tools=`. Use for shared caches, dedup sets, scoring, or structured accumulation across pool workers; calls execute in YOUR kernel and a raised exception returns to the caller without killing it.
+diff --git a/src/prompts/tools/eval.md b/src/prompts/tools/eval.md
+index cf71aa65a1284dd4dfbac2997ff9424d3bd6d7e6..c1d7d22a1b4853fc4c197b6875ed78b890f10168 100644
+--- a/src/prompts/tools/eval.md
++++ b/src/prompts/tools/eval.md
+@@ -21,9 +21,9 @@ output(*ids, format?="raw", query?=None, offset?=None, limit?=None) → str | di
+     Invoke any session tool; `args` = its parameter object.{{#if py}} Async: `await tool.read({...})`.{{/if}}
+ completion(prompt, model?="default"|"smol"|"slow", system?=None, schema?=None) → CompletionHandle
+     Oneshot, stateless (no history/tools); returns immediately. `.wait()` → str (parsed object with `schema`). `model`: "smol" fast | "default" session | "slow" most capable.
+-{{#if spawns}}agent(prompt, agent?="{{spawnDefaultAgent}}", label?=None, schema?=None, schema{{#if js}}Mode{{else}}_mode{{/if}}?="permissive", isolated?=None, apply?=None, merge?=None{{#if evalTools}}, tools?=None{{/if}}) → AgentHandle
+-    Spawns a background subagent and returns immediately. `agent` selects a discovered agent; omit it to use `{{spawnDefaultAgent}}`.{{#if spawnAllowedAgentsText}} Allowed agents: {{spawnAllowedAgentsText}}.{{/if}} Handle: `.id`, `.handle` ("agent://<id>"), `.status`, `.done()`, `.wait(timeout?)` → final text (parsed with `schema`), `.send(message)`, `.cancel()`, `.output()`. Unwaited results auto-deliver like async jobs. `schema` overrides agent/session schemas; `isolated` requests a worktree; `apply`/`merge` control its changes.{{#if evalTools}} `tools`: names of your @tool-defined tools the child may call.{{/if}}
+-{{#if js}}    JS: ONE trailing object — agent(prompt, { agent, label, schema, schemaMode, isolated, apply, merge{{#if evalTools}}, tools{{/if}} }).{{/if}}
++{{#if spawns}}agent(prompt, agent?="{{spawnDefaultAgent}}", model?=None, label?=None, schema?=None, schema{{#if js}}Mode{{else}}_mode{{/if}}?="permissive", isolated?=None, apply?=None, merge?=None{{#if evalTools}}, tools?=None{{/if}}) → AgentHandle
++    Spawns a background subagent and returns immediately. Choose either a discovered `agent` or `model="pi/<role>"`; concrete model IDs are rejected. Omit both to use `{{spawnDefaultAgent}}` with its configured model.{{#if spawnAllowedAgentsText}} Allowed agents: {{spawnAllowedAgentsText}}.{{/if}} Handle: `.id`, `.handle` ("agent://<id>"), `.status`, `.done()`, `.wait(timeout?)` → final text (parsed with `schema`), `.send(message)`, `.cancel()`, `.output()`. Unwaited results auto-deliver like async jobs. `schema` overrides agent/session schemas; `isolated` requests a worktree; `apply`/`merge` control its changes.{{#if evalTools}} `tools`: names of your @tool-defined tools the child may call.{{/if}}
++{{#if js}}    JS: ONE trailing object — agent(prompt, { agent, model, label, schema, schemaMode, isolated, apply, merge{{#if evalTools}}, tools{{/if}} }).{{/if}}
+ wait(handles, timeout?=None, raise_errors?=True) → list
+     Barrier over agent/completion handles, results in input order. `raise_errors=False` keeps the error in its slot.{{#if js}} JS: wait(handles, { timeout, raiseErrors }).{{/if}}
+ workpool(agent?=None, name?=None, context?=None{{#if evalTools}}, tools?=None{{/if}}) → WorkPool
+diff --git a/src/sdk.ts b/src/sdk.ts
+index d647c7908f246ebd2edefe00f427d20378b22d30..015dcae3582762c80083b2149db973fce5397ff2 100644
+--- a/src/sdk.ts
++++ b/src/sdk.ts
+@@ -1,4 +1,6 @@
++import { getHistoricalModelSelection } from "./session/model-usage";
+ import * as path from "node:path";
++import { defaultPlanReferencePath } from "./plan-mode/plan-handoff";
+ import {
+ 	Agent,
+ 	type AgentEvent,
+@@ -75,6 +77,7 @@ import {
+ 	resolveAllowedModels,
+ 	resolveCliModel,
+ 	resolveConfiguredModelPatterns,
++	resolveExplicitModelRole,
+ 	resolveModelRoleValue,
+ } from "./config/model-resolver";
+ import { loadPromptTemplates as loadPromptTemplatesInternal, type PromptTemplate } from "./config/prompt-templates";
+@@ -1849,11 +1852,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 			getSessionSpawns: () => options.spawns ?? "*",
+ 			getModelString: () => (hasExplicitModel && model ? formatModelString(model) : undefined),
+ 			getActiveModelString,
++			getModelSelection: () => getHistoricalModelSelection(sessionManager),
++			recordDirectModelUsage: async record => {
++				sessionManager.appendCustomEntry("gitspace-model-usage", record);
++				await sessionManager.flush();
++			},
+ 			getActiveModel: () => agent?.state.model ?? model,
+ 			getServiceTierByFamily: () => session?.serviceTierByFamily,
+ 			getImageAttachments: () => session?.getImageAttachments() ?? [],
+ 			getPlanModeState: () => session?.getPlanModeState(),
+-			getPlanReferencePath: () => session?.getPlanReferencePath() ?? "local://PLAN.md",
++			getPlanReferencePath: () => session?.getPlanReferencePath() ?? defaultPlanReferencePath(options.localProtocolOptions ?? {}),
+ 			getGoalModeState: () => session?.getGoalModeState(),
+ 			getGoalRuntime: () => session?.goalRuntime,
+ 			getUsageStatistics: () => sessionManager.getUsageStatistics(),
+@@ -3621,6 +3629,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 					: undefined
+ 				: undefined,
+ 		});
++		agent.addBeforeModelCallHook(() => {
++			sessionManager.appendCustomEntry("gitspace-model-selection", {
++				version: 1,
++				...getHistoricalModelSelection(sessionManager),
++			});
++		});
+ 
+ 		cursorEventEmitter = event => agent.emitExternalEvent(event);
+ 
+@@ -3635,7 +3649,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 		} else {
+ 			// Save initial model, thinking level, and service tier for new sessions so they can be restored on resume.
+ 			if (model) {
+-				sessionManager.appendModelChange(`${model.provider}/${model.id}`);
++				sessionManager.appendModelChange(`${model.provider}/${model.id}`,
++					resolveExplicitModelRole(options.modelPattern, settings) ?? (hasExplicitModel ? "temporary" : "default"));
+ 			}
+ 			if (!autoThinking) {
+ 				// Do not write the `auto` selector before the first turn resolves; auto
+@@ -3714,6 +3729,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 		// block createAgentSession for tens of seconds while the whole file is
+ 		// streamed and parsed on the main thread.
+ 		session = new AgentSession({
++			// GitSpace patch: thread the host's local:// mapping into the session
++			// itself, not just the tool session, so plan-reference / plan-mode /
++			// image-vision resolution uses the same root as every tool.
++			localProtocolOptions,
+ 			codeModeState,
+ 			advisorWatchdogPrompt,
+ 			advisorContextPrompt,
+diff --git a/src/session/agent-session-types.ts b/src/session/agent-session-types.ts
+index bead7e308fb46181840b74e1660267493231c593..1290efbd85e3e51592585e08ed04e0d77e48e5b5 100644
+--- a/src/session/agent-session-types.ts
++++ b/src/session/agent-session-types.ts
+@@ -19,6 +19,7 @@ import type {
+ 	ToolChoice,
+ } from "@oh-my-pi/pi-ai";
+ import type { postmortem } from "@oh-my-pi/pi-utils";
++import type { LocalProtocolOptions } from "../internal-urls";
+ import type { AdvisorConfig } from "../advisor";
+ import type { AsyncJob, AsyncJobDeliveryState, AsyncJobManager } from "../async";
+ import type { EffectiveExtensionRoots } from "../capability/types";
+@@ -128,6 +129,8 @@ export interface AgentSessionConfig {
+ 	codeModeState?: { namespacesInfo?: unknown };
+ 	sessionManager: SessionManager;
+ 	settings: Settings;
++	/** Host-supplied local:// mapping used by session internals. */
++	localProtocolOptions?: LocalProtocolOptions;
+ 	/**
+ 	 * Live extension-root policy inherited from the owning session. Subagents use
+ 	 * this provider so explicit roots, discovery mode, configured roots, and
+diff --git a/src/session/agent-session.ts b/src/session/agent-session.ts
+index ea17642ee89d62a21a7d59f87bdfb00e0340f2ff..b5cf52e14ee93d1710f1b4e4706db0c0c408c5c8 100644
+--- a/src/session/agent-session.ts
++++ b/src/session/agent-session.ts
+@@ -166,7 +166,7 @@ import { computeNonMessageTokens } from "../modes/utils/context-usage";
+ import { containsWorkflow, renderWorkflowNotice } from "../modes/workflow";
+ import { type PlanApprovalDetails, resolveApprovedPlan } from "../plan-mode/approved-plan";
+ import { listPlanFiles, readPlanFile } from "../plan-mode/plan-files";
+-import { loadOverallPlanReference } from "../plan-mode/plan-handoff";
++import { defaultPlanReferencePath, loadOverallPlanReference } from "../plan-mode/plan-handoff";
+ import type { PlanModeState } from "../plan-mode/state";
+ import goalModeContextPrompt from "../prompts/goals/goal-mode-context.md" with { type: "text" };
+ import goalTodoContextPrompt from "../prompts/goals/goal-todo-context.md" with { type: "text" };
+@@ -520,6 +520,8 @@ export class AgentSession {
+ 	readonly agent: Agent;
+ 	readonly sessionManager: SessionManager;
+ 	readonly settings: Settings;
++	/** GitSpace patch: host-supplied local:// mapping for session resolution. */
++	readonly hostLocalProtocolOptions?: LocalProtocolOptions;
+ 	/** Entries of tools mounted under `xd://`; empty when virtual devices are unmounted. */
+ 	getXdevToolEntries: () => Array<{ name: string; summary: string }>;
+ 	readonly yieldQueue: YieldQueue;
+@@ -601,7 +603,7 @@ export class AgentSession {
+ 	#advisorCostRestore: Promise<void> = Promise.resolve();
+ 	#goalTurnCounter = 0;
+ 	#planReferenceSent = false;
+-	#planReferencePath = "local://PLAN.md";
++	#planReferencePath: string;
+ 	#clientBridge: ClientBridge | undefined;
+ 	#allowAcpAgentInitiatedTurns = false;
+ 	/** Session file created by this session's `/move`; removed on dispose if it stayed empty. */
+@@ -1151,6 +1153,8 @@ export class AgentSession {
+ 		this.agent = config.agent;
+ 		this.#codeModeState = config.codeModeState ?? {};
+ 		this.sessionManager = config.sessionManager;
++		this.hostLocalProtocolOptions = config.localProtocolOptions;
++		this.#planReferencePath = defaultPlanReferencePath(this.#localProtocolOptions());
+ 		this.settings = config.settings;
+ 		this.#modelRegistry = config.modelRegistry;
+ 		this.#extensionRoots =
+@@ -3911,10 +3915,16 @@ export class AgentSession {
+ 	}
+ 
+ 	#localProtocolOptions(): LocalProtocolOptions {
+-		return {
+-			getArtifactsDir: () => this.sessionManager.getArtifactsDir(),
+-			getSessionId: () => this.sessionManager.getSessionId(),
+-		};
++		// GitSpace patch: prefer the host-supplied mapping (the same object every
++		// tool, subagent, and eval bridge resolves `local://` against) so the
++		// session's own resolution can never drift to a different root. Falls back
++		// to the SessionManager pair for plain SDK consumers that pass nothing.
++		return (
++			this.hostLocalProtocolOptions ?? {
++				getArtifactsDir: () => this.sessionManager.getArtifactsDir(),
++				getSessionId: () => this.sessionManager.getSessionId(),
++			}
++		);
+ 	}
+ 
+ 	#resetSessionStopContinuationState(): void {
+@@ -5699,15 +5709,10 @@ export class AgentSession {
+ 	async #buildPlanModeMessage(): Promise<CustomMessage | null> {
+ 		const state = this.#planModeState;
+ 		if (!state?.enabled) return null;
+-		const sessionPlanUrl = "local://PLAN.md";
+ 		const resolvedPlanPath = state.planFilePath.startsWith("local:")
+ 			? resolveLocalUrlToPath(normalizeLocalScheme(state.planFilePath), this.#localProtocolOptions())
+ 			: resolveToCwd(state.planFilePath, this.sessionManager.getCwd());
+-		const resolvedSessionPlan = resolveLocalUrlToPath(sessionPlanUrl, this.#localProtocolOptions());
+-		const displayPlanPath =
+-			state.planFilePath.startsWith("local:") || resolvedPlanPath !== resolvedSessionPlan
+-				? state.planFilePath
+-				: sessionPlanUrl;
++		const displayPlanPath = state.planFilePath;
+ 
+ 		const planExists = fs.existsSync(resolvedPlanPath);
+ 		// Capability gates, not the visible surface: a Code Mode partition keeps
+@@ -7228,6 +7233,23 @@ export class AgentSession {
+ 		};
+ 	}
+ 
++	/** Remove a queued user message by visible kind + index (GitSpace patch).
++	 *  Maps the display index (user-visible messages, matching getQueuedMessages)
++	 *  to the raw queue index and removes it via the agent. */
++	removeQueuedMessage(kind: "steering" | "followUp", index: number): string | undefined {
++		const queue = kind === "steering" ? this.agent.peekSteeringQueue() : this.agent.peekFollowUpQueue();
++		const userIndices: number[] = [];
++		queue.forEach((m, i) => {
++			if (isUserQueuedMessage(m)) userIndices.push(i);
++		});
++		const rawIndex = userIndices[index];
++		if (rawIndex === undefined) return undefined;
++		const removed = queue[rawIndex];
++		if (kind === "steering") this.agent.removeSteer(rawIndex);
++		else this.agent.removeFollowUp(rawIndex);
++		return removed ? queueChipText(removed) : undefined;
++	}
++
+ 	/**
+ 	 * Pop the last queued message (steering first, then follow-up).
+ 	 * Used by dequeue keybinding to restore messages to editor one at a time.
+@@ -7645,7 +7667,7 @@ export class AgentSession {
+ 
+ 			this.#todo.resetCycle();
+ 			this.#planReferenceSent = false;
+-			this.#planReferencePath = "local://PLAN.md";
++			this.#planReferencePath = defaultPlanReferencePath(this.#localProtocolOptions());
+ 			this.#advisors.resetSessionState();
+ 			advisorRecordersDetached = false;
+ 			this.#reconnectToAgent();
+diff --git a/src/session/async-job-delivery.ts b/src/session/async-job-delivery.ts
+index a8cd10b847c715de1c5ce806262153e7b39becee..dac848ce47d6e16a45b88735d6d7585e48043e4f 100644
+--- a/src/session/async-job-delivery.ts
++++ b/src/session/async-job-delivery.ts
+@@ -46,6 +46,9 @@ type AsyncResultJobDetails = {
+ 	type?: AsyncJobType;
+ 	label?: string;
+ 	durationMs?: number;
++	startedAt?: number;
++	status?: AsyncJob["status"];
++	agentUrlId?: string;
+ 	/** Full structured payload (source/mode/status/data/error), when the job used an output schema. */
+ 	schema?: StructuredSubagentOutput;
+ };
+@@ -88,8 +91,10 @@ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): Custo
+ 			agentUrlId: entry.job?.agentId ?? entry.jobId,
+ 			result: entry.result,
+ 			type: entry.job?.type,
++			status: entry.job?.status,
+ 			label: entry.job?.label,
+ 			durationMs: entry.durationMs,
++			startedAt: entry.job?.startTime,
+ 			structured,
+ 			structuredJson,
+ 			hasStructuredData,
+@@ -104,6 +109,9 @@ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): Custo
+ 			type: job.type,
+ 			label: job.label,
+ 			durationMs: job.durationMs,
++			startedAt: job.startedAt,
++			status: job.status,
++			agentUrlId: job.agentUrlId,
+ 			...(job.structured ? { schema: job.structured } : {}),
+ 		})),
+ 	};
+diff --git a/src/session/blob-store.ts b/src/session/blob-store.ts
+index 7d66cea6114821550afe290810faadd35b2ae309..120f112617b3c4ed8ebcc9cdd9ac01c16d1efc1f 100644
+--- a/src/session/blob-store.ts
++++ b/src/session/blob-store.ts
+@@ -206,6 +206,20 @@ export function isImageDataUrl(data: string): boolean {
+ 	return data.startsWith("data:image/") && data.includes(";base64,");
+ }
+ 
++/**
++ * GitSpace patch: structurally-valid placeholder for an image whose backing blob
++ * is missing (evicted / resolved against a different blobs dir). A 1x1 fully
++ * transparent PNG. Previously the resolvers returned the raw `blob:sha256:...`
++ * reference on a miss, which downstream was spliced into an `image_url` /
++ * `data:` URL as if it were base64 — producing an "invalid image_url / invalid
++ * base64" provider 400 that permanently bricked the session until manually
++ * cleared. Returning a real (empty) image keeps the payload valid so the request
++ * always succeeds; the model simply sees a blank image instead of a hard error.
++ */
++const MISSING_IMAGE_PLACEHOLDER_BASE64 =
++	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
++const MISSING_IMAGE_PLACEHOLDER_DATA_URL = `data:image/png;base64,${MISSING_IMAGE_PLACEHOLDER_BASE64}`;
++
+ /**
+  * Externalize a provider image data URL to the blob store, returning a blob reference.
+  * The full data URL string is preserved so transport-native history can be reconstructed on resume.
+@@ -258,8 +272,10 @@ export async function resolveImageDataUrl(blobStore: BlobStore, data: string): P
+ 
+ 	const buffer = await blobStore.get(hash);
+ 	if (!buffer) {
+-		logger.warn("Blob not found for persisted image data URL", { hash });
+-		return data;
++		// GitSpace patch: degrade to a valid transparent-PNG data URL instead of
++		// returning the unresolved ref (which becomes an invalid image_url → 400).
++		logger.warn("Blob not found for persisted image data URL; using placeholder", { hash });
++		return MISSING_IMAGE_PLACEHOLDER_DATA_URL;
+ 	}
+ 	return buffer.toString("utf8");
+ }
+@@ -275,8 +291,10 @@ export async function resolveImageData(blobStore: BlobStore, data: string): Prom
+ 
+ 	const buffer = await blobStore.get(hash);
+ 	if (!buffer) {
+-		logger.warn("Blob not found for image reference", { hash });
+-		return data; // Return the ref as-is; downstream will see invalid base64 but won't crash
++		// GitSpace patch: return valid transparent-PNG base64 instead of the raw
++		// ref, so the restored image block never carries invalid base64.
++		logger.warn("Blob not found for image reference; using placeholder", { hash });
++		return MISSING_IMAGE_PLACEHOLDER_BASE64;
+ 	}
+ 	return buffer.toString("base64");
+ }
+@@ -288,8 +306,10 @@ export function resolveImageDataSync(blobStore: BlobStore, data: string): string
+ 
+ 	const buffer = blobStore.getSync(hash);
+ 	if (!buffer) {
+-		logger.warn("Blob not found for image reference", { hash });
+-		return data;
++		// GitSpace patch: return valid transparent-PNG base64 instead of the raw
++		// ref, so the restored image block never carries invalid base64.
++		logger.warn("Blob not found for image reference; using placeholder", { hash });
++		return MISSING_IMAGE_PLACEHOLDER_BASE64;
+ 	}
+ 	return buffer.toString("base64");
+ }
+diff --git a/src/session/model-controls.ts b/src/session/model-controls.ts
+index 4ed785ec1f66213965977e20b01aa9bfad9fa3bf..19f87c0b0030d4a0d713be4adeabec5c4a0c21fc 100644
+--- a/src/session/model-controls.ts
++++ b/src/session/model-controls.ts
+@@ -436,7 +436,7 @@ export class ModelControls {
+ 		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(next.model));
+ 		this.#host.clearActiveRetryFallback();
+ 		await this.#host.setModelWithProviderSessionReset(next.model);
+-		this.#host.sessionManager.appendModelChange(`${next.model.provider}/${next.model.id}`);
++		this.#host.sessionManager.appendModelChange(`${next.model.provider}/${next.model.id}`, "temporary");
+ 		this.#host.settings.getStorage()?.recordModelUsage(`${next.model.provider}/${next.model.id}`);
+ 
+ 		// Apply the scoped model's configured thinking level, preserving auto.
+@@ -467,7 +467,7 @@ export class ModelControls {
+ 		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(nextModel));
+ 		this.#host.clearActiveRetryFallback();
+ 		await this.#host.setModelWithProviderSessionReset(nextModel);
+-		this.#host.sessionManager.appendModelChange(`${nextModel.provider}/${nextModel.id}`);
++		this.#host.sessionManager.appendModelChange(`${nextModel.provider}/${nextModel.id}`, "temporary");
+ 		this.#host.settings.getStorage()?.recordModelUsage(`${nextModel.provider}/${nextModel.id}`);
+ 		// Re-apply the current thinking level (or auto) for the newly selected model
+ 		this.#reapplyThinkingLevel();
+diff --git a/src/session/model-usage.ts b/src/session/model-usage.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..9556fb9baa78aa9bfca94455a10f4fb1a7400bc4
+--- /dev/null
++++ b/src/session/model-usage.ts
+@@ -0,0 +1,40 @@
++import type { Usage } from "@oh-my-pi/pi-ai";
++import { EPHEMERAL_MODEL_CHANGE_ROLE } from "./session-entries";
++import type { SessionManager } from "./session-manager";
++
++export interface HistoricalModelSelection {
++	role: string | null;
++	selection: "role" | "pinned" | "inherited" | "unknown";
++}
++
++export interface DirectModelUsage extends HistoricalModelSelection {
++	version: 1;
++	id: string;
++	kind: "completion";
++	provider: string;
++	model: string;
++	usage: Usage;
++}
++
++/** Follow the active branch without inferring semantic roles from model identity. */
++export function getHistoricalModelSelection(manager: SessionManager): HistoricalModelSelection {
++	let entry = manager.getLeafEntry();
++	while (entry) {
++		if (entry.type === "custom" && (entry.customType === "gitspace-model-selection" || entry.customType === "gitspace-agent-definition")) {
++			const data = entry.data as Partial<HistoricalModelSelection> | undefined;
++			if (data && (data.role === null || typeof data.role === "string") &&
++				(data.selection === "role" || data.selection === "pinned" || data.selection === "inherited" || data.selection === "unknown")) {
++				return { role: data.role, selection: data.selection };
++			}
++		}
++		if (entry.type === "session_init" && entry.modelRole) {
++			return { role: entry.modelRole, selection: "role" };
++		}
++		if (entry.type === "model_change" && entry.role !== EPHEMERAL_MODEL_CHANGE_ROLE) {
++			if (entry.role === "temporary") return { role: null, selection: "pinned" };
++			return entry.role ? { role: entry.role, selection: "role" } : { role: null, selection: "unknown" };
++		}
++		entry = entry.parentId ? manager.getEntry(entry.parentId) : undefined;
++	}
++	return { role: null, selection: "unknown" };
++}
+diff --git a/src/stt/asr-worker.ts b/src/stt/asr-worker.ts
+index a120bd12f71bf8cc2ad76e312cf59ba7f9e0ee30..23842cf03bcaf25f95604532b415eb427c31d40d 100644
+--- a/src/stt/asr-worker.ts
++++ b/src/stt/asr-worker.ts
+@@ -147,7 +147,17 @@ function getSherpaRuntimeDir(): string {
+  */
+ function loadSherpaRuntime(transport: SttTransport, requestId: string, modelKey: SttModelKey): Promise<SherpaRuntime> {
+ 	return sherpaRuntime.load(async () => {
+-		if (!isCompiledBinary()) return loadSourceSherpaRuntime(import.meta.url);
++		if (!isCompiledBinary()) {
++			let installed = false;
++			try {
++				createRequire(import.meta.url).resolve(SHERPA_PACKAGE);
++				installed = true;
++			} catch (error) {
++				const code = (error as NodeJS.ErrnoException).code;
++				if (code !== "MODULE_NOT_FOUND" && code !== "ERR_MODULE_NOT_FOUND") throw error;
++			}
++			if (installed) return loadSourceSherpaRuntime(import.meta.url);
++		}
+ 		const runtimeDir = await ensureRuntimeInstalled({
+ 			runtimeDir: getSherpaRuntimeDir(),
+ 			install: { dependencies: { [SHERPA_PACKAGE]: getSherpaVersionSpec() } },
+diff --git a/src/subprocess/worker-runtime.ts b/src/subprocess/worker-runtime.ts
+index ba2ffa13b68babb5aeeebbcc34c3c8431e1aada2..c941d802862f12230a0750377a10e05648430fc6 100644
+--- a/src/subprocess/worker-runtime.ts
++++ b/src/subprocess/worker-runtime.ts
+@@ -451,10 +451,18 @@ export function loadTransformersRuntime<T extends ConfigurableTransformers, K>(
+ ): Promise<T> {
+ 	return holder.load(async () => {
+ 		if (!isCompiledBinary()) {
+-			const entry = sourceRequire.resolve(TRANSFORMERS_PACKAGE);
+-			return attachTransformersRuntimeMetadata(configureTransformers(sourceRequire(entry) as T), {
+-				__ompTransformersEntry: entry,
+-			});
++			let entry: string | undefined;
++			try {
++				entry = sourceRequire.resolve(TRANSFORMERS_PACKAGE);
++			} catch (error) {
++				const code = (error as NodeJS.ErrnoException).code;
++				if (code !== "MODULE_NOT_FOUND" && code !== "ERR_MODULE_NOT_FOUND") throw error;
++			}
++			if (entry) {
++				return attachTransformersRuntimeMetadata(configureTransformers(sourceRequire(entry) as T), {
++					__ompTransformersEntry: entry,
++				});
++			}
+ 		}
+ 		const installedDir = await ensureRuntimeInstalled({
+ 			runtimeDir: runtimeDir(),
+diff --git a/src/task/agents.ts b/src/task/agents.ts
+index 496f64d91dd8a78af8b9975e92c3273b4e9ddcf9..5df65c2fbb48d1d962eed5586562abe8165a9c36 100644
+--- a/src/task/agents.ts
++++ b/src/task/agents.ts
+@@ -3,6 +3,7 @@
+  *
+  * Agents are embedded at build time via Bun's import with { type: "text" }.
+  */
++import { createHash } from "node:crypto";
+ import { Effort } from "@oh-my-pi/pi-ai";
+ import { parseFrontmatter, prompt } from "@oh-my-pi/pi-utils";
+ import { parseAgentFields } from "../discovery/helpers";
+@@ -118,6 +119,8 @@ export function parseAgent(
+ 		systemPrompt: body,
+ 		source,
+ 		filePath,
++		content,
++		revision: createHash("sha256").update(content).digest("hex"),
+ 	};
+ }
+ 
+diff --git a/src/task/discovery.ts b/src/task/discovery.ts
+index caf5474bbc3687e214705d09625d86835ec792de..2acf9eb70f23c0dc0f5b8ef2a3b870032b6f730f 100644
+--- a/src/task/discovery.ts
++++ b/src/task/discovery.ts
+@@ -35,13 +35,21 @@ const TASK_AGENT_CONFIG_SOURCE = ".omp";
+ export interface DiscoveryResult {
+ 	agents: AgentDefinition[];
+ 	projectAgentsDir: string | null;
++	diagnostics?: Array<{ path: string; message: string }>;
+ }
+ 
+ /**
+  * Load agents from a directory.
+  */
+-async function loadAgentsFromDir(dir: string, source: AgentSource): Promise<AgentDefinition[]> {
+-	const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
++async function loadAgentsFromDir(
++	dir: string,
++	source: AgentSource,
++	diagnostics: NonNullable<DiscoveryResult["diagnostics"]>,
++): Promise<AgentDefinition[]> {
++	const entries = await fs.readdir(dir, { withFileTypes: true }).catch(error => {
++		if (error.code !== "ENOENT") diagnostics.push({ path: dir, message: String(error.message ?? error) });
++		return [];
++	});
+ 	const files = entries
+ 		.filter(entry => (entry.isFile() || entry.isSymbolicLink()) && entry.name.endsWith(".md"))
+ 		.sort((a, b) => a.name.localeCompare(b.name))
+@@ -49,9 +57,10 @@ async function loadAgentsFromDir(dir: string, source: AgentSource): Promise<Agen
+ 			const filePath = path.join(dir, file.name);
+ 			return fs
+ 				.readFile(filePath, "utf-8")
+-				.then(content => parseAgent(filePath, content, source, "warn"))
++				.then(content => parseAgent(filePath, content, source))
+ 				.catch(error => {
+ 					logger.warn("Failed to read agent file", { filePath, error });
++					diagnostics.push({ path: filePath, message: String(error.message ?? error) });
+ 					return null;
+ 				});
+ 		});
+@@ -121,7 +130,8 @@ export async function discoverAgents(
+ 	}
+ 
+ 	const seen = new Set<string>();
+-	const loadedAgents = (await Promise.all(orderedDirs.map(({ dir, source }) => loadAgentsFromDir(dir, source))))
++	const diagnostics: NonNullable<DiscoveryResult["diagnostics"]> = [];
++	const loadedAgents = (await Promise.all(orderedDirs.map(({ dir, source }) => loadAgentsFromDir(dir, source, diagnostics))))
+ 		.flat()
+ 		.filter(agent => {
+ 			if (seen.has(agent.name)) return false;
+@@ -137,7 +147,7 @@ export async function discoverAgents(
+ 
+ 	const projectAgentsDir = projectDirs.length > 0 ? projectDirs[0].path : null;
+ 
+-	return { agents: [...loadedAgents, ...bundledAgents], projectAgentsDir };
++	return { agents: [...loadedAgents, ...bundledAgents], projectAgentsDir, diagnostics };
+ }
+ 
+ /**
+diff --git a/src/task/executor.ts b/src/task/executor.ts
+index 405197a3c4a879686c6e899041355f1482f582ab..0b65908b754d7da862216c43cb49538720f9b344 100644
+--- a/src/task/executor.ts
++++ b/src/task/executor.ts
+@@ -1,3 +1,4 @@
++import type { HistoricalModelSelection } from "../session/model-usage";
+ /**
+  * In-process execution for subagents.
+  *
+@@ -21,6 +22,7 @@ import {
+ 	resolveAgentPrewalkPattern,
+ 	resolveConfiguredModelPatterns,
+ 	resolveExplicitModelRole,
++	resolveAgentModelSelection,
+ 	resolveModelOverride,
+ 	resolveModelOverrideWithAuthFallback,
+ } from "../config/model-resolver";
+@@ -419,6 +421,7 @@ export interface ExecutorOptions {
+ 	modelOverride?: string | string[];
+ 	/** Explicit pre-expansion model role alias selected for this run. */
+ 	modelRole?: string;
++	modelSelection?: HistoricalModelSelection;
+ 	/**
+ 	 * Active model selector of the parent session, used as an auth-aware fallback
+ 	 * if the resolved subagent model has no working credentials. See #985.
+@@ -3532,6 +3535,32 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
+ 				outputSchemaMode: options.outputSchemaMode,
+ 				restrictToolNames: restrictToolNames || undefined,
+ 			});
++			// Persist the source that produced this child, never reread the mutable file.
++			// Live and cold revival retain this entry in the native session branch.
++			let historicalSelection = options.modelSelection;
++			if (!historicalSelection) {
++				const selected = resolveAgentModelSelection({
++					requestModel: modelOverride,
++					settingsOverride: settings.get("task.agentModelOverrides")[agent.name],
++					agentModel: agent.model,
++					settings,
++					activeModelPattern: options.parentActiveModelPattern,
++				});
++				historicalSelection = {
++					role: modelRole ?? selected.role ?? null,
++					selection: modelRole || selected.role ? "role" : selected.selection === "inherited" ? "inherited" : "pinned",
++				};
++			}
++			session.sessionManager.appendCustomEntry("gitspace-agent-definition", {
++				version: 1,
++				name: agent.name,
++				source: agent.source,
++				path: agent.filePath ?? null,
++				revision: agent.revision ?? null,
++				content: agent.content ?? null,
++				...historicalSelection,
++			});
++			await session.sessionManager.flush();
+ 
+ 			abortSignal.addEventListener(
+ 				"abort",
+diff --git a/src/task/persisted-revive.ts b/src/task/persisted-revive.ts
+index 5a56eb7024472518d641f0a6ebc1493161db0f89..49d70d81df7fac61a34a94ad9570f2e871a3dc1e 100644
+--- a/src/task/persisted-revive.ts
++++ b/src/task/persisted-revive.ts
+@@ -12,6 +12,7 @@ import { createAgentSession } from "../sdk";
+ import type { AgentSession } from "../session/agent-session";
+ import type { AuthStorage } from "../session/auth-storage";
+ import { SessionManager } from "../session/session-manager";
++import { getHistoricalModelSelection } from "../session/model-usage";
+ import type { EventBus } from "../utils/event-bus";
+ import { attachIrcWakeTurnMonitor, createMCPProxyTools, createSubagentSettings } from "./executor";
+ import type { AgentDefinition } from "./types";
+@@ -116,6 +117,19 @@ export function createPersistedSubagentReviverFactory(
+ 			const reopened = await SessionManager.open(sessionFile, undefined, undefined, {
+ 				suppressBreadcrumb: true,
+ 			});
++			const historicalSelection = getHistoricalModelSelection(reopened);
++			const branch = reopened.getBranch();
++			const lastModelChange = branch.findLast(entry => entry.type === "model_change");
++			const lastModel = lastModelChange?.type === "model_change" ? lastModelChange.model : init.resolvedModel;
++			const currentModelPattern = historicalSelection.selection === "unknown"
++				? persistedModelPattern
++				: historicalSelection.selection === "role" && historicalSelection.role
++					? [formatModelRoleAlias(historicalSelection.role), ...(lastModel ? [lastModel] : [])]
++					: lastModel;
++			const snapshotEntry = branch.findLast(entry => entry.type === "custom" && entry.customType === "gitspace-agent-definition");
++			const snapshot = snapshotEntry?.type === "custom"
++				? snapshotEntry.data as Partial<{ name: string; source: string; path: string; revision: string; content: string }> | undefined
++				: undefined;
+ 			const artifactManager = ctx.session.sessionManager.getArtifactManager();
+ 			if (artifactManager) reopened.adoptArtifactManager(artifactManager);
+ 			// A restricted persisted contract must not consult process-global MCP
+@@ -130,8 +144,8 @@ export function createPersistedSubagentReviverFactory(
+ 				// frames ride the same bus the RPC/collab surfaces subscribed to.
+ 				subagentEventBus: ctx.subagentEventBus,
+ 				modelRegistry: ctx.modelRegistry,
+-				...(persistedModelPattern ? { modelPattern: persistedModelPattern } : {}),
+-				modelPatternAuthFallback: init.resolvedModel,
++				...(currentModelPattern ? { modelPattern: currentModelPattern } : {}),
++				modelPatternAuthFallback: lastModel,
+ 				settings: subagentSettings,
+ 				sessionManager: reopened,
+ 				agentId: ref.id,
+@@ -203,17 +217,21 @@ export function createPersistedSubagentReviverFactory(
+ 			// The internal run-state signal precedes deferrable public `agent_end`,
+ 			// keeping idle-TTL ownership synchronized even while prompts unwind.
+ 			registry.syncSessionStatus(ref.id, session);
+-			// Persisted files predate an agent-source field, so cold-revived frames
+-			// report the runtime-neutral `user` source; name comes from the ref.
++			// Keep loaded provenance from the session, not today's mutable definition.
++			// Legacy files without a snapshot retain their neutral source.
+ 			const wakeAgent: AgentDefinition = {
+-				name: ref.displayName,
++				name: typeof snapshot?.name === "string" ? snapshot.name : init.agent ?? ref.displayName,
+ 				description: "",
+ 				systemPrompt: init.systemPrompt,
+-				source: "user",
++				source: snapshot?.source === "bundled" || snapshot?.source === "project" || snapshot?.source === "user" ? snapshot.source : "user",
++				filePath: typeof snapshot?.path === "string" ? snapshot.path : undefined,
++				revision: typeof snapshot?.revision === "string" ? snapshot.revision : undefined,
++				content: typeof snapshot?.content === "string" ? snapshot.content : undefined,
+ 			};
+ 			attachIrcWakeTurnMonitor(session, {
+ 				id: ref.id,
+ 				agent: wakeAgent,
++				modelRole: historicalSelection.role ?? init.modelRole,
+ 				eventBus: ctx.eventBus,
+ 				subagentEventBus: ctx.subagentEventBus,
+ 				sessionFile,
+diff --git a/src/task/structured-subagent.ts b/src/task/structured-subagent.ts
+index f5ae96904baff7d8a15b8604e327d67953f32471..deda3f7171a483294925a84b2116ec36bac80a0c 100644
+--- a/src/task/structured-subagent.ts
++++ b/src/task/structured-subagent.ts
+@@ -1,3 +1,4 @@
++import type { HistoricalModelSelection } from "../session/model-usage";
+ /**
+  * Shared policy resolution and execution for task and eval subagents.
+  *
+@@ -13,7 +14,7 @@ import type { CustomTool } from "../extensibility/custom-tools/types";
+ import type { LocalProtocolOptions } from "../internal-urls";
+ import { registerArtifactsDir } from "../internal-urls/registry-helpers";
+ import { MCPManager } from "../mcp/manager";
+-import { loadOverallPlanReference } from "../plan-mode/plan-handoff";
++import { defaultPlanReferencePath, loadOverallPlanReference } from "../plan-mode/plan-handoff";
+ import planModeSubagentPrompt from "../prompts/system/plan-mode-subagent.md" with { type: "text" };
+ import subagentUserPromptTemplate from "../prompts/system/subagent-user-prompt.md" with { type: "text" };
+ import { MAIN_AGENT_ID } from "../registry/agent-registry";
+@@ -139,6 +140,7 @@ export interface EffectiveSubagentPolicy {
+ 	modelOverride?: string | string[];
+ 	/** Explicit pre-expansion model role alias selected for this run. */
+ 	modelRole?: string;
++	modelSelection: HistoricalModelSelection;
+ 	parentActiveModelPattern?: string;
+ 	schema: StructuredSubagentSchemaResolution;
+ 	planMode: boolean;
+@@ -309,7 +311,11 @@ export async function resolveEffectiveSubagentPolicy(
+ 	// Role identity and patterns come from one call so they cannot be derived
+ 	// from different sources: the expansion below discards the alias, and the
+ 	// child's inherited retry-fallback chain is keyed off the role.
+-	const { patterns: modelOverride, role: modelRole } = resolveAgentModelSelection(modelResolution);
++	const { patterns: modelOverride, role: modelRole, selection } = resolveAgentModelSelection(modelResolution);
++	const modelSelection: HistoricalModelSelection = {
++		role: modelRole ?? (selection === "inherited" ? request.session.getModelSelection?.().role : undefined) ?? null,
++		selection: selection === "inherited" ? "inherited" : modelRole ? "role" : "pinned",
++	};
+ 	const isolationEnabled = request.session.settings.get("task.isolation.enabled");
+ 	const isIsolated = request.isolation?.requested === true;
+ 	if (isIsolated && !isolationEnabled) {
+@@ -325,6 +331,7 @@ export async function resolveEffectiveSubagentPolicy(
+ 		effectiveAgent,
+ 		modelOverride,
+ 		modelRole,
++		modelSelection,
+ 		parentActiveModelPattern,
+ 		schema,
+ 		planMode,
+@@ -423,6 +430,7 @@ function buildExecutorOptions(
+ 		acquiredAt: request.acquiredAt,
+ 		modelOverride: policy.modelOverride,
+ 		modelRole: policy.modelRole,
++		modelSelection: policy.modelSelection,
+ 		parentActiveModelPattern: policy.parentActiveModelPattern,
+ 		thinkingLevel: policy.effectiveAgent.thinkingLevel,
+ 		effort: request.effort,
+@@ -486,7 +494,7 @@ async function loadPlanReference(
+ 		getArtifactsDir: request.session.getArtifactsDir ?? (() => null),
+ 		getSessionId: request.session.getSessionId ?? (() => null),
+ 	};
+-	return loadOverallPlanReference(request.session.getPlanReferencePath?.() ?? "local://PLAN.md", localProtocolOptions);
++	return loadOverallPlanReference(request.session.getPlanReferencePath?.() ?? defaultPlanReferencePath(localProtocolOptions), localProtocolOptions);
+ }
+ 
+ function buildFailureResult(
+@@ -595,6 +603,13 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
+ 			deferredCleanup = completion;
+ 		};
+ 		baseOptions.planReference = await loadPlanReference(request, policy);
++		// A child may inherit the approved plan, never an unrelated default or an active draft.
++		// Keep this decision in the options used for both initial creation and revival.
++		const inheritedPlanReferencePath = baseOptions.planReference?.path ?? "";
++		baseOptions.localProtocolOptions = {
++			...baseOptions.localProtocolOptions,
++			getDefaultPlanReferencePath: () => inheritedPlanReferencePath,
++		};
+ 		let isolationContext: IsolationContext | null = null;
+ 		if (policy.isIsolated) {
+ 			try {
+diff --git a/src/task/types.ts b/src/task/types.ts
+index b4b5cf87e409c30ec755805ae699ce48150eab5b..841f2b8a8a6de11eddbdacf50096fa1179b32eb2 100644
+--- a/src/task/types.ts
++++ b/src/task/types.ts
+@@ -392,6 +392,9 @@ export interface AgentDefinition {
+ 	advisor?: boolean | string;
+ 	source: AgentSource;
+ 	filePath?: string;
++	/** Exact bytes parsed at discovery; retained across plan transforms and revival. */
++	content?: string;
++	revision?: string;
+ }
+ 
+ /** Details extracted from a subagent `yield` tool call for final-result assembly and task rendering. */
+diff --git a/src/tools/bash.ts b/src/tools/bash.ts
+index 48019f1136e2b5bfa9adfb48c673d946e7f23a30..d50cd7b391fb8e5d54d9cf58cd197758b5229251 100644
+--- a/src/tools/bash.ts
++++ b/src/tools/bash.ts
+@@ -361,6 +361,7 @@ export interface BashToolDetails {
+ 	async?: {
+ 		state: "running" | "completed" | "failed";
+ 		jobId: string;
++		startedAt?: number;
+ 		type: "bash";
+ 	};
+ }
+@@ -805,7 +806,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
+ 		options: { requestedTimeoutSec?: number; notices?: readonly string[] } = {},
+ 	): AgentToolResult<BashToolDetails> {
+ 		const details: BashToolDetails = {
+-			async: { state: "running", jobId, type: "bash" },
++			async: { state: "running", jobId, type: "bash", startedAt: this.session.asyncJobManager?.getJob(jobId)?.startTime },
+ 		};
+ 		if (timeoutSec === undefined) {
+ 			details.timeoutDisabled = true;
+diff --git a/src/tools/eval.ts b/src/tools/eval.ts
+index e380f4dcb0be41cc74d4a651e5c42b990632d366..7516f1d4af7bf99f35cd3448da7f13693e8be7d2 100644
+--- a/src/tools/eval.ts
++++ b/src/tools/eval.ts
+@@ -294,7 +294,12 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
+ 				preludeDocumentation,
+ 			});
+ 		}
+-		return this.#codeModeDescription(base) ?? base;
++		const description = this.#codeModeDescription(base) ?? base;
++		const namespaces = this.session?.localProtocolOptions?.getEvalNamespaces?.() ?? {};
++		const declarations = Object.entries(namespaces)
++			.map(([name, definition]) => `declare const ${name}: ${definition.declaration};`)
++			.join("\n");
++		return declarations ? `${description}\n\nHost SDK namespaces available in JavaScript:\n\`\`\`ts\n${declarations}\n\`\`\`` : description;
+ 	}
+ 
+ 	/**
+@@ -586,7 +591,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
+ 			})),
+ 		};
+ 		if (notice) details.notice ??= notice;
+-		details.async = { state: "running", jobId, type: "eval" };
++		details.async = { state: "running", jobId, type: "eval", startedAt: this.session?.asyncJobManager?.getJob(jobId)?.startTime };
+ 		const lines: string[] = [];
+ 		const trimmedPreview = previewText.trimEnd();
+ 		if (trimmedPreview.length > 0) {
+diff --git a/src/tools/hub/jobs.ts b/src/tools/hub/jobs.ts
+index d38f4ffbe3f15ee9ccc19dd78193c999eb12ecdc..6bad9ca6852625f561cf17109833efc75e8c9001 100644
+--- a/src/tools/hub/jobs.ts
++++ b/src/tools/hub/jobs.ts
+@@ -189,12 +189,14 @@ export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobS
+ 			type: latest.type,
+ 			status: latest.status as JobSnapshot["status"],
+ 			label: latest.label,
++			startedAt: latest.startTime,
++			agentUrlId: current?.agentId ?? latest.id,
+ 			durationMs: Math.max(0, now - latest.startTime),
+ 			...(resolvedModel ? { resolvedModel } : {}),
+ 			...(!resultConsumed && latest.resultText ? { resultText: latest.resultText } : {}),
+ 			...(!resultConsumed && latest.errorText ? { errorText: latest.errorText } : {}),
+ 			...(!resultConsumed && latest.structured
+-				? { structured: latest.structured, agentUrlId: current?.agentId ?? latest.id }
++				? { structured: latest.structured }
+ 				: {}),
+ 		};
+ 	});
+diff --git a/src/tools/hub/launch.ts b/src/tools/hub/launch.ts
+index 355e07e15329c6e815ced811c38eda9d76b3697a..c07fbd04fcca1298ed0db07c753f2478e867e865 100644
+--- a/src/tools/hub/launch.ts
++++ b/src/tools/hub/launch.ts
+@@ -370,6 +370,7 @@ async function toolDetails(result: DaemonRpcResult, params: LaunchParams): Promi
+ 		case "logs":
+ 			return {
+ 				op: "logs",
++				daemon: result.daemon,
+ 				cursor: result.cursor,
+ 				timedOut: result.timedOut,
+ 				state: result.state,
+diff --git a/src/tools/hub/types.ts b/src/tools/hub/types.ts
+index 7110e7a3ac90acb2005011e40726c24e2fee5b1b..4668ecaaa30f102668f9c81958940574758d75de 100644
+--- a/src/tools/hub/types.ts
++++ b/src/tools/hub/types.ts
+@@ -63,6 +63,7 @@ export interface JobSnapshot {
+ 	status: "running" | "completed" | "failed" | "cancelled";
+ 	label: string;
+ 	durationMs: number;
++	startedAt?: number;
+ 	/** Effective task model selector, including an explicit reasoning suffix when configured. */
+ 	resolvedModel?: string;
+ 	resultText?: string;
+diff --git a/src/tools/index.ts b/src/tools/index.ts
+index 798961fe1aad10bc8c954ae05dda56de2f318411..cd8e4951308777ea643a19fcc915cfb4e1ee4509 100644
+--- a/src/tools/index.ts
++++ b/src/tools/index.ts
+@@ -1,3 +1,4 @@
++import type { DirectModelUsage, HistoricalModelSelection } from "../session/model-usage";
+ import type { AgentOptions, AgentTelemetryConfig, AgentTool, AgentToolContext } from "@oh-my-pi/pi-agent-core";
+ import type { EditStore } from "@oh-my-pi/pi-natives";
+ import type { FetchImpl, ImageContent, Model, ServiceTierByFamily, ToolChoice } from "@oh-my-pi/pi-ai";
+@@ -327,6 +328,10 @@ export interface ToolSession {
+ 	getModelString?: () => string | undefined;
+ 	/** Get the current session model string, regardless of how it was chosen */
+ 	getActiveModelString?: () => string | undefined;
++	/** Historical requested selection of the active model, independent of fallback provider. */
++	getModelSelection?: () => HistoricalModelSelection;
++	/** Persist a direct response before extraction or error handling discards it. */
++	recordDirectModelUsage?: (record: DirectModelUsage) => Promise<void>;
+ 	/** Get the current session model object (provider/api capabilities), regardless of how it was chosen. */
+ 	getActiveModel?: () => Model | undefined;
+ 	/** Get the session's live per-family service tiers (undefined = none). Source of truth for subagent `tier.subagent: inherit`. */
+diff --git a/src/tools/plan-mode-guard.ts b/src/tools/plan-mode-guard.ts
+index 7b03befbcfc791a7fbf5a2d31d48aad20edc7465..702c91691b82bcc706f52e67363e618d5092cac6 100644
+--- a/src/tools/plan-mode-guard.ts
++++ b/src/tools/plan-mode-guard.ts
+@@ -136,6 +136,17 @@ export function enforcePlanModeWrite(
+ 	targetPath: string,
+ 	options?: { move?: string; op?: "create" | "update" | "delete" },
+ ): void {
++	const localOptions = planLocalProtocolOptions(session);
++	for (const candidate of [targetPath, options?.move]) {
++		if (!candidate) continue;
++		const normalized = normalizeLocalScheme(unwrapHashlineHeaderPath(candidate));
++		if (!normalized.startsWith(LOCAL_SCHEME_PREFIX)) continue;
++		try {
++			resolveLocalUrlToPath(normalized, localOptions, process.platform, "write");
++		} catch (error) {
++			throw new ToolError(error instanceof Error ? error.message : String(error));
++		}
++	}
+ 	const state = session.getPlanModeState?.();
+ 	if (!state?.enabled) return;
+ 
+diff --git a/dist/types/plan-mode/plan-handoff.d.ts b/dist/types/plan-mode/plan-handoff.d.ts
+--- a/dist/types/plan-mode/plan-handoff.d.ts
++++ b/dist/types/plan-mode/plan-handoff.d.ts
+@@ -1,4 +1,6 @@
+ import { type LocalProtocolOptions } from "../internal-urls/index.js";
++/** A host's plan reference belongs to the same local namespace inherited by its children. */
++export declare function defaultPlanReferencePath(options: LocalProtocolOptions): string;
+ /** The session's active plan, resolved for handoff into a subagent's context. */
+ export interface OverallPlanReference {
+     /** The `local://` reference path (e.g. `local://my-feature.md`), kept for display. */
+diff --git a/dist/types/task/executor.d.ts b/dist/types/task/executor.d.ts
+--- a/dist/types/task/executor.d.ts
++++ b/dist/types/task/executor.d.ts
+@@ -3,6 +3,7 @@
+  *
+  * Runs each subagent on the main thread and forwards AgentEvents for progress tracking.
+  */
++import type { HistoricalModelSelection } from "../session/model-usage.js";
+ import type { AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
+ import type { ServiceTierByFamily } from "@oh-my-pi/pi-ai";
+ import type { Rule } from "../capability/rule.js";
+@@ -109,6 +110,7 @@
+     modelOverride?: string | string[];
+     /** Explicit pre-expansion model role alias selected for this run. */
+     modelRole?: string;
++    modelSelection?: HistoricalModelSelection;
+     /**
+      * Active model selector of the parent session, used as an auth-aware fallback
+      * if the resolved subagent model has no working credentials. See #985.
+diff --git a/dist/types/task/structured-subagent.d.ts b/dist/types/task/structured-subagent.d.ts
+--- a/dist/types/task/structured-subagent.d.ts
++++ b/dist/types/task/structured-subagent.d.ts
+@@ -1,3 +1,4 @@
++import type { HistoricalModelSelection } from "../session/model-usage.js";
+ import type { CustomTool } from "../extensibility/custom-tools/types.js";
+ import type { TaskEffort } from "../thinking.js";
+ import type { ToolSession } from "../tools/index.js";
+@@ -90,6 +91,7 @@
+     modelOverride?: string | string[];
+     /** Explicit pre-expansion model role alias selected for this run. */
+     modelRole?: string;
++    modelSelection: HistoricalModelSelection;
+     parentActiveModelPattern?: string;
+     schema: StructuredSubagentSchemaResolution;
+     planMode: boolean;
+diff --git a/src/session/session-maintenance.ts b/src/session/session-maintenance.ts
+--- a/src/session/session-maintenance.ts
++++ b/src/session/session-maintenance.ts
+@@ -361,6 +361,8 @@
+ 	/** Resolves after an active manual compaction has reconnected the agent subscription. */
+ 	#manualCompactionCleanup: Promise<void> | undefined;
+ 	#autoCompactionAbortController: AbortController | undefined;
++	/** Live work only: an armed speculative result is not an active operation. */
++	readonly #compactionActivity = new Map<symbol | AbortSignal, { label: string; detail: string }>();
+ 	/**
+ 	 * Live tool-loop contexts parked after mid-turn maintenance hit a no-progress
+ 	 * dead end. Membership suppresses the repeated rescue + warning while no cut
+@@ -425,11 +427,11 @@
+ 	}
+ 
+ 	/** Abort and discard any in-flight or armed speculative compaction. */
+-	cancelSpeculation(): void {
++	cancelSpeculation(reason?: unknown): void {
+ 		const run = this.#speculation;
+ 		if (!run) return;
+ 		this.#speculation = undefined;
+-		run.controller.abort();
++		run.controller.abort(reason);
+ 	}
+ 
+ 	/** Assistant timestamp whose post-turn maintenance must be skipped once. */
+@@ -448,6 +450,40 @@
+ 	 */
+ 	#emitLifecycleEvent(event: AgentSessionEvent, detach: boolean): Promise<void> {
+ 		return this.#host.emitSessionEvent(event, detach ? { detachExtensions: true } : undefined);
++	}
++
++	#emitCompactionState(): Promise<void> {
++		let detail: string | undefined;
++		for (const operation of this.#compactionActivity.values()) detail = operation.detail;
++		return this.#emitLifecycleEvent({
++			type: "compaction_state",
++			active: this.#compactionActivity.size > 0,
++			turnActive: this.#host.agent.state.isStreaming,
++			...(detail === undefined ? {} : { detail }),
++		}, true);
++	}
++
++	#startCompactionActivity(operation: symbol | AbortSignal, label: string): Promise<void> {
++		this.#compactionActivity.set(operation, { label, detail: label });
++		return this.#emitCompactionState();
++	}
++
++	async #progressCompactionActivity(
++		operation: symbol | AbortSignal,
++		model: Model,
++		attempt?: number,
++		delayMs?: number,
++	): Promise<void> {
++		const activity = this.#compactionActivity.get(operation);
++		if (!activity) return;
++		activity.detail = `${activity.label} · ${model.provider}/${model.id}${
++			attempt === undefined ? "" : ` · attempt ${attempt}`
++		}${delayMs === undefined ? "" : ` · retrying in ${Math.ceil(delayMs / 1000)}s`}`;
++		await this.#emitCompactionState();
++	}
++
++	async #endCompactionActivity(operation: symbol | AbortSignal): Promise<void> {
++		if (this.#compactionActivity.delete(operation)) await this.#emitCompactionState();
+ 	}
+ 	/**
+ 	 * Append plan-read protection to a prune/shake config so the active plan
+@@ -774,6 +810,7 @@
+ 
+ 		try {
+ 			if (ownsCompactionController) {
++				await this.#startCompactionActivity(compactionAbortController.signal, "Manual compaction");
+ 				this.#host.disconnectFromAgent();
+ 				await this.#host.abort({ goalReason: "internal", preserveCompaction: true });
+ 			}
+@@ -816,6 +853,7 @@
+ 			if (!selectedMethod) {
+ 				throw new Error("No configured compaction method can run manually.");
+ 			}
++			await this.#startCompactionActivity(compactionAbortController.signal, `Manual ${selectedMethod}`);
+ 
+ 			const effectiveSettings = resolveMethodSettings(compactionSettings, selectedMethod);
+ 			const availableModels = this.#host.modelRegistry.getAvailable();
+@@ -1140,6 +1178,7 @@
+ 					this.#manualCompactionCleanup = undefined;
+ 				}
+ 				manualCompactionCleanup?.resolve();
++				await this.#endCompactionActivity(compactionAbortController.signal);
+ 			}
+ 		}
+ 	}
+@@ -1178,6 +1217,7 @@
+ 		const manualCompactionCleanup = this.#manualCompactionCleanup;
+ 		this.#compactionAbortController?.abort(reason);
+ 		this.#autoCompactionAbortController?.abort(reason);
++		this.cancelSpeculation(reason);
+ 		this.#host.abortHandoff();
+ 		return manualCompactionCleanup;
+ 	}
+@@ -1289,13 +1329,16 @@
+ 		const controller = new AbortController();
+ 		const run: SpeculationRun = { controller, promise: Promise.resolve(), contextTokensAtStart: contextTokens };
+ 		this.#speculation = run;
+-		run.promise = this.#runSpeculation(run, method, contextTokens).catch(error => {
+-			logger.debug("Speculative compaction failed", {
+-				method,
+-				error: error instanceof Error ? error.message : String(error),
+-			});
+-			if (this.#speculation === run) this.#speculation = undefined;
+-		});
++		run.promise = this.#startCompactionActivity(controller.signal, `Background ${method}`)
++			.then(() => this.#runSpeculation(run, method, contextTokens))
++			.catch(error => {
++				logger.debug("Speculative compaction failed", {
++					method,
++					error: error instanceof Error ? error.message : String(error),
++				});
++				if (this.#speculation === run) this.#speculation = undefined;
++			})
++			.finally(() => this.#endCompactionActivity(controller.signal));
+ 	}
+ 
+ 	/**
+@@ -2295,6 +2338,7 @@
+ 			}
+ 
+ 			try {
++				await this.#progressCompactionActivity(signal, candidate);
+ 				return await compact(
+ 					this.#host.obfuscatePreparationForProvider(preparation),
+ 					candidate,
+@@ -2973,6 +3017,22 @@
+ 			fallbackFromShake?: boolean;
+ 		} = {},
+ 	): Promise<CompactionCheckResult> {
++		const operation = Symbol("auto-compaction");
++		try {
++			return await this.#runAutoCompaction(reason, willRetry, deferred, allowDefer, options, operation);
++		} finally {
++			await this.#endCompactionActivity(operation);
++		}
++	}
++
++	async #runAutoCompaction(
++		reason: "overflow" | "threshold" | "idle" | "incomplete",
++		willRetry: boolean,
++		deferred: boolean,
++		allowDefer: boolean,
++		options: NonNullable<Parameters<SessionMaintenance["runAutoCompaction"]>[4]>,
++		operation: symbol,
++	): Promise<CompactionCheckResult> {
+ 		const compactionSettings = this.#host.settings.getGroup("compaction");
+ 		if (reason !== "idle" && !compactionSettings.enabled) return COMPACTION_CHECK_NONE;
+ 		const methods = resolveCompactionMethodOrder(compactionSettings.methodOrder);
+@@ -3018,6 +3078,7 @@
+ 		// context, resume from the next configured method instead of hardcoding a
+ 		// context-full summary.
+ 		if (method === "shake" && !armedSpec) {
++			await this.#startCompactionActivity(operation, `Automatic ${method}`);
+ 			const outcome = await this.#runAutoShake(
+ 				reason,
+ 				willRetry,
+@@ -3029,11 +3090,11 @@
+ 				options.detachPostCommit === true,
+ 			);
+ 			if (outcome !== "fallback") return outcome;
+-			return await this.runAutoCompaction(reason, willRetry, deferred, allowDefer, {
++			return await this.#runAutoCompaction(reason, willRetry, deferred, allowDefer, {
+ 				...options,
+ 				methodIndex: methodIndex + 1,
+ 				fallbackFromShake: true,
+-			});
++			}, operation);
+ 		}
+ 		// "overflow" and "incomplete" force inline execution because they are recovery
+ 		// paths the caller wants resolved before scheduling the next turn. "idle" is
+@@ -3082,6 +3143,7 @@
+ 
+ 		let compactionCommitted = false;
+ 		try {
++			await this.#startCompactionActivity(operation, `Automatic ${method}`);
+ 			// Emit start AFTER the controller is installed so isCompacting is already true
+ 			// for any listener — and for input routed during this emit's event-loop yield:
+ 			// a message typed as the compaction loader appears must land in the compaction
+@@ -3578,6 +3640,7 @@
+ 					let attempt = 0;
+ 					while (true) {
+ 						try {
++							await this.#progressCompactionActivity(operation, candidate, attempt + 1);
+ 							compactResult = await compact(
+ 								this.#host.obfuscatePreparationForProvider(preparation),
+ 								candidate,
+@@ -3701,6 +3764,7 @@
+ 								error: message,
+ 								model: `${candidate.provider}/${candidate.id}`,
+ 							});
++							await this.#progressCompactionActivity(operation, candidate, attempt + 1, delayMs);
+ 							await scheduler.wait(delayMs, { signal: autoCompactionSignal });
+ 						}
+ 					}
+@@ -3786,10 +3850,10 @@
+ 					},
+ 					options.detachPostCommit === true,
+ 				);
+-				return await this.runAutoCompaction(reason, willRetry, deferred, allowDefer, {
++				return await this.#runAutoCompaction(reason, willRetry, deferred, allowDefer, {
+ 					...options,
+ 					methodIndex: methodIndex + 1,
+-				});
++				}, operation);
+ 			}
+ 			await this.#emitLifecycleEvent(
+ 				{
+diff --git a/src/session/agent-session-events.ts b/src/session/agent-session-events.ts
+--- a/src/session/agent-session-events.ts
++++ b/src/session/agent-session-events.ts
+@@ -15,6 +15,13 @@
+ 			/** False when an async delivery will resume the session before its true final settle. */
+ 			isTerminal?: boolean;
+ 	  })
++	| {
++			/** Authoritative live maintenance snapshot, including speculative work but not armed results. */
++			type: "compaction_state";
++			active: boolean;
++			turnActive: boolean;
++			detail?: string;
++	  }
+ 	| {
+ 			type: "auto_compaction_start";
+ 			reason: "threshold" | "overflow" | "idle" | "incomplete";
+diff --git a/dist/types/session/agent-session-events.d.ts b/dist/types/session/agent-session-events.d.ts
+--- a/dist/types/session/agent-session-events.d.ts
++++ b/dist/types/session/agent-session-events.d.ts
+@@ -16,6 +16,12 @@
+     /** False when an async delivery will resume the session before its true final settle. */
+     isTerminal?: boolean;
+ }) | {
++    /** Authoritative live maintenance snapshot, including speculative work but not armed results. */
++    type: "compaction_state";
++    active: boolean;
++    turnActive: boolean;
++    detail?: string;
++} | {
+     type: "auto_compaction_start";
+     reason: "threshold" | "overflow" | "idle" | "incomplete";
+     action: "context-full" | "remote" | "handoff" | "shake" | "snapcompact";
+diff --git a/dist/types/session/session-maintenance.d.ts b/dist/types/session/session-maintenance.d.ts
+--- a/dist/types/session/session-maintenance.d.ts
++++ b/dist/types/session/session-maintenance.d.ts
+@@ -146,7 +146,7 @@
+     /** Completion of the current speculative pass, used to resume maintenance skipped during its handoff. */
+     get speculationCompletion(): Promise<void> | undefined;
+     /** Abort and discard any in-flight or armed speculative compaction. */
+-    cancelSpeculation(): void;
++    cancelSpeculation(reason?: unknown): void;
+     /** Assistant timestamp whose post-turn maintenance must be skipped once. */
+     get skipPostTurnMaintenanceAssistantTimestamp(): number | undefined;
+     set skipPostTurnMaintenanceAssistantTimestamp(timestamp: number | undefined);

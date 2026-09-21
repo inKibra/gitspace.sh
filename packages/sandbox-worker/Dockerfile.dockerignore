@@ -1,0 +1,10 @@
+.git
+.gitspace
+node_modules
+**/node_modules
+web
+src
+docs
+coverage
+dist
+**/dist

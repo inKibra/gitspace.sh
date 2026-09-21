@@ -1,0 +1,919 @@
+diff --git a/crates/walgit-server/src/smart.rs b/crates/walgit-server/src/smart.rs
+index 4659606..59853ae 100644
+--- a/crates/walgit-server/src/smart.rs
++++ b/crates/walgit-server/src/smart.rs
+@@ -1772,7 +1772,7 @@ fn git_err(e: walgit_git::GitError) -> ApiError {
+     ApiError::Internal(format!("git: {e}"))
+ }
+ pub(crate) fn wal_err(e: walgit_wal::WalError) -> ApiError {
+-    match &e {
++    match e.root() {
+         walgit_wal::WalError::NotFound => ApiError::NotFound(e.to_string()),
+         walgit_wal::WalError::TooLarge { .. } => ApiError::ServiceUnavailable(e.to_string()),
+         // A store call that timed out / was throttled: fail fast, let the
+@@ -1783,6 +1783,33 @@ pub(crate) fn wal_err(e: walgit_wal::WalError) -> ApiError {
+         _ => ApiError::Internal(format!("wal: {e}")),
+     }
+ }
++
++#[cfg(test)]
++mod wal_error_tests {
++    use super::*;
++
++    #[test]
++    fn shared_upload_failure_remains_service_unavailable() {
++        let source = walgit_wal::WalError::Store(walgit_store::StoreError::retryable(
++            std::io::Error::new(std::io::ErrorKind::TimedOut, "upload timed out"),
++        ));
++        let error = walgit_wal::WalError::Shared {
++            message: source.to_string().into(),
++            source: std::sync::Arc::new(source),
++        };
++        assert!(matches!(wal_err(error), ApiError::ServiceUnavailable(_)));
++    }
++
++    #[test]
++    fn shared_corruption_remains_internal() {
++        let source = walgit_wal::WalError::Corrupt("invalid manifest".into());
++        let error = walgit_wal::WalError::Shared {
++            message: source.to_string().into(),
++            source: std::sync::Arc::new(source),
++        };
++        assert!(matches!(wal_err(error), ApiError::Internal(_)));
++    }
++}
+ fn bundle_err(e: walgit_bundle::BundleError) -> ApiError {
+     ApiError::Internal(format!("bundle: {e}"))
+ }
+diff --git a/crates/walgit-store/src/s3.rs b/crates/walgit-store/src/s3.rs
+index d788cc2..518a539 100644
+--- a/crates/walgit-store/src/s3.rs
++++ b/crates/walgit-store/src/s3.rs
+@@ -28,14 +28,10 @@
+ //!
+ //! ## Multipart upload
+ //!
+-//! Objects above `cfg.multipart_threshold` use `CreateMultipartUpload` +
+-//! `UploadPart` + `CompleteMultipartUpload`. `CreateMultipartUpload` does NOT
+-//! support `If-None-Match`/`If-Match` in the S3 API, so multipart is only
+-//! used for `PutMode::Overwrite`. For walgit's immutable pack objects
+-//! (`PutMode::Create`) we use single-shot PUT when the object is large,
+-//! accepting the (tiny) risk of concurrent create races. CAS-rewritten
+-//! objects (manifests, leases, bundle lists) are always small → single-shot
+-//! PUT with conditional headers.
++//! Objects above `cfg.multipart_threshold` use multipart for Create and Overwrite.
++//! Create applies `If-None-Match: *` at completion, not at initiation.
++//! Two parts upload concurrently, bounding memory and the size of each retry.
++//! CAS updates retain single-shot PUT with their conditional headers.
+ //!
+ //! ## rustfs compatibility (tested with rustfs/rustfs:latest)
+ //!
+@@ -291,19 +287,196 @@ where
+             .is_some_and(|r| is_transient_status(r.status().as_u16()))
+ }
+ 
++/// Classify opaque connector/TLS errors without ever copying their text into
++/// diagnostics. Only inspect a bounded prefix; unknown wording stays redacted.
++fn safe_transport_label(error: &(dyn std::error::Error + 'static)) -> &'static str {
++    use std::fmt::Write;
++    struct Prefix(String);
++    impl std::fmt::Write for Prefix {
++        fn write_str(&mut self, text: &str) -> std::fmt::Result {
++            let mut end = text.len().min(512 - self.0.len());
++            while !text.is_char_boundary(end) {
++                end -= 1;
++            }
++            self.0.push_str(&text[..end]);
++            if end < text.len() {
++                Err(std::fmt::Error)
++            } else {
++                Ok(())
++            }
++        }
++    }
++    let mut prefix = Prefix(String::new());
++    let _ = write!(prefix, "{error}");
++    prefix.0.make_ascii_lowercase();
++    let text = prefix.0.as_str();
++    if [
++        "bad record mac",
++        "badrecordmac",
++        "decrypt error",
++        "decrypterror",
++        "cannot decrypt peer's message",
++    ]
++    .iter()
++    .any(|phrase| text.contains(phrase))
++    {
++        "tls_decrypt_or_bad_record_mac"
++    } else if [
++        "invalid peer certificate",
++        "invalid certificate",
++        "certificate verify failed",
++        "unknown issuer",
++        "unknownissuer",
++        "certificate has expired",
++    ]
++    .iter()
++    .any(|phrase| text.contains(phrase))
++    {
++        "tls_certificate_validation"
++    } else if [
++        "dns error",
++        "failed to lookup address",
++        "name or service not known",
++        "temporary failure in name resolution",
++    ]
++    .iter()
++    .any(|phrase| text.contains(phrase))
++    {
++        "dns_resolution"
++    } else if text.contains("connection reset") {
++        "connection_reset"
++    } else if [
++        "connection closed",
++        "connection was closed",
++        "connection is closed",
++        "connection closed before message completed",
++        "unexpected eof",
++    ]
++    .iter()
++    .any(|phrase| text.contains(phrase))
++    {
++        "connection_closed"
++    } else if text.contains("broken pipe") {
++        "broken_pipe"
++    } else if text.contains("timed out") {
++        "timeout"
++    } else {
++        "redacted"
++    }
++}
++
++/// Only emit typed, allowlisted diagnostics. Display/Debug on a transport source
++/// can contain signed URLs, headers, credentials, or response bodies, so even
++/// "sanitized" free-form source text is deliberately excluded.
++fn safe_source_chain(error: &(dyn std::error::Error + 'static)) -> String {
++    use std::fmt::Write;
++    const MAX_DEPTH: usize = 12;
++    let mut details = String::new();
++    let mut source = error.source();
++    for depth in 0..MAX_DEPTH {
++        let Some(error) = source else { return details };
++        if let Some(io) = error.downcast_ref::<std::io::Error>() {
++            // ErrorKind's Debug is a standard-library enum, not source text.
++            let _ = write!(details, "; cause[{depth}]=io::{:?}", io.kind());
++            if let Some(code) = io.raw_os_error() {
++                let _ = write!(details, "(os_code={code})");
++            }
++            let label = safe_transport_label(error);
++            if label != "redacted" {
++                let _ = write!(details, "({label})");
++            }
++        } else {
++            let _ = write!(details, "; cause[{depth}]={}", safe_transport_label(error));
++        }
++        source = error.source();
++    }
++    if source.is_some() {
++        details.push_str("; causes_truncated");
++    }
++    details
++}
++
++fn safe_sdk_details<E>(err: &aws_sdk_s3::error::SdkError<E>) -> String
++where
++    E: aws_sdk_s3::error::ProvideErrorMetadata + std::error::Error + Send + Sync + 'static,
++{
++    use aws_sdk_s3::error::SdkError;
++    use std::fmt::Write;
++    let kind = match err {
++        SdkError::DispatchFailure(failure) if failure.is_timeout() => "dispatch_timeout",
++        SdkError::DispatchFailure(failure) if failure.is_io() => "dispatch_io",
++        SdkError::DispatchFailure(failure) if failure.is_user() => "dispatch_user",
++        SdkError::DispatchFailure(_) => "dispatch_other",
++        SdkError::TimeoutError(_) => "timeout",
++        SdkError::ConstructionFailure(_) => "construction",
++        SdkError::ResponseError(_) => "response",
++        SdkError::ServiceError(_) => "service",
++        _ => "unknown",
++    };
++    let mut details = kind.to_owned();
++    if let Some(response) = err.raw_response() {
++        let _ = write!(details, "; http_status={}", response.status().as_u16());
++    }
++    if let Some(code) = err_code(err) {
++        // Metadata comes from the remote server, not a trusted enum.
++        let code = match code {
++            "SlowDown"
++            | "RequestLimitExceeded"
++            | "ThrottlingException"
++            | "TooManyRequests"
++            | "InternalError"
++            | "ServiceUnavailable"
++            | "RequestTimeout"
++            | "AccessDenied"
++            | "NoSuchBucket"
++            | "NoSuchKey"
++            | "PreconditionFailed"
++            | "ConditionalRequestConflict"
++            | "InvalidAccessKeyId"
++            | "EntityTooLarge" => code,
++            _ => "unrecognized",
++        };
++        let _ = write!(details, "; service_code={code}");
++    }
++    details.push_str(&safe_source_chain(err));
++    details
++}
++
+ /// Wrap an SDK failure, keeping the retryable/permanent distinction that
+ /// `StoreError::is_retryable` is read for.
+ fn classify_error<E>(context: &str, err: &aws_sdk_s3::error::SdkError<E>) -> StoreError
+ where
+     E: aws_sdk_s3::error::ProvideErrorMetadata + std::error::Error + Send + Sync + 'static,
+ {
++    let details = safe_sdk_details(err);
+     if is_retryable(err) {
+-        StoreError::Retryable(anyhow::anyhow!("{context}: {err}"))
++        StoreError::Retryable(anyhow::anyhow!("{context}: {details}"))
+     } else {
+-        StoreError::Other(anyhow::anyhow!("{context}: {err}"))
++        StoreError::Other(anyhow::anyhow!("{context}: {details}"))
+     }
+ }
+ 
++fn classify_part_error<E>(
++    context: &str,
++    number: i32,
++    bytes: u64,
++    started: std::time::Instant,
++    err: &aws_sdk_s3::error::SdkError<E>,
++) -> StoreError
++where
++    E: aws_sdk_s3::error::ProvideErrorMetadata + std::error::Error + Send + Sync + 'static,
++{
++    // SdkError exposes no executed-attempt count. This duration covers the SDK
++    // call, including its retries; it is not a single-attempt latency.
++    classify_error(
++        &format!(
++            "{context}: part={number} bytes={bytes} elapsed_ms={}",
++            started.elapsed().as_millis()
++        ),
++        err,
++    )
++}
++
+ fn classify_put_error(
+     key: &str,
+     err: &aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::put_object::PutObjectError>,
+@@ -369,11 +542,9 @@ impl ObjectStore for S3Store {
+     async fn put(&self, key: &str, body: PutBody, opts: PutOptions) -> Result<ObjectMeta> {
+         let (s3_body, len) = body_to_s3(body).await?;
+ 
+-        // Multipart only for Overwrite (CreateMultipartUpload has no
+-        // conditional header support in the S3 API). Create/Update always
+-        // use single-shot PUT.
++        // Conditional creation is enforced at completion. CAS updates stay single PUT.
+         let use_multipart =
+-            len > self.multipart_threshold && matches!(opts.mode, PutMode::Overwrite);
++            len > self.multipart_threshold && !matches!(opts.mode, PutMode::Update(_));
+ 
+         if use_multipart {
+             return self.multipart_put(key, s3_body, len, &opts).await;
+@@ -694,6 +865,7 @@ impl ObjectStore for S3Store {
+                     // Copy a range of this one source.
+                     let len = run.min(COPY_PART);
+                     let from = pos - src_start;
++                    let started = std::time::Instant::now();
+                     let part = self
+                         .client
+                         .upload_part_copy()
+@@ -709,7 +881,15 @@ impl ObjectStore for S3Store {
+                         .copy_source_range(format!("bytes={from}-{}", from + len - 1))
+                         .send()
+                         .await
+-                        .map_err(|e| classify_error("s3 upload part copy", &e))?;
++                        .map_err(|e| {
++                            classify_part_error(
++                                "s3 upload part copy",
++                                part_number,
++                                len,
++                                started,
++                                &e,
++                            )
++                        })?;
+                     let etag = part
+                         .copy_part_result()
+                         .and_then(|r| r.e_tag())
+@@ -750,6 +930,7 @@ impl ObjectStore for S3Store {
+                         p += take;
+                     }
+                     let len = buf.len() as u64;
++                    let started = std::time::Instant::now();
+                     let part = self
+                         .client
+                         .upload_part()
+@@ -761,7 +942,9 @@ impl ObjectStore for S3Store {
+                         .content_length(i64::try_from(len).map_err(StoreError::other)?)
+                         .send()
+                         .await
+-                        .map_err(|e| classify_error("s3 upload part", &e))?;
++                        .map_err(|e| {
++                            classify_part_error("s3 upload part", part_number, len, started, &e)
++                        })?;
+                     parts.push(
+                         aws_sdk_s3::types::CompletedPart::builder()
+                             .e_tag(part.e_tag().unwrap_or("").to_owned())
+@@ -832,7 +1015,7 @@ struct ListState {
+     buffer: std::vec::IntoIter<Result<ObjectMeta>>,
+ }
+ 
+-// ---- multipart upload (Overwrite only) ---------------------------------
++// ---- bounded multipart upload -----------------------------------------
+ 
+ impl S3Store {
+     async fn multipart_put(
+@@ -842,6 +1025,7 @@ impl S3Store {
+         len: u64,
+         opts: &PutOptions,
+     ) -> Result<ObjectMeta> {
++        use futures::TryStreamExt;
+         use tokio::io::AsyncReadExt;
+ 
+         let mut create = self
+@@ -867,91 +1051,92 @@ impl S3Store {
+             .to_owned();
+ 
+         let part_size = self.multipart_part_size;
+-        let mut part_number = 1i32;
+-        let mut uploaded_parts: Vec<aws_sdk_s3::types::CompletedPart> = Vec::new();
+-        let mut remaining = len;
+-
+-        let mut reader = body.into_async_read();
+-
+-        while remaining > 0 {
+-            let this_part = part_size.min(remaining);
+-            let to_read = usize::try_from(this_part).map_err(StoreError::other)?;
+-            let mut buf = vec![0u8; to_read];
+-            let mut read_total = 0;
+-
+-            while read_total < to_read {
+-                let n = match reader
+-                    .read(buf.get_mut(read_total..).ok_or_else(|| {
+-                        StoreError::other(anyhow::anyhow!("multipart read exceeded buffer"))
+-                    })?)
+-                    .await
+-                {
+-                    Ok(n) => n,
+-                    Err(e) => {
+-                        let _ = self.abort_multipart(key, &upload_id).await;
+-                        return Err(StoreError::other(anyhow::anyhow!("multipart read: {e}")));
+-                    }
+-                };
+-                if n == 0 {
+-                    break;
++        let parts = futures::stream::try_unfold(
++            (body.into_async_read(), len, 1i32),
++            move |(mut reader, remaining, number)| async move {
++                if remaining == 0 {
++                    return Ok::<_, StoreError>(None);
+                 }
+-                read_total += n;
++                let size = remaining.min(part_size);
++                let mut buf = vec![0u8; usize::try_from(size).map_err(StoreError::other)?];
++                reader
++                    .read_exact(&mut buf)
++                    .await
++                    .map_err(StoreError::other)?;
++                Ok(Some((
++                    (number, Bytes::from(buf)),
++                    (reader, remaining - size, number + 1),
++                )))
++            },
++        )
++        .map_ok(|(number, bytes)| {
++            let upload_id = &upload_id;
++            async move {
++                let size = bytes.len();
++                let started = std::time::Instant::now();
++                let part = self
++                    .client
++                    .upload_part()
++                    .bucket(&self.bucket)
++                    .key(key)
++                    .upload_id(upload_id)
++                    .part_number(number)
++                    .content_length(i64::try_from(size).map_err(StoreError::other)?)
++                    .body(S3ByteStream::from(bytes))
++                    .send()
++                    .await
++                    .map_err(|error| {
++                        classify_part_error("s3 upload part", number, size as u64, started, &error)
++                    })?;
++                let etag = part
++                    .e_tag()
++                    .ok_or_else(|| StoreError::other(anyhow::anyhow!("no ETag from UploadPart")))?;
++                Ok(aws_sdk_s3::types::CompletedPart::builder()
++                    .part_number(number)
++                    .e_tag(etag)
++                    .build())
+             }
+-
+-            if read_total == 0 {
+-                break;
++        })
++        .try_buffer_unordered(2)
++        .try_collect::<Vec<_>>()
++        .await;
++        let mut parts = match parts {
++            Ok(parts) => parts,
++            Err(error) => {
++                let _ = self.abort_multipart(key, &upload_id).await;
++                return Err(error);
+             }
+-            buf.truncate(read_total);
+-            let actual = read_total as u64;
+-
+-            let part = match self
+-                .client
+-                .upload_part()
+-                .bucket(&self.bucket)
+-                .key(key)
+-                .upload_id(&upload_id)
+-                .part_number(part_number)
+-                .body(S3ByteStream::from(Bytes::from(buf)))
+-                .content_length(i64::try_from(actual).map_err(StoreError::other)?)
+-                .send()
+-                .await
+-            {
+-                Ok(p) => p,
+-                Err(e) => {
+-                    let _ = self.abort_multipart(key, &upload_id).await;
+-                    return Err(classify_error("s3 upload part", &e));
+-                }
+-            };
+-
+-            let etag = part.e_tag().unwrap_or("").to_owned();
+-            uploaded_parts.push(
+-                aws_sdk_s3::types::CompletedPart::builder()
+-                    .e_tag(etag)
+-                    .part_number(part_number)
+-                    .build(),
+-            );
+-
+-            remaining -= actual;
+-            part_number += 1;
+-        }
++        };
++        // Uploads finish out of order; completion must describe the original byte order.
++        parts.sort_unstable_by_key(|part| part.part_number());
+ 
+         let completed = aws_sdk_s3::types::CompletedMultipartUpload::builder()
+-            .set_parts(Some(uploaded_parts))
++            .set_parts(Some(parts))
+             .build();
+ 
+-        let resp = match self
++        let mut complete = self
+             .client
+             .complete_multipart_upload()
+             .bucket(&self.bucket)
+             .key(key)
+             .upload_id(&upload_id)
+-            .multipart_upload(completed)
+-            .send()
+-            .await
+-        {
++            .multipart_upload(completed);
++        if matches!(opts.mode, PutMode::Create) {
++            complete = complete.if_none_match("*");
++        }
++        let resp = match complete.send().await {
+             Ok(r) => r,
+             Err(e) => {
+                 let _ = self.abort_multipart(key, &upload_id).await;
++                if matches!(
++                    err_code(&e),
++                    Some("PreconditionFailed" | "ConditionalRequestConflict")
++                ) {
++                    return Err(StoreError::PreconditionFailed {
++                        key: key.into(),
++                        current: None,
++                    });
++                }
+                 return Err(classify_error("s3 complete multipart", &e));
+             }
+         };
+@@ -994,8 +1179,8 @@ fn static_credentials(
+ // 4. 304 Not Modified: HTTP 304 with ETag header, empty body.
+ // 5. ListObjectsV2: StartAfter, ContinuationToken, IsTruncated/NextToken OK.
+ // 6. DeleteObject: idempotent for absent keys (204).
+-// 7. Multipart: CreateMultipartUpload + UploadPart + CompleteMultipartUpload
+-//    supported. No conditional headers on Create/Complete (same as real S3).
++// 7. Multipart Create requires If-None-Match: * on CompleteMultipartUpload.
++//    Qualify this conditional-completion behavior for the deployed rustfs version.
+ // 8. ETags: quoted, MD5 for single-PUT, compound for multipart. Quotes
+ //    stripped consistently in our Version.
+ // 9. force_path_style: required for rustfs local dev.
+@@ -1097,12 +1282,164 @@ mod tests {
+ 
+     #[tokio::test]
+     async fn an_unreachable_endpoint_is_retryable() {
+-        // Nothing listens on port 1: a dispatch failure, no response at all.
+-        let client = client_for("http://127.0.0.1:1");
+-        assert!(matches!(
+-            classify_put_error("k", &put_error(&client).await),
+-            StoreError::Retryable(_)
++        // Reserve an ephemeral port rather than assuming a system port is unused.
++        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
++        let address = listener.local_addr().unwrap();
++        drop(listener);
++        let client = client_for(&format!("http://{address}"));
++        let error = classify_put_error("k", &put_error(&client).await);
++        assert!(matches!(&error, StoreError::Retryable(_)));
++        let details = error.to_string();
++        assert!(details.contains("dispatch_io"), "{details}");
++        assert!(details.contains("io::ConnectionRefused"), "{details}");
++    }
++
++    #[derive(Debug)]
++    struct PrivateCause {
++        next: Option<Box<dyn std::error::Error + Send + Sync>>,
++    }
++
++    impl std::fmt::Display for PrivateCause {
++        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++            f.write_str(
++                "https://user:SECRET@host/path?X-Amz-Signature=SECRET Authorization: SECRET",
++            )
++        }
++    }
++
++    impl std::error::Error for PrivateCause {
++        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
++            self.next.as_deref().map(|error| error as _)
++        }
++    }
++
++    #[test]
++    fn nested_causes_keep_io_kind_without_private_text() {
++        let error = PrivateCause {
++            next: Some(Box::new(PrivateCause {
++                next: Some(Box::new(std::io::Error::new(
++                    std::io::ErrorKind::ConnectionReset,
++                    "SECRET signed request and upload ID",
++                ))),
++            })),
++        };
++        let details = safe_source_chain(&error);
++        assert!(details.contains("io::ConnectionReset"), "{details}");
++        for private in [
++            "SECRET",
++            "https://",
++            "Signature",
++            "Authorization",
++            "upload ID",
++        ] {
++            assert!(!details.contains(private), "{details}");
++        }
++    }
++
++    #[test]
++    fn nested_tls_failure_is_actionable_without_echoing_credentials() {
++        let error = PrivateCause {
++            next: Some(Box::new(std::io::Error::new(
++                std::io::ErrorKind::InvalidData,
++                "cannot decrypt peer's message: https://SECRET@host/?X-Amz-Signature=SECRET",
++            ))),
++        };
++        let details = safe_source_chain(&error);
++        assert!(
++            details.contains("tls_decrypt_or_bad_record_mac"),
++            "{details}"
++        );
++        for private in ["SECRET", "https://", "Signature", "host"] {
++            assert!(!details.contains(private), "{details}");
++        }
++        // A real rustls source uses Display wording rather than a stable type
++        // shared with every supported SDK connector version.
++        assert_eq!(
++            safe_transport_label(&rustls::Error::DecryptError),
++            "tls_decrypt_or_bad_record_mac",
++        );
++    }
++
++    #[test]
++    fn transport_source_inspection_is_bounded_and_unicode_safe() {
++        let error = std::io::Error::other(format!(
++            "{}cannot decrypt peer's message SECRET",
++            "é".repeat(300)
+         ));
++        assert_eq!(safe_transport_label(&error), "redacted");
++    }
++
++    #[test]
++    fn source_diagnostics_bound_deep_chains() {
++        let mut error = PrivateCause { next: None };
++        for _ in 0..100 {
++            error = PrivateCause {
++                next: Some(Box::new(error)),
++            };
++        }
++        let details = safe_source_chain(&error);
++        assert!(details.ends_with("causes_truncated"), "{details}");
++        assert!(details.len() < 1024);
++        assert!(!details.contains("SECRET"));
++    }
++
++    #[tokio::test]
++    async fn upload_part_dispatch_failure_has_safe_context() {
++        use tokio::io::AsyncReadExt;
++        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
++        let address = listener.local_addr().unwrap();
++        let server = tokio::spawn(async move {
++            let (mut socket, _) = listener.accept().await.unwrap();
++            let mut buf = [0u8; 4];
++            socket.read_exact(&mut buf).await.unwrap();
++            // Exercise an actual UploadPart request; never print request bytes.
++            assert!(buf == *b"PUT ");
++            // Drop the connection without a response.
++        });
++        let client = client_for(&format!("http://{address}"));
++        let started = std::time::Instant::now();
++        let error = tokio::time::timeout(
++            std::time::Duration::from_secs(10),
++            client
++                .upload_part()
++                .bucket("b")
++                .key("PRIVATE_KEY")
++                .upload_id("PRIVATE_UPLOAD_ID")
++                .part_number(7)
++                .body(S3ByteStream::from_static(b"payload"))
++                .send(),
++        )
++        .await
++        .unwrap()
++        .expect_err("the endpoint closes without responding");
++        server.await.unwrap();
++        let error = classify_part_error("s3 upload part", 7, 7, started, &error);
++        assert!(matches!(&error, StoreError::Retryable(_)));
++        let details = error.to_string();
++        for field in ["part=7", "bytes=7", "elapsed_ms=", "dispatch_", "cause["] {
++            assert!(details.contains(field), "{details}");
++        }
++        for private in [
++            "PRIVATE_KEY",
++            "PRIVATE_UPLOAD_ID",
++            "http://",
++            "Authorization",
++        ] {
++            assert!(!details.contains(private), "{details}");
++        }
++        assert!(details.len() < 2048);
++        assert!(!details.contains("attempts="));
++    }
++
++    #[tokio::test]
++    async fn untrusted_service_metadata_is_redacted() {
++        let client = fake_s3(503, "SECRET_SIGNED_URL").await;
++        let error = classify_put_error("k", &put_error(&client).await);
++        assert!(matches!(&error, StoreError::Retryable(_)));
++        let details = error.to_string();
++        assert!(details.contains("http_status=503"), "{details}");
++        assert!(details.contains("service_code=unrecognized"), "{details}");
++        assert!(!details.contains("SECRET"));
+     }
+ 
+     #[tokio::test]
+diff --git a/crates/walgit-store/tests/contract.rs b/crates/walgit-store/tests/contract.rs
+index 768b860..3f2b4c6 100644
+--- a/crates/walgit-store/tests/contract.rs
++++ b/crates/walgit-store/tests/contract.rs
+@@ -53,6 +53,7 @@ pub async fn run_contract(store: DynStore, prefix: &str) {
+     test_list(&store, &p("list")).await;
+     test_large_streamed_roundtrip(&store, &p("large")).await;
+     test_multipart_path(&store, &p("multi")).await;
++    test_multipart_create_wins_once(&store, &p("multi-create")).await;
+     test_compose(&store, &p("compose")).await;
+ }
+ 
+@@ -668,6 +669,50 @@ async fn test_multipart_path(store: &DynStore, key: &str) {
+     let _ = store.delete(key, None).await;
+ }
+ 
++/// Large concurrent creates must never overwrite the winner, including at multipart completion.
++async fn test_multipart_create_wins_once(store: &DynStore, key: &str) {
++    let first = Bytes::from(vec![0x31; 6 * 1024 * 1024]);
++    let second = Bytes::from(vec![0x72; 6 * 1024 * 1024]);
++    let options = PutOptions {
++        mode: PutMode::Create,
++        ..Default::default()
++    };
++    let (left, right) = futures::future::join(
++        store.put(key, PutBody::Bytes(first.clone()), options.clone()),
++        store.put(key, PutBody::Bytes(second.clone()), options),
++    )
++    .await;
++    let expected = match (left, right) {
++        (Ok(_), Err(StoreError::PreconditionFailed { .. })) => first.clone(),
++        (Err(StoreError::PreconditionFailed { .. }), Ok(_)) => second,
++        results => panic!("exactly one large create must win: {results:?}"),
++    };
++
++    let stale_update = store
++        .put(
++            key,
++            PutBody::Bytes(first),
++            PutOptions {
++                mode: PutMode::Update(walgit_store::Version::new("stale")),
++                ..Default::default()
++            },
++        )
++        .await;
++    assert!(matches!(
++        stale_update,
++        Err(StoreError::PreconditionFailed { .. })
++    ));
++    let (_, actual) = collect_body(
++        store
++            .get(key, GetOptions::default())
++            .await
++            .expect("read the winning large create"),
++    )
++    .await;
++    assert_eq!(actual, expected, "the winner must remain byte-exact");
++    store.delete(key, None).await.expect("cleanup large create");
++}
++
+ // ---- test wrappers -----------------------------------------------------
+ 
+ #[tokio::test]
+diff --git a/crates/walgit-wal/src/error.rs b/crates/walgit-wal/src/error.rs
+index 5ca8bb7..dd28cf1 100644
+--- a/crates/walgit-wal/src/error.rs
++++ b/crates/walgit-wal/src/error.rs
+@@ -41,6 +41,23 @@ pub enum WalError {
+         "repository pack set is {bytes} bytes, larger than this instance's cache limit ({max} bytes); clone via bundle-uri"
+     )]
+     TooLarge { bytes: u64, max: u64 },
++    /// A batch failure shared by multiple publish waiters without losing its type.
++    #[error("{message}")]
++    Shared {
++        #[source]
++        source: std::sync::Arc<WalError>,
++        message: std::sync::Arc<str>,
++    },
++}
++
++impl WalError {
++    /// The typed failure beneath publisher fan-out wrappers.
++    pub fn root(&self) -> &Self {
++        match self {
++            Self::Shared { source, .. } => source.root(),
++            other => other,
++        }
++    }
+ }
+ 
+ /// Per-ref error within a publish result.
+@@ -58,11 +75,14 @@ pub enum RefError {
+ 
+ impl From<WalError> for RefError {
+     fn from(e: WalError) -> Self {
+-        match e {
++        match e.root() {
+             WalError::RefConflict {
+                 expected, actual, ..
+-            } => RefError::Conflict { expected, actual },
+-            other => RefError::Rejected(other.to_string()),
++            } => RefError::Conflict {
++                expected: expected.clone(),
++                actual: actual.clone(),
++            },
++            _ => RefError::Rejected(e.to_string()),
+         }
+     }
+ }
+diff --git a/crates/walgit-wal/src/publish.rs b/crates/walgit-wal/src/publish.rs
+index 6d92f99..6fd6c73 100644
+--- a/crates/walgit-wal/src/publish.rs
++++ b/crates/walgit-wal/src/publish.rs
+@@ -861,28 +861,17 @@ async fn process_batch(handle: &RepoHandle, batch: Vec<PublishRequest>) -> Resul
+ /// Used when the batch fails before the CAS loop (upload, sync, refs).
+ fn finish_all_errors(batch: Vec<PublishRequest>, err: WalError) -> Result<(), WalError> {
+     let msg = err.to_string();
+-    for req in batch {
+-        let _ = req.response.send(Err(WalError::Corrupt(msg.clone())));
+-    }
+-    Err(err)
++    finish_with_error_msg(batch, &[], &msg, err)
+ }
+ /// Send error responses to valid request senders, then return the error.
+-/// Converts the error to a string for each sender since `WalError` is not Clone.
++/// Rejected waiters also receive the batch failure rather than a dropped channel.
+ fn finish_with_error(
+     batch: Vec<PublishRequest>,
+     valid_indices: &[usize],
+     err: WalError,
+ ) -> Result<(), WalError> {
+     let msg = err.to_string();
+-    // Every waiter gets an answer: the valid ones the batch error, the
+-    // rejected ones their per-ref rejection would be lost here — report the
+-    // batch error too rather than dropping the channel ("publisher dropped
+-    // response" told the caller nothing).
+-    let _ = valid_indices;
+-    for req in batch {
+-        let _ = req.response.send(Err(WalError::Corrupt(msg.clone())));
+-    }
+-    Err(err)
++    finish_with_error_msg(batch, valid_indices, &msg, err)
+ }
+ 
+ fn finish_with_error_msg(
+@@ -892,10 +881,71 @@ fn finish_with_error_msg(
+     err: WalError,
+ ) -> Result<(), WalError> {
+     let _ = valid_indices;
++    let source = Arc::new(err);
++    let message: Arc<str> = Arc::from(msg);
+     for req in batch {
+-        let _ = req.response.send(Err(WalError::Corrupt(msg.to_owned())));
++        let _ = req.response.send(Err(WalError::Shared {
++            source: Arc::clone(&source),
++            message: Arc::clone(&message),
++        }));
++    }
++    Err(WalError::Shared { source, message })
++}
++
++#[cfg(test)]
++mod error_tests {
++    use super::*;
++
++    #[test]
++    fn batch_failures_preserve_typed_errors_for_every_waiter() {
++        for finish in [
++            finish_all_errors as fn(Vec<PublishRequest>, WalError) -> Result<(), WalError>,
++            |batch, err| finish_with_error(batch, &[0], err),
++            |batch, err| finish_with_error_msg(batch, &[0], "manifest re-read failed", err),
++        ] {
++            for retryable in [true, false] {
++                let mut batch = Vec::new();
++                let mut receivers = Vec::new();
++                for _ in 0..2 {
++                    let (response, receiver) = oneshot::channel();
++                    batch.push(PublishRequest {
++                        pack: None,
++                        txn: RefTransaction::default(),
++                        meta: HashMap::new(),
++                        synced: false,
++                        created_at: None,
++                        response,
++                    });
++                    receivers.push(receiver);
++                }
++                let error = if retryable {
++                    WalError::Store(StoreError::retryable(std::io::Error::new(
++                        std::io::ErrorKind::TimedOut,
++                        "upload timed out",
++                    )))
++                } else {
++                    WalError::Corrupt("invalid manifest".into())
++                };
++                let returned = finish(batch, error).expect_err("batch must fail");
++                let mut errors = vec![returned];
++                for mut receiver in receivers {
++                    let result = receiver.try_recv().expect("waiter must receive a response");
++                    match result {
++                        Err(error) => errors.push(error),
++                        Ok(_) => panic!("failed batch reported success"),
++                    }
++                }
++                for error in errors {
++                    if retryable {
++                        assert!(matches!(error.root(), WalError::Store(se) if se.is_retryable()));
++                        assert!(!error.to_string().contains("corrupt:"));
++                    } else {
++                        assert!(matches!(error.root(), WalError::Corrupt(_)));
++                    }
++                }
++            }
++        }
+     }
+-    Err(err)
+ }
+ 
+ fn maybe_trigger_checkpoint(handle: &RepoHandle, _head_seq: u64) {
+diff --git a/docs/ROUNDTRIPS.md b/docs/ROUNDTRIPS.md
+index b8c930b..df22c4d 100644
+--- a/docs/ROUNDTRIPS.md
++++ b/docs/ROUNDTRIPS.md
+@@ -42,6 +42,7 @@ right shape. This document is the thinking tool; apply it to every protocol chan
+ | Any read (`info/refs`, ls-refs, web refs/resolve) | 1 cond GET (or 0 within `freshness_ttl`) | 1 | `sync.rs::freshness_check` |
+ | Cold Refs sync | 1 manifest GET → 1 round (checkpoint refs ∥ log tail segments) | no checkpoint: 1 + tail (2 with one segment); checkpoint: 2 + tail | `registry.rs::open`, `sync.rs` |
+ | Push request / publish (`process_batch`) | 1 freshness GET → pack PUT ∥ idx PUT ∥ log PUT (1 round) → manifest CAS (1 round) | request: 5; already-synced publish: 4 | `publish.rs` |
++| Large S3 pack upload (`Create` or `Overwrite`, above multipart threshold) | was 1 PUT; now initiate → at most 2 parts in flight → complete: `2 + ceil(N / 2)` rounds for `N` parts | `N + 2`; no happy-path HEAD; failed parts use SDK retries, failed uploads are aborted | `walgit-store/src/s3.rs::multipart_put`; immutable Create is conditional at completion, CAS Update stays single PUT |
+ | Compaction publish | same shape as push | — | `publish.rs::publish_compact_impl` |
+ | Checkpoint | 1 cond GET (freshness) → refs PUT ∥ checkpoint PUT → manifest CAS | 3 rounds, 4 requests (was 6/6 until 2026-08-22: a bundle-list GET before the checkpoint PUT and a log GET for provenance times sat in the chain; times now come from the writer's own applied state, `bundle_key` is no longer looked up) | `checkpoint.rs` |
+ | Settings publish (D24) | refs sync (conditional GET) → log slot PUT → manifest CAS; readers pay nothing extra (settings ride inline on the manifest) | 3 rounds; read: 0 | `publish.rs::publish_settings_impl` |

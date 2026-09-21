@@ -1,0 +1,86 @@
+---
+$schema: https://holocron.so/frontmatter.json
+title: Connect machines and browsers
+description: How machines, browser devices, the account Worker, and relay routing connect.
+icon: radio
+---
+
+# Connect machines and browsers
+
+GitSpace uses separate identities for the account root, each machine, and each browser. Enrollment decides which device may call account and machine APIs.
+
+## Connect a machine
+
+Open **Settings > Machines > Add a computer** in your account. Install the client on that computer and run the short-lived pairing command shown by the walkthrough:
+
+```bash
+gitspace machine setup --pair <token>
+```
+
+The computer creates its own Ed25519 and X25519 keys. Compare the signing key in the terminal with the browser, then approve it. The browser signs a delegated machine grant backed by its account-root authorization chain. Setup downloads the verified runtime and starts it without a source checkout or account recovery key.
+
+The started runtime connects to the account relay. It owns the repositories, workspaces, agents, and services placed on that machine.
+
+## Connect a browser
+
+### From a connected browser
+
+Open **Account > Connections > Browsers > Connect another browser**. Create an invitation, then copy its link or scan its QR code in the new browser. Only a browser with permission to enroll devices can create an invitation.
+
+The link works once and expires after five minutes. Anyone holding it can connect to your account before it expires. **Cancel link** invalidates the link, including copies you already shared. After someone redeems it, revoke that browser from the device list instead.
+
+An invited browser depends on the browser that invited it. Signing out or revoking the sending browser also disables browsers it connected. Recovery-key enrollment does not depend on another browser.
+
+### With your recovery key
+
+Visit your account URL, such as `https://bradleat.gitspace.sh`, in the new browser. Under **Use your recovery key**, enter your saved `gsr_` key and choose **Connect with recovery key**. The page already knows your account handle. This does not create a new account.
+
+The private root key stays in the page while it signs the request and invitation. GitSpace does not send it to the server or save it in browser storage. Recovery clears the key from the form when the attempt finishes.
+
+If you already have an invitation, expand **Already have an enrollment link?** and paste it.
+
+The enrollment token travels in the URL fragment and the app removes it before making the enrollment request. The browser generates a non-extractable Ed25519 key in IndexedDB, redeems the invitation, and receives a revocable device grant. Future requests use that device key.
+
+Once linked, `gitspace open` opens the account URL only. It does not mint an invitation or copy authority from the machine.
+
+## Request path
+
+```text
+Browser
+  | signed account or machine RPC request
+  v
+Account cloud APIs and relay
+  | account state works without a machine; workspace requests follow ownership
+  v
+Machine runtime
+  | reads or changes the workspace it owns
+  v
+Signed response to the browser
+```
+
+The browser uses the account Worker for account-scoped state and the relay tunnel for machine-scoped operations. Machine placement therefore remains part of the workspace model.
+
+## Account access and billing
+
+Routine requests check device permissions and account and tenant access state. They do not read GitSpace platform credit balances. Access restrictions still apply, including suspension and quarantine. Requests fail closed when the account or tenant access authority is unavailable.
+
+GitSpace records worker-request usage in the background on a best-effort basis. A billing outage does not block ordinary requests, but it can leave usage unrecorded. [Issue #147](https://github.com/inKibra/gitspace.sh/issues/147) tracks durable usage delivery, automatic overage enforcement, and shutdown policy.
+
+## Important security boundary
+
+Signed requests provide device authentication and tamper detection. They do not, by themselves, hide the RPC body from the Worker or relay that routes it.
+
+GitSpace encrypts artifact and checkpoint blobs with AES-GCM. Machine credentials are sealed to machine keys with ephemeral X25519, HKDF-SHA256, and AES-GCM. These are scoped protections. Browser and terminal RPC bodies are not currently encrypted end to end.
+
+Read [Security boundaries](/security/remote-access) for the implemented guarantees and limits.
+
+## Troubleshooting
+
+```bash
+gitspace machine status
+gitspace doctor
+```
+
+`machine status` reports the local daemon and probes the relay service and this machine's tunnel separately. A reachable relay does not prove that the machine tunnel works. `doctor` checks machine enrollment, bundled runtime components, Git/OpenSSH prerequisites, and account connectivity. Account release controls manage subsequent runtime changes.
+
+If an open request loses its response, the machine may still be restoring the workspace. Refresh the recorded cloud state before another attempt. GitSpace does not replay an open request after a tunnel failure. A project that still says cloud-only may have a clone in progress; that label alone does not make another open safe.

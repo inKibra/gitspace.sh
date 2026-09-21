@@ -1,0 +1,80 @@
+/* GitSpace application layout.
+   Only the outer geometry lives here — shell regions, resizable panes, the
+   terminal dock. Every control, surface, type role, and interaction state is
+   the Fluid Functionalism registry's own (see @gitspace/ui/fluid-theme.css);
+   product components compose Fluid parts with Tailwind utilities and never
+   style inside them. */
+
+html, body, #root { height: 100%; }
+body { overflow: hidden; }
+
+/* ── Shell ── */
+/* The shell follows the visual viewport and always protects the top notch.
+   A keyboard can cover the bottom inset; reserve only its visible portion. */
+:root {
+  --app-safe-area-inset-top: env(safe-area-inset-top, 0px);
+  --app-safe-area-inset-bottom: max(0px, calc(env(safe-area-inset-bottom, 0px) - var(--app-viewport-bottom, 0px)));
+  --app-notice-top: calc(var(--app-viewport-top, 0px) + var(--app-safe-area-inset-top) + 0.75rem);
+}
+.gitspace-shell {
+  box-sizing: border-box;
+  width: 100%;
+  height: 100dvh;
+  min-width: 0;
+  min-height: 0;
+  padding: var(--app-safe-area-inset-top) env(safe-area-inset-right, 0px) var(--app-safe-area-inset-bottom) env(safe-area-inset-left, 0px);
+}
+
+@media (pointer: coarse) {
+  /* Fluid's document min-height: 100vh uses the large viewport. A full-screen
+     app must not leave that document available for focus/scroll anchoring. */
+  html, body, #root { min-height: 0; }
+  html { overflow: hidden; }
+  body { position: fixed; inset: 0; }
+  .gitspace-shell {
+    position: absolute;
+    top: var(--app-viewport-top, 0px);
+    left: 0;
+    height: var(--app-viewport-height, 100dvh);
+  }
+}
+
+@media (width < 768px) {
+  /* The desktop inset card's margins survive its hidden peer. The drawer
+     layout instead fills the shell's already-safe rectangle edge to edge. */
+  .gitspace-shell > [data-slot="sidebar-inset"] { margin: 0; border-radius: 0; }
+}
+
+/* ── Workbench: conversation + inspector + terminal dock ── */
+.workspace-workbench {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr);
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+.workspace-workbench[data-terminal-open] { grid-template-rows: minmax(180px, 1fr) auto var(--terminal-height, 300px); }
+.workspace-content { display: flex; width: 100%; min-width: 0; min-height: 0; }
+.conversation-stage { position: relative; display: flex; flex: 1 1 auto; min-width: 0; min-height: 0; }
+.inspector-pane { width: var(--inspector-width, 440px); min-width: 300px; max-width: min(1200px, 70vw); flex: none; min-height: 0; }
+
+/* ── Resize handles (keyboard-focusable; the visible line reads from Fluid tokens) ── */
+.inspector-resize-handle { position: relative; z-index: 12; width: 7px; flex: 0 0 7px; margin-inline: -3px; cursor: col-resize; touch-action: none; }
+.inspector-resize-handle::after { content: ""; position: absolute; inset-block: 0; left: 3px; width: 1px; background: var(--border); transition: background-color 80ms ease-out; }
+.inspector-resize-handle:hover::after, .inspector-resize-handle:focus-visible::after { background: var(--focus-ring); }
+.terminal-resize-handle { position: relative; z-index: 4; display: grid; place-items: center; height: 6px; cursor: row-resize; touch-action: none; }
+.terminal-resize-handle::after { content: ""; position: absolute; inset-inline: 0; top: 2px; height: 1px; background: var(--border); }
+.terminal-resize-handle:hover::after, .terminal-resize-handle:focus-visible::after { background: var(--focus-ring); }
+
+/* ── Status dot (data, not chrome: a colored point) ── */
+.status-dot { display: inline-block; width: 6px; height: 6px; flex: none; border-radius: 9999px; background: currentColor; }
+.status-dot[data-pulse] { animation: status-pulse 1.8s ease-in-out infinite; }
+@keyframes status-pulse { 50% { opacity: .4; } }
+@media (prefers-reduced-motion: reduce) { .status-dot[data-pulse] { animation: none; } }
+
+/* ── Narrow viewports: inspector overlays the conversation ── */
+@media (max-width: 1100px) {
+  .inspector-resize-handle { display: none; }
+  .inspector-pane { position: absolute; inset: 0 0 0 auto; width: min(92vw, 420px); z-index: 25; box-shadow: var(--shadow-5); }
+}

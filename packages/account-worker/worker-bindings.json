@@ -1,0 +1,73 @@
+[
+  {
+    "name": "BLOBS",
+    "source": "object-storage"
+  },
+  {
+    "name": "DATA",
+    "source": "object-storage"
+  },
+  {
+    "name": "ACCOUNT_ID",
+    "source": "account-id"
+  },
+  {
+    "name": "TENANT_ID",
+    "source": "tenant-id"
+  },
+  {
+    "name": "AUTH_PUBLIC_KEY",
+    "source": "root-public-key"
+  },
+  {
+    "name": "RELAY_NAME",
+    "source": "tenant-id"
+  },
+  {
+    "name": "ACCOUNT_URL",
+    "source": "application-url"
+  },
+  {
+    "name": "RELAY_URL",
+    "source": "transport-url"
+  },
+  {
+    "name": "PLATFORM_URL",
+    "source": "platform-url"
+  },
+  {
+    "name": "PLATFORM_SERVICE",
+    "source": "platform-service"
+  },
+  {
+    "name": "PLATFORM_TOKEN",
+    "source": "provider-token"
+  },
+  {
+    "name": "GITSPACE_OMP_BROKER_TOKEN",
+    "source": "provider-token"
+  },
+  {
+    "name": "ASSETS",
+    "source": "public-assets"
+  },
+  {
+    "name": "AUTH_MAX_SKEW_MS",
+    "source": "literal",
+    "value": "60000"
+  },
+  {
+    "name": "TUNNEL_HEADER_TIMEOUT_MS",
+    "source": "literal",
+    "value": "300000"
+  },
+  {
+    "name": "TUNNEL_IDLE_TIMEOUT_MS",
+    "source": "literal",
+    "value": "300000"
+  },
+  {
+    "name": "STORAGE_BUCKET",
+    "source": "object-storage-name"
+  }
+]

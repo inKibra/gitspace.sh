@@ -3,6 +3,7 @@
   "version": "0.2.0-rc.38",
   "description": "CLI for managing GitHub workspaces with git worktrees and secure remote terminal access",
   "bin": {
+    "gitspace": "./bin/gitspace",
     "gssh": "./bin/gssh"
   },
   "files": [
@@ -11,17 +12,27 @@
     "LICENSE"
   ],
   "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
   "scripts": {
-    "dev": "bun src/index.ts",
-    "dev:web": "bun scripts/dev.ts",
+    "dev": "bun scripts/self-develop.ts",
+    "demo:move": "bun scripts/move-demo.ts",
     "check:lockfile-sync": "bun scripts/check-lockfile-sync.ts",
     "gen:version": "bun scripts/gen-version.ts",
-    "typecheck": "bun scripts/gen-version.ts && tsgo --noEmit -p tsconfig.json && cd web && bunx tsc -b && bunx tsc -p tsconfig.webtests.json --noEmit",
-    "test": "bun scripts/gen-version.ts && bun scripts/gen-cloud-bootstrap.ts && bun scripts/test-isolated.ts src",
+    "typecheck": "bun scripts/gen-version.ts && tsgo --noEmit -p tsconfig.json && cd web && bunx tsc -b && bunx tsc -p tsconfig.webtests.json --noEmit && cd .. && bun run typecheck:packages",
+    "typecheck:packages": "bun run --workspaces --if-present typecheck",
+    "test": "bun run test:unit && bun run design:test",
+    "test:unit": "bun scripts/gen-version.ts && bun scripts/gen-cloud-bootstrap.ts && bun scripts/test-isolated.ts src && bun run test:packages",
+    "test:packages": "bun run --filter './packages/*' --filter '!@gitspace/design-tests' --if-present --sequential test",
     "test:fast": "bun test",
     "lint": "eslint src/",
+    "design:lint": "bun run --cwd packages/design-tests lint",
+    "design:test": "bun run --cwd packages/design-tests test",
+    "design:update-snapshots": "bun run --cwd packages/design-tests test:update",
     "build:web": "bun scripts/gen-version.ts && cd web && bun install && bun run build",
     "build": "bun scripts/build.ts",
+    "build:gitspace": "bun run --cwd packages/cli build",
     "build:all": "bun scripts/build.ts --all",
     "build:npm": "bun scripts/build.ts --npm",
     "relay": "bun src/relay/index.ts",
@@ -29,6 +40,7 @@
     "test:playwright:goal-validation": "playwright test -c playwright.goal-validation.config.ts",
     "check:arch": "node node_modules/.bin/depcruise src --config .dependency-cruiser.cjs --output-type err",
     "check:arch:json": "node node_modules/.bin/depcruise src --config .dependency-cruiser.cjs --output-type json",
+    "check:arch:packages": "bunx --bun depcruise packages/protocol/src packages/protocol-agent/src packages/protocol-environment/src packages/protocol-workspace/src packages/protocol-sync/src packages/platform/src packages/operator-worker/src packages/account-worker/src packages/account-machine/src packages/account-web/src --config .dependency-cruiser.cjs --output-type err",
     "typecheck:coverage": "bun scripts/check-typecheck-coverage.ts"
   },
   "optionalDependencies": {
@@ -60,12 +72,15 @@
     "@linear/sdk": "^80.1.0",
     "@noble/curves": "^2.2.0",
     "@noble/hashes": "^2.2.0",
-    "@oh-my-pi/pi-agent-core": "17.2.4",
-    "@oh-my-pi/pi-ai": "17.2.4",
-    "@oh-my-pi/pi-coding-agent": "17.2.4",
-    "@oh-my-pi/pi-natives": "17.2.4",
-    "@oh-my-pi/pi-tui": "17.2.4",
-    "@oh-my-pi/pi-utils": "17.2.4",
+    "@oh-my-pi/omptype": "18.1.10",
+    "@oh-my-pi/pi-agent-core": "18.1.10",
+    "@oh-my-pi/pi-ai": "18.1.10",
+    "@oh-my-pi/pi-catalog": "18.1.10",
+    "@oh-my-pi/pi-coding-agent": "18.1.10",
+    "@oh-my-pi/pi-natives": "18.1.10",
+    "@oh-my-pi/pi-tui": "18.1.10",
+    "@oh-my-pi/pi-utils": "18.1.10",
+    "@oh-my-pi/pi-wire": "18.1.10",
     "@pierre/diffs": "1.2.12",
     "@pierre/trees": "1.0.0-beta.6",
     "@scure/bip39": "^2.2.0",
@@ -73,6 +88,8 @@
     "@xterm/addon-serialize": "^0.14.0",
     "@xterm/headless": "^6.0.0",
     "ansi-escapes": "^7.3.0",
+    "aws4fetch": "1.0.20",
+    "better-result": "3.0.1",
     "chalk": "^5.6.2",
     "clipboardy": "^5.3.2",
     "commander": "^12.1.0",
@@ -91,6 +108,8 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@cloudflare/vitest-plugin": "^1.1.1",
+    "@cloudflare/workers-types": "^5.20260827.1",
     "@playwright/test": "^1.62.1",
     "@testing-library/react": "^16.3.2",
     "@types/bun": "^1.3.14",
@@ -103,14 +122,20 @@
     "ffmpeg-static": "^5.3.0",
     "ghostty-web": "^0.4.0",
     "happy-dom": "^20.11.1",
-    "miniflare": "^3.20250718.3"
+    "miniflare": "3.20250718.3",
+    "vite": "^8.2.2",
+    "vitest": "^4.1.11",
+    "wrangler": "^4.127.0"
   },
   "engines": {
     "bun": ">=1.3.14"
   },
   "patchedDependencies": {
     "markit-ai@0.5.3": "patches/markit-ai@0.5.3.patch",
-    "@oh-my-pi/pi-agent-core@17.2.4": "patches/@oh-my-pi%2Fpi-agent-core@17.2.4.patch",
-    "@oh-my-pi/pi-coding-agent@17.2.4": "patches/@oh-my-pi%2Fpi-coding-agent@17.2.4.patch"
+    "@oh-my-pi/pi-agent-core@18.1.10": "packages/account-omp/patches/@oh-my-pi%2Fpi-agent-core@18.1.10.patch",
+    "@oh-my-pi/pi-coding-agent@18.1.10": "packages/account-omp/patches/@oh-my-pi%2Fpi-coding-agent@18.1.10.patch",
+    "@oh-my-pi/pi-ai@18.1.10": "packages/account-omp/patches/@oh-my-pi%2Fpi-ai@18.1.10.patch",
+    "ghostty-web@0.4.0": "patches/ghostty-web@0.4.0.patch",
+    "result-rpc@0.5.0": "packages/protocol/patches/result-rpc@0.5.0.patch"
   }
 }

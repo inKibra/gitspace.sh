@@ -12,6 +12,7 @@ import { AgentSettingsPanel } from './AgentSettingsPanel.web.js';
 import { AgentHistoryPanel } from './AgentHistoryPanel.web.js';
 import type { Block } from '../blocks/index.js';
 import { messageData } from '../blocks/types/transcript.js';
+import { applyTranscriptDelta } from '../lib/tmux-lite/agent-state-reducer.js';
 import type { AgentAuthProvider, AgentCompactResult, AgentControlInfo, AgentDefinitionInfo, AgentGoalModeInfo, AgentHistoryEntry, AgentModelInfo, AgentOAuthEvent, AgentSettingSchemaItem, AgentShakeMode, AgentShakeResult, AgentToolInfo, AgentTreeNode, SessionStatus } from '../agents/agent-runtime-types.js';
 import type { AttachedPaneState } from '../session/types.js';
 import type { BackendKey } from '../session/backend.js';
@@ -22,7 +23,7 @@ const PAGE_DOWN = '\x1b[6~';
 const NO_LIVE: Block[] = [];
 
 /** Client-side optimistic echo of the user's just-submitted prompt: shown
- *  pending until the server's transcript_live echo arrives; flipped to failed
+ *  pending until the server's transcript delta echoes it; flipped to failed
  *  (with a working Retry) when the prompt RPC rejects. */
 interface OptimisticPrompt {
   id: string;
@@ -190,21 +191,21 @@ export function PaneTerminalPanel({
     },
   }), [backend, wsId, agentSessionId, retryLastPrompt]);
 
-  // Live transcript suffix: stream the in-progress turn from the agent-state
-  // deltas. On commit, clear it — the hook folds the finished turn into history.
+  // Live transcript suffix: apply block upserts plus append-only text patches.
+  // On commit, clear it — the hook folds the finished turn into history.
   const [liveBlocks, setLiveBlocks] = useState<Block[]>(NO_LIVE);
   useEffect(() => {
     if (!backend?.subscribeAgentState || !wsId || !agentSessionId) return;
     const unsub = backend.subscribeAgentState((delta) => {
-      if (delta.type !== 'agent_transcript_live' || delta.workspaceId !== wsId || delta.sessionId !== agentSessionId) return;
-      setLiveBlocks(delta.committed ? NO_LIVE : delta.blocks);
+      if (delta.type !== 'agent_transcript_delta' || delta.workspaceId !== wsId || delta.sessionId !== agentSessionId) return;
+      setLiveBlocks((current) => applyTranscriptDelta(current, delta));
       // Reconcile the optimistic user echo against the server's live transcript:
       // once the server echoes the user's message (or the turn commits), the
       // optimistic copy is redundant. A failed optimistic only clears on an
       // exact text match — the message provably got through despite the error.
       setOptimistic((o) => {
         if (!o) return o;
-        const echoed = delta.blocks.some((b) => {
+        const echoed = delta.upserts.some((b) => {
           if (b.type !== 'message') return false;
           // Parse rather than cast: this is the one place block data is read
           // before BlockView validates it at render, and a hand-written shape

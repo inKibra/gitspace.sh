@@ -1,0 +1,24 @@
+{
+  "name": "@gitspace/deployment",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./distribution": "./src/distribution.ts"
+  },
+  "scripts": {
+    "typecheck": "tsgo --noEmit -p tsconfig.json",
+    "test": "bun ../../scripts/test-isolated.ts test",
+    "release:build": "bun src/release.ts build",
+    "release:publish": "bun src/release.ts publish"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "3.1132.0",
+    "@gitspace/account-omp": "workspace:*",
+    "@gitspace/protocol": "workspace:*",
+    "@noble/curves": "^2.2.0",
+    "better-result": "3.0.1",
+    "zod": "^4.4.3"
+  }
+}

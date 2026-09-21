@@ -1,0 +1,144 @@
+diff --git a/dist/types/agent.d.ts b/dist/types/agent.d.ts
+--- a/dist/types/agent.d.ts
++++ b/dist/types/agent.d.ts
+@@ -434,6 +434,8 @@
+     followUp(m: AgentMessage): void;
+     clearSteeringQueue(): void;
+     clearFollowUpQueue(): void;
++    removeSteer(index: number): AgentMessage | undefined;
++    removeFollowUp(index: number): AgentMessage | undefined;
+     /**
+      * Drop tool-directive state retained across a gate-stopped run: the
+      * deferred hard choice and the soft-requirement lifecycle.
+diff --git a/src/agent.ts b/src/agent.ts
+--- a/src/agent.ts
++++ b/src/agent.ts
+@@ -1013,6 +1013,20 @@
+ 	clearFollowUpQueue() {
+ 		this.#followUpQueue = [];
+ 	}
++	/** Remove and return a steering message by queue index (GitSpace patch). */
++	removeSteer(index: number): AgentMessage | undefined {
++		if (!Number.isInteger(index) || index < 0 || index >= this.#steeringQueue.length) return undefined;
++		const [removed] = this.#steeringQueue.splice(index, 1);
++		return removed;
++	}
++
++	/** Remove and return a follow-up message by queue index (GitSpace patch). */
++	removeFollowUp(index: number): AgentMessage | undefined {
++		if (!Number.isInteger(index) || index < 0 || index >= this.#followUpQueue.length) return undefined;
++		const [removed] = this.#followUpQueue.splice(index, 1);
++		return removed;
++	}
++
+ 
+ 	/**
+ 	 * Drop tool-directive state retained across a gate-stopped run: the
+diff --git a/src/compaction/openai.ts b/src/compaction/openai.ts
+--- a/src/compaction/openai.ts
++++ b/src/compaction/openai.ts
+@@ -73,7 +73,7 @@
+  * (frozen "Auto context-full maintenance…" spinner, manual /compact queueing
+  * behind it). On timeout the caller falls back to local summarization.
+  */
+-export const REMOTE_COMPACTION_TIMEOUT_MS = 180_000;
++export const REMOTE_COMPACTION_TIMEOUT_MS = 360_000;
+ 
+ const DEFAULT_AZURE_API_VERSION = "v1";
+ 
+diff --git a/src/compaction/compaction-v2-streaming.ts b/src/compaction/compaction-v2-streaming.ts
+--- a/src/compaction/compaction-v2-streaming.ts
++++ b/src/compaction/compaction-v2-streaming.ts
+@@ -44,8 +44,8 @@
+ /** Max retries for V2 streaming compaction on transient stream errors. */
+ export const V2_COMPACTION_MAX_RETRIES = 2;
+ 
+-/** Timeout for V2 streaming compaction (3 minutes, same as V1). */
+-export const V2_COMPACTION_TIMEOUT_MS = 180_000;
++/** Timeout for V2 streaming compaction (6 minutes, same as V1). */
++export const V2_COMPACTION_TIMEOUT_MS = 360_000;
+ 
+ const DEFAULT_AZURE_API_VERSION = "v1";
+ const OPENAI_REMOTE_COMPACTION_PRESERVE_KEY = "openaiRemoteCompaction";
+@@ -291,19 +291,25 @@
+ 				})
+ 			: undefined;
+ 	let lastError: Error | undefined;
++	const timeoutMs = options?.timeoutMs ?? V2_COMPACTION_TIMEOUT_MS;
+ 
+ 	for (let attempt = 0; attempt <= V2_COMPACTION_MAX_RETRIES; attempt++) {
+-		const timeoutSignal = withRequestTimeout(signal, options?.timeoutMs ?? V2_COMPACTION_TIMEOUT_MS);
++		signal?.throwIfAborted();
++		const timeoutSignal = withRequestTimeout(signal, timeoutMs);
+ 		try {
+ 			return await attemptCompactionV2Streaming(endpoint, apiKey, model, request, fetchImpl, timeoutSignal, {
+ 				codexMetadata,
+ 				providerSessionState: options?.providerSessionState,
+ 				codexCompaction: options?.codexCompaction,
+ 				preferWebsockets: options?.preferWebsockets,
++				timeoutMs,
+ 			});
+ 		} catch (err) {
++			signal?.throwIfAborted();
++			// The native deadline ends this attempt; preserve it for the outer
++			// compaction policy instead of spending another full deadline here.
++			timeoutSignal?.throwIfAborted();
+ 			const error = err instanceof Error ? err : new Error(String(err));
+-			if (signal?.aborted) throw error;
+ 
+ 			if (isRetryableCompactionError(error) && attempt < V2_COMPACTION_MAX_RETRIES) {
+ 				lastError = error;
+@@ -313,7 +319,7 @@
+ 					model: model.id,
+ 				});
+ 				await retryWait(backoffMs, signal);
+-				if (signal?.aborted) throw error;
++				signal?.throwIfAborted();
+ 				continue;
+ 			}
+ 
+@@ -336,6 +342,7 @@
+ 		providerSessionState?: Map<string, ProviderSessionState>;
+ 		codexCompaction?: CodexCompactionContext;
+ 		preferWebsockets?: boolean;
++		timeoutMs: number;
+ 	},
+ ): Promise<CompactionV2Response> {
+ 	// Faithful to Codex: append the compaction trigger as the final input item
+@@ -355,6 +362,10 @@
+ 		const eventStream = await openCodexCompactionEventStream(model, body, {
+ 			apiKey,
+ 			signal,
++			// Native compaction owns the deadline; inference's 300s watchdogs
++			// must not shorten this request or silently switch its transport.
++			streamIdleTimeoutMs: options.timeoutMs,
++			streamFirstEventTimeoutMs: options.timeoutMs,
+ 			fetch: fetchImpl,
+ 			sessionId: request.sessionId,
+ 			providerSessionState: options.providerSessionState,
+diff --git a/dist/types/compaction/openai.d.ts b/dist/types/compaction/openai.d.ts
+--- a/dist/types/compaction/openai.d.ts
++++ b/dist/types/compaction/openai.d.ts
+@@ -26,7 +26,7 @@
+  * (frozen "Auto context-full maintenance…" spinner, manual /compact queueing
+  * behind it). On timeout the caller falls back to local summarization.
+  */
+-export declare const REMOTE_COMPACTION_TIMEOUT_MS = 180000;
++export declare const REMOTE_COMPACTION_TIMEOUT_MS = 360000;
+ export declare const CONTEXT_WINDOW_TRUNCATED_OUTPUT_MESSAGE: string;
+ export interface TrimRemoteCompactionInputResult {
+     input: Array<Record<string, unknown>>;
+diff --git a/dist/types/compaction/compaction-v2-streaming.d.ts b/dist/types/compaction/compaction-v2-streaming.d.ts
+--- a/dist/types/compaction/compaction-v2-streaming.d.ts
++++ b/dist/types/compaction/compaction-v2-streaming.d.ts
+@@ -12,8 +12,8 @@
+ export declare const V2_RETAINED_MESSAGE_TOKEN_BUDGET = 64000;
+ /** Max retries for V2 streaming compaction on transient stream errors. */
+ export declare const V2_COMPACTION_MAX_RETRIES = 2;
+-/** Timeout for V2 streaming compaction (3 minutes, same as V1). */
+-export declare const V2_COMPACTION_TIMEOUT_MS = 180000;
++/** Timeout for V2 streaming compaction (6 minutes, same as V1). */
++export declare const V2_COMPACTION_TIMEOUT_MS = 360000;
+ /** Token usage reported by the streamed V2 Responses completion. */
+ export interface CompactionV2Usage {
+     inputTokens: number;

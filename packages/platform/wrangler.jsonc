@@ -1,0 +1,98 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "gitspace-platform-rebuild-20260913",
+  "main": "src/index.ts",
+  "workers_dev": false,
+  "preview_urls": false,
+  "compatibility_date": "2026-08-27",
+  "compatibility_flags": [
+    "nodejs_compat",
+    "enable_request_signal",
+    "request_signal_passthrough"
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "CREDITS",
+        "class_name": "CreditLedgerDO",
+        "script_name": "gitspace-platform"
+      },
+      {
+        "name": "DEPLOYMENTS",
+        "class_name": "TenantDeploymentsDO"
+      },
+      {
+        "name": "TENANT_CONTROL",
+        "class_name": "TenantControlDO",
+        "script_name": "gitspace-platform"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "rebuild-v1",
+      "new_sqlite_classes": ["TenantDeploymentsDO"]
+    }
+  ],
+  "dispatch_namespaces": [
+    {
+      "binding": "DISPATCHER",
+      "namespace": "gitspace-rebuild-20260913"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "RELEASES",
+      "bucket_name": "gitspace-releases-rebuild-20260913"
+    }
+  ],
+  "services": [
+    {
+      "binding": "COMPUTE",
+      "service": "gitspace-sandbox-worker"
+    }
+  ],
+  "routes": [
+    {
+      "pattern": "platform.gssh.dev",
+      "custom_domain": true
+    },
+    {
+      "pattern": "platform.gssh.dev/*",
+      "zone_name": "gssh.dev"
+    },
+    {
+      "pattern": "*.gssh.dev/*",
+      "zone_name": "gssh.dev"
+    },
+    {
+      "pattern": "*.gitspace.sh/*",
+      "zone_name": "gitspace.sh"
+    }
+  ],
+  "vars": {
+    "TENANT_HOST_SUFFIX": ".gssh.dev",
+    "DEFAULT_CPU_MS": 50,
+    "DEFAULT_SUBREQUESTS": 20,
+    "ADMIN_PUBLIC_KEY": "vOSduG2Ge02PoTK0oGKKFODyStGjBO46mv9TQXdRmLA=",
+    "ADMIN_AUTH_MAX_SKEW_MS": 60000,
+    "DISPATCH_SETTLEMENT_MICROS": 1,
+    "DEPLOY_SETTLEMENT_MICROS": 1000,
+    "DEPLOY_PROBE_DELAY_MS": 2000,
+    "COMPUTE_TEMPLATE_SCRIPT": "gitspace-sandbox-worker",
+    "COMPUTE_DEFAULT_IMAGE": "registry.cloudflare.com/2ed07d2f77ecb2aa43ca99a9c970597c/gitspace-onboarding@sha256:1722e0de5ca7e500bfd18a1cf05cc6d1735c0a64da5f830e101adffb490ae65c",
+    "COMPUTE_SANDBOX_HOSTNAME": "sandboxes.gitspace.sh",
+    "COMPUTE_MAX_MACHINES": 20,
+    "COMPUTE_MAX_IMAGE_DEPLOYMENTS": 16,
+    "DISPATCH_NAMESPACE": "gitspace-rebuild-20260913",
+    "CF_ACCOUNT_ID": "2ed07d2f77ecb2aa43ca99a9c970597c",
+    "PLATFORM_URL": "https://platform.gssh.dev",
+    "PLATFORM_SERVICE_NAME": "gitspace-platform-rebuild-20260913",
+    "PUBLIC_ASSETS_SERVICE": "gitspace-auth-rebuild-20260913"
+  },
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1,
+    "logs": { "enabled": true, "invocation_logs": false }
+  }
+}

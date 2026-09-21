@@ -14,7 +14,7 @@ function makeBridge(): OmpHostUIContext & { calls: Record<string, unknown[][]> }
       record('select', title, options, dialogOptions);
       return 'chosen';
     },
-    askForm: async () => undefined,
+    askDialog: async () => undefined,
     confirm: async (title, message, dialogOptions) => {
       record('confirm', title, message, dialogOptions);
       return true;

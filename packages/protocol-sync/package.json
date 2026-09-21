@@ -1,0 +1,9 @@
+{
+  "name": "@gitspace/protocol-sync",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts", "./sse": "./src/sse.ts" },
+  "scripts": { "typecheck": "tsgo --noEmit -p tsconfig.json", "test": "bun ../../scripts/test-isolated.ts test" },
+  "dependencies": { "zod": "^4.4.3" }
+}

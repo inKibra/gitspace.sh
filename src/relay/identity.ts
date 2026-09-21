@@ -11,11 +11,11 @@
  * - Used to sign control messages to machines
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { ed25519 } from "@noble/curves/ed25519.js";
 import { sha256 } from "@noble/hashes/sha2.js";
-import { setSecret, getSecret } from "../utils/secrets.js";
+import { deleteSecret, setSecret, getSecret } from "../utils/secrets.js";
 import { getSpacesDir } from "../core/config.js";
 
 // ============================================================================
@@ -257,6 +257,23 @@ export async function loadRelayIdentity(): Promise<RelayIdentity | null> {
 export function relayIdentityExists(): boolean {
   return existsSync(getRelayIdentityPath());
 }
+/**
+ * Remove the persisted local relay identity so the next startup generates a
+ * fresh keypair. Environment-managed relay keys are authoritative and cannot
+ * be rotated by a filesystem takeover.
+ */
+export async function resetRelayIdentity(): Promise<boolean> {
+  if (process.env[ENV_PRIVATE_KEY]) {
+    throw new Error(`${ENV_PRIVATE_KEY} is set; rotate or unset it before resetting the relay identity`);
+  }
+
+  const identityPath = getRelayIdentityPath();
+  const hadPublicIdentity = existsSync(identityPath);
+  rmSync(identityPath, { force: true });
+  const hadPrivateIdentity = await deleteSecret(KEYCHAIN_KEY);
+  return hadPublicIdentity || hadPrivateIdentity;
+}
+
 
 /**
  * Get relay public identity without loading private key

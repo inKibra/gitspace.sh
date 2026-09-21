@@ -1,0 +1,129 @@
+---
+$schema: https://holocron.so/frontmatter.json
+title: Getting started
+description: Create an account in the browser, then choose where your work runs.
+icon: play
+---
+
+# Getting started
+
+Start at [gitspace.sh](https://gitspace.sh). You need an invitation and a permanent account handle. You do not need to install anything to create an account or use cloud machines.
+
+## 1. Create an invited account
+
+Enter your invitation and choose your handle. Choose **Prepare recovery key**.
+
+Your browser creates the account root key and displays a recovery key beginning with `gsr_`. Save it in a password manager, then paste the saved key into the confirmation field.
+
+<Warning>
+Save the recovery key before creating the account. GitSpace does not store it and cannot restore it. Anyone with this key can act as your account root.
+</Warning>
+
+Choose **Create invited account**, then **Open GitSpace**. This enrolls the browser and opens your account. You do not need a local machine or a terminal for this step.
+
+To connect another browser, create an invitation from **Account > Connections > Browsers > Connect another browser** in your connected browser. You can also visit your account URL in the new browser and fill in **Use your recovery key**. See [Connect machines and browsers](/remote-access).
+
+If initial account creation was interrupted, return to gitspace.sh and choose **Resume with a saved recovery key**. Enter the same handle and key. Recovery does not create a second account or consume another invitation for a completed account. Keep the original invitation until initial account creation finishes.
+
+## 2. Choose where work runs
+
+Complete your profile, then choose a machine during setup. You can also skip this step and return through **Account settings > Machines**.
+
+### Use a cloud machine
+
+Choose **Create cloud machine** and confirm. GitSpace creates a temporary machine with the standard tools and your account's runtime. Wait for its state to become **online** before placing work on it. Provider usage charges may apply.
+
+A cold start or restore can take several minutes. Keep the page open; GitSpace updates the machine state when it is ready.
+
+This path does not need the local client.
+
+In **Settings > Machines**, choose **Stop** to save supported workspace state and stop the cloud machine. If saving fails, the machine stays online. Choose **Start** to run a fresh machine environment and restore saved workspaces.
+
+<Warning>
+The cloud machine's disk is temporary. Stop or replacement discards installed packages, machine-local configuration, ignored files, and other files GitSpace has not captured, including files in the machine's home directory. Start restores saved workspaces, not the old disk.
+</Warning>
+
+Once you have a workspace and a configured provider, ask its normal agent to use the `workspace-lifecycle` skill to plan the repository's tools and local setup. Review its proposed edits before authorizing execution. There is no separate setup agent. Treat machine changes as temporary and keep their approved preparation in the repository.
+
+### Connect your own computer
+
+Choose **Add a computer** in the web app. Follow the walkthrough on the computer you want to connect.
+
+The client supports published macOS and Linux platform builds. On Windows, use a supported Linux distribution in WSL. Install Git and the OpenSSH client first. GitSpace supplies its own Bun, OMP, and walgit runtime; no GitSpace source checkout or local build is required.
+
+Run the installer:
+
+```bash
+curl -fsSL https://gitspace.sh/install | sh
+```
+
+The pairing command uses the full path to `~/.local/bin/gitspace`, so you do not need to change your PATH. You can add that directory to your PATH later to run `gitspace` by name.
+
+In the browser, choose **Generate pairing command**. Copy that command to the computer's terminal. It has this form:
+
+```bash
+"$HOME/.local/bin/gitspace" machine setup --pair <short-lived-pairing-token>
+```
+
+The computer generates its own keys. Compare its name and signing key in the browser with the terminal, then choose **Approve this computer**. The command downloads the verified runtime and starts it. Keep the terminal open until setup reports readiness, then check that the browser shows **Connected**.
+
+<Warning>
+Only approve a computer you control. An enrolled machine can access your workspace data and configured credentials. Pairing does not copy your account recovery key to that machine.
+</Warning>
+
+Pairing commands expire after ten minutes. If setup stops after the account has approved and linked the machine, resume with:
+
+```bash
+gitspace machine start
+```
+
+For a connection problem:
+
+```bash
+gitspace machine status
+gitspace doctor
+```
+
+## 3. Configure your agent provider
+
+Once a machine is online, connect a provider from the **Providers** step or **Settings > OMP > Providers**. Choose the model settings your agents should use. You can skip provider setup while exploring the account, but an agent needs a configured provider before it can work.
+
+For Codex, choose **Sign in** or **Add account**. GitSpace prefers OpenAI's device-code flow: open the sign-in page, enter the displayed code, and approve access. Keep the GitSpace dialog open. It updates when authorization finishes, without a localhost callback or a pasted callback URL.
+
+Codex sign-in methods share one account list. The device flow adds credentials to the same account store used by Codex agents.
+
+## 4. Configure Git and finish setup
+
+In the **Git** step, set your commit author name and email. Copy the shared public key and [add it to GitHub as an authentication key](https://github.com/settings/ssh/new). Your GitHub account must have access to each repository you import. If your organization requires SSO, authorize the key for that organization too.
+
+GitSpace uses this SSH identity for GitHub imports, including pasted HTTPS browser URLs. It configures the key before the first clone and keeps SSH host verification enabled.
+
+GitSpace reapplies your saved author name, email, and SSH configuration when it restores a workspace, before setup scripts or agents can run. These settings stay local to GitSpace repositories; they do not change your global Git configuration.
+
+Every account includes the GitSpace source project. Setup creates its cloud definition without an online machine or GitHub authorization. There is no source-project opt-out. The project stays **Cloud only** until you open it on a machine; GitSpace then checks out its recorded source branch and commit. A failed checkout leaves the cloud definition available to retry.
+
+Finishing setup takes you to **Projects**, without selecting a project or starting a machine. The sidebar lists all your projects. Select one to inspect it, then open it on a machine when you want to run an agent.
+
+## 5. Try a small task
+
+Create a workspace in the GitSpace project, or choose **New project** to import another repository. Enter a project name and the repository's root URL, an SSH address, or GitHub `owner/repository`. The `.git` suffix is optional. Do not paste a file or branch page.
+
+Leave **Base branch** empty to detect the repository's default branch. Enter a branch only to override it. Leave the repository address empty to create a new repository with `main` as its default. An invalid address or failed clone does not create a project entry.
+
+Use a repository you can recover elsewhere for your first test.
+
+For repository prerequisites, ask the normal workspace agent to use the built-in `workspace-lifecycle` skill. Review its proposal before approving edits, then grant separate approval for execution in Environment. Selecting or creating a workspace does not run setup. See [Workspace lifecycle](/workspace-lifecycle).
+
+Ask the agent to make a small change. Review its diff, answer any questions, open a terminal, and save an artifact. Close and reopen the workspace, then continue the conversation.
+
+Controlled workspace close, cloud machine Stop, and provider replacement publish durable checkpoints. These save the Git branch, commits, staged and unstaged tracked changes, non-ignored untracked files, agent conversation, and GitSpace artifacts. Ignored files are excluded.
+
+After an unexpected interruption, the last completed checkpoint is the recovery limit; uncheckpointed work may be lost. Automatic recovery from unclean disk loss and a returning-machine recovery ZIP are not implemented yet.
+
+## Releases and additional machines
+
+Add each computer through its own pairing walkthrough. Each receives a separate identity and grant.
+
+Your account manages releases of the Worker, frontend, machine runtime, and OMP. The installer bootstraps a computer; there is no standalone local update command. Use the account release controls for subsequent runtime changes.
+
+See [CLI reference](/cli-reference) for local start, stop, status, and diagnostic commands, or [Agent workflow](/agent-workflow) for the workspace workflow.

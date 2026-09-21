@@ -85,7 +85,7 @@ jobs:
       # is process-global and mock.restore() does not undo it, so a bare
       # `bun test` is not a trustworthy signal.
       - name: Test
-        run: bun run test
+        run: bun run test:unit
 
       # The suite must not leave daemons, process runners or services behind.
       # Orphans reparent to PID 1 and would otherwise accumulate silently; a
@@ -103,3 +103,26 @@ jobs:
             exit 1
           fi
           echo "No leaked processes."
+
+  design-tests:
+    name: Design tests
+    # Visual baselines are generated on Linux.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install
+        run: bun install --frozen-lockfile
+
+      - name: Install Chromium
+        working-directory: packages/design-tests
+        run: bunx playwright install --with-deps chromium
+
+      - name: Test
+        run: bun run design:test

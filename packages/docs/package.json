@@ -1,0 +1,26 @@
+{
+  "name": "@gitspace/docs",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite dev",
+    "build": "vite build",
+    "deploy": "vite build && wrangler deploy",
+    "typecheck": "tsgo --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@holocron.so/vite": "0.33.1",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "vite": "^8.1.4"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.8.0",
+    "@cloudflare/workers-types": "5.20260904.1",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
+    "typescript": "^5.9.3",
+    "wrangler": "^4.127.0"
+  }
+}
