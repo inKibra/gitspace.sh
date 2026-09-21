@@ -27,7 +27,7 @@
   },
   "scripts": {
     "typecheck": "tsgo --noEmit -p tsconfig.json",
-    "test": "bun test"
+    "test": "bun ../../scripts/test-isolated.ts test"
   },
   "dependencies": {
     "@gitspace/blocks": "workspace:*",

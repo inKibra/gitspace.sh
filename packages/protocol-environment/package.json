@@ -4,6 +4,6 @@
   "private": true,
   "type": "module",
   "exports": { ".": "./src/index.ts" },
-  "scripts": { "typecheck": "tsgo --noEmit -p tsconfig.json", "test": "bun test" },
+  "scripts": { "typecheck": "tsgo --noEmit -p tsconfig.json", "test": "bun ../../scripts/test-isolated.ts test" },
   "dependencies": { "zod": "^4.4.3" }
 }

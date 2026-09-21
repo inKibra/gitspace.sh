@@ -141,6 +141,7 @@ async function loadPayload(root: string, recipeBytes: Buffer): Promise<RecipePay
 /** Hash installed bytes, not just a readiness marker. Links must survive rename and stay inside this install. */
 async function installedTreeHash(root: string): Promise<string> {
   if (!(await lstat(root)).isDirectory()) throw new Error('OMP runtime install must be a regular directory');
+  const physicalRoot = await realpath(root);
   const tree = createHash('sha256');
   async function visit(directory: string): Promise<void> {
     for (const name of (await readdir(directory)).sort()) {
@@ -156,7 +157,7 @@ async function installedTreeHash(root: string): Promise<string> {
         tree.update(JSON.stringify([local, 'file', info.mode & 0o777, hash.digest('hex')]));
       } else if (info.isSymbolicLink()) {
         const target = await readlink(path);
-        if (isAbsolute(target) || !within(root, resolve(dirname(path), target)) || !within(root, await realpath(path))) {
+        if (isAbsolute(target) || !within(root, resolve(dirname(path), target)) || !within(physicalRoot, await realpath(path))) {
           throw new Error(`OMP runtime install link escapes its generation: ${local}`);
         }
         tree.update(JSON.stringify([local, 'link', target]));

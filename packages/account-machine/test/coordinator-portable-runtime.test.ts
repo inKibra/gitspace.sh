@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'bun:test';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { serializeTitleSlot } from '@oh-my-pi/pi-coding-agent/session/session-title-slot';
@@ -515,10 +515,14 @@ describe('CoordinatorPortableSpaceRuntime', () => {
     } finally { database.close(); }
   });
 
-  it('restores a released workspace after the entire machine root is erased without changing session identity or lowering fences', async () => {
+  it('restores a released workspace through a symlinked ancestor after the entire machine root is erased without changing session identity or lowering fences', async () => {
     const root = mkdtempSync(join(tmpdir(), 'gitspace-erased-machine-'));
     roots.push(root);
-    const machineRoot = join(root, 'machine');
+    const physicalRoot = join(root, 'physical');
+    const aliasRoot = join(root, 'alias');
+    mkdirSync(physicalRoot);
+    symlinkSync(physicalRoot, aliasRoot, 'dir');
+    const machineRoot = join(aliasRoot, 'machine');
     const repository = join(machineRoot, 'project-a', 'workspace-a');
     const remote = join(root, 'durable-repository.git');
     mkdirSync(repository, { recursive: true });

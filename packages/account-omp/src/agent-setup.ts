@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
 import { link, lstat, mkdir, open, realpath, rename, unlink } from 'node:fs/promises';
-import { dirname, join, relative, resolve } from 'node:path';
+import { basename, dirname, join, relative } from 'node:path';
 import type { AgentDefinitionSetup, AgentSetupView, SaveAgentDefinitionInput } from '@gitspace/protocol';
 import type { AgentSession } from '@oh-my-pi/pi-coding-agent';
 import { parseAgent } from '@oh-my-pi/pi-coding-agent/task/agents';
@@ -59,11 +59,18 @@ export class WorkspaceAgentSetup {
     const inheritedRole = getHistoricalModelSelection(this.session.sessionManager).role;
     const agents = await Promise.all(discovery.agents.map(async (agent): Promise<AgentDefinitionSetup> => {
       if (agent.content === undefined || !agent.revision || !agent.filePath) throw new Error(`Agent ${agent.name} has no loaded source snapshot`);
-      const portable = relative(root, resolve(agent.filePath)).split('\\').join('/');
+      let portable = '';
       let editable = false;
-      if (WORKSPACE_AGENT_PATH.test(portable)) {
-        try { await workspaceFile(root, portable); editable = true; } catch { /* The definition remains readable, but not writable. */ }
-      }
+      try {
+        // Normalize parent aliases (such as macOS /var), but leave the final
+        // component unresolved so workspaceFile still rejects definition links.
+        const source = join(await realpath(dirname(agent.filePath)), basename(agent.filePath));
+        portable = relative(root, source).split('\\').join('/');
+        if (WORKSPACE_AGENT_PATH.test(portable)) {
+          await workspaceFile(root, portable);
+          editable = true;
+        }
+      } catch { /* The definition remains readable, but not writable. */ }
       const selected = resolveAgentModelSelection({
         settingsOverride: this.session.settings.get('task.agentModelOverrides')[agent.name],
         agentModel: agent.model,

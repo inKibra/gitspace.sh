@@ -278,7 +278,8 @@ it('keeps complete content through same-size revisions and ignores an obsolete c
 });
 
 it('keeps the existing inline message when streaming grows beyond the page payload', async () => {
-  const text = 'Existing streamed text. '.repeat(300);
+  // The page's truncated flag triggers hydration, independently of text length.
+  const text = 'Existing streamed text. ';
   const item: TranscriptItem = { id: 'row-0', type: 'message', role: 'assistant', text, pending: true };
   const row = { ...rows(0, 1)[0]!, item, contentRevision: 1, contentBytes: text.length };
   const full = Promise.withResolvers<TranscriptContentPage>();
@@ -287,13 +288,14 @@ it('keeps the existing inline message when streaming grows beyond the page paylo
   const node = container.querySelector('[data-transcript-row="row-0"]')!;
   await render({ ...history, rows: [{ ...row, truncated: true, contentRevision: 2 }] });
   expect(node.textContent).toContain(text.trim());
-  const serialized = JSON.stringify({ ...item, text: `${text}${'More streamed output. '.repeat(1000)}COMPLETE_STREAM_END` });
+  const completeText = `${text}More streamed output. COMPLETE_STREAM_END`;
+  const serialized = JSON.stringify({ ...item, text: completeText });
   await act(async () => {
     full.resolve({ text: serialized, offset: 0, nextOffset: null, totalCharacters: serialized.length, contentRevision: 2 });
     await full.promise;
   });
   expect(container.querySelector('[data-transcript-row="row-0"]')).toBe(node);
-  expect(node.textContent).toContain('COMPLETE_STREAM_END');
+  expect(node.textContent).toContain(completeText);
 });
 
 it('reuses hydrated items across virtual unmount and native viewport replacement', async () => {

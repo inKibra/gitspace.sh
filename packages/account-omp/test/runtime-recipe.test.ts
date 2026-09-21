@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'bun:test';
 import { createHash } from 'node:crypto';
 import { cp, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { prepareOmpRuntimeArtifact, type OmpRuntimeRecipe } from '../src/runtime-recipe.js';
 
@@ -31,7 +31,7 @@ async function fixture() {
   for (const name of packages) {
     const manifest = {
       name, version, type: 'module', main: 'index.js',
-      ...(name === '@oh-my-pi/pi-coding-agent' ? { optionalDependencies: { 'recipe-optional-heavy': version } } : {}),
+      ...(name === '@oh-my-pi/pi-coding-agent' ? { bin: { 'recipe-agent': 'index.js' }, optionalDependencies: { 'recipe-optional-heavy': version } } : {}),
     };
     manifests.set(name, manifest);
     tarballs.set(name, await new Bun.Archive({
@@ -97,8 +97,8 @@ console.log(JSON.stringify({ entrypoint, value: runtime.default }));
     await writeFile(join(artifact, 'omp-runtime.json'), JSON.stringify(recipe));
     return { artifact, recipe };
   }
-  async function prepare(artifact: string) {
-    const result = await command([runner, artifact, cacheRoot], root, env);
+  async function prepare(artifact: string, runtimeCache = cacheRoot) {
+    const result = await command([runner, artifact, runtimeCache], root, env);
     if (result.code !== 0) throw new Error(result.stderr || result.stdout);
     return JSON.parse(result.stdout.trim()) as { entrypoint: string; value: string };
   }
@@ -117,6 +117,29 @@ describe('OMP runtime recipes', () => {
     await f.server.stop(true);
     await rm(f.bunCache, { recursive: true, force: true });
     expect(await f.prepare(artifact)).toEqual(cold);
+  }, 30_000);
+
+  it('accepts installed bin links through a parent alias but rejects links outside the generation', async () => {
+    const f = await fixture();
+    const alias = join(f.root, 'alias');
+    await symlink(f.root, alias);
+    const { artifact } = await f.generation('base');
+    const cacheRoot = join(alias, 'runtimes');
+    const cold = await f.prepare(artifact, cacheRoot);
+    expect(cold.value).toBe('base');
+    expect(await f.prepare(artifact, cacheRoot)).toEqual(cold);
+    const bin = join(dirname(cold.entrypoint), 'node_modules/.bin/recipe-agent');
+    const outside = join(f.root, 'outside.js');
+    await writeFile(outside, 'export default "outside";\n');
+    await rm(bin);
+    await symlink(relative(dirname(bin), outside), bin);
+    await expect(f.prepare(artifact, cacheRoot)).rejects.toThrow('link escapes its generation');
+    await rm(bin);
+    await symlink('../@oh-my-pi/pi-coding-agent/index.js', bin);
+    const installedModule = join(dirname(cold.entrypoint), 'node_modules/@oh-my-pi/pi-coding-agent/index.js');
+    await rm(installedModule);
+    await symlink(outside, installedModule);
+    await expect(f.prepare(artifact, cacheRoot)).rejects.toThrow('link escapes its generation');
   }, 30_000);
 
   it('isolates patched candidates and preserves a ready generation when new input verification fails', async () => {

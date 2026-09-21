@@ -1,10 +1,12 @@
 import { expect, test } from 'bun:test';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 test('edits discovered workspace overrides with CAS while rejecting invalid or escaping writes', async () => {
   const root = await mkdtemp(join(tmpdir(), 'omp-agent-setup-'));
+  const alias = `${root}-alias`;
+  await symlink(root, alias);
   const program = join(root, 'setup.mjs');
   await writeFile(program, `
 import assert from 'node:assert/strict';
@@ -85,7 +87,7 @@ try {
   await postmortem.cleanup();
 }
 `);
-  const child = Bun.spawn([process.execPath, program], { cwd: root, env: { ...process.env, HOME: root }, stdout: 'pipe', stderr: 'pipe', timeout: 40_000 });
+  const child = Bun.spawn([process.execPath, program], { cwd: alias, env: { ...process.env, HOME: alias }, stdout: 'pipe', stderr: 'pipe', timeout: 40_000 });
   try {
     const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
     if (code !== 0) throw new Error(`Agent setup fixture failed (${code}): ${stderr}\n${stdout}`);
@@ -94,5 +96,6 @@ try {
     child.kill('SIGKILL');
     await child.exited;
     await rm(root, { recursive: true, force: true });
+    await rm(alias, { force: true });
   }
 }, 45_000);

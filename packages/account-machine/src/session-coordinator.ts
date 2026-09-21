@@ -1804,12 +1804,19 @@ export class MachineSessionCoordinator {
     }
     const metadata = await lstat(space.rootPath).catch((error: NodeJS.ErrnoException) => error.code === 'ENOENT' ? null : Promise.reject(error));
     if (metadata?.isSymbolicLink()) throw runtimeError('managed space', new Error('Refusing a symlink checkout'));
-    const actualRoot = await realpath(root).catch((error: NodeJS.ErrnoException) => error.code === 'ENOENT' ? root : Promise.reject(error));
-    const actualCheckout = await realpath(space.rootPath).catch(async (error: NodeJS.ErrnoException) => {
-      if (error.code !== 'ENOENT') throw error;
-      const parent = await realpath(dirname(space.rootPath)).catch((parentError: NodeJS.ErrnoException) => parentError.code === 'ENOENT' ? dirname(space.rootPath) : Promise.reject(parentError));
-      return join(parent, relative(dirname(space.rootPath), space.rootPath));
-    });
+    // Canonicalize both sides through their nearest existing ancestor. A restored
+    // checkout (or the managed root itself) may not have been recreated yet.
+    const canonicalPath = async (path: string): Promise<string> => {
+      let ancestor = resolve(path);
+      const suffix: string[] = [];
+      while (!(await lstat(ancestor).catch((error: NodeJS.ErrnoException) => error.code === 'ENOENT' ? null : Promise.reject(error)))) {
+        suffix.unshift(relative(dirname(ancestor), ancestor));
+        ancestor = dirname(ancestor);
+      }
+      return join(await realpath(ancestor), ...suffix);
+    };
+    const actualRoot = await canonicalPath(root);
+    const actualCheckout = await canonicalPath(space.rootPath);
     const actual = relative(actualRoot, actualCheckout);
     if (actual === '' || actual === '..' || actual.startsWith(`..${sep}`)) throw runtimeError('managed space', new Error('Checkout resolves outside the managed root'));
   }

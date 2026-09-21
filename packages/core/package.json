@@ -11,7 +11,7 @@
     "db:check": "drizzle-kit check",
     "db:studio": "drizzle-kit studio",
     "typecheck": "tsgo --noEmit -p tsconfig.json",
-    "test": "bun test"
+    "test": "bun ../../scripts/test-isolated.ts test"
   },
   "dependencies": {
     "@gitspace/protocol": "workspace:*",

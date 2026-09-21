@@ -683,6 +683,51 @@ describe('MachineSessionCoordinator', () => {
     database.close();
   });
 
+  it.each([false, true])('creates a missing checkout through a symlinked ancestor with managed root present=%s', async (rootPresent) => {
+    const { root, database, artifacts } = fixture();
+    const physicalRoot = join(root, 'physical');
+    const aliasRoot = join(root, 'alias');
+    mkdirSync(physicalRoot);
+    symlinkSync(physicalRoot, aliasRoot, 'dir');
+    const managedRoot = join(aliasRoot, 'managed');
+    if (rootPresent) mkdirSync(managedRoot);
+    const checkout = join(managedRoot, 'project', 'workspace');
+    const created = database.createProject({ id: 'fresh-project', name: 'Fresh', repositoryPath: checkout, repositoryReference: 'https://github.com/example/canonical.git' });
+    if (created.status === 'error') throw created.error;
+    const coordinator = new MachineSessionCoordinator(database, artifacts, new FakeOmpRuntime(), 'machine-a', join(root, 'runtime'), undefined, managedRoot);
+    try {
+      await coordinator.preparePortableSpaceRepository('fresh-project');
+      const origin = Bun.spawnSync(['git', 'remote', 'get-url', 'origin'], { cwd: checkout });
+      expect(origin.exitCode).toBe(0);
+      expect(origin.stdout.toString().trim()).toBe('https://github.com/example/canonical.git');
+      expect(lstatSync(join(physicalRoot, 'managed', 'project', 'workspace', '.git')).isDirectory()).toBe(true);
+    } finally { database.close(); }
+  });
+
+  it.each(['checkout', 'ancestor', 'dangling-ancestor'])('rejects a %s symlink escaping the managed checkout root', async (kind) => {
+    const { root, database, artifacts } = fixture();
+    const managedRoot = join(root, 'managed');
+    const outside = join(root, 'outside');
+    mkdirSync(managedRoot);
+    mkdirSync(outside);
+    writeFileSync(join(outside, 'retained.txt'), 'private data');
+    const link = join(managedRoot, 'linked');
+    symlinkSync(kind === 'dangling-ancestor' ? join(outside, 'missing') : outside, link, 'dir');
+    const checkout = kind === 'checkout' ? link : join(link, 'nested', 'workspace');
+    const created = database.createProject({ id: 'unsafe-project', name: 'Unsafe', repositoryPath: checkout, repositoryReference: 'https://github.com/example/canonical.git' });
+    if (created.status === 'error') throw created.error;
+    const coordinator = new MachineSessionCoordinator(database, artifacts, new FakeOmpRuntime(), 'machine-a', join(root, 'runtime'), undefined, managedRoot);
+    try {
+      await expect(coordinator.preparePortableSpaceRepository('unsafe-project')).rejects.toThrow(
+        kind === 'checkout' ? 'Refusing a symlink checkout' : kind === 'ancestor' ? 'Checkout resolves outside the managed root' : 'ENOENT',
+      );
+      expect(readFileSync(join(outside, 'retained.txt'), 'utf8')).toBe('private data');
+      expect(existsSync(join(outside, '.git'))).toBe(false);
+      expect(existsSync(join(outside, 'nested'))).toBe(false);
+      expect(existsSync(join(outside, 'missing'))).toBe(false);
+    } finally { database.close(); }
+  });
+
   it('detaches linked worktrees before deleting their shared base without losing staged or local changes', async () => {
     const { root, database, artifacts } = fixture();
     const base = join(root, 'repo');
