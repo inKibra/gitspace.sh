@@ -145,7 +145,8 @@ async function fixture() {
   await atomicJson(join(root, 'host-selection.json'), initial.selection);
   await atomicJson(join(root, 'machine-selection.json'), initial.selection);
   const environment = {
-    ...process.env,
+    // A fixture is a fresh installation, not a successor of the hosting machine.
+    ...Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith('GITSPACE_'))),
     GITSPACE_ENVIRONMENT_ROOT: root,
     GITSPACE_HOST_SELECTION: JSON.stringify(initial.selection),
     GITSPACE_BUNDLE_ROOT: root,
