@@ -38,6 +38,7 @@ function Harness({ read }: { read: (uri: string) => Promise<InspectorArtifactCon
       overview={{ projectId: 'project', spaceId: 'workspace', revision: 0, goal: null, workflow: null, rubric: null, journal: { entries: 0, openPhaseRunId: null, recent: [] }, changeGuide: null, review: { total: 0, unresolved: 0 } }}
       workspaces={[]} onSelectWorkspace={() => { throw new Error('Unexpected workspace change'); }}
       repositoryEntries={[]} repositoryFile={null} repositoryDiff={null} journalEntries={[]} threads={[]} services={[]} subagents={[]}
+      repositoryMode="current" onRepositoryModeChange={unavailable}
       usage={{ sessionId: null, report: null, status: 'idle', load: () => {}, refresh: () => {} }}
       agentSetup={{ sessionId: null, report: null, status: 'idle', load: unavailable, refresh: unavailable, save: unavailable }}
       reviewerId="reviewer" resourceRequest={request} onRequestResource={read} onRequestArtifact={unavailable}

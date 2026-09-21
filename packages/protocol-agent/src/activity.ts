@@ -4,14 +4,14 @@ import type { AgentFailure } from './errors.js';
 export const SessionStatusSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('idle') }),
   z.object({ type: z.literal('busy') }),
-  z.object({ type: z.literal('compacting') }),
+  z.object({ type: z.literal('compacting'), detail: z.string().optional() }),
   z.object({ type: z.literal('retry'), attempt: z.number(), message: z.string(), next: z.number() }),
 ]);
 export type SessionStatus = z.infer<typeof SessionStatusSchema>;
 
 export const ActivityReasonSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('turn') }),
-  z.object({ kind: z.literal('compacting') }),
+  z.object({ kind: z.literal('compacting'), detail: z.string().optional() }),
   z.object({ kind: z.literal('retry'), attempt: z.number(), next: z.number() }),
   z.object({ kind: z.literal('human'), questions: z.number(), permissions: z.number() }),
   z.object({ kind: z.literal('queued'), steering: z.number(), followUp: z.number() }),
@@ -36,7 +36,7 @@ export function computeSessionActivity(state: WorkspaceAgentActivityState, sessi
   const reasons: ActivityReason[] = [];
   const status = state.statuses?.[sessionId];
   if (status?.type === 'busy') reasons.push({ kind: 'turn' });
-  if (status?.type === 'compacting') reasons.push({ kind: 'compacting' });
+  if (status?.type === 'compacting') reasons.push({ kind: 'compacting', ...(status.detail === undefined ? {} : { detail: status.detail }) });
   if (status?.type === 'retry') reasons.push({ kind: 'retry', attempt: status.attempt, next: status.next });
   const questions = state.pendingQuestions?.[sessionId]?.length ?? 0;
   const permissions = state.pendingPermissions?.[sessionId]?.length ?? 0;
@@ -66,18 +66,18 @@ export function determineAgentState(
   if (lifecycle.archivedAt) return 'archived';
   if (lifecycle.closedAt) return 'closed';
   if (lifecycle.dormantSince) return 'dormant';
-  if (activity.reasons.some((reason) => reason.kind === 'human')) return 'permission-needed';
-  if (failure?.code === 'AGENT_DISCONNECTED') return 'retrying';
-  if (activity.reasons.some((reason) => reason.kind === 'retry')) return 'retrying';
-  if (activity.reasons.some((reason) => reason.kind === 'turn' || reason.kind === 'compacting')) return 'running';
   if (failure && failure.code !== 'AGENT_ARTIFACT_SYNC_FAILED') return 'retrying';
+  if (activity.reasons.some((reason) => reason.kind === 'retry')) return 'retrying';
+  if (activity.reasons.some((reason) => reason.kind === 'human')) return 'permission-needed';
+  if (activity.reasons.some((reason) => reason.kind === 'turn' || reason.kind === 'compacting' || reason.kind === 'queued' || reason.kind === 'subagents')) return 'running';
   return 'waiting';
 }
 
 export function sessionStatusFromActivity(activity: SessionActivity | undefined, failure?: AgentFailure | null): SessionStatus | undefined {
   if (!activity) return undefined;
+  const compaction = activity.reasons.find((reason) => reason.kind === 'compacting');
+  if (compaction?.kind === 'compacting') return { type: 'compacting', ...(compaction.detail === undefined ? {} : { detail: compaction.detail }) };
   if (activity.reasons.some((reason) => reason.kind === 'turn')) return { type: 'busy' };
-  if (activity.reasons.some((reason) => reason.kind === 'compacting')) return { type: 'compacting' };
   const retry = activity.reasons.find((reason) => reason.kind === 'retry');
   if (retry?.kind === 'retry') return { type: 'retry', attempt: retry.attempt, message: failure?.message ?? 'retrying', next: retry.next };
   return { type: 'idle' };

@@ -15,7 +15,10 @@ import { OMP_IPC_VERSION } from '../../account-omp/src/ipc.js';
 
 const roots: string[] = [];
 const servers: Server[] = [];
+const originalHostHash = process.env.GITSPACE_HOST_HASH;
 afterEach(() => {
+  if (originalHostHash === undefined) delete process.env.GITSPACE_HOST_HASH;
+  else process.env.GITSPACE_HOST_HASH = originalHostHash;
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
   for (const server of servers.splice(0)) server.stop(true);
 });
@@ -212,6 +215,12 @@ describe('release follower', () => {
 
     host.status.machineHash = generation;
     await follower.nudge();
+    expect(authority.reports).toEqual([]);
+    expect(await readFile(selectionPath, 'utf8')).toBe(saved);
+    process.env.GITSPACE_HOST_HASH = generation;
+    await writeFile(join(root, 'host-selection.json'), JSON.stringify({
+      version: 1, path: root, hash: generation, releaseSha: 'new-machine',
+    }));
     await follower.nudge();
     follower.stop();
     expect(JSON.parse(await readFile(selectionPath, 'utf8'))).toEqual(candidate);
@@ -326,6 +335,9 @@ describe('release follower', () => {
     const sha = 'abc123';
     const { artifact, manifest, objects } = await executable(sha, 'machine', {
       'machine.js': 'console.log("machine v2")',
+      'host-runtime.js': 'console.log("host v2")',
+      'machine-update.js': 'console.log("updater v2")',
+      'machine-bootstrap.js': 'console.log("bootstrap v2")',
       'machine.js.map': '{"sources":[]}',
       'drizzle/meta/_journal.json': '{"entries":[]}',
       'drizzle/0000_init.sql': 'CREATE TABLE t (id TEXT);',
@@ -392,6 +404,12 @@ describe('release follower', () => {
     await successor.start();
     expect(authority.reports).toEqual([]);
     host.status.machineHash = manifest.treeHash;
+    await successor.nudge();
+    expect(authority.reports).toEqual([]);
+    process.env.GITSPACE_HOST_HASH = manifest.treeHash;
+    await writeFile(join(root, 'host-selection.json'), JSON.stringify({
+      version: 1, path: host.launches[0]!.path, hash: manifest.treeHash, releaseSha: sha,
+    }));
     await successor.nudge();
     successor.stop();
     expect(authority.reports).toEqual([{ sha, target: 'machine', generation: manifest.treeHash, status: 'applied' }]);
@@ -490,6 +508,12 @@ describe('release follower', () => {
       onError: (error) => { throw error; },
     });
     await successor.start();
+    expect(authority.channelReports).toEqual([{ target: 'omp', generation: 'channel-omp-tree' }]);
+    process.env.GITSPACE_HOST_HASH = host.status.machineHash!;
+    await writeFile(join(root, 'host-selection.json'), JSON.stringify({
+      version: 1, path: root, hash: host.status.machineHash, releaseSha: null,
+    }));
+    await successor.nudge();
     successor.stop();
     expect(authority.channelReports).toEqual([
       { target: 'omp', generation: 'channel-omp-tree' },

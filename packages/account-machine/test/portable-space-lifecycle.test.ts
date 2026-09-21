@@ -347,4 +347,54 @@ describe('PortableSpaceLifecycle', () => {
     expect(authority.manifestKey).toBeUndefined();
   });
 
+  it('does not delete or resume when the commit response is lost and rollback is refused', async () => {
+    const { root, source, remote, binding } = fixture();
+    const authority = new TestAuthority();
+    const commit = authority.commitClosed.bind(authority);
+    authority.commitClosed = async (input) => { await commit(input); throw new Error('lost commit response'); };
+    authority.abortClose = async () => { throw new Error('already committed'); };
+    const lifecycle = new PortableSpaceLifecycle(authority, new FileCheckpointBlobStore(join(root, 'bucket')), new BareGitRemote(remote));
+    const runtime = new TestRuntime(source, true);
+    await expect(lifecycle.close({ projectId: 'project-a', spaceId: 'space-a', machineId: 'machine-a', expectedGeneration: 1, repositoryPath: source, binding }, runtime)).rejects.toThrow(AggregateError);
+    expect(authority.state).toBe('closed');
+    expect(runtime.resumed).toBe(false);
+    expect(runtime.quiesced).toBe(true);
+    expect(existsSync(source)).toBe(true);
+  });
+
+  it('does not resume or roll back ownership when post-commit cleanup fails', async () => {
+    const { root, source, remote, binding } = fixture();
+    const authority = new TestAuthority();
+    const lifecycle = new PortableSpaceLifecycle(authority, new FileCheckpointBlobStore(join(root, 'bucket')), new BareGitRemote(remote));
+    const runtime = new TestRuntime(source, true);
+    runtime.deleteLocalState = async () => { throw new Error('cleanup unavailable'); };
+    const result = await lifecycle.close({ projectId: 'project-a', spaceId: 'space-a', machineId: 'machine-a', expectedGeneration: 1, repositoryPath: source, binding }, runtime);
+    expect(result.warnings).toEqual(['cleanup unavailable']);
+    expect(authority.state).toBe('closed');
+    expect(runtime.resumed).toBe(false);
+    expect(authority.error).toBeUndefined();
+  });
+
+  it('releases source files only after the complete cloud checkpoint, not merely a Git push', async () => {
+    const { root, source, remote, binding } = fixture();
+    const authority = new TestAuthority();
+    const blobs = new CappedCheckpointBlobStore(join(root, 'bucket'));
+    blobs.beforePut = () => {
+      expect(existsSync(source)).toBe(true);
+      expect(authority.state).toBe('closing');
+      expect(git(remote, 'rev-parse', 'refs/gitspace/spaces/space-a/checkpoints/1')).toMatch(/^[0-9a-f]{40}$/);
+    };
+    const lifecycle = new PortableSpaceLifecycle(authority, blobs, new BareGitRemote(remote));
+    const runtime = new TestRuntime(source, true);
+    const remove = runtime.deleteLocalState.bind(runtime);
+    runtime.deleteLocalState = async () => {
+      expect(authority.state).toBe('closed');
+      expect(existsSync(join(root, 'bucket', authority.manifestKey!))).toBe(true);
+      await remove();
+    };
+    await lifecycle.close({ projectId: 'project-a', spaceId: 'space-a', machineId: 'machine-a', expectedGeneration: 1, repositoryPath: source, binding }, runtime, true);
+    expect(existsSync(source)).toBe(false);
+    expect(runtime.resumed).toBe(false);
+  });
+
 });

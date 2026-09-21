@@ -4,7 +4,9 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-08-27",
   "compatibility_flags": [
-    "nodejs_compat"
+    "nodejs_compat",
+    "enable_request_signal",
+    "request_signal_passthrough"
   ],
   "durable_objects": {
     "bindings": [
@@ -122,7 +124,8 @@
   },
   "observability": {
     "enabled": true,
-    "head_sampling_rate": 1
+    "head_sampling_rate": 1,
+    "logs": { "enabled": true, "invocation_logs": false }
   },
   "services": [
     {

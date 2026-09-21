@@ -2,7 +2,7 @@
 
 GitSpace is a browser workspace for coding agents across your own computers and cloud machines. Workspaces keep their code, agent conversation, goals, review evidence, artifacts, and services together.
 
-You or an agent can modify GitSpace from a workspace and release changes through the account's release system. Worker, frontend, machine, and OMP are separate account-governed targets.
+You or an agent can modify GitSpace from a workspace and hot-deploy changes through the account's release system. Worker, frontend, machine, and OMP are separate account-governed targets. Use **Launch GitSpace from here** in the source workspace menu; the release system handles activation rather than a manual server restart. See the [hot tenant deployment procedure](.agents/skills/gitspace-tenant-deployment/SKILL.md) for target selection, progress, and verification.
 
 ## Start in the browser
 

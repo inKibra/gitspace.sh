@@ -34,6 +34,14 @@ export class CoordinatorPortableSpaceRuntime implements PortableSpaceRuntime {
     return (await this.capture()).artifacts;
   }
 
+  async prepareLocalCleanup(): Promise<void> {
+    await this.coordinator.preparePortableSpaceCleanup(this.spaceId);
+  }
+
+  recordLocalCheckpoint(receipt: { revision: number; manifestKey: string; manifestHash: `sha256:${string}` }): void {
+    this.coordinator.recordPortableSpaceCheckpoint(this.spaceId, receipt);
+  }
+
   async deleteLocalState(): Promise<void> {
     await this.coordinator.deletePortableSpaceLocal(this.spaceId);
   }

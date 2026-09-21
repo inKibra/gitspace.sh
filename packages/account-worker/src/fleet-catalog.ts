@@ -1,11 +1,14 @@
 import { DurableObject } from 'cloudflare:workers';
 import { subscriptionIdentity, subscriptionActive } from './account-access.js';
-import { DurableChangeLog } from './durable-stream.js';
+import { DurableChangeLog, type DurableStreamSubscription } from './durable-stream.js';
 import { z } from 'zod';
 import { cloudImageChoiceSchema, cloudImageOperationActive, cloudImageOperationCancellable, cloudImageProviderStatusSchema, cloudImageSelectionSchema, cloudImageStateSchema, type CloudImageChoice, type CloudImageSelection, type CloudImageState } from '@gitspace/protocol/cloud-image';
 import { cloudImageProviderCall, prepareCloudImage, resolveCloudImage, runCloudImageOperation } from './sandbox-rollout.js';
 import { controlCloudflareSandboxMachine, createCloudflareSandboxMachine } from './sandbox-provisioner.js';
 import type { ProjectAuthorityDO, UserProjectIndexDO } from './project-authority.js';
+import { DirectoryOutbox, type DirectoryPublication } from './account-directory.js';
+import type { FleetMachineDefinition } from '@gitspace/protocol/account-directory';
+export type { FleetMachineDefinition } from '@gitspace/protocol/account-directory';
 
 export interface PortableSpaceDefinition {
   projectId: string;
@@ -19,19 +22,6 @@ export interface PortableSpaceDefinition {
   phase: 'plan' | 'code' | 'review' | 'ship' | null;
 }
 
-export interface FleetMachineDefinition {
-  id: string;
-  label: string;
-  state: 'provisioning' | 'online' | 'sleeping' | 'offline' | 'resuming' | 'deleting' | 'error';
-  rpcEndpoint: string | null;
-  kind: 'physical' | 'sandbox';
-  notes: string;
-  provider: 'physical' | 'cloudflare-sandbox';
-  desiredState: 'online' | 'offline' | 'removed';
-  lifecycleRevision: number;
-  operationId: string | null;
-  error: string | null;
-}
 
 interface SandboxEnrollment {
   userId: string;
@@ -42,12 +32,14 @@ interface SandboxEnrollment {
 
 export class FleetCatalogDO extends DurableObject<Env> {
   private readonly changes: DurableChangeLog;
+  private readonly directoryOutbox: DirectoryOutbox;
   private readonly imageRuns = new Map<string, Promise<void>>();
   private readonly provisioningRuns = new Map<string, Promise<void>>();
   private imageDefaultRun: Promise<CloudImageChoice> | null = null;
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.changes = new DurableChangeLog(ctx.storage);
+    this.directoryOutbox = new DirectoryOutbox(ctx, env);
     ctx.blockConcurrencyWhile(async () => {
       this.ctx.storage.sql.exec(`
         CREATE TABLE IF NOT EXISTS space_definitions (
@@ -74,8 +66,15 @@ export class FleetCatalogDO extends DurableObject<Env> {
           error: 'Sandbox provisioning was interrupted. Start the machine to resume.',
         });
       }
+      this.directoryOutbox.kick();
     });
   }
+
+  directoryPublication(): Extract<DirectoryPublication, { source: 'fleet' }> {
+    return { source: 'fleet', cursor: this.directoryOutbox.head(), machines: this.listMachines() };
+  }
+
+  async alarm(): Promise<void> { await this.directoryOutbox.flush(); }
 
   cloudImage(machineId: string): CloudImageState | null {
     const row = this.ctx.storage.sql.exec<{ state_json: string }>('SELECT state_json FROM cloud_images WHERE machine_id=?', machineId).toArray()[0];
@@ -86,7 +85,7 @@ export class FleetCatalogDO extends DurableObject<Env> {
     return this.ctx.storage.sql.exec<{ state_json: string }>('SELECT state_json FROM cloud_images ORDER BY machine_id').toArray().map(row => cloudImageStateSchema.parse(JSON.parse(row.state_json)));
   }
 
-  watchCloudImages(after: number | null): ReadableStream<Uint8Array> {
+  watchCloudImages(after: number | null): DurableStreamSubscription {
     return this.changes.watch('cloud-images', after, () => this.listCloudImages());
   }
 
@@ -351,7 +350,11 @@ export class FleetCatalogDO extends DurableObject<Env> {
     if (input.rpcEndpoint !== null && !input.rpcEndpoint.startsWith('/')) new URL(input.rpcEndpoint);
     const current = this.getMachine(input.id);
     if (cloudImageOperationActive(this.cloudImage(input.id)) && (input.operationId !== null || input.desiredState !== 'online')) throw new Error('Cloud image recovery has reserved this machine lifecycle');
-    if (current && JSON.stringify(current) === JSON.stringify(input)) return current;
+    // Heartbeats with identical public state must not wake the account directory.
+    if (current && current.label === input.label && current.state === input.state && current.rpcEndpoint === input.rpcEndpoint
+      && current.kind === input.kind && current.notes === input.notes && current.provider === input.provider
+      && current.desiredState === input.desiredState && current.lifecycleRevision === input.lifecycleRevision
+      && current.operationId === input.operationId && current.error === input.error) return current;
     this.ctx.storage.transactionSync(() => {
       this.ctx.storage.sql.exec(`
         INSERT INTO fleet_machines(machine_id, definition_json, updated_at)
@@ -359,8 +362,11 @@ export class FleetCatalogDO extends DurableObject<Env> {
         ON CONFLICT(machine_id) DO UPDATE SET definition_json = excluded.definition_json, updated_at = excluded.updated_at
       `, input.id, JSON.stringify(input), new Date().toISOString());
       this.ctx.storage.sql.exec('DELETE FROM destroyed_machines WHERE machine_id=?', input.id);
-      this.changes.append('machines', this.listMachines());
+      const machines = this.listMachines();
+      this.changes.append('machines', machines);
+      this.directoryOutbox.enqueue({ source: 'fleet', machines });
     });
+    this.directoryOutbox.kick();
     this.changes.wake();
     this.ctx.waitUntil(this.broadcast({ type: 'upsert', machineId: input.id, machine: input }));
     return input;
@@ -382,13 +388,16 @@ export class FleetCatalogDO extends DurableObject<Env> {
       if (destroyed) this.ctx.storage.sql.exec('INSERT OR REPLACE INTO destroyed_machines(machine_id,destroyed_at) VALUES(?,?)', machineId, new Date().toISOString());
       this.ctx.storage.sql.exec('DELETE FROM sandbox_enrollments WHERE machine_id=?', machineId);
       const removed = this.ctx.storage.sql.exec('DELETE FROM fleet_machines WHERE machine_id = ?', machineId).rowsWritten > 0;
-      if (removed) this.changes.append('machines', this.listMachines());
       if (removed) {
+        const machines = this.listMachines();
+        this.changes.append('machines', machines);
         this.ctx.storage.sql.exec('DELETE FROM cloud_images WHERE machine_id=?', machineId);
         this.changes.append('cloud-images', this.listCloudImages());
+        this.directoryOutbox.enqueue({ source: 'fleet', machines });
       }
       return removed;
     });
+    this.directoryOutbox.kick();
     if (removed) {
       this.changes.wake();
       this.ctx.waitUntil(this.broadcast({ type: 'remove', machineId, machine: null }));
@@ -408,7 +417,7 @@ export class FleetCatalogDO extends DurableObject<Env> {
         return normalizeMachine(value);
       });
   }
-  watch(after: number | null): ReadableStream<Uint8Array> {
+  watch(after: number | null): DurableStreamSubscription {
     return this.changes.watch('machines', after, () => this.listMachines());
   }
   async fetch(request: Request): Promise<Response> {

@@ -114,6 +114,8 @@ export interface SpaceGitCheckpointRemote {
 
 export interface PortableSpaceRuntime {
   quiesce(): Promise<void>;
+  prepareLocalCleanup?(): Promise<void>;
+  recordLocalCheckpoint?(receipt: { revision: number; manifestKey: string; manifestHash: `sha256:${string}` }): void;
   resumeAfterFailedClose(): Promise<void>;
   captureAgent(): Promise<{
     sessionId: string;
@@ -153,8 +155,8 @@ export class PortableSpaceLifecycle {
   ) {}
 
   /** Checkpoint, hand the space back to the cloud, and delete the local copy. */
-  async close(space: PortableSpaceDescriptor, runtime: PortableSpaceRuntime): Promise<CloseSpaceResult> {
-    const manifest = await this.release(space, runtime, false);
+  async close(space: PortableSpaceDescriptor, runtime: PortableSpaceRuntime, resumeOnMachineRestart = false): Promise<CloseSpaceResult> {
+    const manifest = await this.publishCheckpoint(space, runtime, resumeOnMachineRestart);
     const warnings: string[] = [];
     try {
       await runtime.deleteLocalState();
@@ -164,14 +166,14 @@ export class PortableSpaceLifecycle {
     return { manifest, warnings };
   }
 
-  /** Checkpoint and hand the space back to the cloud while keeping every local file, so this machine can reclaim it without a restore. */
-  async release(space: PortableSpaceDescriptor, runtime: PortableSpaceRuntime, resumeOnMachineRestart = true): Promise<SpaceCheckpointManifest> {
+  private async publishCheckpoint(space: PortableSpaceDescriptor, runtime: PortableSpaceRuntime, resumeOnMachineRestart: boolean): Promise<SpaceCheckpointManifest> {
     const identity = { projectId: space.projectId, spaceId: space.spaceId, machineId: space.machineId, expectedGeneration: space.expectedGeneration };
     const operation = await this.authority.beginClose(identity);
     let quiesced = false;
     try {
       quiesced = true;
       await runtime.quiesce();
+      await runtime.prepareLocalCleanup?.();
       const repository = await createGitIntermediateCheckpoint({
         repositoryPath: space.repositoryPath,
         spaceId: space.spaceId,
@@ -210,6 +212,7 @@ export class PortableSpaceLifecycle {
       });
       const manifestKey = spaceCheckpointManifestKey(space.projectId, space.spaceId, operation.revision);
       const manifestHash = await this.blobs.put(manifestKey, new TextEncoder().encode(JSON.stringify(manifest)));
+      runtime.recordLocalCheckpoint?.({ revision: operation.revision, manifestKey, manifestHash });
       await this.authority.commitClosed({
         ...identity,
         revision: operation.revision,
@@ -222,7 +225,9 @@ export class PortableSpaceLifecycle {
       const failures: unknown[] = [error];
       try { await this.authority.abortClose({ ...identity, revision: operation.revision, message: error instanceof Error ? error.message : String(error) }); }
       catch (abortError) { failures.push(abortError); }
-      if (quiesced) {
+      // A failed abort can mean commit succeeded but its response was lost.
+      // Keep admissions fenced until the authority resolves that uncertainty.
+      if (quiesced && failures.length === 1) {
         try { await runtime.resumeAfterFailedClose(); }
         catch (resumeError) { failures.push(resumeError); }
       }

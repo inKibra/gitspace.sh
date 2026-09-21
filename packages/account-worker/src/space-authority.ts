@@ -1,13 +1,16 @@
 import { DurableObject } from 'cloudflare:workers';
 import { abortSpaceClose, beginSpaceClose, beginSpaceOpen, bootstrapSpaceAuthority, commitSpaceClosed, commitSpaceOpen, failSpaceOpen, SpaceAuthorityRecordSchema, WorkspaceDomainError, type SpaceAuthorityMutation, type SpaceAuthorityRecord, type SpaceAuthorityResult, type VerifiedSpaceAuthorityIdentity } from '@gitspace/protocol-workspace';
-import { DurableChangeLog } from './durable-stream.js';
+import { DurableChangeLog, type DurableStreamSubscription } from './durable-stream.js';
 import { cloudImageDiscardReceiptSchema, type CloudImageDiscardReceipt } from '@gitspace/protocol/cloud-image';
+import { DirectoryOutbox, type DirectoryPublication } from './account-directory.js';
 
 export class SpaceAuthorityDO extends DurableObject<Env> {
   private readonly changes: DurableChangeLog;
+  private readonly directoryOutbox: DirectoryOutbox;
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.changes = new DurableChangeLog(ctx.storage);
+    this.directoryOutbox = new DirectoryOutbox(ctx, env);
     ctx.blockConcurrencyWhile(async () => {
       this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS space_authority (
         id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -17,10 +20,18 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
         record_json TEXT NOT NULL
       )`);
       this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS image_recovery_receipts(operation_id TEXT PRIMARY KEY,receipt_json TEXT NOT NULL)');
+      this.directoryOutbox.kick();
     });
   }
 
-  watch(spaceId: string, after: number | null): ReadableStream<Uint8Array> {
+  directoryPublication(): Extract<DirectoryPublication, { source: 'space' }> | null {
+    const state = this.get();
+    return state ? { source: 'space', cursor: this.directoryOutbox.head(), state } : null;
+  }
+
+  async alarm(): Promise<void> { await this.directoryOutbox.flush(); }
+
+  watch(spaceId: string, after: number | null): DurableStreamSubscription {
     const state = this.get();
     if (state && state.spaceId !== spaceId) throw new WorkspaceDomainError({ domain: 'workspace', code: 'WORKSPACE_IDENTITY_MISMATCH', message: 'Space authority identity mismatch', context: { spaceId } });
     return this.changes.watch(`space:${spaceId}`, after, () => this.get());
@@ -31,9 +42,13 @@ export class SpaceAuthorityDO extends DurableObject<Env> {
       const value = this.ctx.storage.transactionSync(() => {
         const value = mutate();
         const state = this.get();
-        if (state) this.changes.append(`space:${state.spaceId}`, state);
+        if (state) {
+          this.changes.append(`space:${state.spaceId}`, state);
+          this.directoryOutbox.enqueue({ source: 'space', state });
+        }
         return value;
       });
+      this.directoryOutbox.kick();
       this.changes.wake();
       return { status: 'ok', value };
     } catch (error) {

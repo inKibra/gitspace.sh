@@ -13,8 +13,8 @@ afterEach(async () => { for (const close of cleanup.splice(0)) await close(); })
 async function fixture(clientBytes = new Uint8Array([1, 2, 3])) {
   const directory = await mkdtemp(join(tmpdir(), 'distribution-publisher-'));
   const files = [
-    'host.js', 'host-runtime.js', 'rpc-probe.js', 'omp-launcher.js', 'bin/bun', 'bin/omp',
-    'machine/machine.js', 'machine/machine-worker.js', 'machine/machine-native.json', 'machine/native/walgit',
+    'host.js', 'rpc-probe.js', 'omp-launcher.js', 'bin/bun', 'bin/omp',
+    'machine/machine.js', 'machine/machine-worker.js', 'machine/host-runtime.js', 'machine/machine-update.js', 'machine/machine-bootstrap.js', 'machine/machine-native.json', 'machine/native/walgit',
     'machine.manifest.json', 'omp/omp.js', 'omp/omp-adapter.js', 'omp/omp-runtime.json',
     'omp/package.json', 'omp/bun.lock', 'omp.manifest.json',
   ];

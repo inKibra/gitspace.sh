@@ -10,6 +10,16 @@ interface CloudRequestDiagnostics {
   headers: Record<string, string>;
   stage: 'before-headers' | 'response-body' | 'http' | 'application' | 'integrity' | 'complete';
   response?: Response;
+  responseHeadersMs?: number;
+}
+
+interface UploadDiagnostics {
+  uploadId: string;
+  objectKey: string;
+  byteCount: number;
+  attempt: number;
+  maxAttempts: number;
+  targetOrigin: string;
 }
 
 const artifactSyncContext = new AsyncLocalStorage<ArtifactSyncContext>();
@@ -69,6 +79,7 @@ const errorCodes: Record<string, true> = {
   FailedToOpenSocket: true,
   CONTROL_FAILED: true,
   DATA_PUT_FAILED: true,
+  DATA_HEAD_FAILED: true,
   DATA_GET_FAILED: true,
   DATA_INTEGRITY_FAILED: true,
 };
@@ -139,6 +150,7 @@ export function cloudResponseRay(response: Response | undefined): string | undef
 export async function withCloudRequestDiagnostics<T>(
   request: Pick<SignedControlRequest, 'nonce' | 'operation'>,
   run: (diagnostics: CloudRequestDiagnostics) => Promise<T>,
+  upload?: UploadDiagnostics,
 ): Promise<T> {
   const context = artifactSyncContext.getStore();
   const startedAt = new Date().toISOString();
@@ -153,6 +165,15 @@ export async function withCloudRequestDiagnostics<T>(
     requestId: request.nonce,
     operation: request.operation,
     startedAt,
+    // Select fields explicitly: never log signed headers, request bodies, or error messages.
+    ...(upload ? {
+      uploadId: upload.uploadId,
+      objectKey: upload.objectKey,
+      byteCount: upload.byteCount,
+      attempt: upload.attempt,
+      maxAttempts: upload.maxAttempts,
+      targetOrigin: upload.targetOrigin,
+    } : {}),
   };
   const finish = (outcome: 'success' | 'failure', error?: unknown): void => {
     try {
@@ -163,16 +184,17 @@ export async function withCloudRequestDiagnostics<T>(
         outcome,
         status: diagnostics.response?.status,
         cfRay: cloudResponseRay(diagnostics.response),
+        responseHeadersMs: diagnostics.responseHeadersMs,
       }, error);
     } catch {
       // Response metadata collection is diagnostic only.
     }
   };
-  if (context) emit({ ...record, elapsedMs: 0, stage: diagnostics.stage, outcome: 'start' });
+  if (context || upload) emit({ ...record, elapsedMs: 0, stage: diagnostics.stage, outcome: 'start' });
   try {
     const value = await run(diagnostics);
     diagnostics.stage = 'complete';
-    if (context) finish('success');
+    if (context || upload) finish('success');
     return value;
   } catch (error) {
     finish('failure', error);

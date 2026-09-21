@@ -65,8 +65,8 @@ export interface OmpRuntimeSession {
 }
 
 export interface OmpRuntime {
-  create(input: { projectId: string; workspaceId: string | null; workingDirectory: string; sessionKey: string; artifactsDir: string; executionFailure?: AgentFailure | null }): Promise<OmpRuntimeSession>;
-  open(input: { projectId: string; workspaceId: string | null; workingDirectory: string; sessionKey: string; artifactsDir: string; executionFailure?: AgentFailure | null; sessionFile: string }): Promise<OmpRuntimeSession>;
+  create(input: { projectId: string; workspaceId: string | null; workingDirectory: string; sessionKey: string; artifactsDir: string; executionFailure?: AgentFailure | null }, signal?: AbortSignal): Promise<OmpRuntimeSession>;
+  open(input: { projectId: string; workspaceId: string | null; workingDirectory: string; sessionKey: string; artifactsDir: string; executionFailure?: AgentFailure | null; sessionFile: string }, signal?: AbortSignal): Promise<OmpRuntimeSession>;
   transcript(sessionFile: string): Promise<OmpTranscriptEvent[]>;
   checkpointTranscript(bytes: Uint8Array): Promise<OmpTranscriptEvent[]>;
 }

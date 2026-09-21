@@ -1,6 +1,8 @@
 // @vitest-environment happy-dom
 import type { SpacePlacementView } from '@gitspace/protocol';
 import type { CloudWorkspaceDefinition } from '@gitspace/protocol/project-authority';
+import type { AccountDirectorySnapshot } from '@gitspace/protocol/account-directory';
+import type { StreamEvent } from '@gitspace/protocol-sync';
 import type { BaseSpaceViewCodec, WorkspaceViewCodec } from '@gitspace/protocol/rpc-contract';
 import { SidebarProvider } from '@gitspace/ui';
 import { act } from 'react';
@@ -11,8 +13,8 @@ import { AppSidebar } from './AppSidebar.js';
 import type { ProjectLifecycleView } from './GitSpaceShell.js';
 import { ACCOUNT_DIRECTORY_CHANGED, type ProductRoute } from './routes.js';
 import { useAccountDirectory, type Directory, type DirectoryClient } from './useAccountDirectory.js';
-import { SynchronizationContext } from './SynchronizationProvider.js';
-import { SynchronizationOwner } from './synchronization.js';
+import { SynchronizationContext, useAccountMachines, useAccountProjects } from './SynchronizationProvider.js';
+import { SynchronizationOwner, type SynchronizationSource } from './synchronization.js';
 
 type DirectoryProject = Pick<ProjectLifecycleView, 'id' | 'name' | 'lifecycle'>;
 type Mutable<T> = { -readonly [Key in keyof T]: T[Key] };
@@ -27,9 +29,12 @@ interface Fixture {
   placements: Array<{ -readonly [Key in keyof SpacePlacementView]: SpacePlacementView[Key] }>;
   machines: Array<{ id: string; label: string; state: 'online' | 'offline'; desiredState: 'online' | 'offline' }>;
   runtime: RuntimeSnapshot;
-  failures: { directory: string | null; placements: string | null; machines: string | null; runtime: string | null };
+  failures: { directory: string | null; runtime: string | null };
   bootstrap: Mock<() => Promise<RuntimeReply>>;
   client: DirectoryClient;
+  source: SynchronizationSource<AccountDirectorySnapshot>;
+  revisions: Record<string, number>;
+  publish: () => void;
 }
 const working = { primaryColor: 'green' as const, agents: { green: 1, blue: 0, orange: 0, red: 0 }, services: { green: 0, red: 0 }, terminals: { green: 0, red: 0 } };
 const waiting = { ...working, primaryColor: 'blue' as const, agents: { green: 0, blue: 1, orange: 0, red: 0 } };
@@ -53,25 +58,41 @@ function fixture(): Fixture {
       stack: { blockedBy: ['a-parent'], blocking: ['a-child'], findings: [{ code: 'parent-behind', message: 'Parent branch is behind', workspaceId: 'a-parent' }] },
     }],
   };
-  const failures = { directory: null as string | null, placements: null as string | null, machines: null as string | null, runtime: null as string | null };
-  const quiet = async function* (_input: unknown, { signal }: { signal: AbortSignal }): AsyncGenerator<never> {
-    const stopped = Promise.withResolvers<void>();
-    const abort = () => stopped.resolve();
+  const failures = { directory: null as string | null, runtime: null as string | null };
+  const revisions = { a: 1, b: 1 };
+  const snapshot = (): AccountDirectorySnapshot => structuredClone({
+    projects: projects.map((project) => ({ ...project, repositoryReference: null, baseBranch: 'main', role: null, source: null, revision: 1, archivedAt: null, updatedAt: savedMetadata.updatedAt })),
+    workspaces: [...saved.a, ...saved.b], placements,
+    machines: machines.map((machine) => ({ ...machine, rpcEndpoint: `/machine/${machine.id}/rpc`, kind: 'physical', notes: '', provider: 'physical', lifecycleRevision: 1, operationId: null, error: null })),
+    projectRevisions: revisions,
+  });
+  let cursor = 0;
+  let notify = () => {};
+  const queued: StreamEvent<AccountDirectorySnapshot>[] = [];
+  const source: SynchronizationSource<AccountDirectorySnapshot> = async function* (_after, signal) {
+    const abort = () => notify();
     signal.addEventListener('abort', abort, { once: true });
-    if (signal.aborted) stopped.resolve();
-    try { await stopped.promise; } finally { signal.removeEventListener('abort', abort); }
+    queued.length = 0;
+    try {
+      if (failures.directory) { yield { status: 'error', error: new Error(failures.directory) }; return; }
+      yield { status: 'ok', value: { type: 'snapshot', resource: 'account-directory', cursor: ++cursor, revision: cursor, previous: null, value: snapshot() } };
+      while (!signal.aborted) {
+        const next = queued.shift();
+        if (next) { yield { status: 'ok', value: next }; continue; }
+        const ready = Promise.withResolvers<void>();
+        notify = ready.resolve;
+        await ready.promise;
+      }
+    } finally { signal.removeEventListener('abort', abort); }
+  };
+  const publish = () => {
+    const previous = cursor++;
+    queued.push({ type: 'change', resource: 'account-directory', cursor, revision: cursor, previous, value: snapshot() });
+    notify();
   };
   const bootstrap = vi.fn<() => Promise<RuntimeReply>>(async () => failures.runtime ? { status: 'error', error: new Error(failures.runtime) } : { status: 'ok', value: structuredClone(runtime) });
-  const client = {
-    inspector: { bootstrap: async ({ projectId }: { projectId: string }) => failures.directory ? { status: 'error', error: new Error(failures.directory) } : { status: 'ok', value: { workspaces: saved[projectId as keyof typeof saved] } } },
-    placements: async () => failures.placements ? { status: 'error', error: new Error(failures.placements) } : { status: 'ok', value: { machineId: 'account', spaces: placements } },
-    machines: async () => failures.machines ? { status: 'error', error: new Error(failures.machines) } : { status: 'ok', value: machines },
-    bootstrap,
-    project: { events: quiet },
-    space: { events: quiet },
-    machine: { events: quiet },
-  } as unknown as DirectoryClient;
-  return { projects, saved, placements, machines, runtime, failures, bootstrap, client };
+  const client: DirectoryClient = { bootstrap };
+  return { projects, saved, placements, machines, runtime, failures, bootstrap, client, source, revisions, publish };
 }
 
 let container: HTMLDivElement;
@@ -103,7 +124,7 @@ function Probe(props: { scene: Fixture; selected?: { projectId: string; workspac
   return <SynchronizationContext.Provider value={synchronization}><DirectoryProbe {...props} /></SynchronizationContext.Provider>;
 }
 function DirectoryProbe({ scene, selected = null, view = 'settings', projects = scene.projects }: { scene: Fixture; selected?: { projectId: string; workspaceId: string | null } | null; view?: ProductRoute; projects?: Fixture['projects'] }) {
-  directory = useAccountDirectory(projects, scene.client);
+  directory = useAccountDirectory(projects, scene.client, scene.source);
   return <SidebarProvider persist={false}><AppSidebar view={view} onView={() => undefined} selected={selected} projects={projects.map((project) => ({ ...project, ...(directory[project.id] ?? { workspaces: [] }) }))} machines={[]} onSelectWorkspace={() => undefined} /></SidebarProvider>;
 }
 
@@ -177,19 +198,17 @@ it('retains the same status circles through partial and failed refreshes, then c
   expect(directory.a?.error).toBeNull();
 });
 
-it('retains compatible data on cloud failures without hiding a close confirmed by another source', async () => {
+it('retains compatible data on directory failure and applies confirmed closes on recovery even with an offline machine', async () => {
   const scene = fixture();
   await act(async () => { root.render(<Probe scene={scene} />); });
-  scene.failures.placements = 'Placement disconnected';
-  scene.saved.a[1]!.name = 'Renamed work';
+  scene.failures.directory = 'Directory disconnected';
   await refresh();
-  expect(directory.a?.workspaces[0]?.name).toBe('Renamed work');
   expect(workspaceSummary()).toMatchObject({ status: { primaryColor: 'green' }, holder: { kind: 'held', machineId: 'desk' }, freshness: 'stale' });
   expect(directory.a?.workspaces[0]?.runtime?.relations.stackedOn).toBe('a-parent');
-  expect(row('Alpha').getAttribute('aria-description')).toContain('Placement disconnected');
-  scene.failures.placements = null;
-  scene.failures.directory = 'Directory disconnected';
-  scene.failures.machines = 'Machine directory disconnected';
+  expect(directory.a?.error).not.toBeNull();
+  scene.failures.directory = null;
+  scene.saved.a[1]!.name = 'Renamed work';
+  scene.machines[0]!.state = 'offline';
   scene.placements.find((space) => space.spaceId === 'a-work')!.state = 'closed';
   await refresh();
   expect(directory.a?.workspaces[0]?.name).toBe('Renamed work');
@@ -198,10 +217,7 @@ it('retains compatible data on cloud failures without hiding a close confirmed b
   expect(directory.a?.workspaces[0]?.runtime).toBeUndefined();
   expect(directory.a?.workspaces[0]?.definition?.phase).toBe('code');
   expect(directory.a?.baseSummary).toMatchObject({ status: { primaryColor: 'green' }, freshness: 'stale' });
-  expect(row('Alpha').getAttribute('aria-description')).toContain('Directory disconnected');
-  expect(row('Alpha').getAttribute('aria-description')).toContain('Machine directory disconnected');
-  scene.failures.directory = null;
-  scene.failures.machines = null;
+  scene.machines[0]!.state = 'online';
   await refresh();
   expect(directory.a?.baseSummary?.freshness).toBe('fresh');
   expect(directory.a?.error).toBeNull();
@@ -260,6 +276,9 @@ it('coalesces changes during an in-flight read and ignores its superseded runtim
     window.dispatchEvent(new Event(ACCOUNT_DIRECTORY_CHANGED));
     window.dispatchEvent(new Event(ACCOUNT_DIRECTORY_CHANGED));
   });
+  expect(workspaceSummary()?.generation).toBe(2);
+  expect(workspaceSummary()?.status).toBeUndefined();
+  expect(directory.a?.workspaces[0]?.runtime).toBeUndefined();
   await act(async () => { pending.resolve({ status: 'ok', value: staleRuntime }); });
   expect(workspaceSummary()).toMatchObject({ generation: 2, status: { primaryColor: 'blue' }, freshness: 'fresh' });
   expect(directory.a?.workspaces[0]?.runtime).toMatchObject({ generation: 2, status: { primaryColor: 'blue' } });
@@ -354,4 +373,83 @@ it('keeps archived project workspace records available to the account Projects p
   expect(directory.b?.workspaces[0]?.closedAt).toEqual(new Date('2026-09-12T00:00:00.000Z'));
   expect(directory.b?.workspaces[0]?.summary?.holder.kind).toBe('released');
   expect(directory.b?.workspaces[0]?.runtime).toBeUndefined();
+});
+
+it('refreshes activity revisions only for the affected project without idle sidebar fan-out', async () => {
+  const scene = fixture();
+  const source = vi.fn(scene.source);
+  scene.source = source;
+  for (let index = 0; index < 100; index++) scene.saved.b.push({ ...scene.saved.b[1]!, id: `b-archived-${index}`, lifecycle: 'archived', archivedAt: '2026-09-12T00:00:00.000Z' });
+  await act(async () => { root.render(<Probe scene={scene} />); });
+  expect(source).toHaveBeenCalledOnce();
+  expect(scene.bootstrap).toHaveBeenCalledOnce();
+  scene.runtime.workspaces[0]!.status = waiting;
+  scene.revisions.b!++;
+  await act(async () => { scene.publish(); });
+  expect(workspaceSummary()?.status?.primaryColor).toBe('green');
+  expect(scene.bootstrap).toHaveBeenCalledOnce();
+  scene.revisions.a!++;
+  await act(async () => { scene.publish(); });
+  expect(workspaceSummary()?.status?.primaryColor).toBe('blue');
+  expect(scene.bootstrap).toHaveBeenCalledTimes(2);
+  expect(source).toHaveBeenCalledOnce();
+});
+
+it('refreshes only the changed holder and confirms status after that machine returns online', async () => {
+  const scene = fixture();
+  const placement = scene.placements.find((space) => space.spaceId === 'a-work')!;
+  placement.holderId = 'laptop';
+  placement.endpoint = '/machine/laptop/rpc';
+  scene.runtime.workspaces[0]!.possessedBy = 'laptop';
+  await act(async () => { root.render(<Probe scene={scene} />); });
+  expect(scene.bootstrap).toHaveBeenCalledTimes(2);
+  scene.runtime.baseSpace.status = waiting;
+  scene.runtime.workspaces[0]!.status = waiting;
+  scene.machines[1]!.state = 'offline';
+  await act(async () => { scene.publish(); });
+  expect(directory.a?.baseSummary).toMatchObject({ status: { primaryColor: 'green' }, freshness: 'fresh' });
+  expect(workspaceSummary()).toMatchObject({ status: { primaryColor: 'green' }, freshness: 'stale' });
+  expect(scene.bootstrap).toHaveBeenCalledTimes(2);
+  scene.machines[1]!.state = 'online';
+  await act(async () => { scene.publish(); });
+  expect(directory.a?.baseSummary).toMatchObject({ status: { primaryColor: 'green' }, freshness: 'fresh' });
+  expect(workspaceSummary()).toMatchObject({ status: { primaryColor: 'blue' }, freshness: 'fresh' });
+  expect(scene.bootstrap).toHaveBeenCalledTimes(3);
+});
+
+it('does not let a late native response resurrect a project deleted by the directory feed', async () => {
+  const scene = fixture();
+  await act(async () => { root.render(<Probe scene={scene} />); });
+  const pending = Promise.withResolvers<RuntimeReply>();
+  scene.bootstrap.mockImplementationOnce(() => pending.promise);
+  scene.revisions.a!++;
+  await act(async () => { scene.publish(); });
+  scene.projects.splice(0, 1);
+  await act(async () => { scene.publish(); });
+  expect(directory.a).toBeUndefined();
+  await act(async () => { pending.resolve({ status: 'ok', value: scene.runtime }); });
+  expect(directory.a).toBeUndefined();
+  expect(directory.b?.workspaces[0]?.id).toBe('b-work');
+});
+
+it('shares the sidebar snapshot with account project and machine consumers', async () => {
+  const scene = fixture();
+  const source = vi.fn(scene.source);
+  scene.source = source;
+  synchronization.channel('account-directory', source);
+  function AccountReaders() {
+    const projects = useAccountProjects();
+    const machines = useAccountMachines();
+    return <output>{projects.state === 'success' ? projects.value.map((project) => `${project.name}:${project.updatedAt.toISOString()}`).join(',') : projects.state} / {machines.state === 'success' ? machines.value.map((machine) => machine.label).join(',') : machines.state}</output>;
+  }
+  await act(async () => { root.render(<><Probe scene={scene} /><SynchronizationContext.Provider value={synchronization}><AccountReaders /></SynchronizationContext.Provider></>); });
+  expect(source).toHaveBeenCalledOnce();
+  expect(container.querySelector('output')?.textContent).toContain('Alpha:2026-09-01T00:00:00.000Z');
+  expect(container.querySelector('output')?.textContent).toContain('Desk machine,Laptop');
+  scene.machines[0]!.label = 'Renamed desk';
+  await act(async () => { scene.publish(); });
+  expect(workspaceSummary()?.holder).toEqual({ kind: 'held', machineId: 'desk', label: 'Renamed desk' });
+  expect(container.querySelector('output')?.textContent).toContain('Renamed desk,Laptop');
+  expect(source).toHaveBeenCalledOnce();
+  expect(scene.bootstrap).toHaveBeenCalledOnce();
 });

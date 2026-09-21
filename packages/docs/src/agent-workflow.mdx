@@ -25,6 +25,12 @@ Structured agent questions appear as native interactions. Answer the decision di
 
 For repository setup, use the built-in `workspace-lifecycle` skill. It inspects the repository and CI, proposes the lifecycle split, and asks permission before editing. Execution needs separate human approval of the final content. Agents use `space.environment` for authorized runs and logs; they cannot grant content approval, recover uncertain runs, or destroy cloud resources. See [Workspace lifecycle](/workspace-lifecycle).
 
+### Context compaction
+
+The workspace header and sidebar show **Compacting context** for manual compaction, automatic maintenance before or after a turn, and running background compaction. Method, model, and automatic retry details appear when available. Finishing an assistant turn does not clear maintenance that is still running. The indicator clears when the remaining compaction work succeeds, fails, or is cancelled; a completed background result waiting to be applied is not running work. Human-attention and failure states retain their priority.
+
+Each native V1/V2 compaction request has a six-minute deadline, including its Codex stream watchdogs. Ordinary model-request deadlines are unchanged. A deadline retains its timeout cause rather than becoming a generic WebSocket transport failure, and cancelling a request does not replay it through transport fallback.
+
 ## Configure account and project access
 
 **Skills**, **Plugins**, **Secrets**, and **Crons** are account pages. You can manage them with no workspace open and no machine online. Selecting a project does not change an account-level write into a project-level write.

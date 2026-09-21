@@ -47,6 +47,23 @@ export const spacePlacements = sqliteTable('space_placements', {
   check('space_placements_state_check', sql`${table.state} IN ('opening', 'open', 'closing', 'closed')`),
 ]);
 
+/** Cleanup receipts are independent of operational rows and must survive their removal. */
+export const spaceCleanupJobs = sqliteTable('space_cleanup_jobs', {
+  spaceId: text('space_id').primaryKey(),
+  projectId: text('project_id').notNull(),
+  generation: integer('generation').notNull(),
+  rootPath: text('root_path').notNull(),
+  sessionFiles: text('session_files', { mode: 'json' }).notNull().$type<string[]>(),
+  sessionIds: text('session_ids', { mode: 'json' }).notNull().$type<string[]>(),
+  state: text('state', { enum: ['prepared', 'committed'] }).notNull(),
+  checkpointRevision: integer('checkpoint_revision'),
+  manifestKey: text('manifest_key'),
+  manifestHash: text('manifest_hash'),
+  error: text('error'),
+  createdAt: text('created_at').notNull(),
+});
+export type SpaceCleanupJob = typeof spaceCleanupJobs.$inferSelect;
+
 export const spaceRelations = sqliteTable('space_relations', {
   spaceId: text('space_id').notNull().references(() => spaces.id, { onDelete: 'cascade' }),
   relatedId: text('related_id').notNull().references(() => spaces.id, { onDelete: 'cascade' }),

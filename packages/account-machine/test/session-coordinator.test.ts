@@ -6,6 +6,7 @@ import { scheduler } from 'node:timers/promises';
 import {
   FactEventStore,
   factEvents,
+  agentSessions,
   type AgentSession,
   GitSpaceDatabase,
   LocalArtifactResolver,
@@ -13,6 +14,7 @@ import {
 } from '@gitspace/core';
 import { cloudWorkspaceDefinitionSchema } from '@gitspace/protocol';
 import type { AgentFailure, SessionActivity } from '@gitspace/protocol-agent';
+import { eq } from 'drizzle-orm';
 import { createSpaceWorkspaceControls } from '../src/space-workspace-controls.js';
 import { createSpaceEvalNamespace } from '../src/space-eval-sdk.js';
 import {
@@ -231,6 +233,150 @@ function artifactKey(): Uint8Array {
 }
 
 describe('MachineSessionCoordinator', () => {
+  it('recovers a failed required continuation once and attaches idle controls without replaying ordinary failures', async () => {
+    const { root, database, artifacts } = fixture();
+    database.possessWorkspace('workspace-a', 'machine-a');
+    const first = new MachineSessionCoordinator(database, artifacts, new FakeOmpRuntime(), 'machine-a', join(root, 'runtime'));
+    const created = await first.create('workspace-a');
+    if (created.status === 'error') throw created.error;
+    await first.stopForRestart();
+    database.orm.update(agentSessions).set({ state: 'failed', resumePending: false }).where(eq(agentSessions.id, created.value.id)).run();
+    const runtime = new FakeOmpRuntime();
+    let resumes = 0;
+    const open = runtime.open.bind(runtime);
+    runtime.open = async (input) => {
+      const session = await open(input);
+      return { ...session, resume: async () => { resumes += 1; } };
+    };
+    const recovery = new MachineSessionCoordinator(database, artifacts, runtime, 'machine-a', join(root, 'runtime'));
+    try {
+      expect(await recovery.recover()).toMatchObject({ status: 'ok', value: [] });
+      expect(runtime.opened).toEqual([]);
+      const retained = recovery.get(created.value.id)!;
+      database.orm.update(agentSessions).set({
+        resumePending: true,
+        health: { ...retained.health, issues: { ...retained.health.issues, recovery: {
+          ...retained.health.issues.recovery!,
+          attempt: { runtimeId: 'dead-runtime', machineId: 'machine-a', generation: 1, startedAt: new Date().toISOString(), deadlineAt: new Date(Date.now() + 60_000).toISOString(), state: 'running', number: 1 },
+        } } },
+      }).where(eq(agentSessions.id, created.value.id)).run();
+      const [automatic, manual] = await Promise.all([recovery.recover(), recovery.openSpace('workspace-a')]);
+      expect(automatic).toMatchObject({ status: 'ok', value: [{ id: created.value.id, ompSessionId: created.value.ompSessionId, resumePending: false }] });
+      expect(manual).toMatchObject({ status: 'ok', value: { id: created.value.id } });
+      expect(runtime.opened).toEqual([created.value.sessionFile]);
+      expect(resumes).toBe(1);
+      expect(recovery.controlsAvailable(created.value.id)).toBe(true);
+      expect(recovery.get(created.value.id)?.health.issues.recovery?.attempt?.state).toBe('succeeded');
+    } finally {
+      await recovery.close(created.value.id);
+      database.close();
+    }
+  });
+
+  it('preserves the required continuation when handoff fails while flushing', async () => {
+    const { root, database, artifacts } = fixture();
+    database.possessWorkspace('workspace-a', 'machine-a');
+    const runtime = new FakeOmpRuntime();
+    const create = runtime.create.bind(runtime);
+    let predecessor: OmpRuntimeSession | undefined;
+    runtime.create = async (input) => {
+      predecessor = await create(input);
+      return { ...predecessor, handoff: async () => { throw new Error('Journal fsync failed'); } };
+    };
+    const coordinator = new MachineSessionCoordinator(database, artifacts, runtime, 'machine-a', join(root, 'runtime'));
+    try {
+      const created = await coordinator.create('workspace-a');
+      if (created.status === 'error') throw created.error;
+      runtime.emitActivity({ active: true, reasons: [{ kind: 'turn' }] });
+      expect((await coordinator.stopForRestart()).status).toBe('error');
+      expect(coordinator.get(created.value.id)).toMatchObject({
+        state: 'failed', resumePending: true,
+        health: { issues: { recovery: { failure: { message: 'Journal fsync failed' } } } },
+      });
+    } finally { await predecessor?.dispose(); database.close(); }
+  });
+
+  it('does not infer continuation from the user tail of an ordinary failed turn', async () => {
+    const { root, database, artifacts } = fixture();
+    database.possessWorkspace('workspace-a', 'machine-a');
+    const runtime = new FakeOmpRuntime([{ role: 'user', content: [{ type: 'text', text: 'Failed user request' }] }]);
+    const coordinator = new MachineSessionCoordinator(database, artifacts, runtime, 'machine-a', join(root, 'runtime'));
+    try {
+      const created = await coordinator.create('workspace-a');
+      if (created.status === 'error') throw created.error;
+      runtime.emitActivity({ active: false, reasons: [] }, { domain: 'agent', code: 'AGENT_EXECUTION_FAILED', message: 'Provider rejected request', context: {} });
+      expect((await coordinator.stopForRestart()).status).toBe('ok');
+      expect(coordinator.get(created.value.id)?.resumePending).toBe(false);
+    } finally { database.close(); }
+  });
+
+  it('expires a hung opening but keeps the successor behind the predecessor exit fence', async () => {
+    const { root, database, artifacts } = fixture();
+    database.possessWorkspace('workspace-a', 'machine-a');
+    const first = new MachineSessionCoordinator(database, artifacts, new FakeOmpRuntime(), 'machine-a', join(root, 'runtime'));
+    const created = await first.create('workspace-a');
+    if (created.status === 'error') throw created.error;
+    await first.stopForRestart();
+    database.orm.update(agentSessions).set({ state: 'failed', resumePending: true }).where(eq(agentSessions.id, created.value.id)).run();
+    const expired = Promise.withResolvers<void>();
+    const exited = Promise.withResolvers<void>();
+    const runtime = new FakeOmpRuntime();
+    const realOpen = runtime.open.bind(runtime);
+    let calls = 0;
+    const boundedRuntime: OmpRuntime = Object.assign(runtime, {
+      open: async (input: Parameters<OmpRuntime['open']>[0], signal?: AbortSignal) => {
+        calls += 1;
+        if (calls > 1) return realOpen(input);
+        await new Promise<void>((resolve) => {
+          if (signal?.aborted) resolve();
+          else signal?.addEventListener('abort', () => resolve(), { once: true });
+        });
+        expired.resolve();
+        await exited.promise;
+        throw signal?.reason;
+      },
+    });
+    const recovery = new MachineSessionCoordinator(database, artifacts, boundedRuntime, 'machine-a', join(root, 'runtime'), undefined, undefined, undefined, undefined, undefined, 1_000);
+    try {
+      const automatic = recovery.recover();
+      await expired.promise;
+      const racing = recovery.openSpace('workspace-a');
+      expect(calls).toBe(1);
+      exited.resolve();
+      expect((await automatic).status).toBe('error');
+      expect((await racing).status).toBe('error');
+      expect(recovery.get(created.value.id)?.health.issues.recovery?.attempt?.state).toBe('failed');
+      expect(await recovery.recover()).toMatchObject({ status: 'ok', value: [] });
+      expect((await recovery.openSpace('workspace-a')).status).toBe('ok');
+      expect(calls).toBe(2);
+      expect(recovery.controlsAvailable(created.value.id)).toBe(true);
+    } finally {
+      exited.resolve();
+      await recovery.close(created.value.id);
+      database.close();
+    }
+  });
+
+  it('does not resurrect a session with a prepared cleanup receipt or a queued close', async () => {
+    const { root, database, artifacts } = fixture();
+    database.possessWorkspace('workspace-a', 'machine-a');
+    const runtime = new FakeOmpRuntime();
+    const coordinator = new MachineSessionCoordinator(database, artifacts, runtime, 'machine-a', join(root, 'runtime'));
+    const created = await coordinator.create('workspace-a');
+    if (created.status === 'error') throw created.error;
+    await coordinator.stopForRestart();
+    const opening = coordinator.openSpace('workspace-a');
+    const closing = coordinator.close(created.value.id);
+    expect((await opening).status).toBe('error');
+    expect((await closing).status).toBe('ok');
+    database.orm.update(agentSessions).set({ state: 'failed', resumePending: true }).where(eq(agentSessions.id, created.value.id)).run();
+    database.prepareSpaceCleanup({ spaceId: 'workspace-a', projectId: 'project-a', generation: 1, rootPath: database.getSpace('workspace-a')!.rootPath, sessionFiles: [created.value.sessionFile], sessionIds: [created.value.id] });
+    expect(await coordinator.recover()).toMatchObject({ status: 'ok', value: [] });
+    expect((await coordinator.openSpace('workspace-a')).status).toBe('error');
+    expect(runtime.opened).toEqual([]);
+    database.close();
+  });
+
   it('ignores repeated activity observations while preserving real transitions and incidents', async () => {
     const { root, database, artifacts } = fixture();
     database.possessWorkspace('workspace-a', 'machine-a');
@@ -519,7 +665,7 @@ describe('MachineSessionCoordinator', () => {
     }
   });
 
-  it('restores into a fresh repository, preserves unexpected leftovers and installs canonical origin', async () => {
+  it('refuses unproven leftovers and installs canonical origin only into a fresh repository', async () => {
     const { root, database, artifacts } = fixture();
     const checkout = join(root, 'fresh');
     mkdirSync(checkout);
@@ -527,11 +673,10 @@ describe('MachineSessionCoordinator', () => {
     const created = database.createProject({ id: 'fresh-project', name: 'Fresh', repositoryPath: checkout, repositoryReference: 'https://github.com/example/canonical.git' });
     if (created.status === 'error') throw created.error;
     const coordinator = new MachineSessionCoordinator(database, artifacts, new FakeOmpRuntime(), 'machine-a', join(root, 'runtime'));
+    await expect(coordinator.preparePortableSpaceRepository('fresh-project')).rejects.toThrow('Checkout already exists');
+    expect(readFileSync(join(checkout, 'unsaved.txt'), 'utf8')).toBe('must survive');
+    rmSync(checkout, { recursive: true });
     await coordinator.preparePortableSpaceRepository('fresh-project');
-    expect(existsSync(join(checkout, 'unsaved.txt'))).toBeFalse();
-    const retained = readdirSync(root).find((name) => name.startsWith('fresh.retained-'));
-    expect(retained).toBeDefined();
-    expect(readFileSync(join(root, retained!, 'unsaved.txt'), 'utf8')).toBe('must survive');
     const origin = Bun.spawnSync(['git', 'remote', 'get-url', 'origin'], { cwd: checkout });
     expect(origin.exitCode).toBe(0);
     expect(origin.stdout.toString().trim()).toBe('https://github.com/example/canonical.git');
@@ -560,6 +705,7 @@ describe('MachineSessionCoordinator', () => {
     writeFileSync(join(child, 'local.txt'), 'local');
     const before = git(child, ['status', '--porcelain=v1']);
     const coordinator = new MachineSessionCoordinator(database, artifacts, new FakeOmpRuntime(), 'machine-a', join(root, 'runtime'));
+    await coordinator.preparePortableSpaceCleanup('project-a');
     await coordinator.deletePortableSpaceLocal('project-a');
     expect(existsSync(base)).toBeFalse();
     expect(lstatSync(join(child, '.git')).isDirectory()).toBeTrue();
@@ -1074,6 +1220,7 @@ describe('MachineSessionCoordinator', () => {
     const begin = Promise.withResolvers<void>();
     const finish = Promise.withResolvers<void>();
     const started = Promise.withResolvers<void>();
+    const awaitingAcceptance = Promise.withResolvers<void>();
     const runtime = new HandoffOmpRuntime();
     const open = runtime.open.bind(runtime);
     runtime.open = async (input) => {
@@ -1089,6 +1236,7 @@ describe('MachineSessionCoordinator', () => {
           return () => { listener = undefined; };
         },
         resume: async () => {
+          awaitingAcceptance.resolve();
           await begin.promise;
           activity = { active: true, reasons: [{ kind: 'turn' }] };
           listener?.(activity, null);
@@ -1102,10 +1250,13 @@ describe('MachineSessionCoordinator', () => {
     };
     const resumed = new MachineSessionCoordinator(database, artifacts, runtime, 'machine-a', join(root, 'runtime'));
     try {
-      expect((await resumed.recover()).status).toBe('ok');
+      const recovery = resumed.recover();
+      await awaitingAcceptance.promise;
+      expect(resumed.controlsAvailable(created.value.id)).toBe(false);
       expect(resumed.get(created.value.id)?.resumePending).toBe(true);
       begin.resolve();
       await started.promise;
+      expect((await recovery).status).toBe('ok');
       expect(resumed.get(created.value.id)).toMatchObject({
         state: 'active', resumePending: false, activity: { active: true, reasons: [{ kind: 'turn' }] },
       });

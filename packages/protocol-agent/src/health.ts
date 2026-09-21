@@ -36,12 +36,23 @@ export const AGENT_ISSUE_FAILURE_CODES: Readonly<Record<AgentIssue, AgentFailure
 export const AgentIssueStateSchema = z.object({
   revision: z.number().int().nonnegative(), operationId: z.string(),
   failure: AgentIssueFailureSchema.nullable(), incidentId: z.string().nullable(),
+  attempt: z.object({
+    runtimeId: z.string(), machineId: z.string(), generation: z.number().int().positive(),
+    startedAt: z.string(), deadlineAt: z.string(),
+    state: z.enum(['running', 'succeeded', 'failed']), number: z.number().int().positive(),
+  }).strict().optional(),
 }).strict();
 export const AgentHealthStateSchema = z.object({
   revision: z.number().int().nonnegative(),
   issues: z.partialRecord(AgentIssueSchema, AgentIssueStateSchema),
 }).strict();
 export type AgentHealthState = z.infer<typeof AgentHealthStateSchema>;
+
+export function isAgentRecoveryRunning(health: AgentHealthState, machineId: string, generation: number, now = Date.now()): boolean {
+  const attempt = health.issues.recovery?.attempt;
+  return attempt?.state === 'running' && attempt.machineId === machineId
+    && attempt.generation === generation && Date.parse(attempt.deadlineAt) > now;
+}
 export const AgentIncidentSchema = z.object({
   id: z.string().min(1), sessionId: z.string().min(1).nullable(), spaceId: z.string().min(1),
   issue: AgentIssueSchema, operationId: z.string().min(1), revision: z.number().int().positive(),
@@ -76,7 +87,7 @@ export function settleAgentOperation(state: AgentHealthState, token: AgentOperat
   if (!outcome.failure && current.incidentId) changes.push({ type: 'recovered', incidentId: current.incidentId, sessionId: outcome.sessionId, spaceId: outcome.spaceId, issue: token.issue, revision, recoveredAt: outcome.now });
   const incidentId = outcome.failure ? `${outcome.sessionId ?? outcome.spaceId}:${token.operationId}:${revision}` : null;
   if (outcome.failure && incidentId) changes.push({ type: 'occurred', incident: { id: incidentId, sessionId: outcome.sessionId, spaceId: outcome.spaceId, issue: token.issue, operationId: token.operationId, revision, occurredAt: outcome.now, failure: outcome.failure } });
-  return { state: { revision, issues: { ...state.issues, [token.issue]: { revision, operationId: token.operationId, failure: outcome.failure, incidentId } } }, changes };
+  return { state: { revision, issues: { ...state.issues, [token.issue]: { revision, operationId: token.operationId, failure: outcome.failure, incidentId, ...(current.attempt ? { attempt: { ...current.attempt, state: outcome.failure ? 'failed' as const : 'succeeded' as const } } : {}) } } }, changes };
 }
 
 export function currentAgentFailure(state: AgentHealthState, issue?: AgentIssue): AgentIssueFailure | null {

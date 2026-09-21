@@ -348,6 +348,7 @@ export interface SkillsRpc {
 
 export interface ProjectLifecycleRpc {
   list(lifecycle: 'all' | 'active' | 'archived'): Promise<CloudProjectSummary[]>;
+  findWorkspace(workspaceId: string): Promise<CloudWorkspaceDefinition | null>;
   createProject(input: { name: string; baseBranch: string | null; repositoryUrl: string | null }): Promise<{ project: CloudProjectSummary; operation: CloudProjectOperation }>;
   openProject(projectId: string): Promise<{ project: CloudProjectSummary; operation: CloudProjectOperation | null }>;
   createWorkspace(input: { projectId: string; name: string; branch: string; phase?: 'plan' | 'code' | 'review' | 'ship'; sourceKind: 'base' | 'branch' | 'workspace' | 'pull-request' | 'tag' | 'commit'; sourceRef: string; dependsOn?: readonly string[] }): Promise<{ workspace: { id: string }; operation: CloudProjectOperation }>;
@@ -356,7 +357,7 @@ export interface ProjectLifecycleRpc {
   restoreProject(projectId: string, expectedRevision: number): Promise<CloudProjectSummary>;
   deleteProject(projectId: string, expectedRevision: number): Promise<boolean>;
   deleteWorkspace(projectId: string, workspaceId: string, expectedRevision?: number): Promise<boolean>;
-  setWorkspaceLifecycle(projectId: string, workspaceId: string, lifecycle: 'active' | 'archived'): Promise<unknown>;
+  setWorkspaceLifecycle(projectId: string, workspaceId: string, lifecycle: 'active' | 'archived', expectedRevision?: number): Promise<unknown>;
   setWorkspacePhase(projectId: string, workspaceId: string, phase: 'plan' | 'code' | 'review' | 'ship'): Promise<unknown>;
   runLifecycleOperation<T>(projectId: string, workspaceId: string | null, kind: string, labels: string[], action: () => Promise<T>): Promise<T>;
 }
@@ -1052,9 +1053,9 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
     }
   });
   const deleteWorkspace = server.implement(deleteWorkspaceContract).handler(async ({ input, errors }) => {
-    const workspace = options.database.getWorkspace(input.workspaceId);
-    if (!workspace) return err(errors.WorkspaceNotFound({ workspaceId: input.workspaceId }));
     try {
+      const workspace = await options.projects.findWorkspace(input.workspaceId);
+      if (!workspace) return err(errors.WorkspaceNotFound({ workspaceId: input.workspaceId }));
       return ok({ workspaceId: input.workspaceId, deleted: await options.projects.deleteWorkspace(workspace.projectId, input.workspaceId) });
     } catch (error) {
       return err(errors.OperationFailed({ operation: 'delete workspace', message: error instanceof Error ? error.message : 'Unable to delete workspace' }));
@@ -1068,17 +1069,31 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
     }
   });
   const closeSpace = server.implement(closeSpaceContract).handler(async ({ input, errors }) => {
-    const space = options.database.getSpace(input.spaceId);
-    if (!space) return err(errors.OperationFailed({ operation: 'close space', message: `Space ${input.spaceId} does not exist` }));
-    if (space.placementState === 'closed') return ok(lifecycleView(space));
-    if (space.holderId !== options.machineId || space.generation !== input.expectedGeneration) {
-      return err(errors.OperationFailed({ operation: 'close space', message: 'Space placement changed before close' }));
-    }
     try {
+      const space = options.database.getSpace(input.spaceId);
+      if (!space || space.placementState === 'closed') {
+        await options.spaces.retryCleanup?.(input.spaceId);
+        const placement = (await options.spacePlacements()).find((candidate) => candidate.spaceId === input.spaceId);
+        if (!placement || placement.state !== 'closed' || placement.holderId !== 'unassigned'
+            || (placement.generation !== input.expectedGeneration && placement.generation !== input.expectedGeneration + 1)) {
+          throw new Error('Space placement changed before close');
+        }
+        const definition = placement.kind === 'worktree' ? await options.projects.findWorkspace(input.spaceId) : null;
+        const project = placement.kind === 'base' ? (await options.projects.list('all')).find((candidate) => candidate.id === placement.projectId) : null;
+        if (placement.kind === 'worktree' ? !definition || definition.projectId !== placement.projectId : !project || project.lifecycle === 'deleting') {
+          throw new Error(`Space ${input.spaceId} does not exist in project authority`);
+        }
+        return ok({
+          id: placement.spaceId, projectId: placement.projectId, kind: placement.kind,
+          state: definition?.lifecycle === 'archived' || project?.lifecycle === 'archived' ? 'archived' as const : 'closed' as const,
+          machineId: null, generation: placement.generation,
+        });
+      }
+      if (space.holderId !== options.machineId || space.generation !== input.expectedGeneration) {
+        throw new Error('Space placement changed before close');
+      }
       await options.spaces.close(space, input.expectedGeneration);
-      const closed = options.database.getSpace(space.id);
-      if (!closed) throw new Error(`Space ${space.id} disappeared after close`);
-      return ok(lifecycleView(closed));
+      return ok({ ...lifecycleView(space), state: 'closed' as const, machineId: null, generation: input.expectedGeneration + 1 });
     } catch (error) {
       return err(errors.OperationFailed({ operation: 'close space', message: error instanceof Error ? error.message : 'Unable to close space' }));
     }
@@ -1089,6 +1104,14 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
     if (space && space.placementState !== 'closed') {
       if (space.placementState !== 'open' || space.holderId !== options.machineId || space.generation !== input.expectedGeneration) {
         return err(errors.OperationFailed({ operation: 'reopen space', message: 'Space placement is transitioning or active on another machine' }));
+      }
+      try {
+        const current = (await options.spacePlacements()).find((candidate) => candidate.spaceId === space.id);
+        if (current?.state !== 'open' || current.holderId !== options.machineId || current.generation !== input.expectedGeneration) {
+          return err(errors.OperationFailed({ operation: 'reopen space', message: 'Cloud ownership changed before agent recovery; refresh the workspace' }));
+        }
+      } catch (error) {
+        return err(errors.OperationFailed({ operation: 'reopen space', message: `Agent recovery could not verify cloud ownership: ${error instanceof Error ? error.message : String(error)}` }));
       }
       const resumed = await options.sessions.openSpace(space.id, false, input.expectedGeneration);
       return resumed.status === 'ok'
@@ -1114,24 +1137,32 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
     }
   });
   const restoreWorkspace = server.implement(restoreWorkspaceContract).handler(async ({ input, errors }) => {
-    const space = options.database.getSpace(input.spaceId);
-    if (!space) return err(errors.WorkspaceNotFound({ workspaceId: input.spaceId }));
-    if (space.placementState !== 'closed' && (space.placementState !== 'open' || space.holderId !== options.machineId)) {
-      return err(errors.OperationFailed({ operation: 'restore workspace', message: 'Space is transitioning or active on another machine' }));
-    }
-    if (space.generation !== input.expectedGeneration) {
-      return err(errors.OperationFailed({ operation: 'restore workspace', message: 'Space placement changed before restore' }));
-    }
     try {
-      const value = await options.projects.runLifecycleOperation(space.projectId, input.spaceId, 'workspace.restore', ['Restore workspace', 'Start canonical agent'], async () => {
-        if (space.placementState !== 'closed') {
-          const session = await options.sessions.openSpace(space.id);
+      const definition = await options.projects.findWorkspace(input.spaceId);
+      if (!definition) return err(errors.WorkspaceNotFound({ workspaceId: input.spaceId }));
+      const placement = (await options.spacePlacements()).find((candidate) => candidate.spaceId === input.spaceId);
+      if (!placement || placement.projectId !== definition.projectId || placement.kind !== 'worktree'
+          || placement.generation !== input.expectedGeneration) {
+        throw new Error('Space placement changed before restore');
+      }
+      if (placement.state !== 'closed' && (placement.state !== 'open' || placement.holderId !== options.machineId)) {
+        throw new Error('Space is transitioning or active on another machine');
+      }
+      const local = options.database.getSpace(input.spaceId);
+      if (placement.state === 'open'
+          && (!local || local.projectId !== definition.projectId || local.kind !== 'worktree'
+            || local.holderId !== options.machineId || local.placementState !== 'open' || local.generation !== placement.generation)) {
+        throw new Error('Restore requires the matching locally held open generation');
+      }
+      const value = await options.projects.runLifecycleOperation(definition.projectId, input.spaceId, 'workspace.restore', ['Restore workspace', 'Start canonical agent'], async () => {
+        await options.projects.setWorkspaceLifecycle(definition.projectId, definition.id, 'active', definition.revision);
+        if (placement.state === 'open' && local) {
+          options.database.setSpaceClosed(local.id, false);
+          const session = await options.sessions.openSpace(local.id);
           if (session.status === 'error') throw session.error;
-          options.database.setSpaceClosed(space.id, false);
         } else {
           await options.spaces.open(input.spaceId, input.expectedGeneration);
         }
-        await options.projects.setWorkspaceLifecycle(space.projectId, space.id, 'active');
         const opened = options.database.getSpace(input.spaceId);
         if (!opened) throw new Error(`Workspace ${input.spaceId} is unavailable after restore`);
         return lifecycleView(opened);

@@ -150,6 +150,15 @@ export class DeviceRejectedError extends Error {
   }
 }
 
+/** Shared HTTP/WebSocket authentication; callers sign the exact unsigned request target. */
+export async function signDeviceRequest(device: BrowserDevice, request: { method: string; path: string; body: Uint8Array }): Promise<string> {
+  const timestamp = Date.now();
+  const nonce = crypto.randomUUID();
+  const payload = rpcSignaturePayload({ deviceId: device.deviceId, timestamp, nonce, ...request });
+  const signature = deviceProtocolBase64.encode(new Uint8Array(await crypto.subtle.sign('Ed25519', device.keyPair.privateKey, owned(payload))));
+  return encodeSignedRpcHeader({ version: 1, deviceId: device.deviceId, timestamp, nonce, signature });
+}
+
 /**
  * Fetch wrapper that signs each request with the current device. A 401 naming
  * the device (revoked, expired, unknown) clears the stored identity so the
@@ -162,12 +171,8 @@ export function createDeviceSignedFetch(currentDevice: () => Promise<BrowserDevi
     const original = new Request(input, init);
     const body = new Uint8Array(await original.arrayBuffer());
     const url = new URL(original.url);
-    const timestamp = Date.now();
-    const nonce = crypto.randomUUID();
-    const payload = rpcSignaturePayload({ deviceId: device.deviceId, timestamp, nonce, method: original.method, path: `${url.pathname}${url.search}`, body });
-    const signature = deviceProtocolBase64.encode(new Uint8Array(await crypto.subtle.sign('Ed25519', device.keyPair.privateKey, owned(payload))));
     const headers = new Headers(original.headers);
-    headers.set(RPC_DEVICE_HEADER, encodeSignedRpcHeader({ version: 1, deviceId: device.deviceId, timestamp, nonce, signature }));
+    headers.set(RPC_DEVICE_HEADER, await signDeviceRequest(device, { method: original.method, path: `${url.pathname}${url.search}`, body }));
     headers.set('x-gitspace-user', device.userId);
     const response = await fetch(new Request(original.url, { method: original.method, headers, body: body.length > 0 ? body : null, signal: original.signal }));
     if (response.status === 401) {

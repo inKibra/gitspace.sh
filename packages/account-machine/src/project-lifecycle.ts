@@ -164,6 +164,15 @@ export class ProjectLifecycleManager {
     return this.authority.listProjects(lifecycle === 'all' ? undefined : lifecycle);
   }
 
+  async findWorkspace(workspaceId: string): Promise<CloudWorkspaceDefinition | null> {
+    for (const project of await this.authority.listProjects()) {
+      if (project.lifecycle === 'deleting') continue;
+      const workspace = (await this.authority.listProjectWorkspaces(project.id)).find((candidate) => candidate.id === workspaceId);
+      if (workspace?.projectId === project.id && workspace.kind === 'worktree') return workspace;
+    }
+    return null;
+  }
+
   openProject(projectId: string): Promise<{ project: CloudProjectSummary; operation: CloudProjectOperation | null }> {
     const opening = this.openingProjects.get(projectId);
     if (opening) return opening;
@@ -634,6 +643,9 @@ export class ProjectLifecycleManager {
         || currentPlacement.state !== 'closed'
         || currentPlacement.machineId !== null
         || currentPlacement.generation !== closedGeneration
+        || currentPlacement.publishedRevision <= 0
+        || !currentPlacement.manifestKey
+        || !currentPlacement.manifestHash
       )) {
         throw new Error('Workspace placement changed before archiving');
       }
@@ -643,10 +655,24 @@ export class ProjectLifecycleManager {
     });
   }
 
+  private async requireClosedProjectWorkspaces(projectId: string): Promise<void> {
+    for (const workspace of await this.authority.listProjectWorkspaces(projectId)) {
+      if (workspace.kind !== 'worktree') continue;
+      const placement = await this.authority.getSpace(projectId, workspace.id);
+      if (!placement && workspace.lifecycle === 'failed') continue;
+      if (!placement || placement.projectId !== projectId || placement.spaceId !== workspace.id
+          || placement.state !== 'closed' || placement.machineId !== null
+          || placement.publishedRevision <= 0 || !placement.manifestKey || !placement.manifestHash) {
+        throw new Error(`Workspace ${workspace.id} must be safely closed before changing project lifecycle`);
+      }
+    }
+  }
+
   archiveProject(projectId: string, expectedRevision: number): Promise<CloudProjectSummary> {
     return this.runLifecycleOperation(projectId, null, 'project.archive', ['Archive project'], async () => {
       const activeWorkspace = this.database.listWorkspaces(projectId).find((workspace) => workspace.placementState !== 'closed');
       if (activeWorkspace) throw new Error(`Workspace ${activeWorkspace.id} must be archived before archiving the project`);
+      await this.requireClosedProjectWorkspaces(projectId);
       const current = await this.authority.setProjectLifecycle(projectId, expectedRevision, 'archiving');
       return this.authority.setProjectLifecycle(projectId, current.revision, 'archived');
     });
@@ -662,9 +688,17 @@ export class ProjectLifecycleManager {
   deleteWorkspace(projectId: string, workspaceId: string, expectedRevision?: number): Promise<boolean> {
     return this.runLifecycleOperation(projectId, workspaceId, 'workspace.delete', ['Remove worktree', 'Delete workspace authority'], async () => {
       const workspace = this.database.getWorkspace(workspaceId);
+      if (workspace && workspace.projectId !== projectId) throw new Error('Local workspace identity does not match');
       if (workspace && workspace.placementState !== 'closed') throw new Error('Workspace must be archived before permanent deletion');
       const definition = (await this.authority.listProjectWorkspaces(projectId)).find((candidate) => candidate.id === workspaceId);
       if (!definition) return false;
+      if (definition.projectId !== projectId || definition.kind !== 'worktree') throw new Error('Workspace identity does not match');
+      const placement = await this.authority.getSpace(projectId, workspaceId);
+      if (placement && (placement.projectId !== projectId || placement.spaceId !== workspaceId
+          || placement.state !== 'closed' || placement.machineId !== null
+          || placement.publishedRevision <= 0 || !placement.manifestKey || !placement.manifestHash)) {
+        throw new Error('Workspace must be safely closed before permanent deletion');
+      }
       // The cloud enforces completed resource retirement before any local data can be removed.
       if (!await this.authority.removeProjectWorkspace(projectId, workspaceId, expectedRevision ?? definition.revision)) return false;
       if (workspace) {
@@ -684,6 +718,7 @@ export class ProjectLifecycleManager {
       if (project.lifecycle !== 'archived') throw new Error('Project must be archived before permanent deletion');
       const open = this.database.listWorkspaces(projectId).find((workspace) => workspace.placementState !== 'closed');
       if (open) throw new Error(`Workspace ${open.id} must be archived before deleting the project`);
+      await this.requireClosedProjectWorkspaces(projectId);
       await this.authority.deleteProject(projectId, expectedRevision);
       const local = this.database.getBaseSpace(projectId);
       if (local) await rm(join(this.managedRoot, projectId), { recursive: true, force: true });
@@ -700,10 +735,19 @@ export class ProjectLifecycleManager {
   ): Promise<CloudWorkspaceDefinition> {
     const current = (await this.authority.listProjectWorkspaces(projectId)).find((workspace) => workspace.id === workspaceId);
     if (!current) throw new Error(`Workspace ${workspaceId} does not exist in project authority`);
+    if (current.projectId !== projectId || current.kind !== 'worktree') throw new Error('Workspace identity does not match');
     if (expectedRevision !== undefined && current.revision !== expectedRevision) throw new Error(`Workspace revision conflict: expected ${expectedRevision}, actual ${current.revision}`);
     if (lifecycle === 'active') {
       const placement = await this.authority.getSpace(projectId, workspaceId);
       if (!placement) throw new Error(`Workspace ${workspaceId} has no placement to recover`);
+      if (placement.projectId !== projectId || placement.spaceId !== workspaceId) throw new Error('Workspace placement identity does not match');
+      if ((placement.state !== 'closed' || placement.machineId !== null)
+          && (placement.state !== 'open' || placement.machineId !== this.machineId)) {
+        throw new Error('Workspace is transitioning or active on another machine');
+      }
+      if (placement.publishedRevision > 0 && (!placement.manifestKey || !placement.manifestHash)) {
+        throw new Error('Workspace has no committed checkpoint to recover');
+      }
       if (placement.publishedRevision === 0) {
         const local = this.database.getSpace(workspaceId);
         if (placement.state !== 'open' || placement.machineId !== this.machineId ||

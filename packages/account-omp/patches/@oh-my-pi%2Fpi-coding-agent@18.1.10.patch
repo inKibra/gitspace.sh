@@ -2255,3 +2255,261 @@ diff --git a/dist/types/task/structured-subagent.d.ts b/dist/types/task/structur
      parentActiveModelPattern?: string;
      schema: StructuredSubagentSchemaResolution;
      planMode: boolean;
+diff --git a/src/session/session-maintenance.ts b/src/session/session-maintenance.ts
+--- a/src/session/session-maintenance.ts
++++ b/src/session/session-maintenance.ts
+@@ -361,6 +361,8 @@
+ 	/** Resolves after an active manual compaction has reconnected the agent subscription. */
+ 	#manualCompactionCleanup: Promise<void> | undefined;
+ 	#autoCompactionAbortController: AbortController | undefined;
++	/** Live work only: an armed speculative result is not an active operation. */
++	readonly #compactionActivity = new Map<symbol | AbortSignal, { label: string; detail: string }>();
+ 	/**
+ 	 * Live tool-loop contexts parked after mid-turn maintenance hit a no-progress
+ 	 * dead end. Membership suppresses the repeated rescue + warning while no cut
+@@ -425,11 +427,11 @@
+ 	}
+ 
+ 	/** Abort and discard any in-flight or armed speculative compaction. */
+-	cancelSpeculation(): void {
++	cancelSpeculation(reason?: unknown): void {
+ 		const run = this.#speculation;
+ 		if (!run) return;
+ 		this.#speculation = undefined;
+-		run.controller.abort();
++		run.controller.abort(reason);
+ 	}
+ 
+ 	/** Assistant timestamp whose post-turn maintenance must be skipped once. */
+@@ -448,6 +450,40 @@
+ 	 */
+ 	#emitLifecycleEvent(event: AgentSessionEvent, detach: boolean): Promise<void> {
+ 		return this.#host.emitSessionEvent(event, detach ? { detachExtensions: true } : undefined);
++	}
++
++	#emitCompactionState(): Promise<void> {
++		let detail: string | undefined;
++		for (const operation of this.#compactionActivity.values()) detail = operation.detail;
++		return this.#emitLifecycleEvent({
++			type: "compaction_state",
++			active: this.#compactionActivity.size > 0,
++			turnActive: this.#host.agent.state.isStreaming,
++			...(detail === undefined ? {} : { detail }),
++		}, true);
++	}
++
++	#startCompactionActivity(operation: symbol | AbortSignal, label: string): Promise<void> {
++		this.#compactionActivity.set(operation, { label, detail: label });
++		return this.#emitCompactionState();
++	}
++
++	async #progressCompactionActivity(
++		operation: symbol | AbortSignal,
++		model: Model,
++		attempt?: number,
++		delayMs?: number,
++	): Promise<void> {
++		const activity = this.#compactionActivity.get(operation);
++		if (!activity) return;
++		activity.detail = `${activity.label} · ${model.provider}/${model.id}${
++			attempt === undefined ? "" : ` · attempt ${attempt}`
++		}${delayMs === undefined ? "" : ` · retrying in ${Math.ceil(delayMs / 1000)}s`}`;
++		await this.#emitCompactionState();
++	}
++
++	async #endCompactionActivity(operation: symbol | AbortSignal): Promise<void> {
++		if (this.#compactionActivity.delete(operation)) await this.#emitCompactionState();
+ 	}
+ 	/**
+ 	 * Append plan-read protection to a prune/shake config so the active plan
+@@ -774,6 +810,7 @@
+ 
+ 		try {
+ 			if (ownsCompactionController) {
++				await this.#startCompactionActivity(compactionAbortController.signal, "Manual compaction");
+ 				this.#host.disconnectFromAgent();
+ 				await this.#host.abort({ goalReason: "internal", preserveCompaction: true });
+ 			}
+@@ -816,6 +853,7 @@
+ 			if (!selectedMethod) {
+ 				throw new Error("No configured compaction method can run manually.");
+ 			}
++			await this.#startCompactionActivity(compactionAbortController.signal, `Manual ${selectedMethod}`);
+ 
+ 			const effectiveSettings = resolveMethodSettings(compactionSettings, selectedMethod);
+ 			const availableModels = this.#host.modelRegistry.getAvailable();
+@@ -1140,6 +1178,7 @@
+ 					this.#manualCompactionCleanup = undefined;
+ 				}
+ 				manualCompactionCleanup?.resolve();
++				await this.#endCompactionActivity(compactionAbortController.signal);
+ 			}
+ 		}
+ 	}
+@@ -1178,6 +1217,7 @@
+ 		const manualCompactionCleanup = this.#manualCompactionCleanup;
+ 		this.#compactionAbortController?.abort(reason);
+ 		this.#autoCompactionAbortController?.abort(reason);
++		this.cancelSpeculation(reason);
+ 		this.#host.abortHandoff();
+ 		return manualCompactionCleanup;
+ 	}
+@@ -1289,13 +1329,16 @@
+ 		const controller = new AbortController();
+ 		const run: SpeculationRun = { controller, promise: Promise.resolve(), contextTokensAtStart: contextTokens };
+ 		this.#speculation = run;
+-		run.promise = this.#runSpeculation(run, method, contextTokens).catch(error => {
+-			logger.debug("Speculative compaction failed", {
+-				method,
+-				error: error instanceof Error ? error.message : String(error),
+-			});
+-			if (this.#speculation === run) this.#speculation = undefined;
+-		});
++		run.promise = this.#startCompactionActivity(controller.signal, `Background ${method}`)
++			.then(() => this.#runSpeculation(run, method, contextTokens))
++			.catch(error => {
++				logger.debug("Speculative compaction failed", {
++					method,
++					error: error instanceof Error ? error.message : String(error),
++				});
++				if (this.#speculation === run) this.#speculation = undefined;
++			})
++			.finally(() => this.#endCompactionActivity(controller.signal));
+ 	}
+ 
+ 	/**
+@@ -2295,6 +2338,7 @@
+ 			}
+ 
+ 			try {
++				await this.#progressCompactionActivity(signal, candidate);
+ 				return await compact(
+ 					this.#host.obfuscatePreparationForProvider(preparation),
+ 					candidate,
+@@ -2973,6 +3017,22 @@
+ 			fallbackFromShake?: boolean;
+ 		} = {},
+ 	): Promise<CompactionCheckResult> {
++		const operation = Symbol("auto-compaction");
++		try {
++			return await this.#runAutoCompaction(reason, willRetry, deferred, allowDefer, options, operation);
++		} finally {
++			await this.#endCompactionActivity(operation);
++		}
++	}
++
++	async #runAutoCompaction(
++		reason: "overflow" | "threshold" | "idle" | "incomplete",
++		willRetry: boolean,
++		deferred: boolean,
++		allowDefer: boolean,
++		options: NonNullable<Parameters<SessionMaintenance["runAutoCompaction"]>[4]>,
++		operation: symbol,
++	): Promise<CompactionCheckResult> {
+ 		const compactionSettings = this.#host.settings.getGroup("compaction");
+ 		if (reason !== "idle" && !compactionSettings.enabled) return COMPACTION_CHECK_NONE;
+ 		const methods = resolveCompactionMethodOrder(compactionSettings.methodOrder);
+@@ -3018,6 +3078,7 @@
+ 		// context, resume from the next configured method instead of hardcoding a
+ 		// context-full summary.
+ 		if (method === "shake" && !armedSpec) {
++			await this.#startCompactionActivity(operation, `Automatic ${method}`);
+ 			const outcome = await this.#runAutoShake(
+ 				reason,
+ 				willRetry,
+@@ -3029,11 +3090,11 @@
+ 				options.detachPostCommit === true,
+ 			);
+ 			if (outcome !== "fallback") return outcome;
+-			return await this.runAutoCompaction(reason, willRetry, deferred, allowDefer, {
++			return await this.#runAutoCompaction(reason, willRetry, deferred, allowDefer, {
+ 				...options,
+ 				methodIndex: methodIndex + 1,
+ 				fallbackFromShake: true,
+-			});
++			}, operation);
+ 		}
+ 		// "overflow" and "incomplete" force inline execution because they are recovery
+ 		// paths the caller wants resolved before scheduling the next turn. "idle" is
+@@ -3082,6 +3143,7 @@
+ 
+ 		let compactionCommitted = false;
+ 		try {
++			await this.#startCompactionActivity(operation, `Automatic ${method}`);
+ 			// Emit start AFTER the controller is installed so isCompacting is already true
+ 			// for any listener — and for input routed during this emit's event-loop yield:
+ 			// a message typed as the compaction loader appears must land in the compaction
+@@ -3578,6 +3640,7 @@
+ 					let attempt = 0;
+ 					while (true) {
+ 						try {
++							await this.#progressCompactionActivity(operation, candidate, attempt + 1);
+ 							compactResult = await compact(
+ 								this.#host.obfuscatePreparationForProvider(preparation),
+ 								candidate,
+@@ -3701,6 +3764,7 @@
+ 								error: message,
+ 								model: `${candidate.provider}/${candidate.id}`,
+ 							});
++							await this.#progressCompactionActivity(operation, candidate, attempt + 1, delayMs);
+ 							await scheduler.wait(delayMs, { signal: autoCompactionSignal });
+ 						}
+ 					}
+@@ -3786,10 +3850,10 @@
+ 					},
+ 					options.detachPostCommit === true,
+ 				);
+-				return await this.runAutoCompaction(reason, willRetry, deferred, allowDefer, {
++				return await this.#runAutoCompaction(reason, willRetry, deferred, allowDefer, {
+ 					...options,
+ 					methodIndex: methodIndex + 1,
+-				});
++				}, operation);
+ 			}
+ 			await this.#emitLifecycleEvent(
+ 				{
+diff --git a/src/session/agent-session-events.ts b/src/session/agent-session-events.ts
+--- a/src/session/agent-session-events.ts
++++ b/src/session/agent-session-events.ts
+@@ -15,6 +15,13 @@
+ 			/** False when an async delivery will resume the session before its true final settle. */
+ 			isTerminal?: boolean;
+ 	  })
++	| {
++			/** Authoritative live maintenance snapshot, including speculative work but not armed results. */
++			type: "compaction_state";
++			active: boolean;
++			turnActive: boolean;
++			detail?: string;
++	  }
+ 	| {
+ 			type: "auto_compaction_start";
+ 			reason: "threshold" | "overflow" | "idle" | "incomplete";
+diff --git a/dist/types/session/agent-session-events.d.ts b/dist/types/session/agent-session-events.d.ts
+--- a/dist/types/session/agent-session-events.d.ts
++++ b/dist/types/session/agent-session-events.d.ts
+@@ -16,6 +16,12 @@
+     /** False when an async delivery will resume the session before its true final settle. */
+     isTerminal?: boolean;
+ }) | {
++    /** Authoritative live maintenance snapshot, including speculative work but not armed results. */
++    type: "compaction_state";
++    active: boolean;
++    turnActive: boolean;
++    detail?: string;
++} | {
+     type: "auto_compaction_start";
+     reason: "threshold" | "overflow" | "idle" | "incomplete";
+     action: "context-full" | "remote" | "handoff" | "shake" | "snapcompact";
+diff --git a/dist/types/session/session-maintenance.d.ts b/dist/types/session/session-maintenance.d.ts
+--- a/dist/types/session/session-maintenance.d.ts
++++ b/dist/types/session/session-maintenance.d.ts
+@@ -146,7 +146,7 @@
+     /** Completion of the current speculative pass, used to resume maintenance skipped during its handoff. */
+     get speculationCompletion(): Promise<void> | undefined;
+     /** Abort and discard any in-flight or armed speculative compaction. */
+-    cancelSpeculation(): void;
++    cancelSpeculation(reason?: unknown): void;
+     /** Assistant timestamp whose post-turn maintenance must be skipped once. */
+     get skipPostTurnMaintenanceAssistantTimestamp(): number | undefined;
+     set skipPostTurnMaintenanceAssistantTimestamp(timestamp: number | undefined);

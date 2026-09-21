@@ -1,4 +1,4 @@
-import { cp, lstat, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { cp, lstat, mkdir, readFile, readdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createExecutableArtifactManifest, executableManifestPath, type ExecutableArtifactManifest } from '@gitspace/account-omp/manifest';
 import { workerReleaseMetadataSchema, type OmpReleaseMetadata, type WorkerReleaseMetadata } from '@gitspace/protocol';
@@ -169,6 +169,9 @@ export async function buildMachineBundle(root: string, outDir: string): Promise<
   const entrypoints = [
     [join(root, 'packages/account-machine/src/runtime.ts'), 'machine'],
     [join(root, 'packages/account-machine/src/terminal-worker.ts'), 'machine-worker'],
+    [join(root, 'packages/account-machine/src/host.ts'), 'host-runtime'],
+    [join(root, 'packages/account-machine/src/machine-update.ts'), 'machine-update'],
+    [join(root, 'packages/account-machine/src/machine-bootstrap.ts'), 'machine-bootstrap'],
   ] as const;
   for (const [entrypoint, name] of entrypoints) {
     const result = await Bun.build({
@@ -217,10 +220,14 @@ export async function buildOmpBundle(root: string, outDir: string): Promise<Buil
 export async function buildInitialRuntime(root: string, outDir: string): Promise<{ machine: BuiltExecutableArtifact; omp: BuiltOmpArtifact }> {
   const machine = await buildMachineBundle(root, join(outDir, 'machine'));
   const omp = await buildOmpBundle(root, join(outDir, 'omp'));
-  for (const [source, name] of [['host', 'host-runtime'], ['rpc-probe', 'rpc-probe']] as const) {
+  for (const [source, name] of [['machine-bootstrap', 'host'], ['rpc-probe', 'rpc-probe']] as const) {
     const result = await Bun.build({
       entrypoints: [join(root, `packages/account-machine/src/${source}.ts`)],
       target: 'bun', outdir: outDir, naming: `${name}.js`, sourcemap: 'linked',
+      define: {
+        'process.env.GITSPACE_INITIAL_MACHINE_MANIFEST_HASH': JSON.stringify(machine.manifestHash),
+        'process.env.GITSPACE_INITIAL_OMP_MANIFEST_HASH': JSON.stringify(omp.manifestHash),
+      },
     });
     if (!result.success) throw new AggregateError(result.logs, 'Machine host build failed');
   }
@@ -230,15 +237,6 @@ export async function buildInitialRuntime(root: string, outDir: string): Promise
     define: { 'process.env.GITSPACE_INITIAL_OMP_MANIFEST_HASH': JSON.stringify(omp.manifestHash) },
   });
   if (!launcher.success) throw new AggregateError(launcher.logs, 'Selected OMP command launcher build failed');
-  await writeFile(join(outDir, 'host.js'), [
-    "import { fileURLToPath } from 'node:url';",
-    "process.env.GITSPACE_OMP_RUNTIME_PATH = fileURLToPath(new URL('./omp/omp.js', import.meta.url));",
-    `process.env.GITSPACE_OMP_MANIFEST_HASH = ${JSON.stringify(omp.manifestHash)};`,
-    `process.env.GITSPACE_INITIAL_MACHINE_MANIFEST_HASH = ${JSON.stringify(machine.manifestHash)};`,
-    "// The initial trust environment must be set before the host module evaluates.",
-    "await import('./host-runtime.js');",
-    '',
-  ].join('\n'));
   return { machine, omp };
 }
 

@@ -104,13 +104,14 @@ describe('Portable Inspector Git reads', () => {
     const refsBefore = git(context.repositoryPath, 'show-ref');
     const statusBefore = git(context.repositoryPath, 'status', '--porcelain=v1');
 
-    expect(await readRepositoryTree({ ...portable, mode: 'base' })).toContainEqual(expect.objectContaining({ path: 'file.txt', blobId: baseBlob }));
+    expect(await readRepositoryTree({ ...portable, mode: 'base' })).toContainEqual(expect.objectContaining({ path: 'file.txt', blobId: null }));
     expect(await readRepositoryFile({ ...portable, mode: 'base', path: 'file.txt' })).toMatchObject({ content: 'base\n', commitId: baseCommit });
     expect(await readRepositoryStatus({ ...portable, mode: 'base' })).toContainEqual(expect.objectContaining({ path: 'file.txt', status: 'modified' }));
     const diff = await readRepositoryDiff({ ...portable, mode: 'base', path: 'file.txt' });
     expect(diff.baseCommit).toBe(baseCommit);
     expect(diff.patch).toContain('-base\n+working\n');
     expect(diff.files).toContainEqual(expect.objectContaining({ path: 'file.txt', additions: 1, deletions: 1 }));
+    expect(diff.files[0]?.oldBlobId).toBe(baseBlob);
     expect(git(context.repositoryPath, 'show-ref')).toBe(refsBefore);
     expect(git(context.repositoryPath, 'status', '--porcelain=v1')).toBe(statusBefore);
     expect(git(context.repositoryPath, 'show', ':file.txt')).toBe('staged');
@@ -174,6 +175,59 @@ describe('Inspector Git reads', () => {
     expect(git(context.repositoryPath, 'status', '--porcelain=v1')).toBe(before);
   });
 
+  it('returns every tracked and untracked path without reading their contents', async () => {
+    const context = fixture();
+    mkdirSync(join(context.repositoryPath, 'dist'));
+    writeFileSync(join(context.repositoryPath, 'dist/source.ts'), 'tracked source\n');
+    git(context.repositoryPath, 'add', 'dist/source.ts');
+    writeFileSync(join(context.repositoryPath, '.gitignore'), 'ignored/\n');
+    mkdirSync(join(context.repositoryPath, 'ignored'));
+    writeFileSync(join(context.repositoryPath, 'ignored/hidden.txt'), 'ignored\n');
+    for (let index = 0; index < 240; index += 1) {
+      mkdirSync(join(context.repositoryPath, `folder-${index}`));
+      writeFileSync(join(context.repositoryPath, `folder-${index}/file.txt`), 'contents\n');
+    }
+    const tree = await readRepositoryTree({ ...context, mode: 'current' });
+    for (let index = 0; index < 240; index += 1) {
+      expect(tree).toContainEqual(expect.objectContaining({ path: `folder-${index}/file.txt`, blobId: null }));
+      expect(tree).toContainEqual(expect.objectContaining({ path: `folder-${index}`, kind: 'directory' }));
+    }
+    expect(tree).toContainEqual(expect.objectContaining({ path: 'dist/source.ts' }));
+    expect(tree.some((entry) => entry.path.startsWith('ignored/'))).toBe(false);
+  });
+
+  it('includes both comparison sides for additions, renames, and deletions', async () => {
+    const context = { ...fixture(), baseRef: 'main' };
+    git(context.repositoryPath, 'mv', 'unchanged.txt', 'renamed.txt');
+    writeFileSync(join(context.repositoryPath, 'added.txt'), 'added\n');
+    git(context.repositoryPath, 'add', 'added.txt');
+    rmSync(join(context.repositoryPath, 'file.txt'));
+    for (const mode of ['base', 'working', 'staged'] as const) {
+      const tree = await readRepositoryTree({ ...context, mode });
+      expect(tree).toContainEqual(expect.objectContaining({ path: 'added.txt' }));
+      expect(tree).toContainEqual(expect.objectContaining({ path: 'renamed.txt' }));
+      expect(tree).toContainEqual(expect.objectContaining({ path: 'file.txt' }));
+      if (mode !== 'working') expect(tree).toContainEqual(expect.objectContaining({ path: 'unchanged.txt', status: 'deleted' }));
+    }
+    const diff = await readRepositoryDiff({ ...context, mode: 'base' });
+    expect(diff.files).toContainEqual(expect.objectContaining({ path: 'added.txt', status: 'added' }));
+    expect(diff.files).toContainEqual(expect.objectContaining({ path: 'renamed.txt', oldPath: 'unchanged.txt', status: 'renamed' }));
+    expect(diff.files).toContainEqual(expect.objectContaining({ path: 'file.txt', status: 'deleted', newBlobId: null }));
+  });
+
+  it('pins staged, unstaged, and current content rather than substituting HEAD', async () => {
+    const context = fixture();
+    const headBlob = git(context.repositoryPath, 'rev-parse', 'HEAD:file.txt');
+    const indexBlob = git(context.repositoryPath, 'rev-parse', ':file.txt');
+    const workingBlob = git(context.repositoryPath, 'hash-object', 'file.txt');
+    const staged = await readRepositoryDiff({ ...context, mode: 'staged', path: 'file.txt' });
+    const working = await readRepositoryDiff({ ...context, mode: 'working', path: 'file.txt' });
+    const current = await readRepositoryDiff({ ...context, mode: 'current', path: 'file.txt' });
+    expect(staged.files[0]).toMatchObject({ oldBlobId: headBlob, newBlobId: indexBlob });
+    expect(working.files[0]).toMatchObject({ oldBlobId: indexBlob, newBlobId: workingBlob });
+    expect(current.files[0]).toMatchObject({ oldBlobId: workingBlob, newBlobId: workingBlob });
+  });
+
   it('rejects escaping paths and never follows worktree symlinks', async () => {
     const context = fixture();
     await expect(readRepositoryFile({ ...context, mode: 'current', path: '../outside-secret.txt' })).rejects.toThrow('outside');
@@ -182,5 +236,7 @@ describe('Inspector Git reads', () => {
     expect(symlink.kind).toBe('symlink');
     expect(symlink.content).toBe('../outside-secret.txt');
     expect(symlink.content).not.toContain('secret that must not be followed');
+    symlinkSync('..', join(context.repositoryPath, 'parent-link'));
+    await expect(readRepositoryFile({ ...context, mode: 'current', path: 'parent-link/outside-secret.txt' })).rejects.toThrow('symlink parent');
   });
 });

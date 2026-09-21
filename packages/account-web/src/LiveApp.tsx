@@ -1,7 +1,7 @@
 import { executionAgentId, transcriptRowsToTurns, type ExecutionBlock, type SideAgentBlock, type TransportBlock, type TurnBlock } from '@gitspace/blocks';
 import type { DeploymentStatusView, InspectorBootstrapView, LaunchProgressView, OmpSettingValue, ProviderLoginEvent, ReleaseTarget, RepositoryDiffView, RepositoryFileView, RepositoryMode, UserSettings } from '@gitspace/protocol';
 import { executionHash, projectEnvironmentState, lifecycleSummary, lifecycleExecutionOutcome, isLifecycleRunActive, latestLifecycleRun, latestExecutionRun, type EnvironmentBundle as ProtocolEnvironmentBundle } from '@gitspace/protocol-environment';
-import { currentAgentFailure } from '@gitspace/protocol-agent';
+import { currentAgentExecutionFailure, currentAgentFailure } from '@gitspace/protocol-agent';
 import type { ProjectMcpGrantRpcView } from '@gitspace/protocol/mcp-contract';
 import type { ProjectCronView } from '@gitspace/protocol/cron-contract';
 import type { CloudImageSelection } from '@gitspace/protocol/cloud-image';
@@ -37,6 +37,7 @@ import { useTranscriptHistory, type TranscriptHistorySource } from './useTranscr
 import { AccountDirectoryContext, useAccountDirectory } from './useAccountDirectory.js';
 import { invalidatesRead, useRetainedRead, useRetainedQueryValue } from './useRetainedRead.js';
 import { useLiveSessionControls } from './useLiveSessionControls.js';
+import { useAgentRecovery } from './useAgentRecovery.js';
 import { ResourceNavigation, type ResourceRequest } from './ResourceNavigation.js';
 import { loadInspectorResource } from './resource-content.js';
 import { SynchronizationProvider, useAccountSettings, useAccountGitIdentity, useAccountOmpConfiguration, useAccountMachines, useAccountCloudImages, useAccountProjects, useEnvironmentSynchronization, useEventRefresh, useProjectSynchronization, useRuntimeSynchronization, useSpaceSynchronization, useSynchronizationOwner, useSynchronizedEvents } from './SynchronizationProvider.js';
@@ -370,7 +371,8 @@ function LiveInspector({
   const overview = useResultQuery(rpcClient.inspector.overview, request);
   const artifactCatalog = useResultQuery(rpcClient.inspector.artifacts.list, request);
   const [secondaryQueries, setSecondaryQueries] = useState({ repository: false, journal: false, threads: false, services: false });
-  const repository = useResultQuery(rpcClient.inspector.repository.tree, { ...request, mode: 'current', path: null }, { enabled: runtimeAvailable && secondaryQueries.repository });
+  const [repositoryMode, setRepositoryMode] = useState<RepositoryMode>('current');
+  const repository = useResultQuery(rpcClient.inspector.repository.tree, { ...request, mode: repositoryMode, path: null }, { enabled: runtimeAvailable && secondaryQueries.repository });
   const journal = useResultQuery(rpcClient.inspector.journal.list, request, { enabled: secondaryQueries.journal });
   const threads = useResultQuery(rpcClient.inspector.review.list, request, { enabled: secondaryQueries.threads });
   const services = useResultQuery(rpcClient.inspector.services.list, request, { enabled: runtimeAvailable && secondaryQueries.services });
@@ -389,7 +391,7 @@ function LiveInspector({
   const readKey = JSON.stringify([projectId, spaceId, generation, scope?.possessedBy]);
   const overviewRead = useRetainedRead(overview, readKey);
   const artifactValue = useRetainedQueryValue(artifactCatalog, readKey);
-  const repositoryValue = useRetainedQueryValue(repository, readKey);
+  const repositoryValue = useRetainedQueryValue(repository, JSON.stringify([readKey, repositoryMode]));
   const journalValue = useRetainedQueryValue(journal, readKey);
   const threadsValue = useRetainedQueryValue(threads, readKey);
   const servicesValue = useRetainedQueryValue(services, readKey);
@@ -401,6 +403,15 @@ function LiveInspector({
   const [repositoryDiff, setRepositoryDiff] = useState<RepositoryDiffView | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const lastRefreshToken = useRef(refreshToken);
+  const repositoryRequest = useRef<AbortController | null>(null);
+  const repositoryScope = useRef(readKey);
+  repositoryScope.current = readKey;
+  useEffect(() => {
+    repositoryRequest.current?.abort();
+    setRepositoryFile(null);
+    setRepositoryDiff(null);
+    return () => { repositoryRequest.current?.abort(); };
+  }, [readKey, runtimeAvailable]);
   const subagents = useMemo(() => {
     const byAgent = new Map<string, ExecutionBlock | SideAgentBlock>();
     for (const turn of turns) for (const agent of turn.sideAgents) byAgent.set(agent.agentId, agent);
@@ -459,21 +470,32 @@ function LiveInspector({
   }
   const overviewValue = overviewRead.value;
 
-  const requestRepositoryFile = (path: string, mode: RepositoryMode): void => {
+  const beginRepositoryRead = () => {
+    repositoryRequest.current?.abort();
+    const controller = new AbortController();
+    repositoryRequest.current = controller;
     setActionError(null);
-    void rpcClient.inspector.repository.file({ ...request, path, mode }).then((result) => {
+    setRepositoryFile(null);
+    setRepositoryDiff(null);
+    return { signal: controller.signal, current: () => !controller.signal.aborted && repositoryScope.current === readKey };
+  };
+  const requestRepositoryFile = (path: string, mode: RepositoryMode): void => {
+    const pending = beginRepositoryRead();
+    void rpcClient.inspector.repository.file({ ...request, path, mode }, { signal: pending.signal }).then((result) => {
+      if (!pending.current()) return;
       if (result.status === 'error') throw result.error;
+      if (result.value.spaceId !== spaceId || result.value.generation !== generation || result.value.path !== path || result.value.mode !== mode) throw new Error('Repository file response does not match the requested view.');
       setRepositoryFile(result.value);
-      setRepositoryDiff(null);
-    }).catch((error: unknown) => setActionError(error instanceof Error ? error.message : String(error)));
+    }).catch((error: unknown) => { if (pending.current()) setActionError(error instanceof Error ? error.message : String(error)); });
   };
   const requestRepositoryDiff = (path: string | null, mode: Exclude<RepositoryMode, 'current'>, baseRef?: string): void => {
-    setActionError(null);
-    void rpcClient.inspector.repository.diff({ ...request, path, mode, baseRef: baseRef ?? null }).then((result) => {
+    const pending = beginRepositoryRead();
+    void rpcClient.inspector.repository.diff({ ...request, path, mode, baseRef: baseRef ?? null }, { signal: pending.signal }).then((result) => {
+      if (!pending.current()) return;
       if (result.status === 'error') throw result.error;
+      if (result.value.spaceId !== spaceId || result.value.generation !== generation || result.value.path !== path || result.value.mode !== mode) throw new Error('Repository diff response does not match the requested view.');
       setRepositoryDiff(result.value);
-      setRepositoryFile(null);
-    }).catch((error: unknown) => setActionError(error instanceof Error ? error.message : String(error)));
+    }).catch((error: unknown) => { if (pending.current()) setActionError(error instanceof Error ? error.message : String(error)); });
   };
   const refreshOverviewAndThreads = async (): Promise<void> => {
     await Promise.all([overview.refetch(), threads.refetch()]);
@@ -508,6 +530,8 @@ function LiveInspector({
     onSetRelations={onSetRelations}
     stackStatus={stackValue ?? null}
     repositoryEntries={repositoryValue ?? []}
+    repositoryMode={repositoryMode}
+    onRepositoryModeChange={setRepositoryMode}
     repositoryFile={repositoryFile}
     repositoryDiff={repositoryDiff}
     journalEntries={journalValue ?? []}
@@ -538,6 +562,7 @@ function LiveInspector({
     onLoadRepositoryDiff={async (path, mode, baseRef) => {
       const result = await rpcClient.inspector.repository.diff({ ...request, path, mode, baseRef: baseRef ?? null });
       if (result.status === 'error') throw result.error;
+      if (repositoryScope.current !== readKey || result.value.spaceId !== spaceId || result.value.generation !== generation || result.value.path !== path || result.value.mode !== mode) throw new Error('Guide diff response does not match the requested view.');
       return result.value;
     }}
     threads={threadsValue ?? []}
@@ -598,6 +623,7 @@ function LiveInspector({
       });
       if (result.status === 'error') throw result.error;
       await refreshOverviewAndThreads();
+      return result.value;
     }}
     onReplyThread={async (threadId, expectedRevision, body) => {
       const result = await rpcClient.inspector.review.reply({
@@ -722,9 +748,13 @@ function AccountFrame({ children }: { children: ReactNode }) {
     const matchesRuntimeLease = (summary: SidebarProject['baseSummary'], candidate: GitSpaceShellProps['workspace'] | undefined): boolean => !!candidate && !!summary && summary.generation === candidate.generation && summary.holder.kind === 'held' && summary.holder.machineId === candidate.possessedBy;
     const workspaces = (saved?.workspaces ?? []).map((workspace) => {
       const candidate = runtime?.workspaces.find((item) => item.id === workspace.id)?.runtime;
-      return matchesRuntimeLease(workspace.summary, candidate) ? { ...workspace, runtime: candidate } : workspace;
+      if (!matchesRuntimeLease(workspace.summary, candidate) || !candidate || !workspace.summary) return workspace;
+      const liveSummary = runtime?.workspaces.find((item) => item.id === workspace.id)?.summary;
+      return { ...workspace, runtime: candidate, summary: workspace.id === workspaceId ? { ...workspace.summary, ...liveSummary, status: candidate.status } : workspace.summary };
     });
-    return { id: project.id, name: project.name, lifecycle: project.lifecycle, base: matchesRuntimeLease(saved?.baseSummary, runtime?.base) ? runtime?.base : undefined, baseSummary: saved?.baseSummary, workspaces, error: saved?.error };
+    const base = matchesRuntimeLease(saved?.baseSummary, runtime?.base) ? runtime?.base : undefined;
+    const baseSummary = workspaceId === null && base && saved?.baseSummary ? { ...saved.baseSummary, ...runtime?.baseSummary, status: base.status } : saved?.baseSummary;
+    return { id: project.id, name: project.name, lifecycle: project.lifecycle, base, baseSummary, workspaces, error: saved?.error };
   });
   const frameView = route === 'agent' && !projectId ? 'projects' : route;
   const globalSidebar = frameView !== 'agent' && runtimeSidebar?.view === frameView && runtimeSidebar.selected === null ? runtimeSidebar : null;
@@ -1044,10 +1074,12 @@ function RunningWorkspace({ projectId, workspaceId, onOpenSettings, defaultMachi
   const liveSessionId = liveSession?.id ?? '';
   const selectedSpace = bootstrapValue?.workspaces.find((candidate) => candidate.id === workspaceId) ?? bootstrapValue?.baseSpace;
   const selectedPlacement = placementsValue?.spaces.find((candidate) => candidate.spaceId === selectedSpace?.id);
-  const runtimeAvailable = !!selectedSpace && !selectedSpace.closedAt && selectedSpace.possessedBy !== null
+  const runtimeAvailable = !!selectedSpace && !selectedSpace.closedAt && !('archivedAt' in selectedSpace && selectedSpace.archivedAt) && selectedSpace.possessedBy !== null
     && !(placementsQuery.state === 'failure' && invalidatesRead(placementsQuery.error))
     && (placementsValue === undefined || (selectedPlacement?.state === 'open' && selectedPlacement.holderId === selectedSpace.possessedBy && selectedPlacement.generation === selectedSpace.spaceGeneration));
   const controlsAvailable = runtimeAvailable && liveSession?.controlsAvailable === true;
+  const recoveringAgent = useAgentRecovery(liveSession?.health, selectedSpace?.possessedBy ?? null, selectedSpace?.spaceGeneration ?? 0,
+    runtimeAvailable && !controlsAvailable && eventConnection === 'open', bootstrap.refetch);
   const runtimeKey = JSON.stringify([projectId, workspaceId, selectedSpace?.spaceGeneration, selectedSpace?.possessedBy, liveSessionId]);
   const activeRuntime = useRef<string | null>(null);
   activeRuntime.current = controlsAvailable ? runtimeKey : null;
@@ -1309,11 +1341,13 @@ function RunningWorkspace({ projectId, workspaceId, onOpenSettings, defaultMachi
     return operation;
   };
   const retryAgent = async (): Promise<void> => {
-    if (!selectedSpace || !runtimeAvailable || controlsAvailable) throw new Error('Refresh this workspace before retrying its agent.');
+    if (!selectedSpace || !runtimeAvailable || controlsAvailable || recoveringAgent) throw new Error('Refresh this workspace before retrying its agent.');
     const canonical = await rpcClient.inspector.bootstrap({ projectId, workspaceId });
     if (canonical.status === 'error') throw new Error(`Agent retry could not check ownership: ${canonical.error.message}`);
     const placement = canonical.value.placement;
     if (placement?.state !== 'open' || placement.machineId !== selectedSpace.possessedBy || placement.generation !== selectedSpace.spaceGeneration) {
+      await Promise.allSettled([bootstrap.refetch(), placementsQuery.refetch()]);
+      routedTransport.invalidate();
       refreshInspection();
       throw new Error('This workspace changed ownership. Refresh it before retrying its agent.');
     }
@@ -1445,12 +1479,12 @@ function RunningWorkspace({ projectId, workspaceId, onOpenSettings, defaultMachi
         title: `${mainAgent.scope === 'project' ? 'Project' : 'Workspace'} agent ${mainAgent.ompSessionId.slice(0, 8)}`,
         state: mainAgent.renderState,
         model: 'OMP',
-        recovering: mainAgent.resumePending,
+        recovering: recoveringAgent,
         controlsAvailable,
-        errorMessage: currentAgentFailure(mainAgent.health)?.message ?? null,
+        errorMessage: currentAgentExecutionFailure(mainAgent.health)?.message ?? null,
         failed: mainAgent.state === 'failed',
       } : null,
-      onRetryAgent: runtimeAvailable && !controlsAvailable && !liveSession?.resumePending ? retryAgent : undefined,
+      onRetryAgent: runtimeAvailable && !controlsAvailable && !recoveringAgent ? retryAgent : undefined,
       controlsError: controlsAvailable && controlRead.error ? `Agent controls could not refresh: ${controlRead.error.message}` : undefined,
       sessionControls: mainAgent && canSend && sessionControlValue ? {
         value: sessionControlValue,
@@ -1656,7 +1690,7 @@ function RunningWorkspace({ projectId, workspaceId, onOpenSettings, defaultMachi
       deployment: sidebarDeployment,
       launchBanner: launchedMark ? <LaunchedBanner mark={launchedMark} onRevert={revertToStable} onDismiss={dismissLaunched} /> : null,
     };
-  }, [bootstrapValue, projectsValue, machinesValue, placementsValue, skillsValue, deploymentValue, controlsAvailable, runtimeAvailable, runtimeKey, sessionControlValue, controlRead.error, controlRead.refetch, launchDeployment.state, launch, launchedMark, eventConnection, inspectorRefreshToken, prompt.state, prompt.state === 'failure' ? prompt.error : null, archiveWorkspace.state, createProject.state, createWorkspace.state, archiveProject.state, restoreProject.state, deleteProject.state, deleteWorkspace.state, workspaceId, homeMachineId, defaultMachineId, transport, onOpenSettings, onNavigateView, user.name, user.handle, turns, history]);
+  }, [bootstrapValue, projectsValue, machinesValue, placementsValue, skillsValue, deploymentValue, controlsAvailable, runtimeAvailable, recoveringAgent, runtimeKey, sessionControlValue, controlRead.error, controlRead.refetch, launchDeployment.state, launch, launchedMark, eventConnection, inspectorRefreshToken, prompt.state, prompt.state === 'failure' ? prompt.error : null, archiveWorkspace.state, createProject.state, createWorkspace.state, archiveProject.state, restoreProject.state, deleteProject.state, deleteWorkspace.state, workspaceId, homeMachineId, defaultMachineId, transport, onOpenSettings, onNavigateView, user.name, user.handle, turns, history]);
   const recoveryScheduled = retryableBootstrapFailure && runtimeSynchronization.connection !== 'open';
   if (!shell && projectsQuery.state === 'pending') return <PageCanvas><EmptyState icon={<ThinkingIndicator />} title="Opening projects…" description="Loading cloud project authority." /></PageCanvas>;
   if (!shell && projectsQuery.state === 'failure') return <PageCanvas><EmptyState title="Projects are unavailable" description={projectsQuery.error.message} action={<Button variant="ghost" onClick={() => void projectsQuery.refetch()}>Retry</Button>} /></PageCanvas>;

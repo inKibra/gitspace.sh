@@ -1,5 +1,5 @@
 import { rpcErrors } from '@gitspace/protocol';
-import { currentAgentExecutionFailure, currentAgentFailure, determineAgentState } from '@gitspace/protocol-agent';
+import { currentAgentExecutionFailure, determineAgentState } from '@gitspace/protocol-agent';
 import { deriveWorkspaceStatusSummary, type WorkspaceAgentState } from '@gitspace/protocol-workspace';
 import { err, ok } from 'result-rpc';
 import { eq } from 'drizzle-orm';
@@ -130,7 +130,7 @@ export class GitSpaceHandlers {
       closedAt: space.closedAt ? new Date(space.closedAt) : null,
       possessedBy: space.placementState === 'closed' ? null : space.holderId,
       spaceGeneration: space.generation,
-      status: deriveWorkspaceStatusSummary({ agents: agentState && mainAgent ? [{ state: agentState, failure: currentAgentFailure(mainAgent.health) }] : [] }),
+      status: deriveWorkspaceStatusSummary({ agents: agentState && mainAgent ? [{ state: agentState, failure: currentAgentExecutionFailure(mainAgent.health), compaction: mainAgent.activity.reasons.find((reason) => reason.kind === 'compacting') }] : [] }),
     };
   }
   /** Relations and stack validations for every workspace in a project, computed once so list views share one graph. */
@@ -163,7 +163,7 @@ export class GitSpaceHandlers {
       possessedBy: possession?.holderId ?? null,
       possessionGeneration: possession?.generation ?? null,
       spaceGeneration: workspace.generation,
-      status: deriveWorkspaceStatusSummary({ agents: agentState && mainAgent ? [{ state: agentState, failure: currentAgentFailure(mainAgent.health) }] : [] }),
+      status: deriveWorkspaceStatusSummary({ agents: agentState && mainAgent ? [{ state: agentState, failure: currentAgentExecutionFailure(mainAgent.health), compaction: mainAgent.activity.reasons.find((reason) => reason.kind === 'compacting') }] : [] }),
       relations: stack.relations.get(workspace.id) ?? emptyRelations(),
       stack: stack.stacks.get(workspace.id) ?? emptyStack(),
     };

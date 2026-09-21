@@ -1,11 +1,32 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import { verticalSliceFixture } from './App.js';
-import { GitSpaceShell, type GitSpaceShellProps, type WorkspaceView } from './GitSpaceShell.js';
+import { GitSpaceShell, workspaceStatusColor, type GitSpaceShellProps, type WorkspaceView } from './GitSpaceShell.js';
 import { OverviewView } from './inspector/index.js';
 
 
 describe('GitSpaceShell', () => {
+  it('warns for unavailable status without animating retained work as live', () => {
+    const scope = { ...verticalSliceFixture.workspace, status: { ...verticalSliceFixture.workspace.status, primaryColor: 'green' as const } };
+    expect(workspaceStatusColor({ ...scope, freshness: 'stale' })).toBe('orange');
+    expect(workspaceStatusColor({ ...scope, freshness: 'unknown' })).toBe('orange');
+    expect(workspaceStatusColor({ ...scope, holder: { kind: 'released' } })).toBe('dim');
+    expect(workspaceStatusColor({ ...scope, freshness: 'fresh' })).toBe('green');
+  });
+
+  it('keeps compaction visibly active and interruptible', () => {
+    const html = renderToStaticMarkup(<GitSpaceShell
+      {...verticalSliceFixture}
+      workspace={{ ...verticalSliceFixture.workspace, status: { ...verticalSliceFixture.workspace.status, primaryColor: 'green', compaction: { detail: 'Background soft' } } }}
+      mainAgent={{ ...verticalSliceFixture.mainAgent!, state: 'running', controlsAvailable: true }}
+      onCloseSpace={async () => undefined}
+    />);
+    expect(html).toContain('role="status"');
+    expect(html).toContain('Background soft');
+    expect(html).toContain('data-pulse="true"');
+    expect(html).toContain('Stop and close');
+  });
+
   it('gates prompt intake while a reopened session is recovering', () => {
     const html = renderToStaticMarkup(<GitSpaceShell
       {...verticalSliceFixture}
@@ -83,10 +104,9 @@ describe('GitSpaceShell', () => {
       },
     };
     const html = renderToStaticMarkup(<GitSpaceShell {...verticalSliceFixture} workspace={stopped} baseSpace={stopped} mainAgent={null} />);
-    expect(html).toContain('Base · Not started');
-    expect(html).toContain('Base agent not started');
     expect(html).toContain('Start');
     expect(html).not.toContain('Ask the project agent');
+    expect(html).toContain('color:#f97316');
   });
 
 

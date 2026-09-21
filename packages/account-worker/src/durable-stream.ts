@@ -1,4 +1,23 @@
-import { streamCursorSchema, type StreamEvent } from '@gitspace/protocol-sync';
+import { decodeChangeStream, streamCursorSchema, type StreamEvent } from '@gitspace/protocol-sync';
+import { RpcTarget } from 'cloudflare:workers';
+
+export interface DurableStreamSubscription {
+  stream: ReadableStream<Uint8Array>;
+  lifetime: RpcTarget;
+}
+
+/** RPC stream cancellation alone does not release the producer's pending pull. */
+class SubscriptionLifetime extends RpcTarget {
+  readonly #close: () => void;
+  constructor(close: () => void) { super(); this.#close = close; }
+  [Symbol.dispose](): void { this.#close(); }
+}
+
+/** Dispose the whole RPC result: the body alone does not own producer cleanup. */
+export async function* consumeDurableStream<T = unknown>(subscription: Pick<DurableStreamSubscription, 'stream'> & Disposable, signal: AbortSignal): AsyncGenerator<StreamEvent<T>> {
+  using owned = subscription;
+  yield* decodeChangeStream(owned.stream, signal) as AsyncIterable<StreamEvent<T>>;
+}
 
 type Storage = Pick<DurableObjectStorage, 'sql' | 'transactionSync'>;
 const signals = new WeakMap<Storage, Set<() => void>>();
@@ -30,7 +49,20 @@ export class DurableChangeLog {
     return cursor;
   }
   wake(): void { for (const listener of this.listeners) listener(); }
-  watch(resource: string, after: number | null, snapshot: () => unknown): ReadableStream<Uint8Array> {
+  /** A finite durable replay, also used after a hibernating WebSocket wakes. */
+  replay<T>(resource: string, after: number | null, snapshot: () => T, initial = true): StreamEvent<T>[] {
+    if (after !== null) streamCursorSchema.parse(after);
+    const head = this.head(resource);
+    const full = (): StreamEvent<T> => ({ type: 'snapshot', resource, cursor: head, revision: head, previous: null, value: snapshot() });
+    if (after === null) return [full()];
+    const rows = this.storage.sql.exec<ChangeRow>('SELECT cursor,previous,value_json FROM app_changes WHERE resource=? AND cursor>? ORDER BY cursor', resource, after).toArray();
+    if (after > head || (after < head && rows[0]?.previous !== after)) {
+      return [{ type: 'resync', resource, cursor: head, revision: head, reason: after > head ? 'cursor-ahead' : 'cursor-expired' }, full()];
+    }
+    if (!rows.length) return initial ? [full()] : [];
+    return rows.map((row) => ({ type: 'change', resource, cursor: row.cursor, revision: row.cursor, previous: row.previous, value: JSON.parse(row.value_json) as T }));
+  }
+  watch(resource: string, after: number | null, snapshot: () => unknown): DurableStreamSubscription {
     if (after !== null) streamCursorSchema.parse(after);
     let cursor = after;
     let initial = true;
@@ -40,7 +72,9 @@ export class DurableChangeLog {
     const notify = () => { waiting?.(); waiting = undefined; };
     this.listeners.add(notify);
     const close = () => { stopped = true; this.listeners.delete(notify); notify(); };
-    return new ReadableStream<Uint8Array>({
+    let source!: ReadableStreamDefaultController<Uint8Array>;
+    const stream = new ReadableStream<Uint8Array>({
+      start: (controller) => { source = controller; },
       pull: async (controller) => {
         try {
           while (!stopped) {
@@ -76,5 +110,10 @@ export class DurableChangeLog {
       },
       cancel: close,
     }, { highWaterMark: 1 });
+    return { stream, lifetime: new SubscriptionLifetime(() => {
+      if (stopped) return;
+      close();
+      if (source.desiredSize !== null) source.close();
+    }) };
   }
 }

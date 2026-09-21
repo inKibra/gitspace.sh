@@ -57,7 +57,7 @@ interface ParsedStatus {
 interface IndexedEntry {
   path: string;
   kind: 'file' | 'symlink';
-  blobId: string;
+  blobId: string | null;
   size: number | null;
 }
 
@@ -91,24 +91,23 @@ export async function readRepositoryTree(input: InspectorRepositoryRead): Promis
   const statuses = await statusForMode(context, identity);
   const statusByPath = new Map(statuses.map((entry) => [entry.path, entry]));
   const selectedPath = context.path === undefined ? undefined : safeRepositoryPath(context.repositoryPath, context.path);
-  const entries = context.mode === 'base'
-    ? await commitTreeEntries(context, identity.baseCommit, selectedPath)
-    : context.mode === 'staged'
-      ? await indexTreeEntries(context, selectedPath)
-      : await worktreeEntries(context, selectedPath);
-
+  const entries = context.mode === 'staged'
+    ? await indexTreeEntries(context, selectedPath)
+    : await worktreeEntries(context, selectedPath);
+  const before = context.mode === 'working'
+    ? await indexTreeEntries(context, selectedPath)
+    : await commitTreeEntries(context, context.mode === 'base' ? identity.baseCommit : identity.headCommit, selectedPath);
+  const paths = new Set(entries.map((entry) => entry.path));
+  for (const entry of before) {
+    if (!paths.has(entry.path)) entries.push(entry);
+  }
   for (const status of statuses) {
-    if (status.status !== 'deleted' || entries.some((entry) => entry.path === status.path)) continue;
-    if (selectedPath && status.path !== selectedPath && !status.path.startsWith(`${selectedPath}/`)) continue;
-    const blobId = await objectAtPath(context, context.mode === 'base' ? identity.baseCommit : identity.headCommit, status.path);
-    if (!blobId) throw new InspectorGitError('read tree', `${status.path} is missing from ${context.mode} commit`);
-    entries.push({ path: status.path, kind: 'file', blobId, size: null });
+    if (status.oldPath) statusByPath.set(status.oldPath, { ...status, path: status.oldPath, status: 'deleted' });
   }
 
   const selectedEntries = entries
-    .filter((entry) => visibleInspectorPath(entry.path))
-    .sort((left, right) => left.path.split('/').length - right.path.split('/').length || left.path.localeCompare(right.path))
-    .slice(0, 180);
+    .filter((entry) => visibleInspectorPath(entry.path, true))
+    .sort((left, right) => left.path.split('/').length - right.path.split('/').length || left.path.localeCompare(right.path));
   const tree: RepositoryTreeEntry[] = [];
   const directoryStatuses = new Map<string, RepositoryStatus>();
   for (const entry of selectedEntries) {
@@ -147,8 +146,7 @@ export async function readRepositoryTree(input: InspectorRepositoryRead): Promis
     }));
   }
   return tree
-    .sort((left, right) => left.path.split('/').length - right.path.split('/').length || left.path.localeCompare(right.path) || (left.kind === 'directory' ? -1 : 1))
-    .slice(0, 200);
+    .sort((left, right) => left.path.split('/').length - right.path.split('/').length || left.path.localeCompare(right.path) || (left.kind === 'directory' ? -1 : 1));
 }
 
 export async function readRepositoryFile(input: InspectorRepositoryRead & { path: string }): Promise<RepositoryFileView> {
@@ -162,14 +160,14 @@ export async function readRepositoryFile(input: InspectorRepositoryRead & { path
 
   if (context.mode === 'base') {
     const entry = await indexedPath(context, identity.baseCommit, path);
-    if (!entry) throw new InspectorGitError('read file', `${path} does not exist at ${identity.baseCommit}`);
+    if (!entry?.blobId) throw new InspectorGitError('read file', `${path} does not exist at ${identity.baseCommit}`);
     bytes = (await runGit(context, ['cat-file', 'blob', entry.blobId])).stdout;
     kind = entry.kind;
     blobId = entry.blobId;
     commitId = identity.baseCommit;
   } else if (context.mode === 'staged') {
     const entry = (await indexTreeEntries(context, path)).find((candidate) => candidate.path === path);
-    if (!entry) throw new InspectorGitError('read file', `${path} does not exist in the index`);
+    if (!entry?.blobId) throw new InspectorGitError('read file', `${path} does not exist in the index`);
     bytes = (await runGit(context, ['cat-file', 'blob', entry.blobId])).stdout;
     kind = entry.kind;
     blobId = entry.blobId;
@@ -206,17 +204,34 @@ export async function readRepositoryDiff(input: InspectorRepositoryRead): Promis
   const identity = await resolveRepositoryReadIdentity(context);
   const path = context.path === undefined ? undefined : safeRepositoryPath(context.repositoryPath, context.path);
   let patch: string;
+  const blobs = new Map<string, { oldBlobId: string | null; newBlobId: string | null }>();
+  let currentFile: RepositoryFileView | undefined;
   if (context.mode === 'current') {
     if (!path) throw new InspectorGitError('read diff', 'Current mode requires a file path');
     const file = await readRepositoryFile({ ...context, path });
+    currentFile = file;
+    blobs.set(path, { oldBlobId: file.blobId, newBlobId: file.blobId });
     patch = fullFilePatch(file, false);
   } else {
     const args = diffArguments(context.mode, identity.baseCommit, false, path);
     patch = text((await runGit(context, args)).stdout);
+    for (const section of patch.split(/(?=^diff --git )/mu)) {
+      const ids = /^index ([a-f0-9]{40,64})\.\.([a-f0-9]{40,64})(?: |$)/mu.exec(section);
+      const destination = /^\+\+\+ (.+)$/mu.exec(section)?.[1];
+      const source = /^--- (.+)$/mu.exec(section)?.[1];
+      const name = destination === '/dev/null' ? source : destination;
+      if (!ids || !name) continue;
+      const filePath = decodePatchPath(name).slice(2);
+      blobs.set(filePath, {
+        oldBlobId: /^0+$/u.test(ids[1]!) ? null : ids[1]!,
+        newBlobId: /^0+$/u.test(ids[2]!) ? null : ids[2]!,
+      });
+    }
     if (context.mode === 'working' || context.mode === 'base') {
       const untracked = (await statusForMode(context, identity)).filter((entry) => entry.status === 'untracked' && (!path || entry.path === path || entry.path.startsWith(`${path}/`)));
       for (const entry of untracked) {
         const file = await readRepositoryFile({ ...context, mode: 'working', path: entry.path });
+        blobs.set(entry.path, { oldBlobId: null, newBlobId: file.blobId });
         patch += `${patch && !patch.endsWith('\n') ? '\n' : ''}${fullFilePatch(file, true)}`;
       }
     }
@@ -233,18 +248,21 @@ export async function readRepositoryDiff(input: InspectorRepositoryRead): Promis
       path: entry.path,
       oldPath: entry.oldPath,
       status: entry.status,
+      ...(blobs.get(entry.path) ?? { oldBlobId: null, newBlobId: null }),
       additions: stat?.additions ?? (entry.status === 'untracked' ? countPatchAdditions(patch, entry.path) : null),
       deletions: stat?.deletions ?? null,
       binary: stat?.binary ?? false,
     };
   });
-  if (context.mode === 'current' && path) {
-    const file = await readRepositoryFile({ ...context, path });
+  if (currentFile && path) {
+    const file = currentFile;
     if (!files.some((entry) => entry.path === path)) {
       files.push({
         path,
         oldPath: null,
         status: file.status,
+        oldBlobId: file.blobId,
+        newBlobId: file.blobId,
         additions: file.binary ? null : file.content.split('\n').length,
         deletions: 0,
         binary: file.binary,
@@ -286,7 +304,7 @@ function safeRepositoryPath(repositoryPath: string, path: string): string {
 }
 
 async function runGit(repository: GitRepository, args: string[]): Promise<GitResult> {
-  const child = Bun.spawn(['git', ...args], { cwd: repository.repositoryPath, stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' });
+  const child = Bun.spawn(['git', '--literal-pathspecs', ...args], { cwd: repository.repositoryPath, stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' });
   const [exitCode, stdout, stderrBytes] = await Promise.all([
     child.exited,
     new Response(child.stdout).bytes(),
@@ -334,6 +352,7 @@ async function statusForMode(input: InspectorRepositoryRead, identity: Repositor
   if (input.mode === 'current') return all;
   return all.filter((entry) => input.mode === 'staged' ? entry.staged : entry.working).map((entry) => ({
     ...entry,
+    oldPath: input.mode === 'working' && entry.workingStatus !== 'renamed' && entry.workingStatus !== 'copied' ? null : entry.oldPath,
     status: (input.mode === 'staged' ? entry.stagedStatus : entry.workingStatus) ?? entry.status,
   }));
 }
@@ -400,29 +419,29 @@ function statusFromCode(code: string): RepositoryStatus {
   return 'modified';
 }
 
-function visibleInspectorPath(path: string): boolean {
+function visibleInspectorPath(path: string, tracked = false): boolean {
   return !path.startsWith('.gitspace/environments/')
     && !path.startsWith('.gitspace/artifacts/')
-    && !path.startsWith('node_modules/')
-    && !path.startsWith('dist/');
+    && (tracked || (!path.startsWith('node_modules/') && !path.startsWith('dist/')));
 }
 
 async function worktreeEntries(repository: GitRepository, selectedPath?: string): Promise<IndexedEntry[]> {
-  const entries = await indexTreeEntries(repository, selectedPath);
-  const tracked = new Set(entries.map((entry) => entry.path));
+  const indexed = await indexTreeEntries(repository, selectedPath);
+  const entries: IndexedEntry[] = [];
+  const tracked = new Set(indexed.map((entry) => entry.path));
   const args = ['ls-files', '-z', '--others', '--exclude-standard'];
   if (selectedPath) args.push('--', selectedPath);
   const paths = text((await runGit(repository, args)).stdout).split('\0').filter(Boolean)
-    .filter(visibleInspectorPath)
-    .sort((left, right) => left.split('/').length - right.split('/').length || left.localeCompare(right))
-    .slice(0, 180);
-  for (const path of paths) {
-    if (path.endsWith('/') || tracked.has(path)) continue;
+    .filter((path) => visibleInspectorPath(path));
+  for (const path of [...tracked, ...paths]) {
+    if (path.endsWith('/')) continue;
     try {
-      const current = await readWorktreePath(repository.repositoryPath, path);
-      entries.push({ path, kind: current.kind, blobId: await hashBytes(repository, current.bytes), size: current.bytes.byteLength });
+      const absolute = await safeWorktreePath(repository.repositoryPath, path);
+      const stat = await lstat(absolute);
+      if (!stat.isFile() && !stat.isSymbolicLink()) continue;
+      entries.push({ path, kind: stat.isSymbolicLink() ? 'symlink' : 'file', blobId: null, size: stat.size });
     } catch (error) {
-      if (!(error instanceof InspectorGitError) || !error.message.includes('does not exist')) throw error;
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
   }
   return entries;
@@ -458,13 +477,19 @@ async function indexedPath(repository: GitRepository, commit: string, path: stri
   return (await commitTreeEntries(repository, commit, path)).find((entry) => entry.path === path) ?? null;
 }
 
-async function objectAtPath(repository: GitRepository, commit: string, path: string): Promise<string | null> {
-  return (await indexedPath(repository, commit, path))?.blobId ?? null;
+async function safeWorktreePath(repositoryPath: string, path: string): Promise<string> {
+  const portable = safeRepositoryPath(repositoryPath, path);
+  const parts = portable.split('/');
+  for (let index = 1; index < parts.length; index += 1) {
+    const parent = await lstat(resolve(repositoryPath, ...parts.slice(0, index)));
+    if (parent.isSymbolicLink()) throw new InspectorGitError('read file', `${portable} has a symlink parent`);
+  }
+  return resolve(repositoryPath, portable);
 }
 
 async function readWorktreePath(repositoryPath: string, path: string): Promise<{ bytes: Uint8Array; kind: 'file' | 'symlink' }> {
   const portable = safeRepositoryPath(repositoryPath, path);
-  const absolute = resolve(repositoryPath, portable);
+  const absolute = await safeWorktreePath(repositoryPath, portable);
   let stat;
   try {
     stat = await lstat(absolute);
@@ -494,9 +519,9 @@ function decodeContents(bytes: Uint8Array): { content: string; encoding: 'utf-8'
 }
 
 function diffArguments(mode: RepositoryMode, baseCommit: string, numstat: boolean, path?: string): string[] {
-  const args = ['diff', '--no-ext-diff'];
+  const args = ['diff', '--no-ext-diff', '--no-textconv', '--find-renames'];
   if (numstat) args.push('--numstat', '-z');
-  else args.push('--binary', '--no-color');
+  else args.push('--binary', '--no-color', '--full-index', '--src-prefix=a/', '--dst-prefix=b/');
   if (mode === 'staged') args.push('--cached');
   else if (mode === 'base') args.push(baseCommit);
   args.push('--');
@@ -523,6 +548,27 @@ async function diffStats(repository: GitRepository, args: string[]): Promise<Map
     stats.set(path, { additions: binary ? null : Number(match[1]), deletions: binary ? null : Number(match[2]), binary });
   }
   return stats;
+}
+
+function decodePatchPath(path: string): string {
+  if (!path.startsWith('"')) return path.replace(/\t$/u, '');
+  const bytes: number[] = [];
+  const escapes: Record<string, number> = { a: 7, b: 8, t: 9, n: 10, v: 11, f: 12, r: 13, '"': 34, '\\': 92 };
+  const value = path.slice(1, path.lastIndexOf('"'));
+  for (let index = 0; index < value.length; index += 1) {
+    if (value[index] !== '\\') {
+      bytes.push(...new TextEncoder().encode(value[index]!));
+      continue;
+    }
+    const octal = /^[0-7]{3}/u.exec(value.slice(index + 1));
+    if (octal) {
+      bytes.push(Number.parseInt(octal[0], 8));
+      index += 3;
+    } else {
+      bytes.push(escapes[value[++index]!] ?? value.charCodeAt(index));
+    }
+  }
+  return new TextDecoder().decode(new Uint8Array(bytes));
 }
 
 function fullFilePatch(file: RepositoryFileView, added: boolean): string {

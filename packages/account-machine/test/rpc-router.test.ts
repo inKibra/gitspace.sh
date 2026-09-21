@@ -293,6 +293,7 @@ describe('GitSpace Result RPC', () => {
       },
       projects: {
         list: async () => [], createProject: unavailable, openProject: unavailable, createWorkspace: unavailable,
+        findWorkspace: async () => null,
         archiveWorkspace: unavailable, archiveProject: unavailable, restoreProject: unavailable, deleteProject: unavailable, deleteWorkspace: unavailable,
         setWorkspaceLifecycle: unavailable, setWorkspacePhase: unavailable, runLifecycleOperation: unavailable,
       },
@@ -479,6 +480,7 @@ describe('GitSpace Result RPC', () => {
     const events = new CloudProjectEventWriter(projectEvents, database, (error) => { throw error; });
     const handlers = new GitSpaceHandlers(database, artifacts, events);
     const runtime = new RpcFakeOmpRuntime();
+    let retryPlacementMoved = false;
     const sessions = new MachineSessionCoordinator(
       database,
       artifacts,
@@ -488,7 +490,11 @@ describe('GitSpace Result RPC', () => {
       events,
     );
     let remoteSpaceGeneration = 6;
+    let cleanupBlocked = false;
     const spaces = {
+      retryCleanup: async () => {
+        if (cleanupBlocked) throw new Error('Local cleanup is still blocked');
+      },
       close: async (space: MaterializedSpace, expectedGeneration: number) => {
         const started = database.beginSpaceClose({ spaceId: space.id, holderId: 'machine-a', expectedGeneration });
         if (started.status === 'error') throw started.error;
@@ -499,6 +505,10 @@ describe('GitSpace Result RPC', () => {
         }
         const committed = database.commitSpaceClosed({ spaceId: space.id, holderId: 'machine-a', expectedGeneration });
         if (committed.status === 'error') throw committed.error;
+        if (space.id === 'remote-workspace') {
+          remoteSpaceGeneration = expectedGeneration + 1;
+          database.deleteWorkspace(space.id);
+        }
       },
       release: async (space: MaterializedSpace, expectedGeneration: number) => {
         const started = database.beginSpaceClose({ spaceId: space.id, holderId: 'machine-a', expectedGeneration });
@@ -545,6 +555,15 @@ describe('GitSpace Result RPC', () => {
       },
     };
     const projectAuthority = {
+      findWorkspace: async (workspaceId: string) => {
+        if (workspaceId !== 'workspace-a' && workspaceId !== 'remote-workspace') return null;
+        return {
+          id: workspaceId, projectId: 'project-a', kind: 'worktree' as const, name: workspaceId, branch: workspaceId,
+          phase: 'plan' as const, sourceKind: 'base' as const, sourceRef: 'main', sourceCommit: null,
+          lifecycle: 'archived' as const, goalId: null, revision: 1, archivedAt: new Date().toISOString(),
+          createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+        };
+      },
       list: async () => [{
         id: 'project-a',
         name: 'GitSpace',
@@ -673,8 +692,12 @@ describe('GitSpace Result RPC', () => {
       spacePlacements: async () => [
         ...database.listProjects().flatMap((project) => database.listSpaces(project.id)).map((space) => ({
           spaceId: space.id, projectId: space.projectId, kind: space.kind === 'worktree' ? 'worktree' as const : 'base' as const,
-          holderId: space.holderId, state: space.placementState, generation: space.generation,
+          holderId: retryPlacementMoved && space.id === 'project-a' ? 'machine-b' : space.holderId, state: space.placementState, generation: space.generation,
         })),
+        ...(!database.getSpace('remote-workspace') ? [{
+          spaceId: 'remote-workspace', projectId: 'project-a', kind: 'worktree' as const,
+          holderId: 'unassigned', state: 'closed', generation: remoteSpaceGeneration,
+        }] : []),
         ...cloudPlacements,
       ],
       checkpointMetadata: async (_projectId, spaceId) => {
@@ -993,7 +1016,21 @@ describe('GitSpace Result RPC', () => {
     expect(await client.space.close({ spaceId: 'remote-workspace', expectedGeneration: 7 })).toMatchObject({
       status: 'ok', value: { state: 'closed', generation: 8 },
     });
-    // Another machine claimed and released it; this local closed projection is now stale.
+    expect(database.getSpace('remote-workspace')).toBeNull();
+    cleanupBlocked = true;
+    expect((await client.space.close({ spaceId: 'remote-workspace', expectedGeneration: 7 })).status).toBe('error');
+    cleanupBlocked = false;
+    expect(await client.space.close({ spaceId: 'remote-workspace', expectedGeneration: 7 })).toMatchObject({
+      status: 'ok', value: { id: 'remote-workspace', state: 'archived', machineId: null, generation: 8 },
+    });
+    expect((await client.space.close({ spaceId: 'remote-workspace', expectedGeneration: 5 })).status).toBe('error');
+    expect(await client.workspace.restore({ spaceId: 'remote-workspace', expectedGeneration: 8 })).toMatchObject({
+      status: 'ok', value: { id: 'remote-workspace', state: 'active', machineId: 'machine-a', generation: 9 },
+    });
+    expect(await client.space.close({ spaceId: 'remote-workspace', expectedGeneration: 9 })).toMatchObject({
+      status: 'ok', value: { state: 'closed', generation: 10 },
+    });
+    // Another machine claimed and released it; only cloud placement remains.
     remoteSpaceGeneration = 10;
     expect((await client.space.reopen({ spaceId: 'remote-workspace', expectedGeneration: 8 })).status).toBe('error');
     expect(await client.space.reopen({ spaceId: 'remote-workspace', expectedGeneration: 10 })).toMatchObject({
@@ -1060,6 +1097,10 @@ describe('GitSpace Result RPC', () => {
       id: projectAgent.value.id, state: 'closed', controlsAvailable: false,
       health: { issues: { recovery: { failure: { domain: 'agent', code: 'AGENT_RECOVERY_FAILED', context: { sessionId: projectAgent.value.id } } } } },
     });
+    retryPlacementMoved = true;
+    expect((await client.space.reopen({ spaceId: 'project-a', expectedGeneration: 1 })).status).toBe('error');
+    expect(sessions.controlsAvailable(projectAgent.value.id)).toBe(false);
+    retryPlacementMoved = false;
     expect((await client.space.reopen({ spaceId: 'project-a', expectedGeneration: 1 })).status).toBe('ok');
     const retriedBase = await client.bootstrap({ projectId: 'project-a', workspaceId: null });
     if (retriedBase.status === 'error') throw retriedBase.error;
@@ -1249,6 +1290,7 @@ describe('GitSpace Result RPC', () => {
       projectEvents: { appendProjectEvent: unavailable, listProjectEvents: async () => [], latestProjectEventOffset: async () => 0 },
       projects: {
         list: async () => [], createProject: unavailable, openProject: unavailable, createWorkspace: unavailable,
+        findWorkspace: async () => null,
         archiveWorkspace: unavailable, archiveProject: unavailable, restoreProject: unavailable, deleteProject: unavailable, deleteWorkspace: unavailable,
         setWorkspaceLifecycle: unavailable, setWorkspacePhase: unavailable, runLifecycleOperation: unavailable,
       },

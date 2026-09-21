@@ -107,6 +107,31 @@ async function approveActive(manager: WorkspaceEnvironmentManager, ledger: Ledge
 }
 
 describe('WorkspaceEnvironmentManager', () => {
+  it('cleans only durable lifecycle scratch after operational rows are removed', async () => {
+    const context = fixture('true\n');
+    await approveActive(context.manager, context.ledger);
+    await context.manager.runPhase('workspace-a', 'cloud/provision');
+    const run = context.ledger.state.runs[0]!;
+    const scratch = join(context.root, 'scratch');
+    const otherScratch = join(context.root, 'other-scratch');
+    mkdirSync(scratch);
+    mkdirSync(otherScratch);
+    const journal = join(context.managerOptions.stateRoot, 'pending.json');
+    writeFileSync(journal, JSON.stringify({ projectId: 'project-a', spaceId: 'workspace-a', runId: 'unknown-run', directory: scratch }));
+    const otherJournal = join(context.managerOptions.stateRoot, 'other.json');
+    writeFileSync(otherJournal, JSON.stringify({ projectId: 'project-a', spaceId: 'workspace-b', runId: 'other-run', directory: otherScratch }));
+    context.database.deleteWorkspace('workspace-a');
+    await expect(context.manager.forgetSpace('workspace-a', 'project-a')).rejects.toThrow('durable');
+    expect(existsSync(scratch)).toBe(true);
+    expect(existsSync(journal)).toBe(true);
+    writeFileSync(journal, JSON.stringify({ projectId: 'project-a', spaceId: 'workspace-a', runId: run.id, directory: scratch }));
+    await context.manager.forgetSpace('workspace-a', 'project-a');
+    expect(existsSync(scratch)).toBe(false);
+    expect(existsSync(journal)).toBe(false);
+    expect(existsSync(otherScratch)).toBe(true);
+    expect(existsSync(otherJournal)).toBe(true);
+  });
+
   it.each([false, true])('uses only recorded source provenance despite changed local HEAD and inherited overrides (legacy=%s)', async (legacy) => {
     const context = fixture('printf "%s" "$GITSPACE_WORKSPACE_SOURCE_COMMIT" > source-commit.txt\n', 'workspace/materialize');
     const git = (...args: string[]) => {

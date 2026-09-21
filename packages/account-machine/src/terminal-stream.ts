@@ -16,6 +16,13 @@ export class TerminalSnapshotJournal {
     database.orm.run(sql`CREATE INDEX IF NOT EXISTS terminal_stream_resource ON terminal_stream_changes(resource,cursor)`);
     database.orm.run(sql`CREATE TABLE IF NOT EXISTS terminal_stream_heads(resource TEXT PRIMARY KEY,cursor INTEGER NOT NULL,body TEXT NOT NULL)`);
   }
+  forgetSpace(spaceId: string): void {
+    const prefix = `terminals:${spaceId}:`;
+    this.database.orm.transaction((tx) => {
+      tx.run(sql`DELETE FROM terminal_stream_changes WHERE substr(resource,1,${prefix.length})=${prefix}`);
+      tx.run(sql`DELETE FROM terminal_stream_heads WHERE substr(resource,1,${prefix.length})=${prefix}`);
+    });
+  }
   commit(resource: string, value: TerminalSnapshot): void {
     const body = JSON.stringify(value);
     const changed = this.database.orm.transaction((tx) => {

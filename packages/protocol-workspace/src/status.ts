@@ -6,11 +6,12 @@ export interface WorkspaceStatusSummary {
   agents: { green: number; blue: number; orange: number; red: number };
   services: { green: number; red: number };
   terminals: { green: number; red: number };
+  compaction?: { detail?: string };
 }
 
 
 export function deriveWorkspaceStatusSummary(input: {
-  agents: Array<{ state: WorkspaceAgentState; failure?: { code: string; message: string } | null }>;
+  agents: Array<{ state: WorkspaceAgentState; failure?: { code: string; message: string } | null; compaction?: { detail?: string } }>;
   services?: Array<{ running: boolean; exitCode?: number }>;
   terminals?: Array<{ running: boolean; exitCode?: number }>;
   serviceConfigError?: boolean;
@@ -18,7 +19,12 @@ export function deriveWorkspaceStatusSummary(input: {
   const agents = { green: 0, blue: 0, orange: 0, red: 0 };
   const services = { green: 0, red: 0 };
   const terminals = { green: 0, red: 0 };
+  let compaction: WorkspaceStatusSummary['compaction'];
   for (const agent of input.agents) {
+    if (agent.failure && agent.state !== 'closed' && agent.state !== 'archived' && agent.state !== 'dormant') {
+      agents.red += 1;
+      continue;
+    }
     switch (agent.state) {
       case 'archived':
       case 'closed':
@@ -29,6 +35,7 @@ export function deriveWorkspaceStatusSummary(input: {
         break;
       case 'running':
         agents.green += 1;
+        if (agent.compaction && !compaction) compaction = { detail: agent.compaction.detail };
         break;
       case 'waiting':
         agents.blue += 1;
@@ -37,7 +44,6 @@ export function deriveWorkspaceStatusSummary(input: {
         agents.red += 1;
         break;
     }
-    if (agent.failure && agent.state !== 'retrying' && agent.state !== 'closed' && agent.state !== 'archived' && agent.state !== 'dormant') agents.red += 1;
   }
   for (const service of input.services ?? []) {
     if (service.running) services.green += 1;
@@ -49,11 +55,12 @@ export function deriveWorkspaceStatusSummary(input: {
     else if (terminal.exitCode !== undefined && terminal.exitCode !== 0) terminals.red += 1;
   }
   let primaryColor: WorkspaceStatusColor = 'dim';
-  if (agents.orange > 0) primaryColor = 'orange';
+  if (agents.red > 0) primaryColor = 'red';
+  else if (agents.orange > 0) primaryColor = 'orange';
   else if (agents.green > 0) primaryColor = 'green';
   else if (agents.blue > 0) primaryColor = 'blue';
-  else if (agents.red > 0 || services.red > 0 || terminals.red > 0) primaryColor = 'red';
-  return { primaryColor, agents, services, terminals };
+  else if (services.red > 0 || terminals.red > 0) primaryColor = 'red';
+  return { primaryColor, agents, services, terminals, ...(compaction ? { compaction } : {}) };
 }
 
 export interface ActiveWorkspaceStatusItem {

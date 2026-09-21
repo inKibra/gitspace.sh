@@ -12,6 +12,8 @@ import type { DeploymentStatus, ReleaseArtifact, ReleaseRecord } from '@gitspace
 import { z } from 'zod';
 import { environmentLaunchResponseSchema, environmentStatusSchema, type EnvironmentLaunchRequest, type EnvironmentStatus } from './replacement-environment.js';
 import type { OmpGenerationSelection } from './omp-runtime.js';
+import { readJson, requestMachineUpdate } from './machine-update.js';
+import type { MachineSelection } from './machine-update.js';
 
 /**
  * Convergence on the tenant's desired release. Executables are authenticated
@@ -143,11 +145,31 @@ export class ReleaseFollower {
   private async converge(): Promise<void> {
     if (this.stopped) return;
     const status = await this.options.authority.deploymentStatus();
+    // The child becomes healthy before its complete host is committed. It must not
+    // report success, commit staged OMP, or request another update in that window.
+    if (await readJson(join(this.options.environmentRoot, 'machine-update.json'))) return;
+    const updateFailure = await readJson<{ sha: string | null; hash: string; error: string }>(join(this.options.environmentRoot, 'machine-update-failure.json'));
+    if (updateFailure?.sha) await this.reportFailure(updateFailure.sha, 'machine', updateFailure.error);
+    if (this.options.hostUrl && this.options.controlToken && this.options.generation
+      && process.env.GITSPACE_MACHINE_RUNTIME_PATH && !process.env.GITSPACE_HOST_PID
+      && updateFailure?.hash !== this.options.generation) {
+      const legacyHost = await this.hostStatus();
+      if (legacyHost.machineHash !== this.options.generation || legacyHost.machineReleaseSha !== this.options.runningMachineSha) return;
+      // The previous host committed only machine.js; promote the authenticated
+      // candidate to a whole-host release without mutating the distribution.
+      await requestMachineUpdate({
+        version: 1, path: process.env.GITSPACE_MACHINE_RUNTIME_PATH,
+        hash: this.options.generation, releaseSha: this.options.runningMachineSha,
+      }, this.options.hostUrl, this.options.controlToken);
+      return;
+    }
     let host: EnvironmentStatus | undefined;
     if (this.options.omp?.status().pendingMachineCommit) {
       if (!this.options.hostUrl || !this.options.controlToken || !this.options.generation) return;
       host = await this.hostStatus();
       if (host.machineHash !== this.options.generation || host.machineReleaseSha !== this.options.runningMachineSha) return;
+      const committedHost = await readJson<MachineSelection>(join(this.options.environmentRoot, 'host-selection.json'));
+      if (process.env.GITSPACE_HOST_HASH !== this.options.generation || committedHost?.hash !== this.options.generation) return;
       await this.options.omp.commitInitialSelection();
     }
     const failure = this.options.omp?.status().failure;
@@ -220,6 +242,10 @@ export class ReleaseFollower {
     const { runningMachineSha, generation } = this.options;
     if (!generation || this.reportedMachine) return;
     if (host && (host.machineHash !== generation || host.machineReleaseSha !== runningMachineSha)) return;
+    if (host) {
+      const committedHost = await readJson<MachineSelection>(join(this.options.environmentRoot, 'host-selection.json'));
+      if (process.env.GITSPACE_HOST_HASH !== generation || committedHost?.hash !== generation || committedHost.releaseSha !== runningMachineSha) return;
+    }
     if (runningMachineSha === null) await this.options.authority.reportMachineChannelApplied({ target: 'machine', generation });
     else await this.options.authority.reportMachineApplied({ sha: runningMachineSha, target: 'machine', generation, status: 'applied' });
     this.reportedMachine = true;
@@ -298,7 +324,7 @@ export class ReleaseFollower {
       body: JSON.stringify({ target }),
     });
     const outcome = environmentLaunchResponseSchema.parse(await response.json());
-    if (!response.ok || outcome.status !== 'applied') throw new Error(`Channel ${target} activation failed: ${outcome.error ?? response.status}`);
+    if (!response.ok || outcome.status === 'failed') throw new Error(`Channel ${target} activation failed: ${outcome.error ?? response.status}`);
   }
 
   private async launch(sha: string, target: 'machine' | 'frontend', input: EnvironmentLaunchRequest): Promise<void> {

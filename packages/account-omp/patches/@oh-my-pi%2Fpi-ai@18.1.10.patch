@@ -461,3 +461,125 @@ new file mode 100644
 +		throw new WorkerOAuthRefreshError(input.provider, "invalid-response", response.status, text);
 +	}
 +}
+diff --git a/src/providers/openai-codex-responses.ts b/src/providers/openai-codex-responses.ts
+--- a/src/providers/openai-codex-responses.ts
++++ b/src/providers/openai-codex-responses.ts
+@@ -1640,6 +1640,7 @@
+ 					options ? event => options.onSseEvent?.(event, model) : undefined,
+ 				);
+ 			} catch (error) {
++				if (requestSetup.requestSignal.aborted) throw codexAbortReason(requestSetup.requestSignal);
+ 				if (!(error instanceof CodexWebSocketTransportError)) throw error;
+ 				const fatalWebSocketMessage = error.message.toLowerCase();
+ 				const isFatal = CODEX_WEBSOCKET_FATAL_PATTERNS.some(pattern =>
+@@ -1735,7 +1736,8 @@
+ 			try {
+ 				for await (const event of initial.eventStream) bufferedEvents.push(event);
+ 			} catch (error) {
+-				if (options.signal?.aborted || !(error instanceof CodexWebSocketTransportError)) {
++				if (requestSetup.requestSignal.aborted) throw codexAbortReason(requestSetup.requestSignal);
++				if (!(error instanceof CodexWebSocketTransportError)) {
+ 					throw error;
+ 				}
+ 				const state = requestContext.websocketState;
+@@ -2923,6 +2925,7 @@
+ 			this.runtime.transport = next.transport;
+ 			state.lastTransport = next.transport;
+ 		} catch (error) {
++			if (this.requestSetup.requestSignal.aborted) throw codexAbortReason(this.requestSetup.requestSignal);
+ 			if (!(error instanceof CodexWebSocketTransportError)) throw error;
+ 			// Reopen failed at the websocket layer (handshake refused, connect timeout, etc.).
+ 			// Activate fallback so subsequent turns use SSE, and replay this turn over SSE
+@@ -3710,10 +3713,12 @@
+ 	}
+ 
+ 	async connect(signal?: AbortSignal): Promise<void> {
++		if (signal?.aborted) throw codexAbortReason(signal);
+ 		if (this.isOpen()) return;
+ 		if (this.#connectPromise) {
+ 			logger.time("codexWs:awaitSharedHandshake");
+ 			await this.#connectPromise;
++			if (signal?.aborted) throw codexAbortReason(signal);
+ 			return;
+ 		}
+ 		const { promise, resolve, reject } = Promise.withResolvers<void>();
+@@ -3738,7 +3743,7 @@
+ 			if (!settled) {
+ 				settled = true;
+ 				clearPending();
+-				reject(new CodexWebSocketTransportError(`request was aborted`));
++				reject(codexAbortReason(signal));
+ 			}
+ 		};
+ 		if (signal) {
+@@ -3837,14 +3842,12 @@
+ 		signal?: AbortSignal,
+ 		onSseEvent?: (event: RawSseEvent) => void,
+ 	): AsyncGenerator<Record<string, unknown>> {
++		if (signal?.aborted) throw codexAbortReason(signal);
+ 		if (!this.#socket || this.#socket.readyState !== WebSocket.OPEN) {
+ 			throw new CodexWebSocketTransportError(`websocket connection is unavailable`);
+ 		}
+ 		if (this.#activeRequest) {
+ 			throw new CodexWebSocketTransportError(`websocket request already in progress`);
+-		}
+-		if (signal?.aborted) {
+-			throw new CodexWebSocketTransportError(`request was aborted`);
+ 		}
+ 		this.#activeRequest = true;
+ 		this.#streamObserver = onSseEvent;
+@@ -3861,7 +3864,7 @@
+ 		this.#dropStaleFrames();
+ 		const onAbort = () => {
+ 			this.close("aborted");
+-			this.#push(new CodexWebSocketTransportError(`request was aborted`));
++			this.#push(codexAbortReason(signal));
+ 		};
+ 		if (signal) signal.addEventListener("abort", onAbort, { once: true });
+ 
+@@ -3882,6 +3885,7 @@
+ 			const requestPayload = JSON.stringify(request);
+ 			notifyCodexWebSocketOutbound(onSseEvent, request, requestPayload);
+ 			// Re-check liveness: the debug-session await above can outlive the socket.
++			if (signal?.aborted) throw codexAbortReason(signal);
+ 			const socket = this.#socket;
+ 			if (!socket || socket.readyState !== WebSocket.OPEN) {
+ 				throw new CodexWebSocketTransportError(`websocket connection is unavailable`);
+@@ -3939,6 +3943,7 @@
+ 					}
+ 				}
+ 				const next = await this.#nextMessage(timeoutMs, timeoutReason);
++				if (signal?.aborted) throw codexAbortReason(signal);
+ 				if (next instanceof Error) {
+ 					throw next;
+ 				}
+@@ -4215,6 +4220,7 @@
+ 	provider: string,
+ 	signal?: AbortSignal,
+ ): Promise<CodexWebSocketConnection> {
++	if (signal?.aborted) throw codexAbortReason(signal);
+ 	const proxy = getProxyForUrl(provider, new URL(url));
+ 	const headerRecord = headersToRecord(headers);
+ 	// Join an in-flight handshake instead of tearing it down: closing a
+@@ -4229,6 +4235,7 @@
+ 		try {
+ 			await pending.connect(signal);
+ 		} catch {
++			if (signal?.aborted) throw codexAbortReason(signal);
+ 			// The handshake owner surfaces its own failure; re-evaluate below
+ 			// (state.connection may have been replaced or cleared).
+ 		}
+@@ -4751,6 +4758,13 @@
+ 	return payloads;
+ }
+ 
++/** Preserve deadline/cancellation causes instead of marking them as transport failures. */
++function codexAbortReason(signal: AbortSignal | undefined): Error {
++	const reason: unknown = signal?.reason;
++	if (reason instanceof Error) return reason;
++	return new AIError.AbortError(typeof reason === "string" ? reason : undefined, { cause: reason });
++}
++
+ export class CodexWebSocketTransportError extends Error {
+ 	constructor(detail: string) {
+ 		super(`${CODEX_WEBSOCKET_TRANSPORT_ERROR_PREFIX}: ${detail}`);

@@ -60,7 +60,7 @@ The existing confirmed-stop acknowledgement, per-machine immutable image selecti
 ### Tenant orchestration and logging configuration
 
 - `packages/account-worker/src/sandbox-rollout.ts`: `cloud_image_operation` and `cloud_image_provider_request` events identify phases, barriers, resumed workspace IDs, request IDs, HTTP status, elapsed time, and CF Ray where available. Provider bodies and enrollment credentials are not logged.
-- `packages/platform/src/deployer.ts`: tenant Worker upload metadata now explicitly enables persisted invocation/application logs and query-string redaction.
+- `packages/platform/src/deployer.ts`: tenant Worker upload metadata enables persisted application logs, full sampling, and query-string redaction. Automatic invocation logs are disabled to avoid routine per-request log costs.
 - `packages/platform/src/compute-images.ts`: immutable provider Worker upload metadata includes the same observability configuration. Observability is part of its content-addressed identity so old cached providers are not silently reused as if they had the new configuration.
 - `README.md` and `packages/docs/src/concepts.mdx`: document native versus VM replacement, independent per-machine image selection, checkpoint boundaries, and diagnostic event names.
 
@@ -81,7 +81,7 @@ Deleted through supported project deletion:
 
 Pre-deletion inventory verified those machines held only the disposable projects. Post-deletion readback showed no proof machines or projects. Remaining machine: **Darktop**, `m-021d0c06-bf17-41de-ace7-4779e2ab5e9b`. Remaining projects: the real GitSpace source project and `inkibra-core-af58c70d`. No disposable data recovery was attempted. Cached image/provider resources were not indiscriminately removed.
 
-### Persisted tenant Worker logs — enabled now
+### Initial persisted tenant Worker log activation
 
 - Account origin: `https://bradleat.gitspace.sh`.
 - Dispatch namespace: `gitspace-rebuild-20260913`.
@@ -92,7 +92,26 @@ Pre-deletion inventory verified those machines held only the disposable projects
 
 API reference: https://developers.cloudflare.com/api/resources/workers_for_platforms/subresources/dispatch/subresources/namespaces/subresources/scripts/subresources/settings/methods/edit/.
 
+### Logging cost containment — 2026-09-20
+
+- Automatic invocation logs are now disabled on the GitSpace platform/auth/template Workers, this tenant Worker, and its five existing immutable provider Workers. Explicit application diagnostics remain enabled, persisted, and unsampled.
+- Settings-only PATCHes applied the initial containment without replacing containers. Platform version `163789c4-1fa8-4161-a6fe-cccd580410ec` now preserves the policy in future tenant and provider uploads.
+- Tenant release `7309feb163cff0bb65764e6623b7315a8a16df19-dirty.23e9e898ed4e` subsequently applied the Worker/frontend directory cutover. Readback still shows `invocation_logs: false`, full sampling, query-string redaction, and all 33 bindings. Machine and OMP versions were not changed by this release.
+
 New source-level lifecycle events will only appear after their owning components are deployed. Logging configuration on the current tenant Worker is not evidence that the new native/provider code is live.
+
+### Idle subscription lifetime repair — 2026-09-20
+
+- A real-HTTP, two-Worker/DO reproduction showed that cancelling the returned RPC byte stream did not run the idle producer's cleanup. Private DO watches now return an explicit `RpcTarget` lifetime alongside the stream; consumers dispose the entire RPC result. This does not change the public RPC contract or its digest.
+- Platform version `cf657bc9-b3f8-4a39-9411-2dcc8973caa6` and tenant Worker release `7309feb163cff0bb65764e6623b7315a8a16df19-dirty.a181c6016eb4` enable request-abort signaling and forwarding. The Worker-only release applied at `2026-09-20T19:15:57.085Z`; frontend, machine, and OMP releases were unchanged.
+- Production-source HTTP smoke: two subscriptions opened and two producers cleaned up after cancellation. The idle remote-disposal regression and four related suites passed: **67 tests**. Worker typechecking passed.
+- Live reload received one directory WebSocket snapshot at cursor **1523**, with 2 projects, 14 workspaces, 12 placements, and 1 machine; no UI alerts. Settings readback confirms invocation logging remains disabled, explicit diagnostics remain unsampled, both abort flags are deployed, and all 33 tenant bindings remain.
+- **Initial post-deployment duration remained high.** In the window `2026-09-20T19:17:00Z`–`19:20:00Z`, 14 `SpaceAuthorityDO` objects still accrued **325.546832256 GB-s**; `FleetCatalogDO` accrued **46.10573056 GB-s** for one object (about 360 active seconds in a 180-second window). These records are consistent with retained old HTTP/RPC invocations; the metrics do not expose script versions.
+- Relevant namespaces: SpaceAuthority `f0bf04e53add49e8987cc309fb90fc4a`, FleetCatalog `d0d655a6b1664d6e90710ab2713dc8b6`, in account `2ed07d2f77ecb2aa43ca99a9c970597c`. Old HTTP/RPC requests can survive code replacement without storage access. A targeted, storage-preserving `ctx.abort()` experiment was authorized, but its effect on older retained incarnations was not established.
+- **Follow-up at approximately 23:00 UTC: the sustained activity had already ended before the reset experiment.** SpaceAuthority's last recorded activity period began at `21:08:50Z`; ProjectAuthority's at `21:05:08Z`. Adjacent queries cover the full `22:00:00Z`–`23:00:00Z` hour and show no SpaceAuthority, ProjectAuthority, or UserSettings activity. In the final five-minute window, UserProjectIndex recorded **4.545764 active seconds**, FleetCatalog **0.283385**, and Relay **0.928945**, rather than continuously billed instances.
+- No reset method was added, no reset was invoked, and no deployment or storage mutation was performed for this experiment. The observed continuous-duration condition is cleared, but the metrics do not identify what terminated the old activity or prove an operator reset mechanism. A future recurrence would require a fresh baseline before attempting the single-object reset.
+
+References: [DO lifecycle](https://developers.cloudflare.com/durable-objects/concepts/durable-object-lifecycle/), [RPC lifetime ownership](https://developers.cloudflare.com/workers/runtime-apis/rpc/lifecycle/), [request-signal compatibility flags](https://developers.cloudflare.com/workers/configuration/compatibility-flags/).
 
 ## Verification performed
 

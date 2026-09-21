@@ -1,8 +1,42 @@
 import { expect, it } from 'bun:test';
-import { AgentHealthStateSchema, beginAgentOperation, currentAgentExecutionFailure, currentAgentFailure, determineAgentState, settleAgentOperation, transitionAgentExecution, type AgentFailure, type AgentHealthState } from '../src/index.js';
+import { AgentHealthStateSchema, beginAgentOperation, currentAgentExecutionFailure, currentAgentFailure, determineAgentState, isAgentRecoveryRunning, settleAgentOperation, transitionAgentExecution, type AgentFailure, type AgentHealthState } from '../src/index.js';
 
 const failed: AgentFailure = { domain: 'agent', code: 'AGENT_EXECUTION_FAILED', message: 'Provider refused the request', context: { provider: 'test' } };
 const outcome = { sessionId: 'session', spaceId: 'space', now: '2026-09-12T00:00:00.000Z' };
+
+it('keeps queued prompts and awaited subagents running until they settle', () => {
+  expect(determineAgentState({ active: true, reasons: [{ kind: 'queued', steering: 1, followUp: 0 }] }, {})).toBe('running');
+  expect(determineAgentState({ active: true, reasons: [{ kind: 'subagents', count: 2 }] }, {})).toBe('running');
+  expect(determineAgentState({ active: false, reasons: [] }, {})).toBe('waiting');
+});
+
+it('prioritizes disconnection and execution errors without erasing retained questions', () => {
+  const activity = { active: true, reasons: [{ kind: 'human' as const, questions: 1, permissions: 1 }] };
+  expect(determineAgentState(activity, {})).toBe('permission-needed');
+  expect(determineAgentState(activity, {}, { ...failed, code: 'AGENT_DISCONNECTED' })).toBe('retrying');
+  expect(determineAgentState(activity, {}, failed)).toBe('retrying');
+  expect(determineAgentState(activity, {})).toBe('permission-needed');
+});
+
+it('expires recovery ownership and rejects stale completion without losing the successor attempt', () => {
+  const first = beginAgentOperation({ revision: 0, issues: {} }, 'recovery', 'first');
+  first.state.issues.recovery!.attempt = {
+    runtimeId: 'runtime-a', machineId: 'machine-a', generation: 2,
+    startedAt: new Date(100).toISOString(), deadlineAt: new Date(200).toISOString(), state: 'running', number: 1,
+  };
+  expect(isAgentRecoveryRunning(first.state, 'machine-a', 2, 199)).toBe(true);
+  expect(isAgentRecoveryRunning(first.state, 'machine-b', 2, 199)).toBe(false);
+  expect(isAgentRecoveryRunning(first.state, 'machine-a', 3, 199)).toBe(false);
+  expect(isAgentRecoveryRunning(first.state, 'machine-a', 2, 200)).toBe(false);
+  const next = beginAgentOperation(first.state, 'recovery', 'next');
+  next.state.issues.recovery!.attempt = { ...first.state.issues.recovery!.attempt!, runtimeId: 'runtime-b', deadlineAt: new Date(300).toISOString(), number: 2 };
+  const stale = settleAgentOperation(next.state, first.token, { ...outcome, failure: failed });
+  expect(isAgentRecoveryRunning(stale.state, 'machine-a', 2, 250)).toBe(true);
+  const done = settleAgentOperation(stale.state, next.token, { ...outcome, failure: null });
+  expect(done.state.issues.recovery?.attempt?.state).toBe('succeeded');
+  expect(isAgentRecoveryRunning(done.state, 'machine-a', 2, 250)).toBe(false);
+  expect(AgentHealthStateSchema.parse({ revision: 0, issues: {} })).toEqual({ revision: 0, issues: {} });
+});
 
 it('rejects a late failure after a newer operation succeeded, including an initially healthy issue', () => {
   const initial: AgentHealthState = { revision: 0, issues: {} };

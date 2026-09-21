@@ -191,6 +191,7 @@ export const WorkspaceStatusCodec = wire.object({
   agents: statusCountsCodec,
   services: wire.object({ green: wire.number, red: wire.number }),
   terminals: wire.object({ green: wire.number, red: wire.number }),
+  compaction: wire.optional(wire.object({ detail: wire.optional(wire.string) })),
 });
 export const BaseSpaceViewCodec = wire.object({
   id: wire.string,
@@ -409,7 +410,8 @@ export const SessionViewCodec = wire.object({
   ),
   health: wire.serializable(
     (value): value is AgentHealthState => AgentHealthStateSchema.safeParse(value).success,
-    { id: 'gitspace/agent-health/v1' },
+    // Strict custom schemas need a new identity when their accepted shape changes.
+    { id: 'gitspace/agent-health/v2' },
   ),
   updatedAt: wire.date,
 });

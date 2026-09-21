@@ -1,6 +1,7 @@
-import { Database } from 'bun:sqlite';
+import type { Database } from 'bun:sqlite';
 import { Result, TaggedError, type Result as ResultType } from 'better-result';
 import { deploymentPlanSchema, type DeploymentPlan, type EntrypointId } from './contracts.js';
+import { DeploymentSqliteConnection, withDeploymentSqliteContext } from './sqlite-diagnostics.js';
 
 export const deploymentRunStates = [
   'planned',
@@ -14,7 +15,7 @@ export const deploymentRunStates = [
   'rolled-back',
   'failed',
 ] as const;
-export type DeploymentRunState = typeof deploymentRunStates[number];
+export type DeploymentRunState = (typeof deploymentRunStates)[number];
 
 export const deploymentStepStates = [
   'pending',
@@ -26,7 +27,7 @@ export const deploymentStepStates = [
   'finalized',
   'rolled-back',
 ] as const;
-export type DeploymentStepState = typeof deploymentStepStates[number];
+export type DeploymentStepState = (typeof deploymentStepStates)[number];
 
 export interface DeploymentRunRecord {
   id: string;
@@ -77,11 +78,17 @@ export class DeploymentJournalConflict extends TaggedError('DeploymentJournalCon
 
 export class DeploymentJournal {
   private readonly database: Database;
+  private readonly connection: DeploymentSqliteConnection;
 
   constructor(databasePath: string) {
-    this.database = new Database(databasePath, { create: true, strict: true });
-    this.database.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
-    this.database.exec(`
+    this.connection = new DeploymentSqliteConnection(databasePath, { create: true, strict: true });
+    this.database = this.connection.database;
+    this.connection.run('journal.configure', () =>
+      this.database.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;'),
+    );
+    this.connection.captureConfiguration();
+    this.connection.run('journal.schema', () =>
+      this.database.exec(`
       CREATE TABLE IF NOT EXISTS deployment_runs (
         id TEXT PRIMARY KEY,
         plan_hash TEXT NOT NULL,
@@ -103,38 +110,59 @@ export class DeploymentJournal {
         PRIMARY KEY(run_id, attempt, entrypoint),
         FOREIGN KEY(run_id) REFERENCES deployment_runs(id) ON DELETE CASCADE
       );
-    `);
+    `),
+    );
   }
 
   close(): void {
-    this.database.close();
+    this.connection.close();
   }
 
   begin(plan: DeploymentPlan): ResultType<DeploymentRunRecord, DeploymentJournalConflict> {
-    const existing = this.load(plan.id);
-    if (existing) {
-      return existing.planHash === plan.planHash
-        ? Result.ok(existing)
-        : Result.err(new DeploymentJournalConflict({
-            deploymentId: plan.id,
-            message: 'Deployment id already belongs to a different plan hash',
-          }));
-    }
-    const now = new Date().toISOString();
-    this.database.query(`
+    return withDeploymentSqliteContext(
+      { deploymentId: plan.id, releaseSha: plan.source.revision, phase: 'begin' },
+      () => {
+        const existing = this.load(plan.id);
+        if (existing) {
+          return existing.planHash === plan.planHash
+            ? Result.ok(existing)
+            : Result.err(
+                new DeploymentJournalConflict({
+                  deploymentId: plan.id,
+                  message: 'Deployment id already belongs to a different plan hash',
+                }),
+              );
+        }
+        const now = new Date().toISOString();
+        withDeploymentSqliteContext(
+          { deploymentId: plan.id, releaseSha: plan.source.revision, attempt: 1, phase: 'planned' },
+          () =>
+            this.connection.run('journal.run.insert', () =>
+              this.database
+                .query(
+                  `
       INSERT INTO deployment_runs(id, plan_hash, plan_json, state, attempt, created_at, updated_at)
       VALUES (?, ?, ?, 'planned', 1, ?, ?)
-    `).run(plan.id, plan.planHash, JSON.stringify(plan), now, now);
-    return Result.ok(this.load(plan.id)!);
+    `,
+                )
+                .run(plan.id, plan.planHash, JSON.stringify(plan), now, now),
+            ),
+        );
+        return Result.ok(this.load(plan.id)!);
+      },
+    );
   }
 
   load(id: string): DeploymentRunRecord | null {
-    const row = this.database.query<RunRow, [string]>(
-      'SELECT * FROM deployment_runs WHERE id = ?',
-    ).get(id);
+    const row = withDeploymentSqliteContext({ deploymentId: id }, () =>
+      this.connection.run('journal.run.load', () =>
+        this.database.query<RunRow, [string]>('SELECT * FROM deployment_runs WHERE id = ?').get(id),
+      ),
+    );
     if (!row) return null;
     const plan = deploymentPlanSchema.parse(JSON.parse(row.plan_json));
-    if (!deploymentRunStates.includes(row.state as DeploymentRunState)) throw new Error(`Unknown deployment state ${row.state}`);
+    if (!deploymentRunStates.includes(row.state as DeploymentRunState))
+      throw new Error(`Unknown deployment state ${row.state}`);
     return {
       id: row.id,
       planHash: row.plan_hash,
@@ -149,9 +177,13 @@ export class DeploymentJournal {
 
   transition(id: string, state: DeploymentRunState, error?: string): DeploymentRunRecord {
     const now = new Date().toISOString();
-    const result = this.database.query(
-      'UPDATE deployment_runs SET state = ?, error = ?, updated_at = ? WHERE id = ?',
-    ).run(state, error ?? null, now, id);
+    const result = withDeploymentSqliteContext({ deploymentId: id, phase: state }, () =>
+      this.connection.run('journal.run.transition', () =>
+        this.database
+          .query('UPDATE deployment_runs SET state = ?, error = ?, updated_at = ? WHERE id = ?')
+          .run(state, error ?? null, now, id),
+      ),
+    );
     if (result.changes !== 1) throw new Error(`Deployment ${id} does not exist`);
     return this.load(id)!;
   }
@@ -163,10 +195,23 @@ export class DeploymentJournal {
     state: DeploymentStepState,
     detail?: string,
   ): DeploymentStepRecord {
-    const run = this.load(id);
-    if (!run) throw new Error(`Deployment ${id} does not exist`);
-    const now = new Date().toISOString();
-    this.database.query(`
+    return withDeploymentSqliteContext({ deploymentId: id, target: entrypoint, phase: state }, () => {
+      const run = this.load(id);
+      if (!run) throw new Error(`Deployment ${id} does not exist`);
+      const now = new Date().toISOString();
+      withDeploymentSqliteContext(
+        {
+          deploymentId: id,
+          releaseSha: run.plan.source.revision,
+          attempt: run.attempt,
+          target: entrypoint,
+          phase: state,
+        },
+        () =>
+          this.connection.run('journal.step.upsert', () =>
+            this.database
+              .query(
+                `
       INSERT INTO deployment_steps(run_id, attempt, entrypoint, ordinal, state, detail, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(run_id, attempt, entrypoint) DO UPDATE SET
@@ -174,16 +219,31 @@ export class DeploymentJournal {
         state = excluded.state,
         detail = excluded.detail,
         updated_at = excluded.updated_at
-    `).run(id, run.attempt, entrypoint, ordinal, state, detail ?? null, now);
-    return this.steps(id).find((step) => step.entrypoint === entrypoint)!;
+    `,
+              )
+              .run(id, run.attempt, entrypoint, ordinal, state, detail ?? null, now),
+          ),
+      );
+      return this.steps(id).find((step) => step.entrypoint === entrypoint)!;
+    });
   }
 
   steps(id: string): DeploymentStepRecord[] {
     const run = this.load(id);
     if (!run) return [];
-    return this.database.query<StepRow, [string, number]>(`
+    return withDeploymentSqliteContext(
+      { deploymentId: id, releaseSha: run.plan.source.revision, attempt: run.attempt },
+      () =>
+        this.connection.run('journal.step.list', () =>
+          this.database
+            .query<StepRow, [string, number]>(
+              `
       SELECT * FROM deployment_steps WHERE run_id = ? AND attempt = ? ORDER BY ordinal
-    `).all(id, run.attempt).map((row) => ({
+    `,
+            )
+            .all(id, run.attempt),
+        ),
+    ).map((row) => ({
       runId: row.run_id,
       attempt: row.attempt,
       entrypoint: row.entrypoint,
@@ -198,9 +258,19 @@ export class DeploymentJournal {
     const run = this.load(id);
     if (!run) throw new Error(`Deployment ${id} does not exist`);
     const now = new Date().toISOString();
-    this.database.query(`
+    withDeploymentSqliteContext(
+      { deploymentId: id, releaseSha: run.plan.source.revision, attempt: run.attempt, phase: 'restart' },
+      () =>
+        this.connection.run('journal.run.restart', () =>
+          this.database
+            .query(
+              `
       UPDATE deployment_runs SET state = 'planned', attempt = attempt + 1, error = NULL, updated_at = ? WHERE id = ?
-    `).run(now, id);
+    `,
+            )
+            .run(now, id),
+        ),
+    );
     return this.load(id)!;
   }
 }

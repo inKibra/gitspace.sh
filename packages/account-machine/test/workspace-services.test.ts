@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { GitSpaceDatabase } from '@gitspace/core';
@@ -64,5 +64,17 @@ describe('WorkspaceServiceManager', () => {
     await manager.stop('space-a', 'web');
     const restarted = await manager.start('space-a', 'web');
     expect(restarted.port).toBe(observedPort);
+    await manager.stopOwned('space-a');
+    expect(await manager.proxy(new Request('http://web--space-a--brad-srv.gssh.dev/healthz'))).toBeNull();
+    const allocationsPath = join(root, 'runtime', 'services', 'ports.json');
+    const allocations = JSON.parse(readFileSync(allocationsPath, 'utf8'));
+    allocations.allocations['machine-a:space-b:web:web'] = observedPort + 1;
+    writeFileSync(allocationsPath, JSON.stringify(allocations));
+    database.deleteWorkspace('space-a');
+    await manager.forgetSpace('space-a');
+    expect(JSON.parse(readFileSync(allocationsPath, 'utf8')).allocations).toEqual({ 'machine-a:space-b:web:web': observedPort + 1 });
+    await manager.forgetSpace('space-b');
+    expect(existsSync(allocationsPath)).toBe(false);
+    database.close();
   });
 });

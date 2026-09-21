@@ -50,8 +50,8 @@ describe('determineAgentState parity', () => {
     expect(determineAgentState(idle, {}, { domain: 'agent', code: 'AGENT_EXECUTION_FAILED', message: 'boom', context: {} })).toBe('retrying');
   });
 
-  it('keeps queued and side-agent-only activity waiting instead of green', () => {
-    expect(determineAgentState({ active: true, reasons: [{ kind: 'queued', steering: 1, followUp: 0 }] }, {}, undefined)).toBe('waiting');
-    expect(determineAgentState({ active: true, reasons: [{ kind: 'subagents', count: 3 }] }, {}, undefined)).toBe('waiting');
+  it('keeps queued and side-agent-only work green until settled', () => {
+    expect(determineAgentState({ active: true, reasons: [{ kind: 'queued', steering: 1, followUp: 0 }] }, {}, undefined)).toBe('running');
+    expect(determineAgentState({ active: true, reasons: [{ kind: 'subagents', count: 3 }] }, {}, undefined)).toBe('running');
   });
 });

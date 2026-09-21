@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import type { GitSpaceDatabase } from '@gitspace/core';
 import type { ServiceView } from '@gitspace/protocol/inspector-contract';
@@ -122,6 +122,7 @@ function parseService(value: unknown): WorkspaceServiceDefinition {
 export class WorkspaceServiceManager {
   private readonly routes = new Map<string, ActiveServiceRoute>();
   private leaseTimer: Timer | null = null;
+  private allocationWrites: Promise<unknown> = Promise.resolve();
   constructor(
     private readonly database: GitSpaceDatabase,
     private readonly terminals: ServiceTerminalCoordinator,
@@ -233,6 +234,38 @@ export class WorkspaceServiceManager {
     return { ...current, state: 'stopped', exitedAt: new Date().toISOString(), exitCode: 0 };
   }
 
+  async stopOwned(spaceId: string): Promise<void> {
+    for (const terminal of await this.terminals.list(spaceId)) {
+      if (terminal.kind === 'service' && terminal.owner?.startsWith(`gitspace:${spaceId}:`)) {
+        await this.terminals.stop(spaceId, terminal.name);
+      }
+    }
+    for (const [hostname, route] of this.routes) {
+      if (route.spaceId !== spaceId) continue;
+      await this.routeAuthority?.releaseHostedRoute(route.projectId, hostname);
+      this.routes.delete(hostname);
+    }
+  }
+
+  async forgetSpace(spaceId: string): Promise<void> {
+    for (const [hostname, route] of this.routes) {
+      if (route.spaceId !== spaceId) continue;
+      await this.routeAuthority?.releaseHostedRoute(route.projectId, hostname);
+      this.routes.delete(hostname);
+    }
+    const operation = this.allocationWrites.then(async () => {
+      const state = await this.readAllocations();
+      const prefix = `${this.machineId}:${spaceId}:`;
+      for (const key of Object.keys(state.allocations)) {
+        if (key.startsWith(prefix)) delete state.allocations[key];
+      }
+      if (Object.keys(state.allocations).length) await this.writeAllocations(state);
+      else await rm(join(this.runtimeRoot, 'services', 'ports.json'), { force: true });
+    });
+    this.allocationWrites = operation.catch(() => undefined);
+    await operation;
+  }
+
   async proxy(request: Request): Promise<Response | null> {
     const requestUrl = new URL(request.url);
     const hostname = request.headers.get('x-forwarded-host')?.toLowerCase() ?? requestUrl.hostname.toLowerCase();
@@ -278,6 +311,12 @@ export class WorkspaceServiceManager {
   }
 
   private async allocatedPorts(spaceId: string, definition: WorkspaceServiceDefinition, allocate: boolean): Promise<Array<WorkspaceServicePortDefinition & { port: number }>> {
+    const operation = this.allocationWrites.then(() => this.allocatePorts(spaceId, definition, allocate));
+    this.allocationWrites = operation.catch(() => undefined);
+    return operation;
+  }
+
+  private async allocatePorts(spaceId: string, definition: WorkspaceServiceDefinition, allocate: boolean): Promise<Array<WorkspaceServicePortDefinition & { port: number }>> {
     const state = await this.readAllocations();
     const reserved = new Set(Object.values(state.allocations));
     const result: Array<WorkspaceServicePortDefinition & { port: number }> = [];

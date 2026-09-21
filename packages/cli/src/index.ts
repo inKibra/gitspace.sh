@@ -90,6 +90,16 @@ async function machinePid(): Promise<number | null> {
     throw error;
   }
 }
+async function selectedMachineRoot(runtimeRoot: string): Promise<string> {
+  let source: string;
+  try { source = await readFile(join(CONFIG_ROOT, 'machine', 'host-selection.json'), 'utf8'); } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return join(runtimeRoot, 'machine');
+    throw error;
+  }
+  const selected = JSON.parse(source) as { version?: number; path?: string };
+  if (selected.version !== 1 || typeof selected.path !== 'string' || selected.path.length === 0) throw new Error('Invalid complete machine selection; your workspace data has not been changed.');
+  return selected.path;
+}
 function requireSystemTools(): void {
   const missing = ['git', 'ssh', 'ssh-agent', 'ssh-add', 'ssh-keygen'].filter(tool => !Bun.which(tool));
   if (missing.length) throw new Error(`Install Git and the OpenSSH client before linking this machine. Missing: ${missing.join(', ')}. Bun and OMP are included by GitSpace.`);
@@ -106,10 +116,11 @@ async function startMachine(): Promise<void> {
   }
   const { path: runtimeRoot } = JSON.parse(await readFile(selectionPath, 'utf8')) as { path: string };
   const bun = join(runtimeRoot, 'bin', 'bun');
-  if (!existsSync(bun) || !existsSync(join(runtimeRoot, 'machine/machine-native.json'))) throw new Error('The installed runtime is incomplete. Run gitspace doctor to inspect the installation; your workspace data has not been changed.');
+  if (!existsSync(bun) || !existsSync(join(await selectedMachineRoot(runtimeRoot), 'machine-native.json'))) throw new Error('The selected machine runtime is incomplete. Run gitspace doctor to inspect the installation; your workspace data has not been changed.');
   const artifactKey = await accountArtifactKey(config);
   const environmentRoot = join(CONFIG_ROOT, 'machine');
   await mkdir(environmentRoot, { recursive: true, mode: 0o700 });
+  await rm(PID_PATH, { force: true });
   const log = openSync(LOG_PATH, 'a', 0o600);
   let offset = statSync(LOG_PATH).size;
   const child = Bun.spawn([bun, join(runtimeRoot, 'host.js')], {
@@ -119,6 +130,7 @@ async function startMachine(): Promise<void> {
       PATH: `${join(runtimeRoot, 'bin')}${delimiter}${process.env.PATH ?? ''}`,
       GITSPACE_ENVIRONMENT_ROOT: environmentRoot,
       GITSPACE_BUNDLE_ROOT: runtimeRoot,
+      GITSPACE_MACHINE_PID_PATH: PID_PATH,
       GITSPACE_MACHINE_ID: config.machine.id,
       GITSPACE_MACHINE_LABEL: config.machine.label,
       GITSPACE_MACHINE_SIGNING_PRIVATE_KEY: config.machine.signingPrivateKey,
@@ -139,7 +151,6 @@ async function startMachine(): Promise<void> {
   });
   closeSync(log);
   child.unref();
-  await writeFile(PID_PATH, `${child.pid}\n`, { mode: 0o600 });
   console.log(`Starting ${config.machine.label}. Its releases are managed by your account.`);
   const reader = await open(LOG_PATH, 'r');
   const bytes = Buffer.alloc(16 * 1024);
@@ -147,12 +158,13 @@ async function startMachine(): Promise<void> {
   try {
     const deadline = Date.now() + 180_000;
     while (Date.now() < deadline) {
-      if (!processIsRunning(child.pid)) throw new Error(`Machine failed to start. See ${LOG_PATH}`);
+      const pid = await machinePid();
+      if ((!pid || !processIsRunning(pid)) && !processIsRunning(child.pid)) throw new Error(`Machine failed to start. See ${LOG_PATH}`);
       const { bytesRead } = await reader.read(bytes, 0, bytes.length, offset);
       offset += bytesRead;
       recent = (recent + bytes.toString('utf8', 0, bytesRead)).slice(-32_768);
-      if (recent.includes('GitSpace host ready ')) {
-        console.log(`Machine runtime ready (pid ${child.pid}). Check its connection in ${config.accountUrl}`);
+      if (pid && processIsRunning(pid) && recent.includes(`GitSpace host ready pid=${pid} `)) {
+        console.log(`Machine runtime ready (pid ${pid}). Check its connection in ${config.accountUrl}`);
         return;
       }
       await Bun.sleep(500);
@@ -161,17 +173,35 @@ async function startMachine(): Promise<void> {
   } finally { await reader.close(); }
 }
 async function stopMachine(): Promise<void> {
-  const pid = await machinePid();
+  let pid = await machinePid();
   if (!pid || !processIsRunning(pid)) {
     await rm(PID_PATH, { force: true });
     console.log('Machine is stopped');
     return;
   }
-  process.kill(pid, 'SIGTERM');
   const deadline = Date.now() + 120_000;
-  while (Date.now() < deadline && processIsRunning(pid)) await Bun.sleep(250);
-  if (processIsRunning(pid)) throw new Error(`Machine ${pid} has not stopped. Inspect ${LOG_PATH}; it has not been force-killed.`);
-  await rm(PID_PATH, { force: true });
+  let signalled: number | null = null;
+  while (Date.now() < deadline) {
+    if (pid && processIsRunning(pid)) {
+      if (pid !== signalled) {
+        try { process.kill(pid, 'SIGTERM'); } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+        }
+        signalled = pid;
+      }
+    } else {
+      const replacement = await machinePid();
+      if (replacement === pid || !replacement) {
+        await rm(PID_PATH, { force: true });
+        break;
+      }
+      pid = replacement;
+      continue;
+    }
+    await Bun.sleep(250);
+    pid = await machinePid();
+  }
+  if (pid && processIsRunning(pid)) throw new Error(`Machine ${pid} has not stopped. Inspect ${LOG_PATH}; it has not been force-killed.`);
   console.log('Machine stopped');
 }
 
@@ -221,7 +251,7 @@ machine.command('setup').description('Link using the pairing command from your a
   });
 machine.command('start').description('Start the installed account-managed runtime').action(startMachine);
 machine.command('stop').description('Stop this machine runtime').action(stopMachine);
-machine.command('recover').description('Build and health-gate a tenant machine release from its held source workspace, keeping the existing host')
+machine.command('recover').description('Build and activate a complete tenant machine release from its held source workspace')
   .requiredOption('--source <path>', 'GitSpace source checkout held by this machine')
   .requiredOption('--workspace <id>', 'Account workspace id of that checkout')
   .action(async (options: { source: string; workspace: string }) => {
@@ -233,7 +263,7 @@ machine.command('recover').description('Build and health-gate a tenant machine r
     let environment = { ...process.env };
     if (config) {
       const pid = await machinePid();
-      if (!pid || !processIsRunning(pid)) throw new Error('Start the existing machine host before source recovery. Recovery does not replace or restart the host.');
+      if (!pid || !processIsRunning(pid)) throw new Error('Start the machine before source recovery so it can stage and activate the complete release.');
       const installed = JSON.parse(await readFile(join(CONFIG_ROOT, 'runtime-selection.json'), 'utf8')) as { path: string };
       bun = join(installed.path, 'bin/bun');
       environment = {
@@ -257,7 +287,7 @@ machine.command('recover').description('Build and health-gate a tenant machine r
     const install = Bun.spawn([bun, 'install', '--frozen-lockfile'], { cwd: source, env: environment, stdout: 'inherit', stderr: 'inherit' });
     if (await install.exited !== 0) throw new Error('Recovery source dependency installation failed; the existing host was not changed');
     const recovery = Bun.spawn([bun, entrypoint, options.workspace, source], { cwd: source, env: environment, stdout: 'inherit', stderr: 'inherit' });
-    if (await recovery.exited !== 0) throw new Error('Source recovery did not confirm activation; inspect the account deployment progress. This command did not replace the host.');
+    if (await recovery.exited !== 0) throw new Error('Source recovery did not confirm activation; inspect the account deployment progress for the machine update outcome.');
   });
 machine.command('status').description('Show local runtime and relay status').action(async () => {
   const config = await requireConfig();
@@ -297,7 +327,7 @@ program.command('doctor').description('Check this machine installation and accou
     const selection = JSON.parse(await readFile(join(CONFIG_ROOT, 'runtime-selection.json'), 'utf8')) as { path: string };
     const bun = join(selection.path, 'bin/bun');
     checks.push(['bun', existsSync(bun) ? 'ok' : 'fail', bun]);
-    const native = join(selection.path, 'machine/machine-native.json');
+    const native = join(await selectedMachineRoot(selection.path), 'machine-native.json');
     checks.push(['native selection', existsSync(native) ? 'ok' : 'warn', existsSync(native) ? native : 'Legacy bootstrap: recover the tenant machine from source before upgrading its host']);
     checks.push(['omp', existsSync(join(selection.path, 'omp', 'omp.js')) ? 'ok' : 'fail', 'Account-managed packaged OMP']);
   } catch (error) {

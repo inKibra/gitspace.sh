@@ -2,6 +2,7 @@ import { mkdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { computeSessionActivity, transitionAgentExecution, type AgentExecutionState, type AgentFailure, type SessionActivity } from '@gitspace/protocol-agent';
 import type { SkillView } from '@gitspace/protocol';
+import * as AIError from '@oh-my-pi/pi-ai/error';
 import {
   AgentRegistry,
   MemorySessionStorage,
@@ -220,11 +221,6 @@ export class EmbeddedOmpRuntime implements OmpRuntime {
         ] };
       });
     };
-    const compaction = { onStart: null as (() => void) | null, onEnd: null as (() => void) | null };
-    const compactionExtension = (pi: { on(name: string, handler: () => void): void }): void => {
-      pi.on('session_before_compact', () => compaction.onStart?.());
-      pi.on('session_compact', () => compaction.onEnd?.());
-    };
     const authStorage = this.options.authStorage ? await this.options.authStorage() : null;
     let configuredSkills = new Map((this.options.skills?.initial ?? []).map((skill) => [skill.id, skill]));
     const discoverEffectiveSkills = async (configuration: ReadonlyMap<string, SkillView>) => {
@@ -262,7 +258,7 @@ export class EmbeddedOmpRuntime implements OmpRuntime {
         sessionManager: manager,
         hasUI: true,
         interactivePrompts: true,
-        extensions: [compactionExtension, instructionExtension, phaseExtension],
+        extensions: [instructionExtension, phaseExtension],
         enableMCP: true,
         skills,
         ...(authStorage ? { authStorage } : {}),
@@ -406,12 +402,16 @@ export class EmbeddedOmpRuntime implements OmpRuntime {
       const message = event.message && typeof event.message === 'object' ? event.message : null;
       const assistant = message && 'role' in message && message.role === 'assistant';
       const stopReason = message && 'stopReason' in message ? message.stopReason : undefined;
+      const internalAbort = stopReason === 'aborted' && message !== null && 'errorId' in message && typeof message.errorId === 'number' && AIError.is(message.errorId, AIError.Flag.SilentAbort);
       executionState = transitionAgentExecution(executionState, {
         type: event.type, sessionId: session.sessionId,
         ...(typeof event.errorMessage === 'string' ? { message: event.errorMessage } : typeof event.finalError === 'string' ? { message: event.finalError } : message && 'errorMessage' in message && typeof message.errorMessage === 'string' ? { message: message.errorMessage } : {}),
         ...(typeof event.attempt === 'number' ? { attempt: event.attempt } : {}),
         ...(typeof event.delayMs === 'number' ? { delayMs: event.delayMs } : {}),
-        ...(event.type === 'auto_retry_end' ? { succeeded: event.success === true } : assistant && typeof stopReason === 'string' ? { succeeded: stopReason !== 'error' && stopReason !== 'aborted' } : {}),
+        ...(event.type === 'compaction_state' && typeof event.active === 'boolean' ? { active: event.active } : {}),
+        ...(event.type === 'compaction_state' && typeof event.turnActive === 'boolean' ? { turnActive: event.turnActive } : {}),
+        ...(typeof event.detail === 'string' ? { detail: event.detail } : {}),
+        ...(event.type === 'auto_retry_end' ? { succeeded: event.success === true } : assistant && typeof stopReason === 'string' && !internalAbort ? { succeeded: stopReason !== 'error' && stopReason !== 'aborted' } : {}),
       }, Date.now());
       publishActivity();
       for (const handler of eventHandlers) handler(event);
@@ -431,14 +431,6 @@ export class EmbeddedOmpRuntime implements OmpRuntime {
     const registryUnsubscribe = AgentRegistry.global().onChange(updateSubagentCount);
     updateSubagentCount();
 
-    compaction.onStart = () => {
-      executionState = transitionAgentExecution(executionState, { type: 'auto_compaction_start', sessionId: session.sessionId }, Date.now());
-      publishActivity();
-    };
-    compaction.onEnd = () => {
-      executionState = transitionAgentExecution(executionState, { type: 'auto_compaction_end', sessionId: session.sessionId }, Date.now());
-      publishActivity();
-    };
 
     const bus = eventBus as unknown as PermissionEventBus;
     const permissionWaiting = (payload: unknown): void => {
@@ -541,7 +533,11 @@ export class EmbeddedOmpRuntime implements OmpRuntime {
       },
       handoff: async () => {
         const interrupted = executionState.turnActive || session.isStreaming;
-        if (interrupted) await session.abort({ goalReason: 'internal', reason: 'GitSpace machine handoff' });
+        if (interrupted) {
+          session.markPlanInternalAbortPending();
+          try { await session.abort({ goalReason: 'internal', reason: 'GitSpace machine handoff' }); }
+          finally { session.clearPlanInternalAbortPending(); }
+        }
         await manager.flush();
         return interrupted;
       },

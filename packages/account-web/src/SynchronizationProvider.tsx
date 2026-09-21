@@ -3,6 +3,8 @@ import type { StreamEvent } from '@gitspace/protocol-sync';
 import { SynchronizationOwner, type SynchronizationSource, type SynchronizedValue } from './synchronization.js';
 import { rpcClient, routedTransport } from './rpc-client.js';
 import { flushIncidentOutbox } from './incident-outbox.js';
+import { accountDirectorySource } from './account-directory-transport.js';
+import type { AccountDirectorySnapshot } from '@gitspace/protocol/account-directory';
 
 export const SynchronizationContext = createContext<SynchronizationOwner | null>(null);
 export function useSynchronizationOwner(): SynchronizationOwner {
@@ -35,6 +37,9 @@ export function useProjectSynchronization(projectId: string) {
 export function useRuntimeSynchronization(projectId: string) {
   return useSynchronizedResource(`runtime:${projectId}`, (after, signal) => rpcClient.events({ projectId, after }, { signal }));
 }
+export function useAccountDirectorySnapshot(source: SynchronizationSource<AccountDirectorySnapshot> = accountDirectorySource) {
+  return useSynchronizedResource('account-directory', source);
+}
 function readSnapshot<T, Value>(snapshot: SynchronizedValue<T> & { refetch(): Promise<void> }, select: (value: T) => Value) {
   const previous = snapshot.value === undefined ? undefined : select(snapshot.value);
   if (snapshot.transportError) return { state: 'failure' as const, error: snapshot.transportError, previous, refetch: snapshot.refetch };
@@ -54,16 +59,19 @@ export function useAccountOmpConfiguration() {
   return readSnapshot(snapshot, (value) => value.omp);
 }
 export function useAccountMachines() {
-  const snapshot = useSynchronizedResource('machines', (after, signal) => rpcClient.machine.events({ after }, { signal }));
-  return readSnapshot(snapshot, (value) => value);
+  const snapshot = useAccountDirectorySnapshot();
+  return readSnapshot(snapshot, (value) => value.machines);
 }
 export function useAccountCloudImages() {
   const snapshot = useSynchronizedResource('cloud-images', (after, signal) => rpcClient.machine.image.events({ after }, { signal }));
   return readSnapshot(snapshot, (value) => value);
 }
 export function useAccountProjects() {
-  const snapshot = useSynchronizedResource('projects', (after, signal) => rpcClient.project.directoryEvents({ after }, { signal }));
-  return readSnapshot(snapshot, (value) => value);
+  const snapshot = useAccountDirectorySnapshot();
+  const projects = useMemo(() => snapshot.value?.projects.map((project) => ({
+    ...project, archivedAt: project.archivedAt === null ? null : new Date(project.archivedAt), updatedAt: new Date(project.updatedAt),
+  })), [snapshot.value?.projects]);
+  return readSnapshot(snapshot, () => projects!);
 }
 /** Coalesce event-triggered authoritative reads: at most one read plus one dirty bit. */
 export function useEventRefresh(cursor: number | null, refresh: () => Promise<unknown> | void, enabled = true): void {
@@ -89,11 +97,11 @@ export function useEventRefresh(cursor: number | null, refresh: () => Promise<un
 
 function AccountSynchronization() {
   const settings = useSynchronizedResource('settings', (after, signal) => rpcClient.settings.events({ after }, { signal }));
-  const machines = useSynchronizedResource('machines', (after, signal) => rpcClient.machine.events({ after }, { signal }));
+  const directory = useAccountDirectorySnapshot();
+  const routes = directory.value && JSON.stringify([directory.value.placements, directory.value.machines.map(({ id, rpcEndpoint, state, desiredState }) => [id, rpcEndpoint, state, desiredState])]);
   useEffect(() => {
-    if (!machines.value) return;
-    routedTransport.invalidate();
-  }, [machines.cursor]);
+    if (routes) routedTransport.invalidate();
+  }, [routes]);
   useEffect(() => {
     const flush = () => { void flushIncidentOutbox(); };
     window.addEventListener('online', flush);

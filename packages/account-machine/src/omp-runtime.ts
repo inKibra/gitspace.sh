@@ -10,6 +10,7 @@ import type { CloudSpaceCheckpointAuthority } from './cloud-space-authority.js';
 import type { MachineMcpCoordinator, ProjectedMcpSession } from './local-mcp.js';
 import { createSpaceEvalNamespace, type OmpEvalNamespace, type SpaceWorkspaceControls } from './space-eval-sdk.js';
 import { z } from 'zod';
+import { untilAborted } from '@oh-my-pi/pi-utils';
 
 export type { OmpRuntime, OmpRuntimeEvent, OmpRuntimeSession, OmpSessionControlView, OmpTranscriptEvent } from '../../account-omp/src/contracts.js';
 export const ompGenerationSelectionSchema = z.object({
@@ -54,6 +55,7 @@ function spawnChild(
   let child: OmpChild['process'];
   let disconnected = false;
   let closing = false;
+  let closed: Promise<void> | null = null;
   const rpc = new OmpRpcPeer<OmpChildApi, OmpMachineApi>((message) => child.send(message), handlers, notify);
   child = Bun.spawn([process.execPath, entrypoint], {
     stdin: 'ignore', stdout: 'inherit', stderr: 'inherit',
@@ -69,18 +71,22 @@ function spawnChild(
   return {
     rpc, process: child,
     alive: () => !disconnected && !closing,
-    async close() {
+    close() {
+      if (closed) return closed;
       closing = true;
       rpc.close();
       if (!disconnected) child.disconnect();
-      const deadline = setTimeout(() => child.kill('SIGKILL'), 15_000);
-      try { await child.exited; } finally { clearTimeout(deadline); }
+      closed = (async () => {
+        const deadline = setTimeout(() => child.kill('SIGKILL'), 1_000);
+        try { await child.exited; } finally { clearTimeout(deadline); }
+      })();
+      return closed;
     },
   };
 }
 
-async function health(child: OmpChild): Promise<void> {
-  const info = await child.rpc.call('health', [], AbortSignal.timeout(30_000));
+async function health(child: OmpChild, signal?: AbortSignal): Promise<void> {
+  const info = await child.rpc.call('health', [], AbortSignal.any([AbortSignal.timeout(30_000), ...(signal ? [signal] : [])]));
   if (info.protocolVersion !== OMP_IPC_VERSION || info.platform !== process.platform || info.arch !== process.arch || info.bunVersion !== Bun.version) {
     throw new Error(`OMP child is incompatible: ${JSON.stringify(info)}`);
   }
@@ -305,8 +311,8 @@ export class ProcessOmpRuntime implements OmpRuntime {
     }));
   }
 
-  create(input: OmpSessionInput): Promise<OmpRuntimeSession> { return this.boot(input); }
-  open(input: OmpSessionInput & { sessionFile: string }): Promise<OmpRuntimeSession> { return this.boot(input); }
+  create(input: OmpSessionInput, signal?: AbortSignal): Promise<OmpRuntimeSession> { return this.boot(input, signal); }
+  open(input: OmpSessionInput & { sessionFile: string }, signal?: AbortSignal): Promise<OmpRuntimeSession> { return this.boot(input, signal); }
 
   async dispose(): Promise<void> {
     try { await Promise.all([...this.sessions].map((session) => session.dispose())); }
@@ -322,7 +328,8 @@ export class ProcessOmpRuntime implements OmpRuntime {
   async reloadAuthStorage(): Promise<void> {
     await Promise.all([...this.sessions].map((session) => session.reloadAuth()));
   }
-  private async boot(input: OmpSessionInput): Promise<OmpRuntimeSession> {
+  private async boot(input: OmpSessionInput, signal?: AbortSignal): Promise<OmpRuntimeSession> {
+    signal?.throwIfAborted();
     if (!this.selected) throw new Error('OMP runtime has not initialized');
     const events = new Set<(event: OmpRuntimeEvent) => void>();
     const activities = new Set<(activity: SessionActivity, failure: AgentFailure | null) => void>();
@@ -334,6 +341,10 @@ export class ProcessOmpRuntime implements OmpRuntime {
     let operations = 0;
     let migration: Promise<void> | null = null;
     let disposed = false;
+    let disposal: Promise<void> | null = null;
+    const lifetime = new AbortController();
+    const children = new Set<OmpChild>();
+    let openingSignal = AbortSignal.any([lifetime.signal, ...(signal ? [signal] : [])]);
     let hosted: HostedSession;
     const namespaces: { space?: OmpEvalNamespace; mcp?: OmpEvalNamespace } = {};
     const localProtocolOptions = {
@@ -343,8 +354,15 @@ export class ProcessOmpRuntime implements OmpRuntime {
     };
     if (this.options.spaceAuthority) namespaces.space = createSpaceEvalNamespace(this.options.spaceAuthority, input.projectId, input.workspaceId, this.options.workspaceControls?.());
     if (this.options.mcp) {
-      projected = await this.options.mcp.createSession({ projectId: input.projectId, workspaceId: input.workspaceId, workspacePath: input.workingDirectory });
-      namespaces.mcp = projected.evalNamespace(localProtocolOptions);
+      const projectedSession = await untilAborted(openingSignal, this.options.mcp.createSession({ projectId: input.projectId, workspaceId: input.workspaceId, workspacePath: input.workingDirectory }).then(async (session) => {
+        if (openingSignal.aborted) {
+          await session.dispose();
+          openingSignal.throwIfAborted();
+        }
+        return session;
+      }));
+      projected = projectedSession;
+      namespaces.mcp = projectedSession.evalNamespace(localProtocolOptions);
     }
     const catalog = (): OmpMcpCatalog => {
       const manager = projected?.manager;
@@ -368,8 +386,8 @@ export class ProcessOmpRuntime implements OmpRuntime {
     }));
     const migrateWhenIdle = (): void => {
       const target = this.selected;
-      if (!target || !hosted || operations > 0 || activity.activity.active) return;
-      void hosted.migrate().catch((error) => this.recoverGeneration(target, error));
+      if (!target || !hosted || disposed || operations > 0 || activity.activity.active) return;
+      void hosted.migrate().catch((error) => { if (!disposed) this.recoverGeneration(target, error); });
     };
     const notify = (notification: OmpNotification): void => {
       if (notification.type === 'event') {
@@ -383,6 +401,8 @@ export class ProcessOmpRuntime implements OmpRuntime {
       }
     };
     const start = async (generation: OmpGenerationSelection): Promise<OmpChild> => {
+      openingSignal.throwIfAborted();
+      const startSignal = openingSignal;
       const child = spawnChild(this.verifiedEntrypoint(generation), {
         namespace: async ([request], signal) => {
           const namespace = namespaces[request.namespace];
@@ -399,14 +419,20 @@ export class ProcessOmpRuntime implements OmpRuntime {
         mcpPrompt: async ([server, name, args], signal) => { await projected?.refresh(); return projected?.manager.executePrompt(server, name, args, { signal }); },
         listSkills: () => this.options.skills?.() ?? [],
       }, notify);
+      children.add(child);
+      void child.process.exited.then(() => children.delete(child));
+      const abort = (): void => { void child.close(); };
+      startSignal.addEventListener('abort', abort, { once: true });
       try {
-        await health(child);
+        startSignal.throwIfAborted();
+        await health(child, startSignal);
         const opened = await child.rpc.call('initialize', [{
           agentDir: this.options.agentDir, sessionRoot: this.options.sessionRoot,
-          skills: await this.options.skills?.() ?? [], liveSkills: true,
+          skills: await untilAborted(startSignal, Promise.resolve(this.options.skills?.() ?? [])), liveSkills: true,
           input: { ...input, executionFailure, ...(sessionFile ? { sessionFile } : {}) }, tools: descriptors(), mcpCatalog: catalog(),
           namespaces: { ...(namespaces.space ? { space: namespaces.space.declaration } : {}), ...(namespaces.mcp ? { mcp: namespaces.mcp.declaration } : {}) },
-        }], AbortSignal.timeout(120_000));
+        }], AbortSignal.any([startSignal, AbortSignal.timeout(120_000)]));
+        startSignal.throwIfAborted();
         sessionId = opened.id;
         sessionFile = opened.sessionFile;
         activity = { activity: opened.activity, failure: opened.failure };
@@ -414,24 +440,35 @@ export class ProcessOmpRuntime implements OmpRuntime {
       } catch (error) {
         try { await child.close(); }
         catch (cleanupError) { throw new AggregateError([error, cleanupError], 'OMP startup and child cleanup failed'); }
+        startSignal.throwIfAborted();
         throw error;
+      } finally {
+        startSignal.removeEventListener('abort', abort);
       }
     };
     const ensureChild = async (): Promise<void> => {
       if (disposed) throw new Error('OMP session has been disposed');
       if (migration) await migration;
+      if (disposed) throw new Error('OMP session has been disposed');
       if (hosted.child.alive()) return;
       migration = start(hosted.generation).then((child) => { hosted.child = child; });
       try { await migration; } finally { migration = null; }
     };
     let initial: OmpChild;
     const initialGeneration = this.selected;
-    try { initial = await start(initialGeneration); }
+    try {
+      initial = await start(initialGeneration);
+      signal?.throwIfAborted();
+    }
     catch (error) {
-      try { await projected?.dispose(); }
+      try {
+        await Promise.all([...children].map((child) => child.close()));
+        await untilAborted(AbortSignal.timeout(1_000), Promise.resolve(projected?.dispose()));
+      }
       catch (cleanupError) { throw new AggregateError([error, cleanupError], 'OMP startup and resource cleanup failed'); }
       throw error;
     }
+    openingSignal = lifetime.signal;
     hosted = {
       generation: initialGeneration,
       child: initial,
@@ -440,13 +477,15 @@ export class ProcessOmpRuntime implements OmpRuntime {
         if (disposed || operations > 0 || activity.activity.active || hosted.generation.hash === this.selected?.hash) return;
         const target = this.selected!;
         migration = (async () => {
+          const migrationSignal = AbortSignal.any([lifetime.signal, AbortSignal.timeout(30_000)]);
           const old = hosted.generation;
-          const controls = hosted.child.alive() ? await hosted.child.rpc.call('control', []) : null;
+          const controls = hosted.child.alive() ? await hosted.child.rpc.call('control', [], migrationSignal) : null;
           if (hosted.child.alive()) {
-            await hosted.child.rpc.call('persist', []);
-            await hosted.child.rpc.call('dispose', []);
+            await hosted.child.rpc.call('persist', [], migrationSignal);
+            await hosted.child.rpc.call('dispose', [], migrationSignal);
           }
           await hosted.child.close();
+          lifetime.signal.throwIfAborted();
           const checkpoint = `${sessionFile!}.generation-${crypto.randomUUID()}`;
           await cp(sessionFile!, checkpoint);
           try {
@@ -459,6 +498,7 @@ export class ProcessOmpRuntime implements OmpRuntime {
             hosted.generation = target;
           } catch (error) {
             await hosted.child.close();
+            lifetime.signal.throwIfAborted();
             await rename(checkpoint, sessionFile!);
             hosted.child = await start(old);
             if (controls) {
@@ -473,22 +513,27 @@ export class ProcessOmpRuntime implements OmpRuntime {
         finally { migration = null; }
       },
       reloadAuth: async () => { await ensureChild(); await hosted.child.rpc.call('reloadAuth', []); },
-      dispose: async () => {
-        if (disposed) return;
+      dispose: () => {
+        if (disposal) return disposal;
         disposed = true;
-        try {
-          if (migration) await migration;
-          if (hosted.child.alive()) await hosted.child.rpc.call('dispose', []);
-        }
-        finally {
-          unsubscribeNotifications?.();
-          unsubscribeCatalog?.();
-          try { await hosted.child.close(); }
-          finally {
-            try { await projected?.dispose(); }
-            finally { this.sessions.delete(hosted); }
+        lifetime.abort(new Error('OMP session has been disposed'));
+        disposal = (async () => {
+          try {
+            // Do not wait on migration: its RPC or initialization may be hung.
+            if (!migration && hosted.child.alive()) {
+              await hosted.child.rpc.call('dispose', [], AbortSignal.timeout(1_000)).catch(() => undefined);
+            }
+          } finally {
+            unsubscribeNotifications?.();
+            unsubscribeCatalog?.();
+            try { await Promise.all([...children].map((child) => child.close())); }
+            finally {
+              try { await untilAborted(AbortSignal.timeout(1_000), Promise.resolve(projected?.dispose())); }
+              finally { this.sessions.delete(hosted); }
+            }
           }
-        }
+        })();
+        return disposal;
       },
     };
     this.sessions.add(hosted);
@@ -498,11 +543,15 @@ export class ProcessOmpRuntime implements OmpRuntime {
     projected?.attach({ refresh: refreshMcp });
     const invoke = async <K extends SessionMethod | 'reloadSettings' | 'instructionsChanged'>(method: K, args: Parameters<OmpChildApi[K]>): Promise<Awaited<ReturnType<OmpChildApi[K]>>> => {
       if (disposed) throw new Error('OMP session has been disposed');
-      if (!hosted.child.alive()) throw new AgentDomainError(activity.failure ?? { domain: 'agent', code: 'AGENT_DISCONNECTED', message: 'OMP worker is disconnected; retry the agent to reopen its persisted session', context: { sessionId } });
       await hosted.migrate();
-      if (!hosted.child.alive()) throw new AgentDomainError(activity.failure ?? { domain: 'agent', code: 'AGENT_DISCONNECTED', message: 'OMP worker disconnected during the operation', context: { sessionId } });
+      if (disposed) throw new Error('OMP session has been disposed');
+      if (!hosted.child.alive()) throw new AgentDomainError({ domain: 'agent', code: 'AGENT_DISCONNECTED', message: 'OMP worker is disconnected; retry the agent to reopen its persisted session', context: { sessionId, stage: method } });
       operations += 1;
-      try { return await hosted.child.rpc.call(method, args); }
+      try {
+        const signal = method === 'persist' || method === 'handoff' ? AbortSignal.timeout(30_000) : undefined;
+        return await hosted.child.rpc.call(method, args, signal);
+      }
+      catch (cause) { throw new Error(`OMP ${method} failed: ${cause instanceof Error ? cause.message : String(cause)}`, { cause }); }
       finally {
         operations -= 1;
         migrateWhenIdle();

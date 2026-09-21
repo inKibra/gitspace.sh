@@ -44,7 +44,8 @@ import {
   type DeviceCapability,
 } from '@gitspace/protocol';
 import { LifecycleMutationSchema, authorizeLifecycleMachineMutation, environmentFailure, type LifecycleState } from '@gitspace/protocol-environment';
-import { decodeChangeStream, streamCursorSchema } from '@gitspace/protocol-sync';
+import { streamCursorSchema } from '@gitspace/protocol-sync';
+import { consumeDurableStream } from './durable-stream.js';
 import {
   platformDeployResponseSchema,
   stageReleaseInputSchema,
@@ -542,11 +543,20 @@ export class CredentialVaultDO extends DurableObject<Env> {
     return this.authorizeRpcRequest(input, false);
   }
 
-  private authorizeRpcRequest(input: { header: string | null; target: string; body: Uint8Array; capabilities: DeviceCapability[] }, browserOnly: boolean): CredentialVaultResult<{ deviceId: string }> {
+  /** Revalidate the original GET proof on wake without re-consuming its handshake nonce. */
+  authorizeDirectorySubscription(input: { header: string | null; target: string }, initial: boolean): CredentialVaultResult<{ deviceId: string }> {
+    const config = this.config();
+    if (!config || config.user_id !== this.env.ACCOUNT_ID || config.root_public_key !== this.env.AUTH_PUBLIC_KEY) {
+      return publicError('RPC_FORBIDDEN', 'Account credential authority does not own this tenant');
+    }
+    return this.authorizeRpcRequest({ ...input, method: 'GET', body: new Uint8Array(), capabilities: ['rpc.read'] }, false, !initial);
+  }
+
+  private authorizeRpcRequest(input: { header: string | null; target: string; body: Uint8Array; capabilities: DeviceCapability[]; method?: 'GET' | 'POST' }, browserOnly: boolean, revalidate = false): CredentialVaultResult<{ deviceId: string }> {
     const config = this.config();
     const header = input.header ? decodeSignedRpcHeader(input.header) : null;
     const now = Date.now();
-    if (!config || !header || input.body.byteLength > REQUEST_MAX_BYTES || Math.abs(now - header.timestamp) > RPC_SIGNATURE_MAX_SKEW_MS) {
+    if (!config || !header || input.body.byteLength > REQUEST_MAX_BYTES || (!revalidate && Math.abs(now - header.timestamp) > RPC_SIGNATURE_MAX_SKEW_MS)) {
       return publicError('RPC_UNAUTHORIZED', 'Device signature is missing, invalid or expired');
     }
     const record = this.deviceGrant(header.deviceId);
@@ -556,13 +566,15 @@ export class CredentialVaultDO extends DurableObject<Env> {
     };
     const device = record?.invite.invite.userId === config.user_id
       ? verifyDeviceGrantRecord(record, credentialProtocolBase64.decode(config.root_public_key), now, resolve) : null;
-    if (!device || !verifyRpcSignature(header, { method: 'POST', path: input.target, body: input.body }, device.signingPublicKey)) {
+    if (!device && input.method === 'GET') return publicError('RPC_DEVICE_UNKNOWN', 'Device grant is unknown, expired or revoked');
+    if (!device || !verifyRpcSignature(header, { method: input.method ?? 'POST', path: input.target, body: input.body }, device.signingPublicKey)) {
       return publicError('RPC_UNAUTHORIZED', 'Device signature is invalid or its grant is revoked');
     }
     if ((browserOnly && device.kind !== 'browser') || device.scope.kind !== 'user'
       || !input.capabilities.every((capability) => device.capabilities.includes(capability))) {
       return publicError('RPC_FORBIDDEN', 'Device is out of scope or lacks permission');
     }
+    if (revalidate) return { status: 'ok', value: { deviceId: device.deviceId } };
     const nonce = this.consumeRequestNonce(header.nonce, header.timestamp);
     return nonce.status === 'error' ? nonce : { status: 'ok', value: { deviceId: device.deviceId } };
   }
@@ -2046,6 +2058,9 @@ async function accountRpcResponse(request: Request, env: Env): Promise<Response>
 const worker = {
   async fetch(request: Request, env: Env, diagnostics?: SyncRequestDiagnostics): Promise<Response> {
     const url = new URL(request.url);
+    if (url.pathname === '/v1/directory/events') {
+      return (env.USER_PROJECTS as DurableObjectNamespace<UserProjectIndexDO>).getByName(env.ACCOUNT_ID).fetch(request);
+    }
     if (url.pathname.startsWith('/shared-artifacts/')) return serveArtifactShare(request, env);
 
     const browserInvitationRoute = /^\/v1\/devices\/browser-invitations\/(create|status|cancel)$/u.exec(url.pathname);
@@ -2960,7 +2975,8 @@ const worker = {
               const vault = credentialVault(env, body.userId);
               const generation = await vault.authorizeSubscription(body, 'space.control');
               if (generation === null) return Response.json(publicError('DEVICE_UNAUTHORIZED', 'Environment subscription is unauthorized'), { status: 401 });
-              const changes = decodeChangeStream(await authority.watchEnvironment(spaceId, after), request.signal);
+              const subscription = await authority.watchEnvironment(spaceId, after);
+              const changes = consumeDurableStream(subscription, request.signal);
               const encoder = new TextEncoder();
               const stream = new ReadableStream<Uint8Array>({
                 async pull(controller) {
@@ -2976,7 +2992,7 @@ const worker = {
                     controller.enqueue(encoder.encode(`id: ${event.cursor}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`));
                   } catch (error) { controller.error(error); }
                 },
-                async cancel() { await changes.return(undefined); },
+                async cancel() { subscription[Symbol.dispose](); await changes.return(undefined); },
               }, { highWaterMark: 1 });
               return new Response(stream, { headers: { 'content-type': 'text/event-stream', 'cache-control': 'private, no-store', 'x-content-type-options': 'nosniff' } });
             }
@@ -3027,6 +3043,9 @@ const worker = {
                 baseBranch: String(body.payload.baseBranch ?? 'main'),
                 createdBy: body.machineId,
               });
+              if (project.lifecycle === 'archived' || project.lifecycle === 'deleting') {
+                throw new Error(`Cannot bootstrap ${project.lifecycle} project`);
+              }
               const namespace = env.USER_PROJECTS as DurableObjectNamespace<UserProjectIndexDO>;
               value = await namespace.get(namespace.idFromName(body.userId)).put(project);
               break;
@@ -3228,6 +3247,15 @@ const worker = {
         const authorityNamespace = env.SPACE_AUTHORITY as DurableObjectNamespace<SpaceAuthorityDO>;
         const authority = authorityNamespace.get(authorityNamespace.idFromName(`${body.userId}:${spaceId}`));
         const common = { ...body.payload, machineId: body.machineId, projectId: String(body.payload.projectId ?? ''), spaceId };
+        if (body.operation === 'space.bootstrap' || body.operation === 'space.beginOpen') {
+          const projectAuthority = (env.PROJECT_AUTHORITY as DurableObjectNamespace<ProjectAuthorityDO>).getByName(`${body.userId}:${common.projectId}`);
+          const project = await projectAuthority.getProject();
+          const workspace = (await projectAuthority.listWorkspaces()).find((candidate) => candidate.id === spaceId);
+          if (!project || project.lifecycle === 'archived' || project.lifecycle === 'deleting'
+            || !workspace || workspace.lifecycle !== 'active') {
+            return Response.json(publicError('WORKSPACE_UNAVAILABLE', 'Only an active canonical workspace can be opened'), { status: 409 });
+          }
+        }
         let result: SpaceAuthorityResult<unknown>;
         switch (body.operation) {
           case 'space.bootstrap': result = await authority.bootstrap(common as Parameters<SpaceAuthorityDO['bootstrap']>[0]); break;

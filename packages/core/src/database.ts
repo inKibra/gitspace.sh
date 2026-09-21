@@ -13,6 +13,7 @@ import {
   factEvents,
   projects,
   spacePlacements,
+  spaceCleanupJobs,
   spaceRelations,
   spaces,
   type MaterializedSpace,
@@ -21,6 +22,7 @@ import {
   type SpacePlacement,
   type Workspace,
   type WorkspacePossession,
+  type SpaceCleanupJob,
 } from './schema.js';
 import * as schema from './schema.js';
 
@@ -219,6 +221,18 @@ export class GitSpaceDatabase {
     } catch (error) {
       return Result.err(conflict('workspace', parsed.id, error));
     }
+  }
+
+  materializeBaseSpace(projectId: string, rootPath: string): void {
+    const project = this.getProject(projectId);
+    if (!project) throw new Error(`Project ${projectId} does not exist`);
+    if (this.getBaseSpace(projectId)) return;
+    const now = new Date().toISOString();
+    this.orm.transaction((tx) => {
+      tx.insert(spaces).values({ id: projectId, projectId, kind: 'base', name: project.name, branch: project.baseBranch, createdAt: now, updatedAt: now }).run();
+      tx.insert(spacePlacements).values({ spaceId: projectId, holderId: 'unassigned', generation: 0, rootPath, state: 'closed', acquiredAt: now, updatedAt: now }).run();
+      tx.insert(artifactScopes).values({ id: `space:${projectId}`, spaceId: projectId, generation: 0, createdAt: now, updatedAt: now }).run();
+    });
   }
 
   getSpace(id: string): MaterializedSpace | null {
@@ -535,6 +549,53 @@ export class GitSpaceDatabase {
   }
 
 
+
+  prepareSpaceCleanup(input: Omit<SpaceCleanupJob, 'state' | 'error' | 'createdAt' | 'checkpointRevision' | 'manifestKey' | 'manifestHash'>): void {
+    const existing = this.listSpaceCleanupJobs().find((job) => job.spaceId === input.spaceId);
+    if (existing) {
+      if (existing.generation !== input.generation || existing.rootPath !== input.rootPath) {
+        throw new Error(`Space ${input.spaceId} still has cleanup for another generation`);
+      }
+      return;
+    }
+    this.orm.insert(spaceCleanupJobs).values({
+      ...input, state: 'prepared', error: null, createdAt: new Date().toISOString(),
+    }).run();
+  }
+
+  recordSpaceCleanupCheckpoint(spaceId: string, receipt: { revision: number; manifestKey: string; manifestHash: string }): void {
+    const updated = this.orm.update(spaceCleanupJobs).set({
+      checkpointRevision: receipt.revision, manifestKey: receipt.manifestKey, manifestHash: receipt.manifestHash,
+    }).where(and(eq(spaceCleanupJobs.spaceId, spaceId), eq(spaceCleanupJobs.state, 'prepared'))).returning().get();
+    if (!updated) throw new Error(`Missing prepared cleanup receipt for ${spaceId}`);
+  }
+
+  /** Cloud commit is established by the caller. No recoverable workspace row survives this transaction. */
+  commitSpaceCleanup(spaceId: string): void {
+    this.orm.transaction((tx) => {
+      const job = tx.select().from(spaceCleanupJobs).where(eq(spaceCleanupJobs.spaceId, spaceId)).get();
+      if (!job) throw new Error(`Missing cleanup receipt for ${spaceId}`);
+      const placement = tx.select().from(spacePlacements).where(eq(spacePlacements.spaceId, spaceId)).get();
+      if (placement && placement.generation !== job.generation) throw new Error(`Cleanup generation changed for ${spaceId}`);
+      tx.update(spaceCleanupJobs).set({ state: 'committed', error: null }).where(eq(spaceCleanupJobs.spaceId, spaceId)).run();
+      tx.delete(spaces).where(eq(spaces.id, spaceId)).run();
+      if (!tx.select({ id: spaces.id }).from(spaces).where(eq(spaces.projectId, job.projectId)).get()) {
+        tx.delete(projects).where(eq(projects.id, job.projectId)).run();
+      }
+    });
+  }
+
+  listSpaceCleanupJobs(): SpaceCleanupJob[] {
+    return this.orm.select().from(spaceCleanupJobs).all();
+  }
+
+  finishSpaceCleanup(spaceId: string): void {
+    this.orm.delete(spaceCleanupJobs).where(eq(spaceCleanupJobs.spaceId, spaceId)).run();
+  }
+
+  failSpaceCleanup(spaceId: string, error: string): void {
+    this.orm.update(spaceCleanupJobs).set({ error }).where(eq(spaceCleanupJobs.spaceId, spaceId)).run();
+  }
 
   deleteWorkspace(workspaceId: string): boolean {
     const workspace = this.getWorkspace(workspaceId);

@@ -1,3 +1,4 @@
+import { rmSync } from 'node:fs';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, posix } from 'node:path';
 import {
@@ -577,6 +578,23 @@ export class LocalArtifactResolver {
     await rm(this.cacheRoot, { recursive: true, force: true });
     await mkdir(this.cacheRoot, { recursive: true });
     this.database.orm.update(artifactBlobs).set({ cachePath: null, state: 'remote' }).run();
+  }
+
+  async pruneUnreferencedCachedBytes(): Promise<void> {
+    // Keep the reference check and removal synchronous so a concurrent publication
+    // cannot acquire a reference between them. Never touch the remote object store.
+    this.database.orm.transaction((tx) => {
+      const referenced = new Set(tx.select({ hash: artifactEntries.blobHash }).from(artifactEntries).all().map((entry) => entry.hash));
+      for (const scope of tx.select({ hash: artifactScopes.manifestHash }).from(artifactScopes).all()) {
+        if (scope.hash) referenced.add(scope.hash);
+      }
+      for (const blob of tx.select().from(artifactBlobs).all()) {
+        if (referenced.has(blob.hash) || blob.state === 'dirty' || !HASH_PATTERN.test(blob.hash)) continue;
+        rmSync(this.cachePath(blob.hash), { force: true });
+        rmSync(this.sealedPath(blob.hash), { force: true });
+        tx.delete(artifactBlobs).where(eq(artifactBlobs.hash, blob.hash)).run();
+      }
+    });
   }
 
   private resolve(capability: ArtifactCapability, url: string): ResultType<ResolvedArtifactPath, ArtifactError> {

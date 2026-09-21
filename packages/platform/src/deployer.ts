@@ -32,7 +32,7 @@ export interface ScriptUploadMetadata {
     enabled: true;
     head_sampling_rate: 1;
     redact_query_string: true;
-    logs: { enabled: true; invocation_logs: true; persist: true };
+    logs: { enabled: true; invocation_logs: false; persist: true };
   };
   bindings: Array<
     | { type: 'durable_object_namespace'; name: string; class_name: string }
@@ -109,7 +109,7 @@ export function scriptUploadMetadata(
   }
   return {
     main_module: metadata.mainModule, compatibility_date: metadata.compatibilityDate, compatibility_flags: metadata.compatibilityFlags,
-    observability: { enabled: true, head_sampling_rate: 1, redact_query_string: true, logs: { enabled: true, invocation_logs: true, persist: true } },
+    observability: { enabled: true, head_sampling_rate: 1, redact_query_string: true, logs: { enabled: true, invocation_logs: false, persist: true } },
     bindings, ...(migrations ? { migrations } : {}), keep_bindings: [], tags,
   };
 }

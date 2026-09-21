@@ -49,13 +49,13 @@ export async function recoverMachineFromSource(sourceRoot: string, workspaceId: 
     },
   });
   const record = await launcher.launchAndWait({ workspaceId, targets: ['machine'] }).finally(() => progress);
-  console.log(`Recovery staged tenant machine release ${record.sha}; waiting for the existing host's health gate. The host and runtime selections have not been replaced by this command.`);
+  console.log(`Recovery staged tenant machine release ${record.sha}; waiting for complete machine activation and its health gate.`);
   const deadline = Date.now() + 10 * 60_000;
   while (Date.now() < deadline) {
     const status = await authority.deploymentStatus();
     const release = status.releases.find((candidate) => candidate.sha === record.sha);
-    if (release?.status.machines[machineId] === 'failed') throw new Error(`Recovery activation failed; the host retains its predecessor: ${release.error ?? record.sha}`);
-    if (status.desired.machine !== record.sha) throw new Error('Another account selection superseded recovery; no host or runtime selection was changed by this command');
+    if (release?.status.machines[machineId] === 'failed') throw new Error(`Recovery activation failed; inspect deployment rollback status: ${release.error ?? record.sha}`);
+    if (status.desired.machine !== record.sha) throw new Error('Another account selection superseded recovery; this command will not override it');
     const running = status.current.machines[machineId];
     if (running?.sha === record.sha && release?.status.machines[machineId] === 'applied') {
       console.log(JSON.stringify({ status: 'applied', machineId, sha: record.sha, generation: running.generation }));
@@ -63,7 +63,7 @@ export async function recoverMachineFromSource(sourceRoot: string, workspaceId: 
     }
     await Bun.sleep(1_000);
   }
-  throw new Error(`Recovery release ${record.sha} is still pending. Inspect ordinary deployment progress in the account; the host/bootstrap selection was not changed.`);
+  throw new Error(`Recovery release ${record.sha} is still pending. Inspect ordinary deployment progress in the account before taking further action.`);
 }
 
 if (import.meta.main) {

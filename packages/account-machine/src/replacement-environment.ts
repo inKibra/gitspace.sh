@@ -1,14 +1,16 @@
-import { Database } from 'bun:sqlite';
 import { cp, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join, resolve, sep } from 'node:path';
 import {
   DeploymentEngine,
   DeploymentJournal,
+  DeploymentSqliteConnection,
   FrontendReplacementDriver,
   MachineReplacementDriver,
   createDeploymentPlan,
+  deploymentSqliteErrorDetails,
   hashArtifactPath,
+  withDeploymentSqliteContext,
   type DeploymentArtifact,
   type FrontendReplacementHost,
   type MachineGenerationPointer,
@@ -17,6 +19,8 @@ import {
 import { z } from 'zod';
 import { prepareMachineNativeRuntime } from '../../deployment/src/native-runtime.js';
 import { executableManifestPath, parseExecutableArtifactManifest, validateExecutableArtifact } from '@gitspace/account-omp/manifest';
+import { atomicJson, readJson, requestMachineUpdate } from './machine-update.js';
+import type { MachineSelection } from './machine-update.js';
 
 const machineSelectionSchema = z.object({
   version: z.literal(1),
@@ -83,7 +87,7 @@ export const environmentChannelRequestSchema = z.object({
 export type EnvironmentChannelRequest = z.infer<typeof environmentChannelRequestSchema>;
 
 export const environmentLaunchResponseSchema = z.object({
-  status: z.enum(['applied', 'failed']),
+  status: z.enum(['applied', 'pending', 'failed']),
   hash: z.string().nullable(),
   error: z.string().nullable(),
 });
@@ -134,29 +138,47 @@ function openHostDeploymentJournal(root: string): DeploymentJournal {
   const path = join(root, 'deployment.db');
   const journal = new DeploymentJournal(path);
   if (!existsSync(join(root, 'gitspace.db'))) return journal;
-  const database = new Database(path, { strict: true });
+  const connection = new DeploymentSqliteConnection(path, { strict: true });
+  const database = connection.database;
+  let failed = false;
   try {
-    database.query('ATTACH DATABASE ? AS runtime').run(join(root, 'gitspace.db'));
-    const tables = database.query<{ name: string }, []>(
+    connection.registerDatabase('runtime', join(root, 'gitspace.db'));
+    connection.run('host.migration.attach-runtime', () => database.query('ATTACH DATABASE ? AS runtime').run(join(root, 'gitspace.db')));
+    connection.captureConfiguration();
+    const tables = connection.run('host.migration.probe-tables', () => database.query<{ name: string }, []>(
       "SELECT name FROM runtime.sqlite_master WHERE type = 'table' AND name IN ('deployment_runs', 'deployment_steps')",
-    ).all();
+    ).all());
     if (tables.length === 0) return journal;
     if (tables.length !== 2) throw new Error('Legacy deployment journal is incomplete');
     // Commit the destination first. If interrupted before removing the old tables,
     // retry copies missing rows without overwriting newer recovery state here.
-    database.transaction(() => {
-      database.exec('INSERT INTO deployment_runs SELECT * FROM runtime.deployment_runs WHERE true ON CONFLICT(id) DO NOTHING');
-      database.exec('INSERT INTO deployment_steps SELECT * FROM runtime.deployment_steps WHERE true ON CONFLICT(run_id, attempt, entrypoint) DO NOTHING');
-    })();
-    database.transaction(() => {
-      database.exec('DROP TABLE runtime.deployment_steps; DROP TABLE runtime.deployment_runs;');
-    })();
+    connection.transaction('host.migration.copy-journal', () => {
+      connection.run('host.migration.copy-runs', () => database.exec('INSERT INTO deployment_runs SELECT * FROM runtime.deployment_runs WHERE true ON CONFLICT(id) DO NOTHING'));
+      connection.run('host.migration.copy-steps', () => database.exec('INSERT INTO deployment_steps SELECT * FROM runtime.deployment_steps WHERE true ON CONFLICT(run_id, attempt, entrypoint) DO NOTHING'));
+    });
+    connection.transaction('host.migration.drop-legacy-journal', () => {
+      connection.run('host.migration.drop-legacy-steps', () => database.exec('DROP TABLE runtime.deployment_steps;'));
+      connection.run('host.migration.drop-legacy-runs', () => database.exec('DROP TABLE runtime.deployment_runs;'));
+    });
     return journal;
   } catch (error) {
-    journal.close();
+    failed = true;
+    try {
+      journal.close();
+    } catch {
+      // The instrumented close records its failure; retain the migration error.
+    }
     throw error;
   } finally {
-    database.close();
+    if (failed) {
+      try {
+        connection.close();
+      } catch {
+        // The instrumented close records its failure; retain the migration error.
+      }
+    } else {
+      connection.close();
+    }
   }
 }
 
@@ -230,6 +252,9 @@ class MachineHost implements MachineReplacementHost {
       port: options.rpcPort,
       idleTimeout: 0,
       fetch: (request) => {
+        if (new URL(request.url).pathname !== '/health' && existsSync(join(options.root, 'machine-update.json'))) {
+          return new Response('Complete machine update is not committed', { status: 503 });
+        }
         if (!this.accepting || !this.activeUrl) {
           return new Response('GitSpace environment is replacing', { status: 503 });
         }
@@ -238,6 +263,7 @@ class MachineHost implements MachineReplacementHost {
         return fetch(new Request(target, request));
       },
     });
+    options.rpcPort = this.proxy.port!;
   }
 
   async stopAdmissions(): Promise<void> { this.accepting = false; }
@@ -258,12 +284,24 @@ class MachineHost implements MachineReplacementHost {
     await mkdir(checkpoint, { recursive: true });
     const databasePath = join(this.options.root, 'gitspace.db');
     if (existsSync(databasePath)) {
-      const database = new Database(databasePath, { readonly: true, strict: true });
+      const connection = new DeploymentSqliteConnection(databasePath, { readonly: true, strict: true });
+      let failed = false;
       try {
         // A byte copy misses committed WAL pages when another connection remains open.
-        database.query('VACUUM INTO ?').run(join(checkpoint, 'gitspace.db'));
+        connection.run('host.checkpoint.vacuum-into', () => connection.database.query('VACUUM INTO ?').run(join(checkpoint, 'gitspace.db')));
+      } catch (error) {
+        failed = true;
+        throw error;
       } finally {
-        database.close();
+        if (failed) {
+          try {
+            connection.close();
+          } catch {
+            // The instrumented close records its failure; retain the checkpoint error.
+          }
+        } else {
+          connection.close();
+        }
       }
     }
     return checkpoint;
@@ -414,6 +452,9 @@ class MachineHost implements MachineReplacementHost {
     try {
       const generation = { pointer, process, url: await waitForReady(process, pointer.hash) };
       this.running.set(pointer.socketPath, generation);
+      await atomicJson(join(this.options.root, 'host-machine.json'), {
+        pid: process.pid, hostPid: globalThis.process.pid, url: generation.url, hash: pointer.hash,
+      });
       return generation;
     } catch (error) {
       // A failed startup must not keep writing the shared disk during rollback.
@@ -441,6 +482,9 @@ class FrontendHost implements FrontendReplacementHost {
       idleTimeout: 0,
       fetch: async (request) => {
         const url = new URL(request.url);
+        if (request.method !== 'GET' && existsSync(join(options.root, 'machine-update.json'))) {
+          return new Response('Complete machine update is not committed', { status: 503 });
+        }
         if (url.pathname === '/rpc' || url.pathname === '/health') {
           return fetch(new Request(new URL(`${url.pathname}${url.search}`, `http://127.0.0.1:${options.rpcPort}`), request));
         }
@@ -457,12 +501,12 @@ class FrontendHost implements FrontendReplacementHost {
             const parsed = environmentChannelRequestSchema.safeParse(await request.json());
             if (!parsed.success) return Response.json({ error: parsed.error.message }, { status: 400 });
             const launched = await control.channel(parsed.data);
-            return Response.json(launched, { status: launched.status === 'applied' ? 200 : 409 });
+            return Response.json(launched, { status: launched.status === 'failed' ? 409 : launched.status === 'pending' ? 202 : 200 });
           }
           const parsed = environmentLaunchRequestSchema.safeParse(await request.json());
           if (!parsed.success) return Response.json({ error: parsed.error.message }, { status: 400 });
           const launched = await control.launch(parsed.data);
-          return Response.json(launched, { status: launched.status === 'applied' ? 200 : 409 });
+          return Response.json(launched, { status: launched.status === 'failed' ? 409 : launched.status === 'pending' ? 202 : 200 });
         }
         if (!this.generationPath) return new Response('Frontend generation is not active', { status: 503 });
         const requested = decodeURIComponent(url.pathname).replace(/^\/+/, '') || 'index.html';
@@ -540,10 +584,15 @@ export class ReplacementEnvironment {
   }
 
   /** Restore an account-selected machine without briefly running the bundled channel. */
-  async bootMachine(channelPath: string, manifestHash?: string): Promise<void> {
+  async bootMachine(channelPath: string, manifestHash?: string, hostSelection?: MachineSelection): Promise<void> {
     if (this.machineHash !== null) throw new Error('Machine bootstrap requires an unstarted machine host');
     let channelHash: `sha256:${string}`;
-    if (manifestHash) {
+    if (hostSelection && !existsSync(join(channelPath, 'host-runtime.js'))) {
+      // Retain an incompatible legacy channel only as an explicit rollback
+      // choice. Never validate or execute it while booting a complete selection;
+      // the update preflight rejects this old format before draining anything.
+      channelHash = await hashArtifactPath(channelPath);
+    } else if (manifestHash) {
       const manifest = parseExecutableArtifactManifest(await readFile(executableManifestPath(channelPath)), { target: 'machine', manifestHash });
       await validateExecutableArtifact(channelPath, { target: 'machine', hash: manifest.treeHash, manifestHash });
       channelHash = manifest.treeHash;
@@ -560,14 +609,26 @@ export class ReplacementEnvironment {
     } catch (error) {
       if (!(error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT')) throw error;
     }
-    const selected = selection?.releaseSha ? selection : null;
+    const selected = hostSelection ?? (selection?.releaseSha ? selection : null);
     if (selected && await hashArtifactPath(selected.path) !== selected.hash) throw new Error('Selected machine release hash mismatch');
     this.channelArtifacts.set('machine', channel);
     await this.deploy({
-      artifacts: [selected ? { ...channel, path: selected.path, hash: selected.hash } : channel],
+      artifacts: [selected ? { ...channel, path: selected.path, hash: selected.hash as `sha256:${string}` } : channel],
       releaseSha: selected?.releaseSha ?? null,
       revision: selected?.releaseSha ?? 'bundled',
       dirty: false,
+    });
+  }
+
+  /** Frontend selection is independent of machine replacement and survives host restarts. */
+  async restoreFrontend(): Promise<void> {
+    const selected = await readJson<MachineSelection>(join(this.options.root, 'frontend-selection.json'));
+    const channel = await readJson<DeploymentArtifact>(join(this.options.root, 'frontend-channel.json'));
+    if (channel) this.channelArtifacts.set('frontend', channel);
+    if (!selected) return;
+    await this.deploy({
+      artifacts: [{ entrypoint: 'frontend', path: selected.path, hash: selected.hash as `sha256:${string}`, dependsOn: ['machine-daemon'] }],
+      releaseSha: selected.releaseSha, releaseTargets: ['frontend'], revision: selected.releaseSha ?? 'channel', dirty: false,
     });
   }
 
@@ -644,6 +705,11 @@ export class ReplacementEnvironment {
       if (artifact.entrypoint === 'frontend') {
         this.frontendHash = artifact.hash;
         this.frontendReleaseSha = input.releaseSha;
+        await atomicJson(join(this.options.root, 'frontend-selection.json'), {
+          version: 1, path: artifact.path, hash: artifact.hash, releaseSha: input.releaseSha,
+        });
+        const channel = this.channelArtifacts.get('frontend');
+        if (channel) await atomicJson(join(this.options.root, 'frontend-channel.json'), channel);
       }
     }
     if (frontendChanged && this.frontendHash) {
@@ -655,25 +721,37 @@ export class ReplacementEnvironment {
 
   /** A generation's request to swap to a release artifact it downloaded; failures roll back inside the engine and are reported, not thrown. */
   private async launch(input: EnvironmentLaunchRequest): Promise<EnvironmentLaunchResponse> {
-    try {
-      if (input.target === 'omp' || input.applies.includes('omp')) {
-        throw new Error('OMP releases must be activated by the OMP process runtime');
+    return withDeploymentSqliteContext({ releaseSha: input.sha, target: input.target }, async (): Promise<EnvironmentLaunchResponse> => {
+      try {
+        if (input.target === 'omp' || input.applies.includes('omp')) {
+          throw new Error('OMP releases must be activated by the OMP process runtime');
+        }
+        if (input.target === 'machine' && process.env.GITSPACE_HOST_PID === String(process.pid)) {
+          const update = this.queue.then(() => requestMachineUpdate({ version: 1, path: input.path, hash: input.hash, releaseSha: input.sha }, this.hostUrl, this.options.controlToken));
+          this.queue = update.catch(() => undefined);
+          await update;
+          return { status: 'pending', hash: input.hash, error: null };
+        }
+        const artifact: DeploymentArtifact = {
+          entrypoint: input.entrypoint,
+          hash: input.hash,
+          path: input.path,
+          dependsOn: input.entrypoint === 'frontend' && this.machineHash ? ['machine-daemon'] : [],
+        };
+        await this.deploy({ artifacts: [artifact], releaseSha: input.sha, releaseTargets: input.applies, revision: input.sha, dirty: false });
+        this.lastLaunch = { sha: input.sha, entrypoint: input.entrypoint, target: input.target, status: 'applied', error: null };
+        return { status: 'applied', hash: input.hash, error: null };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(JSON.stringify({
+          event: 'native_replacement', machineId: this.options.machineId, operation: 'launch',
+          entrypoint: input.entrypoint, releaseSha: input.sha, target: input.target,
+          stage: 'launch', outcome: 'failure', error: deploymentSqliteErrorDetails(error),
+        }));
+        this.lastLaunch = { sha: input.sha, entrypoint: input.entrypoint, target: input.target, status: 'failed', error: message };
+        return { status: 'failed', hash: input.hash, error: message };
       }
-      const artifact: DeploymentArtifact = {
-        entrypoint: input.entrypoint,
-        hash: input.hash,
-        path: input.path,
-        dependsOn: input.entrypoint === 'frontend' && this.machineHash ? ['machine-daemon'] : [],
-      };
-      await this.deploy({ artifacts: [artifact], releaseSha: input.sha, releaseTargets: input.applies, revision: input.sha, dirty: false });
-      this.lastLaunch = { sha: input.sha, entrypoint: input.entrypoint, target: input.target, status: 'applied', error: null };
-      return { status: 'applied', hash: input.hash, error: null };
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      console.error(`[gitspace-host] launch ${input.entrypoint} ${input.sha} failed: ${message}`);
-      this.lastLaunch = { sha: input.sha, entrypoint: input.entrypoint, target: input.target, status: 'failed', error: message };
-      return { status: 'failed', hash: input.hash, error: message };
-    }
+    });
   }
 
   private channel(input: EnvironmentChannelRequest): Promise<EnvironmentLaunchResponse> {
@@ -682,6 +760,10 @@ export class ReplacementEnvironment {
       const retained = this.channelArtifacts.get(input.target);
       try {
         if (!retained) throw new Error(`No retained ${input.target} channel artifact is available`);
+        if (input.target === 'machine' && process.env.GITSPACE_HOST_PID === String(process.pid)) {
+          await requestMachineUpdate({ version: 1, path: retained.path, hash: retained.hash, releaseSha: null }, this.hostUrl, this.options.controlToken);
+          return { status: 'pending', hash: retained.hash, error: null };
+        }
         await this.replace({
           artifacts: [{ ...retained, dependsOn: input.target === 'frontend' && this.machineHash ? ['machine-daemon'] : [] }],
           releaseSha: null,
@@ -715,6 +797,7 @@ export class ReplacementEnvironment {
 
   async close(): Promise<void> {
     await this.frontend.close();
+    await this.queue;
     await this.machine.close();
     this.journal.close();
   }

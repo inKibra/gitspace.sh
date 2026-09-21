@@ -8,6 +8,44 @@ const projectEnv = env as typeof env & {
 };
 
 describe('ProjectAuthorityDO', () => {
+  it('rejects stale bootstrap and workspace publication until an archived project is explicitly restored', async () => {
+    const authority = projectEnv.PROJECT_AUTHORITY.getByName('archived-bootstrap');
+    const input = { id: 'archived-bootstrap', name: 'Archived', repositoryReference: null, baseBranch: 'main', createdBy: 'machine-a' };
+    const project = await authority.bootstrap(input);
+    const archived = await authority.setProjectLifecycle(project.revision, 'archived');
+    await expect(runInDurableObject(authority, (instance: ProjectAuthorityDO) => instance.bootstrap(input))).rejects.toThrow();
+    await expect(runInDurableObject(authority, (instance: ProjectAuthorityDO) => instance.putWorkspace({
+      id: 'stale-workspace', projectId: project.id, kind: 'worktree', name: 'Stale', branch: 'feature',
+      phase: 'code', sourceKind: 'branch', sourceRef: 'feature', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0,
+    }))).rejects.toThrow();
+    expect(await authority.getProject()).toEqual(archived);
+    expect(await authority.listWorkspaces()).toEqual([]);
+    const restored = await authority.setProjectLifecycle(archived.revision, 'active');
+    expect(await authority.bootstrap(input)).toEqual(restored);
+  });
+
+  it('keeps a deleted project absent when a pre-delete bootstrap reply reaches the directory late', async () => {
+    const authority = projectEnv.PROJECT_AUTHORITY.getByName('deleted-bootstrap');
+    const index = projectEnv.USER_PROJECTS.getByName('deleted-bootstrap');
+    const input = { id: 'deleted-bootstrap', name: 'Deleted', repositoryReference: null, baseBranch: 'main', createdBy: 'machine-a' };
+    const delayedBootstrap = await authority.bootstrap(input);
+    await index.put(delayedBootstrap);
+    await index.putWorkspaceLocation('deleted-workspace', input.id);
+    const deleted = await authority.deleteProject(delayedBootstrap.revision);
+    await index.remove(input.id);
+    await expect(runInDurableObject(index, (instance: UserProjectIndexDO) => instance.put(delayedBootstrap))).rejects.toThrow();
+    await expect(runInDurableObject(index, (instance: UserProjectIndexDO) => instance.put(deleted))).rejects.toThrow();
+    await expect(runInDurableObject(index, (instance: UserProjectIndexDO) => instance.putWorkspaceLocation('deleted-workspace', input.id))).rejects.toThrow();
+    await expect(runInDurableObject(authority, (instance: ProjectAuthorityDO) => instance.bootstrap(input))).rejects.toThrow();
+    await expect(runInDurableObject(authority, (instance: ProjectAuthorityDO) => instance.setProjectLifecycle(deleted.revision, 'active'))).rejects.toThrow();
+    expect(await index.list()).toEqual([]);
+    expect(await index.locateWorkspace('deleted-workspace')).toBeNull();
+    expect(await authority.getProject()).toEqual(deleted);
+    const replacement = await projectEnv.PROJECT_AUTHORITY.getByName('replacement-project').bootstrap({ ...input, id: 'replacement-project' });
+    await index.put(replacement);
+    expect(await index.list()).toEqual([expect.objectContaining({ id: replacement.id })]);
+  });
+
   it('owns canonical project and workspace definitions with optimistic revisions', async () => {
     const stub = projectEnv.PROJECT_AUTHORITY.getByName('project-definitions');
     const project = await runInDurableObject(stub, (authority: ProjectAuthorityDO) => authority.bootstrap({

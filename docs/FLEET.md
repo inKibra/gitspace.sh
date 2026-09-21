@@ -189,11 +189,24 @@ and propose configuration. Human approval to edit is separate from approval
 to execute. Explicit setup enables approved automatic local preparation.
 Content approval authorizes repository code as the machine user, not a sandbox.
 
-Close and move drain services, dematerialize, publish a checkpoint, and then
-delete only the managed checkout. A failed dematerialization or checkpoint
-blocks deletion, not access. Ignored files and machine-local packages are
-disposable and must be recreated on arrival. Neither eviction nor archive
-authorizes cloud destruction.
+Close and move drain services, dematerialize, and publish the complete Git,
+conversation, artifact, and manifest checkpoint before releasing cloud ownership.
+Only after that commit does the source remove its checkout, agent/runtime files,
+and workspace database rows. It removes project caches and rows only when no
+local sibling needs them. A failed checkpoint leaves local state intact.
+
+A committed close leaves no recoverable local workspace. Cleanup errors leave a
+durable retry record, separate from workspace and project rows. Startup and Close
+retries finish that work. If the commit reply was lost, cleanup requires a cloud
+receipt matching the exact checkpoint revision, manifest key, and hash; an older
+checkpoint cannot authorize deletion. An unresolved result blocks local recovery.
+Archive and reopen use cloud definitions and checkpoints, even with no local rows.
+Startup cannot recreate deleted projects or unarchive cloud workspace definitions.
+Same-machine native runtime replacement preserves owned workspaces instead of
+running destructive Close.
+
+Ignored files and machine-local packages are disposable and must be recreated on
+arrival. Neither eviction nor archive authorizes cloud destruction.
 
 Cloud phases run on an authorized machine, not arbitrary shell in a Worker.
 Bindings hold non-secret IDs or URLs, or named secret references. They live
@@ -381,19 +394,30 @@ before execution; there is no silent legacy alias.
   peer navigation.
 - Machine bootstrap creates metadata and placements only; it never creates an
   agent. Code-generation replacement persists live sessions with
-  `stopForRestart(close=false)`, and the successor recovers only
-  opening/active/draining rows with a positive-generation open placement owned
-  by that machine. Recovery rechecks ownership after opening the OMP child.
-  Closed, failed, absent, and remotely held agents remain stopped.
-  `space.open` is the sole ensure-live operation, including when placement is
-  already local but its canonical agent has not started.
-- Mid-turn replacement drains the current OMP run, persists a
-  `resume_pending` fence, and lets the successor call `Agent.continue()` from
-  the persisted user tail. The fence remains set until continuation settles;
-  a second crash therefore retries rather than silently declaring the turn
-  complete.
-  A cancelled partial assistant response resumes through OMP's manual-continue
-  prompt rather than calling `Agent.continue()` on an assistant tail.
+  `stopForRestart(close=false)`. The successor recovers opening/active/draining
+  rows, plus failed rows with an outstanding `resume_pending` obligation. Each
+  must have a positive-generation open placement owned by this machine.
+  Cleanup receipts, Close, and remote ownership block recovery. Ordinary task
+  failures without a resume obligation do not retry user work.
+  `space.reopen` also repairs an agent within existing ownership, without a
+  repository restore or a new canonical session. The backend checks cloud
+  ownership; manual and automatic recovery share the same opening claim.
+- `resume_pending` means recovery is required, not running. The existing recovery
+  health operation records its attempt ID, runtime ID, machine, workspace
+  generation, deadline, and terminal outcome. An attempt has 30 seconds to attach
+  the canonical session and accept continuation, including an idle result.
+  Automatic recovery tries once per session and generation in each runtime.
+  A failed or expired attempt exposes Retry. Its successor must wait until the
+  old worker exits. Late completion cannot settle a newer operation.
+- Mid-turn replacement records draining and the resume obligation before
+  calling OMP's existing internal handoff. That interruption flushes the session
+  and is not a task failure. Persistence waits for an in-flight OMP migration
+  before checking worker availability; genuine persistence errors keep their
+  operation stage and cause. Recovery uses OMP's continuation mechanism, never
+  resends the last user request, and preserves both canonical and OMP identities.
+  Controls return when the recovered session is usable. The UI shows Recovering
+  only for a matching, unexpired attempt; an unclaimed obligation does not hide
+  Retry, and deadline expiry clears progress without waiting for another event.
 - No global top bar. The left app panel owns navigation, search, projects,
   inbox, settings, and active work. The project row is the base-project agent;
   its separately toggled, indented children are workspace agents. Agent focus
@@ -410,15 +434,25 @@ before execution; there is no silent legacy alias.
   inspectable while running children update without polling in the browser.
   Workspace action menus render through a fixed body portal so neither the
   inspector nor the left panel can clip them.
-- Port the 0.x activity system as one truth, not lifecycle inference. Activity
-  reasons are ordered turn, compacting/retry, human, queued steering/follow-up,
-  and live subagents. Human wait renders permission orange; turn or compaction
-  renders green; queued or subagent-only debt stays waiting blue rather than
-  pretending the main agent is executing; actionable retry is red;
-  closed/dormant/archived contribute nothing. Workspace precedence remains
-  orange, green, blue, red, dim. Current workspace sorts first, then orange/red,
-  blue, green; other dim workspaces stay hidden. Visual color tables remain
-  exhaustive and consume this one projection.
+- Agent activity has one shared projection. Turns, compaction, queued messages,
+  and work still owed by subagents render green. Compaction keeps the green
+  pulse and shows its detail; reduced-motion settings disable the pulse.
+  An actionable question or permission request renders orange. Execution
+  failures and retries render red even when an older question remains.
+  Idle agents render blue; closed, dormant, and archived agents contribute
+  nothing. Agent precedence is red, orange, green, blue, then dim; service and
+  terminal failures render red when there is no active agent state.
+  The header and sidebar use the same status, holder, and freshness rules.
+  Current workspace sorts first, then orange/red, blue, green; other dim
+  workspaces stay hidden.
+- Inspector file listings have no silent file or directory count cap.
+  Comparisons distinguish current files, unstaged changes (index to worktree),
+  staged changes (HEAD to index), and all changes since base (merge base to
+  worktree). Comparison listings include added, deleted, and renamed paths.
+  File and Change Guide comments anchor to the displayed content's blob and
+  comparison, not an assumed HEAD blob. Comments on other or unverified content
+  remain available separately. Failed writes retain the draft and show an
+  error; replies and resolution use the current thread revision.
 - `packages/blocks` owns a stable reducer and schema: first-class turns,
   messages, thinking, tool calls/groups, distinct ask and permission blocks,
   todos, nested side agents/reports, interruptions, coalesced transport state,
@@ -524,8 +558,48 @@ before execution; there is no silent legacy alias.
   Existing checkpoint, health gate, pointer commit and rollback mechanics
   preserve state on failed activation. Native distribution/bootstrap and cloud
   images no longer supply a fixed global WalGit path.
-- First upgrade from a host whose launcher predates native packaging uses the
-  product recovery command **before replacing the host/image**:
+- A machine artifact includes `machine.js`, `machine-worker.js`, native assets,
+  migrations, `host-runtime.js`, `machine-update.js`, and `machine-bootstrap.js`.
+  The executable manifest covers the whole application. Normal source launch
+  starts the candidate's temporary updater, which survives the old host's exit.
+  It retires and drains the old machine, checkpoints runtime and deployment
+  databases, starts the complete replacement, and checks health before commit.
+  Application requests and agent recovery wait until the update commits.
+  The machine stops event producers before flushing its cloud outbox, so active
+  sessions cannot keep the shutdown queue growing.
+- `machine-update.json` records the handoff and checkpoint boundary;
+  `host-selection.json` selects the complete application for the next start.
+  Bootstrap resumes an interrupted update. Failed activation stops the candidate
+  before restoring its predecessor and database checkpoint. Process-owned locks
+  prevent two hosts or updaters from writing at once. The updater exits after
+  activation or rollback; it is not a permanent service.
+- The first upgrade authenticates the old parent process before handing off.
+  Native installations retain their original distribution bytes and select a
+  derived bootstrap that loads the committed application. Provider installations
+  update their writable bootstub. Channel builds without complete-host files
+  fail before drain; GitSpace does not mix a new host with an old machine and
+  report that combination as the channel. The cloud Worker deployer is unchanged.
+- Deployment SQLite failures emit `deployment_sqlite_failure` JSON to host
+  stderr, not to SQLite. The journal, legacy-journal migration, and runtime
+  snapshot connections label each SQL operation. Events include deployment,
+  release, target, attempt, and phase when available, plus PID, connection ID,
+  elapsed time, database paths and file identities, cached journal mode and
+  busy timeout, transaction state, and bounded error stack/cause/code fields.
+  SQL text, bindings, and row contents are not part of the event payload.
+- For `SQLITE_BUSY` or `SQLITE_LOCKED`, the event also includes the last 64
+  instrumented operation/transaction events and up to 64 active transaction
+  records from that process. Transaction boundaries come from the actual
+  SQLite transaction callback and its completion. This is evidence of overlap,
+  not proof of which transaction holds the lock; other processes and
+  uninstrumented connections are outside its scope. File identities and PRAGMA
+  settings are captured at open or explicit refresh, not queried on failure.
+- To investigate contention, use `gitspace machine status` to locate the host
+  log. Retain the failure event and matching `native_replacement` records,
+  including the host version and release. Compare connection IDs and database
+  device/inode identities before inferring a shared database. The diagnostics
+  do not change busy timeouts, retries, transaction modes, or activation rules.
+  A complete machine release now updates this host instrumentation too.
+- If an old launcher cannot build the required source release, use:
   `gitspace machine recover --source <held-GitSpace-checkout> --workspace <id>`.
   From this source checkout the same CLI is
   `bun packages/cli/src/index.ts machine recover --source <checkout> --workspace <id>`.
@@ -536,9 +610,9 @@ before execution; there is no silent legacy alias.
   persistent initialization), closes that reader, and invokes the same
   `DeploymentLauncher` transaction. It emits ordinary account project
   deployment progress, stages/launches only the selected source's `machine`
-  target, and waits for the existing host's applied/failed health report.
-  It never rewrites runtime/host selection, stops the host, launches an internal
-  replacement directly, or substitutes stock code for selected tenant code.
+  target, and waits for the complete machine's applied/failed health report.
+  The command stages account selection; the candidate updater performs the
+  host handoff. It does not substitute stock code for selected tenant code.
   Failure leaves the predecessor under the existing rollback contract. For
   this initial build, use real compilation prerequisites or the maintained
   verified cache; the old image's unverified global binary is not reused.
@@ -546,17 +620,73 @@ before execution; there is no silent legacy alias.
   selected source checkout on every build. Packaging changes and transitive
   source edits no longer depend on the launcher's compiled builder version or
   module cache. Install/build/upload/stage/launch and project progress remain
-  one account-managed operation. After recovery succeeds, ordinary **Launch
-  GitSpace from here** uses this path, and the host/image can be upgraded through
-  its supported publication/replacement flow. Missing native contracts still
-  fail closed if this prerequisite recovery is skipped; there is no indefinite
-  legacy-binary shim, stock-code fallback, or implicit storage migration.
+  one account-managed operation. Ordinary **Launch GitSpace from here** uses
+  this path and updates host activation code with the machine application.
+  Missing native contracts fail closed; there is no indefinite legacy-binary
+  shim, stock-code fallback, or implicit storage migration.
+- Machine-only recovery builds the entire selected checkout, including pending
+  protocol edits; it does not isolate the change that motivated recovery.
+  Passing the machine health gate does not prove browser wire compatibility.
+  Before selecting only `machine`, check shared RPC/schema changes against the
+  deployed frontend and worker. Breaking shared-contract changes require a
+  coordinated frontend, worker, and machine rollout, not machine-only recovery.
+- Custom `wire.serializable` codec identities participate in the RPC contract
+  digest; their validation functions do not. Extending a strict schema breaks
+  older readers even when the new field is optional. Recovery `attempt` evidence
+  therefore uses `gitspace/agent-health/v2`. Keep that evidence and strict
+  validation intact. A differing digest lets result-rpc classify an incompatible
+  unary response as `client/stale` rather than an unexplained
+  `client/decode-failure`; stream handshakes require matching digests.
+  Repository diff side identities use `gitspace/repository-diff-view/v2`.
+  Each file carries nullable `oldBlobId` and `newBlobId`; a missing identity
+  stays unknown rather than borrowing HEAD. This strict schema change also
+  requires a coordinated frontend, worker, and machine rollout.
+  New frontend source alone does not update served assets. Publish compatible
+  targets through an authorized rollout, verify the served bundle and target
+  contract versions, then reload the browser. Reloading an unchanged bundle
+  cannot repair a schema mismatch. Source preparation is not deployment
+  authorization, and client skew is not a reason to restart a healthy agent.
+- Machine immutable object uploads check signed `data.head` metadata before each
+  PUT. An existing object is reused only when both its SHA-256 and byte length
+  match; missing or conflicting metadata fails closed. A 404 proceeds to PUT.
+  This also recovers a PUT that committed before its response connection broke,
+  and lets a subsequent launch reuse completed chunks without retransmitting them.
+  Uploads have ten attempt cycles total, with exponential backoff starting at
+  250 ms and capped at five seconds. HEAD and PUT each use a fresh signed nonce.
+  Only transient transport/HTTP failures are retried; authentication, certificate,
+  integrity, and immutable-conflict failures remain fatal. Chunk sizes and the
+  manifest format are unchanged, and the manifest is still published last.
+- Machine `data.head` checks and actual `data.put` requests emit
+  `artifact_sync_request` start and completion records, including uploads outside
+  artifact synchronization. `uploadId` groups retries of one object;
+  `requestId` is each request's signed
+  nonce. Records include `objectKey`, `byteCount`, `attempt`, `maxAttempts`, and
+  `targetOrigin`, plus status and Cloudflare Ray ID when available.
+  `elapsedMs` measures the attempt; `responseHeadersMs` measures the fetch call
+  through receipt of response headers, not separate DNS, TCP, or TLS timing.
+  A reset before headers has no `responseHeadersMs`. Signed headers, payloads,
+  credentials, and raw error messages are not logged. These records come from
+  the running uploader: changing source alone does not instrument an existing
+  daemon. Use the source-recovery command above to bootstrap this uploader when
+  the running daemon still uses the older upload policy.
 - Shared S3 configuration uses a 64 MiB threshold and 16 MiB parts, with two
   concurrent part uploads. Immutable creates use `If-None-Match: *` on multipart
   completion; CAS updates remain conditional single PUTs. Qualify conditional
   completion against each deployed S3-compatible backend. Container publication
   runs `/opt/gitspace/probe-image.js`, which authenticates the initial machine
   tree and checks its selected WalGit and OMP. Publication does not activate it.
+- The maintained WalGit patch reports failed multipart part number, byte count,
+  and elapsed SDK-call time (including SDK retries). Transport diagnostics expose
+  connector categories, typed I/O kinds and OS codes, and fixed labels for known
+  TLS, DNS, and connection failures. Unknown causes are redacted; source-chain
+  depth and inspected message prefixes are bounded. Request URLs, credentials,
+  upload IDs, and raw SDK request/response dumps are not included. The SDK error
+  does not expose an executed-attempt count, so none is reported.
+- Publisher fan-out preserves the original error category: a retryable upload
+  failure remains retryable rather than becoming a corruption error. This does
+  not add upload retries or change multipart sizes. These diagnostics require a
+  machine release containing the updated patch; source changes alone do not
+  update a running WalGit process or recover causes discarded by older binaries.
 - Cloud cards show exact ownership/cost/trust facts: deployment target,
   account/platform owner, relay artifact hash, RelayDO migration, R2 encryption
   state, hosted credit reserve, and whether tunnel traffic is plaintext at
@@ -789,25 +919,42 @@ hosted:     dispatch Worker → same relay artifact as WfP User Worker
   OMP 18 + commit `b972282` implement the first skinny-event cut.
 - Browser relay uses a per-workspace capability grant and OMP’s global broker.
   Logged-in browser access is never ambient.
-- Browser RPC stays on result-rpc's native transport: batched HTTP requests for
-  queries/mutations and exactly one replayable streaming-HTTP fact subscription
-  per browser↔machine connection. Components share its cache; they never open
-  subscriptions. The committed SQLite event log is the queue: bounded pages and
-  explicit offsets prevent per-client memory backlogs. result-rpc 0.5 documents
-  `.resumable()` but omits it from the browser-safe contract builder, so the
-  first implementation reconnects with an explicit `afterOffset` and dedupes by
-  monotonic offset. Replace that input with native resumability when the
-  contract API actually exposes it.
+- Browser RPC stays on result-rpc's native transport for queries, mutations,
+  and active-pane streams. One synchronization owner shares each resource
+  channel; components subscribe to its cache rather than opening transports.
+  Committed SQLite change logs provide monotonic cursors, bounded retention,
+  replay, and explicit resynchronization when a cursor is expired or ahead.
+  Private DO watches return an owned `{ stream, lifetime }` RPC result;
+  consumers dispose the entire result, not just the byte reader. The explicit
+  `RpcTarget` lifetime removes the idle producer's listener and settles its
+  pending pull. Byte-stream cancellation alone does not reliably do this
+  across RPC. Platform and tenant Workers enable `enable_request_signal` and
+  `request_signal_passthrough` so HTTP disconnects also reach stream consumers.
+- The sidebar shares one `account-directory` channel for projects, machines,
+  workspace definitions, and placements. `GET /v1/directory/events` uses a
+  signed, origin-checked WebSocket accepted through `ctx.acceptWebSocket` in
+  the existing `UserProjectIndexDO`. Its snapshot/change envelopes contain the
+  compact account projection, not workspace contents or transcript payloads.
+  Project, space, and fleet authorities publish through transactional,
+  coalescing durable outboxes. Retry/delivery alarms exist only while work is
+  pending; the directory never holds source HTTP watches or polls idle sources.
+  One-time hydration and subsequent publications are source-cursor fenced;
+  deletion tombstones prevent late native state from resurrecting removed rows.
+  Reconnect replays the durable cursor or explicitly resynchronizes. Grant
+  chains, revocation, and account availability are rechecked before disclosure.
+  Native sidebar enrichment is a finite read for changed projects/holders;
+  late responses must still match the current holder and space generation.
 - Local HTTP goes directly to the machine. Remote HTTP/streaming HTTP is
   tunneled through RelayDO over the machine's required outbound WebSocket.
   An `e2eFetch` wrapper encrypts ordered request/response stream records with
   the browser↔machine session key, so RelayDO routes opaque bytes while
   result-rpc still sees ordinary Fetch requests and responses.
-- WebSockets are on-demand interactive transports, not the application RPC:
-  terminal, CDP/browser control, service WebSockets, and the machine's outbound
-  NAT tunnel. Static assets, RPC, transcript ranges, and artifact bytes use
-  HTTP. Fact queues are bounded/coalesced; overflow closes with an explicit
-  resync requirement rather than accumulating memory.
+- WebSockets carry interactive transports and hibernating push channels, not
+  application RPC calls: terminal, CDP/browser control, service WebSockets, the
+  account directory, and the machine's outbound NAT tunnel. Static assets,
+  RPC, transcript ranges, and artifact bytes use HTTP. Fact queues are
+  bounded/coalesced; overflow closes with an explicit resync requirement
+  rather than accumulating memory.
 - ReflectDB is deferred. Possession deliberately prevents ambient multi-master
   writes; result-rpc subscriptions/cache cover current live-state needs.
   Reconsider offline sync only for low-risk personal UI state such as notes,

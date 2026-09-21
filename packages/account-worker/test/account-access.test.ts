@@ -145,6 +145,11 @@ describe('account lifecycle authorization', () => {
 
   it('fences only the image operation machine and its recovering spaces while retaining control reads', async () => {
     const a = await account();
+    const authority = env.PROJECT_AUTHORITY.getByName(`${a.userId}:project`);
+    await authority.bootstrap({ id: 'project', name: 'Project', repositoryReference: null, baseBranch: 'main', createdBy: 'machine' });
+    for (const spaceId of ['new-space', 'unrelated-space', 'recovering-space']) {
+      await authority.putWorkspace({ id: spaceId, projectId: 'project', kind: 'worktree', name: spaceId, branch: 'main', phase: null, sourceKind: 'branch', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0 });
+    }
     const catalog = env.FLEET_CATALOG.getByName(a.userId);
     const image = `ghcr.io/tenant/image@sha256:${'a'.repeat(64)}`;
     await catalog.saveCloudImage({ machineId: 'machine', currentImage: image, desiredImage: image, selection: { kind: 'custom', image }, operation: { id: crypto.randomUUID(), phase: 'checkpointing', barrier: true, startedAt: Date.now(), updatedAt: Date.now(), error: null, resumeSpaceIds: ['recovering-space'] } });
@@ -170,6 +175,9 @@ describe('account lifecycle authorization', () => {
   it('binds space ownership to the signing machine rather than a payload impersonation', async () => {
     const a = await account();
     const spaceId = `signed-space-${crypto.randomUUID()}`;
+    const authority = env.PROJECT_AUTHORITY.getByName(`${a.userId}:project`);
+    await authority.bootstrap({ id: 'project', name: 'Project', repositoryReference: null, baseBranch: 'main', createdBy: 'machine' });
+    await authority.putWorkspace({ id: spaceId, projectId: 'project', kind: 'worktree', name: spaceId, branch: 'main', phase: null, sourceKind: 'branch', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0 });
     const response = await SELF.fetch('https://auth.test/v1/control', {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify(a.signed('space.bootstrap', { projectId: 'project', spaceId, machineId: 'impersonated-machine' })),

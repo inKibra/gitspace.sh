@@ -493,6 +493,8 @@ export type RepositoryFileView = z.infer<typeof repositoryFileViewSchema>;
 export const repositoryDiffFileSchema = z.object({
   path: repositoryPathSchema,
   oldPath: repositoryPathSchema.nullable(),
+  oldBlobId: gitObjectIdSchema.nullable(),
+  newBlobId: gitObjectIdSchema.nullable(),
   status: repositoryStatusSchema,
   additions: z.number().int().nonnegative().nullable(),
   deletions: z.number().int().nonnegative().nullable(),
@@ -631,7 +633,7 @@ export const ChangeGuideViewCodec = asWireCodec(changeGuideViewSchema, 'gitspace
 export const RepositoryTreeEntryCodec = asWireCodec(repositoryTreeEntrySchema, 'gitspace/repository-tree-entry/v1');
 export const RepositoryStatusEntryCodec = asWireCodec(repositoryStatusEntrySchema, 'gitspace/repository-status-entry/v1');
 export const RepositoryFileViewCodec = asWireCodec(repositoryFileViewSchema, 'gitspace/repository-file-view/v1');
-export const RepositoryDiffViewCodec = asWireCodec(repositoryDiffViewSchema, 'gitspace/repository-diff-view/v1');
+export const RepositoryDiffViewCodec = asWireCodec(repositoryDiffViewSchema, 'gitspace/repository-diff-view/v2');
 export const ReviewThreadViewCodec = asWireCodec(reviewThreadViewSchema, 'gitspace/review-thread-view/v1');
 export const ServiceViewCodec = asWireCodec(serviceViewSchema, 'gitspace/service-view/v1');
 export const ChangeGuideWorksheetCodec = asWireCodec(changeGuideWorksheetSchema, 'gitspace/change-guide-worksheet/v1');

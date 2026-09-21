@@ -1,5 +1,5 @@
 import { DurableObject } from 'cloudflare:workers';
-import { cloudWorkspaceDefinitionSchema, GITSPACE_SOURCE_PROJECT_ROLE, GITSPACE_SOURCE_REPOSITORY, isGitSpaceSourceRepository, type GitSpaceSourceProvenance } from '@gitspace/protocol';
+import { cloudWorkspaceDefinitionSchema, GITSPACE_SOURCE_PROJECT_ROLE, GITSPACE_SOURCE_REPOSITORY, isGitSpaceSourceRepository, RPC_DEVICE_HEADER, type GitSpaceSourceProvenance } from '@gitspace/protocol';
 import { AgentHealthStateSchema, SessionActivitySchema } from '@gitspace/protocol-agent';
 import type {
   ArtifactCopyRecord,
@@ -18,7 +18,23 @@ import type {
 } from '@gitspace/protocol';
 import { ProjectEnvironmentStore } from './project-environment.js';
 import { LifecycleMutationSchema, environmentFailure, type LifecycleActor, type EnvironmentFailure, type LifecycleMutation, type LifecycleState, type LifecycleRunLog } from '@gitspace/protocol-environment';
-import { DurableChangeLog } from './durable-stream.js';
+import { DurableChangeLog, type DurableStreamSubscription } from './durable-stream.js';
+import { AccountDirectoryProjection, DirectoryOutbox, directoryPublicationSchema, type DirectoryPublication } from './account-directory.js';
+import type { AccountDirectorySnapshot } from '@gitspace/protocol/account-directory';
+import { streamCursorSchema } from '@gitspace/protocol-sync';
+import { activeAccount, accountAccessResponse } from './account-access.js';
+import type { CredentialVaultDO } from './application.js';
+import type { SpaceAuthorityDO } from './space-authority.js';
+import type { FleetCatalogDO } from './fleet-catalog.js';
+
+interface DirectorySocketAttachment {
+  version: 1;
+  userId: string;
+  header: string | null;
+  target: string;
+  cursor: number | null;
+  initial: boolean;
+}
 
 interface ProjectIndexRow extends Record<string, SqlStorageValue> {
   project_id: string;
@@ -282,9 +298,14 @@ function projectMcpGrant(row: ProjectMcpGrantRow): ProjectMcpGrant {
 
 export class UserProjectIndexDO extends DurableObject<Env> {
   private readonly changes: DurableChangeLog;
+  private readonly directory: AccountDirectoryProjection;
+  private hydration: Promise<void> | null = null;
+  private committing = false;
+  private readonly socketDeliveries = new WeakMap<WebSocket, Promise<void>>();
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.changes = new DurableChangeLog(ctx.storage);
+    this.directory = new AccountDirectoryProjection(ctx.storage);
     ctx.blockConcurrencyWhile(async () => {
       this.ctx.storage.sql.exec(`
         CREATE TABLE IF NOT EXISTS user_projects(
@@ -301,6 +322,7 @@ export class UserProjectIndexDO extends DurableObject<Env> {
           workspace_id TEXT PRIMARY KEY,
           project_id TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS deleted_projects(project_id TEXT PRIMARY KEY);
         CREATE TABLE IF NOT EXISTS environment_values(name TEXT PRIMARY KEY,value TEXT NOT NULL);
       `);
       for (const column of ['role TEXT', 'source_json TEXT']) {
@@ -311,17 +333,171 @@ export class UserProjectIndexDO extends DurableObject<Env> {
     });
   }
 
-  watch(after: number | null): ReadableStream<Uint8Array> {
+  watch(after: number | null): DurableStreamSubscription {
     return this.changes.watch('projects', after, () => this.list());
   }
   private commit<T>(mutate: () => T): T {
+    if (this.committing) return mutate();
     const result = this.ctx.storage.transactionSync(() => {
-      const value = mutate();
-      this.changes.append('projects', this.list());
-      return value;
+      this.committing = true;
+      try {
+        const value = mutate();
+        this.changes.append('projects', this.list());
+        this.changes.append('account-directory', this.directory.snapshot(this.list()));
+        return value;
+      } finally { this.committing = false; }
     });
     this.changes.wake();
+    this.broadcastDirectory();
     return result;
+  }
+
+  publishDirectory(input: DirectoryPublication): boolean {
+    const publication = directoryPublicationSchema.parse(input);
+    const accepted = this.ctx.storage.transactionSync(() => {
+      if (!this.directory.apply(publication)) return false;
+      this.committing = true;
+      try {
+        if (publication.source === 'project') {
+          const project = publication.project;
+          const deleted = this.ctx.storage.sql.exec('SELECT project_id FROM deleted_projects WHERE project_id=?', project.id).toArray().length > 0;
+          if (!deleted) {
+            if (project.lifecycle === 'deleting') this.remove(project.id);
+            else {
+              const current = this.list().find((candidate) => candidate.id === project.id);
+              if (!current || project.revision > current.revision) this.put(project);
+              this.ctx.storage.sql.exec('DELETE FROM workspace_projects WHERE project_id=?', project.id);
+              for (const workspace of publication.workspaces) {
+                if (workspace.projectId !== project.id) throw new Error('Directory workspace project mismatch');
+                this.putWorkspaceLocation(workspace.id, project.id);
+              }
+            }
+            this.changes.append('projects', this.list());
+          }
+        }
+        this.changes.append('account-directory', this.directory.snapshot(this.list()));
+        return true;
+      } finally { this.committing = false; }
+    });
+    if (accepted) { this.changes.wake(); this.broadcastDirectory(); }
+    return accepted;
+  }
+
+  async directorySnapshot(): Promise<AccountDirectorySnapshot> {
+    await this.hydrateDirectory();
+    return this.directory.snapshot(this.list());
+  }
+
+  private async hydrateDirectory(): Promise<void> {
+    if (this.directory.hydrated()) return;
+    if (!this.hydration) {
+      this.hydration = (async () => {
+        // Only a one-time migration read, never an authority subscription.
+        const projects = this.list();
+        await Promise.all(projects.map(async (project) => {
+          const publication = await (this.env.PROJECT_AUTHORITY as DurableObjectNamespace<ProjectAuthorityDO>)
+            .getByName(`${this.env.ACCOUNT_ID}:${project.id}`).directoryPublication();
+          if (!publication) return;
+          this.publishDirectory(publication);
+          await Promise.all(publication.workspaces.map(async (workspace) => {
+            const placement = await (this.env.SPACE_AUTHORITY as DurableObjectNamespace<SpaceAuthorityDO>)
+              .getByName(`${this.env.ACCOUNT_ID}:${workspace.id}`).directoryPublication();
+            if (placement) this.publishDirectory(placement);
+          }));
+        }));
+        this.publishDirectory(await (this.env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>)
+          .getByName(this.env.ACCOUNT_ID).directoryPublication());
+        this.directory.finishHydration();
+      })().finally(() => { this.hydration = null; });
+    }
+    await this.hydration;
+  }
+
+  async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    const error = (code: string, message: string, status: number) => Response.json({ status: 'error', error: { code, message } }, { status, headers: { 'cache-control': 'private, no-store' } });
+    if (url.pathname !== '/v1/directory/events') return error('NOT_FOUND', 'Unknown directory endpoint', 404);
+    if (request.method !== 'GET') return error('METHOD_NOT_ALLOWED', 'Directory events require GET', 405);
+    const upgrading = request.headers.get('upgrade')?.toLowerCase() === 'websocket';
+    const origin = request.headers.get('origin');
+    if ((upgrading || origin !== null) && origin !== new URL(this.env.ACCOUNT_URL).origin) return error('ORIGIN_REJECTED', 'Directory origin does not own this tenant', 403);
+    const after = url.searchParams.get('after');
+    if ((after !== null && (!/^(0|[1-9][0-9]*)$/u.test(after) || !streamCursorSchema.safeParse(Number(after)).success))
+      || url.searchParams.getAll('after').length > 1 || url.searchParams.getAll('auth').length > 1 || (upgrading && url.searchParams.getAll('auth').length !== 1)) {
+      return error('INVALID_DIRECTORY_REQUEST', 'Directory cursor or authorization is invalid', 400);
+    }
+    const header = url.searchParams.get('auth') ?? request.headers.get(RPC_DEVICE_HEADER);
+    url.searchParams.delete('auth');
+    const target = url.pathname + url.search;
+    const vault = (this.env.CREDENTIALS as DurableObjectNamespace<CredentialVaultDO>).getByName(this.env.ACCOUNT_ID);
+    const authorized = await vault.authorizeDirectorySubscription({ header, target }, true);
+    if (authorized.status === 'error') return error(authorized.error.code, authorized.error.message, 401);
+    const denied = accountAccessResponse(await activeAccount(this.env, this.env.ACCOUNT_ID));
+    if (denied) return denied;
+    if (!upgrading) return error('UPGRADE_REQUIRED', 'Expected WebSocket', 426);
+    await this.hydrateDirectory();
+    const [client, server] = Object.values(new WebSocketPair());
+    this.ctx.acceptWebSocket(server);
+    server.serializeAttachment({ version: 1, userId: this.env.ACCOUNT_ID, header, target, cursor: after === null ? null : Number(after), initial: true } satisfies DirectorySocketAttachment);
+    await this.deliverDirectory(server);
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
+  async webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): Promise<void> {
+    // Client messages are only wake/replay requests; identity and cursor are server-owned.
+    if (message !== 'ping') { socket.close(1003, 'Unsupported directory message'); return; }
+    await this.deliverDirectory(socket);
+  }
+
+  webSocketClose(socket: WebSocket): void { socket.close(); }
+  webSocketError(socket: WebSocket): void { socket.close(1011, 'Directory socket failed'); }
+
+  private broadcastDirectory(): void {
+    if (!this.ctx.getWebSockets().length) return;
+    // This write is coalesced with the projection commit, before any network await.
+    const armed = this.ctx.storage.setAlarm(Date.now() + 1_000);
+    this.ctx.waitUntil(armed.then(() => this.alarm()));
+  }
+
+  async alarm(): Promise<void> {
+    await Promise.all(this.ctx.getWebSockets().map((socket) => this.deliverDirectory(socket)));
+    const head = this.changes.head('account-directory');
+    const pending = this.ctx.getWebSockets().some((socket) => {
+      if (socket.readyState !== WebSocket.OPEN) return false;
+      const attachment = socket.deserializeAttachment() as DirectorySocketAttachment | null;
+      return attachment?.initial || attachment?.cursor !== head;
+    });
+    if (pending) await this.ctx.storage.setAlarm(Date.now() + 1_000);
+    else await this.ctx.storage.deleteAlarm();
+  }
+
+  private deliverDirectory(socket: WebSocket): Promise<void> {
+    const previous = this.socketDeliveries.get(socket) ?? Promise.resolve();
+    const delivery = previous.then(async () => {
+      try {
+        const attachment = socket.deserializeAttachment() as DirectorySocketAttachment | null;
+        if (!attachment || attachment.version !== 1 || attachment.userId !== this.env.ACCOUNT_ID) { socket.close(4401, 'RPC_DEVICE_UNKNOWN'); return; }
+        const account = await activeAccount(this.env, attachment.userId);
+        if (account.status === 'error') {
+          socket.close(account.error.code === 'ACCOUNT_AUTHORITY_UNAVAILABLE' ? 1013 : 1008, account.error.code);
+          return;
+        }
+        const authorized = await (this.env.CREDENTIALS as DurableObjectNamespace<CredentialVaultDO>).getByName(attachment.userId)
+          .authorizeDirectorySubscription({ header: attachment.header, target: attachment.target }, false);
+        if (authorized.status === 'error') { socket.close(4401, 'RPC_DEVICE_UNKNOWN'); return; }
+        const events = this.changes.replay('account-directory', attachment.cursor, () => this.directory.snapshot(this.list()), attachment.initial);
+        for (const event of events) {
+          socket.send(JSON.stringify(event));
+          attachment.cursor = event.cursor;
+          attachment.initial = false;
+          socket.serializeAttachment(attachment);
+        }
+      } catch {
+        try { socket.close(1013, 'Directory authority unavailable'); } catch { /* Already closed. */ }
+      }
+    });
+    this.socketDeliveries.set(socket, delivery);
+    return delivery;
   }
 
   list(lifecycle?: 'active' | 'archived'): CloudProjectSummary[] {
@@ -368,6 +544,9 @@ export class UserProjectIndexDO extends DurableObject<Env> {
 
   put(input: CloudProjectSummary): CloudProjectSummary {
     return this.commit(() => {
+    if (this.ctx.storage.sql.exec('SELECT project_id FROM deleted_projects WHERE project_id=?', input.id).toArray().length > 0) {
+      throw new Error('Deleted project identity cannot be republished');
+    }
     const existing = this.list().find((project) => project.id === input.id);
     if ((existing?.role === GITSPACE_SOURCE_PROJECT_ROLE || input.role === GITSPACE_SOURCE_PROJECT_ROLE)
       && input.lifecycle !== 'active' && input.lifecycle !== 'cloud-only') throw new Error('The built-in GitSpace project cannot be archived or deleted');
@@ -408,6 +587,8 @@ export class UserProjectIndexDO extends DurableObject<Env> {
     return this.commit(() => {
     const project = this.list().find((candidate) => candidate.id === projectId);
     if (project?.role === GITSPACE_SOURCE_PROJECT_ROLE) throw new Error('The built-in GitSpace project cannot be removed. Close its workspaces instead.');
+    this.ctx.storage.sql.exec('INSERT OR IGNORE INTO deleted_projects(project_id) VALUES(?)', projectId);
+    this.ctx.storage.sql.exec('DELETE FROM workspace_projects WHERE project_id=?', projectId);
     return this.ctx.storage.sql.exec(
       'DELETE FROM user_projects WHERE project_id=? RETURNING project_id',
       projectId,
@@ -416,6 +597,9 @@ export class UserProjectIndexDO extends DurableObject<Env> {
   }
 
   putWorkspaceLocation(workspaceId: string, projectId: string): void {
+    if (this.ctx.storage.sql.exec('SELECT project_id FROM deleted_projects WHERE project_id=?', projectId).toArray().length > 0) {
+      throw new Error('Deleted project identity cannot own workspaces');
+    }
     this.ctx.storage.sql.exec(
       `INSERT INTO workspace_projects VALUES(?,?)
        ON CONFLICT(workspace_id) DO UPDATE SET project_id=excluded.project_id`,
@@ -453,10 +637,12 @@ export class UserProjectIndexDO extends DurableObject<Env> {
 
 export class ProjectAuthorityDO extends DurableObject<Env> {
   private readonly changes: DurableChangeLog;
+  private readonly directoryOutbox: DirectoryOutbox;
   private readonly environment: ProjectEnvironmentStore;
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.changes = new DurableChangeLog(ctx.storage);
+    this.directoryOutbox = new DirectoryOutbox(ctx, env);
     this.environment = new ProjectEnvironmentStore(ctx.storage);
     ctx.blockConcurrencyWhile(async () => {
       this.environment.initialize();
@@ -594,14 +780,23 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
       catch (error) { if (!(error instanceof Error) || !/duplicate column name/u.test(error.message)) throw error; }
       try { this.ctx.storage.sql.exec('ALTER TABLE project_mcp_grants ADD COLUMN project_space_enabled INTEGER NOT NULL DEFAULT 1'); } catch {}
       try { this.ctx.storage.sql.exec('ALTER TABLE project_mcp_grants ADD COLUMN workspaces_enabled INTEGER NOT NULL DEFAULT 1'); } catch {}
+      this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS deleted_workspaces(workspace_id TEXT PRIMARY KEY)');
+      this.directoryOutbox.kick();
     });
   }
 
-  watch(after: number | null): ReadableStream<Uint8Array> {
+  directoryPublication(): Extract<DirectoryPublication, { source: 'project' }> | null {
+    const project = this.getProject();
+    return project ? { source: 'project', cursor: this.directoryOutbox.head(), project, workspaces: this.listWorkspaces() } : null;
+  }
+
+  async alarm(): Promise<void> { await this.directoryOutbox.flush(); }
+
+  watch(after: number | null): DurableStreamSubscription {
     const resource = `project:${this.requireProject().id}`;
     return this.changes.watch(resource, after, () => ({ entity: 'snapshot', entityId: null, eventOffset: this.latestEventOffset() }));
   }
-  watchEnvironment(spaceId: string, after: number | null): ReadableStream<Uint8Array> {
+  watchEnvironment(spaceId: string, after: number | null): DurableStreamSubscription {
     this.requireLifecycleWorkspace(spaceId);
     return this.changes.watch(`environment:${spaceId}`, after, () => this.getLifecycleState(spaceId));
   }
@@ -613,9 +808,11 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
       try {
         const value = mutate();
         this.changes.append(`project:${this.requireProject().id}`, { entity, entityId, eventOffset: this.latestEventOffset() });
+        this.directoryOutbox.enqueue({ source: 'project', project: this.requireProject(), workspaces: this.listWorkspaces() });
         return value;
       } finally { this.committing = false; }
     });
+    this.directoryOutbox.kick();
     this.changes.wake();
     return result;
   }
@@ -628,6 +825,10 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
     createdBy: string;
   }): CloudProjectSummary {
     return this.commit('project', input.id, () => {
+    const current = this.getProject();
+    if (current?.lifecycle === 'archived' || current?.lifecycle === 'deleting') {
+      throw new Error(`Cannot bootstrap ${current.lifecycle} project`);
+    }
     const now = new Date().toISOString();
     this.ctx.storage.sql.exec(
       'INSERT OR IGNORE INTO project(project_id,name,repository_reference,base_branch,lifecycle,revision,archived_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)',
@@ -723,6 +924,7 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
   setProjectLifecycle(expectedRevision: number, lifecycle: ProjectLifecycle): CloudProjectSummary {
     return this.commit('project', null, () => {
     const current = this.requireProject();
+    if (current.lifecycle === 'deleting') throw new Error('Deleted project identity cannot be restored');
     if (current.role === GITSPACE_SOURCE_PROJECT_ROLE && lifecycle !== 'active' && lifecycle !== 'cloud-only') {
       throw new Error('The built-in GitSpace project cannot be archived or deleted. Close its workspaces instead.');
     }
@@ -750,6 +952,14 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
     expectedRevision: number;
   }): CloudWorkspaceDefinition {
     return this.commit('workspace', input.id, () => {
+    const project = this.requireProject();
+    if (this.ctx.storage.sql.exec('SELECT workspace_id FROM deleted_workspaces WHERE workspace_id=?', input.id).toArray().length > 0) {
+      throw new Error('Deleted workspace identity cannot be republished');
+    }
+    if (project.id !== input.projectId) throw new Error('Workspace project identity mismatch');
+    if (project.lifecycle === 'archived' || project.lifecycle === 'deleting') {
+      throw new Error(`Cannot write workspace for ${project.lifecycle} project`);
+    }
     const current = this.ctx.storage.sql.exec<WorkspaceRow>(
       'SELECT * FROM workspaces WHERE workspace_id=?',
       input.id,
@@ -812,6 +1022,7 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
       throw new Error(`Workspace revision conflict: expected ${expectedRevision}, actual ${current.revision}`);
     }
     this.environment.assertRetired(current.project_id, workspaceId);
+    this.ctx.storage.sql.exec('INSERT OR IGNORE INTO deleted_workspaces(workspace_id) VALUES(?)', workspaceId);
     this.ctx.storage.sql.exec('DELETE FROM canonical_sessions WHERE workspace_id=?', workspaceId);
     this.ctx.storage.sql.exec('DELETE FROM artifact_scopes WHERE workspace_id=?', workspaceId);
     this.ctx.storage.sql.exec('UPDATE artifact_shares SET revoked_at=? WHERE workspace_id=? AND revoked_at IS NULL', new Date().toISOString(), workspaceId);
@@ -828,6 +1039,7 @@ export class ProjectAuthorityDO extends DurableObject<Env> {
     if (project.revision !== expectedRevision) {
       throw new Error(`Project revision conflict: expected ${expectedRevision}, actual ${project.revision}`);
     }
+    if (project.lifecycle === 'deleting') return project;
     for (const workspace of this.listWorkspaces()) this.environment.assertRetired(project.id, workspace.id);
     this.ctx.storage.sql.exec('DELETE FROM canonical_sessions');
     this.ctx.storage.sql.exec('DELETE FROM artifact_scopes');

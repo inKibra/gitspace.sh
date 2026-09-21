@@ -40,6 +40,13 @@ describe('signed control transport', () => {
       capabilities: ['space.control'],
       generation: 1,
     }, rootPrivateKey));
+    const project = await env.PROJECT_AUTHORITY.getByName(`${userId}:project-a`).bootstrap({ id: 'project-a', name: 'Project A', repositoryReference: null, baseBranch: 'main', createdBy: 'machine-a' });
+    await env.USER_PROJECTS.getByName(userId).put(project);
+    await env.PROJECT_AUTHORITY.getByName(`${userId}:project-a`).putWorkspace({
+      id: 'space-a', projectId: 'project-a', kind: 'worktree', name: 'Space A', branch: 'feature',
+      phase: 'code', sourceKind: 'branch', sourceRef: 'feature', sourceCommit: null,
+      lifecycle: 'active', goalId: null, expectedRevision: 0,
+    });
     const request = createSignedControlRequest({
       userId,
       machineId: 'machine-a',
@@ -71,8 +78,6 @@ describe('signed control transport', () => {
       status: 'ok',
       value: { projectId: 'project-a', spaceId: 'space-a', revision: 0, goal: null },
     });
-    const project = await env.PROJECT_AUTHORITY.getByName(`${userId}:project-a`).bootstrap({ id: 'project-a', name: 'Project A', repositoryReference: null, baseBranch: 'main', createdBy: 'machine-a' });
-    await env.USER_PROJECTS.getByName(userId).put(project);
     const createCron = createSignedControlRequest({
       userId,
       machineId: 'machine-a',

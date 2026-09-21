@@ -1,6 +1,6 @@
 import { authPolicyFor, authProviders } from '@oh-my-pi/pi-catalog/compat/auth';
 import { ACCOUNT_CLOUD_RPC_PATHS, ACCOUNT_RUNTIME_RPC_PATHS, spaceCloudRpcSpaceId, isSpaceCloudRpcPath } from '@gitspace/protocol/account-rpc';
-import { decodeChangeStream, type StreamEvent } from '@gitspace/protocol-sync';
+import { consumeDurableStream } from './durable-stream.js';
 import { AgentIncidentChangeSchema } from '@gitspace/protocol-agent';
 import type { LifecycleState } from '@gitspace/protocol-environment';
 import type { CloudImageState } from '@gitspace/protocol/cloud-image';
@@ -72,10 +72,6 @@ async function readBody(request: Pick<Request, 'body'>): Promise<Uint8Array | nu
   return body;
 }
 
-/** Only authenticated tenant code can obtain these DO RPC byte streams. */
-function changes<T>(stream: ReadableStream<Uint8Array>, signal: AbortSignal): AsyncIterable<StreamEvent<T>> {
-  return decodeChangeStream(stream, signal) as AsyncIterable<StreamEvent<T>>;
-}
 
 function accountRouter(env: Env, userId: string, deviceId: string, origin: string) {
   const server = serverRpc.context<GitSpaceRpcContext>();
@@ -224,7 +220,7 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
   const settingsEvents = server.implement(settingsEventsContract).stream(async function* ({ input, signal, errors }) {
     try {
       await requireSubscription();
-      for await (const event of changes<SettingsSnapshot>(await settings.watch(input.after), signal)) {
+      for await (const event of consumeDurableStream<SettingsSnapshot>(await settings.watch(input.after), signal)) {
         await requireSubscription();
         yield ok(event);
       }
@@ -237,7 +233,7 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
   const machineEvents = server.implement(machineLifecycleEventsContract).stream(async function* ({ input, signal, errors }) {
     try {
       await requireSubscription();
-      for await (const event of changes<FleetMachineDefinition[]>(await catalog.watch(input.after), signal)) {
+      for await (const event of consumeDurableStream<FleetMachineDefinition[]>(await catalog.watch(input.after), signal)) {
         await requireSubscription();
         yield ok(event);
       }
@@ -255,7 +251,7 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
   const imageEvents = server.implement(cloudImageEventsContract).stream(async function* ({ input, signal, errors }) {
     try {
       await requireSubscription();
-      for await (const event of changes<CloudImageState[]>(await catalog.watchCloudImages(input.after), signal)) {
+      for await (const event of consumeDurableStream<CloudImageState[]>(await catalog.watchCloudImages(input.after), signal)) {
         await requireSubscription();
         yield ok(event);
       }
@@ -319,7 +315,7 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
   const directoryEvents = server.implement(projectDirectoryEventsContract).stream(async function* ({ input, signal, errors }) {
     try {
       await requireSubscription();
-      for await (const event of changes<CloudProjectSummary[]>(await projectIndex.watch(input.after), signal)) {
+      for await (const event of consumeDurableStream<CloudProjectSummary[]>(await projectIndex.watch(input.after), signal)) {
         await requireSubscription();
         yield ok(event.type === 'resync' ? event : { ...event, value: event.value.map((project) => ({ ...project, updatedAt: new Date(project.updatedAt), archivedAt: project.archivedAt ? new Date(project.archivedAt) : null })) });
       }
@@ -329,7 +325,7 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
     try {
       await requireSubscription();
       const authority = await authorityFor(input.projectId);
-      for await (const event of changes<{ entity: string; entityId: string | null; eventOffset: number }>(await authority.watch(input.after), signal)) {
+      for await (const event of consumeDurableStream<{ entity: string; entityId: string | null; eventOffset: number }>(await authority.watch(input.after), signal)) {
         await requireSubscription();
         yield ok(event);
       }
@@ -341,7 +337,7 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
       const projectId = await projectIndex.locateWorkspace(input.spaceId);
       if (!projectId) throw new Error('Workspace does not belong to this account');
       const authority = await authorityFor(projectId);
-      for await (const event of changes<LifecycleState>(await authority.watchEnvironment(input.spaceId, input.after), signal)) {
+      for await (const event of consumeDurableStream<LifecycleState>(await authority.watchEnvironment(input.spaceId, input.after), signal)) {
         await requireSubscription();
         yield ok(event);
       }
@@ -354,7 +350,7 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
       if (!projectId) throw new Error('Workspace does not belong to this account');
       await authorityFor(projectId);
       const authority = (env.SPACE_AUTHORITY as DurableObjectNamespace<SpaceAuthorityDO>).getByName(`${userId}:${input.spaceId}`);
-      for await (const event of changes<SpaceAuthorityRecord | null>(await authority.watch(input.spaceId, input.after), signal)) {
+      for await (const event of consumeDurableStream<SpaceAuthorityRecord | null>(await authority.watch(input.spaceId, input.after), signal)) {
         await requireSubscription();
         yield ok(event);
       }

@@ -158,6 +158,7 @@ export interface CoordinatorPortableArtifactSnapshot {
 export interface CanonicalSessionWriter {
   get(projectId: string, sessionId: string): Promise<CanonicalSession | null>;
   put(projectId: string, machineId: string, session: AgentSession, checkpoint?: boolean): void;
+  flush?(): Promise<void>;
 }
 
 export interface ArtifactManifestAuthority {
@@ -177,6 +178,10 @@ export class MachineSessionCoordinator {
   private readonly artifactPublicationBases = new Map<string, ArtifactScope>();
   private readonly opening = new Map<string, Promise<ResultType<AgentSession, MachineSessionError>>>();
   private readonly retainedArtifacts = new Map<string, SessionArtifacts>();
+  private readonly runtimeId = crypto.randomUUID();
+  private readonly recoveryControllers = new Map<string, AbortController>();
+  private readonly automaticAttempts = new Set<string>();
+  private readonly disposalFences = new Map<string, OmpRuntimeSession>();
 
   constructor(
     private readonly database: GitSpaceDatabase,
@@ -184,10 +189,12 @@ export class MachineSessionCoordinator {
     private readonly omp: OmpRuntime,
     private readonly machineId: string,
     private readonly runtimeRoot: string,
-    private readonly events?: ProjectEventWriter,
+    private readonly events?: ProjectEventWriter & { flush?(): Promise<void> },
     private readonly managedSpaceRoot: string = dirname(runtimeRoot),
     private readonly canonicalSessions?: CanonicalSessionWriter,
     private readonly artifactManifests?: ArtifactManifestAuthority,
+    private readonly ompSessionRoot: string = join(dirname(runtimeRoot), 'omp-sessions'),
+    private readonly recoveryTimeoutMs = 30_000,
   ) {}
 
   async create(workspaceId: string): Promise<ResultType<AgentSession, MachineSessionError>> {
@@ -202,13 +209,18 @@ export class MachineSessionCoordinator {
   async openSpace(spaceId: string, allowOpening = false, expectedGeneration?: number, operation = 'open'): Promise<ResultType<AgentSession, MachineSessionError>> {
     const target = this.spaceTarget(spaceId, allowOpening);
     if (target.status === 'error') return target;
+    if (this.database.listSpaceCleanupJobs().some((job) => job.spaceId === spaceId)) {
+      return Result.err(runtimeError(operation, new Error('Space cleanup supersedes agent recovery')));
+    }
     const placement = this.database.getSpacePlacement(spaceId)!;
     if (expectedGeneration !== undefined && placement.generation !== expectedGeneration) {
       return Result.err(new SessionPossessionDenied({ workspaceId: spaceId, message: 'Space placement changed before agent retry' }));
     }
     const pending = this.opening.get(spaceId);
     if (pending) return pending;
-    const opening = this.createTarget(target.value, placement.generation, allowOpening, operation);
+    // Reserve the slot before any operation can publish or yield.
+    const opening = Promise.resolve().then(() => this.createTarget(target.value, placement.generation, allowOpening, operation))
+      .catch((error) => Result.err(runtimeError(operation, error)));
     this.opening.set(spaceId, opening);
     try { return await opening; }
     finally { if (this.opening.get(spaceId) === opening) this.opening.delete(spaceId); }
@@ -219,17 +231,48 @@ export class MachineSessionCoordinator {
     const existing = this.list(spaceId)[0];
     if (existing && this.controlsAvailable(existing.id)) return Result.ok(existing);
     if (existing && this.quiesced.has(existing.id)) return Result.err(runtimeError(operation, new Error('Session is quiescing'), existing.id));
+    this.assertSessionPlacement(spaceId, generation, allowOpening);
     const recordId = existing?.id ?? crypto.randomUUID();
     let recoveryToken = this.beginOperation(spaceId, 'recovery');
     let runtime: OmpRuntimeSession | undefined;
     let savedSession: Uint8Array | undefined;
+    const controller = new AbortController();
+    this.recoveryControllers.set(spaceId, controller);
+    const startedAt = Date.now();
+    const timer = setTimeout(() => controller.abort(new Error(`Agent ${operation} exceeded its recovery deadline`)), this.recoveryTimeoutMs);
+    const check = () => {
+      controller.signal.throwIfAborted();
+      this.assertSessionPlacement(spaceId, generation, allowOpening);
+      const current = this.get(recordId);
+      if (current && current.health.issues.recovery?.operationId !== recoveryToken.operationId) throw new Error('Agent recovery was superseded');
+    };
+    const bounded = async <T>(work: Promise<T>): Promise<T> => {
+      check();
+      let aborted!: () => void;
+      const timeout = new Promise<never>((_, reject) => {
+        aborted = () => reject(controller.signal.reason);
+        controller.signal.addEventListener('abort', aborted, { once: true });
+      });
+      try { const value = await Promise.race([work, timeout]); check(); return value; }
+      finally { controller.signal.removeEventListener('abort', aborted); }
+    };
+    const claim = (record: AgentSession) => {
+      const issue = record.health.issues.recovery!;
+      this.commitAgentState(record, { health: { ...record.health, issues: { ...record.health.issues, recovery: { ...issue, attempt: {
+        runtimeId: this.runtimeId, machineId: this.machineId, generation,
+        startedAt: new Date(startedAt).toISOString(), deadlineAt: new Date(startedAt + this.recoveryTimeoutMs).toISOString(),
+        state: 'running', number: (existing?.health.issues.recovery?.attempt?.number ?? 0) + 1,
+      } } } } });
+    };
+    if (existing) claim(this.get(recordId)!);
     try {
       if (existing) {
         await this.disposeUnusableSession(existing.id);
-        savedSession = await retainedSessionBytes(existing);
+        check();
+        savedSession = await bounded(retainedSessionBytes(existing));
       }
       const retainedFailure = existing?.health.issues.execution?.failure;
-      const state = await this.prepareSessionArtifacts(recordId, target.capability, !!existing);
+      const state = await bounded(this.prepareSessionArtifacts(recordId, target.capability, !!existing, check));
       const input = {
         projectId: target.projectId,
         workspaceId: target.scope === 'workspace' ? target.workspaceId : null,
@@ -239,7 +282,8 @@ export class MachineSessionCoordinator {
         executionFailure: retainedFailure?.domain === 'agent' ? retainedFailure : null,
       };
       this.assertSessionPlacement(spaceId, generation, allowOpening);
-      runtime = existing ? await this.omp.open({ ...input, sessionFile: existing.sessionFile }) : await this.omp.create(input);
+      runtime = existing ? await this.omp.open({ ...input, sessionFile: existing.sessionFile }, controller.signal) : await this.omp.create(input, controller.signal);
+      check();
       if (existing && runtime.id !== existing.ompSessionId) {
         throw new Error(`OMP session id changed from ${existing.ompSessionId} to ${runtime.id}`);
       }
@@ -255,18 +299,19 @@ export class MachineSessionCoordinator {
         const begun = beginAgentOperation(record.health, 'recovery', recoveryToken.operationId);
         this.commitAgentState(record, { health: begun.state });
         recoveryToken = begun.token;
+        claim(this.get(recordId)!);
       }
       this.assertSessionPlacement(spaceId, generation, allowOpening);
-      await this.adopt(record, runtime, state.artifactsDir, target.capability, state.artifactBaseline, generation);
+      await bounded(this.adopt(record, runtime, state.artifactsDir, target.capability, state.artifactBaseline, generation, check));
       this.assertSessionPlacement(spaceId, generation, allowOpening);
       if (!runtime.isAvailable()) throw new AgentDomainError(runtime.activity().failure ?? { domain: 'agent', code: 'AGENT_DISCONNECTED', message: 'OMP worker disconnected while opening the session', context: { sessionId: recordId } });
       if (this.quiesced.has(recordId)) throw new Error('Space began closing while the agent was opening');
       const current = this.get(recordId)!;
       this.commitAgentState(current, { state: 'active' });
       this.recoverIssue(spaceId, 'connection');
-      if (recoveryToken) this.settleOperation(spaceId, recoveryToken, null);
+      await bounded(this.resumeIfPending(record, runtime, target.capability));
+      this.settleOperation(spaceId, recoveryToken, null);
       this.publishCanonicalSession(target.projectId, record.id, true);
-      this.resumeIfPending(record, runtime, target.capability);
       return Result.ok(this.get(recordId)!);
     } catch (error) {
       let failure = error;
@@ -299,6 +344,9 @@ export class MachineSessionCoordinator {
         this.recordFailure(spaceId, operation, failure, recoveryToken);
       }
       return Result.err(runtimeError(operation, failure, recordId));
+    } finally {
+      clearTimeout(timer);
+      if (this.recoveryControllers.get(spaceId) === controller) this.recoveryControllers.delete(spaceId);
     }
   }
 
@@ -306,16 +354,22 @@ export class MachineSessionCoordinator {
     const current = this.database.getSpacePlacement(spaceId);
     const denied = agentPlacementFailure(spaceId, current, this.machineId, { generation, allowOpening });
     if (denied) throw denied;
+    if (this.database.listSpaceCleanupJobs().some((job) => job.spaceId === spaceId)) throw new Error('Space cleanup supersedes agent recovery');
   }
 
   async recover(spaceId?: string): Promise<ResultType<AgentSession[], MachineSessionError>> {
     const recoverable = this.database.orm.select().from(agentSessions)
-      .where(and(inArray(agentSessions.state, ['opening', 'active', 'draining']), spaceId ? eq(agentSessions.spaceId, spaceId) : undefined))
+      .where(and(inArray(agentSessions.state, ['opening', 'active', 'draining', 'failed']), spaceId ? eq(agentSessions.spaceId, spaceId) : undefined))
       .orderBy(agentSessions.createdAt, agentSessions.id).all();
     const recovered: AgentSession[] = [];
     for (const record of recoverable) {
+      if (record.state === 'failed' && !record.resumePending) continue;
+      if (this.database.listSpaceCleanupJobs().some((job) => job.spaceId === record.spaceId)) continue;
       const placement = this.database.getSpacePlacement(record.spaceId);
       if (!placement || placement.holderId !== this.machineId || placement.state !== 'open' || placement.generation < 1) continue;
+      const attemptKey = `${record.id}:${placement.generation}`;
+      if (this.automaticAttempts.has(attemptKey)) continue;
+      this.automaticAttempts.add(attemptKey);
       const result = await this.openSpace(record.spaceId, false, placement.generation, 'recover');
       if (result.status === 'error') {
         const current = this.database.getSpacePlacement(record.spaceId);
@@ -477,6 +531,15 @@ export class MachineSessionCoordinator {
   }
 
   async stop(sessionId: string): Promise<OmpSessionControlView> {
+    const session = this.get(sessionId);
+    if (session && this.opening.has(session.spaceId)) {
+      this.quiesced.add(sessionId);
+      this.recoveryControllers.get(session.spaceId)?.abort(new Error('Stop superseded agent recovery'));
+      await this.opening.get(session.spaceId);
+      this.quiesced.delete(sessionId);
+      const current = this.get(sessionId);
+      if (current) this.commitAgentState(current, { resumePending: false });
+    }
     const live = this.controlsAvailable(sessionId) ? this.live.get(sessionId) : undefined;
     if (!live) throw runtimeError('stop session turn', new Error('Session is not active'), sessionId);
     return live.runtime.stop();
@@ -506,7 +569,7 @@ export class MachineSessionCoordinator {
   controlsAvailable(sessionId: string): boolean {
     const live = this.live.get(sessionId);
     const session = this.get(sessionId);
-    if (!session) return false;
+    if (!session || session.resumePending || session.health.issues.recovery?.attempt?.state === 'running') return false;
     return deriveAgentReadiness({ state: session.state, connected: live?.runtime.isAvailable() === true, quiesced: this.quiesced.has(sessionId), machineId: this.machineId, runtimeGeneration: live?.generation ?? 0, placement: this.database.getSpacePlacement(session.spaceId) }).controlsAvailable;
   }
 
@@ -541,7 +604,7 @@ export class MachineSessionCoordinator {
     const issue = token?.issue ?? agentOperationIssue(operation);
     const code = AGENT_ISSUE_FAILURE_CODES[issue];
     this.settleOperation(spaceId, token, agentIssueFailure(error, code, { operation, sessionId: session.id }), {
-      state: session.state === 'closed' ? 'closed' : this.live.get(session.id)?.runtime.isAvailable() ? 'active' : 'failed',
+      state: session.state === 'closed' ? 'closed' : issue === 'recovery' ? 'failed' : this.live.get(session.id)?.runtime.isAvailable() ? 'active' : 'failed',
     });
   }
 
@@ -566,13 +629,17 @@ export class MachineSessionCoordinator {
   }
 
   private async disposeSessionRuntime(sessionId: string, runtime: OmpRuntimeSession): Promise<void> {
+    this.disposalFences.set(sessionId, runtime);
     const live = this.live.get(sessionId);
     if (live?.runtime === runtime) {
       live.unsubscribe();
       live.activityUnsubscribe();
       this.retainedArtifacts.set(sessionId, live);
     }
-    try { await runtime.dispose(); }
+    try {
+      await runtime.dispose();
+      if (this.disposalFences.get(sessionId) === runtime) this.disposalFences.delete(sessionId);
+    }
     finally {
       if (!runtime.isAvailable()) {
         if (this.live.get(sessionId)?.runtime === runtime) this.live.delete(sessionId);
@@ -582,17 +649,13 @@ export class MachineSessionCoordinator {
   }
 
   private async disposeUnusableSession(sessionId: string): Promise<void> {
+    const predecessor = this.disposalFences.get(sessionId);
+    if (predecessor) await this.disposeSessionRuntime(sessionId, predecessor);
     const live = this.live.get(sessionId);
     if (!live) return;
-    if (live.runtime.isAvailable()) {
-      this.quiesced.add(sessionId);
-      await live.runtime.handoff();
-      await Promise.all(this.activePrompts.get(sessionId) ?? []);
-      await this.syncSessionArtifacts(live);
-      await live.runtime.persist();
-    }
+    // Recovery cannot await turn completion or persistence on a broken worker.
+    // dispose is the runtime's bounded child-exit fence.
     await this.disposeSessionRuntime(sessionId, live.runtime);
-    await Promise.all(this.activePrompts.get(sessionId) ?? []);
     this.quiesced.delete(sessionId);
   }
 
@@ -673,11 +736,13 @@ export class MachineSessionCoordinator {
     return index;
   }
 
-  private async seedRuntimeTranscript(sessionId: string, runtime: OmpRuntimeSession): Promise<TranscriptIndex> {
+  private async seedRuntimeTranscript(sessionId: string, runtime: OmpRuntimeSession, check?: () => void): Promise<TranscriptIndex> {
     await runtime.persist();
+    check?.();
     const index = this.indexFor(sessionId, sessionId);
     try {
       await index.syncFile(runtime.sessionFile, true);
+      check?.();
     } catch (error) {
       if (!error || typeof error !== 'object' || !('code' in error) || error.code !== 'ENOENT') throw error;
       index.seed([]);
@@ -686,6 +751,7 @@ export class MachineSessionCoordinator {
     // for a newly created runtime whose first messages have not reached JSONL yet.
     if (index.eventCount === 0) {
       const messages = await runtime.messages();
+      check?.();
       if (messages.length > 0) {
         const createdAt = new Date().toISOString();
         index.seed(messages.map((message, ordinal) => ({ ordinal: ordinal + 1, kind: 'message_end', payload: { message }, createdAt })));
@@ -832,6 +898,9 @@ export class MachineSessionCoordinator {
 
 
   async quiesceSpace(spaceId: string, requirePortableControls = false): Promise<void> {
+    const queued = this.list(spaceId)[0];
+    if (queued) this.quiesced.add(queued.id);
+    this.recoveryControllers.get(spaceId)?.abort(new Error('Space handoff superseded agent recovery'));
     // Close changes placement synchronously; an in-flight open must finish its
     // generation check and dispose before any retained bytes are captured.
     await this.opening.get(spaceId);
@@ -862,7 +931,11 @@ export class MachineSessionCoordinator {
     const session = this.list(spaceId)[0];
     if (session && this.quiesced.delete(session.id)) {
       const live = this.live.get(session.id);
-      if (live?.runtime.isAvailable()) this.resumeIfPending(session, live.runtime, live.capability);
+      if (live?.runtime.isAvailable()) void this.resumeIfPending(session, live.runtime, live.capability).catch((error) => {
+        if (this.live.get(session.id)?.runtime === live.runtime && !this.quiesced.has(session.id)) {
+          this.recordFailure(spaceId, 'resume', error, this.beginOperation(spaceId, 'recovery'));
+        }
+      });
     }
   }
 
@@ -892,6 +965,8 @@ export class MachineSessionCoordinator {
     const scope = this.database.orm.select().from(artifactScopes).where(eq(artifactScopes.spaceId, spaceId)).get();
     if (!scope || scope.dirty || scope.generation !== generation || (generation > 0 && !scope.manifestHash)) throw runtimeError('checkpoint artifacts', new Error('Durable artifact scope is missing'), session.id);
     const verified = await this.artifacts.verifyScope(scope);
+    await this.canonicalSessions?.flush?.();
+    await this.events?.flush?.();
     if (verified.status === 'error') throw runtimeError('checkpoint artifacts', verified.error, session.id);
     return {
       agent: {
@@ -904,23 +979,111 @@ export class MachineSessionCoordinator {
     };
   }
 
-  async deletePortableSpaceLocal(spaceId: string): Promise<void> {
+  recordPortableSpaceCheckpoint(spaceId: string, receipt: { revision: number; manifestKey: string; manifestHash: `sha256:${string}` }): void {
+    this.database.recordSpaceCleanupCheckpoint(spaceId, receipt);
+  }
+
+  async preparePortableSpaceCleanup(spaceId: string): Promise<void> {
+    const queued = this.list(spaceId)[0];
+    if (queued) this.quiesced.add(queued.id);
+    this.recoveryControllers.get(spaceId)?.abort(new Error('Space cleanup superseded agent recovery'));
+    await this.opening.get(spaceId);
     await this.assertManagedSpaceRoot(spaceId);
-    const space = this.database.getSpace(spaceId);
-    if (!space) throw runtimeError('delete local space', new Error('Space does not exist'));
     await this.detachDependentWorktrees(spaceId);
-    const session = this.list(spaceId)[0];
-    if (session && session.state !== 'closed') {
-      const closed = await this.close(session.id);
-      if (closed.status === 'error') throw closed.error;
+    const space = this.database.getSpace(spaceId)!;
+    const sessions = this.list(spaceId);
+    const paths = new Set<string>();
+    for (const session of sessions) {
+      await this.assertCleanupPath(session.sessionFile);
+      paths.add(session.sessionFile);
+      const children = session.sessionFile.replace(/\.jsonl$/u, '');
+      if (children !== session.sessionFile) {
+        await this.assertCleanupPath(children);
+        paths.add(children);
+      }
+      paths.add(join(this.runtimeRoot, 'sessions', session.id));
+      const keys = new Set([session.id, ...[...this.transcriptIndexes.keys()].filter((key) => key.startsWith(`${session.id}:subagent:`))]);
+      if (children !== session.sessionFile) {
+        for (const name of await readdir(children).catch((error: NodeJS.ErrnoException) => error.code === 'ENOENT' ? [] : Promise.reject(error))) {
+          if (name.endsWith('.jsonl')) keys.add(`${session.id}:subagent:${name.slice(0, -6)}`);
+        }
+      }
+      for (const key of keys) {
+        const file = join(this.runtimeRoot, 'transcript-index', `${createHash('sha256').update(key).digest('hex')}.sqlite`);
+        for (const suffix of ['', '-wal', '-shm']) paths.add(`${file}${suffix}`);
+      }
     }
-    if (session) this.quiesced.delete(session.id);
-    if (session) {
-      await rm(session.sessionFile, { force: true });
-      await rm(join(this.runtimeRoot, 'sessions', session.id), { recursive: true, force: true });
-      this.retainedArtifacts.delete(session.id);
+    paths.add(join(this.ompSessionRoot, `space:${spaceId}`));
+    for (const path of paths) await this.assertCleanupPath(path);
+    this.database.prepareSpaceCleanup({
+      spaceId, projectId: space.projectId, generation: this.database.getSpacePlacement(spaceId)!.generation,
+      rootPath: space.rootPath, sessionFiles: [...paths], sessionIds: sessions.map((session) => session.id),
+    });
+  }
+
+  async deletePortableSpaceLocal(spaceId: string): Promise<void> {
+    // This durable receipt must precede the first await: ownership has already moved.
+    this.database.commitSpaceCleanup(spaceId);
+    const job = this.database.listSpaceCleanupJobs().find((candidate) => candidate.spaceId === spaceId);
+    if (!job || job.state !== 'committed') throw runtimeError('delete local space', new Error('Committed cleanup receipt is missing'));
+    try {
+      for (const sessionId of job.sessionIds) {
+        const live = this.live.get(sessionId);
+        if (live) {
+          live.unsubscribe();
+          live.activityUnsubscribe();
+          await live.runtime.dispose();
+          if (live.runtime.isAvailable()) throw new Error(`Session ${sessionId} did not stop`);
+          this.live.delete(sessionId);
+        }
+        await Promise.all(this.activePrompts.get(sessionId) ?? []);
+        clearTimeout(this.transcriptUpdateTimers.get(sessionId));
+        this.transcriptUpdateTimers.delete(sessionId);
+        this.liveTranscripts.delete(sessionId);
+        for (const [key, index] of this.transcriptIndexes) {
+          if (key === sessionId || key.startsWith(`${sessionId}:subagent:`)) {
+            index.close();
+            this.transcriptIndexes.delete(key);
+          }
+        }
+        this.activePrompts.delete(sessionId);
+        this.retainedArtifacts.delete(sessionId);
+        this.quiesced.delete(sessionId);
+        this.recoveringSessions.delete(sessionId);
+      }
+      this.opening.delete(spaceId);
+      this.artifactPublicationBases.delete(spaceId);
+      for (const path of job.sessionFiles) {
+        await this.assertCleanupPath(path);
+        await rm(path, { recursive: true, force: true });
+      }
+      await this.assertManagedCheckoutPath(job.rootPath);
+      await rm(job.rootPath, { recursive: true, force: true });
+      await this.artifacts.pruneUnreferencedCachedBytes();
+      // The caller completes the receipt only after its own resource cleanup succeeds.
+    } catch (error) {
+      this.database.failSpaceCleanup(spaceId, error instanceof Error ? error.message : String(error));
+      throw error;
     }
-    await rm(space.rootPath, { recursive: true, force: true });
+  }
+
+  private async assertCleanupPath(path: string): Promise<void> {
+    const allowed = [this.managedSpaceRoot, this.runtimeRoot, this.ompSessionRoot];
+    const contains = (root: string, candidate: string): boolean => {
+      const local = relative(resolve(root), resolve(candidate));
+      return local !== '' && local !== '..' && !local.startsWith(`..${sep}`);
+    };
+    if (!allowed.some((root) => contains(root, path))) throw new Error(`Refusing unmanaged session cleanup path ${path}`);
+    // Resolve the nearest existing ancestor, including when a previous retry removed the file.
+    let ancestor = resolve(path);
+    const suffix: string[] = [];
+    while (!(await lstat(ancestor).catch((error: NodeJS.ErrnoException) => error.code === 'ENOENT' ? null : Promise.reject(error)))) {
+      suffix.unshift(relative(dirname(ancestor), ancestor));
+      ancestor = dirname(ancestor);
+    }
+    const actual = join(await realpath(ancestor), ...suffix);
+    const roots = await Promise.all(allowed.map((root) => realpath(root).catch((error: NodeJS.ErrnoException) => error.code === 'ENOENT' ? resolve(root) : Promise.reject(error))));
+    if (!roots.some((root) => contains(root, actual))) throw new Error(`Session cleanup path escapes managed roots: ${path}`);
   }
 
   async preparePortableSpaceRepository(spaceId: string): Promise<void> {
@@ -928,12 +1091,10 @@ export class MachineSessionCoordinator {
     const space = this.database.getSpace(spaceId);
     if (!space) throw runtimeError('prepare space', new Error('Space does not exist'));
     await this.detachDependentWorktrees(spaceId);
-    // Never reset or reuse leftovers: failed saves and interrupted restores may contain unique work.
-    // Keep them beside the fresh checkout so recovery is possible without exposing stale files to hooks.
+    // Unproven leftovers may contain unique work. Refuse rather than retain or destroy them.
     const existing = await lstat(space.rootPath).catch((error: NodeJS.ErrnoException) => error.code === 'ENOENT' ? null : Promise.reject(error));
     if (existing) {
-      if (existing.isSymbolicLink()) throw runtimeError('prepare space', new Error('Refusing a symlink checkout'));
-      await rename(space.rootPath, `${space.rootPath}.retained-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`);
+      throw runtimeError('prepare space', new Error('Checkout already exists; refusing to overwrite unproven local data'));
     }
     await mkdir(space.rootPath, { recursive: true });
     await this.portableGit(space.rootPath, ['init', '-b', space.branch]);
@@ -970,9 +1131,9 @@ export class MachineSessionCoordinator {
       const gitFile = join(checkout, '.git');
       const gitDirectory = await this.portableGit(checkout, ['rev-parse', '--absolute-git-dir']);
       const temporary = join(checkout, `.git-detach-${crypto.randomUUID()}`);
-      const retained = `${gitFile}.retained-${crypto.randomUUID()}`;
-      await cp(common, temporary, { recursive: true, filter: (source) => source !== join(common, 'worktrees') });
+      const pointerBackup = `${gitFile}.swap-${crypto.randomUUID()}`;
       try {
+        await cp(common, temporary, { recursive: true, filter: (source) => source !== join(common, 'worktrees') });
         await cp(gitDirectory, temporary, {
           recursive: true,
           filter: (source) => !['commondir', 'gitdir'].includes(relative(gitDirectory, source)),
@@ -981,10 +1142,10 @@ export class MachineSessionCoordinator {
         // Remove a shared core.worktree pointer, if present; an absent value is normal.
         const config = await readFile(join(temporary, 'config'), 'utf8');
         if (/^\s*worktree\s*=/mu.test(config)) await this.portableGit(checkout, ['config', '--file', join(temporary, 'config'), '--unset-all', 'core.worktree']);
-        await rename(gitFile, retained);
+        await rename(gitFile, pointerBackup);
         try { await rename(temporary, gitFile); }
-        catch (error) { await rename(retained, gitFile); throw error; }
-        await rm(retained);
+        catch (error) { await rename(pointerBackup, gitFile); throw error; }
+        await rm(pointerBackup);
       } catch (error) {
         await rm(temporary, { recursive: true, force: true });
         throw error;
@@ -1120,6 +1281,13 @@ export class MachineSessionCoordinator {
   }
 
   async close(sessionId: string): Promise<ResultType<void, MachineSessionError>> {
+    const openingSession = this.get(sessionId);
+    if (openingSession) {
+      this.quiesced.add(sessionId);
+      this.recoveryControllers.get(openingSession.spaceId)?.abort(new Error('Session close superseded agent recovery'));
+      await this.opening.get(openingSession.spaceId);
+      this.quiesced.delete(sessionId);
+    }
     if (this.live.has(sessionId)) return this.stopLive(sessionId, true);
     const session = this.get(sessionId);
     if (!session) return Result.err(runtimeError('close', new Error('Session does not exist'), sessionId));
@@ -1155,7 +1323,7 @@ export class MachineSessionCoordinator {
         });
   }
 
-  private async prepareSessionArtifacts(recordId: string, capability: ArtifactCapability, retained: boolean): Promise<SessionArtifacts> {
+  private async prepareSessionArtifacts(recordId: string, capability: ArtifactCapability, retained: boolean, check?: () => void): Promise<SessionArtifacts> {
     const remembered = this.retainedArtifacts.get(recordId);
     if (remembered) return remembered;
     const artifactsDir = join(this.runtimeRoot, 'sessions', recordId, 'artifacts');
@@ -1165,6 +1333,7 @@ export class MachineSessionCoordinator {
     if (retained) {
       try {
         const entries: unknown = JSON.parse(await readFile(baselinePath, 'utf8'));
+        check?.();
         if (!Array.isArray(entries)) throw new Error('Retained artifact baseline is invalid');
         for (const entry of entries) {
           if (!Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== 'string'
@@ -1183,6 +1352,7 @@ export class MachineSessionCoordinator {
     for (const mount of capability.kind === 'workspace' ? ['base', 'workspace'] as const : ['base'] as const) {
       const root = join(artifactsDir, mount);
       const metadata = await lstat(root).catch((error: NodeJS.ErrnoException) => error.code === 'ENOENT' ? null : Promise.reject(error));
+      check?.();
       if (metadata && !metadata.isDirectory()) throw new Error(`Retained artifact mount ${root} is not a directory`);
       if (!metadata && savedBaseline && mount === writable && artifactBaseline.size > 0) {
         throw new Error(`Retained artifact mount ${root} is missing; refusing to infer deletions`);
@@ -1190,40 +1360,50 @@ export class MachineSessionCoordinator {
       const listed = this.artifacts.list(capability, `local://${mount}/`);
       if (listed.status === 'error') throw listed.error;
       await mkdir(root, { recursive: true });
+      check?.();
       await filesUnder(root);
+      check?.();
       for (const entry of listed.value) {
         if (savedBaseline && mount === writable) continue;
         const bytes = await this.artifacts.read(capability, entry.url);
+        check?.();
         if (bytes.status === 'error') throw bytes.error;
         const path = join(root, entry.path);
         // A workspace's base mount is a read-only cache, not an unsynced write.
         if (mount !== writable) {
           await mkdir(dirname(path), { recursive: true });
+          check?.();
           await writeFile(path, bytes.value);
+          check?.();
           continue;
         }
         const current = await readFile(path).catch((error: NodeJS.ErrnoException) => error.code === 'ENOENT' ? null : Promise.reject(error));
+        check?.();
         const hash = `sha256:${createHash('sha256').update(bytes.value).digest('hex')}`;
         if (current && `sha256:${createHash('sha256').update(current).digest('hex')}` !== hash) {
           throw new Error(`Retained artifact ${entry.url} differs without a trustworthy baseline; local files have been kept for recovery`);
         }
         if (!current) {
           await mkdir(dirname(path), { recursive: true });
+          check?.();
           await writeFile(path, bytes.value, { flag: 'wx' });
+          check?.();
         }
         if (mount === writable) artifactBaseline.set(entry.path, hash);
       }
     }
     const state = { recordId, artifactsDir, capability, artifactBaseline, artifactSync: null, queuedArtifactSync: null };
-    await this.persistArtifactBaseline(state);
+    await this.persistArtifactBaseline(state, check);
+    check?.();
     this.retainedArtifacts.set(recordId, state);
     return state;
   }
 
-  private async persistArtifactBaseline(state: SessionArtifacts): Promise<void> {
+  private async persistArtifactBaseline(state: SessionArtifacts, check?: () => void): Promise<void> {
     const path = join(dirname(state.artifactsDir), 'artifact-baseline.json');
     const temporary = `${path}.${crypto.randomUUID()}`;
     await writeFile(temporary, JSON.stringify([...state.artifactBaseline]), { mode: 0o600 });
+    check?.();
     await rename(temporary, path);
   }
 
@@ -1234,13 +1414,17 @@ export class MachineSessionCoordinator {
     capability: ArtifactCapability,
     artifactBaseline: Map<string, string>,
     generation: number,
+    check: () => void,
   ): Promise<void> {
     const retained = this.liveTranscripts.get(record.id);
     if (retained && !retained.hasUnpersistedBranch) {
       await runtime.persist();
+      check();
       retained.renewGeneration();
     } else {
-      this.liveTranscripts.set(record.id, await this.seedRuntimeTranscript(record.id, runtime));
+      const transcript = await this.seedRuntimeTranscript(record.id, runtime, check);
+      check();
+      this.liveTranscripts.set(record.id, transcript);
     }
     const unsubscribe = runtime.subscribe((event) => {
       this.appendEvent(record.id, event);
@@ -1262,6 +1446,7 @@ export class MachineSessionCoordinator {
     this.retainedArtifacts.delete(record.id);
     // Register before applying authority metadata so concurrent phase edits reach us.
     if (capability.kind === 'workspace') await this.workspacePhaseChanged(capability.projectId, capability.workspaceId);
+    check();
   }
 
   private updateActivity(sessionId: string, capability: ArtifactCapability, runtime: OmpRuntimeSession, generation: number, activity: SessionActivity, failure: AgentFailure | null = null): void {
@@ -1271,7 +1456,9 @@ export class MachineSessionCoordinator {
     const placement = this.database.getSpacePlacement(current.spaceId);
     if (agentPlacementFailure(current.spaceId, placement, this.machineId, { generation, allowOpening: true })) return;
     const disconnected = !runtime.isAvailable();
-    if (resumeAccepted({ activity, recovering: this.recoveringSessions.has(sessionId), controlsAvailable: this.controlsAvailable(sessionId) })) {
+    // Public controls stay gated until recovery settles; acceptance checks the attached worker itself.
+    const attached = deriveAgentReadiness({ state: current.state, connected: !disconnected, quiesced: this.quiesced.has(sessionId), machineId: this.machineId, runtimeGeneration: generation, placement }).controlsAvailable;
+    if (resumeAccepted({ activity, recovering: this.recoveringSessions.has(sessionId), controlsAvailable: attached })) {
       this.recoveringSessions.delete(sessionId);
       this.completeResume(sessionId, capability);
       current = this.get(sessionId)!;
@@ -1541,11 +1728,12 @@ export class MachineSessionCoordinator {
       this.quiesced.add(sessionId);
       const record = this.get(sessionId);
       const activity = record?.activity;
-      const lastMessage = (await this.sessionTranscriptIndex(sessionId)).lastMessage();
-      const transcriptNeedsContinuation = !!lastMessage && typeof lastMessage === 'object' && 'role' in lastMessage && lastMessage.role === 'user';
-      const wasExecuting = this.activePrompts.has(sessionId)
-        || transcriptNeedsContinuation
-        || hasExecutingTurn(activity);
+      const wasExecuting = record?.resumePending === true
+        || this.activePrompts.has(sessionId)
+        || hasExecutingTurn(activity)
+        || hasExecutingTurn(live.runtime.activity().activity);
+      // Record responsibility before handoff can interrupt or fail while flushing.
+      if (!close) this.commitAgentState(this.get(sessionId)!, { state: 'draining', resumePending: wasExecuting });
       const runtimeInterrupted = close ? false : await live.runtime.handoff();
       await Promise.all(this.activePrompts.get(sessionId) ?? []);
       const resumePending = close ? record?.resumePending === true : wasExecuting || runtimeInterrupted;
@@ -1570,30 +1758,45 @@ export class MachineSessionCoordinator {
     const record = this.get(sessionId);
     if (!record?.resumePending || this.quiesced.has(sessionId)) return;
     this.commitAgentState(record, { resumePending: false });
-    this.recoverIssue(record.spaceId, 'recovery');
+    this.resumeAcceptedCallbacks.get(sessionId)?.();
   }
 
-  private resumeIfPending(record: AgentSession, runtime: OmpRuntimeSession, capability: ArtifactCapability): void {
+  private readonly resumeAcceptedCallbacks = new Map<string, () => void>();
+
+  private async resumeIfPending(record: AgentSession, runtime: OmpRuntimeSession, capability: ArtifactCapability): Promise<void> {
     if (!record.resumePending) return;
-    const resumeToken = this.beginOperation(record.spaceId, 'recovery');
     this.recoveringSessions.add(record.id);
+    const accepted = Promise.withResolvers<void>();
+    this.resumeAcceptedCallbacks.set(record.id, accepted.resolve);
     const pending = this.activePrompts.get(record.id) ?? new Set<Promise<void>>();
     const execution = runtime.resume().then(() => {
+      if (this.live.get(record.id)?.runtime !== runtime || this.quiesced.has(record.id)) return;
       this.recoveringSessions.delete(record.id);
       this.completeResume(record.id, capability);
+      accepted.resolve();
     }).catch((error) => {
+      accepted.reject(error);
+      if (this.live.get(record.id)?.runtime !== runtime || this.quiesced.has(record.id)) return;
       this.recoveringSessions.delete(record.id);
-      this.recordFailure(record.spaceId, 'resume', error, resumeToken);
+      // Once resume has been accepted, later turn errors belong to execution.
+      if (!this.get(record.id)?.resumePending) this.recordFailure(record.spaceId, 'prompt', error, this.beginOperation(record.spaceId, 'execution'));
     }).finally(() => {
       pending.delete(execution);
-      if (pending.size === 0) this.activePrompts.delete(record.id);
+      if (pending.size === 0 && this.activePrompts.get(record.id) === pending) this.activePrompts.delete(record.id);
     });
     pending.add(execution);
     this.activePrompts.set(record.id, pending);
+    try { await accepted.promise; }
+    finally { if (this.resumeAcceptedCallbacks.get(record.id) === accepted.resolve) this.resumeAcceptedCallbacks.delete(record.id); }
   }
   private async assertManagedSpaceRoot(spaceId: string): Promise<void> {
     const space = this.database.getSpace(spaceId);
     if (!space) throw runtimeError('managed space', new Error('Space does not exist'));
+    await this.assertManagedCheckoutPath(space.rootPath);
+  }
+
+  private async assertManagedCheckoutPath(rootPath: string): Promise<void> {
+    const space = { rootPath };
     const root = resolve(this.managedSpaceRoot);
     const local = relative(root, resolve(space.rootPath));
     if (local === '' || local === '..' || local.startsWith(`..${sep}`)) {

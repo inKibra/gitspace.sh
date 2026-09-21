@@ -2,6 +2,27 @@
 
 This document provides comprehensive information for AI assistants working on the GitSpace project.
 
+## Hot tenant deployments
+
+GitSpace supports hot tenant deployments as a first-class development workflow.
+Before deployment work or advice, MUST read
+[the tenant deployment skill](.agents/skills/gitspace-tenant-deployment/SKILL.md).
+This account release flow, not the legacy local `gssh web` setup below, governs
+tenant source deployments.
+
+- Use the canonical tenant launch flow, not manual process restarts, deployment
+  pointer edits, or host/image replacement.
+- Shared-contract changes determine the compatible release target set. Apply
+  that set through the normal launch flow; do not treat it as a separate
+  deployment project or a reason to stop at a compatibility warning.
+- Honor deployment authorization already given for the current tenant and
+  task without asking again. Code-only or documentation-only requests do not
+  authorize a live launch. Do not bypass product approval gates or expand the
+  authorized scope to other tenants, platform releases, or destructive actions.
+- Follow launch progress through activation or failure. Report the tenant,
+  source workspace, release, targets, and observed result. A successful build
+  or accepted launch is not proof that the tenant runs the new code.
+
 ## Project Overview
 
 **GitSpace** manages GitHub repository workspaces using git worktrees, with secure remote terminal access via an E2E encrypted relay system. There is no TUI. The interactive surface is the web app, and `gssh web` is the command that starts it.

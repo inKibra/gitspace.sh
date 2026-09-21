@@ -2,12 +2,36 @@ import { describe, expect, it } from 'bun:test';
 import { deriveWorkspaceStatusSummary, visibleActiveWorkspaces } from '@gitspace/protocol-workspace';
 
 describe('workspace status parity', () => {
-  it('preserves orange, green, blue, red, dim precedence', () => {
+  it('prioritizes execution failures over retained asks and outstanding work', () => {
     expect(deriveWorkspaceStatusSummary({ agents: [{ state: 'permission-needed' }, { state: 'running' }] }).primaryColor).toBe('orange');
-    expect(deriveWorkspaceStatusSummary({ agents: [{ state: 'running' }, { state: 'retrying' }] }).primaryColor).toBe('green');
-    expect(deriveWorkspaceStatusSummary({ agents: [{ state: 'waiting' }, { state: 'retrying' }] }).primaryColor).toBe('blue');
+    expect(deriveWorkspaceStatusSummary({ agents: [{ state: 'running' }, { state: 'retrying' }] }).primaryColor).toBe('red');
+    expect(deriveWorkspaceStatusSummary({ agents: [{ state: 'waiting' }, { state: 'retrying' }] }).primaryColor).toBe('red');
     expect(deriveWorkspaceStatusSummary({ agents: [{ state: 'retrying' }] }).primaryColor).toBe('red');
     expect(deriveWorkspaceStatusSummary({ agents: [{ state: 'dormant' }, { state: 'closed' }] }).primaryColor).toBe('dim');
+  });
+
+  it('does not count retained asks as actionable after disconnection', () => {
+    const status = deriveWorkspaceStatusSummary({ agents: [{ state: 'permission-needed', failure: { code: 'AGENT_DISCONNECTED', message: 'Connection lost' } }] });
+    expect(status.primaryColor).toBe('red');
+    expect(status.agents).toEqual({ green: 0, blue: 0, orange: 0, red: 1 });
+  });
+
+  it('keeps service failures separate from working agent counts', () => {
+    const status = deriveWorkspaceStatusSummary({ agents: [{ state: 'running' }], services: [{ running: false, exitCode: 1 }] });
+    expect(status.primaryColor).toBe('green');
+    expect(status.agents.red).toBe(0);
+    expect(status.services.red).toBe(1);
+  });
+
+  it('exposes active compaction without retaining it after the agent stops running', () => {
+    const compaction = { detail: 'Remote compaction · attempt 2' };
+    const running = deriveWorkspaceStatusSummary({ agents: [{ state: 'running', compaction }] });
+    expect(running.primaryColor).toBe('green');
+    expect(running.compaction).toBeDefined();
+    for (const state of ['waiting', 'closed', 'archived'] as const) {
+      expect(deriveWorkspaceStatusSummary({ agents: [{ state, compaction }] }).compaction).toBeUndefined();
+    }
+    expect(deriveWorkspaceStatusSummary({ agents: [{ state: 'running', compaction }, { state: 'permission-needed' }] }).primaryColor).toBe('orange');
   });
 
 

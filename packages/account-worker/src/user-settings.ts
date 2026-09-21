@@ -9,7 +9,7 @@ import {
   type UserSettingsUpdate,
 } from '@gitspace/protocol';
 import { subscriptionIdentity, subscriptionActive } from './account-access.js';
-import { DurableChangeLog } from './durable-stream.js';
+import { DurableChangeLog, type DurableStreamSubscription } from './durable-stream.js';
 
 const EMPTY_SHA256 = 'sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855' as const;
 export class SettingsRevisionConflict extends Error {
@@ -136,7 +136,7 @@ export class UserSettingsDO extends DurableObject<Env> {
     const git = identity ? { generation: identity.generation, publicKey: identity.publicKey, fingerprint: identity.fingerprint, updatedAt: identity.updatedAt, updatedBy: identity.updatedBy } : null;
     return { user: this.get('uninitialized'), omp: this.getOmp(), git };
   }
-  watch(after: number | null): ReadableStream<Uint8Array> {
+  watch(after: number | null): DurableStreamSubscription {
     return this.changes.watch('settings', after, () => this.snapshot());
   }
   async fetch(request: Request): Promise<Response> {

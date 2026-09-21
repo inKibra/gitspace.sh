@@ -253,6 +253,104 @@ describe('ProjectLifecycleManager.archiveWorkspace', () => {
     }
   });
 
+  it('archives after safe close removes both local workspace and project records', async () => {
+    const fixture = archiveFixture('active');
+    const { database, authority, manager, definition, input } = fixture;
+    try {
+      fixture.materialize();
+      const placement = await authority.bootstrap(input);
+      const archived = await manager.archiveWorkspace({ ...input, expectedGeneration: placement.generation }, async (space, generation) => {
+        await fixture.close(space, generation);
+        database.deleteWorkspace(space.id);
+        database.deleteProject(space.projectId);
+      });
+      expect(archived).toMatchObject({ lifecycle: 'archived', sourceCommit: definition.sourceCommit, goalId: definition.goalId });
+      expect(database.getSpace(input.spaceId)).toBeNull();
+      expect(database.getProject(input.projectId)).toBeNull();
+      expect(await authority.getSpace(input.projectId, input.spaceId)).toMatchObject({ state: 'closed', publishedRevision: 1 });
+      expect([...authority.operations.values()]).toMatchObject([{ kind: 'workspace.archive', state: 'succeeded' }]);
+    } finally {
+      database.close();
+    }
+  });
+
+  it.each(['unpublished', 'missing-manifest', 'missing-hash', 'remote', 'closing'] as const)('rejects cloud-only %s placement without changing lifecycle', async (scenario) => {
+    const { database, authority, manager, definition, input } = archiveFixture('active');
+    try {
+      const closed = checkpointedPlacement(await authority.bootstrap(input));
+      const placement = {
+        ...closed,
+        ...(scenario === 'unpublished' ? { publishedRevision: 0 } : {}),
+        ...(scenario === 'missing-manifest' ? { manifestKey: null } : {}),
+        ...(scenario === 'missing-hash' ? { manifestHash: null } : {}),
+        ...(scenario === 'remote' ? { state: 'open' as const, machineId: 'machine-b' } : {}),
+        ...(scenario === 'closing' ? { state: 'closing' as const, machineId: 'machine-a' } : {}),
+      };
+      authority.spaces.set(input.spaceId, placement);
+      await expect(manager.archiveWorkspace({ ...input, expectedGeneration: placement.generation }, async () => {
+        throw new Error('Cloud-only placement must not invoke close');
+      })).rejects.toThrow();
+      expect(authority.workspaces.get(input.spaceId)).toEqual(definition);
+      expect(database.getSpace(input.spaceId)).toBeNull();
+      expect([...authority.operations.values()]).toMatchObject([{ state: 'failed' }]);
+    } finally {
+      database.close();
+    }
+  });
+
+  it('restores and deletes a cloud-only definition without creating operational rows', async () => {
+    const { database, authority, manager, input } = archiveFixture('archived');
+    try {
+      const placement = checkpointedPlacement(await authority.bootstrap(input));
+      authority.spaces.set(input.spaceId, placement);
+      expect(await manager.findWorkspace(input.spaceId)).toMatchObject({ id: input.spaceId, lifecycle: 'archived' });
+      const restored = await manager.setWorkspaceLifecycle(input.projectId, input.spaceId, 'active', input.expectedRevision);
+      expect(restored.lifecycle).toBe('active');
+      const archived = await manager.archiveWorkspace({ ...input, expectedRevision: restored.revision, expectedGeneration: placement.generation }, async () => {
+        throw new Error('Cloud-only workspace must not close');
+      });
+      expect(await manager.deleteWorkspace(input.projectId, input.spaceId, archived.revision)).toBe(true);
+      expect(await manager.findWorkspace(input.spaceId)).toBeNull();
+      expect(database.getProject(input.projectId)).toBeNull();
+      expect(database.getSpace(input.spaceId)).toBeNull();
+    } finally {
+      database.close();
+    }
+  });
+
+  it('archives, restores and deletes a cloud-only project without projecting it locally', async () => {
+    const { database, authority, manager, input } = archiveFixture('archived');
+    try {
+      authority.spaces.set(input.spaceId, checkpointedPlacement(await authority.bootstrap(input)));
+      const archived = await manager.archiveProject(input.projectId, 2);
+      const restored = await manager.restoreProject(input.projectId, archived.revision);
+      expect(restored.lifecycle).toBe('active');
+      const rearchived = await manager.archiveProject(input.projectId, restored.revision);
+      expect(await manager.deleteProject(input.projectId, rearchived.revision)).toBe(true);
+      expect(await authority.getProject(input.projectId)).toMatchObject({ lifecycle: 'deleting' });
+      expect(database.getProject(input.projectId)).toBeNull();
+      expect([...authority.operations.values()].map((operation) => operation.state)).toEqual(['succeeded', 'succeeded', 'succeeded', 'succeeded']);
+    } finally {
+      database.close();
+    }
+  });
+
+  it.each(['remote', 'uncommitted'] as const)('does not archive a project with a cloud-only %s workspace', async (scenario) => {
+    const { database, authority, manager, input } = archiveFixture('active');
+    try {
+      const placement = await authority.bootstrap(input);
+      authority.spaces.set(input.spaceId, scenario === 'remote'
+        ? { ...placement, machineId: 'machine-b' }
+        : { ...placement, state: 'closed', machineId: null });
+      await expect(manager.deleteWorkspace(input.projectId, input.spaceId, input.expectedRevision)).rejects.toThrow('safely closed');
+      await expect(manager.archiveProject(input.projectId, 2)).rejects.toThrow('safely closed');
+      expect(await authority.getProject(input.projectId)).toMatchObject({ lifecycle: 'active', revision: 2 });
+      expect(database.getProject(input.projectId)).toBeNull();
+    } finally {
+      database.close();
+    }
+  });
+
   it('archives a held workspace only after its checkpoint closes and preserves retained disk data', async () => {
     const fixture = archiveFixture('active');
     const { database, authority, manager, input } = fixture;
@@ -648,11 +746,13 @@ describe('ProjectLifecycleManager', () => {
     expect(readFileSync(join(sourcePath, 'untracked.txt'), 'utf8')).toBe('local only\n');
     const stackedLocal = database.getWorkspace(stacked.workspace.id)!;
     expect(database.releaseWorkspacePossession({ workspaceId: stackedLocal.id, holderId: 'machine-a', expectedGeneration: stackedLocal.generation }).status).toBe('ok');
+    authority.spaces.set(stackedLocal.id, checkpointedPlacement(authority.spaces.get(stackedLocal.id)!));
     const stackedArchived = await manager.setWorkspaceLifecycle(created.project.id, stackedLocal.id, 'archived');
     expect(await manager.deleteWorkspace(created.project.id, stackedLocal.id, stackedArchived.revision)).toBe(true);
 
     const local = database.getWorkspace(workspace.workspace.id)!;
     expect(database.releaseWorkspacePossession({ workspaceId: local.id, holderId: 'machine-a', expectedGeneration: local.generation }).status).toBe('ok');
+    authority.spaces.set(local.id, checkpointedPlacement(authority.spaces.get(local.id)!));
     const archived = await manager.setWorkspaceLifecycle(created.project.id, local.id, 'archived');
     expect(await manager.deleteWorkspace(created.project.id, local.id, archived.revision)).toBe(true);
     expect(database.getWorkspace(local.id)).toBeNull();

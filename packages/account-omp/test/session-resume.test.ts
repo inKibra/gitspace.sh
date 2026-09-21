@@ -11,9 +11,10 @@ const resumeResultSchema = z.object({
   goalsForRequests: z.array(z.enum(['initial', 'latest'])),
   uninterruptedAfterEdit: z.boolean(),
   instructionNotices: z.number().int(),
+  failureAfterInterrupt: z.string().nullable(),
 });
 
-test('resumes a cancelled partial response without deleting progress or inventing a user message', async () => {
+test.each(['stop', 'handoff'] as const)('resumes after %s without deleting progress or inventing a user message', async (interrupt) => {
   const root = await mkdtemp(join(tmpdir(), 'omp-resume-'));
   const program = join(root, 'resume.mjs');
   // A real SDK in its own process keeps registry, settings and shutdown hooks isolated.
@@ -77,12 +78,13 @@ try {
   instructions = { ...instructions, goal: { ...instructions.goal, revision: 2, title: 'latest-goal-marker' } };
   await session.instructionsChanged();
   const uninterruptedAfterEdit = requests === 2 && session.activity().activity.active;
-  await session.stop();
+  await session.${interrupt}();
   await running;
   const stopped = (await session.messages()).some(message => message.role === 'assistant' && message.stopReason === 'aborted');
+  const failureAfterInterrupt = session.activity().failure?.code ?? null;
   await session.resume();
   const replies = (await session.messages()).filter(message => message.role === 'assistant').map(message => message.content.filter(part => part.type === 'text').map(part => part.text).join(''));
-  console.log('RESUME_RESULT=' + JSON.stringify({ stopped, replies, history: (await session.control()).history.map(entry => entry.text), goalsForRequests, uninterruptedAfterEdit, instructionNotices }));
+  console.log('RESUME_RESULT=' + JSON.stringify({ stopped, replies, history: (await session.control()).history.map(entry => entry.text), goalsForRequests, uninterruptedAfterEdit, instructionNotices, failureAfterInterrupt }));
 } finally {
   await session?.dispose();
   auth.close();
@@ -104,6 +106,7 @@ try {
       goalsForRequests: ['initial', 'initial', 'latest'],
       uninterruptedAfterEdit: true,
       instructionNotices: 1,
+      failureAfterInterrupt: interrupt === 'handoff' ? null : 'AGENT_EXECUTION_FAILED',
     });
   } finally {
     child.kill('SIGKILL');

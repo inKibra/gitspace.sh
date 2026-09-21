@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'bun:test';
+import { afterEach, describe, expect, it, spyOn } from 'bun:test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -39,6 +39,14 @@ class CloudObjects {
     const key = new URL(String(input)).pathname.slice('/v1/data/'.length).split('/').map(decodeURIComponent).join('/');
     if (signed.payload.key !== key) return new Response(null, { status: 403 });
     const accountKey = `${signed.userId}/${key}`;
+    if (init?.method === 'HEAD') {
+      if (signed.operation !== 'data.head') return new Response(null, { status: 403 });
+      const bytes = this.objects.get(accountKey);
+      return new Response(null, bytes ? { status: 200, headers: {
+        'x-gitspace-sha256': `sha256:${new Bun.CryptoHasher('sha256').update(bytes).digest('hex')}`,
+        'content-length': String(bytes.byteLength),
+      } } : { status: 404 });
+    }
     if (init?.method === 'PUT') {
       if (signed.operation !== 'data.put') return new Response(null, { status: 403 });
       if (this.putsUntilFailure !== null) {
@@ -187,7 +195,11 @@ describe('cloud artifact object storage', () => {
     const nextBytes = new TextEncoder().encode('not yet acknowledged');
     (await original.resolver.write(capability, artifactUrl, nextBytes)).unwrap();
     cloud.putsUntilFailure = uploads;
-    const failed = await original.resolver.commit(capability, 'local://workspace/');
+    const sleep = spyOn(Bun, 'sleep').mockResolvedValue(undefined);
+    const failed = await (async () => {
+      try { return await original.resolver.commit(capability, 'local://workspace/'); }
+      finally { sleep.mockRestore(); }
+    })();
     expect(failed.status).toBe('error');
     if (failed.status === 'error') expect(failed.error).toBeInstanceOf(ArtifactStorageError);
     expect(original.database.orm.select().from(artifactScopes).where(eq(artifactScopes.id, canonical.id)).get()).toMatchObject({

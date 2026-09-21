@@ -35,7 +35,7 @@ import { createContext, useContext, useState, type Dispatch, type SetStateAction
 import { glyph } from './glyph.js';
 import { converging, latestLaunchProgress, launchPhaseLabel, machineConvergence, RELEASE_TARGETS, runningLabel, workspaceRelease, type LaunchTrack } from './release.js';
 import { PRODUCT_ROUTE_LABELS, type AppView, type ProductRoute } from './routes.js';
-import { spaceHolderLabel, StatusDot, workspaceStatusLabel, type AgentScopeView, type ProjectAgentView, type ProjectLifecycleView, type WorkspaceView } from './GitSpaceShell.js';
+import { spaceHolderLabel, StatusDot, workspaceStatusColor, workspaceStatusLabel, type AgentScopeView, type ProjectAgentView, type ProjectLifecycleView, type WorkspaceView } from './GitSpaceShell.js';
 
 const NAV: Array<{ view: Exclude<AppView, 'agent'>; icon: IconComponent }> = [
   { view: 'kanban', icon: glyph(Columns03) },
@@ -74,7 +74,7 @@ export interface SidebarSpaceSummary {
 function summaryLabel(summary: SidebarSpaceSummary): string {
   const status = workspaceStatusLabel(summary);
   if (summary.closedAt) return status;
-  if (summary.status || summary.holder.kind === 'released') return [status, summary.freshness === 'stale' ? 'Last known status' : null, summary.detail].filter(Boolean).join(' · ');
+  if (summary.status || summary.holder.kind === 'released') return [status, summary.detail].filter(Boolean).join(' · ');
   return summary.detail ?? status;
 }
 
@@ -91,7 +91,7 @@ const NewWorkspaceGlyph = glyph(Plus);
 /** Icon slots take component types, so keep this type stable while context updates the accepted status. */
 function SpaceStatusGlyph({ className, size, strokeWidth }: IconComponentProps) {
   const summary = useContext(SpaceSummaryContext);
-  const color = summary?.holder.kind === 'held' ? summary.status?.primaryColor ?? 'dim' : 'dim';
+  const color = summary ? workspaceStatusColor(summary) : 'orange';
   const freshness = summary?.freshness ?? (summary?.status ? 'fresh' : 'unknown');
   return <span className={`inline-flex items-center justify-center ${className ?? ''}`} style={{ width: size, height: size }} data-freshness={freshness}>
     {summary?.closedAt ? <ArchiveGlyph size={size} strokeWidth={strokeWidth} /> : <StatusDot color={color} pulse={color === 'green' && freshness === 'fresh'} />}
@@ -160,6 +160,7 @@ function SpaceMenu({ space, kind, runtime, summary = runtime, machines, deployme
   const launchable = active && kind === 'workspace' && deployment?.isGitSpaceProject === true;
   const canReopen = released && !!onReopen;
   const canClose = !archived && summary?.holder.kind === 'held' && !!onClose;
+  const outstanding = !!summary?.status && summary.status.agents.green + summary.status.agents.orange + summary.status.agents.red > 0;
   const canRestore = kind === 'workspace' && archived && !!onRestore;
   const canArchive = kind === 'workspace' && !archived && !!onArchive;
   const canMove = active && !!onMove && machines.length > 0;
@@ -172,7 +173,7 @@ function SpaceMenu({ space, kind, runtime, summary = runtime, machines, deployme
       {onInspect ? <MenuItem index={index++} icon={ProjectGlyph} label="Open project" onSelect={onInspect} /> : null}
       {onNewWorkspace ? <MenuItem index={index++} icon={NewWorkspaceGlyph} label="New workspace" onSelect={onNewWorkspace} /> : null}
       {canReopen ? <MenuItem index={index++} icon={ReopenGlyph} label="Reopen space" onSelect={() => void onReopen?.(space.id)} /> : null}
-      {canClose ? <MenuItem index={index++} icon={CloseGlyph} label={closePendingSpaceId === space.id ? summary?.status?.primaryColor === 'green' ? 'Stopping agent…' : 'Closing space…' : summary?.status?.primaryColor === 'green' ? 'Stop and close' : 'Close space'} disabled={closePendingSpaceId !== null && closePendingSpaceId !== undefined} onSelect={() => void onClose?.(space.id)} /> : null}
+      {canClose ? <MenuItem index={index++} icon={CloseGlyph} label={closePendingSpaceId === space.id ? outstanding ? 'Stopping agent…' : 'Closing space…' : outstanding ? 'Stop and close' : 'Close space'} disabled={closePendingSpaceId !== null && closePendingSpaceId !== undefined} onSelect={() => void onClose?.(space.id)} /> : null}
       {canRestore ? <MenuItem index={index++} icon={ReopenGlyph} label="Restore workspace" onSelect={() => void onRestore?.(space.id)} /> : null}
       {canArchive ? <MenuItem index={index++} icon={ArchiveGlyph} label="Archive workspace" onSelect={() => void onArchive?.(space.id)} /> : null}
       {canMove ? machines.map((machine) => <MenuItem key={machine.id} index={index++} icon={MachineGlyph} label={`Move to ${machine.label}`} onSelect={() => {

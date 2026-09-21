@@ -130,6 +130,8 @@ export interface InspectorProps {
   stackStatus?: OverviewViewProps['stackStatus'];
   environment?: ReactNode;
   repositoryEntries: readonly RepositoryTreeEntry[];
+  repositoryMode: RepositoryMode;
+  onRepositoryModeChange(mode: RepositoryMode): void;
   repositoryFile: RepositoryFileView | null;
   repositoryDiff: RepositoryDiffView | null;
   journalEntries: readonly JournalEntryView[];
@@ -153,7 +155,7 @@ export interface InspectorProps {
   onRequestRepositoryFile(path: string, mode: RepositoryMode): void;
   onRequestRepositoryDiff(path: string | null, mode: Exclude<RepositoryMode, 'current'>, baseRef?: string): void;
   onLoadRepositoryDiff(path: string, mode: Exclude<RepositoryMode, 'current'>, baseRef?: string): Promise<RepositoryDiffView>;
-  onCreateThread(input: CreateInspectorThread): Promise<void>;
+  onCreateThread(input: CreateInspectorThread): Promise<ReviewThreadView>;
   onReplyThread(threadId: string, expectedRevision: number, body: string): Promise<void>;
   onResolveThread(threadId: string, expectedRevision: number, resolved: boolean, decision: ReviewThreadView['decision']): Promise<void>;
   onMarkGuideSectionRead(sectionId: string, revision: number, headCommit: string): Promise<void>;
@@ -169,7 +171,14 @@ type ActiveView = InspectorPermanentView | 'document';
 type ArtifactReference = Extract<EvidenceReference, { kind: 'artifact' }>;
 type LoadStatus = 'loading' | 'loaded' | 'error' | undefined;
 type ToneColor = NonNullable<BadgeProps['color']>;
-interface ThreadSelection { path: string; side: 'base' | 'head'; startLine: number; endLine: number; mode?: RepositoryMode }
+type ThreadIdentity = Pick<Extract<ReviewAnchor, { kind: 'line' }>, 'generation' | 'baseCommit' | 'headCommit' | 'blobId'>;
+interface ThreadSelection { path: string; side: 'base' | 'head'; startLine: number; endLine: number; identity: ThreadIdentity }
+type ThreadIdentities = Record<'base' | 'head', ThreadIdentity>;
+function diffIdentities(diff: RepositoryDiffView, path: string): ThreadIdentities {
+  const file = diff.files.find((entry) => entry.path === path);
+  const context = { generation: diff.generation, baseCommit: diff.baseCommit, headCommit: diff.headCommit };
+  return { base: { ...context, blobId: file?.oldBlobId ?? null }, head: { ...context, blobId: file?.newBlobId ?? null } };
+}
 interface GuideViewState {
   active: number;
   anchor: { key: string; offset: number } | null;
@@ -195,10 +204,10 @@ const permanentTabs: ReadonlyArray<{ id: InspectorPermanentView; label: string }
 ];
 const agentSetupTabIndex = permanentTabs.findIndex((tab) => tab.id === 'agents');
 const repositoryModes: ReadonlyArray<{ id: RepositoryMode; label: string }> = [
-  { id: 'current', label: 'Current' },
-  { id: 'working', label: 'Working diff' },
-  { id: 'staged', label: 'Staged diff' },
-  { id: 'base', label: 'vs base' },
+  { id: 'current', label: 'Current files' },
+  { id: 'working', label: 'Unstaged' },
+  { id: 'staged', label: 'Staged' },
+  { id: 'base', label: 'All changes since base' },
 ];
 const artifactModes = ['preview', 'source'] as const;
 
@@ -390,13 +399,20 @@ function repositoryPatch(file: RepositoryFileView): string {
   return `diff --git a/${file.path} b/${file.path}\n--- a/${file.path}\n+++ b/${file.path}\n@@ -1,${lines.length} +1,${lines.length} @@\n${lines.map((line) => ` ${line}`).join('\n')}\n`;
 }
 interface ThreadAnnotation { thread: ReviewThreadView }
-function PierreViewer({ path, generation, patch, threads, onSelectThread, onSelectRange }: { path: string; generation: number; patch: string; threads: readonly ReviewThreadView[]; onSelectThread: (thread: ReviewThreadView) => void; onSelectRange: (selection: ThreadSelection) => void }) {
+function PierreViewer({ path, identities, patch, threads, onSelectThread, onSelectRange }: { path: string; identities: ThreadIdentities; patch: string; threads: readonly ReviewThreadView[]; onSelectThread: (thread: ReviewThreadView) => void; onSelectRange: (selection: ThreadSelection) => void }) {
   const fileDiff = useMemo(() => parsePatchFiles(patch).flatMap((parsed) => parsed.files)[0] ?? null, [patch]);
-  const annotations = useMemo<DiffLineAnnotation<ThreadAnnotation>[]>(() => threads.flatMap((thread) => thread.anchor.kind === 'line' && thread.anchor.path === path && thread.anchor.generation === generation ? [{ side: thread.anchor.side === 'head' ? 'additions' as const : 'deletions' as const, lineNumber: thread.anchor.startLine, metadata: { thread } }] : []), [generation, path, threads]);
-  const options = useMemo<FileDiffOptions<ThreadAnnotation>>(() => ({ diffStyle: 'unified', theme: 'github-light', disableFileHeader: true, hunkSeparators: 'line-info', enableHoverUtility: true, enableLineSelection: true, onLineSelectionEnd: (range: SelectedLineRange | null) => { if (!range) return; onSelectRange({ path, side: range.side === 'deletions' ? 'base' : 'head', startLine: Math.min(range.start, range.end), endLine: Math.max(range.start, range.end) }); } }), [onSelectRange, path]);
+  const matches = (thread: ReviewThreadView): boolean => {
+    if (thread.anchor.kind !== 'line' || thread.anchor.path !== path) return false;
+    const identity = identities[thread.anchor.side];
+    return thread.anchorState !== 'stale' && thread.anchor.generation === identity.generation && thread.anchor.baseCommit === identity.baseCommit && thread.anchor.headCommit === identity.headCommit && !!identity.blobId && thread.anchor.blobId === identity.blobId;
+  };
+  const annotations: DiffLineAnnotation<ThreadAnnotation>[] = threads.flatMap((thread) => thread.anchor.kind === 'line' && matches(thread) ? [{ side: thread.anchor.side === 'head' ? 'additions' as const : 'deletions' as const, lineNumber: thread.anchor.startLine, metadata: { thread } }] : []);
+  const outdatedThreads = threads.filter((thread) => thread.anchor.kind === 'line' && thread.anchor.path === path && !matches(thread));
+  const selectLine = (side: 'base' | 'head', startLine: number, endLine: number): void => onSelectRange({ path, identity: identities[side], side, startLine, endLine });
+  const options = useMemo<FileDiffOptions<ThreadAnnotation>>(() => ({ diffStyle: 'unified', theme: 'github-light', disableFileHeader: true, hunkSeparators: 'line-info', enableHoverUtility: true, enableLineSelection: true, onLineSelectionEnd: (range: SelectedLineRange | null) => { if (!range) return; selectLine(range.side === 'deletions' ? 'base' : 'head', Math.min(range.start, range.end), Math.max(range.start, range.end)); } }), [identities, onSelectRange, path]);
   if (!fileDiff) return <Padded><EmptyState icon={ic(FileCode02, 22)} title="No parseable content" description={`The selected ${path} view did not contain a text patch Pierre can render.`} /></Padded>;
   // FLUID-GAP: diff viewer — @pierre/diffs renders the patch with its own theme.
-  return <div className="min-h-0 flex-1 overflow-auto bg-surface-3"><FileDiff fileDiff={fileDiff} options={options} lineAnnotations={annotations} renderAnnotation={(annotation) => <Button variant="tertiary" size="compact" type="button" onClick={() => onSelectThread(annotation.metadata.thread)}>{ic(MessageSquare01, 14)}<span className="tabular-nums">{annotation.metadata.thread.messages.length}</span></Button>} renderGutterUtility={(getHoveredLine) => <Button variant="tertiary" size="icon-compact" type="button" aria-label="Add line comment" onMouseDown={(event) => { event.preventDefault(); const line = getHoveredLine(); if (line) onSelectRange({ path, side: line.side === 'deletions' ? 'base' : 'head', startLine: line.lineNumber, endLine: line.lineNumber }); }}>+</Button>} /></div>;
+  return <div className="min-h-0 flex-1 overflow-auto bg-surface-3">{outdatedThreads.length ? <div className="flex flex-wrap items-center gap-2 p-3"><span className="text-caption text-muted-foreground">Comments on other or unverified content:</span>{outdatedThreads.map((thread) => <Button key={thread.id} variant="tertiary" size="compact" type="button" onClick={() => onSelectThread(thread)}>{ic(MessageSquare01, 14)}{thread.anchor.kind === 'line' ? `Lines ${thread.anchor.startLine}–${thread.anchor.endLine}` : 'Thread'}</Button>)}</div> : null}<FileDiff fileDiff={fileDiff} options={options} lineAnnotations={annotations} renderAnnotation={(annotation) => <Button variant="tertiary" size="compact" type="button" onClick={() => onSelectThread(annotation.metadata.thread)}>{ic(MessageSquare01, 14)}<span className="tabular-nums">{annotation.metadata.thread.messages.length}</span></Button>} renderGutterUtility={(getHoveredLine) => <Button variant="tertiary" size="icon-compact" type="button" aria-label="Add line comment" onMouseDown={(event) => { event.preventDefault(); const line = getHoveredLine(); if (line) selectLine(line.side === 'deletions' ? 'base' : 'head', line.lineNumber, line.lineNumber); }}>+</Button>} /></div>;
 }
 
 function RepositoryTree({ entries, changedOnly, onOpen }: { entries: readonly RepositoryTreeEntry[]; changedOnly: boolean; onOpen: (entry: RepositoryTreeEntry) => void }) {
@@ -412,11 +428,12 @@ function RepositoryTree({ entries, changedOnly, onOpen }: { entries: readonly Re
   return <FileTree model={model} className="h-full" />;
 }
 
-function FilesSurface({ entries, changedOnly, setChangedOnly, onOpen }: { entries: readonly RepositoryTreeEntry[]; changedOnly: boolean; setChangedOnly: (value: boolean) => void; onOpen: (entry: RepositoryTreeEntry) => void }) {
+function FilesSurface({ entries, mode, onModeChange, changedOnly, setChangedOnly, onOpen }: { entries: readonly RepositoryTreeEntry[]; mode: RepositoryMode; onModeChange: (mode: RepositoryMode) => void; changedOnly: boolean; setChangedOnly: (value: boolean) => void; onOpen: (entry: RepositoryTreeEntry) => void }) {
   const changed = entries.filter((entry) => entry.kind === 'file' && entry.status !== 'clean').length;
   return <div className="flex min-h-0 flex-1 flex-col">
     <header className="flex flex-col gap-2 px-4 pb-2 pt-4">
       <div className="flex items-center justify-between gap-2"><strong className="text-body font-medium text-foreground">Repository</strong><span className="text-caption text-muted-foreground tabular-nums">{entries[0] ? `generation ${entries[0].generation}` : 'No checkout'}</span></div>
+      <Select value={mode} onValueChange={(value) => onModeChange(value as RepositoryMode)} size="compact"><SelectTrigger aria-label="Repository comparison" />{selectOptions(repositoryModes.map(({ id, label }) => ({ value: id, label })))}</Select>
       <TabsSubtle size="compact" selectedIndex={changedOnly ? 1 : 0} onSelect={(index) => setChangedOnly(index === 1)} aria-label="Repository filter"><TabsSubtleItem index={0} label="All" /><TabsSubtleItem index={1} label={`Changed · ${changed}`} /></TabsSubtle>
       <p className="text-caption text-muted-foreground">Choose any file from All, or focus the tree to paths changed in this workspace.</p>
     </header>
@@ -427,13 +444,31 @@ function FilesSurface({ entries, changedOnly, setChangedOnly, onOpen }: { entrie
 function ThreadPanel({ thread, selection, onClose, onCreate, onReply, onResolve }: { thread: ReviewThreadView | null; selection: ThreadSelection | null; onClose: () => void; onCreate: (body: string) => Promise<void>; onReply: (body: string) => Promise<void>; onResolve: (resolved: boolean, decision: ReviewThreadView['decision']) => Promise<void> }) {
   const shape = useShape();
   const [draft, setDraft] = useState('');
+  const [pending, setPending] = useState(false);
+  const pendingRef = useRef(false);
+  const [error, setError] = useState<string | null>(null);
+  const mutate = async (operation: () => Promise<void>, clearDraft = false): Promise<void> => {
+    if (pendingRef.current) return;
+    pendingRef.current = true;
+    setPending(true);
+    setError(null);
+    try {
+      await operation();
+      if (clearDraft) setDraft('');
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      pendingRef.current = false;
+      setPending(false);
+    }
+  };
   const title = thread ? thread.anchor.kind === 'line' ? `${thread.anchor.path} · lines ${thread.anchor.startLine}–${thread.anchor.endLine}` : thread.anchor.kind : selection ? `${selection.path} · lines ${selection.startLine}–${selection.endLine}` : 'Review thread';
-  const send = (): void => { const body = draft.trim(); if (!body) return; settle((thread ? onReply(body) : onCreate(body)).then(() => setDraft(''))); };
+  const send = (): void => { const body = draft.trim(); if (!body) return; void mutate(() => thread ? onReply(body) : onCreate(body), true); };
   return <Elevated offset={1} className="flex max-h-[50%] shrink-0 flex-col border-t border-border">
     <header className="flex items-center gap-2 px-3 py-2">
       <span className="flex min-w-0 flex-1 flex-col"><strong className="text-body font-medium text-foreground">{thread ? 'Review thread' : 'New review thread'}</strong><span className="truncate text-caption text-muted-foreground tabular-nums">{title}</span></span>
-      {thread ? <Button variant="secondary" size="compact" type="button" onClick={() => settle(onResolve(!thread.resolved, thread.resolved ? 'pending' : thread.decision))}>{thread.resolved ? 'Reopen' : 'Resolve'}</Button> : null}
-      <Button variant="ghost" size="icon-compact" type="button" aria-label="Close review thread" onClick={onClose}><XClose width={16} height={16} strokeWidth={1.5} /></Button>
+      {thread ? <Button variant="secondary" size="compact" type="button" disabled={pending} onClick={() => void mutate(() => onResolve(!thread.resolved, thread.resolved ? 'pending' : thread.decision))}>{thread.resolved ? 'Reopen' : 'Resolve'}</Button> : null}
+      <Button variant="ghost" size="icon-compact" type="button" disabled={pending} aria-label="Close review thread" onClick={onClose}><XClose width={16} height={16} strokeWidth={1.5} /></Button>
     </header>
     {thread?.anchorState === 'stale' ? <p className="flex flex-wrap items-center gap-2 px-3 pb-2 text-caption text-muted-foreground"><Badge variant="dot" color="amber">Stale anchor</Badge>{thread.staleReason ?? 'The repository identity changed after this thread was created.'}</p> : null}
     <ScrollArea className="min-h-0 flex-1"><div className="flex flex-col gap-3 px-3 pb-3">{thread?.messages.map((message) => <article className="flex gap-2" key={message.id}>
@@ -441,11 +476,12 @@ function ThreadPanel({ thread, selection, onClose, onCreate, onReply, onResolve 
       <div className="flex min-w-0 flex-1 flex-col gap-0.5"><header className="flex items-baseline justify-between gap-2"><strong className="text-body font-medium text-foreground">{message.authorId}</strong><time className="text-caption text-muted-foreground tabular-nums">{formatDate(message.createdAt)}</time></header><p className="text-body text-muted-foreground">{message.body}</p></div>
     </article>)}</div></ScrollArea>
     <div className="flex flex-col gap-2 border-t border-border p-3">
+      {error ? <p role="alert" className="text-caption text-destructive">{error}</p> : null}
       {/* FLUID-GAP: multi-line textarea — the registry has no textarea field. */}
-      <textarea aria-label={thread ? 'Reply to review thread' : 'Start review thread'} value={draft} onChange={(event) => setDraft(event.currentTarget.value)} placeholder={thread ? 'Reply with durable review context' : 'Describe the issue on this line'} className={`${shape.input} min-h-20 w-full resize-y border border-border bg-surface-2 p-2 text-body text-foreground`} />
+      <textarea aria-label={thread ? 'Reply to review thread' : 'Start review thread'} disabled={pending} value={draft} onChange={(event) => setDraft(event.currentTarget.value)} placeholder={thread ? 'Reply with durable review context' : 'Describe the issue on this line'} className={`${shape.input} min-h-20 w-full resize-y border border-border bg-surface-2 p-2 text-body text-foreground`} />
       <footer className="flex items-center justify-between gap-2">
-        {thread ? <Select value={thread.decision} size="compact" onValueChange={(value) => settle(onResolve(thread.resolved, value as ReviewThreadView['decision']))}><SelectTrigger aria-label="Review decision" />{selectOptions([{ value: 'pending', label: 'Pending' }, { value: 'approved', label: 'Approved' }, { value: 'changes-requested', label: 'Changes requested' }])}</Select> : <span />}
-        <Button variant="primary" size="compact" type="button" disabled={!draft.trim()} onClick={send}>{thread ? 'Reply' : 'Start thread'}</Button>
+        {thread ? <Select value={thread.decision} disabled={pending} size="compact" onValueChange={(value) => void mutate(() => onResolve(thread.resolved, value as ReviewThreadView['decision']))}><SelectTrigger aria-label="Review decision" />{selectOptions([{ value: 'pending', label: 'Pending' }, { value: 'approved', label: 'Approved' }, { value: 'changes-requested', label: 'Changes requested' }])}</Select> : <span />}
+        <Button variant="primary" size="compact" type="button" disabled={pending || !draft.trim()} onClick={send}>{pending ? 'Saving…' : thread ? 'Reply' : 'Start thread'}</Button>
       </footer>
     </div>
   </Elevated>;
@@ -653,9 +689,17 @@ function GuideFileDiffBlock({ path, anchorKey, root, baseRef, threads, gateOpene
     return () => observer.disconnect();
   }, [root, runtimeAvailable]);
   useEffect(() => {
-    if (!runtimeAvailable || !requested || diff || error) return;
-    void onLoadDiff(path, 'base', baseRef).then(setDiff).catch((cause: unknown) => setError(cause instanceof Error ? cause.message : String(cause)));
-  }, [requested, diff, error, path, baseRef, runtimeAvailable]);
+    setDiff(null);
+    setError(null);
+    if (!runtimeAvailable || !requested) return;
+    let active = true;
+    void onLoadDiff(path, 'base', baseRef).then((loaded) => {
+      if (!active) return;
+      if (loaded.path !== path || loaded.mode !== 'base') throw new Error('The diff response does not match this guide exhibit.');
+      setDiff(loaded);
+    }).catch((cause: unknown) => { if (active) setError(cause instanceof Error ? cause.message : String(cause)); });
+    return () => { active = false; };
+  }, [requested, path, baseRef, runtimeAvailable]);
   useEffect(() => {
     const host = hostRef.current;
     if (!host || !near) return;
@@ -673,7 +717,7 @@ function GuideFileDiffBlock({ path, anchorKey, root, baseRef, threads, gateOpene
       : error ? <Placeholder><span className="text-destructive">{error}</span></Placeholder>
         : !diff ? <div className="flex min-h-28 items-center justify-center"><ThinkingIndicator aria-label="Loading diff…" /></div>
           : large && !gateOpened ? <Placeholder><Button variant="secondary" size="compact" type="button" onClick={() => onGateOpen(path)}>Large diff · {(new TextEncoder().encode(diff.patch).byteLength / 1024).toFixed(0)} KB · Click to render</Button></Placeholder>
-            : <PierreViewer path={path} generation={diff.generation} patch={diff.patch} threads={threads} onSelectThread={onSelectThread} onSelectRange={(selection) => onSelectRange({ ...selection, mode: 'base' })} />}
+            : <PierreViewer path={path} identities={diffIdentities(diff, path)} patch={diff.patch} threads={threads} onSelectThread={onSelectThread} onSelectRange={onSelectRange} />}
   </div>;
 }
 
@@ -699,7 +743,7 @@ function GuideWalkthroughSection({ section, index, root, baseRef, done, openedGa
       <div className="flex flex-col gap-3 pb-2">
         <div className="flex flex-wrap items-center gap-2"><Badge variant="dot" color={done ? 'green' : 'gray'}>{section.kind}</Badge><span className="text-caption text-muted-foreground tabular-nums">{section.exhibits.length} file{section.exhibits.length === 1 ? '' : 's'}</span><Button variant={done ? 'ghost' : 'secondary'} size="compact" type="button" className="ml-auto" disabled={done} onClick={onToggleDone}>{done ? <>{ic(Check, 14)}Complete</> : 'Mark complete'}</Button></div>
         <div className="flex flex-col gap-2"><GitSpaceMarkdown>{section.explanation}</GitSpaceMarkdown>{section.why ? <GitSpaceMarkdown>{`**Why:** ${section.why}`}</GitSpaceMarkdown> : null}</div>
-        <div className="flex flex-col gap-3">{section.exhibits.length ? section.exhibits.map((exhibit) => <div className="flex flex-col gap-1" key={exhibit.path}>{exhibit.slowRead ? <p className="flex flex-wrap items-center gap-2 text-caption text-muted-foreground"><Badge variant="dot" color="amber">slow read</Badge>{exhibit.note || 'Reviewer attention requested.'}</p> : null}<GuideFileDiffBlock path={exhibit.path} anchorKey={`f${index}:${exhibit.path}`} root={root} baseRef={baseRef} threads={threads} gateOpened={openedGates.has(exhibit.path)} onGateOpen={onGateOpen} onOpenFile={onOpenFile} onLoadDiff={onLoadDiff} onSelectThread={onSelectThread} onSelectRange={onSelectRange} /></div>) : <Placeholder>No file exhibits in this section.</Placeholder>}</div>
+        <div className="flex flex-col gap-3">{section.exhibits.length ? section.exhibits.map((exhibit) => <div className="flex flex-col gap-1" key={`${baseRef}:${exhibit.path}`}>{exhibit.slowRead ? <p className="flex flex-wrap items-center gap-2 text-caption text-muted-foreground"><Badge variant="dot" color="amber">slow read</Badge>{exhibit.note || 'Reviewer attention requested.'}</p> : null}<GuideFileDiffBlock path={exhibit.path} anchorKey={`f${index}:${exhibit.path}`} root={root} baseRef={baseRef} threads={threads} gateOpened={openedGates.has(exhibit.path)} onGateOpen={onGateOpen} onOpenFile={onOpenFile} onLoadDiff={onLoadDiff} onSelectThread={onSelectThread} onSelectRange={onSelectRange} /></div>) : <Placeholder>No file exhibits in this section.</Placeholder>}</div>
       </div>
     </AccordionContent>
   </AccordionItem>;
@@ -875,7 +919,9 @@ export function Inspector(props: InspectorProps) {
   const [fileModes, setFileModes] = useState<Record<string, RepositoryMode>>({});
   const [artifactModeById, setArtifactModeById] = useState<Record<string, 'preview' | 'source'>>({});
   const [changedOnly, setChangedOnly] = useState(false);
-  const [activeThread, setActiveThread] = useState<ReviewThreadView | null>(null);
+  const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
+  const activeThread = props.threads.find((thread) => thread.id === activeThreadId) ?? null;
+  const setActiveThread = (thread: ReviewThreadView | null): void => setActiveThreadId(thread?.id ?? null);
   const [threadSelection, setThreadSelection] = useState<ThreadSelection | null>(null);
   const [artifactContent, setArtifactContent] = useState<Record<string, InspectorArtifactContent>>({});
   const [artifactLoad, setArtifactLoad] = useState<Record<string, 'loading' | 'loaded' | 'error'>>({});
@@ -884,6 +930,8 @@ export function Inspector(props: InspectorProps) {
   const artifacts = useMemo(() => props.artifactReferences ?? evidence.filter((reference): reference is ArtifactReference => reference.kind === 'artifact'), [evidence, props.artifactReferences]);
   const activeDocument = documents.find((document) => document.id === activeDocumentId) ?? null;
   const activeMode = activeDocument ? fileModes[activeDocument.id] ?? 'current' : 'current';
+  const displayedFile = activeDocument?.kind === 'file' && activeMode === 'current' && props.repositoryFile?.path === activeDocument.target && props.repositoryFile.mode === activeMode ? props.repositoryFile : null;
+  const displayedDiff = activeDocument?.kind === 'file' && activeMode !== 'current' && props.repositoryDiff?.path === activeDocument.target && props.repositoryDiff.mode === activeMode ? props.repositoryDiff : null;
   const activeArtifact = activeDocument?.kind === 'artifact'
     ? activeDocument.target.startsWith('current:')
       ? artifacts.find((reference) => reference.url === activeDocument.target.slice(8)) ?? null
@@ -927,15 +975,10 @@ export function Inspector(props: InspectorProps) {
   const closeDocument = (id: string): void => { setDocuments((current) => { const next = current.filter((document) => document.id !== id); if (activeDocumentId === id) { const nextActive = next.at(-1)?.id ?? null; setActiveDocumentId(nextActive); setView(nextActive ? 'document' : 'goal'); } return next; }); setActiveThread(null); setThreadSelection(null); };
   const chooseMode = (mode: RepositoryMode): void => { if (!activeDocument || activeDocument.kind !== 'file') return; setFileModes((current) => ({ ...current, [activeDocument.id]: mode })); if (mode === 'current') props.onRequestRepositoryFile(activeDocument.target, mode); else props.onRequestRepositoryDiff(activeDocument.target, mode); };
   const createThread = async (body: string): Promise<void> => {
-    if (!threadSelection) return;
-    const file = props.repositoryFile?.path === threadSelection.path ? props.repositoryFile : null;
-    const diff = props.repositoryDiff?.path === threadSelection.path ? props.repositoryDiff : null;
-    const selectionMode = threadSelection.mode ?? activeMode;
-    const generation = selectionMode === 'current' ? file?.generation : diff?.generation;
-    const baseCommit = selectionMode === 'current' ? file?.commitId : diff?.baseCommit;
-    const headCommit = selectionMode === 'current' ? file?.headCommit : diff?.headCommit;
-    if (generation === undefined || !baseCommit || !headCommit) return;
-    await props.onCreateThread({
+    if (!threadSelection) throw new Error('Select a line before starting a review thread.');
+    const { generation, baseCommit, headCommit, blobId } = threadSelection.identity;
+    if (generation === undefined || !baseCommit || !headCommit) throw new Error('The displayed content is missing its review identity. Reload the view and select the line again.');
+    const created = await props.onCreateThread({
       body,
       decision: 'pending',
       anchor: {
@@ -944,12 +987,14 @@ export function Inspector(props: InspectorProps) {
         generation,
         baseCommit,
         headCommit,
-        blobId: file?.blobId ?? null,
+        blobId,
         side: threadSelection.side,
         startLine: threadSelection.startLine,
         endLine: threadSelection.endLine,
       },
     });
+    setActiveThreadId(created.id);
+    setThreadSelection(null);
   };
   const counts: Partial<Record<InspectorPermanentView, number>> = { subagents: props.subagents.length, files: props.repositoryEntries.filter((entry) => entry.kind === 'file' && entry.status !== 'clean').length, artifacts: artifacts.length, services: props.services.length };
   const threadOpen = !!(activeThread || threadSelection);
@@ -978,15 +1023,16 @@ export function Inspector(props: InspectorProps) {
       artifactContent={artifactContent}
       onRequest={loadArtifact}
     />;
-  } else if (activeDocument?.kind === 'file' && ((activeMode === 'current' && props.repositoryFile?.path === activeDocument.target) || (activeMode !== 'current' && props.repositoryDiff?.path === activeDocument.target))) {
-    documentBody = <PierreViewer path={activeDocument.target} generation={(activeMode === 'current' ? props.repositoryFile : props.repositoryDiff)!.generation} patch={activeMode === 'current' ? repositoryPatch(props.repositoryFile!) : props.repositoryDiff!.patch} threads={props.threads} onSelectThread={(thread) => { setActiveThread(thread); setThreadSelection(null); }} onSelectRange={(selection) => { setThreadSelection(selection); setActiveThread(null); }} />;
+  } else if (activeDocument?.kind === 'file' && (displayedFile || displayedDiff)) {
+    const currentIdentity = displayedFile ? { generation: displayedFile.generation, baseCommit: displayedFile.commitId, headCommit: displayedFile.headCommit, blobId: displayedFile.blobId } : null;
+    documentBody = <PierreViewer path={activeDocument.target} identities={currentIdentity ? { base: currentIdentity, head: currentIdentity } : diffIdentities(displayedDiff!, activeDocument.target)} patch={displayedFile ? repositoryPatch(displayedFile) : displayedDiff!.patch} threads={props.threads} onSelectThread={(thread) => { setActiveThread(thread); setThreadSelection(null); }} onSelectRange={(selection) => { setThreadSelection(selection); setActiveThread(null); }} />;
   } else if (activeDocument) {
     documentBody = <Padded><EmptyState icon={ic(FileCode02, 22)} title="Loading repository view" description="The selected file mode will render when its generation-pinned response arrives." /></Padded>;
   }
   const activeArtifactMode = activeArtifact ? artifactModeById[artifactId(activeArtifact)] ?? 'preview' : activeDocument?.kind === 'resource' ? artifactModeById[activeDocument.id] ?? 'preview' : 'preview';
   const document = activeDocument ? <div className="flex min-h-0 flex-1 flex-col">
     <header className="flex items-center justify-between gap-3 px-4 pb-2 pt-3">
-      <div className="flex min-w-0 flex-col"><strong className="truncate text-body font-medium text-foreground">{activeDocument.kind === 'file' ? activeDocument.target : activeDocument.label}</strong><span className="truncate text-caption text-muted-foreground tabular-nums">{activeDocument.kind === 'file' ? `${activeMode} · generation ${(props.repositoryFile ?? props.repositoryDiff)?.generation ?? '—'}` : activeDocument.kind === 'artifact' && activeArtifact ? `${activeArtifact.hash} · generation ${activeArtifact.generation}` : `${activeDocument.kind} authority record`}</span></div>
+      <div className="flex min-w-0 flex-col"><strong className="truncate text-body font-medium text-foreground">{activeDocument.kind === 'file' ? activeDocument.target : activeDocument.label}</strong><span className="truncate text-caption text-muted-foreground tabular-nums">{activeDocument.kind === 'file' ? `${repositoryModes.find((mode) => mode.id === activeMode)?.label} · generation ${(displayedFile ?? displayedDiff)?.generation ?? '—'}` : activeDocument.kind === 'artifact' && activeArtifact ? `${activeArtifact.hash} · generation ${activeArtifact.generation}` : `${activeDocument.kind} authority record`}</span></div>
       {!runtimeAvailable && activeDocument.kind === 'artifact' ? <Tooltip content="Open this workspace on a machine before editing artifacts"><span className="shrink-0 text-caption text-muted-foreground">Read-only artifact</span></Tooltip> : null}
       {activeDocument.kind === 'artifact' && activeArtifact && props.artifactActions ? <ArtifactActions selected={[activeArtifact]} actions={props.artifactActions} /> : null}
     </header>
@@ -1002,7 +1048,7 @@ export function Inspector(props: InspectorProps) {
       case 'goal': return <GoalOverview overview={props.overview} openDocuments={documents.length} onOpenProduct={openProduct} onOpenEvidence={openEvidence} />;
       case 'agents': return null;
       case 'subagents': return <SubagentsSurface subagents={props.subagents} />;
-      case 'files': return <FilesSurface entries={props.repositoryEntries} changedOnly={changedOnly} setChangedOnly={setChangedOnly} onOpen={(entry) => openFile(entry.path, 'current')} />;
+      case 'files': return <FilesSurface entries={props.repositoryEntries.filter((entry) => entry.mode === props.repositoryMode)} mode={props.repositoryMode} onModeChange={props.onRepositoryModeChange} changedOnly={changedOnly} setChangedOnly={setChangedOnly} onOpen={(entry) => openFile(entry.path, props.repositoryMode)} />;
       case 'artifacts': return <ArtifactsSurface references={artifacts} onOpen={(reference) => {
         if (reference.kind !== 'artifact') return;
         openDocument({ id: `artifact-current:${reference.url}`, kind: 'artifact', label: reference.label, target: `current:${reference.url}` });

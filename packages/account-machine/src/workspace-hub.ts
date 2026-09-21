@@ -105,6 +105,33 @@ export class WorkspaceHubTerminalCoordinator {
     private readonly clientForProject: HubClientFactory = daemonClientForProject,
   ) { this.terminalJournal = new TerminalSnapshotJournal(database); }
 
+  async forgetSpace(spaceId: string): Promise<void> {
+    const prefix = `terminals:${spaceId}:`;
+    for (const [resource, observer] of this.terminalObservers) {
+      if (!resource.startsWith(prefix)) continue;
+      observer.controller.abort();
+      this.terminalObservers.delete(resource);
+      for (const listener of this.terminalJournal.listeners) listener(resource);
+    }
+    this.terminalJournal.forgetSpace(spaceId);
+    const receipt = this.database.listSpaceCleanupJobs().find((job) => job.spaceId === spaceId);
+    if (!receipt || receipt.state !== 'committed') return;
+    const runtimeDir = getDaemonRuntimeDir(receipt.rootPath);
+    const daemonsDir = join(runtimeDir, 'daemons');
+    const entries = await readdir(daemonsDir).catch((error: NodeJS.ErrnoException) => error.code === 'ENOENT' ? [] : Promise.reject(error));
+    if (!entries.length) return;
+    const client = await this.clientForProject(receipt.rootPath);
+    const listed = await client.request({ op: 'list' });
+    if (listed.op !== 'list') throw new Error('OMP Hub returned an invalid list response');
+    if (listed.daemons.some((daemon) => !daemon.owner?.startsWith(`gitspace:${spaceId}:`))) return;
+    if (listed.daemons.some((daemon) => daemon.state !== 'exited' && daemon.state !== 'failed')) {
+      throw new Error(`Space ${spaceId} still has active terminal processes`);
+    }
+    const shutdown = await client.request({ op: 'shutdown' });
+    if (shutdown.op !== 'shutdown') throw new Error('OMP Hub did not confirm shutdown');
+    await rm(daemonsDir, { recursive: true, force: true });
+  }
+
   async list(spaceId: string): Promise<WorkspaceTerminalView[]> {
     const scope = await this.scope(spaceId);
     const listed = await scope.client.request({ op: 'list' });
@@ -146,12 +173,12 @@ export class WorkspaceHubTerminalCoordinator {
     this.terminalJournal.listeners.add(committed);
     signal.addEventListener('abort', notify, { once: true });
     try {
-      while (!signal.aborted) {
+      while (!signal.aborted && !observer.controller.signal.aborted) {
         const changed = Promise.withResolvers<void>();
         wake = changed.resolve;
         if (observer.failure) throw observer.failure;
         for (const event of this.terminalJournal.replay(resource, cursor, initial)) {
-          if (signal.aborted) return;
+          if (signal.aborted || observer.controller.signal.aborted) return;
           yield event;
           if (event.type !== 'resync') { cursor = event.cursor; initial = false; }
         }
@@ -162,7 +189,7 @@ export class WorkspaceHubTerminalCoordinator {
       signal.removeEventListener('abort', notify);
       if (--observer.references === 0) {
         observer.controller.abort();
-        this.terminalObservers.delete(resource);
+        if (this.terminalObservers.get(resource) === observer) this.terminalObservers.delete(resource);
       }
     }
   }
@@ -444,6 +471,10 @@ export class WorkspaceHubTerminalCoordinator {
       if (described.op !== 'describe' || !described.daemon.owner?.startsWith(`gitspace:${spaceId}:`)) continue;
       const stopped = await client.request({ op: 'stop', name: daemon.name, timeoutMs: 5_000 });
       if (stopped.op !== 'stop') throw new Error(`OMP Hub returned an invalid stop response for ${daemon.name}`);
+      const verified = await client.request({ op: 'describe', name: daemon.name });
+      if (verified.op !== 'describe' || (verified.daemon.state !== 'exited' && verified.daemon.state !== 'failed')) {
+        throw new Error(`Terminal ${daemon.name} is still active`);
+      }
     }
   }
 

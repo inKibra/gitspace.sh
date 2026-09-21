@@ -58,6 +58,7 @@ function git(cwd: string, ...args: string[]): string {
 
 class PortableOmpRuntime implements OmpRuntime {
   resumeCalls = 0;
+  disposeCalls = 0;
   openError: Error | null = null;
   messagesError: Error | null = null;
   private active = false;
@@ -128,7 +129,7 @@ class PortableOmpRuntime implements OmpRuntime {
       setWorkspacePhase: async () => undefined,
       handoff: async () => false,
       resume: async () => { this.resumeCalls += 1; },
-      dispose: async () => { disposed = true; this.active = false; },
+      dispose: async () => { disposed = true; this.active = false; this.disposeCalls += 1; },
       messages: async () => {
         if (this.messagesError) throw this.messagesError;
         return readFileSync(this.sessionFile, 'utf8').split('\n').filter(Boolean)
@@ -180,13 +181,21 @@ class BareRemote implements SpaceGitCheckpointRemote {
   }
 }
 
+async function cloudDefinition(spaceId: string, projectId = 'project-a') {
+  return {
+    projectId, projectName: 'Project', repositoryReference: null, baseBranch: 'main',
+    spaceId, kind: spaceId === projectId ? 'base' as const : 'worktree' as const,
+    name: spaceId, branch: 'main', phase: spaceId === projectId ? null : 'code' as const,
+  };
+}
+
 async function failedBaseFixture(configureRepository?: (repositoryPath: string) => Promise<void>) {
   const root = mkdtempSync(join(tmpdir(), 'gitspace-failed-base-'));
   roots.push(root);
-  const repository = join(root, 'base');
+  const repository = join(root, 'project-a', 'project-a');
   const remote = join(root, 'remote.git');
   const sessionFile = join(root, 'omp.jsonl');
-  mkdirSync(repository);
+  mkdirSync(repository, { recursive: true });
   git(repository, 'init', '-b', 'main');
   writeFileSync(join(repository, 'tracked.txt'), 'retained repository work\n');
   git(repository, 'add', '.');
@@ -218,11 +227,114 @@ async function failedBaseFixture(configureRepository?: (repositoryPath: string) 
     new EncryptedCheckpointBlobStore(new FileCheckpointBlobStore(join(root, 'blobs')), new Uint8Array(32).fill(4)),
     new BareRemote(remote));
   const binding: WalgitProjectBinding = { projectId: 'project-a', bucket: 'bucket', endpoint: 'https://example.invalid', region: 'auto' };
-  const controller = new MachinePortableSpaceController(database, sessions, lifecycle, 'machine-a', () => binding, async () => null, root, undefined, undefined, configureRepository);
+  const controller = new MachinePortableSpaceController(database, sessions, lifecycle, 'machine-a', () => binding, cloudDefinition, root, undefined, undefined, configureRepository);
   return { root, repository, sessionFile, mount, database, store, artifacts, session, runtime, sessions, authority, lifecycle, binding, controller };
 }
 
 describe('CoordinatorPortableSpaceRuntime', () => {
+  it('disposes without publication and retries committed cleanup after the rows disappear', async () => {
+    const { root, database, artifacts, sessionFile, session, runtime } = await failedBaseFixture();
+    let publications = 0;
+    runtime.openError = null;
+    const sessions = new MachineSessionCoordinator(database, artifacts, runtime, 'machine-a', join(root, 'runtime'), undefined, root, {
+      get: async () => null,
+      put: () => { publications += 1; },
+    });
+    try {
+      const opened = await sessions.openSpace('project-a');
+      if (opened.status === 'error') throw opened.error;
+      await sessions.quiesceSpace('project-a');
+      const childRoot = sessionFile.replace(/\.jsonl$/u, '');
+      mkdirSync(childRoot, { recursive: true });
+      writeFileSync(join(childRoot, 'child.jsonl'), 'child transcript');
+      await sessions.preparePortableSpaceCleanup('project-a');
+      const before = publications;
+      database.commitSpaceCleanup('project-a');
+      expect(database.getSpace('project-a')).toBeNull();
+      expect(sessions.get(session.id)).toBeNull();
+      await sessions.deletePortableSpaceLocal('project-a');
+      expect(runtime.disposeCalls).toBe(1);
+      expect(publications).toBe(before);
+      expect(existsSync(sessionFile)).toBe(false);
+      expect(existsSync(childRoot)).toBe(false);
+      expect(existsSync(join(root, 'runtime', 'sessions', session.id))).toBe(false);
+      expect(existsSync(join(root, 'project-a', 'project-a'))).toBe(false);
+      const restarted = new MachineSessionCoordinator(database, artifacts, runtime, 'machine-a', join(root, 'runtime'));
+      await restarted.deletePortableSpaceLocal('project-a');
+      expect(database.listSpaceCleanupJobs()[0]?.state).toBe('committed');
+    } finally { database.close(); }
+  });
+
+  it('detaches a sibling worktree before committing base cleanup', async () => {
+    const { root, repository, database, sessions } = await failedBaseFixture();
+    try {
+      const sibling = join(root, 'sibling');
+      const siblingCapability = { kind: 'workspace' as const, projectId: 'project-a', workspaceId: 'sibling' };
+      git(repository, 'worktree', 'add', '-b', 'sibling', sibling);
+      database.createWorkspace({ id: 'sibling', projectId: 'project-a', name: 'Sibling', branch: 'sibling', rootPath: sibling });
+      const artifacts = new LocalArtifactResolver(database, new MemoryArtifactObjectStore(), join(root, 'cache'), new Uint8Array(32).fill(3));
+      writeFileSync(join(sibling, 'tracked.txt'), 'sibling dirty work\n');
+      const written = await artifacts.write(siblingCapability, 'local://workspace/keep.txt', new TextEncoder().encode('sibling artifact'));
+      if (written.status === 'error') throw written.error;
+      const committed = await artifacts.commit(siblingCapability, 'local://workspace/');
+      if (committed.status === 'error') throw committed.error;
+      await sessions.preparePortableSpaceCleanup('project-a');
+      expect(readFileSync(join(repository, 'tracked.txt'), 'utf8')).toBe('retained repository work\n');
+      await sessions.deletePortableSpaceLocal('project-a');
+      expect(readFileSync(join(sibling, 'tracked.txt'), 'utf8')).toBe('sibling dirty work\n');
+      expect(git(sibling, 'show', 'HEAD:tracked.txt')).toBe('retained repository work');
+      expect(git(sibling, 'status', '--porcelain')).toBe('M tracked.txt');
+      const kept = await artifacts.read(siblingCapability, 'local://workspace/keep.txt');
+      if (kept.status === 'error') throw kept.error;
+      expect(new TextDecoder().decode(kept.value)).toBe('sibling artifact');
+    } finally { database.close(); }
+  });
+
+  it('refuses an unproven restore checkout instead of moving it into retention', async () => {
+    const { root, repository, database, sessions } = await failedBaseFixture();
+    try {
+      await expect(sessions.preparePortableSpaceRepository('project-a')).rejects.toThrow('unproven local data');
+      expect(readFileSync(join(repository, 'tracked.txt'), 'utf8')).toBe('retained repository work\n');
+      expect(readdirSync(dirname(repository)).some((name) => name.startsWith('project-a.retained-'))).toBe(false);
+    } finally { database.close(); }
+  });
+
+  it('persists an interrupted cleanup and retries it after reopening the database without local rows', async () => {
+    const { root, database, sessions, artifacts } = await failedBaseFixture();
+    await sessions.preparePortableSpaceCleanup('project-a');
+    artifacts.pruneUnreferencedCachedBytes = async () => { throw new Error('cache removal interrupted'); };
+    await expect(sessions.deletePortableSpaceLocal('project-a')).rejects.toThrow('cache removal interrupted');
+    expect(database.listSpaceCleanupJobs()[0]).toMatchObject({ state: 'committed', error: 'cache removal interrupted' });
+    database.close();
+    const reopened = new GitSpaceDatabase(join(root, 'gitspace.db'));
+    try {
+      expect(reopened.getSpace('project-a')).toBeNull();
+      const resolver = new LocalArtifactResolver(reopened, new MemoryArtifactObjectStore(), join(root, 'cache'), new Uint8Array(32).fill(3));
+      const restarted = new MachineSessionCoordinator(reopened, resolver, new PortableOmpRuntime(join(root, 'unused.jsonl')), 'machine-a', join(root, 'runtime'));
+      await restarted.deletePortableSpaceLocal('project-a');
+      expect(existsSync(join(root, 'project-a', 'project-a'))).toBe(false);
+      expect(existsSync(join(root, 'omp.jsonl'))).toBe(false);
+      // Resource cleanup remains the controller's responsibility.
+      expect(reopened.listSpaceCleanupJobs()[0]?.state).toBe('committed');
+    } finally { reopened.close(); }
+  });
+
+  it('does not report cleanup complete while the cloud commit outcome remains unresolved', async () => {
+    const { database, repository, sessionFile, sessions, controller } = await failedBaseFixture();
+    try {
+      await sessions.preparePortableSpaceCleanup('project-a');
+      await expect(controller.retryCleanup('project-a')).rejects.toThrow('checkpoint outcome is unresolved');
+      expect(existsSync(repository)).toBe(true);
+      expect(existsSync(sessionFile)).toBe(true);
+      expect(database.listSpaceCleanupJobs()[0]?.state).toBe('prepared');
+      database.commitSpaceCleanup('project-a');
+      await controller.retryCleanup('project-a');
+      expect(database.getSpace('project-a')).toBeNull();
+      expect(existsSync(repository)).toBe(false);
+      expect(existsSync(sessionFile)).toBe(false);
+      expect(database.listSpaceCleanupJobs()).toEqual([]);
+    } finally { database.close(); }
+  });
   it('retries a failed inactive base without changing identity, retained history or unsynced files', async () => {
     const { database, sessionFile, mount, session, runtime, sessions } = await failedBaseFixture();
     try {
@@ -254,11 +366,11 @@ describe('CoordinatorPortableSpaceRuntime', () => {
       await Promise.all([controller.close(database.getSpace('project-a')!, 1), controller.close(database.getSpace('project-a')!, 1)]);
       expect(authority.state).toBe('closed');
       expect(authority.revision).toBe(1);
-      expect(database.getSpace('project-a')).toMatchObject({ placementState: 'closed', generation: 2 });
+      expect(database.getSpace('project-a')).toBeNull();
       expect(existsSync(repository)).toBe(false);
       expect(existsSync(sessionFile)).toBe(false);
       expect(sessions.controlsAvailable(session.id)).toBe(false);
-      expect(sessions.get(session.id)?.health.issues.recovery?.failure).toMatchObject({ code: 'AGENT_RECOVERY_FAILED', context: { operation: 'recover' } });
+      expect(sessions.get(session.id)).toBeNull();
       runtime.openError = null;
       await controller.open('project-a', 2);
       expect(sessions.get(session.id)).toMatchObject({ id: session.id, ompSessionId: session.ompSessionId, state: 'active' });
@@ -296,7 +408,7 @@ describe('CoordinatorPortableSpaceRuntime', () => {
   });
 
   it('does not expose a restored workspace when repository configuration fails', async () => {
-    const { database, session, runtime, sessions, authority, controller } = await failedBaseFixture(async () => {
+    const { database, repository, session, runtime, sessions, authority, controller } = await failedBaseFixture(async () => {
       throw new Error('Saved Git identity is unavailable');
     });
     try {
@@ -375,7 +487,8 @@ describe('CoordinatorPortableSpaceRuntime', () => {
       await closing;
       expect(authority.state).toBe('closed');
       expect(sessions.controlsAvailable(session.id)).toBe(false);
-      expect(database.getSpace('project-a')?.generation).toBe(2);
+      expect(database.getSpace('project-a')).toBeNull();
+      expect(database.getSpacePlacement('project-a')).toBeNull();
     } finally { release.resolve(); database.close(); }
   });
 
@@ -435,19 +548,25 @@ describe('CoordinatorPortableSpaceRuntime', () => {
     writeFileSync(join(repository, 'untracked.txt'), content);
     source.orm.update(agentSessions).set({ resumePending: true }).where(eq(agentSessions.id, session.value.id)).run();
     const controller = new MachinePortableSpaceController(source, coordinator, lifecycle, 'machine-a', () => binding, async () => null, machineRoot);
+    let scope: typeof artifactScopes.$inferSelect | undefined;
+    const commitClosed = authority.commitClosed.bind(authority);
+    authority.commitClosed = async (input) => {
+      scope = source.orm.select().from(artifactScopes).where(eq(artifactScopes.spaceId, 'workspace-a')).get();
+      expect(existsSync(repository)).toBe(true);
+      expect(existsSync(session.value.sessionFile)).toBe(true);
+      await commitClosed(input);
+    };
     await controller.release(source.getSpace('workspace-a')!, 1);
-    const scope = source.orm.select().from(artifactScopes).all().find((scope) => scope.spaceId === 'workspace-a')!;
+    expect(source.getSpace('workspace-a')).toBeNull();
     source.close();
     rmSync(machineRoot, { recursive: true, force: true });
 
     mkdirSync(machineRoot);
     const destination = new GitSpaceDatabase(join(machineRoot, 'gitspace.db'));
-    destination.createProject({ id: 'project-a', name: 'Project', repositoryPath: join(machineRoot, 'project-a', 'base') });
-    destination.createWorkspace({ id: 'workspace-a', projectId: 'project-a', name: 'Workspace', branch: 'main', rootPath: repository });
     const restoredArtifacts = new LocalArtifactResolver(destination, new CloudArtifactObjectStore('account-a', durableBlobs), join(machineRoot, 'cache'), artifactKey);
     const restoredRuntime = new PortableOmpRuntime(join(machineRoot, 'unused.jsonl'));
     const restoredSessions = new MachineSessionCoordinator(destination, restoredArtifacts, restoredRuntime, 'machine-a', join(machineRoot, 'runtime'));
-    const restoredController = new MachinePortableSpaceController(destination, restoredSessions, lifecycle, 'machine-a', () => binding, async () => null, machineRoot);
+    const restoredController = new MachinePortableSpaceController(destination, restoredSessions, lifecycle, 'machine-a', () => binding, cloudDefinition, machineRoot);
     await restoredController.open('workspace-a', 2);
     expect(destination.getSpace('workspace-a')).toMatchObject({ holderId: 'machine-a', placementState: 'open', generation: 3 });
     expect(authority.generation).toBe(3);
@@ -457,7 +576,7 @@ describe('CoordinatorPortableSpaceRuntime', () => {
     expect(readFileSync(join(repository, 'tracked.txt'), 'utf8')).toBe('unstaged final work\n');
     expect(readFileSync(join(repository, 'untracked.txt'), 'utf8')).toBe(content);
     expect(git(repository, 'diff', '--cached', '--name-only')).toBe('staged.txt');
-    expect(destination.orm.select().from(artifactScopes).all().find((entry) => entry.spaceId === 'workspace-a')).toMatchObject({ id: scope.id, generation: scope.generation, manifestHash: scope.manifestHash });
+    expect(destination.orm.select().from(artifactScopes).all().find((entry) => entry.spaceId === 'workspace-a')).toMatchObject({ id: scope!.id, generation: scope!.generation, manifestHash: scope!.manifestHash });
     const artifact = await restoredArtifacts.read({ kind: 'workspace', projectId: 'project-a', workspaceId: 'workspace-a' }, 'local://workspace/agent.txt');
     if (artifact.status === 'error') throw artifact.error;
     expect(new TextDecoder().decode(artifact.value)).toBe(content);
@@ -469,10 +588,10 @@ describe('CoordinatorPortableSpaceRuntime', () => {
   it('moves real files and the canonical OMP agent from machine A to machine B', async () => {
     const root = mkdtempSync(join(tmpdir(), 'gitspace-coordinator-portable-'));
     roots.push(root);
-    const workspaceRoot = join(root, 'workspace');
+    const workspaceRoot = join(root, 'project-a', 'workspace-a');
     const remote = join(root, 'remote.git');
     const sessionFile = join(root, 'sessions', 'omp-portable.jsonl');
-    mkdirSync(workspaceRoot);
+    mkdirSync(workspaceRoot, { recursive: true });
     git(workspaceRoot, 'init', '-b', 'main');
     writeFileSync(join(workspaceRoot, '.gitignore'), 'secret.env\n');
     writeFileSync(join(workspaceRoot, 'tracked.txt'), 'base\n');
@@ -507,10 +626,10 @@ describe('CoordinatorPortableSpaceRuntime', () => {
     const spaces = new MachinePortableSpaceController(database, coordinator, lifecycle, 'machine-a', () => binding, async () => null, root, () => ['portable.txt']);
     await spaces.close(database.getSpace('workspace-a')!, 1);
     expect(authority.state).toBe('closed');
-    expect(database.getSpace('workspace-a')).toMatchObject({ placementState: 'closed', holderId: 'unassigned', generation: 2 });
+    expect(database.getSpace('workspace-a')).toBeNull();
     expect(existsSync(workspaceRoot)).toBe(false);
     expect(existsSync(sessionFile)).toBe(false);
-    expect(coordinator.get(created.value.id)?.state).toBe('closed');
+    expect(coordinator.get(created.value.id)).toBeNull();
 
     const destinationCoordinator = new MachineSessionCoordinator(
       database,
@@ -520,7 +639,7 @@ describe('CoordinatorPortableSpaceRuntime', () => {
       join(root, 'destination-runtime'),
       new FactEventStore(database),
     );
-    const destinationSpaces = new MachinePortableSpaceController(database, destinationCoordinator, lifecycle, 'machine-b', () => binding, async () => null, root, () => ['portable.txt']);
+    const destinationSpaces = new MachinePortableSpaceController(database, destinationCoordinator, lifecycle, 'machine-b', () => binding, cloudDefinition, root, () => ['portable.txt']);
     await destinationSpaces.open('workspace-a', 2);
     expect(database.getSpace('workspace-a')).toMatchObject({ placementState: 'open', holderId: 'machine-b', generation: 3 });
     expect(readFileSync(join(workspaceRoot, 'tracked.txt'), 'utf8')).toBe('changed\n');
@@ -542,10 +661,10 @@ describe('CoordinatorPortableSpaceRuntime', () => {
     if (stopped.status === 'error') throw stopped.error;
     database.close();
   });
-  it('keeps released files until explicit reopen restores a fresh checkout and retains local leftovers', async () => {
+  it('removes released files and restores only the durable checkpoint on explicit reopen', async () => {
     const root = mkdtempSync(join(tmpdir(), 'gitspace-coordinator-release-'));
     roots.push(root);
-    const workspaceRoot = join(root, 'managed-spaces', 'workspace');
+    const workspaceRoot = join(root, 'managed-spaces', 'project-a', 'workspace-a');
     const remote = join(root, 'remote.git');
     const sessionFile = join(root, 'sessions', 'omp-portable.jsonl');
     mkdirSync(workspaceRoot, { recursive: true });
@@ -563,7 +682,7 @@ describe('CoordinatorPortableSpaceRuntime', () => {
     expect(database.createWorkspace({ id: 'workspace-a', projectId: 'project-a', name: 'Workspace', branch: 'main', rootPath: workspaceRoot }).status).toBe('ok');
     expect(database.possessWorkspace('workspace-a', 'machine-a').status).toBe('ok');
     const artifacts = new LocalArtifactResolver(database, new MemoryArtifactObjectStore(), join(root, 'artifact-cache'), new Uint8Array(32).fill(3));
-    const coordinator = new MachineSessionCoordinator(database, artifacts, new PortableOmpRuntime(sessionFile), 'machine-a', join(root, 'runtime'), new FactEventStore(database), join(root, 'managed-spaces'));
+    const coordinator = new MachineSessionCoordinator(database, artifacts, new PortableOmpRuntime(sessionFile), 'machine-a', join(root, 'runtime'), new FactEventStore(database), join(root, 'managed-spaces'), undefined, undefined, join(root, 'sessions'));
     const created = await coordinator.create('workspace-a');
     if (created.status === 'error') throw created.error;
     expect((await coordinator.prompt(created.value.id, 'before-release')).status).toBe('ok');
@@ -572,14 +691,13 @@ describe('CoordinatorPortableSpaceRuntime', () => {
     const blobs = new EncryptedCheckpointBlobStore(new FileCheckpointBlobStore(join(root, 'bucket')), new Uint8Array(32).fill(4));
     const lifecycle = new PortableSpaceLifecycle(authority, blobs, new BareRemote(remote));
     const binding: WalgitProjectBinding = { projectId: 'project-a', bucket: 'user-bucket', endpoint: 'https://example.invalid', region: 'auto' };
-    const spaces = new MachinePortableSpaceController(database, coordinator, lifecycle, 'machine-a', () => binding, async () => null, root);
+    const spaces = new MachinePortableSpaceController(database, coordinator, lifecycle, 'machine-a', () => binding, cloudDefinition, join(root, 'managed-spaces'));
     await spaces.release(database.getSpace('workspace-a')!, 1);
     expect(authority.state).toBe('closed');
-    expect(database.getSpace('workspace-a')).toMatchObject({ placementState: 'closed', holderId: 'unassigned', generation: 2, closedAt: null });
-    expect(readFileSync(join(workspaceRoot, 'tracked.txt'), 'utf8')).toBe('changed\n');
-    expect(readFileSync(join(workspaceRoot, 'secret.env'), 'utf8')).toBe('stays-local\n');
-    expect(existsSync(sessionFile)).toBe(true);
-    expect(coordinator.get(created.value.id)?.state).toBe('closed');
+    expect(database.getSpace('workspace-a')).toBeNull();
+    expect(existsSync(workspaceRoot)).toBe(false);
+    expect(existsSync(sessionFile)).toBe(false);
+    expect(coordinator.get(created.value.id)).toBeNull();
 
     // The cloud checkpoint is readable without opening the space anywhere.
     const checkpointObjectReads: string[] = [];
@@ -644,9 +762,9 @@ describe('CoordinatorPortableSpaceRuntime', () => {
     const content = await reader.content('project-a', 'workspace-a', { generation: page!.generation, rowId: page!.rows[0]!.id, offset: 0 });
     expect(JSON.parse(content!.text)).toMatchObject({ type: 'message', text: 'done:before-release' });
     expect(projections).toBe(1);
-    expect(database.getSpace('workspace-a')).toMatchObject({ placementState: 'closed', generation: 2 });
+    expect(database.getSpace('workspace-a')).toBeNull();
 
-    // Reclaim restores a fresh checkout; ignored leftovers remain available only in the retained directory.
+    // The cloud definition rematerializes metadata; the checkpoint supplies the bytes.
     await spaces.open('workspace-a', 2);
     expect(database.getSpace('workspace-a')).toMatchObject({ placementState: 'open', holderId: 'machine-a', generation: 3 });
     expect(authority.state).toBe('open');
@@ -654,9 +772,7 @@ describe('CoordinatorPortableSpaceRuntime', () => {
     expect(await reader.read('project-a', 'workspace-a')).toBeNull();
     expect(readFileSync(join(workspaceRoot, 'tracked.txt'), 'utf8')).toBe('changed\n');
     expect(existsSync(join(workspaceRoot, 'secret.env'))).toBe(false);
-    const retained = readdirSync(dirname(workspaceRoot)).find((entry) => entry.startsWith('workspace.retained-'));
-    expect(retained).toBeDefined();
-    expect(readFileSync(join(dirname(workspaceRoot), retained!, 'secret.env'), 'utf8')).toBe('stays-local\n');
+    expect(readdirSync(dirname(workspaceRoot)).some((entry) => entry.startsWith('workspace.retained-'))).toBe(false);
     const reclaimed = coordinator.get(created.value.id)!;
     expect(reclaimed).toMatchObject({ id: created.value.id, state: 'active' });
     expect(await coordinator.transcript(reclaimed.id)).toHaveLength(1);
@@ -669,9 +785,11 @@ describe('CoordinatorPortableSpaceRuntime', () => {
   it.skipIf(process.env.GITSPACE_LIVE_PORTABLE_TEST !== '1')('closes and reopens through Miniflare R2 and walgit on RustFS', async () => {
     const root = mkdtempSync(join(tmpdir(), 'gitspace-live-portable-'));
     roots.push(root);
-    const workspaceRoot = join(root, 'workspace');
+    const projectId = `project-${crypto.randomUUID().slice(0, 8)}`;
+    const spaceId = `space-${crypto.randomUUID().slice(0, 8)}`;
+    const workspaceRoot = join(root, projectId, spaceId);
     const sessionFile = join(root, 'sessions', 'omp-portable.jsonl');
-    mkdirSync(workspaceRoot);
+    mkdirSync(workspaceRoot, { recursive: true });
     git(workspaceRoot, 'init', '-b', 'main');
     writeFileSync(join(workspaceRoot, '.gitignore'), 'secret.env\n');
     writeFileSync(join(workspaceRoot, 'tracked.txt'), 'base\n');
@@ -683,8 +801,6 @@ describe('CoordinatorPortableSpaceRuntime', () => {
     writeFileSync(join(workspaceRoot, 'portable.txt'), 'portable\n');
     writeFileSync(join(workspaceRoot, 'secret.env'), 'do-not-move\n');
 
-    const projectId = `project-${crypto.randomUUID().slice(0, 8)}`;
-    const spaceId = `space-${crypto.randomUUID().slice(0, 8)}`;
     const database = new GitSpaceDatabase(join(root, 'gitspace.db'));
     expect(database.createProject({ id: projectId, name: `Project ${projectId}`, repositoryPath: join(root, 'base') }).status).toBe('ok');
     expect(database.createWorkspace({ id: spaceId, projectId, name: 'Workspace', branch: 'main', rootPath: workspaceRoot }).status).toBe('ok');
@@ -724,9 +840,9 @@ describe('CoordinatorPortableSpaceRuntime', () => {
       new EncryptedCheckpointBlobStore(new CloudDataCheckpointBlobStore(controlOptions), new Uint8Array(32).fill(4)),
       walgit,
     );
-    const spaces = new MachinePortableSpaceController(database, coordinator, lifecycle, 'local-machine', () => binding, async () => null, root);
+    const spaces = new MachinePortableSpaceController(database, coordinator, lifecycle, 'local-machine', () => binding, (id) => cloudDefinition(id, projectId), root);
     await spaces.close(database.getSpace(spaceId)!, 1);
-    expect(database.getSpace(spaceId)).toMatchObject({ placementState: 'closed', holderId: 'unassigned', generation: 2 });
+    expect(database.getSpace(spaceId)).toBeNull();
     expect(existsSync(workspaceRoot)).toBe(false);
     expect(existsSync(sessionFile)).toBe(false);
 

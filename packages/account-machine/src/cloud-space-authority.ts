@@ -148,6 +148,8 @@ function projectCronView(value: ProjectCronView): ProjectCronView {
   };
 }
 
+const uploadMaxAttempts = 10;
+
 const uploadRetryCodes: Record<string, true> = {
   ECONNRESET: true, ECONNREFUSED: true, ECONNABORTED: true, EPIPE: true,
   ETIMEDOUT: true, EAI_AGAIN: true, ENETDOWN: true, ENETUNREACH: true,
@@ -214,13 +216,59 @@ export class CloudDataCheckpointBlobStore implements CheckpointBlobStore {
   async put(key: string, bytes: Uint8Array): Promise<`sha256:${string}`> {
     const hash = hashBytes(bytes);
     const url = objectUrl(this.options.baseUrl, key);
-    // Copy once; every attempt uploads the same content with exponential backoff.
+    // Snapshot once so every attempt verifies and uploads the same immutable content.
     const body = ownedBuffer(bytes);
+    const uploadId = crypto.randomUUID();
     for (let attempt = 0; ; attempt += 1) {
-      // The object is immutable, but replay protection requires a fresh signed nonce.
-      const request = signedRequest(this.options, 'data.put', { key, hash, size: body.byteLength });
+      const uploadDiagnostics = {
+        uploadId,
+        objectKey: key,
+        byteCount: body.byteLength,
+        attempt: attempt + 1,
+        maxAttempts: uploadMaxAttempts,
+        targetOrigin: url.origin,
+      };
       try {
+        // A prior PUT may have committed even when its response was lost.
+        const head = signedRequest(this.options, 'data.head', { key, hash });
+        const exists = await withCloudRequestDiagnostics(head, async (diagnostics) => {
+          const fetchStarted = performance.now();
+          const response = await (this.options.fetcher ?? fetch)(url, {
+            method: 'HEAD',
+            headers: { 'x-gitspace-control': encodedRequest(head), ...diagnostics.headers },
+          });
+          diagnostics.responseHeadersMs = performance.now() - fetchStarted;
+          diagnostics.response = response;
+          diagnostics.stage = 'http';
+          if (response.status === 404) {
+            void response.body?.cancel().catch(() => undefined);
+            return false;
+          }
+          if (response.status !== 200) {
+            const serverError = await readControlError(response);
+            throw new CloudSpaceAuthorityError(
+              'DATA_HEAD_FAILED',
+              `Application object metadata ${key} failed with ${response.status}${serverError ? `: ${serverError.code}: ${serverError.message}` : ''}`,
+              { ...serverError, key, status: response.status },
+            );
+          }
+          void response.body?.cancel().catch(() => undefined);
+          diagnostics.stage = 'integrity';
+          if (response.headers.get('x-gitspace-sha256') !== hash
+            || response.headers.get('content-length') !== String(body.byteLength)) {
+            throw new CloudSpaceAuthorityError(
+              'DATA_INTEGRITY_FAILED',
+              `Application object ${key} metadata does not match the upload`,
+              { key, status: response.status },
+            );
+          }
+          return true;
+        }, uploadDiagnostics);
+        if (exists) return hash;
+        // HEAD and PUT each require a fresh nonce for replay protection.
+        const request = signedRequest(this.options, 'data.put', { key, hash, size: body.byteLength });
         return await withCloudRequestDiagnostics(request, async (diagnostics) => {
+          const fetchStarted = performance.now();
           const response = await (this.options.fetcher ?? fetch)(url, {
             method: 'PUT',
             headers: {
@@ -231,6 +279,7 @@ export class CloudDataCheckpointBlobStore implements CheckpointBlobStore {
             },
             body,
           });
+          diagnostics.responseHeadersMs = performance.now() - fetchStarted;
           diagnostics.response = response;
           diagnostics.stage = 'http';
           if (!response.ok) {
@@ -243,11 +292,11 @@ export class CloudDataCheckpointBlobStore implements CheckpointBlobStore {
           }
           await response.body?.cancel().catch(() => undefined);
           return hash;
-        });
+        }, uploadDiagnostics);
       } catch (error) {
-        if (attempt >= 4 || !retryableUploadError(error)) throw error;
-        // Five attempts total; preserve the last transport or HTTP error.
-        await Bun.sleep(250 * 2 ** attempt);
+        if (attempt + 1 >= uploadMaxAttempts || !retryableUploadError(error)) throw error;
+        // Bound retries and preserve the last transport or HTTP error.
+        await Bun.sleep(Math.min(250 * 2 ** attempt, 5_000));
       }
     }
   }
@@ -604,7 +653,7 @@ export class CloudSpaceCheckpointAuthority implements SpaceCheckpointAuthority, 
   }
 
   async putSpaceDefinition(definition: PortableSpaceDefinition): Promise<PortableSpaceDefinition> {
-    await this.bootstrapProject({
+    const project = await this.bootstrapProject({
       projectId: definition.projectId,
       name: definition.projectName,
       repositoryReference: definition.repositoryReference,
@@ -612,15 +661,17 @@ export class CloudSpaceCheckpointAuthority implements SpaceCheckpointAuthority, 
     });
     const current = (await this.listProjectWorkspaces(definition.projectId))
       .find((workspace) => workspace.id === definition.spaceId);
-    if (
-      current
-      && current.kind === definition.kind
-      && current.name === definition.name
-      && current.branch === definition.branch
-      && current.phase === definition.phase
-      && current.lifecycle === 'active'
-    ) {
-      return definition;
+    if (current) {
+      return {
+        ...definition,
+        projectName: project.name,
+        repositoryReference: project.repositoryReference,
+        baseBranch: project.baseBranch,
+        kind: current.kind,
+        name: current.name,
+        branch: current.branch,
+        phase: current.phase,
+      };
     }
     await this.putProjectWorkspace(definition.projectId, {
       id: definition.spaceId,
@@ -629,12 +680,12 @@ export class CloudSpaceCheckpointAuthority implements SpaceCheckpointAuthority, 
       name: definition.name,
       branch: definition.branch,
       phase: definition.phase,
-      sourceKind: current?.sourceKind ?? (definition.kind === 'base' ? 'base' : 'branch'),
-      sourceRef: current?.sourceRef ?? definition.branch,
-      sourceCommit: current?.sourceCommit ?? null,
+      sourceKind: definition.kind === 'base' ? 'base' : 'branch',
+      sourceRef: definition.branch,
+      sourceCommit: null,
       lifecycle: 'active',
       goalId: null,
-      expectedRevision: current?.revision ?? 0,
+      expectedRevision: 0,
     });
     return definition;
   }

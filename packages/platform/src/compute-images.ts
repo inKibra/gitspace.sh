@@ -115,7 +115,7 @@ export async function prepareComputeImage(input: {
   if (!Number.isSafeInteger(maxInstances) || maxInstances < 1 || !Number.isSafeInteger(maxImages) || maxImages < 1) {
     throw new ComputeProviderError('COMPUTE_CONFIGURATION_INVALID', 'Compute resource limits are not configured', 503);
   }
-  const observability = { enabled: true, head_sampling_rate: 1, redact_query_string: true, logs: { enabled: true, invocation_logs: true, persist: true } };
+  const observability = { enabled: true, head_sampling_rate: 1, redact_query_string: true, logs: { enabled: true, invocation_logs: false, persist: true } };
   const identity = JSON.stringify({ tenant, accountId, image, entrypoint, modules: modules.map(({ name, hash }) => ({ name, hash })),
     compatibilityDate: '2026-08-29', className: 'GitSpaceSandbox', instanceType: 'standard-1', maxInstances, hostname: env.COMPUTE_SANDBOX_HOSTNAME, observability });
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(identity));

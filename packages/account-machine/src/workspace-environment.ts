@@ -73,6 +73,32 @@ export class WorkspaceEnvironmentManager {
     private readonly options: { machineId: string; stateRoot: string; prepareRunner?: (spaceId: string, phase: LifecyclePhase) => Promise<string | undefined> },
   ) {}
 
+  async forgetSpace(spaceId: string, projectId: string): Promise<void> {
+    if ([...this.active.values()].some((run) => run.spaceId === spaceId)
+        || [...this.accepting.keys()].some((key) => key.startsWith(`${spaceId}:`))) {
+      throw new EnvironmentError('RecoveryRequired', 'Lifecycle execution must settle before local cleanup', { spaceId });
+    }
+    const files = await readdir(this.options.stateRoot).catch((error: NodeJS.ErrnoException) => error.code === 'ENOENT' ? [] : Promise.reject(error));
+    for (const file of files.filter((name) => name.endsWith('.json'))) {
+      const journal = join(this.options.stateRoot, file);
+      const pending = JSON.parse(await readFile(journal, 'utf8')) as PendingLifecycleRun;
+      if (pending.spaceId !== spaceId) continue;
+      if (pending.projectId !== projectId) throw new EnvironmentError('RecoveryRequired', 'Lifecycle cleanup identity does not match', { spaceId });
+      const state = await this.authority.getLifecycleState(projectId, spaceId);
+      const run = state.runs.find((entry) => entry.id === pending.runId);
+      if (!run || isLifecycleRunActive(run)) {
+        throw new EnvironmentError('RecoveryRequired', 'Lifecycle outcome must be durable before deleting local scratch', { spaceId, runId: pending.runId });
+      }
+      if (pending.incidents?.length) {
+        await this.authority.mutateLifecycleState(projectId, spaceId, { op: 'incidents', runId: run.id, incidents: pending.incidents });
+      }
+      await rm(pending.directory, { recursive: true, force: true });
+      if (pending.workingDirectory) await rm(pending.workingDirectory, { recursive: true, force: true });
+      await rm(`${journal}.incident.tmp`, { force: true });
+      await rm(journal);
+    }
+  }
+
   async view(spaceId: string, cloudOnly = false): Promise<WorkspaceEnvironmentView> {
     const space = this.database.getSpace(spaceId);
     if (!space) throw new EnvironmentError('NotFound', `Space ${spaceId} does not exist`, { spaceId });

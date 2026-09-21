@@ -544,4 +544,51 @@ describe('replacement environment host routes', () => {
     expect(environment.status()).toMatchObject({ machineHash: hash, machineReleaseSha: 'previous' });
     await environment.publishCodeVersion(hash);
   });
+  it('reports the exact SQLite boundary of a blocked frontend launch and retries after the writer releases', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'gitspace-host-lock-evidence-'));
+    roots.push(root);
+    const environment = new ReplacementEnvironment({
+      id: 'lock-evidence', root, repositoryRoot: root, rpcPort: 0, webPort: 0,
+      machineId: 'lock-proof-machine', artifactKey: new Uint8Array(32).fill(1),
+      ompAgentDir: join(root, 'omp'), controlToken: 'control-token',
+    });
+    environments.push(environment);
+    const candidate = join(root, 'candidate');
+    await mkdir(candidate);
+    await writeFile(join(candidate, 'index.html'), '<html>lock proof</html>');
+    const hash = await hashArtifactPath(candidate);
+    const launch = () => fetch(`${environment.hostUrl}/__environment/launch`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer control-token', 'content-type': 'application/json' },
+      body: JSON.stringify({ entrypoint: 'frontend', target: 'frontend', applies: ['frontend'], path: candidate, hash, sha: 'lock-proof-release' }),
+    });
+    const writer = new Database(join(root, 'deployment.db'));
+    writer.exec('BEGIN IMMEDIATE');
+    const messages: string[] = [];
+    const logging = spyOn(process.stderr, 'write').mockImplementation((message) => { messages.push(String(message)); return true; });
+    try {
+      const blocked = await launch();
+      expect(blocked.status).toBe(409);
+      expect(environmentLaunchResponseSchema.parse(await blocked.json()).status).toBe('failed');
+      expect(environment.status().frontendHash).toBeNull();
+      const events = messages.filter((message) => message.startsWith('{')).map((message) => JSON.parse(message));
+      const sqlite = events.find((event) => event.event === 'deployment_sqlite_failure');
+      expect(sqlite).toMatchObject({
+        operation: 'journal.run.insert', releaseSha: 'lock-proof-release', target: 'frontend',
+        error: { code: 'SQLITE_BUSY', errno: 5 },
+      });
+      expect(sqlite.deploymentId).toEqual(expect.any(String));
+      expect(sqlite.databases).toContainEqual(expect.objectContaining({ path: join(root, 'deployment.db') }));
+      expect(sqlite.error.stack).toContain('journal.ts');
+      writer.exec('ROLLBACK');
+      const retried = await launch();
+      expect(environmentLaunchResponseSchema.parse(await retried.json())).toMatchObject({ status: 'applied', error: null });
+      expect(retried.status).toBe(200);
+      expect(await (await fetch(`${environment.hostUrl}/index.html`)).text()).toBe('<html>lock proof</html>');
+    } finally {
+      logging.mockRestore();
+      if (writer.inTransaction) writer.exec('ROLLBACK');
+      writer.close();
+    }
+  });
 });
