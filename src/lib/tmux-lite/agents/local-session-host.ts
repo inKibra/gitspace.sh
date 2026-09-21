@@ -29,6 +29,7 @@ import { resolveTranscriptImageData } from './transcript-image-resolver.js';
 import type { TranscriptPage, TranscriptSource } from '../../../blocks/agent/transcript-source.js';
 import { LiveTurn } from '../../../blocks/agent/live-turn.js';
 import type { AgentEvent as SdkAgentEvent } from '@oh-my-pi/pi-agent-core';
+import type { Model } from '@oh-my-pi/pi-ai';
 import { AgentRegistry } from '@oh-my-pi/pi-coding-agent/registry/agent-registry';
 import type { AgentPromptImage } from '../protocol.js';
 import { recordEditBreadcrumb, flushEditBreadcrumbs } from './edit-breadcrumbs.js';
@@ -120,7 +121,7 @@ interface SessionTreeNodeLike {
 /** The control-seam accessors on a live session (cast loosely; the strict SDK
  *  signatures aren't worth re-declaring on OmpAgentSession). */
 interface ControlSessionAccessors {
-  model?: { provider?: string; id?: string };
+  model?: Model;
   thinkingLevel?: string;
   configuredThinkingLevel?(): string | undefined;
   setThinkingLevel?(level: string, persist?: boolean): void;
@@ -530,7 +531,7 @@ export class LocalSessionHost implements AgentSessionHost {
       currentModel = `${liveModel.provider}/${liveModel.id}`;
     }
     let models: AgentControlInfo['models'] = [];
-    let rawModels: Array<{ provider: string; id: string; api?: string; contextWindow?: number }> = [];
+    let rawModels: Model[] = [];
     try {
       const [registry, auth] = await Promise.all([createPiModelRegistry(), createPiAuthStorage()]);
       const isAuthed = (provider: string): boolean => {
@@ -567,13 +568,11 @@ export class LocalSessionHost implements AgentSessionHost {
       const m = settings?.get('tools.approvalMode');
       if (typeof m === 'string') approvalMode = m;
 
-      const { serviceTierFamily } = (await import('@oh-my-pi/pi-ai')) as {
-        serviceTierFamily: (model: { provider: string; api?: string; id: string }) => string | undefined;
-      };
+      const { serviceTierFamily } = await import('@oh-my-pi/pi-ai');
       const modelObj = liveModel?.provider && liveModel?.id
         ? liveModel
         : rawModels.find((x) => `${x.provider}/${x.id}` === currentModel);
-      const family = modelObj ? serviceTierFamily(modelObj as { provider: string; api?: string; id: string }) : undefined;
+      const family = modelObj ? serviceTierFamily(modelObj) : undefined;
       fastCapable = !!family;
       if (family) {
         serviceTierKey = `tier.${family}`;

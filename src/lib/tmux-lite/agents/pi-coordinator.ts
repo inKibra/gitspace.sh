@@ -1,4 +1,5 @@
 import { parseCommandArgs } from '@oh-my-pi/pi-coding-agent/utils/command-args';
+import type { Model } from '@oh-my-pi/pi-ai';
 
 import type { HostUIBridgeEmitter, HostUIDialogRequest, HostUIDialogResponse } from './host-ui-bridge.js';
 import {
@@ -305,7 +306,7 @@ export class PiCoordinator {
       currentModel = manager.buildSessionContext?.().models?.default ?? null;
     }
     let models: AgentControlInfo['models'] = [];
-    let rawModels: Array<{ provider: string; id: string; api?: string; contextWindow?: number }> = [];
+    let rawModels: Model[] = [];
     try {
       const [registry, auth] = await Promise.all([createPiModelRegistry(), createPiAuthStorage()]);
       const isAuthed = (provider: string): boolean => {
@@ -337,9 +338,7 @@ export class PiCoordinator {
       const m = settings?.get('tools.approvalMode');
       if (typeof m === 'string') approvalMode = m;
 
-      const { serviceTierFamily } = (await import('@oh-my-pi/pi-ai')) as {
-        serviceTierFamily: (model: { provider: string; api?: string; id: string }) => string | undefined;
-      };
+      const { serviceTierFamily } = await import('@oh-my-pi/pi-ai');
       const modelObj = rawModels.find((x) => `${x.provider}/${x.id}` === currentModel);
       const family = modelObj ? serviceTierFamily(modelObj) : undefined;
       fastCapable = !!family;

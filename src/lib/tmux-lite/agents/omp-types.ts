@@ -1,5 +1,5 @@
 import type { Skill } from '@oh-my-pi/pi-coding-agent/extensibility/skills';
-import type { CredentialHealthResult } from '@oh-my-pi/pi-ai';
+import type { CredentialHealthResult, Model } from '@oh-my-pi/pi-ai';
 
 export interface OmpAgentSession {
   sessionId: string;
@@ -77,7 +77,7 @@ export interface OmpSessionManagerStatic {
 export interface OmpModelRegistry {
   refresh(mode?: string): Promise<void>;
   find(provider: string, modelId: string): unknown;
-  getAll(): Array<{ provider: string; id: string; contextWindow?: number }>;
+  getAll(): Model[];
 }
 
 export interface OmpModelRegistryConstructor {

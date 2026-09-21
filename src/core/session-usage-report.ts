@@ -210,14 +210,17 @@ type TierFamilyResolver = (msg: { provider: string; api?: string; model: string 
 
 async function loadTierFamilyResolver(): Promise<TierFamilyResolver> {
   try {
-    const mod = (await import('@oh-my-pi/pi-ai')) as {
-      serviceTierFamily?: (m: { provider: string; api?: string; id: string }) => string | undefined;
-    };
-    const fn = mod.serviceTierFamily;
-    if (typeof fn !== 'function') return (m) => m.provider;
+    const [{ serviceTierFamily }, { classifyModel }] = await Promise.all([
+      import('@oh-my-pi/pi-ai'),
+      import('@oh-my-pi/pi-catalog/identity'),
+    ]);
     return (m) => {
       try {
-        return fn({ provider: m.provider, api: m.api, id: m.model }) ?? m.provider;
+        return serviceTierFamily({
+          provider: m.provider,
+          api: m.api ?? 'unknown',
+          identity: classifyModel(m.provider, m.model, { lenient: true }),
+        }) ?? m.provider;
       } catch {
         return m.provider;
       }

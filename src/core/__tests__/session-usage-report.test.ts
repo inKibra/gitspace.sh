@@ -15,7 +15,7 @@ afterEach(() => {
 });
 
 /** Assistant message entry with usage, matching the on-disk shape. */
-const assistant = (provider: string, model: string, input: number, output: number, cost: number) =>
+const assistant = (provider: string, model: string, input: number, output: number, cost: number, api = 'openai-codex-responses') =>
   JSON.stringify({
     type: 'message',
     id: `m${input}${output}`,
@@ -24,7 +24,7 @@ const assistant = (provider: string, model: string, input: number, output: numbe
       role: 'assistant',
       provider,
       model,
-      api: 'openai-codex-responses',
+      api,
       content: [],
       usage: {
         input,
@@ -182,6 +182,22 @@ describe('buildSessionUsageReport', () => {
     const byTier = Object.fromEntries((await buildSessionUsageReport(file))!.byServiceTier.map((t) => [t.tier, t]));
     expect(byTier.fast!.costUsd).toBeCloseTo(4.0, 6);
     expect(byTier.standard!.costUsd).toBeCloseTo(1.0, 6);
+  });
+
+  it('attributes routed-provider spend to the underlying model tier family', async () => {
+    const file = writeSession('routed', [
+      JSON.stringify({
+        type: 'service_tier_change',
+        id: 'st',
+        parentId: null,
+        serviceTier: { anthropic: 'priority', google: 'standard' },
+      }),
+      assistant('openrouter', 'anthropic/claude-sonnet-4.5', 100, 10, 4.0, 'openrouter'),
+      assistant('openrouter', 'google/gemini-2.5-pro', 200, 20, 1.0, 'openrouter'),
+    ]);
+    const byTier = Object.fromEntries((await buildSessionUsageReport(file))!.byServiceTier.map((t) => [t.tier, t]));
+    expect(byTier.fast?.costUsd).toBeCloseTo(4.0, 6);
+    expect(byTier.standard?.costUsd).toBeCloseTo(1.0, 6);
   });
 
   it('reports no tier rows when the session never set a service tier', async () => {
