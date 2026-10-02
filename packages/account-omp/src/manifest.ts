@@ -159,6 +159,7 @@ export async function createExecutableArtifactManifest(
   const manifest = executableArtifactManifestSchema.parse({
     version: 1,
     target,
+    inferenceVersion: 1,
     entrypoint: `${target}.js`,
     compatibility: { ...executableArtifactCompatibility(), ...(nativeAbi ? { nativeAbi } : {}) },
     treeHash: `sha256:${tree.digest('hex')}`,

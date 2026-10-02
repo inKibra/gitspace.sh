@@ -61,3 +61,4 @@ export * from './artifact-storage.js';
 export * from './rpc-crypto.js';
 export * from './skills-contract.js';
 export * from './user-settings.js';
+export * from './inference.js';

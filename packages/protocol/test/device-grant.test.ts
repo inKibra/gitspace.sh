@@ -14,6 +14,8 @@ import {
   verifyRpcSignature,
   decodeApiKey,
   scopeContains,
+  deviceCanAdminister,
+  type DeviceCapability,
   type DeviceGrantRecord,
 } from '../src/device-grant.js';
 
@@ -74,7 +76,7 @@ describe('device grants', () => {
   });
 
   it('derives capabilities from procedure kind with agent and fleet exceptions', () => {
-    expect(requiredCapability('bootstrap', 'query')).toBe('rpc.read');
+    expect(requiredCapability('space.view', 'query')).toBe('rpc.read');
     expect(requiredCapability('events', 'subscription')).toBe('rpc.read');
     expect(requiredCapability('workspace.create', 'mutation')).toBe('rpc.write');
     expect(requiredCapability('session.prompt', 'mutation')).toBe('session.prompt');
@@ -90,14 +92,18 @@ describe('device grants', () => {
     expect(inputWithinScope({ kind: 'project', projectId: 'project-a' }, { projectId: 'project-b' })).toBe(false);
     expect(inputWithinScope({ kind: 'project', projectId: 'project-a' }, { workspaceId: 'ws-a' }, projectOf)).toBe(true);
     expect(inputWithinScope({ kind: 'project', projectId: 'project-a' }, {})).toBe(false);
-    expect(inputWithinScope({ kind: 'workspace', workspaceId: 'ws-a' }, { spaceId: 'ws-a' })).toBe(true);
+    expect(inputWithinScope({ kind: 'workspace', workspaceId: 'ws-a' }, { spaceId: 'ws-a' }, projectOf)).toBe(true);
+    expect(inputWithinScope({ kind: 'workspace', workspaceId: 'ws-a' }, { spaceId: 'ws-a' })).toBe(false);
+    expect(inputWithinScope({ kind: 'project', projectId: 'project-a' }, { projectId: 'project-a', target: { workspaceId: 'foreign' } }, projectOf)).toBe(false);
+    expect(inputWithinScope({ kind: 'project', projectId: 'project-a' }, { projectId: 'project-a', sessionId: 'unknown' }, projectOf)).toBe(false);
+    expect(inputWithinScope({ kind: 'workspace', workspaceId: 'ws-a' }, { sessionId: 'session-a' }, projectOf, () => ({ projectId: 'project-a', workspaceId: 'ws-a' }))).toBe(true);
     expect(inputWithinScope({ kind: 'workspace', workspaceId: 'ws-a' }, { workspaceId: 'ws-b' })).toBe(false);
   });
 
   it('verifies delegated grants through their issuer and caps them by the issuer', () => {
     const browser = record();
     const clientPrivate = new Uint8Array(32).fill(11);
-    const mint = (capabilities: Array<'rpc.read' | 'rpc.write' | 'fleet.control'>, scope: { kind: 'user' } | { kind: 'project'; projectId: string } = { kind: 'project', projectId: 'p1' }): DeviceGrantRecord => {
+    const mint = (capabilities: DeviceCapability[], scope: { kind: 'user' } | { kind: 'project'; projectId: string } = { kind: 'project', projectId: 'p1' }): DeviceGrantRecord => {
       const invite = signDeviceInvite({
         version: 1, userId: 'user-a', inviteId: '33333333-3333-4333-8333-333333333333', kind: 'client', label: 'CI', scope, capabilities, canDelegate: false,
         issuedAt: NOW, expiresAt: NOW + 60_000, grantTtlMs: 86_400_000, enrollUrl: 'https://control.example',
@@ -107,6 +113,16 @@ describe('device grants', () => {
     };
     const resolve = (issuer: DeviceGrantRecord) => (deviceId: string) => (deviceId === issuer.binding.deviceId ? issuer : null);
     expect(verifyDeviceGrantRecord(mint(['rpc.read']), rootPublic, NOW + 2, resolve(browser))).toMatchObject({ kind: 'client', capabilities: ['rpc.read'], expiresAt: NOW + 1 + 86_400_000 });
+    const oldClient = verifyDeviceGrantRecord(mint(['rpc.write'], { kind: 'user' }), rootPublic, NOW + 2, resolve(browser));
+    expect(deviceCanAdminister(oldClient, 'account.admin')).toBe(false);
+    expect(deviceCanAdminister(oldClient, 'lifecycle.control')).toBe(false);
+    const controller = verifyDeviceGrantRecord(mint(['rpc.write', 'account.admin', 'lifecycle.control'], { kind: 'user' }), rootPublic, NOW + 2, resolve(browser));
+    expect(controller?.kind).toBe('client');
+    expect(deviceCanAdminister(controller, 'account.admin')).toBe(true);
+    expect(deviceCanAdminister(controller, 'lifecycle.control')).toBe(true);
+    const scoped = verifyDeviceGrantRecord(mint(['rpc.write', 'lifecycle.control']), rootPublic, NOW + 2, resolve(browser));
+    expect(deviceCanAdminister(scoped, 'lifecycle.control')).toBe(false);
+    expect(deviceCanAdminister(verifyDeviceGrantRecord(browser, rootPublic, NOW + 2), 'lifecycle.control')).toBe(true);
     // No resolver, unknown issuer, revoked issuer, capability escalation, and non-delegating issuer all fail.
     expect(verifyDeviceGrantRecord(mint(['rpc.read']), rootPublic, NOW + 2)).toBeNull();
     expect(verifyDeviceGrantRecord(mint(['rpc.read']), rootPublic, NOW + 2, () => null)).toBeNull();

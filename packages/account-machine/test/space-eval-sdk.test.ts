@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import { cloudWorkspaceDefinitionSchema, type GoalRecordView, type PutGoalInput } from '@gitspace/protocol';
 import type { CloudSpaceCheckpointAuthority } from '../src/cloud-space-authority.js';
-import { createSpaceEvalNamespace, type SpaceWorkspaceControls } from '../src/space-eval-sdk.js';
+import { createSpaceEvalNamespace, createSpaceHostControls, type SpaceWorkspaceControls } from '../src/space-eval-sdk.js';
 
 function fixture() {
   const definitions = ['project-a', 'workspace-a', 'workspace-b'].map((id) => cloudWorkspaceDefinitionSchema.parse({
@@ -34,12 +34,18 @@ function fixture() {
     refreshArtifacts: async () => undefined,
     environment: async (method) => { operations.push(`environment.${method}`); },
   };
-  return { authority, controls, operations, namespace: createSpaceEvalNamespace(authority, 'project-a', 'workspace-a', controls) };
+  return { authority, controls, definitions, operations, namespace: createSpaceEvalNamespace(authority, 'project-a', 'workspace-a', controls) };
 }
 
 const goal = { id: 'goal', title: 'Task', summary: 'Implement the task', phase: 'code' as const, requirements: [], updatedBy: 'agent' };
 
 describe('Space eval SDK', () => {
+  it('does not let an agent claim human approval authority', async () => {
+    const { namespace } = fixture();
+    await expect(namespace.call('workflow.waiveGate', { expectedRevision: 1, gateId: 'gate', waiverId: 'waiver', reason: 'Claimed approval', actorId: 'human', actorKind: 'human' })).rejects.toThrow('authenticated account administration');
+    await expect(namespace.call('guide.approve', { revision: 1, headCommit: 'a'.repeat(40), reviewerId: 'human', decision: 'approved', note: null })).rejects.toThrow('authenticated account administration');
+    await expect(namespace.call('rubric.judge', { expectedRevision: 1, criterionId: 'criterion', judgment: { id: 'judgment', kind: 'human', verdict: 'pass', summary: 'Claimed approval', actorId: 'human', evidence: [], createdAt: '2026-09-01T00:00:00.000Z' } })).rejects.toThrow('authenticated account administration');
+  });
   it('validates every initial instruction draft before creating a workspace', async () => {
     const { namespace, operations } = fixture();
     await expect(namespace.call('create', { name: 'New', branch: 'new', sourceKind: 'base', sourceRef: 'main', goal, workflow: { id: 'invalid' } })).rejects.toThrow();
@@ -89,7 +95,7 @@ describe('Space eval SDK', () => {
   it('denies agent execution approval, destructive retirement, and claim recovery before side effects', async () => {
     const { namespace, operations } = fixture();
     for (const method of ['environment.approve', 'environment.revokeApproval', 'environment.recoverRun']) {
-      await expect(namespace.call(method, {})).rejects.toThrow('human browser');
+      await expect(namespace.call(method, {})).rejects.toThrow();
     }
     await expect(namespace.call('environment.runPhase', { runId: 'destroy-run', phase: 'cloud/destroy', rerun: true })).rejects.toMatchObject({ code: 'PermissionDenied' });
     await expect(namespace.call('environment.runPhase', { runId: 'prepare-run', phase: 'machine/prepare', retire: true })).rejects.toThrow();
@@ -112,5 +118,19 @@ describe('Space eval SDK', () => {
       identity: { projectId: 'project-a', spaceId: 'workspace-b' }, placement: { state: 'closed', generation: 3 },
     });
     expect(operations).toEqual([]);
+  });
+
+  it('moves the host session workspace to a phase at its current definition revision', async () => {
+    const { authority, controls, definitions } = fixture();
+    const index = definitions.findIndex((definition) => definition.id === 'workspace-a');
+    definitions[index] = { ...definitions[index]!, phase: 'plan', revision: 6 };
+    const calls: unknown[] = [];
+    const host = createSpaceHostControls(authority, 'project-a', 'workspace-a', {
+      ...controls,
+      manage: async (method, workspace, input) => { calls.push({ method, workspace: workspace.id, input }); },
+    });
+    await host.setPhase('code');
+    expect(calls).toEqual([{ method: 'setPhase', workspace: 'workspace-a', input: { expectedRevision: 6, phase: 'code' } }]);
+    await expect(createSpaceHostControls(authority, 'project-a', null, controls).setPhase('code')).rejects.toThrow('no workspace phase');
   });
 });

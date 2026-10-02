@@ -3,7 +3,7 @@ import { env, SELF, runInDurableObject } from 'cloudflare:test';
 import { http, HttpResponse } from 'msw';
 import { credentialProtocolBase64 } from '@gitspace/protocol';
 import { network } from './network.js';
-import { machineBrokerToken } from '../src/account-access.js';
+import { profileBrokerToken } from '../src/account-access.js';
 import type { CredentialRefreshResponse, CredentialUploadResponse, SnapshotResponse } from '@oh-my-pi/pi-ai/auth-broker';
 
 async function seedVault(credentials: Array<{ id: string; provider: 'anthropic' | 'openai-codex'; access: string; accountId?: string; email?: string; expires?: number }>): Promise<string> {
@@ -21,23 +21,23 @@ async function seedVault(credentials: Array<{ id: string; provider: 'anthropic' 
       credential: { ...credential, refresh: `${id}-refresh`, expires },
     })).status).toBe('ok');
   }
+  await vault.ensureInference();
   return userId;
 }
 
-async function fetchUsage(userId: string): Promise<Response> {
-  return SELF.fetch(`https://auth.test/omp/users/${userId}/v1/usage`, { headers: { authorization: `Bearer ${await machineBrokerToken('test-omp-broker-token', userId, 'broker-machine', 1)}` } });
-}
-
-async function writer(userId: string) {
+async function writer(userId: string, profileId = 'default') {
   const vault = env.CREDENTIALS.getByName(userId);
-  await vault.registerManagedDevice({
-    userId, machineId: 'writer',
+  const machineId = profileId === 'default' ? 'writer' : `writer-${profileId}`;
+  const registered = await vault.registerManagedDevice({
+    userId, machineId,
     signingPublicKey: credentialProtocolBase64.encode(new Uint8Array(32).fill(5)),
     exchangePublicKey: credentialProtocolBase64.encode(new Uint8Array(32).fill(6)),
     capabilities: ['credential.access', 'credential.manage'],
   });
-  const token = await machineBrokerToken('test-omp-broker-token', userId, 'writer', 1);
-  return (operation: string, body?: unknown, headers: Record<string, string> = {}) => SELF.fetch(`https://auth.test/omp/users/${userId}/v1/${operation}`, {
+  if (registered.status !== 'ok') throw new Error('Writer enrollment failed');
+  await vault.ensureInference();
+  const token = await profileBrokerToken('test-omp-broker-token', userId, { profileId, machineId, generation: registered.value.generation, capability: 'manage' });
+  return (operation: string, body?: unknown, headers: Record<string, string> = {}) => SELF.fetch(`https://auth.test/omp/users/${userId}/profiles/${profileId}/v1/${operation}`, {
     method: body === undefined ? 'GET' : 'POST',
     headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', ...headers },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -65,10 +65,12 @@ describe('OMP native auth broker adapter', () => {
         accountId: 'account-a',
       },
     })).status).toBe('ok');
-    const health = await SELF.fetch(`https://auth.test/omp/users/${userId}/v1/healthz`);
+    await vault.ensureInference();
+    const token = await profileBrokerToken('test-omp-broker-token', userId, { profileId: 'default', machineId: 'broker-machine', generation: 1, capability: 'inference' });
+    const health = await SELF.fetch(`https://auth.test/omp/users/${userId}/profiles/default/v1/healthz`, { headers: { authorization: `Bearer ${token}` } });
     expect(await health.json()).toMatchObject({ ok: true });
-    const response = await SELF.fetch(`https://auth.test/omp/users/${userId}/v1/snapshot`, {
-      headers: { authorization: `Bearer ${await machineBrokerToken('test-omp-broker-token', userId, 'broker-machine', 1)}` },
+    const response = await SELF.fetch(`https://auth.test/omp/users/${userId}/profiles/default/v1/snapshot`, {
+      headers: { authorization: `Bearer ${token}` },
     });
     expect(response.status).toBe(200);
     const snapshot = await response.json() as {
@@ -87,128 +89,11 @@ describe('OMP native auth broker adapter', () => {
     expect(JSON.stringify(snapshot)).not.toContain('broker-only-refresh-token');
   });
 
-  it('serves provider usage reports for vault credentials', async () => {
-    const userId = await seedVault([
-      { id: 'anthropic-primary', provider: 'anthropic', access: 'anthropic-access-token', email: 'claude@example.com' },
-      { id: 'openai-primary', provider: 'openai-codex', access: 'codex-access-token', accountId: 'account-a', email: 'codex@example.com' },
-    ]);
-    const seen: string[] = [];
-    network.use(
-      http.get('https://api.anthropic.com/api/oauth/usage', ({ request }) => {
-        seen.push(request.headers.get('authorization') ?? '');
-        return HttpResponse.json({
-          five_hour: { utilization: 42, resets_at: '2026-09-01T12:00:00Z' },
-          seven_day: { utilization: 91, resets_at: '2026-09-05T00:00:00Z' },
-          account: { uuid: 'acct-claude' },
-        });
-      }),
-      http.get('https://chatgpt.com/backend-api/wham/usage', ({ request }) => {
-        seen.push(request.headers.get('chatgpt-account-id') ?? '');
-        return HttpResponse.json({
-          plan_type: 'pro',
-          rate_limit: {
-            allowed: true,
-            limit_reached: false,
-            primary_window: { used_percent: 12, limit_window_seconds: 18_000, reset_after_seconds: 3600 },
-            secondary_window: { used_percent: 100, limit_window_seconds: 604_800, reset_at: 1_790_000_000 },
-          },
-          rate_limit_reset_credits: { available_count: 2 },
-        });
-      }),
-    );
-    const response = await fetchUsage(userId);
-    expect(response.status).toBe(200);
-    expect(response.headers.get('cache-control')).toBe('private, no-store');
-    const body = await response.json() as { generatedAt: number; reports: Array<Record<string, unknown>> };
-    expect(typeof body.generatedAt).toBe('number');
-    expect(seen.sort()).toEqual(['Bearer anthropic-access-token', 'account-a']);
-    expect(body.reports).toHaveLength(2);
-    const anthropic = body.reports.find((report) => report.provider === 'anthropic');
-    expect(anthropic).toMatchObject({
-      metadata: { email: 'claude@example.com', accountId: 'acct-claude' },
-      limits: [
-        { id: 'anthropic:5h', status: 'ok', amount: { used: 42, unit: 'percent' }, window: { id: '5h', resetsAt: Date.parse('2026-09-01T12:00:00Z') } },
-        { id: 'anthropic:7d', status: 'warning', amount: { used: 91 } },
-      ],
-    });
-    const codex = body.reports.find((report) => report.provider === 'openai-codex');
-    expect(codex).toMatchObject({
-      metadata: { email: 'codex@example.com', accountId: 'account-a', planType: 'pro' },
-      resetCredits: { availableCount: 2 },
-      limits: [
-        { id: 'openai-codex:primary', label: '5 hours', status: 'ok', window: { id: '5h', durationMs: 18_000_000 } },
-        { id: 'openai-codex:secondary', label: '7 days', status: 'warning', window: { id: '7d', resetsAt: 1_790_000_000_000 } },
-      ],
-    });
-    const serialized = JSON.stringify(body);
-    expect(serialized).not.toContain('access-token');
-    expect(serialized).not.toContain('"raw"');
-  });
-
-  it('reports complete provider failure instead of a successful empty aggregate', async () => {
-    const userId = await seedVault([
-      { id: 'openai-primary', provider: 'openai-codex', access: 'codex-access-token', accountId: 'account-a', email: 'codex@example.com' },
-    ]);
-    network.use(http.get('https://chatgpt.com/backend-api/wham/usage', () => HttpResponse.json({ error: 'boom' }, { status: 500 })));
-    const response = await fetchUsage(userId);
-    expect(response.status).toBe(502);
-    const body = await response.json() as { error: string };
-    expect(body.error).toContain('openai-codex');
-    expect(body.error).toContain('500');
-    expect(body.error).not.toContain('codex-access-token');
-    expect(body.error).not.toContain('openai-primary-refresh');
-  });
-
-  it('preserves usable reports when another provider fails', async () => {
-    const userId = await seedVault([
-      { id: 'anthropic-primary', provider: 'anthropic', access: 'anthropic-access-token', accountId: 'claude-a', email: 'claude@example.com' },
-      { id: 'openai-primary', provider: 'openai-codex', access: 'codex-access-token', accountId: 'account-a' },
-    ]);
-    network.use(
-      http.get('https://api.anthropic.com/api/oauth/usage', () => HttpResponse.json({ five_hour: { utilization: 42 } })),
-      http.get('https://chatgpt.com/backend-api/wham/usage', () => HttpResponse.json({ error: 'unavailable' }, { status: 503 })),
-    );
-    const response = await fetchUsage(userId);
-    expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({
-      reports: [{ provider: 'anthropic', metadata: { email: 'claude@example.com' }, limits: [{ amount: { used: 42 } }] }],
-    });
-  });
-
-  it('identifies expired credentials rather than silently omitting them', async () => {
-    const userId = await seedVault([
-      { id: 'openai-primary', provider: 'openai-codex', access: 'expired-access-token', expires: Date.now() - 60_000 },
-    ]);
-    const response = await fetchUsage(userId);
-    expect(response.status).toBe(502);
-    const body = await response.json() as { error: string };
-    expect(body.error).toContain('openai-codex');
-    expect(body.error).toContain('expired');
-    expect(body.error).not.toContain('expired-access-token');
-  });
-
-  it('rejects provider responses that contain no usable usage limits', async () => {
-    const userId = await seedVault([
-      { id: 'openai-primary', provider: 'openai-codex', access: 'codex-access-token' },
-    ]);
-    network.use(http.get('https://chatgpt.com/backend-api/wham/usage', () => HttpResponse.json({ unexpected: 'payload' })));
-    const response = await fetchUsage(userId);
-    expect(response.status).toBe(502);
-    const body = await response.json() as { error: string };
-    expect(body.error).toContain('openai-codex');
-  });
-
-  it('rejects unauthenticated usage requests', async () => {
-    const userId = await seedVault([]);
-    const response = await SELF.fetch(`https://auth.test/omp/users/${userId}/v1/usage`);
-    expect(response.status).toBe(401);
-  });
-
   it('requires explicit credential management authority without elevating read-only bearers', async () => {
     const userId = await seedVault([{ id: 'existing', provider: 'openai-codex', access: 'existing-access' }]);
     const vault = env.CREDENTIALS.getByName(userId);
     const request = await writer(userId);
-    const readToken = await machineBrokerToken('test-omp-broker-token', userId, 'broker-machine', 1);
+    const readToken = await profileBrokerToken('test-omp-broker-token', userId, { profileId: 'default', machineId: 'broker-machine', generation: 1, capability: 'inference' });
     const upload = { provider: 'anthropic', credential: { type: 'api_key', key: 'api-secret' } };
     expect((await request('credential', upload, { authorization: `Bearer ${readToken}` })).status).toBe(403);
     expect((await request('credential/1/disable', { cause: 'deleted' }, { authorization: `Bearer ${readToken}` })).status).toBe(403);
@@ -228,7 +113,7 @@ describe('OMP native auth broker adapter', () => {
     expect((await request('credential/1/disable', { cause: 'deleted' })).status).toBe(401);
   });
 
-  it('stores API keys canonically without OAuth refresh or usage and invalidates snapshots after the last removal', async () => {
+  it('stores API keys canonically without OAuth refresh and invalidates snapshots after the last removal', async () => {
     const userId = await seedVault([]);
     const request = await writer(userId);
     const before = await request('snapshot');
@@ -245,12 +130,11 @@ describe('OMP native auth broker adapter', () => {
     expect(stored.generation).toBeGreaterThan(initial.generation);
     expect(stored.credentials).toEqual([{ ...uploaded.entries[0], rotatesInMs: null }]);
     const vault = env.CREDENTIALS.getByName(userId);
-    const encrypted = await runInDurableObject(vault, (_instance, state) => state.storage.sql.exec<{ sealed_json: string }>('SELECT sealed_json FROM oauth_credentials').toArray());
+    const encrypted = await runInDurableObject(vault, (_instance, state) => state.storage.sql.exec<{ sealed_json: string }>('SELECT sealed_json FROM inference_credentials').toArray());
     expect(JSON.stringify(encrypted)).not.toContain(upload.credential.key);
     let providerRequests = 0;
     network.use(http.all('https://api.anthropic.com/*', () => { providerRequests += 1; return new HttpResponse(null, { status: 500 }); }));
     expect(await (await request(`credential/${id}/refresh`, {})).json()).toEqual({ entry: uploaded.entries[0] });
-    expect(await (await request('usage')).json()).toMatchObject({ reports: [] });
     expect(providerRequests).toBe(0);
     expect((await request(`credential/${id}/disable`, { cause: 'deleted by user' })).status).toBe(200);
     const removed = await request('snapshot', undefined, { 'if-none-match': snapshot.headers.get('etag')! });
@@ -314,5 +198,178 @@ describe('OMP native auth broker adapter', () => {
     expect(refreshed.ok).toBe(false);
     await refreshed.text();
     expect((await (await request('snapshot')).json() as SnapshotResponse).credentials).toEqual([]);
+  });
+
+  it('isolates same-provider keys, numeric IDs and cache generations, and rejects legacy or mismatched bearers', async () => {
+    const userId = await seedVault([]);
+    const vault = env.CREDENTIALS.getByName(userId);
+    const state = await vault.createInferenceProfile({ name: 'Client', sourceProfileId: null });
+    const profileId = state.profiles.find(profile => profile.id !== 'default')!.id;
+    const defaultRequest = await writer(userId);
+    const clientRequest = await writer(userId, profileId);
+    const a = await (await defaultRequest('credential', { provider: 'openai', credential: { type: 'api_key', key: 'default-only' } })).json() as CredentialUploadResponse;
+    const b = await (await clientRequest('credential', { provider: 'openai', credential: { type: 'api_key', key: 'client-only' } })).json() as CredentialUploadResponse;
+    const before = await clientRequest('snapshot');
+    const clientSnapshot = await before.json() as SnapshotResponse;
+    expect(clientSnapshot.credentials.map(entry => entry.credential)).toEqual([{ type: 'api_key', key: 'client-only' }]);
+    expect((await defaultRequest(`credential/${b.entries[0]!.id}/refresh`, {})).ok).toBe(false);
+    expect((await defaultRequest(`credential/${b.entries[0]!.id}/disable`, {})).status).toBe(404);
+    await vault.disableBrowserCredentials('default', 'openai', String(b.entries[0]!.id));
+    expect((await clientRequest('snapshot', undefined, { 'if-none-match': before.headers.get('etag')! })).status).toBe(304);
+    const payload = `gsb2.${btoa('writer').replace(/=+$/u, '')}.1`;
+    const signingKey = await crypto.subtle.importKey('raw', new TextEncoder().encode('test-omp-broker-token'), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+    const signature = new Uint8Array(await crypto.subtle.sign('HMAC', signingKey, new TextEncoder().encode(`${userId}\n${payload}`)));
+    const old = `${payload}.${btoa(String.fromCharCode(...signature)).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/u, '')}`;
+    const wrong = await profileBrokerToken('test-omp-broker-token', userId, { profileId: 'default', machineId: 'writer', generation: 1, capability: 'manage' });
+    expect((await clientRequest('snapshot', undefined, { authorization: `Bearer ${old}` })).status).toBe(401);
+    expect((await clientRequest('snapshot', undefined, { authorization: `Bearer ${wrong}` })).status).toBe(401);
+    const legacy = await SELF.fetch(`https://auth.test/omp/users/${userId}/v1/snapshot`, { headers: { authorization: `Bearer ${old}` } });
+    expect(legacy.status).toBe(401);
+    expect(await legacy.text()).not.toContain('client-only');
+    expect((await (await defaultRequest('snapshot')).json() as SnapshotResponse).credentials[0]!.id).toBe(a.entries[0]!.id);
+    await vault.deleteInferenceProfile({ profileId, expectedRevision: 0 });
+    expect((await clientRequest('snapshot')).status).toBe(401);
+    expect((await clientRequest(`credential/${b.entries[0]!.id}/refresh`, {})).status).toBe(401);
+  });
+
+  it('limits OAuth identity upsert, auth-mode transition, refresh and logout to the selected profile', async () => {
+    const userId = await seedVault([]);
+    const vault = env.CREDENTIALS.getByName(userId);
+    const profileId = (await vault.createInferenceProfile({ name: 'OAuth client', sourceProfileId: null })).profiles.find(profile => profile.id !== 'default')!.id;
+    const a = await writer(userId);
+    const b = await writer(userId, profileId);
+    const oauth = { type: 'oauth', access: 'a-access', refresh: 'a-refresh', expires: Date.now() + 3_600_000, accountId: 'shared-upstream' };
+    await a('credential', { provider: 'openai-codex', credential: { type: 'api_key', key: 'a-static' } });
+    const uploaded = await (await b('credential', { provider: 'openai-codex', credential: { ...oauth, access: 'b-access', refresh: 'b-refresh' } })).json() as CredentialUploadResponse;
+    expect((await (await a('snapshot')).json() as SnapshotResponse).credentials[0]!.credential).toEqual({ type: 'api_key', key: 'a-static' });
+    await a('credential', { provider: 'openai-codex', credential: oauth });
+    const updated = await (await b('credential', { provider: 'openai-codex', credential: { ...oauth, access: 'b-updated', refresh: 'b-updated-refresh' } })).json() as CredentialUploadResponse;
+    expect(updated.entries[0]!.id).toBe(uploaded.entries[0]!.id);
+    const seen: string[] = [];
+    network.use(http.post('https://auth.openai.com/oauth/token', async ({ request }) => {
+      seen.push(new URLSearchParams(await request.text()).get('refresh_token')!);
+      return HttpResponse.json({ access_token: 'b-rotated', refresh_token: 'b-rotated-refresh', expires_in: 3600 });
+    }));
+    expect((await b(`credential/${uploaded.entries[0]!.id}/refresh`, {})).status).toBe(200);
+    expect(seen).toEqual(['b-updated-refresh']);
+    await vault.disableBrowserCredentials(profileId, 'openai-codex', null);
+    expect((await (await b('snapshot')).json() as SnapshotResponse).credentials).toEqual([]);
+    expect((await (await a('snapshot')).json() as SnapshotResponse).credentials[0]!.credential).toMatchObject({ access: 'a-access', refresh: '__remote__' });
+  });
+
+  it('retries Default migration without rewriting encrypted identities or leases and duplicates configuration only', async () => {
+    const userId = env.ACCOUNT_ID;
+    const vault = env.CREDENTIALS.getByName(userId);
+    await vault.bootstrap({ userId, rootPublicKey: env.AUTH_PUBLIC_KEY, vaultKey: credentialProtocolBase64.encode(new Uint8Array(32).fill(2)) });
+    await vault.putCredential({ id: 'preserved-oauth', credential: { provider: 'openai-codex', access: 'preserved-access', refresh: 'preserved-refresh', accountId: 'existing-account', expires: Date.now() + 3_600_000 } });
+    const settings = env.USER_SETTINGS.getByName(userId);
+    const content = JSON.stringify({ modelRoles: { default: 'openai/gpt-4.1', custom: 'anthropic/claude' }, agents: { custom: { modelRole: 'custom' } }, terminal: { theme: 'dark' } });
+    const checksum = `sha256:${[...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(content)))].map(byte => byte.toString(16).padStart(2, '0')).join('')}`;
+    await settings.updateOmp('legacy', { expectedGeneration: 0, content, checksum });
+    const before = await runInDurableObject(vault, (_instance, state) => {
+      state.storage.sql.exec('INSERT INTO refresh_leases(credential_id, owner, revision, expires_at) VALUES (?, ?, 1, ?)', 'preserved-oauth', 'existing-refresh', Date.now() + 60_000);
+      return {
+        credentials: state.storage.sql.exec('SELECT rowid, id, sealed_json, revision FROM oauth_credentials').toArray(),
+        leases: state.storage.sql.exec('SELECT * FROM refresh_leases').toArray(),
+      };
+    });
+    // Interrupted between authorities: settings preparation has committed, vault has not.
+    await settings.prepareInferenceMigration();
+    const first = await vault.ensureInference();
+    const second = await vault.ensureInference();
+    expect(second).toEqual(first);
+    expect(first.profiles[0]!.settings).toMatchObject({ modelRoles: { default: 'openai/gpt-4.1', custom: 'anthropic/claude' }, agents: { custom: { modelRole: 'custom' } } });
+    expect((await settings.getOmp()).content).toContain('terminal');
+    expect((await settings.getOmp()).content).not.toContain('modelRoles');
+    const after = await runInDurableObject(vault, (_instance, state) => ({
+      credentials: state.storage.sql.exec('SELECT rowid, id, sealed_json, revision FROM inference_credentials').toArray(),
+      leases: state.storage.sql.exec('SELECT * FROM refresh_leases').toArray(),
+    }));
+    expect(after).toEqual(before);
+    expect((await vault.ompSnapshot('default')).credentials[0]!.credential).toMatchObject({ access: 'preserved-access', refresh: '__remote__' });
+    const duplicate = (await vault.createInferenceProfile({ name: 'Independent', sourceProfileId: 'default' })).profiles.find(profile => profile.id !== 'default')!;
+    expect(duplicate.settings).toEqual(first.profiles[0]!.settings);
+    expect((await vault.ompSnapshot(duplicate.id)).credentials).toEqual([]);
+    await vault.updateInferenceProfile({ profileId: duplicate.id, expectedRevision: 0, name: duplicate.name, settings: {} });
+    expect((await vault.ensureInference()).profiles.find(profile => profile.id === 'default')!.settings).toEqual(first.profiles[0]!.settings);
+  });
+
+  it('serializes profile CAS and assignment/delete races without assigning a tombstone', async () => {
+    const userId = await seedVault([]);
+    const vault = env.CREDENTIALS.getByName(userId);
+    const profileId = (await vault.createInferenceProfile({ name: 'Race', sourceProfileId: null })).profiles.find(profile => profile.id !== 'default')!.id;
+    const edits = await Promise.all([
+      vault.updateInferenceProfile({ profileId, expectedRevision: 0, name: 'One', settings: {} }),
+      vault.updateInferenceProfile({ profileId, expectedRevision: 0, name: 'Two', settings: {} }),
+    ]);
+    expect(edits.map(result => result.status).sort()).toEqual(['conflict', 'ok']);
+    expect(edits.find(result => result.status === 'conflict')).toMatchObject({ expected: 0, actual: 1 });
+    const projectId = 'assignment-race';
+    const authority = env.PROJECT_AUTHORITY.getByName(`${userId}:${projectId}`);
+    const project = await authority.bootstrap({ id: projectId, name: 'Race', repositoryReference: null, baseBranch: 'main', createdBy: 'test' });
+    await env.USER_PROJECTS.getByName(userId).put(project);
+    const race = await Promise.allSettled([
+      vault.assignInferenceProfile({ projectId, profileId, expectedRevision: 0 }),
+      vault.deleteInferenceProfile({ profileId, expectedRevision: 1 }),
+    ]);
+    expect(race.filter(result => result.status === 'fulfilled')).toHaveLength(1);
+    const state = await vault.ensureInference();
+    const assigned = state.assignments.find(assignment => assignment.projectId === projectId)!;
+    expect(state.profiles.some(profile => profile.id === assigned.profileId)).toBe(true);
+    expect(await vault.assignInferenceProfile({ projectId: 'foreign-project', profileId: 'default', expectedRevision: 0 }).then(() => 'allowed', () => 'denied')).toBe('denied');
+  });
+
+  it('leaves legacy credential ciphertext and leases untouched until the Worker deployment is committed', async () => {
+    const userId = env.ACCOUNT_ID;
+    const vault = env.CREDENTIALS.getByName(userId);
+    await vault.bootstrap({ userId, rootPublicKey: env.AUTH_PUBLIC_KEY, vaultKey: credentialProtocolBase64.encode(new Uint8Array(32).fill(2)) });
+    await vault.putCredential({ id: 'legacy', credential: { provider: 'openai-codex', access: 'legacy-access', refresh: 'legacy-refresh', expires: Date.now() + 3_600_000 } });
+    const before = await runInDurableObject(vault, (_instance, state) => state.storage.sql.exec('SELECT rowid, * FROM oauth_credentials').toArray());
+    network.use(http.get(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/state`, () => HttpResponse.json({ control: { status: 'active' }, deployment: { active: 'previous-worker' } })));
+    await expect(vault.ensureInference()).rejects.toThrow();
+    expect(await vault.inferenceCutover()).toBe(false);
+    const uncommitted = await runInDurableObject(vault, (_instance, state) => ({
+      rows: state.storage.sql.exec('SELECT rowid, * FROM oauth_credentials').toArray(),
+      scoped: state.storage.sql.exec("SELECT name FROM sqlite_master WHERE name = 'inference_credentials'").toArray(),
+    }));
+    expect(uncommitted.rows).toEqual(before);
+    expect(uncommitted.scoped).toEqual([]);
+    network.use(http.get(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/state`, () => HttpResponse.json({ control: { status: 'active' }, deployment: { active: 'test-inference-worker' } })));
+    await vault.ensureInference();
+    const oldReader = await runInDurableObject(vault, (_instance, state) => {
+      // A rolled-back binary recreates its old table. Its unfiltered query is empty.
+      state.storage.sql.exec('CREATE TABLE IF NOT EXISTS oauth_credentials (id TEXT PRIMARY KEY, provider TEXT, sealed_json TEXT, revision INTEGER, expires_at INTEGER, state TEXT, updated_at TEXT)');
+      return state.storage.sql.exec("SELECT * FROM oauth_credentials WHERE state = 'active'").toArray();
+    });
+    expect(oldReader).toEqual([]);
+    expect((await vault.ompSnapshot('default')).credentials[0]!.credential).toMatchObject({ access: 'legacy-access' });
+    await runInDurableObject(vault, (_instance, state) => state.storage.sql.exec("INSERT INTO oauth_credentials(id, provider, sealed_json, revision, expires_at, state, updated_at) VALUES ('old-write', 'openai', 'untrusted-legacy-ciphertext', 1, 0, 'active', '')").toArray());
+    await expect(vault.ensureInference()).rejects.toThrow();
+    await expect(vault.ompSnapshot('default')).rejects.toThrow();
+  });
+
+  it('withholds in-flight refresh disclosure after enrollment revocation without losing the rotated grant', async () => {
+    const userId = await seedVault([{ id: 'revoked-in-flight', provider: 'openai-codex', access: 'before-revocation' }]);
+    const vault = env.CREDENTIALS.getByName(userId);
+    const request = await writer(userId);
+    const id = ((await (await request('snapshot')).json()) as SnapshotResponse).credentials[0]!.id;
+    // The DO's outbound fetch cannot call back into its own stub, and promises cannot settle across request
+    // contexts; each side polls plain flags while the test revokes the parked refresh.
+    let started = false;
+    let released = false;
+    network.use(http.post('https://auth.openai.com/oauth/token', async () => {
+      started = true;
+      while (!released) await scheduler.wait(5);
+      return HttpResponse.json({ access_token: 'rotated-after-revocation', refresh_token: 'rotated-grant', expires_in: 3600 });
+    }));
+    const refreshing = request(`credential/${id}/refresh`, {});
+    while (!started) await scheduler.wait(5);
+    await vault.removeManagedDevice('writer');
+    released = true;
+    const refreshed = await refreshing;
+    expect(refreshed.ok).toBe(false);
+    expect(await refreshed.text()).not.toContain('rotated-after-revocation');
+    const replacement = await writer(userId);
+    expect(((await (await replacement('snapshot')).json()) as SnapshotResponse).credentials[0]!.credential).toMatchObject({ access: 'rotated-after-revocation', refresh: '__remote__' });
   });
 });

@@ -7,6 +7,7 @@ const rootPublicKey = ed25519.getPublicKey(Uint8Array.from({ length: 32 }, (_, i
 const accountId = `u-${createHash('sha256').update(rootPublicKey).digest('hex').slice(0, 32)}`;
 
 export default defineConfig({
+  define: { GITSPACE_WORKER_SHA: JSON.stringify('test-inference-worker') },
   plugins: [
     cloudflareTest({
       wrangler: { configPath: './wrangler.jsonc' },
@@ -24,7 +25,7 @@ export default defineConfig({
           PLATFORM_TOKEN: 'test-platform-token',
           GITSPACE_OMP_BROKER_TOKEN: 'test-omp-broker-token',
           RELAY_NAME: 'test',
-          AUTH_MAX_SKEW_MS: 60_000,
+          AUTH_MAX_SKEW_MS: 300_000,
           TUNNEL_HEADER_TIMEOUT_MS: 2_000,
           TUNNEL_IDLE_TIMEOUT_MS: 2_000,
         },

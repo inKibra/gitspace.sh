@@ -4,8 +4,8 @@ import { EnvironmentError, type LifecycleActor, type LifecycleMutation } from '@
 import type { ProjectAuthorityDO } from '../src/project-authority.js';
 
 const hash = `sha256:${'a'.repeat(64)}`;
-const machine = { actorId: 'machine-a', machineId: 'machine-a', human: false };
-const human = { actorId: 'browser', machineId: 'browser', human: true };
+const machine = { actorId: 'machine-a', machineId: 'machine-a', kind: 'machine' as const, lifecycleControl: false };
+const human = { actorId: 'browser', machineId: 'browser', kind: 'browser' as const, lifecycleControl: true };
 async function ledger() {
   const authority = (env.PROJECT_AUTHORITY as DurableObjectNamespace<ProjectAuthorityDO>).getByName(`environment-${crypto.randomUUID()}`);
   await authority.bootstrap({ id: 'project', name: 'Project', repositoryReference: null, baseBranch: 'main', createdBy: 'machine-a' });

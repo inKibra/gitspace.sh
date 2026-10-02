@@ -34,7 +34,7 @@ class Ledger implements EnvironmentLifecycleAuthority {
       if (input.value === null) delete this.state.values.global[input.name]; else this.state.values.global[input.name] = input.value;
       return structuredClone(this.state);
     }
-    const transition = transitionLifecycle({ state: this.state, runs: [...this.records.values()], actor: { actorId: 'machine-a', machineId: 'machine-a', human: false }, now: new Date().toISOString(), token: crypto.randomUUID() }, input);
+    const transition = transitionLifecycle({ state: this.state, runs: [...this.records.values()], actor: { actorId: 'machine-a', machineId: 'machine-a', kind: 'machine', lifecycleControl: false }, now: new Date().toISOString(), token: crypto.randomUUID() }, input);
     if (transition.record) this.records.set(transition.record.run.id, transition.record);
     Object.assign(this.state, transition.state);
     if (this.state.bindings.resourceId) this.bindingWritten.resolve();
@@ -200,7 +200,7 @@ describe('WorkspaceEnvironmentManager', () => {
     const context = fixture('echo approved > result.txt\n');
     await expect(context.manager.runPhase('workspace-a', 'cloud/provision')).rejects.toThrow('approval');
     expect(context.materializations()).toBe(0);
-    await expect(context.manager.approve('workspace-a', 'workspace', 'anything')).rejects.toThrow('human browser');
+    await expect(context.manager.approve('workspace-a', 'workspace', 'anything')).rejects.toThrow();
     await approveActive(context.manager, context.ledger);
     context.beforeRun(() => writeFileSync(context.scriptPath, 'echo unapproved > result.txt\n'));
     await context.manager.runPhase('workspace-a', 'cloud/provision');

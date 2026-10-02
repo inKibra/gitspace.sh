@@ -1,5 +1,6 @@
 import type {
   AvailableModel,
+  InferenceExecutionContext,
   ProviderAccount,
   ProviderLoginEvent,
   ProviderUsage,
@@ -12,7 +13,6 @@ import {
   getOAuthProviders,
   listProvidersWithEnvKey,
   resolveUsedFraction,
-  type AuthStorage,
   type CredentialHealthResult,
   type CredentialOrigin,
   type DisabledCredentialSummary,
@@ -24,8 +24,8 @@ import {
   type UsageReport,
 } from '@oh-my-pi/pi-ai';
 import { resolveCredentialIdentityKey } from '@oh-my-pi/pi-ai/auth/sqlite-credential-store';
-import { ModelRegistry } from '@oh-my-pi/pi-coding-agent/config/model-registry';
-import { discoverAuthStorage } from '@oh-my-pi/pi-coding-agent/session/auth-broker-config';
+import type { ModelRegistry } from '@oh-my-pi/pi-coding-agent/config/model-registry';
+import { createManagedInference } from '../../account-omp/src/inference.js';
 import { collectUnreportedAccounts, type UsageAccountIdentity } from '@oh-my-pi/pi-coding-agent/cli/usage-cli';
 
 /** Callbacks handed to `AuthStorage.login`; the coordinator turns them into stream events. */
@@ -39,6 +39,8 @@ export interface ProviderLoginController {
 
 /** The slice of OMP's `AuthStorage` the coordinator depends on (test seam). */
 export interface AuthStorageLike {
+  getGeneration(): number;
+  revalidateCredentials(): Promise<void>;
   hasAuth(provider: string): boolean;
   getCredentialOrigin(provider: string): CredentialOrigin | undefined;
   listStoredCredentials(provider?: string): StoredAuthCredential[];
@@ -54,8 +56,10 @@ export interface AuthStorageLike {
 }
 
 export interface ProviderAuthCoordinatorOptions {
-  /** Machine credential storage; OMP children independently discover this same backing store. */
+  profileId: string;
+  /** Storage belongs to exactly one profile; there is no machine-global credential inventory. */
   authStorage: () => Promise<AuthStorageLike>;
+  modelRegistry: () => Promise<Pick<ModelRegistry, 'getAvailable'>>;
   onChanged?: () => Promise<void>;
 }
 
@@ -66,19 +70,84 @@ export class ProviderAuthError extends Error {
   }
 }
 
-/**
- * One `discoverAuthStorage(agentDir)` per machine process, resolved on first use so a
- * misconfigured auth broker surfaces on the first provider/session call instead of at boot.
- */
-export function sharedAuthStorage(agentDir: string): () => Promise<AuthStorage> {
-  let storage: Promise<AuthStorage> | null = null;
-  return () => {
-    storage ??= discoverAuthStorage(agentDir).catch((error: unknown) => {
-      storage = null;
-      throw error;
-    });
-    return storage;
-  };
+export interface ProviderManagementContext {
+  authStorage: AuthStorageLike;
+  modelRegistry: Pick<ModelRegistry, 'getAvailable'>;
+  close(): void;
+}
+
+/** Profile identity owns the coordinator, including in-flight OAuth callbacks and usage state. */
+export class ProfileProviderAuthCoordinator {
+  readonly #profiles = new Map<string, {
+    coordinator: ProviderAuthCoordinator;
+    context: InferenceExecutionContext;
+    managed: Promise<ProviderManagementContext>;
+    publishBundle: boolean;
+  }>();
+  readonly #managed = new Set<Promise<ProviderManagementContext>>();
+
+  constructor(private readonly options: {
+    agentDir: string;
+    cwd: string;
+    resolve(profileId: string): Promise<InferenceExecutionContext>;
+    createContext?(context: InferenceExecutionContext): Promise<ProviderManagementContext>;
+    onChanged?(profileId: string): Promise<void>;
+  }) {}
+
+  async forProfile(profileId: string): Promise<ProviderAuthCoordinator> {
+    if (!profileId) throw new ProviderAuthError('resolve inference profile', 'Select an inference profile before managing providers');
+    // Recheck canonical authority even when a local coordinator already exists.
+    const context = structuredClone(await this.options.resolve(profileId));
+    if (context.profile.id !== profileId || context.projectId !== null || context.assignmentRevision !== null) {
+      throw new ProviderAuthError('resolve inference profile', 'Provider management requires the requested profile management scope');
+    }
+    let entry = this.#profiles.get(profileId);
+    if (!entry) {
+      const managed = this.createContext(context);
+      entry = {
+        context,
+        managed,
+        publishBundle: false,
+        coordinator: new ProviderAuthCoordinator({
+          profileId,
+          authStorage: async () => (await this.#profiles.get(profileId)!.managed).authStorage,
+          modelRegistry: async () => (await this.#profiles.get(profileId)!.managed).modelRegistry,
+          onChanged: () => this.options.onChanged?.(profileId) ?? Promise.resolve(),
+        }),
+      };
+      this.#profiles.set(profileId, entry);
+    } else if (entry.context.profile.revision !== context.profile.revision
+      || entry.context.advanced.generation !== context.advanced.generation
+      || entry.context.broker.url !== context.broker.url
+      || entry.context.broker.token !== context.broker.token) {
+      entry.context = context;
+      entry.managed = this.createContext(context);
+      entry.publishBundle = true;
+    }
+    try { await entry.managed; }
+    catch (error) { this.#profiles.delete(profileId); throw error; }
+    if (entry.publishBundle) {
+      await this.options.onChanged?.(profileId);
+      entry.publishBundle = false;
+    }
+    return entry.coordinator;
+  }
+
+  private createContext(context: InferenceExecutionContext): Promise<ProviderManagementContext> {
+    const managed = this.options.createContext?.(context)
+      ?? createManagedInference(context, { agentDir: this.options.agentDir, cwd: this.options.cwd });
+    // Retired contexts may still own an OAuth callback. Keep that scope alive until
+    // shutdown rather than closing storage out from under an accepted login.
+    this.#managed.add(managed);
+    return managed;
+  }
+
+  async close(): Promise<void> {
+    await Promise.all([...this.#profiles.values()].map((entry) => entry.coordinator.dispose()));
+    await Promise.all([...this.#managed].map((managed) => managed.then((value) => value.close(), () => undefined)));
+    this.#managed.clear();
+    this.#profiles.clear();
+  }
 }
 
 /** Finished flows stay replayable this long so a subscriber that races `done` still sees it. */
@@ -244,31 +313,62 @@ function errorMessage(error: unknown, fallback: string): string {
 }
 
 export class ProviderAuthCoordinator {
+  readonly profileId: string;
   readonly #authStorage: () => Promise<AuthStorageLike>;
+  readonly #modelRegistry: () => Promise<Pick<ModelRegistry, 'getAvailable'>>;
   readonly #flows = new Map<string, LoginFlow>();
   #descriptors: ProviderDescriptor[] | null = null;
   readonly #onChanged: (() => Promise<void>) | undefined;
+  #refreshingAuth: Promise<AuthStorageLike> | null = null;
+  #publishedGeneration: number | null = null;
 
   constructor(options: ProviderAuthCoordinatorOptions) {
+    if (!options.profileId) throw new ProviderAuthError('initialize provider management', 'An explicit inference profile is required');
+    this.profileId = options.profileId;
     this.#authStorage = options.authStorage;
+    this.#modelRegistry = options.modelRegistry;
     this.#onChanged = options.onChanged;
+  }
+
+  async dispose(): Promise<void> {
+    await Promise.all([...this.#flows.values()].filter((flow) => !flow.done).map((flow) => this.cancel(flow.id)));
+  }
+
+  #currentAuthStorage(): Promise<AuthStorageLike> {
+    this.#refreshingAuth ??= (async () => {
+      const storage = await this.#authStorage();
+      this.#publishedGeneration ??= storage.getGeneration();
+      // Cloud writes bypass this coordinator; re-reading its old AuthStorage is not a refresh.
+      await storage.revalidateCredentials();
+      await this.#publishAuthChanges(storage);
+      return storage;
+    })().finally(() => { this.#refreshingAuth = null; });
+    return this.#refreshingAuth;
+  }
+
+  async #publishAuthChanges(storage: AuthStorageLike): Promise<void> {
+    const generation = storage.getGeneration();
+    if (generation === this.#publishedGeneration) return;
+    await this.#onChanged?.();
+    // A failed child reload must be retried even when our own cache is already current.
+    this.#publishedGeneration = generation;
   }
 
   /** Models runnable on this machine right now: the OMP catalog narrowed to authenticated providers. */
   async models(): Promise<AvailableModel[]> {
-    const storage = await this.#authStorage();
-    const registry = new ModelRegistry(storage as AuthStorage);
-    return registry.getAvailable().map((model) => ({ provider: model.provider, id: model.id, name: model.name, contextWindow: model.contextWindow ?? null }));
+    const storage = await this.#currentAuthStorage();
+    const registry = await this.#modelRegistry();
+    return registry.getAvailable().filter((model) => storage.hasAuth(model.provider)).map((model) => ({ provider: model.provider, id: model.id, name: model.name, contextWindow: model.contextWindow ?? null }));
   }
 
   async list(): Promise<ProviderView[]> {
-    const storage = await this.#authStorage();
+    const storage = await this.#currentAuthStorage();
     const disabled = await this.#disabledCredentials(storage);
     return this.#descriptorList().map((descriptor) => this.#view(storage, descriptor, disabled));
   }
 
   async view(providerId: string): Promise<ProviderView> {
-    const storage = await this.#authStorage();
+    const storage = await this.#currentAuthStorage();
     const descriptor = this.#descriptor(providerId);
     return this.#view(storage, descriptor, await this.#disabledCredentials(storage, descriptor.credentialProvider));
   }
@@ -331,7 +431,7 @@ export class ProviderAuthCoordinator {
 
   async logout(providerId: string, credentialId: string | null): Promise<ProviderView> {
     const descriptor = this.#descriptor(providerId);
-    const storage = await this.#authStorage();
+    const storage = await this.#currentAuthStorage();
     if (credentialId === null) {
       await storage.logout(descriptor.credentialProvider);
     } else {
@@ -339,7 +439,7 @@ export class ProviderAuthCoordinator {
       const removed = Number.isInteger(numeric) && await storage.removeCredential(descriptor.credentialProvider, numeric);
       if (!removed) throw new ProviderAuthError('sign out provider', `Provider ${providerId} has no credential ${credentialId}`);
     }
-    await this.#onChanged?.();
+    await this.#publishAuthChanges(storage);
     return this.view(providerId);
   }
 
@@ -347,14 +447,14 @@ export class ProviderAuthCoordinator {
     const descriptor = this.#descriptor(providerId);
     const trimmed = key.trim();
     if (!trimmed) throw new ProviderAuthError('set provider API key', 'API key must not be empty');
-    const storage = await this.#authStorage();
+    const storage = await this.#currentAuthStorage();
     await storage.set(descriptor.credentialProvider, { type: 'api_key', key: trimmed });
-    await this.#onChanged?.();
+    await this.#publishAuthChanges(storage);
     return this.view(providerId);
   }
 
   async usage(providerId: string | null, refresh: boolean): Promise<ProviderUsage> {
-    const storage = await this.#authStorage();
+    const storage = await this.#currentAuthStorage();
     const errors: Array<{ provider: string; message: string }> = [];
     const aggregateErrors: Array<{ provider: string; message: string }> = [];
     const scope = providerId ?? '*';
@@ -505,7 +605,7 @@ export class ProviderAuthCoordinator {
 
   async #runLogin(flow: LoginFlow): Promise<void> {
     try {
-      const storage = await this.#authStorage();
+      const storage = await this.#currentAuthStorage();
       await storage.login(flow.providerId, {
         signal: flow.controller.signal,
         onAuth: (info) => this.#push(flow, { type: 'auth', url: info.url, launchUrl: info.launchUrl ?? null, instructions: info.instructions ?? null }),
@@ -515,7 +615,7 @@ export class ProviderAuthCoordinator {
         // fallback against its local callback; `done` retires any unanswered prompt.
         onManualCodeInput: () => this.#prompt(flow, { message: 'Paste the authorization code or full redirect URL' }),
       });
-      await this.#onChanged?.();
+      await this.#publishAuthChanges(storage);
       this.#push(flow, { type: 'done', ok: true, provider: await this.view(flow.providerId) });
     } catch (error) {
       const message = flow.controller.signal.aborted ? 'Login cancelled' : errorMessage(error, 'Login failed');

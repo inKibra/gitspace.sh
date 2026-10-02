@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { createDeploymentPlan, DeploymentJournal, hashArtifactPath } from '@gitspace/deployment';
 import { ReplacementEnvironment, environmentLaunchResponseSchema, environmentStatusSchema } from '../src/index.js';
 import { nativeHostAbi } from '@gitspace/account-omp/manifest';
-import { nativeFileDigest } from '../../deployment/src/native-runtime.js';
+import { GIT_LFS_DECLARATION, GIT_LFS_PATH, nativeFileDigest } from '../../deployment/src/native-runtime.js';
 
 const roots: string[] = [];
 const environments: ReplacementEnvironment[] = [];
@@ -23,6 +23,19 @@ async function nativeFixture(path: string): Promise<void> {
   await writeFile(join(path, 'machine-native.json'), JSON.stringify({
     version: 1, bunVersion: Bun.version, abi: nativeHostAbi(),
     walgit: { source: 'release', path: 'native/walgit', ...await nativeFileDigest(binary), provenance: null },
+  }));
+}
+
+async function gitLfsFixture(path: string, label: string): Promise<void> {
+  await mkdir(join(path, 'native/bin'), { recursive: true });
+  const binary = join(path, GIT_LFS_PATH);
+  await writeFile(binary, `#!/bin/sh\necho 'git-lfs/3.8.0 (${label})'\n`, { mode: 0o755 });
+  await writeFile(join(path, GIT_LFS_DECLARATION), JSON.stringify({
+    version: 1, path: GIT_LFS_PATH, ...await nativeFileDigest(binary),
+    upstream: {
+      version: '3.8.0', url: 'https://github.com/git-lfs/git-lfs/releases/download/v3.8.0/git-lfs-linux-amd64-v3.8.0.tar.gz',
+      sha256: 'e455e00f15d9b95661b8d53498ffb0c3367962cf1ec73c31ab7369516cd6ab8d', size: 5_909_255,
+    },
   }));
 }
 
@@ -255,6 +268,47 @@ describe('replacement environment host routes', () => {
     expect(channel).toMatchObject({ sha: null, legacySha: null });
     expect(channel.pid).not.toBe(custom.pid);
     expect(environment.status()).toMatchObject({ machineHash: hash, machineReleaseSha: null, ompReleaseSha: null });
+  });
+
+  it('starts each machine generation with its own bundled git-lfs for machine git and agent sessions', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'gitspace-machine-git-lfs-'));
+    roots.push(root);
+    const environment = new ReplacementEnvironment({
+      id: 'test-machine-git-lfs', root, repositoryRoot: root, rpcPort: 0, webPort: 0, machineId: 'machine-a',
+      artifactKey: new Uint8Array(32).fill(1), ompAgentDir: join(root, 'omp'), controlToken: 'control-token',
+    });
+    environments.push(environment);
+    const booted: Array<{ generation: string; path: string; machineGit: string; agentGit: string }> = [];
+    for (const label of ['generation-a', 'generation-b']) {
+      const candidate = join(root, label);
+      await mkdir(candidate);
+      // Machine git helpers spawn without `env` (Bun then uses the startup environment); OMP children get ompChildEnvironment().
+      await writeFile(join(candidate, 'machine.js'), `
+        import { ompChildEnvironment } from ${JSON.stringify(join(import.meta.dir, '../src/omp-runtime.ts'))};
+        const machine = Bun.spawnSync(['git', 'lfs', 'version'], { stdout: 'pipe', stderr: 'pipe' });
+        const agent = Bun.spawnSync(['git', 'lfs', 'version'], { env: ompChildEnvironment(), stdout: 'pipe', stderr: 'pipe' });
+        await Bun.write(process.env.GITSPACE_ENVIRONMENT_ROOT + '/machine-tools.json', JSON.stringify({
+          generation: process.env.GITSPACE_MACHINE_RUNTIME_PATH,
+          path: process.env.PATH,
+          machineGit: machine.stdout.toString() + machine.stderr.toString(),
+          agentGit: agent.stdout.toString() + agent.stderr.toString(),
+        }));
+        const server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: (request) => Response.json(new URL(request.url).pathname === '/__control/retire' ? { stopMode: 'replace' } : { status: 'ok' }) });
+        console.log('GitSpace RPC ready at http://127.0.0.1:' + server.port + '/rpc');
+      `);
+      await nativeFixture(candidate);
+      await gitLfsFixture(candidate, label);
+      await environment.deploy({
+        artifacts: [{ entrypoint: 'machine-daemon', path: candidate, hash: await hashArtifactPath(candidate), dependsOn: [] }],
+        releaseSha: label, revision: label, dirty: false,
+      });
+      booted.push(JSON.parse(await readFile(join(root, 'machine-tools.json'), 'utf8')));
+    }
+    for (const [index, label] of ['generation-a', 'generation-b'].entries()) {
+      expect(booted[index]).toMatchObject({ machineGit: `git-lfs/3.8.0 (${label})\n`, agentGit: `git-lfs/3.8.0 (${label})\n` });
+      expect(booted[index]!.path.split(':')[0]).toBe(join(booted[index]!.generation, 'native/bin'));
+    }
+    expect(booted[1]!.path).not.toContain(booted[0]!.generation);
   });
 
   it('boots selected machine code after host restart and preserves an explicit channel rollback', async () => {

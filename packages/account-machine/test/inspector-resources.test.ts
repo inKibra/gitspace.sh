@@ -23,14 +23,24 @@ function fixture() {
   return { root, input };
 }
 
+async function readText(input: Parameters<typeof readInspectorResource>[0]): Promise<string> {
+  const frames = [...await readInspectorResource(input)];
+  expect(frames[0]).toMatchObject({ type: 'metadata', text: true });
+  const chunks = frames.slice(1).map((frame) => {
+    if (frame.type !== 'chunk') throw new Error('Expected a byte chunk after metadata');
+    return Buffer.from(frame.base64, 'base64');
+  });
+  return Buffer.concat(chunks).toString('utf8');
+}
+
 describe('Inspector session resource reads', () => {
   it('resolves a tool-output counter only in its originating session, including selectors', async () => {
     const { root, input } = fixture();
     writeFileSync(join(root, 'session-a', '3.bash.log'), 'first\nselected\nlast');
     writeFileSync(join(root, 'session-b', '3.bash.log'), 'other session secret');
     writeFileSync(join(root, 'session-b', '4.read.log'), 'must not be a fallback');
-    expect((await readInspectorResource({ ...input, url: 'artifact://3:2-2' })).text).toBe('selected');
-    expect((await readInspectorResource({ ...input, sessionFile: join(root, 'session-b.jsonl'), url: 'artifact://3' })).text).toBe('other session secret');
+    expect(await readText({ ...input, url: 'artifact://3:2-2' })).toBe('selected');
+    expect(await readText({ ...input, sessionFile: join(root, 'session-b.jsonl'), url: 'artifact://3' })).toBe('other session secret');
     await expect(readInspectorResource({ ...input, url: 'artifact://4' })).rejects.toThrow('not available in this session');
   });
 
@@ -39,22 +49,20 @@ describe('Inspector session resource reads', () => {
     const encoded = new TextEncoder();
     await input.artifacts.write(input.capability, 'local://workspace/PLAN.md', encoded.encode('current mount plan'));
     await input.artifacts.write({ kind: 'project', projectId: 'project' }, 'local://base/reference.md', encoded.encode('project reference'));
-    expect((await readInspectorResource({ ...input, url: 'local://PLAN.md' })).text).toBe('current mount plan');
+    expect(await readText({ ...input, url: 'local://PLAN.md' })).toBe('current mount plan');
     writeFileSync(join(input.localArtifactsDir, 'PLAN.md'), 'actual legacy plan');
-    expect((await readInspectorResource({ ...input, url: 'local://PLAN.md' })).text).toBe('actual legacy plan');
+    expect(await readText({ ...input, url: 'local://PLAN.md' })).toBe('actual legacy plan');
     mkdirSync(join(root, 'session-a', 'local'));
     writeFileSync(join(root, 'session-a', 'local', 'Old.md'), 'original OMP local artifact');
-    expect((await readInspectorResource({ ...input, url: 'local://Old.md' })).text).toBe('original OMP local artifact');
-    expect((await readInspectorResource({ ...input, url: 'local://base/reference.md' })).text).toBe('project reference');
+    expect(await readText({ ...input, url: 'local://Old.md' })).toBe('original OMP local artifact');
+    expect(await readText({ ...input, url: 'local://base/reference.md' })).toBe('project reference');
   });
 
   it('returns a useful bounded-preview error and lets a line selector recover large tool output', async () => {
     const { root, input } = fixture();
     writeFileSync(join(root, 'session-a', '5.read.log'), `first line\n${'long output\n'.repeat(20_000)}`);
-    await expect(readInspectorResource({ ...input, url: 'artifact://5' })).rejects.toThrow('128 KiB');
-    const selected = await readInspectorResource({ ...input, url: 'artifact://5:1-1' });
-    expect(selected.text).toBe('first line');
-    expect(Buffer.from(selected.base64, 'base64').toString()).toBe('first line');
+    await expect(readText({ ...input, url: 'artifact://5' })).rejects.toThrow('128 KiB');
+    expect(await readText({ ...input, url: 'artifact://5:1-1' })).toBe('first line');
   });
 
   it('rejects path traversal, symlink escape, and unauthorized sibling mounts', async () => {

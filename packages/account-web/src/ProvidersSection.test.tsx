@@ -199,7 +199,7 @@ describe('ProvidersSection', () => {
 
 describe('SignInFlowView', () => {
   const login = { respond: rejects, cancel: rejects };
-  const flow = (events: ProviderLoginFlow['events']): ProviderLoginFlow => ({ flowId: 'flow-1', providerId: 'anthropic', events });
+  const flow = (events: ProviderLoginFlow['events']): ProviderLoginFlow => ({ flowId: 'flow-1', profileId: 'default', providerId: 'anthropic', events });
   // Title/Description need Base UI's dialog root context; the popup itself is portaled and never server-renders.
   const render = (current: ProviderLoginFlow): string => renderToStaticMarkup(<Dialog open><SignInFlowView flow={current} providerName="Anthropic" login={{ flow: current, ...login }} onRetry={noop} /></Dialog>);
 
@@ -232,6 +232,7 @@ describe('SignInFlowView', () => {
   it('shows device authorization without asking the user to paste a callback', () => {
     const html = render({
       flowId: 'device-flow',
+      profileId: 'client-a',
       providerId: 'openai-codex-device',
       events: [{ type: 'auth', url: 'https://auth.openai.com/codex/device', launchUrl: null, instructions: 'Enter code: ABCD-EFGH' }],
     });

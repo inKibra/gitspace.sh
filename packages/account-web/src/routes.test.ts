@@ -6,6 +6,7 @@ describe('stable product routes', () => {
     expect(productPath('agent')).toBe('/');
     expect(productPath('kanban')).toBe('/kanban');
     expect(productPath('projects')).toBe('/projects');
+    expect(productPath('inference')).toBe('/inference');
     expect(productPath('plugins')).toBe('/plugins');
     expect(productPath('skills')).toBe('/skills');
     expect(productPath('crons')).toBe('/crons');
@@ -13,6 +14,7 @@ describe('stable product routes', () => {
     expect(productPath('inbox')).toBe('/inbox');
     expect(productPath('settings')).toBe('/settings');
     expect(productRouteFromLocation({ pathname: '/plugins/', search: '?project=project-a' })).toBe('plugins');
+    expect(productRouteFromLocation({ pathname: '/inference', search: '?profile=client-a' })).toBe('inference');
   });
 
   it('leaves workspace selection behind when opening a global destination', () => {

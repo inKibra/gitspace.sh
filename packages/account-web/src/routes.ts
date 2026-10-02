@@ -1,10 +1,11 @@
-export type AppView = 'agent' | 'kanban' | 'projects' | 'plugins' | 'skills' | 'crons' | 'secrets' | 'inbox';
+export type AppView = 'agent' | 'kanban' | 'projects' | 'inference' | 'plugins' | 'skills' | 'crons' | 'secrets' | 'inbox';
 export type ProductRoute = AppView | 'settings';
 
 export const PRODUCT_ROUTE_LABELS: Record<ProductRoute, string> = {
   agent: 'Workspace',
   kanban: 'Kanban',
   projects: 'Projects',
+  inference: 'Inference',
   plugins: 'Plugins',
   skills: 'Skills',
   crons: 'Crons',
@@ -21,6 +22,7 @@ const PATH_BY_ROUTE: Record<ProductRoute, string> = {
   agent: '/',
   kanban: '/kanban',
   projects: '/projects',
+  inference: '/inference',
   plugins: '/plugins',
   skills: '/skills',
   crons: '/crons',
@@ -44,6 +46,7 @@ export function setProductRoute(url: URL, route: ProductRoute): URL {
   url.searchParams.delete('view');
   url.searchParams.delete('gallery');
   if (route !== 'settings') url.searchParams.delete('mode');
+  if (route !== 'inference') url.searchParams.delete('profile');
   if (isGlobalView(route)) {
     url.searchParams.delete('project');
     url.searchParams.delete('workspace');

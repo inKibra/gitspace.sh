@@ -9,7 +9,7 @@ const settings = {
   onboardingComplete: true,
   profile: { displayName: 'Brad', handle: 'brad' },
   git: { authorName: 'Brad', authorEmail: 'brad@example.com' },
-  defaults: { machineId: 'local-machine', enterAction: 'steer' as const },
+  defaults: { machineId: 'local-machine', enterAction: 'steer' as const, appearance: 'system' as const },
   updatedAt: new Date().toISOString(),
   updatedBy: 'local-machine',
 };
@@ -32,12 +32,17 @@ createRoot(root).render(<SettingsPage
   onSetCloudImageDefault={unavailable}
   ompSettings={[]}
   ompGeneration={4}
-  models={[]}
-  providers={{ providers: [], usage: null, usageStatus: 'idle', onShow: () => undefined, onRefreshUsage: unavailable, onSignIn: unavailable, onSignOut: unavailable, onSetApiKey: unavailable, login: { flow: null, respond: unavailable, cancel: unavailable } }}
+  inferenceSetup={<a href="/test/inference-preview.html">Configure Default inference</a>}
   devices={[]}
   onRevokeDevice={unavailable}
   onSignOut={unavailable}
   onCreateApiClient={unavailable}
+  canManageMcp={false}
+  canEnableMcp={false}
+  onMcpStatus={unavailable}
+  onMcpEnable={unavailable}
+  onMcpRotate={unavailable}
+  onMcpDisable={unavailable}
   canConnectBrowser={false}
   onCreateBrowserInvitation={unavailable}
   onBrowserInvitationStatus={unavailable}

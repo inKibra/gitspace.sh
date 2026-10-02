@@ -1,9 +1,10 @@
 import { createRoutedTransport } from '@gitspace/protocol/routed-transport';
-import { gitspaceContract, rpcErrors, type SpacePlacementView } from '@gitspace/protocol/rpc-contract';
+import { gitspaceContract, rpcErrors } from '@gitspace/protocol/rpc-contract';
 import { decodeTranscriptChunks, encodeTranscriptEventChunks, type TranscriptChunk, type TranscriptEvent } from '@gitspace/protocol/transcript';
 import { contractDigest, deserialize, serialize } from 'result-rpc';
 import { batchFetchTransport, createBrowserClient, isCancelled } from 'result-rpc/client';
 import { afterEach, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 
 afterEach(() => vi.useRealTimers());
 
@@ -128,38 +129,43 @@ it('retains terminal server errors and cancels a caller-detached stream', async 
   expect(cancelledBody).toHaveBeenCalledOnce();
 });
 
-it('routes concurrent callers with the refreshed table when an invalidated read finishes last', async () => {
-  const pending: Array<{ resolve: (response: Response) => void; id: string }> = [];
-  const reached: string[] = [];
-  const placement = (endpoint: string): SpacePlacementView => ({
-    spaceId: 'space', projectId: 'project', kind: 'worktree', holderId: 'remote', state: 'open', generation: 1, endpoint,
-  });
+const batchSchema = z.object({ batch: z.array(z.object({ path: z.string() })) });
+
+it('sends machine work for each space or session in its own tagged batch to the account endpoint', async () => {
+  const requests: Array<{ url: string; paths: string[] }> = [];
   const fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const request = new Request(input, init);
     const decoded = deserialize(await request.text());
     if (!decoded.ok) throw new Error('Invalid envelope');
-    const envelope = decoded.value as { batch: Array<{ id: string; path: string }> };
-    if (envelope.batch[0]?.path === 'placements') return new Promise<Response>((resolve) => {
-      pending.push({ resolve, id: envelope.batch[0]!.id });
-    });
-    reached.push(request.url);
+    requests.push({ url: request.url, paths: batchSchema.parse(decoded.value).batch.map((item) => item.path) });
     return new Response('reached');
   }) as typeof fetch;
   const transport = createRoutedTransport({ homeUrl: 'https://account.test/rpc', fetch: fetcher });
-  const first = transport.request({ v: 1, path: 'bootstrap', input: { projectId: 'project', workspaceId: 'space' } });
-  await vi.waitFor(() => expect(pending).toHaveLength(1));
-  transport.invalidate();
-  const second = transport.request({ v: 1, path: 'bootstrap', input: { projectId: 'project', workspaceId: 'space' } });
-  await vi.waitFor(() => expect(pending).toHaveLength(2));
-  const respond = (index: number, endpoint: string) => pending[index]!.resolve(new Response(encoded({
-    v: 1, batch: [{ id: pending[index]!.id, status: 200, response: { v: 1, status: 'ok', value: { machineId: 'home', spaces: [placement(endpoint)] } } }],
-  }), { headers: { 'content-type': 'application/result-rpc+devalue; sv=1', 'x-result-rpc-contract': contractDigest(gitspaceContract) } }));
-  respond(1, 'https://new.test/rpc');
-  await second;
-  respond(0, 'https://old.test/rpc');
-  await first;
-  expect(reached).toEqual(['https://new.test/rpc', 'https://new.test/rpc']);
-  expect((await transport.placements()).space?.endpoint).toBe('https://new.test/rpc');
+  await Promise.all([
+    transport.request({ v: 1, path: 'space.view', input: { projectId: 'project', workspaceId: 'space-a' } }),
+    transport.request({ v: 1, path: 'space.view', input: { projectId: 'project', workspaceId: 'space-b' } }),
+    transport.request({ v: 1, path: 'transcriptPage', input: { projectId: 'project', workspaceId: 'space-a' } }),
+    transport.request({ v: 1, path: 'session.control', input: { sessionId: 'session-a' } }),
+  ]);
+  expect(requests).toHaveLength(3);
+  expect(requests).toEqual(expect.arrayContaining([
+    { url: 'https://account.test/rpc?p=space.view,transcriptPage', paths: ['space.view', 'transcriptPage'] },
+    { url: 'https://account.test/rpc?p=space.view', paths: ['space.view'] },
+    { url: 'https://account.test/rpc?p=session.control', paths: ['session.control'] },
+  ]));
+});
+
+it('bounds the procedure tag and counts the procedures it omits', async () => {
+  const urls: string[] = [];
+  const transport = createRoutedTransport({ homeUrl: '/rpc', fetch: (async (input: RequestInfo | URL) => { urls.push(String(input)); return new Response('reached'); }) as typeof fetch });
+  const paths = Array.from({ length: 32 }, (_, index) => `procedure.with.a.deliberately.long.name.${index}`);
+  await Promise.all(paths.map((path) => transport.request({ v: 1, path, input: {} })));
+  expect(urls).toHaveLength(1);
+  const tag = new URL(urls[0]!, 'https://account.test').searchParams.get('p') ?? '';
+  expect(tag.length).toBeLessThanOrEqual(512);
+  const named = tag.split(',');
+  const omitted = Number(/^(\d+)-more$/u.exec(named.pop() ?? '')?.[1]);
+  expect(named).toEqual(paths.slice(0, paths.length - omitted));
 });
 
 it.each([
@@ -182,10 +188,10 @@ it.each([
   });
   const results: unknown[] = await Promise.all([
     client.session.control({ sessionId: 'running' }),
-    client.bootstrap({ projectId: 'project', workspaceId: null }),
+    client.space.view({ projectId: 'project', workspaceId: null }),
   ]);
   for await (const result of client.transcript({ projectId: 'project', workspaceId: null })) results.push(result);
-  expect(received[0]?.batch?.map((item) => item.path)).toEqual(['session.control', 'bootstrap']);
+  expect(received[0]?.batch?.map((item) => item.path)).toEqual(['session.control', 'space.view']);
   expect(results).toMatchObject(Array.from({ length: 3 }, () => ({ status: 'error', error: { _tag: 'client/http-failure', data: { status } } })));
 });
 

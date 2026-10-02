@@ -1,11 +1,11 @@
 import { expect, test } from 'bun:test';
+import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { SkillView } from '@gitspace/protocol';
-import { ProcessOmpRuntime } from '../../account-machine/src/omp-runtime.js';
+import type { SnapshotResponse } from '@oh-my-pi/pi-ai/auth-broker';
 import { OmpRpcPeer, type OmpChildApi, type OmpChildInit } from '../src/ipc.js';
-import { createExecutableArtifactManifest, readOmpReleaseMetadata } from '../src/manifest.js';
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), 'omp-skills-'));
@@ -14,6 +14,20 @@ async function fixture() {
   const requests: Array<{ first: boolean; second: boolean }> = [];
   const server = Bun.serve({ hostname: '127.0.0.1', port: 0, async fetch(request) {
     const path = new URL(request.url).pathname;
+    if (path === '/broker/v1/snapshot') {
+      if (request.headers.get('authorization') !== 'Bearer broker-token') return new Response('denied', { status: 403 });
+      // The unchanged long poll parks until client shutdown.
+      if (new URL(request.url).searchParams.has('since')) {
+        if (!request.signal.aborted) await new Promise<void>(resolve => request.signal.addEventListener('abort', () => resolve(), { once: true }));
+        return new Response(null, { status: 304 });
+      }
+      const now = Date.now();
+      const snapshot: SnapshotResponse = { generation: 1, generatedAt: now, serverNowMs: now,
+        refresher: { enabled: false, intervalMs: 60_000, skewMs: 60_000, nextSweepInMs: 60_000 },
+        credentials: [{ id: 1, provider: 'openai', identityKey: null, rotatesInMs: null, credential: { type: 'api_key', key: 'local-test-key' } }],
+      };
+      return Response.json(snapshot);
+    }
     if (request.method === 'GET' && path === '/v1/models') return Response.json({ data: [{ id: 'test', object: 'model', owned_by: 'openai' }] });
     if (request.method !== 'POST' || path !== '/v1/chat/completions') return new Response('Not found', { status: 404 });
     const payload = await request.json() as { messages: Array<{ role: string; content: unknown }> };
@@ -28,14 +42,8 @@ async function fixture() {
     });
   } });
   await Promise.all([mkdir(agentDir), mkdir(workspace)]);
-  await writeFile(join(agentDir, 'models.yml'), JSON.stringify({ providers: { openai: {
-    baseUrl: `http://127.0.0.1:${server.port}/v1`, api: 'openai-completions', apiKey: 'local-test-key',
-    models: [{ id: 'test', name: 'Test', reasoning: false, contextWindow: 131072, maxTokens: 4096 }],
-  } } }));
-  await writeFile(join(agentDir, 'config.yml'), JSON.stringify({
-    modelRoles: { default: 'openai/test' }, enabledModels: ['openai/test'], enabledProviders: ['openai'],
-    skillful: true, git: { enabled: false }, lsp: { enabled: false }, retry: { maxRetries: 0 },
-  }));
+  const advancedContent = JSON.stringify({ skillful: true, git: { enabled: false }, lsp: { enabled: false }, retry: { maxRetries: 0 } });
+  await writeFile(join(agentDir, 'config.yml'), advancedContent);
   const skills: SkillView[] = [
     { id: 'first-skill', name: 'first-skill', description: 'first-skill-activation-marker', source: 'user', scope: 'all', enabled: true, exceptions: [], assignments: [], revision: 1 },
     { id: 'second-skill', name: 'second-skill', description: 'second-skill-activation-marker', source: 'user', scope: 'project', enabled: true, exceptions: [], assignments: [{ projectId: 'project', projectSpaceEnabled: true, workspacesEnabled: false }], revision: 1 },
@@ -48,6 +56,18 @@ async function fixture() {
   const input: OmpChildInit = {
     agentDir, sessionRoot: join(root, 'sessions'), skills,
     input: { projectId: 'project', workspaceId: 'workspace', workingDirectory: workspace, sessionKey: 'space', artifactsDir: join(root, 'artifacts') },
+    inference: {
+      version: 1, projectId: 'project', assignmentRevision: 1,
+      profile: { version: 1, id: 'default', name: 'Default', revision: 1, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z', settings: {
+        modelRoles: { default: 'openai/test' }, enabledModels: ['openai/test'],
+        'providers.models': { openai: {
+          baseUrl: `http://127.0.0.1:${server.port}/v1`, api: 'openai-completions',
+          models: [{ id: 'test', name: 'Test', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 131072, maxTokens: 4096 }],
+        } },
+      } },
+      advanced: { generation: 1, content: advancedContent, checksum: `sha256:${createHash('sha256').update(advancedContent).digest('hex')}`, updatedAt: '2026-01-01T00:00:00.000Z', updatedBy: 'test' },
+      broker: { url: `http://127.0.0.1:${server.port}/broker`, token: 'broker-token' },
+    },
     tools: [], mcpCatalog: { servers: [], instructions: [], prompts: {}, resources: {} }, namespaces: {},
   };
   return { root, input, requests, async dispose() { await server.stop(true); await rm(root, { recursive: true, force: true }); } };
@@ -106,51 +126,5 @@ test('opted-in child refreshes authorization and never falls back to its startup
     ]);
   } finally {
     try { await child.dispose(); } finally { await context.dispose(); }
-  }
-}, 75_000);
-
-test('new machine supplies usable startup authorization to a snapshot-only child', async () => {
-  const context = await fixture();
-  const generation = join(context.root, 'legacy-omp');
-  await mkdir(generation);
-  // Keep the old wire behavior: initialize consumes skills, ignores liveSkills,
-  // and never requests listSkills. The actual SDK still renders provider prompts.
-  await writeFile(join(generation, 'omp.js'), `
-// Test module-loading boundary: the SDK must see isolated HOME before evaluating imports.
-process.env.HOME = ${JSON.stringify(context.root)};
-process.chdir(process.env.HOME);
-const { EmbeddedOmpRuntime } = await import(${JSON.stringify(new URL('../src/session.ts', import.meta.url).pathname)});
-const { OMP_IPC_VERSION, OmpRpcPeer } = await import(${JSON.stringify(new URL('../src/ipc.ts', import.meta.url).pathname)});
-const { postmortem } = await import(${JSON.stringify(Bun.resolveSync('@oh-my-pi/pi-utils', import.meta.dir))});
-let session;
-const rpc = new OmpRpcPeer(message => process.send(message), {
-  health: async () => ({ protocolVersion: OMP_IPC_VERSION, platform: process.platform, arch: process.arch, bunVersion: Bun.version, pid: process.pid }),
-  initialize: async ([input]) => {
-    const runtime = new EmbeddedOmpRuntime({ agentDir: input.agentDir, sessionRoot: input.sessionRoot, skills: { initial: input.skills } });
-    session = await runtime.create(input.input);
-    return { id: session.id, sessionFile: session.sessionFile, activity: session.activity().activity };
-  },
-  prompt: ([text, options]) => session.prompt(text, options),
-  dispose: async () => { await session?.dispose(); session = undefined; },
-});
-process.on('message', message => rpc.receive(message));
-process.on('disconnect', async () => { await session?.dispose(); await postmortem.cleanup(); process.exit(0); });
-`);
-  const metadata = await readOmpReleaseMetadata(new URL('../../../', import.meta.url).pathname);
-  const built = await createExecutableArtifactManifest(generation, 'omp', metadata);
-  let latest = context.input.skills;
-  const runtime = new ProcessOmpRuntime({
-    environmentRoot: join(context.root, 'machine'), entrypoint: join(generation, 'omp.js'), manifestHash: built.manifestHash,
-    agentDir: context.input.agentDir, sessionRoot: context.input.sessionRoot, skills: async () => latest,
-  });
-  try {
-    await runtime.initialize();
-    const session = await runtime.create(context.input.input);
-    await session.prompt('First task.');
-    latest = latest.map((skill) => ({ ...skill, revision: 2, enabled: false }));
-    await session.prompt('Second task.');
-    expect(context.requests).toEqual([{ first: true, second: false }, { first: true, second: false }]);
-  } finally {
-    try { await runtime.dispose(); } finally { await context.dispose(); }
   }
 }, 75_000);

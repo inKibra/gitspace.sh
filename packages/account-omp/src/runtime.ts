@@ -1,14 +1,20 @@
 import { postmortem } from '@oh-my-pi/pi-utils';
+import { initTheme } from '@oh-my-pi/pi-tui/theme';
 import { MCPManager, type MCPRequestOptions } from '@oh-my-pi/pi-coding-agent/mcp';
-import { discoverAuthStorage, type AuthStorage, type CustomTool } from '@oh-my-pi/pi-coding-agent';
+import { type AuthStorage, type CustomTool } from '@oh-my-pi/pi-coding-agent';
+import { createManagedInference, type ManagedInference } from './inference.js';
 import { EmbeddedOmpRuntime, projectOmpCheckpointTranscript, projectOmpTranscript, type SessionMcpBridge } from './session.js';
 import type { OmpRuntimeSession } from './contracts.js';
 import { OMP_IPC_VERSION, OmpRpcPeer, type OmpChildApi, type OmpMachineApi, type OmpToolDescriptor, type OmpMcpCatalog } from './ipc.js';
 
 async function startSessionHost(): Promise<void> {
+  // OMP tools read the terminal theme even without a terminal (ask validation builds its
+  // themed "Done selecting" label), so load the built-in theme as OMP's own headless commands do.
+  await initTheme();
   if (!process.send) throw new Error('OMP runtime requires a private machine IPC channel');
   let live: OmpRuntimeSession | null = null;
   let authStorage: AuthStorage | null = null;
+  let inference: ManagedInference | null = null;
   let refresh: ((tools: CustomTool[]) => Promise<void>) | null = null;
   let tools: CustomTool[] = [];
   let catalog: OmpMcpCatalog = { servers: [], instructions: [], prompts: {}, resources: {} };
@@ -29,7 +35,11 @@ async function startSessionHost(): Promise<void> {
       health: async () => ({ protocolVersion: OMP_IPC_VERSION, platform: process.platform, arch: process.arch, bunVersion: Bun.version, pid: process.pid }),
       initialize: async ([input]) => {
         if (live) throw new Error('OMP child already owns a session');
-        authStorage = await discoverAuthStorage(input.agentDir);
+        if (input.inference?.projectId !== input.input.projectId || input.inference.assignmentRevision === null) {
+          throw new Error('OMP IPC3 requires a project-bound inference admission');
+        }
+        inference = await createManagedInference(input.inference, { agentDir: input.agentDir, cwd: input.input.workingDirectory, installDispatchGuard: true });
+        authStorage = inference.authStorage;
         tools = input.tools.map(remoteTool);
         catalog = input.mcpCatalog;
         // Connections, secret material and audits stay machine-owned. The child's
@@ -75,12 +85,18 @@ async function startSessionHost(): Promise<void> {
               refresh: (signal?: AbortSignal) => rpc.call('listSkills', [], signal ? AbortSignal.any([signal, AbortSignal.timeout(15_000)]) : AbortSignal.timeout(15_000)),
             } : {}),
           },
-          authStorage: async () => authStorage!,
+          inference,
           mcp: { createSession: async () => bridge },
-          ...(input.namespaces.space ? { spaceNamespace: {
-            declaration: input.namespaces.space,
-            call: (method: string, args: unknown, signal?: AbortSignal) => rpc.call('namespace', [{ namespace: 'space', method, args }], signal),
-          } } : {}),
+          ...(input.namespaces.space ? {
+            spaceNamespace: {
+              declaration: input.namespaces.space,
+              call: (method: string, args: unknown, signal?: AbortSignal) => rpc.call('namespace', [{ namespace: 'space', method, args }], signal),
+            },
+            workspaceControls: {
+              instructions: (signal?: AbortSignal) => rpc.call('workspaceInstructions', [], signal),
+              setPhase: (phase) => rpc.call('setWorkspacePhase', [phase]),
+            },
+          } : {}),
         });
         live = input.input.sessionFile
           ? await runtime.open({ ...input.input, sessionFile: input.input.sessionFile })
@@ -98,8 +114,13 @@ async function startSessionHost(): Promise<void> {
       instructionsChanged: () => session().instructionsChanged?.(),
       setWorkspacePhase: ([phase]) => session().setWorkspacePhase(phase),
       resume: () => session().resume(),
-      dispose: async () => { if (live) await live.dispose(); live = null; },
+      dispose: async () => { if (live) await live.dispose(); live = null; inference?.close(); },
       reloadAuth: async () => { await authStorage?.revalidateCredentials(); },
+      applyInference: async ([context]) => {
+        if (!inference) throw new Error('OMP session has not initialized');
+        await inference.apply(context);
+        await session().inferenceChanged?.();
+      },
       control: () => session().control(),
       agentSetup: () => session().agentSetup(),
       saveAgentDefinition: ([input]) => session().saveAgentDefinition(input),

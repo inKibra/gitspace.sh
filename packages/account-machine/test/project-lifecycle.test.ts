@@ -38,10 +38,12 @@ class MemoryProjectAuthority implements ProjectLifecycleAuthority {
   readonly operations = new Map<string, CloudProjectOperation>();
   readonly spaces = new Map<string, SpaceAuthorityRecord>();
   readonly inspectors = new Map<string, { projectId: string; spaceId: string }>();
+  /** The real cloud records the signing machine; set this to the manager calling bootstrap. */
+  bootstrapMachineId = 'machine-a';
 
   async bootstrap(input: { projectId: string; spaceId: string }) {
     const record: SpaceAuthorityRecord = {
-      ...input, state: 'open', machineId: 'machine-a', generation: 1, checkpointRevision: 0,
+      ...input, state: 'open', machineId: this.bootstrapMachineId, generation: 1, checkpointRevision: 0,
       manifestKey: null, manifestHash: null, failures: { open: null, close: null },
       revision: 1, publishedRevision: 0, resumeMachineId: null, updatedAt: new Date(0).toISOString(),
     };
@@ -76,6 +78,14 @@ class MemoryProjectAuthority implements ProjectLifecycleAuthority {
     const current = this.projects.get(projectId)!;
     this.projects.set(projectId, { ...current, baseBranch, source: { release: current.source?.release ?? null, commit: current.source?.commit ?? null, branch: baseBranch } });
     return this.setProjectLifecycle(projectId, expectedRevision, 'active');
+  }
+
+  async setProjectBaseBranch(projectId: string, expectedRevision: number, baseBranch: string) {
+    const current = this.projects.get(projectId)!;
+    expect(current.revision).toBe(expectedRevision);
+    const next = { ...current, baseBranch, revision: current.revision + 1, updatedAt: new Date().toISOString() };
+    this.projects.set(projectId, next);
+    return next;
   }
 
   async setProjectLifecycle(projectId: string, expectedRevision: number, lifecycle: CloudProjectSummary['lifecycle']) {
@@ -899,6 +909,7 @@ describe('ProjectLifecycleManager', () => {
         binding: (projectId) => ({ projectId, bucket: 'test', endpoint: 'https://storage.invalid', region: 'auto' }),
       });
       const manager = new ProjectLifecycleManager(targetDatabase, authority, 'machine-b', join(root, 'target'), undefined, undefined, resolver);
+      authority.bootstrapMachineId = 'machine-b';
       const before = [...authority.workspaces.keys()];
       await expect(manager.createWorkspace({ projectId: project.id, name: 'Too far', branch: 'too-far', phase: 'code', sourceKind: 'workspace', sourceRef: source.name })).rejects.toThrow('ahead');
       await expect(manager.createWorkspace({ projectId: project.id, name: 'Ahead of dependency', branch: 'ahead-dependency', phase: 'review', sourceKind: 'base', sourceRef: '', dependsOn: [dependency.id] })).rejects.toThrow('ahead');
@@ -1141,5 +1152,180 @@ describe('ProjectLifecycleManager', () => {
     expect(git(base.rootPath, 'symbolic-ref', '--short', 'HEAD')).toBe('main');
     expect([...authority.operations.values()][0]?.state).toBe('failed');
     database.close();
+  });
+});
+
+describe('ProjectLifecycleManager.setBaseBranch', () => {
+  it('switches the clean base checkout to a remote branch and refuses dirty checkouts or missing branches without changing anything', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'gitspace-base-branch-'));
+    roots.push(root);
+    const source = seedRepository(root, 'main');
+    const main = git(source, 'rev-parse', 'HEAD');
+    git(source, 'switch', '-c', 'release');
+    writeFileSync(join(source, 'README.txt'), 'release\n');
+    git(source, '-c', 'user.name=GitSpace', '-c', 'user.email=gitspace@local.invalid', 'commit', '-am', 'release');
+    const release = git(source, 'rev-parse', 'HEAD');
+    const remote = join(root, 'remote.git');
+    git(root, 'clone', '--bare', source, remote);
+    const database = new GitSpaceDatabase(join(root, 'gitspace.db'));
+    const authority = new MemoryProjectAuthority();
+    const manager = new ProjectLifecycleManager(database, authority, 'machine-a', join(root, 'spaces'));
+    try {
+      const { project } = await manager.createProject({ name: 'Rebased', baseBranch: 'main', repositoryUrl: remote });
+      const base = database.getBaseSpace(project.id)!;
+      const baseDefinition = authority.workspaces.get(project.id)!;
+      const unchanged = () => {
+        expect(authority.projects.get(project.id)).toEqual(project);
+        expect(authority.workspaces.get(project.id)).toEqual(baseDefinition);
+        expect(database.getProject(project.id)?.baseBranch).toBe('main');
+        expect(database.getBaseSpace(project.id)?.branch).toBe('main');
+        expect(git(base.rootPath, 'symbolic-ref', '--short', 'HEAD')).toBe('main');
+        expect(git(base.rootPath, 'rev-parse', 'HEAD')).toBe(main);
+      };
+
+      writeFileSync(join(base.rootPath, 'README.txt'), 'uncommitted\n');
+      await expect(manager.setBaseBranch(project.id, project.revision, 'release')).rejects.toThrow('uncommitted changes');
+      unchanged();
+      expect(readFileSync(join(base.rootPath, 'README.txt'), 'utf8')).toBe('uncommitted\n');
+      git(base.rootPath, 'checkout', '--', 'README.txt');
+
+      await expect(manager.setBaseBranch(project.id, project.revision, 'missing')).rejects.toThrow('does not exist on the repository remote');
+      unchanged();
+
+      const switched = await manager.setBaseBranch(project.id, project.revision, 'release');
+      expect(switched).toMatchObject({ baseBranch: 'release', revision: project.revision + 1 });
+      expect(authority.projects.get(project.id)).toEqual(switched);
+      expect(git(base.rootPath, 'symbolic-ref', '--short', 'HEAD')).toBe('release');
+      expect(git(base.rootPath, 'rev-parse', 'HEAD')).toBe(release);
+      expect(git(base.rootPath, 'rev-parse', '--abbrev-ref', 'release@{upstream}')).toBe('origin/release');
+      expect(authority.workspaces.get(project.id)).toMatchObject({
+        branch: 'release', sourceKind: 'base', sourceRef: 'release', sourceCommit: baseDefinition.sourceCommit, revision: baseDefinition.revision + 1,
+      });
+      expect(database.getProject(project.id)?.baseBranch).toBe('release');
+      expect(database.getBaseSpace(project.id)?.branch).toBe('release');
+    } finally {
+      database.close();
+    }
+  });
+});
+
+describe('ProjectLifecycleManager workspace creation recovery', () => {
+  /** Fails creation as `step` starts, or refuses the first placement like a cloud guard would. */
+  class FaultingAuthority extends MemoryProjectAuthority {
+    fault: string | null = null;
+    async updateProjectOperation(projectId: string, input: Parameters<MemoryProjectAuthority['updateProjectOperation']>[1]) {
+      if (this.fault && input.state === 'running' && input.steps.find((step) => step.id === this.fault)?.state === 'running') {
+        throw new Error(`Injected failure at ${this.fault}`);
+      }
+      return super.updateProjectOperation(projectId, input);
+    }
+    async bootstrap(input: { projectId: string; spaceId: string }) {
+      if (this.fault === 'refused' && input.spaceId !== input.projectId) throw new Error('Only an active canonical workspace can be opened');
+      return this.spaces.get(input.spaceId) ?? super.bootstrap(input);
+    }
+  }
+
+  async function failedCreation(fault: string) {
+    const root = mkdtempSync(join(tmpdir(), 'gitspace-create-recovery-'));
+    roots.push(root);
+    const database = new GitSpaceDatabase(join(root, 'gitspace.db'));
+    const authority = new FaultingAuthority();
+    let checkpoints = 0;
+    const manager = new ProjectLifecycleManager(database, authority, 'machine-a', join(root, 'spaces'), async () => { checkpoints += 1; });
+    const { project } = await manager.createProject({ name: 'Recovery', baseBranch: null, repositoryUrl: null });
+    authority.fault = fault;
+    await expect(manager.createWorkspace({ projectId: project.id, name: 'Feature', branch: 'feature/recover', phase: 'code', sourceKind: 'base', sourceRef: '' })).rejects.toThrow();
+    authority.fault = null;
+    const definition = [...authority.workspaces.values()].find((workspace) => workspace.kind === 'worktree')!;
+    return { root, database, authority, manager, project, definition, checkpoints: () => checkpoints };
+  }
+
+  it.each([
+    ['worktree', 'worktree'], ['projection', 'projection'], ['placement', 'placement'],
+    ['refused', 'placement'], ['checkpoint', 'checkpoint'], ['activate', 'activate'],
+  ])('records a consistent failure at %s, then Retry resumes to an active held workspace', async (fault, failedStep) => {
+    const { database, authority, manager, definition, checkpoints } = await failedCreation(fault);
+    try {
+      expect(definition.lifecycle).toBe('failed');
+      const failed = [...authority.operations.values()].find((operation) => operation.kind === 'workspace.create')!;
+      const index = failed.steps.findIndex((step) => step.id === failedStep);
+      expect(failed.state).toBe('failed');
+      expect(failed.steps.map((step) => step.state)).toEqual(failed.steps.map((_, position) => position < index ? 'succeeded' : position === index ? 'failed' : 'queued'));
+      expect(failed.steps[index]?.message).toBe(failed.error);
+      // The local projection is open only when the cloud holds the same placement for this machine.
+      const cloud = authority.spaces.get(definition.id);
+      const local = database.getSpace(definition.id);
+      expect(local?.placementState === 'open').toBe(cloud?.state === 'open' && cloud.machineId === 'machine-a');
+      expect(existsSync(join(database.getBaseSpace(definition.projectId)!.rootPath, '..', definition.id, '.git'))).toBe(true);
+
+      const retried = await manager.retryCreateWorkspace(definition.id);
+      expect(retried.operation.state).toBe('succeeded');
+      expect(retried.operation.steps.every((step) => step.state === 'succeeded')).toBe(true);
+      expect(authority.workspaces.get(definition.id)).toMatchObject({ lifecycle: 'active', sourceCommit: definition.sourceCommit });
+      const placement = authority.spaces.get(definition.id)!;
+      expect(database.getWorkspace(definition.id)).toMatchObject({ holderId: 'machine-a', placementState: 'open', generation: placement.generation });
+      expect(git(retried.workspace.rootPath, 'rev-parse', 'HEAD')).toBe(definition.sourceCommit!);
+      expect(git(retried.workspace.rootPath, 'symbolic-ref', '--short', 'HEAD')).toBe('feature/recover');
+      expect(checkpoints()).toBeGreaterThanOrEqual(1);
+      await expect(manager.retryCreateWorkspace(definition.id)).rejects.toThrow('only a failed or unfinished creation can be retried');
+    } finally {
+      database.close();
+    }
+  });
+
+  it('deletes a creation the cloud refused without leaving a definition, projection, or checkout', async () => {
+    const { database, authority, manager, definition } = await failedCreation('refused');
+    try {
+      const rootPath = database.getWorkspace(definition.id)!.rootPath;
+      expect(existsSync(rootPath)).toBe(true);
+      expect(await manager.deleteWorkspace(definition.projectId, definition.id)).toBe(true);
+      expect(authority.workspaces.has(definition.id)).toBe(false);
+      expect(database.getSpace(definition.id)).toBeNull();
+      expect(existsSync(rootPath)).toBe(false);
+    } finally {
+      database.close();
+    }
+  });
+
+  it('resumes at the first checkpoint when its release published but the reopen failed', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'gitspace-create-published-'));
+    roots.push(root);
+    const database = new GitSpaceDatabase(join(root, 'gitspace.db'));
+    const authority = new FaultingAuthority();
+    let reopenAdmitted = false;
+    // Mirrors the machine's first checkpoint: release (publish, close, drop the local hold), then reopen.
+    const manager = new ProjectLifecycleManager(database, authority, 'machine-a', join(root, 'spaces'), async (spaceId) => {
+      const local = database.getSpace(spaceId)!;
+      if (local.placementState === 'open') {
+        const change = { spaceId, holderId: 'machine-a', expectedGeneration: local.generation };
+        expect(database.beginSpaceClose(change).status).toBe('ok');
+        expect(database.commitSpaceClosed(change).status).toBe('ok');
+        authority.spaces.set(spaceId, checkpointedPlacement(authority.spaces.get(spaceId)!));
+      }
+      if (!reopenAdmitted && local.kind === 'worktree') throw new Error('Only an active canonical workspace can be opened');
+      const published = authority.spaces.get(spaceId)!;
+      expect(published).toMatchObject({ state: 'closed', machineId: null, publishedRevision: 1 });
+      expect(database.possessSpace(spaceId, 'machine-a').status).toBe('ok');
+      authority.spaces.set(spaceId, { ...published, state: 'open', machineId: 'machine-a', generation: database.getSpace(spaceId)!.generation });
+    });
+    try {
+      const { project } = await manager.createProject({ name: 'Published', baseBranch: null, repositoryUrl: null });
+      await expect(manager.createWorkspace({ projectId: project.id, name: 'Feature', branch: 'feature/published', sourceKind: 'base', sourceRef: '' })).rejects.toThrow('Only an active canonical workspace can be opened');
+      const definition = [...authority.workspaces.values()].find((workspace) => workspace.kind === 'worktree')!;
+      expect(definition.lifecycle).toBe('failed');
+      expect(authority.spaces.get(definition.id)).toMatchObject({ state: 'closed', publishedRevision: 1 });
+
+      reopenAdmitted = true;
+      let bootstraps = 0;
+      const bootstrap = authority.bootstrap.bind(authority);
+      authority.bootstrap = async (input) => { bootstraps += 1; return bootstrap(input); };
+      const retried = await manager.retryCreateWorkspace(definition.id);
+      expect(bootstraps).toBe(0);
+      expect(retried.operation.steps.map((step) => step.state)).toEqual(retried.operation.steps.map(() => 'succeeded'));
+      expect(authority.workspaces.get(definition.id)?.lifecycle).toBe('active');
+      expect(database.getWorkspace(definition.id)).toMatchObject({ holderId: 'machine-a', placementState: 'open', generation: authority.spaces.get(definition.id)!.generation });
+    } finally {
+      database.close();
+    }
   });
 });

@@ -18,6 +18,11 @@ beforeEach(() => {
   animationDescriptor = Object.getOwnPropertyDescriptor(Element.prototype, 'getAnimations');
   // Happy DOM has no Web Animations implementation; these fixtures have no active animations.
   if (!animationDescriptor) Object.defineProperty(Element.prototype, 'getAnimations', { configurable: true, value: () => [] });
+  const BrowserURL = URL;
+  vi.stubGlobal('URL', class extends BrowserURL {
+    static createObjectURL() { return 'blob:inspector-test'; }
+    static revokeObjectURL() {}
+  });
   container = document.createElement('div');
   document.body.append(container);
   root = createRoot(container);
@@ -57,16 +62,18 @@ async function clickLink(label: string) {
 describe('Markdown resource navigation', () => {
   it('opens authenticated local and session output bytes in the actual Inspector and displays missing-resource failures', async () => {
     const transport = {
-      readArtifact: async ({ spaceId, url }: { spaceId: string; url: string }) => {
+      readArtifact: async function* ({ spaceId, url }: { spaceId: string; url: string }) {
         if (spaceId !== 'workspace') throw new Error('Wrong workspace');
-        if (url !== 'local://workspace/PLAN.md') return { status: 'error' as const, error: { message: 'Artifact does not exist' } };
+        if (url !== 'local://workspace/PLAN.md') { yield { status: 'error' as const, error: new Error('Artifact does not exist') }; return; }
         const text = '# Real plan\n\nThe resource body';
-        return { status: 'ok' as const, value: { url, text, mediaType: 'text/markdown', base64: btoa(text) } };
+        yield { status: 'ok' as const, value: { type: 'metadata' as const, url, text: true, mediaType: 'text/markdown', size: text.length } };
+        yield { status: 'ok' as const, value: { type: 'chunk' as const, base64: btoa(text) } };
       },
-      readResource: async ({ sessionId, url }: { sessionId: string | null; url: string }) => {
+      readResource: async function* ({ sessionId, url }: { sessionId: string | null; url: string }) {
         if (sessionId !== 'session-a') throw new Error('Wrong originating session');
         const text = 'Actual spilled tool output';
-        return { status: 'ok' as const, value: { url, text, mediaType: 'text/plain', base64: btoa(text) } };
+        yield { status: 'ok' as const, value: { type: 'metadata' as const, url, text: true, mediaType: 'text/plain', size: text.length } };
+        yield { status: 'ok' as const, value: { type: 'chunk' as const, base64: btoa(text) } };
       },
     };
     await act(async () => root.render(<Harness read={(uri) => loadInspectorResource(transport, { spaceId: 'workspace', projectId: 'project', generation: 3, sessionId: 'session-a', runtimeAvailable: true }, uri)} />));
@@ -82,13 +89,28 @@ describe('Markdown resource navigation', () => {
 
   it('does not let a stale resource response replace the latest selection', async () => {
     const pending = Promise.withResolvers<InspectorArtifactContent>();
+    const dispose = vi.fn();
     await act(async () => root.render(<Harness read={(uri) => uri.startsWith('local:') ? pending.promise : Promise.resolve({ url: uri, source: 'Latest output', mediaType: 'text/plain', previewUrl: '' })} />));
     await clickLink('Plan');
     await clickLink('Output');
-    await act(async () => pending.resolve({ url: 'local://workspace/PLAN.md', source: 'Stale plan', mediaType: 'text/plain', previewUrl: '' }));
+    await act(async () => pending.resolve({ url: 'local://workspace/PLAN.md', source: 'Stale plan', mediaType: 'text/plain', previewUrl: '', dispose }));
+    expect(dispose).toHaveBeenCalledOnce();
     const inspector = container.querySelector('[aria-label="Workspace Inspector"]');
     expect(inspector?.textContent).toContain('Latest output');
     expect(inspector?.textContent).not.toContain('Stale plan');
+  });
+
+  it('disposes the displayed resource when replaced and when the Inspector unmounts', async () => {
+    const planDispose = vi.fn();
+    const outputDispose = vi.fn();
+    await act(async () => root.render(<Harness read={async (uri) => ({ url: uri, source: null, mediaType: 'audio/wav', previewUrl: uri.startsWith('local:') ? 'blob:plan' : 'blob:output', dispose: uri.startsWith('local:') ? planDispose : outputDispose })} />));
+    await clickLink('Plan');
+    expect(container.querySelector('audio')?.getAttribute('src')).toBe('blob:plan');
+    await clickLink('Output');
+    expect(planDispose).toHaveBeenCalledOnce();
+    expect(container.querySelector('audio')?.getAttribute('src')).toBe('blob:output');
+    await act(async () => root.render(null));
+    expect(outputDispose).toHaveBeenCalledOnce();
   });
 
   it('keeps external-link confirmation and rejects raw tags that try to bypass it', async () => {

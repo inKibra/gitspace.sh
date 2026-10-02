@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Badge, Button, Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, InputCopy } from '@gitspace/ui';
 import { QRCodeSVG } from 'qrcode.react';
 import type { BrowserInvitation, BrowserInvitationStatus } from './browser-enrollment.js';
+import { rpcErrorMessage } from './rpc-error-message.js';
 
 export interface BrowserConnectionActions {
   canConnectBrowser: boolean;
@@ -54,7 +55,7 @@ export function ConnectBrowserDialog({ open, onOpenChange, canConnectBrowser, on
   useEffect(() => {
     if (invitation?.status !== 'redeemed' || notified.current === invitation.inviteId) return;
     notified.current = invitation.inviteId;
-    void callbacks.current.onBrowserConnected().catch(cause => setError(cause instanceof Error ? cause.message : 'The browser connected, but the device list could not refresh.'));
+    void callbacks.current.onBrowserConnected().catch(cause => setError(rpcErrorMessage(cause, 'Refresh connected browsers')));
   }, [invitation?.status, invitation?.inviteId]);
 
   const create = async () => {

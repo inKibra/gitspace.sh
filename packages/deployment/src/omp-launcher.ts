@@ -1,10 +1,9 @@
 import { readFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
-import { executableManifestPath, parseExecutableArtifactManifest, validateExecutableArtifact } from '@gitspace/account-omp/manifest';
-import { prepareOmpRuntimeArtifact } from '../../account-omp/src/runtime-recipe.js';
-import { ompGenerationSelectionSchema, type OmpGenerationSelection } from '../../account-machine/src/omp-runtime.js';
+import { join } from 'node:path';
+import { executableManifestPath, parseExecutableArtifactManifest } from '@gitspace/account-omp/manifest';
+import { ompCommandEntrypoint, ompGenerationSelectionSchema, type OmpGenerationSelection } from '../../account-machine/src/omp-runtime.js';
 
-/** Browser-relay and other OMP commands use the same authenticated account selection as agent children. */
+/** Interactive `omp` commands use the same authenticated account selection as agent children. */
 async function selectedOmp(): Promise<OmpGenerationSelection> {
   const environmentRoot = process.env.GITSPACE_ENVIRONMENT_ROOT;
   if (environmentRoot) {
@@ -22,12 +21,7 @@ async function selectedOmp(): Promise<OmpGenerationSelection> {
   return { path, hash: manifest.treeHash, manifestHash, sha: null };
 }
 
-const selection = await selectedOmp();
-await validateExecutableArtifact(selection.path, { target: 'omp', hash: selection.hash, manifestHash: selection.manifestHash });
-const prepared = await prepareOmpRuntimeArtifact(selection.path);
-const entrypoint = prepared === join(selection.path, 'omp.js')
-  ? join(selection.path, 'omp-worker.js')
-  : join(dirname(Bun.resolveSync('@oh-my-pi/pi-coding-agent', dirname(prepared))), 'cli.ts');
+const entrypoint = await ompCommandEntrypoint(await selectedOmp());
 const child = Bun.spawn([process.execPath, entrypoint, ...process.argv.slice(2)], {
   stdin: 'inherit', stdout: 'inherit', stderr: 'inherit', env: process.env,
 });

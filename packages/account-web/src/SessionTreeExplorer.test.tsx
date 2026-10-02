@@ -19,7 +19,7 @@ function page(anchorId: string | null, entries: SessionHistoryEntry[], options: 
 function controls(onReadHistory?: SessionControlsProps['onReadHistory'], historyAnchorId = 'current'): SessionControlsProps {
   const operation = async () => undefined;
   return {
-    value: { sessionId: 'session-a', role: null, roleLabel: null, roles: [], provider: null, models: [], model: null, thinking: null, fastMode: false, planMode: false, approvalMode: 'write', context: null, cost: 0, todos: [], queue: { steering: [], followUp: [] }, pendingAsk: null, goal: null, history: [], historyAnchorId },
+    value: { sessionId: 'session-a', role: null, roleLabel: null, roles: [], provider: null, models: [], model: null, thinking: null, fastMode: false, planMode: false, approvalMode: 'write', context: null, cost: 0, todos: [], queue: { steering: [], followUp: [] }, pendingAsk: null, goal: null, history: [], historyAnchorId, activity: { active: false, reasons: [] }, renderState: 'waiting' },
     onCycleRole: operation, onSetModel: operation, onSetThinking: operation, onSetFast: operation, onSetApproval: operation, onSetGoal: operation, onCompact: operation, onClearQueue: operation, onRemoveQueuedMessage: operation, onPromoteQueuedMessage: operation, onAnswerAsk: operation, onStop: operation, onNavigateTree: operation, onReadHistory,
   };
 }

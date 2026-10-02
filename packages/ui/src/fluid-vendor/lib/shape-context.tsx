@@ -14,6 +14,8 @@ import {
 type ShapeVariant = "pill" | "rounded";
 
 interface ShapeClasses {
+  /** The variant these classes belong to — handy for conditionals. */
+  variant: ShapeVariant;
   item: string;
   bg: string;
   focusRing: string;
@@ -30,6 +32,7 @@ interface ShapeClasses {
 
 const shapeMap: Record<ShapeVariant, ShapeClasses> = {
   pill: {
+    variant: "pill",
     item: "rounded-[20px]",
     bg: "rounded-[20px]",
     // +2px over `item` because the focus ring sits 2px outside the element
@@ -44,6 +47,7 @@ const shapeMap: Record<ShapeVariant, ShapeClasses> = {
     mergedRadius: 16,
   },
   rounded: {
+    variant: "rounded",
     item: "rounded-lg",
     bg: "rounded-lg",
     focusRing: "rounded-[10px]",

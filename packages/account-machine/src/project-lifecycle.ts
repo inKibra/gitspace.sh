@@ -18,6 +18,7 @@ export interface ProjectLifecycleAuthority extends Pick<CloudSpaceCheckpointAuth
   bootstrapProject(input: { projectId: string; name: string; repositoryReference: string | null; baseBranch: string }): Promise<CloudProjectSummary>;
   getProject(projectId: string): Promise<CloudProjectSummary | null>;
   activateSourceProject(projectId: string, expectedRevision: number, baseBranch: string): Promise<CloudProjectSummary>;
+  setProjectBaseBranch(projectId: string, expectedRevision: number, baseBranch: string): Promise<CloudProjectSummary>;
   setProjectLifecycle(projectId: string, expectedRevision: number, lifecycle: CloudProjectSummary['lifecycle']): Promise<CloudProjectSummary>;
   deleteProject(projectId: string, expectedRevision: number): Promise<CloudProjectSummary>;
   listProjectWorkspaces(projectId: string): Promise<CloudWorkspaceDefinition[]>;
@@ -50,6 +51,17 @@ export interface ArchiveWorkspaceInput {
   expectedRevision: number;
   expectedGeneration: number | null;
 }
+
+/** Creation steps in order. The source resolves before the definition enters the catalog, so
+ * provisioning starts at `worktree`; a retry resumes at the first step that has not succeeded. */
+const WORKSPACE_CREATE_STEPS = [
+  { id: 'source', label: 'Resolve source' },
+  { id: 'worktree', label: 'Create worktree' },
+  { id: 'projection', label: 'Create local projection' },
+  { id: 'placement', label: 'Record placement' },
+  { id: 'checkpoint', label: 'Save first checkpoint' },
+  { id: 'activate', label: 'Activate workspace' },
+];
 
 function resourceId(name: string): string {
   const label = name.toLowerCase().replace(/[^a-z0-9]+/gu, '-').replace(/^-|-$/gu, '').slice(0, 48) || 'space';
@@ -149,6 +161,8 @@ async function runGit(args: string[], cwd?: string, environment: Record<string, 
 
 export class ProjectLifecycleManager {
   private readonly openingProjects = new Map<string, Promise<{ project: CloudProjectSummary; operation: CloudProjectOperation | null }>>();
+  /** Workspaces whose creation or retry is running in this process. */
+  private readonly creating = new Set<string>();
 
   constructor(
     private readonly database: GitSpaceDatabase,
@@ -399,75 +413,195 @@ export class ProjectLifecycleManager {
     assertWorkspacePhase(phase, dependencies);
     const workspaceId = resourceId(input.name);
     const rootPath = join(this.managedRoot, input.projectId, workspaceId);
-    await mkdir(join(this.managedRoot, input.projectId), { recursive: true });
-    // Each creation owns its object store and fetch ref; no shared clone or FETCH_HEAD races.
-    await mkdir(rootPath);
-    let sourceCommit: string;
+    this.creating.add(workspaceId);
     try {
-      await runGit(['init', '-b', input.branch], rootPath);
-      sourceCommit = await this.resolveWorkspaceSource(input, project, sourceWorkspace, rootPath);
-    } catch (error) {
-      await rm(rootPath, { recursive: true, force: true });
-      throw error;
+      await mkdir(join(this.managedRoot, input.projectId), { recursive: true });
+      // Each creation owns its object store and fetch ref; no shared clone or FETCH_HEAD races.
+      await mkdir(rootPath);
+      let sourceCommit: string;
+      try {
+        await runGit(['init', '-b', input.branch], rootPath);
+        sourceCommit = await this.resolveWorkspaceSource(input, project, sourceWorkspace, rootPath);
+      } catch (error) {
+        await rm(rootPath, { recursive: true, force: true });
+        throw error;
+      }
+      // Invalid branches, missing sources, and unavailable checkpoints never enter the catalog.
+      const definition = await this.authority.putProjectWorkspace(input.projectId, {
+        id: workspaceId,
+        projectId: input.projectId,
+        kind: 'worktree',
+        name: input.name,
+        branch: input.branch,
+        phase,
+        sourceKind: input.sourceKind,
+        sourceRef: input.sourceRef,
+        sourceCommit,
+        lifecycle: 'provisioning',
+        goalId: null,
+        expectedRevision: 0,
+      });
+      const operation = await this.authority.createProjectOperation(input.projectId, {
+        projectId: input.projectId,
+        workspaceId,
+        kind: 'workspace.create',
+        targetMachines: [this.machineId],
+        steps: WORKSPACE_CREATE_STEPS,
+        createdBy: this.machineId,
+      });
+      return await this.provisionWorkspace({ project, definition, operation, rootPath, sourceCommit, dependencies, stackedOn: sourceWorkspace?.id ?? null });
+    } finally {
+      this.creating.delete(workspaceId);
     }
-    // Invalid branches, missing sources, and unavailable checkpoints never enter the catalog.
-    let definition = await this.authority.putProjectWorkspace(input.projectId, {
-      id: workspaceId,
-      projectId: input.projectId,
-      kind: 'worktree',
-      name: input.name,
-      branch: input.branch,
-      phase,
-      sourceKind: input.sourceKind,
-      sourceRef: input.sourceRef,
-      sourceCommit,
-      lifecycle: 'provisioning',
-      goalId: null,
-      expectedRevision: 0,
-    });
-    let operation = await this.authority.createProjectOperation(input.projectId, {
-      projectId: input.projectId,
-      workspaceId,
-      kind: 'workspace.create',
-      targetMachines: [this.machineId],
-      steps: [{ id: 'source', label: 'Resolve source' }, { id: 'worktree', label: 'Create worktree' }, { id: 'projection', label: 'Create local projection' }],
-      createdBy: this.machineId,
-    });
-    operation = await this.running(input.projectId, operation);
+  }
+
+  /** Resumes a failed or interrupted creation. Every step is safe to repeat: the kept checkout,
+   * the local projection, and this machine's cloud placement are reused rather than recreated. */
+  async retryCreateWorkspace(workspaceId: string): Promise<{ workspace: Workspace; operation: CloudProjectOperation }> {
+    const found = await this.findWorkspace(workspaceId);
+    if (!found) throw new Error(`Workspace ${workspaceId} does not exist`);
+    if (found.lifecycle !== 'failed' && found.lifecycle !== 'provisioning') {
+      throw new Error(`Workspace ${found.name} is ${found.lifecycle}; only a failed or unfinished creation can be retried`);
+    }
+    if (this.creating.has(workspaceId)) throw new Error(`Workspace ${found.name} is already being created on this machine`);
+    this.creating.add(workspaceId);
     try {
-      // A portable checkout owns all its objects and never changes the source branch or dirty files.
-      await runGit(['checkout', '-B', input.branch, sourceCommit, '--'], rootPath);
-      if (project.repositoryReference) await runGit(['remote', 'add', 'origin', project.repositoryReference], rootPath);
-      if (!this.database.getProject(project.id)) {
-        const createdProject = this.database.createProject({
-          id: project.id, name: project.name, baseBranch: project.baseBranch,
-          repositoryPath: join(this.managedRoot, project.id, 'base'),
-          ...(project.repositoryReference ? { repositoryReference: project.repositoryReference } : {}),
-        });
-        if (createdProject.status === 'error') throw createdProject.error;
+      const project = await this.authority.getProject(found.projectId);
+      if (!project || project.lifecycle !== 'active') throw new Error(`Project ${found.projectId} is not active`);
+      const placement = await this.authority.getSpace(found.projectId, workspaceId);
+      // The first checkpoint releases and reopens; a release that committed leaves a published checkpoint to reopen.
+      const published = placement?.state === 'closed' && placement.machineId === null && placement.publishedRevision > 0;
+      if (placement && !published && (placement.state !== 'open' || placement.machineId !== this.machineId)) {
+        throw new Error('This workspace\'s placement is held by another machine or is changing; retry its creation there');
       }
-      // Relations require local FK targets, not possession or a restored checkout.
-      for (const dependency of dependencies) {
-        if (this.database.getWorkspace(dependency.id)) continue;
-        const projected = this.database.createWorkspace({
-          id: dependency.id, projectId: project.id, name: dependency.name, branch: dependency.branch,
-          phase: dependency.phase, rootPath: join(this.managedRoot, project.id, dependency.id),
-        });
-        if (projected.status === 'error') throw projected.error;
-        if (dependency.lifecycle === 'archived') this.database.setSpaceClosed(dependency.id, true);
+      const workspaces = (await this.authority.listProjectWorkspaces(found.projectId))
+        .filter((workspace): workspace is CloudWorkspaceDefinition & { phase: Workspace['phase'] } => workspace.kind === 'worktree' && workspace.phase !== null);
+      const sourceWorkspace = found.sourceKind === 'workspace'
+        ? workspaces.find((candidate) => candidate.id === found.sourceRef) ?? workspaces.find((candidate) => candidate.name === found.sourceRef) ?? null
+        : null;
+      if (found.sourceKind === 'workspace' && !sourceWorkspace) throw new Error(`Source workspace ${found.sourceRef} no longer exists`);
+      const rootPath = join(this.managedRoot, found.projectId, workspaceId);
+      const retained = found.sourceCommit !== null && (published || (existsSync(join(rootPath, '.git'))
+        && await runGit(['rev-parse', '--verify', '--quiet', `${found.sourceCommit}^{commit}`], rootPath).then(() => true, () => false)));
+      let sourceCommit = found.sourceCommit;
+      if (!retained || sourceCommit === null) {
+        await mkdir(rootPath, { recursive: true });
+        if (!existsSync(join(rootPath, '.git'))) await runGit(['init', '-b', found.branch], rootPath);
+        sourceCommit = await this.resolveWorkspaceSource({
+          projectId: found.projectId, name: found.name, branch: found.branch, sourceKind: found.sourceKind, sourceRef: found.sourceRef,
+        }, project, sourceWorkspace, rootPath);
       }
-      const created = this.database.createWorkspace({ id: workspaceId, projectId: input.projectId, name: input.name, branch: input.branch, phase, rootPath });
-      if (created.status === 'error') throw created.error;
-      if (dependencies.length > 0) {
-        const related = this.database.setSpaceRelations(workspaceId, { dependsOn: dependencies.map((dependency) => dependency.id), relatedTo: [], stackedOn: sourceWorkspace?.id ?? null });
-        if (related.status === 'error') throw related.error;
+      const definition = await this.authority.putProjectWorkspace(found.projectId, {
+        id: found.id,
+        projectId: found.projectId,
+        kind: found.kind,
+        name: found.name,
+        branch: found.branch,
+        phase: found.phase,
+        sourceKind: found.sourceKind,
+        sourceRef: found.sourceRef,
+        sourceCommit,
+        lifecycle: 'provisioning',
+        goalId: found.goalId,
+        expectedRevision: found.revision,
+      });
+      const operation = await this.authority.createProjectOperation(found.projectId, {
+        projectId: found.projectId,
+        workspaceId,
+        kind: 'workspace.create',
+        targetMachines: [this.machineId],
+        steps: WORKSPACE_CREATE_STEPS,
+        createdBy: this.machineId,
+      });
+      // Extra dependencies from the original request live only in an existing local projection.
+      return await this.provisionWorkspace({
+        project, definition, operation, rootPath, sourceCommit, published,
+        dependencies: sourceWorkspace ? [sourceWorkspace] : [], stackedOn: sourceWorkspace?.id ?? null,
+      });
+    } finally {
+      this.creating.delete(workspaceId);
+    }
+  }
+
+  /** Runs creation from the worktree step, or from the first checkpoint once its release published.
+   * The cloud grants the placement generation before the local projection opens, so a failure
+   * never leaves a local open holder the cloud lacks. */
+  private async provisionWorkspace(input: {
+    project: CloudProjectSummary;
+    definition: CloudWorkspaceDefinition;
+    operation: CloudProjectOperation;
+    rootPath: string;
+    sourceCommit: string;
+    published?: boolean;
+    dependencies: Array<CloudWorkspaceDefinition & { phase: Workspace['phase'] }>;
+    stackedOn: string | null;
+  }): Promise<{ workspace: Workspace; operation: CloudProjectOperation }> {
+    const { project, rootPath, definition } = input;
+    const workspaceId = definition.id;
+    let operation = input.operation;
+    let completed = input.published ? WORKSPACE_CREATE_STEPS.findIndex((step) => step.id === 'checkpoint') : 1;
+    const advance = async () => {
+      completed += 1;
+      operation = await this.creationProgress(project.id, operation, completed, null);
+    };
+    try {
+      operation = await this.creationProgress(project.id, operation, completed, null);
+      if (!input.published) {
+        // A portable checkout owns all its objects and never changes the source branch or dirty files.
+        // A kept checkout already on its branch is reused so a retry never resets retained changes.
+        const branch = await runGit(['symbolic-ref', '--quiet', '--short', 'HEAD'], rootPath).catch(() => '');
+        const hasHead = await runGit(['rev-parse', '--verify', '--quiet', 'HEAD^{commit}'], rootPath).then(() => true, () => false);
+        if (branch !== definition.branch || !hasHead) await runGit(['checkout', '-B', definition.branch, input.sourceCommit, '--'], rootPath);
+        if (project.repositoryReference && !await runGit(['remote', 'get-url', 'origin'], rootPath).catch(() => '')) {
+          await runGit(['remote', 'add', 'origin', project.repositoryReference], rootPath);
+        }
+        await advance();
+        if (!this.database.getProject(project.id)) {
+          const createdProject = this.database.createProject({
+            id: project.id, name: project.name, baseBranch: project.baseBranch,
+            repositoryPath: join(this.managedRoot, project.id, 'base'),
+            ...(project.repositoryReference ? { repositoryReference: project.repositoryReference } : {}),
+          });
+          if (createdProject.status === 'error') throw createdProject.error;
+        }
+        if (!this.database.getWorkspace(workspaceId)) {
+          // Relations require local FK targets, not possession or a restored checkout.
+          for (const dependency of input.dependencies) {
+            if (this.database.getWorkspace(dependency.id)) continue;
+            const projected = this.database.createWorkspace({
+              id: dependency.id, projectId: project.id, name: dependency.name, branch: dependency.branch,
+              phase: dependency.phase, rootPath: join(this.managedRoot, project.id, dependency.id),
+            });
+            if (projected.status === 'error') throw projected.error;
+            if (dependency.lifecycle === 'archived') this.database.setSpaceClosed(dependency.id, true);
+          }
+          const created = this.database.createWorkspace({ id: workspaceId, projectId: project.id, name: definition.name, branch: definition.branch, phase: definition.phase ?? 'plan', rootPath });
+          if (created.status === 'error') throw created.error;
+          if (input.dependencies.length > 0) {
+            const related = this.database.setSpaceRelations(workspaceId, { dependsOn: input.dependencies.map((dependency) => dependency.id), relatedTo: [], stackedOn: input.stackedOn });
+            if (related.status === 'error') throw related.error;
+          }
+        }
+        await advance();
+        await this.authority.bootstrap({ projectId: project.id, spaceId: workspaceId });
+        await this.authority.bootstrapInspector({ projectId: project.id, spaceId: workspaceId });
+        const placement = await this.authority.getSpace(project.id, workspaceId);
+        if (!placement || placement.state !== 'open' || placement.machineId !== this.machineId) {
+          throw new Error('The cloud did not record this machine as the workspace holder');
+        }
+        const local = this.database.getSpace(workspaceId);
+        if (!local) throw new Error(`Local workspace ${workspaceId} is missing`);
+        if (local.placementState !== 'open' || local.holderId !== this.machineId || local.generation !== placement.generation) {
+          const aligned = local.placementState === 'closed' && local.generation === placement.generation - 1
+            ? this.database.possessWorkspace(workspaceId, this.machineId)
+            : this.database.adoptOpenSpaceProjection({ spaceId: workspaceId, holderId: this.machineId, expectedGeneration: placement.generation, rootPath });
+          if (aligned.status === 'error') throw aligned.error;
+        }
+        await advance();
       }
-      const possessed = this.database.possessWorkspace(workspaceId, this.machineId);
-      if (possessed.status === 'error') throw possessed.error;
-      await this.authority.bootstrap({ projectId: input.projectId, spaceId: workspaceId });
-      await this.authority.bootstrapInspector({ projectId: input.projectId, spaceId: workspaceId });
       await this.checkpointSpace?.(workspaceId);
-      definition = await this.authority.putProjectWorkspace(input.projectId, {
+      await advance();
+      await this.authority.putProjectWorkspace(project.id, {
         id: definition.id,
         projectId: definition.projectId,
         kind: definition.kind,
@@ -481,12 +615,12 @@ export class ProjectLifecycleManager {
         goalId: definition.goalId,
         expectedRevision: definition.revision,
       });
-      operation = await this.succeeded(input.projectId, operation);
+      operation = await this.succeeded(project.id, operation);
       return { workspace: this.database.getWorkspace(workspaceId)!, operation };
     } catch (error) {
-      // A failed checkpoint may contain the only copy of work. Preserve the checkout for recovery.
-      await this.failed(input.projectId, operation, error);
-      await this.authority.putProjectWorkspace(input.projectId, {
+      // Completed steps and the checkout stay in place; Retry resumes at the failed step.
+      await this.creationProgress(project.id, operation, completed, error instanceof Error ? error.message : String(error)).catch(() => undefined);
+      await this.authority.putProjectWorkspace(project.id, {
         id: definition.id,
         projectId: definition.projectId,
         kind: definition.kind,
@@ -502,6 +636,23 @@ export class ProjectLifecycleManager {
       }).catch(() => undefined);
       throw error;
     }
+  }
+
+  /** Steps before `completed` succeeded; the step at `completed` runs, or failed with `failure`. */
+  private creationProgress(projectId: string, operation: CloudProjectOperation, completed: number, failure: string | null): Promise<CloudProjectOperation> {
+    const now = new Date().toISOString();
+    return this.authority.updateProjectOperation(projectId, {
+      id: operation.id,
+      expectedRevision: operation.revision,
+      state: failure === null ? 'running' : 'failed',
+      steps: operation.steps.map((step, index) => ({
+        ...step,
+        state: index < completed ? 'succeeded' : index > completed ? 'queued' : failure === null ? 'running' : 'failed',
+        message: index === completed ? failure : null,
+        updatedAt: now,
+      })),
+      error: failure,
+    });
   }
 
   private async liveSourceRoot(space: MaterializedSpace | null): Promise<string | null> {
@@ -682,6 +833,66 @@ export class ProjectLifecycleManager {
     return this.runLifecycleOperation(projectId, null, 'project.restore', ['Restore project'], async () => {
       const current = await this.authority.setProjectLifecycle(projectId, expectedRevision, 'restoring');
       return this.authority.setProjectLifecycle(projectId, current.revision, 'active');
+    });
+  }
+
+  /** Existing workspaces keep their branches; only the base checkout and its canonical records move. */
+  async setBaseBranch(projectId: string, expectedRevision: number, baseBranch: string): Promise<CloudProjectSummary> {
+    const project = await this.authority.getProject(projectId);
+    if (!project) throw new Error(`Project ${projectId} does not exist`);
+    if (project.role === 'gitspace-source') throw new Error('The built-in GitSpace project base branch is managed by GitSpace releases');
+    if (project.lifecycle !== 'active') throw new Error(`Project ${projectId} must be active to change its base branch`);
+    if (project.revision !== expectedRevision) throw new Error(`Project revision conflict: expected ${expectedRevision}, actual ${project.revision}`);
+    if (project.baseBranch === baseBranch) return project;
+    try {
+      await runGit(['check-ref-format', '--branch', baseBranch]);
+      await runGit(['check-ref-format', `refs/heads/${baseBranch}`]);
+    } catch {
+      throw new Error(`${baseBranch} is not a valid branch name`);
+    }
+    return this.runLifecycleOperation(projectId, null, 'project.setBaseBranch', ['Switch base checkout', 'Update project'], async () => {
+      const repositoryPath = await this.liveSourceRoot(this.database.getBaseSpace(projectId));
+      if (!repositoryPath) throw new Error('Open this project\'s base space before changing its base branch.');
+      if (await runGit(['status', '--porcelain', '--untracked-files=no'], repositoryPath)) {
+        throw new Error('The base checkout has uncommitted changes. Commit or discard them before changing the base branch.');
+      }
+      const environment = project.repositoryReference ? await this.gitEnvironment?.(project.repositoryReference) ?? {} : {};
+      if (project.repositoryReference) {
+        if (!await runGit(['ls-remote', '--heads', 'origin', `refs/heads/${baseBranch}`], repositoryPath, environment)) {
+          throw new Error(`Branch ${baseBranch} does not exist on the repository remote`);
+        }
+      } else if (!await runGit(['rev-parse', '--verify', '--quiet', `refs/heads/${baseBranch}^{commit}`], repositoryPath).catch(() => '')) {
+        throw new Error(`Branch ${baseBranch} does not exist in the base repository`);
+      }
+      const previous = await runGit(['symbolic-ref', '--quiet', '--short', 'HEAD'], repositoryPath)
+        .catch(() => runGit(['rev-parse', '--verify', 'HEAD^{commit}'], repositoryPath));
+      const definition = (await this.authority.listProjectWorkspaces(projectId)).find((workspace) => workspace.id === projectId && workspace.kind === 'base');
+      const publishDefinition = (current: CloudWorkspaceDefinition, branch: string, sourceRef: string, revision: number) => this.authority.putProjectWorkspace(projectId, {
+        id: current.id, projectId, kind: current.kind, name: current.name, branch, phase: current.phase,
+        sourceKind: current.sourceKind, sourceRef, sourceCommit: current.sourceCommit,
+        lifecycle: current.lifecycle, goalId: current.goalId, expectedRevision: revision,
+      });
+      let published: CloudWorkspaceDefinition | null = null;
+      let localUpdated = false;
+      try {
+        if (project.repositoryReference) {
+          await runGit(['fetch', '--no-tags', 'origin', `+refs/heads/${baseBranch}:refs/remotes/origin/${baseBranch}`], repositoryPath, environment);
+          await runGit(['remote', 'set-branches', '--add', 'origin', baseBranch], repositoryPath);
+          await runGit(['checkout', '-B', baseBranch, `refs/remotes/origin/${baseBranch}`, '--'], repositoryPath);
+          await runGit(['branch', `--set-upstream-to=origin/${baseBranch}`, baseBranch], repositoryPath);
+        } else {
+          await runGit(['checkout', baseBranch, '--'], repositoryPath);
+        }
+        if (definition) published = await publishDefinition(definition, baseBranch, definition.sourceKind === 'base' ? baseBranch : definition.sourceRef, definition.revision);
+        localUpdated = this.database.setProjectBaseBranch(projectId, baseBranch) !== null;
+        // The canonical project commits last, so a retry after any earlier failure repeats the whole switch.
+        return await this.authority.setProjectBaseBranch(projectId, expectedRevision, baseBranch);
+      } catch (error) {
+        await runGit(['checkout', previous, '--'], repositoryPath).catch(() => undefined);
+        if (definition && published) await publishDefinition(definition, definition.branch, definition.sourceRef, published.revision).catch(() => undefined);
+        if (localUpdated) this.database.setProjectBaseBranch(projectId, project.baseBranch);
+        throw error;
+      }
     });
   }
 

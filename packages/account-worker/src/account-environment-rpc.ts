@@ -2,7 +2,7 @@ import {
   executionHash, projectEnvironmentState, EnvironmentError, environmentFailure,
   type LifecycleMutation, type LifecycleState,
 } from '@gitspace/protocol-environment';
-import type { GitSpaceRpcContext } from '@gitspace/protocol';
+import type { GitSpaceRpcContext, VerifiedDevice } from '@gitspace/protocol';
 import {
   getWorkspaceEnvironmentContract, approveWorkspaceEnvironmentExecutionContract,
   revokeWorkspaceEnvironmentApprovalContract, recoverWorkspaceEnvironmentRunContract,
@@ -15,7 +15,7 @@ import type { ProjectSecretsDO } from './project-secrets.js';
 import type { FleetCatalogDO } from './fleet-catalog.js';
 
 /** Cloud reads do not possess, materialize, or start an agent in the workspace. */
-export function environmentCloudProcedures(env: Env, userId: string, deviceId: string, requireHuman: () => Promise<void>) {
+export function environmentCloudProcedures(env: Env, userId: string, deviceId: string, requireLifecycleControl: () => Promise<VerifiedDevice>) {
   const server = serverRpc.context<GitSpaceRpcContext>();
   const projects = (env.USER_PROJECTS as DurableObjectNamespace<UserProjectIndexDO>).getByName(userId);
   const authorityFor = async (spaceId: string) => {
@@ -47,7 +47,7 @@ export function environmentCloudProcedures(env: Env, userId: string, deviceId: s
     }
   });
   const approve = async (spaceId: string, input: Extract<LifecycleMutation, { op: 'approval' }>) => {
-    await requireHuman();
+    const device = await requireLifecycleControl();
     const { authority } = await authorityFor(spaceId);
     if (input.approved) {
       const state = await authority.getLifecycleState(spaceId);
@@ -55,7 +55,7 @@ export function environmentCloudProcedures(env: Env, userId: string, deviceId: s
       if (!execution) throw new EnvironmentError('ContentChanged', 'Refresh the environment and review the execution content before approving');
       if (await executionHash({ kind: execution.kind, command: execution.content }) !== execution.hash) throw new EnvironmentError('ContentChanged', 'Execution preview does not match its content hash');
     }
-    const result = await authority.mutateLifecycleState(spaceId, input, { actorId: deviceId, machineId: deviceId, human: true });
+    const result = await authority.mutateLifecycleState(spaceId, input, { actorId: deviceId, machineId: deviceId, kind: device.kind, lifecycleControl: true });
     if (result.status === 'error') throw new EnvironmentError(result.failure.code, result.failure.message, result.failure.context);
     return view(spaceId, result.state);
   };
@@ -75,14 +75,14 @@ export function environmentCloudProcedures(env: Env, userId: string, deviceId: s
   });
   const recoverRun = server.implement(recoverWorkspaceEnvironmentRunContract).handler(async ({ input, errors }) => {
     try {
-      await requireHuman();
+      const device = await requireLifecycleControl();
       const { authority } = await authorityFor(input.spaceId);
       const state = await authority.getLifecycleState(input.spaceId);
       const run = state.runs.find((entry) => entry.id === input.runId);
       if (!run) throw new EnvironmentError('NotFound', 'Lifecycle run does not belong to this workspace', { runId: input.runId });
       const catalog = (env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>).getByName(userId);
       const destroyed = await catalog.wasMachineDestroyed(run.machineId);
-      const result = await authority.mutateLifecycleState(input.spaceId, { op: 'abandon', runId: run.id }, { actorId: deviceId, machineId: deviceId, human: true, ...(destroyed ? { destroyedMachineId: run.machineId } : {}) });
+      const result = await authority.mutateLifecycleState(input.spaceId, { op: 'abandon', runId: run.id }, { actorId: deviceId, machineId: deviceId, kind: device.kind, lifecycleControl: true, ...(destroyed ? { destroyedMachineId: run.machineId } : {}) });
       if (result.status === 'error') throw new EnvironmentError(result.failure.code, result.failure.message, result.failure.context);
       return ok(await view(input.spaceId, result.state));
     } catch (error) {
@@ -101,9 +101,9 @@ export function environmentCloudProcedures(env: Env, userId: string, deviceId: s
   });
   const cancelRun = server.implement(cancelWorkspaceEnvironmentRunContract).handler(async ({ input, errors }) => {
     try {
-      await requireHuman();
+      const device = await requireLifecycleControl();
       const { authority } = await authorityFor(input.spaceId);
-      const result = await authority.mutateLifecycleState(input.spaceId, { op: 'cancel', runId: input.runId }, { actorId: deviceId, machineId: deviceId, human: true });
+      const result = await authority.mutateLifecycleState(input.spaceId, { op: 'cancel', runId: input.runId }, { actorId: deviceId, machineId: deviceId, kind: device.kind, lifecycleControl: true });
       if (result.status === 'error') return err(errors.EnvironmentFailure(result.failure));
       const run = result.state.runs.find((entry) => entry.id === input.runId);
       if (!run) throw new EnvironmentError('NotFound', 'Lifecycle run does not belong to this workspace', { runId: input.runId });

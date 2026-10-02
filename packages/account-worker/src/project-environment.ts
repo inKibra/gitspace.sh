@@ -51,7 +51,7 @@ export class ProjectEnvironmentStore {
       const first = this.storage.sql.exec<JsonRow>('SELECT data FROM environment_state LIMIT 1').toArray()[0];
       const state = first ? JSON.parse(first.data) as LifecycleState : emptyLifecycleState('project', 'account-values');
       state.values.project = shared.values;
-      const transition = transitionLifecycle({ state, runs: [], actor: { actorId: 'account-authority', machineId: 'account-authority', human: false }, now: new Date().toISOString(), token: '' }, mutation);
+      const transition = transitionLifecycle({ state, runs: [], actor: { actorId: 'account-authority', machineId: 'account-authority', kind: 'machine', lifecycleControl: false }, now: new Date().toISOString(), token: '' }, mutation);
       this.saveShared({ ...shared, values: transition.state.values.project });
       this.publishShared();
       return transition.state.values.project;

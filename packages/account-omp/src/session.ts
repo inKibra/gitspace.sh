@@ -3,6 +3,7 @@ import { dirname, join } from 'node:path';
 import { computeSessionActivity, transitionAgentExecution, type AgentExecutionState, type AgentFailure, type SessionActivity } from '@gitspace/protocol-agent';
 import type { SkillView } from '@gitspace/protocol';
 import * as AIError from '@oh-my-pi/pi-ai/error';
+import { isImageGenerationApi } from '@oh-my-pi/pi-ai';
 import {
   AgentRegistry,
   MemorySessionStorage,
@@ -19,6 +20,10 @@ import { OmpAskBridge } from './ask-bridge.js';
 import { WorkspaceAgentSetup } from './agent-setup.js';
 import { INSTRUCTION_CONTEXT_TYPE, INSTRUCTION_NOTICE, WorkspaceInstructionContext, workspaceInstructionText, type WorkspaceInstructions } from './workspace-instructions.js';
 import type { ExtensionAPI } from '@oh-my-pi/pi-coding-agent';
+import type { ManagedInference } from './inference.js';
+import { parseModelString } from '@oh-my-pi/pi-tui/overlays/model-selector';
+import { getRestorableSessionModels } from '@oh-my-pi/pi-coding-agent/session/session-context';
+import { roleCandidatePool } from '@oh-my-pi/pi-coding-agent/config/model-roles';
 
 const ROLE_LABELS: Readonly<Record<string, string>> = {
   default: 'Default',
@@ -33,14 +38,22 @@ const ROLE_LABELS: Readonly<Record<string, string>> = {
   advisor: 'Advisor',
 };
 import type { MCPManager } from '@oh-my-pi/pi-coding-agent/mcp';
-import type { OmpRuntime, OmpRuntimeEvent, OmpRuntimeSession, OmpSessionControlView, OmpTranscriptEvent } from './contracts.js';
+import type { OmpRuntime, OmpRuntimeEvent, OmpRuntimeSession, OmpSessionControlView, OmpTranscriptEvent, WorkspacePhase } from './contracts.js';
 
 const WORKSPACE_PHASE_CONTEXT_TYPE = 'gitspace-workspace-phase';
-type WorkspacePhase = Parameters<OmpRuntimeSession['setWorkspacePhase']>[0];
+const PLAN_APPROVE_LABEL = 'Approve and move to Code';
+const PLAN_REVISE_LABEL = 'Keep planning';
 
 export interface OmpEvalNamespace {
   declaration: string;
   call(method: string, args: unknown, signal?: AbortSignal): Promise<unknown>;
+}
+
+/** Typed machine controls for GitSpace's own host code. */
+export interface OmpWorkspaceControls {
+  instructions(signal?: AbortSignal): Promise<WorkspaceInstructions>;
+  /** Moves this session's workspace to `phase`; the machine supplies the current definition revision. */
+  setPhase(phase: WorkspacePhase): Promise<void>;
 }
 
 export interface SessionMcpBridge {
@@ -54,11 +67,16 @@ export interface SessionMcpBridge {
 export interface EmbeddedOmpRuntimeOptions {
   agentDir: string;
   sessionRoot: string;
-  /** Machine-wide credential store shared with provider sign-in; omitted → one store per session. */
+  /** Constructed before any SDK/model restore/helper setup; same-scope revisions apply in place. */
+  inference?: ManagedInference;
+  /** Test-only SDK injection for embedded non-managed fixtures. Production children require inference. */
   authStorage?: () => Promise<AuthStorage>;
   mcp?: { createSession(input: {projectId: string; workspaceId: string | null; workspacePath: string}): Promise<SessionMcpBridge> };
   skills?: { initial: readonly SkillView[]; refresh?: (signal?: AbortSignal) => Promise<readonly SkillView[]> };
+  /** Forwarded unchanged to OMP's eval runtime for agent-written code. Its methods and results are dynamic,
+   *  so GitSpace host code never calls it; use `workspaceControls`. */
   spaceNamespace?: OmpEvalNamespace;
+  workspaceControls?: OmpWorkspaceControls;
 }
 
 interface PermissionEventBus {
@@ -221,7 +239,27 @@ export class EmbeddedOmpRuntime implements OmpRuntime {
         ] };
       });
     };
-    const authStorage = this.options.authStorage ? await this.options.authStorage() : null;
+    const inference = this.options.inference;
+    if (inference && inference.context.projectId !== projectId) throw new Error('Inference admission belongs to another project');
+    const authStorage = inference?.authStorage ?? (this.options.authStorage ? await this.options.authStorage() : null);
+    // A project moved to another inference profile may resume a session whose saved model that profile lacks.
+    // OMP then falls back to the profile's default model; record which saved model was replaced so we can say so.
+    let unavailableModel: string | null = null;
+    if (inference) {
+      await inference.modelRegistry.hydrateCredentialScopedModelCaches();
+      const restored = getRestorableSessionModels(manager.buildSessionContext().models, manager.getLastModelChangeRole())[0];
+      if (restored) {
+        const selection = parseModelString(restored, { allowMaxSuffix: true, allowAutoAlias: true, isLiteralModelId: (provider, id) => inference.modelRegistry.find(provider, id) !== undefined });
+        const model = selection && inference.modelRegistry.find(selection.provider, selection.id);
+        if (!model || !inference.modelRegistry.hasConfiguredAuth(model)) unavailableModel = restored;
+      }
+      // OMP offers generate_image whenever it is enabled; only offer it when this profile can reach an image model.
+      // The pool holds models whose provider has profile credentials, the same candidates the tool itself tries.
+      if (inference.settings.get('generate_image.enabled')
+        && !roleCandidatePool('image', inference.settings, inference.modelRegistry).some((model) => isImageGenerationApi(model.api))) {
+        inference.settings.override('generate_image.enabled', false);
+      }
+    }
     let configuredSkills = new Map((this.options.skills?.initial ?? []).map((skill) => [skill.id, skill]));
     const discoverEffectiveSkills = async (configuration: ReadonlyMap<string, SkillView>) => {
       const discovered = await discoverSkills(workspacePath, this.options.agentDir, { customDirectories: [join(this.options.agentDir, 'skills')] });
@@ -262,6 +300,7 @@ export class EmbeddedOmpRuntime implements OmpRuntime {
         enableMCP: true,
         skills,
         ...(authStorage ? { authStorage } : {}),
+        ...(inference ? { settings: inference.settings, modelRegistry: inference.modelRegistry } : {}),
         ...(projectedMcp ? { mcpManager: projectedMcp.manager } : {}),
         localProtocolOptions: {
           ...localProtocolOptions,
@@ -276,6 +315,15 @@ export class EmbeddedOmpRuntime implements OmpRuntime {
       throw error;
     }
     const { session, eventBus, setToolUIContext } = result;
+    if (inference && unavailableModel) {
+      const fallback = session.model;
+      // Persist the replacement so later resumes restore it directly instead of repeating the fallback.
+      if (fallback) manager.appendModelChange(`${fallback.provider}/${fallback.id}`, 'default');
+      const content = fallback
+        ? `Saved model ${unavailableModel} isn't available in inference profile ${inference.context.profile.name}; switched to ${fallback.provider}/${fallback.id}.`
+        : `Saved model ${unavailableModel} isn't available in inference profile ${inference.context.profile.name}, and the profile has no default model; choose a model to continue.`;
+      manager.appendCustomMessageEntry('gitspace-model-fallback', content, true);
+    }
     const agentSetup = new WorkspaceAgentSetup(session, workspacePath);
     if (projectedMcp) {
       projectedMcp.attach({ refresh: (tools) => session.refreshMCPTools(tools) });
@@ -328,13 +376,53 @@ export class EmbeddedOmpRuntime implements OmpRuntime {
       const planFilePath = qualifyLocalArtifactPath(planState.planFilePath);
       if (planFilePath !== planState.planFilePath) session.setPlanModeState({ ...planState, planFilePath });
     }
+    /** `xd://propose` in the Plan phase: the reviewer approves through the workspace's question UI,
+     * and approval moves the workspace to Code, which ends plan mode for the agent. */
+    const proposePlan = async (title: string) => {
+      const review = await session.preparePlanForReview(title);
+      if (!review.details) throw new Error('Plan review did not identify a plan file');
+      const planTitle = review.details.title;
+      const planFilePath = qualifyLocalArtifactPath(review.details.planFilePath);
+      const answer = await askBridge.ask([{
+        id: 'plan-approval',
+        header: 'Plan',
+        question: `Approve “${planTitle}” and move this workspace to Code?`,
+        options: [
+          { label: PLAN_APPROVE_LABEL, description: `The agent implements ${planFilePath} with full tools.` },
+          { label: PLAN_REVISE_LABEL, description: 'The workspace stays in Plan; the agent revises the plan and proposes it again.' },
+        ],
+        recommended: 0,
+      }], 'gitspace', [{ label: 'Open plan', uri: planFilePath }]);
+      // Stop or a machine handoff cancels the question; that is not a review decision.
+      if (!answer) throw new Error(`Plan approval was interrupted before an answer. Write ${planTitle} to xd://propose again to resubmit.`);
+      const decision = answer.results[0];
+      if (decision?.selectedOptions.includes(PLAN_APPROVE_LABEL) !== true) {
+        // Revision targets the plan just reviewed, not a stale state path.
+        const state = session.getPlanModeState();
+        if (state && state.planFilePath !== planFilePath) session.setPlanModeState({ ...state, planFilePath });
+        const feedback = decision?.customInput ? ` Reviewer feedback: ${decision.customInput}` : '';
+        return {
+          content: [{ type: 'text' as const, text: `Plan refinement requested.${feedback} Update the plan file, then write ${planTitle} to xd://propose again when ready.` }],
+          details: { ...review.details, planFilePath },
+        };
+      }
+      const controls = this.options.workspaceControls;
+      if (!controls) throw new Error('Plan approval requires this workspace\'s controls');
+      session.setPlanReferencePath(planFilePath);
+      await controls.setPhase('code');
+      return {
+        content: [{ type: 'text' as const, text: `Plan approved: ${planTitle}. The workspace is now in Code; implement the plan.` }],
+        details: { ...review.details, planFilePath },
+      };
+    };
     const applyWorkspacePhase = (phase: WorkspacePhase): void => {
       const previous = session.getPlanModeState();
       if (phase === 'plan') {
         if (!previous?.enabled) session.setPlanModeState({
-          enabled: true, planFilePath: session.getPlanReferencePath(),
+          enabled: true, planFilePath: qualifyLocalArtifactPath(session.getPlanReferencePath()),
           workflow: previous?.workflow ?? 'parallel', reentry: previous !== undefined,
         });
+        session.setPlanProposalHandler(proposePlan);
       } else {
         session.setPlanProposalHandler(null);
         session.setPlanModeState(undefined);
@@ -361,7 +449,8 @@ export class EmbeddedOmpRuntime implements OmpRuntime {
     let disposed = false;
     const hasBackgroundWork = (): boolean => {
       const jobs = session.asyncJobManager;
-      return !!jobs && (jobs.getRunningJobs().length > 0 || jobs.hasPendingDeliveries());
+      return session.hasPostPromptWork || session.hasPendingAsyncWork?.() === true
+        || (!!jobs && (jobs.getRunningJobs().length > 0 || jobs.hasPendingDeliveries()));
     };
     const currentActivity = (backgroundWork = hasBackgroundWork()): SessionActivity => {
       const queued = session.getQueuedMessages?.() ?? { steering: [], followUp: [] };
@@ -378,9 +467,9 @@ export class EmbeddedOmpRuntime implements OmpRuntime {
       const activity = currentActivity(backgroundWork);
       // Await real job and delivery completion; do not poll the runtime for activity.
       const jobs = session.asyncJobManager;
-      if (backgroundWork && jobs && !backgroundCompletion) {
-        backgroundCompletion = Promise.allSettled(jobs.getRunningJobs().map((job) => job.promise))
-          .then(async () => { await jobs.drainDeliveries(); })
+      if (backgroundWork && !backgroundCompletion) {
+        backgroundCompletion = Promise.allSettled((jobs?.getRunningJobs() ?? []).map((job) => job.promise))
+          .then(async () => { await jobs?.drainDeliveries(); await session.waitForIdle(); })
           .finally(() => { backgroundCompletion = null; if (!disposed) publishActivity(); });
       }
       for (const handler of activityHandlers) handler(activity, executionState.failure);
@@ -402,7 +491,9 @@ export class EmbeddedOmpRuntime implements OmpRuntime {
       const message = event.message && typeof event.message === 'object' ? event.message : null;
       const assistant = message && 'role' in message && message.role === 'assistant';
       const stopReason = message && 'stopReason' in message ? message.stopReason : undefined;
-      const internalAbort = stopReason === 'aborted' && message !== null && 'errorId' in message && typeof message.errorId === 'number' && AIError.is(message.errorId, AIError.Flag.SilentAbort);
+      // OMP's own silent aborts and a user's Stop end a turn deliberately; neither is an execution failure.
+      const deliberateAbort = stopReason === 'aborted' && message !== null && 'errorId' in message && typeof message.errorId === 'number'
+        && (AIError.is(message.errorId, AIError.Flag.SilentAbort) || AIError.is(message.errorId, AIError.Flag.UserInterrupt));
       executionState = transitionAgentExecution(executionState, {
         type: event.type, sessionId: session.sessionId,
         ...(typeof event.errorMessage === 'string' ? { message: event.errorMessage } : typeof event.finalError === 'string' ? { message: event.finalError } : message && 'errorMessage' in message && typeof message.errorMessage === 'string' ? { message: message.errorMessage } : {}),
@@ -411,14 +502,15 @@ export class EmbeddedOmpRuntime implements OmpRuntime {
         ...(event.type === 'compaction_state' && typeof event.active === 'boolean' ? { active: event.active } : {}),
         ...(event.type === 'compaction_state' && typeof event.turnActive === 'boolean' ? { turnActive: event.turnActive } : {}),
         ...(typeof event.detail === 'string' ? { detail: event.detail } : {}),
-        ...(event.type === 'auto_retry_end' ? { succeeded: event.success === true } : assistant && typeof stopReason === 'string' && !internalAbort ? { succeeded: stopReason !== 'error' && stopReason !== 'aborted' } : {}),
+        ...(event.type === 'auto_retry_end' ? { succeeded: event.success === true } : assistant && typeof stopReason === 'string' && !deliberateAbort ? { succeeded: stopReason !== 'error' && stopReason !== 'aborted' } : {}),
       }, Date.now());
       publishActivity();
       for (const handler of eventHandlers) handler(event);
     };
-    if (this.options.spaceNamespace) {
+    if (this.options.workspaceControls) {
+      const controls = this.options.workspaceControls;
       instructions = new WorkspaceInstructionContext(
-        async () => await this.options.spaceNamespace!.call('instructions.get', {}, AbortSignal.timeout(15_000)) as WorkspaceInstructions,
+        () => controls.instructions(AbortSignal.timeout(15_000)),
         () => {
           const message = { role: 'custom' as const, customType: 'gitspace-instructions-changed', content: INSTRUCTION_NOTICE, display: true, timestamp: Date.now() };
           // Persist a transcript notice without steering, cancelling tools, or waking an idle agent.
@@ -461,6 +553,10 @@ export class EmbeddedOmpRuntime implements OmpRuntime {
       const goal = session.getGoalModeState()?.goal ?? null;
       return {
         sessionId: session.sessionId,
+        ...(inference && inference.context.assignmentRevision !== null ? { inference: {
+          profileId: inference.context.profile.id, profileName: inference.context.profile.name,
+          profileRevision: inference.context.profile.revision, assignmentRevision: inference.context.assignmentRevision,
+        } } : {}),
         role: currentRole?.role ?? null,
         roleLabel: currentRole ? ROLE_LABELS[currentRole.role] ?? currentRole.role : null,
         roles: (cycle?.models ?? []).map((entry, index) => ({
@@ -533,6 +629,9 @@ export class EmbeddedOmpRuntime implements OmpRuntime {
       },
       handoff: async () => {
         const interrupted = executionState.turnActive || session.isStreaming;
+        // Abort settles the interrupted tool, but a question without an abort signal (plan approval)
+        // would stay pending for the successor's UI until disposal; only this turn could answer it.
+        askBridge.cancel();
         if (interrupted) {
           session.markPlanInternalAbortPending();
           try { await session.abort({ goalReason: 'internal', reason: 'GitSpace machine handoff' }); }
@@ -547,8 +646,20 @@ export class EmbeddedOmpRuntime implements OmpRuntime {
       },
       persist: () => manager.flush(),
       reloadSettings: async () => {
-        const activeSettings = (session as unknown as { settings?: { reloadFromDisk?: () => Promise<void> } }).settings;
-        await activeSettings?.reloadFromDisk?.();
+        // A child retains its admission, including Advanced, until all descendants
+        // settle. The machine re-resolves authority and reopens before new work.
+        if (!inference) await session.settings.reloadFromDisk();
+      },
+      inferenceChanged: async () => {
+        const current = session.model;
+        if (!inference || !current || session.getAvailableModels().some((model) => model.provider === current.provider && model.id === current.id)) return;
+        // The new revision dropped the selected model: continue on the default role instead of failing the next turn.
+        const fallback = session.getRoleModelCycle(['default'])?.models[0];
+        if (!fallback) throw new Error(`Model ${current.provider}/${current.id} left inference profile ${inference.context.profile.name}, and its default role has no available model`);
+        await session.applyRoleModel(fallback);
+        const content = `${current.provider}/${current.id} is no longer available in inference profile ${inference.context.profile.name}; switched to the default role model ${fallback.model.provider}/${fallback.model.id}.`;
+        manager.appendCustomMessageEntry('gitspace-model-fallback', content, true);
+        handleEvent({ type: 'message_end', message: { role: 'custom', customType: 'gitspace-model-fallback', content, display: true, timestamp: Date.now() } });
       },
       dispose: async () => {
         disposed = true;

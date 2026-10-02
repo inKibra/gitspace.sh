@@ -118,7 +118,7 @@
     "RELAY_URL": "http://localhost:8788",
     "PLATFORM_URL": "http://localhost:8787",
     "STORAGE_BUCKET": "gitspace-local-tenant",
-    "AUTH_MAX_SKEW_MS": 60000,
+    "AUTH_MAX_SKEW_MS": 300000,
     "TUNNEL_HEADER_TIMEOUT_MS": 300000,
     "TUNNEL_IDLE_TIMEOUT_MS": 300000
   },

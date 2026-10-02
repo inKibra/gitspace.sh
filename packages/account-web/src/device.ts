@@ -118,19 +118,21 @@ export interface ApiClientDraft {
   rpcUrl: string;
 }
 
-/**
- * Mint an API client: this browser signs a delegated invite, a fresh client
- * key binds to it, the vault records the pair, and the private key is
- * returned exactly once as a `gsk_` string. Nothing here touches the root key.
- */
-export async function createApiClient(device: BrowserDevice, draft: ApiClientDraft, accountOrigin?: string): Promise<string> {
+/** Prepare a delegated invite without creating or enrolling a client key. */
+export async function prepareApiClientInvite(device: BrowserDevice, draft: Pick<ApiClientDraft, 'label' | 'scope' | 'capabilities' | 'ttlMs'>): Promise<SignedDeviceInvite> {
   if (!device.canDelegate || !device.userId) throw new DeviceEnrollmentError('CANNOT_DELEGATE', 'This browser cannot create API clients; re-enroll it with a delegating link');
   const invite: DeviceInvite = {
     version: 1, userId: device.userId, inviteId: crypto.randomUUID(), kind: 'client', label: draft.label, scope: draft.scope, capabilities: draft.capabilities,
     canDelegate: false, issuedAt: Date.now(), expiresAt: Date.now() + 5 * 60_000, grantTtlMs: draft.ttlMs, enrollUrl: device.enrollUrl,
   };
   const inviteSignature = deviceProtocolBase64.encode(new Uint8Array(await crypto.subtle.sign('Ed25519', device.keyPair.privateKey, owned(deviceInvitePayload(invite)))));
-  const signed: SignedDeviceInvite = { invite, signature: inviteSignature, issuer: { kind: 'device', deviceId: device.deviceId } };
+  return { invite, signature: inviteSignature, issuer: { kind: 'device', deviceId: device.deviceId } };
+}
+
+/** Mint and enroll an API client, returning its private key exactly once. */
+export async function createApiClient(device: BrowserDevice, draft: ApiClientDraft, accountOrigin?: string): Promise<string> {
+  const signed = await prepareApiClientInvite(device, draft);
+  const { invite } = signed;
   const clientPrivateKey = crypto.getRandomValues(new Uint8Array(32));
   const binding = createDeviceBinding({
     inviteId: invite.inviteId, deviceId: crypto.randomUUID(), signingPublicKey: deviceProtocolBase64.encode(ed25519.getPublicKey(clientPrivateKey)),

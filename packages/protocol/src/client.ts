@@ -6,7 +6,7 @@ import { createRoutedTransport } from './routed-transport.js';
 export interface GitSpaceClientOptions {
   /** `gsk_…` API key from Settings → Connections → New API client. */
   key: string | ApiKey;
-  /** Override the home RPC endpoint baked into the key. Other machines are reached by placement from there. */
+  /** Override the account RPC endpoint baked into the key. It forwards machine work to the current holder. */
   url?: string;
   fetch?: typeof globalThis.fetch;
 }
@@ -21,8 +21,9 @@ export class InvalidApiKeyError extends Error {
 /**
  * Typed GitSpace client for scripts and services. Every call returns a
  * `Result`; subscriptions are async iterators. Requests are signed with the
- * key's device identity and routed to whichever machine holds the space they
- * name - the caller sees one account, not a fleet.
+ * key's device identity and sent to the account, which forwards each to
+ * whichever machine holds the space it names - the caller sees one account,
+ * not a fleet.
  */
 export function createGitSpaceClient(options: GitSpaceClientOptions) {
   const key = typeof options.key === 'string' ? decodeApiKey(options.key) : options.key;

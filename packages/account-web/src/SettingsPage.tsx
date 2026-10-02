@@ -1,7 +1,11 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { AvailableModel, BrowserRelayStatus, ComposioSetupRpcView, DeploymentStatusView, DeviceCapability, DeviceView, OmpSettingValue, UserSettings } from '@gitspace/protocol';
+import { inferenceSettingSection } from '@gitspace/protocol/inference';
 import { cloudImageOperationActive, cloudImageOperationCancellable, cloudImageSelectionSchema, type CloudImageChoice, type CloudImageSelection, type CloudImageState } from '@gitspace/protocol/cloud-image';
 import type { ApiClientDraft } from './device.js';
+import type { McpAccessView } from '@gitspace/protocol/mcp-access';
+import type { McpAccessActions, McpAccessValue } from './mcp-access.js';
+import { rpcErrorMessage } from './rpc-error-message.js';
 import {
   Accordion,
   AccordionContent,
@@ -40,14 +44,13 @@ import { ArrowLeft, Check, CpuChip01, GitBranch01, Globe02, Key01, Monitor01, Ro
 import { glyph } from './glyph.js';
 import { EmptyState, PageCanvas, PageHeader } from './GitSpaceShell.js';
 import { ProvidersSection, type ProvidersSectionProps } from './ProvidersSection.js';
+import { ModelCombobox, modelOptions } from './ModelCombobox.js';
 import { desiredLabel, machineRollup, ompRollup, RELEASE_STATUS_COLOR, RELEASE_TARGET_LABEL, RELEASE_TARGETS, shortSha, type ReleaseRecordView } from './release.js';
 import { AddMachinePanel } from './AddMachinePanel.js';
 import { navigateProductUrl } from './routes.js';
 import { ConnectBrowserDialog, type BrowserConnectionActions } from './ConnectBrowserDialog.js';
 
-// `omp-providers` is the onboarding step for provider sign-in; in settings
-// mode it is reached as `?section=omp-providers`, which opens the OMP section
-// on its Providers tab.
+// Onboarding embeds the same Default profile surface used by Inference.
 type Section = 'profile' | 'omp' | 'omp-providers' | 'git' | 'machines' | 'connections' | 'hostnames' | 'source' | 'defaults';
 const OMP_TABS = ['Models', 'Agents', 'Providers', 'Advanced'] as const;
 type OmpTab = (typeof OMP_TABS)[number];
@@ -59,18 +62,17 @@ export interface OmpSettingView {
   description: string | null;
   kind: 'boolean' | 'enum' | 'number' | 'string' | 'array' | 'record' | 'other';
   valueJson: string;
+  defaultJson?: string;
   options: readonly string[];
   credential: boolean;
 }
-export interface SettingsPageProps extends BrowserConnectionActions {
+export interface SettingsPageProps extends BrowserConnectionActions, McpAccessActions {
   mode: 'settings' | 'onboarding';
   settings: UserSettings;
   machines: readonly SettingsMachineView[];
   ompSettings: readonly OmpSettingView[];
   ompGeneration: number;
-  providers: ProvidersSectionProps;
-  /** Models runnable on this machine, for the role pickers. */
-  models: readonly AvailableModel[];
+  inferenceSetup: ReactNode;
   gitIdentity: { generation: number; publicKey: string; fingerprint: string; updatedAt: string; updatedBy: string } | null;
   onChange: (settings: UserSettings) => void;
   onSave: (settings: UserSettings) => Promise<void>;
@@ -169,44 +171,57 @@ function OmpControl({ item, onSet, disabled }: { item: OmpSettingView; onSet: (v
   const shape = useShape();
   const value = parseValue(item);
   const [text, setText] = useState(draftText(item, value));
-  useEffect(() => setText(draftText(item, value)), [item.valueJson, item.credential]);
+  const [error, setError] = useState<string | null>(null);
+  const draftSetter = useRef<typeof onSet | null>(null);
+  useEffect(() => { if (!draftSetter.current) setText(draftText(item, value)); }, [item.valueJson, item.credential]);
+  const discard = <Button variant="ghost" size="compact" onClick={() => { draftSetter.current = null; setText(draftText(item, value)); setError(null); }}>Discard draft</Button>;
   if (item.kind === 'boolean') return <Switch label="Enabled" checked={value === true} disabled={disabled} onToggle={() => settle(onSet(value !== true))} />;
   if (item.kind === 'enum') return <Select value={typeof value === 'string' ? value : ''} disabled={disabled} onValueChange={(next) => settle(onSet(next))}><SelectTrigger aria-label={item.label} />{selectOptions(item.options.map((option) => ({ value: option, label: option })))}</Select>;
   if (item.kind === 'number') return <TextField label={item.label} type="number" value={typeof value === 'number' ? String(value) : ''} disabled={disabled} onChange={(next) => settle(onSet(Number(next)))} />;
   if (item.kind === 'array' || item.kind === 'record') {
     // FLUID-GAP: multi-line JSON editor (no textarea/code editor in the registry)
-    return <textarea aria-label={item.label} rows={4} value={text} disabled={disabled} className={`${shape.input} w-64 border border-border bg-surface-2 p-2 font-mono text-caption text-foreground disabled:opacity-50`} onChange={(event) => setText(event.currentTarget.value)} onBlur={() => { try { settle(onSet(JSON.parse(text) as OmpSettingValue)); } catch { /* keep invalid draft visible */ } }} />;
+    return <span className="flex flex-col gap-2"><textarea aria-label={item.label} aria-invalid={!!error} rows={4} value={text} disabled={disabled} className={`${shape.input} w-64 border border-border bg-surface-2 p-2 font-mono text-caption text-foreground disabled:opacity-50`} onChange={(event) => { draftSetter.current ??= onSet; setText(event.currentTarget.value); setError(null); }} onBlur={() => {
+      const update = draftSetter.current;
+      if (!update || text === draftText(item, value)) return;
+      let parsed: OmpSettingValue;
+      try { parsed = JSON.parse(text) as OmpSettingValue; }
+      catch { setError('Invalid JSON. Correct the draft before saving.'); return; }
+      void update(parsed).then(() => { draftSetter.current = null; setError(null); }, (cause) => setError(rpcErrorMessage(cause, 'Save configuration')));
+    }} />{error ? <span role="alert" className="max-w-64 text-caption text-destructive">{error}{discard}</span> : null}</span>;
   }
-  return <TextField label={item.label} type={item.credential ? 'password' : 'text'} value={text} placeholder={item.credential ? 'Enter a replacement value' : undefined} disabled={disabled} onChange={setText} onBlur={() => { if (!item.credential || text) settle(onSet(text)); }} />;
+  return <span className="flex flex-col gap-2"><TextField label={item.label} type={item.credential ? 'password' : 'text'} value={text} placeholder={item.credential ? 'Enter a replacement value' : undefined} disabled={disabled} onChange={(next) => { draftSetter.current ??= onSet; setText(next); setError(null); }} onBlur={() => {
+    const update = draftSetter.current;
+    if (!update || (item.credential && !text)) return;
+    void update(text).then(() => { draftSetter.current = null; setError(null); }, (cause) => setError(rpcErrorMessage(cause, 'Save configuration')));
+  }} />{error ? <span role="alert" className="max-w-64 text-caption text-destructive">{error}{discard}</span> : null}</span>;
 }
 function OmpRows({ items, saving, onSetOmpSetting }: { items: readonly OmpSettingView[] } & Pick<SettingsPageProps, 'saving' | 'onSetOmpSetting'>) {
   return <SettingRows>{items.map((item) => <SettingRow key={item.path} title={item.label} description={item.description ?? item.path}><OmpControl item={item} disabled={saving} onSet={(value) => onSetOmpSetting(item.path, value)} /></SettingRow>)}</SettingRows>;
 }
 const THINKING_LEVELS = ['auto', 'off', 'low', 'medium', 'high', 'xhigh'] as const;
 /** A model role is `provider/model[:thinking]`; the picker splits it into a model select and a thinking select. */
-function RoleModelPicker({ role, label, value, models, disabled, onChange }: { role: string; label: string; value: string; models: readonly AvailableModel[]; disabled: boolean; onChange(value: string): void }) {
+function RoleModelPicker({ role, label, value, models, modelsReady, disabled, onChange }: { role: string; label: string; value: string; models: readonly AvailableModel[]; modelsReady: boolean; disabled: boolean; onChange(value: string): void }) {
   const separator = value.lastIndexOf(':');
   const modelKey = separator > value.indexOf('/') ? value.slice(0, separator) : value;
   const thinking = separator > value.indexOf('/') ? value.slice(separator + 1) : 'auto';
   const known = models.some((model) => `${model.provider}/${model.id}` === modelKey);
   const options = [
-    { value: '', label: role === 'task' ? 'Current session model' : 'Not set' },
-    ...(modelKey && !known ? [{ value: modelKey, label: `${modelKey} (not available here)` }] : []),
-    ...models.map((model) => ({ value: `${model.provider}/${model.id}`, label: `${model.name || model.id} · ${model.provider}` })),
+    ...(modelKey && !known ? [{ value: modelKey, label: modelsReady ? `${modelKey} (not available here)` : modelKey }] : []),
+    ...modelOptions(models),
   ];
   return <span className="flex items-center gap-2">
-    <Select value={modelKey} disabled={disabled} onValueChange={(next) => onChange(next ? (thinking === 'auto' ? next : `${next}:${thinking}`) : '')}>
-      <SelectTrigger aria-label={`Model for ${label}`} placeholder="Choose a model" />
-      {selectOptions(options)}
-    </Select>
+    {modelKey && !known && modelsReady ? <span role="alert" className="max-w-64 text-caption text-destructive">This model is unavailable in this profile. Connect its provider or choose an available model.</span> : null}
+    <ModelCombobox options={options} value={modelKey} disabled={disabled || !modelsReady} clearable ariaLabel={`Model for ${label}`}
+      placeholder={role === 'task' ? 'Current session model' : 'Not set'}
+      onValueChange={(next) => onChange(next ? (thinking === 'auto' ? next : `${next}:${thinking}`) : '')} />
     <Select size="compact" value={thinking} disabled={disabled || !modelKey} onValueChange={(next) => onChange(next === 'auto' ? modelKey : `${modelKey}:${next}`)}>
       <SelectTrigger variant="borderless" aria-label={`Thinking for ${label}`} />
       {selectOptions(THINKING_LEVELS.map((level) => ({ value: level, label: level })))}
     </Select>
   </span>;
 }
-function OmpSettings({ ompSettings, ompGeneration, onSetOmpSetting, saving, providers, models, initialTab }: Pick<SettingsPageProps, 'ompSettings' | 'ompGeneration' | 'ompSync' | 'onSetOmpSetting' | 'saving' | 'providers' | 'models'> & { initialTab: OmpTab }) {
-  const [tab, setTab] = useState<OmpTab>(initialTab);
+export function OmpSettingsEditor({ ompSettings, ompGeneration, onSetOmpSetting, saving, providers, models = [], modelsReady = false, sections, initialTab }: Pick<SettingsPageProps, 'ompSettings' | 'ompGeneration' | 'onSetOmpSetting' | 'saving'> & { providers?: ProvidersSectionProps; models?: readonly AvailableModel[]; modelsReady?: boolean; sections: readonly OmpTab[]; initialTab?: OmpTab }) {
+  const [tab, setTab] = useState<OmpTab>(initialTab ?? sections[0] ?? 'Advanced');
   const rolesItem = ompSettings.find((item) => item.path === 'modelRoles');
   const cycleItem = ompSettings.find((item) => item.path === 'cycleOrder');
   const overridesItem = ompSettings.find((item) => item.path === 'task.agentModelOverrides');
@@ -217,12 +232,13 @@ function OmpSettings({ ompSettings, ompGeneration, onSetOmpSetting, saving, prov
   const roleIds = [...new Set([...Object.keys(roleLabels), ...Object.keys(roles)])];
   const agentDefaults: Readonly<Record<string, string>> = { scout: 'smol', reviewer: 'slow', 'security-reviewer': 'slow', librarian: 'slow', task: 'task', designer: 'designer', sonic: 'tiny' };
   const agentNames = [...new Set([...Object.keys(agentDefaults), ...Object.keys(overrides)])];
-  const advanced = ompSettings.filter((item) => item.path !== 'modelRoles' && item.path !== 'cycleOrder' && item.path !== 'task.agentModelOverrides' && !item.path.startsWith('providers') && !item.credential);
+  const advanced = ompSettings.filter((item) => inferenceSettingSection(item.path) === null && !item.credential);
   const advancedGroups = useMemo(() => Map.groupBy(advanced, (item) => item.tab), [advanced]);
   const advancedTabs = [...advancedGroups.keys()].sort();
   const [advancedTab, setAdvancedTab] = useState(advancedTabs[0] ?? 'other');
-  const providerSettings = ompSettings.filter((item) => item.path.startsWith('providers') || item.credential);
-  const agentSettings = ompSettings.filter((item) => item.path.startsWith('agents') || (item.path.startsWith('task.agent') && item.path !== 'task.agentModelOverrides'));
+  const visibleAdvancedTab = advancedGroups.has(advancedTab) ? advancedTab : advancedTabs[0] ?? 'other';
+  const providerSettings = ompSettings.filter((item) => inferenceSettingSection(item.path) === 'Providers' && !item.credential);
+  const agentSettings = ompSettings.filter((item) => inferenceSettingSection(item.path) === 'Agents' && item.path !== 'task.agentModelOverrides' && !item.credential);
   const setRole = async (role: string, model: string): Promise<void> => {
     if (rolesItem) await onSetOmpSetting(rolesItem.path, { ...roles, [role]: model });
   };
@@ -239,18 +255,19 @@ function OmpSettings({ ompSettings, ompGeneration, onSetOmpSetting, saving, prov
     content = <Group title={<>Model roles · <span className="tabular-nums">generation {ompGeneration}</span></>}>
       <SettingRows>{roleIds.map((role) => <SettingRow key={role} title={roleLabels[role] ?? role} description={role}>
         <Switch label="Quick cycle" checked={cycle.includes(role)} disabled={saving || !cycleItem} onToggle={() => settle(toggleCycle(role))} />
-        <RoleModelPicker role={role} label={roleLabels[role] ?? role} value={roles[role] ?? ''} models={models} disabled={saving || !rolesItem} onChange={(value) => settle(setRole(role, value))} />
+        <RoleModelPicker role={role} label={roleLabels[role] ?? role} value={roles[role] ?? ''} models={models} modelsReady={modelsReady} disabled={saving || !rolesItem} onChange={(value) => settle(setRole(role, value))} />
       </SettingRow>)}</SettingRows>
       <p className="text-caption text-muted-foreground">Quick cycle controls one-click cycling. At least one role remains selected. Role names match the workspace composer.</p>
+      <OmpRows items={ompSettings.filter((item) => inferenceSettingSection(item.path) === 'Models' && item.path !== 'modelRoles' && item.path !== 'cycleOrder' && !item.credential)} saving={saving} onSetOmpSetting={onSetOmpSetting} />
     </Group>;
   } else if (tab === 'Agents') {
     content = <>
-      <Group title="Agent model roles"><SettingRows>{agentNames.map((agent) => { const selected = String(overrides[agent] ?? `pi/${agentDefaults[agent] ?? 'task'}`).replace(/^pi\//u, ''); return <SettingRow key={agent} title={agent} description={roleLabels[selected] ?? selected}><Select value={selected} disabled={!overridesItem || saving} onValueChange={(value) => settle(setAgentRole(agent, value))}><SelectTrigger aria-label={`Role for ${agent}`} />{selectOptions(roleIds.map((role) => ({ value: role, label: roleLabels[role] ?? role })))}</Select></SettingRow>; })}</SettingRows></Group>
+      <Group title="Agent model roles"><SettingRows>{agentNames.map((agent) => { const raw = overrides[agent]; const selected = String(raw ?? `pi/${agentDefaults[agent] ?? 'task'}`).replace(/^pi\//u, ''); const known = roleIds.includes(selected); return <SettingRow key={agent} title={agent} description={known ? roleLabels[selected] ?? selected : `Custom selector: ${Array.isArray(raw) ? raw.join(', ') : selected}`}><Select value={selected} disabled={!overridesItem || saving} onValueChange={(value) => settle(setAgentRole(agent, value))}><SelectTrigger aria-label={`Role for ${agent}`} />{selectOptions([...(known ? [] : [{ value: selected, label: `Custom: ${selected}` }]), ...roleIds.map((role) => ({ value: role, label: roleLabels[role] ?? role }))])}</Select></SettingRow>; })}</SettingRows></Group>
       <Group title="Agent runtime settings"><OmpRows items={agentSettings} saving={saving} onSetOmpSetting={onSetOmpSetting} /></Group>
     </>;
   } else if (tab === 'Providers') {
     content = <>
-      <ProvidersSection {...providers} />
+      {providers ? <ProvidersSection {...providers} /> : null}
       <Accordion type="single" collapsible>
         <AccordionItem value="advanced" index={0}>
           <AccordionTrigger>Advanced provider settings</AccordionTrigger>
@@ -264,17 +281,17 @@ function OmpSettings({ ompSettings, ompGeneration, onSetOmpSetting, saving, prov
       </Accordion>
     </>;
   } else {
-    const visible = advancedGroups.get(advancedTab) ?? [];
+    const visible = advancedGroups.get(visibleAdvancedTab) ?? [];
     content = <>
-      {subtleTabs(advancedTabs, advancedTab, setAdvancedTab, 'omp-advanced')}
-      <TabsSubtlePanel index={Math.max(0, advancedTabs.indexOf(advancedTab))} selectedIndex={Math.max(0, advancedTabs.indexOf(advancedTab))} idPrefix="omp-advanced">
-        <Group title={<>{advancedTab} · <span className="tabular-nums">generation {ompGeneration}</span></>}><OmpRows items={visible} saving={saving} onSetOmpSetting={onSetOmpSetting} /></Group>
+      {subtleTabs(advancedTabs, visibleAdvancedTab, setAdvancedTab, 'omp-advanced')}
+      <TabsSubtlePanel index={Math.max(0, advancedTabs.indexOf(visibleAdvancedTab))} selectedIndex={Math.max(0, advancedTabs.indexOf(visibleAdvancedTab))} idPrefix="omp-advanced">
+        <Group title={<>{visibleAdvancedTab} · <span className="tabular-nums">generation {ompGeneration}</span></>}><OmpRows items={visible} saving={saving} onSetOmpSetting={onSetOmpSetting} /></Group>
       </TabsSubtlePanel>
     </>;
   }
-  const tabIndex = OMP_TABS.indexOf(tab);
+  const tabIndex = sections.indexOf(tab);
   return <>
-    {subtleTabs(OMP_TABS, tab, (value) => setTab(value as OmpTab), 'omp-tabs')}
+    {subtleTabs(sections, tab, (value) => setTab(value as OmpTab), 'omp-tabs')}
     <TabsSubtlePanel index={tabIndex} selectedIndex={tabIndex} idPrefix="omp-tabs" className="flex flex-col gap-8">{content}</TabsSubtlePanel>
   </>;
 }
@@ -311,7 +328,33 @@ const API_CLIENT_CAPABILITIES: ReadonlyArray<{ id: DeviceCapability; label: stri
   { id: 'session.prompt', label: 'Talk to agents', description: 'Prompt, steer, and answer' },
   { id: 'fleet.control', label: 'Fleet', description: 'Create, stop, start, destroy machines' },
   { id: 'deployment.control', label: 'Deployment', description: 'Select cloud images and control GitSpace runtime releases (account scope required)' },
+  { id: 'devices.manage', label: 'Device management', description: 'Revoke enrolled browsers and API clients (whole account required)' },
+  { id: 'account.admin', label: 'Account administration', description: 'Manage provider keys, inference, session approval policy and review decisions (whole account and Write required)' },
+  { id: 'lifecycle.control', label: 'Lifecycle control', description: 'Approve execution content, cancel and recover runs, retire resources (whole account and Write required)' },
 ];
+
+function ApiClientPermissions({ projects, projectId, setProjectId, capabilities, setCapabilities, ttl, setTtl, id }: {
+  projects: ReadonlyArray<{ id: string; name: string }>;
+  projectId: string;
+  setProjectId: (value: string) => void;
+  capabilities: DeviceCapability[];
+  setCapabilities: (value: DeviceCapability[]) => void;
+  ttl: string;
+  setTtl: (value: string) => void;
+  id: string;
+}) {
+  return <SettingRows>
+    <SettingRow title="Scope" description="Everything, or one project.">
+      <Select value={projectId} onValueChange={(value) => setProjectId(value ?? '')}><SelectTrigger aria-label="Scope" placeholder="Whole account" />{selectOptions([{ value: '', label: 'Whole account' }, ...projects.map((project) => ({ value: project.id, label: project.name }))])}</Select>
+    </SettingRow>
+    {API_CLIENT_CAPABILITIES.map((capability) => <SettingRow key={capability.id} title={capability.label} description={capability.description}>
+      <Switch label={capability.label} checked={capabilities.includes(capability.id)} onToggle={() => setCapabilities(capabilities.includes(capability.id) ? capabilities.filter((value) => value !== capability.id) : [...capabilities, capability.id])} />
+    </SettingRow>)}
+    <SettingRow title="Expires" description="Expired access stops working without a revoke.">
+      <Select value={ttl} onValueChange={(value) => { if (value) setTtl(value); }}><SelectTrigger aria-label="Expires" id={`${id}-ttl`} />{selectOptions(API_CLIENT_TTLS)}</Select>
+    </SettingRow>
+  </SettingRows>;
+}
 
 /** Mints a delegated API client; the key is shown once, then only its device row remains. */
 function ApiClientDialog({ open, onOpenChange, projects, onCreate }: { open: boolean; onOpenChange: (open: boolean) => void; projects: ReadonlyArray<{ id: string; name: string }>; onCreate: (draft: ApiClientDraft) => Promise<string> }) {
@@ -338,27 +381,19 @@ function ApiClientDialog({ open, onOpenChange, projects, onCreate }: { open: boo
         rpcUrl: new URL(new URL(window.location.href).searchParams.get('rpc') ?? '/rpc', window.location.origin).toString(),
       }));
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : String(failure));
+      setError(rpcErrorMessage(failure, 'Create API client'));
     } finally {
       setPending(false);
     }
   };
   return <Dialog open={open} onOpenChange={close}>
-    <DialogContent>
+    <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto">
       <DialogHeader><DialogTitle>{key ? 'API client created' : 'New API client'}</DialogTitle><DialogDescription>{key ? 'Copy the key now; it is not stored anywhere and cannot be shown again. Revoke it from this list at any time.' : 'A signed device key for scripts and services. It can do at most what this browser can, within the scope you choose.'}</DialogDescription></DialogHeader>
       {key
         ? <InputCopy label="API key" value={key} />
         : <form id="api-client-form" className="flex flex-col gap-4" onSubmit={(event) => { event.preventDefault(); void submit(); }}>
             <InputGroup className="w-full"><InputField index={0} label="Label" value={label} placeholder="CI deploy bot" onChange={setLabel} autoFocus required /></InputGroup>
-            <SettingRows>
-              <SettingRow title="Scope" description="Everything, or one project.">
-                <Select value={projectId} onValueChange={(value) => setProjectId(value ?? '')}><SelectTrigger aria-label="Scope" />{selectOptions([{ value: '', label: 'Whole account' }, ...projects.map((project) => ({ value: project.id, label: project.name }))])}</Select>
-              </SettingRow>
-              {API_CLIENT_CAPABILITIES.map((capability) => <SettingRow key={capability.id} title={capability.label} description={capability.description}>
-                <Switch label={capability.label} checked={capabilities.includes(capability.id)} onToggle={() => setCapabilities((current) => current.includes(capability.id) ? current.filter((id) => id !== capability.id) : [...current, capability.id])} />
-              </SettingRow>)}
-              <SettingRow title="Expires" description="Expired keys stop working without a revoke.">{subtleTabs(API_CLIENT_TTLS.map((option) => option.value), ttl, setTtl, 'api-client-ttl')}</SettingRow>
-            </SettingRows>
+            <ApiClientPermissions projects={projects} projectId={projectId} setProjectId={setProjectId} capabilities={capabilities} setCapabilities={setCapabilities} ttl={ttl} setTtl={setTtl} id="api-client" />
             {error ? <p role="alert" className="text-caption text-destructive">{error}</p> : null}
           </form>}
       <DialogFooter>
@@ -387,7 +422,7 @@ function ComposioSetupDialog({ open, onOpenChange, setup, onPut, onDelete }: {
       setApiKey('');
       onOpenChange(false);
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : String(failure));
+      setError(rpcErrorMessage(failure, 'Save integration API key'));
     } finally {
       setPending(false);
     }
@@ -433,7 +468,7 @@ function BrowserRelayWalkthrough({ open, onOpenChange, relay, onSetup, onStart, 
       await operation();
       complete?.();
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : String(failure));
+      setError(rpcErrorMessage(failure, 'Browser relay setup'));
     } finally {
       setPending(null);
     }
@@ -494,12 +529,124 @@ function DeviceRows({ devices, kind, onRevokeDevice, onSignOut }: Pick<SettingsP
   </SettingRow>)}</SettingRows>;
 }
 
+/** One-time bearer values live only in this mounted Connections section. */
+export function McpAccessSettings({ projects, canManageMcp, canEnableMcp, onMcpStatus, onMcpEnable, onMcpRotate, onMcpDisable }: McpAccessActions & { projects: ReadonlyArray<{ id: string; name: string }> }) {
+  const [view, setView] = useState<McpAccessView | null>(null);
+  const [action, setAction] = useState<'enable' | 'rotate' | 'disable' | null>(null);
+  const [secret, setSecret] = useState<{ token: string; endpoint: string } | null>(null);
+  const [pending, setPending] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [projectId, setProjectId] = useState('');
+  const [capabilities, setCapabilities] = useState<DeviceCapability[]>(['rpc.read', 'session.prompt']);
+  const [ttl, setTtl] = useState('never');
+  const alive = useRef(false);
+  const status = useRef(onMcpStatus);
+  status.current = onMcpStatus;
+  const refresh = async (): Promise<void> => {
+    setLoading(true);
+    try {
+      const result = await status.current();
+      if (alive.current) {
+        // Never allow a credential returned by a server into status state.
+        const { token: _token, ...next } = result as McpAccessValue;
+        setView(next);
+      }
+    } catch (failure) {
+      if (alive.current) { setView(null); setError(rpcErrorMessage(failure, 'Read MCP status')); }
+    } finally {
+      if (alive.current) setLoading(false);
+    }
+  };
+  useEffect(() => {
+    alive.current = true;
+    if (canManageMcp) void refresh();
+    else { setView(null); setLoading(false); setSecret(null); setAction(null); }
+    return () => { alive.current = false; };
+  }, [canManageMcp]);
+  const close = (): void => { if (!pending) { setAction(null); setSecret(null); } };
+  const submit = async (): Promise<void> => {
+    if (!view || !action || pending) return;
+    setPending(true);
+    setError(null);
+    try {
+      const result = action === 'enable'
+        ? await onMcpEnable(view.revision, { scope: projectId ? { kind: 'project', projectId } : { kind: 'user' }, capabilities, ttlMs: API_CLIENT_TTLS.find(option => option.value === ttl)?.ms ?? null })
+        : action === 'rotate' ? await onMcpRotate(view.revision) : await onMcpDisable(view.revision);
+      if (alive.current) {
+        const { token, ...next } = result;
+        setView(next);
+        setSecret(token ? { token, endpoint: next.endpoint } : null);
+        setAction(null);
+      }
+    } catch (failure) {
+      if (alive.current) { setError(rpcErrorMessage(failure, 'Change MCP access')); setAction(null); }
+    } finally {
+      // Reconcile once, including ambiguous failures; never retry a mutation.
+      if (alive.current) { await refresh(); setPending(false); }
+    }
+  };
+  const open = (next: 'enable' | 'rotate' | 'disable'): void => {
+    setError(null);
+    setSecret(null);
+    setProjectId('');
+    setCapabilities(['rpc.read', 'session.prompt']);
+    setTtl('never');
+    setAction(next);
+  };
+  const scope = view?.scope;
+  return <Group title="MCP">
+    <SettingRows>
+      <SettingRow title="GitSpace MCP" description="Connect an MCP client over Streamable HTTP. Access stays off until you enable it.">
+        <Badge color={view?.active ? 'green' : view?.enabled ? 'amber' : 'gray'}>{loading ? 'Loading…' : view?.active ? 'Active' : view?.enabled ? 'Inactive grant' : view ? 'Disabled' : 'Unavailable'}</Badge>
+      </SettingRow>
+      {view ? <>
+        <SettingRow title="Endpoint" description={view.endpoint}>{null}</SettingRow>
+        {view.enabled ? <SettingRow title="Access" description={<>{scope?.kind === 'project' ? `Project: ${projects.find(project => project.id === scope.projectId)?.name ?? scope.projectId}` : 'Whole account'}<span className="mt-1 block">{view.capabilities.join(', ')}</span><span className="mt-1 block">{view.expiresAt ? `Expires ${new Date(view.expiresAt).toLocaleString()}` : 'Until revoked'}</span></>}>{null}</SettingRow> : null}
+      </> : null}
+    </SettingRows>
+    {!canManageMcp ? <p className="text-caption text-muted-foreground">Manage MCP from an active account-scoped browser with Device management permission.</p> : <>
+      {view?.enabled && !view.active ? <p className="text-caption text-muted-foreground">The dedicated grant was revoked or expired. Disable MCP, then enable it again to authorize a new grant.</p> : null}
+      {!view?.enabled && !canEnableMcp ? <p className="text-caption text-muted-foreground">This browser cannot delegate access. Use a delegating account browser to enable MCP.</p> : null}
+      <div className="flex flex-wrap gap-2 pt-3">
+        {view?.enabled ? <>
+          <Button variant="secondary" size="compact" disabled={pending || loading || !view.active} onClick={() => open('rotate')}>Rotate token</Button>
+          <Button variant="secondary" size="compact" disabled={pending || loading} onClick={() => open('disable')}>Disable MCP</Button>
+        </> : <Button variant="primary" size="compact" disabled={!view || !canEnableMcp || loading || pending} onClick={() => open('enable')}>Enable MCP</Button>}
+        <Button variant="ghost" size="compact" disabled={pending || loading} onClick={() => { setError(null); void refresh(); }}>Refresh status</Button>
+      </div>
+    </>}
+    {error ? <p role="alert" className="mt-3 text-caption text-destructive">{error}</p> : null}
+    <Dialog open={action !== null || secret !== null} onOpenChange={(next) => { if (!next) close(); }}>
+      <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle>{secret ? 'Copy your MCP token' : action === 'enable' ? 'Enable GitSpace MCP' : action === 'rotate' ? 'Rotate MCP token?' : 'Disable MCP?'}</DialogTitle>
+          <DialogDescription>{secret ? 'Shown once. Copy it now and keep it private. Closing this dialog clears the token; it cannot be retrieved later.' : action === 'enable' ? 'Authorize the dedicated GitSpace MCP client with the scope, permissions, and lifetime you choose. The private signing key stays in the vault.' : action === 'rotate' ? 'The current bearer token stops working immediately. Update every connected MCP client with the new token.' : 'The bearer token stops working immediately and the dedicated client grant is revoked. Enabling again requires fresh authorization.'}</DialogDescription>
+        </DialogHeader>
+        {secret ? <div className="flex min-w-0 flex-col gap-4">
+          <InputCopy label="Streamable HTTP URL" value={secret.endpoint} />
+          <InputCopy label="Bearer token" value={secret.token} />
+          <InputCopy label="MCP client configuration" value={JSON.stringify({ mcpServers: { gitspace: { type: 'http', url: secret.endpoint, headers: { Authorization: `Bearer ${secret.token}` } } } }, null, 2)} />
+          <p className="text-caption text-muted-foreground">Choose Streamable HTTP in your client and send the token in the Authorization header, not the URL. Clients may use different configuration formats.</p>
+        </div> : action === 'enable' ? <fieldset disabled={pending} className="min-w-0">
+          <ApiClientPermissions projects={projects} projectId={projectId} setProjectId={setProjectId} capabilities={capabilities} setCapabilities={setCapabilities} ttl={ttl} setTtl={setTtl} id="mcp-client" />
+        </fieldset> : null}
+        <DialogFooter>
+          <Button variant="secondary" disabled={pending} onClick={close}>{secret ? 'Done' : 'Cancel'}</Button>
+          {!secret ? <Button variant="primary" loading={pending} disabled={pending || !view || (action === 'enable' && (!canEnableMcp || capabilities.length === 0))} onClick={() => void submit()}>{action === 'enable' ? 'Enable MCP' : action === 'rotate' ? 'Rotate and invalidate old token' : 'Disable MCP'}</Button> : null}
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  </Group>;
+}
+
 function ConnectionsSettings({
   devices, onRevokeDevice, onSignOut, onCreateApiClient, projects,
+  canManageMcp, canEnableMcp, onMcpStatus, onMcpEnable, onMcpRotate, onMcpDisable,
   composioSetup, onPutComposioSetup, onDeleteComposioSetup,
   browserRelay, onSetupBrowserRelay, onStartBrowserRelay, onStopBrowserRelay, onTestBrowserRelay,
   canConnectBrowser, onCreateBrowserInvitation, onBrowserInvitationStatus, onCancelBrowserInvitation, onBrowserConnected,
-}: Pick<SettingsPageProps, 'devices' | 'onRevokeDevice' | 'onSignOut' | 'onCreateApiClient' | 'projects' | 'composioSetup' | 'onPutComposioSetup' | 'onDeleteComposioSetup' | 'browserRelay' | 'onSetupBrowserRelay' | 'onStartBrowserRelay' | 'onStopBrowserRelay' | 'onTestBrowserRelay'> & BrowserConnectionActions) {
+}: Pick<SettingsPageProps, 'devices' | 'onRevokeDevice' | 'onSignOut' | 'onCreateApiClient' | 'projects' | 'composioSetup' | 'onPutComposioSetup' | 'onDeleteComposioSetup' | 'browserRelay' | 'onSetupBrowserRelay' | 'onStartBrowserRelay' | 'onStopBrowserRelay' | 'onTestBrowserRelay'> & BrowserConnectionActions & McpAccessActions) {
   const [apiClientOpen, setApiClientOpen] = useState(false);
   const [browserOpen, setBrowserOpen] = useState(false);
   const [composioOpen, setComposioOpen] = useState(() => typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('setup') === 'composio');
@@ -512,7 +659,7 @@ function ConnectionsSettings({
     try {
       await action();
     } catch (failure) {
-      setRelayError(failure instanceof Error ? failure.message : String(failure));
+      setRelayError(rpcErrorMessage(failure, 'Browser relay operation'));
     } finally {
       setRelayPending(false);
     }
@@ -521,6 +668,7 @@ function ConnectionsSettings({
     ? `${browserRelay.browserName}${browserRelay.browserVersion ? ` ${browserRelay.browserVersion}` : ''}`
     : null;
   return <>
+    <McpAccessSettings projects={projects} canManageMcp={canManageMcp} canEnableMcp={canEnableMcp} onMcpStatus={onMcpStatus} onMcpEnable={onMcpEnable} onMcpRotate={onMcpRotate} onMcpDisable={onMcpDisable} />
     <Group title="Plugin providers">
       <SettingRows>
         <SettingRow title="Composio" description={composioSetup?.source === 'account' ? <>Encrypted account credential · updated {composioSetup.updatedAt?.toLocaleString() ?? 'recently'}</> : composioSetup?.source === 'platform' ? 'Provided by this GitSpace deployment' : 'Connect hosted apps without copying OAuth credentials into workspaces.'}>
@@ -583,7 +731,7 @@ function MachineSettings({ machines, onUpdateMachine, onCreateSandbox, onControl
   const editingMachine = machines.find((machine) => machine.id === editing) ?? null;
   const run = async (key: string, action: () => Promise<void>) => {
     setPending(key); setActionError(null);
-    try { await action(); } catch (error) { setActionError(error instanceof Error ? error.message : String(error)); }
+    try { await action(); } catch (error) { setActionError(rpcErrorMessage(error, 'Machine settings operation')); }
     finally { setPending(null); }
   };
   return <>
@@ -722,8 +870,8 @@ function DefaultsSettings({ settings, machines, onChange }: Pick<SettingsPagePro
 
 const sectionInfo: Array<{ id: Section; label: string; icon: (typeof ICONS)[keyof typeof ICONS]; kicker: string; title: string; description: string }> = [
   { id: 'profile', label: 'Profile', icon: ICONS.user, kicker: 'Account', title: 'Your GitSpace profile', description: 'Cloud-owned identity and namespace shared by every machine.' },
-  { id: 'omp', label: 'OMP', icon: ICONS.bot, kicker: 'OMP', title: 'Models, agents, providers, and runtime', description: 'The complete OMP configuration used during onboarding and by every GitSpace machine.' },
-  { id: 'omp-providers', label: 'Providers', icon: ICONS.cpu, kicker: 'Model providers', title: 'Connect your model providers', description: 'Connect the providers your agents will use. You can skip this and connect later from Settings → OMP → Providers.' },
+  { id: 'omp', label: 'OMP', icon: ICONS.bot, kicker: 'OMP', title: 'Shared Advanced settings', description: 'Shared runtime configuration for every inference profile. Manage Models, Agents, and Providers under Navigate → Inference.' },
+  { id: 'omp-providers', label: 'Inference', icon: ICONS.cpu, kicker: 'Default inference', title: 'Set up Default inference', description: 'Connect providers and configure the Default profile. The same profile is available under Navigate → Inference after setup.' },
   { id: 'git', label: 'Git', icon: ICONS.git, kicker: 'Git', title: 'Shared Git identity', description: 'One GitSpace SSH identity and commit attribution shared by your enrolled machines.' },
   { id: 'machines', label: 'Machines', icon: ICONS.server, kicker: 'Machines', title: 'Machines', description: 'Live fleet state and placement notes from GitSpace Cloud.' },
   { id: 'connections', label: 'Connections', icon: ICONS.key, kicker: 'Connections', title: 'Connections', description: 'Plugin providers, browser control, and enrolled devices for this account and machine.' },
@@ -733,19 +881,18 @@ const sectionInfo: Array<{ id: Section; label: string; icon: (typeof ICONS)[keyo
 ];
 // The settings tab strip; the providers step only exists as an onboarding step.
 const settingsTabs = sectionInfo.filter((item) => item.id !== 'omp-providers');
-export function requestedSettingsSection(search: string): { section: Section; ompTab: OmpTab } {
+export function requestedSettingsSection(search: string): { section: Section } {
   const requested = new URLSearchParams(search).get('section');
-  if (requested === 'omp-providers') return { section: 'omp', ompTab: 'Providers' };
   const section = settingsTabs.find((item) => item.id === requested)?.id ?? 'profile';
-  return { section, ompTab: 'Models' };
+  return { section };
 }
 function SaveState({ saving, error }: Pick<SettingsPageProps, 'saving' | 'error'>) {
   if (error) return <span role="alert" className="text-caption text-destructive">{error}</span>;
   return saving ? <span className="text-caption text-muted-foreground">Saving…</span> : null;
 }
-function SettingsContent({ section, ompTab = 'Models', ...props }: { section: Section; ompTab?: OmpTab } & SettingsPageProps) {
-  if (section === 'omp') return <OmpSettings {...props} initialTab={ompTab} />;
-  if (section === 'omp-providers') return <ProvidersSection {...props.providers} />;
+function SettingsContent({ section, ...props }: { section: Section } & SettingsPageProps) {
+  if (section === 'omp') return <OmpSettingsEditor {...props} sections={['Advanced']} />;
+  if (section === 'omp-providers') return <>{props.inferenceSetup}</>;
   if (section === 'git') return <GitSettings {...props} />;
   if (section === 'machines') return <MachineSettings {...props} />;
   if (section === 'connections') return <ConnectionsSettings {...props} />;
@@ -766,12 +913,12 @@ function SettingsShell(props: SettingsPageProps) {
     <div className="pb-4"><Button variant="ghost" size="compact" aria-label="Back to workspace" onClick={props.onBack} leadingIcon={glyph(ArrowLeft)}>Back to workspace</Button></div>
     <SectionHeader section={section} ompSync={props.ompSync} actions={<><SaveState {...props} /><Button variant="primary" disabled={props.saving} onClick={() => settle(props.onSave(props.settings))}>{props.saving ? 'Saving' : 'Save changes'}</Button></>} />
     <div className="pb-6"><TabsSubtle selectedIndex={selectedIndex} idPrefix="settings-section" onSelect={(index) => setSection(settingsTabs[index]?.id ?? 'profile')}>{settingsTabs.map(({ id, label, icon: Icon }, index) => <TabsSubtleItem key={id} index={index} label={label} icon={Icon} />)}</TabsSubtle></div>
-    <TabsSubtlePanel index={selectedIndex} selectedIndex={selectedIndex} idPrefix="settings-section" className="flex flex-col gap-8"><SettingsContent section={section} ompTab={requested.ompTab} {...props} /></TabsSubtlePanel>
+    <TabsSubtlePanel index={selectedIndex} selectedIndex={selectedIndex} idPrefix="settings-section" className="flex flex-col gap-8"><SettingsContent section={section} {...props} /></TabsSubtlePanel>
   </PageCanvas>;
 }
 function OnboardingShell(props: SettingsPageProps) {
   const [step, setStep] = useState(0);
-  const steps: Array<{ label: string; section: Section }> = [{ label: 'Profile', section: 'profile' }, { label: 'Machine', section: 'machines' }, { label: 'Providers', section: 'omp-providers' }, { label: 'OMP', section: 'omp' }, { label: 'Git', section: 'git' }, { label: 'Defaults', section: 'defaults' }];
+  const steps: Array<{ label: string; section: Section }> = [{ label: 'Profile', section: 'profile' }, { label: 'Machine', section: 'machines' }, { label: 'Inference', section: 'omp-providers' }, { label: 'Advanced', section: 'omp' }, { label: 'Git', section: 'git' }, { label: 'Defaults', section: 'defaults' }];
   const current = steps[step]!;
   const last = step === steps.length - 1;
   const profileIncomplete = step === 0 && (!props.settings.profile.displayName.trim() || !props.settings.profile.handle);

@@ -1,17 +1,25 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import { deploymentStatusFixture } from './App.js';
-import { requestedSettingsSection, SourceSettings } from './SettingsPage.js';
+import { OmpSettingsEditor, requestedSettingsSection, SourceSettings, type OmpSettingView } from './SettingsPage.js';
 
 describe('requestedSettingsSection', () => {
-  it('opens the requested section, lands provider links on the OMP Providers tab, and falls back to profile', () => {
-    expect(requestedSettingsSection('?section=git')).toEqual({ section: 'git', ompTab: 'Models' });
-    expect(requestedSettingsSection('?section=omp')).toEqual({ section: 'omp', ompTab: 'Models' });
-    expect(requestedSettingsSection('?section=omp-providers')).toEqual({ section: 'omp', ompTab: 'Providers' });
-    expect(requestedSettingsSection('?section=source')).toEqual({ section: 'source', ompTab: 'Models' });
-    expect(requestedSettingsSection('?section=nope')).toEqual({ section: 'profile', ompTab: 'Models' });
-    expect(requestedSettingsSection('')).toEqual({ section: 'profile', ompTab: 'Models' });
+  it('opens account sections without exposing the removed provider editor', () => {
+    expect(requestedSettingsSection('?section=git')).toEqual({ section: 'git' });
+    expect(requestedSettingsSection('?section=omp')).toEqual({ section: 'omp' });
+    expect(requestedSettingsSection('?section=omp-providers')).not.toEqual({ section: 'omp-providers' });
+    expect(requestedSettingsSection('?section=source')).toEqual({ section: 'source' });
   });
+});
+
+it('keeps inference-owned runtime controls out of shared Advanced', () => {
+  const item = (path: string, label: string): OmpSettingView => ({ path, label, tab: 'runtime', description: null, kind: 'boolean', valueJson: 'true', options: [], credential: false });
+  const html = renderToStaticMarkup(<OmpSettingsEditor sections={['Advanced']} ompGeneration={1} saving={false} onSetOmpSetting={async () => undefined} ompSettings={[item('agents.enabled', 'Profile agent control'), item('task.agentFoo', 'Profile task control'), item('providers.custom', 'Profile provider control'), item('modelTags', 'Profile model tags'), item('terminal.enabled', 'Shared terminal control')]} />);
+  expect(html).toContain('Shared terminal control');
+  expect(html).not.toContain('Profile agent control');
+  expect(html).not.toContain('Profile task control');
+  expect(html).not.toContain('Profile provider control');
+  expect(html).not.toContain('Profile model tags');
 });
 
 describe('SourceSettings', () => {

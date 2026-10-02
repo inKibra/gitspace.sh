@@ -280,6 +280,16 @@ async function reduceTranscript(file: string, state: State, depth: number, spawn
       sawModelChange = true;
       continue;
     }
+    // OMP's own off-transcript ledger (judge, find, ttsr, auto-thinking). Each entry is one attempt with its recorded role.
+    if (entry.type === 'model_usage') {
+      const usage = rawUsage(entry.usage);
+      const purpose = string(entry.purpose);
+      if (!usage || !purpose) { state.warnings.add(`${file}: malformed model usage ledger entry; usage coverage may be incomplete`); continue; }
+      const role = string(entry.role);
+      addResponse(state, own, file, spawn, definition, role ? { role, selection: 'role' } : UNKNOWN, string(entry.provider) ?? 'unknown', string(entry.model) ?? 'unknown', usage, timestamp(entry.timestamp), purpose);
+      responseCount += 1;
+      continue;
+    }
     if (entry.type === 'custom') {
       const data = object(entry.data);
       if (data?.version === 1 && (entry.customType === 'gitspace-agent-definition' || entry.customType === 'gitspace-model-selection' || entry.customType === 'gitspace-model-usage')) {

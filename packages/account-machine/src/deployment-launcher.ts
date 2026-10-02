@@ -6,8 +6,24 @@ import { executableManifestPath, readExecutableFile, sha256, validateExecutableA
 import { hashArtifactPath, workspaceSha } from '@gitspace/deployment';
 import type { BuiltArtifact, BuiltOmpArtifact, BuiltExecutableArtifact } from '@gitspace/deployment';
 import { workerReleaseMetadataSchema, type ReleaseArtifact, type ReleaseRecord, type ReleaseTarget, type StageReleaseInput, type TenantDesired, type WorkerReleaseMetadata } from '@gitspace/protocol';
-import { releaseObjectKeys, type FrontendManifest } from './release-follower.js';
+import { FRONTEND_TRANSFER_CONCURRENCY, forEachConcurrent, releaseObjectKeys, type FrontendManifest } from './release-follower.js';
+import { z } from 'zod';
 
+const targetPackages: Record<ReleaseTarget, string> = {
+  worker: 'account-worker', machine: 'account-machine', omp: 'account-omp', frontend: 'account-web',
+};
+const inferenceCapablePackageSchema = z.object({ gitspace: z.object({ inferenceVersion: z.literal(1) }) });
+
+/** A release is stamped only when every selected target's own source declares profile-managed inference. */
+export async function requireInferenceCapableSource(root: string, targets: readonly ReleaseTarget[]): Promise<void> {
+  for (const target of targets) {
+    let capable = false;
+    try {
+      capable = inferenceCapablePackageSchema.safeParse(JSON.parse(await readFile(join(root, 'packages', targetPackages[target], 'package.json'), 'utf8'))).success;
+    } catch { /* Missing or unreadable manifests are legacy sources. */ }
+    if (!capable) throw new Error(`This workspace's ${target} source does not support inference profiles; update the workspace before launching`);
+  }
+}
 
 /** Build code belongs to the selected source tree, not the currently running machine generation. */
 export async function buildWorkspaceTarget<T extends BuiltArtifact>(
@@ -188,6 +204,7 @@ export class DeploymentLauncher {
       });
       const installOutput = await new Response(install.stderr).text();
       if (await install.exited !== 0) throw new Error(`bun install failed: ${installOutput.trim().split('\n').slice(-5).join(' | ')}`);
+      await requireInferenceCapableSource(root, targets);
 
       await rm(buildRoot, { recursive: true, force: true });
       const keys = releaseObjectKeys(sha);
@@ -221,15 +238,14 @@ export class DeploymentLauncher {
         const hash = await hashArtifactPath(built.path);
         const files = await filesUnder(built.path);
         progress('upload', `uploading ${files.length} frontend files under ${keys.frontend}`);
-        const manifest: FrontendManifest = { files: [] };
-        let size = 0;
-        for (const file of files) {
+        const entries: FrontendManifest['files'] = new Array(files.length);
+        await forEachConcurrent(files, FRONTEND_TRANSFER_CONCURRENCY, async (file, index) => {
           const path = relative(built.path, file);
           const bytes = new Uint8Array(await readFile(file));
-          const hash = await this.options.blobs.put(`${keys.frontend}/${path}`, bytes);
-          manifest.files.push({ path, hash, size: bytes.byteLength });
-          size += bytes.byteLength;
-        }
+          entries[index] = { path, hash: await this.options.blobs.put(`${keys.frontend}/${path}`, bytes), size: bytes.byteLength };
+        });
+        const manifest: FrontendManifest = { files: entries };
+        const size = entries.reduce((total, entry) => total + entry.size, 0);
         await this.options.blobs.put(keys.frontendManifest, new TextEncoder().encode(JSON.stringify(manifest)));
         artifacts.frontend = { key: keys.frontend, hash, size };
       }
@@ -237,6 +253,7 @@ export class DeploymentLauncher {
       progress('stage', 'staging release');
       await this.options.authority.stageRelease({
         sha,
+        inferenceVersion: 1,
         label: `${workspace.name} @ ${sha.slice(0, 12)}`,
         workspaceId: workspace.id,
         artifacts,
@@ -262,6 +279,7 @@ export class DeploymentLauncher {
     const manifest = await validateExecutableArtifact(built.path, {
       target: built.manifest.target, hash: built.hash, manifestHash: built.manifestHash,
     });
+    if (manifest.inferenceVersion !== 1) throw new Error('This source build does not support inference profiles; upgrade the workspace before launching');
     for (const file of manifest.files) {
       let index = 0;
       let size = 0;

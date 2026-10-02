@@ -158,11 +158,13 @@ export type LifecycleRunPhase = z.infer<typeof LifecycleRunPhaseSchema>;
 const lifecycleIdSchema = z.string().min(1).max(160);
 export const LifecycleRunRequestSchema = z.object({
   runId: z.string().min(1).max(128), phase: LifecycleRunPhaseSchema, rerun: z.boolean().optional(), deadlineAt: z.string().datetime().optional(),
+  interactive: z.boolean().optional(),
 }).strict();
 export type LifecycleRunRequest = z.infer<typeof LifecycleRunRequestSchema>;
 export function parseLifecycleRunRequest(source: unknown): LifecycleRunRequest {
   const parsed = LifecycleRunRequestSchema.safeParse(source);
   if (!parsed.success) throw new EnvironmentError('InvalidConfiguration', 'Invalid lifecycle run request', { detail: parsed.error.message });
+  if (parsed.data.phase === 'checks' && parsed.data.interactive) throw new EnvironmentError('InvalidConfiguration', 'Environment checks cannot run interactively');
   return parsed.data;
 }
 const executionHashSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/u);
@@ -215,6 +217,7 @@ export type LifecycleIncident = z.infer<typeof LifecycleIncidentSchema>;
 export const LifecycleRunSchema = z.object({
   id: lifecycleIdSchema, projectId: lifecycleIdSchema, spaceId: lifecycleIdSchema,
   phase: LifecycleRunPhaseSchema, status: z.enum(['accepted', 'running', 'cancelling', 'succeeded', 'failed', 'cancelled', 'timed-out', 'interrupted']),
+  interactive: z.boolean().optional(),
   profile: identifierSchema, machineId: lifecycleIdSchema, generation: z.number().int().nonnegative().nullable(),
   executionHashes: z.array(executionHashSchema).max(128), terminalName: z.string().nullable(),
   results: lifecycleResultsSchema, output: z.string(), exitCode: z.number().int().nullable(),
@@ -249,6 +252,7 @@ export const LifecycleMutationSchema = z.discriminatedUnion('op', [
     op: z.literal('claim'), runId: lifecycleIdSchema, phase: LifecycleRunPhaseSchema, profile: identifierSchema,
     executionHashes: z.array(executionHashSchema).max(128), generation: z.number().int().nonnegative().nullable(),
     rerun: z.boolean(), deadlineAt: z.string().datetime().optional(), terminalName: z.string().max(256).nullable().optional(),
+    interactive: z.boolean().optional(),
     ownershipToken: lifecycleIdSchema.optional(),
   }).strict(),
   z.object({ op: z.literal('append'), runId: lifecycleIdSchema, token: lifecycleIdSchema, output: z.string().max(524_288), results: lifecycleResultsSchema.optional(), bindings: LifecycleBindingsSchema.optional(), incidents: z.array(LifecycleIncidentSchema).optional() }).strict(),

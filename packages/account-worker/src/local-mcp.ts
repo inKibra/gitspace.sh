@@ -1,15 +1,20 @@
 import { DurableObject } from 'cloudflare:workers';
 import {
+  DEFAULT_COMPOSIO_TOOL_POLICY,
+  composioToolPolicySchema,
   mcpAuditEventSchema,
   mcpComposioTransportSchema,
   mcpConnectionStatusSchema,
   mcpConnectionDraftSchema,
+  type ComposioPluginTool,
+  type ComposioToolPolicy,
   type McpAuditEvent,
   type McpComposioTransport,
   type McpConnection,
   type McpConnectionDraft,
   type McpConnectionStatus,
 } from '@gitspace/protocol';
+import { z } from 'zod';
 
 interface ConnectionRow extends Record<string, SqlStorageValue> {
   connection_id: string;
@@ -69,6 +74,25 @@ export class McpConnectionValidationError extends Error {
     super(message);
     this.name = 'McpConnectionValidationError';
   }
+}
+
+/** Stored before tool policies: an explicit allow-list where an empty list meant "nothing allowed yet". */
+const legacyComposioTransportSchema = mcpComposioTransportSchema.omit({ toolPolicy: true }).extend({ allowedTools: z.array(z.string()) });
+
+/** An untouched connection gets the new default; a curated list keeps exactly its access, with new tools denied. */
+function migratedToolPolicy(allowedTools: readonly string[]): ComposioToolPolicy {
+  if (allowedTools.length === 0) return DEFAULT_COMPOSIO_TOOL_POLICY;
+  return { groups: { readOnly: false, write: false, destructive: false }, allow: [...allowedTools], deny: [] };
+}
+
+/** Exceptions must name tools Composio currently offers for the connection's toolkit. */
+export function validateComposioToolPolicy(candidate: unknown, available: readonly ComposioPluginTool[]): ComposioToolPolicy {
+  const parsed = composioToolPolicySchema.safeParse(candidate);
+  if (!parsed.success) throw new McpConnectionValidationError('toolPolicy', parsed.error.issues[0]?.message ?? 'Composio tool policy is invalid');
+  const offered = new Set(available.map((tool) => tool.slug));
+  const unavailable = [...parsed.data.allow, ...parsed.data.deny].find((slug) => !offered.has(slug));
+  if (unavailable) throw new McpConnectionValidationError('toolPolicy', `Composio tool ${unavailable} is unavailable`);
+  return parsed.data;
 }
 
 function connection(row: ConnectionRow): McpConnection {
@@ -165,7 +189,20 @@ export class UserMcpConnectionsDO extends DurableObject<Env> {
           consumed_at TEXT
         );
       `);
+      this.migrateLegacyComposioTransports();
     });
+  }
+
+  /** Rewrites allow-list transports stored before tool policies; runs at construction and is idempotent. */
+  migrateLegacyComposioTransports(): void {
+    for (const row of this.ctx.storage.sql.exec<{ connection_id: string; transport_json: string }>(
+      `SELECT connection_id,transport_json FROM mcp_connections
+       WHERE json_extract(transport_json,'$.type')='composio' AND json_extract(transport_json,'$.toolPolicy') IS NULL`,
+    ).toArray()) {
+      const { allowedTools, ...transport } = legacyComposioTransportSchema.parse(JSON.parse(row.transport_json));
+      const migrated: McpComposioTransport = mcpComposioTransportSchema.parse({ ...transport, toolPolicy: migratedToolPolicy(allowedTools) });
+      this.ctx.storage.sql.exec('UPDATE mcp_connections SET transport_json=? WHERE connection_id=?', JSON.stringify(migrated), row.connection_id);
+    }
   }
 
   list(principalId: string): McpConnection[] {
@@ -218,7 +255,7 @@ export class UserMcpConnectionsDO extends DurableObject<Env> {
       type: 'composio',
       toolkit: input.toolkit,
       connectedAccountId: input.connectedAccountId,
-      allowedTools: [],
+      toolPolicy: DEFAULT_COMPOSIO_TOOL_POLICY,
     });
     if (!input.id || !input.label.trim()) throw new McpConnectionValidationError('connection', 'Composio plugin id and label are required');
     if (this.get(principalId, input.id)) throw new McpConnectionRevisionConflictError(input.id, 0, 1);
@@ -294,14 +331,14 @@ export class UserMcpConnectionsDO extends DurableObject<Env> {
     return this.get(principalId, connectionId)!;
   }
 
-  updateComposioTools(principalId: string, connectionId: string, expectedRevision: number, allowedTools: string[]): McpConnection {
+  updateComposioTools(principalId: string, connectionId: string, expectedRevision: number, toolPolicy: ComposioToolPolicy): McpConnection {
     const current = this.get(principalId, connectionId);
     if (!current) throw new McpConnectionNotFoundError(connectionId);
     if (current.revision !== expectedRevision) {
       throw new McpConnectionRevisionConflictError(connectionId, expectedRevision, current.revision);
     }
     if (current.transport.type !== 'composio') throw new McpConnectionValidationError('connectionId', 'Connection is not a Composio plugin');
-    const transport = mcpComposioTransportSchema.parse({ ...current.transport, allowedTools });
+    const transport = mcpComposioTransportSchema.parse({ ...current.transport, toolPolicy });
     const now = new Date().toISOString();
     this.ctx.storage.sql.exec(
       'UPDATE mcp_connections SET transport_json=?,revision=revision+1,updated_at=? WHERE principal_id=? AND connection_id=? AND revision=?',

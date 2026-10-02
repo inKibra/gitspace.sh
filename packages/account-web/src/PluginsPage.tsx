@@ -1,11 +1,17 @@
-import type {
-  ComposioPluginCatalogRpcView,
-  ComposioPluginToolRpcView,
-  DiscoveredMcpToolRpcView,
-  McpConnectionDraftInput,
-  McpConnectionRpcView,
-  ProjectMcpGrantRpcView,
+import { rpcErrorMessage } from './rpc-error-message.js';
+import {
+  DEFAULT_COMPOSIO_TOOL_POLICY,
+  composioToolAllowed,
+  composioToolGroup,
+  type ComposioPluginCatalogRpcView,
+  type ComposioPluginToolRpcView,
+  type ComposioToolPolicy,
+  type DiscoveredMcpToolRpcView,
+  type McpConnectionDraftInput,
+  type McpConnectionRpcView,
+  type ProjectMcpGrantRpcView,
 } from '@gitspace/protocol/mcp-contract';
+import { COMPOSIO_TOOL_GROUPS, composioToolPolicySummary, pruneComposioToolPolicy, setComposioTool, setComposioToolGroup } from './composio-tool-policy.js';
 import {
   Badge,
   Button,
@@ -59,7 +65,7 @@ export interface PluginsPageProps {
   onAuthorizeComposio(toolkit: string, label: string): Promise<string>;
   onRefreshComposio(connectionId: string): Promise<void>;
   onLoadComposioTools(connectionId: string): Promise<readonly ComposioPluginToolRpcView[]>;
-  onUpdateComposioTools(connectionId: string, expectedRevision: number, allowedTools: readonly string[]): Promise<void>;
+  onUpdateComposioTools(connectionId: string, expectedRevision: number, toolPolicy: ComposioToolPolicy): Promise<void>;
   onDisconnectComposio(connectionId: string, expectedRevision: number): Promise<void>;
   onSetGrant(projectId: string, connectionId: string, projectSpaceEnabled: boolean, workspacesEnabled: boolean, expectedRevision: number): Promise<void>;
   onRevokeGrant(projectId: string, connectionId: string, expectedRevision: number): Promise<void>;
@@ -135,7 +141,7 @@ export function PluginsPage(props: PluginsPageProps) {
   const [secretBindings, setSecretBindings] = useState('');
   const [timeoutMs, setTimeoutMs] = useState('30000');
   const [composioTools, setComposioTools] = useState<readonly ComposioPluginToolRpcView[]>([]);
-  const [selectedTools, setSelectedTools] = useState<readonly string[]>([]);
+  const [toolPolicy, setToolPolicy] = useState<ComposioToolPolicy>(DEFAULT_COMPOSIO_TOOL_POLICY);
   const [toolsLoading, setToolsLoading] = useState(false);
   const [diagnosticProjectId, setDiagnosticProjectId] = useState('');
   const [diagnosticMachineId, setDiagnosticMachineId] = useState('');
@@ -153,16 +159,17 @@ export function PluginsPage(props: PluginsPageProps) {
   useEffect(() => {
     if (!expandedConnection || expandedConnection.transport.type !== 'composio' || expandedConnection.status !== 'ready') {
       setComposioTools([]);
-      setSelectedTools([]);
+      setToolPolicy(DEFAULT_COMPOSIO_TOOL_POLICY);
       return;
     }
     let cancelled = false;
     setToolsLoading(true);
-    setSelectedTools(expandedConnection.transport.allowedTools);
+    const { groups, allow, deny } = expandedConnection.transport.toolPolicy;
+    setToolPolicy({ groups: { ...groups }, allow: [...allow], deny: [...deny] });
     void props.onLoadComposioTools(expandedConnection.id).then((tools) => {
       if (!cancelled) setComposioTools(tools);
     }).catch((failure: unknown) => {
-      if (!cancelled) setActionError(failure instanceof Error ? failure.message : String(failure));
+      if (!cancelled) setActionError(rpcErrorMessage(failure, 'Load integration tools'));
     }).finally(() => {
       if (!cancelled) setToolsLoading(false);
     });
@@ -175,7 +182,7 @@ export function PluginsPage(props: PluginsPageProps) {
     setPending(key);
     setActionError(null);
     try { await action(); }
-    catch (failure) { setActionError(failure instanceof Error ? failure.message : String(failure)); }
+    catch (failure) { setActionError(rpcErrorMessage(failure, 'Integration operation')); }
     finally { pendingRef.current = false; setPending(null); }
   };
 
@@ -203,7 +210,7 @@ export function PluginsPage(props: PluginsPageProps) {
       setAccountLabel('');
     } catch (failure) {
       popup?.close();
-      setActionError(failure instanceof Error ? failure.message : String(failure));
+      setActionError(rpcErrorMessage(failure, 'Authorize integration'));
     } finally {
       pendingRef.current = false;
       setPending(null);
@@ -232,7 +239,7 @@ export function PluginsPage(props: PluginsPageProps) {
           const grantCount = props.grants.filter((grant) => grant.connectionId === connection.id && grant.enabled).length;
           return <Card size="compact" key={connection.id}>
             <CardMedia icon={CloudGlyph} />
-            <CardHeader><CardTitle>{connection.label}</CardTitle><CardDescription>{connection.transport.toolkit} · Composio managed</CardDescription><span className="text-caption tabular-nums text-muted-foreground">{connection.transport.allowedTools.length} allowed tools · {grantCount} project grants</span>{connection.statusMessage ? <span className="flex items-center gap-1 text-caption text-destructive"><AlertCircle width={12} height={12} strokeWidth={1.5} />{connection.statusMessage}</span> : null}</CardHeader>
+            <CardHeader><CardTitle>{connection.label}</CardTitle><CardDescription>{connection.transport.toolkit} · Composio managed</CardDescription><span className="text-caption tabular-nums text-muted-foreground">{composioToolPolicySummary(connection.transport.toolPolicy)} · {grantCount} project grants</span>{connection.statusMessage ? <span className="flex items-center gap-1 text-caption text-destructive"><AlertCircle width={12} height={12} strokeWidth={1.5} />{connection.statusMessage}</span> : null}</CardHeader>
             <CardFooter className="gap-2"><Badge color={statusColor(connection.status)}>{connection.status}</Badge>{connection.status === 'connecting' ? <Button variant="ghost" loading={pending === `refresh:${connection.id}`} onClick={() => void settle(`refresh:${connection.id}`, () => props.onRefreshComposio(connection.id))}>Check connection</Button> : null}<Button variant="ghost" onClick={() => setExpanded(connection.id)}>Manage plugin</Button><Button variant="tertiary" size="icon-compact" aria-label={`Disconnect ${connection.label}`} onClick={() => void settle(`disconnect:${connection.id}`, () => props.onDisconnectComposio(connection.id, connection.revision))}><Trash01 width={16} height={16} strokeWidth={1.5} /></Button></CardFooter>
           </Card>;
         })}</CardGroup> : <EmptyState title="No Composio plugins connected" description="Choose a plugin below and connect an account. Connecting alone does not grant an agent access." />}
@@ -275,9 +282,19 @@ export function PluginsPage(props: PluginsPageProps) {
     <Dialog open={expandedConnection !== null} onOpenChange={(open) => { if (!open) setExpanded(null); }}>
       {expandedConnection ? <DialogContent size="lg"><DialogHeader><DialogTitle>{expandedConnection.label}</DialogTitle><DialogDescription>Choose where agents can discover this plugin and, for Composio plugins, which tools they may call.</DialogDescription></DialogHeader>
         {expandedConnection.transport.type === 'composio' ? <div className="flex flex-col gap-3">
-          <div className="flex items-center justify-between gap-3"><div><h3 className="text-body font-medium text-foreground">Allowed tools</h3><p className="text-caption text-muted-foreground">New Composio tools remain denied until selected here.</p></div><div className="flex gap-2"><Button size="compact" variant="ghost" onClick={() => setSelectedTools(composioTools.filter((tool) => tool.readOnly).map((tool) => tool.slug))}>Select read-only</Button><Button size="compact" variant="ghost" onClick={() => setSelectedTools([])}>Clear</Button></div></div>
-          {toolsLoading ? <EmptyState title="Loading plugin tools…" /> : composioTools.length ? <CardGroup border="outlined" separated>{composioTools.map((tool) => <Card size="compact" key={tool.slug}><CardHeader><CardTitle>{tool.name}</CardTitle><CardDescription>{tool.description ?? tool.slug}</CardDescription><span className="text-caption text-muted-foreground">{tool.destructive ? 'Destructive' : tool.readOnly ? 'Read only' : 'Write capable'} · <span className="font-mono">{tool.slug}</span></span></CardHeader><CardFooter><Switch checked={selectedTools.includes(tool.slug)} label={selectedTools.includes(tool.slug) ? 'Allowed' : 'Denied'} onToggle={() => setSelectedTools((current) => current.includes(tool.slug) ? current.filter((slug) => slug !== tool.slug) : [...current, tool.slug])} /></CardFooter></Card>)}</CardGroup> : <EmptyState title="No tools available" description={expandedConnection.status === 'ready' ? 'Composio did not return tools for this plugin.' : 'Finish connecting this plugin before choosing tools.'} />}
-          <Button variant="secondary" disabled={pending !== null || expandedConnection.status !== 'ready'} loading={pending === `tools:${expandedConnection.id}`} onClick={() => void settle(`tools:${expandedConnection.id}`, () => props.onUpdateComposioTools(expandedConnection.id, expandedConnection.revision, selectedTools))}>Save allowed tools</Button>
+          <div><h3 className="text-body font-medium text-foreground">Allowed tools</h3><p className="text-caption text-muted-foreground">Each group&apos;s setting also applies to tools Composio adds later. Switching a single tool records an exception to its group.</p></div>
+          {toolsLoading ? <EmptyState title="Loading plugin tools…" /> : composioTools.length ? <div className="flex max-h-[50dvh] flex-col gap-4 overflow-y-auto pr-1">{COMPOSIO_TOOL_GROUPS.map(({ group, label }) => {
+            const members = composioTools.filter((tool) => composioToolGroup(tool) === group);
+            const allowedCount = members.filter((tool) => composioToolAllowed(toolPolicy, tool)).length;
+            return <section key={group} className="flex flex-col gap-2" aria-label={`${label} tools`}>
+              <div className="flex items-center justify-between gap-3"><div><h4 className="text-body font-medium text-foreground">{label}</h4><p className="text-caption tabular-nums text-muted-foreground">{allowedCount} of {members.length} allowed</p></div><Switch aria-label={`${label} tools`} checked={toolPolicy.groups[group]} label={toolPolicy.groups[group] ? 'On' : 'Off'} onToggle={() => setToolPolicy((current) => setComposioToolGroup(current, composioTools, group, !current.groups[group]))} /></div>
+              {members.length ? <CardGroup border="outlined" separated>{members.map((tool) => {
+                const allowed = composioToolAllowed(toolPolicy, tool);
+                return <Card size="compact" key={tool.slug}><CardHeader><CardTitle>{tool.name}</CardTitle><CardDescription>{tool.description ?? tool.slug}</CardDescription><span className="text-caption text-muted-foreground"><span className="font-mono">{tool.slug}</span>{allowed !== toolPolicy.groups[group] ? ' · Exception' : ''}</span></CardHeader><CardFooter><Switch checked={allowed} label={allowed ? 'Allowed' : 'Denied'} onToggle={() => setToolPolicy((current) => setComposioTool(current, tool, !composioToolAllowed(current, tool)))} /></CardFooter></Card>;
+              })}</CardGroup> : <p className="text-caption text-muted-foreground">No {label.toLowerCase()} tools yet.</p>}
+            </section>;
+          })}</div> : <EmptyState title="No tools available" description={expandedConnection.status === 'ready' ? 'Composio did not return tools for this plugin.' : 'Finish connecting this plugin before choosing tools.'} />}
+          <Button variant="secondary" disabled={pending !== null || expandedConnection.status !== 'ready' || toolsLoading} loading={pending === `tools:${expandedConnection.id}`} onClick={() => void settle(`tools:${expandedConnection.id}`, () => props.onUpdateComposioTools(expandedConnection.id, expandedConnection.revision, pruneComposioToolPolicy(toolPolicy, composioTools)))}>Save tool settings</Button>
         </div> : null}
         <ProjectAssignmentMatrix projects={props.projects} assignments={props.grants.filter((candidate) => candidate.connectionId === expandedConnection.id).map((candidate) => ({ projectId: candidate.projectId, projectSpaceEnabled: candidate.enabled && candidate.projectSpaceEnabled, workspacesEnabled: candidate.enabled && candidate.workspacesEnabled }))} defaultProjectSpaceEnabled={false} defaultWorkspacesEnabled={false} unassignedLabel="Not granted" resetLabel="Revoke" disabled={pending !== null || props.assignmentsLoading} onReset={(projectId) => { const grant = props.grants.find((candidate) => candidate.connectionId === expandedConnection.id && candidate.projectId === projectId); if (grant) void settle(`revoke:${projectId}:${expandedConnection.id}`, () => props.onRevokeGrant(projectId, expandedConnection.id, grant.revision)); }} onChange={(assignment) => { const current = props.grants.find((candidate) => candidate.connectionId === expandedConnection.id && candidate.projectId === assignment.projectId); void settle(`grant:${assignment.projectId}:${expandedConnection.id}`, () => props.onSetGrant(assignment.projectId, expandedConnection.id, assignment.projectSpaceEnabled, assignment.workspacesEnabled, current?.revision ?? 0)); }} />
         {props.assignmentsLoading ? <p role="status" className="text-caption text-muted-foreground">Loading project grants…</p> : null}
@@ -286,7 +303,7 @@ export function PluginsPage(props: PluginsPageProps) {
       </DialogContent> : null}
     </Dialog>
 
-    <Dialog open={connectedToolkit !== null} onOpenChange={(open) => { if (!open && pending === null) setConnectingToolkit(null); }}><DialogContent><DialogHeader><DialogTitle>Connect {connectedToolkit?.name ?? 'plugin'}</DialogTitle><DialogDescription>Composio manages the account credential. No agent receives access until you choose tools and assign this plugin.</DialogDescription></DialogHeader><InputGroup><InputField index={0} label="Account label" value={accountLabel} onChange={setAccountLabel} placeholder="Work account" /></InputGroup>{error ? <p role="alert" className="text-caption text-destructive">{error}</p> : null}<DialogFooter><Button variant="secondary" disabled={pending !== null} onClick={() => setConnectingToolkit(null)}>Cancel</Button><Button variant="primary" disabled={pending !== null} loading={pending?.startsWith('authorize:') === true} onClick={() => void authorizeComposio()}>Continue to authentication</Button></DialogFooter></DialogContent></Dialog>
+    <Dialog open={connectedToolkit !== null} onOpenChange={(open) => { if (!open && pending === null) setConnectingToolkit(null); }}><DialogContent><DialogHeader><DialogTitle>Connect {connectedToolkit?.name ?? 'plugin'}</DialogTitle><DialogDescription>Composio manages the account credential. Every tool starts allowed, and no agent receives access until you grant this plugin to a project.</DialogDescription></DialogHeader><InputGroup><InputField index={0} label="Account label" value={accountLabel} onChange={setAccountLabel} placeholder="Work account" /></InputGroup>{error ? <p role="alert" className="text-caption text-destructive">{error}</p> : null}<DialogFooter><Button variant="secondary" disabled={pending !== null} onClick={() => setConnectingToolkit(null)}>Cancel</Button><Button variant="primary" disabled={pending !== null} loading={pending?.startsWith('authorize:') === true} onClick={() => void authorizeComposio()}>Continue to authentication</Button></DialogFooter></DialogContent></Dialog>
 
     <Dialog open={creatingCustom} onOpenChange={(open) => { if (pending === null) setCreatingCustom(open); }}><DialogContent size="lg"><DialogHeader><DialogTitle>Connect custom plugin</DialogTitle><DialogDescription>Run a local MCP server on a machine or connect a Streamable HTTP or SSE server. Project access is assigned separately.</DialogDescription></DialogHeader><div className="flex flex-col gap-4">
       <InputGroup className="w-full"><InputField index={0} label="Connection ID" placeholder="Stable lowercase identifier used by project grants" value={id} onChange={setId} /><InputField index={1} label="Display label" value={label} onChange={setLabel} /></InputGroup>

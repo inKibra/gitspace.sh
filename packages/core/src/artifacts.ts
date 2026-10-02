@@ -1,5 +1,5 @@
 import { rmSync } from 'node:fs';
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, open, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, posix } from 'node:path';
 import {
   artifactManifestSchema,
@@ -9,6 +9,7 @@ import {
   decryptArtifactBytes,
   encryptArtifactBytes,
 } from '@gitspace/protocol';
+import { CHECKPOINT_CHUNK_BYTES, CHUNKED_CHECKPOINT_VERSION, chunkedCheckpointManifestSchema } from '@gitspace/protocol-workspace';
 import { and, eq, inArray } from 'drizzle-orm';
 import { Result, TaggedError, type Result as ResultType } from 'better-result';
 import type { GitSpaceDatabase } from './database.js';
@@ -183,14 +184,8 @@ export class LocalArtifactResolver {
     bytes: Uint8Array,
     mediaType?: string,
   ): Promise<ResultType<LocalArtifactEntry, ArtifactError>> {
-    const resolved = this.resolve(capability, url);
+    const resolved = this.resolveWritable(capability, url);
     if (resolved.status === 'error') return resolved;
-    if (!resolved.value.path) {
-      return Result.err(new ArtifactAccessDenied({ url, message: 'Artifact writes require a file path' }));
-    }
-    if (!resolved.value.writable) {
-      return Result.err(new ArtifactAccessDenied({ url, message: 'Capability cannot write this artifact scope' }));
-    }
     try {
       const existing = this.database.orm.select().from(artifactEntries).where(and(
         eq(artifactEntries.scopeId, resolved.value.scope.id),
@@ -207,57 +202,54 @@ export class LocalArtifactResolver {
           }
         }
       }
-      const key = await deriveArtifactScopeKey(this.projectKey, resolved.value.scope.id);
-      const sealed = await encryptArtifactBytes(bytes, key);
-      const hash = await digest(sealed);
+      const hash = await this.seal(resolved.value.scope.id, bytes.byteLength, async (offset, length) => bytes.subarray(offset, offset + length));
       const cachePath = this.cachePath(hash);
       await atomicWrite(cachePath, bytes);
-      await atomicWrite(this.sealedPath(hash), sealed);
-      const now = new Date().toISOString();
-      this.database.orm.transaction((tx) => {
-        tx.insert(artifactBlobs).values({
-          hash,
-          size: bytes.byteLength,
-          cachePath,
-          state: 'dirty',
-          lastAccessedAt: now,
-          createdAt: now,
-        }).onConflictDoUpdate({
-          target: artifactBlobs.hash,
-          set: { cachePath, state: 'dirty', lastAccessedAt: now },
-        }).run();
-        tx.insert(artifactEntries).values({
-          scopeId: resolved.value.scope.id,
-          path: resolved.value.path,
-          blobHash: hash,
-          size: bytes.byteLength,
-          mediaType: mediaType ?? null,
-          generation: resolved.value.scope.generation + 1,
-          updatedAt: now,
-        }).onConflictDoUpdate({
-          target: [artifactEntries.scopeId, artifactEntries.path],
-          set: {
-            blobHash: hash,
-            size: bytes.byteLength,
-            mediaType: mediaType ?? null,
-            generation: resolved.value.scope.generation + 1,
-            updatedAt: now,
-          },
-        }).run();
-        tx.update(artifactScopes).set({ dirty: true, updatedAt: now })
-          .where(eq(artifactScopes.id, resolved.value.scope.id)).run();
-      });
-      return Result.ok(this.toLocalEntry(resolved.value, {
-        scopeId: resolved.value.scope.id,
-        path: resolved.value.path,
-        blobHash: hash,
-        size: bytes.byteLength,
-        mediaType: mediaType ?? null,
-        generation: resolved.value.scope.generation + 1,
-        updatedAt: now,
-      }));
+      return Result.ok(this.register(resolved.value, hash, bytes.byteLength, mediaType ?? null, cachePath));
     } catch (error) {
       return Result.err(storageError('write', error));
+    }
+  }
+
+  /** Moves a private staged file into the store, sealing it part by part instead of holding it in memory. */
+  async writeFile(
+    capability: ArtifactCapability,
+    url: string,
+    source: string,
+    mediaType?: string,
+  ): Promise<ResultType<LocalArtifactEntry, ArtifactError>> {
+    const resolved = this.resolveWritable(capability, url);
+    if (resolved.status === 'error') return resolved;
+    try {
+      const handle = await open(source, 'r');
+      let size: number;
+      let hash: `sha256:${string}`;
+      try {
+        size = (await handle.stat()).size;
+        hash = await this.seal(resolved.value.scope.id, size, async (offset, length) => {
+          const part = new Uint8Array(length);
+          for (let filled = 0; filled < length;) {
+            const { bytesRead } = await handle.read(part, filled, length - filled, offset + filled);
+            if (bytesRead === 0) throw new Error(`Artifact source ${source} ended before ${size} bytes`);
+            filled += bytesRead;
+          }
+          return part;
+        });
+      } finally {
+        await handle.close();
+      }
+      const cachePath = this.cachePath(hash);
+      await mkdir(dirname(cachePath), { recursive: true });
+      try {
+        await rename(source, cachePath);
+      } catch (error) {
+        if (!(error && typeof error === 'object' && 'code' in error && error.code === 'EXDEV')) throw error;
+        await copyFile(source, cachePath);
+        await rm(source, { force: true });
+      }
+      return Result.ok(this.register(resolved.value, hash, size, mediaType ?? null, cachePath));
+    } catch (error) {
+      return Result.err(storageError('write file', error));
     }
   }
 
@@ -311,7 +303,24 @@ export class LocalArtifactResolver {
       const sealed = await this.store.get(entry.blobHash as `sha256:${string}`);
       if (!sealed) return Result.err(new ArtifactNotFound({ url, message: `Remote artifact ${entry.blobHash} does not exist` }));
       if (await digest(sealed) !== entry.blobHash) throw new Error(`Remote artifact ${entry.blobHash} failed content verification`);
-      const bytes = await decryptArtifactBytes(sealed, await deriveArtifactScopeKey(this.projectKey, resolved.value.scope.id));
+      const key = await deriveArtifactScopeKey(this.projectKey, resolved.value.scope.id);
+      const parts = await this.sealedParts(sealed, key);
+      let bytes: Uint8Array;
+      if (parts) {
+        bytes = new Uint8Array(parts.reduce((total, part) => total + part.size, 0));
+        let offset = 0;
+        for (const part of parts) {
+          const stored = await this.store.get(part.hash as `sha256:${string}`);
+          if (!stored) throw new Error(`Remote artifact part ${part.hash} of ${entry.blobHash} does not exist`);
+          if (await digest(stored) !== part.hash) throw new Error(`Remote artifact part ${part.hash} failed content verification`);
+          const plaintext = await decryptArtifactBytes(stored, key);
+          if (plaintext.byteLength !== part.size) throw new Error(`Remote artifact part ${part.hash} has an unexpected size`);
+          bytes.set(plaintext, offset);
+          offset += plaintext.byteLength;
+        }
+      } else {
+        bytes = await decryptArtifactBytes(sealed, key);
+      }
       const cachePath = this.cachePath(entry.blobHash);
       await atomicWrite(cachePath, bytes);
       const now = new Date().toISOString();
@@ -370,6 +379,7 @@ export class LocalArtifactResolver {
       .where(eq(artifactEntries.scopeId, scope.id)).orderBy(artifactEntries.path).all();
     const hashes = [...new Set(entries.map((entry) => entry.blobHash))];
     try {
+      const key = await deriveArtifactScopeKey(this.projectKey, scope.id);
       if (hashes.length > 0) {
         const blobs = this.database.orm.select().from(artifactBlobs).where(inArray(artifactBlobs.hash, hashes)).all();
         const byHash = new Map(blobs.map((blob) => [blob.hash, blob]));
@@ -378,6 +388,11 @@ export class LocalArtifactResolver {
           if (!blob) throw new Error(`Artifact blob ${hash} is missing from the local journal`);
           if (blob.state !== 'dirty') continue;
           const sealed = new Uint8Array(await readFile(this.sealedPath(hash)));
+          // Parts first: a published inventory must never reference an incomplete upload.
+          for (const part of await this.sealedParts(sealed, key) ?? []) {
+            const partPath = join(`${this.sealedPath(hash)}.parts`, part.hash.slice('sha256:'.length));
+            await this.store.put(part.hash as `sha256:${string}`, new Uint8Array(await readFile(partPath)));
+          }
           await this.store.put(hash as `sha256:${string}`, sealed);
         }
       }
@@ -393,10 +408,7 @@ export class LocalArtifactResolver {
           mediaType: entry.mediaType,
         })),
       };
-      const sealedManifest = await encryptArtifactBytes(
-        new TextEncoder().encode(JSON.stringify(manifest)),
-        await deriveArtifactScopeKey(this.projectKey, scope.id),
-      );
+      const sealedManifest = await encryptArtifactBytes(new TextEncoder().encode(JSON.stringify(manifest)), key);
       const manifestHash = await digest(sealedManifest);
       await this.store.put(manifestHash, sealedManifest);
       const now = new Date().toISOString();
@@ -539,10 +551,16 @@ export class LocalArtifactResolver {
   async verifyScope(scope: ArtifactScope): Promise<ResultType<void, ArtifactError>> {
     try {
       const entries = await this.scopeManifestEntries(scope);
+      const key = await deriveArtifactScopeKey(this.projectKey, scope.id);
       for (const hash of new Set(entries.map((entry) => entry.blobHash))) {
         const sealed = await this.store.get(hash as `sha256:${string}`);
         if (!sealed) throw new Error(`Artifact blob ${hash} does not exist`);
         if (await digest(sealed) !== hash) throw new Error(`Artifact blob ${hash} failed content verification`);
+        for (const part of await this.sealedParts(sealed, key) ?? []) {
+          const stored = await this.store.get(part.hash as `sha256:${string}`);
+          if (!stored) throw new Error(`Artifact blob part ${part.hash} of ${hash} does not exist`);
+          if (await digest(stored) !== part.hash) throw new Error(`Artifact blob part ${part.hash} failed content verification`);
+        }
       }
       return Result.ok(undefined);
     } catch (error) {
@@ -592,6 +610,7 @@ export class LocalArtifactResolver {
         if (referenced.has(blob.hash) || blob.state === 'dirty' || !HASH_PATTERN.test(blob.hash)) continue;
         rmSync(this.cachePath(blob.hash), { force: true });
         rmSync(this.sealedPath(blob.hash), { force: true });
+        rmSync(`${this.sealedPath(blob.hash)}.parts`, { recursive: true, force: true });
         tx.delete(artifactBlobs).where(eq(artifactBlobs.hash, blob.hash)).run();
       }
     });
@@ -646,6 +665,104 @@ export class LocalArtifactResolver {
         ? 'local://workspace'
         : `local://workspaces/${spaceId}`;
     return Result.ok({ scope, path, writable, displayRoot });
+  }
+
+  private resolveWritable(capability: ArtifactCapability, url: string): ResultType<ResolvedArtifactPath, ArtifactError> {
+    const resolved = this.resolve(capability, url);
+    if (resolved.status === 'error') return resolved;
+    if (!resolved.value.path) {
+      return Result.err(new ArtifactAccessDenied({ url, message: 'Artifact writes require a file path' }));
+    }
+    if (!resolved.value.writable) {
+      return Result.err(new ArtifactAccessDenied({ url, message: 'Capability cannot write this artifact scope' }));
+    }
+    return resolved;
+  }
+
+  /**
+   * Seals plaintext for the object store. Content above one object part becomes independently
+   * sealed parts plus a sealed inventory (the checkpoint chunk format); the inventory is the blob.
+   */
+  private async seal(
+    scopeId: string,
+    size: number,
+    readPart: (offset: number, length: number) => Promise<Uint8Array>,
+  ): Promise<`sha256:${string}`> {
+    const key = await deriveArtifactScopeKey(this.projectKey, scopeId);
+    if (size <= CHECKPOINT_CHUNK_BYTES) {
+      const sealed = await encryptArtifactBytes(await readPart(0, size), key);
+      const hash = await digest(sealed);
+      await atomicWrite(this.sealedPath(hash), sealed);
+      return hash;
+    }
+    const staging = join(this.cacheRoot, 'sealed', `.${crypto.randomUUID()}.parts`);
+    await mkdir(staging, { recursive: true });
+    try {
+      const chunks: Array<{ hash: `sha256:${string}`; size: number }> = [];
+      for (let offset = 0; offset < size; offset += CHECKPOINT_CHUNK_BYTES) {
+        const length = Math.min(CHECKPOINT_CHUNK_BYTES, size - offset);
+        const sealed = await encryptArtifactBytes(await readPart(offset, length), key);
+        const hash = await digest(sealed);
+        await writeFile(join(staging, hash.slice('sha256:'.length)), sealed);
+        chunks.push({ hash, size: length });
+      }
+      const inventory = await encryptArtifactBytes(new TextEncoder().encode(JSON.stringify({ version: 1, size, chunks })), key);
+      const envelope = new Uint8Array(1 + inventory.byteLength);
+      envelope[0] = CHUNKED_CHECKPOINT_VERSION;
+      envelope.set(inventory, 1);
+      const hash = await digest(envelope);
+      await rename(staging, `${this.sealedPath(hash)}.parts`);
+      await atomicWrite(this.sealedPath(hash), envelope);
+      return hash;
+    } finally {
+      await rm(staging, { recursive: true, force: true });
+    }
+  }
+
+  /** Parts of a sealed inventory, or null for a single sealed object. */
+  private async sealedParts(sealed: Uint8Array, key: Uint8Array): Promise<Array<{ hash: string; size: number }> | null> {
+    if (sealed[0] !== CHUNKED_CHECKPOINT_VERSION) return null;
+    const inventory = await decryptArtifactBytes(sealed.subarray(1), key);
+    return chunkedCheckpointManifestSchema.parse(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(inventory))).chunks;
+  }
+
+  private register(
+    resolved: ResolvedArtifactPath,
+    hash: `sha256:${string}`,
+    size: number,
+    mediaType: string | null,
+    cachePath: string,
+  ): LocalArtifactEntry {
+    const now = new Date().toISOString();
+    const entry: ArtifactEntry = {
+      scopeId: resolved.scope.id,
+      path: resolved.path,
+      blobHash: hash,
+      size,
+      mediaType,
+      generation: resolved.scope.generation + 1,
+      updatedAt: now,
+    };
+    this.database.orm.transaction((tx) => {
+      tx.insert(artifactBlobs).values({
+        hash,
+        size,
+        cachePath,
+        state: 'dirty',
+        lastAccessedAt: now,
+        createdAt: now,
+      }).onConflictDoUpdate({
+        target: artifactBlobs.hash,
+        set: { cachePath, state: 'dirty', lastAccessedAt: now },
+      }).run();
+      tx.insert(artifactEntries).values(entry).onConflictDoUpdate({
+        target: [artifactEntries.scopeId, artifactEntries.path],
+        set: { blobHash: hash, size, mediaType, generation: entry.generation, updatedAt: now },
+      }).run();
+      tx.update(artifactScopes).set({ dirty: true, updatedAt: now })
+        .where(eq(artifactScopes.id, resolved.scope.id)).run();
+    });
+    return this.toLocalEntry(resolved, entry);
   }
 
   private toLocalEntry(resolved: ResolvedArtifactPath, entry: ArtifactEntry): LocalArtifactEntry {

@@ -3,6 +3,7 @@ import { Badge, Button, Card, CardContent, CardDescription, CardHeader, CardTitl
 import { RefreshCcw01 } from '@untitledui/icons';
 import { useEffect, useState } from 'react';
 import { EmptyState } from '../GitSpaceShell.js';
+import { rpcErrorMessage } from '../rpc-error-message.js';
 
 export interface InspectorAgentSetupState {
   sessionId: string | null;
@@ -73,7 +74,7 @@ export function AgentSetupView({ state, onDirtyChange }: { state: InspectorAgent
       clearDraft(name);
       setSaved(`${draft.path} saved to the working tree.`);
     } catch (error) {
-      setSaveErrors((current) => ({ ...current, [name]: error instanceof Error ? error.message : String(error) }));
+      setSaveErrors((current) => ({ ...current, [name]: rpcErrorMessage(error, 'Save agent definition') }));
     } finally { setSaving(null); }
   };
 

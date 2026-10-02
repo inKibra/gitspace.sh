@@ -12,7 +12,7 @@ import { afterEach, beforeEach, expect, it, vi, type Mock } from 'vitest';
 import { AppSidebar } from './AppSidebar.js';
 import type { ProjectLifecycleView } from './GitSpaceShell.js';
 import { ACCOUNT_DIRECTORY_CHANGED, type ProductRoute } from './routes.js';
-import { useAccountDirectory, type Directory, type DirectoryClient } from './useAccountDirectory.js';
+import { useWorkspaceProjection, type Directory, type DirectoryClient, type WorkspaceProjection } from './useAccountDirectory.js';
 import { SynchronizationContext, useAccountMachines, useAccountProjects } from './SynchronizationProvider.js';
 import { SynchronizationOwner, type SynchronizationSource } from './synchronization.js';
 
@@ -30,7 +30,7 @@ interface Fixture {
   machines: Array<{ id: string; label: string; state: 'online' | 'offline'; desiredState: 'online' | 'offline' }>;
   runtime: RuntimeSnapshot;
   failures: { directory: string | null; runtime: string | null };
-  bootstrap: Mock<() => Promise<RuntimeReply>>;
+  spaceView: Mock<() => Promise<RuntimeReply>>;
   client: DirectoryClient;
   source: SynchronizationSource<AccountDirectorySnapshot>;
   revisions: Record<string, number>;
@@ -90,9 +90,9 @@ function fixture(): Fixture {
     queued.push({ type: 'change', resource: 'account-directory', cursor, revision: cursor, previous, value: snapshot() });
     notify();
   };
-  const bootstrap = vi.fn<() => Promise<RuntimeReply>>(async () => failures.runtime ? { status: 'error', error: new Error(failures.runtime) } : { status: 'ok', value: structuredClone(runtime) });
-  const client: DirectoryClient = { bootstrap };
-  return { projects, saved, placements, machines, runtime, failures, bootstrap, client, source, revisions, publish };
+  const spaceView = vi.fn<() => Promise<RuntimeReply>>(async () => failures.runtime ? { status: 'error', error: new Error(failures.runtime) } : { status: 'ok', value: structuredClone(runtime) });
+  const client: DirectoryClient = { spaceView };
+  return { projects, saved, placements, machines, runtime, failures, spaceView, client, source, revisions, publish };
 }
 
 let container: HTMLDivElement;
@@ -100,6 +100,7 @@ let root: Root;
 let animationDescriptor: PropertyDescriptor | undefined;
 let directory: Directory;
 let synchronization: SynchronizationOwner;
+let acceptRuntime: WorkspaceProjection['acceptRuntime'];
 
 beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
@@ -124,7 +125,7 @@ function Probe(props: { scene: Fixture; selected?: { projectId: string; workspac
   return <SynchronizationContext.Provider value={synchronization}><DirectoryProbe {...props} /></SynchronizationContext.Provider>;
 }
 function DirectoryProbe({ scene, selected = null, view = 'settings', projects = scene.projects }: { scene: Fixture; selected?: { projectId: string; workspaceId: string | null } | null; view?: ProductRoute; projects?: Fixture['projects'] }) {
-  directory = useAccountDirectory(projects, scene.client, scene.source);
+  ({ directory, acceptRuntime } = useWorkspaceProjection(projects, scene.client, scene.source));
   return <SidebarProvider persist={false}><AppSidebar view={view} onView={() => undefined} selected={selected} projects={projects.map((project) => ({ ...project, ...(directory[project.id] ?? { workspaces: [] }) }))} machines={[]} onSelectWorkspace={() => undefined} /></SidebarProvider>;
 }
 
@@ -162,6 +163,65 @@ it('populates every project and holder independently of the selected pane', asyn
   expect(directory.b?.workspaces[0]?.summary?.status).toBeUndefined();
 });
 
+it('retains accepted activity across navigation and older reads, then converges on a newer read', async () => {
+  const scene = fixture();
+  await act(async () => { root.render(<Probe scene={scene} selected={{ projectId: 'a', workspaceId: 'a-work' }} view="agent" />); });
+  const oldRead = Promise.withResolvers<RuntimeReply>();
+  scene.spaceView.mockImplementationOnce(() => oldRead.promise);
+  await refresh();
+  let release: (() => void) | undefined;
+  await act(async () => { release = acceptRuntime('a', 'a-work', { ...workspaceSummary()!, status: waiting, freshness: 'fresh', refreshing: false }); });
+  expect(row('Alpha work').querySelector('.status-dot')?.hasAttribute('data-pulse')).toBe(false);
+  await act(async () => {
+    release?.();
+    root.render(<Probe scene={scene} view="settings" />);
+    oldRead.resolve({ status: 'ok', value: structuredClone(scene.runtime) });
+  });
+  expect(workspaceSummary()?.status?.primaryColor).toBe('blue');
+  await refresh();
+  expect(workspaceSummary()?.status?.primaryColor).toBe('green');
+});
+
+it('keeps open-pane readiness through native reads and releases it without losing activity', async () => {
+  const scene = fixture();
+  await act(async () => { root.render(<Probe scene={scene} selected={{ projectId: 'a', workspaceId: 'a-work' }} view="agent" />); });
+  const nativeReads = scene.spaceView.mock.calls.length;
+  let release: (() => void) | undefined;
+  await act(async () => {
+    release = acceptRuntime('a', 'a-work', { ...workspaceSummary()!, status: waiting, freshness: 'stale', detail: 'Connection unavailable' });
+  });
+  expect(scene.spaceView.mock.calls.length).toBe(nativeReads);
+  expect(workspaceSummary()?.freshness).toBe('stale');
+  await refresh();
+  expect(workspaceSummary()?.status?.primaryColor).toBe('green');
+  expect(workspaceSummary()?.freshness).toBe('stale');
+  expect(row('Alpha work').querySelector('.status-dot')?.hasAttribute('data-pulse')).toBe(false);
+  await act(async () => { release?.(); });
+  await refresh();
+  expect(workspaceSummary()?.status?.primaryColor).toBe('green');
+  expect(workspaceSummary()?.freshness).toBe('fresh');
+  expect(row('Alpha work').querySelector('.status-dot')?.hasAttribute('data-pulse')).toBe(true);
+});
+
+it('rejects active observations after cloud close and across holder or generation changes', async () => {
+  const scene = fixture();
+  await act(async () => { root.render(<Probe scene={scene} />); });
+  const oldSummary = { ...workspaceSummary()!, status: waiting };
+  const placement = scene.placements.find((item) => item.spaceId === 'a-work')!;
+  placement.state = 'closed';
+  await act(async () => { scene.publish(); });
+  await act(async () => { acceptRuntime('a', 'a-work', oldSummary); });
+  expect(workspaceSummary()).toMatchObject({ holder: { kind: 'released' } });
+  expect(workspaceSummary()?.status).toBeUndefined();
+  placement.state = 'open';
+  placement.holderId = 'laptop';
+  placement.generation = 2;
+  await act(async () => { scene.publish(); });
+  await act(async () => { acceptRuntime('a', 'a-work', oldSummary); });
+  expect(workspaceSummary()).toMatchObject({ holder: { kind: 'held', machineId: 'laptop' }, generation: 2 });
+  expect(workspaceSummary()?.status).toBeUndefined();
+});
+
 it('retains the same status circles through partial and failed refreshes, then confirms fresh recovery', async () => {
   const scene = fixture();
   await act(async () => { root.render(<Probe scene={scene} />); });
@@ -169,7 +229,7 @@ it('retains the same status circles through partial and failed refreshes, then c
   const baseCircle = row('Alpha').querySelector('.status-dot');
   const rowCount = container.querySelectorAll('[data-sidebar="menu-sub-item"]').length;
   const pending = Promise.withResolvers<RuntimeReply>();
-  scene.bootstrap.mockImplementationOnce(() => pending.promise);
+  scene.spaceView.mockImplementationOnce(() => pending.promise);
   await refresh();
   expect(workspaceSummary()).toMatchObject({ status: { primaryColor: 'green' }, freshness: 'fresh', refreshing: true });
   expect(directory.a?.workspaces[0]?.runtime?.stack.blockedBy).toEqual(['a-parent']);
@@ -184,7 +244,7 @@ it('retains the same status circles through partial and failed refreshes, then c
   expect(row('Alpha').getAttribute('aria-description')).toContain('Runtime disconnected');
   expect(container.querySelectorAll('[data-sidebar="menu-sub-item"]')).toHaveLength(rowCount);
   const recovery = Promise.withResolvers<RuntimeReply>();
-  scene.bootstrap.mockImplementationOnce(() => recovery.promise);
+  scene.spaceView.mockImplementationOnce(() => recovery.promise);
   await refresh();
   expect(workspaceSummary()?.freshness).toBe('stale');
   expect(row('Alpha').getAttribute('aria-description')).toContain('Runtime disconnected');
@@ -266,7 +326,7 @@ it('coalesces changes during an in-flight read and ignores its superseded runtim
   await act(async () => { root.render(<Probe scene={scene} />); });
   const pending = Promise.withResolvers<RuntimeReply>();
   const staleRuntime = structuredClone(scene.runtime);
-  scene.bootstrap.mockImplementationOnce(() => pending.promise);
+  scene.spaceView.mockImplementationOnce(() => pending.promise);
   await refresh();
   const placement = scene.placements.find((space) => space.spaceId === 'a-work')!;
   placement.generation = 2;
@@ -382,16 +442,16 @@ it('refreshes activity revisions only for the affected project without idle side
   for (let index = 0; index < 100; index++) scene.saved.b.push({ ...scene.saved.b[1]!, id: `b-archived-${index}`, lifecycle: 'archived', archivedAt: '2026-09-12T00:00:00.000Z' });
   await act(async () => { root.render(<Probe scene={scene} />); });
   expect(source).toHaveBeenCalledOnce();
-  expect(scene.bootstrap).toHaveBeenCalledOnce();
+  expect(scene.spaceView).toHaveBeenCalledOnce();
   scene.runtime.workspaces[0]!.status = waiting;
   scene.revisions.b!++;
   await act(async () => { scene.publish(); });
   expect(workspaceSummary()?.status?.primaryColor).toBe('green');
-  expect(scene.bootstrap).toHaveBeenCalledOnce();
+  expect(scene.spaceView).toHaveBeenCalledOnce();
   scene.revisions.a!++;
   await act(async () => { scene.publish(); });
   expect(workspaceSummary()?.status?.primaryColor).toBe('blue');
-  expect(scene.bootstrap).toHaveBeenCalledTimes(2);
+  expect(scene.spaceView).toHaveBeenCalledTimes(2);
   expect(source).toHaveBeenCalledOnce();
 });
 
@@ -402,26 +462,26 @@ it('refreshes only the changed holder and confirms status after that machine ret
   placement.endpoint = '/machine/laptop/rpc';
   scene.runtime.workspaces[0]!.possessedBy = 'laptop';
   await act(async () => { root.render(<Probe scene={scene} />); });
-  expect(scene.bootstrap).toHaveBeenCalledTimes(2);
+  expect(scene.spaceView).toHaveBeenCalledTimes(2);
   scene.runtime.baseSpace.status = waiting;
   scene.runtime.workspaces[0]!.status = waiting;
   scene.machines[1]!.state = 'offline';
   await act(async () => { scene.publish(); });
   expect(directory.a?.baseSummary).toMatchObject({ status: { primaryColor: 'green' }, freshness: 'fresh' });
   expect(workspaceSummary()).toMatchObject({ status: { primaryColor: 'green' }, freshness: 'stale' });
-  expect(scene.bootstrap).toHaveBeenCalledTimes(2);
+  expect(scene.spaceView).toHaveBeenCalledTimes(2);
   scene.machines[1]!.state = 'online';
   await act(async () => { scene.publish(); });
   expect(directory.a?.baseSummary).toMatchObject({ status: { primaryColor: 'green' }, freshness: 'fresh' });
   expect(workspaceSummary()).toMatchObject({ status: { primaryColor: 'blue' }, freshness: 'fresh' });
-  expect(scene.bootstrap).toHaveBeenCalledTimes(3);
+  expect(scene.spaceView).toHaveBeenCalledTimes(3);
 });
 
 it('does not let a late native response resurrect a project deleted by the directory feed', async () => {
   const scene = fixture();
   await act(async () => { root.render(<Probe scene={scene} />); });
   const pending = Promise.withResolvers<RuntimeReply>();
-  scene.bootstrap.mockImplementationOnce(() => pending.promise);
+  scene.spaceView.mockImplementationOnce(() => pending.promise);
   scene.revisions.a!++;
   await act(async () => { scene.publish(); });
   scene.projects.splice(0, 1);
@@ -451,5 +511,5 @@ it('shares the sidebar snapshot with account project and machine consumers', asy
   expect(workspaceSummary()?.holder).toEqual({ kind: 'held', machineId: 'desk', label: 'Renamed desk' });
   expect(container.querySelector('output')?.textContent).toContain('Renamed desk,Laptop');
   expect(source).toHaveBeenCalledOnce();
-  expect(scene.bootstrap).toHaveBeenCalledOnce();
+  expect(scene.spaceView).toHaveBeenCalledOnce();
 });

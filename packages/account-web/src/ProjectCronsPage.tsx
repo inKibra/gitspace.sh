@@ -1,3 +1,4 @@
+import { rpcErrorMessage } from './rpc-error-message.js';
 import {
   Badge,
   Button,
@@ -202,7 +203,7 @@ function CronEditor({
         enabled,
       });
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(rpcErrorMessage(cause, 'Save scheduled task'));
     } finally {
       submittingRef.current = false;
       setSubmitting(false);
@@ -304,7 +305,7 @@ export function ProjectCronsPage(props: ProjectCronsPageProps): ReactElement {
   const failures = items.filter((cron) => cron.lastRunState === 'failed' || cron.lastRunState === 'blocked').length;
   const targetCount = new Set(items.map((cron) => projectCronTargetKey(cron.target))).size;
 
-  const handleError = (cause: unknown): void => setActionError(cause instanceof Error ? cause.message : String(cause));
+  const handleError = (cause: unknown): void => setActionError(rpcErrorMessage(cause, 'Scheduled task operation'));
 
   const update = async (cron: ProjectCronView, draft: ProjectCronDraft): Promise<void> => {
     setBusyId(cron.id);

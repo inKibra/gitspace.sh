@@ -34,6 +34,9 @@ import {
 } from '../src/index.js';
 
 import { eq } from 'drizzle-orm';
+import type { CanonicalSession } from '@gitspace/protocol';
+import { CanonicalSessionOutbox, CloudCanonicalSessionWriter } from '../src/cloud-session-directory.js';
+import { CloudProjectEventWriter } from '../src/cloud-project-events.js';
 
 const roots: string[] = [];
 const ompEntrypoint = join(import.meta.dir, '../../account-omp/src/runtime.ts');
@@ -588,6 +591,89 @@ describe('CoordinatorPortableSpaceRuntime', () => {
     await expect(restoredController.open('workspace-a', 2)).rejects.toThrow();
     expect(destination.getSpace('workspace-a')?.generation).toBe(3);
     destination.close();
+  });
+  it('publishes a same-machine handoff before release despite unrelated cloud failure and pending events', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'gitspace-coordinator-portable-'));
+    roots.push(root);
+    const repository = join(root, 'project-a', 'workspace-a');
+    const remote = join(root, 'remote.git');
+    mkdirSync(repository, { recursive: true });
+    git(repository, 'init', '-b', 'main');
+    writeFileSync(join(repository, 'tracked.txt'), 'original\n');
+    git(repository, 'add', '.');
+    git(repository, 'commit', '-m', 'original');
+    git(root, 'init', '--bare', remote);
+    const durableBlobs = new FileCheckpointBlobStore(join(root, 'durable-objects'));
+    const artifactKey = new Uint8Array(32).fill(7);
+    const encrypted = new EncryptedCheckpointBlobStore(durableBlobs, artifactKey);
+    const authority = new Authority();
+    const lifecycle = new PortableSpaceLifecycle(authority, encrypted, new BareRemote(remote));
+    const binding: WalgitProjectBinding = { projectId: 'project-a', bucket: 'bucket', endpoint: 'https://example.invalid', region: 'auto' };
+    const database = new GitSpaceDatabase(join(root, 'gitspace.db'));
+    database.createProject({ id: 'project-a', name: 'Project', repositoryPath: join(root, 'project-a', 'base') });
+    database.createWorkspace({ id: 'workspace-a', projectId: 'project-a', name: 'Workspace', branch: 'main', rootPath: repository });
+    database.possessSpace('workspace-a', 'machine-a');
+    const artifacts = new LocalArtifactResolver(database, new CloudArtifactObjectStore('account-a', durableBlobs), join(root, 'cache'), artifactKey);
+    let canonical: CanonicalSession | null = null;
+    const errors: unknown[] = [];
+    const unrelatedFailure = new Error('Unrelated session authority unavailable');
+    const sessionFailed = Promise.withResolvers<void>();
+    const unrelatedEvents = Promise.withResolvers<void>();
+    const eventStarted = Promise.withResolvers<void>();
+    let eventOffset = 0;
+    const eventWriter = new CloudProjectEventWriter({
+      appendProjectEvent: async (input) => {
+        if (input.projectId === 'project-b') {
+          eventStarted.resolve();
+          await unrelatedEvents.promise;
+        }
+        return { ...input, offset: ++eventOffset, createdAt: new Date().toISOString() };
+      },
+    }, database, (error) => errors.push(error));
+    const handoff = new CanonicalSessionOutbox(join(root, 'canonical-session-outbox.json'));
+    const writer = new CloudCanonicalSessionWriter({
+      getCanonicalSession: async (projectId) => {
+        if (projectId === 'project-b') throw unrelatedFailure;
+        return canonical;
+      },
+      putCanonicalSession: async (_projectId, input) => {
+        const now = new Date().toISOString();
+        canonical = { ...input, revision: input.expectedRevision + 1, createdAt: now, updatedAt: now };
+        return canonical;
+      },
+    }, encrypted, (error) => { errors.push(error); sessionFailed.resolve(); }, handoff);
+    const coordinator = new MachineSessionCoordinator(database, artifacts, new PortableOmpRuntime(join(root, 'omp.jsonl')), 'machine-a', join(root, 'runtime'), eventWriter, undefined, writer);
+    const session = await coordinator.openSpace('workspace-a');
+    if (session.status === 'error') throw session.error;
+    const content = `handed-over-${crypto.randomUUID()}`;
+    await coordinator.prompt(session.value.id, content);
+    await writer.flush();
+    writer.put('project-b', 'machine-a', { ...session.value, id: 'unrelated-session', spaceId: 'other-workspace' });
+    await sessionFailed.promise;
+    database.createProject({ id: 'project-b', name: 'Other project', repositoryPath: join(root, 'other-project') });
+    eventWriter.append({ projectId: 'project-b', scope: 'session', entity: 'message', entityId: 'unrelated-session', revision: 1, operation: 'append', payload: { text: 'pending elsewhere' } });
+    await eventStarted.promise;
+    // A same-machine predecessor handed this turn's checkpoint over instead of uploading it.
+    await handoff.record([{ projectId: 'project-a', sessionId: session.value.id, checkpoint: true }]);
+    const controller = new MachinePortableSpaceController(database, coordinator, lifecycle, 'machine-a', () => binding, async () => null, root);
+    const commitClosed = authority.commitClosed.bind(authority);
+    authority.commitClosed = async (input) => {
+      expect(await handoff.entries()).toEqual([]);
+      const checkpoint = await encrypted.get(canonical!.sessionObjectKey!, canonical!.sessionObjectHash!);
+      expect(new TextDecoder().decode(checkpoint!)).toContain(content);
+      await commitClosed(input);
+    };
+    try {
+      await controller.release(database.getSpace('workspace-a')!, 1);
+      expect(authority.state).toBe('closed');
+      expect(database.getSpace('workspace-a')).toBeNull();
+      expect(errors).toEqual([unrelatedFailure]);
+      await expect(writer.flush()).rejects.toBe(unrelatedFailure);
+    } finally {
+      unrelatedEvents.resolve();
+      await eventWriter.flush();
+      database.close();
+    }
   });
   it('moves real files and the canonical OMP agent from machine A to machine B', async () => {
     const root = mkdtempSync(join(tmpdir(), 'gitspace-coordinator-portable-'));

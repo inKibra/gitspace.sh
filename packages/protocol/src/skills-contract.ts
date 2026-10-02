@@ -1,4 +1,4 @@
-import { wire } from 'result-rpc';
+import { wire } from './json-wire.js'
 import { z } from 'zod';
 
 const skillIdSchema = z.string().min(1).max(128).regex(/^[a-z0-9][a-z0-9-]*$/u);
@@ -32,8 +32,8 @@ export const skillUpdateSchema = z.object({
 }).strict();
 export type SkillUpdate = z.infer<typeof skillUpdateSchema>;
 
-export const SkillViewCodec = wire.serializable((value): value is SkillView => skillViewSchema.safeParse(value).success, { id: 'gitspace/skill-view/v1' });
-export const SkillUpdateCodec = wire.serializable((value): value is SkillUpdate => skillUpdateSchema.safeParse(value).success, { id: 'gitspace/skill-update/v1' });
+export const SkillViewCodec = wire.serializable((value): value is SkillView => skillViewSchema.safeParse(value).success, { id: 'gitspace/skill-view/v1', jsonSchema: skillViewSchema });
+export const SkillUpdateCodec = wire.serializable((value): value is SkillUpdate => skillUpdateSchema.safeParse(value).success, { id: 'gitspace/skill-update/v1', jsonSchema: skillUpdateSchema });
 export const DEFAULT_GITSPACE_SKILLS: readonly Omit<SkillView, 'revision'>[] = [
   { id: 'space-goal', name: 'space-goal', description: 'Goal intent, requirements, evidence, and decisions.', source: 'gitspace', scope: 'project', enabled: true, exceptions: [], assignments: [] },
   { id: 'space-chain', name: 'space-chain', description: 'Related spaces and their position in a goal chain.', source: 'gitspace', scope: 'project', enabled: true, exceptions: [], assignments: [] },

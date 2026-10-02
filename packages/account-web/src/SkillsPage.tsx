@@ -28,6 +28,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { glyph } from './glyph.js';
 import { EmptyState, PageCanvas, PageHeader } from './GitSpaceShell.js';
 import { ProjectAssignmentMatrix } from './ProjectAssignmentMatrix.js';
+import { rpcErrorMessage } from './rpc-error-message.js';
 
 export interface SkillsPageProps {
   projects: readonly { id: string; name: string }[];
@@ -60,7 +61,7 @@ export function SkillsPage(props: SkillsPageProps) {
       const updated = await props.update(skill, { enabled: changes.enabled ?? skill.enabled, scope: changes.scope ?? skill.scope, exceptions: changes.exceptions ?? skill.exceptions, assignments: changes.assignments ?? skill.assignments });
       setRecords((current) => current.map((candidate) => candidate.id === updated.id ? updated : candidate));
     } catch (error) {
-      setActionError(error instanceof Error ? error.message : String(error));
+      setActionError(rpcErrorMessage(error, 'Update skill'));
     } finally {
       savingRef.current = false;
       setSaving(null);

@@ -1,13 +1,120 @@
 import { env, runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
+import { ed25519 } from '@noble/curves/ed25519.js';
+import { credentialProtocolBase64, DEFAULT_INFERENCE_PROFILE_ID } from '@gitspace/protocol';
 import { ProjectAuthorityDO, UserProjectIndexDO } from '../src/project-authority.js';
+import { tenantRootPrivateKey } from './setup.js';
 
 const projectEnv = env as typeof env & {
   PROJECT_AUTHORITY: DurableObjectNamespace<ProjectAuthorityDO>;
   USER_PROJECTS: DurableObjectNamespace<UserProjectIndexDO>;
 };
 
+async function inferenceVault() {
+  const vault = env.CREDENTIALS.getByName(env.ACCOUNT_ID);
+  await vault.bootstrap({
+    userId: env.ACCOUNT_ID,
+    rootPublicKey: credentialProtocolBase64.encode(ed25519.getPublicKey(tenantRootPrivateKey)),
+    vaultKey: credentialProtocolBase64.encode(new Uint8Array(32).fill(7)),
+  });
+  await vault.ensureInference();
+  return vault;
+}
+
 describe('ProjectAuthorityDO', () => {
+  it('assigns new canonical projects to Default without resetting an existing profile on registration retry', async () => {
+    const vault = await inferenceVault();
+    const authority = projectEnv.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:inference-project`);
+    const input = { id: 'inference-project', name: 'Inference', repositoryReference: null, baseBranch: 'main', createdBy: 'machine-a' };
+    const project = await authority.bootstrap(input);
+    await projectEnv.USER_PROJECTS.getByName(env.ACCOUNT_ID).put(project);
+    const initial = await vault.ensureInference();
+    expect(initial.assignments).toEqual([{ projectId: project.id, profileId: DEFAULT_INFERENCE_PROFILE_ID, revision: 0 }]);
+    const created = await vault.createInferenceProfile({ name: 'Client', sourceProfileId: null });
+    const profile = created.profiles.find((candidate) => candidate.id !== DEFAULT_INFERENCE_PROFILE_ID)!;
+    const assigned = await vault.assignInferenceProfile({ projectId: project.id, profileId: profile.id, expectedRevision: 0 });
+    expect(assigned.status).toBe('ok');
+    const beforeRetry = await vault.ensureInference();
+
+    expect(await authority.bootstrap(input)).toEqual(project);
+    expect((await vault.ensureInference()).assignments).toEqual(beforeRetry.assignments);
+    expect(beforeRetry.assignments).toEqual([{ projectId: project.id, profileId: profile.id, revision: 1 }]);
+  });
+
+  it('repairs an existing canonical registration whose Default assignment could not be persisted', async () => {
+    const vault = await inferenceVault();
+    const authority = projectEnv.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:inference-retry`);
+    const input = { id: 'inference-retry', name: 'Retry', repositoryReference: null, baseBranch: 'main', createdBy: 'machine-a' };
+    const committed = await runInDurableObject(authority, async (_instance, state) => {
+      const unavailable = new ProjectAuthorityDO(state, { ...env, CREDENTIALS: undefined } as unknown as Env);
+      await state.blockConcurrencyWhile(async () => {});
+      await expect(unavailable.bootstrap(input)).rejects.toThrow();
+      return unavailable.getProject();
+    });
+    expect(committed).toMatchObject({ id: input.id, lifecycle: 'provisioning', revision: 1 });
+    expect((await vault.ensureInference()).assignments).toEqual([]);
+
+    expect(await authority.bootstrap(input)).toEqual(committed);
+    expect((await vault.ensureInference()).assignments).toEqual([{ projectId: input.id, profileId: DEFAULT_INFERENCE_PROFILE_ID, revision: 0 }]);
+  });
+
+  it('keeps interrupted deletion fail-closed and retries assignment cleanup with the original revision', async () => {
+    const vault = await inferenceVault();
+    const authority = projectEnv.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:inference-delete`);
+    const input = { id: 'inference-delete', name: 'Delete inference', repositoryReference: null, baseBranch: 'main', createdBy: 'machine-a' };
+    const project = await authority.bootstrap(input);
+    await projectEnv.USER_PROJECTS.getByName(env.ACCOUNT_ID).put(project);
+    const created = await vault.createInferenceProfile({ name: 'Disposable', sourceProfileId: null });
+    const profile = created.profiles.find((candidate) => candidate.id !== DEFAULT_INFERENCE_PROFILE_ID)!;
+    await vault.assignInferenceProfile({ projectId: project.id, profileId: profile.id, expectedRevision: 0 });
+
+    await runInDurableObject(authority, async (_instance, state) => {
+      const unavailable = new ProjectAuthorityDO(state, { ...env, CREDENTIALS: undefined } as unknown as Env);
+      await state.blockConcurrencyWhile(async () => {});
+      await expect(unavailable.deleteProject(project.revision)).rejects.toThrow();
+    });
+    const tombstone = await authority.getProject();
+    expect(tombstone).toMatchObject({ id: project.id, lifecycle: 'deleting', revision: project.revision + 1 });
+    expect((await vault.ensureInference()).assignments).toEqual([{ projectId: project.id, profileId: profile.id, revision: 1 }]);
+    await expect(vault.deleteInferenceProfile({ profileId: profile.id, expectedRevision: profile.revision })).rejects.toThrow();
+    await expect(vault.assignInferenceProfile({ projectId: project.id, profileId: DEFAULT_INFERENCE_PROFILE_ID, expectedRevision: 1 })).rejects.toThrow();
+    await expect(authority.bootstrap(input)).rejects.toThrow();
+
+    expect(await authority.deleteProject(project.revision)).toEqual(tombstone);
+    expect(await authority.deleteProject(project.revision)).toEqual(tombstone);
+    expect((await vault.ensureInference()).assignments).toEqual([]);
+    // Late lifecycle repair or migration cannot recreate access for this identity.
+    await vault.ensureProjectInference(project.id);
+    expect((await vault.ensureInference()).assignments).toEqual([]);
+    expect((await vault.deleteInferenceProfile({ profileId: profile.id, expectedRevision: profile.revision })).status).toBe('ok');
+    expect((await vault.ensureInference()).profiles.map((candidate) => candidate.id)).toEqual([DEFAULT_INFERENCE_PROFILE_ID]);
+  });
+
+  it('routes deleting lifecycle transitions through canonical assignment cleanup', async () => {
+    const vault = await inferenceVault();
+    const authority = projectEnv.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:inference-lifecycle`);
+    const project = await authority.bootstrap({ id: 'inference-lifecycle', name: 'Lifecycle', repositoryReference: null, baseBranch: 'main', createdBy: 'machine-a' });
+    await authority.setProjectLifecycle(project.revision, 'deleting');
+    expect((await vault.ensureInference()).assignments).toEqual([]);
+    await expect(authority.setProjectLifecycle(project.revision + 1, 'active')).rejects.toThrow();
+  });
+
+  it('changes an active project base branch only at its current revision and never for the built-in source', async () => {
+    const authority = projectEnv.PROJECT_AUTHORITY.getByName('base-branch');
+    const project = await authority.bootstrap({ id: 'base-branch', name: 'Base branch', repositoryReference: null, baseBranch: 'main', createdBy: 'machine-a' });
+    await expect(runInDurableObject(authority, (instance: ProjectAuthorityDO) => instance.setBaseBranch(project.revision, 'release'))).rejects.toThrow('must be active');
+    const active = await authority.setProjectLifecycle(project.revision, 'active');
+    await expect(runInDurableObject(authority, (instance: ProjectAuthorityDO) => instance.setBaseBranch(project.revision, 'release'))).rejects.toThrow('revision conflict');
+    expect(await authority.getProject()).toEqual(active);
+    expect(await authority.setBaseBranch(active.revision, 'release')).toMatchObject({ baseBranch: 'release', revision: active.revision + 1 });
+
+    const reserved = await projectEnv.USER_PROJECTS.getByName('base-branch-source').ensureGitSpaceProject({ release: null, branch: 'release/test', commit: null });
+    const sourceAuthority = projectEnv.PROJECT_AUTHORITY.getByName('base-branch-source-project');
+    const source = await sourceAuthority.setProjectLifecycle((await sourceAuthority.ensureGitSpaceProject(reserved)).revision, 'active');
+    await expect(runInDurableObject(sourceAuthority, (instance: ProjectAuthorityDO) => instance.setBaseBranch(source.revision, 'main'))).rejects.toThrow('managed by GitSpace releases');
+    expect(await sourceAuthority.getProject()).toEqual(source);
+  });
+
   it('rejects stale bootstrap and workspace publication until an archived project is explicitly restored', async () => {
     const authority = projectEnv.PROJECT_AUTHORITY.getByName('archived-bootstrap');
     const input = { id: 'archived-bootstrap', name: 'Archived', repositoryReference: null, baseBranch: 'main', createdBy: 'machine-a' };
@@ -96,8 +203,8 @@ describe('ProjectAuthorityDO', () => {
 
   it('keeps legacy stored provenance unknown through canonical updates even when sourceRef looks like a commit', async () => {
     const stub = projectEnv.PROJECT_AUTHORITY.getByName('legacy-workspace-provenance');
-    const [legacy] = await runInDurableObject(stub, (authority: ProjectAuthorityDO, state) => {
-      authority.bootstrap({ id: 'legacy-project', name: 'Legacy', repositoryReference: null, baseBranch: 'main', createdBy: 'machine-a' });
+    const [legacy] = await runInDurableObject(stub, async (authority: ProjectAuthorityDO, state) => {
+      await authority.bootstrap({ id: 'legacy-project', name: 'Legacy', repositoryReference: null, baseBranch: 'main', createdBy: 'machine-a' });
       state.storage.sql.exec(
         `INSERT INTO workspaces(workspace_id,project_id,kind,name,branch,phase,source_kind,source_ref,lifecycle,goal_id,revision,archived_at,created_at,updated_at)
          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
@@ -304,9 +411,9 @@ describe('UserProjectIndexDO', () => {
       id: source.id, projectId: source.id, kind: 'base', name: source.name, branch: source.baseBranch,
       phase: null, sourceKind: 'base', sourceRef: source.baseBranch, sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0,
     });
-    await runInDurableObject(authority, (instance: ProjectAuthorityDO) => {
-      expect(() => instance.deleteProject(source.revision)).toThrow();
-      expect(() => instance.setProjectLifecycle(source.revision, 'archived')).toThrow();
+    await runInDurableObject(authority, async (instance: ProjectAuthorityDO) => {
+      await expect(instance.deleteProject(source.revision)).rejects.toThrow();
+      await expect(instance.setProjectLifecycle(source.revision, 'archived')).rejects.toThrow();
     });
     expect(await authority.listWorkspaces()).toEqual([base]);
     expect(await authority.getProject()).toEqual(source);

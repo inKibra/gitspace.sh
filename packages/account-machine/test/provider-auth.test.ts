@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'bun:test';
+import { AuthStorage } from '@oh-my-pi/pi-ai';
+import { AuthBrokerClient, RemoteAuthCredentialStore, type SnapshotResponse } from '@oh-my-pi/pi-ai/auth-broker';
 import type {
   CredentialHealthResult,
   CredentialOrigin,
@@ -8,7 +10,9 @@ import type {
   UsageReport,
 } from '@oh-my-pi/pi-ai';
 import type { ProviderLoginEvent } from '@gitspace/protocol';
-import { ProviderAuthCoordinator, ProviderAuthError, type AuthStorageLike, type ProviderLoginController } from '../src/provider-auth.js';
+import { ProfileProviderAuthCoordinator, ProviderAuthCoordinator, ProviderAuthError, type AuthStorageLike, type ProviderLoginController } from '../src/provider-auth.js';
+import { ModelRegistry } from '@oh-my-pi/pi-coding-agent/config/model-registry';
+import { inferenceContext } from './fixtures/inference.js';
 
 interface FakeAuthStorageOptions {
   credentials?: StoredAuthCredential[];
@@ -26,11 +30,15 @@ class FakeAuthStorage implements AuthStorageLike {
   readonly apiKeys: Array<{ provider: string; key: string }> = [];
   readonly loggedOut: string[] = [];
   #nextId = 100;
+  #generation = 0;
 
   constructor(private readonly options: FakeAuthStorageOptions = {}) {
     this.credentials = options.credentials ?? [];
     this.disabled = options.disabled ?? [];
   }
+
+  getGeneration(): number { return this.#generation; }
+  async revalidateCredentials(): Promise<void> {}
 
   addOAuth(provider: string, email: string): void {
     this.credentials.push({
@@ -39,6 +47,7 @@ class FakeAuthStorage implements AuthStorageLike {
       credential: { type: 'oauth', refresh: 'r', access: 'a', expires: Date.now() + 60_000, email },
       disabledCause: null,
     });
+    this.#generation++;
   }
 
   hasAuth(provider: string): boolean {
@@ -72,11 +81,13 @@ class FakeAuthStorage implements AuthStorageLike {
   async logout(provider: string): Promise<void> {
     this.loggedOut.push(provider);
     this.credentials = this.credentials.filter((row) => row.provider !== provider);
+    this.#generation++;
   }
 
   async removeCredential(provider: string, credentialId: number): Promise<boolean> {
     const before = this.credentials.length;
     this.credentials = this.credentials.filter((row) => !(row.provider === provider && row.id === credentialId));
+    if (this.credentials.length !== before) this.#generation++;
     return this.credentials.length !== before;
   }
 
@@ -84,6 +95,7 @@ class FakeAuthStorage implements AuthStorageLike {
     this.apiKeys.push({ provider, key: credential.key });
     this.credentials = this.credentials.filter((row) => row.provider !== provider);
     this.credentials.push({ id: this.#nextId++, provider, credential, disabledCause: null });
+    this.#generation++;
   }
 
   async fetchUsageReports(): Promise<UsageReport[] | null> {
@@ -103,7 +115,7 @@ class FakeAuthStorage implements AuthStorageLike {
 }
 
 function coordinator(storage: FakeAuthStorage): ProviderAuthCoordinator {
-  return new ProviderAuthCoordinator({ authStorage: async () => storage });
+  return new ProviderAuthCoordinator({ profileId: 'default', authStorage: async () => storage, modelRegistry: async () => { throw new Error('No model catalog in this login/usage fixture'); } });
 }
 
 async function collect(events: AsyncIterable<ProviderLoginEvent>, until: (event: ProviderLoginEvent) => boolean): Promise<ProviderLoginEvent[]> {
@@ -114,6 +126,106 @@ async function collect(events: AsyncIterable<ProviderLoginEvent>, until: (event:
   }
   return seen;
 }
+
+async function credentialBrokerFixture() {
+  let snapshot: SnapshotResponse = {
+    generation: 1, generatedAt: Date.now(), serverNowMs: Date.now(),
+    refresher: { enabled: false, intervalMs: 0, skewMs: 0, nextSweepInMs: 0 },
+    credentials: [],
+  };
+  const server = Bun.serve({
+    hostname: '127.0.0.1',
+    port: 0,
+    fetch(request) {
+      if (request.headers.get('authorization') !== 'Bearer provider-refresh-test') return new Response(null, { status: 401 });
+      const url = new URL(request.url);
+      if (url.pathname !== '/v1/snapshot') return new Response(null, { status: 404 });
+      return Response.json(snapshot, { headers: { etag: `"${snapshot.generation}"` } });
+    },
+  });
+  const storages: AuthStorage[] = [];
+  const storage = async () => {
+    const remote = new RemoteAuthCredentialStore({
+      client: new AuthBrokerClient({ url: server.url.toString(), token: 'provider-refresh-test', maxRetries: 0 }),
+      initialSnapshot: snapshot,
+      // Keep background activity parked; each foreground revalidation still uses the real HTTP client.
+      backgroundIdleMs: 0,
+    });
+    const auth = new AuthStorage(remote, { storeOnly: true });
+    storages.push(auth);
+    await auth.reload();
+    return auth;
+  };
+  return {
+    storage,
+    saveKey(key: string | null) {
+      snapshot = {
+        ...snapshot, generation: snapshot.generation + 1, generatedAt: Date.now(), serverNowMs: Date.now(),
+        credentials: key === null ? [] : [{
+          id: 1, provider: 'amazon-bedrock', identityKey: null, rotatesInMs: null,
+          credential: { type: 'api_key', key },
+        }],
+      };
+    },
+    async close() {
+      for (const auth of storages) auth.close();
+      await server.stop(true);
+    },
+  };
+}
+
+describe('ProviderAuthCoordinator broker synchronization', () => {
+  it('picks up cloud key additions, rotations, and removals in provider views, model choices, and existing session auth', async () => {
+    const broker = await credentialBrokerFixture();
+    try {
+      const machine = await broker.storage();
+      const session = await broker.storage();
+      const registry = new ModelRegistry(machine, undefined, { ignoreLocalModelConfig: true });
+      const auth = new ProviderAuthCoordinator({ profileId: 'default', authStorage: async () => machine, modelRegistry: async () => registry, onChanged: () => session.revalidateCredentials() });
+      expect((await auth.view('amazon-bedrock')).accounts).toEqual([]);
+
+      broker.saveKey('bedrock-first');
+      expect((await auth.list()).find(provider => provider.id === 'amazon-bedrock')).toMatchObject({
+        hasAuth: true, accounts: [{ id: '1', type: 'api_key', disabled: false }],
+      });
+      expect(session.listStoredCredentials('amazon-bedrock')[0]?.credential).toEqual({ type: 'api_key', key: 'bedrock-first' });
+
+      broker.saveKey('bedrock-rotated');
+      expect((await auth.models()).some(model => model.provider === 'amazon-bedrock')).toBe(true);
+      expect(session.listStoredCredentials('amazon-bedrock')[0]?.credential).toEqual({ type: 'api_key', key: 'bedrock-rotated' });
+
+      broker.saveKey(null);
+      expect((await auth.view('amazon-bedrock')).accounts).toEqual([]);
+      expect(session.listStoredCredentials('amazon-bedrock')).toEqual([]);
+    } finally { await broker.close(); }
+  });
+
+  it('retries session propagation after a failed reload even when the machine cache is already current', async () => {
+    const broker = await credentialBrokerFixture();
+    try {
+      const machine = await broker.storage();
+      const session = await broker.storage();
+      let available = false;
+      const auth = new ProviderAuthCoordinator({
+        profileId: 'default',
+        authStorage: async () => machine,
+        modelRegistry: async () => new ModelRegistry(machine, undefined, { ignoreLocalModelConfig: true }),
+        onChanged: async () => {
+          if (!available) throw new Error('Session auth reload unavailable');
+          await session.revalidateCredentials();
+        },
+      });
+      await auth.list();
+      broker.saveKey('bedrock-after-reconnect');
+      await expect(auth.list()).rejects.toThrow('Session auth reload unavailable');
+      expect(session.listStoredCredentials('amazon-bedrock')).toEqual([]);
+
+      available = true;
+      expect((await auth.list()).find(provider => provider.id === 'amazon-bedrock')?.accounts).toHaveLength(1);
+      expect(session.listStoredCredentials('amazon-bedrock')[0]?.credential).toEqual({ type: 'api_key', key: 'bedrock-after-reconnect' });
+    } finally { await broker.close(); }
+  });
+});
 
 describe('ProviderAuthCoordinator.list', () => {
   it('maps registry providers with stored credentials, disabled tombstones, origin and usage support', async () => {
@@ -535,5 +647,109 @@ describe('ProviderAuthCoordinator.usage', () => {
     expect(usage.reports.map((report) => report.provider)).toEqual(['anthropic']);
     expect(usage.accountsWithoutUsage).toEqual(['openai-codex: b@example.com']);
     expect(usage.errors).toEqual([{ provider: '*', message: 'Auth broker refresh timed out' }]);
+  });
+});
+
+describe('profile-scoped provider management', () => {
+  it('captures the OAuth profile across UI switches and rejects cross-profile flow IDs', async () => {
+    const storages: Record<string, FakeAuthStorage> = {
+      first: new FakeAuthStorage({
+        login: async (provider, ctrl, storage) => {
+          const email = await ctrl.onPrompt({ message: 'Account email' });
+          storage.addOAuth(provider, email);
+          return { type: 'oauth', email };
+        },
+      }),
+      second: new FakeAuthStorage(),
+    };
+    const profiles = new ProfileProviderAuthCoordinator({
+      agentDir: '/unused', cwd: '/unused', resolve: async (id) => inferenceContext(null, id),
+      createContext: async (context) => {
+        const authStorage = storages[context.profile.id]!;
+        return { authStorage, modelRegistry: { getAvailable() { throw new Error('No model catalog in login fixture'); } }, close() {} };
+      },
+    });
+    try {
+      const first = await profiles.forProfile('first');
+      const flow = await first.startLogin('anthropic');
+      const events = await collect(first.events(flow), (event) => event.type === 'prompt');
+      const prompt = events.at(-1) as Extract<ProviderLoginEvent, { type: 'prompt' }>;
+      const second = await profiles.forProfile('second');
+      expect(() => second.events(flow)).toThrow('Unknown login flow');
+      await expect(second.respond(flow, prompt.promptId, 'wrong@example.com')).rejects.toThrow('Unknown login flow');
+      await (await profiles.forProfile('first')).respond(flow, prompt.promptId, 'right@example.com');
+      const done = (await collect(first.events(flow), () => false)).at(-1);
+      expect(done).toMatchObject({ type: 'done', ok: true, provider: { accounts: [{ email: 'right@example.com' }] } });
+      expect((await second.view('anthropic')).accounts).toEqual([]);
+    } finally { await profiles.close(); }
+  });
+
+  it('isolates usage accounts and invalidation, and never serves a cached coordinator when authority is unavailable', async () => {
+    const storages: Record<string, FakeAuthStorage> = {};
+    for (const id of ['first', 'second']) {
+      storages[id] = new FakeAuthStorage({
+        usageProviders: ['anthropic'],
+        credentials: [{ id: 1, provider: 'anthropic', credential: { type: 'oauth', refresh: `r-${id}`, access: `a-${id}`, expires: 1, email: `${id}@example.com` }, disabledCause: null }],
+        reports: [{ provider: 'anthropic', fetchedAt: 0, metadata: { email: `${id}@example.com` }, limits: [] }],
+      });
+    }
+    let available = true;
+    const profiles = new ProfileProviderAuthCoordinator({
+      agentDir: '/unused', cwd: '/unused',
+      resolve: async (id) => { if (!available) throw new Error('Canonical authority offline'); return inferenceContext(null, id); },
+      createContext: async (context) => {
+        const authStorage = storages[context.profile.id]!;
+        return { authStorage, modelRegistry: { getAvailable() { throw new Error('No model catalog in usage fixture'); } }, close() {} };
+      },
+    });
+    try {
+      expect((await (await profiles.forProfile('first')).usage(null, false)).reports.map((report) => report.account)).toEqual(['first@example.com']);
+      expect((await (await profiles.forProfile('second')).usage('anthropic', true)).reports.map((report) => report.account)).toEqual(['second@example.com']);
+      expect(storages.first!.invalidated).toEqual([]);
+      expect(storages.second!.invalidated).toEqual(['anthropic']);
+      await (await profiles.forProfile('first')).setApiKey('openai', 'first-key');
+      await (await profiles.forProfile('second')).setApiKey('openai', 'second-key');
+      await (await profiles.forProfile('first')).logout('openai', null);
+      expect((await (await profiles.forProfile('first')).view('openai')).hasAuth).toBe(false);
+      expect(storages.second!.listStoredCredentials('openai')[0]?.credential).toEqual({ type: 'api_key', key: 'second-key' });
+      available = false;
+      await expect(profiles.forProfile('first')).rejects.toThrow('Canonical authority offline');
+    } finally { await profiles.close(); }
+  });
+
+  it('propagates cloud key rotation only to children sharing that profile', async () => {
+    const first = await credentialBrokerFixture();
+    const second = await credentialBrokerFixture();
+    let profiles: ProfileProviderAuthCoordinator | undefined;
+    try {
+      first.saveKey('first-initial');
+      second.saveKey('second-independent');
+      const firstChild = await first.storage();
+      const secondChild = await second.storage();
+      const firstManagement = await first.storage();
+      const secondManagement = await second.storage();
+      profiles = new ProfileProviderAuthCoordinator({
+        agentDir: '/unused', cwd: '/unused', resolve: async (id) => inferenceContext(null, id),
+        createContext: async (context) => {
+          const authStorage = context.profile.id === 'first' ? firstManagement : secondManagement;
+          return { authStorage, modelRegistry: new ModelRegistry(authStorage, undefined, { ignoreLocalModelConfig: true }), close() {} };
+        },
+        onChanged: (profileId) => (profileId === 'first' ? firstChild : secondChild).revalidateCredentials(),
+      });
+      await (await profiles.forProfile('first')).list();
+      await (await profiles.forProfile('second')).list();
+      first.saveKey('first-rotated');
+      await (await profiles.forProfile('first')).list();
+      expect(firstChild.listStoredCredentials('amazon-bedrock')[0]?.credential).toEqual({ type: 'api_key', key: 'first-rotated' });
+      expect(secondChild.listStoredCredentials('amazon-bedrock')[0]?.credential).toEqual({ type: 'api_key', key: 'second-independent' });
+      first.saveKey(null);
+      await (await profiles.forProfile('first')).list();
+      expect(firstChild.listStoredCredentials()).toEqual([]);
+      expect(secondChild.listStoredCredentials('amazon-bedrock')[0]?.credential).toEqual({ type: 'api_key', key: 'second-independent' });
+    } finally {
+      await profiles?.close();
+      await first.close();
+      await second.close();
+    }
   });
 });

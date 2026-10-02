@@ -156,3 +156,48 @@ export async function runNextProjectCron<TAgent>(
   const claim = await adapter.claimNext({ projectId, claimedBy });
   return claim ? runClaimedProjectCron(claim, adapter) : null;
 }
+
+/** A project whose drain failed is retried after this delay rather than on every tick. */
+export const PROJECT_CRON_FAILURE_RETRY_MS = 300_000;
+
+export interface ProjectCronDrainFailure {
+  message: string;
+  retryAt: number;
+}
+
+/**
+ * One pass over this machine's projects. A failing project never starves the projects after it:
+ * it is reported once per distinct failure and skipped until its retry time.
+ */
+export async function drainProjectCronQueues<TAgent>(input: {
+  projectIds: readonly string[];
+  claimedBy: string;
+  adapter: ProjectCronRunnerAdapter<TAgent>;
+  processDue(projectId: string): Promise<unknown>;
+  /** Owned by the caller so failure state survives between passes. */
+  failures: Map<string, ProjectCronDrainFailure>;
+  shouldStop(): boolean;
+  report(projectId: string, error: unknown): void;
+  now?: () => number;
+}): Promise<void> {
+  const now = input.now ?? Date.now;
+  for (const projectId of input.failures.keys()) {
+    if (!input.projectIds.includes(projectId)) input.failures.delete(projectId);
+  }
+  for (const projectId of input.projectIds) {
+    if (input.shouldStop()) return;
+    const failure = input.failures.get(projectId);
+    if (failure && failure.retryAt > now()) continue;
+    try {
+      await input.processDue(projectId);
+      while (!input.shouldStop() && await runNextProjectCron(projectId, input.claimedBy, input.adapter)) {
+        // Drain the durable authority queue serially so canonical sessions are never prompted concurrently.
+      }
+      input.failures.delete(projectId);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (failure?.message !== message) input.report(projectId, error);
+      input.failures.set(projectId, { message, retryAt: now() + PROJECT_CRON_FAILURE_RETRY_MS });
+    }
+  }
+}

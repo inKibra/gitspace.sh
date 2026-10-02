@@ -135,6 +135,8 @@ const DialogContent = forwardRef<HTMLDivElement, DialogContentProps>(
                 className={cn(
                   container ? "absolute" : "fixed",
                   "left-1/2 top-1/2 z-50 w-[calc(100%-2rem)]",
+                  // Tall content scrolls inside the dialog instead of spilling past the viewport.
+                  "max-h-[calc(100dvh-2rem)] overflow-y-auto",
                   surfaceClasses(dialogLevel),
                   "p-6 focus:outline-none",
                   size === "sm" && (compact ? "max-w-[360px]" : "max-w-[400px]"),

@@ -303,8 +303,28 @@ function safeRepositoryPath(repositoryPath: string, path: string): string {
   return local.split(sep).join('/');
 }
 
+/** Without git-lfs the worktree holds pointer files, so reading with LFS filters disabled stays accurate. */
+const lfsDisabledConfig = ['-c', 'filter.lfs.required=false', '-c', 'filter.lfs.process=', '-c', 'filter.lfs.smudge=', '-c', 'filter.lfs.clean='];
+const lfsAvailableByPath = new Map<string, Promise<boolean>>();
+
+/**
+ * Probed once per PATH: the machine runtime may expose a bundled git-lfs after this module loads.
+ * Children get the live `Bun.env` (Bun otherwise spawns with the startup environment) so probe and reads agree.
+ */
+function gitLfsAvailable(): Promise<boolean> {
+  const path = Bun.env.PATH ?? '';
+  let available = lfsAvailableByPath.get(path);
+  if (!available) {
+    available = Bun.spawn(['git', 'lfs', 'version'], { env: Bun.env, stdin: 'ignore', stdout: 'ignore', stderr: 'ignore' }).exited.then((exitCode) => exitCode === 0);
+    lfsAvailableByPath.set(path, available);
+  }
+  return available;
+}
+
+/** Inspector reads only; writes must keep LFS filters so a missing git-lfs fails loudly. */
 async function runGit(repository: GitRepository, args: string[]): Promise<GitResult> {
-  const child = Bun.spawn(['git', '--literal-pathspecs', ...args], { cwd: repository.repositoryPath, stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' });
+  const config = await gitLfsAvailable() ? [] : lfsDisabledConfig;
+  const child = Bun.spawn(['git', ...config, '--literal-pathspecs', ...args], { cwd: repository.repositoryPath, env: Bun.env, stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' });
   const [exitCode, stdout, stderrBytes] = await Promise.all([
     child.exited,
     new Response(child.stdout).bytes(),

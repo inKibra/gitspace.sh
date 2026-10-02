@@ -2,8 +2,11 @@ import { describe, expect, it } from 'bun:test';
 import type { ProjectCronRunView } from '@gitspace/protocol/cron-contract';
 import {
   buildProjectCronPrompt,
+  drainProjectCronQueues,
+  PROJECT_CRON_FAILURE_RETRY_MS,
   runClaimedProjectCron,
   runNextProjectCron,
+  type ProjectCronDrainFailure,
   type ProjectCronExecutionAdapter,
   type ProjectCronRunnerAdapter,
   type ProjectCronRunCompletion,
@@ -89,6 +92,47 @@ describe('project cron runner', () => {
       completeRun: async (input) => ({ ...run, state: input.state, message: input.message, resolvedSpaceId: input.resolvedSpaceId, resolvedGeneration: input.resolvedGeneration, completedAt: new Date() }),
     };
     expect(await runNextProjectCron('project-a', 'machine-a', adapter)).toMatchObject({ state: 'succeeded', resolvedGeneration: 11 });
+  });
+
+  it('keeps draining later projects when one project is rejected, reporting it once and retrying after the backoff', async () => {
+    let clock = 1_000;
+    const processed: string[] = [];
+    const reports: string[] = [];
+    const failures = new Map<string, ProjectCronDrainFailure>();
+    let staleRejected = true;
+    const pass = () => drainProjectCronQueues({
+      projectIds: ['stale', 'project-a'],
+      claimedBy: 'machine-a',
+      adapter: {
+        claimNext: async () => null,
+        resolveCanonicalAgent: async () => ({ status: 'blocked', message: 'unused' }),
+        promptCanonicalAgent: async () => ({ status: 'accepted' }),
+        completeRun: async () => runFixture(),
+      },
+      processDue: async (projectId) => {
+        processed.push(projectId);
+        if (projectId === 'stale' && staleRejected) throw new Error('Project does not belong to this account');
+      },
+      failures,
+      shouldStop: () => false,
+      report: (projectId, error) => reports.push(`${projectId}: ${error instanceof Error ? error.message : String(error)}`),
+      now: () => clock,
+    });
+
+    await pass();
+    await pass();
+    expect(processed).toEqual(['stale', 'project-a', 'project-a']);
+    expect(reports).toEqual(['stale: Project does not belong to this account']);
+
+    clock += PROJECT_CRON_FAILURE_RETRY_MS;
+    await pass();
+    expect(processed.slice(3)).toEqual(['stale', 'project-a']);
+    expect(reports).toHaveLength(1);
+
+    staleRejected = false;
+    clock += PROJECT_CRON_FAILURE_RETRY_MS;
+    await pass();
+    expect(failures.size).toBe(0);
   });
 
   it('builds an unattended prompt with both authority scope lists', () => {

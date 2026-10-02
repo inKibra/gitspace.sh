@@ -210,6 +210,20 @@ describe('portable RelayDO', () => {
     expect((await closed).code).toBe(1008);
   });
 
+  it('refuses new tunnels and drops an open tunnel at lease renewal for a machine without an inference-compatible release after cutover', async () => {
+    const machine = await openSocket('machine', 'darktop');
+    const closed = new Promise<CloseEvent>((resolve) => machine.addEventListener('close', resolve, { once: true }));
+    await env.CREDENTIALS.getByName(env.ACCOUNT_ID).ensureInference();
+    const refused = await exports.default.fetch(machineAuthorizedRequest(
+      'https://relay.test/ws?role=machine&id=darktop', { headers: { upgrade: 'websocket' } },
+    ));
+    expect(refused.status).toBe(409);
+    expect(await refused.json()).toMatchObject({ error: { code: 'INFERENCE_UPGRADE_REQUIRED' } });
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 30_001);
+    expect(await runDurableObjectAlarm(env.RELAY.getByName(env.RELAY_NAME))).toBe(true);
+    expect((await closed).code).toBe(1008);
+  });
+
   it('echoes the existing v1 frame and expires a silent heartbeat-enabled tunnel with a CORS error', async () => {
     const machine = await openSocket('machine', 'darktop', true);
     const frame = { version: RELAY_PROTOCOL_VERSION, type: 'frame', to: 'machine:darktop', payload: crypto.randomUUID() };

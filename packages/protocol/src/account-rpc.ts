@@ -3,6 +3,8 @@
 export const ACCOUNT_CLOUD_RPC_PATHS: Readonly<Record<string, true>> = {
   'settings.get': true, 'settings.update': true, 'settings.reserveHandle': true, 'settings.git.get': true,
   'settings.omp.get': true, 'settings.events': true,
+  'inference.list': true, 'inference.create': true, 'inference.update': true,
+  'inference.delete': true, 'inference.assign': true, 'inference.events': true,
   placements: true, 'session.locate': true,
   machines: true, 'machine.events': true, 'machine.createSandbox': true, 'machine.updateNotes': true,
   'machine.sleep': true, 'machine.resume': true, 'machine.destroy': true,
@@ -25,13 +27,14 @@ export const ACCOUNT_CLOUD_RPC_PATHS: Readonly<Record<string, true>> = {
   'configuration.values.get': true, 'configuration.values.put': true, 'configuration.values.delete': true,
   'crons.list': true, 'crons.create': true, 'crons.update': true, 'crons.delete': true,
   'crons.runNow': true, 'crons.history': true,
-  'inspector.bootstrap': true,
+  'inspector.view': true,
   'inspector.transcript': true,
   'inspector.transcriptPage': true,
   'inspector.transcriptContent': true,
   'inspector.availability': true,
   'project.ensureGitSpace': true,
   'inspector.artifacts.read': true,
+  'inspector.artifacts.readPage': true,
   'inspector.artifacts.list': true, 'inspector.artifacts.copyToProject': true,
   'inspector.artifacts.shares.list': true, 'inspector.artifacts.shares.create': true, 'inspector.artifacts.shares.revoke': true,
   'environment.approve': true, 'environment.revokeApproval': true,
@@ -58,4 +61,24 @@ export function spaceCloudRpcSpaceId(input: unknown): string | null {
     ? outer.input as Record<string, unknown>
     : outer;
   return typeof record.spaceId === 'string' ? record.spaceId : null;
+}
+
+/** The space or session a machine-bound call names. The account Worker forwards
+ * each signed batch whole to that target's holder, so a batch names one target. */
+export type RpcCallTarget = { kind: 'space'; spaceId: string } | { kind: 'session'; sessionId: string };
+
+/** Project-level calls whose `projectId` names the project's base space. */
+const BASE_SPACE_RPC_PATHS: Readonly<Record<string, true>> = {
+  'space.view': true, transcript: true, transcriptPage: true, transcriptContent: true,
+  'workspace.create': true, 'session.createProject': true, events: true, 'project.setBaseBranch': true,
+};
+
+export function rpcCallTarget(path: string, input: unknown): RpcCallTarget | null {
+  if (!input || typeof input !== 'object') return null;
+  const named = 'spaceId' in input && typeof input.spaceId === 'string' ? input.spaceId
+    : 'workspaceId' in input && typeof input.workspaceId === 'string' ? input.workspaceId
+    : null;
+  const spaceId = named || (Object.hasOwn(BASE_SPACE_RPC_PATHS, path) && 'projectId' in input && typeof input.projectId === 'string' ? input.projectId : null);
+  if (spaceId) return { kind: 'space', spaceId };
+  return 'sessionId' in input && typeof input.sessionId === 'string' && input.sessionId ? { kind: 'session', sessionId: input.sessionId } : null;
 }

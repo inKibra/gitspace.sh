@@ -36,6 +36,13 @@ type BunWebSocket = WebSocket & { terminate(): void };
 type BunWebSocketConstructor = new (url: string | URL, options: { headers: Record<string, string> }) => BunWebSocket;
 const CONNECT_TIMEOUT_MS = 15_000;
 
+/** Why the current socket was torn down; `code`/`reason` are the relay's close frame. */
+interface RelayDisconnect {
+  cause: 'close' | 'error' | 'connect-timeout' | 'heartbeat-timeout' | 'protocol' | 'send' | 'connect' | 'stop';
+  error?: unknown;
+  code?: number;
+  reason?: string;
+}
 
 function socketUrl(relayUrl: string, machineId: string): URL {
   const url = new URL(relayUrl);
@@ -51,6 +58,7 @@ export class MachineRelayConnector {
   private livenessTimer: ReturnType<typeof setTimeout> | null = null;
   private heartbeatNonce: string | null = null;
   private reconnectDelayMs = 500;
+  private openedAt: number | null = null;
   private stopped = false;
   private readonly pending = new Map<string, PendingRequest>();
   private readonly forwarding = new Map<string, AbortController>();
@@ -67,7 +75,7 @@ export class MachineRelayConnector {
     this.stopped = true;
     clearTimeout(this.reconnectTimer ?? undefined);
     this.reconnectTimer = null;
-    if (this.socket) this.reconnect(this.socket);
+    if (this.socket) this.reconnect(this.socket, { cause: 'stop' });
   }
 
   private connect(): void {
@@ -83,26 +91,30 @@ export class MachineRelayConnector {
       const socket = new Socket(url, { headers });
       this.socket = socket;
       this.livenessTimer = setTimeout(() => {
-        this.reconnect(socket, new Error('Machine relay connection timed out; reconnecting'));
+        this.reconnect(socket, { cause: 'connect-timeout', error: new Error('Machine relay connection timed out; reconnecting') });
       }, CONNECT_TIMEOUT_MS);
       socket.addEventListener('open', () => {
         if (this.socket !== socket) return;
-        console.log(`[gitspace-relay] connected ${url.origin}`);
+        this.openedAt = Date.now();
+        console.log(JSON.stringify({ event: 'relay_connected', at: new Date(this.openedAt).toISOString(), origin: url.origin }));
         this.heartbeat(socket);
       });
       socket.addEventListener('message', (event) => {
         if (this.socket !== socket) return;
         void this.handleMessage(socket, typeof event.data === 'string' ? event.data : '')
-          .catch((error) => this.reconnect(socket, error));
+          .catch((error) => this.reconnect(socket, { cause: 'protocol', error }));
       });
       socket.addEventListener('close', (event) => {
-        this.reconnect(socket, new Error(`Machine relay closed (${event.code}: ${event.reason || 'no reason'}); reconnecting`));
+        this.reconnect(socket, {
+          cause: 'close', code: event.code, reason: event.reason,
+          error: new Error(`Machine relay closed (${event.code}: ${event.reason || 'no reason'}); reconnecting`),
+        });
       });
       socket.addEventListener('error', () => {
-        this.reconnect(socket, new Error('Machine relay socket failed; reconnecting'));
+        this.reconnect(socket, { cause: 'error', error: new Error('Machine relay socket failed; reconnecting') });
       });
     } catch (error) {
-      if (this.socket) this.reconnect(this.socket, error);
+      if (this.socket) this.reconnect(this.socket, { cause: 'connect', error });
       else {
         this.options.onError?.(error);
         this.scheduleReconnect();
@@ -110,17 +122,29 @@ export class MachineRelayConnector {
     }
   }
 
-  private reconnect(socket: BunWebSocket, error?: unknown): void {
+  private reconnect(socket: BunWebSocket, disconnect: RelayDisconnect): void {
     if (this.socket !== socket) return;
+    const now = Date.now();
+    // Aborting transport does not roll back mutations. Never replay them on a new socket.
+    const abortedRequests = this.forwarding.size;
+    const discardedRequests = this.pending.size;
+    const connectionAgeMs = this.openedAt === null ? null : now - this.openedAt;
     this.socket = null;
+    this.openedAt = null;
     clearTimeout(this.livenessTimer ?? undefined);
     this.livenessTimer = null;
     this.heartbeatNonce = null;
     this.pending.clear();
-    // Aborting transport does not roll back mutations. Never replay them on a new socket.
     for (const controller of this.forwarding.values()) controller.abort();
     this.forwarding.clear();
     socket.terminate();
+    const { cause, error, code, reason } = disconnect;
+    console.warn(JSON.stringify({
+      event: 'relay_closed', at: new Date(now).toISOString(), cause,
+      ...(code === undefined ? {} : { code, reason: reason ?? '' }),
+      connectionAgeMs, abortedRequests, discardedRequests,
+      ...(error === undefined ? {} : { error: error instanceof Error ? error.message : String(error) }),
+    }));
     if (this.stopped) return;
     this.scheduleReconnect();
     if (error) this.options.onError?.(error);
@@ -130,6 +154,7 @@ export class MachineRelayConnector {
     if (this.stopped || this.reconnectTimer) return;
     const delay = this.reconnectDelayMs;
     this.reconnectDelayMs = Math.min(this.reconnectDelayMs * 2, 30_000);
+    console.log(JSON.stringify({ event: 'relay_reconnect', at: new Date().toISOString(), delayMs: delay }));
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       this.connect();
@@ -141,7 +166,7 @@ export class MachineRelayConnector {
     clearTimeout(this.livenessTimer ?? undefined);
     this.heartbeatNonce = crypto.randomUUID();
     this.livenessTimer = setTimeout(() => {
-      this.reconnect(socket, new Error('Machine relay heartbeat timed out; reconnecting (in-flight request outcomes may be unknown)'));
+      this.reconnect(socket, { cause: 'heartbeat-timeout', error: new Error('Machine relay heartbeat timed out; reconnecting (in-flight request outcomes may be unknown)') });
     }, RELAY_HEARTBEAT_TIMEOUT_MS);
     try {
       this.send(socket, {
@@ -151,7 +176,7 @@ export class MachineRelayConnector {
         payload: this.heartbeatNonce,
       });
     } catch (error) {
-      this.reconnect(socket, error);
+      this.reconnect(socket, { cause: 'send', error });
     }
   }
 

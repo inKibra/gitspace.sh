@@ -4,6 +4,7 @@ import '@xyflow/react/dist/style.css';
 import { memo, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { EmptyState, workspacePhaseLabel, StatusDot, type WorkspaceView } from './GitSpaceShell.js';
 import type { WorkspacePickerItem } from './WorkspacePicker.js';
+import { rpcErrorMessage } from './rpc-error-message.js';
 
 export type WorkspaceRelations = WorkspaceView['relations'];
 export type SetWorkspaceRelations = (workspaceId: string, relations: WorkspaceRelations) => void | Promise<void>;
@@ -44,7 +45,7 @@ export function useRelationWriter(onSetRelations: SetWorkspaceRelations | undefi
       void (async () => {
         for (const [workspaceId, relations] of changes) await onSetRelations(workspaceId, relations);
         setError(null);
-      })().catch((failure: unknown) => setError(failure instanceof Error ? failure.message : String(failure)));
+      })().catch((failure: unknown) => setError(rpcErrorMessage(failure, 'Update workspace relations')));
     },
   };
 }

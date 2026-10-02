@@ -5,7 +5,8 @@ import type { BrowserRelayStatus } from '@gitspace/protocol';
 interface BrowserRelaySupervisorOptions {
   environmentRoot: string;
   agentDir: string;
-  binaryPath?: string;
+  /** Argv prefix that runs the selected OMP CLI; resolved per operation so relay commands follow OMP updates. */
+  command(): Promise<string[]>;
   port?: number;
   onError?: (error: unknown) => void;
 }
@@ -23,8 +24,8 @@ function browserIdentity(product: unknown): Pick<RelayProbe, 'browserName' | 'br
 }
 
 
-async function command(binaryPath: string, args: string[], env: NodeJS.ProcessEnv): Promise<void> {
-  const child = Bun.spawn([binaryPath, ...args], {
+async function command(omp: string[], args: string[], env: NodeJS.ProcessEnv): Promise<void> {
+  const child = Bun.spawn([...omp, ...args], {
     env,
     stdin: 'ignore',
     stdout: 'pipe',
@@ -42,7 +43,6 @@ export class BrowserRelaySupervisor {
   readonly extensionPath: string;
   readonly endpoint: string;
   readonly chromeExtensionPath: string;
-  private readonly binaryPath: string;
   private readonly environment: NodeJS.ProcessEnv;
   private process: Bun.Subprocess | null = null;
   private starting = false;
@@ -55,7 +55,6 @@ export class BrowserRelaySupervisor {
     const distro = process.env.WSL_DISTRO_NAME?.trim();
     this.chromeExtensionPath = distro ? `\\\\wsl.localhost\\${distro}${this.extensionPath.replaceAll('/', '\\')}` : this.extensionPath;
     this.endpoint = `http://127.0.0.1:${port}`;
-    this.binaryPath = options.binaryPath ?? process.env.GITSPACE_OMP_BINARY ?? Bun.which('omp') ?? 'omp';
     // OMP CLI commands must update the same account settings as SDK sessions, not the invoking shell's profile.
     this.environment = { ...Bun.env, PI_CODING_AGENT_DIR: options.agentDir, OMP_PROFILE: 'default', PI_PROFILE: 'default' };
   }
@@ -74,7 +73,7 @@ export class BrowserRelaySupervisor {
   async setup(): Promise<BrowserRelayStatus> {
     await mkdir(join(this.options.environmentRoot, '.browser-relay'), { recursive: true });
     if (!await Bun.file(join(this.extensionPath, 'manifest.json')).exists()) {
-      await command(this.binaryPath, ['browser-relay', 'install', '--dir', this.extensionPath], this.environment);
+      await command(await this.options.command(), ['browser-relay', 'install', '--dir', this.extensionPath], this.environment);
     }
     await this.start();
     return this.status();
@@ -88,10 +87,11 @@ export class BrowserRelaySupervisor {
     this.starting = true;
     this.lastError = null;
     try {
-      await command(this.binaryPath, ['config', 'set', 'browser.relay', 'true'], this.environment);
-      await command(this.binaryPath, ['config', 'set', 'browser.relayUrl', this.endpoint], this.environment);
+      const omp = await this.options.command();
+      await command(omp, ['config', 'set', 'browser.relay', 'true'], this.environment);
+      await command(omp, ['config', 'set', 'browser.relayUrl', this.endpoint], this.environment);
       const port = new URL(this.endpoint).port;
-      const child = Bun.spawn([this.binaryPath, 'browser-relay', 'serve', '--port', port], {
+      const child = Bun.spawn([...omp, 'browser-relay', 'serve', '--port', port], {
         env: this.environment,
         stdin: 'ignore',
         stdout: 'ignore',

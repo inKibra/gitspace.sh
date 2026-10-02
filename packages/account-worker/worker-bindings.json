@@ -54,7 +54,7 @@
   {
     "name": "AUTH_MAX_SKEW_MS",
     "source": "literal",
-    "value": "60000"
+    "value": "300000"
   },
   {
     "name": "TUNNEL_HEADER_TIMEOUT_MS",

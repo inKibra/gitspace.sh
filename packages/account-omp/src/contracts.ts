@@ -2,6 +2,8 @@ import type { AgentSetupView, SaveAgentDefinitionInput } from '@gitspace/protoco
 import type { AgentFailure, SessionActivity } from '@gitspace/protocol-agent';
 import type { PendingAsk, PendingAskAnswer } from './ask-bridge.js';
 
+export type WorkspacePhase = 'plan' | 'code' | 'review' | 'ship';
+
 export interface OmpRuntimeEvent {
   type: string;
   [key: string]: unknown;
@@ -10,6 +12,7 @@ export interface OmpRuntimeEvent {
 
 export interface OmpSessionControlView {
   sessionId: string;
+  inference?: { profileId: string; profileName: string; profileRevision: number; assignmentRevision: number };
   role: string | null;
   roleLabel: string | null;
   roles: Array<{ id: string; label: string; provider: string; model: string; thinking: string | null; current: boolean }>;
@@ -41,7 +44,9 @@ export interface OmpRuntimeSession {
   handoff(): Promise<boolean>;
   reloadSettings?(): Promise<void>;
   instructionsChanged?(): Promise<void>;
-  setWorkspacePhase(phase: 'plan' | 'code' | 'review' | 'ship'): Promise<void>;
+  /** The admitted inference revision changed in place; reconcile the selected model with it. */
+  inferenceChanged?(): Promise<void>;
+  setWorkspacePhase(phase: WorkspacePhase): Promise<void>;
   resume(): Promise<void>;
   dispose(): Promise<void>;
   control(): Promise<OmpSessionControlView>;

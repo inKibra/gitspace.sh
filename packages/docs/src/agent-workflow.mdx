@@ -25,6 +25,10 @@ Structured agent questions appear as native interactions. Answer the decision di
 
 For repository setup, use the built-in `workspace-lifecycle` skill. It inspects the repository and CI, proposes the lifecycle split, and asks permission before editing. Execution needs separate human approval of the final content. Agents use `space.environment` for authorized runs and logs; they cannot grant content approval, recover uncertain runs, or destroy cloud resources. See [Workspace lifecycle](/workspace-lifecycle).
 
+### Workspace status
+
+The workspace header and sidebar use the same accepted status for the selected workspace. The sidebar keeps a small summary; it does not load each workspace's transcript or agent controls. Leaving a workspace keeps its last-known activity in the sidebar. Newer reads, closing the workspace, and ownership changes replace that summary.
+
 ### Context compaction
 
 The workspace header and sidebar show **Compacting context** for manual compaction, automatic maintenance before or after a turn, and running background compaction. Method, model, and automatic retry details appear when available. Finishing an assistant turn does not clear maintenance that is still running. The indicator clears when the remaining compaction work succeeds, fails, or is cancelled; a completed background result waiting to be applied is not running work. Human-attention and failure states retain their priority.
@@ -34,6 +38,8 @@ Each native V1/V2 compaction request has a six-minute deadline, including its Co
 ## Configure account and project access
 
 **Skills**, **Plugins**, **Secrets**, and **Crons** are account pages. You can manage them with no workspace open and no machine online. Selecting a project does not change an account-level write into a project-level write.
+
+**Inference** loads provider and model catalogs for the selected profile. Until the model catalog is ready, saved model choices stay visible but cannot be changed in the model picker. A loading catalog does not mean that a model or provider is missing.
 
 Skills have account defaults and per-project assignments. Set their use in the project's main space separately from their use in its workspaces. Agent sessions refresh those assignments before their next prompt or provider request. A settings change does not wake an idle agent or erase instructions already in its conversation. Existing subagents keep their copied skill lists; new subagents inherit the refreshed list.
 

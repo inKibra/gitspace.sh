@@ -72,22 +72,38 @@ export function resourceUriFromHref(href: string): string | null {
   } catch { return null; }
 }
 
-/** Bound text plus base64 to fit result-rpc's 1 MiB query envelope without silent truncation. */
-export function createResourcePreview(url: string, bytes: Uint8Array, mediaType: string | null = null): { url: string; mediaType: string | null; base64: string; text: string | null } {
+export type ResourcePreviewFrame =
+  | { type: 'metadata'; url: string; mediaType: string | null; text: boolean; size: number }
+  | { type: 'chunk'; base64: string };
+
+const MEDIA_TYPES: Readonly<Record<string, string>> = {
+  md: 'text/markdown', markdown: 'text/markdown', html: 'text/html', htm: 'text/html', json: 'application/json',
+  svg: 'image/svg+xml', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', avif: 'image/avif',
+  pdf: 'application/pdf', mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg', opus: 'audio/ogg', flac: 'audio/flac', m4a: 'audio/mp4', aac: 'audio/aac',
+  mp4: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime', m4v: 'video/mp4',
+};
+
+/** Finite byte stream: callers accept the preview only after clean completion. */
+export function* createResourcePreview(url: string, bytes: Uint8Array, mediaType: string | null = null): Generator<ResourcePreviewFrame> {
   const resource = parseResourceUri(url);
   if (!resource) throw new Error('Unsupported or unsafe resource URI');
   if (bytes.byteLength > 16 * 1024 * 1024) throw new Error('Resource reads are limited to 16 MiB');
+  mediaType ??= resource.kind === 'local' ? MEDIA_TYPES[resource.path.split('.').at(-1)?.toLowerCase() ?? ''] ?? null : 'text/plain';
+  const binary = mediaType !== null && (/^(audio|video|image)\//u.test(mediaType) && mediaType !== 'image/svg+xml' || mediaType === 'application/pdf');
   let text: string | null = null;
-  try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); } catch { /* Binary preview. */ }
+  if (!binary) {
+    try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); } catch { /* Binary preview. */ }
+  }
   if (resource.selector.ranges.length) {
     if (text === null) throw new Error('Line selectors require a UTF-8 text resource');
     text = selectResourceText(text, resource.selector);
     bytes = new TextEncoder().encode(text);
   }
   if (resource.selector.raw || resource.selector.ranges.length) mediaType = 'text/plain';
-  // Six-byte JSON escaping plus base64 leaves space for the RPC envelope and URI.
-  if (bytes.byteLength > 128 * 1024) throw new Error('This resource exceeds the 128 KiB preview limit. Use a smaller line range, for example :1-200, for text resources.');
-  let binary = '';
-  for (let offset = 0; offset < bytes.length; offset += 32 * 1024) binary += String.fromCharCode(...bytes.subarray(offset, offset + 32 * 1024));
-  return { url, mediaType, base64: btoa(binary), text };
+  if (text !== null && bytes.byteLength > 128 * 1024) throw new Error('This text resource exceeds the 128 KiB preview limit. Use a smaller line range, for example :1-200.');
+  yield { type: 'metadata', url, mediaType, text: text !== null, size: bytes.byteLength };
+  // Divisible by three, so each base64 payload is independently decodable.
+  for (let offset = 0; offset < bytes.byteLength; offset += 48 * 1024) {
+    yield { type: 'chunk', base64: btoa(String.fromCharCode(...bytes.subarray(offset, offset + 48 * 1024))) };
+  }
 }

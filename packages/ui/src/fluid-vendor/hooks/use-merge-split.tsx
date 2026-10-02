@@ -44,6 +44,44 @@ export interface SelBlock extends Rect {
 // can morph it across renders rather than exit+re-enter.
 export type Run = { start: number; end: number; id: number };
 
+/**
+ * Groups checked row indices into contiguous runs with ids that survive
+ * re-renders: a run keeps its id while any of its rows was in a run last
+ * render, so framer morphs a growing/shrinking block instead of swapping it.
+ * Feed the result to useMergeSplitBlocks.
+ */
+export function useSelectionRuns(checkedIndices: readonly number[]): Run[] {
+  const prevGroupMap = useRef(new Map<number, number>());
+  const groupIdCounter = useRef(0);
+
+  const runs: { start: number; end: number }[] = [];
+  const sorted = [...checkedIndices].sort((a, b) => a - b);
+  for (const idx of sorted) {
+    const last = runs[runs.length - 1];
+    if (last && idx === last.end + 1) last.end = idx;
+    else runs.push({ start: idx, end: idx });
+  }
+
+  const usedIds = new Set<number>();
+  const nextGroupMap = new Map<number, number>();
+  const result = runs.map((run) => {
+    let stableId: number | null = null;
+    for (let i = run.start; i <= run.end; i++) {
+      const prevId = prevGroupMap.current.get(i);
+      if (prevId !== undefined && !usedIds.has(prevId)) {
+        stableId = prevId;
+        break;
+      }
+    }
+    const id = stableId ?? ++groupIdCounter.current;
+    usedIds.add(id);
+    for (let i = run.start; i <= run.end; i++) nextGroupMap.set(i, id);
+    return { ...run, id };
+  });
+  prevGroupMap.current = nextGroupMap;
+  return result;
+}
+
 // One in-flight merge or split; geometry is recomputed from the live runs each
 // render so rapid toggles redirect instead of freezing.
 interface Boundary {

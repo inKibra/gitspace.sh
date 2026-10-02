@@ -1,9 +1,10 @@
 import { Composio, ConnectedAccountStatuses, SessionPreset } from '@composio/core';
-import type {
-  ComposioMcpMaterialization,
-  ComposioPluginCatalog,
-  ComposioPluginTool,
-  McpComposioTransport,
+import {
+  composioToolAllowed,
+  type ComposioMcpMaterialization,
+  type ComposioPluginCatalog,
+  type ComposioPluginTool,
+  type McpComposioTransport,
 } from '@gitspace/protocol';
 
 export interface ComposioAuthorizationStart {
@@ -97,12 +98,14 @@ export class ComposioPluginGateway implements ComposioPluginProvider {
     })).sort((left, right) => left.name.localeCompare(right.name));
   }
 
+  /** Resolves the policy against Composio's current tool list, so newly added tools follow their group's setting. */
   async materialize(principalId: string, transport: McpComposioTransport): Promise<ComposioMcpMaterialization> {
-    if (transport.allowedTools.length === 0) throw new Error('This Composio plugin has no allowed tools');
+    const enabled = (await this.tools(transport.toolkit)).filter((tool) => composioToolAllowed(transport.toolPolicy, tool)).map((tool) => tool.slug);
+    if (enabled.length === 0) throw new Error('This Composio plugin has no allowed tools');
     const session = await sdk(this.env, this.accountApiKey).sessions.create(principalId, {
       sessionPreset: SessionPreset.DIRECT_TOOLS,
       toolkits: [transport.toolkit],
-      tools: { [transport.toolkit]: { enable: transport.allowedTools } },
+      tools: { [transport.toolkit]: { enable: enabled } },
       connectedAccounts: { [transport.toolkit]: transport.connectedAccountId },
       manageConnections: false,
       sandbox: { enable: false },

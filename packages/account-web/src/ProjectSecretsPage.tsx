@@ -3,6 +3,7 @@ import { Badge, Button, Dialog, DialogContent, DialogDescription, DialogFooter, 
 import { useEffect, useRef, useState } from 'react';
 import { EmptyState, PageCanvas, PageHeader } from './GitSpaceShell.js';
 import { invalidatesRead } from './useRetainedRead.js';
+import { rpcErrorMessage } from './rpc-error-message.js';
 
 export interface ProjectSecretMetadata {
   projectId: string;
@@ -54,7 +55,7 @@ export function ProjectSecretsPage(props: ProjectSecretsProps) {
     else if (invalidatesRead(secrets.reason)) { setProjectSecrets([]); setDraft(null); }
     if (nextValues.status === 'fulfilled') setValues(nextValues.value);
     else if (invalidatesRead(nextValues.reason)) { setValues({ global: {}, project: {} }); setDraft(null); }
-    const failures = [account, secrets, nextValues].flatMap((result) => result.status === 'rejected' ? [result.reason instanceof Error ? result.reason.message : String(result.reason)] : []);
+    const failures = [account, secrets, nextValues].flatMap((result) => result.status === 'rejected' ? [rpcErrorMessage(result.reason, 'Read project configuration')] : []);
     setError(failures.join(' · ') || null);
     setLoading(false);
   };
@@ -71,7 +72,7 @@ export function ProjectSecretsPage(props: ProjectSecretsProps) {
     setSaving(true);
     setError(null);
     try { await action(); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
+    catch (cause) { setError(rpcErrorMessage(cause, 'Update project configuration')); }
     finally { busy.current = false; setSaving(false); }
   };
   const openEditor = (kind: EntryDraft['kind'], target: WriteTarget, name = '', value = ''): void => {

@@ -1,7 +1,7 @@
 import { env, runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
 import { ComposioPluginGateway } from '../src/composio-plugins.js';
-import type { McpConnectionDraft } from '@gitspace/protocol';
+import { DEFAULT_COMPOSIO_TOOL_POLICY, type McpConnectionDraft } from '@gitspace/protocol';
 import {
   McpConnectionRevisionConflictError,
   UserMcpConnectionsDO,
@@ -112,15 +112,37 @@ describe('UserMcpConnectionsDO', () => {
     }));
     expect(created).toMatchObject({
       target: { kind: 'cloud' },
-      transport: { type: 'composio', toolkit: 'github', connectedAccountId: 'ca_test', allowedTools: [] },
+      transport: { type: 'composio', toolkit: 'github', connectedAccountId: 'ca_test', toolPolicy: DEFAULT_COMPOSIO_TOOL_POLICY },
       status: 'connecting',
     });
     expect(JSON.stringify(created)).not.toContain('oauth-token');
     await runInDurableObject(stub, (authority: UserMcpConnectionsDO) => authority.consumeComposioAuthorization('principal-a', 'state-test'));
     await expect(runInDurableObject(stub, (authority: UserMcpConnectionsDO) => authority.consumeComposioAuthorization('principal-a', 'state-test'))).rejects.toThrow(/already used/u);
     const ready = await runInDurableObject(stub, (authority: UserMcpConnectionsDO) => authority.updateComposioStatus('principal-a', created.id, 'ready', null));
-    const updated = await runInDurableObject(stub, (authority: UserMcpConnectionsDO) => authority.updateComposioTools('principal-a', created.id, ready.revision, ['GITHUB_SEARCH_ISSUES']));
-    expect(updated.transport).toMatchObject({ allowedTools: ['GITHUB_SEARCH_ISSUES'] });
+    const toolPolicy = { groups: { readOnly: true, write: true, destructive: false }, allow: ['GITHUB_DELETE_REPO'], deny: ['GITHUB_CREATE_ISSUE'] };
+    const updated = await runInDurableObject(stub, (authority: UserMcpConnectionsDO) => authority.updateComposioTools('principal-a', created.id, ready.revision, toolPolicy));
+    expect(updated.transport).toMatchObject({ toolPolicy });
+  });
+
+  it('migrates stored allow-lists: untouched plugins allow everything, curated plugins keep exactly their tools', async () => {
+    const stub = mcpEnv.USER_MCP_CONNECTIONS.getByName('mcp-composio-legacy');
+    const migrated = await runInDurableObject(stub, (authority: UserMcpConnectionsDO, state) => {
+      const insert = (id: string, allowedTools: string[]) => state.storage.sql.exec(
+        'INSERT INTO mcp_connections VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+        id, 'principal-a', id, 1, JSON.stringify({ kind: 'cloud' }),
+        JSON.stringify({ type: 'composio', toolkit: 'notion', connectedAccountId: `ca_${id}`, allowedTools }),
+        30_000, 'ready', null, null, null, null, 4, '2026-09-01T00:00:00.000Z', '2026-09-01T00:00:00.000Z',
+      );
+      insert('untouched', []);
+      insert('curated', ['NOTION_SEARCH_NOTION_PAGE']);
+      authority.migrateLegacyComposioTransports();
+      return { untouched: authority.get('principal-a', 'untouched'), curated: authority.get('principal-a', 'curated') };
+    });
+    expect(migrated.untouched).toMatchObject({ revision: 4, transport: { toolPolicy: DEFAULT_COMPOSIO_TOOL_POLICY } });
+    expect(migrated.curated?.transport).toEqual({
+      type: 'composio', toolkit: 'notion', connectedAccountId: 'ca_curated',
+      toolPolicy: { groups: { readOnly: false, write: false, destructive: false }, allow: ['NOTION_SEARCH_NOTION_PAGE'], deny: [] },
+    });
   });
 
   it('stores Paper Desktop as machine-pinned direct Streamable HTTP', async () => {

@@ -6,6 +6,7 @@ import type {
   TranscriptRow,
 } from '@gitspace/blocks';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { rpcErrorMessage } from './rpc-error-message.js';
 import {
   EMPTY_TRANSCRIPT_CACHE,
   mergeTranscriptPage,
@@ -138,7 +139,7 @@ export function useTranscriptHistory(source: TranscriptHistorySource | null, ini
         error = null;
       } catch (cause) {
         if (!active || current.signal.aborted || controller !== current || sourceRef.current?.key !== identity.key) return;
-        error = cause instanceof Error ? cause.message : String(cause);
+        error = rpcErrorMessage(cause, 'Read transcript history');
       }
       if (!active || current.signal.aborted || controller !== current) return;
       controller = null;

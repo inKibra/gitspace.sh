@@ -149,6 +149,28 @@ it('keeps archived projects out of the active list and restores the chosen archi
   expect(restore).toHaveBeenCalledWith('beta', 7);
 });
 
+it('changes a project base branch from Settings at its current revision and keeps the built-in source read-only', async () => {
+  const setBaseBranch = vi.fn();
+  const source: ProjectLifecycleView = { ...projects[0]!, id: 'source', name: 'GitSpace', role: 'gitspace-source', baseBranch: 'release/one' };
+  const onSettingsProjectChange = vi.fn();
+  await act(() => root.render(<AccountWorkPages view="projects" projects={[...projects, source]} directory={directory} loading={false} onRefresh={vi.fn()} onOpenWorkspace={onOpenWorkspace} onOpenProject={onOpenProject} actions={{ onSetProjectBaseBranch: setBaseBranch }} settingsProjectId="source" onSettingsProjectChange={onSettingsProjectChange} />));
+  expect(document.body.textContent).toContain('Managed by GitSpace releases');
+  expect(document.body.querySelector('#project-base-branch-form')).toBeNull();
+  await act(() => [...document.body.querySelectorAll('button')].find((button) => button.textContent === 'Done')!.click());
+  expect(onSettingsProjectChange).toHaveBeenCalledWith(null);
+
+  await render('projects', { onSetProjectBaseBranch: setBaseBranch }, [...projects, source]);
+  await click('Settings for Beta');
+  const form = document.body.querySelector<HTMLFormElement>('#project-base-branch-form')!;
+  await act(() => {
+    const input = form.querySelector<HTMLInputElement>('input')!;
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, ' release ');
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await act(() => { form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); });
+  expect(setBaseBranch).toHaveBeenCalledWith('beta', 7, 'release');
+});
+
 it('includes base-agent waits and component errors across projects while identifying incomplete coverage', async () => {
   directory.alpha!.baseSummary = { holder: { kind: 'held', machineId: 'remote', label: 'Remote' }, closedAt: null, freshness: 'fresh', status: { ...idle, primaryColor: 'orange', agents: { green: 0, blue: 1, orange: 1, red: 0 } } };
   directory.beta!.workspaces[0]!.summary = { holder: { kind: 'released' }, closedAt: null, freshness: 'stale', status: { ...idle, primaryColor: 'red', services: { green: 0, red: 2 }, terminals: { green: 0, red: 1 } } };

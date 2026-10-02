@@ -9,7 +9,8 @@ import {
   type CloudWorkspaceDefinition, type InspectorIdentity,
 } from '@gitspace/protocol';
 import { assertLifecycleCommandAuthorized, LifecyclePhaseSchema, LifecycleRunRequestSchema } from '@gitspace/protocol-environment';
-import { WorkspacePhaseSchema } from '@gitspace/protocol-workspace';
+import { WorkspacePhaseSchema, type WorkspacePhase } from '@gitspace/protocol-workspace';
+import type { WorkspaceInstructions } from '../../account-omp/src/workspace-instructions.js';
 import type { CloudSpaceCheckpointAuthority } from './cloud-space-authority.js';
 import type { CreateWorkspaceInput } from './project-lifecycle.js';
 
@@ -39,7 +40,7 @@ export const spaceEnvironmentSchemas = {
   setProfile: z.object({ profile: z.string().min(1).max(64) }).strict(),
   putValue: z.object({ scope: environmentScope, name: environmentName, value: z.string().max(16_384) }).strict(),
   deleteValue: z.object({ scope: environmentScope, name: environmentName }).strict(),
-  runChecks: LifecycleRunRequestSchema.omit({ phase: true, rerun: true }),
+  runChecks: LifecycleRunRequestSchema.omit({ phase: true, rerun: true, interactive: true }),
   runPhase: LifecycleRunRequestSchema.extend({ phase: LifecyclePhaseSchema.exclude(['cloud/destroy']) }),
   cancelRun: LifecycleRunRequestSchema.pick({ runId: true }),
 };
@@ -82,7 +83,7 @@ const SPACE_DECLARATION = `{
     putValue(input: { workspaceId?: string; scope: 'project'|'workspace'; name: string; value: string }): Promise<unknown>;
     deleteValue(input: { workspaceId?: string; scope: 'project'|'workspace'; name: string }): Promise<unknown>;
     runChecks(input: { workspaceId?: string; runId: string; deadlineAt?: string }): Promise<unknown>; // returns the durable accepted run; reuse runId to retry the same request
-    runPhase(input: { workspaceId?: string; runId: string; deadlineAt?: string; phase: 'cloud/provision'|'machine/prepare'|'workspace/materialize'|'workspace/dematerialize'; rerun?: boolean }): Promise<unknown>; // returns the durable accepted run; approval, recovery, and retirement require the human browser
+    runPhase(input: { workspaceId?: string; runId: string; deadlineAt?: string; phase: 'cloud/provision'|'machine/prepare'|'workspace/materialize'|'workspace/dematerialize'; rerun?: boolean; interactive?: boolean }): Promise<unknown>; // returns the durable accepted run; interactive input/output is browser-only
     cancelRun(input: { workspaceId?: string; runId: string }): Promise<unknown>; // records cancellation; terminal outcome follows actual process completion
   };
   goal: { get(input?: { workspaceId?: string }): Promise<unknown>; put(input: { workspaceId?: string; expectedRevision: number; goal: object }): Promise<unknown>; attachEvidence(input: { workspaceId?: string; expectedRevision: number; requirementId: string; evidence: object }): Promise<unknown> };
@@ -103,6 +104,39 @@ const createSchema = z.object({
   goal: goalDraftSchema.optional(), workflow: workflowDraftSchema.optional(), rubric: rubricDraftSchema.optional(),
 }).strict();
 
+/** Typed controls for GitSpace's own session host; the eval namespace below serves agent-written code. */
+export interface SpaceHostControls {
+  instructions(): Promise<WorkspaceInstructions>;
+  /** Moves the session's workspace to `phase` at its current definition revision. */
+  setPhase(phase: WorkspacePhase): Promise<void>;
+}
+
+export function createSpaceHostControls(
+  authority: CloudSpaceCheckpointAuthority,
+  projectId: string,
+  workspaceId: string | null,
+  controls?: SpaceWorkspaceControls,
+): SpaceHostControls {
+  const spaceId = workspaceId ?? projectId;
+  return {
+    async instructions() {
+      await controls?.refreshArtifacts(projectId, spaceId);
+      const identity = { projectId, spaceId };
+      const [goal, workflow, rubric] = await Promise.all([
+        authority.getInspectorGoal(identity), authority.getInspectorWorkflow(identity), authority.getInspectorRubric(identity),
+      ]);
+      return { goal, workflow, rubric };
+    },
+    async setPhase(phase) {
+      if (workspaceId === null) throw new Error('Project base sessions have no workspace phase');
+      if (!controls) throw new Error('Workspace lifecycle controls are unavailable');
+      const definition = (await authority.listProjectWorkspaces(projectId)).find((workspace) => workspace.id === workspaceId);
+      if (!definition) throw new Error(`Workspace ${workspaceId} does not exist in project ${projectId}`);
+      await controls.manage('setPhase', definition, { expectedRevision: definition.revision, phase });
+    },
+  };
+}
+
 export function createSpaceEvalNamespace(
   authority: CloudSpaceCheckpointAuthority,
   projectId: string,
@@ -110,6 +144,7 @@ export function createSpaceEvalNamespace(
   controls?: SpaceWorkspaceControls,
 ): OmpEvalNamespace {
   const currentSpaceId = workspaceId ?? projectId;
+  const host = createSpaceHostControls(authority, projectId, workspaceId, controls);
   const requireControls = (): SpaceWorkspaceControls => {
     if (!controls) throw new Error('Workspace lifecycle controls are unavailable');
     return controls;
@@ -208,8 +243,8 @@ export function createSpaceEvalNamespace(
       if (method === 'get') return readWorkspace(spaceId, workspaces);
       if (method.startsWith('environment.')) {
         const name = method.slice('environment.'.length) as SpaceEnvironmentMethod;
-        if (!Object.hasOwn(spaceEnvironmentSchemas, name)) throw new Error('Environment approvals, recovery, and retirement require the human browser');
-        if (name === 'runPhase') assertLifecycleCommandAuthorized(LifecyclePhaseSchema.parse(payload.phase), { human: false });
+        if (!Object.hasOwn(spaceEnvironmentSchemas, name)) throw new Error('Environment approvals, recovery, and retirement require an authorized lifecycle controller through the account gateway');
+        if (name === 'runPhase') assertLifecycleCommandAuthorized(LifecyclePhaseSchema.parse(payload.phase), { lifecycleControl: false });
         const input = spaceEnvironmentSchemas[name].parse(payload);
         return requireControls().environment(name, projectId, spaceId, input);
       }
@@ -226,27 +261,27 @@ export function createSpaceEvalNamespace(
         case 'goal.put': return publish(identity, 'goal', await authority.putInspectorGoal(putGoalInputSchema.parse(input)));
         case 'instructions.get': {
           if (target !== undefined) throw new Error('Instruction refresh is scoped to the current workspace');
-          await controls?.refreshArtifacts(projectId, spaceId);
-          const [goal, workflow, rubric] = await Promise.all([
-            authority.getInspectorGoal(identity), authority.getInspectorWorkflow(identity), authority.getInspectorRubric(identity),
-          ]);
-          return { goal, workflow, rubric };
+          return host.instructions();
         }
         case 'goal.attachEvidence': return publish(identity, 'goal', await authority.attachInspectorRequirementEvidence(attachRequirementEvidenceInputSchema.parse(input)));
         case 'workflow.get': return authority.getInspectorWorkflow(identity);
         case 'workflow.put': return publish(identity, 'workflow', await authority.putInspectorWorkflow(putWorkflowInputSchema.parse(input)));
-        case 'workflow.waiveGate': return publish(identity, 'workflow', await authority.waiveInspectorWorkflowGate(waiveWorkflowGateInputSchema.parse(input)));
+        case 'workflow.waiveGate': throw new Error('Workflow waivers require authenticated account administration');
         case 'rubric.get': return authority.getInspectorRubric(identity);
         case 'rubric.put': return publish(identity, 'rubric', await authority.putInspectorRubric(putRubricInputSchema.parse(input)));
-        case 'rubric.judge': return publish(identity, 'rubric', await authority.appendInspectorRubricJudgment(appendRubricJudgmentInputSchema.parse(input)), 'append');
+        case 'rubric.judge': {
+          const parsed = appendRubricJudgmentInputSchema.parse(input);
+          if (parsed.judgment.kind === 'human') throw new Error('Human rubric decisions require authenticated account administration');
+          return publish(identity, 'rubric', await authority.appendInspectorRubricJudgment({ ...parsed, judgment: { ...parsed.judgment, actorId: `agent:${currentSpaceId}`, actorKind: 'agent', createdAt: new Date().toISOString() } }), 'append');
+        }
         case 'journal.list': return authority.listInspectorJournal(identity);
         case 'journal.startPhase': return publish(identity, 'journal', await authority.startInspectorJournalPhase(startJournalPhaseInputSchema.parse(input)), 'created');
         case 'journal.endPhase': return publish(identity, 'journal', await authority.endInspectorJournalPhase(endJournalPhaseInputSchema.parse(input)));
         case 'journal.append': return publish(identity, 'journal', await authority.appendInspectorJournalEntry(appendJournalEntryInputSchema.parse(input)), 'append');
         case 'guide.get': return authority.getInspectorChangeGuide(identity);
         case 'guide.put': return publish(identity, 'change-guide', await authority.putInspectorChangeGuide(putChangeGuideInputSchema.parse(input)));
-        case 'guide.markRead': return publish(identity, 'change-guide', await authority.markInspectorGuideSectionRead(markGuideSectionReadInputSchema.parse(input)));
-        case 'guide.approve': return publish(identity, 'change-guide', await authority.setInspectorGuideApproval(setGuideApprovalInputSchema.parse(input)));
+        case 'guide.markRead': return publish(identity, 'change-guide', await authority.markInspectorGuideSectionRead({ ...markGuideSectionReadInputSchema.parse(input), reviewerId: `agent:${currentSpaceId}` }));
+        case 'guide.approve': throw new Error('Guide approval requires authenticated account administration');
         case 'review.list': return authority.listInspectorReviewThreads(identity, context as never);
         case 'review.create': return publish(identity, 'review-thread', await authority.createInspectorReviewThread(createReviewThreadInputSchema.parse(input), context as never), 'created');
         case 'review.append': return publish(identity, 'review-thread', await authority.appendInspectorReviewMessage(appendReviewMessageInputSchema.parse(input), context as never), 'append');

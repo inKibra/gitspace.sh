@@ -1,7 +1,8 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
+import { resourceLinkHref } from '@gitspace/protocol/resource-uri';
 import { verticalSliceFixture } from './App.js';
-import { GitSpaceShell, workspaceStatusColor, type GitSpaceShellProps, type WorkspaceView } from './GitSpaceShell.js';
+import { GitSpaceShell, pendingProfileChange, workspaceStatusColor, type GitSpaceShellProps, type WorkspaceView } from './GitSpaceShell.js';
 import { OverviewView } from './inspector/index.js';
 
 
@@ -12,6 +13,16 @@ describe('GitSpaceShell', () => {
     expect(workspaceStatusColor({ ...scope, freshness: 'unknown' })).toBe('orange');
     expect(workspaceStatusColor({ ...scope, holder: { kind: 'released' } })).toBe('dim');
     expect(workspaceStatusColor({ ...scope, freshness: 'fresh' })).toBe('green');
+  });
+
+  it('mentions the inference profile only while the next turn would use a different one', () => {
+    const admitted = { profileId: 'default', profileRevision: 3 };
+    expect(pendingProfileChange(admitted, { id: 'default', name: 'Default', revision: 3 })).toBeNull();
+    expect(pendingProfileChange(admitted, { id: 'golconda', name: 'Golconda', revision: 1 })).toBe('Next turn uses Golconda');
+    expect(pendingProfileChange(admitted, { id: 'default', name: 'Default', revision: 4 })).toBe('Next turn uses updated Default');
+    // No session admission yet, or assignments still loading: nothing to compare.
+    expect(pendingProfileChange(undefined, { id: 'default', name: 'Default', revision: 3 })).toBeNull();
+    expect(pendingProfileChange(admitted, undefined)).toBeNull();
   });
 
   it('keeps compaction visibly active and interruptible', () => {
@@ -117,6 +128,7 @@ describe('GitSpaceShell', () => {
       terminals={{
         spaceId: 'space',
         events: () => { throw new Error('not called during server render'); },
+        live: () => { throw new Error('not called during server render'); },
         create: async () => { throw new Error('not called during server render'); },
         send: async () => undefined,
         stop: async () => undefined,
@@ -125,17 +137,39 @@ describe('GitSpaceShell', () => {
     expect(html).toContain('aria-label="Open terminals"');
   });
 
-  it('warns in the composer when the selected model provider is not connected on this machine', () => {
+  it('links disconnected provider setup to Inference instead of account settings', () => {
     const rejects = async (): Promise<never> => { throw new Error('not called during server render'); };
     const sessionControls: NonNullable<GitSpaceShellProps['sessionControls']> = {
-      value: { sessionId: 'session-a', role: null, roleLabel: null, roles: [], provider: 'anthropic', models: [{ provider: 'anthropic', id: 'claude', name: 'Claude', contextWindow: null }], model: 'claude', thinking: null, fastMode: false, planMode: false, approvalMode: 'write', context: null, cost: 0, todos: [], queue: { steering: [], followUp: [] }, pendingAsk: null, goal: null, history: [], historyAnchorId: null },
+      value: { sessionId: 'session-a', role: null, roleLabel: null, roles: [], provider: 'anthropic', models: [{ provider: 'anthropic', id: 'claude', name: 'Claude', contextWindow: null }], model: 'claude', thinking: null, fastMode: false, planMode: false, approvalMode: 'write', context: null, cost: 0, todos: [], queue: { steering: [], followUp: [] }, pendingAsk: null, goal: null, history: [], historyAnchorId: null, activity: { active: false, reasons: [] }, renderState: 'waiting' },
       onCycleRole: rejects, onSetModel: rejects, onSetThinking: rejects, onSetFast: rejects, onSetApproval: rejects, onSetGoal: rejects, onCompact: rejects, onClearQueue: rejects, onRemoveQueuedMessage: rejects, onPromoteQueuedMessage: rejects, onAnswerAsk: rejects, onStop: rejects, onNavigateTree: rejects,
     };
     const disconnected = renderToStaticMarkup(<GitSpaceShell {...verticalSliceFixture} sessionControls={sessionControls} providers={[{ id: 'anthropic', name: 'Anthropic', hasAuth: false }]} />);
-    expect(disconnected).toContain('Anthropic isn’t connected on this machine');
-    expect(disconnected).toContain('href="/settings?section=omp-providers"');
+    expect(disconnected).toContain('href="/inference?section=providers"');
     const connected = renderToStaticMarkup(<GitSpaceShell {...verticalSliceFixture} sessionControls={sessionControls} providers={[{ id: 'anthropic', name: 'Anthropic', hasAuth: true }]} />);
-    expect(connected).not.toContain('isn’t connected on this machine');
+    expect(connected).not.toContain('href="/inference?section=providers"');
+  });
+
+  it('shows a question GitSpace asks itself, such as plan approval, with a link to the plan, even without an ask call in the transcript', () => {
+    const rejects = async (): Promise<never> => { throw new Error('not called during server render'); };
+    const pendingAsk = {
+      id: 'ask-plan', source: 'gitspace' as const, links: [{ label: 'Open plan', uri: 'local://workspace/music-updates-plan.md' }],
+      questions: [{ id: 'plan-approval', question: 'Approve “music-updates” and move this workspace to Code?', header: 'Plan', multi: false, recommended: 0, options: [
+        { label: 'Approve and move to Code', description: 'The agent implements the plan with full tools.', preview: null },
+        { label: 'Keep planning', description: null, preview: null },
+      ] }],
+    };
+    const sessionControls: NonNullable<GitSpaceShellProps['sessionControls']> = {
+      value: { sessionId: 'session-a', role: null, roleLabel: null, roles: [], provider: 'anthropic', models: [], model: null, thinking: null, fastMode: false, planMode: true, approvalMode: 'write', context: null, cost: 0, todos: [], queue: { steering: [], followUp: [] }, pendingAsk, goal: null, history: [], historyAnchorId: null, activity: { active: true, reasons: [{ kind: 'human', questions: 1, permissions: 0 }] }, renderState: 'permission-needed' },
+      onCycleRole: rejects, onSetModel: rejects, onSetThinking: rejects, onSetFast: rejects, onSetApproval: rejects, onSetGoal: rejects, onCompact: rejects, onClearQueue: rejects, onRemoveQueuedMessage: rejects, onPromoteQueuedMessage: rejects, onAnswerAsk: rejects, onStop: rejects, onNavigateTree: rejects,
+    };
+    const html = renderToStaticMarkup(<GitSpaceShell {...verticalSliceFixture} sessionControls={sessionControls} />);
+    expect(html).toContain('Approve “music-updates” and move this workspace to Code?');
+    expect(html).toContain('Approve and move to Code');
+    expect(html).toContain('Keep planning');
+    expect(html).toContain('Open plan');
+    expect(html).toContain(`href="${resourceLinkHref('local://workspace/music-updates-plan.md')}"`);
+    const toolAsk = renderToStaticMarkup(<GitSpaceShell {...verticalSliceFixture} sessionControls={{ ...sessionControls, value: { ...sessionControls.value, pendingAsk: { ...pendingAsk, source: 'ask-tool' } } }} />);
+    expect(toolAsk).not.toContain('Approve and move to Code');
   });
 
   it('never offers a dependent as a new dependency on the Overview', () => {

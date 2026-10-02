@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'bun:test';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -11,8 +12,9 @@ import {
   type FactEvent,
   type MaterializedSpace,
 } from '@gitspace/core';
-import { createDeviceBinding, createEncryptedRpcFetch, createSignedRpcFetch, credentialProtocolBase64, gitspaceContract, rpcErrors, signDeviceInvite, type CloudProjectOperation, type CloudWorkspaceDefinition, type DeviceCapability, type DeviceGrantRecord, type ProjectEvent } from '@gitspace/protocol';
+import { ARTIFACT_UPLOAD_CHUNK_BYTES, ARTIFACT_UPLOAD_MAX_BYTES, createDeviceBinding, createEncryptedRpcFetch, createSignedRpcFetch, credentialProtocolBase64, gitspaceContract, rpcErrors, signDeviceInvite, type CloudProjectOperation, type CloudWorkspaceDefinition, type DeviceCapability, type DeviceGrantRecord, type ProjectEvent } from '@gitspace/protocol';
 import { decodeTranscriptChunks, type TranscriptChunk, type TranscriptEvent } from '@gitspace/protocol/transcript';
+import type { ResourcePreviewFrame } from '@gitspace/protocol/resource-uri';
 import { applyStreamEvent, initialStreamState } from '@gitspace/protocol-sync';
 import { WorkspaceDomainError } from '@gitspace/protocol-workspace';
 import { emptyLifecycleState, isLifecycleRunActive, transitionLifecycle, type LifecycleRunRecord, type LifecycleState } from '@gitspace/protocol-environment';
@@ -24,6 +26,8 @@ import { ProjectLifecycleManager, type ProjectLifecycleAuthority } from '../src/
 import { createSignedRpcHandler } from '../src/signed-rpc.js';
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { createBrowserClient, fetchTransport } from 'result-rpc/client';
+import { DEFAULT_MAX_WIRE_BYTES, serialize } from 'result-rpc';
+import { readRepositoryTree } from '../src/inspector-git.js';
 import {
   MachineSessionCoordinator,
   createEncryptedRpcHandler,
@@ -32,9 +36,11 @@ import {
   type OmpRuntime,
   type OmpRuntimeEvent,
   type OmpRuntimeSession,
+  type OmpSessionControlView,
   type OmpTranscriptEvent,
   type WorkspaceHubTerminalCoordinator,
 } from '../src/index.js';
+import { ARTIFACT_UPLOAD_IDLE_MS, ArtifactUploads } from '../src/artifact-uploads.js';
 
 const roots: string[] = [];
 afterEach(() => {
@@ -56,6 +62,38 @@ async function collectTranscript(source: Parameters<typeof transcriptChunks>[0])
   return events;
 }
 
+async function collectResults<T>(source: AsyncIterable<T>): Promise<T[]> {
+  const results: T[] = [];
+  for await (const result of source) results.push(result);
+  return results;
+}
+
+async function collectResourceBytes(source: AsyncIterable<
+  { status: 'ok'; value: ResourcePreviewFrame } | { status: 'error'; error: unknown }
+>, metadata: { url: string; mediaType: string | null; text: boolean; size: number }): Promise<Buffer> {
+  let receivedMetadata = false;
+  const chunks: Buffer[] = [];
+  for await (const result of source) {
+    if (result.status === 'error') throw result.error;
+    expect(serialize({ v: 1, ...result }, { maxBytes: DEFAULT_MAX_WIRE_BYTES }).ok).toBe(true);
+    const frame = result.value;
+    if (!receivedMetadata) {
+      expect(frame).toEqual({ type: 'metadata', ...metadata });
+      receivedMetadata = true;
+    } else {
+      if (frame.type !== 'chunk') throw new Error('Expected byte chunks after the initial metadata');
+      const bytes = Buffer.from(frame.base64, 'base64');
+      expect(bytes.byteLength).toBeGreaterThan(0);
+      expect(bytes.byteLength).toBeLessThanOrEqual(48 * 1024);
+      chunks.push(bytes);
+    }
+  }
+  expect(receivedMetadata).toBe(true);
+  const bytes = Buffer.concat(chunks);
+  expect(bytes.byteLength).toBe(metadata.size);
+  return bytes;
+}
+
 function git(cwd: string, ...args: string[]): string {
   const result = Bun.spawnSync(['git', ...args], {
     cwd,
@@ -73,6 +111,7 @@ function git(cwd: string, ...args: string[]): string {
 
 class RpcFakeOmpRuntime implements OmpRuntime {
   readonly created: Array<{ workingDirectory: string; sessionKey: string }> = [];
+  controls: OmpSessionControlView | null = null;
   readonly opened: Array<{ workingDirectory: string; sessionKey: string }> = [];
   readonly promptBehaviors: Array<'steer' | 'followUp' | undefined> = [];
   readonly transcripts = new Map<string, OmpTranscriptEvent[]>();
@@ -107,7 +146,10 @@ class RpcFakeOmpRuntime implements OmpRuntime {
       id,
       sessionFile,
       isAvailable: () => available,
-      control: async () => { throw new Error('Session controls are not configured in this fixture'); },
+      control: async () => {
+        if (this.controls) return this.controls;
+        throw new Error('Session controls are not configured in this fixture');
+      },
       agentSetup: async () => { throw new Error('Agent setup is not configured in this fixture'); },
       saveAgentDefinition: async () => { throw new Error('Agent setup is not configured in this fixture'); },
       historyAnchorId: async () => null,
@@ -152,6 +194,59 @@ class RpcFakeOmpRuntime implements OmpRuntime {
 }
 
 describe('GitSpace Result RPC', () => {
+  it('streams a complete repository tree larger than the RPC response limit', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'gitspace-tree-rpc-'));
+    roots.push(root);
+    const repositoryPath = join(root, 'repo', 'workspace');
+    mkdirSync(repositoryPath, { recursive: true });
+    git(repositoryPath, 'init', '-b', 'main');
+    writeFileSync(join(repositoryPath, 'tracked.txt'), 'tracked\n');
+    git(repositoryPath, 'add', '.');
+    git(repositoryPath, 'commit', '-m', 'Initial tree');
+    const directory = Array.from({ length: 30 }, (_, index) => `${index}-${'directory'.repeat(10)}`).join('/');
+    mkdirSync(join(repositoryPath, directory), { recursive: true });
+    for (let index = 0; index < 420; index += 1) {
+      writeFileSync(join(repositoryPath, directory, `${index}-${'file'.repeat(50)}.txt`), 'untracked\n');
+    }
+    const database = new GitSpaceDatabase(join(root, 'gitspace.db'));
+    expect(database.createProject({ id: 'project-a', name: 'Tree', repositoryPath: join(root, 'repo') }).status).toBe('ok');
+    expect(database.createWorkspace({ id: 'workspace-a', projectId: 'project-a', name: 'Tree', branch: 'main', rootPath: repositoryPath }).status).toBe('ok');
+    expect(database.possessWorkspace('workspace-a', 'machine-a').status).toBe('ok');
+    const generation = database.getSpace('workspace-a')!.generation;
+    const expected = await readRepositoryTree({ repositoryPath, spaceId: 'workspace-a', generation, mode: 'current' });
+    expect(serialize({ v: 1, status: 'ok', value: expected }, { maxBytes: DEFAULT_MAX_WIRE_BYTES }).ok).toBe(false);
+    const artifacts = new LocalArtifactResolver(database, new MemoryArtifactObjectStore(), join(root, 'cache'), new Uint8Array(32));
+    const events = new FactEventStore(database);
+    const handlers = new GitSpaceHandlers(database, artifacts, events);
+    const sessions = new MachineSessionCoordinator(database, artifacts, new RpcFakeOmpRuntime(), 'machine-a', join(root, 'runtime'), events);
+    const unavailable = async (): Promise<never> => { throw new Error('Not configured in repository fixture'); };
+    const rpc = createGitSpaceRpcHandler({
+      database, handlers, artifacts, sessions, factEvents: events, machineId: 'machine-a',
+      terminals: {} as WorkspaceHubTerminalCoordinator,
+      spaces: { close: unavailable, release: unavailable, open: unavailable },
+      serviceManager: { list: async () => [], start: unavailable, stop: unavailable },
+      secrets: { listProjectSecrets: async () => [], putProjectSecret: unavailable, deleteProjectSecret: unavailable },
+      projectEvents: { appendProjectEvent: unavailable, listProjectEvents: async () => [], latestProjectEventOffset: async () => 0 },
+      machines: async () => [], spacePlacements: async () => [],
+    });
+    const http = startGitSpaceRpcHttpServer({ handler: rpc.handler });
+    const client = createBrowserClient({ contract: gitspaceContract, transport: fetchTransport({ url: `${http.url}/rpc` }) });
+    try {
+      const received: typeof expected = [];
+      for await (const result of client.inspector.repository.tree({ spaceId: 'workspace-a', expectedGeneration: generation, mode: 'current', path: null })) {
+        if (result.status === 'error') throw result.error;
+        received.push(...result.value);
+      }
+      expect(received).toEqual(expected);
+      const missing = [];
+      for await (const result of client.inspector.repository.tree({ spaceId: 'missing', expectedGeneration: 0, mode: 'current', path: null })) missing.push(result);
+      expect(missing).toMatchObject([{ status: 'error', error: { _tag: 'gitspace/workspace-not-found' } }]);
+    } finally {
+      await http.stop();
+      database.close();
+    }
+  }, 20_000);
+
   it('archives a failed canonical workspace over HTTP without creating a local placement', async () => {
     const root = mkdtempSync(join(tmpdir(), 'gitspace-archive-rpc-'));
     roots.push(root);
@@ -170,7 +265,7 @@ describe('GitSpace Result RPC', () => {
     const unavailable = async (): Promise<never> => { throw new Error('Not configured in archive fixture'); };
     const authority: ProjectLifecycleAuthority = {
       bootstrap: unavailable, bootstrapInspector: unavailable, bootstrapProject: unavailable,
-      activateSourceProject: unavailable, setProjectLifecycle: unavailable, deleteProject: unavailable,
+      activateSourceProject: unavailable, setProjectBaseBranch: unavailable, setProjectLifecycle: unavailable, deleteProject: unavailable,
       removeProjectWorkspace: unavailable,
       listProjects: async () => [],
       getProject: async (projectId) => projectId === definition.projectId ? {
@@ -294,7 +389,7 @@ describe('GitSpace Result RPC', () => {
       projects: {
         list: async () => [], createProject: unavailable, openProject: unavailable, createWorkspace: unavailable,
         findWorkspace: async () => null,
-        archiveWorkspace: unavailable, archiveProject: unavailable, restoreProject: unavailable, deleteProject: unavailable, deleteWorkspace: unavailable,
+        archiveWorkspace: unavailable, archiveProject: unavailable, restoreProject: unavailable, setBaseBranch: unavailable, deleteProject: unavailable, deleteWorkspace: unavailable,
         setWorkspaceLifecycle: unavailable, setWorkspacePhase: unavailable, runLifecycleOperation: unavailable,
       },
       machines: async () => [],
@@ -335,7 +430,7 @@ describe('GitSpace Result RPC', () => {
     });
     try {
       const input = { projectId: 'project-a', workspaceId: 'workspace-a' };
-      const metadata = await client.bootstrap(input);
+      const metadata = await client.space.view(input);
       measureBootstrap = false;
       if (metadata.status === 'error') throw metadata.error;
       expect(metadata.value.mainAgent?.id).toBe(session.id);
@@ -407,7 +502,7 @@ describe('GitSpace Result RPC', () => {
       expect(database.commitSpaceClosed(closing).status).toBe('ok');
       measureBootstrap = true;
       const beforeMetadataOffset = events.latestOffset('project-a');
-      const closed = await client.bootstrap(input);
+      const closed = await client.space.view(input);
       measureBootstrap = false;
       if (closed.status === 'error') throw closed.error;
       expect(closed.value.mainAgent).toBeNull();
@@ -444,6 +539,71 @@ describe('GitSpace Result RPC', () => {
       database.close();
     }
   }, 20_000);
+
+  it('runs and serves an open workspace after its project base is released from the machine', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'gitspace-released-base-rpc-'));
+    roots.push(root);
+    const database = new GitSpaceDatabase(join(root, 'gitspace.db'));
+    expect(database.createProject({ id: 'project-a', name: 'Released base', repositoryPath: join(root, 'base') }).status).toBe('ok');
+    expect(database.createWorkspace({ id: 'workspace-a', projectId: 'project-a', name: 'Workspace', branch: 'feature', rootPath: join(root, 'workspace') }).status).toBe('ok');
+    expect(database.possessWorkspace('workspace-a', 'machine-a').status).toBe('ok');
+    const artifacts = new LocalArtifactResolver(database, new MemoryArtifactObjectStore(), join(root, 'cache'), new Uint8Array(32));
+    const events = new FactEventStore(database);
+    const sessions = new MachineSessionCoordinator(database, artifacts, new RpcFakeOmpRuntime(), 'machine-a', join(root, 'runtime'), events);
+    const base = database.getSpace('project-a')!;
+    database.prepareSpaceCleanup({ spaceId: base.id, projectId: base.projectId, generation: base.generation, rootPath: base.rootPath, sessionFiles: [], sessionIds: [] });
+    database.commitSpaceCleanup(base.id);
+    expect(database.getBaseSpace('project-a')).toBeNull();
+    // The workspace agent starts and syncs its artifacts without the base's read-only mount.
+    const created = await sessions.create('workspace-a');
+    if (created.status === 'error') throw created.error;
+    await sessions.refreshArtifacts('project-a', 'workspace-a');
+    await sessions.publishArtifacts('workspace-a');
+    const checkpoint = { sessionId: 'base-session', generation: 4, lastMachineId: 'machine-b' };
+    const metadataReads: string[] = [];
+    const unavailable = async (): Promise<never> => { throw new Error('Not configured in released-base fixture'); };
+    const rpc = createGitSpaceRpcHandler({
+      database, handlers: new GitSpaceHandlers(database, artifacts, events), artifacts, sessions, factEvents: events,
+      terminals: {} as WorkspaceHubTerminalCoordinator,
+      spaces: { close: unavailable, release: unavailable, open: unavailable },
+      serviceManager: { list: async () => [], start: unavailable, stop: unavailable },
+      secrets: { listProjectSecrets: async () => [], putProjectSecret: unavailable, deleteProjectSecret: unavailable },
+      projectEvents: { appendProjectEvent: unavailable, listProjectEvents: async () => [], latestProjectEventOffset: async () => 0 },
+      projects: {
+        list: async () => [], createProject: unavailable, openProject: unavailable, createWorkspace: unavailable,
+        findWorkspace: async () => null,
+        archiveWorkspace: unavailable, archiveProject: unavailable, restoreProject: unavailable, setBaseBranch: unavailable, deleteProject: unavailable, deleteWorkspace: unavailable,
+        setWorkspaceLifecycle: unavailable, setWorkspacePhase: unavailable, runLifecycleOperation: unavailable,
+      },
+      machines: async () => [],
+      spacePlacements: async () => [],
+      checkpointMetadata: async (_projectId, spaceId) => { metadataReads.push(spaceId); return checkpoint; },
+      checkpointTranscript: unavailable,
+      machineId: 'machine-a',
+    });
+    const http = startGitSpaceRpcHttpServer({ handler: rpc.handler });
+    const client = createBrowserClient({ contract: gitspaceContract, transport: fetchTransport({ url: `${http.url}/rpc` }) });
+    try {
+      const workspace = await client.space.view({ projectId: 'project-a', workspaceId: 'workspace-a' });
+      if (workspace.status === 'error') throw workspace.error;
+      expect(workspace.value.project).toEqual({ id: 'project-a', name: 'Released base', baseBranch: 'main', connected: false });
+      expect(workspace.value.baseSpace).toMatchObject({ id: 'project-a', kind: 'base', branch: 'main', possessedBy: null, closedAt: null });
+      expect(workspace.value.mainAgent).toMatchObject({ id: created.value.id, scope: 'workspace', workspaceId: 'workspace-a' });
+      expect(workspace.value.checkpoint).toBeNull();
+      expect(metadataReads).toEqual([]);
+
+      const released = await client.space.view({ projectId: 'project-a', workspaceId: null });
+      if (released.status === 'error') throw released.error;
+      expect(released.value.mainAgent).toBeNull();
+      expect(released.value.checkpoint).toEqual(checkpoint);
+      expect(metadataReads).toEqual(['project-a']);
+      expect(released.value.workspaces.map((candidate) => candidate.id)).toEqual(['workspace-a']);
+    } finally {
+      await sessions.close(created.value.id);
+      await http.stop();
+      database.close();
+    }
+  });
 
   it('serves typed queries, mutations, and one replayable fact stream over HTTP', async () => {
     const root = mkdtempSync(join(tmpdir(), 'gitspace-rpc-'));
@@ -582,6 +742,7 @@ describe('GitSpace Result RPC', () => {
       archiveWorkspace: async (): Promise<never> => { throw new Error('not configured'); },
       archiveProject: async () => { throw new Error('not configured'); },
       restoreProject: async () => { throw new Error('not configured'); },
+      setBaseBranch: async () => { throw new Error('not configured'); },
       deleteProject: async () => false,
       deleteWorkspace: async () => false,
       setWorkspaceLifecycle: async () => undefined,
@@ -592,15 +753,17 @@ describe('GitSpace Result RPC', () => {
     const rootPrivateKey = Uint8Array.from({ length: 32 }, (_, index) => index + 1);
     const browserPrivateKey = Uint8Array.from({ length: 32 }, (_, index) => index + 90);
     const readerPrivateKey = Uint8Array.from({ length: 32 }, (_, index) => index + 120);
+    const writerPrivateKey = Uint8Array.from({ length: 32 }, (_, index) => index + 180);
     const deviceRecords: DeviceGrantRecord[] = [];
-    const enrollDevice = (privateKey: Uint8Array, capabilities: DeviceCapability[]): string => {
-      const invite = signDeviceInvite({ version: 1, userId: 'user-a', inviteId: crypto.randomUUID(), kind: 'browser', label: null, scope: { kind: 'user' }, capabilities, canDelegate: true, issuedAt: Date.now(), expiresAt: Date.now() + 60_000, grantTtlMs: null, enrollUrl: 'http://control.test' }, rootPrivateKey);
+    const enrollDevice = (privateKey: Uint8Array, capabilities: DeviceCapability[], kind: 'browser' | 'client' = 'browser'): string => {
+      const invite = signDeviceInvite({ version: 1, userId: 'user-a', inviteId: crypto.randomUUID(), kind, label: null, scope: { kind: 'user' }, capabilities, canDelegate: true, issuedAt: Date.now(), expiresAt: Date.now() + 60_000, grantTtlMs: null, enrollUrl: 'http://control.test' }, rootPrivateKey);
       const binding = createDeviceBinding({ inviteId: invite.invite.inviteId, deviceId: crypto.randomUUID(), signingPublicKey: credentialProtocolBase64.encode(ed25519.getPublicKey(privateKey)), label: 'Test device', boundAt: Date.now(), signingPrivateKey: privateKey });
       deviceRecords.push({ invite, binding, generation: 1, revokedAt: null });
       return binding.deviceId;
     };
     const browserDeviceId = enrollDevice(browserPrivateKey, ['rpc.read', 'rpc.write', 'session.prompt', 'fleet.control', 'devices.manage']);
     const readerDeviceId = enrollDevice(readerPrivateKey, ['rpc.read']);
+    const writerDeviceId = enrollDevice(writerPrivateKey, ['rpc.read', 'rpc.write'], 'client');
     const devices = new DeviceRegistry({
       database,
       rootSigningPublicKey: ed25519.getPublicKey(rootPrivateKey),
@@ -641,7 +804,7 @@ describe('GitSpace Result RPC', () => {
       mutateLifecycleState: async (_projectId, _spaceId, input) => {
         const transition = transitionLifecycle({
           state: lifecycle, runs: [...lifecycleRecords.values()],
-          actor: { actorId: 'machine-a', machineId: 'machine-a', human: false },
+          actor: { actorId: 'machine-a', machineId: 'machine-a', kind: 'machine', lifecycleControl: false },
           now: new Date().toISOString(), token: crypto.randomUUID(),
         }, input);
         if (transition.record) lifecycleRecords.set(transition.record.run.id, transition.record);
@@ -669,6 +832,12 @@ describe('GitSpace Result RPC', () => {
       handlers,
       artifacts,
       terminals: {
+        list: async () => lifecycle.runs.filter(isLifecycleRunActive).map((run) => ({
+          spaceId: run.spaceId, name: run.terminalName!, id: run.id, kind: 'lifecycle',
+          protected: run.interactive ?? false, state: 'running', machineId: 'machine-a',
+          owner: null, command: 'approved script', cwd: root, createdAt: new Date(), exitCode: null,
+        })),
+        live: async function* () { yield { type: 'output', data: 'protected fixture output' }; yield { type: 'complete', exitCode: 0 }; },
         stopOwned: async () => undefined,
         runLifecyclePlan: async () => ({ terminalName: 'test-lifecycle', exitCode: 0, output: '', steps: [] }),
       } as unknown as WorkspaceHubTerminalCoordinator,
@@ -748,6 +917,10 @@ describe('GitSpace Result RPC', () => {
       contract: gitspaceContract,
       transport: fetchTransport({ url: `${http.url}/rpc`, fetch: createSignedRpcFetch({ deviceId: browserDeviceId, signingPrivateKey: browserPrivateKey }) }),
     });
+    const writer = createBrowserClient({
+      contract: gitspaceContract,
+      transport: fetchTransport({ url: `${http.url}/rpc`, fetch: createSignedRpcFetch({ deviceId: writerDeviceId, signingPrivateKey: writerPrivateKey }) }),
+    });
     const tunneledClient = createBrowserClient({
       contract: gitspaceContract,
       transport: fetchTransport({
@@ -773,13 +946,13 @@ describe('GitSpace Result RPC', () => {
 
     // Unsigned and under-privileged callers never reach the router.
     const anonymous = createBrowserClient({ contract: gitspaceContract, transport: fetchTransport({ url: `${http.url}/rpc` }) });
-    expect((await anonymous.bootstrap({ projectId: 'project-a', workspaceId: 'workspace-a' })).status).toBe('error');
+    expect((await anonymous.space.view({ projectId: 'project-a', workspaceId: 'workspace-a' })).status).toBe('error');
     const reader = createBrowserClient({ contract: gitspaceContract, transport: fetchTransport({ url: `${http.url}/rpc`, fetch: createSignedRpcFetch({ deviceId: readerDeviceId, signingPrivateKey: readerPrivateKey }) }) });
-    expect((await reader.bootstrap({ projectId: 'project-a', workspaceId: 'workspace-a' })).status).toBe('ok');
+    expect((await reader.space.view({ projectId: 'project-a', workspaceId: 'workspace-a' })).status).toBe('ok');
     expect(await collectTranscript(reader.transcript({ projectId: 'project-a', workspaceId: 'workspace-a' }))).toEqual([]);
     const unsignedTranscript = await anonymous.transcript({ projectId: 'project-a', workspaceId: 'workspace-a' })[Symbol.asyncIterator]().next();
     expect(unsignedTranscript.value?.status).toBe('error');
-    expect((await tunneledClient.bootstrap({ projectId: 'project-a', workspaceId: 'workspace-a' })).status).toBe('ok');
+    expect((await tunneledClient.space.view({ projectId: 'project-a', workspaceId: 'workspace-a' })).status).toBe('ok');
     expect((await reader.secrets.put({ projectId: 'project-a', name: 'X', value: 'y' })).status).toBe('error');
     const deploymentStatus = await reader.deployment.status({});
     if (deploymentStatus.status === 'error') throw deploymentStatus.error;
@@ -791,11 +964,11 @@ describe('GitSpace Result RPC', () => {
     expect(launches).toEqual([]);
     const listedDevices = await client.devices.list({});
     if (listedDevices.status === 'error') throw listedDevices.error;
-    expect(listedDevices.value.map((device) => [device.deviceId, device.current])).toEqual([[browserDeviceId, true], [readerDeviceId, false]]);
+    expect(listedDevices.value.map((device) => [device.deviceId, device.current])).toEqual([[browserDeviceId, true], [readerDeviceId, false], [writerDeviceId, false]]);
     expect((await client.devices.revoke({ deviceId: readerDeviceId })).status).toBe('ok');
-    expect((await reader.bootstrap({ projectId: 'project-a', workspaceId: 'workspace-a' })).status).toBe('error');
+    expect((await reader.space.view({ projectId: 'project-a', workspaceId: 'workspace-a' })).status).toBe('error');
 
-    const initial = await client.bootstrap({ projectId: 'project-a', workspaceId: 'workspace-a' });
+    const initial = await client.space.view({ projectId: 'project-a', workspaceId: 'workspace-a' });
     expect(initial.status).toBe('ok');
     if (initial.status === 'error') throw initial.error;
     expect(initial.value.project.name).toBe('GitSpace');
@@ -850,7 +1023,7 @@ describe('GitSpace Result RPC', () => {
     expect(database.getWorkspace('workspace-a')?.phase).toBe('code');
     projectAuthority.setWorkspacePhase = commitPhase;
 
-    const resumePoint = await client.bootstrap({ projectId: 'project-a', workspaceId: 'workspace-a' });
+    const resumePoint = await client.space.view({ projectId: 'project-a', workspaceId: 'workspace-a' });
     if (resumePoint.status === 'error') throw resumePoint.error;
     const streamController = new AbortController();
     const stream = client.events({ projectId: 'project-a', after: null }, { signal: streamController.signal })[Symbol.asyncIterator]();
@@ -938,6 +1111,12 @@ describe('GitSpace Result RPC', () => {
     if (missingRun.status === 'ok') throw new Error('Expected unknown lifecycle run failure');
     expect(rpcErrors.environmentFailure.is(missingRun.error)).toBe(true);
     expect(missingRun.error.data).toMatchObject({ code: 'NotFound', context: { runId: 'unknown-run' } });
+    const terminalInput = { spaceId: 'workspace-a', name: acceptedChecks.value.terminalName! };
+    expect((await writer.terminals.stop(terminalInput)).status).toBe('error');
+    const stillRunning = await client.environment.get({ spaceId: 'workspace-a' });
+    if (stillRunning.status === 'error') throw stillRunning.error;
+    expect(stillRunning.value.runs[0]?.cancelRequestedAt).toBeNull();
+    expect((await client.terminals.stop(terminalInput)).status).toBe('ok');
     const cancelled = await client.environment.cancelRun({ spaceId: 'workspace-a', runId: checksInput.runId });
     expect(cancelled).toMatchObject({ status: 'ok', value: { id: checksInput.runId, status: 'cancelling', finishedAt: null } });
     await stopRequested.promise;
@@ -955,12 +1134,18 @@ describe('GitSpace Result RPC', () => {
     execution = Promise.withResolvers<WorkspaceLifecyclePlanResult>();
     runnerStarted = Promise.withResolvers<void>();
     runSettled = Promise.withResolvers<void>();
-    const phaseInput = { spaceId: 'workspace-a', runId: 'prepare-rpc', phase: 'machine/prepare' as const, rerun: false, deadlineAt: checksInput.deadlineAt };
+    const phaseInput = { spaceId: 'workspace-a', runId: 'prepare-rpc', phase: 'machine/prepare' as const, rerun: false, interactive: true, deadlineAt: checksInput.deadlineAt };
     const acceptedPhase = await client.environment.runPhase(phaseInput);
     if (acceptedPhase.status === 'error') throw acceptedPhase.error;
     expect(isLifecycleRunActive(acceptedPhase.value)).toBe(true);
     expect(acceptedPhase.value).toMatchObject({ id: phaseInput.runId, phase: phaseInput.phase, deadlineAt: phaseInput.deadlineAt, finishedAt: null });
     await runnerStarted.promise;
+    const protectedInput = { spaceId: 'workspace-a', name: acceptedPhase.value.terminalName! };
+    const deniedLive = await writer.terminals.live(protectedInput)[Symbol.asyncIterator]().next();
+    expect(deniedLive.value?.status).toBe('error');
+    expect((await writer.terminals.send({ ...protectedInput, data: 'fake-code\n' })).status).toBe('error');
+    const browserLive = await collectResults(client.terminals.live(protectedInput));
+    expect(browserLive).toEqual([{ status: 'ok', value: { type: 'output', data: 'protected fixture output' } }, { status: 'ok', value: { type: 'complete', exitCode: 0 } }]);
     execution.resolve({ terminalName: 'prepare', exitCode: 0, output: '', steps: [] });
     await runSettled.promise;
     const preparedEnvironment = await client.environment.get({ spaceId: 'workspace-a' });
@@ -970,7 +1155,7 @@ describe('GitSpace Result RPC', () => {
       { id: checksInput.runId, status: 'cancelled' },
     ]);
 
-    const refreshed = await client.bootstrap({ projectId: 'project-a', workspaceId: 'workspace-a' });
+    const refreshed = await client.space.view({ projectId: 'project-a', workspaceId: 'workspace-a' });
     expect(refreshed.status).toBe('ok');
     if (refreshed.status === 'error') throw refreshed.error;
     expect(refreshed.value.mainAgent).toMatchObject({ id: created.value.id });
@@ -987,7 +1172,7 @@ describe('GitSpace Result RPC', () => {
       relations: { dependsOn: ['workspace-a'], relatedTo: [], stackedOn: 'workspace-a' },
       stack: { blockedBy: ['workspace-a'], blocking: [], findings: [{ code: 'dependency-open', workspaceId: 'workspace-a' }] },
     });
-    const relatedBootstrap = await client.bootstrap({ projectId: 'project-a', workspaceId: null });
+    const relatedBootstrap = await client.space.view({ projectId: 'project-a', workspaceId: null });
     if (relatedBootstrap.status === 'error') throw relatedBootstrap.error;
     expect(relatedBootstrap.value.workspaces.find((workspace) => workspace.id === 'workspace-a')?.stack.blocking).toEqual(['workspace-b']);
     const tooFar = await client.workspace.setPhase({ workspaceId: 'workspace-b', phase: 'review' });
@@ -1055,7 +1240,7 @@ describe('GitSpace Result RPC', () => {
     database.setSpaceClosed('workspace-a', true);
 
     // Closed metadata stays readable without projecting or opening the checkpoint transcript.
-    const closedBootstrap = await client.bootstrap({ projectId: 'project-a', workspaceId: 'workspace-a' });
+    const closedBootstrap = await client.space.view({ projectId: 'project-a', workspaceId: 'workspace-a' });
     if (closedBootstrap.status === 'error') throw closedBootstrap.error;
     expect(closedBootstrap.status).toBe('ok');
     expect(closedBootstrap.value.mainAgent).toBeNull();
@@ -1069,10 +1254,18 @@ describe('GitSpace Result RPC', () => {
     if (reopened.status === 'error') throw reopened.error;
     expect(reopened.value).toMatchObject({ id: 'workspace-a', kind: 'worktree', state: 'active', machineId: 'machine-a', generation: 5 });
 
-    const reopenedBootstrap = await client.bootstrap({ projectId: 'project-a', workspaceId: 'workspace-a' });
+    const reopenedBootstrap = await client.space.view({ projectId: 'project-a', workspaceId: 'workspace-a' });
     expect(reopenedBootstrap.status).toBe('ok');
     if (reopenedBootstrap.status === 'error') throw reopenedBootstrap.error;
     expect(reopenedBootstrap.value.mainAgent).toMatchObject({ id: created.value.id, state: 'active', resumePending: false, renderState: 'waiting' });
+    runtime.controls = {
+      sessionId: created.value.ompSessionId, role: null, roleLabel: null, roles: [], provider: null, models: [], model: null, thinking: null, fastMode: false,
+      approvalMode: 'always-ask', planMode: false, context: null, cost: 0, todos: [], queue: { steering: [], followUp: [] }, pendingAsk: null, goal: null,
+      history: [], historyAnchorId: null,
+    };
+    // MCP clients poll session.control to learn when a turn ended; it must agree with the space view.
+    expect(await client.session.control({ sessionId: created.value.id })).toMatchObject({ status: 'ok', value: { renderState: 'waiting', activity: { active: false } } });
+    runtime.controls = null;
     expect(await collectTranscript(client.transcript({ projectId: 'project-a', workspaceId: 'workspace-a' }))).toEqual(workspaceTranscript);
 
     const projectAgent = await client.session.createProject({ projectId: 'project-a' });
@@ -1081,7 +1274,7 @@ describe('GitSpace Result RPC', () => {
     expect(projectAgent.value).toMatchObject({ projectId: 'project-a', workspaceId: null, scope: 'project', controlsAvailable: true });
     expect(projectAgent.value.id).not.toBe(created.value.id);
 
-    const projectBootstrap = await client.bootstrap({ projectId: 'project-a', workspaceId: null });
+    const projectBootstrap = await client.space.view({ projectId: 'project-a', workspaceId: null });
     expect(runtime.created).toContainEqual({ workingDirectory: join(root, 'repo'), sessionKey: 'space:project-a' });
     expect(runtime.created).toContainEqual({ workingDirectory: workspaceRoot, sessionKey: 'space:workspace-a' });
     expect(projectBootstrap.status).toBe('ok');
@@ -1091,7 +1284,7 @@ describe('GitSpace Result RPC', () => {
 
     await sessions.close(projectAgent.value.id);
     sessions.recordFailure('project-a', 'recover', new Error('Provider configuration could not be loaded'), sessions.beginOperation('project-a', 'recovery'));
-    const failedBase = await client.bootstrap({ projectId: 'project-a', workspaceId: null });
+    const failedBase = await client.space.view({ projectId: 'project-a', workspaceId: null });
     if (failedBase.status === 'error') throw failedBase.error;
     expect(failedBase.value.mainAgent).toMatchObject({
       id: projectAgent.value.id, state: 'closed', controlsAvailable: false,
@@ -1102,7 +1295,7 @@ describe('GitSpace Result RPC', () => {
     expect(sessions.controlsAvailable(projectAgent.value.id)).toBe(false);
     retryPlacementMoved = false;
     expect((await client.space.reopen({ spaceId: 'project-a', expectedGeneration: 1 })).status).toBe('ok');
-    const retriedBase = await client.bootstrap({ projectId: 'project-a', workspaceId: null });
+    const retriedBase = await client.space.view({ projectId: 'project-a', workspaceId: null });
     if (retriedBase.status === 'error') throw retriedBase.error;
     expect(retriedBase.value.mainAgent).toMatchObject({ id: projectAgent.value.id, controlsAvailable: true, health: { issues: { recovery: { failure: null, incidentId: null } } } });
 
@@ -1117,7 +1310,7 @@ describe('GitSpace Result RPC', () => {
     }
     projectStreamController.abort();
     await projectArtifactStream.return?.();
-    const projectRefreshed = await client.bootstrap({ projectId: 'project-a', workspaceId: null });
+    const projectRefreshed = await client.space.view({ projectId: 'project-a', workspaceId: null });
     expect(projectRefreshed.status).toBe('ok');
     if (projectRefreshed.status === 'error') throw projectRefreshed.error;
     expect(await collectTranscript(client.transcript({ projectId: 'project-a', workspaceId: null }))).toMatchObject([
@@ -1125,7 +1318,7 @@ describe('GitSpace Result RPC', () => {
     ]);
     expect(projectRefreshed.value.artifacts).toContainEqual(expect.objectContaining({ path: 'rpc.txt', scope: 'base', workspaceId: null }));
 
-    const isolatedWorkspace = await client.bootstrap({ projectId: 'project-a', workspaceId: 'workspace-a' });
+    const isolatedWorkspace = await client.space.view({ projectId: 'project-a', workspaceId: 'workspace-a' });
     expect(isolatedWorkspace.status).toBe('ok');
     if (isolatedWorkspace.status === 'error') throw isolatedWorkspace.error;
     expect(isolatedWorkspace.value.mainAgent).toMatchObject({ id: created.value.id, scope: 'workspace', workspaceId: 'workspace-a' });
@@ -1179,7 +1372,7 @@ describe('GitSpace Result RPC', () => {
         fetch: createSignedRpcFetch({ deviceId: browserDeviceId, signingPrivateKey: browserPrivateKey, fetch: createEncryptedRpcFetch({ key: rpcKey, sessionId: 'browser-session' }) }),
       }),
     });
-    const encryptedBootstrap = await encryptedClient.bootstrap({ projectId: 'project-a', workspaceId: 'workspace-a' });
+    const encryptedBootstrap = await encryptedClient.space.view({ projectId: 'project-a', workspaceId: 'workspace-a' });
     expect(encryptedBootstrap.status).toBe('ok');
     if (encryptedBootstrap.status === 'error') throw encryptedBootstrap.error;
     expect(await collectTranscript(encryptedClient.transcript({ projectId: 'project-a', workspaceId: 'workspace-a' }))).toEqual(workspaceTranscript);
@@ -1291,7 +1484,7 @@ describe('GitSpace Result RPC', () => {
       projects: {
         list: async () => [], createProject: unavailable, openProject: unavailable, createWorkspace: unavailable,
         findWorkspace: async () => null,
-        archiveWorkspace: unavailable, archiveProject: unavailable, restoreProject: unavailable, deleteProject: unavailable, deleteWorkspace: unavailable,
+        archiveWorkspace: unavailable, archiveProject: unavailable, restoreProject: unavailable, setBaseBranch: unavailable, deleteProject: unavailable, deleteWorkspace: unavailable,
         setWorkspaceLifecycle: unavailable, setWorkspacePhase: unavailable, runLifecycleOperation: unavailable,
       },
       machines: async () => [], spacePlacements: async () => [],
@@ -1303,22 +1496,236 @@ describe('GitSpace Result RPC', () => {
       sessionId: created.value.id, url: 'local://private-output.txt',
     };
     try {
-      expect(await client.inspector.resources.read(input)).toMatchObject({
-        status: 'ok', value: { text: 'Only workspace A can read this session output.' },
-      });
-      expect(await client.inspector.resources.read({ ...input, expectedGeneration: input.expectedGeneration + 1 })).toMatchObject({
-        status: 'error', error: { _tag: 'gitspace/space-generation-conflict' },
-      });
-      expect(await client.inspector.resources.read({
+      const text = 'Only workspace A can read this session output.';
+      expect((await collectResourceBytes(client.inspector.resources.read(input), {
+        url: input.url, mediaType: null, text: true, size: Buffer.byteLength(text),
+      })).toString()).toBe(text);
+      expect(await collectResults(client.inspector.resources.read({ ...input, expectedGeneration: input.expectedGeneration + 1 }))).toMatchObject([
+        { status: 'error', error: { _tag: 'gitspace/space-generation-conflict' } },
+      ]);
+      expect(await collectResults(client.inspector.resources.read({
         ...input, spaceId: 'workspace-b', expectedGeneration: database.getSpace('workspace-b')!.generation,
-      })).toMatchObject({ status: 'error', error: { _tag: 'gitspace/inspector-state' } });
-      expect(await client.inspector.resources.read({ ...input, sessionId: 'unknown-session' })).toMatchObject({
-        status: 'error', error: { _tag: 'gitspace/inspector-state' },
-      });
+      }))).toMatchObject([{ status: 'error', error: { _tag: 'gitspace/inspector-state' } }]);
+      expect(await collectResults(client.inspector.resources.read({ ...input, sessionId: 'unknown-session' }))).toMatchObject([
+        { status: 'error', error: { _tag: 'gitspace/inspector-state' } },
+      ]);
+
+      // A real PCM WAV larger than a single RPC frame must survive both read routes.
+      const wav = Buffer.alloc(2 * 1024 * 1024 + 44);
+      wav.write('RIFF', 0);
+      wav.writeUInt32LE(wav.byteLength - 8, 4);
+      wav.write('WAVEfmt ', 8);
+      wav.writeUInt32LE(16, 16);
+      wav.writeUInt16LE(1, 20);
+      wav.writeUInt16LE(1, 22);
+      wav.writeUInt32LE(16_000, 24);
+      wav.writeUInt32LE(32_000, 28);
+      wav.writeUInt16LE(2, 32);
+      wav.writeUInt16LE(16, 34);
+      wav.write('data', 36);
+      wav.writeUInt32LE(wav.byteLength - 44, 40);
+      for (let offset = 44; offset < wav.byteLength; offset += 2) wav.writeInt16LE((offset % 65_536) - 32_768, offset);
+      const url = 'local://workspace/live-capture.wav';
+      const published = await artifacts.write({ kind: 'workspace', projectId: 'project-a', workspaceId: 'workspace-a' }, url, wav);
+      if (published.status === 'error') throw published.error;
+      const metadata = { url, mediaType: 'audio/wav', text: false, size: wav.byteLength };
+      expect(await collectResourceBytes(client.inspector.resources.read({ ...input, url }), metadata)).toEqual(wav);
+      const artifactInput = { spaceId: input.spaceId, expectedGeneration: input.expectedGeneration, url, hash: published.value.hash };
+      writeFileSync(join(context.localArtifactsDir, 'live-capture.wav'), wav);
+      expect(await collectResourceBytes(client.inspector.resources.read({ ...input, url: 'local://live-capture.wav' }), {
+        ...metadata, url: 'local://live-capture.wav',
+      })).toEqual(wav);
+      expect(await collectResourceBytes(client.inspector.artifacts.read(artifactInput), metadata)).toEqual(wav);
+      expect(await collectResults(client.inspector.artifacts.read({ ...artifactInput, hash: `sha256:${'0'.repeat(64)}` }))).toMatchObject([
+        { status: 'error', error: { _tag: 'gitspace/operation-failed' } },
+      ]);
+      expect(await collectResults(client.inspector.resources.read({ ...input, url: 'local://workspaces/workspace-b/private-output.txt' }))).toMatchObject([
+        { status: 'error', error: { _tag: 'gitspace/operation-failed' } },
+      ]);
+      writeFileSync(join(context.localArtifactsDir, 'too-large.txt'), 'line\n'.repeat(30_000));
+      expect(await collectResults(client.inspector.resources.read({ ...input, url: 'local://too-large.txt' }))).toMatchObject([
+        { status: 'error', error: { _tag: 'gitspace/operation-failed' } },
+      ]);
+      expect((await collectResourceBytes(client.inspector.resources.read({ ...input, url: 'local://too-large.txt:1-1' }), {
+        url: 'local://too-large.txt:1-1', mediaType: 'text/plain', text: true, size: 4,
+      })).toString()).toBe('line');
+      writeFileSync(join(context.localArtifactsDir, 'empty.txt'), '');
+      expect(await collectResults(client.inspector.resources.read({ ...input, url: 'local://empty.txt' }))).toEqual([
+        { status: 'ok', value: { type: 'metadata', url: 'local://empty.txt', mediaType: null, text: true, size: 0 } },
+      ]);
     } finally {
       await sessions.close(created.value.id);
       await http.stop();
       database.close();
+    }
+  });
+});
+
+async function uploadFixture() {
+  const root = mkdtempSync(join(tmpdir(), 'gitspace-upload-rpc-'));
+  roots.push(root);
+  const database = new GitSpaceDatabase(join(root, 'gitspace.db'));
+  database.createProject({ id: 'project-a', name: 'Uploads', repositoryPath: join(root, 'repo') });
+  database.createWorkspace({ id: 'workspace-a', projectId: 'project-a', name: 'A', branch: 'a', rootPath: join(root, 'workspace-a') });
+  database.possessWorkspace('workspace-a', 'machine-a');
+  const store = new MemoryArtifactObjectStore();
+  const artifacts = new LocalArtifactResolver(database, store, join(root, 'cache'), new Uint8Array(32));
+  const events = new FactEventStore(database);
+  const runtime = new RpcFakeOmpRuntime();
+  const sessions = new MachineSessionCoordinator(database, artifacts, runtime, 'machine-a', join(root, 'runtime'), events);
+  const publications: Promise<void>[] = [];
+  const failures: unknown[] = [];
+  let clock = Date.now();
+  const staging = join(root, 'artifact-uploads');
+  const uploads = new ArtifactUploads({
+    artifacts, root: staging, now: () => clock, onError: (error) => failures.push(error),
+    publish: (spaceId) => {
+      const publication = sessions.publishArtifacts(spaceId);
+      publications.push(publication);
+      return publication;
+    },
+  });
+  const unavailable = async (): Promise<never> => { throw new Error('Not configured in upload fixture'); };
+  const rpc = createGitSpaceRpcHandler({
+    database, handlers: new GitSpaceHandlers(database, artifacts, events), artifacts, artifactUploads: uploads, sessions, factEvents: events, machineId: 'machine-a',
+    terminals: {} as WorkspaceHubTerminalCoordinator,
+    spaces: { close: unavailable, release: unavailable, open: unavailable },
+    serviceManager: { list: async () => [], start: unavailable, stop: unavailable },
+    secrets: { listProjectSecrets: async () => [], putProjectSecret: unavailable, deleteProjectSecret: unavailable },
+    projectEvents: { appendProjectEvent: unavailable, listProjectEvents: async () => [], latestProjectEventOffset: async () => 0 },
+    projects: {
+      list: async () => [], createProject: unavailable, openProject: unavailable, createWorkspace: unavailable,
+      findWorkspace: async () => null,
+      archiveWorkspace: unavailable, archiveProject: unavailable, restoreProject: unavailable, setBaseBranch: unavailable, deleteProject: unavailable, deleteWorkspace: unavailable,
+      setWorkspaceLifecycle: unavailable, setWorkspacePhase: unavailable, runLifecycleOperation: unavailable,
+    },
+    machines: async () => [], spacePlacements: async () => [],
+  });
+  const http = startGitSpaceRpcHttpServer({ handler: rpc.handler });
+  const client = createBrowserClient({ contract: gitspaceContract, transport: fetchTransport({ url: `${http.url}/rpc` }) });
+  const space = { spaceId: 'workspace-a', expectedGeneration: database.getSpace('workspace-a')!.generation };
+  const chunk = (uploadId: string, offset: number, bytes: Buffer, sha256 = createHash('sha256').update(bytes).digest('hex')) =>
+    client.inspector.artifacts.uploadChunk({ ...space, uploadId, offset, sha256, data: bytes.toString('base64') });
+  return {
+    root, database, store, artifacts, runtime, sessions, uploads, publications, failures, staging, http, client, space, chunk,
+    advance: (milliseconds: number) => { clock += milliseconds; },
+    close: async () => {
+      uploads.close();
+      await http.stop();
+      database.close();
+    },
+  };
+}
+
+describe('Inspector artifact uploads', () => {
+  it('commits sequential chunks into a published uploads/ artifact without notifying the agent', async () => {
+    const fixture = await uploadFixture();
+    const { artifacts, client, space, chunk, store } = fixture;
+    const capability = { kind: 'workspace', projectId: 'project-a', workspaceId: 'workspace-a' } as const;
+    const session = await fixture.sessions.create('workspace-a');
+    if (session.status === 'error') throw session.error;
+    try {
+      expect((await artifacts.write(capability, 'local://workspace/uploads/report.zip', new TextEncoder().encode('existing'))).status).toBe('ok');
+      const bytes = Buffer.alloc(2 * ARTIFACT_UPLOAD_CHUNK_BYTES + 1000);
+      for (let index = 0; index < bytes.byteLength; index++) bytes[index] = (index * 131 + 17) % 256;
+      const begun = await client.inspector.artifacts.uploadBegin({ ...space, fileName: 'report.zip', size: bytes.byteLength, mediaType: 'application/zip' });
+      if (begun.status === 'error') throw begun.error;
+      expect(begun.value).toMatchObject({ url: 'local://workspace/uploads/report (1).zip', chunkBytes: ARTIFACT_UPLOAD_CHUNK_BYTES });
+      const { uploadId, chunkBytes } = begun.value;
+      // A full chunk must fit the account Worker's 512 KiB space-routed body cap.
+      const fullChunk = { ...space, uploadId, offset: 0, sha256: 'f'.repeat(64), data: Buffer.alloc(chunkBytes, 255).toString('base64') };
+      const envelope = serialize({ v: 1, batch: [{ id: 'b0', path: 'inspector.artifacts.uploadChunk', input: fullChunk }] });
+      if (!envelope.ok) throw new Error(envelope.message);
+      expect(Buffer.byteLength(envelope.value)).toBeLessThan(512 * 1024);
+
+      const first = bytes.subarray(0, chunkBytes);
+      expect(await chunk(uploadId, 0, first)).toEqual({ status: 'ok', value: { received: chunkBytes } });
+      // A timed-out client resends the chunk it cannot prove was stored.
+      expect(await chunk(uploadId, 0, first)).toEqual({ status: 'ok', value: { received: chunkBytes } });
+      expect(await chunk(uploadId, chunkBytes, bytes.subarray(chunkBytes, 2 * chunkBytes))).toEqual({ status: 'ok', value: { received: 2 * chunkBytes } });
+      const last = bytes.subarray(2 * chunkBytes);
+      expect(await chunk(uploadId, 2 * chunkBytes, last)).toEqual({ status: 'ok', value: { received: bytes.byteLength } });
+      expect(await chunk(uploadId, 2 * chunkBytes, last)).toEqual({ status: 'ok', value: { received: bytes.byteLength } });
+
+      const committed = await client.inspector.artifacts.uploadCommit({ ...space, uploadId });
+      if (committed.status === 'error') throw committed.error;
+      expect(committed.value).toMatchObject({
+        url: 'local://workspace/uploads/report (1).zip', path: 'uploads/report (1).zip', size: bytes.byteLength,
+        mediaType: 'application/zip', scope: 'workspace', workspaceId: 'workspace-a',
+      });
+      expect(await client.inspector.artifacts.uploadCommit({ ...space, uploadId })).toEqual(committed);
+      await Promise.all(fixture.publications);
+      expect(fixture.failures).toEqual([]);
+      expect(store.objects.has(committed.value.hash)).toBe(true);
+      const listed = artifacts.list(capability, 'local://workspace/uploads/');
+      if (listed.status === 'error') throw listed.error;
+      expect(listed.value.map((entry) => entry.path)).toEqual(['uploads/report (1).zip', 'uploads/report.zip']);
+      const stored = await artifacts.read(capability, committed.value.url);
+      if (stored.status === 'error') throw stored.error;
+      expect(Buffer.from(stored.value).equals(bytes)).toBe(true);
+      expect(readdirSync(fixture.staging)).toEqual([]);
+      expect(fixture.runtime.promptBehaviors).toEqual([]);
+
+      const base = await client.inspector.artifacts.uploadBegin({
+        spaceId: 'project-a', expectedGeneration: fixture.database.getSpace('project-a')!.generation, fileName: 'shared.txt', size: 1, mediaType: null,
+      });
+      expect(base).toMatchObject({ status: 'ok', value: { url: 'local://base/uploads/shared.txt' } });
+    } finally {
+      await fixture.sessions.close(session.value.id);
+      await fixture.close();
+    }
+  });
+
+  it('rejects invalid, out-of-order, corrupt, incomplete, aborted, oversized and stale uploads', async () => {
+    const fixture = await uploadFixture();
+    const { client, space, chunk, uploads } = fixture;
+    try {
+      expect(await client.inspector.artifacts.uploadBegin({ ...space, fileName: '../escape.txt', size: 1, mediaType: null }))
+        .toMatchObject({ status: 'error', error: { _tag: 'gitspace/inspector-state' } });
+      await expect(client.inspector.artifacts.uploadBegin({ ...space, fileName: 'huge.bin', size: ARTIFACT_UPLOAD_MAX_BYTES + 1, mediaType: null }))
+        .rejects.toThrow('Invalid input');
+      const oversized = await fetch(`${fixture.http.url}/rpc`, {
+        method: 'POST', headers: { 'content-type': 'application/result-rpc+devalue; sv=1' },
+        body: serialize({ v: 1, path: 'inspector.artifacts.uploadBegin', input: { ...space, fileName: 'huge.bin', size: ARTIFACT_UPLOAD_MAX_BYTES + 1, mediaType: null } }).value,
+      });
+      expect(oversized.status).toBe(400);
+      expect(existsSync(fixture.staging)).toBe(false);
+
+      const begun = await client.inspector.artifacts.uploadBegin({ ...space, fileName: 'notes.txt', size: 10, mediaType: 'text/plain' });
+      if (begun.status === 'error') throw begun.error;
+      const { uploadId } = begun.value;
+      expect(await chunk(uploadId, 5, Buffer.from('world')))
+        .toMatchObject({ status: 'error', error: { _tag: 'gitspace/inspector-conflict', data: { resource: 'upload', expected: 0, actual: 5 } } });
+      expect(await chunk(uploadId, 0, Buffer.from('hello'), createHash('sha256').update('other').digest('hex')))
+        .toMatchObject({ status: 'error', error: { _tag: 'gitspace/inspector-state' } });
+      expect(await chunk(uploadId, 0, Buffer.from('hello'))).toEqual({ status: 'ok', value: { received: 5 } });
+      expect(await chunk(uploadId, 5, Buffer.from('world!'))).toMatchObject({ status: 'error', error: { _tag: 'gitspace/inspector-state' } });
+      expect(await client.inspector.artifacts.uploadCommit({ ...space, uploadId }))
+        .toMatchObject({ status: 'error', error: { _tag: 'gitspace/inspector-conflict', data: { expected: 10, actual: 5 } } });
+      expect(readdirSync(fixture.staging)).toEqual([`${uploadId}.part`]);
+      expect(await client.inspector.artifacts.uploadAbort({ ...space, uploadId })).toEqual({ status: 'ok', value: { aborted: true } });
+      expect(readdirSync(fixture.staging)).toEqual([]);
+      expect(await chunk(uploadId, 5, Buffer.from('world'))).toMatchObject({ status: 'error', error: { _tag: 'gitspace/inspector-state' } });
+      expect(await client.inspector.artifacts.uploadAbort({ ...space, uploadId })).toEqual({ status: 'ok', value: { aborted: false } });
+      const aborted = fixture.artifacts.list({ kind: 'workspace', projectId: 'project-a', workspaceId: 'workspace-a' }, 'local://workspace/uploads/');
+      expect(aborted).toMatchObject({ status: 'ok', value: [] });
+
+      const stale = await client.inspector.artifacts.uploadBegin({ ...space, fileName: 'stale.bin', size: 10, mediaType: null });
+      if (stale.status === 'error') throw stale.error;
+      expect(await chunk(stale.value.uploadId, 0, Buffer.from('hello'))).toEqual({ status: 'ok', value: { received: 5 } });
+      const orphan = join(fixture.staging, 'previous-process.part');
+      writeFileSync(orphan, 'lost with its machine process');
+      const old = new Date(Date.now() - 2 * ARTIFACT_UPLOAD_IDLE_MS);
+      utimesSync(orphan, old, old);
+      fixture.advance(ARTIFACT_UPLOAD_IDLE_MS - 1);
+      await uploads.sweep();
+      expect(readdirSync(fixture.staging)).toEqual([`${stale.value.uploadId}.part`]);
+      fixture.advance(2);
+      await uploads.sweep();
+      expect(readdirSync(fixture.staging)).toEqual([]);
+      expect(await chunk(stale.value.uploadId, 5, Buffer.from('world'))).toMatchObject({ status: 'error', error: { _tag: 'gitspace/inspector-state' } });
+    } finally {
+      await fixture.close();
     }
   });
 });

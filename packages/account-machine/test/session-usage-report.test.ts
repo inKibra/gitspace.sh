@@ -156,6 +156,18 @@ describe('buildSessionUsageReport', () => {
     expect(report.byAgent.every((row) => row.spawns === 1)).toBe(true);
   });
 
+  it("counts OMP's off-transcript model_usage ledger as direct calls under their purpose and recorded role", async () => {
+    const report = await reportFor({
+      [ROOT]: transcript('root', assistant('turn', 'openai', 'mini', 1),
+        { type: 'model_usage', id: 'judge-1', parentId: 'turn', timestamp: AT, purpose: 'eval-judge', role: 'judge', api: 'openai-responses', provider: 'openai', model: 'judge-model', usage: usage(4) },
+        { type: 'model_usage', id: 'bad', parentId: 'turn', timestamp: AT, purpose: 'find', provider: 'openai', model: 'judge-model' }),
+    });
+    expect(report.totals.input).toBe(5);
+    expect(report.byCompletion).toEqual([expect.objectContaining({ kind: 'eval-judge', role: 'judge', provider: 'openai', model: 'judge-model', totals: expect.objectContaining({ requests: 1, input: 4 }) })]);
+    expect(report.byRole.find((row) => row.role === 'judge')?.totals.input).toBe(4);
+    expect(report.warnings.some((warning) => warning.includes('malformed model usage ledger entry'))).toBe(true);
+  });
+
   it('recurses nested artifact directories without conflating equal child names from different parents', async () => {
     const a = childSessionFileFor(ROOT, 'a');
     const b = childSessionFileFor(ROOT, 'b');

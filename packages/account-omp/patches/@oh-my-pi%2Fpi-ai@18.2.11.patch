@@ -1,0 +1,1778 @@
+diff --git a/.bun-tag-7c52504dc69cf185 b/.bun-tag-7c52504dc69cf185
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/dist/types/auth-broker/remote-store.d.ts b/dist/types/auth-broker/remote-store.d.ts
+index 8df8472577d9695582f2da335ab105aad4891ac7..fb3a596cc47c0546e6db58ddbd2290f75ccf378a 100644
+--- a/dist/types/auth-broker/remote-store.d.ts
++++ b/dist/types/auth-broker/remote-store.d.ts
+@@ -1,7 +1,7 @@
+ import { type AuthCredential, type AuthCredentialStore, type DisabledCredentialSummary, type OAuthCredential, type StoredAuthCredential, type StoredCredentialBlock } from "../auth-storage.js";
+ import type { OAuthCredentials } from "../registry/oauth/types.js";
+ import type { Provider } from "../types.js";
+-import type { ClientUsageIdentity, ObservedUsageEntry, UsageReport } from "../usage.js";
++import type { ClientUsageIdentity, ObservedUsageEntry } from "../usage.js";
+ import { type AuthBrokerClient } from "./client.js";
+ import type { SnapshotResponse } from "./types.js";
+ /**
+@@ -124,7 +124,6 @@ export declare class RemoteAuthCredentialStore implements AuthCredentialStore {
+     /** Drop all cache rows whose keys start with the supplied prefix. */
+     deleteCachePrefix(prefix: string): void;
+     cleanExpiredCache(): void;
+-    invalidateUsageCache(signal?: AbortSignal): Promise<void>;
+     /**
+      * Store-level hook consumed by `AuthStorage` — routes refresh through the
+      * broker so the actual refresh token never leaves the broker host. Returns
+@@ -132,24 +131,6 @@ export declare class RemoteAuthCredentialStore implements AuthCredentialStore {
+      * the `refresh` slot.
+      */
+     refreshOAuthCredential(_provider: Provider, credentialId: number, _credential: OAuthCredential, signal?: AbortSignal): Promise<OAuthCredentials>;
+-    /**
+-     * Store-level hook consumed by `AuthStorage.fetchUsageReports()` — proxies
+-     * to the broker's `/v1/usage` endpoint. The broker's egress IP isn't
+-     * rate-limited by Anthropic's per-IP `/usage` cap the way a heavy
+-     * residential laptop is, so all credentials surface every cycle.
+-     */
+-    fetchUsageReports(signal?: AbortSignal): Promise<UsageReport[] | null>;
+-    /**
+-     * Per-credential usage hook consumed by `AuthStorage.#getUsageReport`. Pulls
+-     * the aggregate broker `/v1/usage` once and serves all callers from the
+-     * same response (coalesced + cached), then overlays any client-observed
+-     * header hints for the matching credential.
+-     *
+-     * The broker already aggregates with its own 30s TTL on the server side; our
+-     * 15s client TTL is below that so we usually re-use the broker's cache too.
+-     */
+-    getUsageReport(provider: Provider, credential: OAuthCredential, signal?: AbortSignal): Promise<UsageReport | null>;
+-    ingestUsageReport(provider: Provider, credential: OAuthCredential, report: UsageReport): boolean;
+     /**
+      * Fold locally observed request usage into the pending report and schedule
+      * a flush. One `POST /v1/usage/observed` at most per flush interval; on
+diff --git a/dist/types/auth-storage.d.ts b/dist/types/auth-storage.d.ts
+index ce3755c6c995b0271a181ce550550548f911d346..7965f0982ffdefc0e019d3ececc40034edb8d983 100644
+--- a/dist/types/auth-storage.d.ts
++++ b/dist/types/auth-storage.d.ts
+@@ -348,35 +348,28 @@ export interface AuthCredentialStore {
+     /**
+      * Optional store-supplied aggregate usage fetch. When present, `AuthStorage`
+      * routes `fetchUsageReports()` here instead of fanning out per-credential.
+-     * `RemoteAuthCredentialStore` proxies to the broker (whose datacenter IP
+-     * isn't rate-limited like a heavy residential client).
++     * Remote credential stores leave this unset so usage stays machine-side.
+      *
+      * Precedence: `AuthStorageOptions.fetchUsageReports` > this hook > local fan-out.
+      *
+-     * `signal` propagates the agent's cancel down to the broker fetch.
++     * `signal` propagates the agent's cancellation to the override.
+      */
+     fetchUsageReports?(signal?: AbortSignal): Promise<UsageReport[] | null>;
+     /**
+      * Optional store-supplied per-credential usage report lookup. When present,
+      * `AuthStorage` consults this before its own per-credential upstream fetch
+-     * (`#getUsageReport`). `RemoteAuthCredentialStore` implements this against
+-     * the broker's aggregate `/v1/usage` (one coalesced round-trip shared across
+-     * all callers) so multi-credential ranking on the client never hits the
+-     * upstream provider's rate-limited usage endpoint from the laptop IP.
++     * (`#getUsageReport`). Remote credential stores leave this unset.
+      *
+      * Returning `null` is authoritative — `AuthStorage` does NOT fall back to
+-     * the local fetch path. The store hook owns the decision, since falling
+-     * back would re-introduce the per-IP rate-limit problem the broker exists
+-     * to avoid.
++     * the local fetch path.
+      *
+-     * `signal` propagates the agent's cancel down to the broker fetch.
++     * `signal` propagates the agent's cancellation to the override.
+      */
+     getUsageReport?(provider: Provider, credential: OAuthCredential, signal?: AbortSignal): Promise<UsageReport | null>;
+     /**
+      * Optional store hook to ingest a parsed provider usage report for one OAuth
+-     * credential. Remote broker stores use this to overlay header-derived limits
+-     * onto their cached aggregate `/v1/usage` response without mutating broker
+-     * state.
++     * credential. Without this hook, header-derived limits update the local
++     * per-credential cache.
+      */
+     ingestUsageReport?(provider: Provider, credential: OAuthCredential, report: UsageReport): boolean;
+     /**
+@@ -432,6 +425,7 @@ export interface CredentialDisabledEvent {
+     disabledCause: string;
+ }
+ export type AuthStorageOptions = {
++    storeOnly?: boolean;
+     usageProviderResolver?: (provider: Provider) => UsageProvider | undefined;
+     rankingStrategyResolver?: (provider: Provider) => CredentialRankingStrategy | undefined;
+     usageFetch?: typeof fetch;
+diff --git a/dist/types/managed-inference.d.ts b/dist/types/managed-inference.d.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..5e5581a3a18499244117d93a2d0f14bb4e5d398a
+--- /dev/null
++++ b/dist/types/managed-inference.d.ts
+@@ -0,0 +1,13 @@
++import type { AuthStorage } from "./auth-storage.js";
++import type { Api, Model, SimpleStreamOptions, StreamOptions } from "./types.js";
++import { AssistantMessageEventStream } from "./utils/event-stream.js";
++export interface ManagedInferenceGuard {
++    readonly authStorage: AuthStorage;
++    prepare(model: Model<Api>, options: SimpleStreamOptions): Promise<SimpleStreamOptions>;
++}
++export declare function installManagedInferenceGuard(value: ManagedInferenceGuard): void;
++export declare function hasManagedInferenceGuard(): boolean;
++export declare function guardManagedInference<T extends StreamOptions | SimpleStreamOptions>(model: Model<Api>, options: T | undefined, dispatch: (options: T) => AssistantMessageEventStream): AssistantMessageEventStream;
++export declare function prepareManagedInference<T extends StreamOptions | SimpleStreamOptions>(model: Model<Api>, options: T): Promise<T>;
++export declare function assertManagedInferenceEndpoint(model: Model<Api>, endpoint: string): void;
++export declare function managedInferenceAuthStorage(): AuthStorage | undefined;
+diff --git a/dist/types/registry/oauth/anthropic-refresh.d.ts b/dist/types/registry/oauth/anthropic-refresh.d.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..d26fda7930b2fa0276ea3c73885991abf92d2290
+--- /dev/null
++++ b/dist/types/registry/oauth/anthropic-refresh.d.ts
+@@ -0,0 +1,9 @@
++import type { FetchImpl } from "../../types.js";
++export interface AnthropicRefreshTokenResponse {
++    access_token: string;
++    refresh_token: string;
++    expires_in: number;
++    account?: { uuid?: string; email_address?: string };
++    organization?: { uuid?: string; name?: string };
++}
++export declare function refreshAnthropicTokenPortable(refreshToken: string, fetchOverride?: FetchImpl): Promise<AnthropicRefreshTokenResponse>;
+diff --git a/dist/types/registry/oauth/cursor-refresh.d.ts b/dist/types/registry/oauth/cursor-refresh.d.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..d0d344c9697a0a1934ea7319b04d194d559554b8
+--- /dev/null
++++ b/dist/types/registry/oauth/cursor-refresh.d.ts
+@@ -0,0 +1,8 @@
++import type { FetchImpl } from "../../types.js";
++import type { OAuthCredentials } from "./types.js";
++export declare class CursorRefreshError extends Error {
++    readonly status: number;
++    readonly responseBody: string;
++    constructor(status: number, responseBody: string);
++}
++export declare function refreshCursorTokenPortable(apiKeyOrRefreshToken: string, fetchOverride?: FetchImpl): Promise<OAuthCredentials>;
+diff --git a/dist/types/registry/oauth/cursor.d.ts b/dist/types/registry/oauth/cursor.d.ts
+index 7b5c44e82f68504fb816dabc2d76d13fd5782869..14b046cab6b579c03e042e6abfe8d24f1dcd787a 100644
+--- a/dist/types/registry/oauth/cursor.d.ts
++++ b/dist/types/registry/oauth/cursor.d.ts
+@@ -1,3 +1,4 @@
++import type { FetchImpl } from "../../types.js";
+ import type { OAuthController, OAuthCredentials } from "./types.js";
+ export interface CursorAuthParams {
+     verifier: string;
+@@ -12,7 +13,7 @@ export declare function pollCursorAuth(uuid: string, verifier: string): Promise<
+ }>;
+ export declare function loginCursor(onAuthUrl: (url: string) => void, onPollStart?: () => void): Promise<OAuthCredentials>;
+ export declare function loginCursorHook(callbacks: OAuthController): Promise<OAuthCredentials>;
+-export declare function refreshCursorToken(apiKeyOrRefreshToken: string): Promise<OAuthCredentials>;
++export declare function refreshCursorToken(apiKeyOrRefreshToken: string, fetchOverride?: FetchImpl): Promise<OAuthCredentials>;
+ export declare function refreshCursorHook(credentials: OAuthCredentials): Promise<OAuthCredentials>;
+ export declare function extractCursorAccessTokenUserId(accessToken: string): string | undefined;
+ export declare function isCursorTokenExpiringSoon(token: string, thresholdSeconds?: number): boolean;
+diff --git a/dist/types/registry/oauth/google-antigravity-refresh.d.ts b/dist/types/registry/oauth/google-antigravity-refresh.d.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..d43f2c3f7574df8446868b33dbcc0b13d1d9110a
+--- /dev/null
++++ b/dist/types/registry/oauth/google-antigravity-refresh.d.ts
+@@ -0,0 +1,3 @@
++import type { FetchImpl } from "../../types.js";
++import type { OAuthCredentials } from "./types.js";
++export declare function refreshAntigravityTokenPortable(refreshToken: string, projectId: string, fetchOverride?: FetchImpl): Promise<OAuthCredentials>;
+diff --git a/dist/types/registry/oauth/google-gemini-cli-refresh.d.ts b/dist/types/registry/oauth/google-gemini-cli-refresh.d.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..c1e35a31b7df4f874fb1e51ae1e6434316dd8255
+--- /dev/null
++++ b/dist/types/registry/oauth/google-gemini-cli-refresh.d.ts
+@@ -0,0 +1,3 @@
++import type { FetchImpl } from "../../types.js";
++import type { OAuthCredentials } from "./types.js";
++export declare function refreshGoogleCloudTokenPortable(refreshToken: string, projectId: string, fetchOverride?: FetchImpl): Promise<OAuthCredentials>;
+diff --git a/dist/types/registry/oauth/openai-codex-refresh.d.ts b/dist/types/registry/oauth/openai-codex-refresh.d.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..f83fffa45d19ec3816e3dee7ecf54fcb08b41796
+--- /dev/null
++++ b/dist/types/registry/oauth/openai-codex-refresh.d.ts
+@@ -0,0 +1,7 @@
++import type { FetchImpl } from "../../types.js";
++export interface OpenAICodexRefreshTokenResponse {
++    access_token: string;
++    refresh_token: string;
++    expires_in: number;
++}
++export declare function refreshOpenAICodexTokenPortable(refreshToken: string, fetchOverride?: FetchImpl): Promise<OpenAICodexRefreshTokenResponse>;
+diff --git a/dist/types/registry/oauth/worker-refresh.d.ts b/dist/types/registry/oauth/worker-refresh.d.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..0534cf205fa5525721569cc35bf3720705ee0e8d
+--- /dev/null
++++ b/dist/types/registry/oauth/worker-refresh.d.ts
+@@ -0,0 +1,17 @@
++import type { FetchImpl } from "../../types.js";
++export declare function googleOAuthClient(provider: "google-gemini-cli" | "google-antigravity"): { clientId: string; clientSecret: string };
++export declare class WorkerOAuthRefreshError extends Error {
++    readonly provider: string;
++    readonly kind: "network" | "rejected" | "invalid-response";
++    readonly status: number | undefined;
++    readonly responseBody: string;
++    constructor(provider: string, kind: "network" | "rejected" | "invalid-response", status: number | undefined, responseBody: string);
++}
++export declare function requestWorkerOAuthToken(input: {
++    provider: string;
++    url: string;
++    headers: HeadersInit;
++    body: BodyInit;
++    fetchOverride?: FetchImpl;
++    timeoutMs?: number;
++}): Promise<Record<string, unknown>>;
+diff --git a/src/auth-broker/discover.ts b/src/auth-broker/discover.ts
+index 0f14a823a33623d6b6b48ac50fd742fde50852c1..551d627d14539ab4eeccfd2a6c1e5a2f0c03f3d5 100644
+--- a/src/auth-broker/discover.ts
++++ b/src/auth-broker/discover.ts
+@@ -1,3 +1,4 @@
++import { managedInferenceAuthStorage } from "../managed-inference";
+ /**
+  * Broker-aware auth-storage discovery used by both the coding-agent runtime and
+  * the catalog model generator. Keeps the precedence logic (env → config.yml/config.yaml →
+@@ -232,6 +233,8 @@ export async function resolveAuthBrokerConfig(
+  * for the TUI and the catalog generator.
+  */
+ export async function discoverAuthStorage(options: DiscoverAuthStorageOptions = {}): Promise<AuthStorage> {
++	const managed = managedInferenceAuthStorage();
++	if (managed) return managed;
+ 	const agentDir = options.agentDir ?? getAgentDir();
+ 	const brokerConfig = await resolveAuthBrokerConfig({
+ 		agentDir,
+diff --git a/src/auth-broker/remote-store.ts b/src/auth-broker/remote-store.ts
+index 03bc34ebb2e00aa5b197904e26bfb4726dd91981..8cdad673ac0b3f746f39dde123ce6a720e7d9cbb 100644
+--- a/src/auth-broker/remote-store.ts
++++ b/src/auth-broker/remote-store.ts
+@@ -4,8 +4,8 @@
+  * `upsert*`, `delete*ForProvider`) throw because login flows are server-side.
+  *
+  * Cache (`getCache`/`setCache`/`cleanExpiredCache`) is in-memory and ephemeral —
+- * usage reports cache TTL is 5 minutes per credential, so durability across
+- * runs isn't required.
++ * provider usage is fetched and cached by AuthStorage on this machine. Only
++ * credential storage and refresh are delegated to the broker.
+  */
+ import * as os from "node:os";
+ import { getAppName, getInstallId, logger } from "@oh-my-pi/pi-utils";
+@@ -22,7 +22,7 @@ import {
+ import * as AIError from "../error";
+ import type { OAuthCredentials } from "../registry/oauth/types";
+ import type { Provider } from "../types";
+-import type { ClientUsageIdentity, ObservedUsageEntry, UsageReport } from "../usage";
++import type { ClientUsageIdentity, ObservedUsageEntry } from "../usage";
+ import { type AuthBrokerClient, AuthBrokerError, AuthBrokerStreamUnsupportedError } from "./client";
+ import type {
+ 	CredentialBlockSnapshot,
+@@ -49,14 +49,6 @@ function isCredentialInAccountPool(
+ 	return entry.identityKey !== null && identities.has(entry.identityKey);
+ }
+ 
+-/**
+- * Client-side TTL for the aggregate `/v1/usage` response. The broker dedups
+- * upstream `/usage` hits via AuthStorage's 5-minute per-credential cache plus
+- * single-flight, so this short client TTL mainly folds the parallel fan-out
+- * from `#rankOAuthSelections` into a single round-trip — a ranking pass issues
+- * one broker call instead of N.
+- */
+-const USAGE_CACHE_TTL_MS = 15_000;
+ const CREDENTIAL_BLOCK_RECONCILE_DELAY_MS = 5 * 60_000;
+ const WAIT_THRESHOLD_MS = 1_000;
+ const MAX_WAIT_MS = 5_000;
+@@ -107,20 +99,6 @@ function credentialBlockSnapshotsEqual(
+ 	return true;
+ }
+ 
+-function snapshotBlocksChanged(previous: readonly SnapshotEntry[], next: readonly SnapshotEntry[]): boolean {
+-	const previousBlocksById = new Map<number, readonly CredentialBlockSnapshot[] | undefined>();
+-	for (const entry of previous) previousBlocksById.set(entry.id, entry.blocks);
+-	for (const entry of next) {
+-		const previousBlocks = previousBlocksById.get(entry.id);
+-		if (!credentialBlockSnapshotsEqual(previousBlocks, entry.blocks)) return true;
+-		previousBlocksById.delete(entry.id);
+-	}
+-	for (const previousBlocks of previousBlocksById.values()) {
+-		if (previousBlocks && previousBlocks.length > 0) return true;
+-	}
+-	return false;
+-}
+-
+ function credentialEntryWithBlocks(
+ 	entry: AuthCredentialSnapshotEntry,
+ 	blocks: readonly CredentialBlockSnapshot[] | undefined,
+@@ -150,68 +128,6 @@ interface CacheEntry {
+ 	expiresAtSec: number;
+ }
+ 
+-interface UsageCacheEntry {
+-	/**
+-	 * `null` means the last aggregate `/v1/usage` fetch failed. Callers treat
+-	 * this the same as a successful empty-report response ("no usage signal
+-	 * for this cycle"), and the same 15s TTL applies so transient broker
+-	 * outages don't turn every ranking pass into a broker retry storm.
+-	 */
+-	reports: UsageReport[] | null;
+-	fetchedAt: number;
+-}
+-
+-function usageOverlayKey(
+-	provider: Provider,
+-	ids: { accountId?: string; email?: string; projectId?: string; orgId?: string },
+-): string | undefined {
+-	// Org first: one account email can hold several organizations (Anthropic
+-	// Team seat + personal Max), each with its own limit pools. Keying the
+-	// overlay by account/email would merge the two pools' header ingests.
+-	// But the org alone is not enough either: two Team members share the org
+-	// id while drawing on per-user pools, so the key stays qualified by the
+-	// member's own base identity whenever one is known.
+-	let base: string | undefined;
+-	const accountId = ids.accountId?.trim().toLowerCase();
+-	const email = ids.email?.trim().toLowerCase();
+-	const projectId = ids.projectId?.trim().toLowerCase();
+-	if (email) base = `email:${email}`;
+-	else if (accountId) base = `account:${accountId}`;
+-	else if (projectId) base = `project:${projectId}`;
+-	const orgId = ids.orgId?.trim().toLowerCase();
+-	if (orgId) return base ? `${provider}\0org:${orgId}|${base}` : `${provider}\0org:${orgId}`;
+-	if (base) return `${provider}\0${base}`;
+-	return undefined;
+-}
+-
+-function mergeUsageReports(base: UsageReport, overlay: UsageReport): UsageReport {
+-	const overlayLimitsById = new Map(overlay.limits.map(limit => [limit.id, limit]));
+-	const limits = [];
+-	for (const limit of base.limits) {
+-		const replacement = overlayLimitsById.get(limit.id);
+-		if (replacement) {
+-			limits.push(replacement);
+-			overlayLimitsById.delete(limit.id);
+-		} else {
+-			limits.push(limit);
+-		}
+-	}
+-	for (const limit of overlayLimitsById.values()) limits.push(limit);
+-	const overlayMetadata = (overlay.metadata ?? {}) as Record<string, unknown>;
+-	return {
+-		...base,
+-		fetchedAt: Math.max(base.fetchedAt, overlay.fetchedAt),
+-		limits,
+-		metadata: {
+-			...overlayMetadata,
+-			...base.metadata,
+-			...(overlayMetadata.headersUpdatedAt !== undefined
+-				? { headersUpdatedAt: overlayMetadata.headersUpdatedAt }
+-				: {}),
+-		},
+-	};
+-}
+-
+ export interface RemoteAuthCredentialStoreOptions {
+ 	client: AuthBrokerClient;
+ 	/**
+@@ -267,7 +183,6 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
+ 	#credentialRevision = 0;
+ 	/** Revision last reported as "seen" by {@link pollExternalChanges}; seeded from the initial snapshot. */
+ 	#acknowledgedRevision = 0;
+-	#usageOverlays: Map<string, UsageReport> = new Map();
+ 	#backgroundAbort = new AbortController();
+ 	readonly #backgroundIdleMs: number;
+ 	/** Last foreground store use; background sync parks `#backgroundIdleMs` after this. */
+@@ -275,17 +190,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
+ 	/** Present while the background loop is parked; resolved by `#noteActivity` or `close()`. */
+ 	#activityWakeup: PromiseWithResolvers<void> | null = null;
+ 	#cache: Map<string, CacheEntry> = new Map();
+-	#usageCache?: UsageCacheEntry;
+-	#usageInflight?: Promise<UsageReport[] | null>;
+ 	#credentialBlockReconcileAfter: Map<string, number> = new Map();
+-	#usageCacheEpoch = 0;
+-	/** Raw broker credentials retained to size aggregate usage requests before account-pool filtering. */
+-	#brokerUsageProviderByCredentialId = new Map<number, Provider>();
+-	#brokerUsageAccountCounts = new Map<Provider, number>();
+-	/** Per-snapshot lookup of oauth credentials by provider; rebuilt when `#snapshot` is replaced. */
+-	#usageFilterLookup?: { snapshot: SnapshotResponse; byProvider: Map<Provider, OAuthCredential[]> };
+-	/** Memoized `#filterUsageReports` output, keyed on (input identity, lookup identity). */
+-	#usageFilterResult?: { input: UsageReport[]; byProvider: Map<Provider, OAuthCredential[]>; output: UsageReport[] };
+ 	#closed = false;
+ 	/**
+ 	 * `true` once the SSE consumer received its first frame and hasn't dropped
+@@ -328,12 +233,10 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
+ 
+ 	#applySnapshot(snapshot: SnapshotResponse, generation: number, protectNewBlocks = true): void {
+ 		const nowMs = Date.now();
+-		this.#replaceBrokerUsageAccounts(snapshot.credentials);
+ 		const previousCredentials = this.#snapshot.credentials;
+ 		const credentials = snapshot.credentials
+ 			.filter(entry => isCredentialInAccountPool(entry, this.#accountPool))
+ 			.map(entry => this.#normalizeSnapshotEntryBlocks(entry, nowMs));
+-		if (snapshotBlocksChanged(previousCredentials, credentials)) this.#invalidateUsageCache();
+ 		if (protectNewBlocks) this.#protectNewSnapshotBlocks(previousCredentials, credentials, nowMs);
+ 		this.#snapshot = { ...snapshot, credentials };
+ 		this.#generation = generation;
+@@ -570,16 +473,14 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
+ 		generation: number,
+ 		serverNowMs: number,
+ 	): void {
+-		this.#upsertBrokerUsageAccount(entry);
+ 		if (!isCredentialInAccountPool(entry, this.#accountPool)) {
+-			this.#removeStreamCredential(entry.id, refresher, generation, serverNowMs, { retainBrokerUsageAccount: true });
++			this.#removeStreamCredential(entry.id, refresher, generation, serverNowMs);
+ 			return;
+ 		}
+ 		const incoming = this.#normalizeSnapshotEntryBlocks(entry, Date.now());
+ 		const index = this.#snapshot.credentials.findIndex(candidate => candidate.id === incoming.id);
+ 		const previousBlocks = index === -1 ? undefined : this.#snapshot.credentials[index]?.blocks;
+ 		const blocksChanged = !credentialBlockSnapshotsEqual(previousBlocks, incoming.blocks);
+-		if (blocksChanged) this.#invalidateUsageCache();
+ 		const credentials =
+ 			index === -1
+ 				? [...this.#snapshot.credentials, incoming]
+@@ -596,11 +497,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
+ 		refresher: RefresherSchedule,
+ 		generation: number,
+ 		serverNowMs: number,
+-		options?: { retainBrokerUsageAccount?: boolean },
+ 	): void {
+-		if (!options?.retainBrokerUsageAccount) this.#removeBrokerUsageAccount(id);
+-		const removed = this.#snapshot.credentials.find(entry => entry.id === id);
+-		if (removed?.blocks && removed.blocks.length > 0) this.#invalidateUsageCache();
+ 		const credentials = this.#snapshot.credentials.filter(entry => entry.id !== id);
+ 		this.#snapshot = { ...this.#snapshot, generation, serverNowMs, refresher, credentials };
+ 		this.#generation = generation;
+@@ -704,7 +601,6 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
+ 	upsertCredentialBlock(block: StoredCredentialBlock): void {
+ 		this.#noteActivity();
+ 		this.#upsertSnapshotBlock(block);
+-		this.#invalidateUsageCache();
+ 		this.#credentialBlockReconcileAfter.set(
+ 			`${block.credentialId}\0${block.providerKey}\0${block.blockScope}`,
+ 			Math.min(block.blockedUntilMs, Date.now() + CREDENTIAL_BLOCK_RECONCILE_DELAY_MS),
+@@ -737,7 +633,6 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
+ 		for (const key of this.#credentialBlockReconcileAfter.keys()) {
+ 			if (key.startsWith(`${credentialId}\0`)) this.#credentialBlockReconcileAfter.delete(key);
+ 		}
+-		this.#invalidateUsageCache();
+ 		void this.#client
+ 			.deleteCredentialBlocks(credentialId)
+ 			.then(() => {
+@@ -1074,20 +969,6 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
+ 		}
+ 	}
+ 
+-	async invalidateUsageCache(signal?: AbortSignal): Promise<void> {
+-		this.#noteActivity();
+-		this.#invalidateUsageCache();
+-		await this.#client.notifyUsageStale(signal).catch(err => {
+-			logger.warn("auth-broker notification of stale usage failed", { error: String(err) });
+-		});
+-	}
+-
+-	#invalidateUsageCache(): void {
+-		this.#usageCache = undefined;
+-		this.#usageInflight = undefined;
+-		this.#usageCacheEpoch += 1;
+-	}
+-
+ 	/**
+ 	 * Store-level hook consumed by `AuthStorage` — routes refresh through the
+ 	 * broker so the actual refresh token never leaves the broker host. Returns
+@@ -1127,206 +1008,6 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
+ 		};
+ 	}
+ 
+-	/**
+-	 * Store-level hook consumed by `AuthStorage.fetchUsageReports()` — proxies
+-	 * to the broker's `/v1/usage` endpoint. The broker's egress IP isn't
+-	 * rate-limited by Anthropic's per-IP `/usage` cap the way a heavy
+-	 * residential laptop is, so all credentials surface every cycle.
+-	 */
+-	async fetchUsageReports(signal?: AbortSignal): Promise<UsageReport[] | null> {
+-		this.#noteActivity();
+-		const reports = await this.#raceWithSignal(this.#loadUsageReports(), signal);
+-		if (!reports) return null;
+-		return this.#filterUsageReports(this.#applyUsageOverlays(reports));
+-	}
+-
+-	/**
+-	 * Per-credential usage hook consumed by `AuthStorage.#getUsageReport`. Pulls
+-	 * the aggregate broker `/v1/usage` once and serves all callers from the
+-	 * same response (coalesced + cached), then overlays any client-observed
+-	 * header hints for the matching credential.
+-	 *
+-	 * The broker already aggregates with its own 30s TTL on the server side; our
+-	 * 15s client TTL is below that so we usually re-use the broker's cache too.
+-	 */
+-	async getUsageReport(
+-		provider: Provider,
+-		credential: OAuthCredential,
+-		signal?: AbortSignal,
+-	): Promise<UsageReport | null> {
+-		this.#noteActivity();
+-		const reports = await this.#raceWithSignal(this.#loadUsageReports(), signal);
+-		const visibleReports = reports ? this.#filterUsageReports(reports) : null;
+-		const matched = visibleReports ? matchUsageReport(visibleReports, provider, credential) : null;
+-		const overlay = this.#getActiveUsageOverlay(provider, credential);
+-		if (matched && overlay) return mergeUsageReports(matched, overlay);
+-		return overlay ?? matched;
+-	}
+-
+-	/**
+-	 * Hot path — called per `getUsageReport()`/`fetchUsageReports()` (status-line
+-	 * refresh cadence). The oauth-credential lookup is memoized on `#snapshot`
+-	 * identity (every update site replaces the reference), and the filtered
+-	 * output on (reports identity, lookup identity) — `#loadUsageReports`
+-	 * serves the same array for 15s, so steady-state calls are O(1).
+-	 */
+-	#filterUsageReports(reports: UsageReport[]): UsageReport[] {
+-		const accountPool = this.#accountPool;
+-		if (!accountPool) return reports;
+-		let lookup = this.#usageFilterLookup;
+-		if (!lookup || lookup.snapshot !== this.#snapshot) {
+-			const byProvider = new Map<Provider, OAuthCredential[]>();
+-			for (const entry of this.#snapshot.credentials) {
+-				if (entry.credential.type !== "oauth") continue;
+-				const list = byProvider.get(entry.provider);
+-				if (list) list.push(entry.credential);
+-				else byProvider.set(entry.provider, [entry.credential]);
+-			}
+-			lookup = { snapshot: this.#snapshot, byProvider };
+-			this.#usageFilterLookup = lookup;
+-		}
+-		const memo = this.#usageFilterResult;
+-		if (memo && memo.input === reports && memo.byProvider === lookup.byProvider) return memo.output;
+-		const byProvider = lookup.byProvider;
+-		const output = reports.filter(report => {
+-			if (!accountPool.has(report.provider)) return true;
+-			const credentials = byProvider.get(report.provider);
+-			if (!credentials) return false;
+-			return credentials.some(credential => usageReportMatchesCredential(report, credential));
+-		});
+-		this.#usageFilterResult = { input: reports, byProvider, output };
+-		return output;
+-	}
+-
+-	ingestUsageReport(provider: Provider, credential: OAuthCredential, report: UsageReport): boolean {
+-		this.#noteActivity();
+-		const key = usageOverlayKey(provider, credential);
+-		if (!key) return false;
+-		const activeOverlay = this.#getActiveUsageOverlay(provider, credential);
+-		this.#usageOverlays.set(key, activeOverlay ? mergeUsageReports(activeOverlay, report) : report);
+-		return true;
+-	}
+-
+-	#getActiveUsageOverlay(provider: Provider, credential: OAuthCredential): UsageReport | undefined {
+-		const key = usageOverlayKey(provider, credential);
+-		if (!key) return undefined;
+-		const overlay = this.#usageOverlays.get(key);
+-		if (!overlay) return undefined;
+-		if (Date.now() - overlay.fetchedAt >= USAGE_CACHE_TTL_MS) {
+-			this.#usageOverlays.delete(key);
+-			return undefined;
+-		}
+-		return overlay;
+-	}
+-
+-	#applyUsageOverlays(reports: UsageReport[]): UsageReport[] {
+-		const overlays = [...this.#usageOverlays.values()].filter(
+-			overlay => Date.now() - overlay.fetchedAt < USAGE_CACHE_TTL_MS,
+-		);
+-		if (overlays.length === 0) return reports;
+-		const merged = [...reports];
+-		for (const overlay of overlays) {
+-			const matchIndex = findMatchingReportIndex(merged, overlay);
+-			if (matchIndex === -1) {
+-				merged.push(overlay);
+-			} else {
+-				merged[matchIndex] = mergeUsageReports(merged[matchIndex]!, overlay);
+-			}
+-		}
+-		return merged;
+-	}
+-
+-	/**
+-	 * Reject the awaited promise when the caller's signal aborts, without
+-	 * affecting the shared upstream fetch. Used to give each caller their
+-	 * own cancel without one caller's abort cascading into a peer's in-flight
+-	 * request through the single-flight `#usageInflight`.
+-	 */
+-	#raceWithSignal<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+-		if (!signal) return promise;
+-		if (signal.aborted) return Promise.reject(new AIError.AbortError("auth-broker request aborted"));
+-		return new Promise<T>((resolve, reject) => {
+-			const onAbort = (): void => {
+-				signal.removeEventListener("abort", onAbort);
+-				reject(new AIError.AbortError("auth-broker request aborted"));
+-			};
+-			signal.addEventListener("abort", onAbort, { once: true });
+-			promise.then(
+-				value => {
+-					signal.removeEventListener("abort", onAbort);
+-					resolve(value);
+-				},
+-				err => {
+-					signal.removeEventListener("abort", onAbort);
+-					reject(err);
+-				},
+-			);
+-		});
+-	}
+-
+-	#replaceBrokerUsageAccounts(entries: readonly SnapshotEntry[]): void {
+-		this.#brokerUsageProviderByCredentialId.clear();
+-		this.#brokerUsageAccountCounts.clear();
+-		for (const entry of entries) this.#upsertBrokerUsageAccount(entry);
+-	}
+-
+-	#upsertBrokerUsageAccount(entry: Pick<SnapshotEntry, "id" | "provider">): void {
+-		const previous = this.#brokerUsageProviderByCredentialId.get(entry.id);
+-		if (previous === entry.provider) return;
+-		if (previous !== undefined) {
+-			const count = this.#brokerUsageAccountCounts.get(previous) ?? 0;
+-			if (count <= 1) this.#brokerUsageAccountCounts.delete(previous);
+-			else this.#brokerUsageAccountCounts.set(previous, count - 1);
+-		}
+-		this.#brokerUsageProviderByCredentialId.set(entry.id, entry.provider);
+-		this.#brokerUsageAccountCounts.set(entry.provider, (this.#brokerUsageAccountCounts.get(entry.provider) ?? 0) + 1);
+-	}
+-
+-	#removeBrokerUsageAccount(id: number): void {
+-		const provider = this.#brokerUsageProviderByCredentialId.get(id);
+-		if (provider === undefined) return;
+-		this.#brokerUsageProviderByCredentialId.delete(id);
+-		const count = this.#brokerUsageAccountCounts.get(provider) ?? 0;
+-		if (count <= 1) this.#brokerUsageAccountCounts.delete(provider);
+-		else this.#brokerUsageAccountCounts.set(provider, count - 1);
+-	}
+-
+-	#maxBrokerUsageAccounts(): number {
+-		let maximum = 1;
+-		for (const count of this.#brokerUsageAccountCounts.values()) maximum = Math.max(maximum, count);
+-		return maximum;
+-	}
+-
+-	#loadUsageReports(): Promise<UsageReport[] | null> {
+-		const cached = this.#usageCache;
+-		if (cached && Date.now() - cached.fetchedAt < USAGE_CACHE_TTL_MS) {
+-			return Promise.resolve(cached.reports);
+-		}
+-		if (this.#usageInflight) return this.#usageInflight;
+-		const epoch = this.#usageCacheEpoch;
+-		const inflight = this.#client
+-			.fetchUsage({ maxAccountsPerProvider: this.#maxBrokerUsageAccounts() })
+-			.then(body => {
+-				if (epoch !== this.#usageCacheEpoch) return this.#loadUsageReports();
+-				this.#usageCache = { reports: body.reports, fetchedAt: Date.now() };
+-				return body.reports;
+-			})
+-			.catch(error => {
+-				logger.warn("auth-broker usage fetch failed", { error: String(error) });
+-				// Documented 15s TTL fallback: cache the null so sequential callers
+-				// don't re-hit the broker while it's still down. See
+-				// docs/auth-broker-gateway.md § "Client-side single-flight".
+-				if (epoch !== this.#usageCacheEpoch) return this.#loadUsageReports();
+-				this.#usageCache = { reports: null, fetchedAt: Date.now() };
+-				return null;
+-			})
+-			.finally(() => {
+-				if (this.#usageInflight === inflight) this.#usageInflight = undefined;
+-			});
+-		this.#usageInflight = inflight;
+-		return inflight;
+-	}
+-
+ 	/**
+ 	 * Fold locally observed request usage into the pending report and schedule
+ 	 * a flush. One `POST /v1/usage/observed` at most per flush interval; on
+@@ -1415,169 +1096,6 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
+ 		// Best-effort final flush; failures are dropped (the process is exiting).
+ 		if (this.#observedUsage.size > 0) void this.#flushObservedUsage();
+ 		this.#cache.clear();
+-		this.#usageOverlays.clear();
+-	}
+-}
+-
+-/**
+- * Match a broker-supplied usage report to a specific OAuth credential. The
+- * broker returns aggregate reports across all credentials it manages, so we
+- * pick the one whose identity (accountId / email / projectId) lines up with
+- * the credential the caller is asking about.
+- *
+- * Falls back to the lone candidate when only one matches the provider; falls
+- * through to `null` when nothing matches, which `AuthStorage` treats as "no
+- * usage data" (ranking proceeds without a usage signal for this credential).
+- */
+-function matchUsageReport(reports: UsageReport[], provider: Provider, credential: OAuthCredential): UsageReport | null {
+-	const all = reports.filter(report => report.provider === provider);
+-	if (all.length === 0) return null;
+-	// Org precedence, decisive on EITHER side: an org-scoped credential may
+-	// only take its own org's report, and an org-less (legacy) credential may
+-	// only take org-less reports — the shared email/account would otherwise
+-	// hand one subscription the OTHER subscription's pool (e.g. mark healthy
+-	// Max exhausted via Team's report, or rank a legacy row on a sibling's
+-	// numbers).
+-	const orgId = credential.orgId?.trim().toLowerCase();
+-	const accountId = credential.accountId?.trim().toLowerCase();
+-	const email = credential.email?.trim().toLowerCase();
+-	const projectId = credential.projectId?.trim().toLowerCase();
+-	if (orgId) {
+-		const sameOrg: UsageReport[] = [];
+-		let sawReportOrg = false;
+-		for (const report of all) {
+-			const metaOrg = readMetadataString((report.metadata ?? {}) as Record<string, unknown>, "orgId");
+-			if (metaOrg) {
+-				sawReportOrg = true;
+-				if (metaOrg.toLowerCase() === orgId) sameOrg.push(report);
+-			}
+-		}
+-		// Org-attributed reports exist: the shared org is a GATE, not a match.
+-		// Two Team members share the org id while drawing on per-user pools,
+-		// so the credential's own base identity must still line up inside the
+-		// same-org subset — a lone sibling report is NOT ours. An org-only
+-		// credential (no base identifiers) takes the lone same-org report and
+-		// treats several as ambiguous. None in our org → "no usage data"
+-		// rather than mis-attributing another org's pool.
+-		if (sawReportOrg) {
+-			if (accountId || email || projectId) {
+-				for (const report of sameOrg) {
+-					if (reportMatchesIdentity(report, accountId, email, projectId)) return report;
+-				}
+-				return null;
+-			}
+-			return sameOrg.length === 1 ? sameOrg[0]! : null;
+-		}
+-		// No surviving report carries an org at all: presence mismatch is a
+-		// non-match too — the sole org-less report may be a legacy sibling
+-		// row's pool, and handing it to a scoped credential would rank/block
+-		// on the wrong quota. "No usage data" degrades gracefully instead.
+-		return null;
+-	}
+-	const candidates = all.filter(
+-		report => !readMetadataString((report.metadata ?? {}) as Record<string, unknown>, "orgId"),
+-	);
+-	if (candidates.length === 0) return null;
+-	if (all.length === 1 && candidates.length === 1) return candidates[0];
+-	for (const report of candidates) {
+-		if (reportMatchesIdentity(report, accountId, email, projectId)) return report;
+-	}
+-	return null;
+-}
+-
+-function usageReportMatchesCredential(report: UsageReport, credential: OAuthCredential): boolean {
+-	const metadata = (report.metadata ?? {}) as Record<string, unknown>;
+-	const credentialOrg = credential.orgId?.trim().toLowerCase();
+-	const reportOrg = readMetadataString(metadata, "orgId")?.toLowerCase();
+-	if (credentialOrg !== reportOrg) return false;
+-
+-	const accountId = credential.accountId?.trim().toLowerCase();
+-	const email = credential.email?.trim().toLowerCase();
+-	const projectId = credential.projectId?.trim().toLowerCase();
+-	if (accountId || email || projectId) {
+-		return reportMatchesIdentity(report, accountId, email, projectId);
+-	}
+-	return credentialOrg !== undefined;
+-}
+-
+-function findMatchingReportIndex(reports: UsageReport[], overlay: UsageReport): number {
+-	const all = reports
+-		.map((report, index) => ({ report, index }))
+-		.filter(candidate => candidate.report.provider === overlay.provider);
+-	if (all.length === 0) return -1;
+-	const metadata = (overlay.metadata ?? {}) as Record<string, unknown>;
+-	// Org precedence — mirror matchUsageReport: an org-attributed overlay may
+-	// only merge into a report of the SAME org, and an org-less overlay may
+-	// only merge into an org-less report. Within the same org the overlay's
+-	// base identity must still match — two Team members' reports share the
+-	// org id but must not swallow each other's header ingests.
+-	const overlayOrg = readMetadataString(metadata, "orgId")?.toLowerCase();
+-	const accountId = readMetadataString(metadata, "accountId")?.toLowerCase();
+-	const email = readMetadataString(metadata, "email")?.toLowerCase();
+-	const projectId = readMetadataString(metadata, "projectId")?.toLowerCase();
+-	if (overlayOrg) {
+-		const sameOrg: { report: UsageReport; index: number }[] = [];
+-		let sawReportOrg = false;
+-		for (const candidate of all) {
+-			const candidateOrg = readMetadataString((candidate.report.metadata ?? {}) as Record<string, unknown>, "orgId");
+-			if (candidateOrg) {
+-				sawReportOrg = true;
+-				if (candidateOrg.toLowerCase() === overlayOrg) sameOrg.push(candidate);
+-			}
+-		}
+-		if (sawReportOrg) {
+-			if (accountId || email || projectId) {
+-				for (const candidate of sameOrg) {
+-					if (reportMatchesIdentity(candidate.report, accountId, email, projectId)) return candidate.index;
+-				}
+-				return -1;
+-			}
+-			return sameOrg.length === 1 ? sameOrg[0]!.index : -1;
+-		}
+-		// Presence mismatch — mirror matchUsageReport: an org-scoped overlay
+-		// never merges into an org-less report; it becomes its own report row.
+-		return -1;
+-	}
+-	const candidates = all.filter(
+-		candidate => !readMetadataString((candidate.report.metadata ?? {}) as Record<string, unknown>, "orgId"),
+-	);
+-	if (candidates.length === 0) return -1;
+-	if (all.length === 1 && candidates.length === 1) return candidates[0]!.index;
+-	for (const candidate of candidates) {
+-		if (reportMatchesIdentity(candidate.report, accountId, email, projectId)) return candidate.index;
+-	}
+-	return -1;
+-}
+-
+-function reportMatchesIdentity(
+-	report: UsageReport,
+-	accountId: string | undefined,
+-	email: string | undefined,
+-	projectId: string | undefined,
+-): boolean {
+-	const metadata = (report.metadata ?? {}) as Record<string, unknown>;
+-	const metaEmail = readMetadataString(metadata, "email")?.toLowerCase();
+-	// Email identifies the member within shared Team workspace account/org ids.
+-	// When both sides provide it, a mismatch is decisive.
+-	if (email && metaEmail) return metaEmail === email;
+-	if (accountId) {
+-		const metaAccount = readMetadataString(metadata, "accountId") ?? readMetadataString(metadata, "account_id");
+-		if (metaAccount && metaAccount.toLowerCase() === accountId) return true;
+-		for (const limit of report.limits) {
+-			if (limit.scope.accountId?.toLowerCase() === accountId) return true;
+-		}
+ 	}
+-	if (projectId) {
+-		const metaProject = readMetadataString(metadata, "projectId") ?? readMetadataString(metadata, "project_id");
+-		if (metaProject && metaProject.toLowerCase() === projectId) return true;
+-		for (const limit of report.limits) {
+-			if (limit.scope.projectId?.toLowerCase() === projectId) return true;
+-		}
+-	}
+-	return false;
+ }
+ 
+-function readMetadataString(metadata: Record<string, unknown>, key: string): string | undefined {
+-	const value = metadata[key];
+-	return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+-}
+diff --git a/src/auth-storage.ts b/src/auth-storage.ts
+index df8bb7262614afa0cd08e1b259cd16b9b9313fa0..c73488c1d1c4bce280530b837c31a39b4deb1c3f 100644
+--- a/src/auth-storage.ts
++++ b/src/auth-storage.ts
+@@ -496,35 +496,28 @@ export interface AuthCredentialStore {
+ 	/**
+ 	 * Optional store-supplied aggregate usage fetch. When present, `AuthStorage`
+ 	 * routes `fetchUsageReports()` here instead of fanning out per-credential.
+-	 * `RemoteAuthCredentialStore` proxies to the broker (whose datacenter IP
+-	 * isn't rate-limited like a heavy residential client).
++	 * Remote credential stores leave this unset so usage stays machine-side.
+ 	 *
+ 	 * Precedence: `AuthStorageOptions.fetchUsageReports` > this hook > local fan-out.
+ 	 *
+-	 * `signal` propagates the agent's cancel down to the broker fetch.
++	 * `signal` propagates the agent's cancellation to the override.
+ 	 */
+ 	fetchUsageReports?(signal?: AbortSignal): Promise<UsageReport[] | null>;
+ 	/**
+ 	 * Optional store-supplied per-credential usage report lookup. When present,
+ 	 * `AuthStorage` consults this before its own per-credential upstream fetch
+-	 * (`#getUsageReport`). `RemoteAuthCredentialStore` implements this against
+-	 * the broker's aggregate `/v1/usage` (one coalesced round-trip shared across
+-	 * all callers) so multi-credential ranking on the client never hits the
+-	 * upstream provider's rate-limited usage endpoint from the laptop IP.
++	 * (`#getUsageReport`). Remote credential stores leave this unset.
+ 	 *
+ 	 * Returning `null` is authoritative — `AuthStorage` does NOT fall back to
+-	 * the local fetch path. The store hook owns the decision, since falling
+-	 * back would re-introduce the per-IP rate-limit problem the broker exists
+-	 * to avoid.
++	 * the local fetch path.
+ 	 *
+-	 * `signal` propagates the agent's cancel down to the broker fetch.
++	 * `signal` propagates the agent's cancellation to the override.
+ 	 */
+ 	getUsageReport?(provider: Provider, credential: OAuthCredential, signal?: AbortSignal): Promise<UsageReport | null>;
+ 	/**
+ 	 * Optional store hook to ingest a parsed provider usage report for one OAuth
+-	 * credential. Remote broker stores use this to overlay header-derived limits
+-	 * onto their cached aggregate `/v1/usage` response without mutating broker
+-	 * state.
++	 * credential. Without this hook, header-derived limits update the local
++	 * per-credential cache.
+ 	 */
+ 	ingestUsageReport?(provider: Provider, credential: OAuthCredential, report: UsageReport): boolean;
+ 	/**
+@@ -584,6 +577,8 @@ export interface CredentialDisabledEvent {
+ }
+ 
+ export type AuthStorageOptions = {
++	/** Only store credentials; reject runtime/config keys and ignore ambient/fallback auth. */
++	storeOnly?: boolean;
+ 	usageProviderResolver?: (provider: Provider) => UsageProvider | undefined;
+ 	rankingStrategyResolver?: (provider: Provider) => CredentialRankingStrategy | undefined;
+ 	usageFetch?: typeof fetch;
+@@ -1434,9 +1429,11 @@ export class AuthStorage {
+ 	#oauthRefreshInFlight: Map<number, Promise<AuthCredentialSnapshotEntry>> = new Map();
+ 	#oauthCredentialRefreshInFlight: Map<number, Promise<OAuthCredentials>> = new Map();
+ 	#closed = false;
++	readonly #storeOnly: boolean;
+ 
+ 	constructor(store: AuthCredentialStore, options: AuthStorageOptions = {}) {
+ 		this.#store = store;
++		this.#storeOnly = options.storeOnly === true;
+ 		this.#configValueResolver = options.configValueResolver ?? defaultConfigValueResolver;
+ 		this.#usageProviderResolver = options.usageProviderResolver ?? resolveDefaultUsageProvider;
+ 		this.#rankingStrategyResolver = options.rankingStrategyResolver ?? resolveDefaultRankingStrategy;
+@@ -1606,6 +1603,7 @@ export class AuthStorage {
+ 	 * Used for CLI --api-key flag.
+ 	 */
+ 	setRuntimeApiKey(provider: string, apiKey: string): void {
++		if (this.#storeOnly) throw new Error("Managed inference credentials must come from the profile broker");
+ 		this.#runtimeOverrides.set(provider, apiKey);
+ 	}
+ 
+@@ -1650,6 +1648,7 @@ export class AuthStorage {
+ 	 * still wins for the duration of a single invocation.
+ 	 */
+ 	setConfigApiKey(provider: string, apiKeyConfig: string): void {
++		if (this.#storeOnly) throw new Error("Managed inference credentials must come from the profile broker");
+ 		this.#configOverrides.set(provider, apiKeyConfig);
+ 	}
+ 
+@@ -1673,7 +1672,7 @@ export class AuthStorage {
+ 	 * Used for custom provider keys from models.json.
+ 	 */
+ 	setFallbackResolver(resolver: (provider: string) => string | undefined): void {
+-		this.#fallbackResolver = resolver;
++		if (!this.#storeOnly) this.#fallbackResolver = resolver;
+ 	}
+ 	/**
+ 	 * Install the host's async config-value resolver. Coding-agent uses this so
+@@ -3036,13 +3035,14 @@ export class AuthStorage {
+ 		if (this.#runtimeOverrides.has(provider)) return true;
+ 		if (this.#configOverrides.has(provider)) return true;
+ 		if (this.#getAuthBearingCredentials(provider).length > 0) return true;
++		if (this.#storeOnly) return false;
+ 		if ((provider === "amazon-bedrock" || provider === "bedrock-mantle") && $env.AWS_BEARER_TOKEN_BEDROCK?.trim()) {
+ 			return true;
+ 		}
+ 		if (provider === "xai-oauth") {
+ 			if ($env.XAI_OAUTH_TOKEN?.trim()) return true;
+ 		} else {
+-			const envApiKey = getEnvApiKey(provider);
++			const envApiKey = this.#getEnvApiKey(provider);
+ 			if (envApiKey !== undefined && envApiKey !== AUTHENTICATED_SENTINEL) return true;
+ 		}
+ 		const fallback = this.#fallbackResolver?.(provider);
+@@ -3058,12 +3058,12 @@ export class AuthStorage {
+ 	 */
+ 	hasResolvableAuth(provider: string): boolean {
+ 		if (this.hasAuth(provider)) return true;
+-		return Boolean(getEnvApiKey(provider));
++		return Boolean(this.#getEnvApiKey(provider));
+ 	}
+ 
+ 	/**
+ 	 * True iff a dedicated, non-env credential source is configured for this
+-	 * provider — i.e. anything in the cascade EXCEPT `getEnvApiKey(provider)`.
++	 * provider — i.e. anything in the cascade EXCEPT `this.#getEnvApiKey(provider)`.
+ 	 *
+ 	 * Mirrors `hasAuth` minus the env-fallback leg. Useful for callers that
+ 	 * need to distinguish "the user explicitly configured this provider"
+@@ -3083,17 +3083,22 @@ export class AuthStorage {
+ 	/**
+ 	 * Env auth that belongs to this provider, not a cross-provider alias.
+ 	 *
+-	 * `getEnvApiKey("xai-oauth")` also accepts `XAI_API_KEY` so an explicit
++	 * `this.#getEnvApiKey("xai-oauth")` also accepts `XAI_API_KEY` so an explicit
+ 	 * `xai-oauth/…` stream can still borrow the paid key. Availability and
+ 	 * origin must not: otherwise an API-key-only setup marks SuperGrok as
+ 	 * signed in and `pickDefaultAvailableModel` prefers `xai-oauth/grok-4.6`
+ 	 * over paid `xai/grok-4.6`.
+ 	 */
++	#getEnvApiKey(provider: string): string | undefined {
++		return this.#storeOnly ? undefined : getEnvApiKey(provider);
++	}
++
+ 	#hasDedicatedEnvAuth(provider: string): boolean {
++		if (this.#storeOnly) return false;
+ 		if (provider === "xai-oauth") {
+ 			return Boolean($env.XAI_OAUTH_TOKEN?.trim());
+ 		}
+-		return Boolean(getEnvApiKey(provider));
++		return Boolean(this.#getEnvApiKey(provider));
+ 	}
+ 
+ 	/**
+@@ -3154,7 +3159,7 @@ export class AuthStorage {
+ 		// account_uuid injection would misattribute traffic. Only apply this guard when
+ 		// sessionPref is absent; a recorded OAuth sticky (sessionPref.type === "oauth") must
+ 		// NOT be blocked even if an env key also happens to exist.
+-		if (!sessionPref && (getEnvApiKey(provider) || this.#fallbackResolver?.(provider))) return undefined;
++		if (!sessionPref && (this.#getEnvApiKey(provider) || this.#fallbackResolver?.(provider))) return undefined;
+ 		// Resolve the sticky index against the full credential list — the index is
+ 		// recorded against the unfiltered provider array (by #recordSessionCredential /
+ 		// #tryOAuthCredential), not the OAuth-only subset, so dereferencing it into the
+@@ -3966,7 +3971,7 @@ export class AuthStorage {
+ 					requests.push(request);
+ 					hasUsableStoredOAuthCredential = true;
+ 				}
+-				const oauthToken = $env.XAI_OAUTH_TOKEN?.trim();
++				const oauthToken = this.#storeOnly ? undefined : $env.XAI_OAUTH_TOKEN?.trim();
+ 				if (!hasUsableStoredOAuthCredential && oauthToken) {
+ 					const request = this.#buildUsageRequest(provider, { type: "oauth", accessToken: oauthToken }, baseUrl);
+ 					if (!providerImpl.supports || providerImpl.supports(request)) requests.push(request);
+@@ -3975,12 +3980,13 @@ export class AuthStorage {
+ 			}
+ 
+ 			if (entries.length === 0) {
++				if (this.#storeOnly) continue;
+ 				const runtimeKey = this.#runtimeOverrides.get(providerId);
+ 				const extensionUsageKeyConfig = this.#runtimeUsageProviderOverrides.get(provider)?.apiKey,
+ 					extensionUsageKey = extensionUsageKeyConfig
+ 						? await this.#configValueResolver(extensionUsageKeyConfig)
+ 						: undefined,
+-					envKey = getEnvApiKey(providerId);
++					envKey = this.#getEnvApiKey(providerId);
+ 				const apiKey = runtimeKey ?? extensionUsageKey ?? envKey;
+ 				if (!apiKey) continue;
+ 				const request = this.#buildUsageRequest(provider, { type: "api_key", apiKey }, baseUrl);
+@@ -4199,12 +4205,8 @@ export class AuthStorage {
+ 		credential: AuthCredential,
+ 		options?: { baseUrl?: string; timeoutMs?: number; signal?: AbortSignal },
+ 	): Promise<UsageReport | null> {
+-		// Store-level hook (e.g. `RemoteAuthCredentialStore`) is authoritative
+-		// when present for OAuth: the broker already aggregates usage from a
+-		// less-throttled IP, and falling back to the local per-credential fetch
+-		// would defeat the point of routing through it. API-key credentials do
+-		// not have a broker per-credential hook, so they use the normal cached
+-		// provider fetch path.
++		// An explicit store override is authoritative for OAuth. Remote
++		// credential stores omit it and use the local cached provider fetch.
+ 		if (credential.type === "oauth") {
+ 			const storeHook = this.#store.getUsageReport?.bind(this.#store);
+ 			if (storeHook) {
+@@ -4479,9 +4481,7 @@ export class AuthStorage {
+ 		signal?: AbortSignal;
+ 	}): Promise<UsageReport[] | null> {
+ 		// Caller override > store-level hook > local per-credential fan-out.
+-		// `RemoteAuthCredentialStore` implements the store hook so a gateway
+-		// backed by a broker automatically routes usage to the broker without
+-		// needing the caller to wire it explicitly.
++		// Remote credential stores omit the hook; usage is fetched locally.
+ 		const storeOverride = this.#store.fetchUsageReports?.bind(this.#store);
+ 		const override = this.#fetchUsageReportsOverride ?? storeOverride;
+ 		const shouldReconcileStoreHookReports =
+@@ -6057,7 +6057,7 @@ export class AuthStorage {
+ 			return this.#configValueResolver(loginApiKeySelection.credential.key);
+ 		}
+ 
+-		const envKey = getEnvApiKey(provider);
++		const envKey = this.#getEnvApiKey(provider);
+ 		if (envKey) return envKey;
+ 
+ 		const apiKeySelection = this.#selectCredentialByType(provider, "api_key");
+@@ -6118,7 +6118,7 @@ export class AuthStorage {
+ 		// suppresses account_uuid for this session.
+ 		if (sessionId) this.#sessionLastCredential.get(provider)?.delete(sessionId);
+ 
+-		const envKey = getEnvApiKey(provider);
++		const envKey = this.#getEnvApiKey(provider);
+ 		if (envKey) return envKey;
+ 		const apiKeySelection = await this.#selectApiKeyCredential(
+ 			provider,
+@@ -7619,7 +7619,7 @@ export class AuthStorage {
+ 				!this.#isKeylessFallbackCredential(provider, credential),
+ 		);
+ 		if (loginApiKeySource) return loginApiKeySource;
+-		if (getEnvApiKey(provider)) return `env (over ${baseLabel})`;
++		if (this.#getEnvApiKey(provider)) return `env (over ${baseLabel})`;
+ 		const apiKeySource = describeStored(
+ 			"api_key",
+ 			credential => credential.type !== "api_key" || credential.source !== "login",
+diff --git a/src/images/index.ts b/src/images/index.ts
+index ff02ef2f9c5707299ae63a935254c9e9799f279f..212404a27519e40fb1b244cd98aefa5a5b70b307 100644
+--- a/src/images/index.ts
++++ b/src/images/index.ts
+@@ -1,5 +1,7 @@
+ import type { Api, Model } from "@oh-my-pi/pi-catalog/types";
++import { type ApiKeyResolver, isApiKeyResolver } from "../auth-retry";
+ import * as AIError from "../error";
++import { hasManagedInferenceGuard, prepareManagedInference } from "../managed-inference";
+ import { generateAntigravityImage } from "./google-antigravity";
+ import { generateGoogleImage } from "./google-generative-ai";
+ import { generateOpenAIImage } from "./openai-images";
+@@ -35,12 +37,34 @@ export function isImageGenerationApi(api: Api): api is ImageGenerationApi {
+ 	);
+ }
+ 
++/**
++ * Managed inference admits the image model and the model that receives the request (the hosted
++ * carrier), then checks every key a transport resolves, including auth-retry rotations.
++ */
++async function admitManagedImageRequest(model: Model<Api>, options: ImageGenerationOptions): Promise<ImageGenerationOptions> {
++	const target = options.carrier ?? model;
++	await prepareManagedInference(model, { sessionId: options.sessionId, signal: options.signal });
++	if (target !== model) await prepareManagedInference(target, { sessionId: options.sessionId, signal: options.signal });
++	const original = options.apiKey;
++	const apiKey: ApiKeyResolver = async context => {
++		const key = isApiKeyResolver(original) ? await original(context) : original;
++		const prepared = await prepareManagedInference(target, {
++			sessionId: options.sessionId,
++			signal: context.signal ?? options.signal,
++			apiKey: key,
++		});
++		return typeof prepared.apiKey === "string" ? prepared.apiKey : undefined;
++	};
++	return { ...options, apiKey };
++}
++
+ /** Generate (or edit, when `request.inputImages` is set) images through the transport selected by the model's `api`. */
+ export async function generateImage(
+ 	model: Model<Api>,
+ 	request: ImageGenerationRequest,
+-	options: ImageGenerationOptions,
++	requested: ImageGenerationOptions,
+ ): Promise<ImageGenerationResult> {
++	const options = hasManagedInferenceGuard() ? await admitManagedImageRequest(model, requested) : requested;
+ 	switch (model.api) {
+ 		case "openai-images":
+ 			return generateOpenAIImage(model, request, options);
+diff --git a/src/managed-inference.ts b/src/managed-inference.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..4c2a9347b03d000f594fcd6588f2093a88b35c5c
+--- /dev/null
++++ b/src/managed-inference.ts
+@@ -0,0 +1,52 @@
++import type { AuthStorage } from "./auth-storage";
++import type { Api, Model, SimpleStreamOptions, StreamOptions } from "./types";
++import { AssistantMessageEventStream } from "./utils/event-stream";
++
++/** A host-owned, process-lifetime admission. No credential bytes are stored globally. */
++export interface ManagedInferenceGuard {
++	readonly authStorage: AuthStorage;
++	prepare(model: Model<Api>, options: SimpleStreamOptions): Promise<SimpleStreamOptions>;
++}
++let guard: ManagedInferenceGuard | undefined;
++
++/** Install before SDK initialization. A child cannot be rebound to another admission. */
++export function installManagedInferenceGuard(value: ManagedInferenceGuard): void {
++	if (guard) throw new Error("Managed inference is already bound; reopen the child for a new admission");
++	guard = value;
++}
++
++export function hasManagedInferenceGuard(): boolean { return guard !== undefined || process.env.GITSPACE_MANAGED_INFERENCE === "1"; }
++export function managedInferenceAuthStorage(): AuthStorage | undefined {
++	if (!guard && hasManagedInferenceGuard()) throw new Error("Managed inference requires an initialized profile scope in this process");
++	return guard?.authStorage;
++}
++export async function prepareManagedInference<T extends StreamOptions | SimpleStreamOptions>(model: Model<Api>, options: T): Promise<T> {
++	managedInferenceAuthStorage();
++	return guard ? await guard.prepare(model, options as SimpleStreamOptions) as T : options;
++}
++export function assertManagedInferenceEndpoint(model: Model<Api>, endpoint: string): void {
++	if (!guard) return;
++	if (new URL(endpoint).origin !== new URL(model.baseUrl).origin) {
++		throw new Error("Managed compaction endpoint must belong to the admitted provider");
++	}
++}
++
++/** Both simple and API-specific dispatch, including every auth-retry attempt, enter here. */
++export function guardManagedInference<T extends StreamOptions | SimpleStreamOptions>(
++	model: Model<Api>, options: T | undefined,
++	dispatch: (options: T) => AssistantMessageEventStream,
++): AssistantMessageEventStream {
++	managedInferenceAuthStorage();
++	if (!guard) return dispatch((options ?? {}) as T);
++	const outer = new AssistantMessageEventStream();
++	void (async () => {
++		try {
++			const prepared = await guard!.prepare(model, (options ?? {}) as SimpleStreamOptions);
++			if (prepared.signal?.aborted) throw prepared.signal.reason ?? new Error("Inference aborted");
++			const inner = dispatch(prepared as T);
++			for await (const event of inner) outer.push(event);
++			if (!outer.done) outer.end(await inner.result());
++		} catch (error) { outer.fail(error); }
++	})();
++	return outer;
++}
+diff --git a/src/providers/openai-codex-responses.ts b/src/providers/openai-codex-responses.ts
+index 9552ad5284d80a1f780460e46fbb8549076a3e1a..76e8fd136abdd77ad55e2365b0e5c7a53384c354 100644
+--- a/src/providers/openai-codex-responses.ts
++++ b/src/providers/openai-codex-responses.ts
+@@ -1609,6 +1609,7 @@ async function openInitialCodexEventStream(
+ 					options ? event => options.onSseEvent?.(event, model) : undefined,
+ 				);
+ 			} catch (error) {
++				if (requestSetup.requestSignal.aborted) throw codexAbortReason(requestSetup.requestSignal);
+ 				if (!(error instanceof CodexWebSocketTransportError)) throw error;
+ 				const fatalWebSocketMessage = error.message.toLowerCase();
+ 				const isFatal = CODEX_WEBSOCKET_FATAL_PATTERNS.some(pattern =>
+@@ -1704,7 +1705,8 @@ async function* streamCodexCompactionEvents(
+ 			try {
+ 				for await (const event of initial.eventStream) bufferedEvents.push(event);
+ 			} catch (error) {
+-				if (options.signal?.aborted || !(error instanceof CodexWebSocketTransportError)) {
++				if (requestSetup.requestSignal.aborted) throw codexAbortReason(requestSetup.requestSignal);
++				if (!(error instanceof CodexWebSocketTransportError)) {
+ 					throw error;
+ 				}
+ 				const state = requestContext.websocketState;
+@@ -2909,6 +2911,7 @@ class CodexStreamProcessor {
+ 			this.runtime.transport = next.transport;
+ 			state.lastTransport = next.transport;
+ 		} catch (error) {
++			if (this.requestSetup.requestSignal.aborted) throw codexAbortReason(this.requestSetup.requestSignal);
+ 			if (!(error instanceof CodexWebSocketTransportError)) throw error;
+ 			// Reopen failed at the websocket layer (handshake refused, connect timeout, etc.).
+ 			// Activate fallback so subsequent turns use SSE, and replay this turn over SSE
+@@ -3672,10 +3675,12 @@ class CodexWebSocketConnection {
+ 	}
+ 
+ 	async connect(signal?: AbortSignal): Promise<void> {
++		if (signal?.aborted) throw codexAbortReason(signal);
+ 		if (this.isOpen()) return;
+ 		if (this.#connectPromise) {
+ 			logger.time("codexWs:awaitSharedHandshake");
+ 			await this.#connectPromise;
++			if (signal?.aborted) throw codexAbortReason(signal);
+ 			return;
+ 		}
+ 		const { promise, resolve, reject } = Promise.withResolvers<void>();
+@@ -3699,7 +3704,7 @@ class CodexWebSocketConnection {
+ 			if (!settled) {
+ 				settled = true;
+ 				clearPending();
+-				reject(new CodexWebSocketTransportError(`request was aborted`, { cause: signal?.reason }));
++				reject(codexAbortReason(signal));
+ 			}
+ 			this.close("aborted");
+ 		};
+@@ -3799,15 +3804,13 @@ class CodexWebSocketConnection {
+ 		signal?: AbortSignal,
+ 		onSseEvent?: (event: RawSseEvent) => void,
+ 	): AsyncGenerator<Record<string, unknown>> {
++		if (signal?.aborted) throw codexAbortReason(signal);
+ 		if (!this.#socket || this.#socket.readyState !== WebSocket.OPEN) {
+ 			throw new CodexWebSocketTransportError(`websocket connection is unavailable`);
+ 		}
+ 		if (this.#activeRequest) {
+ 			throw new CodexWebSocketTransportError(`websocket request already in progress`);
+ 		}
+-		if (signal?.aborted) {
+-			throw new CodexWebSocketTransportError(`request was aborted`, { cause: signal.reason });
+-		}
+ 		this.#activeRequest = true;
+ 		this.#streamObserver = onSseEvent;
+ 		// Drain any non-error frames left over from a prior request before sending.
+@@ -3822,7 +3825,7 @@ class CodexWebSocketConnection {
+ 		// the death signal instead of writing into a dead socket.
+ 		this.#dropStaleFrames();
+ 		const onAbort = () => {
+-			this.#push(new CodexWebSocketTransportError(`request was aborted`, { cause: signal?.reason }));
++			this.#push(codexAbortReason(signal));
+ 			// Closing can synchronously enqueue a generic onclose error.
+ 			this.close("aborted");
+ 		};
+@@ -3845,8 +3848,7 @@ class CodexWebSocketConnection {
+ 			const requestPayload = JSON.stringify(request);
+ 			notifyCodexWebSocketOutbound(onSseEvent, request, requestPayload);
+ 			// Re-check liveness: the debug-session await above can outlive the socket.
+-			// Preserve the abort cause: onAbort already queued a caused error, but this
+-			// throw would otherwise mask it before #nextMessage() drains the queue.
++			if (signal?.aborted) throw codexAbortReason(signal);
+ 			const socket = this.#socket;
+ 			if (!socket || socket.readyState !== WebSocket.OPEN) {
+ 				if (signal?.aborted) {
+@@ -3909,6 +3911,7 @@ class CodexWebSocketConnection {
+ 					}
+ 				}
+ 				const next = await this.#nextMessage(timeoutMs, timeoutReason);
++				if (signal?.aborted) throw codexAbortReason(signal);
+ 				if (next instanceof Error) {
+ 					throw next;
+ 				}
+@@ -4185,6 +4188,7 @@ async function getOrCreateCodexWebSocketConnection(
+ 	provider: string,
+ 	signal?: AbortSignal,
+ ): Promise<CodexWebSocketConnection> {
++	if (signal?.aborted) throw codexAbortReason(signal);
+ 	const proxy = getProxyForUrl(provider, new URL(url));
+ 	const headerRecord = headersToRecord(headers);
+ 	// Join an in-flight handshake instead of tearing it down: closing a
+@@ -4199,6 +4203,7 @@ async function getOrCreateCodexWebSocketConnection(
+ 		try {
+ 			await pending.connect(signal);
+ 		} catch {
++			if (signal?.aborted) throw codexAbortReason(signal);
+ 			// The handshake owner surfaces its own failure; re-evaluate below
+ 			// (state.connection may have been replaced or cleared).
+ 		}
+@@ -4741,6 +4746,13 @@ export function convertOpenAICodexResponsesTools(
+ 	return payloads;
+ }
+ 
++/** Preserve deadline/cancellation causes instead of marking them as transport failures. */
++function codexAbortReason(signal: AbortSignal | undefined): Error {
++	const reason: unknown = signal?.reason;
++	if (reason instanceof Error) return reason;
++	return new AIError.AbortError(typeof reason === "string" ? reason : undefined, { cause: reason });
++}
++
+ export class CodexWebSocketTransportError extends Error {
+ 	constructor(detail: string, options?: ErrorOptions) {
+ 		super(`${CODEX_WEBSOCKET_TRANSPORT_ERROR_PREFIX}: ${detail}`, options);
+diff --git a/src/providers/register-builtins.ts b/src/providers/register-builtins.ts
+index ec4ffc341a436c33c17787f3b6dbf41c325c9763..5ad8ead50f4397d2cd5622638b952a8e67585ab9 100644
+--- a/src/providers/register-builtins.ts
++++ b/src/providers/register-builtins.ts
+@@ -2,6 +2,7 @@
+  * Built-in provider stream dispatch with shared error, cancellation, and timeout handling.
+  */
+ 
++import { hasManagedInferenceGuard, prepareManagedInference } from "../managed-inference";
+ import type { CompatOf } from "@oh-my-pi/pi-catalog/types";
+ import * as AIError from "../error";
+ import type { Api, AssistantMessage, AssistantMessageEvent, Context, Model, OptionsForApi } from "../types";
+@@ -220,6 +221,20 @@ function createProviderStream<TApi extends Api>(
+ 		try {
+ 			const abortTracker = createAbortSourceTracker(streamOptions.signal);
+ 			const providerOptions: OptionsForApi<TApi> = { ...streamOptions, signal: abortTracker.requestSignal };
++			if (hasManagedInferenceGuard()) {
++				// Direct provider-stream callers are admitted like stream()/streamSimple().
++				prepareManagedInference(model, providerOptions)
++					.then(prepared =>
++						forwardStream(outer, stream(model, context, prepared), model, streamOptions, abortTracker, limits),
++					)
++					.catch(error => {
++						const stopReason = abortTracker.wasCallerAbort() ? "aborted" : "error";
++						const message = createProviderStreamError(model, error, stopReason);
++						outer.push({ type: "error", reason: stopReason, error: message });
++						outer.end(message);
++					});
++				return outer;
++			}
+ 			const inner = stream(model, context, providerOptions);
+ 			forwardStream(outer, inner, model, streamOptions, abortTracker, limits);
+ 		} catch (error) {
+diff --git a/src/registry/oauth/anthropic-refresh.ts b/src/registry/oauth/anthropic-refresh.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..cafabe1e23b7084e9e4810d68d95944f7133abfa
+--- /dev/null
++++ b/src/registry/oauth/anthropic-refresh.ts
+@@ -0,0 +1,42 @@
++import type { FetchImpl } from "../../types";
++import { WorkerOAuthRefreshError, requestWorkerOAuthToken } from "./worker-refresh";
++
++const CLIENT_ID = atob("OWQxYzI1MGEtZTYxYi00NGQ5LTg4ZWQtNTk0NGQxOTYyZjVl");
++
++export interface AnthropicRefreshTokenResponse {
++	access_token: string;
++	refresh_token: string;
++	expires_in: number;
++	account?: { uuid?: string; email_address?: string };
++	organization?: { uuid?: string; name?: string };
++}
++
++export async function refreshAnthropicTokenPortable(
++	refreshToken: string,
++	fetchOverride?: FetchImpl,
++): Promise<AnthropicRefreshTokenResponse> {
++	const data = await requestWorkerOAuthToken({
++		provider: "anthropic",
++		url: "https://api.anthropic.com/v1/oauth/token",
++		headers: {
++			"content-type": "application/json",
++			"anthropic-beta": "oauth-2025-04-20",
++			"user-agent": "anthropic-sdk-typescript/0.94.0 userOAuthProvider",
++		},
++		body: JSON.stringify({ grant_type: "refresh_token", client_id: CLIENT_ID, refresh_token: refreshToken }),
++		fetchOverride,
++	});
++	if (typeof data.access_token !== "string" || typeof data.expires_in !== "number" || !Number.isFinite(data.expires_in) || data.expires_in <= 0) {
++		throw new WorkerOAuthRefreshError("anthropic", "invalid-response", 200, "missing token fields");
++	}
++	if (data.refresh_token !== undefined && typeof data.refresh_token !== "string") {
++		throw new WorkerOAuthRefreshError("anthropic", "invalid-response", 200, "invalid refresh token");
++	}
++	return {
++		access_token: data.access_token,
++		refresh_token: data.refresh_token || refreshToken,
++		expires_in: data.expires_in,
++		...(data.account && typeof data.account === "object" ? { account: data.account as AnthropicRefreshTokenResponse["account"] } : {}),
++		...(data.organization && typeof data.organization === "object" ? { organization: data.organization as AnthropicRefreshTokenResponse["organization"] } : {}),
++	};
++}
+diff --git a/src/registry/oauth/cursor-refresh.ts b/src/registry/oauth/cursor-refresh.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..b95143d52354c0ba00d9c88606e9223eb3bf5d72
+--- /dev/null
++++ b/src/registry/oauth/cursor-refresh.ts
+@@ -0,0 +1,53 @@
++import type { FetchImpl } from "../../types";
++import type { OAuthCredentials } from "./types";
++
++const CURSOR_REFRESH_URL = "https://api2.cursor.sh/auth/exchange_user_api_key";
++
++export class CursorRefreshError extends Error {
++	constructor(readonly status: number, readonly responseBody: string) {
++		super(`Cursor token refresh failed with status ${status}`);
++		this.name = "CursorRefreshError";
++	}
++}
++
++function decodeCursorAccessTokenPayload(token: string): unknown | undefined {
++	const parts = token.split(".");
++	if (parts.length !== 3 || !parts[1]) return undefined;
++	try {
++		return JSON.parse(atob(parts[1].replace(/-/g, "+").replace(/_/g, "/")));
++	} catch {
++		return undefined;
++	}
++}
++
++function getTokenExpiry(token: string): number {
++	const decoded = decodeCursorAccessTokenPayload(token);
++	if (decoded && typeof decoded === "object" && "exp" in decoded && typeof decoded.exp === "number") {
++		return decoded.exp * 1000 - 5 * 60 * 1000;
++	}
++	return Date.now() + 3600 * 1000;
++}
++
++export async function refreshCursorTokenPortable(
++	apiKeyOrRefreshToken: string,
++	fetchOverride?: FetchImpl,
++): Promise<OAuthCredentials> {
++	const response = await (fetchOverride ?? fetch)(CURSOR_REFRESH_URL, {
++		method: "POST",
++		headers: {
++			Authorization: `Bearer ${apiKeyOrRefreshToken}`,
++			"Content-Type": "application/json",
++		},
++		body: "{}",
++	});
++	if (!response.ok) throw new CursorRefreshError(response.status, await response.text());
++	const data = (await response.json()) as { accessToken?: unknown; refreshToken?: unknown };
++	if (typeof data.accessToken !== "string" || (data.refreshToken !== undefined && typeof data.refreshToken !== "string")) {
++		throw new CursorRefreshError(response.status, "invalid token response");
++	}
++	return {
++		access: data.accessToken,
++		refresh: data.refreshToken || apiKeyOrRefreshToken,
++		expires: getTokenExpiry(data.accessToken),
++	};
++}
+diff --git a/src/registry/oauth/cursor.ts b/src/registry/oauth/cursor.ts
+index b1f1a63ab46b38bb22f55d8d0cc9d140c9a6fb4e..03cf4c6e3695190097328bb2d288bd5138911b69 100644
+--- a/src/registry/oauth/cursor.ts
++++ b/src/registry/oauth/cursor.ts
+@@ -1,10 +1,11 @@
+ import * as AIError from "../../error";
++import type { FetchImpl } from "../../types";
++import { CursorRefreshError, refreshCursorTokenPortable } from "./cursor-refresh";
+ import { generatePKCE } from "./pkce";
+ import type { OAuthController, OAuthCredentials } from "./types";
+ 
+ const CURSOR_LOGIN_URL = "https://cursor.com/loginDeepControl";
+ const CURSOR_POLL_URL = "https://api2.cursor.sh/auth/poll";
+-const CURSOR_REFRESH_URL = "https://api2.cursor.sh/auth/exchange_user_api_key";
+ 
+ const POLL_MAX_ATTEMPTS = 150;
+ const POLL_BASE_DELAY = 1000;
+@@ -113,36 +114,22 @@ export async function loginCursorHook(callbacks: OAuthController): Promise<OAuth
+ 	);
+ }
+ 
+-export async function refreshCursorToken(apiKeyOrRefreshToken: string): Promise<OAuthCredentials> {
+-	const response = await fetch(CURSOR_REFRESH_URL, {
+-		method: "POST",
+-		headers: {
+-			Authorization: `Bearer ${apiKeyOrRefreshToken}`,
+-			"Content-Type": "application/json",
+-		},
+-		body: "{}",
+-	});
+-
+-	if (!response.ok) {
+-		const error = await response.text();
+-		throw new AIError.OAuthError(`Cursor token refresh failed: ${error}`, {
+-			kind: "token-refresh",
+-			provider: "cursor",
+-		});
++export async function refreshCursorToken(
++	apiKeyOrRefreshToken: string,
++	fetchOverride?: FetchImpl,
++): Promise<OAuthCredentials> {
++	try {
++		return await refreshCursorTokenPortable(apiKeyOrRefreshToken, fetchOverride);
++	} catch (error) {
++		if (error instanceof CursorRefreshError) {
++			throw new AIError.OAuthError(`Cursor token refresh failed: ${error.responseBody}`, {
++				kind: "token-refresh",
++				provider: "cursor",
++				status: error.status,
++			});
++		}
++		throw error;
+ 	}
+-
+-	const data = (await response.json()) as {
+-		accessToken: string;
+-		refreshToken: string;
+-	};
+-
+-	const expiresAt = getTokenExpiry(data.accessToken);
+-
+-	return {
+-		access: data.accessToken,
+-		refresh: data.refreshToken || apiKeyOrRefreshToken,
+-		expires: expiresAt,
+-	};
+ }
+ 
+ export async function refreshCursorHook(credentials: OAuthCredentials): Promise<OAuthCredentials> {
+diff --git a/src/registry/oauth/google-antigravity-refresh.ts b/src/registry/oauth/google-antigravity-refresh.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..059647ae2c82b6efa603a4bbad86696b6780efc3
+--- /dev/null
++++ b/src/registry/oauth/google-antigravity-refresh.ts
+@@ -0,0 +1,30 @@
++import type { FetchImpl } from "../../types";
++import type { OAuthCredentials } from "./types";
++import { WorkerOAuthRefreshError, googleOAuthClient, requestWorkerOAuthToken } from "./worker-refresh";
++
++export async function refreshAntigravityTokenPortable(
++	refreshToken: string,
++	projectId: string,
++	fetchOverride?: FetchImpl,
++): Promise<OAuthCredentials> {
++	const { clientId, clientSecret } = googleOAuthClient("google-antigravity");
++	const data = await requestWorkerOAuthToken({
++		provider: "google-antigravity",
++		url: "https://oauth2.googleapis.com/token",
++		headers: { "content-type": "application/x-www-form-urlencoded" },
++		body: new URLSearchParams({ client_id: clientId, client_secret: clientSecret, refresh_token: refreshToken, grant_type: "refresh_token" }),
++		fetchOverride,
++	});
++	if (typeof data.access_token !== "string" || typeof data.expires_in !== "number" || !Number.isFinite(data.expires_in) || data.expires_in <= 0) {
++		throw new WorkerOAuthRefreshError("google-antigravity", "invalid-response", 200, "missing token fields");
++	}
++	if (data.refresh_token !== undefined && typeof data.refresh_token !== "string") {
++		throw new WorkerOAuthRefreshError("google-antigravity", "invalid-response", 200, "invalid refresh token");
++	}
++	return {
++		refresh: data.refresh_token || refreshToken,
++		access: data.access_token,
++		expires: Date.now() + data.expires_in * 1000 - 5 * 60 * 1000,
++		projectId,
++	};
++}
+diff --git a/src/registry/oauth/google-gemini-cli-refresh.ts b/src/registry/oauth/google-gemini-cli-refresh.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..20402d1dc0b81f490d7f07061e9dc61a2a18a87e
+--- /dev/null
++++ b/src/registry/oauth/google-gemini-cli-refresh.ts
+@@ -0,0 +1,30 @@
++import type { FetchImpl } from "../../types";
++import type { OAuthCredentials } from "./types";
++import { WorkerOAuthRefreshError, googleOAuthClient, requestWorkerOAuthToken } from "./worker-refresh";
++
++export async function refreshGoogleCloudTokenPortable(
++	refreshToken: string,
++	projectId: string,
++	fetchOverride?: FetchImpl,
++): Promise<OAuthCredentials> {
++	const { clientId, clientSecret } = googleOAuthClient("google-gemini-cli");
++	const data = await requestWorkerOAuthToken({
++		provider: "google-gemini-cli",
++		url: "https://oauth2.googleapis.com/token",
++		headers: { "content-type": "application/x-www-form-urlencoded" },
++		body: new URLSearchParams({ client_id: clientId, client_secret: clientSecret, refresh_token: refreshToken, grant_type: "refresh_token" }),
++		fetchOverride,
++	});
++	if (typeof data.access_token !== "string" || typeof data.expires_in !== "number" || !Number.isFinite(data.expires_in) || data.expires_in <= 0) {
++		throw new WorkerOAuthRefreshError("google-gemini-cli", "invalid-response", 200, "missing token fields");
++	}
++	if (data.refresh_token !== undefined && typeof data.refresh_token !== "string") {
++		throw new WorkerOAuthRefreshError("google-gemini-cli", "invalid-response", 200, "invalid refresh token");
++	}
++	return {
++		refresh: data.refresh_token || refreshToken,
++		access: data.access_token,
++		expires: Date.now() + data.expires_in * 1000 - 5 * 60 * 1000,
++		projectId,
++	};
++}
+diff --git a/src/registry/oauth/openai-codex-refresh.ts b/src/registry/oauth/openai-codex-refresh.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..22fce96b203b4f3efbfd4b8874dc1ec783396040
+--- /dev/null
++++ b/src/registry/oauth/openai-codex-refresh.ts
+@@ -0,0 +1,29 @@
++import type { FetchImpl } from "../../types";
++import { WorkerOAuthRefreshError, requestWorkerOAuthToken } from "./worker-refresh";
++
++export interface OpenAICodexRefreshTokenResponse {
++	access_token: string;
++	refresh_token: string;
++	expires_in: number;
++}
++
++export async function refreshOpenAICodexTokenPortable(
++	refreshToken: string,
++	fetchOverride?: FetchImpl,
++): Promise<OpenAICodexRefreshTokenResponse> {
++	const data = await requestWorkerOAuthToken({
++		provider: "openai-codex",
++		url: "https://auth.openai.com/oauth/token",
++		headers: { "content-type": "application/x-www-form-urlencoded" },
++		body: new URLSearchParams({
++			grant_type: "refresh_token",
++			refresh_token: refreshToken,
++			client_id: "app_EMoamEEZ73f0CkXaXp7hrann",
++		}),
++		fetchOverride,
++	});
++	if (typeof data.access_token !== "string" || typeof data.refresh_token !== "string" || typeof data.expires_in !== "number" || !Number.isFinite(data.expires_in) || data.expires_in <= 0) {
++		throw new WorkerOAuthRefreshError("openai-codex", "invalid-response", 200, "missing token fields");
++	}
++	return { access_token: data.access_token, refresh_token: data.refresh_token, expires_in: data.expires_in };
++}
+diff --git a/src/registry/oauth/worker-refresh.ts b/src/registry/oauth/worker-refresh.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..7b862a0d29d187a54d91a915b2a6713565789ae7
+--- /dev/null
++++ b/src/registry/oauth/worker-refresh.ts
+@@ -0,0 +1,87 @@
++import { authPolicyFor } from "@oh-my-pi/pi-catalog/compat/auth";
++import type { FetchImpl } from "../../types";
++
++const MAX_RESPONSE_BYTES = 64 * 1024;
++
++/** Read public Google OAuth client metadata from the same catalog as the native auth engine. */
++export function googleOAuthClient(provider: "google-gemini-cli" | "google-antigravity"): { clientId: string; clientSecret: string } {
++	const login = authPolicyFor(provider)?.login;
++	if (login?.kind !== "oauth-code" || !login.clientId?.value || !login.clientSecret?.value) {
++		throw new Error(`Missing OAuth client metadata for ${provider}`);
++	}
++	return {
++		clientId: login.clientId.encoding === "base64" ? atob(login.clientId.value) : login.clientId.value,
++		clientSecret: login.clientSecret.encoding === "base64" ? atob(login.clientSecret.value) : login.clientSecret.value,
++	};
++}
++
++export class WorkerOAuthRefreshError extends Error {
++	constructor(
++		readonly provider: string,
++		readonly kind: "network" | "rejected" | "invalid-response",
++		readonly status: number | undefined,
++		readonly responseBody: string,
++	) {
++		super(`${provider} OAuth refresh ${kind}`);
++		this.name = "WorkerOAuthRefreshError";
++	}
++}
++
++async function boundedText(response: Response): Promise<string> {
++	const declared = Number(response.headers.get("content-length"));
++	if (Number.isFinite(declared) && declared > MAX_RESPONSE_BYTES) throw new Error("response too large");
++	if (!response.body) return "";
++	const reader = response.body.getReader();
++	const decoder = new TextDecoder();
++	let size = 0;
++	let text = "";
++	try {
++		while (true) {
++			const chunk = await reader.read();
++			if (chunk.done) return text + decoder.decode();
++			size += chunk.value.byteLength;
++			if (size > MAX_RESPONSE_BYTES) {
++				await reader.cancel();
++				throw new Error("response too large");
++			}
++			text += decoder.decode(chunk.value, { stream: true });
++		}
++	} finally {
++		reader.releaseLock();
++	}
++}
++
++export async function requestWorkerOAuthToken(input: {
++	provider: string;
++	url: string;
++	headers: HeadersInit;
++	body: BodyInit;
++	fetchOverride?: FetchImpl;
++	timeoutMs?: number;
++}): Promise<Record<string, unknown>> {
++	let response: Response;
++	try {
++		response = await (input.fetchOverride ?? fetch)(input.url, {
++			method: "POST",
++			headers: input.headers,
++			body: input.body,
++			signal: AbortSignal.timeout(input.timeoutMs ?? 15_000),
++		});
++	} catch {
++		throw new WorkerOAuthRefreshError(input.provider, "network", undefined, "");
++	}
++	let text: string;
++	try {
++		text = await boundedText(response);
++	} catch {
++		throw new WorkerOAuthRefreshError(input.provider, "invalid-response", response.status, "response too large");
++	}
++	if (!response.ok) throw new WorkerOAuthRefreshError(input.provider, "rejected", response.status, text);
++	try {
++		const parsed = JSON.parse(text) as unknown;
++		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("not an object");
++		return parsed as Record<string, unknown>;
++	} catch {
++		throw new WorkerOAuthRefreshError(input.provider, "invalid-response", response.status, text);
++	}
++}
+diff --git a/src/stream.ts b/src/stream.ts
+index feb9934af10f4d02bbfe8433f39ba25bd3305c26..d8d034269c2b422d1855509cb04da4ac474e69fe 100644
+--- a/src/stream.ts
++++ b/src/stream.ts
+@@ -1,4 +1,5 @@
+ import * as crypto from "node:crypto";
++import { guardManagedInference, hasManagedInferenceGuard } from "./managed-inference";
+ import * as fsSync from "node:fs";
+ import * as fs from "node:fs/promises";
+ import * as path from "node:path";
+@@ -853,6 +854,7 @@ const serviceProviderMap: Record<string, KeyResolver> = {
+  * Checks Bun.env, then cwd/.env, then ~/.env.
+  */
+ export function getEnvApiKey(provider: string): string | undefined {
++	if (hasManagedInferenceGuard()) return undefined;
+ 	const resolver = serviceProviderMap[provider];
+ 	if (typeof resolver === "string") {
+ 		return $env[resolver];
+@@ -932,9 +934,13 @@ export function stream<TApi extends Api>(
+ }
+ 
+ function streamDispatch<TApi extends Api>(
+-	model: Model<TApi>,
+-	context: Context,
+-	options?: OptionsForApi<TApi>,
++	model: Model<TApi>, context: Context, options?: OptionsForApi<TApi>,
++): AssistantMessageEventStream {
++	return guardManagedInference(model, options, prepared => streamAuthorizedDispatch(model, context, prepared));
++}
++
++function streamAuthorizedDispatch<TApi extends Api>(
++	model: Model<TApi>, context: Context, options: OptionsForApi<TApi>,
+ ): AssistantMessageEventStream {
+ 	const requestOptions = withTransportFetch(model, (options || {}) as StreamOptions) as OptionsForApi<TApi>;
+ 	assertExplicitOpenAIResponsesPromptCacheSupport(model, requestOptions);
+@@ -1650,6 +1656,12 @@ function streamSimpleRequest<TApi extends Api>(
+ 		);
+ 	}
+ 
++	return guardManagedInference(model, requestOptions, prepared => streamSimpleAuthorizedRequest(model, context, prepared));
++}
++
++function streamSimpleAuthorizedRequest<TApi extends Api>(
++	model: Model<TApi>, context: Context, requestOptions: SimpleStreamOptions,
++): AssistantMessageEventStream {
+ 	// Pi-native transport short-circuits the per-provider dispatch entirely:
+ 	// the gateway resolves provider + credential server-side, so we don't
+ 	// need an `apiKey` from `getEnvApiKey` here — `options.apiKey` carries

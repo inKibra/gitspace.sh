@@ -1,6 +1,7 @@
 import { isLifecycleRunActive, lifecycleExecutionOutcome, LifecycleLogReader, type LifecycleRun, type LifecycleRunLog } from '@gitspace/protocol-environment';
 import { Button, Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@gitspace/ui';
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { rpcErrorMessage } from '../rpc-error-message.js';
 
 export interface LifecycleLogDialogProps {
   run: LifecycleRun;
@@ -54,7 +55,7 @@ function ScriptLog({ run, script, revision, loadPage, onClose }: LifecycleLogDia
         state.exhausted = page.nextOffset === null;
         state.readRevision = snapshot.revision;
       } catch (error) {
-        if (!controller.signal.aborted) state.error = error instanceof Error ? error.message : String(error);
+        if (!controller.signal.aborted) state.error = rpcErrorMessage(error, 'environment.runLog');
       } finally {
         state.pending = null;
         if (!state.disposed) refresh();

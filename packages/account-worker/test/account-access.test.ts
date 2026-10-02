@@ -6,9 +6,10 @@ import {
   signDeviceInvite, type ControlOperation, type SignedControlRequest,
 } from '@gitspace/protocol';
 import { describe, expect, it } from 'vitest';
+import { z } from 'zod';
 import { HttpResponse, http } from 'msw';
 import worker, { CredentialVaultDO } from '../src/index.js';
-import { machineBrokerToken } from '../src/account-access.js';
+import { profileBrokerToken } from '../src/account-access.js';
 import { network } from './network.js';
 import { tenantRootPrivateKey } from './setup.js';
 
@@ -34,7 +35,7 @@ async function account() {
   await vault.putCredential({ id: 'primary', credential: { provider: 'openai-codex', access: `secret-${handle}`, refresh: 'refresh-secret', expires: Date.now() + 3_600_000 } });
   await env.USER_SETTINGS.getByName(userId).setHandle('fixture', 0, handle);
   await env.DATA.put(`users/${userId}/private`, `data-${handle}`);
-  const brokerToken = await machineBrokerToken('test-omp-broker-token', userId, 'machine', 1);
+  const brokerToken = await profileBrokerToken('test-omp-broker-token', userId, { profileId: 'default', machineId: 'machine', generation: 1, capability: 'inference' });
   function signed(operation: ControlOperation, payload: Record<string, unknown> = {}) {
     return createSignedControlRequest({ userId, machineId: 'machine', operation, payload, signingPrivateKey: signing });
   }
@@ -48,6 +49,7 @@ async function account() {
     return socket;
   }
   async function requests() {
+    await vault.ensureInference();
     const invite = signDeviceInvite({
       version: 1, userId, inviteId: crypto.randomUUID(), kind: 'browser', label: null, scope: { kind: 'user' },
       capabilities: ['rpc.read'], canDelegate: false, issuedAt: Date.now(), expiresAt: Date.now() + 60_000, grantTtlMs: null, enrollUrl: 'https://auth.test',
@@ -60,7 +62,7 @@ async function account() {
       json('/v1/control', signed('artifacts.key.get')),
       SELF.fetch('https://auth.test/v1/data/private', { headers: { 'x-gitspace-control': btoa(JSON.stringify(signed('data.get', { key: 'private' }))) } }),
       json(`/v1/users/${userId}/credentials/primary/access`, createCredentialAccessRequest({ userId, machineId: 'machine', credentialId: 'primary', signingPrivateKey: signing })),
-      SELF.fetch(`https://auth.test/omp/users/${userId}/v1/snapshot`, { headers: { authorization: `Bearer ${brokerToken}` } }),
+      SELF.fetch(`https://auth.test/omp/users/${userId}/profiles/default/v1/snapshot`, { headers: { authorization: `Bearer ${brokerToken}` } }),
       json('/v1/devices/enroll', { invite, binding }),
       json('/v1/machines/enroll', { userId, label: 'Machine', deviceGrant: grant }, { authorization: createRelayAuthorization(root, '/v1/machines/enroll') }),
     ]);
@@ -186,9 +188,34 @@ describe('account lifecycle authorization', () => {
     expect(await response.json()).toMatchObject({ status: 'ok', value: { machineId: 'machine' } });
   });
 
+  it('places and reopens only active or provisioning workspaces', async () => {
+    const a = await account();
+    const authority = env.PROJECT_AUTHORITY.getByName(`${a.userId}:project`);
+    await authority.bootstrap({ id: 'project', name: 'Project', repositoryReference: null, baseBranch: 'main', createdBy: 'machine' });
+    for (const lifecycle of ['provisioning', 'failed', 'archived'] as const) {
+      await authority.putWorkspace({ id: lifecycle, projectId: 'project', kind: 'worktree', name: lifecycle, branch: lifecycle, phase: 'plan', sourceKind: 'branch', sourceRef: 'main', sourceCommit: null, lifecycle, goalId: null, expectedRevision: 0 });
+    }
+    const cases = [
+      { operation: 'space.bootstrap', payload: { projectId: 'project', spaceId: 'provisioning' }, admitted: true },
+      // Admitted past the lifecycle guard; the open placement itself then refuses a reopen.
+      { operation: 'space.beginOpen', payload: { projectId: 'project', spaceId: 'provisioning', expectedGeneration: 1 }, admitted: true },
+      { operation: 'space.bootstrap', payload: { projectId: 'project', spaceId: 'failed' }, admitted: false },
+      { operation: 'space.beginOpen', payload: { projectId: 'project', spaceId: 'failed', expectedGeneration: 1 }, admitted: false },
+      { operation: 'space.bootstrap', payload: { projectId: 'project', spaceId: 'archived' }, admitted: false },
+    ] as const;
+    const results = [];
+    for (const { operation, payload } of cases) {
+      const response = await SELF.fetch('https://auth.test/v1/control', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(a.signed(operation, payload)) });
+      const body = z.object({ error: z.object({ code: z.string() }).optional() }).parse(await response.json());
+      results.push(body.error?.code !== 'WORKSPACE_UNAVAILABLE');
+    }
+    expect(results).toEqual(cases.map((entry) => entry.admitted));
+    expect(await env.SPACE_AUTHORITY.getByName(`${a.userId}:provisioning`).get()).toMatchObject({ machineId: 'machine', state: 'open', generation: 1 });
+  });
+
   it.each(['suspended', 'quarantined'] as const)('blocks %s tenant access on direct APIs', async status => {
     const a = await account();
-    expect((await a.requests()).map(response => response.status)).toEqual([200, 200, 200, 200, 200, 200, 200]);
+    expect((await a.requests()).map(response => response.status)).toEqual([200, 200, 200, 401, 200, 200, 200]);
     platformState(status);
     for (const response of await a.requests()) {
       expect([401, 403]).toContain(response.status);
@@ -198,13 +225,14 @@ describe('account lifecycle authorization', () => {
 
   it('revokes every credential broker route at the machine generation without disabling another machine', async () => {
     const a = await account();
-    const url = `https://auth.test/omp/users/${a.userId}/v1`;
+    await a.vault.ensureInference();
+    const url = `https://auth.test/omp/users/${a.userId}/profiles/default/v1`;
     const get = (token: string) => SELF.fetch(`${url}/snapshot`, { headers: { authorization: `Bearer ${token}` } });
     expect((await get(a.brokerToken)).status).toBe(200);
     await a.vault.registerDevice(signCredentialAuthorityGrant({ ...a.grant.grant, machineId: 'other-machine' }, a.root));
-    const otherToken = await machineBrokerToken('test-omp-broker-token', a.userId, 'other-machine', 1);
+    const otherToken = await profileBrokerToken('test-omp-broker-token', a.userId, { profileId: 'default', machineId: 'other-machine', generation: 1, capability: 'inference' });
     await a.vault.removeManagedDevice('machine');
-    for (const [path, method] of [['snapshot', 'GET'], ['snapshot/stream', 'GET'], ['usage', 'GET'], ['credential/1/refresh', 'POST'], ['credential', 'POST'], ['credential/1/disable', 'POST']] as const) {
+    for (const [path, method] of [['snapshot', 'GET'], ['snapshot/stream', 'GET'], ['credential/1/refresh', 'POST'], ['credential', 'POST'], ['credential/1/disable', 'POST']] as const) {
       const response = await SELF.fetch(`${url}/${path}`, { method, headers: { authorization: `Bearer ${a.brokerToken}` } });
       expect(response.status).toBe(401);
       expect(await response.text()).not.toContain(`secret-${a.handle}`);
@@ -212,8 +240,8 @@ describe('account lifecycle authorization', () => {
     expect((await get(otherToken)).status).toBe(200);
     await a.vault.registerDevice(signCredentialAuthorityGrant({ ...a.grant.grant, generation: 2 }, a.root));
     expect((await get(a.brokerToken)).status).toBe(401);
-    expect((await get(a.brokerToken.replace('.1.', '.2.'))).status).toBe(401);
-    expect((await get(await machineBrokerToken('test-omp-broker-token', a.userId, 'machine', 2))).status).toBe(200);
+    expect((await get(a.brokerToken.replace('gsip1.', 'gsip2.'))).status).toBe(401);
+    expect((await get(await profileBrokerToken('test-omp-broker-token', a.userId, { profileId: 'default', machineId: 'machine', generation: 2, capability: 'inference' }))).status).toBe(200);
   });
 
   it('rejects foreign account identities at this tenant without exposing its credentials', async () => {
@@ -225,11 +253,84 @@ describe('account lifecycle authorization', () => {
     });
     expect(credential.status).toBe(403);
     expect(await credential.json()).toMatchObject({ error: { code: 'ACCOUNT_UNAVAILABLE' } });
-    const crossBroker = await SELF.fetch(`https://auth.test/omp/users/${foreignUserId}/v1/snapshot`, { headers: { authorization: `Bearer ${a.brokerToken}` } });
+    const crossBroker = await SELF.fetch(`https://auth.test/omp/users/${foreignUserId}/profiles/default/v1/snapshot`, { headers: { authorization: `Bearer ${a.brokerToken}` } });
     expect(crossBroker.status).toBe(401);
     expect(await crossBroker.text()).not.toContain(`secret-${a.handle}`);
-    expect((await a.requests()).map(response => response.status)).toEqual([200, 200, 200, 200, 200, 200, 200]);
+    expect((await a.requests()).map(response => response.status)).toEqual([200, 200, 200, 401, 200, 200, 200]);
   });
+
+  it('blocks incompatible runtime RPC, workspace and cron admissions after cutover without blocking deployment control', async () => {
+    const a = await account();
+    await a.vault.ensureInference();
+    for (const operation of ['space.bootstrap', 'space.beginOpen', 'crons.claimNext', 'inference.resolve'] as const) {
+      const response = await SELF.fetch('https://auth.test/v1/control', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(a.signed(operation, { projectId: 'new-project', spaceId: 'new-space' })),
+      });
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({ status: 'error', error: { code: 'INFERENCE_UPGRADE_REQUIRED' } });
+    }
+    const runtime = await SELF.fetch(`https://auth.test/__sandbox/${a.userId}/sandbox-old/rpc`, { method: 'POST', body: '{}' });
+    expect(runtime.status).toBe(409);
+    expect(await runtime.json()).toMatchObject({ error: { code: 'INFERENCE_UPGRADE_REQUIRED' } });
+    const relay = await SELF.fetch('https://auth.test/v1/relay/authorize', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ grant: a.grant, capability: 'space.control' }) });
+    expect(relay.status).toBe(409);
+    expect(await relay.json()).toMatchObject({ error: { code: 'INFERENCE_UPGRADE_REQUIRED' } });
+    expect(await env.PROJECT_AUTHORITY.getByName(`${a.userId}:new-project`).getProject()).toBe(null);
+    const control = await SELF.fetch('https://auth.test/v1/control', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(a.signed('deploy.status')) });
+    expect(control.status).toBe(200);
+  });
+
+  it('requires configuration authority for signed profile management and returns typed CAS conflicts', async () => {
+    const a = await account();
+    const request = (operation: ControlOperation, payload: Record<string, unknown>) => SELF.fetch('https://auth.test/v1/control', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(a.signed(operation, payload)),
+    });
+    const denied = await request('inference.create', { name: 'Denied', sourceProfileId: null });
+    expect(denied.status).toBe(401);
+    expect(await denied.json()).toMatchObject({ error: { code: 'ACCESS_DENIED' } });
+    await a.vault.registerDevice(signCredentialAuthorityGrant({ ...a.grant.grant, generation: 2, capabilities: [...a.grant.grant.capabilities, 'credential.manage'] }, a.root));
+    const created = await (await request('inference.create', { name: 'Managed', sourceProfileId: null })).json() as { value: { profiles: Array<{ id: string }> } };
+    const profileId = created.value.profiles.find(profile => profile.id !== 'default')!.id;
+    expect((await request('inference.update', { profileId, expectedRevision: 0, name: 'Updated', settings: {} })).status).toBe(200);
+    const conflict = await request('inference.update', { profileId, expectedRevision: 0, name: 'Stale', settings: {} });
+    expect(conflict.status).toBe(409);
+    expect(await conflict.json()).toMatchObject({ status: 'error', error: { code: 'SETTINGS_CONFLICT', resource: 'inference-profile', expected: 0, actual: 1 } });
+    const foreign = await request('inference.assign', { projectId: 'foreign', profileId, expectedRevision: 0 });
+    expect(foreign.ok).toBe(false);
+    const listing = await (await request('inference.list', {})).text();
+    const releases = env.TENANT_RELEASES.getByName(a.userId);
+    const hash = `sha256:${'ab'.repeat(32)}`;
+    await releases.stage({
+      sha: 'profile-runtime', inferenceVersion: 1, label: 'Compatible runtime', workspaceId: 'build',
+      artifacts: {
+        worker: null, frontend: null,
+        machine: { key: 'releases/profile-runtime/machine.js', hash, size: 1 },
+        omp: { key: 'releases/profile-runtime/omp.js', hash, size: 1 },
+      },
+      worker: null, omp: { upstreamVersion: '18.1.10', bunVersion: '1.4.0', packages: {}, patches: [] },
+    }, 'machine');
+    await releases.machineApplied('machine', { sha: 'profile-runtime', target: 'machine', generation: '2', status: 'applied' });
+    await releases.machineApplied('machine', { sha: 'profile-runtime', target: 'omp', generation: '2', status: 'applied' });
+    const projectId = 'bound-project';
+    const authority = env.PROJECT_AUTHORITY.getByName(`${a.userId}:${projectId}`);
+    await env.USER_PROJECTS.getByName(a.userId).put(await authority.bootstrap({ id: projectId, name: 'Bound', baseBranch: 'main', repositoryReference: null, createdBy: 'machine' }));
+    await a.vault.assignInferenceProfile({ projectId, profileId, expectedRevision: 0 });
+    await a.vault.putBrowserApiKey(profileId, 'openai', 'bound-project-key');
+    const resolved = await (await request('inference.resolve', { projectId })).json() as { value: { projectId: string; assignmentRevision: number; profile: { id: string }; broker: { url: string; token: string } } };
+    expect(resolved.value).toMatchObject({ projectId, assignmentRevision: 1, profile: { id: profileId } });
+    const scoped = await SELF.fetch(`${resolved.value.broker.url}/v1/snapshot`, { headers: { authorization: `Bearer ${resolved.value.broker.token}` } });
+    expect(await scoped.json()).toMatchObject({ credentials: [{ credential: { type: 'api_key', key: 'bound-project-key' } }] });
+    const runtimeWrite = await SELF.fetch(`${resolved.value.broker.url}/v1/credential`, { method: 'POST', headers: { authorization: `Bearer ${resolved.value.broker.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ provider: 'openai', credential: { type: 'api_key', key: 'must-not-write' } }) });
+    expect(runtimeWrite.status).toBe(403);
+    const management = await (await request('inference.providers', { profileId })).json() as { value: { projectId: null; assignmentRevision: null; broker: { url: string; token: string } } };
+    expect(management.value).toMatchObject({ projectId: null, assignmentRevision: null });
+    const manageWrite = await SELF.fetch(`${management.value.broker.url}/v1/credential`, { method: 'POST', headers: { authorization: `Bearer ${management.value.broker.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ provider: 'openai', credential: { type: 'api_key', key: 'managed-update' } }) });
+    expect(manageWrite.status).toBe(200);
+    expect(listing).not.toContain('broker');
+    expect(listing).not.toContain('secret-');
+  });
+
 
   it.each(['settings.get', 'artifacts.key.get'] as const)('allows active tenant control but still denies revoked devices for %s', async operation => {
     const a = await account();

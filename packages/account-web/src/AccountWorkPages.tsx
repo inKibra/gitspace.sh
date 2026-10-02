@@ -1,4 +1,5 @@
-import { Badge, Button, Card, CardContent, CardDescription, CardFooter, CardGroup, CardHeader, CardTitle, Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, Select, SelectContent, SelectItem, SelectTrigger, TabsSubtle, TabsSubtleItem, Tooltip } from '@gitspace/ui';
+import { rpcErrorMessage } from './rpc-error-message.js';
+import { Badge, Button, Card, CardContent, CardDescription, CardFooter, CardGroup, CardHeader, CardTitle, Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, InputField, InputGroup, Select, SelectContent, SelectItem, SelectTrigger, TabsSubtle, TabsSubtleItem, Tooltip } from '@gitspace/ui';
 import { Archive, Plus, RefreshCcw01, Trash01, XClose } from '@untitledui/icons';
 import { useContext, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { AccountSidebarContext, type SidebarSpaceSummary } from './AppSidebar.js';
@@ -7,6 +8,8 @@ import { WorkspaceGraph, type WorkspaceGraphItem } from './WorkspaceGraph.js';
 import type { Directory } from './useAccountDirectory.js';
 import { glyph } from './glyph.js';
 import { navigateProductUrl, setProductRoute } from './routes.js';
+import { useInference } from './InferenceContext.js';
+import { ProjectInferenceSelector } from './InferencePage.js';
 
 export interface AccountWorkPagesProps {
   view: 'kanban' | 'projects' | 'inbox';
@@ -16,7 +19,12 @@ export interface AccountWorkPagesProps {
   onRefresh(): void;
   onOpenWorkspace(projectId: string, workspaceId: string): void;
   onOpenProject(projectId: string): void;
-  actions: Pick<GitSpaceShellProps, 'onCreateProject' | 'onCreateWorkspace' | 'onCloseSpace' | 'onReopenSpace' | 'onArchiveWorkspace' | 'onClaimWorkspace' | 'onArchiveProject' | 'onRestoreProject' | 'onDeleteProject' | 'onDeleteWorkspace' | 'onSetWorkspaceRelations'>;
+  actions: Pick<GitSpaceShellProps, 'onCreateProject' | 'onCreateWorkspace' | 'onCloseSpace' | 'onReopenSpace' | 'onArchiveWorkspace' | 'onClaimWorkspace' | 'onArchiveProject' | 'onRestoreProject' | 'onDeleteProject' | 'onDeleteWorkspace' | 'onSetWorkspaceRelations'> & {
+    onSetProjectBaseBranch?: (projectId: string, expectedRevision: number, baseBranch: string) => void | Promise<void>;
+  };
+  /** Controls which project's Settings dialog is open; omit to let the Projects view own it. */
+  settingsProjectId?: string | null;
+  onSettingsProjectChange?(projectId: string | null): void;
 }
 
 interface AccountWorkspace extends WorkspaceGraphItem {
@@ -78,7 +86,7 @@ function DirectoryCoverage({ projects, directory, loading, onRefresh }: Pick<Acc
 }
 
 export function AccountWorkPages(props: AccountWorkPagesProps) {
-  const { view, projects, directory, loading, onRefresh, onOpenWorkspace, onOpenProject, actions } = props;
+  const { view, projects, directory, loading, onRefresh, onOpenWorkspace, onOpenProject, actions, settingsProjectId, onSettingsProjectChange } = props;
   const accountSidebar = useContext(AccountSidebarContext);
   const current = useRef(props);
   current.current = props;
@@ -111,7 +119,7 @@ export function AccountWorkPages(props: AccountWorkPagesProps) {
   return <div className="flex min-h-0 min-w-0 flex-1 flex-col">
     <DirectoryCoverage projects={projects} directory={directory} loading={loading} onRefresh={onRefresh} />
     {view === 'kanban' ? <KanbanView workspaces={activeWorkspaces} onOpen={open} onSetRelations={actions.onSetWorkspaceRelations} onNewWorkspace={actions.onCreateWorkspace ? setNewWorkspacePhase : undefined} />
-      : view === 'projects' ? <ProjectsView projects={projects} workspaces={workspaces} directory={directory} onOpen={open} onOpenProject={onOpenProject} {...actions} onRestoreWorkspace={actions.onClaimWorkspace ? (workspaceId) => actions.onClaimWorkspace!(workspaceId, null) : undefined} />
+      : view === 'projects' ? <ProjectsView projects={projects} workspaces={workspaces} directory={directory} onOpen={open} onOpenProject={onOpenProject} {...actions} onRestoreWorkspace={actions.onClaimWorkspace ? (workspaceId) => actions.onClaimWorkspace!(workspaceId, null) : undefined} settingsProjectId={settingsProjectId} onSettingsProjectChange={onSettingsProjectChange} />
         : <InboxView projects={activeProjects.filter((project) => project.lifecycle !== 'cloud-only')} directory={directory} onOpenWorkspace={onOpenWorkspace} onOpenProject={onOpenProject} />}
     <Dialog open={newWorkspacePhase !== null && newWorkspaceProject === null} onOpenChange={(next) => { if (!next) clearCreate(); }}>
       <DialogContent><DialogHeader><DialogTitle>Choose a project</DialogTitle><DialogDescription>Choose which project the new {newWorkspacePhase ? PHASE_LABEL[newWorkspacePhase].toLowerCase() : ''} workspace belongs to.</DialogDescription></DialogHeader>
@@ -124,14 +132,14 @@ export function AccountWorkPages(props: AccountWorkPagesProps) {
       if (pendingRef.current) return;
       pendingRef.current = true; setPending(true); setError(null);
       try { await actions.onCreateWorkspace!(input); clearCreate(); onRefresh(); }
-      catch (failure) { setError(failure instanceof Error ? failure.message : String(failure)); }
+      catch (failure) { setError(rpcErrorMessage(failure, 'Create workspace')); }
       finally { pendingRef.current = false; setPending(false); }
     }} /> : null}
     {actions.onCreateProject ? <CreateProjectDialog open={newProject} onOpenChange={(next) => { setNewProject(next); if (!next) setError(null); }} pending={pending} error={newProject ? error : null} onSubmit={async (input) => {
       if (pendingRef.current) return;
       pendingRef.current = true; setPending(true); setError(null);
       try { await actions.onCreateProject!(input); setNewProject(false); onRefresh(); }
-      catch (failure) { setError(failure instanceof Error ? failure.message : String(failure)); }
+      catch (failure) { setError(rpcErrorMessage(failure, 'Create project')); }
       finally { pendingRef.current = false; setPending(false); }
     }} /> : null}
   </div>;
@@ -203,7 +211,7 @@ function KanbanView({ workspaces, onOpen, onSetRelations, onNewWorkspace }: { wo
     {!workspaces.length ? <EmptyState title="No active workspaces in the available directory" description="Create a workspace in a project, or refresh if project coverage is incomplete." /> : null}
   </PageCanvas>;
 }
-function ProjectsView({ projects, workspaces, directory, onOpen, onOpenProject, onCloseSpace, onReopenSpace, onArchiveWorkspace, onRestoreWorkspace, onCreateProject, onCreateWorkspace, onArchiveProject, onRestoreProject, onDeleteProject, onDeleteWorkspace }: {
+function ProjectsView({ projects, workspaces, directory, onOpen, onOpenProject, onCloseSpace, onReopenSpace, onArchiveWorkspace, onRestoreWorkspace, onCreateProject, onCreateWorkspace, onArchiveProject, onRestoreProject, onDeleteProject, onDeleteWorkspace, onSetProjectBaseBranch, settingsProjectId: requestedSettingsProjectId, onSettingsProjectChange }: {
   projects: readonly ProjectLifecycleView[];
   workspaces: readonly AccountWorkspace[];
   directory: Directory;
@@ -219,7 +227,18 @@ function ProjectsView({ projects, workspaces, directory, onOpen, onOpenProject, 
   onRestoreProject?: GitSpaceShellProps['onRestoreProject'];
   onDeleteProject?: GitSpaceShellProps['onDeleteProject'];
   onDeleteWorkspace?: GitSpaceShellProps['onDeleteWorkspace'];
+  onSetProjectBaseBranch?: AccountWorkPagesProps['actions']['onSetProjectBaseBranch'];
+  settingsProjectId?: string | null;
+  onSettingsProjectChange?: (projectId: string | null) => void;
 }) {
+  const inference = useInference();
+  const [ownedSettingsProjectId, setOwnedSettingsProjectId] = useState<string | null>(null);
+  const settingsProjectId = requestedSettingsProjectId === undefined ? ownedSettingsProjectId : requestedSettingsProjectId;
+  const setSettingsProjectId = (projectId: string | null) => {
+    if (requestedSettingsProjectId === undefined) setOwnedSettingsProjectId(projectId);
+    onSettingsProjectChange?.(projectId);
+  };
+  const settingsProject = projects.find((project) => project.id === settingsProjectId && project.lifecycle !== 'deleting') ?? null;
   const [filter, setFilter] = useState<'active' | 'archived' | 'all'>('active');
   const [projectDialog, setProjectDialog] = useState(false);
   const [workspaceDialog, setWorkspaceDialog] = useState<string | null>(null);
@@ -232,7 +251,7 @@ function ProjectsView({ projects, workspaces, directory, onOpen, onOpenProject, 
     pendingRef.current = true;
     setPending(true);
     setError(null);
-    try { await action(); close?.(); } catch (failure) { setError(failure instanceof Error ? failure.message : String(failure)); } finally { pendingRef.current = false; setPending(false); }
+    try { await action(); close?.(); } catch (failure) { setError(rpcErrorMessage(failure, 'Project operation')); } finally { pendingRef.current = false; setPending(false); }
   };
   return <PageCanvas>
     <PageHeader kicker="Repositories" title="Projects" actions={<>
@@ -253,6 +272,7 @@ function ProjectsView({ projects, workspaces, directory, onOpen, onOpenProject, 
               {project.role === 'gitspace-source' ? <Badge size="compact" color="gray">Built in</Badge> : null}
             </button>
             <div className="flex items-center gap-1">
+              {project.lifecycle !== 'deleting' ? <Button variant="ghost" size="compact" aria-label={`Settings for ${project.name}`} onClick={() => setSettingsProjectId(project.id)}>Settings</Button> : null}
               {project.lifecycle === 'active' && onCreateWorkspace ? <Button variant="secondary" size="compact" onClick={() => setWorkspaceDialog(project.id)} leadingIcon={glyph(Plus)}>Workspace</Button> : null}
               {project.role !== 'gitspace-source' && project.lifecycle === 'active' && onArchiveProject ? <Button variant="ghost" size="compact" disabled={pending} onClick={() => void run(() => onArchiveProject(project.id, project.revision))} leadingIcon={glyph(Archive)}>Archive</Button> : null}
               {project.lifecycle === 'archived' && onRestoreProject ? <Button variant="ghost" size="compact" disabled={pending} onClick={() => void run(() => onRestoreProject(project.id, project.revision))} leadingIcon={glyph(RefreshCcw01)}>Restore</Button> : null}
@@ -296,8 +316,50 @@ function ProjectsView({ projects, workspaces, directory, onOpen, onOpenProject, 
       })}
       {!visible.length ? <EmptyState title="No projects" description={filter === 'archived' ? 'Nothing is archived.' : 'Create a project or import a repository to start.'} /> : null}
     </div>
+    <Dialog open={settingsProject !== null} onOpenChange={(open) => { if (!open) setSettingsProjectId(null); }}><DialogContent>
+      <DialogHeader><DialogTitle>{settingsProject?.name} settings</DialogTitle><DialogDescription>Project-wide settings shared by every workspace in this project.</DialogDescription></DialogHeader>
+      {settingsProject ? <ProjectBaseBranchSettings key={settingsProject.id} project={settingsProject} onSetBaseBranch={onSetProjectBaseBranch} /> : null}
+      {settingsProject && inference ? <section className="flex flex-col gap-3">
+        <div className="flex flex-col gap-1">
+          <h3 className="text-body font-medium text-foreground">Inference</h3>
+          <p className="text-caption text-muted-foreground">Choose the canonical inference profile for every workspace in this project. Running work keeps its admitted profile; new work uses the new assignment.</p>
+        </div>
+        <ProjectInferenceSelector key={settingsProject.id} projectId={settingsProject.id} projectName={settingsProject.name} />
+        <p className="text-caption text-muted-foreground">Manage models, agents, and credentials under Navigate → Inference.</p>
+      </section> : null}
+      <DialogFooter><Button variant="secondary" onClick={() => setSettingsProjectId(null)}>Done</Button></DialogFooter>
+    </DialogContent></Dialog>
     {error && !projectDialog && workspaceDialog === null ? <p role="alert" className="pt-4 text-caption text-destructive">{error}</p> : null}
     {onCreateProject ? <CreateProjectDialog open={projectDialog} onOpenChange={(open) => { setProjectDialog(open); if (!open) setError(null); }} pending={pending} error={projectDialog ? error : null} onSubmit={(input) => run(() => onCreateProject(input), () => setProjectDialog(false))} /> : null}
     {onCreateWorkspace ? <CreateWorkspaceDialog key={workspaceDialog ?? 'closed'} projectId={workspaceDialog} workspaces={workspaces} onOpenChange={(open) => { if (!open) { setWorkspaceDialog(null); setError(null); } }} pending={pending} error={workspaceDialog ? error : null} onSubmit={(input) => run(() => onCreateWorkspace(input), () => setWorkspaceDialog(null))} /> : null}
   </PageCanvas>;
+}
+
+function ProjectBaseBranchSettings({ project, onSetBaseBranch }: { project: ProjectLifecycleView; onSetBaseBranch?: AccountWorkPagesProps['actions']['onSetProjectBaseBranch'] }) {
+  const [branch, setBranch] = useState('');
+  const [pending, setPending] = useState(false);
+  const pendingRef = useRef(false);
+  const [error, setError] = useState<string | null>(null);
+  const next = branch.trim();
+  const canChange = project.lifecycle === 'active' && !pending && next !== '' && next !== project.baseBranch;
+  return <section className="flex flex-col gap-3">
+    <div className="flex flex-col gap-1">
+      <h3 className="text-body font-medium text-foreground">Base branch</h3>
+      <p className="text-caption text-muted-foreground">Current base branch: <span className="font-mono text-foreground">{project.baseBranch}</span></p>
+    </div>
+    {project.role === 'gitspace-source' ? <p className="text-caption text-muted-foreground">Managed by GitSpace releases.</p>
+      : onSetBaseBranch ? <form id="project-base-branch-form" className="flex flex-col gap-3" onSubmit={async (event) => {
+        event.preventDefault();
+        if (!canChange || pendingRef.current) return;
+        pendingRef.current = true; setPending(true); setError(null);
+        try { await onSetBaseBranch(project.id, project.revision, next); setBranch(''); }
+        catch (failure) { setError(rpcErrorMessage(failure, 'Change base branch')); }
+        finally { pendingRef.current = false; setPending(false); }
+      }}>
+        <InputGroup><InputField index={0} label="New base branch" placeholder={project.baseBranch} value={branch} onChange={setBranch} disabled={pending || project.lifecycle !== 'active'} /></InputGroup>
+        <p className="text-caption text-muted-foreground">Existing workspaces keep their branches; stack status will compare against the new base. The project’s base space must be open and have no uncommitted changes.</p>
+        {error ? <p role="alert" className="text-caption text-destructive">{error}</p> : null}
+        <div><Button type="submit" variant="secondary" size="compact" loading={pending} disabled={!canChange}>{pending ? 'Changing base branch…' : 'Change base branch'}</Button></div>
+      </form> : null}
+  </section>;
 }

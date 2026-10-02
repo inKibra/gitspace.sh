@@ -5,6 +5,10 @@ import { basename, dirname, join } from 'node:path';
 import { Settings } from '@oh-my-pi/pi-coding-agent/config/settings';
 import { SETTINGS_SCHEMA, isCredential, type SettingPath } from '@oh-my-pi/pi-coding-agent/config/settings-schema';
 import {
+  extractInferenceSettings,
+  inferenceCredentialPaths,
+  inferenceSettingSection,
+  managedOmpSettingDefaults,
   ompSettingValueSchema,
   type OmpConfigDocument,
   type OmpSettingSchemaItem,
@@ -12,6 +16,10 @@ import {
   type UserSettings,
   type UserSettingsUpdate,
 } from '@gitspace/protocol';
+
+function isSettingPath(path: string): path is SettingPath {
+  return Object.hasOwn(SETTINGS_SCHEMA, path);
+}
 import { CloudSpaceAuthorityError } from './cloud-space-authority.js';
 
 export interface CanonicalSettingsCloud {
@@ -44,6 +52,7 @@ export interface CanonicalSettingsChangedEvent {
 
 interface OmpSettingsAccess {
   get(path: string): unknown;
+  isConfigured(path: string): boolean;
   set(path: string, value: unknown): void;
   flush(): Promise<void>;
   reloadFromDisk(): Promise<void>;
@@ -64,6 +73,14 @@ function conflictFrom(error: unknown): CanonicalSettingsConflict | null {
   return (resource === 'user-settings' || resource === 'omp-config') && typeof expected === 'number' && typeof actual === 'number'
     ? new CanonicalSettingsConflict(resource, expected, actual)
     : null;
+}
+
+function assertSharedAdvanced(content: string): void {
+  const config: unknown = Bun.YAML.parse(content);
+  if (config === null || config === undefined) return;
+  if (typeof config !== 'object' || Array.isArray(config)) throw new Error('Shared OMP Advanced configuration must be a YAML mapping');
+  if (inferenceCredentialPaths(config).length > 0) throw new Error('Shared OMP configuration contains raw credentials; connect them in Inference → Providers and remove them from Advanced before synchronizing');
+  if (Object.keys(extractInferenceSettings(config as Record<string, unknown>)).length > 0) throw new Error('Models, Agents, and Providers belong to inference profiles; move these settings to Inference before synchronizing Advanced');
 }
 
 export class CanonicalSettingsCoordinator {
@@ -100,7 +117,9 @@ export class CanonicalSettingsCoordinator {
     const local = await this.readLocal();
     try {
       let remote = await this.cloud.getOmpConfig();
+      assertSharedAdvanced(remote.content);
       if (remote.generation === 0 && local.length > 0) {
+        assertSharedAdvanced(local);
         remote = await this.cloud.updateOmpConfig({ expectedGeneration: 0, content: local, checksum: checksum(local) });
       } else if (remote.generation > 0 && checksum(local) !== remote.checksum) {
         await this.applyRemote(remote);
@@ -183,12 +202,15 @@ export class CanonicalSettingsCoordinator {
 
   async getOmpSettings(): Promise<{ document: OmpConfigDocument; schema: OmpSettingSchemaItem[]; sync: CanonicalSettingsSyncState }> {
     if (!this.settings || !this.document) throw new Error('Canonical OMP settings are not initialized');
+    assertSharedAdvanced(this.document.content);
     return { document: this.document, schema: this.schemaView(), sync: this.syncState };
   }
 
   async setOmpSetting(path: string, value: OmpSettingValue): Promise<{ document: OmpConfigDocument; schema: OmpSettingSchemaItem[]; sync: CanonicalSettingsSyncState }> {
     if (!this.settings || !this.document) throw new Error('Canonical OMP settings are not initialized');
-    if (!Object.hasOwn(SETTINGS_SCHEMA, path)) throw new Error(`Unknown OMP setting ${path}`);
+    if (!isSettingPath(path)) throw new Error(`Unknown OMP setting ${path}`);
+    if (inferenceSettingSection(path)) throw new Error('Manage Models, Agents, and Providers in Inference, not shared Advanced settings');
+    if (isCredential(path) || path.startsWith('auth.broker.')) throw new Error('Connect credentials in Inference → Providers; raw credentials and ambient auth brokers are not supported in Advanced');
     this.settings.set(path, ompSettingValueSchema.parse(value));
     await this.settings.flush();
     await this.publishLocal(false);
@@ -199,20 +221,24 @@ export class CanonicalSettingsCoordinator {
   private schemaView(): OmpSettingSchemaItem[] {
     if (!this.settings) return [];
     return (Object.keys(SETTINGS_SCHEMA) as SettingPath[]).map((path) => {
-      const definition = SETTINGS_SCHEMA[path] as { type?: string; values?: readonly string[]; ui?: { tab?: string; label?: string; description?: string; options?: unknown } };
+      const definition = SETTINGS_SCHEMA[path] as { default?: unknown; type?: string; values?: readonly string[]; ui?: { tab?: string; label?: string; description?: string; options?: unknown } };
       const kind = definition.type === 'boolean' || definition.type === 'enum' || definition.type === 'number' || definition.type === 'string' || definition.type === 'array' || definition.type === 'record' ? definition.type : 'other';
       const rawOptions = definition.ui?.options;
       const options = definition.values ? [...definition.values] : Array.isArray(rawOptions)
         ? rawOptions.map((option: unknown) => typeof option === 'string' ? option : option && typeof option === 'object' && typeof (option as { value?: unknown }).value === 'string' ? (option as { value: string }).value : null).filter((option): option is string => option !== null)
         : [];
       const credential = isCredential(path);
+      // Sessions run with GitSpace's managed default until Advanced configures the path.
+      const managedDefault = Object.hasOwn(managedOmpSettingDefaults, path) ? managedOmpSettingDefaults[path] : undefined;
+      const configured = inferenceSettingSection(path) ? definition.default : this.settings!.isConfigured(path) ? this.settings!.get(path) : managedDefault ?? this.settings!.get(path);
       return {
         path,
         tab: definition.ui?.tab ?? 'other',
         label: definition.ui?.label ?? path,
         ...(definition.ui?.description ? { description: definition.ui.description } : {}),
         kind,
-        value: credential ? null : ompSettingValueSchema.parse(this.settings!.get(path) ?? null),
+        value: credential ? null : ompSettingValueSchema.parse(configured ?? null),
+        defaultJson: JSON.stringify(credential ? null : managedDefault ?? definition.default ?? null),
         options,
         credential,
       };
@@ -240,6 +266,7 @@ export class CanonicalSettingsCoordinator {
   private async publishLocal(resolveConflict: boolean): Promise<void> {
     if (this.applyingRemote || !this.document) return;
     const content = await this.readLocal();
+    assertSharedAdvanced(content);
     const nextChecksum = checksum(content);
     if (nextChecksum === this.document.checksum) { this.dirty = false; return; }
     this.syncState = { status: 'connecting', message: null };
@@ -275,6 +302,7 @@ export class CanonicalSettingsCoordinator {
 
   private async applyRemote(remote: OmpConfigDocument): Promise<void> {
     if (!this.settings) throw new Error('OMP settings are not initialized');
+    assertSharedAdvanced(remote.content);
     this.applyingRemote = true;
     try {
       const tempPath = `${this.configPath}.${process.pid}.${crypto.randomUUID()}.tmp`;

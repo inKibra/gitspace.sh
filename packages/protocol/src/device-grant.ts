@@ -33,6 +33,10 @@ export const deviceCapabilitySchema = z.enum([
   'devices.manage',
   /** Launch GitSpace itself from a workspace, or revert to the channel build. */
   'deployment.control',
+  /** Explicit API-client authority for account credentials, inference, approval policy and review decisions. */
+  'account.admin',
+  /** Explicit API-client authority for lifecycle approval, recovery, cancellation and retirement. */
+  'lifecycle.control',
 ]);
 export type DeviceCapability = z.infer<typeof deviceCapabilitySchema>;
 
@@ -126,7 +130,6 @@ export const signedRpcHeaderSchema = z.object({
   signature: z.string().min(64).max(128),
 });
 export type SignedRpcHeader = z.infer<typeof signedRpcHeaderSchema>;
-export const RPC_SIGNATURE_MAX_SKEW_MS = 2 * 60_000;
 
 function canonical(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonical);
@@ -249,7 +252,7 @@ export function verifyDeviceGrantRecord(record: DeviceGrantRecord, rootSigningPu
     if (issuerRecord?.invite.invite.userId !== parsed.data.invite.invite.userId) return null;
     if (!issuer || !issuer.canDelegate || issuer.deviceId !== parsed.data.invite.issuer.deviceId) return null;
     if (!scopeContains(issuer.scope, parsed.data.invite.invite.scope)) return null;
-    if (!parsed.data.invite.invite.capabilities.every((capability) => issuer.capabilities.includes(capability))) return null;
+    if (!parsed.data.invite.invite.capabilities.every((capability) => deviceHasCapability(issuer, capability))) return null;
     issuerKey = issuer.signingPublicKey;
   }
   const invite = verifyDeviceInvite(parsed.data.invite, issuerKey);
@@ -335,21 +338,68 @@ export function requiredCapability(procedurePath: string, kind: 'query' | 'mutat
   return kind === 'mutation' ? 'rpc.write' : 'rpc.read';
 }
 
+/** Browsers retain their existing administrative authority; clients must be explicitly granted it. */
+export function deviceHasCapability(device: { kind: DeviceKind; scope: DeviceScope; capabilities: readonly string[] }, capability: DeviceCapability): boolean {
+  return device.capabilities.includes(capability)
+    || ((capability === 'account.admin' || capability === 'lifecycle.control')
+      && device.kind === 'browser' && device.scope.kind === 'user' && device.capabilities.includes('rpc.write'));
+}
+
+export function deviceCanAdminister(device: { kind: DeviceKind; scope: DeviceScope; capabilities: readonly string[] } | undefined | null, capability: 'account.admin' | 'lifecycle.control'): boolean {
+  return !!device && device.scope.kind === 'user' && device.capabilities.includes('rpc.write') && deviceHasCapability(device, capability);
+}
+
+/** Authentication adapters use this before accepting approval decisions or policy changes. */
+export function requireDeviceAdministration<T extends { deviceId: string; kind: DeviceKind; scope: DeviceScope; capabilities: readonly string[] }>(device: T | undefined | null): T {
+  if (!device || !deviceCanAdminister(device, 'account.admin')) throw new Error('Account administration requires account scope, rpc.write and account.admin authorization');
+  return device;
+}
+
+/** Additional authorization; ordinary mutation capability is still required. */
+export function requiredAdministrativeCapability(path: string, input?: unknown): 'account.admin' | 'lifecycle.control' | null {
+  if (['providers.apiKey.set', 'providers.logout', 'inference.create', 'inference.update', 'inference.delete', 'inference.assign', 'session.setApproval', 'inspector.workflow.waiveGate', 'inspector.guide.setApproval', 'inspector.rubric.appendJudgment'].includes(path)) return 'account.admin';
+  if (['environment.approve', 'environment.revokeApproval', 'environment.recoverRun', 'environment.cancelRun'].includes(path)) return 'lifecycle.control';
+  if (path === 'environment.runPhase' && input && typeof input === 'object' && (input as Record<string, unknown>).phase === 'cloud/destroy') return 'lifecycle.control';
+  return null;
+}
+
 /** An explicit boot image changes executable deployment content, even when selecting the platform default. */
 export function requiresImageSelectionControl(procedurePath: string, input: unknown): boolean {
   return procedurePath === 'machine.createSandbox' && input !== null && typeof input === 'object'
     && (input as Record<string, unknown>).image !== undefined;
 }
 
-/** Scope check on a procedure input: a scoped grant may only name its own project/workspace. */
-export function inputWithinScope(scope: DeviceScope, input: unknown, workspaceProject?: (workspaceId: string) => string | null): boolean {
+/** Check every named target, including nested scopes, against resolved ownership. */
+export function inputWithinScope(scope: DeviceScope, input: unknown, workspaceProject?: (workspaceId: string) => string | null, sessionTarget?: (sessionId: string) => { projectId: string; workspaceId: string } | null): boolean {
   if (scope.kind === 'user') return true;
-  const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
-  const workspaceId = [record.workspaceId, record.spaceId].find((value): value is string => typeof value === 'string') ?? null;
-  const projectId = typeof record.projectId === 'string' ? record.projectId : null;
-  if (scope.kind === 'workspace') return workspaceId === scope.workspaceId && (projectId === null || workspaceProject?.(workspaceId) === projectId);
-  if (projectId !== null) return projectId === scope.projectId && (workspaceId === null || workspaceProject?.(workspaceId) === projectId);
-  return workspaceId !== null && workspaceProject?.(workspaceId) === scope.projectId;
+  let targetFound = false;
+  const projectAllowed = (projectId: string) => scope.kind === 'project' ? projectId === scope.projectId : workspaceProject?.(scope.workspaceId) === projectId;
+  const workspaceAllowed = (workspaceId: string) => {
+    const projectId = workspaceProject?.(workspaceId);
+    return !!projectId && projectAllowed(projectId) && (scope.kind !== 'workspace' || workspaceId === scope.workspaceId);
+  };
+  const visit = (value: unknown): boolean => {
+    if (!value || typeof value !== 'object') return true;
+    if (Array.isArray(value)) return value.every(visit);
+    const record = value as Record<string, unknown>;
+    for (const [name, target] of Object.entries(record)) {
+      if (typeof target === 'string' && (name === 'projectId' || name === 'workspaceId' || name === 'spaceId' || name === 'sessionId')) {
+        if (name === 'projectId') {
+          if (!projectAllowed(target)) return false;
+          if (scope.kind === 'project') targetFound = true;
+        } else if (name === 'sessionId') {
+          const resolved = sessionTarget?.(target);
+          if (!resolved || !projectAllowed(resolved.projectId) || !workspaceAllowed(resolved.workspaceId)) return false;
+          targetFound = true;
+        } else {
+          if (!workspaceAllowed(target)) return false;
+          targetFound = true;
+        }
+      } else if (!visit(target)) return false;
+    }
+    return true;
+  };
+  return visit(input) && targetFound;
 }
 
 /** Signs device requests; account RPCs also require the account identity used for grant lookup. */

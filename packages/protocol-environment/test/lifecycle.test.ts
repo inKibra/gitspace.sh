@@ -3,9 +3,10 @@ import {
   emptyLifecycleState, transitionLifecycle, environmentFailure, loadEnvironmentBundle,
   isLifecycleRunActive, lifecycleRunOutcome, lifecycleExecutionOutcome, LifecycleLogReader, type LifecycleActor, type LifecycleMutation,
   type LifecycleRunRecord, type LifecycleState,
+  isInteractiveLifecycleScript, assertLifecycleRequestIdentity, parseLifecycleRunRequest,
 } from '../src/index.js';
 
-const machine: LifecycleActor = { actorId: 'machine-a', machineId: 'machine-a', human: false };
+const machine: LifecycleActor = { actorId: 'machine-a', machineId: 'machine-a', kind: 'machine', lifecycleControl: false };
 const hash = `sha256:${'a'.repeat(64)}`;
 function scenario() {
   let state = emptyLifecycleState('project', 'workspace');
@@ -18,13 +19,49 @@ function scenario() {
     return state;
   };
   apply({ op: 'configure', bundleJson: JSON.stringify({ version: 1, profiles: { base: {} } }), executions: [{ id: 'prepare', kind: 'script', label: 'Prepare', command: '01-prepare.sh', content: 'echo ready', fileName: '01-prepare.sh', phase: 'machine/prepare', hash }] });
-  apply({ op: 'approval', scope: 'project', executionHash: hash, approved: true }, { ...machine, human: true });
+  apply({ op: 'approval', scope: 'project', executionHash: hash, approved: true }, { actorId: 'browser', machineId: 'browser', kind: 'browser', lifecycleControl: true });
   return { apply, advance: (now: string) => { time = now; } };
 }
 const claim = (runId: string, overrides: Partial<Extract<LifecycleMutation, { op: 'claim' }>> = {}): LifecycleMutation => ({ op: 'claim', runId, phase: 'machine/prepare', profile: 'base', executionHashes: [hash], generation: 1, rerun: false, ...overrides });
 const finish = (runId: string, overrides: Partial<Extract<LifecycleMutation, { op: 'finish' }>> = {}): LifecycleMutation => ({ op: 'finish', runId, token: 'ownership', status: 'succeeded', exitCode: 0, results: [], output: '', bindings: {}, ...overrides });
 
 describe('isomorphic environment decisions', () => {
+  it('recognizes only an exact interactive directive in the leading shell header', () => {
+    expect(isInteractiveLifecycleScript('#!/bin/bash\r\n# rationale\r\n\r\n# gitspace: interactive\r\nread value')).toBe(true);
+    expect(isInteractiveLifecycleScript('echo running\n# gitspace: interactive')).toBe(false);
+    expect(isInteractiveLifecycleScript('# gitspace: interactive extra\nread value')).toBe(false);
+    expect(isInteractiveLifecycleScript(' # gitspace: interactive\nread value')).toBe(false);
+  });
+
+  it('cannot upgrade a noninteractive delivery retry into a protected run', () => {
+    const context = scenario();
+    const accepted = context.apply(claim('identity')).runs[0]!;
+    expect(() => assertLifecycleRequestIdentity({ runId: 'identity', phase: 'machine/prepare', interactive: true }, accepted)).toThrow();
+    expect(() => context.apply(claim('identity', { interactive: true }))).toThrow();
+    expect(() => parseLifecycleRunRequest({ runId: 'checks', phase: 'checks', interactive: true })).toThrow();
+    expect(context.apply(claim('identity', { interactive: false })).claim?.status).toBe('existing');
+  });
+
+  it('requires explicit protected execution for approved interactive script bytes', () => {
+    const context = scenario();
+    context.apply({ op: 'configure', bundleJson: JSON.stringify({ version: 1, profiles: { base: {} } }), executions: [{ id: 'prepare', kind: 'script', label: 'Prepare', command: '01-prepare.sh', content: '# gitspace: interactive\nread value', fileName: '01-prepare.sh', phase: 'machine/prepare', hash }] });
+    let failure: unknown;
+    try { context.apply(claim('automatic')); } catch (error) { failure = error; }
+    expect(environmentFailure(failure)?.code).toBe('InteractionRequired');
+    expect(context.apply(claim('manual', { interactive: true })).runs[0]).toMatchObject({ status: 'accepted', interactive: true });
+  });
+  it('authorizes explicit client lifecycle control without impersonating a browser or bypassing recovery proof', () => {
+    const context = scenario();
+    const client: LifecycleActor = { actorId: 'api-client', machineId: 'api-client', kind: 'client', lifecycleControl: true };
+    expect(() => context.apply({ op: 'approval', scope: 'project', executionHash: hash, approved: false }, { ...client, lifecycleControl: false })).toThrow();
+    const approved = context.apply({ op: 'approval', scope: 'project', executionHash: hash, approved: true }, client);
+    expect(approved.approvals[0]?.approvedBy).toBe('api-client');
+    context.apply(claim('recover'));
+    expect(() => context.apply({ op: 'cancel', runId: 'recover' }, { ...client, machineId: machine.machineId, lifecycleControl: false })).toThrow();
+    expect(context.apply({ op: 'cancel', runId: 'recover' }, client).runs[0]?.status).toBe('cancelling');
+    expect(() => context.apply({ op: 'abandon', runId: 'recover' }, client)).toThrow();
+    expect(context.apply({ op: 'abandon', runId: 'recover' }, { ...client, destroyedMachineId: machine.machineId }).runs[0]?.status).toBe('interrupted');
+  });
   it('rejects unsupported formats with typed identity instead of converting or silently emptying them', () => {
     let failure: unknown;
     try { loadEnvironmentBundle({ version: '1.0', name: 'Old bundle', onboarding: [] }); } catch (error) { failure = error; }

@@ -23,7 +23,7 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 function controls(model: string): SessionControlView {
-  return { sessionId: 'omp-session', role: null, roleLabel: null, roles: [], provider: null, models: [], model, thinking: null, fastMode: false, planMode: false, approvalMode: 'write', context: null, cost: 0, todos: [], queue: { steering: [], followUp: [] }, pendingAsk: null, goal: null, history: [], historyAnchorId: null };
+  return { sessionId: 'omp-session', role: null, roleLabel: null, roles: [], provider: null, models: [], model, thinking: null, fastMode: false, planMode: false, approvalMode: 'write', context: null, cost: 0, todos: [], queue: { steering: [], followUp: [] }, pendingAsk: null, goal: null, history: [], historyAnchorId: null, activity: { active: false, reasons: [] }, renderState: 'waiting' };
 }
 function View({ lease, revision = 1 }: { lease: string | null; revision?: number }) {
   const read = useLiveSessionControls('saved-session', 'omp-session', lease, revision);

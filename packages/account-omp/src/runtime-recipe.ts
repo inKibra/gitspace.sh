@@ -6,6 +6,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 export interface OmpRuntimeRecipe {
   version: 1;
+  inferenceVersion: 1;
   upstreamVersion: string;
   bunVersion: string;
   platform: 'linux' | 'darwin' | 'win32';
@@ -48,8 +49,8 @@ function digest(bytes: Uint8Array): string {
 
 function parseRecipe(value: unknown): OmpRuntimeRecipe {
   const recipe = record(value, 'runtime recipe');
-  const fields = ['version', 'upstreamVersion', 'bunVersion', 'platform', 'arch', 'adapter', 'packageHash', 'lockHash', 'patches'];
-  if (Object.keys(recipe).some((key) => !fields.includes(key)) || recipe.version !== 1
+  const fields = ['version', 'inferenceVersion', 'upstreamVersion', 'bunVersion', 'platform', 'arch', 'adapter', 'packageHash', 'lockHash', 'patches'];
+  if (Object.keys(recipe).some((key) => !fields.includes(key)) || recipe.version !== 1 || recipe.inferenceVersion !== 1
     || typeof recipe.upstreamVersion !== 'string' || !VERSION.test(recipe.upstreamVersion)
     || typeof recipe.bunVersion !== 'string' || !VERSION.test(recipe.bunVersion)
     || !['linux', 'darwin', 'win32'].includes(String(recipe.platform))

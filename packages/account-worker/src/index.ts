@@ -25,6 +25,8 @@ import application, { CredentialVaultDO } from './application.js';
 import { HostedRouteRegistryDO } from './hosted-route-registry.js';
 import { FleetCatalogDO } from './fleet-catalog.js';
 import { forwardTunnelRequest, relayRequest, tunnelTarget, INTERNAL_NONCE, INTERNAL_TIMESTAMP, INTERNAL_TUNNEL_MACHINE, INTERNAL_TUNNEL_PATH, INTERNAL_SIGNED_TARGET } from './relay-request.js';
+import type { TenantReleasesDO } from './tenant-releases.js';
+import { handleMcpRequest } from './mcp-server.js';
 export * from './application.js';
 
 declare const GITSPACE_WORKER_SHA: string | undefined;
@@ -92,17 +94,54 @@ async function currentMachineAuthority(
       return jsonError(401, 'MACHINE_GRANT_REJECTED', 'Machine issuer proof is invalid or expired');
     }
     if (grant.grant.userId !== env.ACCOUNT_ID) return jsonError(401, 'MACHINE_GRANT_REJECTED', 'Machine grant belongs to another tenant');
-    const result = await (env.CREDENTIALS as DurableObjectNamespace<CredentialVaultDO>).getByName(env.ACCOUNT_ID).authorizeRelayGrant(grant, capability);
-    if (result.status === 'ok') return null;
+    const vault = (env.CREDENTIALS as DurableObjectNamespace<CredentialVaultDO>).getByName(env.ACCOUNT_ID);
+    const result = await vault.authorizeRelayGrant(grant, capability);
+    if (result.status === 'ok') {
+      // Every lease renewal re-fences space control, so an already-open tunnel cannot outlive a cutover.
+      if (capability === 'space.control' && await vault.inferenceCutover()) {
+        const releases = env.TENANT_RELEASES as DurableObjectNamespace<TenantReleasesDO>;
+        if (!await releases.get(releases.idFromName(env.ACCOUNT_ID)).machineInferenceCompatible(grant.grant.machineId)) {
+          return jsonError(409, 'INFERENCE_UPGRADE_REQUIRED', 'Upgrade this machine and OMP before admitting profile-managed work');
+        }
+      }
+      return null;
+    }
     return jsonError(401, 'MACHINE_GRANT_REJECTED', result.error.message);
-  } catch {
+  } catch (error) {
     // Current authority is required; never fall back to the offline signature.
+    console.error(JSON.stringify({
+      event: 'machine_authority_unavailable', machineId: grant.grant.machineId, capability,
+      errorName: error instanceof Error ? error.name : 'UnknownError',
+      message: (error instanceof Error ? error.message : String(error)).slice(0, 300),
+    }));
   }
   return jsonError(503, 'MACHINE_AUTHORITY_UNAVAILABLE', 'Machine authority could not be verified');
 }
 
 function jsonError(status: number, code: string, message: string): Response {
   return Response.json({ error: { code, message } }, { status });
+}
+
+/** Which check made the relay close a machine socket. */
+type MachineSocketCloseDetail =
+  | { check: 'replaced' | 'heartbeat-expired' | 'grant-missing' | 'grant-machine-mismatch' | 'socket-closed' }
+  | { check: 'authority-rejected'; status: number; code: string | null; message: string | null }
+  | { check: 'authorization-expired'; authorizedUntil: number };
+
+/** Reads the `jsonError` body `currentMachineAuthority` produced; it carries no grant material. */
+async function authorityRejection(response: Response): Promise<MachineSocketCloseDetail> {
+  const body: unknown = await response.json().catch(() => null);
+  const error = body && typeof body === 'object' && 'error' in body && body.error && typeof body.error === 'object' ? body.error : null;
+  return {
+    check: 'authority-rejected',
+    status: response.status,
+    code: error && 'code' in error && typeof error.code === 'string' ? error.code : null,
+    message: error && 'message' in error && typeof error.message === 'string' ? error.message : null,
+  };
+}
+
+function isoTime(ms: number | undefined): string | null {
+  return ms === undefined || !Number.isFinite(ms) ? null : new Date(ms).toISOString();
 }
 
 function filteredHeaders(headers: Headers, requestDirection: boolean): Array<[string, string]> {
@@ -368,6 +407,7 @@ export class UserRelayDO extends DurableObject<Env> {
     const tag = endpointTag(parsed.data);
     if (parsed.data.role === 'machine') {
       for (const existing of this.ctx.getWebSockets(tag)) {
+        this.logMachineSocketClose(existing, 1000, { check: 'replaced' });
         this.failSocketTunnels(existing, new Error('Machine connection was replaced'));
         existing.close(1000, 'Replaced by a newer machine connection');
       }
@@ -559,12 +599,13 @@ export class UserRelayDO extends DurableObject<Env> {
     const attachment = this.socketAttachment(socket);
     if (attachment?.role === 'client') return true;
     if (attachment?.heartbeatExpiresAt !== undefined && attachment.heartbeatExpiresAt <= Date.now()) {
+      this.logMachineSocketClose(socket, 1011, { check: 'heartbeat-expired' });
       this.failSocketTunnels(socket, new Error('Machine relay heartbeat expired; the host is reconnecting'));
       socket.close(1011, 'Machine relay heartbeat expired');
       return false;
     }
     if (!attachment?.machineGrant || attachment.machineGrant.grant.machineId !== attachment.id) {
-      this.rejectMachineSocket(socket);
+      this.rejectMachineSocket(socket, { check: attachment?.machineGrant ? 'grant-machine-mismatch' : 'grant-missing' });
       return false;
     }
     const checking = this.machineChecks.get(socket);
@@ -573,8 +614,10 @@ export class UserRelayDO extends DurableObject<Env> {
     const check = (async () => {
       const authorizedUntil = machineAuthorizationDeadline(attachment.machineGrant!);
       const rejected = await currentMachineAuthority(this.env, attachment.machineGrant!, 'space.control');
-      if (rejected || authorizedUntil <= Date.now() || socket.readyState !== 1) {
-        this.rejectMachineSocket(socket);
+      const rejection = rejected ? await authorityRejection(rejected) : null;
+      if (rejection || authorizedUntil <= Date.now() || socket.readyState !== 1) {
+        this.rejectMachineSocket(socket, rejection
+          ?? (authorizedUntil <= Date.now() ? { check: 'authorization-expired', authorizedUntil } : { check: 'socket-closed' }));
         return false;
       }
       socket.serializeAttachment({ ...this.socketAttachment(socket), authorizedUntil });
@@ -588,9 +631,29 @@ export class UserRelayDO extends DurableObject<Env> {
     }
   }
 
-  private rejectMachineSocket(socket: WebSocket): void {
+  private rejectMachineSocket(socket: WebSocket, detail: MachineSocketCloseDetail): void {
+    this.logMachineSocketClose(socket, 1008, detail);
     this.failSocketTunnels(socket, new Error('Machine authorization expired or was revoked'));
     socket.close(1008, 'Machine authorization expired or was revoked');
+  }
+
+  /** One line per relay-initiated machine close; grants and keys are never logged, only their deadlines. */
+  private logMachineSocketClose(socket: WebSocket, closeCode: number, detail: MachineSocketCloseDetail): void {
+    const attachment = this.socketAttachment(socket);
+    const grant = attachment?.machineGrant;
+    let issuerExpiresAt = Infinity;
+    for (const issuer of grant?.issuerChain ?? []) issuerExpiresAt = Math.min(issuerExpiresAt, deviceGrantExpiresAt(issuer) ?? Infinity);
+    let inFlightTunnels = 0;
+    for (const pending of this.pendingTunnels.values()) if (pending.socket === socket) inFlightTunnels++;
+    console.warn(JSON.stringify({
+      event: 'relay_machine_socket_closed', at: new Date().toISOString(), machineId: attachment?.id ?? null, closeCode,
+      ...detail,
+      ...('authorizedUntil' in detail ? { authorizedUntil: isoTime(detail.authorizedUntil) } : {}),
+      grantGeneration: grant?.grant.generation ?? null,
+      grantExpiresAt: isoTime(grant?.grant.expiresAt), issuerExpiresAt: isoTime(issuerExpiresAt),
+      leaseUntil: isoTime(attachment?.authorizedUntil), heartbeatExpiresAt: isoTime(attachment?.heartbeatExpiresAt),
+      inFlightTunnels,
+    }));
   }
 
   private socketAttachment(socket: WebSocket): RelaySocketAttachment | null {
@@ -610,6 +673,7 @@ export class UserRelayDO extends DurableObject<Env> {
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+    if (url.pathname === '/mcp') return handleMcpRequest(request, env, (signed) => application.fetch(signed, env));
     if (url.pathname === '/v1/accounts/bootstrap' || url.pathname === '/v1/accounts/recover') {
       const cors = { 'access-control-allow-origin': '*', 'access-control-allow-methods': 'POST, OPTIONS', 'access-control-allow-headers': 'authorization, content-type', 'cache-control': 'private, no-store' };
       if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });

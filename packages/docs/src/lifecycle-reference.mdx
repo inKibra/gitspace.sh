@@ -117,6 +117,40 @@ Cloud claims prevent concurrent effects. A failed or abandoned cloud attempt req
 
 Approval, recovery, and `cloud/destroy` require a human browser action. The workspace agent cannot grant itself content approval or invoke destruction.
 
+### Interactive scripts
+
+Prefer unattended scripts. Use explicit flags and configured values for ordinary setup questions. Reserve interactive execution for provider authentication or another decision that requires a person.
+
+Declare an interactive script with this exact line in its leading comment header, before any executable command:
+
+```bash
+#!/bin/bash
+# gitspace: interactive
+set -euo pipefail
+set +x
+
+aws configure mfa-login \
+  --profile staging-source \
+  --update-profile staging-session \
+  --duration-seconds 43200
+```
+
+This AWS example assumes the source IAM credentials and MFA device are already configured. The profile names are arbitrary. Set `AWS_CONFIG_FILE` and `AWS_SHARED_CREDENTIALS_FILE` to protected, ignored workspace-local paths if credentials should not use the machine's default AWS files. Add the ignore rule before writing credentials.
+
+The declaration is part of the approved script content. Automatic preparation does not opt in: a phase containing a declared interactive script reports `InteractionRequired` before launching that phase. Choose **Run interactively** in Environment and confirm the approved effects. The entire phase then uses a protected terminal, including any unmarked scripts in that phase. An explicit phase request can also set `interactive: true`; retries with the same run ID must preserve that choice.
+
+The dedicated **Environment** terminal appears without taking keyboard focus. It lists scripts in execution order and keeps completed steps visible, even when they finish immediately. Execution waits for the first live browser attachment, within the run deadline.
+
+On success or failure, input stops and the terminal keeps its bounded visible output in memory, including the final error. Closing the pane or reloading discards that output. A broken live connection also clears private output; reconnecting restores safe script progress, not earlier terminal text.
+
+Closing the pane leaves a running process running. Reopening or reloading attaches to that same process without replay, so a prompt printed before reconnection may no longer be visible. Use cancellation when you need to stop, rather than rerunning a partially completed phase.
+
+Interactive execution disables input echo and does not retain raw terminal input or output in run logs, Hub output, browser history caches, or terminal replay. It retains step start/end metadata, exit codes, run state, and validated resource bindings. Protected output and input require a browser session; MCP and agent log reads cannot retrieve the raw stream. The terminal ends with the script and never becomes an unrestricted shell.
+
+This is supervised, machine-local authentication on Linux or macOS, not central credential storage. Ignored credential files do not travel in checkpoints. Moves and expired sessions can require authentication again. Checks remain noninteractive, and detached recovery checkouts cannot run interactive phases. Scripts must not daemonize or leave unmanaged background processes.
+
+Approved scripts still receive their secrets and can intentionally write a `.env` or provider credential file. Use restrictive permissions and ignored paths. Protected terminal handling is not a sandbox and does not make arbitrary secret output safe.
+
 ### Retire after the original machine is gone
 
 Choose an authorized online runner in the browser and explicitly request `cloud/destroy`. If that runner does not hold the workspace checkout, it restores the latest durable checkpoint into an isolated directory and restores the canonical repository origin. The full checkout supplies repository helpers; the destroy entry script comes from the approved cloud execution record.
@@ -157,7 +191,7 @@ Bindings are strings for resource IDs, URLs, or `secret:NAME` references. They a
 
 Binding names start with a letter and contain letters, digits, underscores, periods, or hyphens, up to 128 characters. Values can contain up to 4,096 characters. Credential-like binding names require a `secret:NAME` reference. Private keys and URLs with embedded credentials reject. These checks catch common mistakes, not every possible secret.
 
-Scripts run on an authorized machine runner, not inside a Cloudflare Worker. They inherit the machine user's `HOME`, `PATH`, and ordinary environment. GitSpace prepends `GITSPACE_MACHINE_TOOLS/bin` to `PATH`; declared values and granted secrets override inherited values. Internal `GITSPACE_*` daemon bootstrap variables are excluded, and the runner supplies its own workspace metadata. Git uses the user's normal configuration, with interactive prompting disabled.
+Scripts run on an authorized machine runner, not inside a Cloudflare Worker. They inherit the machine user's `HOME`, `PATH`, and ordinary environment. GitSpace prepends `GITSPACE_MACHINE_TOOLS/bin` to `PATH`; declared values and granted secrets override inherited values. Internal `GITSPACE_*` daemon bootstrap variables are excluded, and the runner supplies its own workspace metadata. Git uses the user's normal configuration; unattended runs disable its interactive prompting.
 
 Each run keeps its logs and output in a separate temporary directory. Cleanup removes that directory, not the user's home. Use checks to verify existing tool versions and `machine/prepare` to install missing tools. Inheritance uses the daemon's environment; it does not search for tools outside its `PATH` or source login dotfiles. A cloud machine uses its own home, not a copy of your personal machine.
 
@@ -178,11 +212,11 @@ Discover each method's schema before sending arguments. Available methods are `g
 
 An authorized phase request names one of the five canonical phases and can set `rerun: true` only for an explicitly authorized rerun. The agent surface excludes `cloud/destroy`. Do not use raw shell to bypass this restriction or a missing content approval.
 
-The environment view includes `lifecycle`, the cloud-owned record of profile, values, approvals, automatic policy, execution definitions and content, bindings, last successful provision, destruction time, and phase runs. Saved script content lets the human inspect what a closed workspace would execute; do not embed secrets in it. Run status is `running`, `succeeded`, `failed`, or `abandoned`. The run stores its machine, profile, hashes, timestamps, results, and output preview.
+The environment view includes `lifecycle`, the cloud-owned record of profile, values, approvals, automatic policy, execution definitions and content, bindings, last successful provision, destruction time, and phase runs. Saved script content lets the human inspect what a closed workspace would execute; do not embed secrets in it. Run status is `accepted`, `running`, `cancelling`, `succeeded`, `failed`, `cancelled`, `timed-out`, or `interrupted`. The run stores its machine, profile, hashes, interaction mode, timestamps, results, and safe output preview.
 
 Each script result has its own `exitCode`: zero means success, a nonzero value means failure, and null means no exit was recorded. A started script with no exit is running while the phase is active and interrupted after the phase ends. A script with no result has not started. Available `startedAt` and `finishedAt` timestamps describe that script, not the whole phase.
 
-Full run output lives in durable cloud log chunks, not in an artifact file inside the checkout. The wire `environment.runLog` request accepts `spaceId`, `runId`, and nullable `offset`. It returns `output`, `nextOffset`, and `cursor`. Follow `nextOffset` while more stored chunks are available. A null `nextOffset` means caught up for now, not necessarily that a running script has finished; retain `cursor`, the first unread stored row, and use it as the next request's offset after a run update. The agent wrapper uses its discovered workspace-target schema. Read subsequent chunks rather than treating the preview as the full log.
+For unattended runs, full output lives in durable cloud log chunks, not in an artifact file inside the checkout. Interactive runs retain safe step metadata instead of raw terminal output. The wire `environment.runLog` request accepts `spaceId`, `runId`, and nullable `offset`. It returns `output`, `nextOffset`, and `cursor`. Follow `nextOffset` while more stored chunks are available. A null `nextOffset` means caught up for now, not necessarily that a running script has finished; retain `cursor`, the first unread stored row, and use it as the next request's offset after a run update. The agent wrapper uses its discovered workspace-target schema. Read subsequent chunks rather than treating the preview as the full log.
 
 Closed or offline workspaces retain cloud lifecycle records and logs. Running scripts still requires an authorized online machine. These are account-private records, not public artifact links. The runner redacts known resolved secret values and the cloud applies further sanitization, but redaction is not a guarantee that arbitrary output contains no secrets. Never print credentials or enable shell tracing around them.
 

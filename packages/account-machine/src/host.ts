@@ -122,7 +122,7 @@ relay = relayUrl
         Buffer.from(requiredEnvironment('GITSPACE_MACHINE_SIGNING_PRIVATE_KEY'), 'base64'),
       ),
       localOrigin: `http://${environment.options.rpcHost}:${environment.options.rpcPort}`,
-      onError: (error) => console.error('[gitspace-relay]', error),
+      onError: (error) => console.error('[gitspace-relay]', new Date().toISOString(), error),
     })
   : null;
 relay?.start();

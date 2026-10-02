@@ -1,4 +1,5 @@
 import { TRANSCRIPT_CACHE_ROWS, transcriptItemSchema, type TranscriptContentPage, type TranscriptItem, type TranscriptRow } from '@gitspace/blocks';
+import { rpcErrorMessage } from './rpc-error-message.js';
 
 const CONTENT_CACHE_BYTES = 64 * 1024 * 1024;
 const CONTENT_READS = 3;
@@ -151,7 +152,7 @@ export class TranscriptContentCache {
       this.running.add(entry);
       void this.load(entry, this.reader, controller.signal).catch((cause: unknown) => {
         if (!controller.signal.aborted && this.entries.get(key) === entry) {
-          entry.error = cause instanceof Error ? cause.message : String(cause);
+          entry.error = rpcErrorMessage(cause, 'Read transcript content');
           this.notify();
         }
       }).finally(() => {

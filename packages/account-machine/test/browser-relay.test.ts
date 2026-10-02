@@ -34,7 +34,7 @@ if (args[0] === 'browser-relay' && args[1] === 'serve') {
 }
 `, { mode: 0o755 });
     await chmod(binary, 0o755);
-    const relay = new BrowserRelaySupervisor({ environmentRoot: root, agentDir: join(root, 'omp'), binaryPath: binary, port: 20_000 + Math.floor(Math.random() * 10_000) });
+    const relay = new BrowserRelaySupervisor({ environmentRoot: root, agentDir: join(root, 'omp'), command: async () => [binary], port: 20_000 + Math.floor(Math.random() * 10_000) });
 
     expect(await relay.status()).toMatchObject({ state: 'stopped', installed: false });
     expect(await relay.setup()).toMatchObject({ state: 'waiting', installed: true });
@@ -53,7 +53,7 @@ if (args[0] === 'browser-relay' && args[1] === 'serve') {
       fetch: () => Response.json({ Browser: 'Chrome/140.0.7339.128' }),
     });
     try {
-      const relay = new BrowserRelaySupervisor({ environmentRoot: root, agentDir: join(root, 'omp'), port: server.port });
+      const relay = new BrowserRelaySupervisor({ environmentRoot: root, agentDir: join(root, 'omp'), command: async () => { throw new Error('Status must not run OMP'); }, port: server.port });
       expect(await relay.status()).toMatchObject({
         state: 'connected',
         browserName: 'Chrome',

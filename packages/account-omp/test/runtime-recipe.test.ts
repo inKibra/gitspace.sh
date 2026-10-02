@@ -89,7 +89,7 @@ console.log(JSON.stringify({ entrypoint, value: runtime.default }));
     await writeFile(join(artifact, 'omp-adapter.js'), 'import value from "@oh-my-pi/pi-coding-agent"; export default value;\n');
     const hash = async (path: string) => `sha256:${createHash('sha256').update(await readFile(join(artifact, path))).digest('hex')}`;
     const recipe: OmpRuntimeRecipe = {
-      version: 1, upstreamVersion: version, bunVersion: Bun.version,
+      version: 1, inferenceVersion: 1, upstreamVersion: version, bunVersion: Bun.version,
       platform: process.platform as OmpRuntimeRecipe['platform'], arch: process.arch as OmpRuntimeRecipe['arch'],
       adapter: 'omp-adapter.js', packageHash: await hash('package.json'), lockHash: await hash('bun.lock'),
       patches: patched ? [{ path: patchPath, hash: await hash(patchPath) }] : [],

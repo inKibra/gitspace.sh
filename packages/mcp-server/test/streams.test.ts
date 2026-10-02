@@ -1,0 +1,58 @@
+import { describe, expect, test } from 'bun:test';
+import { encodeTranscriptEventChunks } from '@gitspace/protocol/transcript';
+import { readLivePage, STREAM_LIMITS, type RpcResult, type Subscription } from '../src/streams.js';
+
+function source(values: RpcResult[]): Subscription {
+  return { close() {}, async *[Symbol.asyncIterator]() { yield* values; } };
+}
+const event = (cursor: number, previous: number | null, value: unknown = cursor): Extract<RpcResult, { status: 'ok' }> => ({ status: 'ok', value: { type: previous === null ? 'snapshot' : 'change', resource: 'test', cursor, previous, revision: cursor, value } });
+
+describe('bounded live stream continuation', () => {
+  test('returns the original backend cursor without dropping the next page boundary', async () => {
+    const values = Array.from({ length: STREAM_LIMITS.items + 2 }, (_, index) => event(index + 1, index === 0 ? null : index));
+    const first = await readLivePage({ path: 'events', input: { after: null }, stream: source(values), encode: (value) => value, signal: new AbortController().signal });
+    expect(first.nextInput).toEqual({ after: STREAM_LIMITS.items });
+    expect(first.complete).toBe(false);
+    const second = await readLivePage({ path: 'events', input: first.nextInput!, stream: source(values.slice(STREAM_LIMITS.items)), encode: (value) => value, signal: new AbortController().signal });
+    expect([...first.items, ...second.items]).toEqual(values.map((value) => value.value));
+    expect(second.reason).toBe('ended');
+    expect(second.complete).toBe(false);
+  });
+
+  test('retains the cursor preceding a frame that would exceed the byte budget', async () => {
+    const values = [event(1, null, 'a'.repeat(600_000)), event(2, 1, 'b'.repeat(600_000))];
+    const page = await readLivePage({ path: 'events', input: { after: null }, stream: source(values), encode: (value) => value, signal: new AbortController().signal });
+    expect(page.items).toEqual([values[0]!.value]);
+    expect(page.nextInput).toEqual({ after: 1 });
+  });
+
+  test('reports resynchronization rather than treating an expired cursor as completion', async () => {
+    const resync = { type: 'resync', resource: 'test', cursor: 9, revision: 9, reason: 'cursor-expired' };
+    const page = await readLivePage({ path: 'events', input: { after: 1 }, stream: source([{ status: 'ok', value: resync }]), encode: (value) => value, signal: new AbortController().signal });
+    expect(page).toEqual({ items: [resync], nextInput: { after: null }, complete: false, gap: true, reason: 'resync' });
+  });
+
+  test('does not turn a broken chain or operation failure into a successful page', async () => {
+    await expect(readLivePage({ path: 'events', input: { after: 4 }, stream: source([event(7, 6)]), encode: (value) => value, signal: new AbortController().signal })).rejects.toThrow('STREAM_CURSOR_GAP');
+    await expect(readLivePage({ path: 'events', input: { after: null }, stream: source([{ status: 'error', error: { _tag: 'OperationFailed' } }]), encode: (value) => value, signal: new AbortController().signal })).rejects.toThrow('GitSpace operation failed');
+  });
+
+  test('never advances an ordinal for an interrupted transcript event', async () => {
+    const chunks = [...encodeTranscriptEventChunks({ sessionId: 's', ordinal: 8, kind: 'message', payload: { text: 'a'.repeat(100_000) }, createdAt: new Date(0) })];
+    const abort = new AbortController();
+    let closed = false;
+    const stream: Subscription = {
+      close() { closed = true; },
+      async *[Symbol.asyncIterator]() {
+        yield { status: 'ok', value: chunks[0] } as RpcResult;
+        abort.abort();
+        await Promise.withResolvers<void>().promise;
+      },
+    };
+    const page = await readLivePage({ path: 'subagents.events', input: { sessionId: 's', subagentId: 'a', afterOrdinal: 7 }, stream, encode: (value) => value, signal: abort.signal });
+    expect(page.items).toEqual([]);
+    expect(page.nextInput).toEqual({ sessionId: 's', subagentId: 'a', afterOrdinal: 7 });
+    expect(page.reason).toBe('timeout');
+    expect(closed).toBe(true);
+  });
+});

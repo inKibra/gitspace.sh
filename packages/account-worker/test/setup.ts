@@ -8,7 +8,7 @@ export const tenantRootPrivateKey = Uint8Array.from({ length: 32 }, (_, index) =
 beforeAll(() => network.enable());
 beforeEach(() => network.use(http.get(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/state`, ({ request }) => {
   if (request.headers.get('authorization') !== `Bearer ${env.PLATFORM_TOKEN}`) return new HttpResponse(null, { status: 401 });
-  return HttpResponse.json({ control: { status: 'active' } });
+  return HttpResponse.json({ control: { status: 'active' }, deployment: { active: 'test-inference-worker' } });
 })));
 afterEach(async () => {
   network.resetHandlers();
